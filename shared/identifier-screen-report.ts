@@ -256,7 +256,18 @@ const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
  * does not re-derive the scanner's verdict (a review-severity hit of a direct kind is legitimate
  * and the counts cannot tell it apart from a direct one).
  */
-function checkStatus(r: DatasetRecord): void {
+function checkStatus(
+  r: Pick<
+    DatasetRecord,
+    | "status"
+    | "incomplete"
+    | "incomplete_reasons"
+    | "files"
+    | "findings_by_kind"
+    | "unscreened_formats"
+    | "edf_bdf_files_flagged"
+  >,
+): void {
   const kinds = Object.keys(r.findings_by_kind ?? {}) as FindingKind[];
   const unscreened = Object.values(r.unscreened_formats ?? {}).reduce((a, b) => a + b, 0);
   const files = r.files;
@@ -316,6 +327,21 @@ function parseRecord(x: unknown): DatasetRecord {
   ) {
     bad("scan-version");
   }
+  const record = {
+    id: x.id,
+    version: x.version,
+    ...parseScanBody(x),
+  } as unknown as DatasetRecord;
+  checkStatus(record);
+  return record;
+}
+
+/**
+ * Every field of a scan except the dataset's identity, validated. Shared by the publication
+ * report and the uploader preflight, which is made before the dataset has an id. The caller has
+ * already refused unknown keys.
+ */
+function parseScanBody(x: Record<string, unknown>): Record<string, unknown> {
   if (typeof x.scanned_at !== "string" || !ISO_TIME.test(x.scanned_at)) bad("scan-time");
   if (!(DATASET_STATUSES as readonly string[]).includes(x.status as string)) bad("scan-status");
   if (typeof x.incomplete !== "boolean") bad("scan-incomplete");
@@ -327,8 +353,6 @@ function parseRecord(x: unknown): DatasetRecord {
     bad("scan-reasons");
   }
   const out: Record<string, unknown> = {
-    id: x.id,
-    version: x.version,
     scanned_at: x.scanned_at,
     status: x.status,
     incomplete: x.incomplete,
@@ -396,9 +420,7 @@ function parseRecord(x: unknown): DatasetRecord {
       "scan-formats",
     );
   }
-  const record = out as unknown as DatasetRecord;
-  checkStatus(record);
-  return record;
+  return out;
 }
 
 /** Validate a report from the wire. Throws {@link ReportError} with a fixed word, never the input. */
@@ -503,22 +525,65 @@ const ERROR_TEXT: Record<ScreenError, string> = {
   deadline: "the screen workflow ran out of time before it finished reading",
 };
 
-const HEADLINES: Record<ScreenState, { headline: string; tone: ScreenDescription["tone"] }> = {
-  pending: { headline: "Identifier screen: running", tone: "note" },
-  clean: { headline: "Identifier screen: clean", tone: "ok" },
-  "dates-only": { headline: "Identifier screen: clean (acquisition dates only)", tone: "ok" },
-  "no-recordings": { headline: "Identifier screen: clean (no recordings)", tone: "ok" },
-  review: { headline: "Identifier screen: needs review", tone: "warn" },
-  "direct-identifiers": { headline: "Identifier screen: FOUND IDENTIFIERS", tone: "stop" },
-  unchecked: { headline: "Identifier screen: INCOMPLETE", tone: "warn" },
-  "not-screened": { headline: "Identifier screen: recordings NOT screened", tone: "warn" },
+/**
+ * What each state is called, without the surface's prefix. The publication screen says
+ * "Identifier screen: <verdict>" and the uploader preflight "Identifier preflight: <verdict>", so
+ * one state reads the same everywhere it is shown.
+ */
+const VERDICTS: Record<ScreenState, { verdict: string; tone: ScreenDescription["tone"] }> = {
+  pending: { verdict: "running", tone: "note" },
+  clean: { verdict: "clean", tone: "ok" },
+  "dates-only": { verdict: "clean (acquisition dates only)", tone: "ok" },
+  "no-recordings": { verdict: "clean (no recordings)", tone: "ok" },
+  review: { verdict: "needs review", tone: "warn" },
+  "direct-identifiers": { verdict: "FOUND IDENTIFIERS", tone: "stop" },
+  unchecked: { verdict: "INCOMPLETE", tone: "warn" },
+  "not-screened": { verdict: "recordings NOT screened", tone: "warn" },
   "clean-edf-only-others-unscreened": {
-    headline: "Identifier screen: EDF/BDF clean, other recordings NOT screened",
+    verdict: "EDF/BDF clean, other recordings NOT screened",
     tone: "warn",
   },
-  error: { headline: "Identifier screen: DID NOT RUN", tone: "stop" },
-  unreported: { headline: "Identifier screen: DID NOT REPORT", tone: "stop" },
+  error: { verdict: "DID NOT RUN", tone: "stop" },
+  unreported: { verdict: "DID NOT REPORT", tone: "stop" },
 };
+
+/** The counts of a scan as lines of fixed words, shared by the publication screen and the preflight. */
+function scanLines(
+  scan: Pick<
+    DatasetRecord,
+    | "files"
+    | "findings_by_kind"
+    | "edf_bdf_files_flagged"
+    | "unscreened_formats"
+    | "incomplete_reasons"
+  >,
+): string[] {
+  const lines: string[] = [];
+  if (scan.files) {
+    const unreadable =
+      scan.files.header_read_failed > 0 ? ` (${scan.files.header_read_failed} unreadable)` : "";
+    lines.push(
+      `Files: ${scan.files.total}; EDF/BDF headers read: ${scan.files.header_read} of ${scan.files.edf_bdf}${unreadable}.`,
+    );
+  }
+  const kinds = Object.entries(scan.findings_by_kind ?? {});
+  if (kinds.length > 0) {
+    lines.push(`Findings by kind: ${kinds.map(([k, n]) => `${k} x${n}`).join(", ")}.`);
+  }
+  if (scan.edf_bdf_files_flagged) {
+    lines.push(`EDF/BDF files with an identifier finding: ${scan.edf_bdf_files_flagged}.`);
+  }
+  const formats = Object.entries(scan.unscreened_formats ?? {});
+  if (formats.length > 0) {
+    lines.push(
+      `Not screened (format x files): ${formats.map(([f, n]) => `${f} x${n}`).join(", ")}.`,
+    );
+  }
+  if (scan.incomplete_reasons.length > 0) {
+    lines.push(`Incomplete: ${scan.incomplete_reasons.join(", ")}.`);
+  }
+  return lines;
+}
 
 /**
  * The words that go in front of a person. One function for the admin email, the status view and
@@ -535,7 +600,7 @@ export function describeScreen(
       lines: ["This request predates the screen, or the screen was never started for it."],
     };
   }
-  const base = HEADLINES[state];
+  const base = VERDICTS[state];
   const lines: string[] = [];
   // The Worker stores an 'unreported' screen WITH the error report that says so
   // (`no-report-in-time`), so the cause is stated once, from the report, when
@@ -546,31 +611,89 @@ export function describeScreen(
   if (report?.error) lines.push(`Cause: ${ERROR_TEXT[report.error]}.`);
   const scan = report?.scan;
   if (scan) {
-    if (scan.files) {
-      const unreadable =
-        scan.files.header_read_failed > 0 ? ` (${scan.files.header_read_failed} unreadable)` : "";
-      lines.push(
-        `Files: ${scan.files.total}; EDF/BDF headers read: ${scan.files.header_read} of ${scan.files.edf_bdf}${unreadable}.`,
-      );
-    }
-    const kinds = Object.entries(scan.findings_by_kind ?? {});
-    if (kinds.length > 0) {
-      lines.push(`Findings by kind: ${kinds.map(([k, n]) => `${k} x${n}`).join(", ")}.`);
-    }
-    if (scan.edf_bdf_files_flagged) {
-      lines.push(`EDF/BDF files with an identifier finding: ${scan.edf_bdf_files_flagged}.`);
-    }
-    const formats = Object.entries(scan.unscreened_formats ?? {});
-    if (formats.length > 0) {
-      lines.push(
-        `Not screened (format x files): ${formats.map(([f, n]) => `${f} x${n}`).join(", ")}.`,
-      );
-    }
-    if (scan.incomplete_reasons.length > 0) {
-      lines.push(`Incomplete: ${scan.incomplete_reasons.join(", ")}.`);
-    }
+    lines.push(...scanLines(scan));
     lines.push("Not read: the contents of sidecars and tables in earlier commits.");
     lines.push(`Scanner ${report.scanner}; commit ${report.head?.slice(0, 12)}.`);
   }
-  return { headline: base.headline, tone: base.tone, lines };
+  return { headline: `Identifier screen: ${base.verdict}`, tone: base.tone, lines };
+}
+
+// ---------------------------------------------------------------------------------------
+// Folding a scan into the vocabulary
+// ---------------------------------------------------------------------------------------
+
+/** The bucket for a format whose name is not shaped like an extension. */
+export const OTHER_FORMAT = ".other";
+const MAX_FORMAT_KEYS = 60;
+
+/**
+ * `unscreened_formats` names formats by file extension, and an extension is whatever the file's
+ * author typed (`.dat_backup`, a thirteen-letter suffix). The contract refuses a key that does
+ * not look like an extension, which would turn a dataset with one odd file into a screen that
+ * never reports. The count is the point, so such keys (and any beyond the contract's key limit)
+ * are folded into `.other`: the dataset is still not clean, and no file name rides in a key.
+ */
+export function foldOddFormats<T extends { unscreened_formats?: Record<string, number> }>(
+  record: T,
+): T {
+  const formats = record?.unscreened_formats;
+  if (typeof formats !== "object" || formats === null) return record;
+  const kept: Record<string, number> = {};
+  let other = 0;
+  for (const [key, count] of Object.entries(formats)) {
+    if (FORMAT_KEY.test(key)) kept[key] = count;
+    else other += count;
+  }
+  const ranked = Object.entries(kept).sort(([, a], [, b]) => b - a);
+  const room = MAX_FORMAT_KEYS - 1;
+  const folded: Record<string, number> = Object.fromEntries(ranked.slice(0, room));
+  for (const [, count] of ranked.slice(room)) other += count;
+  if (other > 0) folded[OTHER_FORMAT] = (folded[OTHER_FORMAT] ?? 0) + other;
+  return { ...record, unscreened_formats: folded };
+}
+
+/** The class for a read failure whose name is not a fixed word. */
+export const INTERNAL_FAILURE = "internal";
+const MAX_FAILURE_KEYS = 60;
+
+/**
+ * `read_failures` keys are `<what>/<class>`. The fleet scan names the class of a failure that is
+ * not a ReadFailure after the error (`error-RangeError`), which the contract refuses because it
+ * allows lower case only. One unexpected throw in one sidecar (a JSON nested deep enough to
+ * overflow the scanner's stack) must not turn into a scan that cannot be reported and drop the
+ * findings from every header, so here the class is lowercased and anything still outside the
+ * pattern becomes the fixed class `internal`. The failure stays counted, so the record is still
+ * incomplete. The fleet scan's own output is unchanged.
+ */
+export function foldOddFailures<T extends { read_failures?: Record<string, number> }>(
+  record: T,
+): T {
+  const failures = record?.read_failures;
+  if (typeof failures !== "object" || failures === null) return record;
+  const folded: Record<string, number> = {};
+  const add = (key: string, count: number) => {
+    folded[key] = (folded[key] ?? 0) + count;
+  };
+  for (const [key, count] of Object.entries(failures)) {
+    const lower = key.toLowerCase();
+    if (isReadFailureKey(lower)) {
+      add(lower, count);
+      continue;
+    }
+    const what = lower.slice(0, Math.max(0, lower.indexOf("/")));
+    add(
+      `${isReadFailureKey(`${what}/${INTERNAL_FAILURE}`) ? what : INTERNAL_FAILURE}/${INTERNAL_FAILURE}`,
+      count,
+    );
+  }
+  // Past the contract's key limit, the smallest classes share one key.
+  const ranked = Object.entries(folded).sort(([, a], [, b]) => b - a);
+  if (ranked.length > MAX_FAILURE_KEYS) {
+    const kept: Record<string, number> = Object.fromEntries(ranked.slice(0, MAX_FAILURE_KEYS - 1));
+    const key = `${INTERNAL_FAILURE}/${INTERNAL_FAILURE}`;
+    for (const [, count] of ranked.slice(MAX_FAILURE_KEYS - 1))
+      kept[key] = (kept[key] ?? 0) + count;
+    return { ...record, read_failures: kept };
+  }
+  return { ...record, read_failures: folded };
 }

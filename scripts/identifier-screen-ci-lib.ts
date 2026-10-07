@@ -53,15 +53,19 @@ import { join } from "node:path";
 import { S3Client, type Subprocess } from "bun";
 import {
   type DatasetRecord,
+  INTERNAL_FAILURE,
+  OTHER_FORMAT,
   REPORT_VERSION,
   ReportError,
   type ScreenError,
   type ScreenReport,
-  isReadFailureKey,
+  foldOddFailures,
+  foldOddFormats,
   parseScreenReport,
 } from "../shared/identifier-screen-report";
 import {
   type EntryReadOptions,
+  LOCAL_SCAN_LIMITS,
   type ManifestEntry,
   ReadFailure,
   RunAborted,
@@ -84,10 +88,6 @@ export const GITHUB_DATASETS = "https://github.com/nemarDatasets";
 /** Pointer files and symlink targets are tiny; anything bigger is content. */
 const POINTER_MAX_BYTES = 1024;
 const SYMLINK_MAX_BYTES = 4096;
-/** One JSON or text file (and one scans table) is read up to this many bytes. */
-const SIDE_FILE_BYTES = 2 * 1024 * 1024;
-/** `participants.tsv` is one row per participant; 36,000 participants is a few megabytes. */
-const PARTICIPANTS_BYTES = 16 * 1024 * 1024;
 /** Bytes of git blobs the screen will fetch beyond the clone's bound, in total. */
 const PREFETCH_BUDGET_BYTES = 2 * 1024 ** 3;
 /** Inline recordings are large, so they are fetched in small batches the budget can stop between. */
@@ -301,78 +301,9 @@ export function errorReport(
   return { version: REPORT_VERSION, scanner, head, error };
 }
 
-const FORMAT_KEY = /^(\.[a-z0-9]{1,12}(\.[a-z0-9]{1,12})?\/?|\(no extension\))$/;
-/** The bucket for a format whose name is not shaped like an extension. */
-export const OTHER_FORMAT = ".other";
-const MAX_FORMAT_KEYS = 60;
-
-/**
- * `unscreened_formats` names formats by file extension, and an extension is whatever the file's
- * author typed (`.dat_backup`, a thirteen-letter suffix). The contract refuses a key that does
- * not look like an extension, which would turn a dataset with one odd file into a screen that
- * never reports. The count is the point, so such keys (and any beyond the contract's key limit)
- * are folded into `.other`: the dataset is still not clean, and no file name rides in a key.
- */
-export function foldOddFormats(record: DatasetRecord): DatasetRecord {
-  const formats = record?.unscreened_formats;
-  if (typeof formats !== "object" || formats === null) return record;
-  const kept: Record<string, number> = {};
-  let other = 0;
-  for (const [key, count] of Object.entries(formats)) {
-    if (FORMAT_KEY.test(key)) kept[key] = count;
-    else other += count;
-  }
-  const ranked = Object.entries(kept).sort(([, a], [, b]) => b - a);
-  const room = MAX_FORMAT_KEYS - 1;
-  const folded: Record<string, number> = Object.fromEntries(ranked.slice(0, room));
-  for (const [, count] of ranked.slice(room)) other += count;
-  if (other > 0) folded[OTHER_FORMAT] = (folded[OTHER_FORMAT] ?? 0) + other;
-  return { ...record, unscreened_formats: folded };
-}
-
-/** The class for a read failure whose name is not a fixed word. */
-export const INTERNAL_FAILURE = "internal";
-const MAX_FAILURE_KEYS = 60;
-
-/**
- * `read_failures` keys are `<what>/<class>`. The fleet scan names the class of a failure that is
- * not a {@link ReadFailure} after the error (`error-RangeError`), which the contract refuses
- * because it allows lower case only. One unexpected throw in one sidecar (a JSON nested deep
- * enough to overflow the scanner's stack) must not turn into `workflow-failed` and drop the
- * findings from every header, so here the class is lowercased and anything still outside the
- * pattern becomes the fixed class `internal`. The failure stays counted, so the record is
- * still incomplete. The fleet scan's own output is unchanged.
- */
-export function foldOddFailures(record: DatasetRecord): DatasetRecord {
-  const failures = record?.read_failures;
-  if (typeof failures !== "object" || failures === null) return record;
-  const folded: Record<string, number> = {};
-  const add = (key: string, count: number) => {
-    folded[key] = (folded[key] ?? 0) + count;
-  };
-  for (const [key, count] of Object.entries(failures)) {
-    const lower = key.toLowerCase();
-    if (isReadFailureKey(lower)) {
-      add(lower, count);
-      continue;
-    }
-    const what = lower.slice(0, Math.max(0, lower.indexOf("/")));
-    add(
-      `${isReadFailureKey(`${what}/${INTERNAL_FAILURE}`) ? what : INTERNAL_FAILURE}/${INTERNAL_FAILURE}`,
-      count,
-    );
-  }
-  // Past the contract's key limit, the smallest classes share one key.
-  const ranked = Object.entries(folded).sort(([, a], [, b]) => b - a);
-  if (ranked.length > MAX_FAILURE_KEYS) {
-    const kept: Record<string, number> = Object.fromEntries(ranked.slice(0, MAX_FAILURE_KEYS - 1));
-    const key = `${INTERNAL_FAILURE}/${INTERNAL_FAILURE}`;
-    for (const [, count] of ranked.slice(MAX_FAILURE_KEYS - 1))
-      kept[key] = (kept[key] ?? 0) + count;
-    return { ...record, read_failures: kept };
-  }
-  return { ...record, read_failures: folded };
-}
+// The folds that bring a scan into the contract's vocabulary live with the contract, so the
+// uploader preflight (ADR 0087) folds exactly as this screen does.
+export { INTERNAL_FAILURE, OTHER_FORMAT, foldOddFailures, foldOddFormats };
 
 /**
  * The one door a scan passes through on its way to the Worker: the contract's own parser. What it
@@ -1345,10 +1276,7 @@ export async function screenDataset(
       fileConcurrency: config.concurrency,
       workerConcurrency: 1,
       githubToken: async () => null,
-      limits: {
-        sideFileBytes: SIDE_FILE_BYTES,
-        participantsBytes: PARTICIPANTS_BYTES,
-      },
+      limits: { ...LOCAL_SCAN_LIMITS },
       readEntryHead: createEntryReader({ blobs, presign: createPresigner(config), deadlineAt }),
     });
     const scan = deps.scan ?? scanDatasetFromManifest;

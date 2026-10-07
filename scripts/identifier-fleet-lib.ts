@@ -447,6 +447,19 @@ export interface FleetLimits {
   participantsBytes: number;
 }
 
+/**
+ * Byte limits for a scan of bytes read locally: the publication screen's metadata-only clone and
+ * the uploader preflight's own tree (ADR 0086, ADR 0087). One definition, so the two read side
+ * files and tables the same way. One JSON or text file (and one scans table) is read up to
+ * `sideFileBytes`; `participants.tsv` is one row per participant, and 36,000 participants is a
+ * few megabytes.
+ */
+export const LOCAL_SCAN_LIMITS: Readonly<Pick<FleetLimits, "sideFileBytes" | "participantsBytes">> =
+  {
+    sideFileBytes: 2 * 1024 * 1024,
+    participantsBytes: 16 * 1024 * 1024,
+  };
+
 export interface FleetContext {
   api: string;
   data: string;
