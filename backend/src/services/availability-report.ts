@@ -10,10 +10,9 @@
  * (verifyDatasetVersionS3) instead of recomputing it.
  */
 
-import { getS3Config } from "../routes/admin/shared.js";
 import type { Bindings } from "../types/bindings.js";
 import { datasetHasVersionSql } from "./archive-retry.js";
-import { isNonProductionEnv, testS3EndpointOverride } from "./environment.js";
+import { isNonProductionEnv } from "./environment.js";
 import { exemplarOrFragment } from "./exemplar.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { branchExists, createOrUpdateFile } from "./github/contents.js";
@@ -22,9 +21,10 @@ import {
   type ExpectedManifestFile,
   parseManifestFiles,
   verifyDatasetVersionS3,
+  versionReadS3Options,
 } from "./import-integrity.js";
 import { errorMessage } from "./repo-metadata.js";
-import { type PresignedUrlOptions, getManifest } from "./s3.js";
+import { getManifest } from "./s3.js";
 
 /** One manifest PATH whose declared annex key is not present in S3 at its
  *  declared size. Entries are built by walking manifest PATHS (not annex
@@ -276,14 +276,7 @@ export async function writeAvailabilityReport(
   // comparison result, not the parsed files map itself.
   let manifest: Record<string, ExpectedManifestFile> | null = null;
   if (integrity.version) {
-    // Same origin rule as verifyDatasetVersionS3: S3_ENDPOINT_URL is honored
-    // outside production only, so a stray value cannot redirect the reads that
-    // decide `complete` (and with it data_complete and the withdrawal rule).
-    const s3Options: PresignedUrlOptions = {
-      ...getS3Config(env),
-      endpointUrl: testS3EndpointOverride(env),
-    };
-    const manifestJson = await getManifest(s3Options, datasetId, integrity.version);
+    const manifestJson = await getManifest(versionReadS3Options(env), datasetId, integrity.version);
     if (manifestJson) {
       manifest = parseManifestFiles(manifestJson);
     }
