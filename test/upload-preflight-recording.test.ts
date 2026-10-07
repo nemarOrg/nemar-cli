@@ -13,6 +13,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { UploaderPreflight } from "../shared/identifier-screen-report";
+import { getApiUrl } from "../src/lib/api/client";
 import type { DepositAttestation } from "../src/lib/attestation";
 import type { LocalDatasetConfig } from "../src/lib/dataset-config";
 import { identifierPreflightStep } from "../src/lib/upload/identifier-preflight";
@@ -31,7 +32,7 @@ let recordedReply: boolean | undefined;
 let putStatus = 200;
 let configDir: string;
 let datasetDir: string;
-let previousApiUrl: string | undefined;
+let serverUrl: string;
 let previousConfigDir: string | undefined;
 let preflight: UploaderPreflight;
 
@@ -58,7 +59,6 @@ const recording = (): Record<string, boolean> =>
   recordedReply === undefined ? {} : { identifier_preflight_recorded: recordedReply };
 
 beforeAll(async () => {
-  previousApiUrl = process.env.TEST_API_URL;
   previousConfigDir = process.env.NEMAR_CONFIG_DIR;
   server = Bun.serve({
     port: 0,
@@ -92,7 +92,7 @@ beforeAll(async () => {
       return Response.json({ error: "not found" }, { status: 404 });
     },
   });
-  process.env.TEST_API_URL = `http://localhost:${server.port}`;
+  serverUrl = `http://localhost:${server.port}`;
 
   // A real record, from the real step over a real (clean) tree.
   const tree = mkdtempSync(join(tmpdir(), "nemar-preflight-wire-tree-"));
@@ -111,8 +111,6 @@ beforeAll(async () => {
 afterAll(() => {
   server?.stop(true);
   // Guarded restore (#1175): test/ and backend/test/ share one process at the root.
-  if (previousApiUrl === undefined) Reflect.deleteProperty(process.env, "TEST_API_URL");
-  else process.env.TEST_API_URL = previousApiUrl;
   if (previousConfigDir === undefined) Reflect.deleteProperty(process.env, "NEMAR_CONFIG_DIR");
   else process.env.NEMAR_CONFIG_DIR = previousConfigDir;
 });
@@ -125,9 +123,15 @@ beforeEach(() => {
   datasetDir = mkdtempSync(join(tmpdir(), "nemar-preflight-wire-ds-"));
   writeFileSync(
     join(configDir, "config.json"),
-    JSON.stringify({ activeAccount: "wire", accounts: { wire: { apiKey: "test-key" } } }),
+    JSON.stringify({
+      activeAccount: "wire",
+      accounts: { wire: { apiKey: "test-key", apiUrl: serverUrl } },
+    }),
   );
   process.env.NEMAR_CONFIG_DIR = configDir;
+  // The stand-in is named in the config file only. If anything in the environment points the
+  // client somewhere else, stop here rather than send a request to it.
+  expect(getApiUrl()).toBe(serverUrl);
 });
 
 afterEach(() => {
@@ -248,5 +252,36 @@ describe("warnUnrecordedPreflight: never silent, never a refusal", () => {
       }),
     ).toBe(true);
     expect(warnUnrecordedPreflight(preflight, { error: new Error("offline") })).toBe(true);
+  });
+
+  test("each cause is said as itself", async () => {
+    const said = async (outcome: Parameters<typeof warnUnrecordedPreflight>[1]) =>
+      (
+        await printed(async () => {
+          warnUnrecordedPreflight(preflight, outcome);
+        })
+      ).output;
+    expect(await said({})).toContain("this NEMAR server does not record it");
+    expect(await said({ identifier_preflight_recorded: false })).toContain(
+      "the server could not store it",
+    );
+    expect(
+      await said({
+        identifier_preflight_recorded: false,
+        identifier_preflight_refused: "scan-kinds",
+      }),
+    ).toContain("the server refused it (scan-kinds)");
+    expect(await said({ error: new Error("offline") })).toContain("the request failed: offline");
+  });
+});
+
+describe("a resume with a preflight and no attestation says the preflight went nowhere", () => {
+  test("nothing is sent for it, and the uploader is told", async () => {
+    const { value: result, output } = await printed(() =>
+      createOrResumeDataset(datasetDir, {}, "fixture", FILES, LOCAL_CONFIG, undefined, preflight),
+    );
+    expect(result.status).toBe("ok");
+    expect(seen.map((s) => `${s.method} ${s.pathname}`)).toEqual(["GET /datasets/nm099998"]);
+    expect(output).toContain("preflight-without-attestation");
   });
 });

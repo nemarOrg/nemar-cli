@@ -110,12 +110,16 @@ export function warnUnrecordedPreflight(
   ) {
     return false;
   }
-  const why =
-    "error" in outcome
-      ? `the request failed: ${errorDetail(outcome.error)}`
-      : outcome.identifier_preflight_refused
-        ? `the server refused it (${outcome.identifier_preflight_refused})`
-        : "this NEMAR server does not record it";
+  // Four different facts, each said as itself: the call failed; the record was refused at the
+  // door; the server took it and could not store it; or the server never mentioned it, which is
+  // what a backend that predates the preflight does (it drops the field without a word).
+  let why: string;
+  if ("error" in outcome) why = `the request failed: ${errorDetail(outcome.error)}`;
+  else if (outcome.identifier_preflight_refused) {
+    why = `the server refused it (${outcome.identifier_preflight_refused})`;
+  } else if (outcome.identifier_preflight_recorded === false) {
+    why = "the server could not store it; running the upload again records it";
+  } else why = "this NEMAR server does not record it";
   console.log(
     chalk.yellow(
       `  Warning: the identifier preflight was not recorded with your attestation (${why}).`,
@@ -192,6 +196,12 @@ export async function createOrResumeDataset(
         );
         warnUnrecordedPreflight(identifierPreflight, { error });
       }
+    } else {
+      // The preflight is recorded WITH the attestation; without one it has nowhere to go.
+      warnUnrecordedPreflight(identifierPreflight, {
+        identifier_preflight_recorded: false,
+        identifier_preflight_refused: "preflight-without-attestation",
+      });
     }
   } else {
     // Step 6: Create new dataset in backend with file manifest
@@ -232,13 +242,14 @@ export async function createOrResumeDataset(
       };
       writeLocalConfig(absolutePath, localConfig);
 
-      if (response.resumed) {
-        spinner.succeed(`Resumed existing dataset: ${datasetInfo.dataset_id}`);
-        warnUnrecordedPreflight(identifierPreflight, response);
-      } else {
-        spinner.succeed(`Dataset created: ${datasetInfo.dataset_id}`);
-        warnUnrecordedPreflight(identifierPreflight, response);
-
+      spinner.succeed(
+        response.resumed
+          ? `Resumed existing dataset: ${datasetInfo.dataset_id}`
+          : `Dataset created: ${datasetInfo.dataset_id}`,
+      );
+      // One call for both answers, so the warning cannot be dropped from either.
+      warnUnrecordedPreflight(identifierPreflight, response);
+      if (!response.resumed) {
         // Wait for IAM policy propagation (AWS is eventually consistent)
         // This initial wait helps reduce retry attempts during upload
         await new Promise((resolve) => setTimeout(resolve, 10000));
