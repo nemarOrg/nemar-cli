@@ -14,7 +14,7 @@ import type { Bindings } from "../types/bindings.js";
 import { isNonProductionEnv } from "./environment.js";
 import { exemplarOrFragment } from "./exemplar.js";
 import { getDatasetsToken } from "./github-auth.js";
-import { createOrUpdateFile } from "./github/contents.js";
+import { branchExists, createOrUpdateFile } from "./github/contents.js";
 import {
   type DatasetVersionIntegrityResult,
   type ExpectedManifestFile,
@@ -151,7 +151,7 @@ export function buildAvailabilityReport(args: BuildAvailabilityReportArgs): Avai
 export class AvailabilityReportError extends Error {
   constructor(
     message: string,
-    public readonly statusCode: 400 | 404 | 500,
+    public readonly statusCode: 400 | 404 | 409 | 500,
   ) {
     super(message);
     this.name = "AvailabilityReportError";
@@ -243,6 +243,18 @@ export async function writeAvailabilityReport(
     } catch (err) {
       throw new AvailabilityReportError(`Failed to resolve GitHub auth: ${errorMessage(err)}`, 500);
     }
+    // Never create `main`. On a repository nothing has been pushed to yet --
+    // a dataset created but still uploading -- the Contents API PUT would
+    // make an unrelated ROOT commit on a fresh `main`, and the depositor's
+    // first push is then rejected as non-fast-forward with histories that
+    // cannot be rebased (nm000358, 2026-10-07: created 14:55Z, report commit
+    // 4ba0a7b at 03:00Z, every upload retry failed at "Pushing metadata").
+    if (!(await branchExists(repoName, "main", pat))) {
+      throw new AvailabilityReportError(
+        `Repository ${dataset.github_repo} has no main branch yet (nothing pushed); not creating one for the availability report`,
+        409,
+      );
+    }
     await createOrUpdateFile(
       repoName,
       ".nemar/availability-report.json",
@@ -275,10 +287,17 @@ export async function writeAvailabilityReport(
  *  exemplar fleet (`is_exemplar = 1`) is inserted `is_sandbox = 1` but is
  *  permanent, not churning (AGENTS.md's dataset ID bands, "never" cleaned),
  *  so `exemplarOrFragment()` carves it back into candidacy (issue #1168),
- *  matching the visibility predicates in dataset-search.ts / catalog.ts. */
+ *  matching the visibility predicates in dataset-search.ts / catalog.ts.
+ *  A dataset with no version yet (no version DOI, no dataset_versions row) is
+ *  not a candidate: its report has nothing to compare against, its repository
+ *  may still be empty mid-upload, and -- as in ARCHIVE_RETRY_SWEEP_QUERY -- a
+ *  row the pass cannot complete must not occupy one of its LIMIT slots
+ *  forever (ORDER BY dataset_id would starve everything after it). */
 const AVAILABILITY_REPORT_SWEEP_BASE_WHERE = `github_repo IS NOT NULL
      AND (is_sandbox = 0 OR is_sandbox IS NULL OR ${exemplarOrFragment("")})
-     AND json_extract(sweep_stamps, '$.availability_report_at') IS NULL`;
+     AND json_extract(sweep_stamps, '$.availability_report_at') IS NULL
+     AND (latest_version_doi IS NOT NULL
+          OR EXISTS (SELECT 1 FROM dataset_versions dv WHERE dv.dataset_id = datasets.dataset_id))`;
 
 /** Appended to the base predicate when `?missing-only=1` narrows candidacy to
  *  datasets already known incomplete (data_complete = 0, migration 0059). */

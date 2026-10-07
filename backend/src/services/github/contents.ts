@@ -342,6 +342,34 @@ export async function getFileContent(
 }
 
 /**
+ * Whether `branch` exists in the dataset repository. A 404 (no such ref) and
+ * a 409 (GitHub's "Git Repository is empty") are the answer "no", not a
+ * propagation delay to retry; any other failure throws.
+ */
+export async function branchExists(repo: string, branch: string, pat: string): Promise<boolean> {
+  const response = await githubFetchWithRetry(
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/ref/heads/${encodeURIComponent(branch)}`,
+    {
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+      },
+    },
+  );
+  if (response.status === 404 || response.status === 409) return false;
+  if (!response.ok) {
+    const error = await response.text().catch(() => "<failed to read body>");
+    throw new HttpError(
+      `Failed to look up ${branch} branch ref: HTTP ${response.status}: ${error.slice(0, 300)}`,
+      response.status,
+      error.slice(0, 300),
+    );
+  }
+  return true;
+}
+
+/**
  * Get the latest commit SHA on a branch.
  *
  * @param repo Repository name (e.g., "nm000123")
