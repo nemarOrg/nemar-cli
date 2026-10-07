@@ -3,9 +3,8 @@
  * (`src/lib/s3-server-copy.ts`) and the Worker
  * (`backend/src/services/import-integrity.ts`).
  *
- * Pure on purpose: no `node:` import, so the Workers bundle can take it. The two
- * callers used to hold hand-kept copies of this logic, which is the drift
- * AGENTS.md warns about; there is one definition now and both re-export it.
+ * Pure on purpose: no `node:` import, so the Workers bundle can take it. One
+ * definition, shared by the CLI and the Worker; both re-export it.
  *
  * KEY GRAMMAR. A key is `<fields>--<name>`, split at the FIRST `--`:
  *
@@ -13,11 +12,12 @@
  *
  * A special remote configured with `chunk=<size>` stores each piece of a file as
  * `<fields>-S<chunksize>-C<n>--<name>` (n counts from 1) and never the plain key.
- * `scripts/zarr/generate_zarr.py` is the other implementation of this grammar
- * (`annex_key_size`, `annex_chunk_key`, `annex_chunk_sizes`, `_complete_chunk_size`)
- * and reads it the same way: everything is taken from the fields before the first
- * `--`, because the name after it is free text for a WORM or URL key. Keep the
- * two consistent.
+ * `scripts/zarr/generate_zarr.py` is the other implementation of this grammar.
+ * `annex_key_size` and `annex_chunk_key` read only the fields before the first
+ * `--`, as `annexKeyFieldSize` and `annexChunkKey` do. `annex_chunk_sizes` and
+ * `_complete_chunk_size` are the chunk geometry. `annexKeyDeclaredSize` is the one
+ * deliberate exception: it scans the whole key, so a `-sN--` in a free-text name
+ * can be read as a size.
  *
  * PRESENCE. A key is present when its plain object exists at the declared size,
  * or, only when the plain object is ABSENT, when some chunking of it is complete
@@ -41,14 +41,24 @@ function splitKey(key: string): { fields: string; name: string } | null {
  * bytes claimed" -- load-bearing for the copy-integrity checks, which must not
  * silently accept an empty object as correct.
  *
- * This is the historical contract for a PLAIN key and is deliberately unchanged:
- * a key with an `-m<mtime>` field (`WORM-s5-m17--x`) returns null here, so a
- * plain WORM object stays present-if-listed. The chunk path uses
- * {@link annexKeyFieldSize}, which reads past `-m`.
+ * This is the historical contract for a PLAIN key and is deliberately unchanged.
+ * A simple key with an `-m<mtime>` field (`WORM-s5-m17--x`) returns null here, so
+ * a plain WORM object stays present-if-listed. The scan covers the whole key,
+ * though, so a `-sN--` inside a free-text name is read as a size:
+ * `WORM-s5-m17--a-s9--b` gives 9 here and 5 from {@link annexKeyFieldSize}. That
+ * is a documented pre-existing exception, pinned by a test and not changed here.
  */
 export function annexKeyDeclaredSize(key: string): number | null {
   const match = key.match(/-s(\d+)--/);
   return match ? Number.parseInt(match[1], 10) : null;
+}
+
+/** The `-s<size>` field of a key's fields, tolerant of a following `-m<mtime>`. */
+function sizeOfFields(fields: string): number | null {
+  const match = fields.match(/-s(\d+)(?=-|$)/);
+  if (!match) return null;
+  const size = Number.parseInt(match[1], 10);
+  return Number.isSafeInteger(size) ? size : null;
 }
 
 /**
@@ -60,11 +70,7 @@ export function annexKeyDeclaredSize(key: string): number | null {
  */
 export function annexKeyFieldSize(key: string): number | null {
   const parts = splitKey(key);
-  if (!parts) return null;
-  const match = parts.fields.match(/-s(\d+)(?=-|$)/);
-  if (!match) return null;
-  const size = Number.parseInt(match[1], 10);
-  return Number.isSafeInteger(size) ? size : null;
+  return parts ? sizeOfFields(parts.fields) : null;
 }
 
 /**
@@ -79,11 +85,11 @@ export function annexKeyFieldSize(key: string): number | null {
  *
  * Chunks are consulted ONLY when the plain object is ABSENT, for content uploaded
  * through a chunked special remote (nm000276, #1565): present when a chunking of
- * it is complete (see isChunkedKeyPresent). A truncated plain object beside a
- * complete chunk set stays missing. The data plane serves the plain key, so that
- * combination is the #967 signature, and reading it as present would be worse
- * than reading it as absent: the listing would say complete while the served
- * object is short.
+ * it is complete (see isChunkedKeyPresent). A plain object that exists at the
+ * wrong size stays missing even beside a complete chunk set. The data plane
+ * serves the plain key, and a short plain object is served as a 200 with
+ * truncated bytes, silently, where an absent plain key fails loudly. Complete
+ * chunks elsewhere in the bucket do not make that object whole.
  */
 export function isKeyPresentAtDeclaredSize(key: string, existing: Map<string, number>): boolean {
   const actual = existing.get(key);
@@ -104,11 +110,11 @@ export interface ParsedChunkKey {
 /**
  * Chunk object name -> its whole-file key, chunk size and chunk number.
  * `SHA256E-s982-S1073741824-C1--ba3d.vhdr` -> base `SHA256E-s982--ba3d.vhdr`,
- * chunk size 1073741824, chunk 1 (nm000276: 3055 of 3089 objects, #1565). The
- * `-S<chunksize>-C<n>` pair must be the LAST thing in the fields, before the
- * first `--`, as the special remote writes it; the same text inside the free-text
- * name is not a chunk. Returns null for anything that is not a chunk name,
- * including a zero or unsafe-integer size or number.
+ * chunk size 1073741824, chunk 1 (nm000276, #1565). The `-S<chunksize>-C<n>` pair
+ * must be the LAST thing in the fields, before the first `--`, as the special
+ * remote writes it; the same text inside the free-text name is not a chunk.
+ * Returns null for anything that is not a chunk name, including a zero or
+ * unsafe-integer size or number.
  */
 export function parseChunkKey(name: string): ParsedChunkKey | null {
   const parts = splitKey(name);
@@ -122,66 +128,87 @@ export function parseChunkKey(name: string): ParsedChunkKey | null {
   return { baseKey: `${match[1]}--${parts.name}`, chunkSize, chunkNumber };
 }
 
+/** The name chunk `chunkNumber` of a split key is stored under. */
+function chunkObjectName(
+  parts: { fields: string; name: string },
+  chunkSize: number,
+  chunkNumber: number,
+): string {
+  return `${parts.fields}-S${chunkSize}-C${chunkNumber}--${parts.name}`;
+}
+
 /**
- * The object name git-annex stores chunk `number` of `key` under: the twin of
+ * The object name git-annex stores chunk `chunkNumber` of `key` under: the twin of
  * `annex_chunk_key` in `scripts/zarr/generate_zarr.py`. Null when `key` has no
  * `--` and so is not a git-annex key.
  */
-export function annexChunkKey(key: string, chunkSize: number, number: number): string | null {
+export function annexChunkKey(key: string, chunkSize: number, chunkNumber: number): string | null {
   const parts = splitKey(key);
-  if (!parts) return null;
-  return `${parts.fields}-S${chunkSize}-C${number}--${parts.name}`;
+  return parts ? chunkObjectName(parts, chunkSize, chunkNumber) : null;
 }
 
 /**
- * The distinct chunk sizes any object in a listing carries, computed once per
- * listing. Chunk presence is then a handful of direct lookups of the exact chunk
- * names, not an index of every chunk in the bucket: a file's chunks can only live
- * under a chunk size some object in the listing carries.
+ * The chunk sizes each chunked file in a listing was stored at, read off its C1
+ * objects: whole-file key -> chunk sizes.
  *
- * A listing is treated as a snapshot. The cache is keyed by the Map itself and
- * invalidated by its size, so a listing that is grown after a lookup is rescanned;
- * one edited in place without changing its size is not, and nothing in the
- * callers does that. The scan is lazy, so a dataset whose every key is present as
- * a plain object never pays for it.
+ * Only C1 is indexed. A complete chunking always contains C1, so a key with no C1
+ * object cannot be complete at any size, and a key is only ever tried at the sizes
+ * its OWN C1 objects carry. That bounds the work for a key by the chunkings of
+ * that one file, not by how many distinct chunk sizes the bucket holds anywhere.
+ * The distinction matters because anyone who can write under `<id>/objects/` can
+ * mint any number of `-S<n>-C1--x` names; trying every size in the listing for
+ * every missing key would let them multiply the cost of the integrity sweep.
+ * Memory is one entry per chunked file, not per chunk.
+ *
+ * The scan is lazy, so a dataset whose every key is present as a plain object
+ * never pays for it, and it runs once per listing: the cache is keyed by the Map's
+ * identity and revalidated by its size, so a listing that grows or shrinks is
+ * rescanned. An edit that leaves the size unchanged (one name deleted, one added)
+ * keeps a stale index. That can only make a key read as missing, never present:
+ * the index only nominates chunk sizes to try, and every chunk is then looked up
+ * in the live Map. No caller mutates a listing after its first lookup.
  */
-const chunkSizesCache = new WeakMap<
+const firstChunksCache = new WeakMap<
   Map<string, number>,
-  { listingSize: number; chunkSizes: readonly number[] }
+  { listingSize: number; chunkSizesByKey: ReadonlyMap<string, readonly number[]> }
 >();
 
-function chunkSizesIn(existing: Map<string, number>): readonly number[] {
-  const cached = chunkSizesCache.get(existing);
-  if (cached && cached.listingSize === existing.size) return cached.chunkSizes;
-  const sizes = new Set<number>();
+function firstChunksIn(existing: Map<string, number>): ReadonlyMap<string, readonly number[]> {
+  const cached = firstChunksCache.get(existing);
+  if (cached && cached.listingSize === existing.size) return cached.chunkSizesByKey;
+  const sets = new Map<string, Set<number>>();
   for (const name of existing.keys()) {
     const parsed = parseChunkKey(name);
-    if (parsed) sizes.add(parsed.chunkSize);
+    if (!parsed || parsed.chunkNumber !== 1) continue;
+    const sizes = sets.get(parsed.baseKey);
+    if (sizes) sizes.add(parsed.chunkSize);
+    else sets.set(parsed.baseKey, new Set([parsed.chunkSize]));
   }
-  const chunkSizes = [...sizes];
-  chunkSizesCache.set(existing, { listingSize: existing.size, chunkSizes });
-  return chunkSizes;
+  const chunkSizesByKey = new Map<string, readonly number[]>();
+  for (const [baseKey, sizes] of sets) chunkSizesByKey.set(baseKey, [...sizes]);
+  firstChunksCache.set(existing, { listingSize: existing.size, chunkSizesByKey });
+  return chunkSizesByKey;
 }
 
 /**
- * True when every chunk of `key` at `chunkSize` is in `existing` at the size
- * chunking gives it: chunks 1..n-1 at `chunkSize`, the last at the remainder, and
- * a single empty chunk for an empty file. Matches `annex_chunk_sizes` and
+ * True when every chunk of a key at `chunkSize` is in `existing` at the size
+ * chunking gives it. A complete chunking is chunks C1..Cn, with n the size divided
+ * by the chunk size, rounded up. Every chunk is exactly the chunk size except the
+ * last, which holds whatever is left (a full chunk when the size divides evenly).
+ * An empty file is a single empty chunk. Matches `annex_chunk_sizes` and
  * `_complete_chunk_size` in `scripts/zarr/generate_zarr.py`. A missing, short or
  * oversized chunk means the file cannot be reassembled at that chunk size.
  */
 function isChunkSetComplete(
-  key: string,
+  parts: { fields: string; name: string },
   declared: number,
   chunkSize: number,
   existing: Map<string, number>,
 ): boolean {
   const n = declared === 0 ? 1 : Math.ceil(declared / chunkSize);
   for (let i = 1; i <= n; i++) {
-    const name = annexChunkKey(key, chunkSize, i);
-    if (name === null) return false;
     const expected = i < n ? chunkSize : declared - (n - 1) * chunkSize;
-    if (existing.get(name) !== expected) return false;
+    if (existing.get(chunkObjectName(parts, chunkSize, i)) !== expected) return false;
   }
   return true;
 }
@@ -189,16 +216,20 @@ function isChunkSetComplete(
 /**
  * True when some chunking of `key` is complete in `existing`. A listing can hold
  * more than one chunking of a key (a partial attempt at one chunk size and a
- * finished upload at another), so every chunk size in the listing is tried and
- * the answer is true if ANY is complete, whatever order they are tried in. False
- * for a key with no declared size: without it there is no way to know how many
- * chunks to expect.
+ * finished upload at another), so every chunk size the key's own C1 objects carry
+ * is tried and the answer is true if ANY is complete, whatever order they are
+ * tried in. False for a key with no declared size: without it there is no way to
+ * know how many chunks to expect.
  */
 export function isChunkedKeyPresent(key: string, existing: Map<string, number>): boolean {
-  const declared = annexKeyFieldSize(key);
+  const parts = splitKey(key);
+  if (!parts) return false;
+  const declared = sizeOfFields(parts.fields);
   if (declared === null) return false;
-  for (const chunkSize of chunkSizesIn(existing)) {
-    if (isChunkSetComplete(key, declared, chunkSize, existing)) return true;
+  const chunkSizes = firstChunksIn(existing).get(key);
+  if (!chunkSizes) return false;
+  for (const chunkSize of chunkSizes) {
+    if (isChunkSetComplete(parts, declared, chunkSize, existing)) return true;
   }
   return false;
 }
