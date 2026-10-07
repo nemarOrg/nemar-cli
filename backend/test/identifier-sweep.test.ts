@@ -31,6 +31,7 @@ import {
 } from "../src/services/github";
 import {
   IDENTIFIER_SWEEP_CALLBACK_PATH,
+  IDENTIFIER_SWEEP_DISPATCH_TIMEOUT_MS,
   IDENTIFIER_SWEEP_LATE_REPORT_HOURS,
   IDENTIFIER_SWEEP_MAX_IN_FLIGHT,
   IDENTIFIER_SWEEP_SLICE,
@@ -61,6 +62,8 @@ let server: Server;
 let dispatches: Dispatch[] = [];
 let githubRequests: string[] = [];
 let dispatchStatus = 204;
+/** When true, the stand-in never answers a dispatch: the lost-answer case a timeout must end. */
+let dispatchHang = false;
 let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
 let ownerId: number;
@@ -73,6 +76,7 @@ beforeAll(() => {
       const url = new URL(req.url);
       githubRequests.push(`${req.method} ${url.pathname}`);
       if (req.method === "POST" && url.pathname === "/repos/nemarDatasets/.github/dispatches") {
+        if (dispatchHang) return new Promise<Response>(() => {});
         const body = (await req.json()) as Dispatch;
         if (dispatchStatus < 300) dispatches.push(body);
         return new Response(dispatchStatus < 300 ? null : '{"message":"refused"}', {
@@ -95,6 +99,7 @@ afterEach(() => {
   dispatches = [];
   githubRequests = [];
   dispatchStatus = 204;
+  dispatchHang = false;
 });
 
 function env(over: Partial<Bindings> = {}): Bindings {
@@ -644,6 +649,20 @@ describe("a screen that cannot start", () => {
     expect(res.status).toBe(200);
     expect(stamps("nm000626").identifier_sweep_status).toBe("clean");
   });
+
+  test(
+    "a dispatch GitHub never answers is cut off by the timeout and left pending, not hung on",
+    async () => {
+      seedDataset("nm000629");
+      dispatchHang = true;
+      const started = Date.now();
+      const r = await runIdentifierSweepTick(env());
+      expect(Date.now() - started).toBeLessThan(IDENTIFIER_SWEEP_DISPATCH_TIMEOUT_MS + 5_000);
+      expect(r.unconfirmed).toEqual(["nm000629"]);
+      expect(stamps("nm000629").identifier_sweep_attempt).toBe("pending");
+    },
+    { timeout: IDENTIFIER_SWEEP_DISPATCH_TIMEOUT_MS + 10_000 },
+  );
 
   test("a Worker without the callback secret or the API base claims nothing, stamps nothing and calls nobody", async () => {
     seedDataset("nm000621");

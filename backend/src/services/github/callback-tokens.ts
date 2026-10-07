@@ -241,7 +241,7 @@ export interface IdentifierSweepCallbackPayload {
   nonce: string;
 }
 
-/** Canonical, domain-tagged payload encoding -- pinned so signer and verifier agree. */
+/** Canonical, domain-tagged payload encoding, pinned so signer and verifier agree. */
 function encodeIdentifierSweepCallbackPayload(payload: IdentifierSweepCallbackPayload): string {
   return `${IDENTIFIER_SWEEP_TOKEN_DOMAIN}\n${payload.datasetId}\n${payload.nonce}`;
 }
