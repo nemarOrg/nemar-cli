@@ -9,11 +9,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import {
-  isKeyPresentAtDeclaredSize,
-  keysWithoutObjects,
-  parseChunkKey,
-} from "../src/lib/s3-server-copy";
+import { parseChunkKey } from "../shared/annex-key";
+import { isKeyPresentAtDeclaredSize, keysWithoutObjects } from "../src/lib/s3-server-copy";
 
 const GiB = 1073741824;
 const BASE_EEG = "SHA256E-s2500000000--abc.eeg";

@@ -7,10 +7,10 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { parseChunkKey } from "../../shared/annex-key";
 import {
   compareManifestToListing,
   isKeyPresentAtDeclaredSize,
-  parseChunkKey,
 } from "../src/services/import-integrity";
 
 const GiB = 1073741824;
