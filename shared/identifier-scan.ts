@@ -396,13 +396,18 @@ function hasNonAscii(bytes: Uint8Array, start: number, end: number): boolean {
   return false;
 }
 
-function fieldText(bytes: Uint8Array, start: number, end: number): string {
+/** A header field as text, one character per byte, NUL read as a space, not trimmed. */
+function rawFieldText(bytes: Uint8Array, start: number, end: number): string {
   let out = "";
   for (let i = start; i < end; i++) {
     const b = bytes[i] as number;
     out += b === 0 ? " " : String.fromCharCode(b);
   }
-  return out.trim();
+  return out;
+}
+
+function fieldText(bytes: Uint8Array, start: number, end: number): string {
+  return rawFieldText(bytes, start, end).trim();
 }
 
 /**
@@ -562,6 +567,102 @@ function parseHeaderStartDate(text: string): { day: number; month: number } | nu
   return validDayMonth(day, month) ? { day, month } : null;
 }
 
+/**
+ * How the scanner reads the header start date (bytes 168..176): not a `dd.mm.yy` date at all, the
+ * year-only 1 January, or a date finer than the year. The year is never read.
+ */
+function readHeaderStartDate(text: string): "unparsed" | "year-only" | "dated" {
+  const start = parseHeaderStartDate(text);
+  if (!start) return "unparsed";
+  return start.day === 1 && start.month === 1 ? "year-only" : "dated";
+}
+
+/** The dates in a local recording identification, read the one way the scanner reads them. */
+interface RecordingDateReading {
+  parts: string[];
+  /** The EDF+ form: the field starts with the keyword `Startdate`, in any letter case. */
+  keyword: boolean;
+  /** In the EDF+ form, the token after the keyword and where it starts in the field's text. */
+  slot: { text: string; index: number } | undefined;
+  dates: DateMatch[];
+  /**
+   * The acquisition date: in the EDF+ form the first date that is not year-only inside the slot;
+   * in a free-text field the first that is not year-only, unless a birth word is present.
+   */
+  acquisition: DateMatch | undefined;
+  /** Every other date that is not year-only and is not the acquisition date's slot: a birth date. */
+  birth: DateMatch[];
+}
+
+function readRecordingDates(recording: string): RecordingDateReading {
+  const parts = recording.split(/\s+/);
+  const keyword = (parts[0] as string).toLowerCase() === "startdate";
+  const dates = findDates(recording);
+  const slotText = keyword ? parts[1] : undefined;
+  const slot =
+    slotText === undefined
+      ? undefined
+      : { text: slotText, index: recording.indexOf(slotText, (parts[0] as string).length) };
+  const inSlot = (d: DateMatch) =>
+    slot !== undefined && d.index >= slot.index && d.index < slot.index + slot.text.length;
+  // A birth word anywhere in a free-text recording id makes every date in it a birth date: the
+  // writer said what the field holds, and which date it means cannot be told from distance.
+  const hasBirthWord =
+    /\b(?:dob|d\.o\.b)\b|birth|\bborn|\bgeb|nacid|nacimiento|(?:^|\s)\*(?=\d)/iu.test(recording);
+  let acquisition: DateMatch | undefined;
+  const birth: DateMatch[] = [];
+  for (const d of dates) {
+    if (isYearOnly(d.candidates)) continue;
+    // In the EDF+ form only the date in the slot after `Startdate` is an acquisition date;
+    // a date anywhere else in the field is not the start date of anything.
+    const isAcquisition = keyword ? inSlot(d) : !hasBirthWord;
+    if (isAcquisition) acquisition ??= d;
+    else birth.push(d);
+  }
+  return { parts, keyword, slot, dates, acquisition, birth };
+}
+
+/**
+ * Where an EDF/BDF header holds the acquisition dates the scanner reports: the reading behind
+ * `edf-startdate` and `edf-recording-startdate` in {@link scanEdfHeader}, with byte offsets, for
+ * the one rule that rewrites them (`normalizeEdfDates`, ADR 0091). Null when the bytes are not an
+ * EDF or BDF header. It returns positions, never text.
+ */
+export interface EdfAcquisitionDates {
+  /** `edf-startdate`: bytes 168..176 hold a `dd.mm.yy` date that is not 1 January. */
+  startdate: boolean;
+  /**
+   * `edf-recording-startdate`: the byte range of the date the scanner reports in the recording
+   * field, and whether that date is the whole EDF+ slot after `Startdate`.
+   */
+  recording: { start: number; end: number; wholeSlot: boolean } | null;
+}
+
+export function edfAcquisitionDates(bytes: Uint8Array): EdfAcquisitionDates | null {
+  if (!detectEdfFamily(bytes)) return null;
+  const raw = rawFieldText(bytes, 88, 168);
+  const recording = raw.trim();
+  let found: EdfAcquisitionDates["recording"] = null;
+  if (recording !== "" && !isPlaceholder(recording)) {
+    const reading = readRecordingDates(recording);
+    const d = reading.acquisition;
+    if (d) {
+      // The field's text is trimmed; one character is one byte, so the offset is the trim plus the index.
+      const start = 88 + (raw.length - raw.trimStart().length) + d.index;
+      const slot = reading.slot;
+      found = {
+        start,
+        end: start + d.text.length,
+        wholeSlot: reading.keyword && slot?.index === d.index && slot.text === d.text,
+      };
+    }
+  }
+  return {
+    startdate: readHeaderStartDate(fieldText(bytes, 168, 176)) === "dated",
+    recording: found,
+  };
+}
+
 export function detectEdfFamily(bytes: Uint8Array): "edf" | "bdf" | null {
   if (bytes.length < EDF_HEADER_BYTES) return null;
   if (bytes[0] === 0xff && fieldText(bytes, 1, 8) === "BIOSEMI") return "bdf";
@@ -666,27 +767,19 @@ export function scanEdfHeader(bytes: Uint8Array): Finding[] {
   const recording = fieldText(bytes, 88, 168);
   if (hasNonAscii(bytes, 88, 168)) add("edf-recording-nonascii", "review", "recording", recording);
   if (recording !== "" && !isPlaceholder(recording)) {
-    const parts = recording.split(/\s+/);
-    const keyword = (parts[0] as string).toLowerCase() === "startdate";
-    const recDates = findDates(recording);
-    const slot = keyword ? parts[1] : undefined;
-    const slotStart =
-      slot === undefined ? -1 : recording.indexOf(slot, (parts[0] as string).length);
-    const inSlot = (d: DateMatch) =>
-      slot !== undefined && d.index >= slotStart && d.index < slotStart + slot.length;
-    // A birth word anywhere in a free-text recording id makes every date in it a birth date: the
-    // writer said what the field holds, and which date it means cannot be told from distance.
-    const hasBirthWord =
-      /\b(?:dob|d\.o\.b)\b|birth|\bborn|\bgeb|nacid|nacimiento|(?:^|\s)\*(?=\d)/iu.test(recording);
-    let acquisitionDate: DateMatch | undefined;
-    for (const d of recDates) {
-      if (isYearOnly(d.candidates)) continue;
-      // In the EDF+ form only the date in the slot after `Startdate` is an acquisition date;
-      // a date anywhere else in the field is not the start date of anything.
-      const acquisition = keyword ? inSlot(d) : !hasBirthWord;
-      if (acquisition) acquisitionDate ??= d;
-      else flagBirth("recording.birthdate", d.text);
-    }
+    // One reading of the field's dates, shared with `edfAcquisitionDates`, so the rule that
+    // rewrites an acquisition date finds exactly the date reported here.
+    const {
+      parts,
+      keyword,
+      dates: recDates,
+      slot: slotAt,
+      acquisition: acquisitionDate,
+      birth,
+    } = readRecordingDates(recording);
+    const slot = slotAt?.text;
+    const firstBirth = birth[0];
+    if (firstBirth) flagBirth("recording.birthdate", firstBirth.text);
     if (acquisitionDate) {
       add("edf-recording-startdate", "review", "recording.startdate", acquisitionDate.text);
     }
@@ -720,11 +813,9 @@ export function scanEdfHeader(bytes: Uint8Array): Finding[] {
 
   // Header start date, bytes 168..176: `dd.mm.yy`. Anything else is reported as not a date.
   const startText = fieldText(bytes, 168, 176);
-  const start = parseHeaderStartDate(startText);
-  if (!start) add("edf-startdate-unparsed", "review", "startdate", startText);
-  else if (!(start.day === 1 && start.month === 1)) {
-    add("edf-startdate", "review", "startdate", startText);
-  }
+  const start = readHeaderStartDate(startText);
+  if (start === "unparsed") add("edf-startdate-unparsed", "review", "startdate", startText);
+  else if (start === "dated") add("edf-startdate", "review", "startdate", startText);
   return findings;
 }
 
@@ -832,6 +923,56 @@ export function scanAcqTime(value: string): Finding[] {
   if (!m) return [];
   if (Number(m[3]) === 1 && Number(m[2]) === 1) return [];
   return [{ kind: "acq-time-dated", severity: "review", field: "acq_time", shape: shapeOf(value) }];
+}
+
+/** One `acq_time` cell of a scans table: where its text starts in the table's text, and the text. */
+export interface AcqTimeCell {
+  index: number;
+  value: string;
+}
+
+/**
+ * Every `acq_time` cell of a scans table, read the way the screen reads one: a leading byte-order
+ * mark dropped, rows split at `\n`, the column found by its exact name in the header row (the
+ * first such column), and a row too short to have that cell skipped. `index` is a position in the
+ * text as given, the mark included. Shared by the screen ({@link scanScansTable}) and the one rule
+ * that rewrites these dates (ADR 0091), so the two read the same cells.
+ */
+export function acqTimeCells(tsvText: string): AcqTimeCell[] {
+  const out: AcqTimeCell[] = [];
+  let rowStart = tsvText.startsWith("﻿") ? 1 : 0;
+  let col = -1;
+  for (let row = 0; ; row++) {
+    const newline = tsvText.indexOf("\n", rowStart);
+    const rowEnd = newline < 0 ? tsvText.length : newline;
+    const text = tsvText.slice(rowStart, rowEnd);
+    if (row === 0) {
+      col = text.replace(/\r$/, "").split("\t").indexOf("acq_time");
+      if (col < 0) return out;
+    } else {
+      let cellStart = 0;
+      let k = 0;
+      for (; k < col; k++) {
+        const tab = text.indexOf("\t", cellStart);
+        if (tab < 0) break;
+        cellStart = tab + 1;
+      }
+      if (k === col) {
+        const tab = text.indexOf("\t", cellStart);
+        out.push({
+          index: rowStart + cellStart,
+          value: text.slice(cellStart, tab < 0 ? text.length : tab),
+        });
+      }
+    }
+    if (newline < 0) return out;
+    rowStart = newline + 1;
+  }
+}
+
+/** Screen a scans table's text: the dated `acq_time` values ({@link scanAcqTime}). */
+export function scanScansTable(tsvText: string): Finding[] {
+  return acqTimeCells(tsvText).flatMap((cell) => scanAcqTime(cell.value));
 }
 
 /**
