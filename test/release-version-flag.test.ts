@@ -10,7 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
@@ -115,25 +115,40 @@ describe("bindShadowedOptionValues", () => {
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
+// Nothing here may depend on the network. The CLI is pointed at a closed port
+// through config.json (the account's apiUrl) rather than an environment
+// variable: this file has to stay in the offline `unit-pure` CI tier, and a
+// test that names the live-backend variable or helper is routed to the soft
+// `integration-dev` tier instead (see the file-sorting grep in test.yml).
+const UNREACHABLE_API = "http://127.0.0.1:9";
 let configDir: string;
 
 beforeEach(() => {
   configDir = mkdtempSync(join(tmpdir(), "nemar-release-version-"));
+  // An account with an apiUrl and no key: the notices call fails fast against
+  // the closed port, and the release handler refuses with "Not authenticated".
+  writeFileSync(
+    join(configDir, "config.json"),
+    JSON.stringify({
+      activeAccount: "argv-shadow",
+      accounts: { "argv-shadow": { apiUrl: UNREACHABLE_API } },
+    }),
+  );
 });
 
 afterEach(() => {
   rmSync(configDir, { recursive: true, force: true });
 });
 
-async function runCli(args: string[]) {
-  const env: Record<string, string | undefined> = {
-    ...process.env,
-    NEMAR_CONFIG_DIR: configDir,
-    // Unreachable on purpose: nothing here may depend on the network.
-    TEST_API_URL: "http://127.0.0.1:9",
-    NEMAR_NO_UPDATE_CHECK: "1",
-    NO_COLOR: "1",
-  };
+async function spawnCli(args: string[]) {
+  // Drop every TEST_* variable so an ambient live-backend setting cannot
+  // override the config.json URL above.
+  const env: Record<string, string | undefined> = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.startsWith("TEST_")),
+  );
+  env.NEMAR_CONFIG_DIR = configDir;
+  env.NEMAR_NO_UPDATE_CHECK = "1";
+  env.NO_COLOR = "1";
   env.FORCE_COLOR = undefined;
   env.CLICOLOR_FORCE = undefined;
   const proc = spawn({
@@ -151,7 +166,7 @@ async function runCli(args: string[]) {
 
 describe("nemar entry point", () => {
   test("dataset release --version X.Y.Z reaches the release handler", async () => {
-    const r = await runCli(["dataset", "release", "nm000104", "--version", "2.0.0", "-y"]);
+    const r = await spawnCli(["dataset", "release", "nm000104", "--version", "2.0.0", "-y"]);
     expect(r.stdout.trim()).not.toBe(version);
     expect(r.stdout).toContain("Not authenticated");
     expect(r.exitCode).toBe(1);
@@ -162,7 +177,7 @@ describe("nemar entry point", () => {
       ["dataset", "release", "nm000104", "--version"],
       ["dataset", "release", "nm000104", "--version", "-y"],
     ]) {
-      const r = await runCli(args);
+      const r = await spawnCli(args);
       expect(r.stdout.trim()).not.toBe(version);
       expect(r.stderr).toContain("error: option '--version <version>' argument missing");
       expect(r.exitCode).toBe(1);
@@ -170,7 +185,7 @@ describe("nemar entry point", () => {
   });
 
   test("the root --version still prints the CLI version", async () => {
-    const r = await runCli(["--version"]);
+    const r = await spawnCli(["--version"]);
     expect(r.exitCode).toBe(0);
     expect(r.stdout.trim()).toBe(version);
   });
