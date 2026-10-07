@@ -36,6 +36,57 @@ export async function isGitAnnexDataset(path: string): Promise<boolean> {
 }
 
 /**
+ * True when `git init` rejected `-b`/`--initial-branch`: the option arrived in
+ * git 2.28, and git 2.25 (Ubuntu 20.04's system git, still common on HPC login
+ * and compute images) answers "error: unknown switch `b'". Exported for tests.
+ */
+export function isInitialBranchUnsupported(stderr: string): boolean {
+  return /unknown switch [`']b'|unknown option [`']?(-b|initial-branch)|usage: git init/i.test(
+    stderr,
+  );
+}
+
+/**
+ * `git init` with `main` as the unborn branch, on any git version.
+ *
+ * Tries `git init -b main` first; when this git predates `-b` (< 2.28) it
+ * falls back to a plain `git init` followed by pointing the unborn HEAD at
+ * `refs/heads/main`, which is exactly what `-b` does. Previously the upload
+ * failed outright on git 2.25 and depositors had to put a git shim on PATH.
+ */
+export async function initGitRepoOnMain(
+  path: string,
+  env: Record<string, string> = {},
+): Promise<{ success: boolean; error?: string }> {
+  const envOpt = Object.keys(env).length > 0 ? { env } : {};
+  const withBranch = await runCommand(["git", "init", "-b", "main", path], envOpt);
+  if (withBranch.exitCode === 0) {
+    return { success: true };
+  }
+  if (!isInitialBranchUnsupported(withBranch.stderr)) {
+    return {
+      success: false,
+      error: withBranch.stderr.trim() || "Failed to initialize git repository",
+    };
+  }
+  const plain = await runCommand(["git", "init", path], envOpt);
+  if (plain.exitCode !== 0) {
+    return { success: false, error: plain.stderr.trim() || "Failed to initialize git repository" };
+  }
+  const head = await runCommand(["git", "symbolic-ref", "HEAD", "refs/heads/main"], {
+    cwd: path,
+    ...envOpt,
+  });
+  if (head.exitCode !== 0) {
+    return {
+      success: false,
+      error: head.stderr.trim() || "Failed to set the initial branch to main",
+    };
+  }
+  return { success: true };
+}
+
+/**
  * Initialize a git-annex dataset
  *
  * If author info is provided, sets GIT_AUTHOR_NAME and GIT_AUTHOR_EMAIL
@@ -61,15 +112,9 @@ export async function initDataset(
     }
 
     // Initialize git repository with explicit "main" branch name
-    const { stderr: gitStderr, exitCode: gitExitCode } = await runCommand(
-      ["git", "init", "-b", "main", path],
-      {
-        ...(Object.keys(env).length > 0 ? { env } : {}),
-      },
-    );
-
-    if (gitExitCode !== 0) {
-      return { success: false, error: gitStderr.trim() || "Failed to initialize git repository" };
+    const gitInit = await initGitRepoOnMain(path, env);
+    if (!gitInit.success) {
+      return gitInit;
     }
 
     // Initialize git-annex
