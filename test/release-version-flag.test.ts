@@ -67,8 +67,16 @@ function declareRoot(): Command {
 
 class StoppedBeforeAction extends Error {}
 
+/** What Commander had parsed for the command that was about to run. */
+interface Reached {
+  name: string;
+  opts: Record<string, unknown>;
+  optsWithGlobals: Record<string, unknown>;
+  processedArgs: unknown[];
+}
+
 let program: Command;
-const reached: Command[] = [];
+const reached: Reached[] = [];
 const originalParents = SHARED_GROUPS.map((c) => c.parent);
 
 beforeAll(() => {
@@ -83,7 +91,12 @@ beforeAll(() => {
   // Stop at the command that would run, before its action touches the network
   // or the account. What Commander parsed for that command is the evidence.
   program.hook("preAction", (_root, actionCommand) => {
-    reached.push(actionCommand);
+    reached.push({
+      name: actionCommand.name(),
+      opts: { ...actionCommand.opts() },
+      optsWithGlobals: { ...actionCommand.optsWithGlobals() },
+      processedArgs: [...actionCommand.processedArgs],
+    });
     throw new StoppedBeforeAction();
   });
 });
@@ -94,13 +107,61 @@ afterAll(() => {
   });
 });
 
-/** Parse `argv` the way src/index.ts does and return the command Commander reached. */
-async function reach(argv: string[]): Promise<Command> {
+/** The parse called process.exit(), which would have ended the whole `bun test` run. */
+class ProcessExitCalled extends Error {}
+
+/**
+ * Commander 12 never clears the option values a parse stored, and the command
+ * groups are shared with every other test file in this process. After a parse
+ * (including one that died on a usage error before reaching any command), drop
+ * what it set, keeping declared defaults, so no case sees, or leaves behind,
+ * another case's flags.
+ */
+function forgetParsedOptions(command: Command): void {
+  const state = command as unknown as {
+    _optionValues?: Record<string, unknown>;
+    _optionValueSources?: Record<string, unknown>;
+  };
+  for (const [key, source] of Object.entries(state._optionValueSources ?? {})) {
+    if (source === "default") continue;
+    delete state._optionValues?.[key];
+    delete state._optionValueSources?.[key];
+  }
+  for (const sub of command.commands) forgetParsedOptions(sub);
+}
+
+/**
+ * Parse `argv` the way src/index.ts does and return what Commander had parsed
+ * for the command it reached. Only the throwaway root has exitOverride(); a usage error raised by
+ * a shared command (a missing <dataset-id>, say) calls process.exit(1), which
+ * would abort every test file in the run, so process.exit and stderr are
+ * trapped for the length of the parse and the exit surfaces as a failure.
+ */
+async function reach(argv: string[]): Promise<Reached> {
   reached.length = 0;
-  await expect(
-    program.parseAsync(bindShadowedOptionValues(program, argv), { from: "user" }),
-  ).rejects.toBeInstanceOf(StoppedBeforeAction);
-  expect(reached).toHaveLength(1);
+  const realExit = process.exit;
+  const realWrite = process.stderr.write;
+  let stderr = "";
+  process.exit = ((code?: number) => {
+    throw new ProcessExitCalled(`process.exit(${code}) during parse: ${stderr.trim()}`);
+  }) as typeof process.exit;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  let outcome: unknown;
+  try {
+    await program.parseAsync(bindShadowedOptionValues(program, argv), { from: "user" });
+  } catch (err) {
+    outcome = err;
+  } finally {
+    process.exit = realExit;
+    process.stderr.write = realWrite;
+  }
+  forgetParsedOptions(program);
+  if (!(outcome instanceof StoppedBeforeAction)) {
+    throw outcome ?? new Error("the parse finished without reaching a command");
+  }
   return reached[0];
 }
 
@@ -204,15 +265,32 @@ describe("bindShadowedOptionValues on the real command tree", () => {
       expect(bindShadowedOptionValues(program, argv)).toEqual(argv);
     }
     const validate = await reach(["dataset", "validate", "--verbose", "./x"]);
-    expect(validate.name()).toBe("validate");
+    expect(validate.name).toBe("validate");
     expect(validate.processedArgs).toEqual(["./x"]);
   });
 
+  // Each parse below uses values no other case uses, and reach() clears what a
+  // parse stored: Commander 12 never resets option values, and the shared
+  // `release` command would otherwise carry them into later cases and files.
   test("Commander then hands the value to the subcommand", async () => {
-    const release = await reach(["dataset", "release", "nm1", "--version", "2.0.0", "-y"]);
-    expect(release.name()).toBe("release");
-    expect(release.opts().version).toBe("2.0.0");
+    const release = await reach(["dataset", "release", "nm1", "--version", "3.1.4", "-y"]);
+    expect(release.name).toBe("release");
+    expect(release.opts.version).toBe("3.1.4");
     expect(release.processedArgs).toEqual(["nm1"]);
+  });
+
+  test("reach() reports a usage error from a shared command instead of exiting", async () => {
+    const exitBefore = process.exit;
+    const writeBefore = process.stderr.write;
+    // <dataset-id> is missing, so Commander calls process.exit(1) on `release`.
+    await expect(reach(["dataset", "release", "--version", "4.0.4"])).rejects.toThrow(
+      /process\.exit\(1\) during parse: error: missing required argument 'dataset-id'/,
+    );
+    expect(process.exit).toBe(exitBefore);
+    expect(process.stderr.write).toBe(writeBefore);
+    // ... and the failed parse left nothing behind on the shared command.
+    const release = await reach(["dataset", "release", "nm1", "-y"]);
+    expect(release.opts.version).toBeUndefined();
   });
 
   // `admin recover status` redeclares --recover-file from its parent group
@@ -221,9 +299,9 @@ describe("bindShadowedOptionValues on the real command tree", () => {
   // through optsWithGlobals() (src/commands/admin.ts), so the join must leave
   // that design working.
   test("a value option shared with a value-taking group still resolves", async () => {
-    const status = await reach(["admin", "recover", "status", "--recover-file", "list.json"]);
-    expect(status.name()).toBe("status");
-    expect(status.optsWithGlobals().recoverFile).toBe("list.json");
+    const status = await reach(["admin", "recover", "status", "--recover-file", "recover-1.json"]);
+    expect(status.name).toBe("status");
+    expect(status.optsWithGlobals.recoverFile).toBe("recover-1.json");
   });
 });
 
