@@ -33,6 +33,13 @@ let putStatus = 200;
 let configDir: string;
 let datasetDir: string;
 let serverUrl: string;
+/**
+ * Test-tier URL overrides (every `TEST_`-prefixed variable ending in `_URL`), set aside while this
+ * file runs and put back after. The client prefers such an override to the config file, and a
+ * live-tier file earlier in the same process sets one and keeps it, so without this the client
+ * would follow it. This file talks to its own stand-in only, named in the config file.
+ */
+const setAside = new Map<string, string>();
 let previousConfigDir: string | undefined;
 let preflight: UploaderPreflight;
 
@@ -59,6 +66,12 @@ const recording = (): Record<string, boolean> =>
   recordedReply === undefined ? {} : { identifier_preflight_recorded: recordedReply };
 
 beforeAll(async () => {
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined && key.startsWith("TEST_") && key.endsWith("_URL")) {
+      setAside.set(key, value);
+      Reflect.deleteProperty(process.env, key);
+    }
+  }
   previousConfigDir = process.env.NEMAR_CONFIG_DIR;
   server = Bun.serve({
     port: 0,
@@ -110,6 +123,7 @@ beforeAll(async () => {
 
 afterAll(() => {
   server?.stop(true);
+  for (const [key, value] of setAside) process.env[key] = value;
   // Guarded restore (#1175): test/ and backend/test/ share one process at the root.
   if (previousConfigDir === undefined) Reflect.deleteProperty(process.env, "NEMAR_CONFIG_DIR");
   else process.env.NEMAR_CONFIG_DIR = previousConfigDir;
