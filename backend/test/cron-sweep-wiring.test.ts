@@ -118,7 +118,8 @@ const SWEEP_WIRING: Record<
   // production-only there and absent from DEV_CRON_ALLOWLIST.
   sweepIdentifierScreens: "tick-prod-only",
   // Epic #1610 phase 5 (ADR 0087): the sweep's callback token pair, called by the tick
-  // and the callback route; not cron entry points.
+  // and the callback route, and the weekly report's mail sender; not cron entry points.
+  sendIdentifierSweepReportEmail: "helper",
   signIdentifierSweepCallbackToken: "helper",
   verifyIdentifierSweepCallbackToken: "helper",
   // #1440: the non-production scope clause for sweepBlockedBidsValidationRequests,

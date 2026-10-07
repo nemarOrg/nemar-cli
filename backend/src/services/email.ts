@@ -175,6 +175,15 @@ export interface EmailPreferences {
    * by accident, and the finding is time-sensitive in a way a request is not.
    */
   dataset_anonymity: boolean;
+  /**
+   * The scheduled identifier sweep's weekly report (epic #1610 phase 5, ADR 0087).
+   *
+   * Its own category for the reason `dataset_anonymity` has one: an admin who
+   * stops watching publication requests has said nothing about wanting to stop
+   * hearing which published datasets carry identifiers. Opted in by default,
+   * like every category here, so a stored row from before it existed receives it.
+   */
+  identifier_sweep: boolean;
 }
 
 export type EmailCategory = keyof EmailPreferences;
@@ -184,6 +193,7 @@ export const DEFAULT_EMAIL_PREFERENCES: EmailPreferences = {
   publication_request: true,
   announcements: true,
   dataset_anonymity: true,
+  identifier_sweep: true,
 };
 
 interface ResendResponse {
@@ -212,6 +222,7 @@ export function parseEmailPreferences(raw: string | null): EmailPreferences {
       // IN rather than out. Defaulting a new alert to off would silently give
       // every current admin no anonymity mail at all.
       dataset_anonymity: parsed.dataset_anonymity !== false,
+      identifier_sweep: parsed.identifier_sweep !== false,
     };
   } catch (err) {
     console.error("Corrupt email_preferences JSON, defaulting to all enabled:", raw, err);
@@ -2269,4 +2280,73 @@ export async function sendAnonymityFindingsEmail(
     }
   }
   return { delivered, failed };
+}
+
+/**
+ * What the identifier sweep's weekly report says (ADR 0087). Structurally the
+ * report `identifier-sweep-report.ts` renders, re-declared here so `email.ts`
+ * does not import a sweep; the dependency runs the other way.
+ */
+export interface IdentifierSweepReportForEmail {
+  subject: string;
+  headline: string;
+  attention: boolean;
+  lines: readonly string[];
+}
+
+/**
+ * Send the identifier sweep's weekly report to each admin, one message each.
+ *
+ * Every line is escaped: a line carries dataset ids, finding kinds, counts and
+ * fixed words, never a value, and escaping is what keeps it that way if a line
+ * ever carried anything else. Returns how many admins it reached, so the caller
+ * records the week as sent only when someone received it.
+ */
+export async function sendIdentifierSweepReportEmail(
+  adminEmails: readonly string[],
+  report: IdentifierSweepReportForEmail,
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
+): Promise<number> {
+  const color = report.attention ? "#d97706" : "#16a34a";
+  const body = report.lines.map((line) => escapeHtml(line)).join("\n");
+  const html = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 720px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #333; font-size: 20px;">Identifier sweep: weekly report</h1>
+  <p style="color: ${color}; font-weight: bold;">${escapeHtml(report.headline)}</p>
+  <pre style="white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; background: #f4f4f5; padding: 16px; border-radius: 8px;">${body}</pre>
+  <p style="color: #666; font-size: 14px;">This report arrives every week whether or not anything is wrong; a week without it means the reporter is not running. The sweep reports and never repairs. Read it on demand: <code>GET /admin/identifier-sweep</code>.</p>
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+  <p style="color: #999; font-size: 12px;"><a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource</p>
+</body>
+</html>
+  `;
+  let delivered = 0;
+  for (const adminEmail of adminEmails) {
+    try {
+      await sendEmail(
+        adminEmail,
+        report.subject,
+        html,
+        resendApiKey,
+        fromEmail,
+        replyTo,
+        isDev,
+        deliveryEnv,
+      );
+      delivered++;
+    } catch (error) {
+      console.error(
+        `Failed to send the identifier sweep report to ${redactRecipient(adminEmail)}:`,
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
+  return delivered;
 }
