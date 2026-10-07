@@ -518,7 +518,11 @@ describe("a first import of a tree with identifiers", () => {
 
   test("a recording git holds is patched in the clone, annexed, uploaded, and held for a person", async () => {
     const small = edfBytes(FLAGGED_PATIENT, 500, 3);
-    const files = [...baseFixtures(), { path: FLAGGED_GIT, bytes: small }];
+    // No sidecar to blank: the git-held recording alone must be what holds the publication.
+    const files = [
+      ...baseFixtures().filter((f) => f.path !== SIDECAR),
+      { path: FLAGGED_GIT, bytes: small },
+    ];
     const upstream = await buildUpstream(files);
     const { clone, store } = await cloneForImport(upstream);
     expect((await listAnnexedKeys(clone)).has(FLAGGED_GIT)).toBe(false);
@@ -541,6 +545,7 @@ describe("a first import of a tree with identifiers", () => {
     expect(result.normalized.data).toBeNull();
     expect(result.manifest.items.find((it) => it.key === key)?.origin).toBe("local");
     // The original stays in the pushed history as a git blob: never approved automatically.
+    expect(result.scrub.counts.json_values_blanked).toBe(0);
     expect(result.privacy.historyHoldsOriginals).toBe(true);
   }, 120_000);
 
