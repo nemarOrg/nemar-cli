@@ -54,7 +54,7 @@ The maintainer chose B on 2026-10-07 and asked that the warning be shown to the 
   A scan with no date finding prints no warning, and a count that is not a non-negative integer is ignored rather than added.
 - **Where it is shown.**
   It is part of `describeScreen` and `describePreflight`, which are already the one place the screen's words are made, so it appears wherever those words do and nowhere else:
-  1. The uploader: the identifier preflight of `nemar dataset upload` (and `--dry-run`), printed under the verdict.
+  1. The uploader: the identifier preflight of `nemar dataset upload` (and `--dry-run`), printed under the verdict, and printed again if the second screen, right before the create call, counts a different number of dates than the first.
   2. The person who requests publication: `nemar dataset publish status`, which prints the request's screen as stored, and the mail that tells a requester a direct identifier blocked the request.
   3. The administrator: the publication-request email, including a resend, and `nemar admin publish list`.
   The terminal prints the warning's lines in the warning color; which lines they are comes from `isDateWarningLine`, in the same module.
