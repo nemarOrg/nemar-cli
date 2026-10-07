@@ -10,122 +10,21 @@
  *   - the retry engine's "verify current state first" step before deciding
  *     whether to blocklist or re-dispatch an incomplete/failed/quarantined row.
  *
- * `annexKeyDeclaredSize`/`isKeyPresentAtDeclaredSize` below are a Workers-side
- * port of the identically-named Phase 1 helpers in `src/lib/s3-server-copy.ts`
- * (CLI code; not importable into a Workers bundle -- it pulls in node:fs at
- * module scope via git-annex/run-command.js). Keep the regex and null-vs-0
- * semantics in sync if either changes.
+ * `annexKeyDeclaredSize`/`isKeyPresentAtDeclaredSize` are defined once in
+ * `shared/annex-key.ts` (pure, so a Workers bundle can take it) and shared with
+ * the CLI's `src/lib/s3-server-copy.ts`; they are re-exported here so existing
+ * importers keep their path. That module also owns the chunked-key rule: content
+ * stored as `-S<size>-C<n>` chunk objects counts as present when a chunking is
+ * complete (#1565, ADR 0064 amendment 2026-10-07).
  */
 
+import { annexKeyDeclaredSize, isKeyPresentAtDeclaredSize } from "../../../shared/annex-key.js";
 import type { Bindings } from "../types/bindings.js";
 import { resolveCurrentVersion } from "./archive-retry.js";
 import { testS3EndpointOverride } from "./environment.js";
 import { type PresignedUrlOptions, getManifest, listObjectSizes } from "./s3.js";
 
-/**
- * Declared size (bytes) encoded in a git-annex key, e.g.
- * `SHA256E-s10565888--abc123.edf` -> 10565888. Returns null for a `git:`-keyed
- * (non-annex) manifest entry or anything that doesn't match the pattern, so
- * callers can tell "no declared size" apart from "0 bytes claimed".
- */
-export function annexKeyDeclaredSize(key: string): number | null {
-  const match = key.match(/-s(\d+)--/);
-  return match ? Number.parseInt(match[1], 10) : null;
-}
-
-/**
- * True when `key` is present in `existing` (a key -> byte-size map from
- * {@link import("./s3.js").listObjectSizes}) at its correct size. An annex
- * key's declared size must match exactly -- a 0-byte or truncated object
- * counts as absent even though the key exists (the #967 bug). A key with no
- * declared size (shouldn't reach here; git:-keyed entries are filtered out
- * before this is called) is treated as present-if-listed. Content uploaded
- * through a chunked special remote (nm000276, #1565) is present when all of its
- * chunk objects are -- otherwise `nemar dataset status` reports such a dataset
- * "incomplete" although every byte is in the bucket.
- */
-export function isKeyPresentAtDeclaredSize(key: string, existing: Map<string, number>): boolean {
-  const actual = existing.get(key);
-  if (actual !== undefined) {
-    const declared = annexKeyDeclaredSize(key);
-    if (declared === null || actual === declared) return true;
-  }
-  // Content uploaded through a chunked special remote exists only as chunk
-  // objects; it is present when every chunk is (#1565).
-  return isChunkedKeyPresent(key, existing);
-}
-
-/**
- * git-annex chunk object name -> its whole-file key, chunk size and chunk
- * number. A dataset uploaded with `chunk=1GiB` on its special remote stores
- * `SHA256E-s982-S1073741824-C1--<hash>.vhdr` (C1..Cn) and never the plain
- * `SHA256E-s982--<hash>.vhdr` (nm000276: 3055 of 3089 objects, #1565). The
- * whole-file key is the name with `-S<chunksize>-C<n>` removed. Returns null
- * for anything that is not a chunk name.
- */
-export function parseChunkKey(
-  name: string,
-): { baseKey: string; chunkSize: number; chunkNumber: number } | null {
-  const m = name.match(/^(.+?-s\d+(?:-m\d+)?)-S(\d+)-C(\d+)(--.*)$/);
-  if (!m) return null;
-  const chunkSize = Number.parseInt(m[2], 10);
-  const chunkNumber = Number.parseInt(m[3], 10);
-  if (!(chunkSize > 0) || !(chunkNumber > 0)) return null;
-  return { baseKey: `${m[1]}${m[4]}`, chunkSize, chunkNumber };
-}
-
-/** baseKey -> chunkSize -> chunkNumber -> object size, built once per listing. */
-type ChunkIndex = Map<string, Map<number, Map<number, number>>>;
-const chunkIndexCache = new WeakMap<Map<string, number>, { size: number; index: ChunkIndex }>();
-
-function chunkIndexFor(existing: Map<string, number>): ChunkIndex {
-  const cached = chunkIndexCache.get(existing);
-  if (cached && cached.size === existing.size) return cached.index;
-  const index: ChunkIndex = new Map();
-  for (const [name, size] of existing) {
-    const parsed = parseChunkKey(name);
-    if (!parsed) continue;
-    let bySize = index.get(parsed.baseKey);
-    if (!bySize) {
-      bySize = new Map();
-      index.set(parsed.baseKey, bySize);
-    }
-    let chunks = bySize.get(parsed.chunkSize);
-    if (!chunks) {
-      chunks = new Map();
-      bySize.set(parsed.chunkSize, chunks);
-    }
-    chunks.set(parsed.chunkNumber, size);
-  }
-  chunkIndexCache.set(existing, { size: existing.size, index });
-  return index;
-}
-
-/**
- * True when every chunk of `key` is in `existing` at the size chunking gives
- * it: chunks 1..n-1 at the chunk size, the last one at the remainder (one
- * chunk for an empty file). A missing or short chunk means the file cannot be
- * reassembled, so it counts as absent. Exported for unit tests.
- */
-export function isChunkedKeyPresent(key: string, existing: Map<string, number>): boolean {
-  const declared = annexKeyDeclaredSize(key);
-  if (declared === null) return false;
-  const bySize = chunkIndexFor(existing).get(key);
-  if (!bySize) return false;
-  for (const [chunkSize, chunks] of bySize) {
-    const n = declared === 0 ? 1 : Math.ceil(declared / chunkSize);
-    let complete = true;
-    for (let i = 1; i <= n; i++) {
-      const expected = i < n ? chunkSize : declared - (n - 1) * chunkSize;
-      if (chunks.get(i) !== expected) {
-        complete = false;
-        break;
-      }
-    }
-    if (complete) return true;
-  }
-  return false;
-}
+export { annexKeyDeclaredSize, isKeyPresentAtDeclaredSize };
 
 /** The subset of VersionManifest (services/manifest.ts) this check needs. */
 export interface ExpectedManifestFile {
