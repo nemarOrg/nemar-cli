@@ -398,7 +398,7 @@ describe("describeScreen", () => {
   test("a screen that never reported is its own headline", () => {
     const d = describeScreen("unreported", null);
     expect(d.headline).toContain("DID NOT REPORT");
-    expect(d.lines.join(" ")).toContain("never reported back");
+    expect(d.lines.join(" ")).toContain("no report arrived from the screen workflow in time");
   });
 
   test("an unreported screen stored with its error report states the cause once", () => {
@@ -412,7 +412,7 @@ describe("describeScreen", () => {
     });
     const d = describeScreen("unreported", stored);
     expect(d.headline).toContain("DID NOT REPORT");
-    expect(d.lines.filter((l) => l.includes("never reported back"))).toHaveLength(1);
+    expect(d.lines.filter((l) => l.includes("no report arrived"))).toHaveLength(1);
   });
 
   test("a request with no screen is not described as clean", () => {

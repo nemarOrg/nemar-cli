@@ -497,9 +497,10 @@ export interface ScreenDescription {
  */
 const ERROR_TEXT: Record<ScreenError, string> = {
   "dispatch-unconfigured":
-    "the Worker had no GitHub credential or callback secret, so the screen was never started",
+    "the screen could not be started: the Worker had no GitHub credential or callback secret, or the dataset has no repository",
   "dispatch-failed": "GitHub refused to start the screen workflow",
-  "no-report-in-time": "the screen workflow started but never reported back",
+  "no-report-in-time":
+    "no report arrived from the screen workflow in time (it may never have started)",
   "workflow-failed": "the screen workflow failed before it produced a result",
   "clone-failed": "the screen workflow could not read the dataset repository",
   "credentials-missing":
