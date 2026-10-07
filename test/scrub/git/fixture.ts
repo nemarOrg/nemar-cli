@@ -302,8 +302,12 @@ export const PARTICIPANTS_OLD =
   '{\n\t"Participant Name": "Bob",\n\t"Age": {\n\t\t"Description": "age in years"\n\t},\n\t"participantname_note": "keep"\n}\n';
 export const PARTICIPANTS_NEW =
   '{\n\t"Participant Name": "",\n\t"Age": {\n\t\t"Description": "age in years"\n\t},\n\t"participantname_note": "keep"\n}\n';
-export const COMPACT_OLD = '{"a":1,"PartName":"X","list":[1,2,{"partname":"Y"}],"n":null}';
-export const COMPACT_NEW = '{"a":1,"PartName":"","list":[1,2,{"partname":""}],"n":null}';
+// Keys spelled with a no-break space and with a tab (JSON escapes, so the file stays ASCII): the scanner reads both as `partname` (its
+// canonical spelling removes every whitespace character), so the rewrite and verify must too.
+export const COMPACT_OLD =
+  '{"a":1,"PartName":"X","Part\\u00a0Name":"Z","list":[1,2,{"partname":"Y","Part\\tName":"W"}],"n":null}';
+export const COMPACT_NEW =
+  '{"a":1,"PartName":"","Part\\u00a0Name":"","list":[1,2,{"partname":"","Part\\tName":""}],"n":null}';
 export const NOT_JSON = '{"SubjectName": "unterminated';
 /** Latin-1, not UTF-8: left alone and counted. */
 export const LATIN1_JSON = Buffer.from('{"SubjectName": "caf\xe9"}', "latin1");

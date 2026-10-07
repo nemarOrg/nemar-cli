@@ -225,6 +225,49 @@ SUITE("verify --fresh-clone: the pushed repository (I1, I11)", () => {
     git(again, "push", "-q", "--force", "origin", "main");
   }, 180_000);
 
+  test("the importer's own commit (an import-scrubbed line beside the files it scrubbed) is tolerated", async () => {
+    const importLine = LEDGER_LINE.replace("history-rewritten", "import-scrubbed");
+    /** The ledger as the clone has it, so the new text is an append whatever ran before. */
+    const ledgerOf = (repo: string) => {
+      const file = join(repo, ".nemar", "corrections.jsonl");
+      return existsSync(file) ? readFileSync(file, "utf8") : "";
+    };
+    const push = (repo: string, ledger: string, message: string) => {
+      write(repo, ".nemar/corrections.jsonl", ledger);
+      write(repo, "scrubbed-alongside.txt", message);
+      git(repo, "add", ".");
+      git(repo, "commit", "-q", "-m", message);
+      git(repo, "push", "-q", "origin", "main");
+    };
+    const repo = fresh();
+    push(repo, `${ledgerOf(repo)}${importLine}`, "import scrub");
+    const ok = await verifyFresh(fresh());
+    expect(ok.code, ok.out).toBe(0);
+
+    // The twins: the same commit with a line of another action, or one that edits the lines
+    // before it, is a ledger commit that touches something else.
+    for (const [label, text] of [
+      ["another action", (before: string) => `${before}${LEDGER_LINE}`],
+      [
+        "an edited earlier line",
+        (before: string) => `${before.replace("v1.0.1", "v1.0.9")}${importLine}`,
+      ],
+    ] as const) {
+      const again = fresh();
+      // Edit a line that is there: with none, the edit is a no-op and the commit is an append.
+      expect(ledgerOf(again)).toContain("v1.0.1");
+      push(again, text(ledgerOf(again)), `ledger and more (${label})`);
+      const bad = await verifyFresh(fresh());
+      expect(bad.code, `${label}: ${bad.out}`).toBe(4);
+      expect(bad.out).toContain("reason=ledger-commit-not-alone");
+      git(again, "reset", "-q", "--hard", "HEAD~1");
+      git(again, "push", "-q", "--force", "origin", "main");
+    }
+    // Undo, so later tests see the tolerated state.
+    git(repo, "reset", "-q", "--hard", "HEAD~1");
+    git(repo, "push", "-q", "--force", "origin", "main");
+  }, 240_000);
+
   test("a ledger that is not a valid ledger of this dataset fails", async () => {
     const repo = fresh();
     write(repo, ".nemar/corrections.jsonl", LEDGER_LINE.replace(DATASET, "nm000123"));

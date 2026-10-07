@@ -46,6 +46,7 @@
 
 import { spawnSync } from "node:child_process";
 import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { parseArgs } from "node:util";
 import { scanJsonKeys, scanPaths } from "../../../shared/identifier-scan";
 import {
   PROVENANCE_README_PATH,
@@ -137,10 +138,11 @@ function readHistory(repo: string, refs: string[]): History {
   for (const { path, newMode, newSha, status } of entries) {
     paths.add(path);
     if (!isZeroSha(newSha) && /^(100644|100755|120000)$/.test(newMode)) fileBlobs.add(newSha);
-    // Inline JSON only: an annex pointer is a few dozen bytes of `/annex/objects/...`, not JSON.
+    // Inline JSON only, a regular file of either mode (a file copied from exFAT or Windows is
+    // committed executable): an annex pointer is a few dozen bytes of `/annex/objects/...`, not JSON.
     if (
       path.toLowerCase().endsWith(".json") &&
-      newMode === "100644" &&
+      (newMode === "100644" || newMode === "100755") &&
       !isZeroSha(newSha) &&
       (status === "A" || status === "M" || status === "T")
     ) {
@@ -418,33 +420,48 @@ function writePrivate(path: string, value: unknown): void {
   chmodSync(path, 0o600);
 }
 
+const OPTIONS = {
+  repo: { type: "string" },
+  dataset: { type: "string" },
+  out: { type: "string" },
+  date: { type: "string" },
+  "s3-plan": { type: "string" },
+  "allow-skipped-json": { type: "boolean" },
+} as const;
+
 if (import.meta.main) {
   // Owner-only for every file this process creates: the git plan holds paths that may be
   // identifying.
   process.umask(0o077);
-  const arg = (n: string) => {
-    const i = process.argv.indexOf(`--${n}`);
-    return i >= 0 ? process.argv[i + 1] : undefined;
-  };
-  const repo = arg("repo");
-  const dataset = arg("dataset");
-  const out = arg("out");
+  const USAGE =
+    "usage: build-git-plan.ts --repo CLONE --dataset ID --out FILE [--date YYYY-MM-DD] [--s3-plan plan.json] [--allow-skipped-json]";
+  let values: ReturnType<typeof parseArgs<{ options: typeof OPTIONS }>>["values"];
+  try {
+    // Strict: a misspelled flag (`--s3plan`) must stop the run, not silently skip the check it
+    // names. The message of the parse error is not printed; it would quote the argument.
+    values = parseArgs({ args: process.argv.slice(2), options: OPTIONS, strict: true }).values;
+  } catch {
+    console.error(USAGE);
+    process.exit(2);
+  }
+  const { repo, dataset, out } = values;
   if (!repo || !dataset || !out) {
-    console.error(
-      "usage: build-git-plan.ts --repo CLONE --dataset ID --out FILE [--date YYYY-MM-DD] [--s3-plan plan.json] [--allow-skipped-json]",
-    );
+    console.error(USAGE);
     process.exit(2);
   }
   const skippedFile = `${out}.skipped.json`;
   try {
+    // No plan survives a run that does not write one: a refused re-plan (after a branch was
+    // deleted, say) must not leave the earlier clone's plan for the next step to pick up.
     rmSync(skippedFile, { force: true });
+    rmSync(out, { force: true });
     const { plan, report } = buildGitPlan(
       repo,
       dataset,
-      arg("date") ?? new Date().toISOString().slice(0, 10),
+      values.date ?? new Date().toISOString().slice(0, 10),
       {
-        allowSkippedJson: process.argv.includes("--allow-skipped-json"),
-        ...(arg("s3-plan") ? { s3PlanPath: arg("s3-plan") as string } : {}),
+        allowSkippedJson: values["allow-skipped-json"] === true,
+        ...(values["s3-plan"] ? { s3PlanPath: values["s3-plan"] } : {}),
       },
     );
     writePrivate(out, plan);

@@ -100,9 +100,19 @@ class AfterRewrite(Exception):
 # --------------------------------------------------------------------------------------
 
 
+# JavaScript's `\s`, spelled out: Python's `\s` adds U+001C to U+001F and U+0085 and lacks U+FEFF.
+_JS_WHITESPACE = (
+    "\t\n\x0b\x0c\r \xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+_CANON_REMOVED = re.compile(f"[{_JS_WHITESPACE}_\\-]+")
+
+
 def canon(name: str) -> str:
-    """Canonical spelling of a JSON key: lowercase, with spaces, underscores, hyphens removed."""
-    return re.sub(r"[ _\-]", "", name.lower())
+    """Canonical spelling of a JSON key: lowercase, with whitespace, underscores and hyphens
+    removed. The same rule as `canonical` in shared/identifier-scan.ts, which names the keys a plan
+    lists: a key spelled with a no-break space or a tab must match here exactly when the scanner
+    flagged it, or the rewrite leaves its value in the history."""
+    return _CANON_REMOVED.sub("", name.lower())
 
 
 _DIR_CHARS = "0123456789zqjxkmvwgpfZQJXKMVWGPF"

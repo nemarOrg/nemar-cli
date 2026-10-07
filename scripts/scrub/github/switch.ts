@@ -102,16 +102,32 @@ function load(): Snapshot {
 }
 
 const repo = need("repo");
-const api: Api = {
-  base: process.env.GITHUB_API_BASE ?? "https://api.github.com",
-  token: await token(),
-};
+/** The admin token goes to this base: GitHub's, or this machine (what the tests serve). */
+function apiBase(): string {
+  const raw = process.env.GITHUB_API_BASE ?? "https://api.github.com";
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return usage("GITHUB_API_BASE is not a URL");
+  }
+  const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+  if (raw !== "https://api.github.com" && !(url.protocol === "http:" && loopback)) {
+    return usage("GITHUB_API_BASE must be https://api.github.com or a loopback http URL");
+  }
+  return raw;
+}
+const api: Api = { base: apiBase(), token: await token() };
 const execute = v.execute === true;
 const remote = v.remote ?? "origin";
 
 try {
   if (command === "snapshot") {
     const out = need("out");
+    // Every flag is resolved BEFORE the file is created: a usage error exits the process, and a
+    // snapshot file created first would be left empty and refuse the corrected run.
+    const beforePath = need("before");
+    const cloneDir = need("clone");
     // Never over an existing file: it may be the only record of what a restore must put back.
     // Created exclusively FIRST, so nothing is read from GitHub for a snapshot that cannot be kept.
     let fd: number;
@@ -121,8 +137,8 @@ try {
       throw new SwitchRefused("snapshot-exists");
     }
     try {
-      const before = readGitSnapshot(need("before"));
-      const snap = await takeSnapshot(api, repo, need("clone"), remote, before.originTips, {
+      const before = readGitSnapshot(beforePath);
+      const snap = await takeSnapshot(api, repo, cloneDir, remote, before.originTips, {
         acceptDisabled: v["accept-disabled"] === true,
       });
       writeSync(fd, `${JSON.stringify(snap, null, 1)}\n`);

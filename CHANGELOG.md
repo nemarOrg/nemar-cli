@@ -28,20 +28,21 @@ ledger of counts and fixed words per dataset); this release makes sure it cannot
   read; the administrator mail waits for it. A direct identifier blocks the request and tells
   the requester; `unchecked` (the workflow did not run, or the scan could not read
   everything) is never treated as clean. `nemar dataset publish status` and
-  `nemar admin publish list` show the verdict by its fixed words. The request answers with
-  one neutral sentence (checking eligibility; an administrator is notified if every check
-  passes, #1664).
+  `nemar admin publish list` show the verdict by its fixed words. An accepted request is
+  answered with a neutral four-line notice that names no finding (received; checking
+  eligibility; an administrator is notified if every check passes; the `publish status`
+  command, #1664).
 - **`nemar dataset upload` screens on the uploader's machine first (#1635, ADR 0087).** It
   reads 256 bytes of every EDF and BDF header and the side files within limits, refuses
   direct identifiers (also under `--dry-run`, no override), and asks for an acknowledgment
   that names exactly what was found for anything lesser (`--acknowledge-identifier-preflight`;
   `--yes` never counts). Output is fixed words and counts, never a value or a path. The
   Worker re-screens at publication; what the CLI records is a note, not a verdict.
-- **A weekly sweep re-screens published datasets (#1636, ADR 0088).** Production only, three
-  dispatches per 30-minute tick, a cadence that does not depend on the verdict (the Actions
-  run list is public). It reports, never repairs, files no issue and mails no requester. The
-  weekly admin report (new `identifier_sweep` mail category) says what was not screened;
-  `GET /admin/identifier-sweep` shows it on demand.
+- **A scheduled sweep re-screens published datasets (#1636, ADR 0088).** Production only, at
+  most three dispatches per 30-minute tick (a verdict counts for 28 days), on a cadence that
+  does not depend on the verdict (the Actions run list is public). It reports, never repairs,
+  files no issue and mails no requester. The weekly admin report (new `identifier_sweep` mail
+  category) says what was not screened; `GET /admin/identifier-sweep` shows it on demand.
 - **Imports from OpenNeuro are scrubbed in place before the push (#1639, ADR 0089).** Every
   recording header the copy will copy is read first; a header with an identifying string is
   patched in bytes 8 to 168 only, proven, annexed under a new SHA256E key, and the old key is
@@ -49,13 +50,20 @@ ledger of counts and fixed words per dataset); this release makes sure it cannot
   not an import failure.
 - **Acquisition dates (#1657, #1667, ADR 0090 and 0091).** A day-level acquisition date is a
   review finding that warns and never blocks, with one shared warning sentence shown to the
-  uploader, the requester and the administrator. For NEW uploads and imports the date is set to
-  1 January of its year in the stored copy (header start date and the EDF+ `Startdate` slot;
-  `acq_time` in scans tables on imports). Nothing already published is changed.
+  uploader, the requester and the administrator. For NEW uploads and imports the date of an
+  EDF or BDF header is set to 1 January of its year (the start date and the EDF+ `Startdate`
+  slot); an import also sets inline `acq_time` values in scans tables, and an upload edits no
+  table. On upload the change is made to the files in the uploader's own directory, after the
+  final confirmation and by copy and rename, never in place; a file git tracks or ignores, a
+  link, or a file the uploader cannot write keeps its dates and is warned about. Nothing already
+  published is changed.
 - **Operator tooling for the scrub (#1625 to #1640, ADR 0085).** `scripts/scrub/` (plan,
   assemble, verify, delete-old with batched `DeleteObjects`, Zarr stage, git rewrite and
   verify, ledger) and the runbook `.context/scrub-runbook.md`. It runs from an operator's
-  machine only; nothing in the Worker or the CLI package calls it.
+  machine only. The Worker does not use it; the CLI bundles three of its helper modules (the
+  contract constants and key rules, the annex registry and location-log readers, and the
+  ledger file) for the importer (ADR 0089), and none of its stages. Nothing in them runs at
+  import.
 - **A deterministic scanner and a fleet scan script (#1617).**
 
 ### Changed
@@ -84,8 +92,12 @@ None.
   change there reaches every dataset repository at once (ADR 0020). Until it is pushed every
   publication request ends `unchecked` and the administrators get a "did not run" mail.
 - Hallu's converter (cron `ZARR_DRIVER_REF=main`) picks up the new `generate_zarr.py` on its
-  next tick; its biosigIO must be at least 1.2.11 or every conversion ends `failed` with a
-  fixed error.
+  next tick and installs `biosigio>=1.2.11,<1.2.12` from `requirements.txt`; setup stops with
+  a FATAL line, converting nothing, when the installed version is outside that range. The first
+  tick runs the previous script body, which still caps biosigIO below 1.2.11, so it can install
+  1.2.11 and then stop at that check; the next tick converts. Nothing is marked failed in the
+  queue either way (the converter exits 78 when it cannot leave subject information out, and
+  `hallu-zarr.sh` stops the drain on it).
 - `nemarOrg/docs` pull request 64 describes all of the above and is merged with this release.
 
 ### Known limitations

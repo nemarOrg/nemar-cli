@@ -146,13 +146,20 @@ export function appendLedger(path: string, entry: LedgerEntry): string {
   return line;
 }
 
-/** Read a ledger file back, validating every line. A line that fails refuses the whole file. */
-export function readLedger(path: string): LedgerEntry[] {
-  const text = readFileSync(path, "utf8");
+/**
+ * The entries of a ledger's text, validating every line. A line that fails refuses the whole text.
+ * Validation and use take the same string, so what was checked is what is used.
+ */
+export function parseLedgerText(text: string): LedgerEntry[] {
   return text
     .split("\n")
     .filter((l) => l.trim() !== "")
     .map((l) => validateLedgerEntry(JSON.parse(l) as LedgerEntry));
+}
+
+/** Read a ledger file back, validating every line. A line that fails refuses the whole file. */
+export function readLedger(path: string): LedgerEntry[] {
+  return parseLedgerText(readFileSync(path, "utf8"));
 }
 
 /**

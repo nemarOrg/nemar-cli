@@ -2,7 +2,7 @@
 
 Operational steps for [ADR 0085](decisions/0085-a-privacy-correction-scrubs-every-version-in-place.md).
 One dataset at a time, the smallest one first.
-Every stage is a dry run unless a command carries `--execute`, and nothing irreversible happens before step 9.
+Every stage that reads or deletes is a dry run unless a command carries `--execute`; the few that write a local file without it (`git-scrub snapshot` and `rewrite`, `build-git-plan.ts`, `ledger-cli.ts` append) write only to the working directory and can be redone, and nothing irreversible happens before step 9.
 Four steps are irreversible, and each sits in a marked box: the force-push of the rewritten history (step 9), the deletion of the archives and of the old bytes (steps 15a and 15b), and making the dataset public again (step 16).
 A box needs the maintainer's go for that dataset, in exact words, before its `--execute` is typed (see "Boxes and the go").
 Opening the dispatch window (step 8b) can be undone, but it pauses three central workflows for every dataset repository, so it needs a go too.
@@ -43,17 +43,17 @@ mkdir -p -m 700 "$W"
 
 - `bun`, `uv` (the rewrite runs `uv run --with git-filter-repo==2.47.0`, so uv must be able to fetch or have cached that version), `git`, `git-annex`, `jq`, `curl`, and `gh` as an org admin (`switch.ts` takes its token from `GITHUB_TOKEN` or `gh auth token`).
 - **`aws` CLI 2.23.0 or later.**
-  `s3-scrub.ts` (every command except `zarr-public`) and `ledger-cli.ts publish` run `aws --version` first and refuse an older CLI (`aws-cli-too-old`) or one whose version cannot be read (`aws-cli-version-unknown`), both exit 3 with nothing attempted.
+  `s3-scrub.ts` (every command except `zarr-public` and `raw-verify`) and `ledger-cli.ts publish` run `aws --version` first and refuse an older CLI (`aws-cli-too-old`) or one whose version cannot be read (`aws-cli-version-unknown`), both exit 3 with nothing attempted.
   The hash host needs the same CLI for its default source command, although `hash_stage.py` does not check.
 - Credentials are the ambient `aws login` session (short-lived `ASIA` credentials).
   A long-lived `AKIA` key in the environment is refused (`long-lived-key-in-environment`).
   The S3 tools resolve the session once and share it across every `aws` call (`cliCredentialSource`), because parallel `aws` processes race on the login session's single-use refresh token.
   So do not `export` credentials in the shell that runs the TypeScript tools: a key already in the environment is used as it is, and it expires.
 - The hash host (a host with fast reads from S3; Hallu in the maintainers' setup) needs `python3` 3.12, the `aws` CLI, and the host's own read-only AWS credentials.
-- The suites pass on the checkout: `NEMAR_REQUIRE_SCRUB_TOOLS=1 bun run test:scrub` (669 tests when this runbook was written; the variable makes a missing tool a failure, not a skip).
+- The suites pass on the checkout: `NEMAR_REQUIRE_SCRUB_TOOLS=1 bun run test:scrub` (the variable makes a missing tool a failure, not a skip).
   One file: `bun test --path-ignore-patterns=x test/scrub/<file>.test.ts`, because `bunfig.toml` keeps `test/scrub` out of a bare `bun test` and hides even an explicit path.
 
-Every tool prints counts and fixed words only.
+Every tool prints counts and fixed words only, with one exception: `hash_stage.py` with a custom `--source-cmd` prints the last 200 characters of that command's standard error when it fails, so a source command must not print a value there.
 `s3-scrub.ts`, `git-scrub.ts` and `hash_stage.py` print their usage with `--help`; the others print theirs on a usage error.
 A dataset with raw copies (step 1) puts their names, which are file paths, in `plan.json`, `raw-hashes.json` and `raw-unmatched.json`; those stay in `$W` and on the hash host, and are never printed.
 A bad flag is exit 2 everywhere.
@@ -88,7 +88,7 @@ The tools add their own words: `--confirm-dataset $D` on `drop-archives` and `de
 | `s3-scrub.ts` | ok | a stage failed | usage | refused (a precondition or proof is missing or stale) | unreadable (the plan, a Zarr store or the Zarr index is incomplete) | versions or markers remain after a delete | 129, 130, 143 |
 | `git-scrub.ts` | done | failed (a command or the tool broke) | usage | refused (nothing was changed) | checked and not clean (`verify` found failures, each a reason with a count, `provenance-unannotated` among them, listed in steps 7 and 14; or `annex-registry`'s read-back disagrees) | | |
 | `build-git-plan.ts` | plan written | failed | usage | refused (no plan written) | | | |
-| `switch.ts` | done | failed (a push failed part way) | usage | refused (nothing changed) | | a ruleset could not be restored | 129, 130, 143 after restoring |
+| `switch.ts` | done | failed (a push failed part way), or `check` found a ruleset that differs | usage | refused (nothing changed) | | a ruleset could not be restored | 129, 130, 143 after restoring |
 | `hash_stage.py` | all done and verified | an object failed | usage | refused (an input does not match the contract, or `patches-stale`) | `--limit` stopped with keys left | | 129, 130, 143 |
 | `ledger-cli.ts` | done | failed | usage | refused (nothing written) | written but not proven: look at the object now | | 129, 130, 143 |
 | `identifier-fleet-scan.ts` | done | | usage | the run was stopped (a server was struggling) | | | |
@@ -176,7 +176,7 @@ The Worker answers every push to a dataset repository (`POST /webhooks/github`),
 Left alone, the force-push of step 9 sets off, for each moved `v*` tag, the whole publication fan-out: a version-DOI run, which refreshes the enrichment, publishes the version DOI (and so dispatches the manifest job, and can upload a Zenodo backup), then dispatches the archive and records jobs.
 The push event's `forced` field is never read, so a moved tag looks like a new one.
 The appendix lists every job, what it writes and what its public log shows.
-No tool in this branch suppresses dispatch, pauses the Zarr queue or removes the uploader's write access (ADR 0085 lists these as not built).
+No tool in this repository suppresses dispatch, pauses the Zarr queue or removes the uploader's write access (ADR 0085 lists these as not built).
 
 **Decision of 2026-10-06 (the maintainer): suppress dispatch by hand, for a short window (step 8b).**
 
@@ -236,8 +236,8 @@ canary: the unlocked versions were deleted by id without the bypass
 canary: zero versions and zero delete markers remain under the prefix
 ```
 
-With `--multipart`, also `canary: multipart object built with the lock set at create`, and the without-bypass and with-bypass pair twice more.
-With `--batch`, also, after the lines above, the proof of `DeleteObjects` that steps 15a and 15b rely on (a batch answers 200 whatever happened to an item, so the stand-in's belief about it is checked here, on the real bucket):
+With `--multipart`, also, before the last line above, `canary: multipart object built with the lock set at create`, and the without-bypass and with-bypass pair twice more.
+With `--batch`, also, before the last line above (`zero versions and zero delete markers remain`), the proof of `DeleteObjects` that steps 15a and 15b rely on (a batch answers 200 whatever happened to an item, so the stand-in's belief about it is checked here, on the real bucket):
 
 ```
 canary: a batch delete without the bypass removed 3 unlocked versions (one a delete marker, one with XML characters in its key) and refused the 2 locked ones
@@ -248,7 +248,7 @@ canary: a batch naming an already deleted version answered deleted
 The last line is a record, not a pass or fail: it says what a resend of an already deleted version answers (a retry after a lost answer sends such versions again).
 Measured against the real bucket on 2026-10-06 (aws-cli 2.x, `nm099999/canary-*-batch/`, every line above printed, the independent listing empty afterwards): a locked version is refused per item inside a 200 and stays, a delete marker and a key with `&`, a space and angle brackets are removed in the same request, the bypass removes the locked ones, and an already deleted version answers `deleted`.
 The two others are the proof: a locked version is refused per item inside a 200 and stays, and the bypass removes it.
-Any other word is a stop: `batch-lock-not-enforced`, `batch-bypass-denied`, `batch-unexpected:...`, `batch-result-wrong`, `batch-marker-missing`, `lock-not-enforced`, `bypass-denied`, `conditional-put-not-enforced`, `conditional-get-not-enforced`, `conditional-put-failed:...`, `unlocked-delete-refused:...`, `multipart-lock-missing`, or `canary-remainder` (exit 5).
+Any other word is a stop: `batch-lock-not-enforced`, `batch-bypass-denied`, `batch-unexpected:...`, `batch-result-wrong`, `batch-marker-missing`, `lock-not-enforced`, `bypass-denied`, `conditional-put-not-enforced`, `conditional-get-not-enforced`, `conditional-put-failed:...`, `unlocked-delete-refused:...`, `multipart-lock-missing`, `canary-remainder` (exit 5), or another fixed word such as `prefix-not-canary` (exit 3), `multipart-size-wrong`, `multipart-no-version`, `conditional-put-unexpected:...` or a word followed by `+abort-failed`.
 Then confirm independently that nothing is left; both listings must be empty:
 
 ```bash
@@ -399,9 +399,9 @@ rm -rf $W/check
    - **nm000348**, 153 stores (33,250 Zarr keys): only `channels_tsv_units`, `number_of_signals`, `source_file`, `streamed`.
      Nothing to remove, and a clean proof (`found: stores`), not a failure.
    - A name outside the removal set and the allow-list refuses the zarr stage (`unknown-recording-member`, step 10) until a person has looked at it.
-     The four technical flags biosigIO writes only when they apply (`channel_labels_deduplicated`, `brainvision_header_recovered`, `eeglab_fdt_recovered`, `edf_tolerant_read`, named in `scripts/zarr/requirements.txt`) are not in the allow-list, so a store with one is refused until `--allow-member NAME` names it; whether to add them to the list is the maintainer's decision.
+     The four technical flags biosigIO writes only when they apply (`channel_labels_deduplicated`, `brainvision_header_recovered`, `eeglab_fdt_recovered`, `edf_tolerant_read`, named in `scripts/zarr/requirements.txt`) are not in the allow-list, so a store with one is refused until `--allow-member NAME` names it; whether to add them to the list is the maintainer's decision. Since release 0.10.15 the converter removes `brainvision_header_recovered` and `eeglab_fdt_recovered` itself (biosigIO's `SUBJECT_INFO_KEYS`), so only a store converted before it carries those two.
 6. Know what a push sets off (above).
-   And know that nothing stops the converter from writing the removed members again on a reconversion until Phase 8 (nemarOrg/nemar-cli#1626) changes it, so a reconversion after the scrub makes `zarr-public` report them.
+   And know that the converter of release 0.10.15 (Phase 8, nemarOrg/nemar-cli#1626 and #1627) writes no subject or operator member into a store, but a node still on an older converter writes them again on a reconversion, and `zarr-public` then reports them.
 7. **The repository has no branch but `main` and `git-annex`, and this is true before step 0.**
    The switch snapshot of step 9 refuses any other remote head (`unexpected-remote-head`).
    It also leases on what the clone knew (`before.json`'s `originTips` lists every `refs/remotes/origin/*` of the clone), so a branch deleted after the clone makes it refuse `remote-moved-since-clone`: delete before cloning, not just before the push.
@@ -475,7 +475,7 @@ A plan made with `--tags` is partial, and a plan with any unreadable key is inco
 bun run $T/plan/build-git-plan.ts --repo $W/clone --dataset $D --out $W/git-plan.json --s3-plan $W/plan.json > $W/git-plan.report.json
 ```
 
-It reads every commit of every ref, not only the tips, and prints one JSON line of counts (`dropPaths`, `jsonFilesBlanked`, `jsonKeysBlanked`, `provenanceEntriesDropped`, `provenanceAnnotated`, `provenanceReadmeAnnotated`, `s3KeysScrubbed`, `skippedOversizeJson`, `skippedUnparseableJson`, `orphanKeys`, `versions`), which the redirect keeps for step 13.
+It reads every commit of every ref, not only the tips, and prints one JSON line of counts (`refs`, `commits`, `dropPaths`, `jsonFilesBlanked`, `jsonKeysBlanked`, `provenanceEntriesDropped`, `provenanceAnnotated`, `provenanceReadmeAnnotated`, `s3KeysScrubbed`, `skippedOversizeJson`, `skippedUnparseableJson`, `orphanKeys`, `versions`), which the redirect keeps for step 13.
 
 A dataset that mirrors upstream recordings under `sourcedata/` has `sourcedata/sourcedata_provenance.json`, whose `files` entries carry the `sha256` of each original upstream file.
 Those checksums stay, as provenance (ADR 0085), and they are also the hashes of old keys the S3 plan scrubs, because the mirrored copies were the upstream bytes.
@@ -711,7 +711,8 @@ A disable does not stop a run that has already started, and a run that started b
 
 ### Step 8c: A mirror's import is quiet (`on` datasets only)
 
-For an OpenNeuro mirror (on005007, on005383), nothing refuses a purged key yet: the purge list is not built (ADR 0085), and the importer's part is Phase 7 (nemarOrg/nemar-cli#1618).
+For an OpenNeuro mirror (on005007, on005383), the purge list as a document is not built (ADR 0085), but since release 0.10.15 the importer's prepare step (Phase 7, ADR 0089) cuts its copy manifest to the committed tree minus every key the git-annex branch records as dead, and refuses a replaced key the tree still names (`old-key-still-named`).
+Until the git-annex branch that carries those dead marks is pushed (step 9), nothing refuses an old key.
 Three production crons read `import_jobs` and can copy the upstream originals back into `D/objects/`: `sweepImportRetries` re-pulls a row that is `incomplete`, `failed` or `quarantined`; `autoImportTick` re-imports a `failed` one; and `reclassifyCompleteRows` re-verifies a `complete` row whose `integrity_checked_at` is empty and flips it to `incomplete` when the S3 copy reads incomplete (`backend/src/services/import-retry.ts`, `auto-import.ts`).
 So before the push, read the dataset's rows (read-only):
 
@@ -843,7 +844,7 @@ The noncurrent versions of every zarr object still hold the old metadata, and st
 The count is not one per document rewritten: it is the whole history of the prefix.
 nm000186 (88 stores, 968 documents rewritten) measured 46,127 noncurrent versions and 36,068 markers, 82,195 in all: 40,654 data chunks, 5,456 `zarr.json` and 5 `index.json` from every earlier conversion, 15,622 noncurrent delete markers, and 20,446 delete markers that are current (keys deleted long ago, whose old versions are still there).
 The old `zarr.json` versions are the ones that carry the subject, and the rest is history of a derived copy, regenerable from the dataset.
-Read the dry run's `prune noncurrent versions=N markers=P` line and set `delete-old --max-prune` to at least N+P (its default is 1,000, which a dataset converted more than once always exceeds).
+Read the `delete-old: prune noncurrent versions=N markers=P` line of step 15b's dry run and set `delete-old --max-prune` to at least N+P (its default is 1,000, which a dataset converted more than once always exceeds).
 
 **Waiting for the edge.**
 The stage writes to S3, not through `zarr.nemar.org`.
@@ -1120,7 +1121,7 @@ If the path differs, ask the maintainer to read the row.
 > - while Zarr objects are current, `zarr-verified.json` exists, names stores, and belongs to this plan (`zarr-not-scrubbed`);
 > - for a plan with raw copies, `raw-verified.json` (step 5b) exists, parses, names this `plan.json` and this dataset, counts the plan's raw names, versions and markers, and matched only keys of the plan (`raw-copies-unverified`, with the reason; a proof that is there and cannot be read is `raw-verified.json-unreadable`, exit 1); it is a working file, so it is checked with the proofs, before the bucket is read;
 > - every annex key a raw recording matched (step 5b), other than one this run replaces, is current at the size its key declares (`raw-duplicate-missing`, with the count: the raw recording goes because that key keeps its bytes, and a clean key's whole body was never read, only its header and size);
-> - an anonymous `HEAD` of a new object, and of an old one while any remains, answers 403 (`dataset-is-public` on 200, `privacy-unproven` otherwise), and `--public-base` is the plan's bucket's own S3 endpoint over https (`bad-public-base`, exit 2);
+> - an anonymous `HEAD` of a new object, and of an old one while any remains, answers 403 (`dataset-is-public` on 200, `privacy-unproven` otherwise), and `--public-base` is the plan's bucket's own S3 endpoint over https (`bad-public-base`, exit 2); a plan that scrubs no key has no new object to ask about, so `delete-old` refuses it with `privacy-unproven` and its raw copies or Zarr history cannot be removed by this tool;
 > - every version of an old key is the size its key declares (`version-size-differs`) and one the plan recorded (`version-not-in-plan`: someone wrote to an old key after the plan, so stop and find out why);
 > - every version and marker under a raw name is one the plan recorded, at the size recorded, and every non-annex name under `D/objects/` but `annex-uuid` is one the plan listed (`raw-copy-not-in-plan`: a raw object written after the plan, whose bytes step 5b never compared; a plan made without raw copies refuses any raw object the same way);
 > - the count is within `--max-delete` (`over-max-delete`, old keys and raw copies together) and the prune within `--max-prune` (`over-max-prune`);
@@ -1302,7 +1303,7 @@ bun run $T/s3/s3-scrub.ts zarr-public --dataset $D --zarr-verified $W/zarr-verif
 ```
 
 It reads `zarr/index.json` and the root of every store in the union of the index's stores and the proof's, and exits 0 only when at least one store was read and every one is clean by the zarr stage's own rule, or the proof says `no-zarr` and the index names no store (so there is nothing to skip).
-Its refusals are `store-not-in-index` (a store the zarr stage proved is not in the index), `zarr-verified-wrong-dataset`, `zarr-verified.json-missing` and `zarr-verified.json-invalid` (exit 3), and `index-unreadable` and `index-malformed` (exit 4); a store with an identifier or an unknown member is exit 1.
+Its refusals are `store-not-in-index` (a store the zarr stage proved is not in the index), `no-store-checked` (no store at all and the proof is not `no-zarr`), `zarr-verified-wrong-dataset`, `zarr-verified.json-missing` and `zarr-verified.json-invalid` (exit 3), and `index-unreadable` and `index-malformed` (exit 4); a store root it could not read is exit 4, `zarr-verified.json-unreadable` is exit 1, and so is a store with an identifier or an unknown member.
 It reads store roots only, because an anonymous reader cannot list the nested documents.
 Check one store root through `zarr.nemar.org` too if the privacy flip was recent (step 10).
 Do step 17 only after all of this passes.
@@ -1323,10 +1324,11 @@ Do step 17 only after all of this passes.
   `old-versions-deleted` is read, not typed: `--proof` must be `deleted.json` (parsed strictly), its counts (`keys`, `versions`, `markers`, `pruned_versions`, `pruned_markers`, and `raw_versions` and `raw_markers` when the plan had raw copies) are taken from it, `--counts` beside it is a usage error, and the verification is set to `authoritative-listing-empty+proof-<first 16 hex of the sha256 of deleted.json>` (`--verification` may be omitted or say `authoritative-listing-empty`; anything else is `verification-contradicts-proof`).
   Refusals: `proof-missing`, `proof-invalid`, `proof-wrong-dataset`, and `verification-needs-deletion` when `authoritative-listing-empty` is used with another action.
   **If `delete-old` was interrupted and run again**, `deleted.json` counts only the last run (the first run's deletions are gone, so the last run's listing never saw them), and the line would undercount.
-  Add what the first run removed with `--earlier-run-counts`, read from that run's own lines (its dry run's `delete-old: keys=K versions=V markers=M` and `prune noncurrent versions=N markers=P`, less what the last run removed, which is in `deleted.json`): `A --action old-versions-deleted --proof $W/deleted.json --earlier-run-counts versions=V,markers=M,pruned_versions=N,pruned_markers=P-<last run's pruned_markers>`.
+  Add what the first run removed with `--earlier-run-counts`, read from that run's own lines (its dry run's `delete-old: keys=K versions=V markers=M` and `prune noncurrent versions=N markers=P`, less what the last run removed, which is in `deleted.json`): `A --action old-versions-deleted --proof $W/deleted.json --earlier-run-counts versions=<V minus deleted.json's versions>,markers=<M minus its markers>,pruned_versions=<N minus its pruned_versions>,pruned_markers=<P minus its pruned_markers>`, each a number you computed (the flag takes digits only and adds them to the proof's).
   For a plan with raw copies add the raw counts the same way, from that run's `delete-old: raw copies ... versions=RV markers=RM` line less what `deleted.json` says: `raw_versions=...,raw_markers=...`.
   It takes only those six names (the two raw ones only beside a proof that has raw counts), adds them to the proof's, and is refused for any other action or without `--proof` (usage error).
   nm000186 (2026-10-06) was the case: the first run, one version at a time, was stopped after removing all 176 old versions and part of the history, the rest was finished by the batch tool.
+- Ask the scheduled sweep to screen the dataset again (`POST /admin/identifier-sweep/$D/rescreen` as an admin, ADR 0088), so the weekly report stops listing its pre-scrub finding; there is no CLI client for the route.
 - Comment on the dataset issue in plain words and close it; tell the uploader and the authors, and the source archive for a mirror.
 - Do not ask GitHub Support to clear cached views or pull-request refs: they are an accepted residual (decision of 2026-10-06).
 - Walk "Residuals" for this dataset: run the read-only checks it names (the `Zenodo:` line of `nemar admin doi info $D`, and the count of this dataset's id in the logs of the central runs that ran for it) and post what they show, as counts and yes or no, on the dataset issue.

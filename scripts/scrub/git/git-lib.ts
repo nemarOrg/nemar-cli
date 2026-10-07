@@ -17,6 +17,7 @@
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { canonical } from "../../../shared/identifier-scan";
 import { PROVENANCE_NOTE_KEY, PROVENANCE_PATH } from "../../../shared/privacy-correction-text";
 import {
   ANNEX_KEY,
@@ -83,9 +84,12 @@ export class GitScrubError extends Error {
 // Inputs
 // ---------------------------------------------------------------------------------------
 
-/** `canon`: the spelling plans use for JSON keys. Lowercase, no space, underscore or hyphen. */
+/**
+ * `canon`: the spelling plans use for JSON keys. It is the scanner's own `canonical` (lowercase, no
+ * whitespace, underscore or hyphen), so a key the scanner flags is the key verify looks for.
+ */
 export function canonicalKey(name: string): string {
-  return name.toLowerCase().replace(/[ _-]/g, "");
+  return canonical(name);
 }
 
 /** The ids a dataset repository can have: `nm`, `xx` and `on` followed by six digits. */
@@ -1338,8 +1342,38 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
 }
 
 /**
+ * Whether the lines a commit appended to the ledger are all the importer's own `import-scrubbed`
+ * line. The importer commits that line in the SAME commit as the files it scrubbed (ADR 0089), so a
+ * dataset imported that way would otherwise fail `ledger-commit-not-alone` for good. Anything else
+ * (a line that is not an append, one of another action, one that does not parse) is not that.
+ */
+async function addsOnlyImportLines(repo: string, sha: string): Promise<boolean> {
+  const lines = async (rev: string): Promise<string[] | undefined> => {
+    const r = await gitRaw(repo, ["cat-file", "blob", `${rev}:${LEDGER_PATH}`]);
+    if (r.exitCode !== 0) return undefined;
+    return r.stdout
+      .toString("utf8")
+      .split("\n")
+      .filter((l) => l.trim() !== "");
+  };
+  const now = await lines(sha);
+  // A first commit, or a parent with no ledger, appends everything.
+  const before = (await lines(`${sha}^`)) ?? [];
+  if (!now || now.length <= before.length || before.some((l, i) => l !== now[i])) return false;
+  try {
+    return now.slice(before.length).every((l) => {
+      const entry = JSON.parse(l) as { action?: unknown };
+      return entry.action === "import-scrubbed";
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The commits that touch {@link LEDGER_PATH}: how many there are, how many touch anything else
- * too, and at how many head tips the ledger is not a valid ledger of `dataset`.
+ * too (the importer's own commit excepted, see {@link addsOnlyImportLines}), and at how many head
+ * tips the ledger is not a valid ledger of `dataset`.
  */
 async function ledgerChecks(
   repo: string,
@@ -1361,7 +1395,9 @@ async function ledgerChecks(
     const paths = rest.filter((p) => p !== "");
     if (!paths.includes(LEDGER_PATH)) continue;
     commits++;
-    if (paths.some((p) => p !== LEDGER_PATH)) notAlone++;
+    if (paths.some((p) => p !== LEDGER_PATH) && !(await addsOnlyImportLines(repo, sha))) {
+      notAlone++;
+    }
   }
   let invalid = 0;
   for (const ref of scanRefs.filter(
