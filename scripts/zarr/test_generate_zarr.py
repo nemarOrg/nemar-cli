@@ -7981,6 +7981,17 @@ class TestEventsSummary(unittest.TestCase):
             {fits: 1, "\u00e9" * 13 + "~a62bf20794e9af": 1},
         )
 
+    def test_the_limit_counts_code_points_not_utf16_units(self):
+        fits = "\U0001f600" * 128  # 128 code points, 256 UTF-16 units, 512 bytes
+        over = "\U0001f600" * 129
+        text = f"onset\ttrial_type\n0.0\t{fits}\n1.0\t{over}\n"
+        # for i in $(seq 1 129); do printf '\xf0\x9f\x98\x80'; done | shasum -a 256
+        #   -> f1725ce917cd79...
+        self.assertEqual(
+            events_summary(text)["trial_types"],
+            {fits: 1, "\U0001f600" * 13 + "~f1725ce917cd79": 1},
+        )
+
     def test_the_prefix_counts_code_points_and_the_digest_is_over_utf8(self):
         value = "a\U0001f600bcdefghijkl" + "z" * 120  # 133 code points, 4-byte emoji first
         # { printf 'a\xf0\x9f\x98\x80bcdefghijkl'; printf 'z%.0s' $(seq 1 120); } \
@@ -8096,8 +8107,9 @@ class TestEventsSummary(unittest.TestCase):
         key equals it is re-hashed instead of being merged into its count."""
         long_value = self._record_value(7.0)
         taken = trial_type_key(long_value)
-        # sha256 of the 281 bytes of _record_value(7.0): 108c50fe64de81..., and of
-        # printf '1\0' followed by them: 50fbdf9ddd7954...
+        # sha256 of the 279 bytes of _record_value(7.0) is 108c50fe64de81...; the
+        # salted material is printf '1\0' followed by them (281 bytes), whose
+        # sha256 starts 50fbdf9ddd7954...
         self.assertEqual(taken, "{'story': 'ea~108c50fe64de81")
         counts = {taken: 3, long_value: 2}
         shortened = shorten_trial_types(counts)
@@ -8107,16 +8119,38 @@ class TestEventsSummary(unittest.TestCase):
         # And it is still stable when the short value arrives second.
         self.assertEqual(shorten_trial_types({long_value: 2, taken: 3}), shortened)
 
+    def test_salts_are_decimal_and_pinned(self):
+        # printf "$N\\0%s" "$COLLIDING_SECOND" | shasum -a 256, for N = 1, 2, 3 and 10
+        #   -> 4000e57045d764..., 52a0d9dbea719f..., 5e0be657b304bc..., 60d73bb1f08b00...
+        # (10 is decimal, not a byte or a letter).
+        second = self.COLLIDING_SECOND
+        self.assertEqual(trial_type_key(second, 1), "{'story': 'ea~4000e57045d764")
+        self.assertEqual(trial_type_key(second, 2), "{'story': 'ea~52a0d9dbea719f")
+        self.assertEqual(trial_type_key(second, 3), "{'story': 'ea~5e0be657b304bc")
+        self.assertEqual(trial_type_key(second, 10), "{'story': 'ea~60d73bb1f08b00")
+
     def test_salts_keep_stepping_until_a_key_is_free(self):
-        long_value = self._record_value(8.0)
-        counts = {
-            trial_type_key(long_value, 0): 1,
-            trial_type_key(long_value, 1): 2,
-            long_value: 4,
-        }
-        shortened = shorten_trial_types(counts)
-        self.assertEqual(shortened[trial_type_key(long_value, 2)], 4)
-        self.assertEqual(sum(shortened.values()), 7)
+        second = self.COLLIDING_SECOND
+        k0 = "{'story': 'ea~10544c804e6d2b"  # the digest key of both colliding values
+        k1 = "{'story': 'ea~4000e57045d764"  # salt 1 of the second value
+        k2 = "{'story': 'ea~52a0d9dbea719f"  # salt 2
+        k3 = "{'story': 'ea~5e0be657b304bc"  # salt 3
+        # Keys that fit claim their own key first, so these three are already taken.
+        self.assertEqual(
+            shorten_trial_types({k0: 1, k1: 2, second: 4}), {k0: 1, k1: 2, k2: 4}
+        )
+        self.assertEqual(
+            shorten_trial_types({k0: 1, k1: 2, k2: 3, second: 4}),
+            {k0: 1, k1: 2, k2: 3, k3: 4},
+        )
+
+    def test_the_order_is_by_value_not_by_count(self):
+        """The value that sorts first keeps the digest key even when it has the
+        larger count, in either arrival order."""
+        first, second = self.COLLIDING_FIRST, self.COLLIDING_SECOND
+        expected = {"{'story': 'ea~10544c804e6d2b": 5, "{'story': 'ea~4000e57045d764": 3}
+        self.assertEqual(shorten_trial_types({first: 5, second: 3}), expected)
+        self.assertEqual(shorten_trial_types({second: 3, first: 5}), expected)
 
     def test_the_parquet_rows_keep_the_full_value(self):
         """Only the index summary is keyed by the short form; events.parquet is
@@ -8132,6 +8166,29 @@ class TestEventsSummary(unittest.TestCase):
         self.assertEqual(
             list(events_summary_of(parsed)["trial_types"]), ["{'story': 'ea~97ecccec881a7c"]
         )
+
+    def test_every_parquet_trial_type_finds_its_count_in_the_summary(self):
+        """The join a client relies on: hash the `trial_type` of an events.parquet
+        row and look it up in the store's `trial_types`. Both cut the same stripped
+        cell, so leading or trailing spaces in the TSV change neither."""
+        pinned = self._record_value(93.72)  # key {'story': 'ea~97ecccec881a7c
+        other = self._record_value(2.5)
+        text = (
+            "onset\ttrial_type\n"
+            f"0.0\t   {pinned}\n1.0\t{pinned}   \n2.0\t  {other}\n3.0\t go \n"
+        )
+        parsed = parse_events_tsv(text)
+        rows = event_rows_for_store(
+            "sub-01/eeg/a_eeg.zarr", "sub-01/eeg/sub-01_task-x_eeg.edf",
+            [{"name": "eeg_250hz", "rate": 250.0}], parsed,
+        )
+        cells = (rows or {})["trial_type"]
+        summary = events_summary_of(parsed)["trial_types"]
+        self.assertEqual(sorted(set(cells)), sorted([pinned, other, "go"]))
+        for cell in set(cells):
+            key = trial_type_key(cell) if len(cell) > TRIAL_TYPE_KEY_MAX else cell
+            self.assertEqual(summary[key], cells.count(cell), cell)
+        self.assertEqual(summary["{'story': 'ea~97ecccec881a7c"], 2)
 
     def test_the_summary_and_the_rows_come_from_one_parse(self):
         """#1060's last acceptance criterion. `n_events` in index.json and the
@@ -9419,6 +9476,9 @@ class TestIndexSchemaSelfCheck(unittest.TestCase):
             store["trial_types"], events_summary(self._events_tsv(old))["trial_types"]
         )
         self.assertEqual(len(store["trial_types"]), 51)
+        # sha256 of the 279 bytes of _record_value(0.0), from a file, with shasum -a 256
+        #   -> f7b38eb9d52cad...
+        self.assertEqual(store["trial_types"]["{'story': 'ea~f7b38eb9d52cad"], 1)
         self.assertTrue(all(len(k) <= TRIAL_TYPE_KEY_MAX for k in store["trial_types"]))
         self.assertEqual(
             sum(1 for k in store["trial_types"] if len(k) == TRIAL_TYPE_DIGEST_KEY_LEN), 50
