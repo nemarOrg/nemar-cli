@@ -910,8 +910,8 @@ const GIT_VERIFIED_FIELDS = [
 
 /**
  * Read git-verified.json, or refuse: every field checked, and no field the contract does not name.
- * `allowedTags` is the one optional field, and when present it is a non-empty, sorted, duplicate-free
- * list of version tags.
+ * `allowedTags` is the one optional field, and when present (in a `fresh-clone` proof only, the one
+ * mode `--allow-tag` exists in) it is a non-empty, sorted, duplicate-free list of version tags.
  */
 export function parseGitVerified(text: string): GitVerifiedFile {
   const x = JSON.parse(text) as unknown;
@@ -930,6 +930,7 @@ export function parseGitVerified(text: string): GitVerifiedFile {
   if (hasAllowed) {
     const tags = x.allowedTags;
     if (
+      x.mode !== "fresh-clone" ||
       !Array.isArray(tags) ||
       tags.length === 0 ||
       !tags.every((t) => typeof t === "string" && VERSION_TAG.test(t)) ||

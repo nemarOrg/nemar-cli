@@ -464,6 +464,11 @@ describe("stage files", () => {
         JSON.stringify(allowedTags),
       ).toThrow(ContractError);
     }
+    // The flag exists in a fresh-clone verify only, so no other proof carries a list.
+    expect(() =>
+      parseGitVerified(JSON.stringify({ ...proof, mode: "local", allowedTags: ["v1.1.1"] })),
+    ).toThrow(ContractError);
+    expect(parseGitVerified(JSON.stringify({ ...proof, mode: "local" })).mode).toBe("local");
     // Still no field the contract does not name.
     expect(() =>
       parseGitVerified(JSON.stringify({ ...proof, allowedTags: ["v1.1.1"], extra: 1 })),
