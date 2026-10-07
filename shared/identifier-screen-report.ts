@@ -245,11 +245,10 @@ const SCANNER = /^identifier-scan@[0-9a-f]{7,40}$/;
 const HEAD = /^[0-9a-f]{40}$/;
 const DATASET_ID = /^(nm|on|xx)\d{6}$/;
 /**
- * `<kind>:<field>`. The field half is the scanner's own alphabet: a header field
- * (`patient.birthdate`) or the CANONICAL spelling of a matched column or key,
- * which `canonical()` in identifier-scan.ts lowercases and strips of spaces. Upper
- * case, spaces and punctuation are therefore never a field, and refusing them is
- * what keeps a header's text (`JOHN SMITH`) from riding in this list.
+ * A UTC timestamp, to the second, as `Date.prototype.toISOString` writes it. The only free-form
+ * string a scan carries besides closed words, so it is a pattern and not a vocabulary. The
+ * scanner's `finding_fields` (a matched column or key name, a header field) is not accepted at all:
+ * {@link parseRecord} lists the keys it takes, and a name is exactly what a report must not hold.
  */
 const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
 
