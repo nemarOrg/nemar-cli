@@ -331,6 +331,22 @@ export async function getAdminEmailsForCategory(
  * still fails closed (isEmailDeliveryAllowed treats undefined ENVIRONMENT
  * as non-production with an empty allow-list, i.e. refuses).
  */
+/**
+ * Resend ANSWERED a send with a 4xx: it refused the message itself (a bad key,
+ * a bad address, a malformed body) and delivered nothing. The message keeps the
+ * plain error's words. A thrown fetch, a timeout or a 5xx is not this class:
+ * the mail may have been accepted and only the answer lost.
+ */
+export class EmailRejectedError extends Error {
+  constructor(
+    readonly httpStatus: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "EmailRejectedError";
+  }
+}
+
 async function sendEmail(
   to: string,
   subject: string,
@@ -340,6 +356,7 @@ async function sendEmail(
   replyTo?: string,
   isDev?: boolean,
   deliveryEnv?: EmailDeliveryEnv,
+  timeoutMs?: number,
 ): Promise<void> {
   if (!isEmailDeliveryAllowed(to, deliveryEnv)) {
     console.warn(
@@ -365,13 +382,16 @@ async function sendEmail(
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
+    ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
   });
 
   if (!response.ok) {
-    const error: ResendResponse = await response.json();
-    throw new Error(
-      `Failed to send email from ${fromEmail} to ${to}: ${error.message || response.statusText}`,
-    );
+    const error = (await response.json().catch(() => ({}))) as ResendResponse;
+    const message = `Failed to send email from ${fromEmail} to ${to}: ${error.message || response.statusText}`;
+    if (response.status >= 400 && response.status < 500) {
+      throw new EmailRejectedError(response.status, message);
+    }
+    throw new Error(message);
   }
 }
 
@@ -2282,6 +2302,9 @@ export async function sendAnonymityFindingsEmail(
   return { delivered, failed };
 }
 
+/** How long one send of the identifier sweep's weekly report waits for Resend. */
+export const IDENTIFIER_SWEEP_EMAIL_TIMEOUT_MS = 15_000;
+
 /**
  * What the identifier sweep's weekly report says (ADR 0087). Structurally the
  * report `identifier-sweep-report.ts` renders, re-declared here so `email.ts`
@@ -2300,7 +2323,9 @@ export interface IdentifierSweepReportForEmail {
  * Every line is escaped: a line carries dataset ids, finding kinds, counts and
  * fixed words, never a value, and escaping is what keeps it that way if a line
  * ever carried anything else. Returns how many admins it reached, so the caller
- * records the week as sent only when someone received it.
+ * records the week as sent only when someone received it, and how many sends
+ * ended without a definite answer (a timeout, a dropped connection, a 5xx), so
+ * the caller never treats a send that may have landed as one that reached nobody.
  */
 export async function sendIdentifierSweepReportEmail(
   adminEmails: readonly string[],
@@ -2310,7 +2335,7 @@ export async function sendIdentifierSweepReportEmail(
   replyTo?: string,
   isDev?: boolean,
   deliveryEnv?: EmailDeliveryEnv,
-): Promise<number> {
+): Promise<{ delivered: number; ambiguous: number }> {
   const color = report.attention ? "#d97706" : "#16a34a";
   const body = report.lines.map((line) => escapeHtml(line)).join("\n");
   const html = `
@@ -2328,6 +2353,7 @@ export async function sendIdentifierSweepReportEmail(
 </html>
   `;
   let delivered = 0;
+  let ambiguous = 0;
   for (const adminEmail of adminEmails) {
     try {
       await sendEmail(
@@ -2339,9 +2365,16 @@ export async function sendIdentifierSweepReportEmail(
         replyTo,
         isDev,
         deliveryEnv,
+        IDENTIFIER_SWEEP_EMAIL_TIMEOUT_MS,
       );
       delivered++;
     } catch (error) {
+      // Refused for certain: a 4xx from Resend, or the dev fence before any
+      // request. Anything else (a timeout, a dropped connection, a 5xx) may have
+      // been accepted, and the caller must not treat it as "reached nobody".
+      if (!(error instanceof EmailRejectedError || error instanceof DevEmailFenceError)) {
+        ambiguous++;
+      }
       // `sendEmail`'s message names the recipient; redact it in the message too.
       const message = error instanceof Error ? error.message : String(error);
       console.error(
@@ -2350,5 +2383,5 @@ export async function sendIdentifierSweepReportEmail(
       );
     }
   }
-  return delivered;
+  return { delivered, ambiguous };
 }
