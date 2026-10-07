@@ -51,6 +51,11 @@ jobs:
       agentdocs: ${{ steps.filter.outputs.agentdocs }}
       neurobagel_deploy: ${{ steps.filter.outputs.neurobagel_deploy }}
       scrub: ${{ steps.filter.outputs.scrub }}
+      # The ONE predicate for "the scrub suites must run", read by both `scrub-tools-shard` and
+      # `scrub-tools` below so the shards and the check that gates on them cannot disagree about
+      # whether they were due. It is the same condition `scrub-tools` always had: the toolchain
+      # and the scanner (`scrub`), or the wire contract they import (`shared`).
+      scrub_suites: ${{ steps.filter.outputs.scrub == 'true' || steps.filter.outputs.shared == 'true' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -99,6 +104,10 @@ jobs:
               # members it accepts (KNOWN_BENIGN in scripts/scrub/s3/zarr-json.ts): a change to
               # what it writes must run the scrub suites.
               - 'scripts/zarr/**'
+              # Self-reference, mirroring the `email` filter below: the sharded job and its
+              # aggregator are defined in this file, and editing only them left `scrub` false,
+              # so the one change that could break the scrub CI never ran the scrub CI.
+              - '.github/workflows/test.yml'
             # shared/ is imported by BOTH src/ and backend/ but matched by
             # neither filter, so a PR touching only shared/** -- the wire
             # contract, the facet vocabulary, the two published Zarr JSON
@@ -375,18 +384,63 @@ jobs:
           PY
 
   # The scrub toolchain's suites, run against REAL git, git-annex, uv/python and the aws CLI
-  # with a local S3 stand-in (no mocks, .rules/testing.md). They are slow (minutes), so they
-  # run only when the toolchain or the scanner changes. NEMAR_REQUIRE_SCRUB_TOOLS makes a
-  # missing tool a failure: these suites used to skip silently without uv or git-annex, and a
-  # skipped suite reports green.
-  scrub-tools:
+  # with a local S3 stand-in (no mocks, .rules/testing.md). They run only when the toolchain or
+  # the scanner changes. NEMAR_REQUIRE_SCRUB_TOOLS makes a missing tool a failure: these suites
+  # used to skip silently without uv or git-annex, and a skipped suite reports green.
+  #
+  # WHY THIS IS SHARDED. On one runner the suites took 25 to 46 minutes for a three-line change
+  # (run 37586871174: 45 minutes), because they drive the real aws CLI hundreds of times and the
+  # test files ran one after another. The files do not depend on each other (each starts its own
+  # stand-in on an ephemeral port and registers its own temp directories), and a shard is its own
+  # VM, so `bun test --shard=i/N` splits the files across N runners. The same tests run, against
+  # the same real tools; only their grouping changed. The split is weighted by the per-file
+  # durations in test/scrub/timings.json (`--timings`), because a few files take minutes and
+  # most take seconds, so splitting by file count would leave one runner with all the slow ones.
+  #
+  # THE SLOWEST SLICE SETS THE TIME. bun cuts the path-sorted file list into contiguous slices
+  # of about equal duration, so a shard cannot finish before its slowest file does, and the
+  # cut points follow file order, not an ideal packing: five shards left one slice at 11.4
+  # minutes, six at 11.7, seven at 8.9, measured on the timings when this was written. So
+  # CHECK A SHARD COUNT BEFORE CHANGING IT, with a dry run that imports the files and runs no
+  # test (it exits 1 on "matched 0 tests"; the junit file names each shard's files):
+  #   for i in 1 2 3 4 5 6 7; do bun test --preload ./test/scrub/helpers/temp-dirs-preload.ts   #     --path-ignore-patterns='__run_every_scrub_suite__' --timings test/scrub/timings.json   #     --shard=$i/7 -t '^never$' --reporter=junit --reporter-outfile=/tmp/shard-$i.xml   #     test/scrub test/identifier-scan.test.ts test/identifier-scrub.test.ts   #     test/identifier-fleet.test.ts; done
+  # delete.test.ts alone took 13.5 minutes, which no shard count beats, so its preconditions
+  # describe block now lives in delete-preconditions.test.ts (the shared fixture is
+  # delete-harness.ts). When a file grows past a third of the slice time again, split it the
+  # same way before adding runners.
+  #
+  # THE CHECK NAME. `scrub-tools-shard` is the matrix; `scrub-tools` is a gate that needs it and
+  # keeps the name this check always had, so anything that names it keeps working. The gate is
+  # skipped exactly when the suites were not due (the same `if` as the shards, from the one
+  # `scrub_suites` output), as the single job was. When they were due it fails unless every
+  # shard succeeded AND the shards together ran every test file bun discovered, so a shard that
+  # ran nothing, or a partition that dropped a file, cannot pass green.
+  #
+  # TO ADD A SHARD, add the next number to `matrix.shard`. The slice each job runs comes from
+  # its position (`strategy.job-index`), so the numbers only count the jobs, and a gap or a
+  # repeat is refused in the step below.
+  #
+  # TO REFRESH test/scrub/timings.json (after files are added, removed or split, or when the
+  # shards drift apart): every shard uploads the durations it measured as the artifact
+  # `scrub-shard-<n>`. From a green run on the branch:
+  #   gh run download <run-id> --pattern 'scrub-shard-*' --dir /tmp/scrub-shards
+  #   jq -S -s '{version: 1, files: (map(.files) | add)}' /tmp/scrub-shards/*/timings.json \
+  #     > test/scrub/timings.json
+  # A file missing from the timings file still runs; it is only balanced less well.
+  scrub-tools-shard:
+    name: scrub-tools shard ${{ matrix.shard }}/${{ strategy.job-total }}
     runs-on: ubuntu-latest
-    # The suite takes 25 to 30 minutes on a runner (about 13 on a laptop): a 30 minute limit
-    # cancelled it on three runs that were otherwise passing, and a cancelled check reads as
-    # neither green nor red.
-    timeout-minutes: 60
+    # A shard takes under 10 minutes. The limit is 30 because a cancelled check reads as neither
+    # green nor red: the single 30 minute limit this job once had cancelled three runs that were
+    # otherwise passing.
+    timeout-minutes: 30
     needs: changes
-    if: needs.changes.outputs.scrub == 'true' || needs.changes.outputs.shared == 'true'
+    if: needs.changes.outputs.scrub_suites == 'true'
+    strategy:
+      # Every shard reports, so one red shard does not hide a second one.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -420,16 +474,145 @@ jobs:
           aws --version
 
       # The lint job's filters do not match a scrub-only change, and `bun run lint` covers
-      # src/ only, so the scrub tools are linted here.
+      # src/ only, so the scrub tools are linted here, once (the first job), not once a shard.
       - name: Lint the scrub toolchain
+        if: strategy.job-index == 0
         run: bun run lint:scrub
 
       # `bun run test:scrub`, not a bare `bun test`: bunfig.toml keeps test/scrub out of a bare run,
-      # and the script's --path-ignore-patterns puts it back.
-      - name: Scrub toolchain and scanner suites
+      # and the script's --path-ignore-patterns puts it back. It also owns the file list and the
+      # temp-dir preload, so the shards cannot drift from a local run; --shard, --timings and
+      # --update-timings are appended to it.
+      #
+      # An empty shard is not an error to bun: `--shard=3/3` over two files prints
+      # "Ran 0 tests across 0 files" and exits 0. So the step reads the run's own summary and
+      # refuses a shard that ran no file or no test, and records what it ran for the gate.
+      - name: Scrub toolchain and scanner suites (shard ${{ matrix.shard }}/${{ strategy.job-total }})
+        shell: bash
         env:
           NEMAR_REQUIRE_SCRUB_TOOLS: "1"
-        run: bun run test:scrub
+          SHARD_INDEX: ${{ strategy.job-index }}
+          SHARD_TOTAL: ${{ strategy.job-total }}
+          SHARD_LABEL: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          shard=$((SHARD_INDEX + 1))
+          if [ "$shard" != "$SHARD_LABEL" ]; then
+            echo "::error::matrix.shard must be 1..N in order: job $SHARD_INDEX is labeled $SHARD_LABEL, so a slice of the suites would run twice or never"
+            exit 1
+          fi
+
+          out="$RUNNER_TEMP/scrub-shard-out"
+          mkdir -p "$out"
+          timings="$out/timings.json"
+          cp test/scrub/timings.json "$timings"
+          log="$RUNNER_TEMP/scrub-shard.log"
+
+          # pipefail keeps bun's own exit status: a failing test fails this step.
+          bun run test:scrub --shard="$shard/$SHARD_TOTAL" --timings "$timings" --update-timings 2>&1 | tee "$log"
+
+          esc=$(printf '\033')
+          plain=$(sed -E "s/${esc}\[[0-9;]*m//g" "$log")
+          header=$(grep -E -m1 '^--shard=[0-9]+/[0-9]+: running [0-9]+/[0-9]+ test files' <<<"$plain" || true)
+          summary=$(grep -E '^Ran [0-9]+ tests? across [0-9]+ files?' <<<"$plain" | tail -1 || true)
+          if [ -z "$header" ] || [ -z "$summary" ]; then
+            echo "::error::bun printed no shard header or no run summary, so what this shard ran is unknown"
+            exit 1
+          fi
+          read -r planned discovered < <(sed -E 's#^--shard=[0-9]+/[0-9]+: running ([0-9]+)/([0-9]+) test files.*#\1 \2#' <<<"$header")
+          read -r tests files < <(sed -E 's#^Ran ([0-9]+) tests? across ([0-9]+) files?.*#\1 \2#' <<<"$summary")
+          if [ "$files" -lt 1 ] || [ "$tests" -lt 1 ]; then
+            echo "::error::shard $shard/$SHARD_TOTAL ran $tests tests across $files files; an empty shard passes bun and asserts nothing"
+            exit 1
+          fi
+          if [ "$files" != "$planned" ]; then
+            echo "::error::shard $shard/$SHARD_TOTAL was assigned $planned files and ran $files"
+            exit 1
+          fi
+
+          jq -n --argjson shard "$shard" --argjson total "$SHARD_TOTAL" \
+            --argjson files "$files" --argjson discovered "$discovered" --argjson tests "$tests" \
+            '{shard: $shard, total: $total, files: $files, discovered: $discovered, tests: $tests}' \
+            > "$out/shard.json"
+          echo "shard $shard/$SHARD_TOTAL: $tests tests across $files of $discovered files" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # The gate reads shard.json from every shard; timings.json is what a refresh of
+      # test/scrub/timings.json collects (see the note above the job).
+      - name: Upload what this shard ran and how long each file took
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrub-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/scrub-shard-out
+          retention-days: 14
+          if-no-files-found: error
+          overwrite: true
+
+  # The check named `scrub-tools`. See THE CHECK NAME above.
+  #
+  # `if: always()` so a failed or cancelled shard still reaches this job and turns it red; a
+  # job skipped because its dependency failed would read as passing. The second term skips it
+  # when the suites were not due, which is what the single job did.
+  scrub-tools:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [changes, scrub-tools-shard]
+    if: always() && needs.changes.outputs.scrub_suites == 'true'
+    steps:
+      - name: Every shard must have succeeded
+        env:
+          SHARDS_RESULT: ${{ needs.scrub-tools-shard.result }}
+        run: |
+          if [ "$SHARDS_RESULT" != "success" ]; then
+            echo "::error::scrub-tools-shard finished as '$SHARDS_RESULT', not 'success'"
+            exit 1
+          fi
+
+      - name: Download what every shard ran
+        uses: actions/download-artifact@v4
+        with:
+          pattern: scrub-shard-*
+          path: scrub-shards
+
+      # A green shard is not enough: bun can run a shard that holds no file, and a partition
+      # that disagreed between shards (a different bun on one runner) could drop or repeat a
+      # file. Each shard recorded how many files it ran and how many bun discovered in all.
+      - name: The shards together ran every test file
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          reports=(scrub-shards/*/shard.json)
+          if [ "${#reports[@]}" -eq 0 ]; then
+            echo "::error::no shard left a report"
+            exit 1
+          fi
+          problems=$(jq -r -s '
+            . as $all
+            | ($all[0].total) as $total
+            | ($all[0].discovered) as $discovered
+            | [
+                (if ($all | length) != $total
+                  then "expected \($total) shard reports, found \($all | length)" else empty end),
+                (if ([$all[].total] | unique | length) != 1
+                  then "the shards disagree on how many shards there are" else empty end),
+                (if ([$all[].discovered] | unique | length) != 1
+                  then "the shards disagree on how many test files exist" else empty end),
+                (if ([$all[].shard] | sort) != [range(1; $total + 1)]
+                  then "the shard numbers are not exactly 1..\($total)" else empty end),
+                (if ([$all[].files] | add) != $discovered
+                  then "the shards ran \([$all[].files] | add) test files and bun discovered \($discovered)" else empty end),
+                ($all[] | select(.files < 1 or .tests < 1)
+                  | "shard \(.shard) ran \(.tests) tests across \(.files) files")
+              ] | .[]' "${reports[@]}")
+          if [ -n "$problems" ]; then
+            while IFS= read -r line; do echo "::error::$line"; done <<<"$problems"
+            exit 1
+          fi
+          jq -r -s '
+            "| shard | files | tests |\n|---|---|---|\n"
+            + ([.[] | "| \(.shard)/\(.total) | \(.files) | \(.tests) |"] | join("\n"))
+            + "\n| all | \([.[].files] | add) of \(.[0].discovered) | \([.[].tests] | add) |"
+          ' "${reports[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
 
   # Type check and lint - always runs on code changes
   lint:

@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "files": {
+    "test/scrub/s3/delete-preconditions.test.ts": 18
+  }
+}
