@@ -11,6 +11,7 @@ import {
   datasetFacetsEnvelopeSchema,
   datasetSearchEnvelopeSchema,
 } from "../../../shared/contract/index.js";
+import type { UploaderPreflight } from "../../../shared/identifier-screen-report.js";
 import { request } from "./client.js";
 
 /** ORCID identifier format: XXXX-XXXX-XXXX-XXXX (last char may be X) */
@@ -511,16 +512,34 @@ export interface CreateDatasetRequest {
   dataset_id?: string;
   // Deposit attestation (#1077): recorded on the dataset row (migration 0067).
   // Optional at the wire level for older CLIs; collected for every new upload.
-  attestation?: {
-    deposit_type: "owner" | "redistribution";
-    key_status: "destroyed" | "retained";
-    deidentified: true;
-    no_duplicate?: boolean;
-    upstream_source?: string;
-  };
+  attestation?: AttestationWire;
+  /**
+   * The identifier preflight this upload ran before sending anything (ADR 0087), recorded with
+   * the attestation. Counts and fixed words only; the backend parses it with the same contract.
+   */
+  identifier_preflight?: UploaderPreflight;
 }
 
-export interface CreateDatasetResponse {
+/** The attestation as the create and record-attestation routes take it. */
+export interface AttestationWire {
+  deposit_type: "owner" | "redistribution";
+  key_status: "destroyed" | "retained";
+  deidentified: true;
+  no_duplicate?: boolean;
+  upstream_source?: string;
+}
+
+/**
+ * What the backend says about the identifier preflight it was sent. Absent on a backend that
+ * predates the preflight, which drops the field without a word: absent is "not recorded".
+ */
+export interface PreflightRecording {
+  identifier_preflight_recorded?: boolean;
+  /** The contract's fixed word when the record was refused at the door. */
+  identifier_preflight_refused?: string;
+}
+
+export interface CreateDatasetResponse extends PreflightRecording {
   message: string;
   resumed: boolean;
   dataset: {
@@ -554,6 +573,27 @@ export async function createDataset(data: CreateDatasetRequest): Promise<CreateD
       method: "POST",
       body: JSON.stringify(data),
     },
+    true,
+  );
+}
+
+export interface RecordAttestationResponse extends PreflightRecording {
+  recorded: boolean;
+}
+
+/**
+ * Record the deposit attestation, and the identifier preflight with it, on a dataset this upload
+ * is resuming (ADR 0087). A resume from a local config never calls `createDataset`, so without
+ * this the answers given at the prompt, and the preflight of the files now being sent, would not
+ * reach the dataset at all. Owner or admin only, and refused once the dataset is public.
+ */
+export async function recordDepositAttestation(
+  datasetId: string,
+  body: { attestation: AttestationWire; identifier_preflight?: UploaderPreflight },
+): Promise<RecordAttestationResponse> {
+  return request<RecordAttestationResponse>(
+    `/datasets/${datasetId}/attestation`,
+    { method: "PUT", body: JSON.stringify(body) },
     true,
   );
 }

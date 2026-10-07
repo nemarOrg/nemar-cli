@@ -78,6 +78,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "listCollaborators",
     "listDatasets",
     "listManifestVersions",
+    "recordDepositAttestation",
     "requestDatasetAccess",
     "resolveSourceId",
     "searchDatasets",
@@ -199,6 +200,7 @@ const INTERNAL_WIRING = ["request"];
  * protection every other symbol has.
  */
 const POST_SPLIT_ADDITIONS = [
+  "recordDepositAttestation", // epic #1610 phase 3, ADR 0087: PUT /datasets/:id/attestation
   "getApiUrl", // #1401: the data plane is this origin + /data (lib/http-download.ts)
   "mintDocsSession", // #1341, epic #1336 phase 3: POST /auth/docs/cli-session
   "NOTICE_LEVELS", // #1025, notice level vocabulary
