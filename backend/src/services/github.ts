@@ -110,6 +110,7 @@ export type { GitHubIssue } from "./github/issues";
 export {
   buildBidsValidationDispatch,
   CENTRAL_WORKFLOW_REPO,
+  IdentifierScreenDispatchRejected,
   triggerArchiveGeneration,
   triggerBidsValidation,
   triggerEnrichmentRun,

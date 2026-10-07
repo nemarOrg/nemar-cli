@@ -28,6 +28,7 @@ const EXPECTED_EXPORTS = [
   "EnrichmentCommitError",
   "IDENTIFIER_SCREEN_TOKEN_DOMAIN",
   "IDENTIFIER_SWEEP_TOKEN_DOMAIN",
+  "IdentifierScreenDispatchRejected",
   "NEMAR_APP_ID",
   "ORG_NAME",
   "VERSION_COMPARE_SNIPPET",
