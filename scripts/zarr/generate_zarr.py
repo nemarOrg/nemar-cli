@@ -1349,8 +1349,9 @@ def _scratch_setting(name: str, default: float, *, minimum: float) -> float:
     what an operator intended. A factor of 0 or below would charge every recording
     nothing and quietly switch the gate off, ``nan`` raised ValueError deep inside
     ``main``, ``inf`` overflowed ``int()``, and a negative headroom inflated the
-    budget; each is a crontab typo that should stop the run at import, naming the
-    variable, not surface hours later as a full disk."""
+    budget; each is a crontab typo that should stop the run, naming the
+    variable, not surface hours later as a full disk. The import records the message and
+    keeps the default; `main` is what refuses to run (see SCRATCH_SETTING_ERRORS)."""
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
         return default
@@ -1363,14 +1364,33 @@ def _scratch_setting(name: str, default: float, *, minimum: float) -> float:
     return value
 
 
-SCRATCH_STREAM_FACTOR = _scratch_setting("ZARR_SCRATCH_STREAM_FACTOR", 3.0, minimum=1.0)
+# A bad value must not take down the import: every dataset run (and `patch_duration`)
+# loads this module, and an exception here would kill each before it could write a
+# callback, so nothing would say why. The defaults stand and the messages wait here
+# for `main()`, which refuses to run and reports them through the callback.
+SCRATCH_SETTING_ERRORS: list[str] = []
+
+
+def _scratch_setting_or_default(name: str, default: float, *, minimum: float) -> float:
+    try:
+        return _scratch_setting(name, default, minimum=minimum)
+    except ValueError as exc:
+        SCRATCH_SETTING_ERRORS.append(str(exc))
+        return default
+
+
+SCRATCH_STREAM_FACTOR = _scratch_setting_or_default(
+    "ZARR_SCRATCH_STREAM_FACTOR", 3.0, minimum=1.0
+)
 # In-memory path: the raw copy plus the store it writes. Those recordings are small
 # by construction (the streaming threshold is 256 MiB) or have no streaming reader.
-SCRATCH_INMEM_FACTOR = _scratch_setting("ZARR_SCRATCH_INMEM_FACTOR", 2.0, minimum=1.0)
+SCRATCH_INMEM_FACTOR = _scratch_setting_or_default(
+    "ZARR_SCRATCH_INMEM_FACTOR", 2.0, minimum=1.0
+)
 # Left unspoken for: other tenants share the volume and grow while a run lasts hours,
 # and `aws s3 cp` keeps partial files beside the chunks it is assembling.
 SCRATCH_HEADROOM_BYTES = int(
-    _scratch_setting("ZARR_SCRATCH_HEADROOM_BYTES", 10 * 1024**3, minimum=0)
+    _scratch_setting_or_default("ZARR_SCRATCH_HEADROOM_BYTES", 10 * 1024**3, minimum=0)
 )
 # What a recording whose size cannot be read is charged. Its pointer carries no
 # `-s` field (or there is no pointer), so the factor would multiply nothing and the
@@ -1378,13 +1398,15 @@ SCRATCH_HEADROOM_BYTES = int(
 # than a refusal: most such recordings are small, and one that is not fails with a
 # retryable ENOSPC like any other miss.
 SCRATCH_UNKNOWN_SIZE_BYTES = int(
-    _scratch_setting("ZARR_SCRATCH_UNKNOWN_SIZE_BYTES", 16 * 1024**3, minimum=1)
+    _scratch_setting_or_default("ZARR_SCRATCH_UNKNOWN_SIZE_BYTES", 16 * 1024**3, minimum=1)
 )
 # How many times admission looks at the volume again, `ADMISSION_RECHECK_SECONDS`
 # apart, before it concludes that nothing left can fit and defers the rest of the
 # queue. One statvfs sample can land in another tenant's transient spike, and with
 # nothing in flight the whole remaining queue would be deferred on it.
-SCRATCH_DEFER_RESAMPLES = int(_scratch_setting("ZARR_SCRATCH_DEFER_RESAMPLES", 3, minimum=0))
+SCRATCH_DEFER_RESAMPLES = int(
+    _scratch_setting_or_default("ZARR_SCRATCH_DEFER_RESAMPLES", 3, minimum=0)
+)
 # One line per deferred recording is the point, but a dataset of 25k recordings on a
 # node with no room would write 25k of them every tick; the index names them all.
 SCRATCH_DEFER_LOG_LINES = 200
@@ -8645,6 +8667,25 @@ def main() -> int:
         "multi-GB recordings within local scratch + RAM.",
     )
     args = ap.parse_args()
+
+    if SCRATCH_SETTING_ERRORS:
+        # Refused here, not at import, so the failure is REPORTED: the callback is
+        # how an operator learns why every dataset stopped converting.
+        message = "invalid scratch setting: " + "; ".join(SCRATCH_SETTING_ERRORS)
+        print(f"::error::{message}", flush=True)
+        with open(args.callback_out, "w") as fh:
+            json.dump(
+                {
+                    "dataset_id": args.dataset_id,
+                    "status": "failed",
+                    "errors": 1,
+                    "failed": [],
+                    "deterministic": False,
+                    "error": message,
+                },
+                fh,
+            )
+        return 1
 
     dataset_id = args.dataset_id
     bucket = args.bucket

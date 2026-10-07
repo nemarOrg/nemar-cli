@@ -5594,8 +5594,9 @@ class TestScratchSettings(unittest.TestCase):
         base = {k: v for k, v in os.environ.items() if not k.startswith("ZARR_SCRATCH_")}
         code = (
             f"import sys; sys.path.insert(0, {str(Path(__file__).resolve().parent)!r}); "
-            "import generate_zarr as g; "
-            "print(g.SCRATCH_STREAM_FACTOR, g.SCRATCH_INMEM_FACTOR, g.SCRATCH_HEADROOM_BYTES)"
+            "import generate_zarr as g, json; "
+            "print(g.SCRATCH_STREAM_FACTOR, g.SCRATCH_INMEM_FACTOR, g.SCRATCH_HEADROOM_BYTES); "
+            "print(json.dumps(g.SCRATCH_SETTING_ERRORS))"
         )
         return subprocess.run(
             [sys.executable, "-I", "-c", code], env={**base, **env},
@@ -5607,18 +5608,47 @@ class TestScratchSettings(unittest.TestCase):
         # override of the module attributes cannot make this pass or fail.
         out = self._import_in_fresh_interpreter()
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertEqual(out.stdout.split(), ["3.0", "2.0", str(10 * 1024**3)])
+        values, errors = out.stdout.splitlines()
+        self.assertEqual(values.split(), ["3.0", "2.0", str(10 * 1024**3)])
+        self.assertEqual(json.loads(errors), [])
 
-    def test_a_bad_setting_stops_the_import_and_names_the_variable(self):
+    def test_a_bad_setting_does_not_break_the_import_and_is_recorded_by_name(self):
+        # Every dataset run (and patch_duration) imports this module: raising here
+        # would kill each before it could write a callback.
         for name, raw in (
             ("ZARR_SCRATCH_STREAM_FACTOR", "0"),
             ("ZARR_SCRATCH_INMEM_FACTOR", "nan"),
-            ("ZARR_SCRATCH_HEADROOM_BYTES", "-1"),
+            ("ZARR_SCRATCH_HEADROOM_BYTES", "10G"),
         ):
             with self.subTest(name=name):
                 out = self._import_in_fresh_interpreter(**{name: raw})
-                self.assertNotEqual(out.returncode, 0)
-                self.assertIn(name, out.stderr)
+                self.assertEqual(out.returncode, 0, out.stderr)
+                values, errors = out.stdout.splitlines()
+                self.assertEqual(
+                    values.split(), ["3.0", "2.0", str(10 * 1024**3)], "defaults stand"
+                )
+                (message,) = json.loads(errors)
+                self.assertIn(name, message)
+
+    def test_main_refuses_a_bad_setting_and_reports_it_through_the_callback(self):
+        script = Path(__file__).resolve().parent / "generate_zarr.py"
+        env = {k: v for k, v in os.environ.items() if not k.startswith("ZARR_SCRATCH_")}
+        env["ZARR_SCRATCH_HEADROOM_BYTES"] = "10G"
+        with tempfile.TemporaryDirectory() as tmp:
+            callback = os.path.join(tmp, "cb.json")
+            done = subprocess.run(
+                [sys.executable, str(script), "--dataset-id", "on000001",
+                 "--repo-dir", os.path.join(tmp, "no-repo"), "--callback-out", callback],
+                env=env, capture_output=True, text=True, timeout=120,
+            )
+            self.assertEqual(done.returncode, 1, done.stderr)
+            with open(callback) as fh:
+                body = json.load(fh)
+        self.assertEqual(body["status"], "failed")
+        self.assertEqual(body["dataset_id"], "on000001")
+        self.assertFalse(body["deterministic"], "a config typo must stay retryable")
+        self.assertIn("ZARR_SCRATCH_HEADROOM_BYTES='10G' is not a number", body["error"])
+        self.assertIn("::error::invalid scratch setting", done.stdout)
 
 
 class TestUnreadableSizesAreCharged(unittest.TestCase):
