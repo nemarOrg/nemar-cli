@@ -49,6 +49,7 @@ import {
   type PublicationDecision,
   awaitScreenAndApprove,
   describePublicationDecision,
+  screenWaitBudget,
 } from "./import-publication.js";
 import { httpUpstreamReader, prepareImportedTreeForCopy } from "./import-scrub.js";
 import {
@@ -106,7 +107,8 @@ interface ImportOptions {
   persistStaging?: boolean;
   /**
    * How long finalize waits for the identifier screen's verdict, and how often it
-   * reads the request's status meanwhile (ADR 0087). Defaults: `SCREEN_WAIT_MS`,
+   * reads the request's status meanwhile (ADR 0087). Defaults: what the finalize
+   * job's timeout leaves, at most `SCREEN_WAIT_MS` (`screenWaitBudget`), and
    * `SCREEN_POLL_MS`.
    */
   screenWaitMs?: number;
@@ -1513,6 +1515,9 @@ export async function finalizeImport(
   options: ImportOptions = {},
   inMemoryManifest?: ImportManifest,
 ): Promise<PublicationDecision> {
+  // When this run started, so the wait for the identifier screen can be cut to what
+  // the job's timeout leaves (`screenWaitBudget`).
+  const finalizeStartedAt = Date.now();
   const nemarId = mapDatasetId(openneuroId);
   const manifest = inMemoryManifest ?? (await readManifestFromS3(nemarId, S3_BUCKET, S3_REGION));
   const workDir = options.workDir || mkdtempSync(join(tmpdir(), `nemar-finalize-${nemarId}-`));
@@ -1876,7 +1881,7 @@ export async function finalizeImport(
         nemarId,
         skipCiCheck,
         privacy: manifest.privacy,
-        waitMs: options.screenWaitMs,
+        waitMs: options.screenWaitMs ?? screenWaitBudget(Date.now() - finalizeStartedAt),
         pollMs: options.screenPollMs,
         onProgress: (text) => {
           approveSpinner.text = text;

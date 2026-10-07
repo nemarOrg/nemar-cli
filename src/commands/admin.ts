@@ -4196,7 +4196,7 @@ adminCommand
   )
   .option(
     "--screen-wait-minutes <n>",
-    "How long finalize waits for the identifier screen's verdict before leaving the publication for an admin (default 45; ADR 0087).",
+    "How long finalize waits for the identifier screen's verdict before leaving the publication for an admin (default: what the finalize job's 90-minute timeout leaves, at most 45; ADR 0087).",
   )
   .action(
     async (

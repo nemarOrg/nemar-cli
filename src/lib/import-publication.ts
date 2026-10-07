@@ -66,8 +66,26 @@ export interface PublicationDecision {
   reason?: ImportPublicationReason;
 }
 
-/** How long finalize waits for a verdict: past the screen's own 35-minute deadline, under the 50-minute watchdog. */
+/** The longest finalize waits for a verdict: past the screen's own 35-minute deadline, under the 50-minute watchdog. */
 export const SCREEN_WAIT_MS = 45 * 60_000;
+
+/**
+ * The finalize job's `timeout-minutes` in `.github/dataset-workflows/onboard-openneuro.yml`, pinned
+ * to the file by a test. A job killed by its timeout reports a failure for an import whose data is
+ * in place, so the wait is cut to what the job has left; the file is deployed as a whole-file copy
+ * to `nemarDatasets/.github`, and raising the timeout there lets the full wait apply (ADR 0087).
+ */
+export const FINALIZE_JOB_TIMEOUT_MS = 90 * 60_000;
+/** What the job keeps after the wait: runner setup before this process, the approval's S3 lock pages, and the reindex. */
+export const FINALIZE_RESERVE_MS = 30 * 60_000;
+/** The shortest wait: a screen usually reports in minutes. */
+export const MIN_SCREEN_WAIT_MS = 5 * 60_000;
+
+/** The wait finalize can afford after `elapsedMs` of its own run, within {@link SCREEN_WAIT_MS}. */
+export function screenWaitBudget(elapsedMs: number): number {
+  const left = FINALIZE_JOB_TIMEOUT_MS - FINALIZE_RESERVE_MS - elapsedMs;
+  return Math.min(SCREEN_WAIT_MS, Math.max(MIN_SCREEN_WAIT_MS, left));
+}
 /** How often it reads the request's status while it waits. */
 export const SCREEN_POLL_MS = 30_000;
 /** Re-runs allowed for a screen whose commit `main` has moved past. */
