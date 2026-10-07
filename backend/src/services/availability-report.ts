@@ -11,6 +11,7 @@
  */
 
 import type { Bindings } from "../types/bindings.js";
+import { datasetHasVersionSql } from "./archive-retry.js";
 import { isNonProductionEnv } from "./environment.js";
 import { exemplarOrFragment } from "./exemplar.js";
 import { getDatasetsToken } from "./github-auth.js";
@@ -308,12 +309,12 @@ export async function writeAvailabilityReport(
  *  not a candidate: its report has nothing to compare against, its repository
  *  may still be empty mid-upload, and -- as in ARCHIVE_RETRY_SWEEP_QUERY -- a
  *  row the pass cannot complete must not occupy one of its LIMIT slots
- *  forever (ORDER BY dataset_id would starve everything after it). */
+ *  forever (ORDER BY dataset_id would starve everything after it). The rule is
+ *  `datasetHasVersionSql`, the one ARCHIVE_RETRY_SWEEP_QUERY also builds from. */
 const AVAILABILITY_REPORT_SWEEP_BASE_WHERE = `github_repo IS NOT NULL
      AND (is_sandbox = 0 OR is_sandbox IS NULL OR ${exemplarOrFragment("")})
      AND json_extract(sweep_stamps, '$.availability_report_at') IS NULL
-     AND (latest_version_doi IS NOT NULL
-          OR EXISTS (SELECT 1 FROM dataset_versions dv WHERE dv.dataset_id = datasets.dataset_id))`;
+     AND ${datasetHasVersionSql("datasets")}`;
 
 /** Appended to the base predicate when `?missing-only=1` narrows candidacy to
  *  datasets already known incomplete (data_complete = 0, migration 0059). */

@@ -32,11 +32,13 @@ import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { adminRoutes } from "../src/routes/admin";
+import { ARCHIVE_RETRY_SWEEP_QUERY, datasetHasVersionSql } from "../src/services/archive-retry";
 import {
   AVAILABILITY_REPORT_STAMP_SQL,
   AVAILABILITY_REPORT_SWEEP_MAX,
   availabilityReportSweepCandidateQuery,
   availabilityReportSweepRemainingQuery,
+  availabilityReportSweepWhere,
 } from "../src/services/availability-report";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
@@ -309,6 +311,17 @@ describe("availability-report-sweep candidate SQL (pinned, no route dispatch)", 
 
     expect(candidates(false)).toEqual(["nm000359", "nm000360"]);
     expect(remainingCount()).toBe(2);
+  });
+
+  // The has-a-version rule was hand-copied into this sweep from the archive
+  // retry sweep; both now build from the one exported predicate, so a change
+  // to what "has a version" means reaches both or neither. The behavior is
+  // pinned by the test above (and by archive-retry.test.ts for the other
+  // sweep); this pins that they still SHARE it.
+  test("candidacy and the archive retry sweep share one has-a-version predicate", () => {
+    expect(availabilityReportSweepWhere(false)).toContain(datasetHasVersionSql("datasets"));
+    expect(availabilityReportSweepWhere(true)).toContain(datasetHasVersionSql("datasets"));
+    expect(ARCHIVE_RETRY_SWEEP_QUERY).toContain(datasetHasVersionSql("d"));
   });
 
   // Issue #1168: the curated exemplar fleet is inserted `is_sandbox = 1`
