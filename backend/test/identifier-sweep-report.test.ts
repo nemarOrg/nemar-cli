@@ -555,6 +555,14 @@ describe("the weekly send", () => {
     expect(auditRows(IDENTIFIER_SWEEP_REPORT_SENT_ACTION).map((r) => r.resource_id)).toEqual([
       week,
     ]);
+    // Once sent, the week stays sent: a lapsed lease does not reopen it.
+    db.run("UPDATE audit_log SET timestamp = datetime('now', '-1 days') WHERE action = ?", [
+      IDENTIFIER_SWEEP_REPORT_CLAIM_ACTION,
+    ]);
+    await withFakeResend(async (calls: CapturedEmail[]) => {
+      expect((await sendIdentifierSweepWeeklyReport(env(), when))?.claimed).toBe(false);
+      expect(calls).toHaveLength(0);
+    });
   });
 
   test(`no more than ${IDENTIFIER_SWEEP_REPORT_MAX_CLAIMS} claims in a week, however the record fails`, async () => {

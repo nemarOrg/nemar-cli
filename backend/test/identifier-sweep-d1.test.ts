@@ -154,6 +154,11 @@ describe("the sweep's statements on D1", () => {
 
     const nonce = s.identifier_sweep_nonce as string;
     const body = scanBody("nm000800", "direct-identifiers");
+    // A scan under any other nonce is not this attempt's, and stores nothing.
+    expect(
+      await storeSweepResult(env(d1), { datasetId: "nm000800", nonce: "not-it", body }),
+    ).toEqual({ stored: false });
+    expect((await stampsOf(d1, "nm000800")).identifier_sweep_status).toBeUndefined();
     expect(await storeSweepResult(env(d1), { datasetId: "nm000800", nonce, body })).toEqual({
       stored: true,
       kind: "verdict",

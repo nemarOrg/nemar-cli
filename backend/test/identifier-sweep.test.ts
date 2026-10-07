@@ -268,8 +268,8 @@ describe("the callback token", () => {
   });
 
   test("is its own kind: it opens neither the publication screen's door nor the pre-screen's, nor they its", async () => {
-    // Same secret, so the domain tag is the whole separation. A request id of 0 is
-    // what the sweep's dispatch carries.
+    // Same secret, so the domain tag (and the field layout under it) is what keeps
+    // the kinds apart. A request id of 0 is what the sweep's dispatch carries.
     const sweep = await signIdentifierSweepCallbackToken(PAYLOAD, SECRET);
     const asRequest = { datasetId: PAYLOAD.datasetId, requestId: 0, nonce: PAYLOAD.nonce };
     expect(await verifyIdentifierScreenCallbackToken(sweep, asRequest, SECRET)).toBe(false);
