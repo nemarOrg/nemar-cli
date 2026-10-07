@@ -783,6 +783,22 @@ describe("what the scrub refuses, before anything is pushed or copied", () => {
     expect(Buffer.from(readFileSync(outside))).toEqual(Buffer.from(small));
   }, 120_000);
 
+  test("the closing check refuses an upstream recording in the manifest whose header was not read", async () => {
+    // Nothing in the scrub should leave a copyable recording unread; this is the net under it. The
+    // map the scrub reads from loses the clean recording's source while the manifest, built from
+    // the same whereis elsewhere, still names it: the copy would carry bytes nobody looked at.
+    const upstream = await buildUpstream(baseFixtures());
+    const { clone } = await cloneForImport(upstream);
+    const view = await upstreamView(clone);
+    const keyUrlMap = new Map(view.keyUrlMap);
+    keyUrlMap.delete(await keyAt(clone, CLEAN_ANNEXED));
+    const err = await refusal(prepare(clone, { keyUrlMap, upstreamItems: view.upstreamItems }));
+    expect(err.code).toBe("header-unreadable");
+    expect(err.message).toContain(
+      "1 recording(s) in the copy manifest whose header this run did not read",
+    );
+  }, 120_000);
+
   test("an empty recording is not read and does not refuse", async () => {
     const files = [
       ...baseFixtures(),
