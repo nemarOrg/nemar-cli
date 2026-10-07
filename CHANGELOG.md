@@ -13,6 +13,58 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## 0.10.14 - 2026-10-07
+
+### Fixed
+
+- **Zarr conversion admits recordings against free scratch disk and reclaims what a killed
+  worker leaves behind (#1638).** A very large recording could never finish: the conversion
+  node's scratch volume filled, workers died with `No space left on device`, and the dead
+  workers' scratch stayed on disk, so every recording queued behind them failed the same way.
+  nm000276 (40 recordings, 3,031 GiB) stalled at 12 converted for that reason. Memory was not
+  the cause. A recording is now charged 3 times its bytes when streamed (2 times otherwise)
+  against free space plus what its in-flight recordings hold, minus 10 GiB, re-read every
+  round, and one that does not fit yet is deferred rather than attempted. A deferral is neither
+  an attempt nor a conversion: it keeps a published store whose index is current, counts as
+  not attempted so the queue advances no retry round, and a run that defers everything and
+  finds the index unchanged writes nothing to S3. Each recording gets its own memmap
+  directory; after a broken worker pool its scratch is deleted, its orphaned `aws s3 cp`
+  children are killed, and the free space before and after is logged. A killed worker's
+  verdict now lists a full scratch disk among its possible causes, and a pool break warns
+  about it, so a full volume is no longer read only as out of memory.
+- **`generate_zarr.py --check-env` and a single settings check per run (#1638).**
+  `hallu-zarr.sh` validates the `ZARR_SCRATCH_*` settings once before it dispatches anything,
+  so a typo stops the run with the queue and D1 untouched instead of posting `failed` and
+  burning an attempt for every dataset the drain visits.
+
+### Known limitations
+
+- The 3x factor is the measured float32 peak plus margin, so an int16 source can still hit
+  `No space left on device`; this narrows the risk, it does not remove it.
+- A recording that can never fit is still re-queued hourly (a metadata clone and the
+  start-of-run signal, no publish), and its `ready` callback restamps `zarr_converted_at`.
+  The start-of-run signal sets the dataset pending again each hour, and each `ready` callback
+  clears its recording-stats stamp so that sweep picks it up again. An `unchanged` webhook
+  status and a `scratch_deferred` field are the follow-up.
+- nm000276's largest recording is charged about 532 GiB, and admission also keeps 10 GiB of
+  headroom, so it needs about 542 GiB free with nothing else running and stays deferred until
+  then. With `ZARR_SCRATCH_STREAM_FACTOR=2.9` it is charged about 514 GiB and needs about
+  524 GiB free.
+
+### Migrations
+
+None.
+
+### Deploy coupling
+
+Merging to `main` makes the Hallu converter (the Zarr conversion host, cron `ZARR_DRIVER_REF=main`)
+run this code on its next tick. The only other deploy-relevant changes are the versions:
+`backend/package.json` moves, so the backend redeploys unchanged, and the root `package.json`
+moves from 0.10.13 to a `0.10.14-devN` pre-release, so the merge also triggers `auto-tag.yml`,
+which strips `-dev`, tags `v0.10.14` and publishes the identical CLI to npm as a new version.
+A dataset already stuck on scratch space converts again only when it is queued:
+`hallu-zarr.sh --dataset <id> --requeue done --execute`.
+
 ## 0.10.13 - 2026-10-05
 
 ### Added
@@ -42,7 +94,7 @@ earlier releases are described only by their generated notes.
     with a flag, and a dataset with an entry is never converted without it. Every entry
     records its source and reviewer. Twelve ship: six written and reviewed by the author,
     and six reused from annotations the Neurobagel community published for OpenNeuro
-    datasets (MIT licence), which are marked as not reviewed by NEMAR beyond the loader and
+    datasets (MIT license), which are marked as not reviewed by NEMAR beyond the loader and
     binder checks.
   - **One eligibility predicate (ADR 0084).** A dataset is federated only when it is
     public, published and not anonymous, and is not withdrawn, deleted, tombstoned, a

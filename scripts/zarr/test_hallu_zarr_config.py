@@ -729,9 +729,38 @@ if argv[:1] == ["-c"]:
 with open(os.environ["QPY_LOG"], "a") as fh:
     fh.write(" ".join(argv) + chr(10))
 
+if "--check-env" in argv:
+    # generate_zarr.py --check-env: the scratch-settings preflight. A test makes it
+    # fail by setting CHECK_ENV_RC (and CHECK_ENV_MSG, printed as the driver does, on
+    # stderr when CHECK_ENV_STREAM is "stderr", the way a traceback arrives), or runs
+    # the REAL driver's check by pointing CHECK_ENV_REAL_DRIVER at it.
+    real_driver = os.environ.get("CHECK_ENV_REAL_DRIVER")
+    if real_driver:
+        real = os.environ["FAKE_REAL_PYTHON"]
+        os.execv(real, [real, real_driver, "--check-env"])
+    rc = int(os.environ.get("CHECK_ENV_RC", "0"))
+    if rc:
+        stream = sys.stderr if os.environ.get("CHECK_ENV_STREAM") == "stderr" else sys.stdout
+        print(os.environ.get("CHECK_ENV_MSG", "::error::invalid scratch setting"), file=stream)
+    sys.exit(rc)
+
+if "--callback-out" in argv and os.environ.get("DRIVER_CALLBACK_JSON"):
+    # The conversion driver, as far as hallu-zarr.sh can tell: it writes the body it
+    # was told to and exits with DRIVER_RC. What the script does with that body is
+    # the script's own logic.
+    with open(argv[argv.index("--callback-out") + 1], "w") as fh:
+        fh.write(os.environ["DRIVER_CALLBACK_JSON"])
+    sys.exit(int(os.environ.get("DRIVER_RC", "0")))
+
 if "reconcile" in argv:
     print(os.environ.get("QPY_RECONCILE_OUT", "queued=0 parked=0"))
-# `next` prints nothing: an empty line ends the drain immediately.
+if "next" in argv and os.environ.get("QPY_NEXT_OUT"):
+    # One queue entry, then an empty queue.
+    marker = os.environ["QPY_LOG"] + ".next-served"
+    if not os.path.exists(marker):
+        open(marker, "w").close()
+        print(os.environ["QPY_NEXT_OUT"])
+# Otherwise `next` prints nothing: an empty line ends the drain immediately.
 sys.exit(0)
 """
 
@@ -886,6 +915,230 @@ def test_ack_file_is_consumed_by_exactly_one_run(ack_run) -> None:
     reconciles = [c for c in qpy_calls() if "reconcile" in c]
     assert len(reconciles) == 2, qpy_calls()
     assert "--engine-requeue-ack" not in reconciles[1]
+
+
+# ---------------------------------------------------------------------------
+# The scratch-settings preflight runs once, before any dataset is dispatched
+# ---------------------------------------------------------------------------
+
+BAD_SETTING = "::error::invalid scratch setting: ZARR_SCRATCH_HEADROOM_BYTES='10G' is not a number"
+
+
+def test_a_bad_scratch_setting_stops_the_whole_run_before_the_queue_is_touched(ack_run) -> None:
+    """Checked per dataset, a typo in the crontab posts `failed` for every dataset
+    the drain visits and burns a queue attempt on each. Checked here, once, it stops
+    the run with the message and leaves the queue and D1 alone."""
+    run, qpy_calls, _, _ = ack_run
+    done = run(extra_env={"CHECK_ENV_RC": "1", "CHECK_ENV_MSG": BAD_SETTING})
+    assert done.returncode != 0
+    assert "ZARR_SCRATCH_HEADROOM_BYTES='10G' is not a number" in done.stderr
+    assert "refusing to dispatch any dataset" in done.stderr
+    calls = qpy_calls()
+    assert any("--check-env" in c for c in calls), calls
+    # No reconcile, no `next`, nothing that touches the queue.
+    assert [c for c in calls if "--check-env" not in c] == [], calls
+
+
+def test_a_bad_scratch_setting_also_stops_a_single_dataset_run(ack_run) -> None:
+    run, qpy_calls, _, _ = ack_run
+    done = run(
+        args=["--dataset", "nm000001"],
+        extra_env={"CHECK_ENV_RC": "1", "CHECK_ENV_MSG": BAD_SETTING},
+    )
+    assert done.returncode != 0
+    assert "is not a number" in done.stderr
+    assert [c for c in qpy_calls() if "--check-env" not in c] == []
+
+
+def test_valid_scratch_settings_let_the_run_proceed_to_the_queue(ack_run) -> None:
+    run, qpy_calls, _, _ = ack_run
+    done = run()
+    assert done.returncode == 0, done.stderr
+    calls = qpy_calls()
+    check = next(i for i, c in enumerate(calls) if "--check-env" in c)
+    reconcile = next(i for i, c in enumerate(calls) if "reconcile" in c)
+    assert check < reconcile, calls
+    assert sum("--check-env" in c for c in calls) == 1, "checked once per run, not per dataset"
+
+
+def test_stats_and_requeue_still_work_with_a_bad_scratch_setting(ack_run) -> None:
+    """The check sits after every early exit, so an operator can still read the queue
+    and revive recordings to find out what a bad setting did."""
+    run, qpy_calls, _, _ = ack_run
+    bad = {"CHECK_ENV_RC": "1", "CHECK_ENV_MSG": BAD_SETTING}
+    stats = run(args=["--stats"], extra_env=bad)
+    assert stats.returncode == 0, stats.stderr
+    requeue = run(args=["--requeue", "failed"], extra_env=bad)
+    assert requeue.returncode == 0, requeue.stderr
+    calls = qpy_calls()
+    assert any(c.endswith("stats") for c in calls), calls
+    assert any("requeue" in c for c in calls), calls
+    assert not any("--check-env" in c for c in calls), calls
+
+
+def test_a_message_the_driver_prints_on_stderr_reaches_the_error_log(ack_run) -> None:
+    """The check's stderr is merged into what the script reports, so a traceback is
+    logged as an ERROR line (and teed to the log file) instead of vanishing."""
+    run, _, _, _ = ack_run
+    done = run(
+        extra_env={
+            "CHECK_ENV_RC": "1",
+            "CHECK_ENV_STREAM": "stderr",
+            "CHECK_ENV_MSG": "Traceback (most recent call last): ValueError: boom",
+        }
+    )
+    assert done.returncode != 0
+    assert "ERROR: Traceback (most recent call last): ValueError: boom" in done.stderr
+
+
+def test_the_real_driver_refuses_a_bad_setting_through_the_real_wiring(ack_run) -> None:
+    """hallu-zarr.sh runs the REAL `generate_zarr.py --check-env`: its message and its
+    exit status are what stop the run, with the queue untouched."""
+    run, qpy_calls, _, _ = ack_run
+    done = run(
+        extra_env={
+            "CHECK_ENV_REAL_DRIVER": str(SCRIPT.with_name("generate_zarr.py")),
+            "ZARR_SCRATCH_HEADROOM_BYTES": "10G",
+        }
+    )
+    assert done.returncode != 0
+    assert "ZARR_SCRATCH_HEADROOM_BYTES" in done.stderr
+    assert "refusing to dispatch any dataset" in done.stderr
+    assert [c for c in qpy_calls() if "--check-env" not in c] == []
+
+
+def test_the_real_driver_accepts_the_default_settings_through_the_real_wiring(ack_run) -> None:
+    run, qpy_calls, _, _ = ack_run
+    done = run(extra_env={"CHECK_ENV_REAL_DRIVER": str(SCRIPT.with_name("generate_zarr.py"))})
+    assert done.returncode == 0, done.stderr
+    assert any("reconcile" in c for c in qpy_calls()), qpy_calls()
+
+
+# ---------------------------------------------------------------------------
+# The run's ready body is posted as it is, and its counts reach the queue
+# ---------------------------------------------------------------------------
+
+STAND_IN_NEMAR = """#!/bin/sh
+# `nemar dataset download <id> --no-data -o <dir>`: the metadata clone. The driver
+# stand-in never reads it, so an empty directory is the whole job.
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-o" ]; then mkdir -p "$2"; fi
+  shift
+done
+exit 0
+"""
+
+STAND_IN_CURL = """#!/bin/sh
+# Records each call as one compact JSON line: the full argv and the JSON body the
+# call carries. `--data @file` is read, as curl does.
+argv_json="$(printf '%s\n' "$@" | jq -R . | jq -cs .)"
+payload=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--data" ]; then shift; payload="$1"; fi
+  shift
+done
+case "$payload" in @*) payload="$(cat "${payload#@}")" ;; esac
+jq -cn --argjson argv "$argv_json" --argjson payload "$payload" \
+  '{argv: $argv, payload: $payload}' >> "$CURL_LOG"
+"""
+
+WEBHOOK_URL = "https://hooks.example.test/webhooks/zarr-ready"
+
+
+@pytest.fixture
+def drain_one(ack_run, tmp_path: Path):
+    """The queue drain handling one dataset: `next` serves it once, the conversion
+    driver writes the body a test chooses, and `curl` records every POST. The
+    script's own handling of that body (what it posts, what it hands `qpy done`) is
+    the real code."""
+    run, qpy_calls, _, _ = ack_run
+    stubs = tmp_path / "stubbin"
+    stubs.mkdir()
+    _write_exec(stubs / "nemar", STAND_IN_NEMAR)
+    _write_exec(stubs / "curl", STAND_IN_CURL)
+    curl_log = tmp_path / "curl.log"
+
+    def go(body: dict, rc: int = 0) -> subprocess.CompletedProcess[str]:
+        path = os.pathsep.join(
+            [str(stubs), str(tmp_path / "fakebin"), os.environ.get("PATH", "/usr/bin:/bin")]
+        )
+        return run(
+            extra_env={
+                "PATH": path,
+                "NEMAR_WEBHOOK_TOKEN": "test-token",
+                "ZARR_CALLBACK_URL": WEBHOOK_URL,
+                "CURL_LOG": str(curl_log),
+                "QPY_NEXT_OUT": "nm000276\tv1",
+                "DRIVER_CALLBACK_JSON": json.dumps(body),
+                "DRIVER_RC": str(rc),
+            }
+        )
+
+    def posts() -> list[dict]:
+        """Every curl call, in order: ``{"argv": [...], "payload": {...}}``."""
+        lines = curl_log.read_text().splitlines() if curl_log.exists() else []
+        return [json.loads(line) for line in lines]
+
+    return go, posts, qpy_calls
+
+
+UNCHANGED_BODY = {
+    "dataset_id": "nm000276",
+    "status": "ready",
+    "store_count": 12,
+    "index_etag": "d41d8cd98f00b204e9800998ecf8427e",
+    "commit": "a" * 40,
+    "converted": [],
+    "removed": [],
+    "errors": 0,
+    "failed": [],
+    "failure_count": 0,
+    "data_failures": [],
+    "deterministic": False,
+    "retryable_failures": 0,
+    # Distinct, so a crossed read of the body or a crossed `qpy done` flag shows.
+    "pending_count": 28,
+    "discovered_count": 40,
+    "not_attempted_count": 25,
+}
+
+
+def assert_webhook_post(call: dict) -> None:
+    """One call is a POST to the configured webhook with the token and JSON headers."""
+    argv = call["argv"]
+    assert argv[argv.index("-X") + 1 : argv.index("-X") + 3] == ["POST", WEBHOOK_URL], argv
+    headers = [argv[i + 1] for i, arg in enumerate(argv) if arg == "-H"]
+    assert headers == ["Content-Type: application/json", "X-Webhook-Token: test-token"], argv
+    assert "--data" in argv, argv
+
+
+def test_an_unchanged_run_is_posted_as_ready_and_its_counts_reach_the_queue(drain_one) -> None:
+    """A run that deferred everything and wrote nothing still ends with a `ready` body
+    that is POSTed as it is (the `converting` signal before it set the dataset
+    pending), and its pending and not-attempted counts go to `qpy done` so the queue
+    re-queues it at the shortest delay without spending a retry round."""
+    go, posts, qpy_calls = drain_one
+    done = go(UNCHANGED_BODY)
+    assert done.returncode == 0, done.stderr
+    calls = posts()
+    assert [c["payload"] for c in calls] == [
+        {"dataset_id": "nm000276", "status": "converting"},
+        UNCHANGED_BODY,
+    ]
+    for call in calls:
+        assert_webhook_post(call)
+    done_calls = [c for c in qpy_calls() if " done " in f" {c} "]
+    assert len(done_calls) == 1, qpy_calls()
+    # Each flag gets its own count: pending 28, of which 25 were never attempted.
+    assert done_calls[0].endswith("done nm000276 v1 --pending-count 28 --not-attempted-count 25")
+    assert "RETRYABLE reason" not in done.stdout + done.stderr
+
+
+def test_a_run_with_retryable_failures_says_so_once(drain_one) -> None:
+    go, _, _ = drain_one
+    done = go({**UNCHANGED_BODY, "retryable_failures": 3})
+    assert done.returncode == 0, done.stderr
+    assert done.stderr.count("3 recording(s) failed for a RETRYABLE reason") == 1
 
 
 def test_a_pending_bump_is_re_raised_as_its_own_error_line(ack_run) -> None:

@@ -20,7 +20,9 @@ import io
 import itertools
 import json
 import os
+import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -655,6 +657,302 @@ class TestMergeIndex(unittest.TestCase):
         converted = [{"zarr": "b.zarr"}, {"zarr": "a.zarr"}]
         index = merge_index(None, "nm000104", SHA_NEW, converted, [], "2026-06-02T00:00:00Z")
         self.assertEqual([s["zarr"] for s in index["stores"]], ["a.zarr", "b.zarr"])
+
+
+class TestKeptManifestSeed(unittest.TestCase):
+    KEPT = {"sub-01/eeg/a_eeg.zarr"}
+
+    def seed(self, reader):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            seed = generate_zarr.kept_manifest_seed("b", "nm000276", self.KEPT, read=reader)
+        return seed, out.getvalue()
+
+    def test_it_carries_exactly_the_kept_stores_entries(self):
+        live = {"stores": [
+            {"zarr": "sub-01/eeg/a_eeg.zarr", "source_key": "K", "size_bytes": 5},
+            {"zarr": "sub-02/eeg/b_eeg.zarr", "source_key": "L", "size_bytes": 6},
+        ]}
+        seed, log = self.seed(lambda _b, _k: live)
+        self.assertEqual([e["zarr"] for e in seed["stores"]], ["sub-01/eeg/a_eeg.zarr"])
+        self.assertEqual(log, "")
+
+    def test_an_absent_manifest_is_a_warning_not_silence(self):
+        seed, log = self.seed(lambda _b, _k: None)
+        self.assertEqual(seed, {"stores": []})
+        self.assertIn("no published manifest to carry 1 kept store(s)", log)
+
+    def test_a_failed_read_is_a_warning_naming_the_error(self):
+        def broken(_bucket, _key):
+            raise RuntimeError("aws s3 cp exited 1: AccessDenied")
+
+        seed, log = self.seed(broken)
+        self.assertEqual(seed, {"stores": []})
+        self.assertIn(
+            "could not read the published manifest (aws s3 cp exited 1: AccessDenied)", log
+        )
+        self.assertIn("1 kept store(s) will have no source_key", log)
+
+
+class TestMergeIndexDeferredRecordings(unittest.TestCase):
+    """A recording the scratch gate deferred is neither an attempt nor a conversion:
+    it must not spend an attempt, and it must not make the index serve less than
+    it did. ``--clean`` hands the merge no prior, so every case below that matters
+    runs with prior=None and the published index as the seed."""
+
+    A = "sub-01/eeg/sub-01_task-a_eeg.edf"
+    B = "sub-02/eeg/sub-02_task-a_eeg.edf"
+    NOW = "2026-10-06T00:00:00Z"
+    NOTE = "deferred: needs 500.0 GiB of scratch, 100 GiB available"
+
+    def store(self, path):
+        return {"path": path, "zarr": store_rel_for(path)}
+
+    def merge(self, deferred, *, seed=None, seed_current=False, prior=None,
+              prior_pending=None, converted=(), failures=None, discovered=None):
+        index = merge_index(
+            prior, "nm000276", SHA_NEW, list(converted), [], self.NOW,
+            failures or [], [],
+            discovered=discovered or [self.A, self.B], prior_pending=prior_pending,
+            deferred=deferred, seed=seed, seed_current=seed_current,
+        )
+        check_index_invariant(index)
+        return index
+
+    def pending(self, index):
+        return {p["path"]: p for p in index["pending"]}
+
+    def test_a_current_store_stays_served_under_clean(self):
+        seed = {"stores": [self.store(self.A)], "pending": []}
+        index = self.merge({self.A: self.NOTE}, seed=seed, seed_current=True, discovered=[self.A])
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A])
+        self.assertEqual(index["pending"], [])
+        self.assertEqual(index["store_count"], 1)
+
+    def test_a_stale_store_leaves_the_index_and_is_listed_pending(self):
+        seed = {"stores": [self.store(self.A)], "pending": []}
+        index = self.merge({self.A: self.NOTE}, seed=seed, seed_current=False, discovered=[self.A])
+        self.assertEqual(index["stores"], [])
+        entry = self.pending(index)[self.A]
+        self.assertEqual((entry["reason"], entry["attempts"]), ("not_attempted", 0))
+        self.assertEqual(entry["last_error"], self.NOTE)
+
+    def test_an_incremental_merge_drops_a_stale_carried_store_too(self):
+        prior = {"source_commit": SHA_OLD, "stores": [self.store(self.A)], "pending": []}
+        index = self.merge(
+            {self.A: self.NOTE}, prior=prior, seed=prior, seed_current=False, discovered=[self.A]
+        )
+        self.assertEqual(index["stores"], [])
+        self.assertEqual(list(self.pending(index)), [self.A])
+
+    def test_a_recording_with_no_store_is_pending_not_attempted(self):
+        index = self.merge({self.B: self.NOTE}, seed={"stores": []}, discovered=[self.B])
+        entry = self.pending(index)[self.B]
+        self.assertEqual((entry["reason"], entry["attempts"]), ("not_attempted", 0))
+        self.assertIsNone(entry["last_attempt_utc"])
+
+    def test_a_deferral_keeps_the_attempts_and_the_last_error_it_already_had(self):
+        history = [{
+            "path": self.B, "zarr": store_rel_for(self.B), "reason": "infra_failure",
+            "attempts": 3, "last_error": "RuntimeError: No space left on device",
+            "last_attempt_utc": "2026-10-05T00:00:00Z",
+        }]
+        index = self.merge(
+            {self.B: self.NOTE}, seed={"pending": history}, prior_pending=history,
+            discovered=[self.B],
+        )
+        entry = self.pending(index)[self.B]
+        self.assertEqual(entry["reason"], "not_attempted")
+        self.assertEqual(entry["attempts"], 3, "a deferral is not an attempt")
+        self.assertEqual(entry["last_attempt_utc"], "2026-10-05T00:00:00Z")
+        self.assertEqual(
+            entry["last_error"], f"{self.NOTE}; last error: RuntimeError: No space left on device"
+        )
+
+    def test_deferring_again_replaces_the_note_instead_of_chaining_it(self):
+        history = [{
+            "path": self.B, "zarr": store_rel_for(self.B), "reason": "not_attempted",
+            "attempts": 3,
+            "last_error": "deferred: needs 400 GiB of scratch, 90 GiB available; last error: boom",
+            "last_attempt_utc": None,
+        }]
+        index = self.merge(
+            {self.B: self.NOTE}, seed={"pending": history}, prior_pending=history,
+            discovered=[self.B],
+        )
+        self.assertEqual(
+            self.pending(index)[self.B]["last_error"], f"{self.NOTE}; last error: boom"
+        )
+        bare = [{
+            **history[0],
+            "last_error": "deferred: needs 400 GiB of scratch, 90 GiB available",
+        }]
+        index = self.merge(
+            {self.B: self.NOTE}, seed={"pending": bare}, prior_pending=bare, discovered=[self.B]
+        )
+        self.assertEqual(self.pending(index)[self.B]["last_error"], self.NOTE)
+
+    def test_a_deferred_recording_at_the_attempt_cap_is_not_promoted_to_exhausted(self):
+        # The cap exists so a recording that keeps failing stops consuming the queue.
+        # A disk-full node must not be able to trip it for a healthy recording.
+        history = [{
+            "path": self.B, "zarr": store_rel_for(self.B), "reason": "infra_failure",
+            "attempts": generate_zarr.PENDING_MAX_ATTEMPTS, "last_error": "x",
+            "last_attempt_utc": None,
+        }]
+        index = self.merge(
+            {self.B: self.NOTE}, seed={"pending": history}, prior_pending=history,
+            discovered=[self.B],
+        )
+        self.assertEqual(index["failures"], [])
+        self.assertEqual(
+            self.pending(index)[self.B]["attempts"], generate_zarr.PENDING_MAX_ATTEMPTS
+        )
+
+    def test_a_typed_failure_on_record_stays_a_failure_when_the_index_is_current(self):
+        failure = generate_zarr._failure_entry(self.B, "not_continuous", "epoched")
+        index = self.merge(
+            {self.B: self.NOTE}, seed={"failures": [failure]}, seed_current=True,
+            discovered=[self.B],
+        )
+        self.assertEqual([f["path"] for f in index["failures"]], [self.B])
+        self.assertEqual(index["pending"], [])
+
+    def test_a_stale_typed_failure_is_not_published_as_final(self):
+        # The verdict was reached on older data or by an older engine, and a failure
+        # is never retried: it goes back to pending so a later round reads it again.
+        failure = generate_zarr._failure_entry(self.B, "not_continuous", "epoched")
+        for label, kwargs in (
+            ("clean", {"seed": {"failures": [failure]}}),
+            ("incremental", {"prior": {"failures": [failure]}, "seed": {"failures": [failure]}}),
+        ):
+            with self.subTest(label):
+                index = self.merge(
+                    {self.B: self.NOTE}, seed_current=False, discovered=[self.B], **kwargs
+                )
+                self.assertEqual(index["failures"], [])
+                entry = self.pending(index)[self.B]
+                self.assertEqual((entry["reason"], entry["attempts"]), ("not_attempted", 0))
+
+    def test_the_note_is_bounded(self):
+        index = self.merge({self.B: "deferred: " + "x" * 1000}, seed={}, discovered=[self.B])
+        self.assertLessEqual(len(self.pending(index)[self.B]["last_error"]), 300)
+
+    def test_what_converted_this_run_is_untouched_by_a_neighbors_deferral(self):
+        converted = [{"path": self.A, "zarr": store_rel_for(self.A)}]
+        index = self.merge({self.B: self.NOTE}, seed={}, converted=converted)
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A])
+        self.assertEqual(list(self.pending(index)), [self.B])
+
+    def test_without_a_deferral_nothing_changes(self):
+        index = self.merge(None, seed={"stores": [self.store(self.A)]}, discovered=[self.A])
+        self.assertEqual(index["stores"], [])
+        self.assertEqual(self.pending(index)[self.A]["reason"], "not_attempted")
+
+
+class TestIndexCurrencyProblem(unittest.TestCase):
+    ROW = {"concept_doi": "10.1/x", "license": "CC0"}
+
+    def index(self, **over):
+        base = {
+            "source_commit": SHA_NEW, "engine_version": ZARR_ENGINE_VERSION,
+            "biosigio_version": "1.2.10", **generate_zarr.index_provenance(self.ROW),
+        }
+        return {**base, **over}
+
+    def problem(self, index, **over):
+        args = {"head": SHA_NEW, "dataset_row": self.ROW, "row_fetch_failed": False,
+                "biosigio_version": "1.2.10", **over}
+        return generate_zarr.index_currency_problem(
+            index, args["head"], args["dataset_row"], args["row_fetch_failed"],
+            args["biosigio_version"],
+        )
+
+    def test_a_matching_index_is_current(self):
+        self.assertIsNone(self.problem(self.index()))
+
+    def test_an_unreadable_catalog_keeps_a_store_but_never_licenses_a_retry_round(self):
+        index = self.index()
+        generate_zarr_problem = generate_zarr.index_currency_problem
+        self.assertIsNone(
+            generate_zarr_problem(
+                index, SHA_NEW, None, True, "1.2.10", provenance_unknown_ok=True
+            )
+        )
+        self.assertIn(
+            "catalog", generate_zarr_problem(index, SHA_NEW, None, True, "1.2.10")
+        )
+        # The other three comparisons still run when only provenance is unknowable.
+        self.assertIn(
+            "different commit",
+            generate_zarr_problem(
+                self.index(source_commit=SHA_OLD), SHA_NEW, None, True, "1.2.10",
+                provenance_unknown_ok=True,
+            ),
+        )
+
+    def test_each_difference_is_named(self):
+        self.assertIn("no published index", self.problem(None))
+        self.assertIn("different commit", self.problem(self.index(source_commit=SHA_OLD)))
+        self.assertIn("different engine", self.problem(self.index(engine_version="0")))
+        self.assertIn("different biosigIO", self.problem(self.index(biosigio_version="0")))
+        self.assertIn("provenance", self.problem(self.index(license="MIT")))
+        self.assertIn("catalog", self.problem(self.index(), row_fetch_failed=True))
+
+
+class TestDeferralLeavesIndexAsIs(unittest.TestCase):
+    A, B = "sub-01/eeg/a_eeg.edf", "sub-02/eeg/b_eeg.edf"
+    NOTE = "deferred: needs 500 GiB of scratch, 100 GiB available"
+
+    def live(self, **over):
+        base = {
+            "stores": [{"path": self.A, "zarr": "sub-01/eeg/a_eeg.zarr"}],
+            "pending": [{"path": self.B, "reason": "not_attempted", "last_error": self.NOTE}],
+            "failures": [],
+        }
+        return {**base, **over}
+
+    def check(
+        self, live, deferred=None, current=True, convert=None, remove=(), failed=(), wipe=False
+    ):
+        deferred = {self.A: self.NOTE, self.B: self.NOTE} if deferred is None else deferred
+        return generate_zarr.deferral_leaves_index_as_is(
+            live, current, convert if convert is not None else [self.A, self.B], deferred,
+            list(remove), list(failed), wipe,
+        )
+
+    def test_a_store_it_may_keep_and_a_pending_entry_with_a_note_change_nothing(self):
+        self.assertTrue(self.check(self.live()))
+
+    def test_a_stale_store_is_a_real_change(self):
+        self.assertFalse(self.check(self.live(), current=False))
+
+    def test_an_older_infra_failure_reason_is_a_change_the_first_time(self):
+        pending = [{"path": self.B, "reason": "infra_failure", "last_error": "No space"}]
+        self.assertFalse(self.check(self.live(pending=pending)))
+
+    def test_a_pending_entry_without_a_note_is_a_change(self):
+        pending = [{"path": self.B, "reason": "not_attempted", "last_error": None}]
+        self.assertFalse(self.check(self.live(pending=pending)))
+
+    def test_something_converted_or_removed_or_failed_is_not_all_deferred(self):
+        self.assertFalse(self.check(self.live(), convert=[self.A, self.B, "c_eeg.edf"]))
+        self.assertFalse(self.check(self.live(), remove=["x.zarr"]))
+        self.assertFalse(self.check(self.live(), failed=[self.A]))
+
+    def test_no_published_index_or_a_wipe_always_publishes(self):
+        self.assertFalse(self.check(None))
+        self.assertFalse(self.check(self.live(), wipe=True))
+        self.assertFalse(self.check(self.live(), deferred={}))
+
+    def test_a_typed_failure_on_record_changes_nothing_when_the_index_is_current(self):
+        live = self.live(pending=[], failures=[{"path": self.B, "code": "not_continuous"}])
+        self.assertTrue(self.check(live))
+
+    def test_a_typed_failure_under_a_stale_index_is_a_real_change(self):
+        live = self.live(pending=[], failures=[{"path": self.B, "code": "not_continuous"}])
+        self.assertFalse(
+            self.check(live, deferred={self.B: self.NOTE}, convert=[self.B], current=False)
+        )
 
 
 class TestSafeStorePrefix(unittest.TestCase):
@@ -4835,6 +5133,1469 @@ class TestPoolBreakRecovery(unittest.TestCase):
         self.assertTrue(all(r["ok"] for r in results))
         self.assertEqual(breaks, 0)
 
+
+def _scratch_worker(primary, peak_bytes=None):
+    """Fault-injection worker that leaves the same footprint `convert_one` does:
+    a raw copy under `work/` and a memmap under the recording's `.scratch`
+    sibling. A recording whose path contains `boom` is SIGKILLed by its own
+    process, WITHOUT running any cleanup, which is the case `convert_one`'s
+    `finally` cannot cover (a SIGBUS from a full volume kills the same way).
+    Module-level so it pickles.
+
+    `leftover` reports whether this recording's scratch already existed when it
+    started: true means a previous attempt's debris was never reclaimed."""
+    started = time.monotonic()
+    tmp = generate_zarr._CTX["tmp"]
+    paths = generate_zarr.recording_scratch_paths(tmp, primary)
+    leftover = any(os.path.exists(p) for p in paths)
+    for path in (paths[0], paths[2]):
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, "blob"), "wb") as fh:
+            fh.write(b"x" * (1024 * 1024))
+    if "boom" in primary:
+        time.sleep(0.15)
+        os.kill(os.getpid(), signal.SIGKILL)
+    time.sleep(0.45)
+    for path in paths:
+        shutil.rmtree(path, ignore_errors=True)
+    return {
+        "ok": True, "primary": primary, "entry": {"zarr": primary + ".zarr"},
+        "leftover": leftover, "span": (started, time.monotonic()),
+    }
+
+
+def _orphaning_worker(primary, peak_bytes=None):
+    """Like `_scratch_worker`'s `boom`, but the dying worker first starts a child
+    that names a path under its scratch and outlives it, as an `aws s3 cp` does
+    when its worker is SIGKILLed. The child's pid is written under the run's temp
+    root for the test to find."""
+    tmp = generate_zarr._CTX["tmp"]
+    work = generate_zarr.recording_scratch_paths(tmp, primary)[0]
+    os.makedirs(work, exist_ok=True)
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(300)", os.path.join(work, "part")],
+        start_new_session=True,
+    )
+    with open(os.path.join(tmp, "orphan.pid"), "w") as fh:
+        fh.write(str(child.pid))
+    time.sleep(0.15)
+    os.kill(os.getpid(), signal.SIGKILL)
+
+
+class TestRecordingScratchPaths(unittest.TestCase):
+    def test_every_path_is_keyed_to_one_recording(self):
+        a = "sub-01/ses-1/eeg/sub-01_ses-1_task-a_eeg.vhdr"
+        b = "sub-01/ses-1/eeg/sub-01_ses-1_task-b_eeg.vhdr"
+        pa = generate_zarr.recording_scratch_paths("/t", a)
+        pb = generate_zarr.recording_scratch_paths("/t", b)
+        self.assertEqual(len(set(pa) | set(pb)), 6, "two recordings never share a path")
+        work, store, memmap = pa
+        self.assertEqual(store, "/t/stores/sub-01/ses-1/eeg/sub-01_ses-1_task-a_eeg.zarr")
+        self.assertEqual(memmap, store + generate_zarr.SCRATCH_DIR_SUFFIX)
+        self.assertTrue(work.startswith("/t/work/"))
+
+    def test_the_memmap_directory_is_a_sibling_of_the_store_not_inside_it(self):
+        # `aws s3 sync <store>` uploads the store directory, so a memmap inside it
+        # would be published; a sibling is not.
+        with tempfile.TemporaryDirectory() as tmp:
+            store = os.path.join(tmp, "stores", "sub-01", "eeg", "sub-01_task-a_eeg.zarr")
+            os.makedirs(os.path.dirname(store))
+            scratch = generate_zarr._memmap_scratch_dir(store)
+            self.assertTrue(os.path.isdir(scratch))
+            self.assertEqual(os.path.dirname(scratch), os.path.dirname(store))
+            self.assertFalse(scratch.startswith(store + os.sep))
+
+
+class TestAllocatedBytes(unittest.TestCase):
+    def test_a_sparse_file_is_charged_for_blocks_not_for_its_length(self):
+        # A streaming memmap is created at its full length and filled as the
+        # windows arrive; st_size would charge it all up front.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "memmap.f32")
+            with open(path, "wb") as fh:
+                fh.truncate(8 * 1024**3)
+                fh.seek(0)
+                fh.write(b"x" * 4096)
+            if os.stat(path).st_blocks * 512 >= 1024**3:
+                self.skipTest("this filesystem does not support sparse files")
+            self.assertLess(generate_zarr.allocated_bytes(tmp), 64 * 1024**2)
+
+    def test_it_counts_nested_files_and_ignores_a_missing_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            nested = os.path.join(tmp, "a", "b")
+            os.makedirs(nested)
+            with open(os.path.join(nested, "data"), "wb") as fh:
+                fh.write(os.urandom(1024 * 1024))
+            self.assertGreaterEqual(generate_zarr.allocated_bytes(tmp), 1024 * 1024)
+            self.assertEqual(generate_zarr.allocated_bytes(os.path.join(tmp, "absent")), 0)
+
+
+class TestReclaimRecordingScratch(unittest.TestCase):
+    def test_removes_all_three_directories_and_reports_what_it_freed(self):
+        primary = "sub-01/eeg/sub-01_task-a_eeg.vhdr"
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = generate_zarr.recording_scratch_paths(tmp, primary)
+            for path in paths:
+                os.makedirs(path)
+                with open(os.path.join(path, "blob"), "wb") as fh:
+                    fh.write(os.urandom(1024 * 1024))
+            result = generate_zarr.reclaim_recording_scratch(tmp, primary)
+            self.assertGreaterEqual(result.freed, 3 * 1024 * 1024)
+            self.assertEqual((result.leaked, result.errors), (0, []))
+            for path in paths:
+                self.assertFalse(os.path.exists(path), path)
+
+    def test_leaves_another_recordings_scratch_alone(self):
+        keep = "sub-01/eeg/sub-01_task-a_eeg.vhdr"
+        drop = "sub-01/eeg/sub-01_task-b_eeg.vhdr"
+        with tempfile.TemporaryDirectory() as tmp:
+            for primary in (keep, drop):
+                for path in generate_zarr.recording_scratch_paths(tmp, primary):
+                    os.makedirs(path)
+            generate_zarr.reclaim_recording_scratch(tmp, drop)
+            for path in generate_zarr.recording_scratch_paths(tmp, keep):
+                self.assertTrue(os.path.isdir(path), path)
+
+    def test_a_recording_with_nothing_on_scratch_frees_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = generate_zarr.reclaim_recording_scratch(tmp, "sub-01/eeg/x_eeg.vhdr")
+            self.assertEqual(tuple(result), (0, 0, []))
+
+
+class TestScratchPathsStayInsideTheRun(unittest.TestCase):
+    def test_an_absolute_primary_is_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            generate_zarr.recording_scratch_paths("/run/tmp", "/etc/sub-01_eeg.vhdr")
+        self.assertIn("outside", str(caught.exception))
+
+    def test_a_primary_that_climbs_out_is_refused(self):
+        for primary in ("../../x/sub-01_eeg.vhdr", "sub-01/../../../x_eeg.vhdr"):
+            with self.subTest(primary=primary):
+                with self.assertRaises(ValueError):
+                    generate_zarr.recording_scratch_paths("/run/tmp", primary)
+
+    def test_an_ordinary_bids_path_is_accepted(self):
+        paths = generate_zarr.recording_scratch_paths(
+            "/run/tmp", "sub-01/ses-1/ieeg/sub-01_ses-1_task-x_ieeg.vhdr"
+        )
+        self.assertTrue(all(p.startswith("/run/tmp/") for p in paths))
+
+    def test_reclaim_refuses_to_touch_a_path_outside_the_run(self):
+        with tempfile.TemporaryDirectory() as outer:
+            run = os.path.join(outer, "run")
+            os.makedirs(run)
+            victim = os.path.join(outer, "keep_eeg.zarr")  # where an absolute primary lands
+            os.makedirs(victim)
+            with open(os.path.join(victim, "data"), "w") as fh:
+                fh.write("precious")
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                result = generate_zarr.reclaim_recording_scratch(
+                    run, os.path.join(outer, "keep_eeg.vhdr")
+                )
+            self.assertTrue(os.path.exists(os.path.join(victim, "data")))
+        self.assertEqual((result.freed, result.leaked), (0, 0))
+        self.assertIn("::error::not reclaiming scratch", out.getvalue())
+
+    def test_a_symlink_inside_the_run_that_points_outside_is_refused(self):
+        # A lexical check passes `<run>/stores/...`; a reclaim would then delete
+        # through the link.
+        with tempfile.TemporaryDirectory() as outer:
+            run = os.path.join(outer, "run")
+            elsewhere = os.path.join(outer, "elsewhere")
+            os.makedirs(run)
+            os.makedirs(elsewhere)
+            os.symlink(elsewhere, os.path.join(run, "stores"))
+            primary = "sub-01/eeg/sub-01_task-a_eeg.vhdr"
+            with self.assertRaises(ValueError):
+                generate_zarr.recording_scratch_paths(run, primary)
+            victim = os.path.join(elsewhere, "sub-01", "eeg", "sub-01_task-a_eeg.zarr")
+            os.makedirs(victim)
+            with open(os.path.join(victim, "data"), "w") as fh:
+                fh.write("precious")
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = generate_zarr.reclaim_recording_scratch(run, primary)
+            self.assertTrue(os.path.exists(os.path.join(victim, "data")))
+        self.assertEqual((result.freed, result.leaked), (0, 0))
+
+    def test_a_run_root_that_is_itself_reached_through_a_symlink_is_fine(self):
+        with tempfile.TemporaryDirectory() as outer:
+            real = os.path.join(outer, "real")
+            link = os.path.join(outer, "link")
+            os.makedirs(real)
+            os.symlink(real, link)
+            paths = generate_zarr.recording_scratch_paths(link, "sub-01/eeg/x_eeg.vhdr")
+        self.assertTrue(all(p.startswith(link + os.sep) for p in paths))
+
+    def test_held_bytes_skips_a_primary_that_cannot_be_ours(self):
+        with tempfile.TemporaryDirectory() as run:
+            self.assertEqual(generate_zarr.held_scratch_bytes(run, ["/etc/x_eeg.vhdr"]), 0)
+
+
+class TestReclaimReportsWhatItCouldNotRemove(unittest.TestCase):
+    PRIMARY = "sub-01/eeg/sub-01_task-a_eeg.vhdr"
+
+    def setUp(self):
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("root ignores directory permissions, so a delete cannot fail")
+
+    def _undeletable(self, root):
+        work = generate_zarr.recording_scratch_paths(root, self.PRIMARY)[0]
+        os.makedirs(work)
+        with open(os.path.join(work, "blob"), "wb") as fh:
+            fh.write(os.urandom(4 * 1024 * 1024))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(work, 0o500)  # the files inside can no longer be unlinked
+        self.addCleanup(self._restore, work)
+        return work
+
+    @staticmethod
+    def _restore(path):
+        with contextlib.suppress(OSError):
+            os.chmod(path, 0o700)
+
+    def test_remove_scratch_tree_names_what_it_could_not_delete(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = self._undeletable(root)
+            failures = generate_zarr.remove_scratch_tree(work)
+            self.assertTrue(failures)
+            self.assertTrue(all(work in f for f in failures), failures)
+            self.assertTrue(os.path.exists(work))
+            os.chmod(work, 0o700)
+
+    def test_a_failed_delete_is_not_reported_as_freed(self):
+        # `freed` used to be measured BEFORE an `ignore_errors` delete: this very
+        # case reported 4 MiB freed while all 4 MiB stayed on disk.
+        with tempfile.TemporaryDirectory() as root:
+            self._undeletable(root)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                result = generate_zarr.reclaim_recording_scratch(root, self.PRIMARY)
+            os.chmod(generate_zarr.recording_scratch_paths(root, self.PRIMARY)[0], 0o700)
+        self.assertLess(result.freed, 1024 * 1024)
+        self.assertGreaterEqual(result.leaked, 4 * 1024 * 1024)
+        self.assertTrue(result.errors)
+        self.assertIn("::error::could not remove scratch", out.getvalue())
+        self.assertIn("is still on disk", out.getvalue())
+
+    def test_convert_one_reports_a_scratch_directory_it_could_not_remove(self):
+        # Through the real `convert_one`: the recording fails before any conversion
+        # (its file is not in the repo), and the `finally` that follows has to say it
+        # could not delete the directory a killed attempt left locked.
+        with tempfile.TemporaryDirectory() as root:
+            repo = os.path.join(root, "repo")
+            os.makedirs(repo)
+            run = os.path.join(root, "run")
+            os.makedirs(run)
+            work = self._undeletable(run)
+            generate_zarr._init_worker({
+                "repo": repo, "bucket": "nemar-test", "dataset_id": "on000117",
+                "head": "b" * 40, "head_files": {self.PRIMARY}, "local": True,
+                "tmp": run, "updated": "2026-10-07T00:00:00Z",
+                "contract_base": "https://zarr.nemar.org", "engine_version": "3",
+                "dataset_row": None, "provenance_fetch_failed": False,
+                "mem_budget": None, "hard_ceiling": None, "projections": {},
+            })
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                result = convert_one(self.PRIMARY)
+            os.chmod(work, 0o700)
+        self.assertFalse(result["ok"], "the recording has no file, so it cannot convert")
+        self.assertRegex(out.getvalue(), r"::error::could not remove scratch .*" + re.escape(work))
+
+
+class TestKillOrphansUnder(unittest.TestCase):
+    def _sleeper(self, *args):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(300)", *args],
+            start_new_session=True,
+        )
+
+        def finish():
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+
+        self.addCleanup(finish)
+        return proc
+
+    def test_a_process_naming_a_path_under_the_run_root_is_killed(self):
+        # The real scan of this platform: /proc/<pid>/cmdline on Linux, ps elsewhere.
+        with tempfile.TemporaryDirectory() as root:
+            orphan = self._sleeper(os.path.join(root, "work", "sub-01_x", "part"))
+            bystander = self._sleeper("unrelated")
+            lookalike = self._sleeper(root + "-sibling/work/x")
+            time.sleep(0.3)  # let the interpreters start so their arguments are readable
+            report = generate_zarr.kill_orphans_under(root)
+            self.assertIn(orphan.pid, report.killed)
+            self.assertEqual(orphan.wait(timeout=10), -signal.SIGKILL)
+            self.assertIsNone(bystander.poll(), "an unrelated process must survive")
+            self.assertIsNone(lookalike.poll(), "a sibling directory sharing a prefix must survive")
+            self.assertNotIn(os.getpid(), report.killed)
+            self.assertEqual(report.survivors, [])
+            self.assertIsNone(report.error)
+            self.assertGreater(report.scanned, 0)
+
+    def test_nothing_to_kill_returns_nothing(self):
+        with tempfile.TemporaryDirectory() as root:
+            report = generate_zarr.kill_orphans_under(root)
+        self.assertEqual((report.killed, report.survivors), ([], []))
+
+    def test_the_proc_reader_matches_exact_arguments_in_the_kernels_layout(self):
+        # A fixture in /proc's own layout, naming REAL pids of processes whose real
+        # command lines say nothing, so the match is the reader's and the kill lands
+        # on nothing but the sleepers this test started.
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as proc:
+            under = self._sleeper("a")
+            sibling = self._sleeper("b")
+            other = self._sleeper("c")
+
+            def entry(pid, *args):
+                os.makedirs(os.path.join(proc, str(pid)))
+                with open(os.path.join(proc, str(pid), "cmdline"), "wb") as fh:
+                    fh.write(b"\0".join(a.encode() for a in args) + b"\0")
+
+            entry(under.pid, "aws", "s3", "cp", "s3://b/k", os.path.join(root, "work", "x", "part"))
+            entry(sibling.pid, "aws", "s3", "cp", root + "-sibling/work/x")
+            entry(other.pid, "aws", "s3", "ls")
+            os.makedirs(os.path.join(proc, "not-a-pid"))
+            report = generate_zarr.kill_orphans_under(root, proc_root=proc)
+            self.assertEqual(report.killed, [under.pid])
+            self.assertEqual(under.wait(timeout=10), -signal.SIGKILL)
+            self.assertIsNone(sibling.poll())
+            self.assertIsNone(other.poll())
+            self.assertEqual(report.scanned, 3)
+
+    def test_a_scan_that_cannot_run_says_so_instead_of_returning_nothing(self):
+        report = generate_zarr.kill_orphans_under("/run/x", proc_root="/no/such/proc")
+        self.assertEqual(report.killed, [])
+        self.assertIn("cannot list", report.error)
+        self.assertEqual(report.scanned, 0)
+
+    def test_the_ps_fallback_sees_this_process_untruncated(self):
+        if shutil.which("ps") is None:
+            self.skipTest("no ps binary here")
+        # A command line far wider than any terminal: truncated `args` is what hid a
+        # live process from the first version of this scan on Ubuntu.
+        wide = "x" * 400
+        sleeper = self._sleeper(wide)
+        time.sleep(0.3)
+        table, error = generate_zarr._ps_process_table()
+        self.assertIsNone(error)
+        argv = dict(table).get(sleeper.pid)
+        self.assertIsNotNone(argv)
+        self.assertIn(wide, argv)
+
+    def test_a_missing_ps_is_reported_not_swallowed(self):
+        saved = os.environ["PATH"]
+        self.addCleanup(os.environ.__setitem__, "PATH", saved)
+        os.environ["PATH"] = "/nonexistent"
+        table, error = generate_zarr._ps_process_table()
+        self.assertEqual(table, [])
+        self.assertIn("ps could not run", error)
+
+    def test_a_killed_but_unreaped_process_counts_as_gone(self):
+        proc = self._sleeper("z")
+        time.sleep(0.2)
+        os.kill(proc.pid, signal.SIGKILL)  # a zombie until the test waits on it
+        self.assertEqual(generate_zarr._wait_until_gone([proc.pid], 5.0), [])
+
+    def test_a_process_that_stays_is_a_survivor(self):
+        self.assertEqual(generate_zarr._wait_until_gone([os.getpid()], 0.1), [os.getpid()])
+
+
+class TestKillOrphansGuards(unittest.TestCase):
+    """The scan's deadline, the re-read before each kill, the wait for killed
+    processes and the survivors report, against real processes."""
+
+    @staticmethod
+    def _script(body):
+        return ["-c", body]
+
+    def _start(self, body, *args):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", body, *args], start_new_session=True
+        )
+
+        def finish():
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+
+        self.addCleanup(finish)
+        return proc
+
+    def _fixture_proc(self, proc_dir, pid, *args):
+        os.makedirs(os.path.join(proc_dir, str(pid)))
+        with open(os.path.join(proc_dir, str(pid), "cmdline"), "wb") as fh:
+            fh.write(b"\0".join(a.encode() for a in args) + b"\0")
+
+    def test_a_pid_that_no_longer_matches_when_re_read_is_not_killed(self):
+        # Between the scan and the kill a pid can be freed and reused by an unrelated
+        # process. The fixture's command line is rewritten after the scan, as a
+        # reused pid's would read, and the process must survive.
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as proc:
+            victim = self._start("import time; time.sleep(300)", "innocent")
+            cmdline = os.path.join(proc, str(victim.pid), "cmdline")
+            self._fixture_proc(proc, victim.pid, "aws", "s3", "cp", os.path.join(root, "work", "x"))
+
+            def pid_is_reused():
+                with open(cmdline, "wb") as fh:
+                    fh.write(b"someone-else\0--unrelated\0")
+
+            report = generate_zarr.kill_orphans_under(
+                root, proc_root=proc, _after_scan=pid_is_reused
+            )
+            self.assertEqual(report.killed, [])
+            self.assertIsNone(victim.poll(), "an unrelated process was killed")
+
+    def test_a_pid_that_vanishes_between_scan_and_kill_is_skipped(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as proc:
+            victim = self._start("import time; time.sleep(300)", "x")
+            self._fixture_proc(proc, victim.pid, "aws", os.path.join(root, "work", "x"))
+            report = generate_zarr.kill_orphans_under(
+                root, proc_root=proc,
+                _after_scan=lambda: shutil.rmtree(os.path.join(proc, str(victim.pid))),
+            )
+            self.assertEqual(report.killed, [])
+            self.assertIsNone(victim.poll())
+
+    def test_a_scan_blocked_on_a_read_is_abandoned_at_the_deadline(self):
+        # A FIFO where a cmdline file should be blocks the reader forever: a real
+        # read that does not return. The run must not hang on it.
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("no FIFOs here")
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as proc:
+            os.makedirs(os.path.join(proc, "424242"))
+            fifo = os.path.join(proc, "424242", "cmdline")
+            os.mkfifo(fifo)
+
+            def release():
+                # Let the abandoned reader finish, so the test leaves no stuck thread.
+                with open(fifo, "wb"):
+                    pass
+
+            started = time.monotonic()
+            try:
+                report = generate_zarr.kill_orphans_under(
+                    root, proc_root=proc, scan_seconds=0.3
+                )
+            finally:
+                release()
+            self.assertLess(time.monotonic() - started, 5.0)
+            self.assertIn("did not finish", report.error)
+            self.assertEqual((report.killed, report.survivors, report.scanned), ([], [], 0))
+
+    def test_a_process_that_outlives_the_signal_is_a_survivor(self):
+        # SIGSTOP stands in for a process the kernel cannot reap (uninterruptible
+        # sleep): the signal is delivered and the process is still there.
+        with tempfile.TemporaryDirectory() as root:
+            orphan = self._start(
+                "import time; time.sleep(300)", os.path.join(root, "work", "x", "part")
+            )
+            time.sleep(0.3)
+            report = generate_zarr.kill_orphans_under(
+                root, wait_seconds=0.3,
+                send_signal=lambda pid, _sig: os.kill(pid, signal.SIGSTOP),
+            )
+            self.assertEqual(report.killed, [orphan.pid])
+            self.assertEqual(report.survivors, [orphan.pid])
+
+    def test_the_pool_break_names_a_survivor_as_an_error(self):
+        with (
+            tempfile.TemporaryDirectory() as root,
+            contextlib.redirect_stdout(io.StringIO()) as out,
+        ):
+            orphan = self._start(
+                "import time; time.sleep(300)", os.path.join(root, "work", "x", "part")
+            )
+            time.sleep(0.3)
+            generate_zarr.reclaim_after_pool_break(
+                root, [], wait_seconds=0.3,
+                send_signal=lambda pid, _sig: os.kill(pid, signal.SIGSTOP),
+            )
+        log = out.getvalue()
+        self.assertIn("::error::1 orphaned process(es) survived SIGKILL", log)
+        self.assertIn(str(orphan.pid), log)
+        self.assertIn("1 orphaned child process(es) killed", log)
+
+    def test_it_waits_for_a_slow_dying_process_before_reporting(self):
+        # SIGTERM with a handler that takes 0.6 s to exit: the report must not call
+        # it a survivor if it is given time, and must if it is not.
+        slow = (
+            "import os, signal, time\n"
+            "signal.signal(signal.SIGTERM, lambda *a: (time.sleep(0.6), os._exit(0)))\n"
+            "time.sleep(300)"
+        )
+        with tempfile.TemporaryDirectory() as root:
+            first = self._start(slow, os.path.join(root, "work", "a"))
+            time.sleep(0.4)
+            started = time.monotonic()
+            patient = generate_zarr.kill_orphans_under(
+                root, wait_seconds=10.0,
+                send_signal=lambda pid, _sig: os.kill(pid, signal.SIGTERM),
+            )
+            waited = time.monotonic() - started
+            self.assertEqual(patient.killed, [first.pid])
+            self.assertEqual(patient.survivors, [])
+            self.assertGreaterEqual(waited, 0.4, "returned before the process had gone")
+            second = self._start(slow, os.path.join(root, "work", "b"))
+            time.sleep(0.4)
+            impatient = generate_zarr.kill_orphans_under(
+                root, wait_seconds=0.1,
+                send_signal=lambda pid, _sig: os.kill(pid, signal.SIGTERM),
+            )
+            self.assertEqual(impatient.survivors, [second.pid])
+
+
+class TestPoolBreakReportsWhatItCouldNotVerify(unittest.TestCase):
+    PRIMARY = "sub-01/eeg/sub-01_task-a_eeg.vhdr"
+
+    def _leave(self, root, mib):
+        work = generate_zarr.recording_scratch_paths(root, self.PRIMARY)[0]
+        os.makedirs(work)
+        with open(os.path.join(work, "blob"), "wb") as fh:
+            fh.write(os.urandom(mib * 1024 * 1024))
+            fh.flush()
+            os.fsync(fh.fileno())
+
+    @staticmethod
+    def _volume(*readings):
+        reads = iter(readings)
+        return lambda: next(reads)
+
+    def test_a_scan_that_cannot_run_is_a_warning_naming_the_reason(self):
+        with (
+            tempfile.TemporaryDirectory() as root,
+            contextlib.redirect_stdout(io.StringIO()) as out,
+        ):
+            generate_zarr.reclaim_after_pool_break(
+                root, [self.PRIMARY], proc_root="/no/such/proc"
+            )
+        self.assertIn("could not look for orphaned child processes (cannot list", out.getvalue())
+
+    def test_a_scan_that_read_nothing_is_a_warning(self):
+        with (
+            tempfile.TemporaryDirectory() as root,
+            tempfile.TemporaryDirectory() as empty_proc,
+            contextlib.redirect_stdout(io.StringIO()) as out,
+        ):
+            generate_zarr.reclaim_after_pool_break(root, [self.PRIMARY], proc_root=empty_proc)
+        self.assertIn("no process command line was readable", out.getvalue())
+
+    def test_a_volume_that_gains_less_than_was_removed_says_a_process_may_hold_it(self):
+        gib = 1024**3
+        with (
+            tempfile.TemporaryDirectory() as root,
+            contextlib.redirect_stdout(io.StringIO()) as out,
+        ):
+            self._leave(root, 8)
+            generate_zarr.reclaim_after_pool_break(
+                root, [self.PRIMARY],
+                self._volume((100 * gib, 500 * gib), (100 * gib, 500 * gib)),
+                suspect_after=1024 * 1024,
+            )
+        self.assertIn("scratch free rose by 0.0 GiB although", out.getvalue())
+        self.assertIn("may still hold deleted files open", out.getvalue())
+
+    def test_a_volume_that_gains_what_was_removed_is_not_suspected(self):
+        gib = 1024**3
+        with (
+            tempfile.TemporaryDirectory() as root,
+            contextlib.redirect_stdout(io.StringIO()) as out,
+        ):
+            self._leave(root, 8)
+            generate_zarr.reclaim_after_pool_break(
+                root, [self.PRIMARY],
+                self._volume((100 * gib, 500 * gib), (100 * gib + 8 * 1024 * 1024, 500 * gib)),
+                suspect_after=1024 * 1024,
+            )
+        self.assertNotIn("may still hold deleted files open", out.getvalue())
+
+    def test_the_removed_bytes_are_not_called_reclaimed(self):
+        with (
+            tempfile.TemporaryDirectory() as root,
+            contextlib.redirect_stdout(io.StringIO()) as out,
+        ):
+            generate_zarr.reclaim_after_pool_break(root, [self.PRIMARY], proc_root="/no/such/proc")
+        self.assertIn("removed 0.0 GiB of files", out.getvalue())
+        self.assertNotIn("reclaimed", out.getvalue())
+
+
+class TestPoolBreakReclaimsScratch(unittest.TestCase):
+    """A worker killed outright never runs `convert_one`'s `finally`. On nm000276
+    two killed workers kept 535 GiB until the dataset run ended, and every
+    recording behind them failed with ENOSPC: the break must give the disk back
+    before the suspects re-run and the rebuilt pool drains the rest."""
+
+    def test_a_killed_workers_scratch_is_gone_before_anything_re_runs(self):
+        boom = "sub-boom/eeg/sub-boom_task-rest_eeg.vhdr"
+        primaries = [f"sub-{i:02d}/eeg/sub-{i:02d}_task-rest_eeg.vhdr" for i in range(1, 7)]
+        primaries.insert(2, boom)
+        results = []
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()) as out:
+            breaks, _ = _drain_with_admission(
+                list(primaries), {p: 1024 for p in primaries}, 3, 10**9, {"tmp": tmp},
+                lambda r, i: results.append(r), worker=_scratch_worker,
+            )
+            leaked = [
+                path for p in primaries
+                for path in generate_zarr.recording_scratch_paths(tmp, p)
+                if os.path.exists(path)
+            ]
+        self.assertGreaterEqual(breaks, 1)
+        self.assertEqual(leaked, [], "nothing may outlive the run's drain")
+        self.assertEqual(len(results), len(primaries))
+        innocents = [r for r in results if r["primary"] != boom]
+        self.assertTrue(all(r["ok"] for r in innocents))
+        self.assertFalse(
+            any(r["leftover"] for r in innocents),
+            "an innocent re-ran on top of the debris its killed attempt left behind",
+        )
+        self.assertIn("worker pool broke with", out.getvalue())
+
+    def test_the_break_says_how_full_the_disk_was(self):
+        # The "killed its worker process" verdict reads as out of memory; the line
+        # printed at the break is what tells an operator the volume was the cause.
+        boom = "sub-boom/eeg/sub-boom_task-rest_eeg.vhdr"
+        results = []
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()) as out:
+            _drain_with_admission(
+                [boom], {boom: 1024}, 1, 10**9, {"tmp": tmp},
+                lambda r, i: results.append(r), worker=_scratch_worker,
+            )
+        log = out.getvalue()
+        self.assertIn("scratch free", log)
+        self.assertIn("SIGBUS", log)
+        self.assertIn("orphaned child process(es) killed", log)
+        self.assertIn("a full scratch disk", results[0]["error"], "the verdict now names the disk")
+
+    def test_a_killed_workers_orphaned_child_is_killed_with_it(self):
+        boom = "sub-boom/eeg/sub-boom_task-rest_eeg.vhdr"
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            _drain_with_admission(
+                [boom], {boom: 1024}, 1, 10**9, {"tmp": tmp},
+                lambda r, i: None, worker=_orphaning_worker,
+            )
+            with open(os.path.join(tmp, "orphan.pid")) as fh:
+                pid = int(fh.read())
+            deadline = time.monotonic() + 10
+            alive = True
+            while alive and time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                    time.sleep(0.05)
+                except ProcessLookupError:
+                    alive = False
+            if alive:
+                os.kill(pid, signal.SIGKILL)
+        self.assertFalse(alive, "the child of a killed worker outlived the pool break")
+
+    def test_a_clean_run_reclaims_nothing_and_says_nothing(self):
+        primaries = [f"sub-{i:02d}/eeg/sub-{i:02d}_task-rest_eeg.vhdr" for i in range(1, 4)]
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()) as out:
+            breaks, _ = _drain_with_admission(
+                list(primaries), {p: 1024 for p in primaries}, 2, 10**9, {"tmp": tmp},
+                lambda r, i: None, worker=_scratch_worker,
+            )
+        self.assertEqual(breaks, 0)
+        self.assertNotIn("worker pool broke with", out.getvalue())
+
+
+class TestScratchSettings(unittest.TestCase):
+    """The scratch tunables are validated when the module loads: a value that
+    cannot mean what the operator meant stops the run, naming the variable."""
+
+    NAME = "ZARR_SCRATCH_TEST_SETTING"
+
+    def setting(self, raw, default=3.0, minimum=1.0):
+        saved = os.environ.get(self.NAME)
+        self.addCleanup(
+            lambda: os.environ.pop(self.NAME, None)
+            if saved is None else os.environ.__setitem__(self.NAME, saved)
+        )
+        if raw is None:
+            os.environ.pop(self.NAME, None)
+        else:
+            os.environ[self.NAME] = raw
+        return generate_zarr._scratch_setting(self.NAME, default, minimum=minimum)
+
+    def test_unset_or_blank_takes_the_default(self):
+        self.assertEqual(self.setting(None), 3.0)
+        self.assertEqual(self.setting("  "), 3.0)
+
+    def test_a_valid_value_is_used(self):
+        self.assertEqual(self.setting("2.5"), 2.5)
+        self.assertEqual(self.setting("1"), 1.0)
+        self.assertEqual(self.setting("0", default=10.0, minimum=0), 0.0)
+
+    def test_values_that_would_silently_misbehave_are_refused_by_name(self):
+        for raw in ("0", "-1", "0.99", "nan", "inf", "-inf", "abc"):
+            with self.subTest(raw=raw):
+                with self.assertRaises(ValueError) as caught:
+                    self.setting(raw)
+                self.assertIn(self.NAME, str(caught.exception))
+
+    def test_a_negative_or_infinite_headroom_is_refused(self):
+        for raw in ("-1", "inf", "nan"):
+            with self.subTest(raw=raw):
+                with self.assertRaises(ValueError):
+                    self.setting(raw, default=10.0, minimum=0)
+
+    def _import_in_fresh_interpreter(self, **env):
+        base = {k: v for k, v in os.environ.items() if not k.startswith("ZARR_SCRATCH_")}
+        code = (
+            f"import sys; sys.path.insert(0, {str(Path(__file__).resolve().parent)!r}); "
+            "import generate_zarr as g, json; "
+            "print(g.SCRATCH_STREAM_FACTOR, g.SCRATCH_INMEM_FACTOR, g.SCRATCH_HEADROOM_BYTES); "
+            "print(json.dumps(g.SCRATCH_SETTING_ERRORS))"
+        )
+        return subprocess.run(
+            [sys.executable, "-I", "-c", code], env={**base, **env},
+            capture_output=True, text=True, timeout=120,
+        )
+
+    def test_the_shipped_defaults_are_3_2_and_10_gib(self):
+        # The values the node runs with. A fresh interpreter, so another test's
+        # override of the module attributes cannot make this pass or fail.
+        out = self._import_in_fresh_interpreter()
+        self.assertEqual(out.returncode, 0, out.stderr)
+        values, errors = out.stdout.splitlines()
+        self.assertEqual(values.split(), ["3.0", "2.0", str(10 * 1024**3)])
+        self.assertEqual(json.loads(errors), [])
+
+    def test_a_bad_setting_does_not_break_the_import_and_is_recorded_by_name(self):
+        # Every dataset run (and patch_duration) imports this module: raising here
+        # would kill each before it could write a callback.
+        for name, raw in (
+            ("ZARR_SCRATCH_STREAM_FACTOR", "0"),
+            ("ZARR_SCRATCH_INMEM_FACTOR", "nan"),
+            ("ZARR_SCRATCH_HEADROOM_BYTES", "10G"),
+        ):
+            with self.subTest(name=name):
+                out = self._import_in_fresh_interpreter(**{name: raw})
+                self.assertEqual(out.returncode, 0, out.stderr)
+                values, errors = out.stdout.splitlines()
+                self.assertEqual(
+                    values.split(), ["3.0", "2.0", str(10 * 1024**3)], "defaults stand"
+                )
+                (message,) = json.loads(errors)
+                self.assertIn(name, message)
+
+    def test_main_refuses_a_bad_setting_and_reports_it_through_the_callback(self):
+        script = Path(__file__).resolve().parent / "generate_zarr.py"
+        env = {k: v for k, v in os.environ.items() if not k.startswith("ZARR_SCRATCH_")}
+        env["ZARR_SCRATCH_HEADROOM_BYTES"] = "10G"
+        with tempfile.TemporaryDirectory() as tmp:
+            callback = os.path.join(tmp, "cb.json")
+            done = subprocess.run(
+                [sys.executable, str(script), "--dataset-id", "on000001",
+                 "--repo-dir", os.path.join(tmp, "no-repo"), "--callback-out", callback],
+                env=env, capture_output=True, text=True, timeout=120,
+            )
+            self.assertEqual(done.returncode, 1, done.stderr)
+            with open(callback) as fh:
+                body = json.load(fh)
+        self.assertEqual(body["status"], "failed")
+        self.assertEqual(body["dataset_id"], "on000001")
+        self.assertFalse(body["deterministic"], "a config typo must stay retryable")
+        self.assertIn("ZARR_SCRATCH_HEADROOM_BYTES='10G' is not a number", body["error"])
+        self.assertIn("::error::invalid scratch setting", done.stdout)
+
+
+class TestCheckEnv(unittest.TestCase):
+    """`--check-env`: the scratch settings, validated once, with no dataset."""
+
+    SCRIPT = Path(__file__).resolve().parent / "generate_zarr.py"
+
+    def run_check(self, **env):
+        base = {k: v for k, v in os.environ.items() if not k.startswith("ZARR_SCRATCH_")}
+        return subprocess.run(
+            [sys.executable, str(self.SCRIPT), "--check-env"], env={**base, **env},
+            capture_output=True, text=True, timeout=120,
+        )
+
+    def test_valid_settings_exit_zero_and_say_nothing(self):
+        done = self.run_check()
+        self.assertEqual((done.returncode, done.stdout), (0, ""), done.stderr)
+
+    def test_a_valid_override_is_accepted(self):
+        self.assertEqual(self.run_check(ZARR_SCRATCH_HEADROOM_BYTES="0").returncode, 0)
+
+    def test_a_bad_setting_exits_one_and_names_it(self):
+        done = self.run_check(ZARR_SCRATCH_HEADROOM_BYTES="10G")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("::error::invalid scratch setting", done.stdout)
+        self.assertIn("ZARR_SCRATCH_HEADROOM_BYTES='10G' is not a number", done.stdout)
+
+    def test_every_bad_setting_is_listed_in_one_message(self):
+        done = self.run_check(ZARR_SCRATCH_STREAM_FACTOR="0", ZARR_SCRATCH_INMEM_FACTOR="nan")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("ZARR_SCRATCH_STREAM_FACTOR", done.stdout)
+        self.assertIn("ZARR_SCRATCH_INMEM_FACTOR", done.stdout)
+
+    def test_it_needs_no_dataset_repository_or_callback(self):
+        # None of the arguments a conversion requires, and it must not write one.
+        with tempfile.TemporaryDirectory() as tmp:
+            before = os.listdir(tmp)
+            self.assertEqual(self.run_check().returncode, 0)
+            self.assertEqual(os.listdir(tmp), before)
+
+
+class TestUnreadableSizesAreCharged(unittest.TestCase):
+    STREAMED = "sub-01/ieeg/sub-01_task-x_ieeg.vhdr"
+
+    def _git(self, repo, *args):
+        subprocess.run(["git", "-C", repo, *args], check=True, capture_output=True)
+
+    def _repo(self, repo, links):
+        self._git(repo, "init", "-q")
+        self._git(repo, "config", "user.email", "t@t")
+        self._git(repo, "config", "user.name", "t")
+        for path, key in links.items():
+            os.makedirs(os.path.dirname(os.path.join(repo, path)), exist_ok=True)
+            os.symlink(f"../../.git/annex/objects/aa/bb/{key}/{key}", os.path.join(repo, path))
+        self._git(repo, "add", "-A")
+        self._git(repo, "commit", "-qm", "fixture")
+        return subprocess.check_output(["git", "-C", repo, "rev-parse", "HEAD"], text=True).strip()
+
+    def test_a_zero_size_is_charged_the_floor_not_nothing(self):
+        floor = generate_zarr.SCRATCH_UNKNOWN_SIZE_BYTES
+        self.assertEqual(generate_zarr.scratch_peak_bytes(self.STREAMED, 0), floor)
+        self.assertGreater(floor, 0)
+
+    def test_a_key_without_a_size_field_is_charged_at_least_the_floor(self):
+        floor = generate_zarr.SCRATCH_UNKNOWN_SIZE_BYTES
+        tiny = 4096  # only the sidecars could be sized
+        self.assertEqual(generate_zarr.scratch_peak_bytes(self.STREAMED, tiny, False), floor)
+
+    def test_a_readable_size_is_charged_by_its_factor_even_when_small(self):
+        got = generate_zarr.scratch_peak_bytes(self.STREAMED, 4096, True)
+        self.assertEqual(got, int(4096 * generate_zarr.SCRATCH_INMEM_FACTOR))
+
+    def test_the_floor_never_lowers_a_larger_charge(self):
+        size = 100 * 1024**3
+        got = generate_zarr.scratch_peak_bytes(self.STREAMED, size, False)
+        self.assertEqual(got, int(size * generate_zarr.SCRATCH_STREAM_FACTOR))
+
+    def test_pointer_walk_reports_whether_the_size_could_be_read(self):
+        sized = "sub-01/eeg/sub-01_task-a_eeg.set"
+        sizeless = "sub-02/eeg/sub-02_task-a_eeg.set"
+        with tempfile.TemporaryDirectory() as repo:
+            head = self._repo(repo, {
+                sized: "SHA256E-s5000--aaaa.set",
+                # A WORM key's name after `--` is free text, never a size.
+                sizeless: "WORM-m1700000000--sub-02-s5.set",
+            })
+            files = {sized, sizeless}
+            self.assertEqual(
+                generate_zarr.recording_size_info(repo, sized, files, head), (5000, True)
+            )
+            size, readable = generate_zarr.recording_size_info(repo, sizeless, files, head)
+            self.assertEqual((size, readable), (0, False))
+            absent = "sub-03/eeg/sub-03_task-a_eeg.set"
+            self.assertEqual(
+                generate_zarr.recording_size_info(repo, absent, files | {absent}, head),
+                (0, False),
+            )
+
+    def test_admission_size_info_adds_a_declared_fdt_and_keeps_readability(self):
+        sized = "sub-01/eeg/sub-01_task-a_eeg.set"
+        with tempfile.TemporaryDirectory() as repo:
+            head = self._repo(repo, {sized: "SHA256E-s5000--aaaa.set"})
+            decl = {sized: {"fdt": "x.fdt", "fdt_bytes": 700}}
+            info = generate_zarr.admission_size_info(repo, [sized], {sized}, head, decl)
+        self.assertEqual(info, {sized: (5700, True)})
+
+
+class TestScratchAdmissionDecision(unittest.TestCase):
+    GIB = 1024**3
+
+    def test_a_recording_that_does_not_fit_scratch_waits_for_one_that_does(self):
+        # Running 100 of a 150 budget: the 80 behind the head cannot fit, the 40 can.
+        idx = _next_admission(
+            [1, 1], 1, 0, 4, 100,
+            pending_scratch=[80, 40], running_scratch=100, scratch_budget=150,
+        )
+        self.assertEqual(idx, 1)
+
+    def test_scratch_has_no_run_alone_exception(self):
+        # RAM lets an oversized head run alone because its own preflight skips it
+        # cleanly. A recording the DISK cannot hold would download for hours and
+        # then fail, so it is never admitted, even with nothing in flight.
+        self.assertIsNone(
+            _next_admission(
+                [1], 0, 0, 4, 100,
+                pending_scratch=[200], running_scratch=0, scratch_budget=150,
+            )
+        )
+
+    def test_ram_still_runs_an_oversized_head_alone_when_scratch_fits(self):
+        self.assertEqual(
+            _next_admission(
+                [10**12], 0, 0, 4, 100,
+                pending_scratch=[10], running_scratch=0, scratch_budget=150,
+            ),
+            0,
+        )
+
+    def test_without_a_scratch_budget_nothing_changes(self):
+        self.assertEqual(_next_admission([10**12], 0, 0, 4, 100), 0)
+        self.assertEqual(
+            _next_admission([30, 10], 1, 50, 4, 100, pending_scratch=[10**15, 10**15]), 0
+        )
+
+    def test_a_recording_exactly_at_the_budget_is_admitted(self):
+        self.assertEqual(
+            _next_admission(
+                [1], 1, 0, 4, 100, pending_scratch=[50], running_scratch=100, scratch_budget=150
+            ),
+            0,
+        )
+
+    def test_a_streamed_recording_is_charged_the_streaming_factor(self):
+        size = 10 * self.GIB
+        got = generate_zarr.scratch_peak_bytes("sub-01/ieeg/sub-01_task-x_ieeg.vhdr", size)
+        self.assertEqual(got, int(size * generate_zarr.SCRATCH_STREAM_FACTOR))
+
+    def test_a_small_or_unstreamable_recording_is_charged_the_in_memory_factor(self):
+        small = 100 * 1024**2  # under the 256 MiB streaming threshold
+        self.assertEqual(
+            generate_zarr.scratch_peak_bytes("sub-01/ieeg/sub-01_task-x_ieeg.vhdr", small),
+            int(small * generate_zarr.SCRATCH_INMEM_FACTOR),
+        )
+        # EEGLAB .set never streams, whatever its size.
+        big = 5 * self.GIB
+        self.assertEqual(
+            generate_zarr.scratch_peak_bytes("sub-01/eeg/sub-01_task-x_eeg.set", big),
+            int(big * generate_zarr.SCRATCH_INMEM_FACTOR),
+        )
+
+    def test_the_default_factor_covers_the_measured_nm000276_peak(self):
+        # raw 1.00x + float32 memmap 1.00x + int16 memmap 0.50x + views 0.33x
+        # was observed at 2.83x on that dataset; the charge must not be below it.
+        self.assertGreaterEqual(generate_zarr.SCRATCH_STREAM_FACTOR, 2.83)
+
+
+class TestScratchBudgetArithmetic(unittest.TestCase):
+    """The budget formula on integers, so a term dropped from it fails here
+    deterministically instead of hiding behind a volume's real free space."""
+
+    def test_free_plus_held_minus_headroom(self):
+        self.assertEqual(generate_zarr.scratch_budget_bytes(100, 30, 10), 120)
+
+    def test_what_the_run_holds_is_added_back(self):
+        # Without `held` the run would count its own in-flight writes against
+        # itself: free has already shrunk by exactly that much.
+        with_held = generate_zarr.scratch_budget_bytes(100, 50, 10)
+        without = generate_zarr.scratch_budget_bytes(100, 0, 10)
+        self.assertEqual(with_held - without, 50)
+
+    def test_headroom_is_subtracted(self):
+        self.assertEqual(generate_zarr.scratch_budget_bytes(100, 0, 40), 60)
+
+    def test_it_is_never_negative(self):
+        self.assertEqual(generate_zarr.scratch_budget_bytes(5, 0, 10), 0)
+        self.assertEqual(generate_zarr.scratch_budget_bytes(0, 0, 0), 0)
+
+
+class TestHeldScratchBytes(unittest.TestCase):
+    A = "sub-01/eeg/sub-01_task-a_eeg.vhdr"
+    B = "sub-01/eeg/sub-01_task-b_eeg.vhdr"
+    MIB = 1024 * 1024
+
+    def _write(self, root, primary, which, mib):
+        path = generate_zarr.recording_scratch_paths(root, primary)[which]
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, "blob"), "wb") as fh:
+            fh.write(os.urandom(mib * self.MIB))
+            fh.flush()
+            os.fsync(fh.fileno())
+
+    def test_it_counts_only_the_recordings_it_is_asked_about(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._write(root, self.A, 0, 4)
+            self._write(root, self.B, 0, 4)
+            held_a = generate_zarr.held_scratch_bytes(root, [self.A])
+            held_both = generate_zarr.held_scratch_bytes(root, [self.A, self.B])
+        self.assertGreaterEqual(held_a, 4 * self.MIB)
+        self.assertLess(held_a, 8 * self.MIB)
+        self.assertGreaterEqual(held_both, 8 * self.MIB)
+
+    def test_debris_nobody_is_running_is_not_counted_as_held(self):
+        # A killed worker's leftovers (or a failed delete's) are not scratch the
+        # run is about to give back, so they must not be added to its budget.
+        with tempfile.TemporaryDirectory() as root:
+            self._write(root, self.B, 0, 4)
+            self.assertEqual(generate_zarr.held_scratch_bytes(root, []), 0)
+            self.assertEqual(generate_zarr.held_scratch_bytes(root, [self.A]), 0)
+
+    def test_it_sums_the_work_store_and_memmap_directories(self):
+        with tempfile.TemporaryDirectory() as root:
+            for which in (0, 1, 2):
+                self._write(root, self.A, which, 2)
+            self.assertGreaterEqual(generate_zarr.held_scratch_bytes(root, [self.A]), 6 * self.MIB)
+
+
+class TestScratchGate(unittest.TestCase):
+    """The gate against a stated volume: the probe is injected, the files it
+    counts are real, so every number below is exact."""
+
+    A = "sub-01/eeg/sub-01_task-a_eeg.vhdr"
+
+    @staticmethod
+    def usage(free, total=10**12):
+        return lambda _path: type("Usage", (), {"free": free, "total": total})()
+
+    @staticmethod
+    def failing(exc):
+        def probe(_path):
+            raise exc
+        return probe
+
+    def test_the_budget_is_free_minus_headroom_with_nothing_in_flight(self):
+        with tempfile.TemporaryDirectory() as root:
+            gate = generate_zarr.ScratchGate(root, headroom=100, usage=self.usage(1000))
+            self.assertEqual(gate(()), 900)
+
+    def test_what_an_in_flight_recording_holds_is_added_back(self):
+        # The assertion a gate that forgot `held` would fail, with no volume noise.
+        with tempfile.TemporaryDirectory() as root:
+            path = generate_zarr.recording_scratch_paths(root, self.A)[0]
+            os.makedirs(path)
+            with open(os.path.join(path, "blob"), "wb") as fh:
+                fh.write(os.urandom(4 * 1024 * 1024))
+            held = generate_zarr.held_scratch_bytes(root, [self.A])
+            self.assertGreaterEqual(held, 4 * 1024 * 1024)
+            gate = generate_zarr.ScratchGate(root, headroom=100, usage=self.usage(1000))
+            self.assertEqual(gate([self.A]), 900 + held)
+            self.assertEqual(gate(()), 900, "not in flight, so not ours to hand back")
+
+    def test_the_volume_reports_free_and_total(self):
+        with tempfile.TemporaryDirectory() as root:
+            gate = generate_zarr.ScratchGate(root, usage=self.usage(7, 9))
+            self.assertEqual(gate.volume(), (7, 9))
+            free, total = generate_zarr.ScratchGate(root).volume()
+        self.assertGreater(total, 0)
+        self.assertLessEqual(free, total)
+
+    def test_an_unreadable_volume_from_the_start_admits_nothing_and_says_so_once(self):
+        gate = generate_zarr.ScratchGate(
+            "/r", usage=self.failing(OSError(errno.EIO, "Input/output error"))
+        )
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            first, second = gate(()), gate(())
+        self.assertEqual((first, second), (0, 0))
+        self.assertEqual(out.getvalue().count("cannot read the scratch volume"), 1)
+        self.assertIn("admitting nothing", out.getvalue())
+        self.assertIsNone(gate.volume())
+
+    def test_a_volume_that_fails_mid_run_keeps_the_last_good_budget(self):
+        state = {"fail": None, "free": 1000}
+
+        def probe(_path):
+            if state["fail"]:
+                raise state["fail"]
+            return type("Usage", (), {"free": state["free"], "total": 10**12})()
+
+        gate = generate_zarr.ScratchGate("/r", headroom=100, usage=probe)
+        self.assertEqual(gate(()), 900)
+        state["fail"] = OSError(errno.ESTALE, "Stale file handle")
+        state["free"] = 5  # what a successful read would now say; it must not be used
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            during = [gate(()), gate(()), gate(())]
+        self.assertEqual(during, [900, 900, 900], "fail closed on the last good budget")
+        self.assertEqual(
+            out.getvalue().count("cannot read the scratch volume"), 1, "warned once, not per round"
+        )
+        self.assertIn("holding the last good budget of", out.getvalue())
+
+    def test_it_recovers_and_warns_again_after_a_later_failure(self):
+        state = {"fail": None}
+
+        def probe(_path):
+            if state["fail"]:
+                raise state["fail"]
+            return type("Usage", (), {"free": 1000, "total": 10**12})()
+
+        gate = generate_zarr.ScratchGate("/r", headroom=0, usage=probe)
+        gate(())
+        state["fail"] = OSError(errno.EIO, "x")
+        with contextlib.redirect_stdout(io.StringIO()):
+            gate(())
+        state["fail"] = None
+        self.assertEqual(gate(()), 1000)
+        state["fail"] = OSError(errno.EIO, "x")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            gate(())
+        self.assertEqual(out.getvalue().count("cannot read the scratch volume"), 1)
+
+
+class TestDrainAdmitsAgainstScratch(unittest.TestCase):
+    """The drain charges scratch like RAM: what fits runs, what waits is admitted
+    when something finishes, and what can never fit is handed back unreported."""
+
+    PRIMARIES = tuple(f"sub-{i:02d}/eeg/sub-{i:02d}_task-rest_eeg.set" for i in range(1, 4))
+
+    def setUp(self):
+        # Short enough that the re-samples before a deferral cost milliseconds.
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.05
+
+    def _drain(self, scratch_peaks, budget, cpu_cap=3, deferred=None, volume=None):
+        results = []
+        _drain_with_admission(
+            list(scratch_peaks), {p: 1024 for p in scratch_peaks}, cpu_cap, 10**12, {},
+            lambda r, i: results.append(r), worker=_timed_worker,
+            scratch_peaks=scratch_peaks,
+            scratch_budget=budget if callable(budget) else (lambda _in_flight: budget),
+            deferred=deferred, scratch_volume=volume,
+        )
+        return results
+
+    def test_a_tight_budget_runs_recordings_one_at_a_time(self):
+        peaks = {p: 100 for p in self.PRIMARIES}
+        spans = sorted(r["span"] for r in self._drain(peaks, budget=150))
+        self.assertEqual(len(spans), 3)
+        for earlier, later in itertools.pairwise(spans):
+            self.assertGreaterEqual(later[0], earlier[1] - 0.01)
+
+    def test_a_roomy_budget_runs_them_together(self):
+        peaks = {p: 100 for p in self.PRIMARIES}
+        spans = sorted(r["span"] for r in self._drain(peaks, budget=1000))
+        self.assertLess(spans[1][0], spans[0][1], "the second started before the first ended")
+
+    def test_a_recording_that_can_never_fit_is_deferred_not_reported(self):
+        a, b, c = self.PRIMARIES
+        deferred: dict[str, str] = {}
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            results = self._drain({b: 500, a: 50, c: 50}, budget=150, cpu_cap=2, deferred=deferred)
+        self.assertEqual(sorted(r["primary"] for r in results), [a, c])
+        self.assertTrue(all(r["ok"] for r in results))
+        self.assertEqual(list(deferred), [b])
+        self.assertIn("deferred 1 recording(s)", out.getvalue())
+
+    def test_the_first_fitting_and_the_second_not_converts_one_and_defers_one(self):
+        a, b, _ = self.PRIMARIES
+        deferred: dict[str, str] = {}
+        with contextlib.redirect_stdout(io.StringIO()):
+            results = self._drain({a: 50, b: 500}, budget=150, cpu_cap=2, deferred=deferred)
+        self.assertEqual([r["primary"] for r in results], [a])
+        self.assertEqual(list(deferred), [b])
+
+    def test_it_terminates_when_every_recording_is_too_large(self):
+        deferred: dict[str, str] = {}
+        with contextlib.redirect_stdout(io.StringIO()):
+            results = self._drain({p: 500 for p in self.PRIMARIES}, budget=150, deferred=deferred)
+        self.assertEqual(results, [])
+        self.assertEqual(sorted(deferred), sorted(self.PRIMARIES))
+
+    def test_each_deferred_recording_is_named_with_its_charge_and_the_volume(self):
+        a, b, _ = self.PRIMARIES
+        gib = 1024**3
+        deferred: dict[str, str] = {}
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self._drain(
+                {a: 80 * gib, b: 60 * gib}, budget=50 * gib, deferred=deferred,
+                volume=lambda: (40 * gib, 500 * gib),
+            )
+        log = out.getvalue()
+        for primary, charge in ((a, 80), (b, 60)):
+            line = next(ln for ln in log.splitlines() if primary in ln)
+            self.assertIn(f"charged {charge} GiB", line)
+            self.assertIn("budget 50 GiB", line)
+            self.assertIn("free 40 of 500 GiB", line)
+        self.assertEqual(deferred[a], "deferred: needs 80 GiB of scratch, 50 GiB available")
+        self.assertNotIn("::error::", log, "both could fit an empty volume, so neither is final")
+
+    def test_a_recording_larger_than_the_volume_is_an_error_naming_it(self):
+        a, b, _ = self.PRIMARIES
+        gib = 1024**3
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self._drain(
+                {a: 900 * gib, b: 60 * gib}, budget=50 * gib,
+                volume=lambda: (40 * gib, 500 * gib),
+            )
+        errors = [ln for ln in out.getvalue().splitlines() if ln.startswith("::error::")]
+        self.assertEqual(len(errors), 1)
+        self.assertIn(a, errors[0])
+        self.assertIn("can never fit this volume", errors[0])
+        self.assertIn("1 can never fit", out.getvalue())
+
+    def test_the_per_recording_lines_are_capped_but_every_recording_is_deferred(self):
+        self.addCleanup(
+            setattr, generate_zarr, "SCRATCH_DEFER_LOG_LINES", generate_zarr.SCRATCH_DEFER_LOG_LINES
+        )
+        generate_zarr.SCRATCH_DEFER_LOG_LINES = 2
+        peaks = {f"sub-{i:02d}/eeg/sub-{i:02d}_task-rest_eeg.set": 500 for i in range(1, 6)}
+        deferred: dict[str, str] = {}
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self._drain(peaks, budget=150, deferred=deferred)
+        self.assertEqual(len(deferred), 5)
+        self.assertEqual(out.getvalue().count("::warning::deferring "), 2)
+        self.assertIn("3 more deferred recording(s) not listed", out.getvalue())
+
+    def test_a_transient_spike_does_not_defer_the_queue(self):
+        # With nothing in flight one bad sample used to defer everything left. The
+        # volume reads as full twice, then as it really is.
+        reads = {"n": 0}
+
+        def spiky(_in_flight):
+            reads["n"] += 1
+            return 0 if reads["n"] <= 2 else 10**6
+
+        deferred: dict[str, str] = {}
+        results = self._drain({p: 100 for p in self.PRIMARIES}, budget=spiky, deferred=deferred)
+        self.assertEqual(len(results), 3)
+        self.assertEqual(deferred, {})
+
+    def test_a_sustained_shortage_defers_after_the_resamples(self):
+        reads = {"n": 0}
+
+        def full(_in_flight):
+            reads["n"] += 1
+            return 0
+
+        deferred: dict[str, str] = {}
+        with contextlib.redirect_stdout(io.StringIO()):
+            self._drain({p: 100 for p in self.PRIMARIES}, budget=full, deferred=deferred)
+        self.assertEqual(len(deferred), 3)
+        self.assertEqual(reads["n"], 1 + generate_zarr.SCRATCH_DEFER_RESAMPLES)
+
+    def test_without_resamples_the_first_sample_decides(self):
+        self.addCleanup(
+            setattr, generate_zarr, "SCRATCH_DEFER_RESAMPLES", generate_zarr.SCRATCH_DEFER_RESAMPLES
+        )
+        generate_zarr.SCRATCH_DEFER_RESAMPLES = 0
+        reads = {"n": 0}
+
+        def spiky(_in_flight):
+            reads["n"] += 1
+            return 0 if reads["n"] == 1 else 10**6
+
+        deferred: dict[str, str] = {}
+        with contextlib.redirect_stdout(io.StringIO()):
+            self._drain({p: 100 for p in self.PRIMARIES}, budget=spiky, deferred=deferred)
+        self.assertEqual(len(deferred), 3)
+
+    def test_a_budget_that_changes_between_rounds_is_followed(self):
+        # Every other test here hands the drain a constant. This one rewrites the
+        # budget while recordings run, as another tenant freeing space would.
+        import threading
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "budget")
+
+        def set_budget(n):
+            with open(path + ".tmp", "w") as fh:
+                fh.write(str(n))
+            os.replace(path + ".tmp", path)
+
+        def read_budget(_in_flight):
+            with open(path) as fh:
+                return int(fh.read())
+
+        set_budget(150)  # room for one recording at a time
+        timer = threading.Timer(0.2, set_budget, args=(10**6,))
+        timer.start()
+        self.addCleanup(timer.cancel)
+        results = []
+        _drain_with_admission(
+            list(self.PRIMARIES), {p: 1024 for p in self.PRIMARIES}, 3, 10**12, {},
+            lambda r, i: results.append(r), worker=_timed_worker,
+            scratch_peaks={p: 100 for p in self.PRIMARIES}, scratch_budget=read_budget,
+        )
+        spans = sorted(r["span"] for r in results)
+        self.assertEqual(len(spans), 3)
+        # The first runs 0.8 s; the budget rises at 0.2 s and the others start then.
+        self.assertLess(spans[1][0], spans[0][1])
+        self.assertLess(spans[2][0], spans[0][1])
+
+    def test_what_in_flight_recordings_hold_is_counted_in_the_pool_path(self):
+        # The budget is free + held - headroom, with `held` read from the recordings
+        # that are RUNNING. Here two admitted recordings write real scratch, and the
+        # third (which does not fit on the stated free space alone) must be admitted
+        # as soon as they have: a drain that handed the gate no in-flight recordings
+        # would hold it back until one finished.
+        primaries = list(self.PRIMARIES)
+        headroom = 10**9
+        free = headroom + 250
+
+        def usage(_path):
+            return type("U", (), {"free": free, "total": 10**12})()
+
+        seen: list[tuple[list[str], int]] = []
+        results = []
+        with tempfile.TemporaryDirectory() as tmp:
+            gate = generate_zarr.ScratchGate(tmp, headroom=headroom, usage=usage)
+
+            def spy(in_flight):
+                budget = gate(in_flight)
+                seen.append((list(in_flight), budget))
+                return budget
+
+            _drain_with_admission(
+                primaries, {p: 1024 for p in primaries}, 3, 10**12, {"tmp": tmp},
+                lambda r, i: results.append(r), worker=_scratch_worker,
+                scratch_peaks={p: 100 for p in primaries}, scratch_budget=spy,
+            )
+        self.assertEqual(len(results), 3)
+        # Three recordings of 100 against a stated 250: the third waited ...
+        starts = sorted(r["span"][0] for r in results)
+        first_end = min(r["span"][1] for r in results)
+        # ... and was admitted before either of the first two had finished, because
+        # their files were by then held scratch, not free space.
+        self.assertLess(starts[2], first_end)
+        two_in_flight = [(live, b) for live, b in seen if len(live) == 2]
+        self.assertTrue(two_in_flight, "the gate was never asked with two recordings running")
+        self.assertTrue(all(b >= 250 for _, b in two_in_flight))
+        self.assertTrue(
+            any(b > 250 for _, b in two_in_flight),
+            "what the two hold was not added to the budget",
+        )
+
+    def test_an_unreadable_volume_admits_nothing_instead_of_everything(self):
+        # The default gate fails closed: with no good read there is no budget, so
+        # the whole queue is deferred rather than admitted blind.
+        deferred: dict[str, str] = {}
+        results = []
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            _drain_with_admission(
+                list(self.PRIMARIES), {p: 1024 for p in self.PRIMARIES}, 3, 10**12,
+                {"tmp": "/no/such/scratch/root"}, lambda r, i: results.append(r),
+                worker=_timed_worker, scratch_peaks={p: 1 for p in self.PRIMARIES},
+                deferred=deferred,
+            )
+        self.assertEqual(results, [])
+        self.assertEqual(sorted(deferred), sorted(self.PRIMARIES))
+        self.assertEqual(out.getvalue().count("cannot read the scratch volume"), 1)
+
+    def test_an_unconsumed_deferral_does_not_crash_a_caller_that_ignores_it(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            results = self._drain({p: 500 for p in self.PRIMARIES}, budget=150)
+        self.assertEqual(results, [])
+
+
+
+class TestSerialDrainAdmitsAgainstScratch(unittest.TestCase):
+    """The ``--jobs 1`` drain: same rule, in this process."""
+
+    A, B, C = tuple(f"sub-{i:02d}/eeg/sub-{i:02d}_task-rest_eeg.set" for i in range(1, 4))
+
+    def setUp(self):
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.01
+
+    def _run(self, peaks, budget, order=None):
+        ran, results, deferred = [], [], {}
+
+        def run_one(p):
+            ran.append(p)
+            return {"ok": True, "primary": p}
+
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            generate_zarr.drain_serially(
+                list(order or peaks), peaks,
+                budget if callable(budget) else (lambda _in_flight: budget),
+                None, deferred, run_one, lambda r, i: results.append((i, r["primary"])),
+            )
+        return ran, results, deferred, out.getvalue()
+
+    def test_the_first_fitting_and_the_second_not_converts_one_and_defers_one(self):
+        ran, results, deferred, _ = self._run({self.A: 50, self.B: 500}, 150)
+        self.assertEqual(ran, [self.A])
+        self.assertEqual(results, [(1, self.A)])
+        self.assertEqual(list(deferred), [self.B])
+        self.assertTrue(deferred[self.B].startswith("deferred: needs"))
+
+    def test_a_giant_at_the_head_does_not_hold_a_smaller_recording_behind_it(self):
+        ran, _, deferred, _ = self._run({self.B: 500, self.A: 50}, 150)
+        self.assertEqual(ran, [self.A])
+        self.assertEqual(list(deferred), [self.B])
+
+    def test_everything_that_fits_runs_in_order(self):
+        ran, results, deferred, _ = self._run({self.A: 10, self.B: 20, self.C: 30}, 150)
+        self.assertEqual(ran, [self.A, self.B, self.C])
+        self.assertEqual([i for i, _ in results], [1, 2, 3])
+        self.assertEqual(deferred, {})
+
+    def test_a_transient_spike_does_not_defer(self):
+        reads = {"n": 0}
+
+        def spiky(_in_flight):
+            reads["n"] += 1
+            return 0 if reads["n"] <= 2 else 10**6
+
+        ran, _, deferred, _ = self._run({self.A: 10, self.B: 20}, spiky)
+        self.assertEqual(ran, [self.A, self.B])
+        self.assertEqual(deferred, {})
+
+    def test_a_sustained_shortage_defers_all_after_the_resamples(self):
+        reads = {"n": 0}
+
+        def full(_in_flight):
+            reads["n"] += 1
+            return 0
+
+        ran, _, deferred, log = self._run({self.A: 10, self.B: 20}, full)
+        self.assertEqual(ran, [])
+        self.assertEqual(len(deferred), 2)
+        self.assertEqual(reads["n"], 1 + generate_zarr.SCRATCH_DEFER_RESAMPLES)
+        self.assertIn(self.A, log)
+        self.assertIn(self.B, log)
+
+
+class TestHeldMemoryFailureIsReportedWhenTheRetryCannotFit(unittest.TestCase):
+    """A recording that failed its memory budget WAS attempted. If the serial retry
+    then cannot get scratch for it, the failure it already had is reported, not
+    replaced by "not attempted" at the index's coverage balance."""
+
+    MIB = 1024**2
+
+    def setUp(self):
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.01
+
+    def _run(self, retry_budget):
+        small = "sub-01/eeg/sub-01_task-rest_eeg.set"
+        big = "sub-02/eeg/sub-02_task-rest_need-300_eeg.set"
+        peaks = {small: 100 * self.MIB, big: 100 * self.MIB}
+        phase = {"retry": False}
+        results, deferred = [], {}
+
+        def memory_retry():
+            phase["retry"] = True
+            return {"mem_budget": 512 * self.MIB}, 512 * self.MIB
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            _drain_with_admission(
+                [small, big], peaks, 2, 10**12, {"mem_budget": 100 * self.MIB},
+                lambda r, i: results.append(r), worker=_budget_worker,
+                memory_retry=memory_retry, scratch_peaks={small: 1, big: 1},
+                scratch_budget=lambda _in_flight: retry_budget if phase["retry"] else 10**9,
+                deferred=deferred,
+            )
+        return small, big, {r["primary"]: r for r in results}, deferred
+
+    def test_a_retry_with_room_converts_it(self):
+        small, big, results, deferred = self._run(retry_budget=10**9)
+        self.assertTrue(results[big]["ok"])
+        self.assertEqual(deferred, {})
+
+    def test_a_retry_without_room_reports_the_memory_failure_it_already_had(self):
+        small, big, results, deferred = self._run(retry_budget=0)
+        self.assertTrue(results[small]["ok"])
+        self.assertFalse(results[big]["ok"])
+        self.assertEqual(results[big]["code"], "recording_memory_exceeded")
+        self.assertNotIn(big, deferred, "it was attempted, so it is not a deferral")
 
 class TestSerialMemoryRetry(unittest.TestCase):
     """#1483: a recording that exceeds its memory reserve is retried ONCE, alone,
@@ -9031,6 +10792,131 @@ class TestConvertOneEndToEnd(unittest.TestCase):
         self.assertEqual(result["entry"]["path"], self.primary)
 
 
+class TestConvertOneStreamsIntoItsOwnScratch(unittest.TestCase):
+    """The real exporter, driven by the real `convert_one`: the memmap directory it
+    is handed is the recording's own `.scratch` sibling of its store, and nothing
+    of it, the store or the work directory outlives the call. `stream_to_zarr` is
+    wrapped only to see its arguments; the real function still does the work."""
+
+    PRIMARY = "sub-01/meg/sub-01_task-rest_meg.fif"
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import biosigio  # noqa: F401
+            import mne  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = os.path.join(self._tmp.name, "repo")
+        os.makedirs(os.path.join(self.repo, "sub-01", "meg"))
+        build_real_fif(os.path.join(self.repo, self.PRIMARY))
+        bindir = os.path.join(self._tmp.name, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        path = os.environ["PATH"]
+        os.environ["PATH"] = bindir + os.pathsep + path
+        self.addCleanup(os.environ.__setitem__, "PATH", path)
+        # Any size streams: the point is the streaming path, not the threshold.
+        self.addCleanup(setattr, generate_zarr, "STREAM_MIN_BYTES", generate_zarr.STREAM_MIN_BYTES)
+        generate_zarr.STREAM_MIN_BYTES = 0
+
+    def test_the_memmap_goes_to_the_recordings_own_scratch_and_is_removed(self):
+        import biosigio
+
+        work_root = os.path.join(self._tmp.name, "work")
+        os.makedirs(work_root)
+        work, store_local, scratch = generate_zarr.recording_scratch_paths(
+            work_root, self.PRIMARY
+        )
+        seen: dict = {}
+        real = biosigio.stream_to_zarr
+
+        def spy(*args, **kwargs):
+            seen["scratch_dir"] = kwargs.get("scratch_dir")
+            seen["existed"] = os.path.isdir(kwargs.get("scratch_dir") or "")
+            seen["store"] = args[1] if len(args) > 1 else None
+            return real(*args, **kwargs)
+
+        biosigio.stream_to_zarr = spy
+        self.addCleanup(setattr, biosigio, "stream_to_zarr", real)
+        generate_zarr._init_worker({
+            "repo": self.repo, "bucket": "nemar-test", "dataset_id": "on000117",
+            "head": "b" * 40, "head_files": {self.PRIMARY}, "local": True,
+            "tmp": work_root, "updated": "2026-10-06T00:00:00Z",
+            "contract_base": "https://zarr.nemar.org", "engine_version": "3",
+            "dataset_row": None, "provenance_fetch_failed": False,
+            "mem_budget": None, "hard_ceiling": None, "projections": {},
+        })
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = convert_one(self.PRIMARY)
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertTrue(seen, "the streaming path was not taken")
+        self.assertEqual(seen["scratch_dir"], scratch)
+        self.assertEqual(seen["scratch_dir"], store_local + generate_zarr.SCRATCH_DIR_SUFFIX)
+        self.assertTrue(
+            seen["existed"], "the directory must exist before the exporter makes a temp dir in it"
+        )
+        self.assertEqual(os.path.dirname(seen["scratch_dir"]), os.path.dirname(seen["store"]))
+        for path in (work, store_local, scratch):
+            self.assertFalse(os.path.exists(path), f"{path} outlived convert_one")
+        stores_parent = os.path.dirname(store_local)
+        leftovers = [n for n in os.listdir(stores_parent)] if os.path.isdir(stores_parent) else []
+        self.assertEqual(leftovers, [], "nothing may remain beside the store")
+
+
+    def test_a_volume_that_fills_under_the_exporter_is_an_uncoded_failure_and_leaves_nothing(self):
+        # The case the admission gate exists to avoid, and what happens when it
+        # misses: the exporter has made its memmap and half a store when the volume
+        # fills. Today that is an uncoded infrastructure failure, which spends one of
+        # a recording's five attempts (whether it should defer instead is a design
+        # question, not decided here). Whatever the classification, nothing may stay
+        # on the disk that just filled.
+        #
+        # The exporter is made to raise at the library boundary: a really full volume
+        # needs root to create. Everything after that point is the real convert_one.
+        import biosigio
+
+        work_root = os.path.join(self._tmp.name, "work")
+        os.makedirs(work_root)
+        work, store_local, scratch = generate_zarr.recording_scratch_paths(
+            work_root, self.PRIMARY
+        )
+        real = biosigio.stream_to_zarr
+
+        def full_volume(*args, **kwargs):
+            with open(os.path.join(kwargs["scratch_dir"], "memmap.dat"), "wb") as fh:
+                fh.write(b"x" * 4096)
+            os.makedirs(args[1], exist_ok=True)
+            with open(os.path.join(args[1], "zarr.json"), "wb") as fh:
+                fh.write(b"{}")
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+        biosigio.stream_to_zarr = full_volume
+        self.addCleanup(setattr, biosigio, "stream_to_zarr", real)
+        generate_zarr._init_worker({
+            "repo": self.repo, "bucket": "nemar-test", "dataset_id": "on000117",
+            "head": "b" * 40, "head_files": {self.PRIMARY}, "local": True,
+            "tmp": work_root, "updated": "2026-10-07T00:00:00Z",
+            "contract_base": "https://zarr.nemar.org", "engine_version": "3",
+            "dataset_row": None, "provenance_fetch_failed": False,
+            "mem_budget": None, "hard_ceiling": None, "projections": {},
+        })
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = convert_one(self.PRIMARY)
+        self.assertFalse(result["ok"])
+        self.assertIsNone(result["code"], "uncoded, so it is an infrastructure failure")
+        self.assertIn("No space left on device", result["error"])
+        for path in (work, store_local, scratch):
+            self.assertFalse(os.path.exists(path), f"{path} outlived the failed conversion")
+
+
 class TestConvertOneFifSidecarOvercount(unittest.TestCase):
     """on000117 through `convert_one`: an MEG channels.tsv listing channels its
     FIF never had (CHPI coils, EEG inherited from another run) was refused as
@@ -10276,6 +12162,13 @@ class TestPendingRetryWorklist(unittest.TestCase):
         self.assertEqual(self.worklist(index)[0], [self.B])
 
 
+def generate_zarr_queue_shortest() -> int:
+    """The queue's shortest re-queue delay, from the queue module itself."""
+    import zarr_queue
+
+    return zarr_queue.PENDING_BACKOFF_SECONDS[0]
+
+
 class TestMainRetryPendingRound(unittest.TestCase):
     """`--retry-pending` through `main()` (#1483): real recordings converted by
     the real exporter, the real `aws` stand-in over local files, and a local
@@ -10382,11 +12275,11 @@ class TestMainRetryPendingRound(unittest.TestCase):
         os.makedirs(os.path.dirname(self.b_object), exist_ok=True)
         build_real_edf(os.path.dirname(self.b_object), "B", seconds=10)
 
-    def run_main(self, *extra) -> tuple[int, str, dict]:
+    def run_main(self, *extra, clean: bool = True) -> tuple[int, str, dict]:
         argv = [
             "generate_zarr.py", "--dataset-id", "on008083", "--repo-dir", self.repo,
             "--bucket", "nemar-test", "--callback-out", self.callback, "--local",
-            "--api-base", self.api, "--jobs", "2", "--clean", *extra,
+            "--api-base", self.api, "--jobs", "2", *(["--clean"] if clean else []), *extra,
         ]
         saved, sys.argv = sys.argv, argv
         try:
@@ -10461,6 +12354,738 @@ class TestMainRetryPendingRound(unittest.TestCase):
         self.assertEqual(rc, 0, log)
         self.assertNotIn("--retry-pending", log)
         self.assertIn(f"converted {self.A}", log)
+
+
+    def _no_scratch(self):
+        """Headroom larger than any volume leaves a budget of zero, so no recording
+        fits and every one is deferred. Returns a function that gives the room
+        back, for a test that goes on to a run with space."""
+        saved = generate_zarr.SCRATCH_HEADROOM_BYTES
+        generate_zarr.SCRATCH_HEADROOM_BYTES = 10**18
+        self.addCleanup(setattr, generate_zarr, "SCRATCH_HEADROOM_BYTES", saved)
+        # The re-samples before a deferral are ADMISSION_RECHECK_SECONDS apart.
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.01
+        return lambda: setattr(generate_zarr, "SCRATCH_HEADROOM_BYTES", saved)
+
+    def _index_bytes(self) -> bytes:
+        with open(os.path.join(self.s3, "on008083_zarr_index.json"), "rb") as fh:
+            return fh.read()
+
+    def _body(self) -> dict:
+        with open(self.callback) as fh:
+            return json.load(fh)
+
+    def _git(self, *args) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=self.repo, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    def _assert_deferred_without_spending_attempts(self, rc, log, body):
+        self.assertEqual(rc, 0, log)
+        self.assertIn("deferred ", log)
+        self.assertNotIn("conversion(s) failed", log)
+        self.assertNotIn(f"converted {self.A}", log)
+        self.assertNotIn(f"converted {self.B}", log)
+        index = self.published_index()
+        self.assertEqual(index["stores"], [])
+        self.assertEqual(
+            sorted((p["path"], p["reason"], p["attempts"]) for p in index["pending"]),
+            [(self.A, "not_attempted", 0), (self.B, "not_attempted", 0)],
+        )
+        self.assertEqual(body["not_attempted_count"], 2)
+        self.assertEqual(body["status"], "ready")
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_a_pool_run_that_cannot_fit_scratch_defers_instead_of_failing(self):
+        self._no_scratch()
+        self._assert_deferred_without_spending_attempts(*self.run_main("--retry-pending"))
+
+    def test_a_deferred_retry_spends_no_attempt(self):
+        # The contrast with `test_a_round_that_converts_nothing_still_advances_the
+        # _attempts`: there B was tried and failed, so its count went to 2. Here the
+        # node had no room to try, so the count stays at 1 and nothing is closer to
+        # `retry_exhausted` than before. A disk-full node must not be able to
+        # promote healthy recordings into permanent failures.
+        self.first_round()
+        self._no_scratch()
+        rc, log, body = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("deferred ", log)
+        index = self.published_index()
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A])
+        self.assertEqual([(p["path"], p["attempts"]) for p in index["pending"]], [(self.B, 1)])
+        self.assertEqual(index["failures"], [])
+        (entry,) = index["pending"]
+        # Re-reasoned as not attempted, with the history kept behind the note.
+        self.assertEqual(entry["reason"], "not_attempted")
+        self.assertTrue(entry["last_error"].startswith("deferred: needs"), entry["last_error"])
+        self.assertIn("; last error:", entry["last_error"])
+        self.assertEqual(body["pending_count"], 1)
+        self.assertEqual(body["not_attempted_count"], 1)
+
+    def test_an_all_deferred_clean_run_keeps_the_served_store(self):
+        # The run hallu always makes: --clean, so the merge is handed no prior. A
+        # previously served store must not drop out of the index because this run
+        # could not rebuild it, and a run with nothing to say must not
+        # rewrite the index at all.
+        self.first_round()
+        self._no_scratch()
+        rc, log, body = self.run_main()  # no --retry-pending: a full --clean rebuild
+        self.assertEqual(rc, 0, log)
+        self.assertIn("deferred ", log)
+        index = self.published_index()
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A], "A is still served")
+        self.assertEqual(index["store_count"], 1)
+        self.assertEqual(body["store_count"], 1)
+        (entry,) = index["pending"]
+        self.assertEqual(
+            (entry["path"], entry["reason"], entry["attempts"]), (self.B, "not_attempted", 1)
+        )
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+        # The same situation again: the index already says it, so it is left alone.
+        before = self._index_bytes()
+        rc, log, body = self.run_main()
+        self.assertEqual(rc, 0, log)
+        self.assertIn("left untouched", log)
+        self.assertEqual(self._index_bytes(), before)
+        self.assertEqual(body["status"], "ready")
+        self.assertEqual(body["store_count"], 1)
+        self.assertEqual((body["pending_count"], body["not_attempted_count"]), (1, 1))
+
+    def test_a_retry_round_that_defers_everything_leaves_the_index_alone(self):
+        self.first_round()
+        self._no_scratch()
+        self.run_main("--retry-pending")  # corrects B's reason and says why, once
+        before = self._index_bytes()
+        rc, log, body = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("left untouched", log)
+        self.assertEqual(self._index_bytes(), before)
+        self.assertEqual(body["store_count"], 1)
+
+    def _queue(self):
+        """The real queue, holding the dataset as a pending job."""
+        from zarr_queue import connect, reconcile
+
+        conn = connect(os.path.join(self.dir, "q.db"))
+        self.addCleanup(conn.close)
+        reconcile(conn, [("on008083", "v1.0.0")], 3600)
+        return conn
+
+    @staticmethod
+    def _round(conn, body):
+        """One run's callback numbers into the real `mark_done`; the row after."""
+        from zarr_queue import claim_next, mark_done
+
+        conn.execute("UPDATE jobs SET status='pending' WHERE dataset_id='on008083'")
+        conn.commit()
+        claim_next(conn)
+        mark_done(
+            conn, "on008083", "v1.0.0",
+            pending_count=body["pending_count"],
+            not_attempted_count=body["not_attempted_count"],
+        )
+        conn.commit()
+        return conn.execute(
+            "SELECT retry_round, next_retry_at, pending_count FROM jobs "
+            "WHERE dataset_id='on008083'"
+        ).fetchone()
+
+    def test_a_deferral_spends_no_queue_retry_round_end_to_end(self):
+        # B is pending as an attempted failure: two real rounds advance the queue
+        # to round 2 (a six-hour backoff). The deferred rounds that follow report
+        # the recording as not attempted, so the real `mark_done` leaves the round
+        # where it was and re-queues at the shortest delay.
+        self.first_round()
+        first = self._body()
+        rc, log, second = self.run_main("--retry-pending")  # B fails again: attempt 2
+        self.assertEqual(rc, 0, log)
+        self.assertEqual((second["pending_count"], second["not_attempted_count"]), (1, 0))
+        self._no_scratch()
+        rc, log, deferred_once = self.run_main("--retry-pending")  # publishes the correction
+        self.assertEqual(rc, 0, log)
+        rc, log, deferred_twice = self.run_main("--retry-pending")  # index left untouched
+        self.assertIn("left untouched", log)
+        for body in (deferred_once, deferred_twice):
+            self.assertEqual(
+                (body["pending_count"], body["not_attempted_count"]), (1, 1),
+                "the deferred recording must be counted as not attempted",
+            )
+        conn = self._queue()
+        self._round(conn, first)
+        row = self._round(conn, second)
+        self.assertEqual(row["retry_round"], 2)
+        shortest = generate_zarr_queue_shortest()
+        for deferral in (deferred_once, deferred_twice):
+            row = self._round(conn, deferral)
+            self.assertEqual(row["retry_round"], 2, "a deferral advanced the retry round")
+            self.assertLessEqual(row["next_retry_at"] - int(time.time()), shortest + 5)
+
+    def test_an_attempted_failure_still_advances_the_round_for_contrast(self):
+        self.first_round()
+        first = self._body()
+        rc, log, second = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        conn = self._queue()
+        self._round(conn, first)
+        self.assertEqual(self._round(conn, second)["retry_round"], 2)
+
+    def test_a_deferred_stale_store_is_listed_pending_and_rebuilt_later(self):
+        # The provenance changed (a new license), so A's published store is stale.
+        # A deferral must not leave it in the index claiming the new commit and a
+        # complete dataset: it is pending, and the next round rebuilds it.
+        self.first_round()
+        self.row = {**self.row, "license": "CC-BY-4.0"}
+        restore = self._no_scratch()
+        rc, log, body = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("provenance changed", log)
+        index = self.published_index()
+        self.assertEqual(index["stores"], [], "the stale store left the index")
+        self.assertEqual(
+            sorted((p["path"], p["reason"]) for p in index["pending"]),
+            [(self.A, "not_attempted"), (self.B, "not_attempted")],
+        )
+        self.assertEqual((body["pending_count"], body["not_attempted_count"]), (2, 2))
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+        restore()
+        self.materialize_b()
+        rc, log, _ = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("converting only 2 pending recording(s)", log)
+        index = self.published_index()
+        self.assertEqual(sorted(s["path"] for s in index["stores"]), [self.A, self.B])
+        self.assertEqual(index["license"], "CC-BY-4.0")
+        self.assertEqual(index["pending"], [])
+
+    def test_an_incremental_run_that_defers_holds_the_commit_back(self):
+        # Without --clean the worklist is a diff from the index's commit, so a
+        # deferred recording has to leave that commit where it was or the next run
+        # would diff from a commit the recording was never built at.
+        self.first_round()
+        first_commit = self._git("rev-parse", "HEAD")
+        build_real_edf(os.path.join(self.repo, "sub-01", "eeg"), "sub-01_task-rest_eeg", seconds=12)
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "A changes")
+        second_commit = self._git("rev-parse", "HEAD")
+        restore = self._no_scratch()
+        rc, log, body = self.run_main(clean=False)
+        self.assertEqual(rc, 0, log)
+        self.assertIn("full=False", log)
+        index = self.published_index()
+        self.assertEqual(index["source_commit"], first_commit, "the commit is held back")
+        self.assertNotEqual(index["source_commit"], second_commit)
+        self.assertEqual(index["stores"], [], "A's store predates the change")
+        self.assertEqual(
+            sorted(p["path"] for p in index["pending"]), [self.A, self.B]
+        )
+        restore()
+        rc, log, _ = self.run_main(clean=False)
+        self.assertEqual(rc, 0, log)
+        self.assertIn(f"converted {self.A}", log)
+        index = self.published_index()
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A])
+        self.assertEqual(index["source_commit"], second_commit)
+
+    def _manifest(self) -> dict:
+        with open(os.path.join(self.s3, "on008083_zarr_manifest.json")) as fh:
+            return json.load(fh)
+
+    def _bigger_a_streams_with_an_absurd_charge(self):
+        """A is re-recorded larger than B's pointer and made to stream, with a charge
+        no volume holds, so A is the recording the gate defers while B (30 bytes of
+        pointer, in memory) still fits. Applied AFTER the first round, which must
+        convert A normally."""
+        saved = (generate_zarr.STREAM_EDF_MIN_BYTES, generate_zarr.SCRATCH_STREAM_FACTOR)
+
+        def restore():
+            generate_zarr.STREAM_EDF_MIN_BYTES, generate_zarr.SCRATCH_STREAM_FACTOR = saved
+
+        self.addCleanup(restore)
+        generate_zarr.STREAM_EDF_MIN_BYTES = 1000
+        generate_zarr.SCRATCH_STREAM_FACTOR = 1e12
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.01
+
+    def test_an_unreadable_catalog_does_not_drop_a_served_store(self):
+        # With the catalog down, provenance cannot be compared. The store the index
+        # serves must stay: dropping it because the catalog blinked is worse than
+        # serving it, and a rebuild would have given A null provenance.
+        self.first_round()
+        self._no_scratch()
+        rc, log, body = self.run_main("--api-base", "http://127.0.0.1:9")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("deferred ", log)
+        index = self.published_index()
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A], "A is still served")
+        self.assertEqual((index["store_count"], body["store_count"]), (1, 1))
+        check_index_invariant(index)
+
+    def test_a_partial_deferral_under_clean_keeps_the_served_stores_manifest_entry(self):
+        # --clean hands the manifest no prior, so a store the index KEPT lost its
+        # source_key and size: the manifest listed [B] while the index served [A, B].
+        build_real_edf(os.path.join(self.repo, "sub-01", "eeg"), "sub-01_task-rest_eeg", seconds=30)
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "A is longer")
+        self.first_round()
+        # Local mode has no annex key, so give A's published entry the content a real
+        # run records, to see it survive a run that does not rebuild A.
+        manifest = self._manifest()
+        marked = {
+            "zarr": store_rel_for(self.A),
+            "source_key": "SHA256E-s48000--" + "a" * 64 + ".edf",
+            "size_bytes": 48000,
+        }
+        manifest["stores"] = [
+            marked if e["zarr"] == marked["zarr"] else e for e in manifest["stores"]
+        ]
+        with open(os.path.join(self.s3, "on008083_zarr_manifest.json"), "w") as fh:
+            json.dump(manifest, fh)
+        entry = marked
+        self.materialize_b()
+        self._bigger_a_streams_with_an_absurd_charge()
+        rc, log, body = self.run_main()  # --clean, no --retry-pending
+        self.assertEqual(rc, 0, log)
+        self.assertIn(f"converted {self.B}", log)
+        self.assertNotIn(f"converted {self.A}", log)
+        index = self.published_index()
+        self.assertEqual(sorted(s["path"] for s in index["stores"]), [self.A, self.B])
+        manifest = self._manifest()
+        by_rel = {e["zarr"]: e for e in manifest["stores"]}
+        self.assertEqual(
+            sorted(by_rel), sorted(e["zarr"] for e in index["stores"]),
+            "the manifest and the index must list the same stores",
+        )
+        self.assertEqual(by_rel[store_rel_for(self.A)], entry, "A's entry carried unchanged")
+        validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
+
+    def test_a_partial_deferral_with_no_published_manifest_warns(self):
+        build_real_edf(os.path.join(self.repo, "sub-01", "eeg"), "sub-01_task-rest_eeg", seconds=30)
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "A is longer")
+        self.first_round()
+        os.remove(os.path.join(self.s3, "on008083_zarr_manifest.json"))
+        self.materialize_b()
+        self._bigger_a_streams_with_an_absurd_charge()
+        rc, log, _ = self.run_main()
+        self.assertEqual(rc, 0, log)
+        self.assertIn("::warning::no published manifest to carry 1 kept store(s)", log)
+        self.assertEqual(
+            sorted(s["path"] for s in self.published_index()["stores"]), [self.A, self.B]
+        )
+
+    def test_the_callback_of_a_failed_run_counts_what_it_deferred(self):
+        # B is attempted and fails (its content is absent); A is deferred. The
+        # failure callback must report the deferred recording as not attempted.
+        self._bigger_a_streams_with_an_absurd_charge()
+        rc, log, body = self.run_main()
+        self.assertEqual(rc, 1, log)
+        self.assertEqual(body["status"], "failed")
+        self.assertEqual(body["not_attempted_count"], 1)
+        self.assertEqual(body["pending_count"], 2)  # B, attempted and failed, and A, deferred
+
+    def _s3_snapshot(self) -> dict[str, tuple[int, int, str]]:
+        """Every object in the stand-in bucket: size, mtime and content hash. Equal
+        before and after means no object was written, replaced or deleted."""
+        snapshot = {}
+        for name in sorted(os.listdir(self.s3)):
+            full = os.path.join(self.s3, name)
+            if os.path.isfile(full):
+                with open(full, "rb") as fh:
+                    digest = hashlib.sha256(fh.read()).hexdigest()
+                snapshot[name] = (os.path.getsize(full), os.stat(full).st_mtime_ns, digest)
+        return snapshot
+
+    def test_an_unchanged_run_posts_ready_with_the_commit_the_index_names_and_writes_nothing(self):
+        # Nothing was rebuilt, so no S3 object may be written and the row must agree
+        # with the document it describes (the commit the index names, not this HEAD).
+        # The run still ends with a normal `ready` body, which hallu-zarr.sh POSTs:
+        # it began with a `converting` signal that sets zarr_status to `pending`, and a
+        # dataset that serves stores must not be left there (it would lose its index
+        # URL and drop out of every "has a Zarr copy" filter).
+        self._no_scratch()
+        rc, log, first = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        index_commit = self.published_index()["source_commit"]
+        self._git("commit", "-q", "--allow-empty", "-m", "an unrelated commit")
+        head = self._git("rev-parse", "HEAD")
+        self.assertNotEqual(head, index_commit)
+        before = self._s3_snapshot()
+        self.assertTrue(before, "the first run published something to compare against")
+        rc, log, body = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("left untouched", log)
+        self.assertEqual(self._s3_snapshot(), before, "an S3 object was written")
+        self.assertEqual(body["status"], "ready")
+        self.assertEqual(body["commit"], index_commit)
+        self.assertNotEqual(body["commit"], head)
+        self.assertEqual((body["pending_count"], body["not_attempted_count"]), (2, 2))
+
+    def _make_b_enormous(self):
+        """B's pointer now declares 500 GB, so admission charges it more than any
+        volume holds while A (a real 10 s EDF) still fits: the first recording
+        fits and the second does not."""
+        link = os.path.join(self.repo, self.B)
+        os.remove(link)
+        key = "SHA256E-s500000000000--" + "b" * 32 + ".edf"
+        os.symlink(f"../../.git/annex/objects/bb/bb/{key}/{key}", link)
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "B is enormous")
+
+    def _assert_a_converts_and_b_is_deferred(self, rc, log, body):
+        self.assertEqual(rc, 0, log)
+        self.assertIn(f"converted {self.A}", log)
+        self.assertNotIn(f"converted {self.B}", log)
+        self.assertIn(f"::error::{self.B} can never fit this volume", log)
+        index = self.published_index()
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A])
+        (entry,) = index["pending"]
+        self.assertEqual(
+            (entry["path"], entry["reason"], entry["attempts"]), (self.B, "not_attempted", 0)
+        )
+        self.assertTrue(entry["last_error"].startswith("deferred: needs"), entry["last_error"])
+        self.assertEqual((body["pending_count"], body["not_attempted_count"]), (1, 1))
+        self.assertEqual(body["converted"], [store_rel_for(self.A)])
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_a_pool_run_converts_what_fits_and_defers_what_does_not(self):
+        self._make_b_enormous()
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.01
+        self._assert_a_converts_and_b_is_deferred(*self.run_main("--retry-pending"))
+
+    def test_a_serial_run_converts_what_fits_and_defers_what_does_not(self):
+        self._make_b_enormous()
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.01
+        self._assert_a_converts_and_b_is_deferred(*self.run_main("--retry-pending", "--jobs", "1"))
+
+    def test_a_serial_run_that_cannot_fit_scratch_defers_instead_of_failing(self):
+        self._no_scratch()
+        self._assert_deferred_without_spending_attempts(
+            *self.run_main("--retry-pending", "--jobs", "1")
+        )
+
+
+class TestSerialAdmissionBoundary(unittest.TestCase):
+    """`--jobs 1` admits a recording whose charge EQUALS the budget, like the pool."""
+
+    def _drain(self, peak, budget):
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.0
+        ran: list[str] = []
+        deferred: dict[str, str] = {}
+        with contextlib.redirect_stdout(io.StringIO()):
+            generate_zarr.drain_serially(
+                ["a"], {"a": peak}, lambda _in_flight: budget, None, deferred,
+                lambda p: {"ok": True, "primary": p}, lambda r, _i: ran.append(r["primary"]),
+            )
+        return ran, deferred
+
+    def test_a_charge_equal_to_the_budget_runs(self):
+        self.assertEqual(self._drain(100, 100), (["a"], {}))
+
+    def test_a_charge_one_byte_over_the_budget_is_deferred(self):
+        ran, deferred = self._drain(101, 100)
+        self.assertEqual(ran, [])
+        self.assertEqual(list(deferred), ["a"])
+
+
+class TestNeverFitThreshold(unittest.TestCase):
+    """A recording can never fit when its charge exceeds the volume's TOTAL minus the
+    headroom; one that merely does not fit now is a note, not an operator error."""
+
+    GIB = 1024**3
+
+    def _defer(self, charge):
+        self.addCleanup(
+            setattr, generate_zarr, "SCRATCH_HEADROOM_BYTES", generate_zarr.SCRATCH_HEADROOM_BYTES
+        )
+        generate_zarr.SCRATCH_HEADROOM_BYTES = 10 * self.GIB
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            generate_zarr.defer_unfit(
+                ["a"], {"a": charge}, 5 * self.GIB, lambda: (50 * self.GIB, 100 * self.GIB), {}
+            )
+        return out.getvalue()
+
+    def test_a_charge_that_fits_the_volume_minus_headroom_exactly_is_only_deferred(self):
+        log = self._defer(90 * self.GIB)  # the 100 GiB volume less the 10 GiB headroom
+        self.assertNotIn("can never fit", log)
+        self.assertIn("::warning::deferring a: charged 90 GiB", log)
+
+    def test_one_byte_more_can_never_fit_and_is_an_error(self):
+        log = self._defer(90 * self.GIB + 1)
+        self.assertIn("::error::a can never fit this volume", log)
+        self.assertIn("(1 can never fit this volume)", log)
+
+
+class TestOrphanKillNeverTouchesThisProcess(unittest.TestCase):
+    def test_this_process_is_not_signalled_even_when_its_command_line_matches(self):
+        # A fixture in /proc's layout names THIS pid with an argument under the run
+        # root, as an unlucky command line would. The recording `send_signal` shows
+        # who would have been killed; it must be nobody here.
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as proc:
+            os.makedirs(os.path.join(proc, str(os.getpid())))
+            with open(os.path.join(proc, str(os.getpid()), "cmdline"), "wb") as fh:
+                fh.write(b"aws\0s3\0cp\0" + os.path.join(root, "work", "x").encode() + b"\0")
+            signalled: list[int] = []
+            report = generate_zarr.kill_orphans_under(
+                root, proc_root=proc, wait_seconds=0.1,
+                send_signal=lambda pid, _sig: signalled.append(pid),
+            )
+        self.assertEqual(signalled, [])
+        self.assertEqual(report.killed, [])
+        self.assertEqual(report.scanned, 1)
+
+
+class TestPoolBreakWarningContract(unittest.TestCase):
+    """The one line a pool break prints, as an operator reads it."""
+
+    GIB = 1024**3
+    PRIMARY = "sub-01/eeg/sub-01_task-a_eeg.vhdr"
+
+    @staticmethod
+    def _readings(*values):
+        """A volume probe answering ``values`` in order, then the last one again, so a
+        further probe never raises StopIteration into the code under test."""
+        remaining = list(values)
+        return lambda: remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+    def _warning(self, volume):
+        with (
+            tempfile.TemporaryDirectory() as root,
+            tempfile.TemporaryDirectory() as empty_proc,
+            contextlib.redirect_stdout(io.StringIO()) as out,
+        ):
+            generate_zarr.reclaim_after_pool_break(
+                root, [self.PRIMARY], volume, proc_root=empty_proc
+            )
+        return out.getvalue()
+
+    def test_the_warning_gives_the_volume_before_and_after_the_reclaim(self):
+        log = self._warning(
+            self._readings((200 * self.GIB, 500 * self.GIB), (260 * self.GIB, 500 * self.GIB))
+        )
+        self.assertRegex(
+            log,
+            r"(?m)^::warning::worker pool broke with 1 recording\(s\) in flight; "
+            r"scratch free 200 GiB before the reclaim and 260 GiB after, of 500 GiB; ",
+        )
+
+    def test_a_volume_that_cannot_be_read_says_the_free_space_is_unreadable(self):
+        # No probe at all, and a probe that answers None (the real unreadable case:
+        # statvfs failed on the scratch volume).
+        for label, volume in (("no probe", None), ("a probe returning None", lambda: None)):
+            with self.subTest(label):
+                self.assertRegex(
+                    self._warning(volume),
+                    r"(?m)^::warning::worker pool broke with 1 recording\(s\) in flight; "
+                    r"scratch free space unreadable; ",
+                )
+
+    def test_a_probe_that_fails_only_after_the_reclaim_is_unreadable_too(self):
+        log = self._warning(self._readings((200 * self.GIB, 500 * self.GIB), None))
+        self.assertIn("scratch free space unreadable;", log)
+
+    def test_a_break_inside_a_drain_reads_the_drains_own_volume(self):
+        # The drain hands its volume probe to the reclaim: a run whose probe works
+        # must not report the free space as unreadable.
+        boom = "sub-boom/eeg/sub-boom_task-rest_eeg.vhdr"
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()) as out:
+            _drain_with_admission(
+                [boom], {boom: 1024}, 1, 10**9, {"tmp": tmp},
+                lambda r, i: None, worker=_scratch_worker,
+                scratch_volume=lambda: (200 * self.GIB, 500 * self.GIB),
+            )
+        self.assertRegex(
+            out.getvalue(),
+            r"scratch free 200 GiB before the reclaim and 200 GiB after, of 500 GiB",
+        )
+
+
+def _fixture_only(cls):
+    """Keep what ``cls`` inherits from `TestMainRetryPendingRound` (a real repo, the
+    real exporter, the `aws` stand-in over local files, a local catalog) without
+    re-running that class's own tests: the loaders skip a non-callable attribute."""
+    for name in dir(cls):
+        if name.startswith("test") and name not in cls.__dict__:
+            setattr(cls, name, None)
+    return cls
+
+
+@_fixture_only
+class TestDeferredRunsAgainstALiveIndex(TestMainRetryPendingRound):
+    """What a run that defers recordings says about the dataset, checked against the
+    index it left on S3: a live index with a served store (A, with events), a pending
+    recording (B, with events) and a typed failure (C, an unreadable EDF)."""
+
+    C = "sub-03/eeg/sub-03_task-rest_eeg.edf"
+
+    def setUp(self):
+        super().setUp()
+        os.makedirs(os.path.join(self.repo, "sub-03", "eeg"))
+        with open(os.path.join(self.repo, self.C), "wb") as fh:
+            fh.write(b"this is not an EDF file\n" * 40)
+        for rel, onsets in (("sub-01/eeg/sub-01_task-rest_events.tsv", (0.5, 1.5, 2.5)),
+                            ("sub-02/eeg/sub-02_task-rest_events.tsv", (0.25, 0.75))):
+            with open(os.path.join(self.repo, rel), "w") as fh:
+                fh.write("onset\tduration\ttrial_type\n")
+                fh.writelines(f"{t}\t0.1\tgo\n" for t in onsets)
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "events and an unreadable recording")
+
+    def events_rows(self) -> list[dict]:
+        import pyarrow.parquet as pq
+
+        path = os.path.join(self.s3, "on008083_zarr_events.parquet")
+        return pq.read_table(path).to_pylist()
+
+    def _defer_b_then_publish(self) -> dict:
+        """The first run: A converts (with events), B is too large for any volume and
+        is deferred, C is an unreadable EDF and becomes a typed failure. Returns the
+        index it published."""
+        self._make_b_enormous()
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.01
+        index = self.first_round()
+        self.assertEqual([f["path"] for f in index["failures"]], [self.C])
+        self.assertTrue(index["errors"] > 0, "a live index with no errors proves nothing")
+        return index
+
+    def test_an_all_deferred_run_restates_what_the_live_index_says(self):
+        # The backend derives the dataset's row from this body (its error and failure
+        # counts, a bounded summary of pending and discovered counts, the ETag), so a
+        # field restated wrongly (a zero error count, no ETag) changes that row on every
+        # hourly tick of a recording that never fits. Not every field below reaches the
+        # row (the failure entries and the events row count do not); each is pinned
+        # here as part of the body the script POSTs.
+        live = self._defer_b_then_publish()
+        self._no_scratch()
+        before = self._s3_snapshot()
+        rc, log, body = self.run_main()
+        self.assertEqual(rc, 0, log)
+        self.assertIn("left untouched", log)
+        self.assertEqual(self._s3_snapshot(), before, "an S3 object was written")
+        self.assertEqual(body["status"], "ready")
+        self.assertEqual(body["errors"], live["errors"])
+        self.assertEqual(body["failure_count"], live["failure_count"])
+        self.assertEqual(
+            body["data_failures"],
+            [{"path": self.C, "code": "corrupt_or_truncated"}],
+            "the typed failure the index carries",
+        )
+        # Not deterministic: B is still owed, so the dataset is not all data failures.
+        self.assertIs(body["deterministic"], False)
+        self.assertEqual(
+            body["index_etag"], hashlib.md5(self._index_bytes()).hexdigest(),
+            "the ETag of the published index, unquoted",
+        )
+        self.assertEqual(body["commit"], live["source_commit"])
+        self.assertEqual(body["store_count"], live["store_count"])
+        self.assertEqual((body["pending_count"], body["not_attempted_count"]), (1, 1))
+        self.assertEqual(body["discovered_count"], 3)
+        self.assertEqual(body["events_row_count"], live["events_row_count"])
+        self.assertEqual(body["events_row_count"], 3)
+        self.assertEqual((body["converted"], body["removed"], body["failed"]), ([], [], []))
+
+    def test_an_all_deferred_run_reports_no_failure_of_its_own(self):
+        # Nothing was attempted, so nothing failed for a retryable reason: the
+        # driver's "N recording(s) failed for a RETRYABLE reason" line would otherwise
+        # repeat every hour for a recording that is only waiting for room.
+        self._defer_b_then_publish()
+        self._no_scratch()
+        rc, log, body = self.run_main()
+        self.assertEqual(rc, 0, log)
+        self.assertIn("left untouched", log)
+        self.assertEqual(body["pending_count"], 1)
+        self.assertEqual(body["retryable_failures"], 0)
+
+    def test_a_companion_pointer_with_no_size_makes_the_recording_charged_the_floor(self):
+        # B's primary pointer declares a small size, but a same-stem companion's
+        # pointer is a WORM key with no `-s` field, so the total cannot be trusted
+        # even though it is positive: the recording is charged at least
+        # SCRATCH_UNKNOWN_SIZE_BYTES. With a floor no volume holds it can never fit,
+        # while A (real files of known size) converts. Reading the size as known would
+        # charge B its few bytes and attempt it, and B has no content to convert.
+        link = os.path.join(self.repo, self.B)
+        os.remove(link)
+        sized = "SHA256E-s2000--" + "b" * 32 + ".edf"
+        os.symlink(f"../../.git/annex/objects/bb/bb/{sized}/{sized}", link)
+        companion = os.path.join(self.repo, "sub-02/eeg/sub-02_task-rest_eeg.json")
+        unsized = "WORM-m1700000000--sub-02_task-rest_eeg.json"
+        os.symlink(f"../../.git/annex/objects/cc/cc/{unsized}/{unsized}", companion)
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "B has a sized primary and an unsized companion")
+        self.addCleanup(
+            setattr, generate_zarr, "SCRATCH_UNKNOWN_SIZE_BYTES",
+            generate_zarr.SCRATCH_UNKNOWN_SIZE_BYTES,
+        )
+        generate_zarr.SCRATCH_UNKNOWN_SIZE_BYTES = 10**18
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.01
+        rc, log, _ = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("the size of 1 recording(s) could not be read from their pointers", log)
+        self.assertIn(f"(first: {self.B})", log)
+        self.assertIn(f"::error::{self.B} can never fit this volume", log)
+        self.assertIn(f"converted {self.A}", log)
+        index = self.published_index()
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A])
+        entry = next(p for p in index["pending"] if p["path"] == self.B)
+        self.assertEqual((entry["reason"], entry["attempts"]), ("not_attempted", 0))
+        self.assertTrue(entry["last_error"].startswith("deferred: needs"), entry["last_error"])
+
+    def test_a_kept_store_under_clean_carries_its_events_rows_beside_the_converted_ones(self):
+        # --clean rebuilds from scratch, so the rows of a store it deferred and the
+        # index kept have to come from the LIVE events.parquet: A's three rows from
+        # the first run, and B's two from this one. Losing A's would leave the index
+        # serving a store with no events behind it.
+        build_real_edf(os.path.join(self.repo, "sub-01", "eeg"), "sub-01_task-rest_eeg", seconds=30)
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "A is longer")
+        self.first_round()
+        self.assertEqual({r["store_path"] for r in self.events_rows()}, {store_rel_for(self.A)})
+        self.materialize_b()
+        self._bigger_a_streams_with_an_absurd_charge()
+        rc, log, body = self.run_main()  # --clean, no --retry-pending
+        self.assertEqual(rc, 0, log)
+        self.assertIn(f"converted {self.B}", log)
+        self.assertNotIn(f"converted {self.A}", log)
+        index = self.published_index()
+        self.assertEqual(sorted(s["path"] for s in index["stores"]), [self.A, self.B])
+        per_store: dict[str, int] = {}
+        for row in self.events_rows():
+            per_store[row["store_path"]] = per_store.get(row["store_path"], 0) + 1
+        self.assertEqual(per_store, {store_rel_for(self.A): 3, store_rel_for(self.B): 2})
+        self.assertEqual(index["events_row_count"], 5)
+        self.assertEqual(body["events_row_count"], 5)
+        self.assertEqual(body["events_stores_without_rows"], 0)
 
 
 class TestLiveAdmissionCeiling(unittest.TestCase):
