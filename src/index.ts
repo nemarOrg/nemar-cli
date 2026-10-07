@@ -360,18 +360,22 @@ async function main() {
   }
 
   // `nemar dataset release <id> --version X.Y.Z` must reach `release`, not
-  // the root --version (#1493); see lib/argv-shadowing.ts. A shadowed option
-  // written without a value is reported by the command that declares it, the
-  // way Commander reports any option missing its argument: the root would
-  // otherwise claim the bare flag and print the CLI version.
+  // the root --version (#1493); see lib/argv-shadowing.ts.
   let argv: string[];
   try {
     argv = bindShadowedOptionValues(program, rawArgs);
   } catch (err) {
     if (err instanceof MissingShadowedValueError || err instanceof MisplacedShadowedOptionError) {
+      // A mistyped option, reported the way Commander reports one. error()
+      // prints the message and EXITS; it never returns. Going through it runs
+      // the exitOverride installed by markCommanderExitsRecursively, whose
+      // markUsageExit() makes the exit handler skip the bug-report nudge: a
+      // wrong flag is not a bug.
       err.command.error(err.message, { code: err.code });
     }
-    throw err;
+    // Anything else is a defect in the pre-pass itself, not in the user's
+    // arguments: say so, instead of letting it read as a command failure.
+    throw new Error(`argv pre-pass failed: ${errorDetail(err)}`, { cause: err });
   }
   await program.parseAsync(argv, { from: "user" });
 }
