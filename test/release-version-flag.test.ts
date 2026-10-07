@@ -166,6 +166,23 @@ async function reach(argv: string[]): Promise<Reached> {
 }
 
 describe("bindShadowedOptionValues on the real command tree", () => {
+  // A value that starts with "-" has to be spelled --flag=value: the next
+  // token is read as a flag, so `--version -1.0.0` is a missing value. A lone
+  // "-" is the exception, because Commander reads it as a value too.
+  test("a lone dash is a value; any other dash-leading token is not", () => {
+    expect(
+      bindShadowedOptionValues(program, ["dataset", "release", "nm1", "--version", "-"]),
+    ).toEqual(["dataset", "release", "nm1", "--version=-"]);
+    expect(
+      bindShadowedOptionValues(program, ["dataset", "release", "nm1", "--version", "-", "-y"]),
+    ).toEqual(["dataset", "release", "nm1", "--version=-", "-y"]);
+    expect(() =>
+      bindShadowedOptionValues(program, ["dataset", "release", "nm1", "--version", "-1.0.0"]),
+    ).toThrow(MissingShadowedValueError);
+    const spelled = ["dataset", "release", "nm1", "--version=-1.0.0"];
+    expect(bindShadowedOptionValues(program, spelled)).toEqual(spelled);
+  });
+
   test("joins a shadowed value option of the addressed subcommand", () => {
     expect(
       bindShadowedOptionValues(program, [
@@ -618,6 +635,25 @@ describe("spawned CLI", () => {
           expect(r.stderr).not.toContain("Run again with --debug");
           expect(r.exitCode).toBe(1);
         }
+      },
+      SPAWN_TEST_TIMEOUT_MS,
+    );
+
+    test.skipIf(!HAS_RELEASE_TOOLS)(
+      "a lone dash reaches the handler as the version, and a dash-leading value needs =",
+      async () => {
+        writeAccount("stand-in-key");
+        const dash = await spawnCli(["dataset", "release", DATASET_ID, "--version", "-", "-y"]);
+        expect(dash.stdout).toContain("Invalid version: -");
+        expect(dash.exitCode).toBe(1);
+
+        const spaced = await spawnCli(["dataset", "release", DATASET_ID, "--version", "-1.0.0"]);
+        expect(spaced.stderr).toContain("error: option '--version <version>' argument missing");
+        expect(spaced.exitCode).toBe(1);
+
+        const equals = await spawnCli(["dataset", "release", DATASET_ID, "--version=-1.0.0", "-y"]);
+        expect(equals.stdout).toContain("Invalid version: -1.0.0");
+        expect(equals.exitCode).toBe(1);
       },
       SPAWN_TEST_TIMEOUT_MS,
     );
