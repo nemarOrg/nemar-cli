@@ -64,6 +64,8 @@ import pickle
 import posixpath
 import re
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -78,7 +80,7 @@ from concurrent.futures import (
 )
 from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timezone
-from typing import Any, Literal, Protocol, TypedDict
+from typing import Any, Literal, NamedTuple, Protocol, TypedDict
 
 # The engine stamp lives in `zarr_queue`, whose column decides which already-done
 # datasets re-convert (ADR 0033). The index republishes it so a consumer can tell
@@ -2079,14 +2081,54 @@ def recording_scratch_paths(tmp: str, primary: str) -> tuple[str, str, str]:
     """Where one recording keeps its local bytes under the run's temp root:
     ``(work, store_local, memmap_scratch)``. One definition, shared by the worker
     that creates them and by the drain that reclaims them after a pool break, so
-    the two cannot disagree about what a dead worker left behind."""
+    the two cannot disagree about what a dead worker left behind.
+
+    Every path must sit inside ``tmp``: a git primary is relative today, but this is
+    also what a reclaim deletes, so an absolute or ``..``-climbing ``primary`` (it
+    would make `os.path.join` discard ``tmp``) raises ValueError instead of naming
+    a directory outside the run."""
     work = os.path.join(tmp, "work", primary.replace("/", "_"))
     store_local = os.path.join(tmp, "stores", store_rel_for(primary))
-    return work, store_local, store_local + SCRATCH_DIR_SUFFIX
+    paths = (work, store_local, store_local + SCRATCH_DIR_SUFFIX)
+    root = os.path.abspath(tmp)
+    for path in paths:
+        resolved = os.path.abspath(path)
+        if resolved == root or os.path.commonpath([root, resolved]) != root:
+            raise ValueError(f"scratch path {path!r} for {primary!r} is outside {tmp!r}")
+    return paths
 
 
-def reclaim_recording_scratch(tmp: str, primary: str) -> int:
-    """Delete everything a recording left on scratch and return the bytes freed.
+def remove_scratch_tree(path: str) -> list[str]:
+    """Delete ``path`` and return what could not be removed, as ``"<path>: <error>"``.
+
+    Every scratch delete used to be ``ignore_errors=True``: a failed one (a read-only
+    directory, a busy mount) reported the bytes as freed, left them on disk, and
+    added them to the next budget. Nothing here is silent now."""
+    failures: list[str] = []
+    if not os.path.lexists(path):
+        return failures
+
+    def record(_func, failed_path, exc) -> None:
+        failures.append(f"{failed_path}: {exc}")
+
+    try:
+        try:
+            shutil.rmtree(path, onexc=record)
+        except TypeError:  # Python < 3.12 has onerror, not onexc
+            shutil.rmtree(path, onerror=lambda f, p, info: record(f, p, info[1]))
+    except OSError as exc:  # the top-level path itself (not a directory, vanished)
+        failures.append(f"{path}: {exc}")
+    return failures
+
+
+class ReclaimResult(NamedTuple):
+    freed: int  # bytes that are gone from disk, measured after the delete
+    leaked: int  # bytes still on disk under the recording's paths
+    errors: list[str]
+
+
+def reclaim_recording_scratch(tmp: str, primary: str) -> ReclaimResult:
+    """Delete everything a recording left on scratch and say what that bought.
 
     `convert_one`'s ``finally`` does this on every exit it gets to run. A worker
     killed outright (SIGKILL, or SIGBUS from a memmap write to a full volume) never
@@ -2094,12 +2136,115 @@ def reclaim_recording_scratch(tmp: str, primary: str) -> int:
     disk until the whole dataset run ended: on nm000276 two killed workers held 535
     GiB and every recording behind them in the queue failed with ENOSPC. Called
     only once the pool's workers are gone, when nothing can still be writing.
+
+    ``freed`` is measured AFTER the delete (before minus after), so a delete that
+    failed reports what it did not free: it used to claim the bytes it had only
+    tried to remove. Each failure is an ``::error::`` naming the path and what is
+    still on disk.
     """
-    freed = 0
-    for path in recording_scratch_paths(tmp, primary):
-        freed += allocated_bytes(path)
-        shutil.rmtree(path, ignore_errors=True)
-    return freed
+    try:
+        paths = recording_scratch_paths(tmp, primary)
+    except ValueError as exc:
+        print(f"::error::not reclaiming scratch for {primary!r}: {exc}", flush=True)
+        return ReclaimResult(0, 0, [str(exc)])
+    freed = leaked = 0
+    errors: list[str] = []
+    for path in paths:
+        before = allocated_bytes(path)
+        failures = remove_scratch_tree(path)
+        after = allocated_bytes(path)
+        freed += max(0, before - after)
+        leaked += after
+        for failure in failures:
+            print(
+                f"::error::could not remove scratch {failure}; "
+                f"{after / 1024**3:.2f} GiB under {path} is still on disk",
+                flush=True,
+            )
+        errors.extend(failures)
+    return ReclaimResult(freed, leaked, errors)
+
+
+def kill_orphans_under(root: str) -> list[int]:
+    """SIGKILL every process whose command line names a path under ``root``.
+
+    `aws s3 cp` children are started without a process group or a parent-death
+    signal, so one can outlive the worker that started it and keep writing into
+    files `reclaim_recording_scratch` has just unlinked (the blocks stay allocated
+    until it exits). ``root`` is this run's own unique temp directory, so a process
+    that names a path under it belongs to this run, and the caller only asks once
+    the pool's workers are gone: what is left is an orphan. Matched on whole
+    arguments, not substrings, and never this process. Returns the pids killed.
+    """
+    try:
+        listing = subprocess.run(
+            ["ps", "-Ao", "pid=,args="], capture_output=True, text=True, timeout=30
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    prefix = os.path.join(root, "")
+    me = os.getpid()
+    killed: list[int] = []
+    for line in listing.splitlines():
+        pid_text, _, args = line.strip().partition(" ")
+        if not pid_text.isdigit() or int(pid_text) == me:
+            continue
+        if not any(arg.startswith(prefix) for arg in args.split()):
+            continue
+        try:
+            os.kill(int(pid_text), signal.SIGKILL)
+            killed.append(int(pid_text))
+        except OSError:
+            continue  # already gone, or not ours to signal
+    return killed
+
+
+def reclaim_after_pool_break(tmp_root: str, primaries: list[str], volume=None) -> ReclaimResult:
+    """What a pool break owes the disk, in one warning.
+
+    Kills the orphaned children of the dead workers first (they would keep writing
+    into what is about to be unlinked), reclaims each in-flight recording's scratch,
+    and reports the volume before and after. The warning names the cause the
+    "killed its worker process" verdict cannot: a full volume kills workers with
+    SIGBUS, which looks exactly like an out-of-memory kill. When the disk is still
+    short after the reclaim (a delete failed, or something outside the run holds it)
+    that is an ``::error::`` with the numbers, since the rebuilt pool is about to
+    inherit it. ``volume`` is a callable returning ``(free, total)`` or None."""
+    before = volume() if volume else None
+    killed = kill_orphans_under(tmp_root)
+    freed = leaked = 0
+    errors: list[str] = []
+    for primary in primaries:
+        result = reclaim_recording_scratch(tmp_root, primary)
+        freed += result.freed
+        leaked += result.leaked
+        errors.extend(result.errors)
+    after = volume() if volume else None
+    gib = 1024**3
+    if before and after:
+        disk = (
+            f"scratch free {before[0] / gib:.0f} GiB before the reclaim and "
+            f"{after[0] / gib:.0f} GiB after, of {after[1] / gib:.0f} GiB"
+        )
+    else:
+        disk = "scratch free space unreadable"
+    print(
+        f"::warning::worker pool broke with {len(primaries)} recording(s) in flight; "
+        f"{disk}; reclaimed {freed / gib:.1f} GiB, {leaked / gib:.1f} GiB still on disk, "
+        f"{len(killed)} orphaned child process(es) killed. A full scratch volume kills "
+        "workers with SIGBUS, which the 'killed its worker process' verdict below "
+        "reports as out of memory",
+        flush=True,
+    )
+    if leaked or (after and after[0] < SCRATCH_HEADROOM_BYTES):
+        free_text = f"{after[0] / gib:.1f} GiB" if after else "unknown"
+        print(
+            f"::error::scratch is still short after reclaiming: {free_text} free, "
+            f"{leaked / gib:.1f} GiB left under the dead workers' recordings "
+            f"({len(errors)} delete(s) failed); the rest of the queue starts from this",
+            flush=True,
+        )
+    return ReclaimResult(freed, leaked, errors)
 
 
 def allocated_bytes(root: str) -> int:
@@ -2107,6 +2252,12 @@ def allocated_bytes(root: str) -> int:
     size: a streaming memmap is a sparse file created at its full length, so
     `st_size` would charge hundreds of GiB that were never written. Unreadable or
     vanishing entries count as zero; a live scratch tree changes under the walk."""
+    try:
+        top = os.lstat(root)
+    except OSError:
+        return 0
+    if not stat.S_ISDIR(top.st_mode):
+        return top.st_blocks * 512
     total = 0
     stack = [root]
     while stack:
@@ -7566,7 +7717,8 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         # right after upload so N concurrent stores don't accumulate on disk.
         for d in (store_local, memmap_scratch, work):
             if d:
-                shutil.rmtree(d, ignore_errors=True)
+                for failure in remove_scratch_tree(d):
+                    print(f"::error::could not remove scratch {failure}", flush=True)
 
 
 # How often a drain re-evaluates admission while nothing finishes (#1483). A
@@ -7619,6 +7771,7 @@ def _next_admission(
 def _drain_with_admission(
     convert, peaks, cpu_cap, ram_ceiling, ctx, record, worker=None, memory_retry=None,
     ceiling=None, scratch_peaks=None, scratch_budget=None, deferred=None,
+    scratch_volume=None,
 ) -> tuple[int, int]:
     """Run ``convert_one`` over ``convert`` in a pool of up to ``cpu_cap`` workers,
     dispatching a recording only while the SUM of in-flight projected peaks stays
@@ -7680,6 +7833,9 @@ def _drain_with_admission(
             return live_admission_ceiling(ram_ceiling, hard, running_peak, track_dir)
     if scratch_peaks is not None and scratch_budget is None and ctx.get("tmp"):
         scratch_budget = ScratchGate(ctx["tmp"])
+    volume = scratch_volume or (
+        ScratchGate(ctx["tmp"]).volume if ctx.get("tmp") else None
+    )
     done = 0
     pool_breaks = 0
     held: list[dict] = []  # memory failures awaiting the serial retry
@@ -7816,14 +7972,7 @@ def _drain_with_admission(
             # suspects re-run and the rest of the queue drains.
             tmp_root = run_ctx.get("tmp")
             if tmp_root and suspects_now:
-                freed = sum(reclaim_recording_scratch(tmp_root, p) for p in suspects_now)
-                if freed:
-                    print(
-                        f"::warning::reclaimed {freed / 1024**3:.1f} GiB of scratch left "
-                        f"by the {len(suspects_now)} recording(s) a broken worker pool "
-                        "was running",
-                        flush=True,
-                    )
+                reclaim_after_pool_break(tmp_root, suspects_now, volume)
         return suspects_now
 
     pending = list(convert)
@@ -7845,7 +7994,7 @@ def _drain_with_admission(
             flush=True,
         )
     killed = ("killed its worker process while running alone "
-              "(out of memory, or a native crash in the reader)")
+              "(out of memory, a full scratch disk, or a native crash in the reader)")
     while suspects:
         culprits = drain_once(suspects, 1)
         # cap=1, so at most one recording was in flight: it died running alone.

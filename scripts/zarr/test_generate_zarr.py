@@ -21,6 +21,7 @@ import itertools
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -4839,9 +4840,10 @@ class TestPoolBreakRecovery(unittest.TestCase):
 def _scratch_worker(primary, peak_bytes=None):
     """Fault-injection worker that leaves the same footprint `convert_one` does:
     a raw copy under `work/` and a memmap under the recording's `.scratch`
-    sibling. A recording whose path contains `boom` dies the way a worker killed
-    by SIGKILL or SIGBUS does, WITHOUT running any cleanup, which is the case
-    `convert_one`'s `finally` cannot cover. Module-level so it pickles.
+    sibling. A recording whose path contains `boom` is SIGKILLed by its own
+    process, WITHOUT running any cleanup, which is the case `convert_one`'s
+    `finally` cannot cover (a SIGBUS from a full volume kills the same way).
+    Module-level so it pickles.
 
     `leftover` reports whether this recording's scratch already existed when it
     started: true means a previous attempt's debris was never reclaimed."""
@@ -4854,7 +4856,7 @@ def _scratch_worker(primary, peak_bytes=None):
             fh.write(b"x" * (1024 * 1024))
     if "boom" in primary:
         time.sleep(0.15)
-        os._exit(1)
+        os.kill(os.getpid(), signal.SIGKILL)
     time.sleep(0.45)
     for path in paths:
         shutil.rmtree(path, ignore_errors=True)
@@ -4862,6 +4864,24 @@ def _scratch_worker(primary, peak_bytes=None):
         "ok": True, "primary": primary, "entry": {"zarr": primary + ".zarr"},
         "leftover": leftover,
     }
+
+
+def _orphaning_worker(primary, peak_bytes=None):
+    """Like `_scratch_worker`'s `boom`, but the dying worker first starts a child
+    that names a path under its scratch and outlives it, as an `aws s3 cp` does
+    when its worker is SIGKILLed. The child's pid is written under the run's temp
+    root for the test to find."""
+    tmp = generate_zarr._CTX["tmp"]
+    work = generate_zarr.recording_scratch_paths(tmp, primary)[0]
+    os.makedirs(work, exist_ok=True)
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(300)", os.path.join(work, "part")],
+        start_new_session=True,
+    )
+    with open(os.path.join(tmp, "orphan.pid"), "w") as fh:
+        fh.write(str(child.pid))
+    time.sleep(0.15)
+    os.kill(os.getpid(), signal.SIGKILL)
 
 
 class TestRecordingScratchPaths(unittest.TestCase):
@@ -4921,8 +4941,9 @@ class TestReclaimRecordingScratch(unittest.TestCase):
                 os.makedirs(path)
                 with open(os.path.join(path, "blob"), "wb") as fh:
                     fh.write(os.urandom(1024 * 1024))
-            freed = generate_zarr.reclaim_recording_scratch(tmp, primary)
-            self.assertGreaterEqual(freed, 3 * 1024 * 1024)
+            result = generate_zarr.reclaim_recording_scratch(tmp, primary)
+            self.assertGreaterEqual(result.freed, 3 * 1024 * 1024)
+            self.assertEqual((result.leaked, result.errors), (0, []))
             for path in paths:
                 self.assertFalse(os.path.exists(path), path)
 
@@ -4939,7 +4960,136 @@ class TestReclaimRecordingScratch(unittest.TestCase):
 
     def test_a_recording_with_nothing_on_scratch_frees_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(generate_zarr.reclaim_recording_scratch(tmp, "sub-01/eeg/x_eeg.vhdr"), 0)
+            result = generate_zarr.reclaim_recording_scratch(tmp, "sub-01/eeg/x_eeg.vhdr")
+            self.assertEqual(tuple(result), (0, 0, []))
+
+
+class TestScratchPathsStayInsideTheRun(unittest.TestCase):
+    def test_an_absolute_primary_is_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            generate_zarr.recording_scratch_paths("/run/tmp", "/etc/sub-01_eeg.vhdr")
+        self.assertIn("outside", str(caught.exception))
+
+    def test_a_primary_that_climbs_out_is_refused(self):
+        for primary in ("../../x/sub-01_eeg.vhdr", "sub-01/../../../x_eeg.vhdr"):
+            with self.subTest(primary=primary):
+                with self.assertRaises(ValueError):
+                    generate_zarr.recording_scratch_paths("/run/tmp", primary)
+
+    def test_an_ordinary_bids_path_is_accepted(self):
+        paths = generate_zarr.recording_scratch_paths(
+            "/run/tmp", "sub-01/ses-1/ieeg/sub-01_ses-1_task-x_ieeg.vhdr"
+        )
+        self.assertTrue(all(p.startswith("/run/tmp/") for p in paths))
+
+    def test_reclaim_refuses_to_touch_a_path_outside_the_run(self):
+        with tempfile.TemporaryDirectory() as outer:
+            run = os.path.join(outer, "run")
+            os.makedirs(run)
+            victim = os.path.join(outer, "keep_eeg.zarr")  # where an absolute primary lands
+            os.makedirs(victim)
+            with open(os.path.join(victim, "data"), "w") as fh:
+                fh.write("precious")
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                result = generate_zarr.reclaim_recording_scratch(
+                    run, os.path.join(outer, "keep_eeg.vhdr")
+                )
+            self.assertTrue(os.path.exists(os.path.join(victim, "data")))
+        self.assertEqual((result.freed, result.leaked), (0, 0))
+        self.assertIn("::error::not reclaiming scratch", out.getvalue())
+
+    def test_held_bytes_skips_a_primary_that_cannot_be_ours(self):
+        with tempfile.TemporaryDirectory() as run:
+            self.assertEqual(generate_zarr.held_scratch_bytes(run, ["/etc/x_eeg.vhdr"]), 0)
+
+
+class TestReclaimReportsWhatItCouldNotRemove(unittest.TestCase):
+    PRIMARY = "sub-01/eeg/sub-01_task-a_eeg.vhdr"
+
+    def setUp(self):
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("root ignores directory permissions, so a delete cannot fail")
+
+    def _undeletable(self, root):
+        work = generate_zarr.recording_scratch_paths(root, self.PRIMARY)[0]
+        os.makedirs(work)
+        with open(os.path.join(work, "blob"), "wb") as fh:
+            fh.write(os.urandom(4 * 1024 * 1024))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(work, 0o500)  # the files inside can no longer be unlinked
+        self.addCleanup(self._restore, work)
+        return work
+
+    @staticmethod
+    def _restore(path):
+        with contextlib.suppress(OSError):
+            os.chmod(path, 0o700)
+
+    def test_remove_scratch_tree_names_what_it_could_not_delete(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = self._undeletable(root)
+            failures = generate_zarr.remove_scratch_tree(work)
+            self.assertTrue(failures)
+            self.assertTrue(all(work in f for f in failures), failures)
+            self.assertTrue(os.path.exists(work))
+            os.chmod(work, 0o700)
+
+    def test_a_failed_delete_is_not_reported_as_freed(self):
+        # `freed` used to be measured BEFORE an `ignore_errors` delete: this very
+        # case reported 4 MiB freed while all 4 MiB stayed on disk.
+        with tempfile.TemporaryDirectory() as root:
+            self._undeletable(root)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                result = generate_zarr.reclaim_recording_scratch(root, self.PRIMARY)
+            os.chmod(generate_zarr.recording_scratch_paths(root, self.PRIMARY)[0], 0o700)
+        self.assertLess(result.freed, 1024 * 1024)
+        self.assertGreaterEqual(result.leaked, 4 * 1024 * 1024)
+        self.assertTrue(result.errors)
+        self.assertIn("::error::could not remove scratch", out.getvalue())
+        self.assertIn("is still on disk", out.getvalue())
+
+    def test_convert_one_reports_a_scratch_directory_it_could_not_remove(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = self._undeletable(root)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                for failure in generate_zarr.remove_scratch_tree(work):
+                    print(f"::error::could not remove scratch {failure}", flush=True)
+            os.chmod(work, 0o700)
+        self.assertIn("::error::could not remove scratch", out.getvalue())
+
+
+class TestKillOrphansUnder(unittest.TestCase):
+    def _sleeper(self, *args):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(300)", *args],
+            start_new_session=True,
+        )
+
+        def finish():
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+
+        self.addCleanup(finish)
+        return proc
+
+    def test_a_process_naming_a_path_under_the_run_root_is_killed(self):
+        with tempfile.TemporaryDirectory() as root:
+            orphan = self._sleeper(os.path.join(root, "work", "sub-01_x", "part"))
+            bystander = self._sleeper("unrelated")
+            lookalike = self._sleeper(root + "-sibling/work/x")
+            time.sleep(0.3)  # let the interpreters start so ps shows their arguments
+            killed = generate_zarr.kill_orphans_under(root)
+            self.assertIn(orphan.pid, killed)
+            self.assertEqual(orphan.wait(timeout=10), -signal.SIGKILL)
+            self.assertIsNone(bystander.poll(), "an unrelated process must survive")
+            self.assertIsNone(lookalike.poll(), "a sibling directory sharing a prefix must survive")
+            self.assertNotIn(os.getpid(), killed)
+
+    def test_nothing_to_kill_returns_nothing(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.assertEqual(generate_zarr.kill_orphans_under(root), [])
 
 
 class TestPoolBreakReclaimsScratch(unittest.TestCase):
@@ -4973,6 +5123,43 @@ class TestPoolBreakReclaimsScratch(unittest.TestCase):
             "an innocent re-ran on top of the debris its killed attempt left behind",
         )
         self.assertIn("reclaimed", out.getvalue())
+
+    def test_the_break_says_how_full_the_disk_was(self):
+        # The "killed its worker process" verdict reads as out of memory; the line
+        # printed at the break is what tells an operator the volume was the cause.
+        boom = "sub-boom/eeg/sub-boom_task-rest_eeg.vhdr"
+        results = []
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()) as out:
+            _drain_with_admission(
+                [boom], {boom: 1024}, 1, 10**9, {"tmp": tmp},
+                lambda r, i: results.append(r), worker=_scratch_worker,
+            )
+        log = out.getvalue()
+        self.assertIn("scratch free", log)
+        self.assertIn("SIGBUS", log)
+        self.assertIn("orphaned child process(es) killed", log)
+        self.assertIn("a full scratch disk", results[0]["error"], "the verdict now names the disk")
+
+    def test_a_killed_workers_orphaned_child_is_killed_with_it(self):
+        boom = "sub-boom/eeg/sub-boom_task-rest_eeg.vhdr"
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            _drain_with_admission(
+                [boom], {boom: 1024}, 1, 10**9, {"tmp": tmp},
+                lambda r, i: None, worker=_orphaning_worker,
+            )
+            with open(os.path.join(tmp, "orphan.pid")) as fh:
+                pid = int(fh.read())
+            deadline = time.monotonic() + 10
+            alive = True
+            while alive and time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                    time.sleep(0.05)
+                except ProcessLookupError:
+                    alive = False
+            if alive:
+                os.kill(pid, signal.SIGKILL)
+        self.assertFalse(alive, "the child of a killed worker outlived the pool break")
 
     def test_a_clean_run_reclaims_nothing_and_says_nothing(self):
         primaries = [f"sub-{i:02d}/eeg/sub-{i:02d}_task-rest_eeg.vhdr" for i in range(1, 4)]
@@ -9647,6 +9834,83 @@ class TestConvertOneEndToEnd(unittest.TestCase):
         result = self.convert(dataset_row=None, provenance_failed=True)
         self.assertTrue(result["ok"], result.get("error"))
         self.assertEqual(result["entry"]["path"], self.primary)
+
+
+class TestConvertOneStreamsIntoItsOwnScratch(unittest.TestCase):
+    """The real exporter, driven by the real `convert_one`: the memmap directory it
+    is handed is the recording's own `.scratch` sibling of its store, and nothing
+    of it, the store or the work directory outlives the call. `stream_to_zarr` is
+    wrapped only to see its arguments; the real function still does the work."""
+
+    PRIMARY = "sub-01/meg/sub-01_task-rest_meg.fif"
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import biosigio  # noqa: F401
+            import mne  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = os.path.join(self._tmp.name, "repo")
+        os.makedirs(os.path.join(self.repo, "sub-01", "meg"))
+        build_real_fif(os.path.join(self.repo, self.PRIMARY))
+        bindir = os.path.join(self._tmp.name, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        path = os.environ["PATH"]
+        os.environ["PATH"] = bindir + os.pathsep + path
+        self.addCleanup(os.environ.__setitem__, "PATH", path)
+        # Any size streams: the point is the streaming path, not the threshold.
+        self.addCleanup(setattr, generate_zarr, "STREAM_MIN_BYTES", generate_zarr.STREAM_MIN_BYTES)
+        generate_zarr.STREAM_MIN_BYTES = 0
+
+    def test_the_memmap_goes_to_the_recordings_own_scratch_and_is_removed(self):
+        import biosigio
+
+        work_root = os.path.join(self._tmp.name, "work")
+        os.makedirs(work_root)
+        work, store_local, scratch = generate_zarr.recording_scratch_paths(
+            work_root, self.PRIMARY
+        )
+        seen: dict = {}
+        real = biosigio.stream_to_zarr
+
+        def spy(*args, **kwargs):
+            seen["scratch_dir"] = kwargs.get("scratch_dir")
+            seen["existed"] = os.path.isdir(kwargs.get("scratch_dir") or "")
+            seen["store"] = args[1] if len(args) > 1 else None
+            return real(*args, **kwargs)
+
+        biosigio.stream_to_zarr = spy
+        self.addCleanup(setattr, biosigio, "stream_to_zarr", real)
+        generate_zarr._init_worker({
+            "repo": self.repo, "bucket": "nemar-test", "dataset_id": "on000117",
+            "head": "b" * 40, "head_files": {self.PRIMARY}, "local": True,
+            "tmp": work_root, "updated": "2026-10-06T00:00:00Z",
+            "contract_base": "https://zarr.nemar.org", "engine_version": "3",
+            "dataset_row": None, "provenance_fetch_failed": False,
+            "mem_budget": None, "hard_ceiling": None, "projections": {},
+        })
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = convert_one(self.PRIMARY)
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertTrue(seen, "the streaming path was not taken")
+        self.assertEqual(seen["scratch_dir"], scratch)
+        self.assertEqual(seen["scratch_dir"], store_local + generate_zarr.SCRATCH_DIR_SUFFIX)
+        self.assertTrue(seen["existed"], "the directory must exist before the exporter makes a temp dir in it")
+        self.assertEqual(os.path.dirname(seen["scratch_dir"]), os.path.dirname(seen["store"]))
+        for path in (work, store_local, scratch):
+            self.assertFalse(os.path.exists(path), f"{path} outlived convert_one")
+        stores_parent = os.path.dirname(store_local)
+        leftovers = [n for n in os.listdir(stores_parent)] if os.path.isdir(stores_parent) else []
+        self.assertEqual(leftovers, [], "nothing may remain beside the store")
 
 
 class TestConvertOneFifSidecarOvercount(unittest.TestCase):
