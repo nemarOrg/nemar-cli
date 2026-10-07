@@ -251,6 +251,36 @@ export function computeVersionIntegrity(
   };
 }
 
+/** The bindings {@link versionReadS3Options} reads. */
+type VersionReadS3Env = Pick<
+  Bindings,
+  | "S3_BUCKET"
+  | "AWS_REGION"
+  | "AWS_ACCESS_KEY_ID"
+  | "AWS_SECRET_ACCESS_KEY"
+  | "S3_ENDPOINT_URL"
+  | "ENVIRONMENT"
+>;
+
+/**
+ * The S3 options for every read that decides whether a dataset version is
+ * complete: this module's LIST and manifest read, and the availability report's
+ * own manifest read. One builder, so they cannot disagree about the origin.
+ *
+ * A test points those reads at a local server through S3_ENDPOINT_URL, which is
+ * honored outside production only ({@link testS3EndpointOverride}): the verdict
+ * they produce feeds data_complete and the withdrawal rule (ADR 0064).
+ */
+export function versionReadS3Options(env: VersionReadS3Env): PresignedUrlOptions {
+  return {
+    bucket: env.S3_BUCKET,
+    region: env.AWS_REGION,
+    accessKeyId: env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+    endpointUrl: testS3EndpointOverride(env),
+  };
+}
+
 /**
  * I/O wrapper: resolve a dataset's version manifest (a specific `version`, or
  * the latest published one when omitted) and the live `<id>/objects/`
@@ -262,28 +292,11 @@ export function computeVersionIntegrity(
  * than trust a zero.
  */
 export async function verifyDatasetVersionS3(
-  env: Pick<
-    Bindings,
-    | "DB"
-    | "S3_BUCKET"
-    | "AWS_REGION"
-    | "AWS_ACCESS_KEY_ID"
-    | "AWS_SECRET_ACCESS_KEY"
-    | "S3_ENDPOINT_URL"
-    | "ENVIRONMENT"
-  >,
+  env: Pick<Bindings, "DB"> & VersionReadS3Env,
   datasetId: string,
   version?: string,
 ): Promise<DatasetVersionIntegrityResult> {
-  const options: PresignedUrlOptions = {
-    bucket: env.S3_BUCKET,
-    region: env.AWS_REGION,
-    accessKeyId: env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
-    // A test points the LIST and manifest reads at a local server. Fenced to
-    // non-production: this verdict feeds data_complete and the withdrawal rule.
-    endpointUrl: testS3EndpointOverride(env),
-  };
+  const options = versionReadS3Options(env);
 
   let resolvedVersion = version ?? null;
   if (!resolvedVersion) {
