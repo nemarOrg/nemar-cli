@@ -185,6 +185,13 @@ import {
 import { checkPrerequisitesForCommand } from "../lib/prerequisites.js";
 import { DownloadProgressTracker } from "../lib/progress.js";
 import { promptForProvenance } from "../lib/provenance.js";
+import {
+  DEFAULT_WAIT_MINUTES,
+  ciPendingHint,
+  isCiPendingBlock,
+  parseWaitOption,
+  requestWaitingForCi,
+} from "../lib/publish-wait.js";
 import { renderSnippetLine, truncateTokenList } from "../lib/render/snippet.js";
 import { resolveSandboxCompletion } from "../lib/sandbox-status.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
@@ -4059,11 +4066,31 @@ Anonymous deposit (--anonymous):
 Examples:
   $ nemar dataset publish request nm000104
   $ nemar dataset publish request nm000104 --anonymous   # blind, for review
-  $ nemar dataset publish status nm000104     # Check request status`,
+  $ nemar dataset publish request nm000104 --wait        # right after upload: wait for CI
+  $ nemar dataset publish status nm000104     # Check request status
+
+Waiting for CI (--wait [minutes]):
+  Right after an upload the dataset's BIDS validation run has usually not
+  finished, and the request is refused as "not run yet" / "in progress". With
+  --wait the request is retried every minute until validation has concluded
+  (default 30 minutes, at most 24 hours). A validation FAILURE is never waited
+  out: it is reported at once.`,
   )
   .option("--anonymous", "Release the data with your identity withheld until publication")
-  .action(async (datasetId, options: { anonymous?: boolean }) => {
+  .option(
+    "--wait [minutes]",
+    `Retry while BIDS validation has not concluded yet (default ${DEFAULT_WAIT_MINUTES} min)`,
+  )
+  .action(async (datasetId, options: { anonymous?: boolean; wait?: boolean | string }) => {
     requireAuth();
+
+    let waitMinutes: number | null;
+    try {
+      waitMinutes = parseWaitOption(options.wait);
+    } catch (e) {
+      console.error(chalk.red(errorDetail(e)));
+      process.exit(1);
+    }
 
     const spinner = ora(
       options.anonymous
@@ -4072,7 +4099,19 @@ Examples:
     ).start();
 
     try {
-      const result = await requestPublication(datasetId, { anonymous: options.anonymous });
+      const send = () => requestPublication(datasetId, { anonymous: options.anonymous });
+      const result =
+        waitMinutes === null
+          ? await send()
+          : await requestWaitingForCi({
+              request: send,
+              waitMs: waitMinutes * 60 * 1000,
+              onPending: (reason, waitedMs) => {
+                const state =
+                  reason === "bids_validation_in_progress" ? "running" : "not started yet";
+                spinner.text = `BIDS validation ${state}; retrying publication request for ${datasetId} (waited ${Math.round(waitedMs / 60000)} of ${waitMinutes} min)...`;
+              },
+            });
       spinner.succeed(result.message);
       // Printed from the server's ECHO, not from the flag that was typed. A
       // request whose body never arrived would otherwise succeed with a
@@ -4113,7 +4152,12 @@ Examples:
       console.log();
       for (const line of publicationRequestNotice(datasetId)) console.log(`  ${line}`);
     } catch (error) {
-      if (error instanceof ApiError) {
+      if (isCiPendingBlock(error)) {
+        spinner.fail(error.message);
+        for (const line of ciPendingHint(datasetId, waitMinutes !== null)) {
+          console.log(chalk.dim(line));
+        }
+      } else if (error instanceof ApiError) {
         spinner.fail(error.message);
         console.log(chalk.dim(`  ${error.message}`));
         if (error.statusCode === 409) {
