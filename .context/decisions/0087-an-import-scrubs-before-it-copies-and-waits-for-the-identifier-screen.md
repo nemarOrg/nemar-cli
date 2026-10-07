@@ -28,8 +28,14 @@ bound (ADR 0060).
 **Prepare scrubs, with the Phase 2 rules, before anything is copied** (`src/lib/import-scrub.ts`,
 `prepareImportedTreeForCopy`, called between the S3 remote setup and the annex-policy step):
 
-- **EDF and BDF headers.** Every recording in the tree is read: a file git holds from the clone, an
-  annexed one by an anonymous 256-byte ranged read of the upstream object the copy phase would copy.
+- **EDF and BDF headers.** Every recording the copy will copy is read: a file git holds from the
+  clone, an annexed one by an anonymous 256-byte ranged read of the upstream object the copy phase
+  would copy (the S3 object by path, or, for a whereis URL that is not an S3 endpoint, that URL,
+  which the copy's curl fallback fetches). A read must return every byte it should and state the
+  object's size, which must be the key's. Not read: annexed recordings under `--skip-data`, which
+  copies nothing; a key with no URL at all, which nothing copies; a re-import's own keys, which NEMAR
+  already holds and the screen reads; an empty file. A closing check refuses an upstream recording in
+  the cut manifest whose header this run did not read.
   A header needs a scrub exactly when `scrubEdfHeader` changes it, the rule ADR 0085's plan uses.
   Such a recording is downloaded whole, checked against its annex key (size and digest), patched in
   bytes 8 to 168 only, re-proven with `verifyScrub`, annexed as SHA256E and uploaded from the host by
@@ -61,8 +67,10 @@ downloads and git-held data together, over `NORMALIZE_MAX_BYTES`; raise with `--
 `content-mismatch`, `unsupported-key-backend` (a key to replace that is not SHA256E, which ADR 0085's
 tools cannot follow), `already-imported-unscrubbed` (a re-import whose tree already names a key that
 needs a scrub: NEMAR holds the original, which is ADR 0085's procedure, not an import's),
-`old-key-still-named`, `retire-failed` and `scrub-unverified`. The import-failure classifier gains the
-cause `identifier_scrub`.
+`old-key-still-named`, `retire-failed`, `scrub-unverified`, `upload-failed` and `scrub-failed` (any
+other error, named by its class and errno code only, because a file system error's message carries
+the path). The import-failure classifier gains the cause `identifier_scrub`, and the retry engine
+parks the words a retry cannot clear (`identifier_scrub_refused`) instead of re-dispatching them.
 
 **The copy manifest is the final tree's keys and nothing else.** An upstream key the committed tree
 does not name, and any key the git-annex branch records as dead, is dropped and counted. This is the
@@ -88,11 +96,22 @@ whatever the screen says, including when it never reports; `nemar admin publish 
 
 **A forward fix of git-tracked content is never approved automatically.** When the scrub blanked a
 JSON value or rewrote a recording git held, the history the push carries still holds the original:
-the outcome is `review` even on a clear screen, and the staging manifest says so to finalize.
-A manifest without that record (an older prepare) is treated the same way.
+the outcome is `review` whatever the screen says, and the staging manifest says so to finalize. A
+re-import reads the same hold from the dataset's ledger (an earlier `import-scrubbed` line that
+changed git-tracked content, with no `history-rewritten` line after it; a ledger that cannot be read
+holds). A manifest without an exact record (`version: 1` and a boolean; an older prepare) is treated
+the same way. The screen cannot see these holds, so finalize writes them on the request before
+anything else, through the deny route with a fixed reason: a request left open with a clean verdict
+would be approved by the next admin to read the mail. If the hold cannot be written, finalize fails.
+
+**A re-run of finalize meets the request it left.** An open request is waited on like a fresh one;
+one that is being approved is not approved a second time (`unchecked`, `approval-in-progress`).
 
 **Logs, refusals and the ledger carry counts and fixed words only.** The Actions log of
-`nemarDatasets/.github` is public.
+`nemarDatasets/.github` is public. The importer's log does state an outcome word per dataset, which
+ADR 0086's screen workflow deliberately does not: the brief for this phase asked for an explicit
+outcome per dataset, and the mirrored data is public upstream. Suppressing it is one function
+(`describePublicationDecision`) and the maintainer's call.
 
 ## Consequences
 
@@ -109,9 +128,14 @@ A manifest without that record (an older prepare) is treated the same way.
   can move them, with `--normalize-max-gb`.
 - Residuals, not closed by this ADR: upstream keeps the originals, and an old commit's pointer still
   names the replaced key, which upstream serves; a forward fix leaves blanked JSON values in the
-  pushed history (hence the `review` hold); objects copied before publication are anonymously
-  readable by key, which now means only scrubbed or not-flagged bytes, plus formats the scanner cannot
-  read; held imports are not yet counted in the weekly report (ADR 0054).
+  pushed history (hence the hold); objects copied before publication are anonymously readable by
+  key, which now means scrubbed or not-flagged recordings, plus what the scrub does not read and only
+  the screen does afterwards: formats the scanner cannot parse, JSON that upstream annexed or that is
+  over 1 MiB or not UTF-8 JSON, and tables (a participants identifier column has no scrub rule); the
+  server-side copy takes the object by path, as the scrub reads it, while its curl fallback fetches
+  the version the whereis URL pins, so the two differ only if upstream replaced an object without a
+  new commit, and the screen reads NEMAR's copy either way; held imports are not yet counted in the
+  weekly report (ADR 0054).
 - The finalize job's timeout is not raised by this change. Raising it in both copies at release
   (with Phase 4's `run-identifier-screen.yml`), and `FINALIZE_JOB_TIMEOUT_MS` with it, lets the
   full wait apply; until then a slow run waits less and leaves more publications for an admin.
