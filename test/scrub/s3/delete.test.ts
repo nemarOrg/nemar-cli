@@ -485,6 +485,22 @@ describe("delete-old: deleting", () => {
   );
 
   test(
+    "a git proof that names an allowed tag is a proof like any other",
+    async () => {
+      // `git-scrub verify --fresh-clone --allow-tag` records the names; the stage that reads the
+      // proof binds it by hash and mode and asks nothing of the field.
+      writeProofs();
+      writeGitVerified(dir, { allowedTags: ["v1.1.1"] });
+      const r = await runScrub(standin, deleteArgs());
+      expect(r.exitCode, r.all).toBe(0);
+      expect(r.stdout).toContain("would delete versions=4 markers=2 across 2 keys");
+      expect(r.stdout).not.toContain("git-proof");
+      expectOldIntact();
+    },
+    SLOW,
+  );
+
+  test(
     "removes every version and delete marker by id with the bypass, leaves the new keys alone",
     async () => {
       writeProofs();
