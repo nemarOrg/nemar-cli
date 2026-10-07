@@ -504,8 +504,8 @@ jobs:
 
       - name: Install git-annex
         run: |
-          if compgen -G "$HOME/annex-debs/*.deb" > /dev/null \
-            && sudo dpkg -i "$HOME"/annex-debs/*.deb; then
+          if compgen -G "$HOME/annex-debs/git-annex_*.deb" > /dev/null \
+            && sudo dpkg -i "$HOME"/annex-debs/*.deb && git annex version > /dev/null; then
             echo "installed git-annex from the cached packages"
             exit 0
           fi
@@ -521,8 +521,11 @@ jobs:
           done
           sudo apt-get install -y git-annex
           mkdir -p "$HOME/annex-debs"
+          # The cache is an optimization. A package the runner image already carries is not in
+          # apt's cache, and its missing file must not fail a job whose install just succeeded.
           cp /var/cache/apt/archives/git-annex_*.deb /var/cache/apt/archives/git-remote-gcrypt_*.deb \
-            /var/cache/apt/archives/nocache_*.deb "$HOME/annex-debs/"
+            /var/cache/apt/archives/nocache_*.deb "$HOME/annex-debs/" \
+            || echo "::warning::not every git-annex package could be cached"
 
       - name: Install dependencies
         run: bun install
