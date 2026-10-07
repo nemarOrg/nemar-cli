@@ -384,6 +384,10 @@ describe("spawned CLI", () => {
         const r = await spawnCli(args);
         expect(r.stdout.trim()).not.toBe(version);
         expect(r.stderr).toContain("error: option '--version <version>' argument missing");
+        // Reported by Commander as a usage error, so the exit handler does not
+        // add its "attach a debug log to a bug report" nudge, which an error
+        // thrown out of main() would get.
+        expect(r.stderr).not.toContain("Run again with --debug");
         expect(r.exitCode).toBe(1);
       }
     });
