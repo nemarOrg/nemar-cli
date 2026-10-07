@@ -4954,7 +4954,11 @@ def deferred_unchanged_callback(
         "pool_breaks": 0,
         "calibration": [],
         "measured_count": 0,
-        "retryable_failures": len(pending),
+        # This run attempted nothing, so nothing in it failed for a retryable
+        # reason; the pending recordings are counted below. `hallu-zarr.sh` logs
+        # "N recording(s) failed for a RETRYABLE reason" from this field, which
+        # would otherwise repeat every hour for a recording that only waits for room.
+        "retryable_failures": 0,
         "pending_count": len(pending),
         "discovered_count": discovered_count,
         "not_attempted_count": deferred_pending,

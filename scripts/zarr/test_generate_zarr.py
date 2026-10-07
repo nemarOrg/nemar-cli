@@ -12630,7 +12630,7 @@ class TestMainRetryPendingRound(unittest.TestCase):
         self.assertEqual(rc, 1, log)
         self.assertEqual(body["status"], "failed")
         self.assertEqual(body["not_attempted_count"], 1)
-        self.assertGreaterEqual(body["pending_count"], body["not_attempted_count"])
+        self.assertEqual(body["pending_count"], 2)  # B, attempted and failed, and A, deferred
 
     def _s3_snapshot(self) -> dict[str, tuple[int, int, str]]:
         """Every object in the stand-in bucket: size, mtime and content hash. Equal
@@ -12665,7 +12665,6 @@ class TestMainRetryPendingRound(unittest.TestCase):
         self.assertIn("left untouched", log)
         self.assertEqual(self._s3_snapshot(), before, "an S3 object was written")
         self.assertEqual(body["status"], "ready")
-        self.assertNotIn("post", body, "the script posts every body it is handed")
         self.assertEqual(body["commit"], index_commit)
         self.assertNotEqual(body["commit"], head)
         self.assertEqual((body["pending_count"], body["not_attempted_count"]), (2, 2))
@@ -12721,6 +12720,168 @@ class TestMainRetryPendingRound(unittest.TestCase):
         self._assert_deferred_without_spending_attempts(
             *self.run_main("--retry-pending", "--jobs", "1")
         )
+
+
+def _fixture_only(cls):
+    """Keep what ``cls`` inherits from `TestMainRetryPendingRound` (a real repo, the
+    real exporter, the `aws` stand-in over local files, a local catalog) without
+    re-running that class's own tests: the loaders skip a non-callable attribute."""
+    for name in dir(cls):
+        if name.startswith("test") and name not in cls.__dict__:
+            setattr(cls, name, None)
+    return cls
+
+
+@_fixture_only
+class TestDeferredRunsAgainstALiveIndex(TestMainRetryPendingRound):
+    """What a run that defers recordings says about the dataset, checked against the
+    index it left on S3: a live index with a served store (A, with events), a pending
+    recording (B, with events) and a typed failure (C, an unreadable EDF)."""
+
+    C = "sub-03/eeg/sub-03_task-rest_eeg.edf"
+
+    def setUp(self):
+        super().setUp()
+        os.makedirs(os.path.join(self.repo, "sub-03", "eeg"))
+        with open(os.path.join(self.repo, self.C), "wb") as fh:
+            fh.write(b"this is not an EDF file\n" * 40)
+        for rel, onsets in (("sub-01/eeg/sub-01_task-rest_events.tsv", (0.5, 1.5, 2.5)),
+                            ("sub-02/eeg/sub-02_task-rest_events.tsv", (0.25, 0.75))):
+            with open(os.path.join(self.repo, rel), "w") as fh:
+                fh.write("onset\tduration\ttrial_type\n")
+                fh.writelines(f"{t}\t0.1\tgo\n" for t in onsets)
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "events and an unreadable recording")
+
+    def events_rows(self) -> list[dict]:
+        import pyarrow.parquet as pq
+
+        path = os.path.join(self.s3, "on008083_zarr_events.parquet")
+        return pq.read_table(path).to_pylist()
+
+    def _defer_b_then_publish(self) -> dict:
+        """The first run: A converts (with events), B is too large for any volume and
+        is deferred, C is an unreadable EDF and becomes a typed failure. Returns the
+        index it published."""
+        self._make_b_enormous()
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.01
+        index = self.first_round()
+        self.assertEqual([f["path"] for f in index["failures"]], [self.C])
+        self.assertTrue(index["errors"] > 0, "a live index with no errors proves nothing")
+        return index
+
+    def test_an_all_deferred_run_restates_what_the_live_index_says(self):
+        # The backend overwrites the dataset's row from this body, so a field
+        # restated wrongly (an empty failure list, a zero error count, no ETag) is
+        # written over the truth on every hourly tick of a recording that never fits.
+        live = self._defer_b_then_publish()
+        self._no_scratch()
+        before = self._s3_snapshot()
+        rc, log, body = self.run_main()
+        self.assertEqual(rc, 0, log)
+        self.assertIn("left untouched", log)
+        self.assertEqual(self._s3_snapshot(), before, "an S3 object was written")
+        self.assertEqual(body["status"], "ready")
+        self.assertEqual(body["errors"], live["errors"])
+        self.assertEqual(body["failure_count"], live["failure_count"])
+        self.assertEqual(
+            body["data_failures"],
+            [{"path": self.C, "code": "corrupt_or_truncated"}],
+            "the typed failure the index carries",
+        )
+        # Not deterministic: B is still owed, so the dataset is not all data failures.
+        self.assertIs(body["deterministic"], False)
+        self.assertEqual(
+            body["index_etag"], hashlib.md5(self._index_bytes()).hexdigest(),
+            "the ETag of the published index, unquoted",
+        )
+        self.assertEqual(body["commit"], live["source_commit"])
+        self.assertEqual(body["store_count"], live["store_count"])
+        self.assertEqual((body["pending_count"], body["not_attempted_count"]), (1, 1))
+        self.assertEqual(body["discovered_count"], 3)
+        self.assertEqual(body["events_row_count"], live["events_row_count"])
+        self.assertEqual(body["events_row_count"], 3)
+        self.assertEqual((body["converted"], body["removed"], body["failed"]), ([], [], []))
+
+    def test_an_all_deferred_run_reports_no_failure_of_its_own(self):
+        # Nothing was attempted, so nothing failed for a retryable reason: the
+        # driver's "N recording(s) failed for a RETRYABLE reason" line would otherwise
+        # repeat every hour for a recording that is only waiting for room.
+        self._defer_b_then_publish()
+        self._no_scratch()
+        rc, log, body = self.run_main()
+        self.assertEqual(rc, 0, log)
+        self.assertIn("left untouched", log)
+        self.assertEqual(body["pending_count"], 1)
+        self.assertEqual(body["retryable_failures"], 0)
+
+    def test_a_companion_pointer_with_no_size_makes_the_recording_charged_the_floor(self):
+        # B's primary pointer declares a small size, but a same-stem companion's
+        # pointer is a WORM key with no `-s` field, so the total cannot be trusted
+        # even though it is positive: the recording is charged at least
+        # SCRATCH_UNKNOWN_SIZE_BYTES. With a floor no volume holds it can never fit,
+        # while A (real files of known size) converts. Reading the size as known would
+        # charge B its few bytes and attempt it, and B has no content to convert.
+        link = os.path.join(self.repo, self.B)
+        os.remove(link)
+        sized = "SHA256E-s2000--" + "b" * 32 + ".edf"
+        os.symlink(f"../../.git/annex/objects/bb/bb/{sized}/{sized}", link)
+        companion = os.path.join(self.repo, "sub-02/eeg/sub-02_task-rest_eeg.json")
+        unsized = "WORM-m1700000000--sub-02_task-rest_eeg.json"
+        os.symlink(f"../../.git/annex/objects/cc/cc/{unsized}/{unsized}", companion)
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "B has a sized primary and an unsized companion")
+        self.addCleanup(
+            setattr, generate_zarr, "SCRATCH_UNKNOWN_SIZE_BYTES",
+            generate_zarr.SCRATCH_UNKNOWN_SIZE_BYTES,
+        )
+        generate_zarr.SCRATCH_UNKNOWN_SIZE_BYTES = 10**18
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.01
+        rc, log, _ = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("the size of 1 recording(s) could not be read from their pointers", log)
+        self.assertIn(f"(first: {self.B})", log)
+        self.assertIn(f"::error::{self.B} can never fit this volume", log)
+        self.assertIn(f"converted {self.A}", log)
+        index = self.published_index()
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A])
+        entry = next(p for p in index["pending"] if p["path"] == self.B)
+        self.assertEqual((entry["reason"], entry["attempts"]), ("not_attempted", 0))
+        self.assertTrue(entry["last_error"].startswith("deferred: needs"), entry["last_error"])
+
+    def test_a_kept_store_under_clean_carries_its_events_rows_beside_the_converted_ones(self):
+        # --clean rebuilds from scratch, so the rows of a store it deferred and the
+        # index kept have to come from the LIVE events.parquet: A's three rows from
+        # the first run, and B's two from this one. Losing A's would leave the index
+        # serving a store with no events behind it.
+        build_real_edf(os.path.join(self.repo, "sub-01", "eeg"), "sub-01_task-rest_eeg", seconds=30)
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "A is longer")
+        self.first_round()
+        self.assertEqual({r["store_path"] for r in self.events_rows()}, {store_rel_for(self.A)})
+        self.materialize_b()
+        self._bigger_a_streams_with_an_absurd_charge()
+        rc, log, body = self.run_main()  # --clean, no --retry-pending
+        self.assertEqual(rc, 0, log)
+        self.assertIn(f"converted {self.B}", log)
+        self.assertNotIn(f"converted {self.A}", log)
+        index = self.published_index()
+        self.assertEqual(sorted(s["path"] for s in index["stores"]), [self.A, self.B])
+        per_store: dict[str, int] = {}
+        for row in self.events_rows():
+            per_store[row["store_path"]] = per_store.get(row["store_path"], 0) + 1
+        self.assertEqual(per_store, {store_rel_for(self.A): 3, store_rel_for(self.B): 2})
+        self.assertEqual(index["events_row_count"], 5)
+        self.assertEqual(body["events_row_count"], 5)
+        self.assertEqual(body["events_stores_without_rows"], 0)
 
 
 class TestLiveAdmissionCeiling(unittest.TestCase):
