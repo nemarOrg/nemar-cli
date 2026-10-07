@@ -407,7 +407,7 @@ describe("chunk geometry", () => {
       expect(isKeyPresentAtDeclaredSize(KEY, listing)).toBe(true);
     });
 
-    test("the last chunk must be the remainder, not a full chunk and not short", () => {
+    test("every chunk is the chunk size except the last, which holds what is left", () => {
       expect(isKeyPresentAtDeclaredSize(KEY, through(94).set(nm276(95), GiB))).toBe(false);
       expect(isKeyPresentAtDeclaredSize(KEY, through(94).set(nm276(95), TAIL - 1))).toBe(false);
     });
