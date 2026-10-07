@@ -12,6 +12,7 @@ import {
   MAX_PARTS,
   MIB,
   StageError,
+  appendAll,
   classifyAwsError,
   failureWord,
   planAssembly,
@@ -332,5 +333,24 @@ describe("new-hash-verified.json", () => {
       ).toThrow(ContractError);
     }
     expect(() => parseHashVerified("[]")).toThrow(ContractError);
+  });
+});
+
+describe("appendAll", () => {
+  test("keeps what the target held and appends in order", () => {
+    const target = ["a", "b"];
+    appendAll(target, ["c", "d"]);
+    appendAll(target, []);
+    expect(target).toEqual(["a", "b", "c", "d"]);
+  });
+
+  test("appends two million items, more than a spread call survives", () => {
+    const items = Array.from({ length: 2_000_000 }, (_, i) => i);
+    const target: number[] = [-1];
+    appendAll(target, items);
+    expect(target.length).toBe(2_000_001);
+    expect(target[0]).toBe(-1);
+    expect(target[1]).toBe(0);
+    expect(target[2_000_000]).toBe(1_999_999);
   });
 });
