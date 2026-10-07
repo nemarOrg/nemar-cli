@@ -25,7 +25,7 @@ import chalk from "chalk";
 import ora from "ora";
 import { addCi, importDataset, reindexDataset } from "./api/admin.js";
 import { getDataset, getUserCiStatus } from "./api/datasets.js";
-import { approvePublication, requestPublication } from "./api/publish.js";
+import { requestPublication } from "./api/publish.js";
 
 import { cloneDataset, pushToGitHub } from "./git-annex/clone-push.js";
 import { configureGitHubRemote } from "./git-annex/github.js";
@@ -45,6 +45,11 @@ import {
 } from "./git-annex/transfer.js";
 import { OPENNEURO_UPSTREAM_MARKER } from "./import-markers.js";
 import { annexCopyUpload } from "./import-normalize.js";
+import {
+  type PublicationDecision,
+  awaitScreenAndApprove,
+  describePublicationDecision,
+} from "./import-publication.js";
 import { httpUpstreamReader, prepareImportedTreeForCopy } from "./import-scrub.js";
 import {
   type ImportManifest,
@@ -99,6 +104,13 @@ interface ImportOptions {
    * passes the manifest in memory.
    */
   persistStaging?: boolean;
+  /**
+   * How long finalize waits for the identifier screen's verdict, and how often it
+   * reads the request's status meanwhile (ADR 0087). Defaults: `SCREEN_WAIT_MS`,
+   * `SCREEN_POLL_MS`.
+   */
+  screenWaitMs?: number;
+  screenPollMs?: number;
 }
 
 /**
@@ -1500,7 +1512,7 @@ export async function finalizeImport(
   openneuroId: string,
   options: ImportOptions = {},
   inMemoryManifest?: ImportManifest,
-): Promise<void> {
+): Promise<PublicationDecision> {
   const nemarId = mapDatasetId(openneuroId);
   const manifest = inMemoryManifest ?? (await readManifestFromS3(nemarId, S3_BUCKET, S3_REGION));
   const workDir = options.workDir || mkdtempSync(join(tmpdir(), `nemar-finalize-${nemarId}-`));
@@ -1849,35 +1861,38 @@ export async function finalizeImport(
     pubSpinner.succeed("Publication requested");
   }
 
-  const approveSpinner = ora("Approving publication...").start();
-  const maxRetries = 10;
-  let approved = false;
+  // Step 11: wait for the identifier screen's verdict and approve only a clear one
+  // (ADR 0087). Requesting publication started the screen (ADR 0086); approving in
+  // the same breath is what the gate refuses. A verdict that is not clear leaves the
+  // request open for an admin, whom Phase 4 mails, and is NOT an import failure: the
+  // data is copied and registered, so this run still completes.
+  const approveSpinner = ora("Waiting for the identifier screen...").start();
+  let publication: PublicationDecision;
   if (alreadyPublished) {
-    approved = true;
-    approveSpinner.succeed(
-      `${nemarId} is already published; skipping publish/approve (data re-copy only)`,
-    );
-  }
-  for (let attempt = 1; !alreadyPublished && attempt <= maxRetries; attempt++) {
+    publication = { outcome: "already-published" };
+  } else {
     try {
-      // skipCiCheck is set in step 9 — true only when the bounded
-      // workflow_run poll timed out AND --trust-upstream was passed.
-      await approvePublication(nemarId, attempt > 1, false, skipCiCheck);
-      approved = true;
-      break;
+      publication = await awaitScreenAndApprove({
+        nemarId,
+        skipCiCheck,
+        privacy: manifest.privacy,
+        waitMs: options.screenWaitMs,
+        pollMs: options.screenPollMs,
+        onProgress: (text) => {
+          approveSpinner.text = text;
+        },
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (attempt < maxRetries) {
-        approveSpinner.text = `Approving publication... (attempt ${attempt + 1}/${maxRetries})`;
-        await new Promise((r) => setTimeout(r, 3000));
-      } else {
-        approveSpinner.fail(`Failed to approve publication after ${maxRetries} attempts: ${msg}`);
-        process.exit(1);
-      }
+      approveSpinner.fail(`Failed to approve publication: ${msg}`);
+      process.exit(1);
     }
   }
-  if (approved && !alreadyPublished) {
-    approveSpinner.succeed("Publication approved");
+  const outcomeLine = describePublicationDecision(nemarId, publication);
+  if (publication.outcome === "published" || publication.outcome === "already-published") {
+    approveSpinner.succeed(outcomeLine);
+  } else {
+    approveSpinner.warn(outcomeLine);
   }
 
   // Phase 2 of #512: trigger LLM enrichment + D1 metadata-column population
@@ -1885,8 +1900,9 @@ export async function finalizeImport(
   // NULL modalities/subject_count/tasks/etc in the catalog (the existing
   // post-version-DOI sync skips on* because it can't push to nemar.org).
   //
-  // Failure here is logged but non-fatal: the dataset is already published.
-  // Operators can re-run with `nemar admin reindex <id>` afterward.
+  // Failure here is logged but non-fatal: the import itself is complete (and the
+  // dataset published, when the screen was clear). Operators can re-run with
+  // `nemar admin reindex <id>` afterward.
   const reindexSpinner = ora("Refreshing metadata + LLM enrichment...").start();
   try {
     const result = await reindexDataset(nemarId);
@@ -1914,9 +1930,14 @@ export async function finalizeImport(
   }
 
   // Summary
-  console.log(chalk.green(`\nImport and publish complete: ${openneuroId} -> ${nemarId}`));
+  console.log(
+    chalk.green(
+      `\nImport complete: ${openneuroId} -> ${nemarId} (publication: ${publication.outcome})`,
+    ),
+  );
   console.log(chalk.dim(`  GitHub: https://github.com/nemarDatasets/${nemarId}`));
   console.log(chalk.dim(`  Working dir: ${datasetPath}`));
+  return publication;
 }
 
 /**
