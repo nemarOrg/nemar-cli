@@ -6,12 +6,13 @@
  * (bun:sqlite behind realD1, the real auth/admin middleware with a seeded
  * admin token, real route dispatch via Hono app.request()).
  *
- * writeAvailabilityReport has NO local test seam: verifyDatasetVersionS3
- * always issues a real S3 LIST regardless of candidate state (the same
- * structural constraint data-integrity-sweep-route.test.ts documents), and a
- * successful write additionally reaches GitHub's Contents API. So every test
- * in the first describe block below is scoped to a candidate set that yields
- * ZERO real candidates reaching the per-row loop -- seeded rows are either
+ * This file's env sets no S3_ENDPOINT_URL, so a candidate reaching
+ * writeAvailabilityReport here would issue a real S3 LIST (the same
+ * structural constraint data-integrity-sweep-route.test.ts documents) and,
+ * on success, reach GitHub's Contents API. The write path against local S3
+ * and GitHub stand-ins lives in availability-report-never-creates-main.test.ts.
+ * So every test in the first describe block below is scoped to a candidate
+ * set that yields ZERO real candidates reaching the per-row loop -- seeded rows are either
  * excluded by the WHERE clause (no-repo / sandbox / already-stamped /
  * missing-only's data_complete filter) or the table is empty. That proves
  * the EXCLUSION side of each filter dimension for real, through the actual

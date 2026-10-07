@@ -172,9 +172,14 @@ export interface WriteAvailabilityReportOptions {
  * `createOrUpdateFile` enrichment uses for `.nemar/metadata.json`).
  *
  * Throws {@link AvailabilityReportError} for the dataset-not-found case (and,
- * on the write path only, a missing/invalid github_repo or a GitHub auth
- * failure) so callers can map them to specific HTTP statuses; a dry-run never
- * needs a repo at all, so those checks are skipped when `dryRun` is true.
+ * on the write path only, a missing/invalid github_repo, a GitHub auth
+ * failure, or a repository with no `main` branch) so callers can map them to
+ * specific HTTP statuses; a dry-run never needs a repo at all, so those checks
+ * are skipped when `dryRun` is true.
+ *
+ * On the write path the GitHub checks run BEFORE the S3 work. Verifying a
+ * dataset is a paginated LIST plus a manifest walk, the dominant cost of a
+ * sweep row, so a row the write is going to refuse anyway must not pay it.
  */
 export async function writeAvailabilityReport(
   env: Bindings,
@@ -189,6 +194,41 @@ export async function writeAvailabilityReport(
     .first<{ dataset_id: string; github_repo: string | null }>();
   if (!dataset) {
     throw new AvailabilityReportError(`Dataset not found: ${datasetId}`, 404);
+  }
+
+  // Write path only: resolve the target and refuse BEFORE the S3 work below.
+  let target: { repoName: string; pat: string } | null = null;
+  if (!opts?.dryRun) {
+    if (!dataset.github_repo) {
+      throw new AvailabilityReportError(`Dataset has no GitHub repository: ${datasetId}`, 400);
+    }
+    const repoName = dataset.github_repo.split("/")[1];
+    if (!repoName) {
+      throw new AvailabilityReportError(`Invalid github_repo format: ${dataset.github_repo}`, 400);
+    }
+    let pat: string;
+    try {
+      pat = await getDatasetsToken(env);
+    } catch (err) {
+      throw new AvailabilityReportError(`Failed to resolve GitHub auth: ${errorMessage(err)}`, 500);
+    }
+    // Never create `main`. On a repository nothing has been pushed to yet --
+    // a dataset created but still uploading -- the Contents API PUT would
+    // make an unrelated ROOT commit on a fresh `main`, and the depositor's
+    // first push is then rejected as non-fast-forward with histories that
+    // cannot be rebased (nm000358, 2026-10-07: created 14:55Z, report commit
+    // 4ba0a7b at 03:00Z, every upload retry failed at "Pushing metadata").
+    //
+    // A 404 from the ref lookup is not only "no branch yet": GitHub answers
+    // 404 for a repository the token cannot see too, and `branchExists` cannot
+    // tell the two apart, so the message names both.
+    if (!(await branchExists(repoName, "main", pat))) {
+      throw new AvailabilityReportError(
+        `No main branch found in ${dataset.github_repo}: nothing has been pushed yet, or the repository is not visible to NEMAR. Nothing was written; the availability report never creates main`,
+        409,
+      );
+    }
+    target = { repoName, pat };
   }
 
   // import_jobs carries OpenNeuro provenance for imported (on*) datasets
@@ -230,38 +270,13 @@ export async function writeAvailabilityReport(
     blocklistReason: importJob?.blocklist_reason ?? null,
   });
 
-  if (!opts?.dryRun) {
-    if (!dataset.github_repo) {
-      throw new AvailabilityReportError(`Dataset has no GitHub repository: ${datasetId}`, 400);
-    }
-    const repoName = dataset.github_repo.split("/")[1];
-    if (!repoName) {
-      throw new AvailabilityReportError(`Invalid github_repo format: ${dataset.github_repo}`, 400);
-    }
-    let pat: string;
-    try {
-      pat = await getDatasetsToken(env);
-    } catch (err) {
-      throw new AvailabilityReportError(`Failed to resolve GitHub auth: ${errorMessage(err)}`, 500);
-    }
-    // Never create `main`. On a repository nothing has been pushed to yet --
-    // a dataset created but still uploading -- the Contents API PUT would
-    // make an unrelated ROOT commit on a fresh `main`, and the depositor's
-    // first push is then rejected as non-fast-forward with histories that
-    // cannot be rebased (nm000358, 2026-10-07: created 14:55Z, report commit
-    // 4ba0a7b at 03:00Z, every upload retry failed at "Pushing metadata").
-    if (!(await branchExists(repoName, "main", pat))) {
-      throw new AvailabilityReportError(
-        `Repository ${dataset.github_repo} has no main branch yet (nothing pushed); not creating one for the availability report`,
-        409,
-      );
-    }
+  if (target) {
     await createOrUpdateFile(
-      repoName,
+      target.repoName,
       ".nemar/availability-report.json",
       JSON.stringify(report, null, 2),
       "Update NEMAR availability report",
-      pat,
+      target.pat,
       "main",
     );
   }
