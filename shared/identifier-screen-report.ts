@@ -646,6 +646,16 @@ export function isDateWarningLine(line: string): boolean {
   return line.startsWith(DATE_WARNING_LEAD) || DATE_WARNING_FIXED_LINES.includes(line);
 }
 
+/**
+ * The one line `nemar dataset upload` prints about the dates it sets itself (ADR 0091): fixed
+ * words and a count, never a date, a value or a path. It is not a warning and asks nothing; the
+ * warning above covers only the dates that stay.
+ */
+export function dateNormalizationLine(count: number): string {
+  const headers = `${count} recording header${count === 1 ? "" : "s"}`;
+  return `Acquisition dates in ${headers} are set to 1 January of their year before upload.`;
+}
+
 /** The counts of a scan as lines of fixed words, shared by the publication screen and the preflight. */
 function scanLines(
   scan: Pick<
