@@ -236,6 +236,10 @@ describe("bindShadowedOptionValues on the real command tree", () => {
       ["dataset", "release", "nm1", "--version", "--yes"],
       ["dataset", "release", "--version", "-y", "nm1"],
       ["--debug", "dataset", "release", "nm1", "--version"],
+      // An empty value is a missing one: the release handler would otherwise
+      // read it as "no --version" and bump by --type, or prompt.
+      ["dataset", "release", "nm1", "--version", "", "--type", "patch", "-y"],
+      ["dataset", "release", "nm1", "--version", ""],
     ];
     for (const argv of cases) {
       let caught: unknown;
@@ -422,6 +426,13 @@ describe("every same-named value option in the real tree", () => {
 // test.yml).
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
+const DATASET_ID = "nm099999";
+// The stand-in backend names this repository for the dataset. It must not
+// exist: if a release got past its version check (the bug these tests guard),
+// the clone fails here instead of branching, pushing and opening a pull
+// request on a real dataset repository.
+const NO_SUCH_REPO = "nemarOrg/argv-shadowing-1493-no-such-repo";
+const HAS_RELEASE_TOOLS = !!Bun.which("git") && !!Bun.which("gh");
 const SPAWN_KILL_MS = 20_000;
 const SPAWN_TEST_TIMEOUT_MS = 30_000;
 // A proxy in the environment can send even a loopback request elsewhere (an
@@ -440,6 +451,7 @@ async function spawnCli(args: string[]) {
   );
   env.NEMAR_CONFIG_DIR = configDir;
   env.NEMAR_NO_UPDATE_CHECK = "1";
+  env.GIT_TERMINAL_PROMPT = "0";
   env.NO_COLOR = "1";
   env.FORCE_COLOR = undefined;
   env.CLICOLOR_FORCE = undefined;
@@ -480,6 +492,20 @@ describe("spawned CLI", () => {
         const { pathname } = new URL(req.url);
         hits.push(`${req.method} ${pathname}`);
         if (pathname === "/notices") return Response.json({ notices: [] });
+        if (pathname === `/datasets/${DATASET_ID}`) {
+          return Response.json({
+            dataset: {
+              dataset_id: DATASET_ID,
+              name: "Stand-in dataset",
+              github_repo: NO_SUCH_REPO,
+              status: "active",
+              visibility: "private",
+            },
+          });
+        }
+        if (pathname === `/datasets/${DATASET_ID}/versions`) {
+          return Response.json({ dataset_id: DATASET_ID, current_version: "v1.0.0", versions: [] });
+        }
         return Response.json({ error: "not found" }, { status: 404 });
       },
     });
@@ -490,18 +516,22 @@ describe("spawned CLI", () => {
     backend.stop(true);
   });
 
-  beforeEach(() => {
-    hits.length = 0;
-    configDir = mkdtempSync(join(tmpdir(), "nemar-release-version-"));
-    // An account with an apiUrl and no key: the release handler refuses with
-    // "Not authenticated".
+  /** An account that points at the stand-in backend, with or without a key. */
+  function writeAccount(apiKey?: string): void {
     writeFileSync(
       join(configDir, "config.json"),
       JSON.stringify({
         activeAccount: "argv-shadow",
-        accounts: { "argv-shadow": { apiUrl: backendUrl } },
+        accounts: { "argv-shadow": { apiUrl: backendUrl, ...(apiKey ? { apiKey } : {}) } },
       }),
     );
+  }
+
+  beforeEach(() => {
+    hits.length = 0;
+    configDir = mkdtempSync(join(tmpdir(), "nemar-release-version-"));
+    // No key by default: the release handler refuses with "Not authenticated".
+    writeAccount();
   });
 
   afterEach(() => {
@@ -564,6 +594,47 @@ describe("spawned CLI", () => {
           // thrown out of main() would get.
           expect(r.stderr).not.toContain("Run again with --debug");
           expect(r.exitCode).toBe(1);
+        }
+      },
+      SPAWN_TEST_TIMEOUT_MS,
+    );
+
+    test(
+      "an empty --version is a missing value, stopped before any request for the dataset",
+      async () => {
+        writeAccount("stand-in-key");
+        for (const args of [
+          ["dataset", "release", DATASET_ID, "--version", "", "--type", "patch", "-y"],
+          ["dataset", "release", DATASET_ID, "--version", ""],
+        ]) {
+          const r = await spawnCli(args);
+          expect(r.stderr).toContain("error: option '--version <version>' argument missing");
+          expect(r.stderr).not.toContain("Run again with --debug");
+          expect(r.stdout).toBe("");
+          expect(r.exitCode).toBe(1);
+          expect(hits).not.toContain(`GET /datasets/${DATASET_ID}`);
+        }
+      },
+      SPAWN_TEST_TIMEOUT_MS,
+    );
+
+    // `--version=` reaches the handler as "". A truthiness check there read it
+    // as "no --version": with --type it bumped by --type, and without it the
+    // handler opened an interactive prompt that hangs on a closed stdin.
+    test.skipIf(!HAS_RELEASE_TOOLS)(
+      "an empty --version= reaches the handler and is refused as an invalid version",
+      async () => {
+        writeAccount("stand-in-key");
+        for (const args of [
+          ["dataset", "release", DATASET_ID, "--version=", "--type", "patch", "-y"],
+          ["dataset", "release", DATASET_ID, "--version=", "-y"],
+        ]) {
+          const r = await spawnCli(args);
+          expect(r.stdout).toContain("Invalid version");
+          expect(r.stdout).not.toContain("Version bump");
+          expect(r.exitCode).toBe(1);
+          // The handler ran far enough to ask for the dataset and its versions.
+          expect(hits).toContain(`GET /datasets/${DATASET_ID}/versions`);
         }
       },
       SPAWN_TEST_TIMEOUT_MS,
