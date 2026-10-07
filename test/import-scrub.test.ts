@@ -25,6 +25,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -761,6 +762,25 @@ describe("what the scrub refuses, before anything is pushed or copied", () => {
     expect(err.code).toBe("header-unreadable");
     expect(err.message).toContain("local-unreadable x1");
     expect(err.message).not.toContain(OPENNEURO_UPSTREAM_MARKER);
+  }, 120_000);
+
+  test("a recording git holds that is a link is refused, never patched through to its target", async () => {
+    // git stores a link as the text of its target, so the "recording" the push carries is not the
+    // bytes the scrub would read through it, and writing the patch there would change a file that
+    // is not the dataset's.
+    const small = edfBytes(FLAGGED_PATIENT, 500, 5);
+    const upstream = await buildUpstream([...baseFixtures(), { path: FLAGGED_GIT, bytes: small }]);
+    const { clone } = await cloneForImport(upstream);
+    const view = await upstreamView(clone);
+    const outside = join(scratchDir("nemar-scrub-outside-"), "target.edf");
+    writeFileSync(outside, small);
+    rmSync(join(clone, FLAGGED_GIT));
+    symlinkSync(outside, join(clone, FLAGGED_GIT));
+    const err = await refusal(
+      prepare(clone, view, { unannexedData: [{ path: FLAGGED_GIT, size: small.length }] }),
+    );
+    expect(err.code).toBe("scrub-unverified");
+    expect(Buffer.from(readFileSync(outside))).toEqual(Buffer.from(small));
   }, 120_000);
 
   test("an empty recording is not read and does not refuse", async () => {
