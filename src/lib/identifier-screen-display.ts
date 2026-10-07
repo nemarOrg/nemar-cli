@@ -7,9 +7,15 @@
  * tone and count lines. This module owns only colour and indentation, so
  * `nemar dataset publish status`, `nemar admin publish list` and the admin email
  * cannot say different things about one screen.
+ *
+ * The one thing set apart is the acquisition-date warning (ADR 0090): its lines are
+ * recognized by `isDateWarningLine`, which owns the wording, and printed in the
+ * warning color instead of the dim of a count line. Which lines they are is not
+ * decided here.
  */
 
 import chalk from "chalk";
+import { isDateWarningLine } from "../../shared/identifier-screen-report.js";
 
 /** The `identifier_screen` field of the status and list responses. */
 export interface IdentifierScreenView {
@@ -40,7 +46,7 @@ export function identifierScreenLines(
   const color = TONE[view.tone] ?? chalk.white;
   const out = [`${pad}${color(view.headline)}`];
   for (const line of Array.isArray(view.lines) ? view.lines : []) {
-    out.push(`${pad}  ${chalk.dim(line)}`);
+    out.push(`${pad}  ${isDateWarningLine(line) ? chalk.yellow(line) : chalk.dim(line)}`);
   }
   return out;
 }

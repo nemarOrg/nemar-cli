@@ -155,3 +155,9 @@ Everything above about the workflow, the contract and the public log holds for t
 
 The importer no longer requests and approves in one run: [ADR 0089](0089-an-import-scrubs-before-it-copies-and-waits-for-the-identifier-screen.md) scrubs the tree in prepare, and finalize waits for this screen's verdict and approves only a clear one, leaving any other for an admin.
 Nothing in this ADR's gate changed; the importer is one more client of it.
+
+## Amendment 2026-10-07 (#1616): acquisition dates are warned about
+
+The 2026-10-04 policy above stands: an acquisition date alone is clear, and nothing in the gate changed.
+[ADR 0090](0090-acquisition-dates-finer-than-year-and-month-are-warned-about-never-gated-or-rewritten.md) records the maintainer's choice of policy B and adds a fixed warning, produced by `describeScreen` from the report's counts whenever a date kind is counted.
+The admin email, the status views and the requester's blocked-request mail therefore carry it; the report contract gained no field.

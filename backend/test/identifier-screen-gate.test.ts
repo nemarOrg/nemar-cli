@@ -345,6 +345,61 @@ describe("the orchestrator's gate (POST /approve)", () => {
     });
   });
 
+  test("acquisition dates alone pass with no reason, and none is recorded (ADR 0090)", async () => {
+    // The warning is words beside the counts: a dataset with dates only is as clear as it was.
+    const id = seedRequest();
+    markScreen(db, id, DATASET, {
+      status: "dates-only",
+      findings: { "edf-startdate": 3, "acq-time-dated": 1 },
+    });
+    const res = await approve({ resume: true });
+    expect(res.status).toBe(200);
+    const row = requestRow(id);
+    expect(row?.status).toBe("published");
+    expect(row?.identifier_screen_ack_by).toBeNull();
+    expect(row?.identifier_screen_ack_reason).toBeNull();
+    expect(row?.identifier_screen_ack_at).toBeNull();
+    expect(
+      db
+        .query<{ n: number }, []>(
+          "SELECT COUNT(*) AS n FROM audit_log WHERE action = 'identifier_screen_acknowledged'",
+        )
+        .get()?.n,
+    ).toBe(0);
+  });
+
+  test("dates beside a review finding still need the reason they needed before", async () => {
+    const id = seedRequest();
+    markScreen(db, id, DATASET, {
+      status: "review",
+      findings: { "tooling-debris": 1, "edf-startdate": 3 },
+    });
+    const refused = await approve({ resume: true });
+    expect(refused.status).toBe(409);
+    expect((await refusal(refused)).gate).toBe("acknowledge");
+    expect(requestRow(id)?.status).toBe("requested");
+    const passed = await approve({ resume: true, acknowledge_identifier_screen: REASON });
+    expect(passed.status).toBe(200);
+    expect(requestRow(id)?.identifier_screen_ack_reason).toBe(REASON);
+  });
+
+  test("dates beside a direct identifier are still refused, with or without a reason", async () => {
+    const id = seedRequest();
+    markScreen(db, id, DATASET, {
+      status: "direct-identifiers",
+      findings: { "edf-patient-name": 4, "edf-startdate": 4 },
+    });
+    for (const body of [
+      { resume: true },
+      { resume: true, acknowledge_identifier_screen: REASON },
+    ]) {
+      const res = await approve(body);
+      expect(res.status).toBe(409);
+      expect((await refusal(res)).gate).toBe("blocks");
+    }
+    expect(requestRow(id)?.status).toBe("requested");
+  });
+
   test("an acknowledgment attaches only to the result it was given for", async () => {
     // The screen's result changes between the gate's read and the write that
     // records the reason (a re-run lands): the reason must not attach to it.

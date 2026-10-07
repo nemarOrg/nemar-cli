@@ -384,6 +384,28 @@ describe("the week's facts and words", () => {
     expect(r.attention).toBe(true);
   });
 
+  test("date findings are named by their fixed kind words and counts, never warned about (ADR 0090)", () => {
+    // What an administrator can already see: a review dataset is listed by id with every kind it
+    // has, date kinds included; a dataset with dates only is counted under the screen's own words.
+    const f = facts([
+      screenedRow("nm000740", "review", 2, {
+        findings_by_kind: { "tooling-debris": 1, "edf-startdate": 3, "acq-time-dated": 2 },
+      }),
+      screenedRow("nm000741", "dates-only", 2, { findings_by_kind: { "edf-startdate": 5 } }),
+      screenedRow("nm000742", "dates-only", 2, { findings_by_kind: { "acq-time-dated": 1 } }),
+    ]);
+    expect(f.review?.map((d) => d.dataset_id)).toEqual(["nm000740"]);
+    expect(f.flagged).toEqual([]);
+    const text = renderIdentifierWeek(f).lines.join("\n");
+    expect(text).toContain(
+      "  nm000740 (screened 2026-10-05): tooling-debris x1, edf-startdate x3, acq-time-dated x2",
+    );
+    expect(text).toContain("  clean (acquisition dates only): 2");
+    // The warning is for the people who deposit; the weekly report keeps its counts.
+    expect(text).not.toContain("Warning: acquisition dates");
+    expect(text).not.toContain("NEMAR does not change them");
+  });
+
   test("a finding stays listed after its screen ages out of the cycle, and says so", () => {
     const f = facts([
       screenedRow("nm000720", "direct-identifiers", 40, {

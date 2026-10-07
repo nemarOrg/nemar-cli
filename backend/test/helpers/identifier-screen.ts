@@ -45,12 +45,13 @@ export function markScreen(
   db: Database,
   requestId: number,
   datasetId: string,
-  opts: { status?: string; head?: string } = {},
+  opts: { status?: string; head?: string; findings?: Record<string, number> } = {},
 ): void {
   const status = opts.status ?? "clean";
-  const report = parseScreenReport(
-    cleanScreenReportBody(datasetId, opts.head ?? SCREENED_HEAD, status),
-  );
+  const body = cleanScreenReportBody(datasetId, opts.head ?? SCREENED_HEAD, status);
+  // The counts a finding leaves, when the test cares which kinds the screen found.
+  if (opts.findings) (body.scan as Record<string, unknown>).findings_by_kind = opts.findings;
+  const report = parseScreenReport(body);
   db.run(
     `UPDATE publication_requests
         SET identifier_screen_status = ?, identifier_screen_report = ?,

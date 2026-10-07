@@ -64,6 +64,7 @@ import {
   type PreflightScan,
   ReportError,
   type UploaderPreflight,
+  dateFindingCount,
   describePreflight,
   foldOddFailures,
   foldUnknownFormats,
@@ -594,6 +595,13 @@ export async function recheckIdentifierPreflight(
     markReportedExit();
     return FAIL;
   }
-  spinner.succeed(`${describePreflight(scan, null).headline} (screened again)`);
+  // The warning about acquisition dates (ADR 0090) is printed once, at the first screen. A tree
+  // that gained or lost some while the prompts ran is told again, because the record sent is this
+  // scan's and the uploader has not seen its count.
+  if (dateFindingCount(scan.findings_by_kind) !== dateFindingCount(first.scan.findings_by_kind)) {
+    printVerdict(spinner, scan, " (screened again)");
+  } else {
+    spinner.succeed(`${describePreflight(scan, null).headline} (screened again)`);
+  }
   return preflightRecord(scan, first.acknowledged_via);
 }

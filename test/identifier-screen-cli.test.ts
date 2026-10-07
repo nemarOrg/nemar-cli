@@ -15,6 +15,13 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
+import chalk from "chalk";
+import {
+  dateWarningLines,
+  describeScreen,
+  parseScreenReport,
+} from "../shared/identifier-screen-report";
+import { identifierScreenLines } from "../src/lib/identifier-screen-display";
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -364,6 +371,122 @@ describe("nemar admin publish screen", () => {
       expect(out).toContain("GitHub refused to start the screen workflow");
     } finally {
       server.stop();
+    }
+  });
+});
+
+// The words below are made by the real `describeScreen` from a parsed report, not typed here, so
+// what is asserted is what the backend would send and the terminal would print.
+describe("the acquisition-date warning in the terminal (ADR 0090)", () => {
+  const DATED = parseScreenReport({
+    version: 1,
+    scanner: "identifier-scan@abcdef1",
+    head: "0123456789abcdef0123456789abcdef01234567",
+    scan: {
+      id: "nm000104",
+      version: null,
+      scanned_at: "2026-10-07T12:00:00.000Z",
+      manifest_source: "clone",
+      status: "dates-only",
+      incomplete: false,
+      incomplete_reasons: [],
+      files: { total: 10, edf_bdf: 4, header_read: 4, header_read_failed: 0 },
+      findings_by_kind: { "edf-startdate": 4, "acq-time-dated": 2 },
+      edf_bdf_files_flagged: 0,
+      unscreened_formats: {},
+    },
+  });
+  const view = { state: "dates-only", ...describeScreen("dates-only", DATED) };
+  const WARNING = dateWarningLines({
+    findings_by_kind: { "edf-startdate": 4, "acq-time-dated": 2 },
+  });
+
+  test("the view carries the warning, whole, from one definition", () => {
+    expect(WARNING).toHaveLength(5);
+    expect(view.lines).toEqual(expect.arrayContaining(WARNING));
+    expect(WARNING[0]).toContain("(6 entries)");
+  });
+
+  test("nemar dataset publish status prints it under the verdict, in order", async () => {
+    const server = startServer({
+      "GET /datasets/nm000104/publish/status": {
+        body: { dataset_id: "nm000104", status: "requested", identifier_screen: view },
+      },
+    });
+    try {
+      const r = await runCli(["dataset", "publish", "status", "nm000104"], server.url);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("Identifier screen: clean (acquisition dates only)");
+      const at = WARNING.map((line) => r.stdout.indexOf(line));
+      expect(at.every((i) => i > 0)).toBe(true);
+      expect(at).toEqual([...at].sort((a, b) => a - b));
+      expect(at[0]).toBeGreaterThan(r.stdout.indexOf("Findings by kind:"));
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("nemar admin publish list prints it under each request that has dates", async () => {
+    const server = startServer({
+      "GET /admin/publish/requests": {
+        body: {
+          count: 1,
+          requests: [
+            {
+              id: 1,
+              dataset_id: "nm000104",
+              status: "requested",
+              requested_at: "2026-10-07 12:00:00",
+              requested_by_username: "alice",
+              requested_by_email: "alice@example.org",
+              steps_completed: [],
+              current_step: null,
+              last_error: null,
+              identifier_screen: view,
+            },
+          ],
+        },
+      },
+    });
+    try {
+      const r = await runCli(["admin", "publish", "list"], server.url);
+      expect(r.exitCode).toBe(0);
+      for (const line of WARNING) expect(r.stdout).toContain(line);
+      expect(r.stdout).toContain("edf-startdate x4, acq-time-dated x2");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a screen with no date finding prints no warning", async () => {
+    const server = startServer({
+      "GET /datasets/nm000104/publish/status": {
+        body: { dataset_id: "nm000104", status: "blocked", identifier_screen: FOUND },
+      },
+    });
+    try {
+      const r = await runCli(["dataset", "publish", "status", "nm000104"], server.url);
+      expect(r.stdout).not.toContain("Warning: acquisition dates");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("the terminal sets the warning apart in the warning color, and no count line", () => {
+    const before = chalk.level;
+    chalk.level = 1;
+    try {
+      const printed = identifierScreenLines(view, 2);
+      const YELLOW = "\u001b[33m";
+      const DIM = "\u001b[2m";
+      const warned = printed.filter((line) => line.includes(YELLOW));
+      expect(warned).toHaveLength(5);
+      for (const line of WARNING) expect(warned.some((w) => w.includes(line))).toBe(true);
+      const counts = printed.find((line) => line.includes("Findings by kind:"));
+      expect(counts).toContain(DIM);
+      expect(counts).not.toContain(YELLOW);
+    } finally {
+      chalk.level = before;
     }
   });
 });
