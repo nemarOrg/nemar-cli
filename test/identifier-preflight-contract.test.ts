@@ -327,7 +327,7 @@ describe("describePreflight", () => {
     expect(d.lines).toEqual([
       "Files: 12; EDF/BDF headers read: 4 of 4.",
       "Findings by kind: edf-startdate x4.",
-      ...dateWarningLines({ "edf-startdate": 4 }),
+      ...dateWarningLines({ findings_by_kind: { "edf-startdate": 4 } }),
     ]);
     expect(d.lines[2]).toBe(
       "Warning: acquisition dates finer than year and month were found in recording headers or scans tables (4 entries).",
@@ -342,24 +342,57 @@ describe("describePreflight", () => {
       ...scanFor("review"),
       findings_by_kind: { "image-or-document-file": 1, "acq-time-dated": 2 },
     });
-    const warning = dateWarningLines({ "acq-time-dated": 2 });
+    const warning = dateWarningLines({ findings_by_kind: { "acq-time-dated": 2 } });
     expect(describePreflight(review, "flag").lines).toEqual([
       "Files: 12; EDF/BDF headers read: 4 of 4.",
       "Findings by kind: image-or-document-file x1, acq-time-dated x2.",
       ...warning,
       "Acknowledged by the uploader with --acknowledge-identifier-preflight.",
     ]);
-    // Over every status the scanner can conclude, the warning is there exactly when the
-    // scan's counts include a date kind.
+  });
+
+  test("over every status the parser accepts, a counted date warns and no date does not", () => {
+    const isDate = ([kind]: [string, number]) => DATE_KINDS.has(kind as never);
     for (const status of DATASET_STATUSES) {
-      const scan = scanFor(status) as { findings_by_kind: Record<string, number> };
-      const warned = describePreflight(parsePreflightScan(scan), null).lines.some(
-        isDateWarningLine,
+      const plain = scanFor(status) as { findings_by_kind: Record<string, number> };
+      const plainDates = Object.entries(plain.findings_by_kind)
+        .filter(isDate)
+        .reduce((sum, [, n]) => sum + n, 0);
+      const withDates = {
+        ...plain,
+        findings_by_kind: { ...plain.findings_by_kind, "acq-time-dated": 2 },
+      };
+      // `clean` cannot carry a finding at all: the contract refuses a status cleaner than its counts.
+      if (status === "clean") {
+        expect(() => parsePreflightScan(withDates)).toThrow();
+      } else {
+        const lines = describePreflight(parsePreflightScan(withDates), null).lines;
+        const warned = lines.filter(isDateWarningLine);
+        // The count is the dates there were plus the two added, and a lower bound when incomplete.
+        const bound = status === "unchecked" ? "at least " : "";
+        expect(warned[0]).toContain(`(${bound}${plainDates + 2} entries)`);
+        expect(warned).toHaveLength(5);
+      }
+      // The same scan without its date kinds: no warning, except that `dates-only` IS the date.
+      if (status === "dates-only") continue;
+      const without = Object.fromEntries(
+        Object.entries(plain.findings_by_kind).filter((entry) => !isDate(entry)),
       );
-      expect(warned).toBe(
-        Object.keys(scan.findings_by_kind).some((k) => DATE_KINDS.has(k as never)),
+      const bare = describePreflight(
+        parsePreflightScan({ ...plain, findings_by_kind: without }),
+        null,
       );
+      expect(bare.lines.some(isDateWarningLine)).toBe(false);
     }
+  });
+
+  test("a dates-only record whose counts were lost still warns, without a count", () => {
+    const lost = parsePreflightScan({ ...scanFor("dates-only"), findings_by_kind: {} });
+    const lines = describePreflight(lost, null).lines;
+    expect(lines.filter(isDateWarningLine)).toEqual(dateWarningLines({ status: "dates-only" }));
+    expect(lines.find(isDateWarningLine)).toBe(
+      "Warning: acquisition dates finer than year and month were found in recording headers or scans tables.",
+    );
   });
 
   test("a direct finding is described by kind and count", () => {

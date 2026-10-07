@@ -247,7 +247,7 @@ const dateWarning = (n: number) => [
   "NEMAR does not change them.",
   "A date can help identify a participant when it is combined with other information.",
   "Remove or coarsen any date that could identify someone before uploading or requesting publication.",
-  "An administrator reviews these before a dataset is made public.",
+  "Administrators are told of these findings when publication is requested.",
 ];
 
 /** No date, no path and no file name in what the warning printed, and no digit but its count. */
@@ -259,8 +259,22 @@ function expectWarningCarriesOnlyItsCount(output: string, n: number): void {
   expect(printed).toEqual(dateWarning(n));
   const withoutCount = printed.join("\n").replace(`(${n} entries)`, "()");
   expect(withoutCount).not.toMatch(/\d/);
-  for (const part of ["1985", "1991", "15.03", "02.11", "03-15", "sub-01", "_scans", ".edf"]) {
-    expect(printed.join("\n")).not.toContain(part);
+  // The whole output, not just the warning's lines: no date of the fixture, and no path or file
+  // name, is printed anywhere (the lines above were filtered to the fixed text, so they could not
+  // have held one).
+  for (const part of [
+    "15.03.85",
+    "02.11.91",
+    "09.09.90",
+    "1985-03-15",
+    "T10:00",
+    "sub-01",
+    "sub-02",
+    "task-rest",
+    "_scans.tsv",
+    ".edf",
+  ]) {
+    expect(output).not.toContain(part);
   }
 }
 

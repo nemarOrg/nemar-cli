@@ -1113,7 +1113,7 @@ const WARNING = (n: number) => [
   "NEMAR does not change them.",
   "A date can help identify a participant when it is combined with other information.",
   "Remove or coarsen any date that could identify someone before uploading or requesting publication.",
-  "An administrator reviews these before a dataset is made public.",
+  "Administrators are told of these findings when publication is requested.",
 ];
 
 /** A scan report with the given verdict and finding counts, as the workflow would post it. */
@@ -1267,6 +1267,48 @@ describe("acquisition dates are warned about, in every place the screen's counts
       );
       expect(await status.text()).not.toContain("acquisition dates");
     });
+  });
+
+  test("a dates-only verdict whose stored report does not read back still warns, and is not silent", async () => {
+    await requestPublication();
+    const HAND_EDITED = `{"scan":{"id":"${LEAK} 1985-03-15"}}`;
+    db.run(
+      `UPDATE publication_requests
+          SET identifier_screen_status = 'dates-only', identifier_screen_report = ?
+        WHERE dataset_id = ?`,
+      [HAND_EDITED, DATASET],
+    );
+    const warnings: string[] = [];
+    const warn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.join(" "));
+    };
+    let body: { identifier_screen: { headline: string; lines: string[] } };
+    try {
+      const res = await app.request(
+        `/datasets/${DATASET}/publish/status`,
+        { headers: { Authorization: `Bearer ${OWNER_KEY}` } },
+        env(),
+      );
+      body = (await res.json()) as typeof body;
+    } finally {
+      console.warn = warn;
+    }
+    expect(body.identifier_screen.headline).toBe(
+      "Identifier screen: clean (acquisition dates only)",
+    );
+    // The verdict is on the row, so the warning is, with its count left out.
+    expect(body.identifier_screen.lines).toEqual([
+      "Warning: acquisition dates finer than year and month were found in recording headers or scans tables.",
+      ...WARNING(1).slice(1),
+    ]);
+    // And the unreadable report is said once, in the parser's word, never its text.
+    const said = warnings.filter((w) => w.includes("a stored report does not read back"));
+    expect(said.length).toBeGreaterThan(0);
+    for (const w of warnings) {
+      expect(w).not.toContain(LEAK);
+      expect(w).not.toContain("1985");
+    }
   });
 
   test("a hostile count never reaches the warning: the report is refused, and no date is mailed", async () => {

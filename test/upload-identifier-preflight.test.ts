@@ -716,6 +716,33 @@ describe("the tree is screened again right before anything is sent", () => {
       expect(lines.some((line) => line.includes("(1 entry)"))).toBe(true);
     });
 
+    test("more dates than the first scan counted: warned again, with the new count", async () => {
+      bidsWith(datedRecording("15.03.85"));
+      const record = await first();
+      write("sub-02/eeg/sub-02_task-rest_eeg.edf", datedRecording("02.11.91"));
+      write("sub-03/eeg/sub-03_task-rest_eeg.edf", datedRecording("09.09.90"));
+      let again: Awaited<ReturnType<typeof recheckIdentifierPreflight>> | undefined;
+      const lines = await printed(async () => {
+        again = await recheckIdentifierPreflight(root, record);
+      });
+      expect(again?.status).toBe("ok");
+      expect(lines.some((line) => line.includes("(3 entries)"))).toBe(true);
+    });
+
+    test("every date gone since the first scan: told again, with the verdict and no warning", async () => {
+      bidsWith(datedRecording("15.03.85"));
+      const record = await first();
+      write("sub-01/eeg/sub-01_task-rest_eeg.edf", recording(CLEAN_PATIENT));
+      let again: Awaited<ReturnType<typeof recheckIdentifierPreflight>> | undefined;
+      const lines = await printed(async () => {
+        again = await recheckIdentifierPreflight(root, record);
+      });
+      if (again?.status !== "ok") throw new Error("expected the recheck to pass");
+      // The record sent is the second scan's, and it holds no date.
+      expect(again.value.scan.status).toBe("clean");
+      expect(warned(lines)).toBe(false);
+    });
+
     test("unchanged dates are not warned about twice", async () => {
       bidsWith(datedRecording("15.03.85"));
       let record: UploaderPreflight | undefined;

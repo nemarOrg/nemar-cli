@@ -37,21 +37,26 @@ The maintainer chose B on 2026-10-07 and asked that the warning be shown to the 
   A rewrite of dates would change data content, and it would not be a privacy correction of a public record that anyone had asked for.
   The Data Contributor Terms put the duty to keep identifying information out of a deposit on the depositor (ADR 0086), and the warning is how the depositor is told about a kind of date that can identify.
 - **One definition.**
-  `dateWarningLines` in `shared/identifier-screen-report.ts` returns the warning from a scan's `findings_by_kind`, and nothing else in the repository spells the sentences.
+  `dateWarningLines` in `shared/identifier-screen-report.ts` returns the warning from a scan, and nothing else in the repository spells the sentences.
   The first line states the count, the next four are fixed words:
 
   > Warning: acquisition dates finer than year and month were found in recording headers or scans tables (N entries).
   > NEMAR does not change them.
   > A date can help identify a participant when it is combined with other information.
   > Remove or coarsen any date that could identify someone before uploading or requesting publication.
-  > An administrator reviews these before a dataset is made public.
+  > Administrators are told of these findings when publication is requested.
 
-  `N` is the sum of the counts of the date kinds, and `1 entry` in the singular.
+  `N` is the sum of the counts of the date kinds, and `1 entry` in the singular; a scan that was incomplete read less than it could, so its count is a lower bound and says `at least N entries`.
   It is the only number, and the only variable part.
-  The warning never carries a date, a value, a file name or a path, so it is as safe to print in a public CI log as the kind and count lines beside it (the report contract of ADR 0086).
+  The warning never carries a date, a value, a file name or a path, so it adds nothing to the kind and count lines beside it that those do not already show to the same readers (the report contract of ADR 0086, and the preflight of ADR 0087 for the uploader's own pipeline).
+  The screen workflow's log in `nemarDatasets/.github` is public and prints no verdict by design, so that workflow does not print the warning either: it posts a report and the Worker words it.
+  The last sentence says "told" and not "reviews": a publication request is mailed to the administrators with the warning, but nothing forces a person to read it, and an OpenNeuro import is approved by its own finalize step when the verdict is clear (see Consequences).
 - **Only when there is one.**
   The warning appears exactly when at least one date-kind finding is counted, whatever the verdict: `dates-only`, `review`, `direct-identifiers`, or `unchecked`.
   A scan with no date finding prints no warning, and a count that is not a non-negative integer is ignored rather than added.
+  One case stands in for a count: a `dates-only` verdict IS the scanner saying a date was found, so a `dates-only` state whose report does not read back, or whose counts were lost, still warns, with the count left out (`... scans tables.`).
+  Silence there would be a depositor or an administrator not told, with nothing saying so.
+  A stored report that does not read back is also logged by the Worker, in the parser's fixed word and never its text.
 - **Where it is shown.**
   It is part of `describeScreen` and `describePreflight`, which are already the one place the screen's words are made, so it appears wherever those words do and nowhere else:
   1. The uploader: the identifier preflight of `nemar dataset upload` (and `--dry-run`), printed under the verdict, and printed again if the second screen, right before the create call, counts a different number of dates than the first.
@@ -73,8 +78,16 @@ The maintainer chose B on 2026-10-07 and asked that the warning be shown to the 
 - The count is of findings, so a recording whose recording-identification field also holds a date counts twice, and a scans-table row counts once.
   It is a size, not a number of recordings.
 - The scanner's test for "year only" is "1 January", so a date on the first of another month is counted, though it may already be coarsened to a month.
-  The warning therefore errs toward saying more.
-  Changing the test is a scanner change, and is the maintainer's call.
+  The warning therefore errs toward saying more, and the advice in it ("coarsen") does not clear it for a depositor who coarsens to year and month: only a date of 1 January of its year stops being counted, and an EDF start-date field cannot hold a month alone.
+  Changing the test, so that the first of any month counts as month precision, is a scanner change and the maintainer's call.
+- The OpenNeuro importer approves any clear verdict itself (ADR 0089), and `dates-only` is clear, so a mirror whose headers carry dates is published with no person reading them.
+  The administrators are mailed with the warning when the screen reports, concurrently with that approval, so for a mirror nobody can act first.
+  Whether finalize should hold `dates-only` mirrors for an administrator is a gate change and needs an ADR of its own; this decision does not make it.
+- The warning covers what the scanner reads: EDF and BDF headers and `_scans.tsv`.
+  Its absence is not evidence that no date exists in BrainVision, EEGLAB or FIF headers, in sessions tables or in sidecars, which are counted as not screened and not read.
+- A swap between kinds with the same total (a date removed from a header and one added to a scans table) is not warned about again by the second screen; only a different total is.
+- The Worker deploys before the CLI is published: a new CLI against a Worker that predates this prints the preflight warning (it is made locally) but not the one in `publish status` or `admin publish list`, which come from the Worker's lines.
+  An older CLI against a newer Worker prints the same lines in dim, as it prints every line.
 - What an administrator can list today:
   the publication mail and `nemar admin publish list` name the date kinds and counts of each request;
   the weekly report and `GET /admin/identifier-sweep` list every dataset whose last verdict is `review` with its kinds and counts, date kinds included (the first 50 by id in the mail, all in the route), and count the datasets that are `dates-only` without naming them.

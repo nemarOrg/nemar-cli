@@ -191,7 +191,10 @@ export function readStoredReport(raw: unknown): ScreenReport | null {
   if (typeof raw !== "string") return null;
   try {
     return parseScreenReport(JSON.parse(raw));
-  } catch {
+  } catch (err) {
+    // The parser's own fixed word, never its input, so a hand-edited row is not silent.
+    const code = err instanceof Error && err.name === "ReportError" ? err.message : "unparseable";
+    console.warn(`[identifier-screen] a stored report does not read back (${code})`);
     return null;
   }
 }

@@ -397,7 +397,9 @@ describe("the acquisition-date warning in the terminal (ADR 0090)", () => {
     },
   });
   const view = { state: "dates-only", ...describeScreen("dates-only", DATED) };
-  const WARNING = dateWarningLines({ "edf-startdate": 4, "acq-time-dated": 2 });
+  const WARNING = dateWarningLines({
+    findings_by_kind: { "edf-startdate": 4, "acq-time-dated": 2 },
+  });
 
   test("the view carries the warning, whole, from one definition", () => {
     expect(WARNING).toHaveLength(5);

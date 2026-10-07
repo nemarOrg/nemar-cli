@@ -603,8 +603,17 @@ const DATE_WARNING_FIXED_LINES: readonly string[] = [
   "NEMAR does not change them.",
   "A date can help identify a participant when it is combined with other information.",
   "Remove or coarsen any date that could identify someone before uploading or requesting publication.",
-  "An administrator reviews these before a dataset is made public.",
+  "Administrators are told of these findings when publication is requested.",
 ];
+
+/** What the warning needs to know about a scan. Every field is optional: a view may have lost some. */
+export interface DateWarningInput {
+  findings_by_kind?: Partial<Record<FindingKind, number>>;
+  /** The verdict. `dates-only` IS the scanner saying a date was found, whatever the counts say. */
+  status?: DatasetStatus;
+  /** An incomplete scan read less than it could, so its count is a lower bound. */
+  incomplete?: boolean;
+}
 
 /**
  * The acquisition-date warning for a scan, as lines; empty when the scan holds no date finding.
@@ -612,17 +621,24 @@ const DATE_WARNING_FIXED_LINES: readonly string[] = [
  * Policy B (ADR 0090): a date finer than year and month stays a review-level finding. It never
  * gates and nothing rewrites it, so this changes no verdict and no acknowledgment, and it is
  * only words. They carry one number, the count of date findings, and never a date, a value, a
- * file name or a path, so they are as safe to print in a public CI log as the counts beside them.
+ * file name or a path. The count is "at least" when the scan was incomplete. A `dates-only`
+ * verdict with no date counted (a report that did not read back, or counts that were lost) still
+ * warns, with the count left out: the verdict alone says a date was found, and a warning that
+ * went missing without a word is the failure this exists to prevent.
+ *
+ * The screen workflow's own log is public and prints no verdict by design, so it must not print
+ * these lines; it posts a report and the Worker words it.
  */
-export function dateWarningLines(
-  byKind: Partial<Record<FindingKind, number>> | undefined,
-): string[] {
-  const n = dateFindingCount(byKind);
-  if (n === 0) return [];
-  return [
-    `${DATE_WARNING_LEAD} in recording headers or scans tables (${n} ${n === 1 ? "entry" : "entries"}).`,
-    ...DATE_WARNING_FIXED_LINES,
-  ];
+export function dateWarningLines(scan: DateWarningInput | undefined): string[] {
+  const n = dateFindingCount(scan?.findings_by_kind);
+  let where = "in recording headers or scans tables";
+  if (n > 0) {
+    const size = `${scan?.incomplete === true ? "at least " : ""}${n} ${n === 1 ? "entry" : "entries"}`;
+    where = `${where} (${size})`;
+  } else if (scan?.status !== "dates-only") {
+    return [];
+  }
+  return [`${DATE_WARNING_LEAD} ${where}.`, ...DATE_WARNING_FIXED_LINES];
 }
 
 /** Is this line one of the warning's? For a terminal that wants to set the warning apart. */
@@ -693,9 +709,12 @@ export function describeScreen(
   const scan = report?.scan;
   if (scan) {
     lines.push(...scanLines(scan));
-    lines.push(...dateWarningLines(scan.findings_by_kind));
+    lines.push(...dateWarningLines(scan));
     lines.push(SCREEN_NOT_READ);
     lines.push(`Scanner ${report.scanner}; commit ${report.head?.slice(0, 12)}.`);
+  } else if (state === "dates-only") {
+    // The verdict reads back and its report does not: the warning does not depend on the report.
+    lines.push(...dateWarningLines({ status: state }));
   }
   return { headline: `Identifier screen: ${base.verdict}`, tone: base.tone, lines };
 }
@@ -923,7 +942,7 @@ export function describePreflight(
 ): ScreenDescription {
   const base = VERDICTS[scan.status];
   const lines = scanLines(scan);
-  lines.push(...dateWarningLines(scan.findings_by_kind));
+  lines.push(...dateWarningLines(scan));
   if (acknowledgedVia === "prompt") lines.push("Acknowledged by the uploader at the prompt.");
   if (acknowledgedVia === "flag") {
     lines.push("Acknowledged by the uploader with --acknowledge-identifier-preflight.");

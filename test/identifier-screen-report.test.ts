@@ -450,29 +450,43 @@ describe("describeScreen", () => {
 // ---------------------------------------------------------------------------------------
 
 /** The warning exactly as ADR 0090 words it, for a count of `n`. */
-const warningFor = (n: number) => [
-  `Warning: acquisition dates finer than year and month were found in recording headers or scans tables (${n} ${n === 1 ? "entry" : "entries"}).`,
+const warningFor = (n: number, options: { atLeast?: boolean } = {}) => [
+  `Warning: acquisition dates finer than year and month were found in recording headers or scans tables (${options.atLeast ? "at least " : ""}${n} ${n === 1 ? "entry" : "entries"}).`,
+  ...FIXED_AFTER_THE_FIRST,
+];
+
+const FIXED_AFTER_THE_FIRST = [
   "NEMAR does not change them.",
   "A date can help identify a participant when it is combined with other information.",
   "Remove or coarsen any date that could identify someone before uploading or requesting publication.",
-  "An administrator reviews these before a dataset is made public.",
+  "Administrators are told of these findings when publication is requested.",
+];
+
+/** The same warning for a verdict that says dates were found and a count that did not survive. */
+const WARNING_WITHOUT_COUNT = [
+  "Warning: acquisition dates finer than year and month were found in recording headers or scans tables.",
+  ...FIXED_AFTER_THE_FIRST,
 ];
 
 describe("dateFindingCount and dateWarningLines", () => {
   test("the sentence is pinned: five lines, one count, singular for one", () => {
-    expect(dateWarningLines({ "edf-startdate": 3 })).toEqual(warningFor(3));
-    expect(dateWarningLines({ "acq-time-dated": 1 })).toEqual(warningFor(1));
-    expect(dateWarningLines({ "edf-recording-startdate": 12 })).toEqual(warningFor(12));
+    expect(dateWarningLines({ findings_by_kind: { "edf-startdate": 3 } })).toEqual(warningFor(3));
+    expect(dateWarningLines({ findings_by_kind: { "acq-time-dated": 1 } })).toEqual(warningFor(1));
+    expect(dateWarningLines({ findings_by_kind: { "edf-recording-startdate": 12 } })).toEqual(
+      warningFor(12),
+    );
   });
 
   test("the count is the sum over the three date kinds, and nothing else is added", () => {
     expect(
       dateWarningLines({
-        "edf-startdate": 2,
-        "edf-recording-startdate": 3,
-        "acq-time-dated": 4,
-        "edf-patient-name": 50,
-        "tooling-debris": 7,
+        findings_by_kind: {
+          "edf-startdate": 2,
+          "edf-recording-startdate": 3,
+          "acq-time-dated": 4,
+          "edf-patient-name": 50,
+          "tooling-debris": 7,
+        },
       })[0],
     ).toBe(warningFor(9)[0]);
     expect(dateFindingCount({ "edf-startdate": 2, "acq-time-dated": 4 })).toBe(6);
@@ -480,7 +494,7 @@ describe("dateFindingCount and dateWarningLines", () => {
 
   test("exactly the date kinds raise it: every kind the scanner can report is checked", () => {
     for (const kind of FINDING_KINDS) {
-      const raised = dateWarningLines({ [kind]: 1 }).length > 0;
+      const raised = dateWarningLines({ findings_by_kind: { [kind]: 1 } }).length > 0;
       expect(raised).toBe(DATE_KINDS.has(kind as FindingKind));
     }
     expect([...DATE_KINDS].sort()).toEqual([
@@ -489,14 +503,49 @@ describe("dateFindingCount and dateWarningLines", () => {
       "edf-startdate",
     ]);
     // Text in a date slot that is not a date is a different kind, and does not warn.
-    expect(dateWarningLines({ "edf-startdate-unparsed": 5 })).toEqual([]);
+    expect(dateWarningLines({ findings_by_kind: { "edf-startdate-unparsed": 5 } })).toEqual([]);
   });
 
   test("no date finding, no warning", () => {
     expect(dateWarningLines(undefined)).toEqual([]);
     expect(dateWarningLines({})).toEqual([]);
-    expect(dateWarningLines({ "edf-startdate": 0 })).toEqual([]);
+    expect(dateWarningLines({ findings_by_kind: {} })).toEqual([]);
+    expect(dateWarningLines({ findings_by_kind: { "edf-startdate": 0 } })).toEqual([]);
+    // Only the verdict `dates-only` stands in for a count.
+    for (const status of DATASET_STATUSES.filter((x) => x !== "dates-only")) {
+      expect(dateWarningLines({ status })).toEqual([]);
+    }
     expect(dateFindingCount(undefined)).toBe(0);
+  });
+
+  test("an incomplete scan says its count is a lower bound", () => {
+    expect(
+      dateWarningLines({ findings_by_kind: { "edf-startdate": 3 }, incomplete: true }),
+    ).toEqual(warningFor(3, { atLeast: true }));
+    expect(
+      dateWarningLines({ findings_by_kind: { "acq-time-dated": 1 }, incomplete: true })[0],
+    ).toContain("(at least 1 entry)");
+    for (const incomplete of [false, undefined]) {
+      expect(dateWarningLines({ findings_by_kind: { "edf-startdate": 3 }, incomplete })).toEqual(
+        warningFor(3),
+      );
+    }
+  });
+
+  test("a dates-only verdict warns even when the counts did not survive, without a count", () => {
+    for (const input of [
+      { status: "dates-only" as const },
+      { status: "dates-only" as const, findings_by_kind: {} },
+      { status: "dates-only" as const, findings_by_kind: { "edf-startdate": 0 } },
+      { status: "dates-only" as const, incomplete: true },
+    ]) {
+      expect(dateWarningLines(input)).toEqual(WARNING_WITHOUT_COUNT);
+    }
+    // Counts, when there are any, still win: the verdict is not a second source of the number.
+    expect(
+      dateWarningLines({ status: "dates-only", findings_by_kind: { "edf-startdate": 2 } }),
+    ).toEqual(warningFor(2));
+    expect(WARNING_WITHOUT_COUNT.join("\n")).not.toMatch(/\d/);
   });
 
   test("a count that is not a non-negative integer is ignored, never added", () => {
@@ -506,22 +555,22 @@ describe("dateFindingCount and dateWarningLines", () => {
       "edf-recording-startdate": 2.5,
     } as unknown as Partial<Record<FindingKind, number>>;
     expect(dateFindingCount(hostile)).toBe(0);
-    expect(dateWarningLines(hostile)).toEqual([]);
+    expect(dateWarningLines({ findings_by_kind: hostile })).toEqual([]);
     const mixed = { "edf-startdate": 2, "acq-time-dated": Number.NaN } as Partial<
       Record<FindingKind, number>
     >;
-    expect(dateWarningLines(mixed)).toEqual(warningFor(2));
+    expect(dateWarningLines({ findings_by_kind: mixed })).toEqual(warningFor(2));
   });
 
   test("the words carry no digit but the count, no path, no date and no value", () => {
     for (const n of [1, 7, 4096]) {
-      const text = dateWarningLines({ "edf-startdate": n }).join("\n");
+      const text = dateWarningLines({ findings_by_kind: { "edf-startdate": n } }).join("\n");
       const withoutCount = text.replace(`(${n} ${n === 1 ? "entry" : "entries"})`, "()");
       expect(withoutCount).not.toMatch(/\d/);
       expect(text).not.toMatch(/\d{4}-\d{2}|\d{2}\.\d{2}\.\d{2}/);
       expect(text).not.toMatch(/[\\/]|\.\.|sub-|\.edf|\.tsv|\.json/i);
       // The count is the only thing that varies: the other four lines are the same for every n.
-      const lines = dateWarningLines({ "edf-startdate": n });
+      const lines = dateWarningLines({ findings_by_kind: { "edf-startdate": n } });
       expect(lines.slice(1)).toEqual(warningFor(1).slice(1));
       expect(lines[0]?.replace(/\(\d+ \w+\)/, "()")).toBe(
         warningFor(1)[0]?.replace("(1 entry)", "()"),
@@ -531,6 +580,9 @@ describe("dateFindingCount and dateWarningLines", () => {
 
   test("isDateWarningLine recognizes the warning's lines and no count or footer line", () => {
     for (const line of warningFor(5)) expect(isDateWarningLine(line)).toBe(true);
+    for (const line of [...warningFor(5, { atLeast: true }), ...WARNING_WITHOUT_COUNT]) {
+      expect(isDateWarningLine(line)).toBe(true);
+    }
     for (const line of [
       "Findings by kind: edf-startdate x5.",
       "Files: 10; EDF/BDF headers read: 4 of 4.",
@@ -604,7 +656,28 @@ describe("describeScreen carries the warning and changes nothing else", () => {
     );
     const d = describeScreen("unchecked", unchecked);
     expect(d.headline).toBe("Identifier screen: INCOMPLETE");
-    expect(d.lines).toEqual(expect.arrayContaining(warningFor(3)));
+    expect(d.lines).toEqual(expect.arrayContaining(warningFor(3, { atLeast: true })));
+  });
+
+  test("a dates-only verdict whose report does not read back still warns, without a count", () => {
+    // The stored report is gone or unreadable (null), or the counts were lost (none recorded):
+    // the verdict column alone says a date was found, and silence here would be silent.
+    const noCounts = parseScreenReport(
+      report({
+        scan: scan({
+          status: "dates-only",
+          findings_by_kind: undefined,
+          edf_bdf_files_flagged: 0,
+          unscreened_formats: {},
+        }),
+      }),
+    );
+    for (const stored of [null, noCounts]) {
+      const d = describeScreen("dates-only", stored);
+      expect(d.headline).toBe("Identifier screen: clean (acquisition dates only)");
+      expect(d.tone).toBe("ok");
+      expect(d.lines).toEqual(expect.arrayContaining(WARNING_WITHOUT_COUNT));
+    }
   });
 
   test("no date finding, no warning, in any state", () => {
@@ -612,8 +685,11 @@ describe("describeScreen carries the warning and changes nothing else", () => {
     expect(describeScreen("review", none).lines.some(isDateWarningLine)).toBe(false);
     const clean = withKinds("clean", {});
     expect(describeScreen("clean", clean).lines.some(isDateWarningLine)).toBe(false);
+    // With no report at all, only the verdict `dates-only` says a date was found.
     for (const state of [...DATASET_STATUSES, "pending", "error", "unreported"] as ScreenState[]) {
-      expect(describeScreen(state, null).lines.some(isDateWarningLine)).toBe(false);
+      expect(describeScreen(state, null).lines.some(isDateWarningLine)).toBe(
+        state === "dates-only",
+      );
     }
     const failed = parseScreenReport({
       version: 1,
