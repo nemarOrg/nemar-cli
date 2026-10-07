@@ -7,7 +7,7 @@
  */
 
 import { HttpError } from "../retry";
-import { GITHUB_API, ORG_NAME } from "./shared";
+import { GITHUB_API, ORG_NAME, ghHeaders } from "./shared";
 import { githubFetchWithRetry } from "./transport";
 
 /** Identity used for all backend-initiated commits and tags on dataset repos. */
@@ -342,30 +342,59 @@ export async function getFileContent(
 }
 
 /**
- * Whether `branch` exists in the dataset repository. A 404 (no such ref) and
- * a 409 (GitHub's "Git Repository is empty") are the answer "no", not a
- * propagation delay to retry; any other failure throws.
+ * GET the ref of `branch`: the one request `branchExists` and
+ * `getMainBranchSha` both make, so they cannot disagree about the URL.
+ *
+ * The branch is encoded per path segment, never as one component: the route is
+ * `git/ref/heads/{ref}` and GitHub reads the rest of the path as the ref name,
+ * so `release/1.0` has to keep its slash (`encodeURIComponent` alone sends
+ * `release%2F1.0`, which names no ref), while a character that means something
+ * in a URL is still escaped.
+ *
+ * `retryOn404` is the one thing the callers differ on, and it is why neither
+ * is written in terms of the other: `getMainBranchSha` is asked about a branch
+ * the caller knows exists, so a 404 is a propagation delay worth retrying;
+ * `branchExists` is asked whether it exists at all, so a 404 is its answer.
+ */
+async function fetchBranchRef(
+  repo: string,
+  branch: string,
+  pat: string,
+  retryOn404: boolean,
+): Promise<Response> {
+  const ref = branch.split("/").map(encodeURIComponent).join("/");
+  return githubFetchWithRetry(
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/ref/heads/${ref}`,
+    { headers: ghHeaders(pat) },
+    { retryOn404 },
+  );
+}
+
+/** The `HttpError` both branch-ref readers throw for a response that is not
+ *  an answer (`verb` completes "Failed to ... <branch> branch ref"). */
+async function branchRefHttpError(
+  response: Response,
+  verb: string,
+  branch: string,
+): Promise<HttpError> {
+  const error = await response.text().catch(() => "<failed to read body>");
+  return new HttpError(
+    `Failed to ${verb} ${branch} branch ref: HTTP ${response.status}: ${error.slice(0, 300)}`,
+    response.status,
+    error.slice(0, 300),
+  );
+}
+
+/**
+ * Whether `branch` exists in the dataset repository. A 404 (no such ref, or a
+ * repository the token cannot see) and a 409 (GitHub's "Git Repository is
+ * empty") are the answer "no", not a propagation delay to retry; any other
+ * failure throws.
  */
 export async function branchExists(repo: string, branch: string, pat: string): Promise<boolean> {
-  const response = await githubFetchWithRetry(
-    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/ref/heads/${encodeURIComponent(branch)}`,
-    {
-      headers: {
-        Authorization: `Bearer ${pat}`,
-        Accept: "application/vnd.github.v3+json",
-        "User-Agent": "NEMAR-API",
-      },
-    },
-  );
+  const response = await fetchBranchRef(repo, branch, pat, false);
   if (response.status === 404 || response.status === 409) return false;
-  if (!response.ok) {
-    const error = await response.text().catch(() => "<failed to read body>");
-    throw new HttpError(
-      `Failed to look up ${branch} branch ref: HTTP ${response.status}: ${error.slice(0, 300)}`,
-      response.status,
-      error.slice(0, 300),
-    );
-  }
+  if (!response.ok) throw await branchRefHttpError(response, "look up", branch);
   return true;
 }
 
@@ -381,26 +410,8 @@ export async function branchExists(repo: string, branch: string, pat: string): P
 export async function getMainBranchSha(repo: string, branch: string, pat: string): Promise<string> {
   // retryOn404: caller knows the branch exists (e.g., we just committed to it),
   // so 404 indicates GitHub hasn't propagated the ref yet.
-  const response = await githubFetchWithRetry(
-    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/ref/heads/${branch}`,
-    {
-      headers: {
-        Authorization: `Bearer ${pat}`,
-        Accept: "application/vnd.github.v3+json",
-        "User-Agent": "NEMAR-API",
-      },
-    },
-    { retryOn404: true },
-  );
-
-  if (!response.ok) {
-    const error = await response.text().catch(() => "<failed to read body>");
-    throw new HttpError(
-      `Failed to get ${branch} branch ref: HTTP ${response.status}: ${error.slice(0, 300)}`,
-      response.status,
-      error.slice(0, 300),
-    );
-  }
+  const response = await fetchBranchRef(repo, branch, pat, true);
+  if (!response.ok) throw await branchRefHttpError(response, "get", branch);
 
   const refData = (await response.json()) as { object: { sha: string } };
   if (!refData.object?.sha) {
