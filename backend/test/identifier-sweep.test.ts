@@ -1440,6 +1440,41 @@ describe("the callback's size bound", () => {
     expect(lying.status).toBe(413);
     expect(stamps("nm000760").identifier_sweep_attempt).toBe("pending");
   });
+
+  test("a body with no length is cut off at the bound, not read whole first", async () => {
+    seedDataset("nm000761");
+    await runIdentifierSweepTick(env());
+    const token = (dispatches[0] as Dispatch).client_payload.callback_token;
+    // 400 chunks of 4 KB (1.6 MB) with no Content-Length, as a chunked upload arrives. The stream
+    // is pull-driven, so the count of chunks handed out is the count the route read.
+    const chunk = new Uint8Array(4096).fill(120);
+    let pulled = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pulled >= 400) {
+          controller.close();
+          return;
+        }
+        pulled++;
+        controller.enqueue(chunk);
+      },
+    });
+    const res = await app.request(
+      "/webhooks/identifier-sweep-result",
+      {
+        method: "POST",
+        headers: { "X-Webhook-Token": token, "Content-Type": "application/json" },
+        body,
+        // @ts-expect-error `duplex` is required for a streamed body and is not in the DOM typings.
+        duplex: "half",
+      },
+      env(),
+    );
+    expect(res.status).toBe(413);
+    // 256 KB is 64 chunks; a few more may have been in flight, and nothing like the 400 offered.
+    expect(pulled).toBeLessThan(100);
+    expect(stamps("nm000761").identifier_sweep_attempt).toBe("pending");
+  });
 });
 
 describe("the mail category through the route", () => {
