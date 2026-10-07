@@ -400,13 +400,13 @@ jobs:
   # THE SLOWEST SLICE SETS THE TIME. bun cuts the path-sorted file list into contiguous slices
   # of about equal duration, so a shard cannot finish before its slowest file does, and the
   # cut points follow file order, not an ideal packing. On the per-file durations averaged over
-  # runs 37652785302 and 37655119691 the slowest slice is 10.8 minutes with 5 or 6 shards, 8.2
-  # with 7 (the knee: the first count that gives delete-preconditions.test.ts a runner of its
-  # own, 8 minutes) and 8.7 with 8, which also leaves a runner holding one 0-second file: more
-  # runners do not always help. So CHECK A SHARD COUNT BEFORE CHANGING IT, with a dry run that
-  # imports the files and runs no test (it exits 1 with "matched 0 tests"; the junit file names
-  # each shard's files). Never add --update-timings to it: that would overwrite the timings file
-  # with the files of one shard.
+  # runs 37652785302, 37655119691 and 37656450491 the slowest slice is 10.4 minutes with 5 or 6
+  # shards, 7.5 with 7 (the first count that gives delete-preconditions.test.ts, raw-copies and
+  # zarr a runner each) and 8.0 with 8, which splits the small files differently and is no
+  # faster: more runners do not always help. So CHECK A SHARD COUNT BEFORE CHANGING IT, with a
+  # dry run that imports the files and runs no test (it exits 1 with "matched 0 tests"; the
+  # junit file names each shard's files). Run it from the repository root, and never add
+  # --update-timings to it: that would overwrite the timings file with the files of one shard.
   #   for i in 1 2 3 4 5 6 7; do
   #     bun test --preload ./test/scrub/helpers/temp-dirs-preload.ts \
   #       --path-ignore-patterns='__run_every_scrub_suite__' \
@@ -471,16 +471,20 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
 
-      # Retried because the job is now N runners and any one failing to reach the package mirror
-      # turns the gate red; a missing git-annex is still a failure, after the last attempt.
+      # Each attempt has a time limit because the job is now N runners and any one of them can
+      # draw a slow package mirror: one shard spent 7 minutes 22 seconds on this step (16.6 MB at
+      # 37 kB/s; it normally takes 10 seconds) and set the wall time of its run. A retry resumes
+      # the partial download, usually from a faster mirror. A missing git-annex is still a
+      # failure, after the last attempt.
       - name: Install git-annex
         run: |
           for attempt in 1 2 3; do
-            if sudo apt-get update && sudo apt-get install -y git-annex; then
+            if sudo timeout $((attempt * 60)) apt-get update \
+              && sudo timeout $((attempt * 60)) apt-get install -y git-annex; then
               exit 0
             fi
-            echo "::warning::apt attempt $attempt failed"
-            sleep $((attempt * 10))
+            echo "::warning::apt attempt $attempt failed or timed out"
+            sudo dpkg --configure -a || true
           done
           echo "::error::git-annex could not be installed"
           exit 1
