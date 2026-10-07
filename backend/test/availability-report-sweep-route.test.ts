@@ -120,11 +120,14 @@ function seedDataset(
     isExemplar?: 0 | 1;
     stamped?: boolean;
     dataComplete?: 0 | 1 | null;
+    /** How the dataset's version is known; "none" = nothing published yet. */
+    version?: "doi" | "row" | "none";
   } = {},
 ): void {
+  const version = opts.version ?? "doi";
   db.prepare(
-    `INSERT INTO datasets (dataset_id, name, owner_user_id, github_repo, is_sandbox, is_exemplar, sweep_stamps, data_complete)
-     VALUES (?, ?, 1, ?, ?, ?, ?, ?)`,
+    `INSERT INTO datasets (dataset_id, name, owner_user_id, github_repo, is_sandbox, is_exemplar, sweep_stamps, data_complete, latest_version_doi)
+     VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     id,
@@ -133,7 +136,13 @@ function seedDataset(
     opts.isExemplar ?? 0,
     opts.stamped ? '{"availability_report_at":"2026-07-01 00:00:00"}' : null,
     opts.dataComplete ?? null,
+    version === "doi" ? `10.82901/nemar.${id}.v1.0.0` : null,
   );
+  if (version === "row") {
+    db.prepare(
+      "INSERT INTO dataset_versions (dataset_id, version, doi) VALUES (?, '1.0.0', ?)",
+    ).run(id, `10.82901/nemar.${id}.v1.0.0`);
+  }
 }
 
 beforeEach(async () => {
@@ -286,6 +295,19 @@ describe("availability-report-sweep candidate SQL (pinned, no route dispatch)", 
     seedDataset("nm000305", { stamped: true }); // excluded: already stamped
 
     expect(candidates(false)).toEqual(["nm000300", "on000301"]);
+  });
+
+  // nm000358 (2026-10-07): the report was committed to an EMPTY repository
+  // mid-upload, creating an unrelated root commit on `main` that the
+  // depositor's first push could never fast-forward over. A dataset with no
+  // version yet is not a candidate (and cannot hog the LIMIT window).
+  test("a dataset with no version yet is not a candidate; a version DOI or a version row makes it one", () => {
+    seedDataset("nm000358", { version: "none" }); // excluded: created, still uploading
+    seedDataset("nm000359", { version: "row" }); // included: has a dataset_versions row
+    seedDataset("nm000360", { version: "doi" }); // included: has a version DOI
+
+    expect(candidates(false)).toEqual(["nm000359", "nm000360"]);
+    expect(remainingCount()).toBe(2);
   });
 
   // Issue #1168: the curated exemplar fleet is inserted `is_sandbox = 1`
