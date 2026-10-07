@@ -1039,7 +1039,8 @@ export async function signalDefaultsSweepReset(): Promise<SignalDefaultsSweepRes
  *  `POST /admin/datasets/data-integrity-sweep`). */
 export interface DataIntegritySweepBatchResponse {
   processed: number;
-  /** Verified complete (every annex-keyed manifest entry present at declared size). */
+  /** Verified complete (every annex-keyed manifest entry present at declared size,
+   *  whole or as a complete chunk set). */
   complete: number;
   /** Verified incomplete this batch -- the #967 signature. */
   incomplete: number;

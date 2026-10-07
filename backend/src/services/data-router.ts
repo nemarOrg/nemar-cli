@@ -773,8 +773,9 @@ export interface NemarExtensionBlock {
   pipeline_stage: PipelineStage | null;
   /**
    * Data completeness (#970, epic #967 Phase 3): 1 = every annex-keyed manifest
-   * entry verified present at its declared size, 0 = at least one missing/
-   * truncated (the #967 signature), null = not audited yet. Lives in the
+   * entry verified present at its declared size, whole or as a complete chunk set
+   * (#1565), 0 = at least one missing/truncated (the #967 signature), null = not
+   * audited yet. Lives in the
    * `nemar` extension namespace rather than the canonical `data_summary` block
    * because neuroschema's dataSummary.schema.json is `additionalProperties:
    * false` -- this is a NEMAR-specific integrity fact, not part of the
