@@ -16,6 +16,11 @@
  *
  * Pure functions over bytes, no I/O, no dependencies beyond the scanner it is proven against.
  *
+ * {@link normalizeEdfDates} is a separate rule with its own proof ({@link verifyDateNormalization}),
+ * and {@link scrubEdfHeader} never calls it: it sets the acquisition dates of a NEW recording to
+ * 1 January of their year (ADR 0091), for the importer and the upload, and ADR 0085's correction of
+ * published data does not use it. {@link normalizeScansTableDates} is its scans-table counterpart.
+ *
  * {@link blankIdentifierJsonKeys} is the JSON half, for a caller that edits one document at a time
  * (the importer, ADR 0089): the rule ADR 0085's history rewrite applies to every commit
  * (`scripts/scrub/git/rewrite_history.py`, `blank_json`), applied to one document.
@@ -24,11 +29,16 @@
 import {
   EDF_HEADER_BYTES,
   type Finding,
+  type FindingKind,
+  acqTimeCells,
   detectEdfFamily,
+  edfAcquisitionDates,
   edfIdentificationText,
   hasContent,
+  scanAcqTime,
   scanEdfHeader,
   scanJsonKeys,
+  scanScansTable,
 } from "./identifier-scan";
 
 /** Byte ranges of the two fields this module may rewrite. Everything else is preserved. */
@@ -156,6 +166,208 @@ export function applyHeaderPatch(data: Uint8Array, header: Uint8Array): Uint8Arr
   const out = data.slice();
   out.set(header.subarray(0, EDF_HEADER_BYTES), 0);
   return out;
+}
+
+// ---------------------------------------------------------------------------------------
+// Acquisition dates (ADR 0091)
+// ---------------------------------------------------------------------------------------
+
+/** The two header dates the rule may set, by the scanner's field names. */
+export type DateField = "startdate" | "recording.startdate";
+
+/** The finding kinds of the two header dates; a scans table's `acq-time-dated` is its own rule. */
+const HEADER_DATE_KINDS: ReadonlySet<FindingKind> = new Set<FindingKind>([
+  "edf-startdate",
+  "edf-recording-startdate",
+]);
+
+/** Bytes of the header start date `dd.mm.yy` that hold the day and the month. */
+const STARTDATE_DAY_MONTH = [168, 169, 171, 172] as const;
+
+/**
+ * The EDF+ spelling of the date after `Startdate`, the only layout the rule writes into: two digits
+ * of day, three letters of month and four of year. The slot's day and month are its bytes 0, 1 and
+ * 3 to 5.
+ */
+const EDF_PLUS_SLOT_DATE = /^\d{2}-[A-Za-z]{3}-\d{4}$/;
+const SLOT_DAY_MONTH = [0, 1, 3, 4, 5] as const;
+
+export interface DateNormalizeResult {
+  /** The new 256-byte header. Equal to the input header when nothing changed. */
+  header: Uint8Array;
+  changed: boolean;
+  /** Which dates were set. Field names only. */
+  fields: DateField[];
+}
+
+/** Thrown when a date rewrite cannot be proven: a fault in the rule, never a property of the file. */
+export class DateNormalizationUnverified extends Error {
+  constructor() {
+    super("date normalization unverified");
+    this.name = "DateNormalizationUnverified";
+  }
+}
+
+/** The bytes the rule may change in this header: the day and month of each date the scanner reports. */
+function dateBytes(header: Uint8Array): Set<number> | null {
+  const at = edfAcquisitionDates(header);
+  if (!at) return null;
+  const out = new Set<number>();
+  if (at.startdate) for (const i of STARTDATE_DAY_MONTH) out.add(i);
+  if (at.recording) for (const i of SLOT_DAY_MONTH) out.add(at.recording.start + i);
+  return out;
+}
+
+/**
+ * Set the acquisition dates of an EDF, EDF+ or BDF header to 1 January of their year (ADR 0091).
+ *
+ * The dates are the ones the scanner reports, found by its own reading (`edfAcquisitionDates`), so
+ * what the rule writes is what the scanner exempts: 1 January is its year-only date.
+ *
+ * - The header start date, bytes 168..176 in `dd.mm.yy`: `dd` and `mm` become `01`. The year is
+ *   never read or written, so a reader's two-digit-year pivot gives the same year before and after;
+ *   the start time, bytes 176..184, is not touched.
+ * - The EDF+ date after `Startdate` in the recording field, when it is the whole slot in
+ *   `dd-MMM-yyyy`: `dd` becomes `01` and the three month letters `JAN`, each in the letter case it
+ *   had. The separators and the year stay.
+ *
+ * All or nothing per header: if the recording field holds an acquisition date in any other layout
+ * (`14.03.2023`, a free-text field), nothing is changed, because setting one date would leave the
+ * other one saying the day and the two disagreeing. A field the scanner does not read as a date is
+ * never touched. Same size, in place, those bytes only; the result is proven by
+ * {@link verifyDateNormalization} before it is returned, and an unprovable result throws
+ * {@link DateNormalizationUnverified} rather than return bytes nobody checked.
+ */
+export function normalizeEdfDates(bytes: Uint8Array): DateNormalizeResult {
+  if (bytes.length < EDF_HEADER_BYTES) throw new ScrubRefused("header-too-short");
+  const before = bytes.subarray(0, EDF_HEADER_BYTES);
+  const at = edfAcquisitionDates(before);
+  if (!at) throw new ScrubRefused("not-edf");
+  const header = before.slice();
+  const unchanged: DateNormalizeResult = { header, changed: false, fields: [] };
+  const slot = at.recording;
+  if (slot) {
+    const text = String.fromCharCode(...header.subarray(slot.start, slot.end));
+    if (!slot.wholeSlot || !EDF_PLUS_SLOT_DATE.test(text)) return unchanged;
+  }
+  const fields: DateField[] = [];
+  if (slot) {
+    header[slot.start] = 0x30;
+    header[slot.start + 1] = 0x31;
+    for (let i = 0; i < 3; i++) {
+      const was = header[slot.start + 3 + i] as number;
+      const upper = "JAN".charCodeAt(i);
+      header[slot.start + 3 + i] = was >= 0x61 && was <= 0x7a ? upper | 0x20 : upper;
+    }
+    fields.push("recording.startdate");
+  }
+  if (at.startdate) {
+    header[168] = 0x30;
+    header[169] = 0x31;
+    header[171] = 0x30;
+    header[172] = 0x31;
+    fields.push("startdate");
+  }
+  if (fields.length === 0) return unchanged;
+  if (!verifyDateNormalization(before, header).ok) throw new DateNormalizationUnverified();
+  return { header, changed: true, fields };
+}
+
+/**
+ * The proof that a header differs from the original only in the day and month of the acquisition
+ * dates the scanner reports, that the scanner now reports none, and that every other finding is
+ * what it was. Pass the first 256 bytes of each. It never returns a value.
+ */
+export function verifyDateNormalization(before: Uint8Array, after: Uint8Array): ScrubVerdict {
+  if (before.length < EDF_HEADER_BYTES || after.length < EDF_HEADER_BYTES) {
+    return { ok: false, reasons: ["header-too-short"] };
+  }
+  const allowed = dateBytes(before);
+  if (!allowed) return { ok: false, reasons: ["not-edf"] };
+  const reasons: string[] = [];
+  for (let i = 0; i < EDF_HEADER_BYTES; i++) {
+    if (before[i] !== after[i] && !allowed.has(i)) {
+      reasons.push("bytes-outside-dates-changed");
+      break;
+    }
+  }
+  if (detectEdfFamily(before) !== detectEdfFamily(after)) reasons.push("file-family-changed");
+  const found = scanEdfHeader(after.subarray(0, EDF_HEADER_BYTES));
+  if (found.some((f) => HEADER_DATE_KINDS.has(f.kind))) reasons.push("acquisition-date-remains");
+  const others = (fs: Finding[]) =>
+    fs
+      .filter((f) => !HEADER_DATE_KINDS.has(f.kind))
+      .map((f) => `${f.kind}\0${f.severity}\0${f.field}\0${f.shape}`)
+      .sort()
+      .join("\n");
+  if (others(found) !== others(scanEdfHeader(before.subarray(0, EDF_HEADER_BYTES)))) {
+    reasons.push("other-findings-changed");
+  }
+  return { ok: reasons.length === 0, reasons };
+}
+
+/** What {@link normalizeScansTableDates} did. Counts and a fixed word; never a value. */
+export interface ScansTableDateResult {
+  /**
+   * `normalized`: values were set and `bytes` holds the new table. `clean`: no dated value.
+   * `unreadable`: not UTF-8 text, so nothing was changed.
+   */
+  status: "normalized" | "clean" | "unreadable";
+  bytes?: Uint8Array;
+  /** `acq_time` values set to 1 January. */
+  values: number;
+}
+
+/**
+ * Set every dated `acq_time` value of a BIDS scans table to 1 January of its year (ADR 0091): in a
+ * value the scanner reports (`scanAcqTime`: it starts `YYYY-MM-DD` and is not `-01-01`), `MM-DD`
+ * becomes `01-01`, and the year, the time of day, any fraction or zone, every other cell and every
+ * byte between them stay. The cells are the screen's own (`acqTimeCells`). Same size.
+ *
+ * The result is proven: it decodes, the screen reports no dated value in it, and it differs from
+ * the input only in month and day digits. An unprovable result throws
+ * {@link DateNormalizationUnverified}.
+ */
+export function normalizeScansTableDates(raw: Uint8Array): ScansTableDateResult {
+  // Decoded as the screen decodes it (one mark dropped by the decoder, one by the reading), but
+  // fatally: a table that is not UTF-8 is not edited.
+  const bom = raw.length >= 3 && raw[0] === 0xef && raw[1] === 0xbb && raw[2] === 0xbf;
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(raw);
+  } catch {
+    return { status: "unreadable", values: 0 };
+  }
+  // UTF-16 code units, the unit `acqTimeCells` counts in.
+  const chars = text.split("");
+  const digits = new Set<number>();
+  let values = 0;
+  for (const cell of acqTimeCells(text)) {
+    if (scanAcqTime(cell.value).length === 0) continue;
+    const at = cell.index + (cell.value.length - cell.value.trimStart().length);
+    // `YYYY-MM-DD`: month at 5 and 6, day at 8 and 9.
+    for (const [offset, digit] of [
+      [5, "0"],
+      [6, "1"],
+      [8, "0"],
+      [9, "1"],
+    ] as const) {
+      chars[at + offset] = digit;
+      digits.add(at + offset);
+    }
+    values++;
+  }
+  if (values === 0) return { status: "clean", values: 0 };
+  const out = chars.join("");
+  let onlyDigits = out.length === text.length;
+  for (let i = 0; onlyDigits && i < out.length; i++) {
+    if (out[i] !== text[i] && !(digits.has(i) && /\d/.test(text[i] as string))) onlyDigits = false;
+  }
+  if (!onlyDigits || scanScansTable(out).length !== 0) throw new DateNormalizationUnverified();
+  const body = new TextEncoder().encode(out);
+  const bytes = bom ? new Uint8Array([0xef, 0xbb, 0xbf, ...body]) : body;
+  if (bytes.length !== raw.length) throw new DateNormalizationUnverified();
+  return { status: "normalized", bytes, values };
 }
 
 // ---------------------------------------------------------------------------------------
