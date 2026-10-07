@@ -13,7 +13,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { parseGitVerified } from "../../../scripts/scrub/contract";
+import { parseGitVerified, parseKey } from "../../../scripts/scrub/contract";
 import {
   GitScrubError,
   hashDirLower,
@@ -286,21 +286,28 @@ SUITE("verify --fresh-clone: the pushed repository (I1, I11)", () => {
 
   test("--allow-tag is repeatable; the proof lists the names sorted, without duplicates", async () => {
     const repo = fresh();
-    git(repo, "tag", "v9.9.9");
-    git(repo, "tag", "v9.10.0-rc1");
+    const extra = ["v9.9.9", "v9.10.0-rc1", "v9.9.9-B", "v9.9.9-a"];
+    for (const t of extra) git(repo, "tag", t);
     const proof = join(fx.root, "allow-two-proof.json");
-    const ok = await verifyFresh(repo, proof, allow("v9.9.9", "v9.10.0-rc1", "v9.9.9"));
+    const ok = await verifyFresh(
+      repo,
+      proof,
+      allow("v9.9.9", "v9.10.0-rc1", "v9.9.9-a", "v9.9.9-B", "v9.9.9"),
+    );
     expect(ok.code, ok.out).toBe(0);
-    expect(ok.out).toContain("allowedTags=2 ");
-    // Sorted by code unit, which is what the proof's parser requires, so the real file parses.
+    expect(ok.out).toContain("allowedTags=4 ");
+    // Sorted by code unit (upper case before lower case, "10" before "9"), which is what the
+    // proof's parser requires; a locale-aware sort writes a proof the parser then refuses.
     expect(parseGitVerified(readFileSync(proof, "utf8")).allowedTags).toEqual([
       "v9.10.0-rc1",
       "v9.9.9",
+      "v9.9.9-B",
+      "v9.9.9-a",
     ]);
-    // One of the two alone leaves the other unplanned.
+    // One of the four alone leaves the other three unplanned.
     const one = await verifyFresh(repo, proof, allow("v9.9.9"));
     expect(one.code, one.out).toBe(4);
-    expect(one.out).toContain("reason=tag-names-not-plan count=1");
+    expect(one.out).toContain("reason=tag-names-not-plan count=3");
     expect(one.out).toContain("verify: failed mode=fresh-clone allowedTags=1 ");
   }, 180_000);
 
@@ -331,6 +338,19 @@ SUITE("verify --fresh-clone: the pushed repository (I1, I11)", () => {
     expect(gone.out).toContain("reason=allowed-tag-missing count=1");
     expect(gone.out).toContain("reason=tag-names-not-plan count=1");
 
+    // The count is of names, not a flag: two missing names are two.
+    const two = await verifyFresh(fresh(), proof, allow("v8.8.8", "v8.8.9"));
+    expect(two.code, two.out).toBe(4);
+    expect(two.out).toContain("reason=allowed-tag-missing count=2");
+
+    // Only a TAG of that name counts: a branch called v8.8.8 does not make the allowance good.
+    const branch = fresh();
+    git(branch, "branch", "v8.8.8");
+    const notATag = await verifyFresh(branch, proof, allow("v8.8.8"));
+    expect(notATag.code, notATag.out).toBe(4);
+    expect(notATag.out).toContain("reason=allowed-tag-missing count=1");
+    expect(notATag.out).not.toContain("tag-names-not-plan");
+
     // A typo: the extra tag stays unplanned and the name that was typed is missing.
     const typo = fresh();
     git(typo, "tag", "v9.9.9");
@@ -357,10 +377,30 @@ SUITE("verify --fresh-clone: the pushed repository (I1, I11)", () => {
     expect(existsSync(proof)).toBe(false);
   }, 120_000);
 
+  test("an allowed annotated tag is read like any other: an old key in its message still fails", async () => {
+    const repo = fresh();
+    git(repo, "tag", "-a", "v9.9.9", "-m", `released from ${parseKey(OLD_A).sha256}`);
+    const proof = join(fx.root, "allow-annotated-proof.json");
+    writeFileSync(proof, "{}");
+    const r = await verifyFresh(repo, proof, allow("v9.9.9"));
+    expect(r.code, r.out).toBe(4);
+    expect(r.out).toContain("reason=old-key-in-message");
+    expect(r.out).not.toContain("tag-names-not-plan");
+    expect(existsSync(proof)).toBe(false);
+    // The same tag with a clean message is accepted: the message was the only problem.
+    git(repo, "tag", "-d", "v9.9.9");
+    git(repo, "tag", "-a", "v9.9.9", "-m", "a clean release note");
+    const ok = await verifyFresh(repo, proof, allow("v9.9.9"));
+    expect(ok.code, ok.out).toBe(0);
+  }, 180_000);
+
   test("--allow-tag takes a version tag and is for --fresh-clone only (usage errors)", async () => {
     const base = ["--repo", work, "--keymap", fx.keymapPath, "--plan", fx.planPath];
     const proof = join(fx.root, "allow-usage-proof.json");
+    // A usage error is a run that did not pass: a proof from an earlier run must not outlive it.
+    const stale = () => writeFileSync(proof, "{}");
     for (const name of ["main", "1.1.1", "v1.1", "v1.1.1/x", "v1.1.1 ", ""]) {
+      stale();
       const r = await cli([
         "verify",
         "--fresh-clone",
@@ -390,6 +430,7 @@ SUITE("verify --fresh-clone: the pushed repository (I1, I11)", () => {
     expect(bare.code, bare.out).toBe(2);
 
     // Local mode compares with the snapshot: the flag means nothing there, so it is refused.
+    stale();
     const local = await cli([
       "verify",
       ...base,
@@ -418,8 +459,11 @@ SUITE("verify --fresh-clone: the pushed repository (I1, I11)", () => {
     });
     await expect(local).rejects.toBeInstanceOf(GitScrubError);
     await expect(local).rejects.toThrow("refused: allow-tag-not-for-local");
-    const named = verifyRewrite({ ...base, mode: "fresh-clone", allowTags: ["main"] });
-    await expect(named).rejects.toThrow("bad-input: allow-tag-not-semver");
+    // The CLI checks first, so only a direct call shows that the library does not rely on it.
+    for (const name of ["main", "1.1.1", "v1.1", "v1.1.1/x", "v1.1.1\n", "v1.1.1 ", ""]) {
+      const named = verifyRewrite({ ...base, mode: "fresh-clone", allowTags: ["v1.0.1", name] });
+      await expect(named, JSON.stringify(name)).rejects.toThrow("bad-input: allow-tag-not-semver");
+    }
   }, 120_000);
 
   test("a git-annex branch that does not record the registration fails", async () => {
@@ -438,7 +482,9 @@ SUITE("verify --fresh-clone: the pushed repository (I1, I11)", () => {
     expect(none.out).toContain("reason=annex-branch-missing count=1");
   }, 120_000);
 
-  test("--fresh-clone takes no --before", async () => {
+  test("--fresh-clone takes no --before, and leaves no earlier proof behind", async () => {
+    const proof = join(fx.root, "before-usage-proof.json");
+    writeFileSync(proof, "{}");
     const r = await cli([
       "verify",
       "--fresh-clone",
@@ -452,9 +498,12 @@ SUITE("verify --fresh-clone: the pushed repository (I1, I11)", () => {
       s3Plan,
       "--before",
       join(fx.root, "before.json"),
+      "--proof-out",
+      proof,
     ]);
     expect(r.code).toBe(2);
     expect(r.out).toContain("--fresh-clone takes no --before");
+    expect(existsSync(proof)).toBe(false);
   });
 
   test("hashDirLower is git-annex's own hashdirlower", () => {

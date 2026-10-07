@@ -136,6 +136,10 @@ export async function main(argv: string[]): Promise<number> {
         const planPath = need(values.plan, "--plan");
         const s3PlanPath = need(values["s3-plan"], "--s3-plan");
         const fresh = values["fresh-clone"] === true;
+        const proofPath = values["proof-out"] ?? join(dirname(keymapPath), "git-verified.json");
+        // A proof from an earlier run must not outlive a run that does not pass, a usage error
+        // included: nothing below may leave one behind.
+        rmSync(proofPath, { force: true });
         if (fresh && values.before) throw new UsageError("--fresh-clone takes no --before");
         // The names are never echoed: a tag name is part of what the output keeps to counts.
         const allowTags = [...new Set(values["allow-tag"] ?? [])].sort();
@@ -145,9 +149,6 @@ export async function main(argv: string[]): Promise<number> {
         if (allowTags.some((t) => !VERSION_TAG.test(t))) {
           throw new UsageError("--allow-tag takes a version tag, vX.Y.Z or vX.Y.Z-pre");
         }
-        const proofPath = values["proof-out"] ?? join(dirname(keymapPath), "git-verified.json");
-        // A proof from an earlier run must not outlive a run that does not pass.
-        rmSync(proofPath, { force: true });
         const { keymap, plan } = readInputs(keymapPath, planPath);
         const s3Plan = readS3Plan(s3PlanPath);
         const result = await verifyRewrite({
