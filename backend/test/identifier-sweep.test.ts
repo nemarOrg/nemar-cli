@@ -1270,6 +1270,42 @@ describe("round two: a finding outlives screens that read less", () => {
   });
 });
 
+describe("round two: what a carried finding may hold", () => {
+  test("a carried finding holds a stored time only in the shape the sweep writes", async () => {
+    seedDataset("nm000740");
+    await runIdentifierSweepTick(env());
+    await answer("nm000740", scanBody("nm000740", "direct-identifiers"));
+    db.run(
+      `UPDATE datasets SET sweep_stamps = json_set(sweep_stamps, '$.identifier_sweep_checked_at', ?)
+        WHERE dataset_id = 'nm000740'`,
+      [LEAK],
+    );
+    expect(await rescreenAs("nm000740")).toBe(200);
+    dispatches = [];
+    await runIdentifierSweepTick(env());
+    await answer("nm000740", scanBody("nm000740", "unchecked"));
+    const kept = stamps("nm000740").identifier_sweep_finding as {
+      status: string;
+      checked_at: unknown;
+    };
+    expect(kept.status).toBe("direct-identifiers");
+    expect(kept.checked_at).toBeNull();
+    expect(rawStamps("nm000740")).not.toContain(LEAK);
+  });
+
+  test("the unparsed-format map is not stored: its keys are a pattern, not a closed list", async () => {
+    seedDataset("nm000741");
+    await runIdentifierSweepTick(env());
+    await answer(
+      "nm000741",
+      scanBody("nm000741", "not-screened", { unscreened_formats: { ".set": 2 } }),
+    );
+    const report = stamps("nm000741").identifier_sweep_report as { scan: Record<string, unknown> };
+    expect(report.scan.status).toBe("not-screened");
+    expect(report.scan.unscreened_formats).toBeUndefined();
+  });
+});
+
 describe("round two: dispatch edges", () => {
   test("a refused credential (401) closes one attempt without counting it and claims nobody else", async () => {
     seedDataset("nm000734");
