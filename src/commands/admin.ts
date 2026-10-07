@@ -6533,19 +6533,22 @@ adminCommand.addCommand(reindexCommand);
 
 const availabilityReportCommand = new Command("availability-report")
   .description(
-    "Report how much of a dataset's declared data is present in S3, and exactly which files are missing + why (#1000). Dry-run by default. --all backfills every managed dataset (#1001).",
+    "Report how much of a dataset's declared data is present in S3, and exactly which files are missing + why (#1000). Dry-run by default. --all backfills every non-sandbox dataset that has a version and no report yet (#1001).",
   )
   .argument("[dataset-id]", "Dataset ID (e.g., nm000103)")
   .option(
     "--write",
     "Commit the report to .nemar/availability-report.json on main (default: preview only)",
   )
-  .option("--all", "Backfill every managed dataset instead of a single one (#1001)")
+  .option(
+    "--all",
+    "Backfill every non-sandbox dataset that has a version and no report yet, instead of a single one (#1001)",
+  )
   .option(
     "--missing-only",
     "With --all, sweep only datasets already known incomplete (data_complete=0)",
   )
-  .option("--limit <n>", "With --all, datasets per batch (server clamps to [1,10])", "10")
+  .option("--limit <n>", "With --all, datasets per batch (server clamps to [1,30])", "10")
   .option("--reset", "With --all, clear every stamped sweep row so it re-sweeps from scratch")
   .option("--verbose", "With --all, print per-batch progress")
   .option("--json", "Output raw JSON")

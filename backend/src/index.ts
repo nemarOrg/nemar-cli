@@ -1175,11 +1175,13 @@ export default {
       // runAvailabilityReportSweepCron instead. Kept inside this block too,
       // belt and braces, exactly like archiveRetrySweep's own internal guard.
       //
-      // Self-limiting rather than exhaustive: capped at 10 GitHub commits per
-      // run (AVAILABILITY_REPORT_SWEEP_MAX) because a burst of writes trips
-      // GitHub's secondary rate limit on the shared PAT. It drains ~10/day and
-      // stamps only on success, so failures are retried on the next pass. A
-      // large backlog is meant to be cleared with `nemar admin
+      // Self-limiting rather than exhaustive: capped at
+      // AVAILABILITY_REPORT_SWEEP_MAX (30) GitHub commits per run because a
+      // burst of writes trips GitHub's secondary rate limit on the shared PAT.
+      // It drains up to 30/day and stamps only on success, so failures are
+      // retried on the next pass; a row the write refuses (the repository has
+      // no `main`) is retried every day and holds one of the 30 slots until
+      // main exists. A large backlog is meant to be cleared with `nemar admin
       // availability-report --all`, not by waiting on this.
       ctx.waitUntil(
         runAvailabilityReportSweepCron(env)
