@@ -821,8 +821,10 @@ async function listPages(
     } else {
       const key = str(out.NextKeyMarker);
       const id = str(out.NextVersionIdMarker);
-      if (!key) throw bad();
-      next = ["--key-marker", key, ...(id ? ["--version-id-marker", id] : [])];
+      // Both markers or none: a key marker alone resumes AFTER that key, and the rest of its
+      // versions would never be listed, which is the listing that decides whether a delete is done.
+      if (!key || !id) throw bad();
+      next = ["--key-marker", key, "--version-id-marker", id];
     }
     // A marker that does not move on would list forever.
     const at = next.join("\u0000");

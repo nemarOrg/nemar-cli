@@ -83,6 +83,30 @@ describe("listings", () => {
   );
 
   test(
+    "a truncated version listing with no next version id is refused, never resumed after the key",
+    async () => {
+      standin = startS3Standin();
+      seed();
+      await withCtx(standin, async (ctx) => {
+        // The twin: with both markers the same listing is complete.
+        const whole = await listPrefixVersions(ctx, "p/", 2);
+        expect(whole.length).toBe(13);
+
+        // A key marker alone resumes AFTER that key, so the rest of its versions would be
+        // missing from the listing that decides whether a delete finished.
+        standin.omitNextVersionIdMarker();
+        await expect(listPrefixVersions(ctx, "p/", 2)).rejects.toMatchObject({
+          code: "bad-output",
+        });
+        await expect(listKeyVersions(ctx, "p/k0.edf", 1)).rejects.toMatchObject({
+          code: "bad-output",
+        });
+      });
+    },
+    SLOW,
+  );
+
+  test(
     "a listing longer than one call's timeout finishes when each page is quick enough",
     async () => {
       standin = startS3Standin();
