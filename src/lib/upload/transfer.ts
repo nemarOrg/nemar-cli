@@ -27,6 +27,7 @@ import {
   gitAnnexAdd,
   initDataset,
   isGitAnnexDataset,
+  replaceDefaultAnnexDescription,
 } from "../git-annex/init.js";
 import { ensureLocalMainBranch, getCurrentBranch } from "../git-annex/repo-state.js";
 import { runCommand } from "../git-annex/run-command.js";
@@ -244,6 +245,11 @@ export async function initializeAnnexDataset(
     return FAIL;
   }
 
+  // A repository initialized by an older CLI (or by hand) carries git-annex's
+  // default `user@host:/path` description, which the push below would publish
+  // in uuid.log (#1399). Replace it before anything is pushed.
+  const redescribed = await replaceDefaultAnnexDescription(absolutePath);
+
   // Configure largefiles pattern
   const largefilesResult = await configureLargefiles(absolutePath);
   if (!largefilesResult.success) {
@@ -252,6 +258,9 @@ export async function initializeAnnexDataset(
   }
 
   spinner.succeed("git-annex dataset initialized");
+  if (redescribed) {
+    console.log(chalk.dim("  Replaced the repository's user@host:/path annex description (#1399)"));
+  }
 
   // Inform user that the adjusted branch name is normal
   const postInitBranch = await getCurrentBranch(absolutePath);

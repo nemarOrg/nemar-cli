@@ -46,12 +46,16 @@ const MODULE_EXPORTS: Record<string, string[]> = {
   init: [
     "ADD_CHUNK_MAX_BYTES",
     "ADD_CHUNK_MAX_PATHS",
+    "ANNEX_CLONE_DESCRIPTION",
+    "ANNEX_DEPOSIT_DESCRIPTION",
     "chunkAddTargets",
     "configureLargefiles",
     "ensureGitAnnexInitialized",
     "gitAnnexAdd",
     "initDataset",
+    "isDefaultAnnexDescription",
     "isGitAnnexDataset",
+    "replaceDefaultAnnexDescription",
   ],
   policy: [
     "ANNEX_DATA_EXTENSIONS",
@@ -162,6 +166,11 @@ const INTERNAL_WIRING = [
   "ADD_CHUNK_MAX_PATHS",
   "ADD_CHUNK_MAX_BYTES",
   "isVersionCompatible",
+  // Non-identifying annex repository descriptions (#1399).
+  "ANNEX_CLONE_DESCRIPTION",
+  "ANNEX_DEPOSIT_DESCRIPTION",
+  "isDefaultAnnexDescription",
+  "replaceDefaultAnnexDescription",
   // policy.ts postdates the split (#1158). Its surface is consumed by sibling
   // git-annex modules and by import-openneuro, never by the CLI directly, so
   // none of it belongs to the pre-split monolith surface below.
