@@ -101,7 +101,7 @@ describe("chunked annex keys (#1565, nm000276)", () => {
     expect(isKeyPresentAtDeclaredSize(BASE_EEG, new Map([[BASE_EEG, 7]]))).toBe(false);
   });
 
-  test("the chunk index follows a listing that grows after the first lookup", () => {
+  test("the chunk-size scan follows a listing that grows after the first lookup", () => {
     const existing = new Map<string, number>([[chunk(1), GiB]]);
     expect(isKeyPresentAtDeclaredSize(BASE_EEG, existing)).toBe(false);
     existing.set(chunk(2), GiB);

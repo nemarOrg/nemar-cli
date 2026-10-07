@@ -117,55 +117,83 @@ export function parseChunkKey(name: string): ParsedChunkKey | null {
   return { baseKey: `${match[1]}--${parts.name}`, chunkSize, chunkNumber };
 }
 
-/** baseKey -> chunkSize -> chunkNumber -> object size, built once per listing. */
-type ChunkIndex = Map<string, Map<number, Map<number, number>>>;
-const chunkIndexCache = new WeakMap<Map<string, number>, { size: number; index: ChunkIndex }>();
-
-function chunkIndexFor(existing: Map<string, number>): ChunkIndex {
-  const cached = chunkIndexCache.get(existing);
-  if (cached && cached.size === existing.size) return cached.index;
-  const index: ChunkIndex = new Map();
-  for (const [name, size] of existing) {
-    const parsed = parseChunkKey(name);
-    if (!parsed) continue;
-    let bySize = index.get(parsed.baseKey);
-    if (!bySize) {
-      bySize = new Map();
-      index.set(parsed.baseKey, bySize);
-    }
-    let chunks = bySize.get(parsed.chunkSize);
-    if (!chunks) {
-      chunks = new Map();
-      bySize.set(parsed.chunkSize, chunks);
-    }
-    chunks.set(parsed.chunkNumber, size);
-  }
-  chunkIndexCache.set(existing, { size: existing.size, index });
-  return index;
+/**
+ * The object name git-annex stores chunk `number` of `key` under: the twin of
+ * `annex_chunk_key` in `scripts/zarr/generate_zarr.py`. Null when `key` has no
+ * `--` and so is not a git-annex key.
+ */
+export function annexChunkKey(key: string, chunkSize: number, number: number): string | null {
+  const parts = splitKey(key);
+  if (!parts) return null;
+  return `${parts.fields}-S${chunkSize}-C${number}--${parts.name}`;
 }
 
 /**
- * True when every chunk of `key` is in `existing` at the size chunking gives
- * it: chunks 1..n-1 at the chunk size, the last one at the remainder (one
- * chunk for an empty file). A missing or short chunk means the file cannot be
- * reassembled, so it counts as absent. Exported for unit tests.
+ * The distinct chunk sizes any object in a listing carries, computed once per
+ * listing. Chunk presence is then a handful of direct lookups of the exact chunk
+ * names, not an index of every chunk in the bucket: a file's chunks can only live
+ * under a chunk size some object in the listing carries.
+ *
+ * A listing is treated as a snapshot. The cache is keyed by the Map itself and
+ * invalidated by its size, so a listing that is grown after a lookup is rescanned;
+ * one edited in place without changing its size is not, and nothing in the
+ * callers does that. The scan is lazy, so a dataset whose every key is present as
+ * a plain object never pays for it.
+ */
+const chunkSizesCache = new WeakMap<
+  Map<string, number>,
+  { listingSize: number; chunkSizes: readonly number[] }
+>();
+
+function chunkSizesIn(existing: Map<string, number>): readonly number[] {
+  const cached = chunkSizesCache.get(existing);
+  if (cached && cached.listingSize === existing.size) return cached.chunkSizes;
+  const sizes = new Set<number>();
+  for (const name of existing.keys()) {
+    const parsed = parseChunkKey(name);
+    if (parsed) sizes.add(parsed.chunkSize);
+  }
+  const chunkSizes = [...sizes];
+  chunkSizesCache.set(existing, { listingSize: existing.size, chunkSizes });
+  return chunkSizes;
+}
+
+/**
+ * True when every chunk of `key` at `chunkSize` is in `existing` at the size
+ * chunking gives it: chunks 1..n-1 at `chunkSize`, the last at the remainder, and
+ * a single empty chunk for an empty file. Matches `annex_chunk_sizes` and
+ * `_complete_chunk_size` in `scripts/zarr/generate_zarr.py`. A missing, short or
+ * oversized chunk means the file cannot be reassembled at that chunk size.
+ */
+function isChunkSetComplete(
+  key: string,
+  declared: number,
+  chunkSize: number,
+  existing: Map<string, number>,
+): boolean {
+  const n = declared === 0 ? 1 : Math.ceil(declared / chunkSize);
+  for (let i = 1; i <= n; i++) {
+    const name = annexChunkKey(key, chunkSize, i);
+    if (name === null) return false;
+    const expected = i < n ? chunkSize : declared - (n - 1) * chunkSize;
+    if (existing.get(name) !== expected) return false;
+  }
+  return true;
+}
+
+/**
+ * True when some chunking of `key` is complete in `existing`. A listing can hold
+ * more than one chunking of a key (a partial attempt at one chunk size and a
+ * finished upload at another), so every chunk size in the listing is tried and
+ * the answer is true if ANY is complete, whatever order they are tried in. False
+ * for a key with no declared size: without it there is no way to know how many
+ * chunks to expect.
  */
 export function isChunkedKeyPresent(key: string, existing: Map<string, number>): boolean {
   const declared = annexKeyFieldSize(key);
   if (declared === null) return false;
-  const bySize = chunkIndexFor(existing).get(key);
-  if (!bySize) return false;
-  for (const [chunkSize, chunks] of bySize) {
-    const n = declared === 0 ? 1 : Math.ceil(declared / chunkSize);
-    let complete = true;
-    for (let i = 1; i <= n; i++) {
-      const expected = i < n ? chunkSize : declared - (n - 1) * chunkSize;
-      if (chunks.get(i) !== expected) {
-        complete = false;
-        break;
-      }
-    }
-    if (complete) return true;
+  for (const chunkSize of chunkSizesIn(existing)) {
+    if (isChunkSetComplete(key, declared, chunkSize, existing)) return true;
   }
   return false;
 }
