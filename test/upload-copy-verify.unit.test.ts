@@ -38,16 +38,16 @@ import {
 describe("formatUploadSummary", () => {
   test("a resume with nothing left says so instead of 'Uploaded 0'", () => {
     expect(formatUploadSummary(165, 0, 0)).toBe(
-      "All 165 data files were already on S3 (nothing to copy)",
+      "All 165 data files were already recorded at the S3 remote (nothing to copy)",
     );
   });
 
-  test("states sent, already-present and verified totals", () => {
+  test("states sent, already-present and recorded totals", () => {
     expect(formatUploadSummary(10, 4, 4)).toBe(
-      "Uploaded 4 data files to S3; 6 were already there; all 10 verified at the remote",
+      "Uploaded 4 data files to S3; 6 already there; all 10 recorded at the remote",
     );
     expect(formatUploadSummary(4, 4, 0)).toBe(
-      "Uploaded 4 data files to S3 (0 confirmed by git-annex, rest verified in the log); all 4 verified at the remote",
+      "Uploaded 4 data files to S3 (git-annex confirmed 0 of 4; the rest are recorded in the location log); all 4 recorded at the remote",
     );
   });
 });
