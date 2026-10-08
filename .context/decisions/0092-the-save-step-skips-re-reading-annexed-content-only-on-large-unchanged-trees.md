@@ -6,7 +6,7 @@
 
 Issue #1642, see also the 2026-09-18 comment on #1455 (the save step's re-read), tracked under epic #1671.
 Relates to [ADR 0031](0031-the-annex-policy-has-one-source-and-data-may-wear-a-metadata-extension.md) (the annex policy and what the save annexes).
-Relates to ADR 0060, which records what `git annex add` considers: only files git sees as new or modified, which is why a re-run re-tracks a changed file, and why a file that was edited while a stale flag hid it is not re-tracked.
+Relates to [ADR 0060](0060-an-imported-tree-is-brought-onto-nemars-annex-policy-in-prepare.md), which records what `git annex add` considers: only files git sees as new or modified, which is why a re-run re-tracks a changed file, and why a file that was edited while a stale flag hid it is not re-tracked.
 
 ## Context
 
