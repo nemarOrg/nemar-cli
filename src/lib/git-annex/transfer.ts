@@ -781,7 +781,7 @@ export function extractCopyError(stdout: string, stderr: string): string {
   return picked || "Failed to copy to remote";
 }
 
-/** One parsed `git annex copy --json` record. */
+/** One parsed `--json` record of `git annex copy` or `git annex fsck`. */
 export interface CopyJsonRecord {
   file: string | null;
   key: string | null;
@@ -790,12 +790,15 @@ export interface CopyJsonRecord {
    * True when git-annex moved the content in this copy, false when it found the
    * remote already holding it. A transfer carries the progress note ("to nemar-s3...");
    * an object found already present carries no note at all (measured against
-   * git-annex 10.20260901 with a `directory` remote).
+   * git-annex 10.20260901 with a `directory` remote). A git-annex that words or omits
+   * the note differently makes this count LOW, which changes what a summary says and
+   * never whether a step succeeds: success rests on the exit status and the location log.
    */
   transferred: boolean;
   /**
    * Why a failed record failed. Empty on success, and also possibly empty on a
-   * failure that gave no reason; see {@link parseCopyJson}.
+   * failure that gave no reason; see {@link parseCopyJson}. Credentials are removed
+   * from it ({@link redactCredentials}).
    */
   errors: string[];
 }
@@ -806,6 +809,88 @@ export interface CopyJsonRecord {
  * none.
  */
 const COPY_PROGRESS_NOTE = /^(?:to|from) \S+\.\.\.$/;
+
+/** Header tuples that carry credentials in git-annex's printed `HttpExceptionRequest`. */
+const CREDENTIAL_HEADER =
+  /\(\s*"((?:x-amz-)[^"]*|authorization|proxy-authorization)"\s*,\s*"[^"]*"\s*\)/gi;
+
+/** The longest reason worth printing; a printed HTTP request is far longer. */
+const MAX_REASON_CHARS = 600;
+
+/**
+ * Take credentials out of text git-annex printed. A failed S3 request makes git-annex
+ * print the whole request it built, and that dump carries `("X-Amz-Security-Token",
+ * "<token>")` (only `Authorization` is redacted by git-annex itself). Header tuples
+ * named `x-amz-*`, `authorization` and `proxy-authorization` are blanked, and so is any
+ * value in `secrets` (the keys and token the command was given) wherever it appears.
+ * Exported for unit tests.
+ */
+export function redactCredentials(text: string, secrets: readonly string[] = []): string {
+  let out = text.replace(CREDENTIAL_HEADER, '("$1","<redacted>")');
+  for (const secret of secrets) {
+    if (secret.length >= 8) out = out.split(secret).join("<redacted>");
+  }
+  return out;
+}
+
+/** One printable line for a reason: whitespace collapsed, the middle of a long one cut. */
+function shortenReason(text: string): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  if (flat.length <= MAX_REASON_CHARS) return flat;
+  const head = Math.floor(MAX_REASON_CHARS * 0.35);
+  return `${flat.slice(0, head)} ... ${flat.slice(flat.length - (MAX_REASON_CHARS - head))}`;
+}
+
+/** The credentials a command was given, as values to blank from anything it printed. */
+function credentialValues(env: Record<string, string> | undefined): string[] {
+  if (!env) return [];
+  return [env.AWS_SESSION_TOKEN, env.AWS_SECRET_ACCESS_KEY, env.AWS_ACCESS_KEY_ID].filter(
+    (v): v is string => typeof v === "string" && v.length > 0,
+  );
+}
+
+function parseJsonRecords(
+  stdout: string,
+  command: string,
+  secrets: readonly string[],
+): CopyJsonRecord[] {
+  const clean = (text: string): string => shortenReason(redactCredentials(text, secrets));
+  const records: CopyJsonRecord[] = [];
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (typeof parsed !== "object" || parsed === null) continue;
+    const rec = parsed as Record<string, unknown>;
+    if (rec.command !== undefined && rec.command !== command) continue;
+    if (typeof rec.success !== "boolean") continue;
+    const messages = Array.isArray(rec["error-messages"])
+      ? (rec["error-messages"] as unknown[])
+          .filter((m): m is string => typeof m === "string")
+          .map((m) => clean(m))
+          .filter(Boolean)
+      : [];
+    const note = typeof rec.note === "string" ? rec.note.trim() : "";
+    let errors: string[] = [];
+    if (!rec.success) {
+      errors = [...new Set(messages)];
+      if (errors.length === 0 && note && !COPY_PROGRESS_NOTE.test(note)) errors = [clean(note)];
+    }
+    records.push({
+      file: typeof rec.file === "string" ? rec.file : null,
+      key: typeof rec.key === "string" ? rec.key : null,
+      success: rec.success,
+      transferred: rec.success && COPY_PROGRESS_NOTE.test(note),
+      errors,
+    });
+  }
+  return records;
+}
 
 /**
  * Parse the `--json --json-error-messages` output of `git annex copy`.
@@ -821,44 +906,17 @@ const COPY_PROGRESS_NOTE = /^(?:to|from) \S+\.\.\.$/;
  * repeated; a remote git-annex declined to use before trying (a store directory
  * that is gone) leaves `error-messages` EMPTY and says why in `note`. Reading only
  * the first would turn the second into "file: failed" with no cause, so the reason
- * is the de-duplicated messages, else the note unless it is progress text.
+ * is the de-duplicated messages, else the note unless it is progress text. Either
+ * can be a printed HTTP request for an S3 remote; it is stripped of credentials and
+ * cut to one line before it is kept. `secrets` are values to blank wherever they occur.
  */
-export function parseCopyJson(stdout: string): CopyJsonRecord[] {
-  const records: CopyJsonRecord[] = [];
-  for (const line of stdout.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith("{")) continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(trimmed);
-    } catch {
-      continue;
-    }
-    if (typeof parsed !== "object" || parsed === null) continue;
-    const rec = parsed as Record<string, unknown>;
-    if (rec.command !== undefined && rec.command !== "copy") continue;
-    if (typeof rec.success !== "boolean") continue;
-    const messages = Array.isArray(rec["error-messages"])
-      ? (rec["error-messages"] as unknown[])
-          .filter((m): m is string => typeof m === "string")
-          .map((m) => m.trim())
-          .filter(Boolean)
-      : [];
-    const note = typeof rec.note === "string" ? rec.note.trim() : "";
-    let errors: string[] = [];
-    if (!rec.success) {
-      errors = [...new Set(messages)];
-      if (errors.length === 0 && note && !COPY_PROGRESS_NOTE.test(note)) errors = [note];
-    }
-    records.push({
-      file: typeof rec.file === "string" ? rec.file : null,
-      key: typeof rec.key === "string" ? rec.key : null,
-      success: rec.success,
-      transferred: rec.success && COPY_PROGRESS_NOTE.test(note),
-      errors,
-    });
-  }
-  return records;
+export function parseCopyJson(stdout: string, secrets: readonly string[] = []): CopyJsonRecord[] {
+  return parseJsonRecords(stdout, "copy", secrets);
+}
+
+/** The same for `git annex fsck --json`. Exported for unit tests. */
+export function parseFsckJson(stdout: string, secrets: readonly string[] = []): CopyJsonRecord[] {
+  return parseJsonRecords(stdout, "fsck", secrets);
 }
 
 /**
@@ -877,6 +935,7 @@ export function extractCopyJsonError(
   stdout: string,
   stderr: string,
   exitCode?: number,
+  command: "copy" | "fsck" = "copy",
 ): string {
   const failed = records.filter((r) => !r.success);
   const lines = failed.map((r) => {
@@ -891,11 +950,11 @@ export function extractCopyJsonError(
   if (lines.length === 0) {
     const code = exitCode === undefined ? "" : ` with exit code ${exitCode}`;
     if (records.length === 0 && stdout.trim()) {
-      return `git annex copy failed${code}; its output was not recognized as copy records${err ? `: ${err}` : ""}`;
+      return `git annex ${command} failed${code}; its output was not recognized as ${command} records${err ? `: ${err}` : ""}`;
     }
     return err
-      ? `git annex copy failed${code}: ${err}`
-      : `git annex copy failed${code} without saying why`;
+      ? `git annex ${command} failed${code}: ${err}`
+      : `git annex ${command} failed${code} without saying why`;
   }
   const shown =
     lines.length > MAX_COPY_ERROR_LINES
@@ -904,7 +963,8 @@ export function extractCopyJsonError(
           ...lines.slice(-MAX_COPY_ERROR_LINES),
         ]
       : lines;
-  return [`${failed.length} file(s) failed to copy:`, ...shown, ...(err ? [err] : [])].join("\n");
+  const what = command === "copy" ? "to copy" : "the presence check";
+  return [`${failed.length} file(s) failed ${what}:`, ...shown, ...(err ? [err] : [])].join("\n");
 }
 
 /** What a JSON-mode `git annex copy` run amounted to. */
@@ -916,8 +976,9 @@ export interface CopyOutcome {
   /** Of those, the ones git-annex actually transferred rather than found already there. */
   filesSent: number;
   /**
-   * False when git-annex exited 0, printed something, and none of it parsed as copy
-   * records. The count above is then not evidence of anything.
+   * False when git-annex printed something and none of it parsed as copy records, or
+   * when it exited 0 with fewer records than paths it was given. The counts above are
+   * then not evidence of anything.
    */
   outputRecognized: boolean;
 }
@@ -926,7 +987,10 @@ export interface CopyOutcome {
  * Run one JSON-mode `git annex copy --to <remote>` over `pathspecs` and say what it
  * amounted to. Deliberately NOT `--fast`: without it git-annex checks the remote
  * for the content of each key and re-sends one the location log wrongly says is
- * there, which is the only thing that notices a store that lost objects.
+ * there, which is how this step notices a store that lost objects. `expectedRecords`
+ * is how many paths were named explicitly; a clean exit with fewer records than that
+ * means git-annex skipped some (a path whose content is not in this repository gets no
+ * record and no remote contact).
  */
 async function runJsonCopy(
   datasetPath: string,
@@ -934,6 +998,7 @@ async function runJsonCopy(
   jobs: number,
   pathspecs: string[],
   env: Record<string, string> | undefined,
+  expectedRecords?: number,
 ): Promise<CopyOutcome> {
   const { stdout, stderr, exitCode } = await runCommand(
     [
@@ -951,24 +1016,117 @@ async function runJsonCopy(
     ],
     { cwd: datasetPath, env },
   );
-  const records = parseCopyJson(stdout);
+  const secrets = credentialValues(env);
+  const records = parseCopyJson(stdout, secrets);
   const filesCopied = records.filter((r) => r.success).length;
   const filesSent = records.filter((r) => r.transferred).length;
-  if (exitCode !== 0) {
+  const printed = records.length > 0 || !stdout.trim();
+  const complete = expectedRecords === undefined || records.length >= expectedRecords;
+  const outputRecognized = printed && (exitCode !== 0 || complete);
+  // A failed record means a failed copy, whatever the exit status says.
+  if (exitCode !== 0 || records.some((r) => !r.success)) {
     return {
       success: false,
-      error: extractCopyJsonError(records, stdout, stderr, exitCode),
+      error: extractCopyJsonError(records, stdout, redactCredentials(stderr, secrets), exitCode),
       filesCopied,
       filesSent,
-      outputRecognized: records.length > 0 || !stdout.trim(),
+      outputRecognized,
     };
   }
-  return {
-    success: true,
-    filesCopied,
-    filesSent,
-    outputRecognized: records.length > 0 || !stdout.trim(),
-  };
+  return { success: true, filesCopied, filesSent, outputRecognized };
+}
+
+/** What {@link checkRemoteHolds} found. */
+export interface RemoteHoldsOutcome {
+  /** False when the check itself could not run (the remote is unreachable, git-annex was killed). */
+  success: boolean;
+  error?: string;
+  /** Files git-annex reported as present at the remote. */
+  present: number;
+  /** Files it reported as NOT present there, with its reason; it also corrects the location log. */
+  absent: Array<{ file: string; errors: string[] }>;
+  /** False when what it printed was not fsck records, or there were fewer than paths. */
+  outputRecognized: boolean;
+}
+
+/**
+ * Ask the remote itself whether it holds the content of `paths`, for files whose content
+ * is NOT in this repository. `git annex copy --to` cannot do that: it has no content to
+ * send, so it skips such a path with exit 0, no record and no contact with the remote,
+ * and a clone that holds only pointers hits this on every file. `git annex fsck --fast
+ * --from <remote>` checks presence only (no content is read), exits 1 with a failed
+ * record for each file the remote lacks, and corrects the location log to say so, so the
+ * walk that follows sees it. Run with `-J jobs`, in argv-safe chunks.
+ */
+export async function checkRemoteHolds(
+  datasetPath: string,
+  remoteName: string,
+  paths: string[],
+  jobs = 4,
+  credentials?: S3Credentials,
+): Promise<RemoteHoldsOutcome> {
+  const env = awsCredentialEnv(credentials);
+  const secrets = credentialValues(env);
+  let present = 0;
+  let outputRecognized = true;
+  const absent: Array<{ file: string; errors: string[] }> = [];
+  try {
+    for (const chunk of chunkAddTargets(paths)) {
+      const { stdout, stderr, exitCode } = await runCommand(
+        [
+          "git",
+          "annex",
+          "fsck",
+          "--fast",
+          "--from",
+          remoteName,
+          "-J",
+          jobs.toString(),
+          "--json",
+          "--json-error-messages",
+          "--",
+          ...chunk,
+        ],
+        { cwd: datasetPath, env },
+      );
+      const records = parseFsckJson(stdout, secrets);
+      const failed = records.filter((r) => !r.success);
+      present += records.length - failed.length;
+      if (
+        !(records.length > 0 || !stdout.trim()) ||
+        (exitCode === 0 && records.length < chunk.length)
+      ) {
+        outputRecognized = false;
+      }
+      for (const r of failed)
+        absent.push({ file: r.file ?? r.key ?? "(unknown file)", errors: r.errors });
+      if (exitCode !== 0 && failed.length === 0) {
+        // Non-zero with no failed record: the check did not run, which says nothing about the files.
+        return {
+          success: false,
+          error: extractCopyJsonError(
+            records,
+            stdout,
+            redactCredentials(stderr, secrets),
+            exitCode,
+            "fsck",
+          ),
+          present,
+          absent,
+          outputRecognized,
+        };
+      }
+    }
+    return { success: true, present, absent, outputRecognized };
+  } catch (e) {
+    return {
+      success: false,
+      error: e instanceof Error ? e.message : String(e),
+      present,
+      absent,
+      outputRecognized,
+    };
+  }
 }
 
 /**
@@ -1625,7 +1783,7 @@ export async function copyPathsToAnnexRemote(
   let outputRecognized = true;
   try {
     for (const chunk of chunkAddTargets(paths)) {
-      const run = await runJsonCopy(datasetPath, remoteName, jobs, chunk, env);
+      const run = await runJsonCopy(datasetPath, remoteName, jobs, chunk, env, chunk.length);
       filesCopied += run.filesCopied;
       filesSent += run.filesSent;
       outputRecognized = outputRecognized && run.outputRecognized;
