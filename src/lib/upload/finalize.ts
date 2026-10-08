@@ -92,7 +92,8 @@ export function writeNemarMetadata(
  *
  * 1 GiB is a deliberately conservative starting point, not a measured crossover:
  * nm000358 (1.6 TB) is three orders of magnitude above it and the Ceph benchmark
- * three orders below. Re-measure on the target host before moving it.
+ * (72 MB of annexed data) more than one order below. Re-measure on the target host
+ * before moving it.
  */
 export const SAVE_SKIP_MIN_BYTES = 1024 ** 3;
 
