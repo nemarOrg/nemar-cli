@@ -161,3 +161,18 @@ Nothing in this ADR's gate changed; the importer is one more client of it.
 The 2026-10-04 policy above stands: an acquisition date alone is clear, and nothing in the gate changed.
 [ADR 0090](0090-acquisition-dates-finer-than-year-and-month-are-warned-about-never-gated-or-rewritten.md) records the maintainer's choice of policy B and adds a fixed warning, produced by `describeScreen` from the report's counts whenever a date kind is counted.
 The admin email, the status views and the requester's blocked-request mail therefore carry it; the report contract gained no field.
+
+## Amendment 2026-10-07 (#1646): a CI-pending refusal is a state the CLI reports, not an error
+
+A request made before the dataset's BIDS validation has concluded is refused with `bids_validation_pending` or `bids_validation_in_progress`, and that refusal is recorded: the request row is `blocked`, and the blocked-request sweep re-reads the latest run and unblocks it when CI passes.
+Unblocking starts the identifier screen exactly as a re-request would, so the request carries on by itself.
+The refusal means "recorded, waiting", and the CLI used to print it as a failure and exit 1, which sent depositors into retry loops of their own.
+
+The maintainer decided that `nemar dataset publish request` reports it in the info style and exits 0.
+A failed validation (`bids_validation_failed`), a missing minimum, a request already open, an identifier finding and every other refusal keep their text and exit 1.
+The CLI does not wait, retry or poll: a `--wait` option that re-requested on a timer was built first and removed.
+The depositor follows CI with `nemar dataset ci <id>` and requests again if they would rather not wait for the sweep, and the upload's success output names both commands.
+The text promises no time, because the sweep's cadence is the server's and is not a contract.
+A re-request restates the anonymous flag, so the command printed for an anonymous depositor carries `--anonymous`.
+
+The pending state is `isCiPendingBlock` in `src/lib/publish-pending.ts`, guarded through the real CLI by `test/publish-request-pending-cli.test.ts`.

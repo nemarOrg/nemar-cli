@@ -185,7 +185,7 @@ import {
 import { checkPrerequisitesForCommand } from "../lib/prerequisites.js";
 import { DownloadProgressTracker } from "../lib/progress.js";
 import { promptForProvenance } from "../lib/provenance.js";
-import { ciPendingHint, isCiPendingBlock } from "../lib/publish-pending.js";
+import { ciPendingHeadline, ciPendingHint, isCiPendingBlock } from "../lib/publish-pending.js";
 import { renderSnippetLine, truncateTokenList } from "../lib/render/snippet.js";
 import { resolveSandboxCompletion } from "../lib/sandbox-status.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
@@ -4021,6 +4021,20 @@ datasetCommand.addCommand(accessCommand);
 
 const publishCommand = new Command("publish").description("Publication workflow management");
 
+/** The warning for an anonymous release the server did not echo back as anonymous. */
+function printAnonymousNotConfirmed(datasetId: string): void {
+  console.log(
+    chalk.yellow(
+      "\n  WARNING: you asked for an anonymous release, but the server did not confirm it.",
+    ),
+  );
+  console.log(
+    chalk.yellow(
+      `  Run 'nemar dataset publish status ${datasetId}' and check the Anonymous line before an admin approves it.`,
+    ),
+  );
+}
+
 publishCommand
   .command("request")
   .description("Request publication of a dataset")
@@ -4039,6 +4053,9 @@ Description:
   - Have S3 Object Lock enabled (prevents data deletion)
 
   You can only have one active publication request per dataset.
+
+  BIDS validation runs after the upload and must complete first. A request made
+  earlier is recorded and proceeds on its own; follow CI with: nemar dataset ci <dataset-id>
 
 Status Flow:
   requested → approving → published (or denied)
@@ -4080,16 +4097,7 @@ Examples:
       // message indistinguishable from a correct one, and the depositor would
       // find out when their name appeared on the published record.
       if (options.anonymous && result.anonymous !== true) {
-        console.log(
-          chalk.yellow(
-            "\n  WARNING: you asked for an anonymous release, but the server did not confirm it.",
-          ),
-        );
-        console.log(
-          chalk.yellow(
-            `  Run 'nemar dataset publish status ${datasetId}' and check the Anonymous line before an admin approves it.`,
-          ),
-        );
+        printAnonymousNotConfirmed(datasetId);
       } else if (result.anonymous === true) {
         console.log(
           chalk.dim(
@@ -4115,11 +4123,22 @@ Examples:
       for (const line of publicationRequestNotice(datasetId)) console.log(`  ${line}`);
     } catch (error) {
       if (isCiPendingBlock(error)) {
-        spinner.fail(error.message);
-        for (const line of ciPendingHint(datasetId)) {
-          console.log(chalk.dim(line));
+        // Not an error (issue #1646): the request IS recorded, and the server
+        // re-checks it and continues once BIDS validation passes. Said in the
+        // info style and left to exit 0, so a script does not retry it and a
+        // depositor does not read it as a rejection. A validation FAILURE is a
+        // different reason and takes the error path below.
+        spinner.info(ciPendingHeadline(error.blockReason));
+        for (const line of ciPendingHint(datasetId, options.anonymous === true)) {
+          console.log(line);
         }
-      } else if (error instanceof ApiError) {
+        // Same check as for an accepted request: what was recorded, not what
+        // was typed. A recorded request is the one an admin later sees.
+        const recorded = (error.rawBody as { anonymous?: unknown } | undefined)?.anonymous;
+        if (options.anonymous && recorded !== true) printAnonymousNotConfirmed(datasetId);
+        return;
+      }
+      if (error instanceof ApiError) {
         spinner.fail(error.message);
         console.log(chalk.dim(`  ${error.message}`));
         if (error.statusCode === 409) {

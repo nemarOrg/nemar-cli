@@ -63,11 +63,20 @@ describe("ciPendingHeadline", () => {
 describe("ciPendingHint", () => {
   test("says it continues on its own, promises no time, and names both commands", () => {
     const text = ciPendingHint("nm000358").join("\n");
-    expect(text).toContain("re-checks it automatically");
+    expect(text).toContain("re-checks the request automatically");
     expect(text).toContain("'nemar dataset ci nm000358'");
     expect(text).toContain("'nemar dataset publish request nm000358'");
     // No waiting flag exists any more, and no duration is promised.
     expect(text).not.toContain("--wait");
     expect(text).not.toMatch(/\b(\d+\s*(s|sec|seconds?|min|minutes?|hours?)|daily|hourly)\b/i);
+  });
+
+  test("an anonymous depositor is handed the flag back; a plain one is not", () => {
+    // Asking again without --anonymous is a normal publication request.
+    expect(ciPendingHint("nm000358", true).join("\n")).toContain(
+      "'nemar dataset publish request nm000358 --anonymous'",
+    );
+    expect(ciPendingHint("nm000358", false).join("\n")).not.toContain("--anonymous");
+    expect(ciPendingHint("nm000358").join("\n")).not.toContain("--anonymous");
   });
 });
