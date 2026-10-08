@@ -169,7 +169,7 @@ describe("the stat guard: a changed file fails the save", () => {
 
   test("describeChangedSinceTracked says what to do", () => {
     expect(describeChangedSinceTracked(["a.edf"], "before")).toBe(
-      "1 annexed file(s) changed since the upload plan recorded them, so the commit would not match the tree: a.edf. Re-run the upload command to re-track them (add --restart if a file is no longer a data file, for example after shrinking below the size threshold).",
+      "1 annexed file(s) changed since the upload plan recorded them, so the commit would not match the tree: a.edf. Re-run the upload command to re-track them.",
     );
     expect(describeChangedSinceTracked(["a.edf", "b.edf"], "during")).toBe(
       "2 annexed file(s) changed, disappeared or became unreadable while the save was running, so the commit does not match the tree: a.edf, b.edf. Re-run the upload command to re-track them.",

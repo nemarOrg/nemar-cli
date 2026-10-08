@@ -6,8 +6,8 @@
  * matches the argument string against each rule, and changes only those calls,
  * letting every other call (including the ones git-annex makes internally) run the
  * real git untouched. A rule can fail the call, kill it, make it succeed with output
- * nobody expected (`stdout`), or run it for real with extra environment variables
- * (`env`). The repository, the index and the commits are all real.
+ * nobody expected (`stdout`), run it for real with extra environment variables (`env`),
+ * or make it hang first (`sleep`). The repository, the index and the commits are all real.
  *
  * `env` exists so a test can steer ONE child process (for example point git-annex's
  * HTTP client at a dead local proxy) without writing to `process.env`: Bun keeps a
@@ -42,6 +42,11 @@ export interface ShimRule {
    * nothing else on the rule: it neither fails nor counts.
    */
   env?: Record<string, string>;
+  /**
+   * Sleep this many seconds, then run the real git: a call that hangs. Like `env` it
+   * neither fails nor counts, and combines with nothing else on the rule.
+   */
+  sleep?: number;
 }
 
 const quote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
@@ -61,6 +66,14 @@ export function installGitShim(root: string, rules: ShimRule[]): () => void {
       return [
         `case "$args" in *${quote(rule.match)}*)`,
         ...exports.map((e) => `  ${e}`),
+        "  ;;",
+        "esac",
+      ].join("\n");
+    }
+    if (rule.sleep !== undefined) {
+      return [
+        `case "$args" in *${quote(rule.match)}*)`,
+        `  sleep ${rule.sleep}`,
         "  ;;",
         "esac",
       ].join("\n");

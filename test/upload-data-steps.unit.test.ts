@@ -3,10 +3,12 @@
  * three together, `uploadDataToS3` for the copy on its own, both against real git-annex
  * and a real `directory` special remote called `nemar-s3`.
  *
- * The only thing replaced is how the remote is opened (`deps.openRemote`): production
- * asks the backend for STS credentials and configures an S3 remote, which a test
- * cannot do. Everything downstream of it, including the outcome switch that marks files
- * uploaded, clears credentials and recovers a blocked upload, is the production code.
+ * What a test supplies is how the remote is opened (`deps.openRemote`: production asks
+ * the backend for STS credentials and configures an S3 remote, which a test cannot do),
+ * and, where a test needs it, the save's size gate (`skipMinBytes`, so a small tree takes
+ * the large-tree branch) and a wrapper around the save (`saveStep`, to see what it was
+ * handed). Everything else, including the outcome switch that marks files uploaded,
+ * clears credentials and recovers a blocked upload, is the production code.
  */
 
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
@@ -16,10 +18,12 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  rmSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { clearStaleFlags } from "../src/lib/git-annex/clone-push";
 import { annexRemoteExists, configureS3Remote } from "../src/lib/git-annex/s3-remote";
 import { collectFileManifest } from "../src/lib/git-annex/transfer";
 import {
@@ -53,7 +57,7 @@ import {
   tags,
   writeFile,
 } from "./helpers/annex-repo";
-import { installGitShim } from "./helpers/git-shim";
+import { type ShimRule, installGitShim } from "./helpers/git-shim";
 
 setDefaultTimeout(60_000);
 
@@ -333,8 +337,8 @@ describe("what the copy step does with each outcome", () => {
 
   test("cached credentials are removed after an S3 remote that failed to initialize", async () => {
     // Guards the credentials cleanup living in a `finally` around opening the remote too.
-    // A failed `initremote` has already written the keys (mode 600) when it fails, and
-    // the step used to return before clearing them. This runs the real configureS3Remote
+    // A failed `initremote` has already written the keys (mode 600) when it fails, so they
+    // must be cleared although the step returns early. This runs the real configureS3Remote
     // against a closed local port: no traffic leaves the machine, so the failure is a
     // refused connection, and the keys in the file are made up.
     const dir = await dataset("creds-initremote-fails", { "a.edf": 3_000 });
@@ -453,6 +457,125 @@ describe("a run killed inside the save", () => {
   });
 });
 
+describe("a run signaled inside the save", () => {
+  /**
+   * Start the runner in a dataset whose pre-commit hook announces itself (a `ready` file)
+   * and then waits for the test to let it go (a `stop` file). The save is then inside its
+   * window with the paths marked assume-unchanged, and the test chooses what happens to
+   * it. `shimRules` are installed BEFORE the runner starts, because a child inherits the
+   * PATH it was spawned with.
+   */
+  async function inTheWindow(name: string, shimRules: ShimRule[] = []) {
+    const dir = await dataset(name, { "a.edf": 3_000, "b.edf": 3_000 });
+    const tag = Math.random().toString(36).slice(2);
+    const pidFile = join(dir, "..", `runner-${tag}.pid`);
+    const ready = join(dir, "..", `ready-${tag}`);
+    const stop = join(dir, "..", `stop-${tag}`);
+    const store = join(dir, "..", `store-${tag}`);
+    mkdirSync(store, { recursive: true });
+    const restoreHook = prependPreCommit(
+      dir,
+      `touch "${ready}"; i=0; while [ ! -e "${stop}" ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i + 1)); done; exit 1`,
+    );
+    const restoreShim = shimRules.length > 0 ? installGitShim(scratch.root, shimRules) : () => {};
+    const child = Bun.spawn(
+      ["bun", "run", join(import.meta.dir, "helpers", "data-steps-runner.ts"), dir, pidFile, store],
+      // The environment is passed explicitly: it carries the PATH with the shim in front.
+      { stdout: "pipe", stderr: "pipe", env: { ...process.env } },
+    );
+    const deadline = Date.now() + 40_000;
+    while (!existsSync(ready)) {
+      if (Date.now() > deadline) throw new Error("the runner never reached the pre-commit hook");
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    // The premise: the paths are marked and the save has not committed.
+    expect(Object.values(await tags(dir, "a.edf", "b.edf"))).toEqual(["h", "h"]);
+    const release = () => {
+      writeFileSync(stop, "");
+      restoreHook();
+      restoreShim();
+    };
+    return { dir, child, release };
+  }
+
+  test("a signal with nothing in the way takes the flags back before the process dies", async () => {
+    const { dir, child, release } = await inTheWindow("signal-clean");
+    child.kill("SIGTERM");
+    await child.exited;
+    release();
+    expect(child.signalCode).toBe("SIGTERM");
+    expect(Object.values(await tags(dir, "a.edf", "b.edf"))).toEqual(["H", "H"]);
+  });
+
+  test("an index lock that clears within the retry window does not leave the flags behind", async () => {
+    // Guards the retry. With `index.lock` held (the usual state when the signal lands
+    // during `git add -A`) the handler's single unmark failed silently, the process died,
+    // and every annexed file stayed flagged. The handler now stops the in-flight git and
+    // retries, so a lock released a second later is enough.
+    const { dir, child, release } = await inTheWindow("signal-lock-clears");
+    const lock = join(dir, ".git", "index.lock");
+    writeFileSync(lock, "", { flag: "wx" });
+    const sent = Date.now();
+    child.kill("SIGTERM");
+    setTimeout(() => rmSync(lock, { force: true }), 1_000);
+    await child.exited;
+    const waited = Date.now() - sent;
+    release();
+    rmSync(lock, { force: true });
+
+    expect(child.signalCode).toBe("SIGTERM");
+    // It really waited for the lock instead of giving up at once.
+    expect(waited).toBeGreaterThanOrEqual(900);
+    expect(Object.values(await tags(dir, "a.edf", "b.edf"))).toEqual(["H", "H"]);
+  });
+
+  test("a lock that never clears is reported with the exact way out, and the next save repairs it", async () => {
+    // Guards the message and the bound. After the retry window the handler stops waiting,
+    // says what is wrong and what to run, and the process still dies by the signal. The
+    // flags it could not clear are the next save's entry clear to fix.
+    const { dir, child, release } = await inTheWindow("signal-lock-stays");
+    const lock = join(dir, ".git", "index.lock");
+    writeFileSync(lock, "", { flag: "wx" });
+    const sent = Date.now();
+    child.kill("SIGTERM");
+    await child.exited;
+    const waited = Date.now() - sent;
+    const stderr = await new Response(child.stderr).text();
+    release();
+
+    expect(child.signalCode).toBe("SIGTERM");
+    expect(waited).toBeLessThan(15_000);
+    expect(stderr).toContain("2 annexed file(s) were marked assume-unchanged");
+    expect(stderr).toContain("nemar dataset commit");
+    expect(stderr).toContain("update-index --no-assume-unchanged -- 'a.edf' 'b.edf'");
+    expect(Object.values(await tags(dir, "a.edf", "b.edf"))).toEqual(["h", "h"]);
+
+    // The lock goes away (the person fixed it); the next save repairs the flags.
+    rmSync(lock, { force: true });
+    expect((await clearStaleFlags(dir)).cleared).toBe(2);
+    expect(Object.values(await tags(dir, "a.edf", "b.edf"))).toEqual(["H", "H"]);
+  });
+
+  test("an unmark that hangs cannot hang the handler", async () => {
+    // Guards the spawnSync timeout. A git that never returns would make Ctrl-C do
+    // nothing at all while the handler waited on it.
+    const { dir, child, release } = await inTheWindow("signal-hung-git", [
+      { match: "update-index --no-assume-unchanged", sleep: 40 },
+    ]);
+    try {
+      const sent = Date.now();
+      child.kill("SIGTERM");
+      await child.exited;
+      expect(Date.now() - sent).toBeLessThan(20_000);
+      expect(child.signalCode).toBe("SIGTERM");
+      expect(await new Response(child.stderr).text()).toContain("nemar dataset commit");
+    } finally {
+      release();
+    }
+    expect(Object.values(await tags(dir, "a.edf", "b.edf"))).toEqual(["h", "h"]);
+  });
+});
+
 describe("the location log decides, not the add targets", () => {
   /** A dataset whose progress file says everything is uploaded while one file never was. */
   async function claimedUploaded(name: string) {
@@ -477,9 +600,9 @@ describe("the location log decides, not the add targets", () => {
   }
 
   test("a file tracked but never copied is copied on a run with nothing to add", async () => {
-    // Guards `listPendingAtRemote` being asked BEFORE the empty-add-targets gate. With no
-    // add targets the step used to print "No data files to upload to S3" and stamp itself
-    // complete, whatever the log said.
+    // Guards `listPendingAtRemote` being asked BEFORE the empty-add-targets gate. A gate
+    // that skipped it would print "No data files to upload to S3" with no add targets and
+    // stamp the step complete, whatever the log said.
     const { dir, open } = await claimedUploaded("never-copied");
     const p = await plan(dir);
     expect(p.filesToUpload).toEqual([]);
@@ -528,7 +651,7 @@ describe("the location log decides, not the add targets", () => {
     // Characterizes the gap recorded in ADR 0031. The CLI folds case, so it calls an
     // uppercase BIG.JSON metadata and never hands it to `git annex add`; git-annex's
     // case-sensitive `exclude=*.json` misses it, so the save's `git add -A` annexes it by
-    // size AFTER the copy. Its content is then only here. The run used to end in
+    // size AFTER the copy. Its content is then only here, so the run must not end in
     // "Upload complete" with that pointer on its way to GitHub.
     const dir = await dataset("big-json", { "ok.edf": 3_000, "BIG.JSON": 200_000 });
     const open = directoryRemote(dir);
