@@ -7,7 +7,7 @@
  * that it is unchanged. The tee-metered test below counts those bytes.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
@@ -66,6 +66,10 @@ describe("findDataFilesNotAnnexed", () => {
 // ---------------------------------------------------------------------------
 // Real git-annex
 // ---------------------------------------------------------------------------
+
+// Each test builds a repository and runs git-annex a few times; CI machines are slower
+// than the 5 s default allows.
+setDefaultTimeout(60_000);
 
 const TMP_DIR = join(import.meta.dir, ".test-upload-copy-verify");
 

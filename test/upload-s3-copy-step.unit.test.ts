@@ -11,7 +11,7 @@
  * guards; the mutation table in the PR says which revert turned which one red.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
@@ -51,6 +51,10 @@ import {
   writeFile,
 } from "./helpers/annex-repo";
 import { installGitShim } from "./helpers/git-shim";
+
+// Each test builds a repository and runs git-annex a few times; CI machines are slower
+// than the 5 s default allows.
+setDefaultTimeout(60_000);
 
 const REMOTE = "nemar-s3";
 const scratch = makeScratch("nemar-s3-step");
@@ -112,6 +116,31 @@ describe("copyAnnexedToRemote: what is copied", () => {
     expect(outcome.annexedPaths).toEqual(new Set(targets.map((t) => t.path)));
     expect(plans).toEqual([{ total: 3, pending: 3 }]);
     expect(await listAnnexedPaths(dir, REMOTE)).toEqual(new Set(targets.map((t) => t.path)));
+  });
+
+  test("a file name with a newline in it is one path, copied and recorded", async () => {
+    // Guards NUL-separated listing. Split on newlines, "new\nline.edf" becomes two paths
+    // that exist nowhere, and `git annex copy` fails on them as pathspecs.
+    const { dir, targets } = await dataset("newline-name", {
+      "a.edf": 3_000,
+      "new\nline.edf": 3_000,
+    });
+    expect(
+      (
+        await trackDataFiles(
+          dir,
+          targets.map((t) => t.path),
+        )
+      ).success,
+    ).toBe(true);
+
+    const outcome = await step(dir, targets);
+
+    expect(outcome).toMatchObject({ status: "ok", total: 2, attempted: 2 });
+    if (outcome.status !== "ok") throw new Error("unreachable");
+    expect(outcome.annexedPaths).toEqual(new Set(["a.edf", "new\nline.edf"]));
+    expect(await listAnnexedPaths(dir, REMOTE)).toEqual(new Set(["a.edf", "new\nline.edf"]));
+    expect(await listAnnexedPathsNotAt(dir, REMOTE)).toEqual(new Set());
   });
 
   test("a resume copies exactly the remainder, and a second run copies nothing", async () => {

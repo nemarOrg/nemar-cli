@@ -399,14 +399,16 @@ export async function listAnnexedPaths(
   absolutePath: string,
   remote?: string,
 ): Promise<Set<string>> {
+  // NUL-separated: a file name may contain a newline, and a newline-split list turns
+  // it into two bogus paths that `git annex copy` then rejects as pathspecs.
   const args = remote
-    ? ["git", "annex", "find", "--in", remote]
-    : ["git", "annex", "find", "--include", "*"];
+    ? ["git", "annex", "find", "--in", remote, "--print0"]
+    : ["git", "annex", "find", "--include", "*", "--print0"];
   const { stdout, stderr, exitCode } = await runCommand(args, { cwd: absolutePath });
   if (exitCode !== 0) {
     throw new Error(stderr.trim() || "git annex find failed");
   }
-  return new Set(stdout.split("\n").filter(Boolean));
+  return new Set(stdout.split("\0").filter(Boolean));
 }
 
 /**
@@ -422,13 +424,13 @@ export async function listAnnexedPathsNotAt(
   remote: string,
 ): Promise<Set<string>> {
   const { stdout, stderr, exitCode } = await runCommand(
-    ["git", "annex", "find", "--not", "--in", remote],
+    ["git", "annex", "find", "--not", "--in", remote, "--print0"],
     { cwd: absolutePath },
   );
   if (exitCode !== 0) {
     throw new Error(stderr.trim() || "git annex find failed");
   }
-  return new Set(stdout.split("\n").filter(Boolean));
+  return new Set(stdout.split("\0").filter(Boolean));
 }
 
 /**

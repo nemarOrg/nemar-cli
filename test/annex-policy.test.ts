@@ -10,7 +10,7 @@
  * precisely a TS re-implementation quietly disagreeing with the real thing.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   chmodSync,
   mkdirSync,
@@ -94,6 +94,10 @@ const FIXTURES: Array<{ path: string; size: number; why: string }> = [
   // The .github workflows that must never become symlinks (ADR 0015).
   { path: ".github/workflows/bids-validate.yml", size: 4_000, why: "CI workflow must stay in git" },
 ];
+
+// Each test builds a repository and runs git-annex a few times; CI machines are slower
+// than the 5 s default allows.
+setDefaultTimeout(60_000);
 
 let repoDir: string;
 /** path -> true when git-annex itself put the file in the annex. */

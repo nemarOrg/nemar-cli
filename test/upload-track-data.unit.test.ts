@@ -11,12 +11,16 @@
  * a real repository through the production init path.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { saveDataset } from "../src/lib/git-annex/clone-push";
 import { gitAnnexAdd } from "../src/lib/git-annex/init";
 import { isCaseVariantData, shouldAnnex } from "../src/lib/git-annex/policy";
 import { findDataFilesNotAnnexed, trackDataFiles } from "../src/lib/upload/transfer";
 import { annexedSet, makeScratch, newDatasetRepo, run, writeFile } from "./helpers/annex-repo";
+
+// Each test builds a repository and runs git-annex a few times; CI machines are slower
+// than the 5 s default allows.
+setDefaultTimeout(60_000);
 
 const scratch = makeScratch("nemar-track-data");
 
