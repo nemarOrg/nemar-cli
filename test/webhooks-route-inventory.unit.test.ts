@@ -38,6 +38,7 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /identifier-sweep-result": 1,
 
   // Dataset pull-request review callback (domain-tagged token, same secret; ADR 0092)
+  "POST /pr-review-claim": 1,
   "POST /pr-review-result": 1,
 
   // OpenNeuro import state callback (bearer token)
@@ -66,7 +67,7 @@ describe("webhooks route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(webhooks.routes.length).toBe(14);
+    expect(webhooks.routes.length).toBe(15);
   });
 
   // The webhooks router has NO router-level middleware: every route does its

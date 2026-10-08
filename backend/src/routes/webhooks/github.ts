@@ -17,6 +17,27 @@ import { isNonProductionEnv } from "../../services/environment.js";
 import { getDatasetsToken } from "../../services/github-auth.js";
 import { triggerEnrichmentRun, triggerVersionDoiRun } from "../../services/github.js";
 import { handlePullRequestEvent } from "../../services/pr-review.js";
+
+/**
+ * Reasons a pull request was NOT reviewed that deserve a line in the Worker's log: each is a
+ * setup problem or a payload nobody expected, not the ordinary filtering of events the review is
+ * not for (a draft, another branch, an action that adds nothing).
+ */
+const PR_REVIEW_LOGGED_SKIPS: ReadonlySet<string> = new Set([
+  "malformed",
+  "misconfigured",
+  "unknown_dataset",
+]);
+
+/** `nm000460#7`, or `unknown` when the payload does not say. Shape-checked, so safe to log. */
+function describePullRequest(payload: unknown): string {
+  const p = payload as { repository?: { name?: unknown }; number?: unknown } | null;
+  const name = p?.repository?.name;
+  const n = p?.number;
+  return typeof name === "string" && isValidDatasetId(name) && Number.isSafeInteger(n)
+    ? `${name}#${n}`
+    : "unknown";
+}
 import { verifyGitHubWebhookSignature } from "../../services/webhook-signature.js";
 import type { WebhookRouter } from "./shared.js";
 
@@ -417,7 +438,7 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
       payload = JSON.parse(rawBody) as PushEventPayload;
     } catch (err) {
       console.warn(
-        `[github-webhook] push delivery ${deliveryId} had unparseable JSON: ${err instanceof Error ? err.message : String(err)}`,
+        `[github-webhook] ${eventType} delivery ${deliveryId} had unparseable JSON: ${err instanceof Error ? err.message : String(err)}`,
       );
       return c.json({ ok: true, dispatched: false, reason: "unparseable_payload" });
     }
@@ -514,16 +535,28 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
 
     // A pull request is taken up by the review, after the same ownership fences as a push:
     // production leaves dev-owned repositories to the dev Worker, and the dev Worker answers
-    // only for repositories it owns. Never 5xx: a retried delivery only repeats the work, and a
-    // failed review is published as a check that needs a person, not lost.
+    // only for repositories it owns.
+    //
+    // Unlike a push, an unexpected failure here (the database, say) answers 500. GitHub does not
+    // retry a failed delivery, but it lists it as failed in the App's delivery log, where it can
+    // be redelivered; answering 200 would leave a pull request with no check and no trace.
+    // Redelivering is safe because (dataset, pull request, commit) is unique. A review that fails
+    // AFTER it was recorded is a check that needs a person, not a failure of the delivery.
     if (eventType === "pull_request") {
+      const where = describePullRequest(payload);
       try {
-        return c.json(await handlePullRequestEvent(c.env, payload));
+        const res = await handlePullRequestEvent(c.env, payload);
+        if (PR_REVIEW_LOGGED_SKIPS.has(res.reason)) {
+          console.warn(
+            `[github-webhook] pull_request delivery ${deliveryId} (${where}) not reviewed: ${res.reason}`,
+          );
+        }
+        return c.json(res);
       } catch (err) {
         console.error(
-          `[github-webhook] pull_request delivery ${deliveryId} failed: ${err instanceof Error ? err.message.slice(0, 120) : "unknown"}`,
+          `[github-webhook] pull_request delivery ${deliveryId} (${where}) failed: ${err instanceof Error ? err.message.slice(0, 120) : "unknown"}`,
         );
-        return c.json({ ok: true, dispatched: false, reason: "pr_review_error" });
+        return c.json({ ok: false, dispatched: false, reason: "pr_review_error" }, 500);
       }
     }
 

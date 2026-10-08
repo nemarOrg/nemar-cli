@@ -1,17 +1,24 @@
 /**
  * What a pull request changed, read as git data (ADR 0092).
  *
- * Runs inside the central review workflow against a `--no-checkout` clone of the dataset
- * repository. **Nothing is checked out and nothing from the pull request is executed**: the
- * working tree never exists, so no hook, filter, `.gitattributes` driver or script in the pull
- * request can run, and a fork's content is read exactly like a branch's. Every git call passes its
- * arguments as an array (no shell) after the commit ids have been checked against a 40-hex shape,
- * so a path or a branch name is only ever data.
+ * Runs inside the central review workflow against a repository made with `git init` and
+ * `git fetch`, which has no working tree. **Nothing is checked out and nothing from the pull
+ * request is executed**: with no working tree, no hook, filter, `.gitattributes` driver or script
+ * in the pull request can run, and a fork's content is read exactly like a branch's. Every git
+ * call passes its arguments as an array (no shell) after the commit ids have been checked against
+ * a 40-hex shape, and with `--literal-pathspecs`, so a path or a branch name is only ever data and
+ * a file named like a pathspec (`:(glob)*.json`) cannot make git read another file's content.
  *
  * The output has two halves with different trust. {@link buildEvidence} is the deterministic
  * account (counts per area, versions, subjects, a file list) that goes into the report whatever
  * the model says. {@link GitFacts} also carries the text the model is shown (patches, commit
  * subjects), all of it attacker-controlled and handled as such by `pr-review-prompt.ts`.
+ *
+ * **What the reviewer was NOT shown is a fact too.** The model sees the diff of the changed
+ * metadata files that fit a budget, never recordings. A file it needs to read to rule out a loss
+ * (a MODIFIED or REMOVED metadata file) that it was not shown in full makes the evidence
+ * `truncated`, which stops a clean pass about nothing being lost. An unread ADDED file does not:
+ * a new file cannot remove anything.
  */
 
 import { execFileSync } from "node:child_process";
@@ -22,18 +29,18 @@ import {
   type ChangeStatus,
   type ChangedFile,
   MAX_LISTED,
+  MAX_MODEL_FILES,
   type ReviewEvidence,
 } from "../../shared/pr-review";
 import { shouldAnnex } from "../../src/lib/git-annex/policy";
 
-/** At most this many changed files are listed to the model; the counts always cover all of them. */
-export const MAX_MODEL_FILES = 400;
+export { MAX_MODEL_FILES };
 /** At most this many files have their content (a diff) shown to the model. */
-export const MAX_PATCH_FILES = 12;
+export const MAX_PATCH_FILES = 40;
 /** Characters of one file's diff shown to the model. */
-export const MAX_PATCH_FILE_CHARS = 6_000;
-/** Characters of diff shown to the model in all. */
-export const MAX_PATCH_TOTAL_CHARS = 24_000;
+export const MAX_PATCH_FILE_CHARS = 12_000;
+/** Characters of diff shown to the model in all (about 20,000 tokens: pennies for Haiku). */
+export const MAX_PATCH_TOTAL_CHARS = 80_000;
 /** Commit subjects shown to the model. */
 export const MAX_COMMITS = 30;
 
@@ -69,18 +76,30 @@ export function classifyPath(path: string): Area {
   return "other";
 }
 
-/** The order a reviewer would open things: the files that describe the dataset come first. */
-const AREA_PRIORITY: readonly Area[] = [
+/**
+ * The order a reviewer would open things: the files that describe the dataset come first. A
+ * `Record`, so a new area added to the contract fails the build here instead of silently sorting
+ * first (`indexOf` of a missing area is -1).
+ */
+const AREA_PRIORITY: Record<Area, number> = {
+  dataset_description: 0,
+  readme_and_changes: 1,
+  participants: 2,
+  sidecars: 3,
+  code: 4,
+  derivatives: 5,
+  sourcedata: 6,
+  other: 7,
+  recordings: 8,
+};
+
+/** The areas whose changed files are worth reading in full, because they describe the dataset. */
+const READABLE_AREAS: ReadonlySet<Area> = new Set([
   "dataset_description",
   "readme_and_changes",
   "participants",
   "sidecars",
-  "code",
-  "derivatives",
-  "sourcedata",
-  "other",
-  "recordings",
-];
+]);
 
 // ---------------------------------------------------------------------------------------------
 // Reading git
@@ -99,7 +118,7 @@ export interface Patch {
 
 export interface GitFacts {
   changes: RawChange[];
-  /** Diffs of the files worth reading: a few metadata files, in priority order. */
+  /** Diffs of the changed metadata files that fit the budget, most important first. */
   patches: Patch[];
   /** Subject lines of the commits being merged. Attacker-controlled. */
   commits: string[];
@@ -109,12 +128,18 @@ export interface GitFacts {
   subjectsAfter: number | null;
   /** True when the change list was longer than {@link MAX_MODEL_FILES}. */
   listCut: boolean;
+  /**
+   * True when a MODIFIED or REMOVED metadata file the reviewer needed was not shown in full: it
+   * did not fit the file or character budget, its diff was cut, or reading it failed.
+   */
+  readIncomplete: boolean;
 }
 
 function git(dir: string, args: string[]): string {
   return execFileSync(
     "git",
     [
+      "--literal-pathspecs",
       "-C",
       dir,
       "-c",
@@ -164,9 +189,20 @@ export function parseNameStatus(raw: string): RawChange[] {
   return out;
 }
 
+/**
+ * The `Version` in `dataset_description.json` at a revision, or null when the file has none (absent
+ * file, no `Version`, or one that is not `X.Y.Z`). A file that EXISTS but cannot be read is not
+ * "no version": it is an {@link EvidenceError}, so a failed fetch of a blob cannot pass as
+ * "this dataset has no version".
+ */
 function versionAt(dir: string, rev: string): string | null {
+  // Ask the TREE whether the file exists: that needs no blob, so a blob that cannot be fetched
+  // is told apart from a file that is not there.
+  const entry = tryGit(dir, ["ls-tree", rev, "--", "dataset_description.json"]);
+  if (entry === null) throw new EvidenceError("could not read the tree");
+  if (entry.trim() === "") return null;
   const raw = tryGit(dir, ["show", `${rev}:dataset_description.json`]);
-  if (raw === null) return null;
+  if (raw === null) throw new EvidenceError("could not read dataset_description.json");
   try {
     const v = (JSON.parse(raw) as { Version?: unknown }).Version;
     return typeof v === "string" && SEMVER.test(v) ? v : null;
@@ -186,6 +222,8 @@ function clip(text: string, max: number): { text: string; truncated: boolean } {
     : { text: text.slice(0, max), truncated: true };
 }
 
+const STATUS_RANK: Record<ChangeStatus, number> = { removed: 0, modified: 1, added: 2 };
+
 /**
  * Read what `headSha` changes relative to the point it branched from `baseSha`.
  *
@@ -203,26 +241,21 @@ export function gatherGitFacts(dir: string, baseSha: string, headSha: string): G
   if (raw === null) throw new EvidenceError("could not list changes");
   const changes = parseNameStatus(raw);
 
+  // Removals and modifications first: that is where a loss hides. Added files come last, so a
+  // budget that runs out costs the least important reads.
   const wanted = changes
-    .filter((c) => {
-      const area = classifyPath(c.path);
-      return (
-        area === "dataset_description" ||
-        area === "readme_and_changes" ||
-        area === "participants" ||
-        (area === "sidecars" && /\.json$/i.test(c.path))
-      );
-    })
+    .filter((c) => READABLE_AREAS.has(classifyPath(c.path)))
     .sort(
       (a, b) =>
-        AREA_PRIORITY.indexOf(classifyPath(a.path)) - AREA_PRIORITY.indexOf(classifyPath(b.path)) ||
+        STATUS_RANK[a.status] - STATUS_RANK[b.status] ||
+        AREA_PRIORITY[classifyPath(a.path)] - AREA_PRIORITY[classifyPath(b.path)] ||
         a.path.localeCompare(b.path),
-    )
-    .slice(0, MAX_PATCH_FILES);
+    );
 
   const patches: Patch[] = [];
+  const read = new Map<string, Patch>();
   let budget = MAX_PATCH_TOTAL_CHARS;
-  for (const c of wanted) {
+  for (const c of wanted.slice(0, MAX_PATCH_FILES)) {
     if (budget <= 0) break;
     const diff = tryGit(dir, [
       "diff",
@@ -238,8 +271,16 @@ export function gatherGitFacts(dir: string, baseSha: string, headSha: string): G
     if (diff === null || diff === "") continue;
     const { text, truncated } = clip(diff, Math.min(MAX_PATCH_FILE_CHARS, budget));
     budget -= text.length;
-    patches.push({ path: c.path, text, truncated });
+    const patch = { path: c.path, text, truncated };
+    patches.push(patch);
+    read.set(c.path, patch);
   }
+
+  const readIncomplete = wanted.some((c) => {
+    if (c.status === "added") return false;
+    const patch = read.get(c.path);
+    return patch === undefined || patch.truncated;
+  });
 
   const log = tryGit(dir, ["log", "--format=%s", `-n${MAX_COMMITS}`, `${mergeBase}..${headSha}`]);
   return {
@@ -251,6 +292,7 @@ export function gatherGitFacts(dir: string, baseSha: string, headSha: string): G
     subjectsBefore: subjectsAt(dir, mergeBase),
     subjectsAfter: subjectsAt(dir, headSha),
     listCut: changes.length > MAX_MODEL_FILES,
+    readIncomplete,
   };
 }
 
@@ -263,8 +305,6 @@ function emptyAreas(): Record<Area, AreaCounts> {
   for (const a of AREAS) out[a] = { added: 0, modified: 0, removed: 0 };
   return out;
 }
-
-const STATUS_RANK: Record<ChangeStatus, number> = { removed: 0, modified: 1, added: 2 };
 
 /**
  * The report's evidence block, from git alone. Every change is counted in exactly one area, so
@@ -284,7 +324,7 @@ export function buildEvidence(facts: GitFacts): ReviewEvidence {
     .sort(
       (a, b) =>
         STATUS_RANK[a.status] - STATUS_RANK[b.status] ||
-        AREA_PRIORITY.indexOf(classifyPath(a.path)) - AREA_PRIORITY.indexOf(classifyPath(b.path)) ||
+        AREA_PRIORITY[classifyPath(a.path)] - AREA_PRIORITY[classifyPath(b.path)] ||
         a.path.localeCompare(b.path),
     )
     .slice(0, MAX_LISTED)
@@ -292,7 +332,7 @@ export function buildEvidence(facts: GitFacts): ReviewEvidence {
   return {
     files_changed: facts.changes.length,
     files_read: facts.patches.length,
-    truncated: facts.listCut || facts.patches.some((p) => p.truncated),
+    truncated: facts.listCut || facts.readIncomplete,
     version_before: facts.versionBefore,
     version_after: facts.versionAfter,
     subjects_before: facts.subjectsBefore,

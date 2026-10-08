@@ -9,18 +9,27 @@
 import { describe, expect, test } from "bun:test";
 import {
   CRITERIA,
+  DAILY_AUTHOR_CAP,
   DAILY_REVIEW_CAP,
   FINDING_CODES,
   HOURLY_REVIEW_CAP,
   MAX_FINDINGS,
+  MAX_MODEL_FILES,
   NOTE_MAX,
+  OVERRIDE_MODES,
   PR_REVIEW_COMMENT_MARKER,
   type PrReviewReport,
   PrReviewReportError,
   REJECTION_COUNT,
+  REVIEW_STATES,
+  VERDICTS,
   conclusionOf,
+  dailyAuthorCapFor,
   effectiveCriteria,
+  factsOf,
   hourlyCapFor,
+  isRunError,
+  parseCallbackOutcome,
   parsePrReviewReport,
   renderCheck,
   renderComment,
@@ -274,7 +283,7 @@ describe("every changed file is accounted for", () => {
   });
 
   test("the file list says how many it is leaving out", () => {
-    const r = parsed({ evidence: evidence({ files_changed: 500 }) });
+    const r = parsed({ evidence: evidence({ files_changed: 500, truncated: true }) });
     const { text } = renderCheck({ kind: "reported", report: r });
     expect(text).toContain("Changed files (2 of 500)");
     expect(text).toContain("and 498 more files, counted above");
@@ -563,5 +572,319 @@ describe("rate caps", () => {
   test("the daily ceiling is finite", () => {
     expect(Number.isSafeInteger(DAILY_REVIEW_CAP)).toBe(true);
     expect(DAILY_REVIEW_CAP).toBeGreaterThan(0);
+  });
+});
+
+describe("the sanitiser cannot rebuild a link, and is a fixed point", () => {
+  // Every one of these was found by the review of PR 1682: stripping characters AFTER finding
+  // links rebuilt them, and entities decode to the characters the function removes.
+  const attacks = [
+    "ht@tp://evil.example/x",
+    "w@ww.evil.example",
+    "j`avascript:alert(1)",
+    "h*ttps://evil.example",
+    "ht#tps://evil.example",
+    "ww_w.evil.example",
+    "ht~tp://evil.example",
+    "ft|p://evil.example",
+    "&commat;octocat see &num;12 and &#64;owner and &#x40;owner",
+    "&lt;script&gt;alert(1)&lt;/script&gt;",
+    "GH-12 and gh-345 and GH-7",
+    "see [a](https://x.example) and ![i](https://y.example/p.png)",
+    '<a href="https://x.example">c</a>',
+    "ftp://x.example/a",
+    "file:///etc/passwd",
+    "data:text/html;base64,AAAA",
+    "owner/repo#12 fixes #3",
+  ];
+  const LINKISH = /\b(?:https?|ftp|file|data|javascript):|www\.\S/i;
+  // What GitHub's autolinker actually links: a scheme or www. at the start, after whitespace, or
+  // after one of * _ ~ (. Glued to a letter (as in "tpwww.x") it is plain text.
+  const AUTOLINKED = /(?:^|[\s*_~(])(?:(?:https?|ftp):\/\/\S|www\.\S)/i;
+  const NOTIFYING = /[@#<>`*_~|\\[\]{}]|&#?\w+;|\bGH-\d+/i;
+
+  for (const a of attacks) {
+    test(`${JSON.stringify(a)} comes out inert`, () => {
+      const out = sanitizeNote(a);
+      expect(out).not.toMatch(LINKISH);
+      expect(out).not.toMatch(NOTIFYING);
+      expect(sanitizeNote(out)).toBe(out);
+    });
+  }
+
+  test("a seeded fuzz of link and mention fragments never produces a link, a mention or a second-pass change", () => {
+    const parts = [
+      "ht",
+      "tp",
+      "s",
+      "://",
+      "@",
+      "#",
+      "*",
+      "_",
+      "`",
+      "[",
+      "]",
+      "(",
+      ")",
+      "<",
+      ">",
+      "&",
+      "amp;",
+      "commat;",
+      "www.",
+      "evil",
+      ".com",
+      "GH-",
+      "12",
+      " ",
+      "|",
+      "~",
+      "\\",
+      "a",
+      "javascript:",
+      "data:",
+    ];
+    let seed = 20261008;
+    const next = () => {
+      seed = (seed * 1664525 + 1013904223) % 4294967296;
+      return seed;
+    };
+    for (let i = 0; i < 400; i++) {
+      let s = "";
+      const n = 3 + (next() % 14);
+      for (let j = 0; j < n; j++) s += parts[next() % parts.length];
+      const out = sanitizeNote(s);
+      expect(out, JSON.stringify(s)).not.toMatch(AUTOLINKED);
+      expect(out, JSON.stringify(s)).not.toMatch(NOTIFYING);
+      expect(sanitizeNote(out), JSON.stringify(s)).toBe(out);
+    }
+  });
+
+  test("a note is cut by whole characters, never through a surrogate pair", () => {
+    const smile = String.fromCodePoint(0x1f600);
+    const out = sanitizeNote("x".repeat(NOTE_MAX - 4) + smile.repeat(10));
+    expect(out.isWellFormed()).toBe(true);
+    expect(Array.from(out).length).toBeLessThanOrEqual(NOTE_MAX);
+    expect(out.endsWith("...")).toBe(true);
+  });
+
+  test("a parsed report's notes and summary are inert after one pass through the parser", () => {
+    const r = parsed({
+      summary: "ht@tp://evil.example &commat;owner GH-9",
+      findings: [
+        {
+          criterion: "no_degradation",
+          severity: "note",
+          code: "other",
+          path: null,
+          note: "w@ww.evil.example",
+        },
+      ],
+    });
+    expect(r.summary).not.toMatch(LINKISH);
+    expect(r.findings[0].note).not.toMatch(LINKISH);
+    expect(parsed({ summary: r.summary }).summary).toBe(r.summary);
+  });
+});
+
+describe("findings are never evicted by the facts, and a red check always says why", () => {
+  const finding = (criterion: string, i: number) => ({
+    criterion,
+    severity: "note",
+    code: "other",
+    path: null,
+    note: `n${i}`,
+  });
+
+  test("with a full set of model findings, every failing criterion still has one", () => {
+    const r = parsed({
+      criteria: { no_degradation: "fail", advances_revision: "fail", material_improvement: "pass" },
+      findings: Array.from({ length: MAX_FINDINGS }, (_, i) => finding("material_improvement", i)),
+    });
+    expect(r.findings.length).toBeLessThanOrEqual(MAX_FINDINGS);
+    for (const c of ["no_degradation", "advances_revision"]) {
+      expect(
+        r.findings.some((f) => f.criterion === c),
+        c,
+      ).toBe(true);
+    }
+    // The model's own last findings made room; the added ones are intact.
+    expect(r.findings.filter((f) => f.note === "No detail given.")).toHaveLength(2);
+  });
+
+  test("a failure found from the files is stated in the check, not left under 'No findings'", () => {
+    const r = parsed({ evidence: evidence({ version_before: "1.2.0", version_after: "1.1.0" }) });
+    const { text } = renderCheck({ kind: "reported", report: r });
+    expect(text).toContain("Version not advanced");
+    expect(text).toContain("found from the files, not by the reviewer");
+    expect(text).not.toContain("No findings.");
+  });
+
+  test("a fact the model already reported is not repeated", () => {
+    const r = parsed({
+      criteria: { no_degradation: "pass", advances_revision: "fail", material_improvement: "pass" },
+      findings: [
+        {
+          criterion: "advances_revision",
+          severity: "blocker",
+          code: "version_not_advanced",
+          path: null,
+          note: "Same version.",
+        },
+      ],
+      evidence: evidence({ version_before: "1.0.0", version_after: "1.0.0" }),
+    });
+    const { text } = renderCheck({ kind: "reported", report: r });
+    expect(text.match(/Version not advanced/g)).toHaveLength(1);
+  });
+});
+
+describe("facts lower a criterion and never raise one", () => {
+  const verdictFor = (e: Record<string, unknown>, criteria?: Record<string, string>) =>
+    verdictOf(parsed({ evidence: e, ...(criteria ? { criteria } : {}) }));
+  const emptyAreasLocal = () => ({
+    dataset_description: { added: 0, modified: 0, removed: 0 },
+    readme_and_changes: { added: 0, modified: 0, removed: 0 },
+    participants: { added: 0, modified: 0, removed: 0 },
+    sidecars: { added: 0, modified: 0, removed: 0 },
+    recordings: { added: 0, modified: 0, removed: 0 },
+    derivatives: { added: 0, modified: 0, removed: 0 },
+    sourcedata: { added: 0, modified: 0, removed: 0 },
+    code: { added: 0, modified: 0, removed: 0 },
+    other: { added: 0, modified: 0, removed: 0 },
+  });
+
+  test("a version downgrade cannot advance the revision, however the model answered", () => {
+    expect(verdictFor(evidence({ version_before: "2.0.0", version_after: "1.0.5" }))).toBe("fail");
+    expect(verdictFor(evidence({ version_before: "1.2.0", version_after: "1.1.9" }))).toBe("fail");
+  });
+
+  test("versions compare as numbers, not as text", () => {
+    expect(verdictFor(evidence({ version_before: "1.9.0", version_after: "1.10.0" }))).toBe("pass");
+    expect(verdictFor(evidence({ version_before: "9.0.0", version_after: "10.0.0" }))).toBe("pass");
+    expect(verdictFor(evidence({ version_before: "1.10.0", version_after: "1.9.0" }))).toBe("fail");
+  });
+
+  test("a dataset whose main had no version, gaining one, still advances", () => {
+    expect(verdictFor(evidence({ version_before: null, version_after: "1.0.0" }))).toBe("pass");
+  });
+
+  test("removing a recording needs a person: never a pass on the model's word", () => {
+    const areas = { ...emptyAreasLocal(), recordings: { added: 0, modified: 0, removed: 1 } };
+    const e = evidence({ files_changed: 1, files_read: 0, areas, listed: [] });
+    const r = parsed({ evidence: e });
+    expect(verdictOf(r)).toBe("uncertain");
+    expect(factsOf(r).notes).toContainEqual({
+      criterion: "no_degradation",
+      code: "data_removed",
+      result: "unknown",
+    });
+  });
+
+  test("removing the participants table, the dataset description, README or CHANGES needs a person", () => {
+    for (const area of ["participants", "dataset_description", "readme_and_changes"]) {
+      const areas = { ...emptyAreasLocal(), [area]: { added: 0, modified: 0, removed: 1 } };
+      const e = evidence({ files_changed: 1, files_read: 0, areas, listed: [] });
+      expect(verdictFor(e), area).toBe("uncertain");
+    }
+  });
+
+  test("a fall in the subject count needs a person; a rise or no change does not", () => {
+    expect(verdictFor(evidence({ subjects_before: 22, subjects_after: 20 }))).toBe("uncertain");
+    expect(verdictFor(evidence({ subjects_before: 20, subjects_after: 22 }))).toBe("pass");
+    expect(verdictFor(evidence({ subjects_before: 20, subjects_after: 20 }))).toBe("pass");
+    expect(verdictFor(evidence({ subjects_before: null, subjects_after: 20 }))).toBe("pass");
+  });
+
+  test("a fact never turns a model's fail into something milder", () => {
+    const e = evidence({ subjects_before: 22, subjects_after: 20 });
+    const v = verdictFor(e, {
+      no_degradation: "fail",
+      advances_revision: "pass",
+      material_improvement: "pass",
+    });
+    expect(v).toBe("fail");
+  });
+
+  test("removing a derivative or an unrelated file is not a loss of data", () => {
+    const areas = { ...emptyAreasLocal(), derivatives: { added: 0, modified: 0, removed: 3 } };
+    const e = evidence({ files_changed: 3, files_read: 0, areas, listed: [] });
+    expect(verdictFor(e)).toBe("pass");
+  });
+});
+
+describe("the evidence block cannot claim more than it can hold", () => {
+  test("a file list longer than the number of changed files is refused", () => {
+    const listed = Array.from({ length: 5 }, (_, i) => ({ status: "added", path: `a/${i}` }));
+    expect(refusal(report({ evidence: evidence({ files_changed: 1, listed }) }))).toBe(
+      "bad_evidence",
+    );
+  });
+
+  test("a change list longer than the model was shown must say it was cut", () => {
+    const big = evidence({ files_changed: MAX_MODEL_FILES + 1, files_read: 0, truncated: false });
+    expect(refusal(report({ evidence: big }))).toBe("bad_evidence");
+    const cut = evidence({ files_changed: MAX_MODEL_FILES + 1, files_read: 0, truncated: true });
+    expect(refusal(report({ evidence: cut }))).toBe("accepted");
+  });
+});
+
+describe("the callback body becomes an outcome, and never a verdict by itself", () => {
+  test("a good report is a reported outcome", () => {
+    const o = parseCallbackOutcome({ outcome: "reported", report: report(), error: undefined });
+    expect(o.kind).toBe("reported");
+  });
+
+  test("a report the parser refuses is report_invalid, with no quotation of it", () => {
+    const o = parseCallbackOutcome({
+      outcome: "reported",
+      report: { ...report(), verdict: "pass" },
+      error: undefined,
+    });
+    expect(o).toEqual({ kind: "error", error: "report_invalid" });
+  });
+
+  test("an error word in the vocabulary is kept; one outside it is workflow_failed", () => {
+    expect(
+      parseCallbackOutcome({ outcome: "error", report: undefined, error: "model_refused" }),
+    ).toEqual({ kind: "error", error: "model_refused" });
+    expect(
+      parseCallbackOutcome({ outcome: "error", report: undefined, error: "boom SMITH" }),
+    ).toEqual({ kind: "error", error: "workflow_failed" });
+  });
+
+  test("any other outcome, including one that says pass, is workflow_failed", () => {
+    for (const outcome of ["pass", "success", "REPORTED", "reported ", undefined, null, 1, {}]) {
+      const o = parseCallbackOutcome({ outcome, report: report(), error: undefined });
+      expect(o, JSON.stringify(outcome)).toEqual({ kind: "error", error: "workflow_failed" });
+    }
+  });
+
+  test("isRunError accepts exactly the vocabulary", () => {
+    expect(isRunError("dispatch_failed")).toBe(true);
+    expect(isRunError("model_refused")).toBe(true);
+    expect(isRunError("other")).toBe(false);
+    expect(isRunError(undefined)).toBe(false);
+  });
+});
+
+describe("closed lists the SQL and the code share", () => {
+  test("they name the values the Worker stores", () => {
+    expect([...VERDICTS]).toEqual(["pass", "fail", "uncertain"]);
+    expect([...REVIEW_STATES]).toEqual([
+      "dispatched",
+      "reported",
+      "declined",
+      "errored",
+      "unreported",
+    ]);
+    expect([...OVERRIDE_MODES]).toEqual(["allow", "block"]);
+  });
+
+  test("a contributor has a daily allowance as well as an hourly one", () => {
+    expect(dailyAuthorCapFor("COLLABORATOR")).toBe(DAILY_AUTHOR_CAP.trusted);
+    expect(dailyAuthorCapFor("NONE")).toBe(DAILY_AUTHOR_CAP.other);
+    expect(DAILY_AUTHOR_CAP.other).toBeLessThan(DAILY_AUTHOR_CAP.trusted);
   });
 });

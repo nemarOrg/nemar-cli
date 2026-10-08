@@ -2,17 +2,21 @@
  * The dataset pull-request review, Worker side (ADR 0092).
  *
  * A pull request opened or updated against `main` of a dataset repository reaches the Worker as a
- * `pull_request` delivery from the NEMAR GitHub App. The Worker decides whether to review it,
- * records the attempt in `pr_reviews`, and dispatches a workflow to `nemarDatasets/.github` that
- * reads the change as git data and asks a model three questions. The workflow posts a report back;
- * the Worker validates it against the closed vocabulary in `shared/pr-review.ts`, derives the
- * verdict, and publishes a check-run and one pull-request comment.
+ * `pull_request` delivery from the NEMAR GitHub App (once the App is subscribed to those events).
+ * The Worker decides whether to review it, records the attempt in `pr_reviews`, and dispatches a
+ * workflow to `nemarDatasets/.github`. The workflow CLAIMS the review (the Worker accepts the
+ * one-shot token and marks the row started) before it spends anything, reads the change as git
+ * data, and asks a model three questions. It posts a report back; the Worker validates it against
+ * the closed vocabulary in `shared/pr-review.ts`, derives the verdict, and publishes a check-run
+ * and one pull-request comment.
  *
  * **Why the Worker is the gate.** Every pull request reaches it, a fork's included, from a
  * delivery GitHub signs; no workflow in a dataset repository takes part, so no collaborator can
  * edit the review or reach the credentials it uses by editing a branch. It is also the only place
  * that can count: who opened which pull request, how many were rejected, how many reviews were
- * started this hour. Those counts decide whether a review is spent at all.
+ * started this hour. Those counts decide whether a review is spent at all. A `repository_dispatch`
+ * can be sent by anyone holding a dataset repository's workflow credentials, so the caps bind
+ * only reviews the Worker started; the claim step is what makes a forged dispatch buy nothing.
  *
  * **Nothing here trusts the pull request.** The event is read by {@link readPullRequestEvent},
  * which accepts only the shapes it expects; the dispatch carries the review's coordinates and not
@@ -21,20 +25,28 @@
  * request body.
  *
  * **Unknown is never green.** A review that was declined, errored, or never reported is published
- * as `action_required`, which GitHub does not count as passing for a required check.
+ * as `action_required`, which GitHub does not count as passing for a required check. A result that
+ * could not be published is recorded as unpublished (`published_at` NULL) and the watchdog
+ * publishes it again, so a GitHub outage delays a check and never leaves it "in progress".
+ *
+ * Database failures inside {@link handlePullRequestEvent} throw: the webhook route answers 500 so
+ * the delivery shows as failed in the App's delivery log, where it can be redelivered. Redelivery
+ * is safe because (dataset, pull request, commit) is unique.
  */
 
 import {
   type AuthorOverride,
   type AuthorTally,
   DAILY_REVIEW_CAP,
+  DECLINE_REASONS,
   type DeclineReason,
-  PrReviewReportError,
-  RUN_ERRORS,
+  OVERRIDE_MODES,
   type ReviewOutcome,
-  type RunError,
+  type ReviewState,
   conclusionOf,
+  dailyAuthorCapFor,
   hourlyCapFor,
+  isRunError,
   parsePrReviewReport,
   renderCheck,
   renderComment,
@@ -44,7 +56,7 @@ import {
 import type { Bindings } from "../types/bindings.js";
 import { isValidDatasetId } from "./datasetId.js";
 import { isNonProductionEnv } from "./environment.js";
-import { getDatasetsToken } from "./github-auth.js";
+import { getDatasetsToken, getDatasetsTokenWithRefresher } from "./github-auth.js";
 import { signPrReviewCallbackToken } from "./github/callback-tokens.js";
 import { approvalDispatchEnvironment, triggerPrReviewRun } from "./github/dispatch.js";
 import { upsertReviewCheckRun, upsertReviewComment } from "./github/pr-review-api.js";
@@ -61,14 +73,20 @@ export const PR_REVIEW_ACTIONS: ReadonlySet<string> = new Set([
 /** The branch whose pull requests are reviewed. */
 export const PR_REVIEW_BASE_BRANCH = "main";
 
-/** How long a dispatched review may take before the watchdog gives up on it. The workflow's own deadline is 20. */
+/** How long a dispatched review may take before the watchdog gives up on it. The workflow's own limit is 20. */
 export const PR_REVIEW_DEADLINE_MINUTES = 30;
 
-/** Rows the watchdog handles per tick. */
+/** A result that did not reach GitHub is tried again after this long, up to {@link PUBLISH_MAX_ATTEMPTS} times. */
+export const PUBLISH_RETRY_AFTER_MINUTES = 2;
+export const PUBLISH_MAX_ATTEMPTS = 5;
+
+/** Rows the watchdog handles per pass. */
 const SWEEP_LIMIT = 20;
 
 /** How long the dispatch may wait for GitHub before the Worker answers the webhook. */
 const DISPATCH_TIMEOUT_MS = 10_000;
+
+type Db = D1Database;
 
 // ---------------------------------------------------------------------------------------------
 // Intake
@@ -184,18 +202,25 @@ export function readPullRequestEvent(payload: unknown): IntakeResult {
 // ---------------------------------------------------------------------------------------------
 
 /**
+ * Rows that cost a model call, or may yet: everything except a decline (never sent) and a run
+ * that errored before the model was reached (the commit was superseded, or the dispatch failed).
+ */
+const COUNTS_TOWARD_CAPS = `state != 'declined' AND NOT (state = 'errored' AND detail IN ('stale_head', 'dispatch_failed'))`;
+
+/**
  * The tally for one contributor, counted from the reviews themselves.
  *
  * `decided` is the number of distinct pull requests with at least one decided (pass or fail)
  * review; `rejected` is how many of those were most recently decided as a fail. Counting the
  * LATEST decided review of each pull request means a contributor who fixes a rejected pull
  * request is not punished for iterating, and five pushes to one bad pull request are one
- * rejection, not five.
+ * rejection, not five. "Latest" is the last commit SEEN (`seen_at`), not the highest row id, so
+ * force-pushing back to an earlier reviewed commit makes that commit's result the current one.
  */
 export const AUTHOR_TALLY_SQL = `
   WITH latest AS (
     SELECT verdict,
-           ROW_NUMBER() OVER (PARTITION BY dataset_id, pr_number ORDER BY id DESC) AS rn
+           ROW_NUMBER() OVER (PARTITION BY dataset_id, pr_number ORDER BY seen_at DESC, id DESC) AS rn
       FROM pr_reviews
      WHERE author_id = ? AND state = 'reported' AND verdict IN ('pass', 'fail')
   )
@@ -204,13 +229,20 @@ export const AUTHOR_TALLY_SQL = `
     FROM latest
    WHERE rn = 1`;
 
-/** Reviews that cost something: a declined row never reached the model. */
-const AUTHOR_HOURLY_SQL = `SELECT COUNT(*) AS n FROM pr_reviews
-  WHERE author_id = ? AND state != 'declined' AND created_at >= datetime('now', '-1 hour')`;
-const PLATFORM_DAILY_SQL = `SELECT COUNT(*) AS n FROM pr_reviews
-  WHERE state != 'declined' AND created_at >= datetime('now', '-1 day')`;
+/**
+ * A row's place in its allowance: how many rows that count against it, up to and including this
+ * one, were created inside the window. Counted AFTER the row is inserted, so two deliveries that
+ * race each see the other and at most the cap survive; checking before inserting let a burst of
+ * pull requests all pass the same check.
+ */
+const AUTHOR_HOURLY_RANK_SQL = `SELECT COUNT(*) AS n FROM pr_reviews
+  WHERE author_id = ? AND ${COUNTS_TOWARD_CAPS} AND created_at >= datetime('now', '-1 hour') AND id <= ?`;
+const AUTHOR_DAILY_RANK_SQL = `SELECT COUNT(*) AS n FROM pr_reviews
+  WHERE author_id = ? AND ${COUNTS_TOWARD_CAPS} AND created_at >= datetime('now', '-1 day') AND id <= ?`;
+const PLATFORM_DAILY_RANK_SQL = `SELECT COUNT(*) AS n FROM pr_reviews
+  WHERE ${COUNTS_TOWARD_CAPS} AND created_at >= datetime('now', '-1 day') AND id <= ?`;
 
-export async function readAuthorTally(db: D1Database, authorId: number): Promise<AuthorTally> {
+export async function readAuthorTally(db: Db, authorId: number): Promise<AuthorTally> {
   const row = await db
     .prepare(AUTHOR_TALLY_SQL)
     .bind(authorId)
@@ -218,39 +250,39 @@ export async function readAuthorTally(db: D1Database, authorId: number): Promise
   return { decided: row?.decided ?? 0, rejected: row?.rejected ?? 0 };
 }
 
-export async function readAuthorOverride(
-  db: D1Database,
-  authorId: number,
-): Promise<AuthorOverride> {
+export async function readAuthorOverride(db: Db, authorId: number): Promise<AuthorOverride> {
   const row = await db
     .prepare("SELECT mode FROM pr_review_overrides WHERE author_id = ?")
     .bind(authorId)
     .first<{ mode: string }>();
-  return row?.mode === "allow" || row?.mode === "block" ? row.mode : null;
+  return (OVERRIDE_MODES as readonly string[]).includes(row?.mode ?? "")
+    ? (row?.mode as AuthorOverride)
+    : null;
 }
 
-/** Whether to spend a review on this pull request, and if not, the fixed word for why. */
-export async function decideReview(
-  db: D1Database,
+/** Which allowance, if any, the row just inserted is over. */
+async function capDecision(
+  db: Db,
   pr: PrIntake,
-): Promise<{ review: true } | { review: false; reason: DeclineReason }> {
-  const standing = standingOf(
-    await readAuthorTally(db, pr.authorId),
-    await readAuthorOverride(db, pr.authorId),
-  );
-  if (standing.paused) return { review: false, reason: "contributor_paused" };
-
-  const hourly = await db.prepare(AUTHOR_HOURLY_SQL).bind(pr.authorId).first<{ n: number }>();
-  if ((hourly?.n ?? 0) >= hourlyCapFor(pr.authorAssociation)) {
-    return { review: false, reason: "rate_limited" };
-  }
-  const daily = await db.prepare(PLATFORM_DAILY_SQL).first<{ n: number }>();
-  if ((daily?.n ?? 0) >= DAILY_REVIEW_CAP) return { review: false, reason: "daily_limit" };
-  return { review: true };
+  rowId: number,
+): Promise<Extract<DeclineReason, "rate_limited" | "daily_limit"> | null> {
+  const hourly = await db
+    .prepare(AUTHOR_HOURLY_RANK_SQL)
+    .bind(pr.authorId, rowId)
+    .first<{ n: number }>();
+  if ((hourly?.n ?? 0) > hourlyCapFor(pr.authorAssociation)) return "rate_limited";
+  const daily = await db
+    .prepare(AUTHOR_DAILY_RANK_SQL)
+    .bind(pr.authorId, rowId)
+    .first<{ n: number }>();
+  if ((daily?.n ?? 0) > dailyAuthorCapFor(pr.authorAssociation)) return "rate_limited";
+  const platform = await db.prepare(PLATFORM_DAILY_RANK_SQL).bind(rowId).first<{ n: number }>();
+  if ((platform?.n ?? 0) > DAILY_REVIEW_CAP) return "daily_limit";
+  return null;
 }
 
 // ---------------------------------------------------------------------------------------------
-// Publishing
+// Rows
 // ---------------------------------------------------------------------------------------------
 
 interface ReviewRow {
@@ -258,13 +290,90 @@ interface ReviewRow {
   datasetId: string;
   prNumber: number;
   headSha: string;
+  state: ReviewState;
+  detail: string | null;
+  report: string | null;
   checkRunId: number | null;
   commentId: number | null;
 }
 
+interface RawRow {
+  id: number;
+  dataset_id: string;
+  pr_number: number;
+  head_sha: string;
+  state: ReviewState;
+  detail: string | null;
+  report: string | null;
+  check_run_id: number | null;
+  comment_id: number | null;
+}
+
+const ROW_COLUMNS =
+  "id, dataset_id, pr_number, head_sha, state, detail, report, check_run_id, comment_id";
+
+function toRow(r: RawRow): ReviewRow {
+  return {
+    id: r.id,
+    datasetId: r.dataset_id,
+    prNumber: r.pr_number,
+    headSha: r.head_sha,
+    state: r.state,
+    detail: r.detail,
+    report: r.report,
+    checkRunId: r.check_run_id,
+    commentId: r.comment_id,
+  };
+}
+
+async function readRow(db: Db, id: number): Promise<ReviewRow | null> {
+  const r = await db
+    .prepare(`SELECT ${ROW_COLUMNS} FROM pr_reviews WHERE id = ?`)
+    .bind(id)
+    .first<RawRow>();
+  return r ? toRow(r) : null;
+}
+
+async function readRowByKey(
+  db: Db,
+  datasetId: string,
+  prNumber: number,
+  headSha: string,
+): Promise<ReviewRow | null> {
+  const r = await db
+    .prepare(
+      `SELECT ${ROW_COLUMNS} FROM pr_reviews WHERE dataset_id = ? AND pr_number = ? AND head_sha = ?`,
+    )
+    .bind(datasetId, prNumber, headSha)
+    .first<RawRow>();
+  return r ? toRow(r) : null;
+}
+
+/** The outcome a stored row stands for, or null for a review still waiting for its report. */
+export function outcomeOfRow(row: ReviewRow): ReviewOutcome | null {
+  if (row.state === "reported") {
+    try {
+      return { kind: "reported", report: parsePrReviewReport(JSON.parse(row.report ?? "null")) };
+    } catch {
+      return { kind: "error", error: "report_invalid" };
+    }
+  }
+  if (row.state === "errored") {
+    return { kind: "error", error: isRunError(row.detail) ? row.detail : "workflow_failed" };
+  }
+  if (row.state === "declined") {
+    const reason = (DECLINE_REASONS as readonly string[]).includes(row.detail ?? "")
+      ? (row.detail as DeclineReason)
+      : "contributor_paused";
+    return { kind: "declined", reason };
+  }
+  if (row.state === "unreported") return { kind: "unreported" };
+  return null;
+}
+
 /** The comment this pull request already carries, from any earlier review of it. */
 async function existingCommentId(
-  db: D1Database,
+  db: Db,
   datasetId: string,
   prNumber: number,
 ): Promise<number | null> {
@@ -272,88 +381,171 @@ async function existingCommentId(
     .prepare(
       `SELECT comment_id FROM pr_reviews
         WHERE dataset_id = ? AND pr_number = ? AND comment_id IS NOT NULL
-        ORDER BY id DESC LIMIT 1`,
+        ORDER BY seen_at DESC, id DESC LIMIT 1`,
     )
     .bind(datasetId, prNumber)
     .first<{ comment_id: number }>();
   return row?.comment_id ?? null;
 }
 
-/** True when no later commit of this pull request has been taken up since `id`. */
-async function isLatestReview(db: D1Database, row: ReviewRow): Promise<boolean> {
+/** True when this row is the last commit of its pull request that was seen. */
+async function isLatestReview(db: Db, row: ReviewRow): Promise<boolean> {
   const latest = await db
-    .prepare("SELECT MAX(id) AS id FROM pr_reviews WHERE dataset_id = ? AND pr_number = ?")
+    .prepare(
+      `SELECT id FROM pr_reviews WHERE dataset_id = ? AND pr_number = ?
+        ORDER BY seen_at DESC, id DESC LIMIT 1`,
+    )
     .bind(row.datasetId, row.prNumber)
     .first<{ id: number }>();
   return latest?.id === row.id;
 }
 
+const NOW_MS = "strftime('%Y-%m-%d %H:%M:%f', 'now')";
+
+function errName(err: unknown): string {
+  return err instanceof Error ? err.message.slice(0, 120) : "unknown";
+}
+
+// ---------------------------------------------------------------------------------------------
+// Publishing
+// ---------------------------------------------------------------------------------------------
+
+export interface PublishResult {
+  /** The check-run reached GitHub. */
+  check: boolean;
+  /** The comment reached GitHub; null when it was not attempted (running, not latest, comment-only off). */
+  comment: boolean | null;
+}
+
 /**
- * Publish an outcome to GitHub: the check-run on the reviewed commit, and (for a decided outcome,
- * and only while this is still the latest commit of the pull request) the pull-request comment.
- * Each surface fails on its own and is logged by status; neither can lose the stored verdict.
- * `running` publishes the in-progress check only.
+ * Publish an outcome to GitHub: the check-run on the reviewed commit, and (for any outcome but
+ * `running`, and only while this is still the last commit of the pull request seen) the
+ * pull-request comment. Each surface fails on its own, is logged by status, and is reported in
+ * the result; neither can lose the stored verdict. A decided outcome whose check reached GitHub
+ * is marked published; one that did not stays unpublished and the watchdog tries again.
+ * `running` is bounded (it runs inside the webhook request) and publishes the in-progress check
+ * only. `commentOnly` re-states a stored result on the pull request without touching the check.
  */
 export async function publishOutcome(
   env: Bindings,
   row: ReviewRow,
   outcome: ReviewOutcome | "running",
-): Promise<void> {
+  opts: { commentOnly?: boolean } = {},
+): Promise<PublishResult> {
+  const result: PublishResult = { check: false, comment: null };
   let token: string;
+  let refresh: () => Promise<string>;
   try {
-    token = await getDatasetsToken(env);
+    ({ token, refresh } = await getDatasetsTokenWithRefresher(env));
   } catch (err) {
     console.error(`[pr-review] review ${row.id}: no GitHub token (${errName(err)})`);
-    return;
+    return result;
   }
   const db = env.DB;
-  const rendered =
-    outcome === "running"
-      ? {
-          title: "Review in progress",
-          summary: "The changes are being reviewed. This check will update when it finishes.",
-          text: "",
+
+  if (!opts.commentOnly) {
+    const rendered =
+      outcome === "running"
+        ? {
+            title: "Review in progress",
+            summary: "The changes are being reviewed. This check will update when it finishes.",
+            text: "",
+          }
+        : renderCheck(outcome);
+    try {
+      const id = await upsertReviewCheckRun({
+        token,
+        refresh,
+        quick: outcome === "running",
+        repo: row.datasetId,
+        headSha: row.headSha,
+        checkRunId: row.checkRunId,
+        conclusion: outcome === "running" ? null : conclusionOf(outcome),
+        ...rendered,
+      });
+      result.check = true;
+      if (id !== row.checkRunId) {
+        // Its own try: the check exists on GitHub whether or not this write lands.
+        try {
+          await db
+            .prepare("UPDATE pr_reviews SET check_run_id = ? WHERE id = ?")
+            .bind(id, row.id)
+            .run();
+          row.checkRunId = id;
+        } catch (err) {
+          console.error(`[pr-review] review ${row.id}: check id not stored (${errName(err)})`);
         }
-      : renderCheck(outcome);
-  try {
-    const id = await upsertReviewCheckRun({
-      token,
-      repo: row.datasetId,
-      headSha: row.headSha,
-      checkRunId: row.checkRunId,
-      conclusion: outcome === "running" ? null : conclusionOf(outcome),
-      ...rendered,
-    });
-    if (id !== row.checkRunId) {
-      await db
-        .prepare("UPDATE pr_reviews SET check_run_id = ? WHERE id = ?")
-        .bind(id, row.id)
-        .run();
+      }
+    } catch (err) {
+      console.error(`[pr-review] review ${row.id}: check-run not published (${errName(err)})`);
     }
-  } catch (err) {
-    console.error(`[pr-review] review ${row.id}: check-run not published (${errName(err)})`);
   }
-  if (outcome === "running" || !(await isLatestReview(db, row))) return;
+
+  if (outcome === "running") return result;
   try {
-    const commentId = row.commentId ?? (await existingCommentId(db, row.datasetId, row.prNumber));
-    const id = await upsertReviewComment({
-      token,
-      repo: row.datasetId,
-      prNumber: row.prNumber,
-      commentId,
-      body: renderComment(outcome, row.headSha),
-    });
-    if (id !== row.commentId) {
-      await db.prepare("UPDATE pr_reviews SET comment_id = ? WHERE id = ?").bind(id, row.id).run();
+    if (await isLatestReview(db, row)) {
+      const commentId = row.commentId ?? (await existingCommentId(db, row.datasetId, row.prNumber));
+      const id = await upsertReviewComment({
+        token,
+        refresh,
+        repo: row.datasetId,
+        prNumber: row.prNumber,
+        commentId,
+        body: renderComment(outcome, row.headSha),
+      });
+      result.comment = true;
+      if (id !== row.commentId) {
+        try {
+          await db
+            .prepare("UPDATE pr_reviews SET comment_id = ? WHERE id = ?")
+            .bind(id, row.id)
+            .run();
+          row.commentId = id;
+        } catch (err) {
+          console.error(`[pr-review] review ${row.id}: comment id not stored (${errName(err)})`);
+        }
+      }
     }
   } catch (err) {
     // Typically the App lacks pull_requests: write. The check still carries the whole review.
+    result.comment = false;
     console.error(`[pr-review] review ${row.id}: comment not published (${errName(err)})`);
   }
+
+  if (!opts.commentOnly && result.check) {
+    try {
+      await db
+        .prepare("UPDATE pr_reviews SET published_at = datetime('now') WHERE id = ?")
+        .bind(row.id)
+        .run();
+    } catch (err) {
+      console.error(`[pr-review] review ${row.id}: published_at not stored (${errName(err)})`);
+    }
+  }
+  return result;
 }
 
-function errName(err: unknown): string {
-  return err instanceof Error ? err.message.slice(0, 120) : "unknown";
+/**
+ * A stranger pushing commit after commit would otherwise cost two GitHub writes per push for a
+ * message that never changes. A decline is published the first time; the same decline for the
+ * same pull request within the hour is recorded without being published again.
+ */
+async function publishDecline(env: Bindings, row: ReviewRow, reason: DeclineReason): Promise<void> {
+  const repeat = await env.DB.prepare(
+    `SELECT 1 AS ok FROM pr_reviews
+      WHERE dataset_id = ? AND pr_number = ? AND state = 'declined' AND detail = ?
+        AND published_at IS NOT NULL AND id < ? AND created_at >= datetime('now', '-1 hour')
+      LIMIT 1`,
+  )
+    .bind(row.datasetId, row.prNumber, reason, row.id)
+    .first<{ ok: number }>();
+  if (repeat) {
+    await env.DB.prepare("UPDATE pr_reviews SET published_at = datetime('now') WHERE id = ?")
+      .bind(row.id)
+      .run();
+    return;
+  }
+  await publishOutcome(env, row, { kind: "declined", reason });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -367,12 +559,17 @@ export interface PrReviewResponse {
   review_id?: number;
 }
 
-const no = (reason: string): PrReviewResponse => ({ ok: true, dispatched: false, reason });
+const no = (reason: string, reviewId?: number): PrReviewResponse => ({
+  ok: true,
+  dispatched: false,
+  reason,
+  ...(reviewId === undefined ? {} : { review_id: reviewId }),
+});
 
 /**
  * Take up a `pull_request` delivery. The caller has already verified the delivery's signature and
- * applied the production/dev ownership fence; everything else is decided here, and nothing here
- * throws into the webhook (a retried delivery would only repeat the work).
+ * applied the production/dev ownership fence; everything else is decided here. A database error
+ * throws, and the route answers 500 (see the module comment).
  */
 export async function handlePullRequestEvent(
   env: Bindings,
@@ -386,7 +583,9 @@ export async function handlePullRequestEvent(
 
   const secret = env.PRESCREEN_CALLBACK_SECRET;
   if (!secret) {
-    console.error("[pr-review] PRESCREEN_CALLBACK_SECRET is unset; not reviewing");
+    console.error(
+      `[pr-review] PRESCREEN_CALLBACK_SECRET is unset; not reviewing ${pr.datasetId}#${pr.prNumber}`,
+    );
     return no("misconfigured");
   }
 
@@ -397,14 +596,21 @@ export async function handlePullRequestEvent(
     .first<{ ok: number }>();
   if (!known) return no("unknown_dataset");
 
-  const decision = await decideReview(db, pr);
-  const nonce = decision.review ? crypto.randomUUID() : null;
+  const existing = await readRowByKey(db, pr.datasetId, pr.prNumber, pr.headSha);
+  if (existing) return await handleRepeat(env, existing, secret);
+
+  const standing = standingOf(
+    await readAuthorTally(db, pr.authorId),
+    await readAuthorOverride(db, pr.authorId),
+  );
+  const paused = standing.paused;
+  const nonce = paused ? null : crypto.randomUUID();
   const inserted = await db
     .prepare(
       `INSERT INTO pr_reviews
          (dataset_id, pr_number, head_sha, author_id, author_login, author_association,
-          from_fork, state, detail, nonce)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          from_fork, state, detail, nonce, decided_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${paused ? "datetime('now')" : "NULL"})
        ON CONFLICT (dataset_id, pr_number, head_sha) DO NOTHING`,
     )
     .bind(
@@ -415,40 +621,104 @@ export async function handlePullRequestEvent(
       pr.authorLogin,
       pr.authorAssociation,
       pr.fromFork ? 1 : 0,
-      decision.review ? "dispatched" : "declined",
-      decision.review ? null : decision.reason,
+      paused ? "declined" : "dispatched",
+      paused ? "contributor_paused" : null,
       nonce,
     )
     .run();
-  // The same commit again (a repeated delivery, or a second event for it) finds its row.
-  if ((inserted.meta.changes ?? 0) !== 1) return no("duplicate");
+  if ((inserted.meta.changes ?? 0) !== 1) {
+    // Another delivery of the same commit won the insert between the read and the write.
+    const raced = await readRowByKey(db, pr.datasetId, pr.prNumber, pr.headSha);
+    return raced ? await handleRepeat(env, raced, secret) : no("duplicate");
+  }
   const reviewId = Number(inserted.meta.last_row_id);
-  const row: ReviewRow = {
-    id: reviewId,
-    datasetId: pr.datasetId,
-    prNumber: pr.prNumber,
-    headSha: pr.headSha,
-    checkRunId: null,
-    commentId: null,
-  };
+  const row = await readRow(db, reviewId);
+  if (!row) return no("duplicate", reviewId);
 
-  if (!decision.review) {
-    await publishOutcome(env, row, { kind: "declined", reason: decision.reason });
-    return { ok: true, dispatched: false, reason: decision.reason, review_id: reviewId };
+  if (paused) {
+    await publishDecline(env, row, "contributor_paused");
+    return no("contributor_paused", reviewId);
   }
 
+  const over = await capDecision(db, pr, reviewId);
+  if (over) {
+    await db
+      .prepare(
+        `UPDATE pr_reviews SET state = 'declined', detail = ?, nonce = NULL, decided_at = datetime('now')
+          WHERE id = ? AND state = 'dispatched'`,
+      )
+      .bind(over, reviewId)
+      .run();
+    const declined = await readRow(db, reviewId);
+    await publishDecline(env, declined ?? row, over);
+    return no(over, reviewId);
+  }
+
+  return await startReview(env, row, nonce as string, secret);
+}
+
+/**
+ * The commit has been delivered before. It is marked seen again (so it is the pull request's
+ * current commit, which is what force-pushing back to an earlier reviewed commit means), its
+ * stored result is re-stated on the pull request, and a review whose dispatch failed is tried
+ * again. Nothing else is reviewed twice.
+ */
+async function handleRepeat(
+  env: Bindings,
+  existing: ReviewRow,
+  secret: string,
+): Promise<PrReviewResponse> {
+  const db = env.DB;
+  await db
+    .prepare(`UPDATE pr_reviews SET seen_at = ${NOW_MS} WHERE id = ?`)
+    .bind(existing.id)
+    .run();
+
+  if (existing.state === "errored" && existing.detail === "dispatch_failed") {
+    const nonce = crypto.randomUUID();
+    const reset = await db
+      .prepare(
+        `UPDATE pr_reviews
+            SET state = 'dispatched', detail = NULL, nonce = ?, claimed_at = NULL,
+                published_at = NULL, publish_attempts = 0, decided_at = NULL
+          WHERE id = ? AND state = 'errored' AND detail = 'dispatch_failed'`,
+      )
+      .bind(nonce, existing.id)
+      .run();
+    if ((reset.meta.changes ?? 0) === 1) {
+      const row = await readRow(db, existing.id);
+      if (row) {
+        const res = await startReview(env, row, nonce, secret);
+        return res.dispatched ? { ...res, reason: "redispatched" } : res;
+      }
+    }
+  }
+
+  const outcome = outcomeOfRow(existing);
+  if (outcome) await publishOutcome(env, existing, outcome, { commentOnly: true });
+  return no("duplicate", existing.id);
+}
+
+/** Show the review as running, hand it to GitHub, and record a failure to do so. */
+async function startReview(
+  env: Bindings,
+  row: ReviewRow,
+  nonce: string,
+  secret: string,
+): Promise<PrReviewResponse> {
+  const db = env.DB;
   await publishOutcome(env, row, "running");
   try {
     const token = await signPrReviewCallbackToken(
-      { datasetId: pr.datasetId, reviewId, nonce: nonce as string },
+      { datasetId: row.datasetId, reviewId: row.id, nonce },
       secret,
     );
     await triggerPrReviewRun(
       {
-        datasetId: pr.datasetId,
-        prNumber: pr.prNumber,
-        headSha: pr.headSha,
-        reviewId,
+        datasetId: row.datasetId,
+        prNumber: row.prNumber,
+        headSha: row.headSha,
+        reviewId: row.id,
         callbackToken: token,
         environment: approvalDispatchEnvironment(env),
       },
@@ -456,56 +726,35 @@ export async function handlePullRequestEvent(
       DISPATCH_TIMEOUT_MS,
     );
   } catch (err) {
-    console.error(`[pr-review] review ${reviewId}: dispatch failed (${errName(err)})`);
-    await db
-      .prepare(
-        `UPDATE pr_reviews SET state = 'errored', detail = 'workflow_failed', nonce = NULL,
-                decided_at = datetime('now')
-          WHERE id = ? AND state = 'dispatched'`,
-      )
-      .bind(reviewId)
-      .run();
-    const fresh = await readRow(db, reviewId);
-    await publishOutcome(env, fresh ?? row, { kind: "error", error: "workflow_failed" });
-    return { ok: true, dispatched: false, reason: "dispatch_failed", review_id: reviewId };
+    console.error(
+      `[pr-review] review ${row.id} (${row.datasetId}#${row.prNumber}): dispatch failed (${errName(err)})`,
+    );
+    try {
+      await db
+        .prepare(
+          `UPDATE pr_reviews SET state = 'errored', detail = 'dispatch_failed', nonce = NULL,
+                  decided_at = datetime('now')
+            WHERE id = ? AND state = 'dispatched'`,
+        )
+        .bind(row.id)
+        .run();
+      const fresh = await readRow(db, row.id);
+      await publishOutcome(env, fresh ?? row, { kind: "error", error: "dispatch_failed" });
+    } catch (inner) {
+      console.error(`[pr-review] review ${row.id}: failure not recorded (${errName(inner)})`);
+    }
+    return no("dispatch_failed", row.id);
   }
-  return { ok: true, dispatched: true, reason: "dispatched", review_id: reviewId };
-}
-
-async function readRow(db: D1Database, id: number): Promise<ReviewRow | null> {
-  const r = await db
-    .prepare(
-      `SELECT id, dataset_id, pr_number, head_sha, check_run_id, comment_id
-         FROM pr_reviews WHERE id = ?`,
-    )
-    .bind(id)
-    .first<{
-      id: number;
-      dataset_id: string;
-      pr_number: number;
-      head_sha: string;
-      check_run_id: number | null;
-      comment_id: number | null;
-    }>();
-  return r
-    ? {
-        id: r.id,
-        datasetId: r.dataset_id,
-        prNumber: r.pr_number,
-        headSha: r.head_sha,
-        checkRunId: r.check_run_id,
-        commentId: r.comment_id,
-      }
-    : null;
+  return { ok: true, dispatched: true, reason: "dispatched", review_id: row.id };
 }
 
 // ---------------------------------------------------------------------------------------------
-// The callback
+// The claim and the callback
 // ---------------------------------------------------------------------------------------------
 
 /** The nonce of a review still waiting for its report, or null. Replays and strangers find nothing. */
 export async function pendingNonce(
-  db: D1Database,
+  db: Db,
   reviewId: number,
   datasetId: string,
 ): Promise<string | null> {
@@ -520,45 +769,72 @@ export async function pendingNonce(
   return row?.nonce ?? null;
 }
 
-export interface ReviewCallbackBody {
-  outcome: unknown;
-  report: unknown;
-  error: unknown;
+export type ClaimResult = "claimed" | "already_claimed" | "superseded";
+
+/**
+ * The workflow's first act, before it mints an identity or reads anything: take the review. The
+ * caller has verified the token. A review is claimed once, so one dispatch buys one model call;
+ * a dispatch for a commit that is no longer the pull request's latest is refused and recorded
+ * as `stale_head`, so a superseded commit never spends a model call.
+ */
+export async function claimPrReview(
+  env: Bindings,
+  reviewId: number,
+  datasetId: string,
+  nonce: string,
+): Promise<ClaimResult> {
+  const db = env.DB;
+  const row = await readRow(db, reviewId);
+  if (!row || row.datasetId !== datasetId) return "already_claimed";
+
+  if (!(await isLatestReview(db, row))) {
+    const res = await db
+      .prepare(
+        `UPDATE pr_reviews SET state = 'errored', detail = 'stale_head', nonce = NULL,
+                decided_at = datetime('now'), published_at = NULL, publish_attempts = 0
+          WHERE id = ? AND dataset_id = ? AND nonce = ? AND claimed_at IS NULL
+            AND state IN ('dispatched', 'unreported')`,
+      )
+      .bind(reviewId, datasetId, nonce)
+      .run();
+    if ((res.meta.changes ?? 0) === 1) {
+      const fresh = await readRow(db, reviewId);
+      await publishOutcome(env, fresh ?? row, { kind: "error", error: "stale_head" });
+    }
+    return "superseded";
+  }
+
+  const res = await db
+    .prepare(
+      `UPDATE pr_reviews SET claimed_at = datetime('now')
+        WHERE id = ? AND dataset_id = ? AND nonce = ? AND claimed_at IS NULL
+          AND state IN ('dispatched', 'unreported')`,
+    )
+    .bind(reviewId, datasetId, nonce)
+    .run();
+  return (res.meta.changes ?? 0) === 1 ? "claimed" : "already_claimed";
 }
 
 /**
  * Store a verified callback and publish it. The write is one conditional UPDATE keyed on the
- * nonce, so a duplicate callback or the watchdog winning the race stores nothing twice; a report
- * the parser refuses is stored as the run error `report_invalid` and never as a verdict.
+ * nonce, so a duplicate callback stores nothing twice. The caller has already turned the body
+ * into an outcome with `parseCallbackOutcome`: a report the parser refused is the run error
+ * `report_invalid` and never a verdict. A late report for a row the watchdog gave up on is
+ * accepted, and replaces the "could not decide" check.
  */
 export async function storePrReviewResult(
   env: Bindings,
   reviewId: number,
   datasetId: string,
   nonce: string,
-  body: ReviewCallbackBody,
-): Promise<{ stored: boolean }> {
+  outcome: Extract<ReviewOutcome, { kind: "reported" | "error" }>,
+): Promise<{ stored: boolean; state: ReviewState | null }> {
   const db = env.DB;
-  let outcome: ReviewOutcome;
-  if (body.outcome === "reported") {
-    try {
-      outcome = { kind: "reported", report: parsePrReviewReport(body.report) };
-    } catch (err) {
-      if (!(err instanceof PrReviewReportError)) throw err;
-      outcome = { kind: "error", error: "report_invalid" };
-    }
-  } else {
-    const word = (RUN_ERRORS as readonly unknown[]).includes(body.error)
-      ? (body.error as RunError)
-      : "workflow_failed";
-    outcome = { kind: "error", error: word };
-  }
-
   const res = await db
     .prepare(
       `UPDATE pr_reviews
           SET state = ?, verdict = ?, detail = ?, report = ?, nonce = NULL,
-              decided_at = datetime('now')
+              decided_at = datetime('now'), published_at = NULL, publish_attempts = 0
         WHERE id = ? AND dataset_id = ? AND nonce = ? AND state IN ('dispatched', 'unreported')`,
     )
     .bind(
@@ -571,10 +847,10 @@ export async function storePrReviewResult(
       nonce,
     )
     .run();
-  if ((res.meta.changes ?? 0) !== 1) return { stored: false };
+  if ((res.meta.changes ?? 0) !== 1) return { stored: false, state: null };
   const row = await readRow(db, reviewId);
   if (row) await publishOutcome(env, row, outcome);
-  return { stored: true };
+  return { stored: true, state: row?.state ?? null };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -582,28 +858,38 @@ export async function storePrReviewResult(
 // ---------------------------------------------------------------------------------------------
 
 export interface PrReviewSweepResult {
+  /** Reviews that never reported and were marked unreported. */
   timedOut: number;
+  /** Stored results that had not reached GitHub and did on this pass. */
+  republished: number;
   errors: number;
   skipped: boolean;
 }
 
 /**
- * Give up on reviews that never reported. GitHub answers a dispatch 204 whether or not any
- * workflow listens, so a review can be handed over and never run; left alone its check would
- * stay "in progress" for good. The row is marked `unreported` and its nonce KEPT, so a report that
- * arrives late is still accepted and replaces the verdict. PRODUCTION-ONLY, like the other
- * watchdogs: it writes to GitHub on the shared `nemarDatasets` org.
+ * Two jobs, both so a check cannot stay wrong for good.
+ *
+ * 1. Give up on reviews that never reported. GitHub answers a dispatch 204 whether or not any
+ *    workflow listens, so a review can be handed over and never run. The row is marked
+ *    `unreported` and its nonce KEPT, so a report that arrives late is still accepted and then
+ *    replaces the "could not decide" check.
+ * 2. Publish again any stored result that did not reach GitHub (a GitHub error, a token that
+ *    would not mint), a few times each.
+ *
+ * It does not depend on `PR_REVIEW_ENABLED`: turning the review off must not strand a check that
+ * is already running. PRODUCTION-ONLY, like the other watchdogs: it writes to the shared
+ * `nemarDatasets` org.
  */
 export async function sweepStalePrReviews(env: Bindings): Promise<PrReviewSweepResult> {
-  const result: PrReviewSweepResult = { timedOut: 0, errors: 0, skipped: false };
-  if (isNonProductionEnv(env) || env.PR_REVIEW_ENABLED !== "1") {
+  const result: PrReviewSweepResult = { timedOut: 0, republished: 0, errors: 0, skipped: false };
+  if (isNonProductionEnv(env)) {
     result.skipped = true;
     return result;
   }
   const db = env.DB;
-  let overdue: { id: number }[] = [];
+
   try {
-    overdue = (
+    const overdue = (
       await db
         .prepare(
           `SELECT id FROM pr_reviews
@@ -614,28 +900,63 @@ export async function sweepStalePrReviews(env: Bindings): Promise<PrReviewSweepR
         .bind(SWEEP_LIMIT)
         .all<{ id: number }>()
     ).results;
+    for (const { id } of overdue) {
+      try {
+        const res = await db
+          .prepare(
+            `UPDATE pr_reviews SET state = 'unreported', decided_at = datetime('now'),
+                    published_at = NULL, publish_attempts = 0
+              WHERE id = ? AND state = 'dispatched'`,
+          )
+          .bind(id)
+          .run();
+        if ((res.meta.changes ?? 0) !== 1) continue;
+        result.timedOut++;
+        const row = await readRow(db, id);
+        if (row) await publishOutcome(env, row, { kind: "unreported" });
+      } catch (err) {
+        result.errors++;
+        console.error(`[pr-review-sweep] review ${id} failed (${errName(err)})`);
+      }
+    }
   } catch (err) {
     result.errors++;
     console.error(`[pr-review-sweep] overdue query failed (${errName(err)})`);
-    return result;
   }
-  for (const { id } of overdue) {
-    try {
-      const res = await db
+
+  try {
+    const unpublished = (
+      await db
         .prepare(
-          `UPDATE pr_reviews SET state = 'unreported', decided_at = datetime('now')
-            WHERE id = ? AND state = 'dispatched'`,
+          `SELECT id FROM pr_reviews
+            WHERE state != 'dispatched' AND published_at IS NULL
+              AND publish_attempts < ${PUBLISH_MAX_ATTEMPTS}
+              AND COALESCE(decided_at, created_at)
+                  < datetime('now', '-${PUBLISH_RETRY_AFTER_MINUTES} minutes')
+            ORDER BY id LIMIT ?`,
         )
-        .bind(id)
-        .run();
-      if ((res.meta.changes ?? 0) !== 1) continue;
-      result.timedOut++;
-      const row = await readRow(db, id);
-      if (row) await publishOutcome(env, row, { kind: "unreported" });
-    } catch (err) {
-      result.errors++;
-      console.error(`[pr-review-sweep] review ${id} failed (${errName(err)})`);
+        .bind(SWEEP_LIMIT)
+        .all<{ id: number }>()
+    ).results;
+    for (const { id } of unpublished) {
+      try {
+        await db
+          .prepare("UPDATE pr_reviews SET publish_attempts = publish_attempts + 1 WHERE id = ?")
+          .bind(id)
+          .run();
+        const row = await readRow(db, id);
+        const outcome = row ? outcomeOfRow(row) : null;
+        if (!row || !outcome) continue;
+        const published = await publishOutcome(env, row, outcome);
+        if (published.check) result.republished++;
+      } catch (err) {
+        result.errors++;
+        console.error(`[pr-review-sweep] republish ${id} failed (${errName(err)})`);
+      }
     }
+  } catch (err) {
+    result.errors++;
+    console.error(`[pr-review-sweep] republish query failed (${errName(err)})`);
   }
   return result;
 }

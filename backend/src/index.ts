@@ -904,14 +904,18 @@ export default {
         // ADR 0092: the pull-request review watchdog. A review handed to GitHub that never
         // reports is marked unreported and its check turned to "needs a person", because a
         // dispatch is answered 204 whether or not a workflow listens and the check would
-        // otherwise stay "in progress" for good. PRODUCTION-ONLY for the same reason as the
-        // screen watchdog above (it writes to the shared nemarDatasets org), and a no-op
-        // unless PR_REVIEW_ENABLED is "1".
+        // otherwise stay "in progress" for good. It also republishes a stored result whose
+        // check never reached GitHub. PRODUCTION-ONLY for the same reason as the identifier
+        // sweep above (it writes to the shared nemarDatasets org, which the dev worker would
+        // also reach). It does NOT read PR_REVIEW_ENABLED: switching the review off must not
+        // strand the checks of reviews already in flight.
         ctx.waitUntil(
           sweepStalePrReviews(env)
             .then((r) => {
-              if (r.timedOut + r.errors > 0) {
-                console.log(`[pr-review-sweep] timedOut=${r.timedOut} errors=${r.errors}`);
+              if (r.timedOut + r.republished + r.errors > 0) {
+                console.log(
+                  `[pr-review-sweep] timedOut=${r.timedOut} republished=${r.republished} errors=${r.errors}`,
+                );
               }
             })
             .catch((err) =>

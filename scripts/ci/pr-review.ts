@@ -1,17 +1,18 @@
 #!/usr/bin/env bun
 /**
  * The pull-request review job's script (ADR 0092). Run by the central workflow
- * `run-pr-review.yml` in `nemarDatasets/.github`, in a job that holds a read-only token for one
- * dataset repository and a federated Anthropic identity, and no credential that can write to
- * GitHub or to NEMAR.
+ * `run-pr-review.yml` in `nemarDatasets/.github`, after the workflow has claimed the review. This
+ * step holds a federated Anthropic identity and the one-shot callback token, and no GitHub
+ * credential: the repository was fetched by an earlier step, and the token it used is not in this
+ * step's environment.
  *
  *   bun run scripts/ci/pr-review.ts review \
  *     --repo-dir DIR --base SHA --head SHA --fetched-head SHA --pr-json FILE \
  *     --review-id N --dataset nmNNNNNN --environment production|dev
- *   bun run scripts/ci/pr-review.ts fail \
- *     --review-id N --dataset nmNNNNNN --environment production|dev --error WORD
  *
- * The callback token comes from the environment (PR_REVIEW_CALLBACK_TOKEN), never argv.
+ * The callback token comes from the environment (PR_REVIEW_CALLBACK_TOKEN), never argv. A job that
+ * fails before this script can report is reported by the workflow's own curl step, which needs
+ * nothing installed.
  *
  * **Nothing in the dispatch is trusted for a decision.** The pull request is re-read from the API
  * (`--pr-json`): it must still be open, still target `main`, and still be at `--head`, and the
@@ -28,12 +29,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import Anthropic from "@anthropic-ai/sdk";
-import {
-  type PrReviewReport,
-  PrReviewReportError,
-  RUN_ERRORS,
-  type RunError,
-} from "../../shared/pr-review";
+import { type PrReviewReport, PrReviewReportError, type RunError } from "../../shared/pr-review";
 import { EvidenceError, buildEvidence, gatherGitFacts } from "./pr-review-evidence";
 import {
   REVIEW_MODEL,
@@ -59,7 +55,7 @@ const MAX_TOKENS = 16_000;
 
 export type ReviewResult =
   | { outcome: "reported"; report: PrReviewReport }
-  | { outcome: "error"; error: RunError };
+  | { outcome: "error"; error: RunError; diag?: string };
 
 class RunFailure extends Error {
   readonly error: RunError;
@@ -84,19 +80,37 @@ export interface ReviewArgs {
 export function mapError(e: unknown): RunError {
   if (e instanceof RunFailure) return e.error;
   if (e instanceof EvidenceError) return "evidence_unavailable";
-  if (e instanceof PrReviewReportError) return "model_invalid";
-  if (
-    e instanceof Anthropic.AuthenticationError ||
-    e instanceof Anthropic.PermissionDeniedError ||
-    (e instanceof Error && e.name === "WorkloadIdentityError")
-  ) {
+  // Our own evidence block failing the parser is a bug on this side, not the model's doing.
+  if (e instanceof PrReviewReportError) {
+    return e.code === "bad_evidence" ? "report_invalid" : "model_invalid";
+  }
+  if (e instanceof Anthropic.AuthenticationError || e instanceof Anthropic.PermissionDeniedError) {
+    return "auth_failed";
+  }
+  // The SDK's federation failures (an identity token it cannot read, an exchange the rule
+  // rejects) are plain AnthropicErrors named "Error", not API errors: there is no HTTP response of
+  // the messages API yet. Matching on a class name here was dead code; a test now provokes the
+  // real error from the real SDK.
+  if (e instanceof Anthropic.AnthropicError && !(e instanceof Anthropic.APIError)) {
     return "auth_failed";
   }
   if (e instanceof Anthropic.BadRequestError) return "model_invalid";
-  if (e instanceof Anthropic.APIError || e instanceof Anthropic.APIConnectionError) {
-    return "model_unavailable";
-  }
+  if (e instanceof Anthropic.APIError) return "model_unavailable";
   return "workflow_failed";
+}
+
+/**
+ * Why a run failed, in words that are safe in a public log: class names the SDK and this module
+ * define, HTTP status numbers, parser codes, and the fixed strings of {@link EvidenceError}. Never
+ * the text of an error that could carry pull request content.
+ */
+export function describeError(e: unknown): string {
+  const cls = e instanceof Error ? e.constructor.name : typeof e;
+  if (e instanceof Anthropic.APIError) return `${cls} status=${e.status ?? "none"}`;
+  if (e instanceof PrReviewReportError) return `${cls} code=${e.code}`;
+  if (e instanceof EvidenceError) return `${cls}: ${e.message}`;
+  if (e instanceof RunFailure) return `${cls} ${e.error}`;
+  return cls;
 }
 
 /**
@@ -180,7 +194,7 @@ export async function runReview(
     const modelOutput = await callModel(system, user);
     return { outcome: "reported", report: assembleReport(modelOutput, evidence) };
   } catch (e) {
-    return { outcome: "error", error: mapError(e) };
+    return { outcome: "error", error: mapError(e), diag: describeError(e) };
   }
 }
 
@@ -225,8 +239,8 @@ function need(argv: string[], name: string): string {
 async function main(argv: string[]): Promise<number> {
   const cmd = argv[0];
   const rest = argv.slice(1);
-  if (cmd !== "review" && cmd !== "fail") {
-    console.error("usage: pr-review.ts review|fail ...");
+  if (cmd !== "review") {
+    console.error("usage: pr-review.ts review ...");
     return 2;
   }
   const dataset = need(rest, "dataset");
@@ -246,27 +260,16 @@ async function main(argv: string[]): Promise<number> {
     return 2;
   }
 
-  let result: ReviewResult;
-  if (cmd === "fail") {
-    const word = flag(rest, "error");
-    result = {
-      outcome: "error",
-      error: (RUN_ERRORS as readonly string[]).includes(word ?? "")
-        ? (word as RunError)
-        : "workflow_failed",
-    };
-  } else {
-    result = await runReview({
-      repoDir: need(rest, "repo-dir"),
-      base: need(rest, "base"),
-      head: need(rest, "head"),
-      fetchedHead: need(rest, "fetched-head"),
-      prJson: need(rest, "pr-json"),
-      reviewId,
-      dataset,
-      environment,
-    });
-  }
+  const result: ReviewResult = await runReview({
+    repoDir: need(rest, "repo-dir"),
+    base: need(rest, "base"),
+    head: need(rest, "head"),
+    fetchedHead: need(rest, "fetched-head"),
+    prJson: need(rest, "pr-json"),
+    reviewId,
+    dataset,
+    environment,
+  });
 
   const body: Record<string, unknown> = {
     review_id: reviewId,
@@ -277,7 +280,7 @@ async function main(argv: string[]): Promise<number> {
   const sent = await postCallback(CALLBACK_ORIGINS[environment], token, body);
   // A review id and fixed words only: this log is public.
   console.log(
-    `review ${reviewId}: ${result.outcome}${result.outcome === "error" ? ` (${result.error})` : ""}; callback ${
+    `review ${reviewId}: ${result.outcome}${result.outcome === "error" ? ` (${result.error}${result.diag ? `; ${result.diag}` : ""})` : ""}; callback ${
       sent.delivered ? "delivered" : `not delivered (${sent.status ?? "no response"})`
     }`,
   );
@@ -288,9 +291,8 @@ if (import.meta.main) {
   main(process.argv.slice(2))
     .then((code) => process.exit(code))
     .catch((e) => {
-      console.error(
-        `pr-review failed: ${e instanceof Error ? e.message.slice(0, 120) : "unknown"}`,
-      );
+      // A fixed word: the text of an unexpected error is not ours to put in a public log.
+      console.error(`pr-review failed: ${e instanceof Error ? e.constructor.name : "unknown"}`);
       process.exit(1);
     });
 }

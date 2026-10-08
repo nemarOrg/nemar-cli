@@ -15,7 +15,7 @@
  *     some findings. {@link verdictOf} decides pass, fail or uncertain from those and from
  *     facts the script computed from git, and no field of the report is "the verdict".
  *  2. **Facts override the model.** A criterion the git facts contradict cannot pass, whatever
- *     the model said ({@link effectiveCriteria}).
+ *     the model said ({@link factsOf}).
  *  3. **Free text is a note, never markup.** The one place a model's words reach a person,
  *     {@link sanitizeNote}, removes links, mentions, cross-references, HTML and emphasis, so a
  *     note cannot ping someone, link anywhere or hide the verdict.
@@ -69,6 +69,30 @@ export const MAX_FINDINGS = 8;
 export const NOTE_MAX = 200;
 export const SUMMARY_MAX = 400;
 
+/**
+ * The most changed files the model is shown by name. A change list longer than this is cut, and a
+ * report for one must say `truncated` ({@link parsePrReviewReport} refuses one that does not).
+ */
+export const MAX_MODEL_FILES = 400;
+
+/** What a review concludes. Derived by {@link verdictOf}, stored beside the report. */
+export const VERDICTS = ["pass", "fail", "uncertain"] as const;
+export type Verdict = (typeof VERDICTS)[number];
+
+/** A stored review's lifecycle. Kept equal to the CHECK in migration 0092 by a test. */
+export const REVIEW_STATES = [
+  "dispatched",
+  "reported",
+  "declined",
+  "errored",
+  "unreported",
+] as const;
+export type ReviewState = (typeof REVIEW_STATES)[number];
+
+/** A maintainer's standing decision about one contributor. */
+export const OVERRIDE_MODES = ["allow", "block"] as const;
+export type OverrideMode = (typeof OVERRIDE_MODES)[number];
+
 export interface ReviewFinding {
   criterion: Criterion;
   severity: Severity;
@@ -82,7 +106,7 @@ export interface ReviewFinding {
 /**
  * Where in a dataset a changed file sits. Closed, so a change summary can be counted, shown and
  * compared without quoting a path. The script that fills it is `classifyPath` in
- * `shared/pr-review-evidence.ts`; this list is what the Worker will accept.
+ * `scripts/ci/pr-review-evidence.ts`; this list is what the Worker will accept.
  */
 export const AREAS = [
   "dataset_description",
@@ -124,7 +148,13 @@ export interface ReviewEvidence {
   files_changed: number;
   /** How many changed files had their content (a diff) given to the model. The rest were judged by name and type. */
   files_read: number;
-  /** The change list or a patch given to the model was cut short, so a pass about absence cannot be trusted. */
+  /**
+   * Something the reviewer needed to see was not shown in full: the change list was cut at
+   * {@link MAX_MODEL_FILES}, a modified or removed metadata file was not read or was cut, or a read
+   * failed. A pass about nothing being lost cannot be trusted then. Unread ADDED files do not set
+   * it (a new file cannot remove anything), but they still count in `files_changed` and not in
+   * `files_read`.
+   */
   truncated: boolean;
   version_before: string | null;
   version_after: string | null;
@@ -135,7 +165,7 @@ export interface ReviewEvidence {
   listed: ChangedFile[];
 }
 
-export interface PrReviewReport {
+export interface ReportShape {
   v: typeof REPORT_VERSION;
   model: ReviewModel;
   criteria: Record<Criterion, CriterionResult>;
@@ -145,6 +175,17 @@ export interface PrReviewReport {
   steering: boolean;
   evidence: ReviewEvidence;
 }
+
+declare const validated: unique symbol;
+
+/**
+ * A report that {@link parsePrReviewReport} accepted. The brand makes that a fact of the type: an
+ * object literal, a spread of one or a cast cannot be handed to {@link verdictOf},
+ * {@link renderCheck} or a stored {@link ReviewOutcome} without going through the parser, so the
+ * closed vocabulary and the counts-must-add-up rule cannot be skipped by accident. It is
+ * `Readonly` (shallowly) so a parsed report is not edited into something the parser never saw.
+ */
+export type PrReviewReport = Readonly<ReportShape> & { readonly [validated]: true };
 
 // ---------------------------------------------------------------------------------------------
 // Parsing: a closed vocabulary, enforced at the door.
@@ -196,22 +237,42 @@ function hasExactKeys(o: Record<string, unknown>, keys: readonly string[]): bool
 /**
  * Free text from a model or a pull request, made safe to put in a check-run.
  *
- * Removes what could notify a person (`@name`), cross-reference an issue (`#12`), link
- * somewhere (URLs, `[text](url)`, images), inject markup (HTML tags, emphasis, table pipes,
- * backslash escapes), or hide itself (control, zero-width and bidirectional-override
- * characters). What is left is plain words, cut to `max` characters.
+ * Removes what could notify a person (`@name`, `GH-12`), cross-reference an issue (`#12`), link
+ * somewhere (URLs, `[text](url)`, images, HTML entities that decode to `@` or `#`), inject markup
+ * (HTML tags, emphasis, table pipes, backslash escapes), or hide itself (control, zero-width and
+ * bidirectional-override characters). What is left is plain words, cut to `max` characters.
+ *
+ * The order matters, and it is the lesson of a real bug: deleting special characters AFTER finding
+ * links rebuilt them (`ht@tp://x` became `http://x`). So the special characters go first, in a
+ * loop until nothing changes (removing one can reveal another), and links are found LAST. The
+ * replacement text contains none of the characters stripped, so the result is a fixed point:
+ * `sanitizeNote(sanitizeNote(x))` equals `sanitizeNote(x)`, which a test pins.
  */
 export function sanitizeNote(input: unknown, max: number = NOTE_MAX): string {
   if (typeof input !== "string") return "";
-  let s = input.normalize("NFKC");
-  s = s.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ");
-  s = s.replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1");
-  s = s.replace(/<[^>]*>/g, " ");
-  s = s.replace(/\b(?:https?|ftp|file|data|javascript):\/*\S*/gi, "[link removed]");
-  s = s.replace(/\bwww\.\S+/gi, "[link removed]");
-  s = s.replace(/[@#`*_~|\\<>[\]{}]/g, "");
-  s = s.replace(/\s+/g, " ").trim();
-  return s.length > max ? `${s.slice(0, max - 1).trimEnd()}…` : s;
+  let s = input.normalize("NFKC").replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ");
+  for (let i = 0; i < 8; i++) {
+    const before = s;
+    s = s
+      .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/&#?\w+;/g, " ")
+      .replace(/[@#`*_~|\\<>[\]{}]/g, "")
+      .replace(/\bGH-\d+/gi, "");
+    if (s === before) break;
+  }
+  s = s
+    .replace(/\b(?:https?|ftp|file|data|javascript):\/*\S*/gi, "(link removed)")
+    .replace(/\bwww\.\S+/gi, "(link removed)")
+    .replace(/\s+/g, " ")
+    .trim();
+  const chars = Array.from(s);
+  return chars.length > max
+    ? `${chars
+        .slice(0, max - 3)
+        .join("")
+        .trimEnd()}...`
+    : s;
 }
 
 function parseFinding(raw: unknown): ReviewFinding {
@@ -321,6 +382,12 @@ function parseEvidence(raw: unknown): ReviewEvidence {
   if (!Array.isArray(raw.listed) || raw.listed.length > MAX_LISTED) {
     throw new PrReviewReportError("bad_evidence");
   }
+  // A list cannot hold more files than changed, and a change list longer than the model was
+  // shown must say it was cut: `truncated` is the precondition of the `no_degradation` rule.
+  if (raw.listed.length > files_changed) throw new PrReviewReportError("bad_evidence");
+  if (files_changed > MAX_MODEL_FILES && raw.truncated !== true) {
+    throw new PrReviewReportError("bad_evidence");
+  }
   return {
     files_changed,
     files_read,
@@ -340,8 +407,9 @@ function parseEvidence(raw: unknown): ReviewEvidence {
  * (`note`, `summary`) is not rejected for its content, it is sanitised: a model's wording is
  * not a reason to lose the review.
  *
- * A criterion that fails with no blocking finding gets one added (`other`, "No detail given."),
- * so a red check always has something for a person to read.
+ * A criterion that fails with no finding against it gets one added (`other`, "No detail given."),
+ * so a red check always has something for a person to read. Room is made by dropping the model's
+ * LAST findings (the prompt asks for most important first), never one of the added ones.
  */
 export function parsePrReviewReport(raw: unknown): PrReviewReport {
   if (!isRecord(raw)) throw new PrReviewReportError("not_an_object");
@@ -369,20 +437,21 @@ export function parsePrReviewReport(raw: unknown): PrReviewReport {
   if (typeof raw.steering !== "boolean") throw new PrReviewReportError("bad_steering");
   const evidence = parseEvidence(raw.evidence);
 
-  for (const c of CRITERIA) {
-    if (criteria[c] === "fail" && !findings.some((f) => f.criterion === c)) {
-      if (findings.length >= MAX_FINDINGS) findings.pop();
-      findings.push({
-        criterion: c,
-        severity: "blocker",
-        code: "other",
-        path: null,
-        note: "No detail given.",
-      });
-    }
+  const unexplained = CRITERIA.filter(
+    (c) => criteria[c] === "fail" && !findings.some((f) => f.criterion === c),
+  );
+  findings.splice(MAX_FINDINGS - unexplained.length);
+  for (const c of unexplained) {
+    findings.push({
+      criterion: c,
+      severity: "blocker",
+      code: "other",
+      path: null,
+      note: "No detail given.",
+    });
   }
 
-  return {
+  const report: ReportShape = {
     v: REPORT_VERSION,
     model: raw.model as ReviewModel,
     criteria,
@@ -391,37 +460,91 @@ export function parsePrReviewReport(raw: unknown): PrReviewReport {
     steering: raw.steering,
     evidence,
   };
+  return report as PrReviewReport;
 }
 
 // ---------------------------------------------------------------------------------------------
 // Verdict: derived from the report and the git facts, never read from it.
 // ---------------------------------------------------------------------------------------------
 
-export type Verdict = "pass" | "fail" | "uncertain";
+/** A fact found from the files that moved a criterion away from what the model said. */
+export interface FactNote {
+  criterion: Criterion;
+  code: FindingCode;
+  /** What the fact made of the criterion. */
+  result: "fail" | "unknown";
+}
+
+/** Compare two `X.Y.Z` strings: negative when `a` is older than `b`. Both are parser-validated. */
+function compareVersions(a: string, b: string): number {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if (pa[i] !== pb[i]) return pa[i] - pb[i];
+  }
+  return 0;
+}
 
 /**
- * The criteria after the git facts have had their say.
+ * The criteria after the git facts have had their say, and the facts that moved them. The model's
+ * answer can only be lowered by a fact, never raised.
  *
  *  - No file changed: the pull request improves nothing, so `material_improvement` fails.
- *  - Both versions are known and equal: the revision did not advance, so `advances_revision`
- *    fails. (The required `version-check` already refuses this for a merge; the review says it
- *    in its own words so the two never read as contradicting each other.)
- *  - The new version is unknown (the field is absent or unreadable): `advances_revision`
- *    cannot be better than unknown.
- *  - The change list or a patch was cut short: a pass about nothing being lost
+ *  - Both versions are known and the new one is not newer (equal, or a downgrade):
+ *    `advances_revision` fails. (The required `version-check` already refuses this for a merge;
+ *    the review says it in its own words so the two never read as contradicting each other.)
+ *  - The new version is unknown (absent or unreadable): `advances_revision` cannot be better than
+ *    unknown.
+ *  - Something a reviewer needed was not shown (`truncated`): a pass about nothing being lost
  *    (`no_degradation`) rests on evidence nobody saw, so it is unknown.
+ *  - Data or the files that describe the dataset were REMOVED (a recording, the dataset
+ *    description, README or CHANGES, the participants table) or the subject count fell: a removal
+ *    can be right (a privacy correction) but it is never something to pass on a model's word, so
+ *    `no_degradation` is unknown and a person confirms it.
  */
-export function effectiveCriteria(report: PrReviewReport): Record<Criterion, CriterionResult> {
+export function factsOf(report: PrReviewReport): {
+  criteria: Record<Criterion, CriterionResult>;
+  notes: FactNote[];
+} {
   const out = { ...report.criteria };
+  const notes: FactNote[] = [];
+  const lower = (criterion: Criterion, code: FindingCode, to: "fail" | "unknown") => {
+    // Only ever lower a criterion: a fail stays a fail, and unknown never replaces a fail.
+    const rank = { pass: 2, unknown: 1, fail: 0 } as const;
+    if (rank[to] < rank[out[criterion]]) {
+      out[criterion] = to;
+      notes.push({ criterion, code, result: to });
+    }
+  };
   const e = report.evidence;
-  if (e.files_changed === 0) out.material_improvement = "fail";
-  if (e.version_before !== null && e.version_before === e.version_after) {
-    out.advances_revision = "fail";
-  } else if (e.version_after === null && out.advances_revision === "pass") {
-    out.advances_revision = "unknown";
+  if (e.files_changed === 0) lower("material_improvement", "no_substantive_change", "fail");
+  if (e.version_after === null) {
+    lower("advances_revision", "evidence_incomplete", "unknown");
+  } else if (e.version_before !== null && compareVersions(e.version_after, e.version_before) <= 0) {
+    lower("advances_revision", "version_not_advanced", "fail");
   }
-  if (e.truncated && out.no_degradation === "pass") out.no_degradation = "unknown";
-  return out;
+  if (e.truncated) lower("no_degradation", "evidence_incomplete", "unknown");
+  if (e.areas.recordings.removed > 0) lower("no_degradation", "data_removed", "unknown");
+  if (
+    e.areas.dataset_description.removed +
+      e.areas.readme_and_changes.removed +
+      e.areas.participants.removed >
+    0
+  ) {
+    lower("no_degradation", "metadata_removed", "unknown");
+  }
+  if (
+    e.subjects_before !== null &&
+    e.subjects_after !== null &&
+    e.subjects_after < e.subjects_before
+  ) {
+    lower("no_degradation", "data_removed", "unknown");
+  }
+  return { criteria: out, notes };
+}
+
+export function effectiveCriteria(report: PrReviewReport): Record<Criterion, CriterionResult> {
+  return factsOf(report).criteria;
 }
 
 export function verdictOf(report: PrReviewReport): Verdict {
@@ -452,9 +575,14 @@ export const RUN_ERRORS = [
   "model_truncated",
   "model_invalid",
   "report_invalid",
+  "dispatch_failed",
   "workflow_failed",
 ] as const;
 export type RunError = (typeof RUN_ERRORS)[number];
+
+export function isRunError(x: unknown): x is RunError {
+  return typeof x === "string" && (RUN_ERRORS as readonly string[]).includes(x);
+}
 
 export type ReviewOutcome =
   | { kind: "reported"; report: PrReviewReport }
@@ -492,7 +620,7 @@ const RESULT_WORD: Record<CriterionResult, string> = {
 
 const DECLINE_COPY: Record<DeclineReason, string> = {
   contributor_paused:
-    "Automated review is paused for this contributor because too many of their earlier pull requests were rejected. A maintainer needs to review this one by hand.",
+    "Automated review is paused for this contributor. A maintainer needs to review this one by hand.",
   rate_limited:
     "Automated review is rate limited for this contributor right now. Push again later, or ask a maintainer to review it by hand.",
   daily_limit:
@@ -504,12 +632,13 @@ const ERROR_COPY: Record<RunError, string> = {
   stale_head: "The pull request changed while the review was starting. Push again to re-run it.",
   too_large: "The change is too large for automated review. A maintainer needs to review it.",
   auth_failed:
-    "The review service could not sign in. A maintainer has been notified by this check.",
+    "The review service could not sign in. A maintainer needs to fix the review service.",
   model_unavailable: "The reviewing model was unavailable.",
   model_refused: "The reviewing model declined to review this change.",
   model_truncated: "The reviewing model ran out of room before it finished.",
   model_invalid: "The reviewing model did not return a usable review.",
   report_invalid: "The review could not be read back.",
+  dispatch_failed: "The review could not be started. Push again to re-run it.",
   workflow_failed: "The review job failed before it finished.",
 };
 
@@ -590,7 +719,7 @@ export function describeChanges(e: ReviewEvidence): string[] {
   facts.push(
     e.files_read === e.files_changed
       ? `The content of all ${plural(e.files_changed, "changed file", "changed files")} was read.`
-      : `The content of ${e.files_read} of ${plural(e.files_changed, "changed file", "changed files")} was read. The rest were judged by name and type only, because recordings and other data files are stored outside git.`,
+      : `The content of ${e.files_read} of ${plural(e.files_changed, "changed file", "changed files")} was read. Files not read were judged by name and type only. Recordings and other data files are stored outside git and are never read.`,
   );
   out.push(facts.join(" "), "");
   return out;
@@ -635,7 +764,7 @@ export function renderCheck(outcome: ReviewOutcome): RenderedCheck {
 
   const { report } = outcome;
   const verdict = verdictOf(report);
-  const criteria = effectiveCriteria(report);
+  const { criteria, notes } = factsOf(report);
   const title =
     verdict === "pass"
       ? "Passes: nothing lost, revision advances, materially better"
@@ -656,8 +785,18 @@ export function renderCheck(outcome: ReviewOutcome): RenderedCheck {
     const note = f.note ? `: ${f.note}` : "";
     details.push(`- **${CODE_LABEL[f.code]}**${where}, ${f.severity}${note}`);
   }
+  // Facts found from the files, stated in their own right so a red or amber answer is never left
+  // without a reason. A model finding that already says the same thing is not repeated.
+  for (const n of notes) {
+    if (report.findings.some((f) => f.criterion === n.criterion && f.code === n.code)) continue;
+    details.push(
+      `- **${CODE_LABEL[n.code]}**, ${n.result === "fail" ? "blocker" : "concern"}: found from the files, not by the reviewer.`,
+    );
+  }
   if (report.evidence.truncated) {
-    details.push("- Part of the change was too large to read, so a clean result is not claimed.");
+    details.push(
+      "- Some changed files were not shown to the reviewer in full, so a clean result is not claimed.",
+    );
   }
   const text = [
     details.length ? `### Findings\n\n${details.join("\n")}` : "No findings.",
@@ -671,9 +810,10 @@ export function renderCheck(outcome: ReviewOutcome): RenderedCheck {
 }
 
 /**
- * The hidden marker on the review's pull-request comment. The Worker finds its own comment by it
- * and edits it in place on every new commit, so a pull request carries one review comment, not
- * one per push.
+ * The hidden marker on the review's pull-request comment. It labels the comment as this review's
+ * so a person (or a later search) can tell it apart. The Worker does not search for it: it edits
+ * the comment whose id it stored in `pr_reviews.comment_id`, so a pull request carries one review
+ * comment, reused by later commits, not one per push.
  */
 export const PR_REVIEW_COMMENT_MARKER = "<!-- nemar-pr-review:v1 -->";
 
@@ -709,9 +849,9 @@ export function renderComment(outcome: ReviewOutcome, headSha: string): string {
 /**
  * Automated review is paused for a contributor once MORE THAN this many of their pull requests
  * were rejected AND those rejections are MORE THAN {@link REJECTION_PERCENT} percent of the pull
- * requests that got a decision. Both must hold, so the later of the two thresholds decides: a
- * newcomer's first failure never pauses anyone, and a prolific contributor with a few failures
- * among hundreds of accepted pull requests is not paused either.
+ * requests that got a decision. Both must hold, so the harder one to reach decides: a newcomer's
+ * first failure never pauses anyone, and a prolific contributor with a few failures among hundreds
+ * of accepted pull requests is not paused either.
  */
 export const REJECTION_COUNT = 5;
 export const REJECTION_PERCENT = 10;
@@ -723,8 +863,8 @@ export interface AuthorTally {
   decided: number;
 }
 
-/** A maintainer's standing decision about one contributor. Wins over the tally in both directions. */
-export type AuthorOverride = "allow" | "block" | null;
+/** A maintainer's standing decision about one contributor, or none. Wins over the tally in both directions. */
+export type AuthorOverride = OverrideMode | null;
 
 export type Standing = { paused: false } | { paused: true; because: "maintainer" | "tally" };
 
@@ -752,6 +892,9 @@ const TRUSTED_ASSOCIATIONS: ReadonlySet<string> = new Set(["OWNER", "MEMBER", "C
  */
 export const HOURLY_REVIEW_CAP = { trusted: 20, other: 3 } as const;
 
+/** Reviews one contributor may start per day, so a few accounts cannot drain the platform's pool. */
+export const DAILY_AUTHOR_CAP = { trusted: 100, other: 6 } as const;
+
 /** Reviews the whole platform starts per day, a ceiling on spend whatever else is true. */
 export const DAILY_REVIEW_CAP = 400;
 
@@ -759,4 +902,36 @@ export function hourlyCapFor(authorAssociation: string | null | undefined): numb
   return authorAssociation && TRUSTED_ASSOCIATIONS.has(authorAssociation)
     ? HOURLY_REVIEW_CAP.trusted
     : HOURLY_REVIEW_CAP.other;
+}
+
+export function dailyAuthorCapFor(authorAssociation: string | null | undefined): number {
+  return authorAssociation && TRUSTED_ASSOCIATIONS.has(authorAssociation)
+    ? DAILY_AUTHOR_CAP.trusted
+    : DAILY_AUTHOR_CAP.other;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The callback body
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Turn a callback's untrusted `outcome`, `report` and `error` fields into an outcome. A report
+ * goes through {@link parsePrReviewReport}; one it refuses is the run error `report_invalid`. An
+ * error word that is not in the vocabulary is `workflow_failed`. Anything else (a missing or
+ * unknown `outcome`) is also `workflow_failed`: it can never become a verdict.
+ */
+export function parseCallbackOutcome(body: {
+  outcome: unknown;
+  report: unknown;
+  error: unknown;
+}): ReviewOutcome {
+  if (body.outcome === "reported") {
+    try {
+      return { kind: "reported", report: parsePrReviewReport(body.report) };
+    } catch (err) {
+      if (!(err instanceof PrReviewReportError)) throw err;
+      return { kind: "error", error: "report_invalid" };
+    }
+  }
+  return { kind: "error", error: isRunError(body.error) ? body.error : "workflow_failed" };
 }
