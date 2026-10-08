@@ -309,6 +309,33 @@ describe("copyAnnexedToRemote: every annexed file must be recorded at the remote
     expect(await listAnnexedPaths(dir, REMOTE)).toEqual(new Set(["a.edf", "b.edf"]));
   });
 
+  test("a file whose content is not in this repository is called what it is, not retried forever", async () => {
+    // Guards `notLocal`. `git annex copy` skips, silently and with exit 0, a path whose
+    // content was dropped or never fetched, so the step ends "incomplete" and the old
+    // advice, "re-run to resume", loops. The cure is `git annex get`, and the report must say so.
+    const { dir, targets } = await dataset("not-local", { "a.edf": 3_000, "b.edf": 3_000 });
+    expect(
+      (
+        await trackDataFiles(
+          dir,
+          targets.map((t) => t.path),
+        )
+      ).success,
+    ).toBe(true);
+    expect((await run(["git", "annex", "drop", "--force", "--", "b.edf"], dir)).exitCode).toBe(0);
+
+    const outcome = await step(dir, targets);
+
+    expect(outcome).toEqual({
+      status: "incomplete",
+      missing: ["b.edf"],
+      total: 2,
+      notLocal: ["b.edf"],
+    });
+    // a.edf did go.
+    expect(await listAnnexedPaths(dir, REMOTE)).toEqual(new Set(["a.edf"]));
+  });
+
   test("a copy that fails reports git-annex's reason and leaves the log honest", async () => {
     const { dir, store, targets } = await dataset("copy-fails", { "a.edf": 3_000, "b.edf": 3_000 });
     expect(
