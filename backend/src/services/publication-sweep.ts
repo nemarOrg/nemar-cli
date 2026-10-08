@@ -12,7 +12,11 @@
  *
  * It reuses the exact readiness evaluation from the publish-request path
  * (`getWorkflowRuns(..., "bids-validation.yml")` -> latest run conclusion), so
- * the cron and the interactive path can never disagree.
+ * the cron and the interactive path can never disagree. A request that CI would
+ * release is also put through the submission minimums and the anonymity blind
+ * check (`checkSubmissionGate`, the function the request route calls), because
+ * a request made while CI was still running is nearly always released HERE and
+ * would otherwise skip both.
  */
 
 import type { Bindings } from "../types/bindings.js";
@@ -21,6 +25,7 @@ import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { getWorkflowRuns } from "./github.js";
 import { RESET_SCREEN_COLUMNS_SQL, startScreenAndNotify } from "./identifier-screen.js";
+import { checkSubmissionGate } from "./submission-gate.js";
 
 /**
  * Requests one sweep may unblock, and therefore screen (epic #1610 phase 4).
@@ -110,7 +115,8 @@ export function blockedCandidateQuery(
   const { clause, ids } = blockedSweepScope(nonProduction);
   const placeholders = BIDS_VALIDATION_BLOCK_REASONS.map(() => "?").join(", ");
   return {
-    sql: `SELECT pr.id, pr.dataset_id, pr.block_reason, d.github_repo
+    sql: `SELECT pr.id, pr.dataset_id, pr.block_reason, pr.anonymous, d.github_repo,
+                 d.source, d.is_exemplar
            FROM publication_requests pr
            JOIN datasets d ON d.dataset_id = pr.dataset_id
           WHERE pr.status = 'blocked'
@@ -129,7 +135,10 @@ export function blockedCandidateQuery(
  * can't abort the sweep.
  *
  * Unblocked requests move to 'requested' (they re-enter the admin publish
- * queue, visible via `nemar admin publish list`) and their identifier screen is
+ * queue, visible via `nemar admin publish list`) once the submission gate also
+ * passes (one that fails is re-blocked as `min_requirements_failed`, counted as
+ * `reblocked`; a blind that could not be verified waits for the next run,
+ * counted as an error) and their identifier screen is
  * started (epic #1610 phase 4, ADR 0086), exactly as a re-request would: the
  * admins are mailed once, when the screen reports, or at once if it cannot
  * start. Without it an unblocked request would sit `requested` with no screen,
@@ -175,14 +184,25 @@ export async function sweepBlockedBidsValidationRequests(
       id: number;
       dataset_id: string;
       block_reason: string;
+      anonymous: number | null;
       github_repo: string | null;
+      source: string | null;
+      is_exemplar: number | null;
     }>;
   };
   try {
     rows = await db
       .prepare(candidate.sql)
       .bind(...candidate.binds)
-      .all<{ id: number; dataset_id: string; block_reason: string; github_repo: string | null }>();
+      .all<{
+        id: number;
+        dataset_id: string;
+        block_reason: string;
+        anonymous: number | null;
+        github_repo: string | null;
+        source: string | null;
+        is_exemplar: number | null;
+      }>();
   } catch (err) {
     result.errors++;
     console.error(`[publish-sweep] initial query failed; sweep aborted: ${errMsg(err)}`);
@@ -232,6 +252,47 @@ export async function sweepBlockedBidsValidationRequests(
         if (unblocks >= MAX_SCREENED_UNBLOCKS_PER_SWEEP) {
           // Over the cap: left blocked for a later sweep, never unblocked
           // without a screen.
+          continue;
+        }
+        // The submission minimums and the anonymity blind check (ADR 0026, ADR
+        // 0065), through the same function the request route uses. A request
+        // made while CI was running was blocked on CI alone, and the route
+        // checks these when it records one, but the depositor may have edited
+        // `dataset_description.json` since, and a request is released under a
+        // blind or a Name only if it passes NOW. A request that does not is
+        // re-blocked with the reasons, as the route would have, and is no longer
+        // a candidate here: the depositor fixes the data and requests again.
+        // An anonymous blind that could not be VERIFIED (a failed read) says
+        // nothing about the data, so the request is left blocked for the next
+        // sweep rather than given a verdict.
+        const gate = await checkSubmissionGate({
+          datasetId: row.dataset_id,
+          repoName,
+          pat,
+          dataset: row,
+          anonymous: row.anonymous === 1,
+          caller: "publish-sweep",
+        });
+        if (gate.kind === "unverified") {
+          result.errors++;
+          continue;
+        }
+        if (gate.kind === "blocked") {
+          const reblock = await db
+            .prepare(
+              `UPDATE publication_requests
+                  SET block_reason = 'min_requirements_failed', min_requirements_reasons = ?,
+                      updated_at = datetime('now')
+                WHERE id = ? AND status = 'blocked'`,
+            )
+            .bind(JSON.stringify(gate.reasons), row.id)
+            .run();
+          if ((reblock.meta.changes ?? 0) > 0) {
+            result.reblocked++;
+            console.log(
+              `[publish-sweep] ${row.dataset_id}: BIDS validation green but submission minimums failing; request ${row.id} block_reason -> min_requirements_failed`,
+            );
+          }
           continue;
         }
         // Mirror the interactive re-request unblock (routes/datasets/publication.ts): also

@@ -24,7 +24,6 @@ import {
   checkWorkflowExists,
   deployWorkflows,
   ensureRepoToSpec,
-  getFileContent,
   getWorkflowRuns,
   setRepoVisibility,
   signPrescreenCallbackToken,
@@ -41,10 +40,8 @@ import {
 } from "../../services/identifier-screen";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../services/repo-spec";
 import { markDatasetPrivate, markDatasetPublic } from "../../services/s3";
-import {
-  SUBMISSION_POLICY_URL,
-  evaluateSubmissionMinimums,
-} from "../../services/submission-minimums";
+import { checkSubmissionGate } from "../../services/submission-gate";
+import { SUBMISSION_POLICY_URL } from "../../services/submission-minimums";
 import {
   OWNER_NAME_MISSING_MESSAGE,
   OWNER_NAME_MISSING_REASON,
@@ -328,6 +325,11 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     // the request the same way other CI infrastructure failures do, rather
     // than 500-ing the request before we've even recorded a row.
     let pat: string | null = null;
+    // True when the readiness check itself could not run (token, workflow
+    // deploy, GitHub outage), as opposed to running and finding no run yet.
+    // The two share a block reason, and only the second has a GitHub that
+    // answered, which the submission-minimums check below needs.
+    let ciCheckFailed = false;
     if (repoName && !blocked) {
       try {
         pat = await getDatasetsToken(c.env);
@@ -368,6 +370,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         );
         blocked = true;
         blockReason = "bids_validation_pending";
+        ciCheckFailed = true;
       }
     } else if (!repoName) {
       console.warn(`[publish-request] Skipping CI checks for ${datasetId}: no GitHub repo`);
@@ -388,53 +391,37 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     // granting a blind nobody verified, and an upstream review (OpenNeuro, an
     // exemplar) says a dataset was curated, never that it was blinded. So for
     // an anonymous release the check always runs and an infrastructure failure
-    // BLOCKS.
-    const anonymousNeedsBlindCheck = anonymousRequested;
+    // BLOCKS. The rules live in `checkSubmissionGate`, shared with the sweep
+    // that later moves a blocked request on.
+    //
+    // It runs when nothing blocks the request AND when the only block is that
+    // CI has not finished. The second case is the common one (a request made
+    // right after an upload), and without it a missing minimum would be hidden
+    // behind "pending" and found, if at all, only after the sweep had released
+    // the request. It does not run when CI failed, when the owner has no name,
+    // or when the readiness check itself could not run: the first two already
+    // have a fix to make, and the last has nothing trustworthy to read with.
+    // A missing minimum replaces the pending reason, so the depositor is told
+    // at once and the verdict is re-recorded on every request.
+    const ciOnlyPending =
+      blocked &&
+      !ciCheckFailed &&
+      (blockReason === "bids_validation_pending" || blockReason === "bids_validation_in_progress");
     let minReasons: string[] | null = null;
-    const runMinimums =
-      !blocked &&
-      (anonymousNeedsBlindCheck || (dataset.source !== "openneuro" && !dataset.is_exemplar));
-    if (runMinimums && repoName && pat) {
-      try {
-        const descriptionJson = await getFileContent(repoName, "dataset_description.json", pat);
-        let readme: string | null = null;
-        for (const candidate of ["README.md", "README", "README.txt", "README.rst"]) {
-          readme = await getFileContent(repoName, candidate, pat);
-          if (readme !== null) break;
-        }
-        const reasons = evaluateSubmissionMinimums(descriptionJson, readme, {
-          // A blinded deposit must NOT name anybody in Authors; a publication
-          // must. The two rules are complements, checked by the same gate, and
-          // the second is what orders de-anonymization before publication.
-          anonymousRelease: anonymousRequested,
-        });
-        if (reasons.length > 0) {
-          blocked = true;
-          blockReason = "min_requirements_failed";
-          minReasons = reasons;
-        }
-      } catch (err) {
-        console.error(
-          `[publish-request] submission-minimums check failed for ${datasetId}` +
-            `${anonymousNeedsBlindCheck ? "" : " (non-fatal)"}:`,
-          err instanceof Error ? err.message : err,
-        );
-        if (anonymousNeedsBlindCheck) {
-          blocked = true;
-          blockReason = "min_requirements_failed";
-          minReasons = [
-            "NEMAR could not read dataset_description.json from your repository, so it could not confirm that the Authors field is blinded. An anonymous release is not granted on an unverified blind. This is usually a transient GitHub error; request it again.",
-          ];
-        }
+    if (!blocked || ciOnlyPending) {
+      const gate = await checkSubmissionGate({
+        datasetId,
+        repoName,
+        pat,
+        dataset,
+        anonymous: anonymousRequested,
+        caller: "publish-request",
+      });
+      if (gate.kind !== "clear") {
+        blocked = true;
+        blockReason = "min_requirements_failed";
+        minReasons = gate.reasons;
       }
-    } else if (runMinimums && anonymousNeedsBlindCheck) {
-      // No repository, or no token: same verdict for the same reason. There is
-      // nothing to read, so there is nothing to certify.
-      blocked = true;
-      blockReason = "min_requirements_failed";
-      minReasons = [
-        "An anonymous release requires NEMAR to read dataset_description.json and confirm that the Authors field names nobody, and this dataset has no readable repository yet. Upload the dataset first, then request the release.",
-      ];
     }
 
     let prId: number | null = requestId ?? null;
