@@ -1,9 +1,6 @@
 /**
- * git-annex service: repository init and largefiles configuration.
- *
- * Split from lib/git-annex.ts by concern (#908, epic #902); bodies moved
- * verbatim, except that initDataset's `git init` gained a fallback for a git
- * without `-b` (#1645).
+ * git-annex service: repository init and largefiles configuration. `initDataset`'s
+ * `git init` falls back to a plain init plus re-pointing HEAD for a git without `-b`.
  */
 
 import { existsSync } from "node:fs";

@@ -51,7 +51,9 @@ writeFileSync(gitConfig, "[init]\n\tdefaultBranch = trunk\n[commit]\n\tgpgsign =
 // init.defaultBranch (2.28) and GIT_CONFIG_GLOBAL (2.32); a git that ignores the
 // override would leave the trunk default inert and the "never re-point HEAD"
 // mistake would pass unseen. `init -b`, which the modern-git assertions rely on,
-// predates both. Such a host skips this file with a warning; CI must not.
+// arrived in 2.28 together with `init.defaultBranch`, so only GIT_CONFIG_GLOBAL
+// (2.32) can be missing on a git that has `-b`. Such a host skips this file with a
+// warning; CI must not.
 git(root, "init", "-q", "canary");
 const gitIsNewEnough = git(root, "-C", "canary", "symbolic-ref", "HEAD").out === "refs/heads/trunk";
 if (!gitIsNewEnough) {
