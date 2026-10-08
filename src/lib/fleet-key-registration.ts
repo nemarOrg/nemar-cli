@@ -22,10 +22,11 @@
  *     token. One `list-objects-v2` per dataset is both conclusive and cheaper
  *     than 4,177 HEADs.
  *  2. **A dataset the bucket cannot fully account for is left alone.** If any
- *     annexed key has no object (whole or chunked), this is not a lost registration, it is content
- *     that was never transferred (#1396), and registering the rest would write
- *     true claims into a repository whose real problem is elsewhere. Reported
- *     and skipped, unless the caller asks otherwise.
+ *     annexed key has no object (whole or chunked), this is not a lost
+ *     registration, it is content that was never transferred (#1396), and
+ *     registering the rest would write true claims into a repository whose real
+ *     problem is elsewhere. Reported and skipped, unless the caller asks
+ *     otherwise.
  */
 
 import { rmSync } from "node:fs";
@@ -97,13 +98,17 @@ export interface KeyRegistrationState {
   annexed: string[];
   /** Of those, the ones the location log already records at NEMAR's remote. */
   registered: string[];
-  /** Of those, the ones the bucket actually holds: an object of the declared size, or
-   *  every chunk of it (#1565). */
+  /**
+   * Of those, the ones the bucket actually holds: an object of the declared size,
+   * or every chunk of it (#1565).
+   */
   inBucket: string[];
   /** In the bucket and not in the log: the repair target. */
   toRegister: string[];
-  /** Annexed, and neither an object of the declared size nor a complete chunk set in
-   *  the bucket: #1396's shape, not this one's. */
+  /**
+   * Annexed, and neither an object of the declared size nor a complete chunk set
+   * in the bucket: #1396's shape, not this one's.
+   */
   missingContent: string[];
   /**
    * Claimed in the log and NOT in the bucket at its declared size, whole or as a
