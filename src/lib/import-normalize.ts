@@ -130,10 +130,10 @@ export interface NormalizeDataResult {
   items: ImportManifestItem[];
   files: NormalizedFile[];
   /**
-   * Files git-annex reported `ok` for, which counts a key the remote already
-   * held as well as one transferred now -- both print `copy <path> ok`. Useful
-   * for the operator line, and NOT the evidence that the content arrived: that
-   * comes from asking git-annex which paths the remote holds afterwards.
+   * Files git-annex reported a successful copy record for, which counts a key the
+   * remote already held as well as one transferred now. Useful for the operator
+   * line, and NOT the evidence that the content arrived: that comes from asking
+   * git-annex which paths the remote holds afterwards.
    */
   copied: number;
   bytes: number;
@@ -423,10 +423,10 @@ export async function normalizeUnannexedData(args: {
 /**
  * The default upload: git-annex's own client, then the location log as proof.
  *
- * Exit 0 is not evidence on its own. `git annex copy --to` prints `copy <path> ok`
- * both for a transfer and for a key the remote already held, and says nothing at
- * all for a path it does not consider annexed -- so this asks the location log
- * which paths the remote now holds. A log read, no network.
+ * Exit 0 is not evidence on its own. `git annex copy --to` reports success both for
+ * a transfer and for a key the remote already held, and says nothing at all for a
+ * path it does not consider annexed -- so this asks the location log which paths
+ * the remote now holds. A log read, no network.
  *
  * That check is the second net behind `normalizeUnannexedData`'s key verification,
  * which is what makes the silent-skip case unreachable today. It does work on its
