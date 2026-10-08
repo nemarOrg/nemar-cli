@@ -242,6 +242,38 @@ describe("the request route checks the minimums while CI is pending", () => {
     expect(row().min_requirements_reasons).toBeNull();
   });
 
+  test("the pending messages say the request is recorded, and do not ask for another request", async () => {
+    // The message is also what the website's badge shows, and it used to tell
+    // the depositor to "re-request publication", which contradicts a request
+    // that continues on its own.
+    runs = "none";
+    const pending = (await requestPublication()).body.message ?? "";
+    expect(pending).toBe(
+      "BIDS validation has not run yet. Your request is recorded and continues automatically once validation passes.",
+    );
+    runs = "running";
+    const running = (await requestPublication()).body.message ?? "";
+    expect(running).toBe(
+      "BIDS validation is currently running. Your request is recorded and continues automatically once validation passes.",
+    );
+    for (const message of [pending, running]) expect(message).not.toMatch(/re-?request/i);
+  });
+
+  test("the in-progress message keeps the phrase two CLI loops match on", async () => {
+    // src/lib/exemplar-clone.ts and src/lib/import-openneuro.ts decide to keep
+    // waiting by looking for this substring in the refusal's message. If it
+    // changed, they would stop waiting and fail the run instead.
+    runs = "running";
+    const { body } = await requestPublication();
+    expect(body.message).toContain("BIDS validation is currently running");
+    // And the pending refusal must NOT contain it: they must not start
+    // retrying a request that has no run at all.
+    runs = "none";
+    expect((await requestPublication()).body.message).not.toContain(
+      "BIDS validation is currently running",
+    );
+  });
+
   test("a validation run still in progress is checked the same way", async () => {
     runs = "running";
     descriptionBody = SHORT_NAME;

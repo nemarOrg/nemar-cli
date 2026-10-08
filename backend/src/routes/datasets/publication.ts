@@ -76,9 +76,12 @@ const BLOCK_MESSAGES: Record<PublicationBlockReason, string> = {
   bids_validation_failed:
     "BIDS validation is failing on your dataset. Please check the repository CI and fix validation errors, then re-request publication.",
   bids_validation_pending:
-    "BIDS validation has not run yet. Please wait for CI to complete, then re-request publication.",
+    "BIDS validation has not run yet. Your request is recorded and continues automatically once validation passes.",
+  // "BIDS validation is currently running" is matched as a substring by two
+  // CLI loops that wait out this refusal (src/lib/exemplar-clone.ts and
+  // src/lib/import-openneuro.ts); the rest of the sentence is free to change.
   bids_validation_in_progress:
-    "BIDS validation is currently running. Please wait for it to complete, then re-request publication.",
+    "BIDS validation is currently running. Your request is recorded and continues automatically once validation passes.",
   // Legacy only: the pre-screen no longer blocks (#756), so new rows never get
   // this block_reason. Kept (without the now-removed repo-issue reference) so a
   // pre-deploy 'blocked' row still renders a sensible message until re-request.
