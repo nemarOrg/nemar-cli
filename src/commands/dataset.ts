@@ -814,12 +814,16 @@ Examples:
       );
       if (uploaded.status === "fail") process.exit(1);
       uploadProgress = uploaded.value.progress;
+      const annexedPaths = uploaded.value.annexedPaths;
 
       // Step 10b: Ensure .nemar metadata is on disk and .bidsignore covers it
       writeNemarMetadata(absolutePath, coAuthorEnrichment, uploadProgress);
 
       // Step 11: Save dataset changes
-      if ((await saveDatasetStep(absolutePath, author, uploadProgress)).status === "fail") {
+      if (
+        (await saveDatasetStep(absolutePath, author, uploadProgress, { annexedPaths })).status ===
+        "fail"
+      ) {
         process.exit(1);
       }
 

@@ -18,7 +18,7 @@ import type { NemarMetadataPayload } from "../api/datasets.js";
 import { ApiError, errorDetail } from "../api/errors.js";
 import { printStepFailure } from "../cli-output.js";
 import { updateLastUpload } from "../dataset-config.js";
-import { pushToGitHub, saveDataset } from "../git-annex/clone-push.js";
+import { type SkipContentCheckEntry, pushToGitHub, saveDataset } from "../git-annex/clone-push.js";
 import {
   type UploadProgress,
   clearUploadProgress,
@@ -77,31 +77,96 @@ export function writeNemarMetadata(
   }
 }
 
-/** Step 11: Save dataset changes (gated). */
+/**
+ * Annexed bytes below which the save step reads every file as it always has.
+ *
+ * Skipping the re-read (see `saveDataset`) costs a pass over the annexed files to
+ * compare their stat and two index rewrites to mark and unmark them, plus, when the
+ * S3 step did not hand the annexed set on, a walk of the tree to list them. What it
+ * saves is the content of those files streamed through git-annex filter-process.
+ * On a tree of a few hundred megabytes the first outweighs the second: a
+ * contributor's benchmark on a Ceph filesystem (600 annexed 120 KB files plus 600
+ * JSON files) saved SLOWER with the skip, 33.5 s against 6.6 s. So the skip is taken
+ * only when there is real content to avoid reading, and a small tree behaves exactly
+ * as it did before the skip existed.
+ *
+ * 1 GiB is a deliberately conservative starting point, not a measured crossover:
+ * nm000358 (1.6 TB) is three orders of magnitude above it and the Ceph benchmark
+ * three orders below. Re-measure on the target host before moving it.
+ */
+export const SAVE_SKIP_MIN_BYTES = 1024 ** 3;
+
+/**
+ * The annexed files whose content the save may skip re-reading, with the size and
+ * mtime recorded for each when it was tracked, or null when the tree is too small
+ * to be worth it ({@link SAVE_SKIP_MIN_BYTES}). A path with no recorded mtime (a
+ * progress file from before mtimes were kept) cannot be vouched for and is left
+ * out, so it is read as before. Pure; exported for unit tests.
+ */
+export function planSaveSkip(
+  progress: UploadProgress,
+  annexedPaths: ReadonlySet<string>,
+  minBytes: number = SAVE_SKIP_MIN_BYTES,
+): SkipContentCheckEntry[] | null {
+  const entries: SkipContentCheckEntry[] = [];
+  let bytes = 0;
+  for (const path of annexedPaths) {
+    const recorded = progress.files[path];
+    if (!recorded || recorded.mtimeMs === undefined) continue;
+    entries.push({ path, size: recorded.size, mtimeMs: recorded.mtimeMs });
+    bytes += recorded.size;
+  }
+  return bytes >= minBytes ? entries : null;
+}
+
+/** Every data file's recorded size: an upper bound on the annexed bytes, free to compute. */
+function recordedDataBytes(progress: UploadProgress): number {
+  let bytes = 0;
+  for (const file of Object.values(progress.files)) bytes += file.size;
+  return bytes;
+}
+
+/**
+ * Step 11: Save dataset changes (gated).
+ *
+ * `annexedPaths` is the set the S3 step already listed (null when it did not run
+ * its copy). It is used only to decide what the save may skip re-reading, and only
+ * when the data is large enough for that to matter; below the threshold this step
+ * does no listing, no stat pass and no index rewrite. `skipMinBytes` exists so a
+ * test can reach the large-tree branch without a gigabyte of fixtures.
+ */
 export async function saveDatasetStep(
   absolutePath: string,
   author: { name: string; email: string } | undefined,
   progress: UploadProgress,
+  options: { annexedPaths?: ReadonlySet<string> | null; skipMinBytes?: number } = {},
 ): Promise<Step> {
   if (!isStepCompleted(progress, "dataset_save")) {
     const spinner = ora("Saving dataset changes...").start();
 
-    // Annexed files are already staged (by the tracking step) and verified at
-    // the S3 remote; `git add -A` must not stream their content through
-    // git-annex filter-process again (#1455). A failure to list them only
-    // costs speed, so it falls back to the plain add.
-    let annexed: string[] = [];
-    try {
-      annexed = [...(await listAnnexedPaths(absolutePath))];
-    } catch (listError) {
-      console.log(
-        chalk.dim(
-          `  Could not list annexed files (${errorDetail(listError)}); staging will re-read them`,
-        ),
-      );
+    // Annexed files are already staged (by the tracking step) and recorded at the
+    // S3 remote; on a large tree `git add -A` must not stream their content through
+    // git-annex filter-process again (#1455). A failure to list them only costs
+    // speed, so it falls back to the plain add.
+    const minBytes = options.skipMinBytes ?? SAVE_SKIP_MIN_BYTES;
+    let skipContentCheck: SkipContentCheckEntry[] = [];
+    if (recordedDataBytes(progress) >= minBytes) {
+      let annexed: ReadonlySet<string> | null = options.annexedPaths ?? null;
+      if (annexed === null) {
+        try {
+          annexed = await listAnnexedPaths(absolutePath);
+        } catch (listError) {
+          console.log(
+            chalk.dim(
+              `  Could not list annexed files (${errorDetail(listError)}); staging will re-read them`,
+            ),
+          );
+        }
+      }
+      if (annexed !== null) skipContentCheck = planSaveSkip(progress, annexed, minBytes) ?? [];
     }
     const saveResult = await saveDataset(absolutePath, "Initial NEMAR dataset upload", author, {
-      skipContentCheckPaths: annexed,
+      skipContentCheck,
     });
     if (!saveResult.success) {
       writeUploadProgress(absolutePath, progress);

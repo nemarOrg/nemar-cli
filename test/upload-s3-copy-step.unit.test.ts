@@ -140,6 +140,9 @@ describe("copyAnnexedToRemote: what is copied", () => {
     const outcome = await step(dir, thisRunsTargets);
     expect(outcome).toMatchObject({ status: "ok", total: 2, attempted: 2 });
     expect(await listAnnexedPaths(dir, REMOTE)).toEqual(new Set(["old.edf", "new.edf"]));
+    // The set handed on to the save step is every annexed path, not this run's targets.
+    if (outcome.status !== "ok") throw new Error("unreachable");
+    expect(outcome.annexedPaths).toEqual(new Set(["old.edf", "new.edf"]));
   });
 });
 

@@ -188,7 +188,15 @@ describe("copy accounting against a real special remote", () => {
   });
 });
 
-describe("saveDataset with skipContentCheckPaths", () => {
+/** The size and mtime a tracked file has right now, as the upload records them. */
+function recorded(dir: string, paths: string[]) {
+  return paths.map((path) => {
+    const st = statSync(join(dir, path));
+    return { path, size: st.size, mtimeMs: st.mtimeMs };
+  });
+}
+
+describe("saveDataset with skipContentCheck", () => {
   test("commits the staged pointers without streaming annexed content to the filter", async () => {
     const big = Buffer.alloc(2 * 1024 * 1024, 7);
     const runOnce = async (skip: boolean): Promise<{ bytes: number; dir: string }> => {
@@ -205,7 +213,7 @@ describe("saveDataset with skipContentCheckPaths", () => {
         dir,
         "upload",
         undefined,
-        skip ? { skipContentCheckPaths: annexed } : {},
+        skip ? { skipContentCheck: recorded(dir, annexed) } : {},
       );
       expect(res).toEqual({ success: true });
       return { bytes: readFileSync(log).length, dir };
@@ -245,10 +253,9 @@ describe("saveDataset with skipContentCheckPaths", () => {
     writeFile(dir, "sub-01/eeg/b.edf", "b".repeat(200_000));
     expect((await gitAnnexAdd(dir, ["sub-01/eeg/a.edf", "sub-01/eeg/b.edf"])).success).toBe(true);
     expect((await saveDataset(dir, "first")).success).toBe(true);
+    const entries = recorded(dir, ["sub-01/eeg/a.edf", "sub-01/eeg/b.edf"]);
     rmSync(join(dir, "sub-01/eeg/b.edf"), { force: true });
-    const res = await saveDataset(dir, "second", undefined, {
-      skipContentCheckPaths: ["sub-01/eeg/a.edf", "sub-01/eeg/b.edf"],
-    });
+    const res = await saveDataset(dir, "second", undefined, { skipContentCheck: entries });
     expect(res.success).toBe(true);
     const tree = await runCmd(["git", "ls-tree", "-r", "--name-only", "HEAD"], dir);
     expect(tree.stdout).toContain("sub-01/eeg/a.edf");
