@@ -2,7 +2,8 @@
  * git-annex service: repository init and largefiles configuration.
  *
  * Split from lib/git-annex.ts by concern (#908, epic #902); bodies moved
- * verbatim.
+ * verbatim, except that initDataset's `git init` gained a fallback for a git
+ * without `-b` (#1645).
  */
 
 import { existsSync } from "node:fs";
@@ -36,6 +37,139 @@ export async function isGitAnnexDataset(path: string): Promise<boolean> {
 }
 
 /**
+ * The exit status git uses for a usage error: a switch it does not know. A git
+ * older than 2.28 (for example Ubuntu 20.04's 2.25) rejects `git init -b` this way.
+ *
+ * The fallback keys on the status and never on stderr: git localizes its
+ * messages ("Unbekannter Schalter", "bascule inconnue"), so any text match
+ * would miss the fallback on a non-English LANG. Apart from the path, which is
+ * passed after `--`, the arguments are fixed, so 129 means git rejected `-b`;
+ * fatal errors (a path that cannot be created) exit 128. A SIGHUP also reads as
+ * 129, and the cost of that misreading is a redundant fallback attempt.
+ */
+const GIT_USAGE_ERROR_EXIT = 129;
+
+/** What a failed git call said, or its exit status when it said nothing. */
+function said(r: { stderr: string; exitCode: number }): string {
+  return r.stderr.trim() || `exit ${r.exitCode}`;
+}
+
+type HeadState = { kind: "resolves" } | { kind: "unborn" } | { kind: "unreadable"; reason: string };
+
+/**
+ * Is HEAD of the repository at `path` resolvable, unborn, or neither?
+ *
+ * Unborn means HEAD names a branch whose ref does not exist yet, which is the
+ * state of a fresh `git init`. A bare "does not resolve" is not enough: `git
+ * rev-parse` also exits 1 quietly for a branch ref that exists but is corrupt,
+ * and 128 for an unreadable repository. Re-pointing HEAD in either case would
+ * strand whatever the old branch held and report success. Only exit statuses
+ * are read here, never text, because git localizes its messages.
+ */
+async function readHeadState(path: string, env: Record<string, string>): Promise<HeadState> {
+  const opts = { cwd: path, env };
+  const resolved = await runCommand(["git", "rev-parse", "-q", "--verify", "HEAD"], opts);
+  if (resolved.exitCode === 0) {
+    return { kind: "resolves" };
+  }
+  if (resolved.exitCode !== 1) {
+    return { kind: "unreadable", reason: `cannot read HEAD: ${said(resolved)}` };
+  }
+  // Exit 1: HEAD does not resolve. Find the branch it names...
+  const target = await runCommand(["git", "symbolic-ref", "-q", "HEAD"], opts);
+  const ref = target.stdout.trim();
+  if (target.exitCode !== 0 || ref === "") {
+    return {
+      kind: "unreadable",
+      reason: `HEAD does not resolve and its branch cannot be read: ${said(target)}`,
+    };
+  }
+  // ...and confirm that ref is absent (exit 1) rather than present or broken.
+  const exists = await runCommand(["git", "show-ref", "--verify", "-q", ref], opts);
+  if (exists.exitCode === 1) {
+    return { kind: "unborn" };
+  }
+  if (exists.exitCode === 0) {
+    return { kind: "unreadable", reason: `HEAD does not resolve although ${ref} exists` };
+  }
+  return {
+    kind: "unreadable",
+    reason: `HEAD does not resolve and ${ref} cannot be checked: ${said(exists)}`,
+  };
+}
+
+/**
+ * `git init` with `main` as the branch of a new repository, on any git version.
+ *
+ * Tries `git init -b main` first. When git answers with a usage error (exit
+ * 129, see GIT_USAGE_ERROR_EXIT) it falls back to a plain `git init` and names
+ * the branch by pointing an unborn HEAD at `refs/heads/main`, which is what
+ * `-b` does.
+ *
+ * An existing repository keeps its branch, as under a modern git, which ignores
+ * `-b` there; the upload's later branch check deals with it. One measured
+ * difference: an existing repository whose HEAD names an unborn branch (a
+ * master with no commits) is named main at once, where a modern git commits on
+ * that branch and the branch check then renames the adjusted branch to main,
+ * leaving a stray master behind. The fallback's result, `adjusted/main(unlocked)`
+ * with no stray branch, is the tidier of the two.
+ */
+async function initGitRepoOnMain(
+  path: string,
+  env: Record<string, string>,
+): Promise<{ success: boolean; error?: string }> {
+  const withBranch = await runCommand(["git", "init", "-b", "main", "--", path], { env });
+  if (withBranch.exitCode === 0) {
+    return { success: true };
+  }
+  if (withBranch.exitCode !== GIT_USAGE_ERROR_EXIT) {
+    return {
+      success: false,
+      error:
+        withBranch.stderr.trim() ||
+        `Failed to initialize git repository (exit ${withBranch.exitCode})`,
+    };
+  }
+  // From here on a failure came after the fallback began. Say so: callers print
+  // the text under "Failed to initialize git-annex dataset", where a bare git
+  // error such as "cannot lock ref 'HEAD'" reads like a git-annex problem.
+  const fallback = `git init -b main was rejected (exit ${GIT_USAGE_ERROR_EXIT}); `;
+  const plain = await runCommand(["git", "init", "--", path], { env });
+  if (plain.exitCode !== 0) {
+    return {
+      success: false,
+      error: `${fallback}plain git init failed: ${said(plain)}`,
+    };
+  }
+  // `-b` only names the branch of a repository that is being created. Modern git
+  // ignores it for an existing one ("re-init: ignored --initial-branch=main") and
+  // HEAD stays where it was: `git annex adjust --unlock` builds
+  // `adjusted/<branch>(unlocked)` on it, and the later branch check renames that
+  // adjusted branch to main, carrying its history. Re-pointing a HEAD that
+  // resolves would instead strand the history on the old branch and make main a
+  // one-commit root. Only an unborn HEAD is ours to name, and a HEAD that cannot
+  // be read is neither ours to rename nor safe to guess about.
+  const state = await readHeadState(path, env);
+  if (state.kind === "unreadable") {
+    return { success: false, error: `${fallback}${state.reason}` };
+  }
+  if (state.kind === "resolves") {
+    return { success: true };
+  }
+  const head = await runCommand(["git", "symbolic-ref", "HEAD", "refs/heads/main"], {
+    cwd: path,
+    env,
+  });
+  if (head.exitCode !== 0) {
+    return {
+      success: false,
+      error: `${fallback}could not point HEAD at main: ${said(head)}`,
+    };
+  }
+  return { success: true };
+}
+
+/**
  * Initialize a git-annex dataset
  *
  * If author info is provided, sets GIT_AUTHOR_NAME and GIT_AUTHOR_EMAIL
@@ -60,16 +194,10 @@ export async function initDataset(
       env.GIT_COMMITTER_EMAIL = options.author.email;
     }
 
-    // Initialize git repository with explicit "main" branch name
-    const { stderr: gitStderr, exitCode: gitExitCode } = await runCommand(
-      ["git", "init", "-b", "main", path],
-      {
-        ...(Object.keys(env).length > 0 ? { env } : {}),
-      },
-    );
-
-    if (gitExitCode !== 0) {
-      return { success: false, error: gitStderr.trim() || "Failed to initialize git repository" };
+    // Create the repository on main; an existing repository keeps the branch it has
+    const gitInit = await initGitRepoOnMain(path, env);
+    if (!gitInit.success) {
+      return gitInit;
     }
 
     // Initialize git-annex
