@@ -358,6 +358,7 @@ describe("copyAnnexedToRemote: every annexed file must be recorded at the remote
       missing: ["late.edf"],
       total: 3,
       notLocal: [],
+      notLocalKnown: true,
       lostAtRemote: [],
     });
     // The two planned files did arrive; only the late one is missing.
@@ -386,6 +387,7 @@ describe("copyAnnexedToRemote: every annexed file must be recorded at the remote
       missing: ["b.edf"],
       total: 2,
       notLocal: ["b.edf"],
+      notLocalKnown: true,
       lostAtRemote: [],
     });
     // a.edf did go.
@@ -807,13 +809,13 @@ describe("what a blocked step says", () => {
   test("an unsaved progress file is reported, and no command is offered for work already done", () => {
     // Guards the split on `unstaged`. Unstaging worked here and only the progress file
     // could not be written, so the files are NOT staged any more: printing the unstage
-    // command anyway sent the person to undo something that was already undone.
+    // command would send the person to undo something that is already undone.
     const text = describeBlockedTracking([{ path: "big.edf", size: 200_000 }], {
       unstaged: 1,
       staged: ["big.edf"],
       error: "the upload progress could not be saved",
     }).join("\n");
-    expect(text).toContain("1 of them were unstaged");
+    expect(text).toContain("1 of them was unstaged");
     expect(text).toContain("the upload progress could not be saved");
     expect(text).not.toContain("git --literal-pathspecs rm");
     expect(text).not.toContain("Could not finish making the next run able to annex them");
@@ -1001,21 +1003,40 @@ describe("what the step says", () => {
   });
 
   test("output git-annex printed that was not understood is never rounded to the good case", () => {
-    // Guards the order of checks: the readable-output flag is looked at BEFORE the early
+    // Guards the order of checks: the state of the output is looked at BEFORE the early
     // return for "nothing to copy", or an exit-0 run that printed plain text still says
     // "git-annex checked each one".
-    const checkedNothing = formatUploadSummary(2, 0, 0, { recordedOutputRecognized: false });
+    const checkedNothing = formatUploadSummary(2, 0, 0, { recordedOutput: "unrecognized" });
     expect(checkedNothing).toBe(
       "All 2 data files are recorded at the S3 remote (git-annex's output was not recognized, so what its check found is unknown)",
     );
     expect(checkedNothing).not.toContain("checked each one");
     expect(checkedNothing).not.toContain("already at the S3 remote");
 
-    expect(formatUploadSummary(3, 3, 0, { outputRecognized: false })).toBe(
+    expect(formatUploadSummary(3, 3, 0, { output: "unrecognized" })).toBe(
       "3 data files not yet recorded at the S3 remote were copied (git-annex's output was not recognized, so how many it transferred is unknown; the location log is what shows them recorded); all recorded at the remote",
     );
-    expect(formatUploadSummary(5, 2, 2, { recordedOutputRecognized: false })).toBe(
+    expect(formatUploadSummary(5, 2, 2, { recordedOutput: "unrecognized" })).toBe(
       "Uploaded 2 data files to S3; 3 were already recorded at the remote (git-annex's output was not recognized, so what its check found is unknown); all recorded at the remote",
+    );
+  });
+
+  test("output that was readable but incomplete says git-annex gave no result, not that it was unrecognized", () => {
+    // Guards the third state. Fewer records than paths on a clean exit is not a format the
+    // CLI failed to read; git-annex gave no answer for some files, and the wording says so.
+    const checked = formatUploadSummary(2, 0, 0, { recordedOutput: "partial" });
+    expect(checked).toBe(
+      "All 2 data files are recorded at the S3 remote (git-annex gave no result for some of them, so what its check found is unknown)",
+    );
+    expect(checked).not.toContain("not recognized");
+    expect(checked).not.toContain("checked each one");
+
+    const copied = formatUploadSummary(3, 3, 1, { output: "partial" });
+    expect(copied).toContain("git-annex gave no result for some of them");
+    expect(copied).not.toContain("not recognized");
+    expect(copied).not.toContain("Uploaded");
+    expect(formatUploadSummary(5, 2, 2, { recordedOutput: "partial" })).toBe(
+      "Uploaded 2 data files to S3; 3 were already recorded at the remote (git-annex gave no result for some of them, so what its check found is unknown); all recorded at the remote",
     );
   });
 
@@ -1034,14 +1055,17 @@ describe("what the step says", () => {
     );
   });
 
-  test("a check skipped because the remote confirmed the files recently says so", () => {
+  test("a check skipped because a recent one covered them says what that check was", () => {
+    // The claim is only what was checked: a check of this many recorded files, recently.
+    // It does not say the remote "confirmed them", which a merged location log could make false.
     expect(formatUploadSummary(8, 0, 0, { recordedCheckSkipped: true })).toBe(
-      "All 8 data files are recorded at the S3 remote; they were not checked again, because the remote confirmed them in the last 6 hours",
+      "All 8 data files are recorded at the S3 remote; not checked again, because a check of this many recorded files passed within the last 6 hours",
     );
     const mixed = formatUploadSummary(8, 2, 2, { recordedCheckSkipped: true });
     expect(mixed).toBe(
-      "Uploaded 2 data files to S3; 6 already recorded at the remote were not checked again, because the remote confirmed them in the last 6 hours; all recorded at the remote",
+      "Uploaded 2 data files to S3; 6 already recorded at the remote were not checked again, because a check of this many recorded files passed within the last 6 hours; all recorded at the remote",
     );
     expect(mixed).not.toContain("already at the remote");
+    expect(mixed).not.toContain("confirmed");
   });
 });

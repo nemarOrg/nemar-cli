@@ -122,11 +122,20 @@ async function captured<T>(fn: () => Promise<T>): Promise<{ value: T; text: stri
   }
 }
 
+/** The records fsck or copy would print for the first `n` of `paths`, all successes. */
+const successRecords = (command: "copy" | "fsck", paths: string[], n: number): string =>
+  paths
+    .slice(0, n)
+    .map((file) =>
+      JSON.stringify({ command, "error-messages": [], file, key: `K-${file}`, success: true }),
+    )
+    .join("\n");
+
 describe("recorded files whose content is not in this repository", () => {
   test("a recorded file the remote lost, with no copy here, makes the step fail instead of passing", async () => {
     // Guards the fsck pass. `git annex copy --to` over a path with no local content exits 0
-    // with no record and never asks the remote, so the old check saw nothing wrong and the
-    // step returned ok: "already at the S3 remote" for a file S3 no longer held.
+    // with no record and never asks the remote, so without fsck the step returns ok:
+    // "already at the S3 remote" for a file S3 no longer held.
     const { dir, store, targets } = await dataset("lost-no-copy");
     expect((await step(dir, targets)).status).toBe("ok");
     await loseObject(dir, store, "b.edf");
@@ -141,6 +150,7 @@ describe("recorded files whose content is not in this repository", () => {
       missing: ["b.edf"],
       total: 3,
       notLocal: ["b.edf"],
+      notLocalKnown: true,
       lostAtRemote: ["b.edf"],
     });
     // fsck wrote what it found into the location log, so the next walk sees it too.
@@ -169,7 +179,7 @@ describe("recorded files whose content is not in this repository", () => {
       resent: 0,
       recordedNoLocal: 3,
       recordedCheckSkipped: false,
-      recordedOutputRecognized: true,
+      recordedOutput: "understood",
       remoteConfirmed: true,
     });
     expect(plans).toHaveLength(1);
@@ -188,7 +198,7 @@ describe("recorded files whose content is not in this repository", () => {
     expect(summary).not.toContain("git-annex checked each one");
   });
 
-  test("some files with content and some without are each asked the right way", async () => {
+  test("files with and without local content are told apart: only the one lost with no copy is missing", async () => {
     const { dir, store, targets } = await dataset("mixed");
     expect((await step(dir, targets)).status).toBe("ok");
     // a keeps its content; b has none here and is intact at the remote; c has none and is lost.
@@ -224,6 +234,29 @@ describe("recorded files whose content is not in this repository", () => {
     expect(outcome.error).toContain("is not accessible");
   });
 
+  test("a path fsck gave no record for makes the step unverifiable, not a hedged pass", async () => {
+    // Guards `unanswered`. fsck exits 0 with one record for three paths: two were never
+    // asked, and the log (untouched) says they are recorded, so only the missing records
+    // can show the check did not happen for them.
+    const { dir, targets } = await dataset("fsck-partial");
+    expect((await step(dir, targets)).status).toBe("ok");
+    await dropLocal(dir, "a.edf", "b.edf", "c.edf");
+    const restore = installGitShim(scratch.root, [
+      { match: "annex fsck", stdout: successRecords("fsck", ["a.edf", "b.edf", "c.edf"], 1) },
+    ]);
+    try {
+      const outcome = await step(dir, targets);
+      expect(outcome.status).toBe("unverifiable");
+      if (outcome.status !== "unverifiable") throw new Error("unreachable");
+      expect(outcome.error).toContain(
+        "could not confirm that 2 recorded files with no local content",
+      );
+      expect(outcome.error).toContain("git-annex gave no result for it");
+    } finally {
+      restore();
+    }
+  });
+
   test("with content here the ordinary copy check still finds and resends a lost object", async () => {
     // The other half of the split: files WITH local content keep going through `copy`.
     const { dir, store, targets } = await dataset("with-content");
@@ -237,48 +270,147 @@ describe("recorded files whose content is not in this repository", () => {
       recordedNoLocal: 0,
     });
   });
+
+  test("when the walk for the hint fails, files fsck asked about are still named as having no content here", async () => {
+    // Guards the fallback in the catch. A lost file has no content here by construction;
+    // reading a failed second walk as "none have no content" sent the person to re-run
+    // the upload, which can never fix it.
+    const { dir, store, targets } = await dataset("hint-walk-fails");
+    expect((await step(dir, targets)).status).toBe("ok");
+    await loseObject(dir, store, "b.edf");
+    await dropLocal(dir, "b.edf");
+    // The first `find --not --in here` (the split before the check) passes; the second,
+    // for the hint, fails.
+    const restore = installGitShim(scratch.root, [
+      { match: "annex find --not --in here", after: 1, message: "fatal: shim: find failed" },
+    ]);
+    try {
+      const outcome = await step(dir, targets);
+      expect(outcome).toMatchObject({
+        status: "incomplete",
+        missing: ["b.edf"],
+        notLocal: ["b.edf"],
+        notLocalKnown: false,
+        lostAtRemote: ["b.edf"],
+      });
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe("what the step prints about files the remote lost", () => {
+  const transfer = (dir: string, targets: Target[]) => {
+    const progress = initUploadProgress(dir, "nm000996", targets);
+    return captured(() =>
+      transferAnnexedData({
+        absolutePath: dir,
+        progress,
+        addTargets: targets,
+        jobs: 2,
+        openRemote: async () => ok({}),
+      }),
+    );
+  };
+
+  test("the loss is reported as git-annex's finding, with the way to undo a wrongful strike", async () => {
+    // Guards the wording. fsck strikes a key when the remote cannot be read as well as when
+    // the object is gone, so "the remote no longer holds it" is git-annex's report, not a
+    // fact, and the message offers the fsck that puts back keys struck for that reason.
+    const { dir, store, targets } = await dataset("lost-wording");
+    expect((await step(dir, targets)).status).toBe("ok");
+    await loseObject(dir, store, "b.edf");
+    await dropLocal(dir, "b.edf");
+
+    const { value, text } = await transfer(dir, targets);
+
+    expect(value.status).toBe("fail");
+    expect(text).toContain("git-annex reports that the S3 remote no longer holds 1 of them");
+    expect(text).toContain("git annex fsck --fast --from nemar-s3");
+    expect(text).toContain("struck only for that reason");
+    expect(text).not.toContain("is gone");
+    expect(text).not.toContain("corrected the location log");
+  });
+
+  test("when the walk for the hint fails the advice still points at fetching, not at re-running", async () => {
+    const { dir, store, targets } = await dataset("hint-wording");
+    expect((await step(dir, targets)).status).toBe("ok");
+    await loseObject(dir, store, "b.edf");
+    await dropLocal(dir, "b.edf");
+    const restore = installGitShim(scratch.root, [
+      { match: "annex find --not --in here", after: 1, message: "fatal: shim: find failed" },
+    ]);
+    try {
+      const { text } = await transfer(dir, targets);
+      expect(text).toContain("At least 1 of them has no content in this repository");
+      expect(text).toContain("git annex get --not --in nemar-s3");
+      expect(text).not.toContain("Re-run the same command to resume uploading.");
+    } finally {
+      restore();
+    }
+  });
 });
 
 describe("a recent passed check is not repeated", () => {
-  test("isRecordedCheckFresh trusts only a recent, readable, not-future timestamp", () => {
+  const progressWith = (stamp: unknown, count: unknown = 3): UploadProgress =>
+    ({
+      dataset_id: "nm000001",
+      started_at: "",
+      updated_at: "",
+      files: {},
+      completed_steps: [],
+      remote_checked_at: stamp,
+      remote_checked_count: count,
+    }) as unknown as UploadProgress;
+
+  test("isRecordedCheckFresh trusts only a recent, readable, not-future timestamp over the same number of files", () => {
     const now = Date.parse("2026-10-07T12:00:00.000Z");
-    const progress = (stamp: unknown): UploadProgress =>
-      ({
-        dataset_id: "nm000001",
-        started_at: "",
-        updated_at: "",
-        files: {},
-        completed_steps: [],
-        remote_checked_at: stamp,
-      }) as unknown as UploadProgress;
     const at = (msAgo: number) => new Date(now - msAgo).toISOString();
 
-    expect(isRecordedCheckFresh(progress(at(0)), now)).toBe(true);
-    expect(isRecordedCheckFresh(progress(at(RECORDED_CHECK_VALID_MS - 1)), now)).toBe(true);
+    expect(isRecordedCheckFresh(progressWith(at(0)), 3, now)).toBe(true);
+    expect(isRecordedCheckFresh(progressWith(at(RECORDED_CHECK_VALID_MS - 1)), 3, now)).toBe(true);
     // Six hours exactly is already stale, and so is anything older.
-    expect(isRecordedCheckFresh(progress(at(RECORDED_CHECK_VALID_MS)), now)).toBe(false);
-    expect(isRecordedCheckFresh(progress(at(7 * 60 * 60 * 1000)), now)).toBe(false);
+    expect(isRecordedCheckFresh(progressWith(at(RECORDED_CHECK_VALID_MS)), 3, now)).toBe(false);
+    expect(isRecordedCheckFresh(progressWith(at(7 * 60 * 60 * 1000)), 3, now)).toBe(false);
     // Nothing that cannot be read as a recent time may skip the check.
-    expect(isRecordedCheckFresh(progress(undefined), now)).toBe(false);
-    expect(isRecordedCheckFresh(progress("yesterday"), now)).toBe(false);
-    expect(isRecordedCheckFresh(progress(""), now)).toBe(false);
-    expect(isRecordedCheckFresh(progress(now), now)).toBe(false);
-    expect(isRecordedCheckFresh(progress(null), now)).toBe(false);
-    expect(isRecordedCheckFresh(progress({}), now)).toBe(false);
+    expect(isRecordedCheckFresh(progressWith(undefined), 3, now)).toBe(false);
+    expect(isRecordedCheckFresh(progressWith("yesterday"), 3, now)).toBe(false);
+    expect(isRecordedCheckFresh(progressWith(""), 3, now)).toBe(false);
+    expect(isRecordedCheckFresh(progressWith(now), 3, now)).toBe(false);
+    expect(isRecordedCheckFresh(progressWith(null), 3, now)).toBe(false);
+    expect(isRecordedCheckFresh(progressWith({}), 3, now)).toBe(false);
     // A stamp from the future is a clock that moved back, not proof of a recent check.
-    expect(isRecordedCheckFresh(progress(new Date(now + 60_000).toISOString()), now)).toBe(false);
+    expect(isRecordedCheckFresh(progressWith(new Date(now + 60_000).toISOString()), 3, now)).toBe(
+      false,
+    );
   });
 
-  test("a progress file with a damaged stamp is still a progress file", () => {
-    // The stamp is deliberately unchecked by the progress schema: a damaged value must
-    // cost one check, not the whole resume record.
+  test("a different, missing or damaged count never skips the check", () => {
+    // Guards the count. A collaborator's location log merged within the window changes how
+    // many files are recorded; a bare timestamp would take them as already confirmed.
+    const now = Date.parse("2026-10-07T12:00:00.000Z");
+    const fresh = new Date(now - 60_000).toISOString();
+    expect(isRecordedCheckFresh(progressWith(fresh, 3), 3, now)).toBe(true);
+    expect(isRecordedCheckFresh(progressWith(fresh, 3), 4, now)).toBe(false);
+    expect(isRecordedCheckFresh(progressWith(fresh, 3), 2, now)).toBe(false);
+    const noCount = progressWith(fresh, 3);
+    Reflect.deleteProperty(noCount, "remote_checked_count");
+    expect(isRecordedCheckFresh(noCount, 3, now)).toBe(false);
+    expect(isRecordedCheckFresh(progressWith(fresh, "3"), 3, now)).toBe(false);
+    expect(isRecordedCheckFresh(progressWith(fresh, null), 3, now)).toBe(false);
+  });
+
+  test("a progress file with a damaged stamp or count is still a progress file", () => {
+    // The stamp and count are deliberately unchecked by the progress schema: a damaged
+    // value must cost one check, not the whole resume record.
     const dir = join(scratch.root, "damaged-stamp");
     const progress = initUploadProgress(dir, "nm000001", []);
     (progress as unknown as Record<string, unknown>).remote_checked_at = { not: "a time" };
+    (progress as unknown as Record<string, unknown>).remote_checked_count = "many";
     expect(writeUploadProgress(dir, progress)).toBe(true);
     const read = readUploadProgress(dir);
     expect(read).not.toBeNull();
-    expect(isRecordedCheckFresh(read as UploadProgress)).toBe(false);
+    expect(isRecordedCheckFresh(read as UploadProgress, 3)).toBe(false);
   });
 
   /** A resume with everything already at the store, to which a stamp can be given. */
@@ -293,27 +425,35 @@ describe("a recent passed check is not repeated", () => {
       openRemote: async () => ok({}),
     });
     expect(first.status).toBe("ok");
-    expect(isRecordedCheckFresh(progress)).toBe(true);
+    expect(isRecordedCheckFresh(progress, 3)).toBe(true);
     if (stamp === undefined) progress.remote_checked_at = undefined;
     else (progress as unknown as Record<string, unknown>).remote_checked_at = stamp;
     return { dir, store, targets, progress };
   }
 
-  const resume = (r: Awaited<ReturnType<typeof resumed>>) =>
+  const resume = (r: Awaited<ReturnType<typeof resumed>>, targets = r.targets) =>
     captured(() =>
       transferAnnexedData({
         absolutePath: r.dir,
         progress: r.progress,
-        addTargets: r.targets,
+        addTargets: targets,
         jobs: 2,
         openRemote: async () => ok({}),
       }),
     );
 
-  test("a passed check is stamped and persisted", async () => {
-    const r = await resumed("stamped", new Date().toISOString());
+  const emptyStore = (store: string) => {
+    chmodTreeWritable(store);
+    for (const entry of readdirSync(store)) {
+      rmSync(join(store, entry), { recursive: true, force: true });
+    }
+  };
+
+  test("a passed check is stamped with its time and its count, and the stamp is persisted", async () => {
+    const r = await resumed("stamped");
     const onDisk = readUploadProgress(r.dir);
     expect(typeof onDisk?.remote_checked_at).toBe("string");
+    expect(onDisk?.remote_checked_count).toBe(3);
   });
 
   test("within six hours of a passed check a resume does not ask the remote again", async () => {
@@ -322,10 +462,7 @@ describe("a recent passed check is not repeated", () => {
     // stamp is not refreshed by a run that checked nothing.
     const stamp = new Date(Date.now() - 60 * 60 * 1000).toISOString();
     const r = await resumed("skip-fresh", stamp);
-    chmodTreeWritable(r.store);
-    for (const entry of readdirSync(r.store)) {
-      rmSync(join(r.store, entry), { recursive: true, force: true });
-    }
+    emptyStore(r.store);
 
     const { value, text } = await resume(r);
 
@@ -333,16 +470,34 @@ describe("a recent passed check is not repeated", () => {
     expect(readdirSync(r.store)).toEqual([]);
     expect(r.progress.remote_checked_at).toBe(stamp);
     expect(text).toContain("not checked again");
-    expect(text).toContain("confirmed there in the last 6 hours");
+    expect(text).toContain("A check of this many recorded files passed within the last 6 hours");
+  });
+
+  test("a changed number of recorded files means the check runs, whatever the stamp says", async () => {
+    // Guards the count. The stamp is fresh and the store has lost everything, but a fourth
+    // file has since been recorded (a collaborator's location log, merged): the number no
+    // longer matches, so the check runs and the lost objects come back.
+    const stamp = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const r = await resumed("count-changes", stamp);
+    emptyStore(r.store);
+    writeFile(r.dir, "d.edf", "d.edf:".padEnd(3_000, "x"));
+    expect((await trackDataFiles(r.dir, ["d.edf"])).success).toBe(true);
+    expect(
+      (await run(["git", "annex", "copy", "--to", REMOTE, "--", "d.edf"], r.dir)).exitCode,
+    ).toBe(0);
+    const withD = [...r.targets, { path: "d.edf", size: 3_000, type: "data" as const }];
+
+    const { value, text } = await resume(r, withD);
+
+    expect(value.status).toBe("ok");
+    expect(text).toContain("3 were recorded but missing at the remote and were sent again");
+    expect(text).not.toContain("not checked again");
   });
 
   test("a stamp older than six hours is checked again, and refreshed", async () => {
     const old = new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString();
     const r = await resumed("stale", old);
-    chmodTreeWritable(r.store);
-    for (const entry of readdirSync(r.store)) {
-      rmSync(join(r.store, entry), { recursive: true, force: true });
-    }
+    emptyStore(r.store);
 
     const { value, text } = await resume(r);
 
@@ -350,16 +505,13 @@ describe("a recent passed check is not repeated", () => {
     expect(readdirSync(r.store).length).toBeGreaterThan(0);
     expect(text).toContain("3 were recorded but missing at the remote and were sent again");
     expect(r.progress.remote_checked_at).not.toBe(old);
-    expect(isRecordedCheckFresh(r.progress)).toBe(true);
+    expect(isRecordedCheckFresh(r.progress, 3)).toBe(true);
   });
 
   test("a stamp that cannot be read never skips the check", async () => {
     for (const [i, bad] of ["not a time", 12345, ""].entries()) {
       const r = await resumed(`unreadable-${i}`, bad);
-      chmodTreeWritable(r.store);
-      for (const entry of readdirSync(r.store)) {
-        rmSync(join(r.store, entry), { recursive: true, force: true });
-      }
+      emptyStore(r.store);
       const { value } = await resume(r);
       expect(value.status).toBe("ok");
       // The store was refilled: the check ran.
@@ -386,9 +538,32 @@ describe("a recent passed check is not repeated", () => {
     expect(r.progress.remote_checked_at).toBeUndefined();
   });
 
+  test("an answer for only some of the files is said so, is not stamped, and ends as a warning", async () => {
+    // Guards the partial state and the warning. git-annex printed readable records for one
+    // of three files on a clean exit: the output WAS understood, it is the answer that is
+    // incomplete, so the words differ from "not recognized"; and a summary that says
+    // something is unknown is not a success line.
+    const r = await resumed("partial-answer");
+    r.progress.remote_checked_at = undefined;
+    const restore = installGitShim(scratch.root, [
+      { match: "annex copy", stdout: successRecords("copy", ["a.edf", "b.edf", "c.edf"], 1) },
+    ]);
+    try {
+      const { value, text } = await resume(r);
+      expect(value.status).toBe("ok");
+      expect(text).toContain("git-annex gave no result for some of them");
+      expect(text).not.toContain("not recognized");
+      expect(text).toContain("⚠");
+      expect(text).not.toContain("✔");
+    } finally {
+      restore();
+    }
+    expect(r.progress.remote_checked_at).toBeUndefined();
+  });
+
   test("the log walks still run when the check is skipped", async () => {
     // A skipped check must not skip the verification that every annexed file is recorded:
-    // a file the log does not list is copied and an unreachable log still fails the step.
+    // a file the log does not list is still copied.
     const { dir, targets } = await dataset("skip-walks");
     expect((await step(dir, targets)).status).toBe("ok");
     // Mark one file as not at the remote in the log only.
@@ -398,7 +573,7 @@ describe("a recent passed check is not repeated", () => {
     ).stdout.trim();
     expect((await run(["git", "annex", "setpresentkey", key, uuid, "0"], dir)).exitCode).toBe(0);
 
-    const skipped = await step(dir, targets, { skipRecordedCheck: true });
+    const skipped = await step(dir, targets, { skipRecordedCheck: () => true });
 
     expect(skipped).toMatchObject({
       status: "ok",
@@ -407,6 +582,20 @@ describe("a recent passed check is not repeated", () => {
       remoteConfirmed: false,
     });
     expect(await listAnnexedPathsNotAt(dir, REMOTE)).toEqual(new Set());
+  });
+
+  test("a skipped check still reads the log: an unreadable log fails the step", async () => {
+    const { dir, targets } = await dataset("skip-unreadable-log");
+    expect((await step(dir, targets)).status).toBe("ok");
+    const restore = installGitShim(scratch.root, [
+      { match: "annex find --not --in nemar-s3", message: "fatal: shim: the log is unreadable" },
+    ]);
+    try {
+      const skipped = await step(dir, targets, { skipRecordedCheck: () => true });
+      expect(skipped.status).toBe("unreadable");
+    } finally {
+      restore();
+    }
   });
 });
 
@@ -440,6 +629,13 @@ describe("what a long check announces", () => {
     );
   });
 
+  test("the promise of a skip on a re-run carries its condition", () => {
+    // The skip is bought only by a check whose answers were understood.
+    expect(describeRecordedCheck(plan({ recorded: 15_000 }), 4).join("\n")).toContain(
+      "with git-annex's answers understood, lets a re-run within 6 hours skip it",
+    );
+  });
+
   test("at or below 5,000 files nothing is announced, and the estimate never offers an opt-out", () => {
     expect(describeRecordedCheck(plan({ recorded: 5_000 }), 4)).toEqual([]);
     expect(describeRecordedCheck(plan({ recorded: 0 }), 4)).toEqual([]);
@@ -451,7 +647,7 @@ describe("what a long check announces", () => {
     expect(
       describeRecordedCheck(plan({ recorded: 12, recordedCheckSkipped: true }), 4).join("\n"),
     ).toContain(
-      "12 data files already recorded at the S3 remote were confirmed there in the last 6 hours",
+      "A check of this many recorded files passed within the last 6 hours; the remote is not asked about the 12 again",
     );
     expect(
       describeRecordedCheck(plan({ recorded: 3, recordedNoLocal: 3 }), 4).join("\n"),
@@ -460,12 +656,14 @@ describe("what a long check announces", () => {
 });
 
 describe("markRecordedChecked", () => {
-  test("writes an ISO time that isRecordedCheckFresh accepts", () => {
+  test("writes an ISO time and the count, which isRecordedCheckFresh accepts", () => {
     const progress = initUploadProgress(join(scratch.root, "mark"), "nm000001", []);
     expect(progress.remote_checked_at).toBeUndefined();
-    markRecordedChecked(progress);
+    markRecordedChecked(progress, 7);
     expect(typeof progress.remote_checked_at).toBe("string");
     expect(Number.isNaN(Date.parse(progress.remote_checked_at as string))).toBe(false);
-    expect(isRecordedCheckFresh(progress)).toBe(true);
+    expect(progress.remote_checked_count).toBe(7);
+    expect(isRecordedCheckFresh(progress, 7)).toBe(true);
+    expect(isRecordedCheckFresh(progress, 8)).toBe(false);
   });
 });

@@ -17,13 +17,13 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import { chmodSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { gitAnnexAdd } from "../src/lib/git-annex/init";
+import { redactCredentials } from "../src/lib/git-annex/run-command";
 import {
   checkRemoteHolds,
   copyPathsToAnnexRemote,
   copyToAnnexRemote,
   extractCopyJsonError,
   parseCopyJson,
-  redactCredentials,
 } from "../src/lib/git-annex/transfer";
 import {
   chmodTreeWritable,
@@ -243,22 +243,24 @@ describe("a git-annex that exits 0 and says something unexpected", () => {
         success: true,
         filesCopied: 0,
         filesSent: 0,
-        outputRecognized: false,
+        output: "unrecognized",
       });
     } finally {
       restore();
     }
   });
 
-  test("a clean exit with fewer records than paths is unrecognized too", async () => {
+  test("a clean exit with fewer records than paths is partial: readable and incomplete", async () => {
     // `git annex copy` skips a path whose content is not here, with exit 0 and no record.
     // Two paths and one record means one path went unreported, so the counts are partial.
+    // The output WAS understood; it is the answer that is incomplete, and the two are
+    // worded differently for the person reading them.
     const cap = await captureCopy("none", 2);
     const one = `{"command":"copy","error-messages":[],"file":"${cap.paths[0]}","key":"K","success":true}`;
     const restore = installGitShim(scratch.root, [{ match: "annex copy", stdout: one }]);
     try {
       const result = await copyPathsToAnnexRemote(cap.repo, "store", cap.paths, 2);
-      expect(result).toMatchObject({ success: true, filesCopied: 1, outputRecognized: false });
+      expect(result).toMatchObject({ success: true, filesCopied: 1, output: "partial" });
     } finally {
       restore();
     }
@@ -303,7 +305,7 @@ describe("counting by the note must never decide success", () => {
         success: true,
         filesCopied: 2,
         filesSent: 0,
-        outputRecognized: true,
+        output: "understood",
       });
     } finally {
       restore();
@@ -319,6 +321,48 @@ describe("counting by the note must never decide success", () => {
     const records = parseCopyJson(stdout);
     expect(records.map((r) => r.success)).toEqual([true, true, true]);
     expect(records.map((r) => r.transferred)).toEqual([false, true, false]);
+  });
+});
+
+describe("file names in error text", () => {
+  test("extractCopyJsonError shows a failed file's name escaped", () => {
+    // Guards displayName on `file`/`key`: the error text is printed to a terminal.
+    const records = parseCopyJson(
+      JSON.stringify({
+        command: "copy",
+        "error-messages": ["store rejected it"],
+        file: "bad\x1b[2Jname\n.edf",
+        key: "K",
+        success: false,
+      }),
+    );
+    // The parsed record keeps the real name, which callers match against their own paths.
+    expect(records[0].file).toBe("bad\x1b[2Jname\n.edf");
+    const text = extractCopyJsonError(records, "", "", 1);
+    expect(text).toContain("bad\\x1b[2Jname\\n.edf: store rejected it");
+    expect(text).not.toContain("\x1b");
+  });
+
+  test("a real failed copy of a file with an ESCAPE in its name prints no ESCAPE", async () => {
+    if (!canBlockWrites) return;
+    const repo = await newDatasetRepo(scratch.root, "copy-escape-name");
+    const name = "esc\x1b[31mred.edf";
+    writeFile(repo, name, "x".repeat(3_000));
+    writeFile(repo, "first.edf", "y".repeat(3_000));
+    expect((await gitAnnexAdd(repo, [name, "first.edf"])).success).toBe(true);
+    const store = await initDirectoryRemote(scratch.root, repo, "store");
+    expect(
+      (await run(["git", "annex", "copy", "--to", "store", "--", "first.edf"], repo)).exitCode,
+    ).toBe(0);
+    chmodSync(store, 0o555);
+    try {
+      const result = await copyPathsToAnnexRemote(repo, "store", [name], 2);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("red.edf");
+      expect(result.error).not.toContain("\x1b");
+    } finally {
+      chmodSync(store, 0o755);
+    }
   });
 });
 
@@ -438,6 +482,35 @@ describe("credentials never reach what is printed", () => {
     }
   });
 
+  test("credentials the process inherits are redacted too, not only the ones it was handed", async () => {
+    // Guards credentialValues reading process.env. The import path runs on ambient AWS_*
+    // variables and passes no credentials down, yet the child inherits them.
+    const ambient = "AMBIENT-SESSION-TOKEN-0123456789";
+    const cap = await captureCopy("none", 1);
+    const failed = JSON.stringify({
+      command: "copy",
+      "error-messages": [`signing with ${ambient} failed`],
+      file: cap.paths[0],
+      key: "K",
+      success: false,
+    });
+    const restore = installGitShim(scratch.root, [
+      { match: "annex copy", stdout: failed, exit: 1 },
+    ]);
+    const before = process.env.AWS_SESSION_TOKEN;
+    process.env.AWS_SESSION_TOKEN = ambient;
+    try {
+      const result = await copyPathsToAnnexRemote(cap.repo, "store", cap.paths, 2);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("signing with <redacted> failed");
+      expect(result.error).not.toContain(ambient);
+    } finally {
+      if (before === undefined) Reflect.deleteProperty(process.env, "AWS_SESSION_TOKEN");
+      else process.env.AWS_SESSION_TOKEN = before;
+      restore();
+    }
+  });
+
   test("redactCredentials blanks header tuples in any case and any given secret", () => {
     expect(redactCredentials('("x-amz-security-token","abc")', [])).toBe(
       '("x-amz-security-token","<redacted>")',
@@ -479,7 +552,7 @@ describe("checkRemoteHolds: files whose content is not in this repository", () =
     const result = await copyPathsToAnnexRemote(repo, "store", paths, 2);
     expect(result.success).toBe(true);
     expect(result.filesCopied).toBe(0);
-    expect(result.outputRecognized).toBe(false);
+    expect(result.output).toBe("partial");
   });
 
   test("a file the remote holds is present, a file it lost is reported absent and the log is corrected", async () => {
@@ -503,6 +576,78 @@ describe("checkRemoteHolds: files whose content is not in this repository", () =
     expect(
       (await run(["git", "annex", "find", "--not", "--in", "store"], repo)).stdout.trim(),
     ).toBe(paths[1]);
+  });
+
+  test("a repository that wants two copies does not fail a file the remote holds", async () => {
+    // Guards --numcopies=1 --mincopies=1. fsck also enforces the repository's numcopies:
+    // with `git annex numcopies 2` and the one copy at the store it fails a file the store
+    // DOES hold ("Only 1 of 2 trustworthy copies exist"), and no re-run can help.
+    const { repo, paths } = await droppedAfterCopy("fsck-numcopies", 2);
+    expect((await run(["git", "annex", "numcopies", "2"], repo)).exitCode).toBe(0);
+    // The premise: a bare fsck over the same files does fail them.
+    const bare = await run(
+      ["git", "annex", "fsck", "--fast", "--from", "store", "--", ...paths],
+      repo,
+    );
+    expect(bare.exitCode).not.toBe(0);
+
+    const outcome = await checkRemoteHolds(repo, "store", paths, 2);
+
+    expect(outcome).toMatchObject({
+      success: true,
+      present: 2,
+      absent: [],
+      unanswered: [],
+      output: "understood",
+    });
+  });
+
+  test("a path fsck printed no record for is unanswered, never present", async () => {
+    // Guards `unanswered`. A clean exit with one record for two paths leaves one path
+    // unasked; the old reading counted what it saw and called the rest fine.
+    const { repo, paths } = await droppedAfterCopy("fsck-partial", 2);
+    const one = `{"command":"fsck","error-messages":[],"file":"${paths[0]}","key":"K","success":true}`;
+    const restore = installGitShim(scratch.root, [{ match: "annex fsck", stdout: one }]);
+    try {
+      const outcome = await checkRemoteHolds(repo, "store", paths, 2);
+      expect(outcome).toMatchObject({
+        success: true,
+        present: 1,
+        absent: [],
+        unanswered: [paths[1]],
+        output: "partial",
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  test("a file name with an ESCAPE in it never reaches the reasons raw", async () => {
+    // Guards `clean`. git-annex echoes the name inside its messages ("** Based on the
+    // location log, <name>"), and shortening only collapses whitespace, so an ESCAPE
+    // sequence in the name would reach the terminal through the reason.
+    const repo = await newDatasetRepo(scratch.root, "fsck-escape-name");
+    const name = "esc\x1b[31mred.edf";
+    writeFile(repo, name, "x".repeat(3_000));
+    expect((await gitAnnexAdd(repo, [name])).success).toBe(true);
+    const store = await initDirectoryRemote(scratch.root, repo, "store");
+    expect((await run(["git", "annex", "copy", "--to", "store", "--", name], repo)).exitCode).toBe(
+      0,
+    );
+    expect((await run(["git", "annex", "drop", "--force", "--", name], repo)).exitCode).toBe(0);
+    chmodTreeWritable(store);
+    for (const entry of readdirSync(store))
+      rmSync(join(store, entry), { recursive: true, force: true });
+
+    const outcome = await checkRemoteHolds(repo, "store", [name], 2);
+
+    expect(outcome.absent).toHaveLength(1);
+    // The record keeps the real path: callers match it against what they asked about.
+    expect(outcome.absent[0].file).toBe(name);
+    const reasons = outcome.absent[0].errors.join("\n");
+    expect(reasons).toContain("red.edf");
+    expect(reasons).not.toContain("\x1b");
+    expect(reasons).toContain("\\x1b[31mred.edf");
   });
 
   test("a remote that cannot be reached is reported per file with its reason, not as present", async () => {
