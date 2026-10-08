@@ -290,18 +290,27 @@ export async function pushMetadata(absolutePath: string, progress: UploadProgres
   return ok();
 }
 
+/**
+ * Whether the upload set up BIDS validation CI. `unknown` is a resumed upload
+ * whose CI step an earlier run already completed: the progress file records that
+ * the step ran, not how it ended.
+ */
+export type CiOutcome = "configured" | "not-configured" | "unknown";
+
 /** Step 12b: Deploy BIDS validation CI (gated; 403 means an admin will configure it). */
 export async function deployCiStep(
   absolutePath: string,
   datasetId: string,
   progress: UploadProgress,
-): Promise<void> {
+): Promise<CiOutcome> {
   if (!isStepCompleted(progress, "ci_deploy")) {
     const spinner = ora("Setting up BIDS validation CI...").start();
+    let outcome: CiOutcome = "configured";
     try {
       await addCi(datasetId);
       spinner.succeed("BIDS validation CI configured");
     } catch (error) {
+      outcome = "not-configured";
       if (error instanceof ApiError && error.statusCode === 403) {
         spinner.info("CI workflow will be configured by an admin");
       } else {
@@ -313,13 +322,47 @@ export async function deployCiStep(
 
     markStepCompleted(progress, "ci_deploy");
     writeUploadProgress(absolutePath, progress);
-  } else {
-    console.log(chalk.dim("  CI deploy already completed (skipping)"));
+    return outcome;
   }
+  console.log(chalk.dim("  CI deploy already completed (skipping)"));
+  return "unknown";
+}
+
+/**
+ * What happens after an upload, in the order it has to be done: validation runs
+ * on GitHub, then publication is requested. A request made before validation has
+ * finished is only recorded, so the order is worth saying. A sandbox (`xx`)
+ * dataset cannot be published and is not told to request publication. When the
+ * upload could not set up CI, `nemar dataset ci` has nothing to show; the
+ * publication request is what sets it up, so that is what the output names.
+ */
+function printNextSteps(datasetId: string, ci: CiOutcome): void {
+  const sandbox = datasetId.startsWith("xx");
+  if (ci === "not-configured") {
+    if (sandbox) return;
+    console.log("BIDS validation is not set up yet.");
+    console.log(
+      `  CI is set up when you request publication: ${chalk.cyan(`nemar dataset publish request ${datasetId}`)}`,
+    );
+    console.log();
+    return;
+  }
+  console.log("BIDS validation runs on GitHub after the upload.");
+  console.log(`  Check it with: ${chalk.cyan(`nemar dataset ci ${datasetId}`)}`);
+  if (!sandbox) {
+    console.log(
+      `  Once it has passed, request publication: ${chalk.cyan(`nemar dataset publish request ${datasetId}`)}`,
+    );
+  }
+  console.log();
 }
 
 /** Step 13: Clear progress, stamp last upload, and print the success summary. */
-export function printUploadSuccess(absolutePath: string, datasetInfo: DatasetInfo): void {
+export function printUploadSuccess(
+  absolutePath: string,
+  datasetInfo: DatasetInfo,
+  ci: CiOutcome = "unknown",
+): void {
   // Note: Branch protection is NOT applied here for private datasets.
   // Protection is applied when creating a DOI (admin doi create) or making public.
 
@@ -337,6 +380,7 @@ export function printUploadSuccess(absolutePath: string, datasetInfo: DatasetInf
   console.log(chalk.dim("To download this dataset:"));
   console.log(chalk.dim(`  nemar dataset download ${datasetInfo.dataset_id}`));
   console.log();
+  printNextSteps(datasetInfo.dataset_id, ci);
   console.log(
     chalk.yellow("Note: This dataset is private. Only the owner and designated collaborators can"),
   );

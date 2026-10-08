@@ -185,6 +185,13 @@ import {
 import { checkPrerequisitesForCommand } from "../lib/prerequisites.js";
 import { DownloadProgressTracker } from "../lib/progress.js";
 import { promptForProvenance } from "../lib/provenance.js";
+import {
+  ciPendingHeadline,
+  ciPendingHint,
+  ciUrlOf,
+  isCiPendingBlock,
+  isCiPendingReason,
+} from "../lib/publish-pending.js";
 import { renderSnippetLine, truncateTokenList } from "../lib/render/snippet.js";
 import { resolveSandboxCompletion } from "../lib/sandbox-status.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
@@ -815,10 +822,10 @@ Examples:
       if ((await pushMetadata(absolutePath, uploadProgress)).status === "fail") process.exit(1);
 
       // Step 12b: Deploy BIDS validation CI
-      await deployCiStep(absolutePath, datasetInfo.dataset_id, uploadProgress);
+      const ciOutcome = await deployCiStep(absolutePath, datasetInfo.dataset_id, uploadProgress);
 
       // Step 13: Success!
-      printUploadSuccess(absolutePath, datasetInfo);
+      printUploadSuccess(absolutePath, datasetInfo, ciOutcome);
     });
 }
 
@@ -4008,6 +4015,20 @@ datasetCommand.addCommand(accessCommand);
 
 const publishCommand = new Command("publish").description("Publication workflow management");
 
+/** The warning for an anonymous release the server did not echo back as anonymous. */
+function printAnonymousNotConfirmed(datasetId: string): void {
+  console.log(
+    chalk.yellow(
+      "\n  WARNING: you asked for an anonymous release, but the server did not confirm it.",
+    ),
+  );
+  console.log(
+    chalk.yellow(
+      `  Run 'nemar dataset publish status ${datasetId}' and check the Anonymous line before an admin approves it.`,
+    ),
+  );
+}
+
 publishCommand
   .command("request")
   .description("Request publication of a dataset")
@@ -4026,6 +4047,10 @@ Description:
   - Have S3 Object Lock enabled (prevents data deletion)
 
   You can only have one active publication request per dataset.
+
+  BIDS validation runs on GitHub after the upload. A request made before it has
+  completed is recorded, and NEMAR continues it once validation passes.
+  Check validation with: nemar dataset ci <dataset-id>
 
 Status Flow:
   requested → approving → published (or denied)
@@ -4066,17 +4091,9 @@ Examples:
       // request whose body never arrived would otherwise succeed with a
       // message indistinguishable from a correct one, and the depositor would
       // find out when their name appeared on the published record.
-      if (options.anonymous && result.anonymous !== true) {
-        console.log(
-          chalk.yellow(
-            "\n  WARNING: you asked for an anonymous release, but the server did not confirm it.",
-          ),
-        );
-        console.log(
-          chalk.yellow(
-            `  Run 'nemar dataset publish status ${datasetId}' and check the Anonymous line before an admin approves it.`,
-          ),
-        );
+      const anonymityUnconfirmed = options.anonymous === true && result.anonymous !== true;
+      if (anonymityUnconfirmed) {
+        printAnonymousNotConfirmed(datasetId);
       } else if (result.anonymous === true) {
         console.log(
           chalk.dim(
@@ -4092,7 +4109,7 @@ Examples:
         for (const line of identifierScreenLines(screen)) console.log(line);
       }
       // What happens next, in neutral words that name no finding, verdict or
-      // date warning (ADR 0090, amendment 2026-10-07): the screen runs after
+      // date warning (ADR 0090, amendment "what an accepted request is told"): the screen runs after
       // this request and its verdict is bound to a commit, so the outcome is
       // read from `publish status` or the mail, never guessed at here. Made
       // from the shared definition rather than read off the response, so every
@@ -4100,7 +4117,33 @@ Examples:
       // one threw above and prints its own text.
       console.log();
       for (const line of publicationRequestNotice(datasetId)) console.log(`  ${line}`);
+      // An anonymous release that was not confirmed would be published under
+      // the real name, so a script must not read this run as a success.
+      if (anonymityUnconfirmed) process.exit(1);
     } catch (error) {
+      if (isCiPendingBlock(error)) {
+        // Not an error: the request IS recorded, and the server re-checks it
+        // and continues once BIDS validation passes. Said in the info style and
+        // left to exit 0, so a script does not retry it and a depositor does
+        // not read it as a rejection. A validation FAILURE is a different
+        // reason and takes the error path below.
+        spinner.info(ciPendingHeadline(error.blockReason));
+        // The command to run again takes its `--anonymous` from what was
+        // typed, never from the server's echo, which may be missing.
+        for (const line of ciPendingHint(datasetId, options.anonymous === true)) {
+          console.log(line);
+        }
+        const ciUrl = ciUrlOf(error);
+        if (ciUrl) console.log(`  CI: ${ciUrl}`);
+        // What was recorded, not what was typed: the recorded request is the
+        // one an administrator later approves.
+        const recorded = (error.rawBody as { anonymous?: unknown } | undefined)?.anonymous;
+        if (options.anonymous && recorded !== true) {
+          printAnonymousNotConfirmed(datasetId);
+          process.exit(1);
+        }
+        return;
+      }
       if (error instanceof ApiError) {
         spinner.fail(error.message);
         console.log(chalk.dim(`  ${error.message}`));
@@ -4215,18 +4258,32 @@ Examples:
         console.log(`\n  ${chalk.red("Reason:")} ${result.denied_reason}`);
       }
 
+      // A request waiting on validation has had no screen yet, because the
+      // screen starts when validation passes and the request is released; the
+      // backend words that absence as "NOT RUN for this request", in red, which
+      // reads as a fault in a state that is only waiting.
+      const pendingReason =
+        result.status === "blocked" && isCiPendingReason(result.block_reason)
+          ? result.block_reason
+          : undefined;
       // Epic #1610 phase 4: the identifier screen, in the backend's words.
-      const screenLines = identifierScreenLines(result.identifier_screen);
+      const screenLines = pendingReason ? [] : identifierScreenLines(result.identifier_screen);
       if (screenLines.length > 0) {
         console.log();
         for (const line of screenLines) console.log(line);
       }
 
       // Blocked requests: surface WHY (e.g. BIDS validation pending/failed) plus
-      // the CI link and what to do next (#428). A pending/in-progress block now
-      // clears automatically once CI goes green (daily sweep), but the user can
-      // re-request to retry immediately.
-      if (result.status === "blocked") {
+      // the CI link and what to do next. A request that is blocked only because
+      // validation has not finished is a pending state, not a failure: it is
+      // said the way `publish request` says it (info, not red, no "re-request"
+      // from the server's message) and clears on its own once CI passes. Any
+      // other reason stays a red block.
+      if (pendingReason) {
+        console.log(`\n  ${chalk.cyan("ℹ")} ${ciPendingHeadline(pendingReason)}`);
+        for (const line of ciPendingHint(datasetId, result.anonymous === true)) console.log(line);
+        if (result.ci_url) console.log(`  ${chalk.dim("CI:")} ${result.ci_url}`);
+      } else if (result.status === "blocked") {
         if (result.message) {
           console.log(`\n  ${chalk.red("Blocked:")} ${result.message}`);
         } else if (result.block_reason) {
@@ -4245,9 +4302,10 @@ Examples:
         if (result.ci_url) {
           console.log(`  ${chalk.dim("CI:")} ${result.ci_url}`);
         }
+        const again = `nemar dataset publish request ${datasetId}${result.anonymous === true ? " --anonymous" : ""}`;
         console.log(
           chalk.dim(
-            `  This re-checks automatically once CI passes; or re-run 'nemar dataset publish request ${datasetId}' to retry now.`,
+            `  This re-checks automatically once CI passes; or re-run '${again}' to retry now.`,
           ),
         );
       }
