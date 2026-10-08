@@ -148,6 +148,10 @@ function shadowedFlagsInTree(command: Command, ancestors: readonly Command[]): S
  *   command that declares it.
  */
 export function bindShadowedOptionValues(root: Command, argv: string[]): string[] {
+  // `--` ends option parsing: what follows it is neither a flag nor a command.
+  const dashDash = argv.indexOf("--");
+  const end = dashDash < 0 ? argv.length : dashDash;
+
   // Walk to the leaf command: descend while a non-flag token names a
   // subcommand of the current one, skipping tokens that start with "-". That
   // assumes no command with subcommands takes a value option, so no option
@@ -159,17 +163,16 @@ export function bindShadowedOptionValues(root: Command, argv: string[]): string[
   const ancestors: Command[] = [];
   let current = root;
   let leafIndex = -1;
-  for (let i = 0; i < argv.length; i++) {
+  for (let i = 0; i < end; i++) {
     const token = argv[i];
-    if (token === "--") break;
     if (token.startsWith("-")) {
       // A shadowed flag below the root, ahead of the command that takes it
       // (`dataset --version 2.0.0 release`): remember it, and step over its
       // value so the walk can still find that command. At the root it is the
       // root's own flag (`nemar --version`).
-      const next = argv[i + 1];
       if (current !== root && treeFlags.has(token)) {
         early.push({ flag: token, index: i });
+        const next = argv[i + 1];
         if (isValue(next) && !findSubcommand(current, next)) i++;
       }
       continue;
@@ -190,21 +193,14 @@ export function bindShadowedOptionValues(root: Command, argv: string[]): string[
   }
 
   // Help outranks a missing value: asking for it is a request to read, not run.
-  const dashDash = argv.indexOf("--");
-  const helpRequested = argv
-    .slice(0, dashDash < 0 ? argv.length : dashDash)
-    .some((token) => token === "--help" || token === "-h");
+  const helpRequested = argv.slice(0, end).some((token) => token === "--help" || token === "-h");
 
   // Only the tokens after the leaf's name belong to it. Whatever came before
   // stays the ancestors' (`nemar --version dataset release ...` prints the
   // version), apart from the misplaced flag rejected above.
   const out = argv.slice(0, leafIndex + 1);
-  for (let i = leafIndex + 1; i < argv.length; i++) {
+  for (let i = leafIndex + 1; i < end; i++) {
     const token = argv[i];
-    if (token === "--") {
-      out.push(...argv.slice(i));
-      break;
-    }
     const option = shadowed.get(token);
     if (!option) {
       out.push(token);
@@ -214,14 +210,13 @@ export function bindShadowedOptionValues(root: Command, argv: string[]): string[
     if (isValue(next)) {
       out.push(`${token}=${next}`);
       i++;
-    } else if (helpRequested) {
-      // Drop the bare flag: left in, the root claims it and prints the CLI
-      // version instead of the help that was asked for.
-    } else if (option.required) {
-      throw new MissingShadowedValueError(current, option);
-    } else {
+    } else if (!helpRequested) {
+      if (option.required) throw new MissingShadowedValueError(current, option);
       out.push(token);
     }
+    // else: with help requested the bare flag is dropped. Left in, the root
+    // claims it and prints the CLI version instead of the help.
   }
+  out.push(...argv.slice(end));
   return out;
 }
