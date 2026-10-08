@@ -1186,6 +1186,25 @@ describe("a request that changes while the sweep works on it is not overwritten"
     });
   }
 
+  test("moving a waiting row to the back does not touch a row that changed in between", async () => {
+    await pending();
+    runs = "running";
+    onRunsRead = () => {
+      db.run(
+        "UPDATE publication_requests SET anonymous = 1, updated_at = datetime('now', '+1 hour') WHERE dataset_id = ?",
+        [DATASET],
+      );
+    };
+    await sweepBlockedBidsValidationRequests(env());
+    const age = db
+      .query<{ age: number }, []>(
+        "SELECT strftime('%s','now') - strftime('%s', updated_at) AS age FROM publication_requests",
+      )
+      .get()?.age;
+    // Still the hour ahead the concurrent request left it at, not 'now'.
+    expect(age).toBeLessThan(-3000);
+  });
+
   test("control: with no change in between, the same three writes go through", async () => {
     await pending();
     runs = "failure";
