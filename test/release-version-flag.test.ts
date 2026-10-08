@@ -687,6 +687,21 @@ async function spawnCli(args: string[]) {
   return { stdout, stderr, exitCode };
 }
 
+/**
+ * A mistyped option, reported the way Commander reports one: the message on
+ * stderr and exit 1, with no bug-report nudge (the exit handler adds that only
+ * to exits Commander did not report) and not the CLI version.
+ */
+function expectUsageError(
+  r: { stdout: string; stderr: string; exitCode: number },
+  message: string,
+) {
+  expect(r.stderr).toContain(message);
+  expect(r.stderr).not.toContain("Run again with --debug");
+  expect(r.stdout.trim()).not.toBe(version);
+  expect(r.exitCode).toBe(1);
+}
+
 describe("spawned CLI", () => {
   // The stand-in backend: answers the notices call every command makes and
   // records each request, so a test can see which URL the CLI really used.
@@ -746,191 +761,180 @@ describe("spawned CLI", () => {
     rmSync(configDir, { recursive: true, force: true });
   });
 
-  describe("nemar entry point", () => {
-    // Compares flag strings and top-level command names only, as sets: not
-    // descriptions, defaults or arguments, and not the order index.ts happens
-    // to declare them in. A nested command or option added to a command group
-    // is not checked here; those groups are imported, not copied.
-    test(
-      "the tree under test has the options and top-level commands of `nemar --help`",
-      async () => {
-        const result = await spawnCli(["--help"]);
-        // A crashed spawn would otherwise read as drift.
-        expect(result.exitCode).toBe(0);
-        const help = result.stdout.split("\n");
-        const section = (title: string) =>
-          help
-            .slice(help.indexOf(`${title}:`) + 1)
-            .join("\n")
-            .split("\n\n")[0]
-            .split("\n")
-            // Wrapped descriptions are indented further than the entries.
-            .filter((line) => /^ {2}\S/.test(line));
+  // Compares flag strings and top-level command names only, as sets: not
+  // descriptions, defaults or arguments, and not the order index.ts happens
+  // to declare them in. A nested command or option added to a command group
+  // is not checked here; those groups are imported, not copied.
+  test(
+    "the tree under test has the options and top-level commands of `nemar --help`",
+    async () => {
+      const result = await spawnCli(["--help"]);
+      // A crashed spawn would otherwise read as drift.
+      expect(result.exitCode).toBe(0);
+      const help = result.stdout.split("\n");
+      const section = (title: string) =>
+        help
+          .slice(help.indexOf(`${title}:`) + 1)
+          .join("\n")
+          .split("\n\n")[0]
+          .split("\n")
+          // Wrapped descriptions are indented further than the entries.
+          .filter((line) => /^ {2}\S/.test(line));
 
-        // `-h, --help` is Commander's own and not part of options[].
-        const optionFlags = section("Options").map((line) => line.trim().split(/ {2,}/)[0]);
-        expect([...optionFlags].sort()).toEqual(
-          [...program.options.map((o) => o.flags), "-h, --help"].sort(),
+      // `-h, --help` is Commander's own and not part of options[].
+      const optionFlags = section("Options").map((line) => line.trim().split(/ {2,}/)[0]);
+      expect([...optionFlags].sort()).toEqual(
+        [...program.options.map((o) => o.flags), "-h, --help"].sort(),
+      );
+
+      // Help prints an aliased command as `name|alias`.
+      const commandNames = section("Commands").map((line) => line.trim().split(/[\s|]/)[0]);
+      expect([...commandNames].sort()).toEqual(
+        [...program.commands.map((c) => c.name()), ...INLINE_ROOT_COMMANDS, "help"].sort(),
+      );
+    },
+    SPAWN_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "dataset release --version X.Y.Z reaches the release handler",
+    async () => {
+      const r = await spawnCli(["dataset", "release", "nm099999", "--version", "2.0.0", "-y"]);
+      expect(r.stdout.trim()).not.toBe(version);
+      expect(r.stdout).toContain("Not authenticated");
+      expect(r.exitCode).toBe(1);
+      // Tripwire: the notices call every command makes went to the stand-in,
+      // so config.json's apiUrl is honored. Without this, a config that
+      // stopped being read would send the call to the real API silently.
+      expect(hits).toContain("GET /notices");
+    },
+    SPAWN_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "dataset release --version with no value fails like Commander",
+    async () => {
+      for (const args of [
+        ["dataset", "release", "nm099999", "--version"],
+        ["dataset", "release", "nm099999", "--version", "-y"],
+      ]) {
+        // The nudge assertion also proves index.ts reports the error through
+        // Commander: an error thrown out of main() would get the nudge.
+        expectUsageError(
+          await spawnCli(args),
+          "error: option '--version <version>' argument missing",
         );
+      }
+    },
+    SPAWN_TEST_TIMEOUT_MS,
+  );
 
-        // Help prints an aliased command as `name|alias`.
-        const commandNames = section("Commands").map((line) => line.trim().split(/[\s|]/)[0]);
-        expect([...commandNames].sort()).toEqual(
-          [...program.commands.map((c) => c.name()), ...INLINE_ROOT_COMMANDS, "help"].sort(),
+  test.skipIf(!HAS_RELEASE_TOOLS)(
+    "a lone dash reaches the handler as the version, and a dash-leading value needs =",
+    async () => {
+      writeAccount("stand-in-key");
+      const dash = await spawnCli(["dataset", "release", DATASET_ID, "--version", "-", "-y"]);
+      expect(dash.stdout).toContain("Invalid version: -");
+      expect(dash.exitCode).toBe(1);
+
+      const spaced = await spawnCli(["dataset", "release", DATASET_ID, "--version", "-1.0.0"]);
+      expectUsageError(spaced, "error: option '--version <version>' argument missing");
+
+      const equals = await spawnCli(["dataset", "release", DATASET_ID, "--version=-1.0.0", "-y"]);
+      expect(equals.stdout).toContain("Invalid version: -1.0.0");
+      expect(equals.exitCode).toBe(1);
+    },
+    SPAWN_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "a shadowed flag typed before its command fails instead of printing the version",
+    async () => {
+      for (const args of [
+        ["dataset", "--version", "2.0.0", "release", DATASET_ID, "-y"],
+        ["dataset", "--version", "release", DATASET_ID, "-y"],
+      ]) {
+        expectUsageError(
+          await spawnCli(args),
+          "error: option '--version <version>' must come after 'release'",
         );
-      },
-      SPAWN_TEST_TIMEOUT_MS,
-    );
+      }
+      // The equals spelling cannot reach `release` from there; `dataset`
+      // refuses it, which is also a failure and not the version.
+      const equals = await spawnCli(["dataset", "--version=2.0.0", "release", DATASET_ID, "-y"]);
+      expectUsageError(equals, "unknown option '--version=2.0.0'");
+      // At the root the flag is the root's own, as documented.
+      const root = await spawnCli(["--version", "dataset", "release", DATASET_ID]);
+      expect(root.stdout.trim()).toBe(version);
+      expect(root.exitCode).toBe(0);
+    },
+    SPAWN_TEST_TIMEOUT_MS,
+  );
 
-    test(
-      "dataset release --version X.Y.Z reaches the release handler",
-      async () => {
-        const r = await spawnCli(["dataset", "release", "nm099999", "--version", "2.0.0", "-y"]);
+  test(
+    "release --help shows help even when --version has no value",
+    async () => {
+      for (const args of [
+        ["dataset", "release", "--help", "--version"],
+        ["dataset", "release", DATASET_ID, "--version", "--help"],
+        ["dataset", "release", DATASET_ID, "--version", "-h"],
+      ]) {
+        const r = await spawnCli(args);
+        expect(r.stdout).toContain("Usage: nemar dataset release");
         expect(r.stdout.trim()).not.toBe(version);
-        expect(r.stdout).toContain("Not authenticated");
-        expect(r.exitCode).toBe(1);
-        // Tripwire: the notices call every command makes went to the stand-in,
-        // so config.json's apiUrl is honored. Without this, a config that
-        // stopped being read would send the call to the real API silently.
-        expect(hits).toContain("GET /notices");
-      },
-      SPAWN_TEST_TIMEOUT_MS,
-    );
-
-    test(
-      "dataset release --version with no value fails like Commander",
-      async () => {
-        for (const args of [
-          ["dataset", "release", "nm099999", "--version"],
-          ["dataset", "release", "nm099999", "--version", "-y"],
-        ]) {
-          const r = await spawnCli(args);
-          expect(r.stdout.trim()).not.toBe(version);
-          expect(r.stderr).toContain("error: option '--version <version>' argument missing");
-          // Reported by Commander as a usage error, so the exit handler does not
-          // add its "attach a debug log to a bug report" nudge, which an error
-          // thrown out of main() would get.
-          expect(r.stderr).not.toContain("Run again with --debug");
-          expect(r.exitCode).toBe(1);
-        }
-      },
-      SPAWN_TEST_TIMEOUT_MS,
-    );
-
-    test.skipIf(!HAS_RELEASE_TOOLS)(
-      "a lone dash reaches the handler as the version, and a dash-leading value needs =",
-      async () => {
-        writeAccount("stand-in-key");
-        const dash = await spawnCli(["dataset", "release", DATASET_ID, "--version", "-", "-y"]);
-        expect(dash.stdout).toContain("Invalid version: -");
-        expect(dash.exitCode).toBe(1);
-
-        const spaced = await spawnCli(["dataset", "release", DATASET_ID, "--version", "-1.0.0"]);
-        expect(spaced.stderr).toContain("error: option '--version <version>' argument missing");
-        expect(spaced.exitCode).toBe(1);
-
-        const equals = await spawnCli(["dataset", "release", DATASET_ID, "--version=-1.0.0", "-y"]);
-        expect(equals.stdout).toContain("Invalid version: -1.0.0");
-        expect(equals.exitCode).toBe(1);
-      },
-      SPAWN_TEST_TIMEOUT_MS,
-    );
-
-    test(
-      "a shadowed flag typed before its command fails instead of printing the version",
-      async () => {
-        for (const args of [
-          ["dataset", "--version", "2.0.0", "release", DATASET_ID, "-y"],
-          ["dataset", "--version", "release", DATASET_ID, "-y"],
-        ]) {
-          const r = await spawnCli(args);
-          expect(r.stdout.trim()).not.toBe(version);
-          expect(r.stderr).toContain(
-            "error: option '--version <version>' must come after 'release'",
-          );
-          expect(r.stderr).not.toContain("Run again with --debug");
-          expect(r.exitCode).toBe(1);
-        }
-        // The equals spelling cannot reach `release` from there; `dataset`
-        // refuses it, which is also a failure and not the version.
-        const equals = await spawnCli(["dataset", "--version=2.0.0", "release", DATASET_ID, "-y"]);
-        expect(equals.stderr).toContain("unknown option '--version=2.0.0'");
-        expect(equals.exitCode).toBe(1);
-        // At the root the flag is the root's own, as documented.
-        const root = await spawnCli(["--version", "dataset", "release", DATASET_ID]);
-        expect(root.stdout.trim()).toBe(version);
-        expect(root.exitCode).toBe(0);
-      },
-      SPAWN_TEST_TIMEOUT_MS,
-    );
-
-    test(
-      "release --help shows help even when --version has no value",
-      async () => {
-        for (const args of [
-          ["dataset", "release", "--help", "--version"],
-          ["dataset", "release", DATASET_ID, "--version", "--help"],
-          ["dataset", "release", DATASET_ID, "--version", "-h"],
-        ]) {
-          const r = await spawnCli(args);
-          expect(r.stdout).toContain("Usage: nemar dataset release");
-          expect(r.stdout.trim()).not.toBe(version);
-          expect(r.stderr).not.toContain("error:");
-          expect(r.exitCode).toBe(0);
-        }
-      },
-      SPAWN_TEST_TIMEOUT_MS,
-    );
-
-    test(
-      "an empty --version is a missing value, stopped before any request for the dataset",
-      async () => {
-        writeAccount("stand-in-key");
-        for (const args of [
-          ["dataset", "release", DATASET_ID, "--version", "", "--type", "patch", "-y"],
-          ["dataset", "release", DATASET_ID, "--version", ""],
-        ]) {
-          const r = await spawnCli(args);
-          expect(r.stderr).toContain("error: option '--version <version>' argument missing");
-          expect(r.stderr).not.toContain("Run again with --debug");
-          expect(r.stdout).toBe("");
-          expect(r.exitCode).toBe(1);
-          expect(hits).not.toContain(`GET /datasets/${DATASET_ID}`);
-        }
-      },
-      SPAWN_TEST_TIMEOUT_MS,
-    );
-
-    // `--version=` reaches the handler as "". A truthiness check there read it
-    // as "no --version": with --type it bumped by --type, and without it the
-    // handler opened an interactive prompt that hangs on a closed stdin.
-    test.skipIf(!HAS_RELEASE_TOOLS)(
-      "an empty --version= reaches the handler and is refused as an invalid version",
-      async () => {
-        writeAccount("stand-in-key");
-        for (const args of [
-          ["dataset", "release", DATASET_ID, "--version=", "--type", "patch", "-y"],
-          ["dataset", "release", DATASET_ID, "--version=", "-y"],
-        ]) {
-          const r = await spawnCli(args);
-          expect(r.stdout).toContain("Invalid version");
-          expect(r.stdout).not.toContain("Version bump");
-          expect(r.exitCode).toBe(1);
-          // The handler ran far enough to ask for the dataset and its versions.
-          expect(hits).toContain(`GET /datasets/${DATASET_ID}/versions`);
-        }
-      },
-      SPAWN_TEST_TIMEOUT_MS,
-    );
-
-    test(
-      "the root --version still prints the CLI version",
-      async () => {
-        const r = await spawnCli(["--version"]);
+        expect(r.stderr).not.toContain("error:");
         expect(r.exitCode).toBe(0);
-        expect(r.stdout.trim()).toBe(version);
-      },
-      SPAWN_TEST_TIMEOUT_MS,
-    );
-  });
+      }
+    },
+    SPAWN_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "an empty --version is a missing value, stopped before any request for the dataset",
+    async () => {
+      writeAccount("stand-in-key");
+      for (const args of [
+        ["dataset", "release", DATASET_ID, "--version", "", "--type", "patch", "-y"],
+        ["dataset", "release", DATASET_ID, "--version", ""],
+      ]) {
+        const r = await spawnCli(args);
+        expectUsageError(r, "error: option '--version <version>' argument missing");
+        expect(r.stdout).toBe("");
+        expect(hits).not.toContain(`GET /datasets/${DATASET_ID}`);
+      }
+    },
+    SPAWN_TEST_TIMEOUT_MS,
+  );
+
+  // `--version=` reaches the handler as "". A truthiness check there read it
+  // as "no --version": with --type it bumped by --type, and without it the
+  // handler opened an interactive prompt that hangs on a closed stdin.
+  test.skipIf(!HAS_RELEASE_TOOLS)(
+    "an empty --version= reaches the handler and is refused as an invalid version",
+    async () => {
+      writeAccount("stand-in-key");
+      for (const args of [
+        ["dataset", "release", DATASET_ID, "--version=", "--type", "patch", "-y"],
+        ["dataset", "release", DATASET_ID, "--version=", "-y"],
+      ]) {
+        const r = await spawnCli(args);
+        expect(r.stdout).toContain("Invalid version");
+        expect(r.stdout).not.toContain("Version bump");
+        expect(r.exitCode).toBe(1);
+        // The handler ran far enough to ask for the dataset and its versions.
+        expect(hits).toContain(`GET /datasets/${DATASET_ID}/versions`);
+      }
+    },
+    SPAWN_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "the root --version still prints the CLI version",
+    async () => {
+      const r = await spawnCli(["--version"]);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout.trim()).toBe(version);
+    },
+    SPAWN_TEST_TIMEOUT_MS,
+  );
 });
