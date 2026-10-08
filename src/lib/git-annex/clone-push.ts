@@ -1,13 +1,10 @@
 /**
- * git-annex service: clone, save, and push flows.
- *
- * Split from lib/git-annex.ts by concern (#908, epic #902). The clone and push flows
- * were moved verbatim; the save flow has since gained the assume-unchanged skip and
- * its guards (see {@link saveDataset}).
+ * git-annex service: clone, save, and push flows. The save flow can skip re-reading
+ * annexed content under a set of guards; see {@link saveDataset}.
  */
 
 import { spawnSync } from "node:child_process";
-import { statSync } from "node:fs";
+import { statSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { getGitHubToken, resolveGitHubCloneAuth } from "./github.js";
 import { chunkAddTargets } from "./init.js";
@@ -43,14 +40,17 @@ const INTERRUPT_SIGNALS: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"];
  * with zero stat data; the next `git add -A` (and `git status`) then treats
  * every one of them as possibly modified and streams its full content through
  * `git-annex filter-process` to find out it is not. On nm000358 (165 files,
- * 1.6 TB on Ceph) that was the hours-long "Saving dataset changes" step after
- * the S3 copy had already finished. These paths are marked `assume-unchanged`
+ * 1.6 TB on Ceph) the "Saving dataset changes" step after the S3 copy took hours;
+ * this re-read is the likely cause (it reproduces at small scale), but the save was
+ * not timed at that size. These paths are marked `assume-unchanged`
  * for the duration of the add/status/commit and unmarked afterwards, so the
  * commit records exactly the pointers that were staged, the ones whose content
  * is recorded at the S3 remote.
  *
  * The skip DEFERS the re-read, it does not remove it: the entries stay zero-stat,
- * so the first `git status` afterwards re-reads the annexed content once.
+ * so the first `git status` afterwards re-reads the annexed content once (measured
+ * on local disk: about 0.35 to 0.45 s against 0.01 s at 600 files of 120 KB, and
+ * 4 to 7 s against 0.04 s at 10,000 annexed files plus 5,000 JSON files).
  *
  * Marking a path hides it from git, so the skip is only taken where it cannot
  * hide an edit, and cannot outlive the save:
@@ -76,8 +76,11 @@ const INTERRUPT_SIGNALS: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"];
  *  - A failure to mark degrades to the plain add, with a warning: the skip is an
  *    optimization, never a reason to refuse a save.
  *  - The bits are cleared in a `finally`, retried once, and a failure to clear
- *    them after the commit FAILS the save with the way out; on SIGINT, SIGTERM and
- *    SIGHUP they are cleared before the process dies.
+ *    them after the commit FAILS the save with the way out. On SIGINT, SIGTERM and
+ *    SIGHUP the clear is attempted before the process dies, and it is best effort:
+ *    a SIGKILL or a power loss cannot run it, and an `index.lock` that outlasts the
+ *    retry window defeats it (the recovery is then printed). What is left behind is
+ *    cleared by the next save's entry clear.
  *
  * The stale-bit check and the clear run at the repository's top level, and
  * `git add -A` stages the whole tree, so a save started from a subdirectory sees and
@@ -143,13 +146,15 @@ export async function saveDataset(
       }
     }
   } finally {
-    disarm();
+    // Disarmed only AFTER the final unmark: a signal that lands while it runs must still
+    // find a handler, or the bits outlive the process.
     if (marked.length > 0) {
       unmarkError = await unmarkWithRetry(
         path,
         marked.map((e) => e.path),
       );
     }
+    disarm();
   }
 
   if (unmarkError) {
@@ -204,12 +209,72 @@ async function unmarkWithRetry(path: string, paths: string[]): Promise<string | 
   return last.success ? undefined : last.error;
 }
 
+/** How long one synchronous unmark may run; a hung git must not make Ctrl-C unresponsive. */
+const SIGNAL_UNMARK_TIMEOUT_MS = 5_000;
+
+/** How long a signal handler keeps retrying an unmark that fails, usually on `index.lock`. */
+const SIGNAL_UNMARK_RETRY_MS = 2_500;
+
+/** Pause between those retries. */
+const SIGNAL_UNMARK_PAUSE_MS = 100;
+
+/** The most paths a recovery message spells out as a command. */
+const MAX_RECOVERY_PATHS = 10;
+
+/** Sleep without leaving the signal handler: it cannot await. */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** One synchronous `git update-index --no-assume-unchanged`; its complaint when it fails. */
+function unmarkSync(path: string, input: string, timeoutMs: number): string | undefined {
+  const r = spawnSync("git", ["update-index", "--no-assume-unchanged", "-z", "--stdin"], {
+    cwd: path,
+    input,
+    stdio: ["pipe", "ignore", "pipe"],
+    timeout: timeoutMs,
+  });
+  if (r.error) return r.error.message;
+  if (r.status === 0) return undefined;
+  const said = r.stderr?.toString().trim();
+  return said || `git update-index exited ${r.status ?? r.signal}`;
+}
+
+/** Ask the children of this process to stop, so an in-flight `git add` lets go of `index.lock`. */
+function stopChildren(): void {
+  // git removes its lock files when it receives SIGTERM. Where pkill is missing this does
+  // nothing, and the retry window below is all there is.
+  spawnSync("pkill", ["-TERM", "-P", String(process.pid)], { stdio: "ignore", timeout: 1_000 });
+}
+
+/** The recovery a person needs when the signal handler could not clear the bits. */
+function describeStuckFlags(
+  path: string,
+  entries: SkipContentCheckEntry[],
+  reason: string,
+): string {
+  const quoted = (p: string) => `'${p.replace(/'/g, `'\\''`)}'`;
+  const printable =
+    entries.length <= MAX_RECOVERY_PATHS && entries.every((e) => !/\p{Cc}/u.test(e.path));
+  const manual = printable
+    ? ` To clear them by hand: git -C ${quoted(path)} update-index --no-assume-unchanged -- ${entries.map((e) => quoted(e.path)).join(" ")}`
+    : "";
+  return `\nInterrupted while ${entries.length} annexed file(s) were marked assume-unchanged, and git would not clear them (${reason}). Until they are cleared, git hides later edits to those files. Run \`nemar dataset commit\` in ${path}, or run the upload again: both clear them first.${manual}\n`;
+}
+
 /**
- * Take the bits back if the process is interrupted while they are set. A signal
- * handler cannot await, so this is a synchronous `git update-index`; the handler
- * then removes itself and re-raises the signal, so the process still dies the way
- * the signal says and any other handler still runs. Returns the function that
- * disarms it.
+ * Take the bits back if the process is interrupted while they are set, as far as a
+ * signal handler can. It cannot await, so this is a synchronous `git update-index`. If
+ * that fails (an `index.lock` held by the `git add` the signal interrupted is the usual
+ * reason: a signal sent to the CLI alone, unlike a terminal's Ctrl-C, does not reach its
+ * children), the in-flight git children are asked to stop, which releases the lock, and
+ * the unmark is retried for {@link SIGNAL_UNMARK_RETRY_MS}. If it still fails the exact
+ * recovery is written to stderr. Each attempt has a timeout.
+ *
+ * The handler then removes itself and re-raises the signal. The process dies the way the
+ * signal says only if no other handler for it is registered; any other handler runs, and
+ * decides. Best effort by construction: SIGKILL cannot be caught. Returns the function
+ * that disarms it.
  */
 function armUnmarkOnInterrupt(path: string, entries: SkipContentCheckEntry[]): () => void {
   const input = entries.map((e) => `${e.path}\0`).join("");
@@ -217,11 +282,22 @@ function armUnmarkOnInterrupt(path: string, entries: SkipContentCheckEntry[]): (
     for (const signal of INTERRUPT_SIGNALS) process.removeListener(signal, onSignal);
   }
   function onSignal(signal: NodeJS.Signals): void {
-    spawnSync("git", ["update-index", "--no-assume-unchanged", "-z", "--stdin"], {
-      cwd: path,
-      input,
-      stdio: ["pipe", "ignore", "ignore"],
-    });
+    const deadline = Date.now() + SIGNAL_UNMARK_RETRY_MS;
+    let failure = unmarkSync(path, input, SIGNAL_UNMARK_TIMEOUT_MS);
+    if (failure) {
+      stopChildren();
+      while (failure && Date.now() < deadline) {
+        sleepSync(SIGNAL_UNMARK_PAUSE_MS);
+        failure = unmarkSync(path, input, SIGNAL_UNMARK_TIMEOUT_MS);
+      }
+    }
+    if (failure) {
+      try {
+        writeSync(2, describeStuckFlags(path, entries, failure));
+      } catch {
+        // stderr is gone (a closed terminal); there is nowhere left to say it.
+      }
+    }
     disarm();
     process.kill(process.pid, signal);
   }
@@ -277,7 +353,7 @@ export function describeChangedSinceTracked(changed: string[], when: "before" | 
   if (when === "during") {
     return `${changed.length} annexed file(s) changed, disappeared or became unreadable while the save was running, so the commit does not match the tree: ${shown}${more}. Re-run the upload command to re-track them.`;
   }
-  return `${changed.length} annexed file(s) changed since the upload plan recorded them, so the commit would not match the tree: ${shown}${more}. Re-run the upload command to re-track them (add --restart if a file is no longer a data file, for example after shrinking below the size threshold).`;
+  return `${changed.length} annexed file(s) changed since the upload plan recorded them, so the commit would not match the tree: ${shown}${more}. Re-run the upload command to re-track them.`;
 }
 
 /** What `clearStaleAssumeUnchanged` reports. */
