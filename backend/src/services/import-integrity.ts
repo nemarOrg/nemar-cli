@@ -10,12 +10,10 @@
  *   - the retry engine's "verify current state first" step before deciding
  *     whether to blocklist or re-dispatch an incomplete/failed/quarantined row.
  *
- * `annexKeyDeclaredSize`/`isKeyPresentAtDeclaredSize` are defined once in
- * `shared/annex-key.ts` (pure, so a Workers bundle can take it) and shared with
- * the CLI's `src/lib/s3-server-copy.ts`; they are re-exported here so existing
- * importers keep their path. That module also owns the chunked-key rule: content
- * stored as `-S<size>-C<n>` chunk objects counts as present when a chunking is
- * complete (#1565, ADR 0064 amendment 2026-10-07).
+ * `annexKeyDeclaredSize`/`isKeyPresentAtDeclaredSize` are re-exported from
+ * `shared/annex-key.ts` so existing importers keep their path. That module owns
+ * the chunked-key rule: content stored as `-S<size>-C<n>` chunk objects counts as
+ * present when a chunking is complete (#1565, ADR 0064 amendment 2026-10-07).
  */
 
 import { annexKeyDeclaredSize, isKeyPresentAtDeclaredSize } from "../../../shared/annex-key.js";
