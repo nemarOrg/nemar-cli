@@ -211,6 +211,25 @@ export async function sweepBlockedBidsValidationRequests(
     gateReads: 0,
   };
   const budget: GateReadBudget = { remaining: gateReadBudget };
+  // Candidates are taken oldest `updated_at` first, `limit` at a time. A row
+  // that is looked at and left as it is (CI still running, a file that could
+  // not be read) keeps its old `updated_at` and so stays first in line: enough
+  // of them would fill every run and starve the rows behind. A row that stays a
+  // candidate after being looked at is therefore moved to the back. One that was
+  // NOT looked at (over the unblock cap, or deferred by the read budget) is left
+  // where it is, so the next run starts with it.
+  const rotate = async (row: Candidate): Promise<void> => {
+    try {
+      await db
+        .prepare(
+          `UPDATE publication_requests SET updated_at = datetime('now') WHERE ${AS_READ_SQL}`,
+        )
+        .bind(...asRead(row))
+        .run();
+    } catch (err) {
+      console.error(`[publish-sweep] could not requeue ${row.dataset_id}: ${errMsg(err)}`);
+    }
+  };
 
   // Production only (epic #923 Phase 7). The candidate query filters on request
   // status alone, with no dataset-id prefix restriction, so on the dev/staging
@@ -272,6 +291,7 @@ export async function sweepBlockedBidsValidationRequests(
     const repoName = row.github_repo?.split("/")[1];
     if (!repoName) {
       console.warn(`[publish-sweep] ${row.dataset_id}: no github_repo on dataset; skipping`);
+      await rotate(row);
       continue;
     }
 
@@ -285,6 +305,7 @@ export async function sweepBlockedBidsValidationRequests(
     } catch (err) {
       result.errors++;
       console.error(`[publish-sweep] CI lookup failed for ${row.dataset_id}: ${errMsg(err)}`);
+      await rotate(row);
       continue;
     }
 
@@ -320,8 +341,12 @@ export async function sweepBlockedBidsValidationRequests(
           budget,
         });
         if (gate.kind === "unverified") {
-          if (gate.cause === "budget") result.deferred++;
-          else result.errors++;
+          if (gate.cause === "budget") {
+            result.deferred++;
+          } else {
+            result.errors++;
+            await rotate(row);
+          }
           continue;
         }
         if (gate.kind === "blocked") {
@@ -397,6 +422,11 @@ export async function sweepBlockedBidsValidationRequests(
         } else {
           result.skipped++;
         }
+      } else {
+        // Still waiting on validation (no run, a run going, an inconclusive
+        // one), or already labelled as failing: nothing to write, but it was
+        // looked at.
+        await rotate(row);
       }
     } catch (err) {
       // A transient D1 error on one row must not abort the whole sweep: count
