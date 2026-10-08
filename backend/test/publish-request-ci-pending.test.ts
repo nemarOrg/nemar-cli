@@ -721,8 +721,8 @@ describe("the sweep checks the same minimums before it releases a request", () =
       ["placeholder author", descriptionJson(NAME, ["TBD"])],
       ["missing file", null],
     ];
-    for (const [label, body] of cases) {
-      const id = `nm0005${cases.findIndex((c) => c[0] === label)}0`;
+    for (const [i, [label, body]] of cases.entries()) {
+      const id = `nm00056${i}`;
       seedDataset(id);
       runs = "none";
       descriptionBody = body;
@@ -748,30 +748,16 @@ describe("the sweep checks the same minimums before it releases a request", () =
 describe("a readiness check that cannot run is not reported as pending", () => {
   // `bids_validation_pending` means GitHub answered and there is no run yet,
   // and the sweep then carries the request on. When the check itself fails (no
-  // credential, workflow deploy, an outage) the sweep would fail the same way,
-  // so the depositor is not promised a continuation: 503, no block reason.
+  // credential, workflow deploy, an outage) the cause can be one the sweep does
+  // not cure, so the depositor is not promised a continuation: 503, no block
+  // reason (the field-for-field pin below has no `block_reason` or `status`).
   const NO_GITHUB_AUTH = { GITHUB_ADMIN_PAT: undefined } as Partial<Bindings>;
 
   test("no GitHub credential: 503 ci_check_unavailable, and the request is still recorded", async () => {
+    // The whole body is pinned, field for field, with the other CLI bodies below.
     const { status, body } = await requestPublication({ bindings: env(NO_GITHUB_AUTH) });
     expect(status).toBe(503);
-    expect(Object.keys(body).sort()).toEqual([
-      "anonymous",
-      "ci_url",
-      "dataset_id",
-      "error",
-      "message",
-    ]);
-    expect(body).toMatchObject({
-      error: "ci_check_unavailable",
-      dataset_id: DATASET,
-      anonymous: false,
-      ci_url: `https://github.com/nemarDatasets/${DATASET}/actions`,
-    });
-    expect((body as { message: string }).message).toContain(
-      "NEMAR could not check BIDS validation status right now",
-    );
-    expect((body as { message: string }).message).toContain("Your request is recorded");
+    expect((body as { error: string }).error).toBe("ci_check_unavailable");
     // Recorded, as the message says, and blocked on the existing reason.
     expect(row().status).toBe("blocked");
     expect(row().block_reason).toBe("bids_validation_pending");
@@ -783,13 +769,6 @@ describe("a readiness check that cannot run is not reported as pending", () => {
     expect(status).toBe(503);
     expect((body as { error: string }).error).toBe("ci_check_unavailable");
     expect(row().status).toBe("blocked");
-  });
-
-  test("it carries no block reason, so nothing reads it as pending", async () => {
-    runsStatus = 403;
-    const { body } = await requestPublication();
-    expect(body.block_reason).toBeUndefined();
-    expect(body.status).toBeUndefined();
   });
 
   test("the minimums are not read when the check could not run", async () => {
