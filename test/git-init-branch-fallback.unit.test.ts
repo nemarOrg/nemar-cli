@@ -22,17 +22,12 @@ import { spawnSync } from "bun";
 import { initDataset } from "../src/lib/git-annex/init";
 import { ensureLocalMainBranch } from "../src/lib/git-annex/repo-state";
 
-const REAL_GIT = Bun.which("git") ?? "";
+const foundGit = Bun.which("git");
+if (foundGit === null) {
+  throw new Error("test/git-init-branch-fallback.unit.test.ts needs a git executable on PATH");
+}
+const REAL_GIT: string = foundGit;
 const AUTHOR = { name: "Test", email: "test@test.com" };
-
-// `-b` reached git in 2.28. On a host whose own git is older, the modern-git
-// assertions below would be describing a git the host does not have.
-const gitVersion = spawnSync([REAL_GIT, "--version"])
-  .stdout.toString()
-  .match(/(\d+)\.(\d+)/);
-const REAL_GIT_HAS_INITIAL_BRANCH =
-  gitVersion !== null &&
-  (Number(gitVersion[1]) > 2 || (Number(gitVersion[1]) === 2 && Number(gitVersion[2]) >= 28));
 
 /** How git 2.25 answers `git init -b main`, and how a localized git words the same refusal. */
 const OLD_GIT_STDERR = {
@@ -139,10 +134,27 @@ async function withShim<T>(shim: Shim, fn: () => Promise<T>): Promise<T> {
   }
 }
 
-/** Real git, by absolute path, so inspecting a repository never writes to a shim log. */
-function git(dir: string, ...args: string[]): { exit: number; out: string } {
-  const r = spawnSync([REAL_GIT, ...args], { cwd: dir, env: { ...process.env } });
-  return { exit: r.exitCode ?? -1, out: r.stdout.toString().trim() };
+/**
+ * Real git, by absolute path, so inspecting a repository never writes to a shim
+ * log, and under the test's own global config so the developer's does not leak in.
+ */
+function git(dir: string, ...args: string[]): { exit: number; out: string; err: string } {
+  const r = spawnSync([REAL_GIT, ...args], {
+    cwd: dir,
+    env: { ...process.env, GIT_CONFIG_GLOBAL: gitConfig },
+  });
+  return {
+    exit: r.exitCode ?? -1,
+    out: r.stdout.toString().trim(),
+    err: r.stderr.toString().trim(),
+  };
+}
+
+/** `git`, but a fixture step that fails stops the test with git's own words. */
+function gitOk(dir: string, ...args: string[]): string {
+  const r = git(dir, ...args);
+  if (r.exit !== 0) throw new Error(`git ${args.join(" ")} failed (exit ${r.exit}): ${r.err}`);
+  return r.out;
 }
 
 const subjects = (dir: string, ref: string): string[] =>
@@ -161,11 +173,54 @@ beforeAll(() => {
   // A host default that is not "main": plain `git init` then leaves HEAD on
   // "trunk", so a fallback that forgot to re-point HEAD cannot pass by accident.
   gitConfig = join(root, "gitconfig");
-  writeFileSync(gitConfig, "[init]\n\tdefaultBranch = trunk\n");
+  writeFileSync(gitConfig, "[init]\n\tdefaultBranch = trunk\n[commit]\n\tgpgsign = false\n");
+
+  // Canary. GIT_CONFIG_GLOBAL needs git 2.32, and a git that ignores it would
+  // leave the trunk default inert, so the "never re-point HEAD" mistake would
+  // pass unseen. 2.32 also covers `init -b` (2.28), which the modern-git
+  // assertions rely on. Fail loudly instead of weakening the tests.
+  const canary = join(root, "canary");
+  const plain = git(root, "init", "-q", canary);
+  const modern = git(root, "init", "-q", "-b", "main", join(root, "canary-b"));
+  const head = git(canary, "symbolic-ref", "HEAD").out;
+  if (plain.exit !== 0 || modern.exit !== 0 || head !== "refs/heads/trunk") {
+    throw new Error(
+      `these tests need git >= 2.32 (GIT_CONFIG_GLOBAL and init -b); ${REAL_GIT} gave HEAD ` +
+        `${head || "(none)"} and exits ${plain.exit}/${modern.exit}: ${plain.err || modern.err}`,
+    );
+  }
 });
 
 afterAll(() => {
+  // git-annex makes annexed content read-only; make the tree removable first.
+  spawnSync(["chmod", "-R", "u+w", root]);
   rmSync(root, { recursive: true, force: true });
+});
+
+describe("what the real git answers", () => {
+  // The fallback rests on two facts: a switch git does not know exits 129 in
+  // every locale, and a fatal error exits 128. The stand-ins below only hand-write
+  // the first, so the real git is asked here. A real git older than 2.28 is the
+  // one case no test in this file can reach; check it by hand in a container
+  // that has one (Ubuntu 20.04 ships 2.25): `git init -b main /tmp/x; echo $?`
+  // should print 129.
+  for (const locale of ["C", "de_DE.UTF-8", "fr_FR.UTF-8"]) {
+    test(`an unknown switch exits 129 under LC_ALL=${locale}`, () => {
+      const target = join(root, `unknown-switch-${locale}`);
+      const r = spawnSync([REAL_GIT, "init", "--no-such-switch", target], {
+        env: { ...process.env, LC_ALL: locale, LANGUAGE: locale.slice(0, 2) },
+      });
+      expect(r.exitCode).toBe(129);
+      expect(r.stderr.toString()).not.toBe("");
+    });
+  }
+
+  test("a path git cannot create exits 128", () => {
+    const blocker = join(root, "blocker-file");
+    writeFileSync(blocker, "x");
+    const r = spawnSync([REAL_GIT, "init", "-b", "main", join(blocker, "sub")]);
+    expect(r.exitCode).toBe(128);
+  });
 });
 
 describe("the older-git stand-ins", () => {
@@ -229,27 +284,22 @@ describe("initDataset when git init fails for any other reason", () => {
     }, 30_000);
   }
 
-  // On a git without -b the same path fails the retry as well; this one pins the
-  // modern case, where the first and only init is the one that reports.
-  test.skipIf(!REAL_GIT_HAS_INITIAL_BRANCH)(
-    "a path that cannot be created is reported by the real git, once",
-    async () => {
-      const shim = loggingGit();
-      const blocker = join(root, "a-file");
-      writeFileSync(blocker, "x");
-      const target = join(blocker, "sub");
-      const res = await withShim(shim, () => initDataset(target, { author: AUTHOR }));
+  test("a path that cannot be created is reported by the real git, once", async () => {
+    const shim = loggingGit();
+    const blocker = join(root, "a-file");
+    writeFileSync(blocker, "x");
+    const target = join(blocker, "sub");
+    const res = await withShim(shim, () => initDataset(target, { author: AUTHOR }));
 
-      // The report is git's own stderr, in whatever language git speaks here. A
-      // later step failing on the missing directory would word it differently.
-      const direct = spawnSync([REAL_GIT, "init", "-b", "main", target]);
-      expect(direct.exitCode).not.toBe(0);
-      expect(direct.stderr.toString().trim()).not.toBe("");
-      expect(res).toEqual({ success: false, error: direct.stderr.toString().trim() });
-      expect(initCalls(shim)).toEqual([`init -b main ${target}`]);
-      expect(headRepoints(shim)).toHaveLength(0);
-    },
-  );
+    // The report is git's own stderr, in whatever language git speaks here. A
+    // later step failing on the missing directory would word it differently.
+    const direct = spawnSync([REAL_GIT, "init", "-b", "main", target]);
+    expect(direct.exitCode).not.toBe(0);
+    expect(direct.stderr.toString().trim()).not.toBe("");
+    expect(res).toEqual({ success: false, error: direct.stderr.toString().trim() });
+    expect(initCalls(shim)).toEqual([`init -b main ${target}`]);
+    expect(headRepoints(shim)).toHaveLength(0);
+  });
 
   test("a failing plain git init in the fallback is reported", async () => {
     const shim = oldGit(
@@ -275,22 +325,18 @@ describe("initDataset when git init fails for any other reason", () => {
 });
 
 describe("initDataset on a modern git", () => {
-  test.skipIf(!REAL_GIT_HAS_INITIAL_BRANCH)(
-    "uses -b main directly: the fallback never runs",
-    async () => {
-      const shim = loggingGit();
-      const dir = freshDir();
-      const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
+  test("uses -b main directly: the fallback never runs", async () => {
+    const shim = loggingGit();
+    const dir = freshDir();
+    const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
 
-      expect(res).toEqual({ success: true });
-      // Exactly one init, and it is the one with -b; no plain init, no re-point.
-      expect(initCalls(shim)).toEqual([`init -b main ${dir}`]);
-      expect(headRepoints(shim)).toHaveLength(0);
-      expect(subjects(dir, "refs/heads/main")).toEqual(["Initialize dataset"]);
-      expect(hasBranch(dir, "trunk")).toBe(false);
-    },
-    30_000,
-  );
+    expect(res).toEqual({ success: true });
+    // Exactly one init, and it is the one with -b; no plain init, no re-point.
+    expect(initCalls(shim)).toEqual([`init -b main ${dir}`]);
+    expect(headRepoints(shim)).toHaveLength(0);
+    expect(subjects(dir, "refs/heads/main")).toEqual(["Initialize dataset"]);
+    expect(hasBranch(dir, "trunk")).toBe(false);
+  }, 30_000);
 });
 
 /**
@@ -305,20 +351,27 @@ async function initThenEnsureMain(shim: Shim, dir: string): Promise<boolean> {
   });
 }
 
-describe("initDataset where the branch name was not chosen by git init", () => {
-  /** A plain repository with two commits on master, made by the real git. */
-  function seedMasterWithHistory(dir: string): void {
-    mkdirSync(dir, { recursive: true });
-    git(dir, "init", "-q", "-b", "master", ".");
-    for (const message of ["c1", "c2"]) {
-      git(
-        dir,
-        ...["-c", "user.name=t", "-c", "user.email=t@t"],
-        ...["commit", "-q", "--allow-empty", "-m", message],
-      );
-    }
+/**
+ * A plain repository with two commits on master, made by the real git under the
+ * test's config. Plain `git init` plus `symbolic-ref` rather than `init -b`, so
+ * the seed does not depend on the git version under test; every step must
+ * succeed, so a failing seed is not mistaken for a failing fallback.
+ */
+function seedMasterWithHistory(dir: string): void {
+  mkdirSync(dir, { recursive: true });
+  gitOk(dir, "init", "-q", ".");
+  gitOk(dir, "symbolic-ref", "HEAD", "refs/heads/master");
+  for (const message of ["c1", "c2"]) {
+    gitOk(
+      dir,
+      ...["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"],
+      ...["commit", "-q", "--allow-empty", "-m", message],
+    );
   }
+  expect(gitOk(dir, "rev-list", "--count", "refs/heads/master")).toBe("2");
+}
 
+describe("initDataset where the branch name was not chosen by git init", () => {
   test("a fresh directory is already on main, so the upload renames nothing", async () => {
     const shim = oldGit(OLD_GIT_STDERR.english);
     const dir = freshDir();
@@ -353,28 +406,26 @@ describe("initDataset where the branch name was not chosen by git init", () => {
     );
   }, 30_000);
 
-  test.skipIf(!REAL_GIT_HAS_INITIAL_BRANCH)(
-    "the fallback ends where a modern git does on the same repository",
-    async () => {
-      // On a modern git `init -b main` is ignored for an existing repository
-      // (it warns "re-init: ignored --initial-branch=main"), so this is the
-      // reference outcome for the fallback to match.
-      const modernDir = freshDir();
-      seedMasterWithHistory(modernDir);
-      await initThenEnsureMain(loggingGit(), modernDir);
+  test("the fallback ends where a modern git does on the same repository", async () => {
+    // On a modern git `init -b main` is ignored for an existing repository
+    // (it warns "re-init: ignored --initial-branch=main"), so this is the
+    // reference outcome for the fallback to match.
+    const modernDir = freshDir();
+    seedMasterWithHistory(modernDir);
+    await initThenEnsureMain(loggingGit(), modernDir);
+    // Equal because both kept the history, not because both came out empty.
+    expect(subjects(modernDir, "refs/heads/main")).toEqual(
+      expect.arrayContaining(["c1", "c2", "Initialize dataset"]),
+    );
 
-      const oldDir = freshDir();
-      seedMasterWithHistory(oldDir);
-      await initThenEnsureMain(oldGit(OLD_GIT_STDERR.german), oldDir);
+    const oldDir = freshDir();
+    seedMasterWithHistory(oldDir);
+    await initThenEnsureMain(oldGit(OLD_GIT_STDERR.german), oldDir);
 
-      expect(subjects(oldDir, "refs/heads/main")).toEqual(subjects(modernDir, "refs/heads/main"));
-      expect(subjects(oldDir, "refs/heads/master")).toEqual(
-        subjects(modernDir, "refs/heads/master"),
-      );
-      expect(git(oldDir, "symbolic-ref", "HEAD").out).toBe(
-        git(modernDir, "symbolic-ref", "HEAD").out,
-      );
-    },
-    60_000,
-  );
+    expect(subjects(oldDir, "refs/heads/main")).toEqual(subjects(modernDir, "refs/heads/main"));
+    expect(subjects(oldDir, "refs/heads/master")).toEqual(subjects(modernDir, "refs/heads/master"));
+    expect(git(oldDir, "symbolic-ref", "HEAD").out).toBe(
+      git(modernDir, "symbolic-ref", "HEAD").out,
+    );
+  }, 60_000);
 });
