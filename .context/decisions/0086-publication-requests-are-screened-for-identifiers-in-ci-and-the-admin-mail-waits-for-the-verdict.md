@@ -187,6 +187,7 @@ An identifier finding is never a refusal of this command: the request is accepte
 The CLI does not wait, retry or poll: the server already records the request and owns the transition, and every re-request repeats the GitHub readiness check and rewrites the row, so a client-side loop (an earlier `--wait` re-requested every minute for up to 24 hours) is rejected.
 The depositor checks validation with `nemar dataset ci <id>` and requests again if they would rather not wait for the sweep, and the upload's success output names both commands.
 A re-request restates the anonymous flag, so the command printed for an anonymous depositor carries `--anonymous`, and a request that asked for anonymity and was not recorded as anonymous exits 1.
-If validation fails, the sweep relabels the request `bids_validation_failed` and mails nobody, so the text says where to look.
+If validation fails, the sweep relabels the request `bids_validation_failed` and mails nobody; if a submission minimum fails when the sweep goes to release it, it re-blocks the request as `min_requirements_failed` and mails nobody either.
+The text says where to look.
 
 The pending state is `isCiPendingBlock` in `src/lib/publish-pending.ts`, guarded through the real CLI by `test/publish-pending-cli.test.ts` and `test/publish-status-pending-cli.test.ts`.

@@ -68,8 +68,9 @@ export function ciPendingHeadline(reason: CiPendingReason): string {
  * one. `anonymous` is what the depositor TYPED (or, for `publish status`, what
  * the recorded request says), never an echo that might be missing.
  *
- * If validation fails, the sweep relabels the request and mails nobody, so the
- * last lines say where to look.
+ * If validation fails, or a submission minimum fails when the sweep goes to
+ * release the request, the sweep relabels it and mails nobody, so the last
+ * lines say where to look.
  */
 export function ciPendingHint(datasetId: string, anonymous = false): string[] {
   const again = `nemar dataset publish request ${datasetId}${anonymous ? " --anonymous" : ""}`;
@@ -78,7 +79,7 @@ export function ciPendingHint(datasetId: string, anonymous = false): string[] {
     `  If you would rather not wait for that, check validation with: nemar dataset ci ${datasetId}`,
     `  Once it has passed, request again: ${again}`,
     "  If it says a request already exists, nothing more is needed.",
-    "  If validation fails, the request stays blocked and nothing is emailed:",
+    "  If validation fails or a submission minimum fails, the request stays blocked and nothing is emailed:",
     `  check nemar dataset ci ${datasetId} or nemar dataset publish status ${datasetId}.`,
   ];
 }
