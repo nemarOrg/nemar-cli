@@ -43,7 +43,7 @@ describe("formatUploadSummary", () => {
       "Uploaded 4 data files to S3; 6 were already at the remote; all recorded at the remote",
     );
     expect(formatUploadSummary(4, 4, 0)).toBe(
-      "Uploaded 4 data files to S3 (git-annex confirmed 0 of 4; the rest are recorded in the location log); all recorded at the remote",
+      "4 data files not yet recorded at the S3 remote were copied (git-annex confirmed 0 of 4; the rest are recorded in the location log); all recorded at the remote",
     );
   });
 });
