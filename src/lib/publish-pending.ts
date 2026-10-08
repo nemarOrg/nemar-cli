@@ -11,24 +11,16 @@
  * CLI does not wait or poll. Checking validation is `nemar dataset ci <id>`.
  */
 
-import type { PublicationBlockReason } from "../../shared/contract/publication.js";
+import {
+  CI_PENDING_BLOCK_REASONS,
+  type CiPendingReason,
+  isCiPendingReason,
+} from "../../shared/contract/publication.js";
 import { ApiError } from "./api/errors.js";
 
-/** The two block reasons that mean "CI has not concluded yet", not "CI failed". */
-export type CiPendingReason = Extract<
-  PublicationBlockReason,
-  "bids_validation_pending" | "bids_validation_in_progress"
->;
-
-export const CI_PENDING_BLOCK_REASONS: ReadonlySet<string> = new Set<CiPendingReason>([
-  "bids_validation_pending",
-  "bids_validation_in_progress",
-]);
-
-/** Is this block reason one of the two that only say CI has not finished? */
-export function isCiPendingReason(reason: unknown): reason is CiPendingReason {
-  return typeof reason === "string" && CI_PENDING_BLOCK_REASONS.has(reason);
-}
+// Declared once in the shared contract, which the route and the sweep read too.
+export { CI_PENDING_BLOCK_REASONS, isCiPendingReason };
+export type { CiPendingReason };
 
 /**
  * True for a publication refusal that only says CI has not finished: a 422
