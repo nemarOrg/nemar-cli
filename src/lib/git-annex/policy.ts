@@ -55,9 +55,13 @@ export const ANNEX_DATA_EXTENSIONS = [
 export const ANNEX_DATA_GLOBS = ["*_motion.tsv"] as const;
 
 /**
- * Metadata that stays in plain git regardless of size, so a metadata-only clone
- * is readable and GitHub renders it. Note that these are exact globs: `*.tsv`
- * does not match `*.tsv.gz`, so compressed data still annexes.
+ * Metadata that stays in plain git, so a metadata-only clone is readable and
+ * GitHub renders it. Note that these are exact globs: `*.tsv` does not match
+ * `*.tsv.gz`, so compressed data still annexes.
+ *
+ * In the BIDS tree itself this holds at any size. Under
+ * {@link SIZE_CAPPED_METADATA_DIRS} it holds up to
+ * {@link METADATA_GIT_SIZE_CAP_BYTES} (ADR 0093).
  */
 export const NEVER_ANNEX_GLOBS = [
   "*.tsv",
@@ -95,15 +99,48 @@ export function describeAnnexSizeThreshold(): string {
 }
 
 /**
+ * Top-level directories where a file matching {@link NEVER_ANNEX_GLOBS} is
+ * annexed once it is larger than {@link METADATA_GIT_SIZE_CAP_BYTES} (ADR 0093).
+ *
+ * These are the directories nothing reads as metadata: the BIDS validator
+ * ignores all three by default, and the backend treats all three as non-raw.
+ * They are also where large text that is really data lands, such as spike
+ * times exported as `.txt` or derived tables as `.tsv`. Everywhere else a
+ * metadata name stays in git at any size, because the backend, the enrichment
+ * and the CI validator read those files from the GitHub checkout.
+ *
+ * Matched case-sensitively from the dataset root, as git-annex matches
+ * `include=sourcedata/*`: `sub-01/sourcedata/` and `SourceData/` are not in
+ * scope.
+ */
+export const SIZE_CAPPED_METADATA_DIRS = ["sourcedata/", "derivatives/", "code/"] as const;
+
+/**
+ * Above this size, a metadata-named file under {@link SIZE_CAPPED_METADATA_DIRS}
+ * is annexed. 10 MiB, an exact byte count in the expression.
+ *
+ * GitHub warns about a file over 50 MiB and refuses one over 100 MiB, and a
+ * large push can time out before either limit: `nm000429` pushed 1.40 GB of
+ * `.txt` files and failed with HTTP 408 on 12 attempts. With a 10 MiB cap, 21 of
+ * those 24 files are annexed and 12 MB stay in git.
+ */
+export const METADATA_GIT_SIZE_CAP_BYTES = 10 * 1024 * 1024;
+
+/**
  * Render the policy as a git-annex preferred-content expression.
  *
- * Shape: `(<data extensions> or <data globs> or largerthan=N) and (<not metadata>) and ...`
+ * Shape: `(<data extensions> or <data globs> or largerthan=N)
+ *   and ((<not metadata>) or (<capped dirs> and largerthan=CAP))`
  *
  * The data globs appear in BOTH clauses on purpose. git-annex ANDs the top-level
  * terms, so the metadata clause can veto the first one: listing `*_motion.tsv`
  * only among the includes would still lose to `exclude=*.tsv`. Pairing it as
  * `(exclude=*.tsv or include=*_motion.tsv)` reads "not a TSV, or else a motion
  * TSV" and is what actually lets it through.
+ *
+ * The last clause lets a metadata name through when it is under one of the
+ * size-capped directories and larger than the cap. The cap is above the size
+ * threshold, so the first clause is always true for such a file.
  */
 export function buildLargefilesExpression(): string {
   const dataTerms = [
@@ -121,7 +158,10 @@ export function buildLargefilesExpression(): string {
     return `(exclude=${glob} or ${alternatives})`;
   }).join(" and ");
 
-  return `(${dataTerms}) and ${metadataTerms}`;
+  const cappedDirs = SIZE_CAPPED_METADATA_DIRS.map((dir) => `include=${dir}*`).join(" or ");
+  const oversizedMetadata = `(${cappedDirs}) and largerthan=${METADATA_GIT_SIZE_CAP_BYTES}`;
+
+  return `(${dataTerms}) and ((${metadataTerms}) or (${oversizedMetadata}))`;
 }
 
 /**
@@ -197,9 +237,16 @@ function nameVerdict(path: string, foldCase: boolean): NameVerdict {
  */
 export function shouldAnnex(path: string, size: number): boolean {
   const verdict = nameVerdict(path, true);
-  if (verdict === "metadata") return false;
+  if (verdict === "metadata") {
+    return isInSizeCappedDir(path) && size > METADATA_GIT_SIZE_CAP_BYTES;
+  }
   if (verdict === "data") return true;
   return size > ANNEX_SIZE_THRESHOLD_BYTES;
+}
+
+/** True under a {@link SIZE_CAPPED_METADATA_DIRS} entry, case-sensitively as git-annex reads it. */
+function isInSizeCappedDir(path: string): boolean {
+  return SIZE_CAPPED_METADATA_DIRS.some((dir) => path.startsWith(dir));
 }
 
 /**

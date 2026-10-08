@@ -26,6 +26,7 @@ import { dirname, join } from "node:path";
 import { configureLargefiles, gitAnnexAdd, initDataset } from "../src/lib/git-annex/init";
 import {
   ANNEX_SIZE_THRESHOLD_BYTES,
+  METADATA_GIT_SIZE_CAP_BYTES,
   buildLargefilesExpression,
   describeAnnexSizeThreshold,
   isCurrentLargefilesExpression,
@@ -69,7 +70,12 @@ const FIXTURES: Array<{ path: string; size: number; why: string }> = [
   { path: "sub-01/eeg/sub-01_task-rest_eeg.set", size: 500, why: "recording extension, tiny" },
   // Metadata stays in git however big it gets (ADR 0015).
   { path: "sub-01/eeg/sub-01_task-rest_events.tsv", size: 300_000, why: "events sidecar, large" },
-  { path: "participants.tsv", size: 3, why: "root metadata" },
+  // Root metadata over the sourcedata cap still stays in git: the backend reads it from GitHub.
+  {
+    path: "participants.tsv",
+    size: 10_485_761,
+    why: "root metadata, over the metadata cap",
+  },
   { path: "dataset_description.json", size: 400, why: "root metadata" },
   { path: "README", size: 120_000, why: "README stays in git at any size" },
   { path: "CHANGES", size: 120_000, why: "CHANGES stays in git at any size" },
@@ -93,6 +99,55 @@ const FIXTURES: Array<{ path: string; size: number; why: string }> = [
   { path: "derivatives/small.dat", size: 50, why: "unknown extension under threshold" },
   // The .github workflows that must never become symlinks (ADR 0015).
   { path: ".github/workflows/bids-validate.yml", size: 4_000, why: "CI workflow must stay in git" },
+  // ADR 0093: a metadata name over 10 MiB under sourcedata/, derivatives/ or code/ is
+  // annexed. The nm000429 case is Plexon spike times exported as .txt in sourcedata.
+  {
+    path: "sourcedata/plexon/Sub11_Block07_spikes2.txt",
+    size: 10_485_761,
+    why: "sourcedata .txt one byte over the metadata cap",
+  },
+  {
+    path: "sourcedata/plexon/Sub02_Block01_spikes2.txt",
+    size: 10_485_760,
+    why: "sourcedata .txt exactly at the metadata cap",
+  },
+  {
+    // Annexed if the cap were written `largerthan=10mb`, which git-annex reads as SI.
+    path: "sourcedata/plexon/Sub03_Block01_spikes1.txt",
+    size: 10_000_001,
+    why: "sourcedata .txt over 10 MB but under 10 MiB",
+  },
+  { path: "sourcedata/notes.txt", size: 2_000, why: "small sourcedata .txt" },
+  {
+    path: "derivatives/features/sub-01_features.tsv",
+    size: 10_485_761,
+    why: "derivatives .tsv over the metadata cap",
+  },
+  {
+    path: "code/conversion_report.json",
+    size: 10_485_761,
+    why: "code .json over the metadata cap",
+  },
+  {
+    path: "sub-01/eeg/sub-01_task-long_events.tsv",
+    size: 10_485_761,
+    why: "events sidecar over the metadata cap, outside the capped directories",
+  },
+  {
+    path: "SourceData/big.txt",
+    size: 10_485_761,
+    why: "directory named in another case, not in scope",
+  },
+  {
+    path: "sub-01/sourcedata/big.txt",
+    size: 10_485_761,
+    why: "nested sourcedata, not in scope",
+  },
+  {
+    path: "sourcedata/motion/sub-01_task-walk_tracksys-imu_motion.tsv",
+    size: 800,
+    why: "motion recording under sourcedata, annexed at any size as before",
+  },
 ];
 
 // Each test builds a repository and runs git-annex a few times; CI machines are slower
@@ -252,6 +307,43 @@ describe("annex policy: ADR 0015 invariants still hold", () => {
   });
 });
 
+describe("annex policy: oversized metadata outside the BIDS tree (ADR 0093)", () => {
+  test("a sourcedata .txt over the cap is annexed; at the cap or small it stays in git", () => {
+    expect(annexedByGitAnnex.get("sourcedata/plexon/Sub11_Block07_spikes2.txt")).toBe(true);
+    expect(annexedByGitAnnex.get("sourcedata/plexon/Sub02_Block01_spikes2.txt")).toBe(false);
+    expect(annexedByGitAnnex.get("sourcedata/plexon/Sub03_Block01_spikes1.txt")).toBe(false);
+    expect(annexedByGitAnnex.get("sourcedata/notes.txt")).toBe(false);
+    expect(METADATA_GIT_SIZE_CAP_BYTES).toBe(10_485_760);
+  });
+
+  test("derivatives/ and code/ are capped the same way", () => {
+    expect(annexedByGitAnnex.get("derivatives/features/sub-01_features.tsv")).toBe(true);
+    expect(annexedByGitAnnex.get("code/conversion_report.json")).toBe(true);
+  });
+
+  test("the BIDS tree keeps its metadata in git over the cap", () => {
+    // The backend, enrichment and the CI validator read these from the GitHub checkout.
+    expect(annexedByGitAnnex.get("participants.tsv")).toBe(false);
+    expect(annexedByGitAnnex.get("sub-01/eeg/sub-01_task-long_events.tsv")).toBe(false);
+  });
+
+  test("only the top-level directories as written are in scope", () => {
+    expect(annexedByGitAnnex.get("SourceData/big.txt")).toBe(false);
+    expect(annexedByGitAnnex.get("sub-01/sourcedata/big.txt")).toBe(false);
+  });
+
+  test("a motion recording under sourcedata/ is still annexed at any size", () => {
+    const motion = "sourcedata/motion/sub-01_task-walk_tracksys-imu_motion.tsv";
+    expect(annexedByGitAnnex.get(motion)).toBe(true);
+  });
+
+  test("the expression states the directories and the cap in exact bytes", () => {
+    expect(buildLargefilesExpression()).toContain(
+      "or ((include=sourcedata/* or include=derivatives/* or include=code/*) and largerthan=10485760))",
+    );
+  });
+});
+
 describe("annex policy: the shell copy cannot drift", () => {
   test("nemar-restore-dataset.sh ANNEX_LARGEFILES matches the policy module", () => {
     const script = readFileSync(
@@ -344,12 +436,24 @@ describe("annex policy: the size threshold is 100,000 bytes", () => {
   }
 
   test("the legacy spelling counts as NEMAR's policy and a different threshold does not", () => {
-    // Datasets configured before the amendment carry `100kb`; the fleet sweep must not
-    // read them as drifted. Both are the same rule, as the boundary tests above show.
+    // `100kb` and `100000` are the same rule, as the boundary tests above show, so the
+    // spelling alone must not read as drift.
     expect(isCurrentLargefilesExpression(buildLargefilesExpression())).toBe(true);
-    expect(isCurrentLargefilesExpression(LEGACY_EXPRESSION)).toBe(true);
-    expect(isCurrentLargefilesExpression(LEGACY_EXPRESSION.replace("100kb", "1mb"))).toBe(false);
-    expect(isCurrentLargefilesExpression(LEGACY_EXPRESSION.replace("100kb", "100kib"))).toBe(false);
+    expect(
+      isCurrentLargefilesExpression(
+        buildLargefilesExpression().replace("largerthan=100000", "largerthan=100kb"),
+      ),
+    ).toBe(true);
+    // The expression from before ADR 0093 is a different rule: it keeps a 50 MiB
+    // sourcedata .txt in git. The fleet sweep reports it as drift.
+    expect(isCurrentLargefilesExpression(LEGACY_EXPRESSION)).toBe(false);
+    const current = buildLargefilesExpression();
+    expect(
+      isCurrentLargefilesExpression(current.replace("largerthan=100000", "largerthan=1mb")),
+    ).toBe(false);
+    expect(
+      isCurrentLargefilesExpression(current.replace("largerthan=100000", "largerthan=100kib")),
+    ).toBe(false);
     expect(isCurrentLargefilesExpression("largerthan=100kb")).toBe(false);
   });
 });

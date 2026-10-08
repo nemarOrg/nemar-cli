@@ -133,22 +133,44 @@ describe("classifyAnnexPolicy", () => {
     ).toBe(true);
   });
 
-  test("the largerthan=100kb spelling every earlier dataset carries is still configured", () => {
-    // Verbatim what `configureLargefiles` wrote before the threshold was rendered in
-    // exact bytes (ADR 0031, amendment of 2026-10-07). git-annex reads `100kb` as
-    // 100,000 bytes, the rule the new spelling states, so reading these datasets as
-    // drifted would have the sweep clone the whole fleet to rewrite one config line.
+  test("the largerthan=100kb spelling of the current expression is still configured", () => {
+    // git-annex reads `100kb` as 100,000 bytes, the rule the expression states in
+    // bytes (ADR 0031, amendment of 2026-10-07), so the spelling alone is not drift.
     // test/annex-policy.test.ts proves the two annex the same files at the boundary.
-    const legacy =
-      "(include=*.edf or include=*.bdf or include=*.set or include=*.fif or include=*.vhdr or include=*.eeg or include=*.cnt or include=*.fdt or include=*_motion.tsv or largerthan=100kb) and (exclude=*.tsv or include=*_motion.tsv) and exclude=*.json and exclude=*.md and exclude=*.txt and exclude=*.yml and exclude=*.yaml and exclude=README* and exclude=LICENSE* and exclude=CHANGES* and exclude=.bidsignore and exclude=.gitignore";
-    expect(state({ configLog: `1750000000s annex.largefiles ${legacy}` }).policyConfigured).toBe(
+    const spelled = buildLargefilesExpression().replace("largerthan=100000", "largerthan=100kb");
+    expect(state({ configLog: `1750000000s annex.largefiles ${spelled}` }).policyConfigured).toBe(
       true,
     );
     // A different threshold under the same unit is a different rule, not a spelling.
-    const other = legacy.replace("largerthan=100kb", "largerthan=1mb");
+    const other = spelled.replace("largerthan=100kb", "largerthan=1mb");
     expect(state({ configLog: `1750000000s annex.largefiles ${other}` }).policyConfigured).toBe(
       false,
     );
+  });
+
+  test("the expression from before the metadata cap is drift", () => {
+    // Verbatim what `configureLargefiles` wrote before ADR 0093. It keeps a 50 MiB
+    // `.txt` under sourcedata/ in git, so it is a different rule and the sweep
+    // reports the dataset as needing the policy.
+    const preCap =
+      "(include=*.edf or include=*.bdf or include=*.set or include=*.fif or include=*.vhdr or include=*.eeg or include=*.cnt or include=*.fdt or include=*_motion.tsv or largerthan=100kb) and (exclude=*.tsv or include=*_motion.tsv) and exclude=*.json and exclude=*.md and exclude=*.txt and exclude=*.yml and exclude=*.yaml and exclude=README* and exclude=LICENSE* and exclude=CHANGES* and exclude=.bidsignore and exclude=.gitignore";
+    expect(state({ configLog: `1750000000s annex.largefiles ${preCap}` }).policyConfigured).toBe(
+      false,
+    );
+  });
+
+  test("a sourcedata .txt over the metadata cap held in git is data git still holds", () => {
+    const result = state({
+      configLog: `1750000000s annex.largefiles ${buildLargefilesExpression()}`,
+      entries: [
+        { path: "sourcedata/plexon/spikes.txt", mode: "100644", size: 164_501_157 },
+        { path: "sourcedata/plexon/small_spikes.txt", mode: "100644", size: 504_674 },
+        { path: "sub-01/eeg/sub-01_task-rest_events.tsv", mode: "100644", size: 20_000_000 },
+      ],
+    });
+    expect(result.gitResidentData).toEqual([
+      { path: "sourcedata/plexon/spikes.txt", size: 164_501_157 },
+    ]);
   });
 
   test("a symlink is annexed content; a plain blob of the same path is not", () => {
