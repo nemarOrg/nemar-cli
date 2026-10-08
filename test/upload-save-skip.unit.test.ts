@@ -94,7 +94,9 @@ describe("the stat guard: a changed file fails the save", () => {
     expect(res.error).toContain("a.edf");
     expect(res.error).not.toContain("b.edf");
     expect(res.error).toContain("Re-run the upload command to re-track them");
-    expect(res.error).toContain("--restart");
+    // A file that stopped being data is dropped from the skip before the compare, so the
+    // hint for it is not reachable here.
+    expect(res.error).not.toContain("--restart");
     expect(await commitCount(dir)).toBe(before);
     // Nothing was marked, so nothing is left behind.
     expect(await tags(dir, "a.edf", "b.edf")).toEqual({ "a.edf": "H", "b.edf": "H" });
@@ -165,6 +167,15 @@ describe("the stat guard: a changed file fails the save", () => {
     const later = new Date(entries[0].mtimeMs + 1_000);
     utimesSync(join(dir, "a.edf"), later, later);
     expect(compareRecordedStat(dir, entries).changed).toEqual(["a.edf"]);
+  });
+
+  test("describeChangedSinceTracked cannot be split or colored by a file name", () => {
+    // Guards displayNames: a name is the user's data, and a newline or an ESCAPE in it
+    // must not split the message or reach the terminal.
+    const text = describeChangedSinceTracked(["a\nb.edf", "c\x1b[2J.edf"], "before");
+    expect(text).toContain("a\\nb.edf, c\\x1b[2J.edf");
+    expect(text).not.toContain("\n");
+    expect(text).not.toContain("\x1b");
   });
 
   test("describeChangedSinceTracked says what to do", () => {
