@@ -6,10 +6,11 @@
  * git-annex filter-process again), and it is also exactly how an edit, a deletion
  * or a crash could be lost without a word. Each guard below is a way the skip could
  * have done that, exercised against real git-annex on a real repository with the
- * production init path, and each names the line it guards.
+ * production init path. Where a test guards one particular line, its first comment
+ * says which.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -32,12 +33,21 @@ import {
 import { SAVE_SKIP_MIN_BYTES, planSaveSkip, saveDatasetStep } from "../src/lib/upload/finalize";
 import { copyAnnexedToRemote, listAnnexedPaths, trackDataFiles } from "../src/lib/upload/transfer";
 import {
+  commitCount,
   initDirectoryRemote,
   makeScratch,
+  trackedRepo as makeTrackedRepo,
+  meterFilterProcess,
   newDatasetRepo,
+  prependPreCommit,
+  recorded,
   run,
+  tags,
   writeFile,
 } from "./helpers/annex-repo";
+
+// Each test builds a repository and runs git-annex a few times; CI is slower than 5 s allows.
+setDefaultTimeout(60_000);
 
 const scratch = makeScratch("nemar-save-skip");
 
@@ -49,53 +59,21 @@ afterAll(() => scratch.cleanup());
 
 const MIB = 1024 * 1024;
 
-/** What the upload records for each tracked file. */
-function recorded(dir: string, paths: string[]): SkipContentCheckEntry[] {
-  return paths.map((path) => {
-    const st = statSync(join(dir, path));
-    return { path, size: st.size, mtimeMs: st.mtimeMs };
-  });
+const trackedRepo = (name: string, files: Record<string, number>) =>
+  makeTrackedRepo(scratch.root, name, files);
+
+/** A whole-second instant: exact in seconds, so a file's mtime can be put back bit for bit. */
+const PINNED_MTIME_S = 1_700_000_000;
+
+/** Give a file the pinned mtime, so a later rewrite can restore exactly it. */
+function pinMtime(dir: string, path: string): void {
+  utimesSync(join(dir, path), PINNED_MTIME_S, PINNED_MTIME_S);
 }
 
-/** `git ls-files -v` tags, one per path: "H" ordinary, lowercase "h" assume-unchanged. */
-async function tags(dir: string, ...paths: string[]): Promise<Record<string, string>> {
-  const out = await run(["git", "ls-files", "-v", "-z", "--", ...paths], dir);
-  const result: Record<string, string> = {};
-  for (const entry of out.stdout.split("\0").filter(Boolean)) result[entry.slice(2)] = entry[0];
-  return result;
-}
-
-async function commitCount(dir: string): Promise<number> {
-  return Number((await run(["git", "rev-list", "--count", "HEAD"], dir)).stdout.trim());
-}
-
-/** A repo with `files` annexed (not yet committed), as the tracking step leaves it. */
-async function trackedRepo(name: string, files: Record<string, number>) {
-  const dir = await newDatasetRepo(scratch.root, name);
-  for (const [path, size] of Object.entries(files))
-    writeFile(dir, path, `${path}:`.padEnd(size, "x"));
-  expect((await gitAnnexAdd(dir, Object.keys(files))).success).toBe(true);
-  return dir;
-}
-
-/** Route this repo's filter-process through `tee` so re-read content is countable. */
-async function meterFilterProcess(dir: string): Promise<string> {
-  const log = join(dir, "..", `${Math.random().toString(36).slice(2)}.filterlog`);
-  writeFileSync(log, "");
-  const set = await run(
-    ["git", "config", "filter.annex.process", `sh -c 'tee -a "${log}" | git-annex filter-process'`],
-    dir,
-  );
-  expect(set.exitCode).toBe(0);
-  return log;
-}
-
-/** Make the next commit's pre-commit hook run `script` first, then git-annex's own hook. */
-function prependPreCommit(dir: string, script: string): void {
-  const hook = join(dir, ".git", "hooks", "pre-commit");
-  const original = readFileSync(hook, "utf-8");
-  writeFileSync(hook, `#!/bin/sh\n${script}\n${original.replace(/^#!.*\n/, "")}`);
-  chmodSync(hook, 0o755);
+/** Push a file's mtime a few seconds past the one it was recorded with. */
+function touchLater(dir: string, path: string, recordedMtimeMs: number): void {
+  const later = (recordedMtimeMs + 5_000) / 1000;
+  utimesSync(join(dir, path), later, later);
 }
 
 describe("the stat guard: a changed file fails the save", () => {
@@ -108,16 +86,17 @@ describe("the stat guard: a changed file fails the save", () => {
     const before = await commitCount(dir);
 
     // Same size, different content, later mtime: the case size alone cannot see.
-    await new Promise((r) => setTimeout(r, 20));
     writeFileSync(join(dir, "a.edf"), "y".repeat(3_000));
+    touchLater(dir, "a.edf", entries[0].mtimeMs);
 
     const res = await saveDataset(dir, "upload", undefined, { skipContentCheck: entries });
 
     expect(res.success).toBe(false);
-    expect(res.error).toContain("1 annexed file(s) changed since they were tracked");
+    expect(res.error).toContain("1 annexed file(s) changed since the upload plan recorded them");
     expect(res.error).toContain("a.edf");
     expect(res.error).not.toContain("b.edf");
     expect(res.error).toContain("Re-run the upload command to re-track them");
+    expect(res.error).toContain("--restart");
     expect(await commitCount(dir)).toBe(before);
     // Nothing was marked, so nothing is left behind.
     expect(await tags(dir, "a.edf", "b.edf")).toEqual({ "a.edf": "H", "b.edf": "H" });
@@ -132,7 +111,7 @@ describe("the stat guard: a changed file fails the save", () => {
 
     const res = await saveDataset(dir, "upload", undefined, { skipContentCheck: entries });
     expect(res.success).toBe(false);
-    expect(res.error).toContain("6 annexed file(s) changed since they were tracked");
+    expect(res.error).toContain("6 annexed file(s) changed since the upload plan recorded them");
     expect(res.error).toContain("(and 3 more)");
     expect(res.error?.match(/f\d\.edf/g)).toHaveLength(3);
   });
@@ -150,7 +129,7 @@ describe("the stat guard: a changed file fails the save", () => {
     const res = await saveDataset(dir, "upload", undefined, { skipContentCheck: entries });
 
     expect(res.success).toBe(false);
-    expect(res.error).toContain("changed while the save was running");
+    expect(res.error).toContain("while the save was running");
     expect(res.error).toContain("a.edf");
     expect(await tags(dir, "a.edf", "b.edf")).toEqual({ "a.edf": "H", "b.edf": "H" });
   });
@@ -177,8 +156,8 @@ describe("the stat guard: a changed file fails the save", () => {
     for (const f of first) markFileUploaded(progress, f.path, f);
     const oldKey = (await run(["git", "annex", "lookupkey", "a.edf"], dir)).stdout.trim();
 
-    await new Promise((r) => setTimeout(r, 20));
     writeFileSync(join(dir, "a.edf"), "e".repeat(3_000));
+    touchLater(dir, "a.edf", progress.files["a.edf"].mtimeMs as number);
     const failed = await saveDatasetStep(dir, undefined, progress, {
       annexedPaths: copied.annexedPaths,
       skipMinBytes: 1,
@@ -233,6 +212,19 @@ describe("the stat guard: a changed file fails the save", () => {
     expect(out.changed).toEqual(["edit.edf"]);
   });
 
+  test("a different size is a change even when the mtime was put back", async () => {
+    // Guards the size half of the comparison. rsync -t, cp -p and tar all restore an
+    // mtime, so a file can come back with the recorded mtime and different bytes; the
+    // earlier test rewrote size AND mtime together and could not tell the halves apart.
+    const dir = await trackedRepo("size-only", { "a.edf": 3_000 });
+    pinMtime(dir, "a.edf");
+    const entries = recorded(dir, ["a.edf"]);
+    writeFileSync(join(dir, "a.edf"), "q".repeat(3_001));
+    pinMtime(dir, "a.edf");
+    expect(statSync(join(dir, "a.edf")).mtimeMs).toBe(entries[0].mtimeMs);
+    expect(compareRecordedStat(dir, entries).changed).toEqual(["a.edf"]);
+  });
+
   test("an mtime moved by a second is a change even when the size and bytes match", async () => {
     const dir = await trackedRepo("mtime", { "a.edf": 3_000 });
     const entries = recorded(dir, ["a.edf"]);
@@ -243,7 +235,10 @@ describe("the stat guard: a changed file fails the save", () => {
 
   test("describeChangedSinceTracked says what to do", () => {
     expect(describeChangedSinceTracked(["a.edf"], "before")).toBe(
-      "1 annexed file(s) changed since they were tracked, so the commit would not match the tree: a.edf. Re-run the upload command to re-track them.",
+      "1 annexed file(s) changed since the upload plan recorded them, so the commit would not match the tree: a.edf. Re-run the upload command to re-track them (add --restart if a file is no longer a data file, for example after shrinking below the size threshold).",
+    );
+    expect(describeChangedSinceTracked(["a.edf", "b.edf"], "during")).toBe(
+      "2 annexed file(s) changed, disappeared or became unreadable while the save was running, so the commit does not match the tree: a.edf, b.edf. Re-run the upload command to re-track them.",
     );
   });
 });
@@ -288,7 +283,7 @@ describe("stale flags: an interrupted save does not hide later edits", () => {
     expect((await setAssumeUnchanged(dir, ["notes.txt"], true)).success).toBe(true);
     writeFileSync(join(dir, "notes.txt"), "mine, edited, deliberately kept out of commits");
 
-    expect(await clearStaleAssumeUnchanged(dir)).toEqual({ cleared: 0 });
+    expect(await clearStaleAssumeUnchanged(dir)).toEqual({ cleared: 0, found: 0 });
     expect((await saveDataset(dir, "second")).success).toBe(true);
     expect(await tags(dir, "notes.txt")).toEqual({ "notes.txt": "h" });
   });
@@ -310,13 +305,13 @@ describe("stale flags: an interrupted save does not hide later edits", () => {
     expect(mode.startsWith("120000")).toBe(true);
     expect((await setAssumeUnchanged(dir, ["sub-01/eeg/a.edf"], true)).success).toBe(true);
 
-    expect(await clearStaleAssumeUnchanged(dir)).toEqual({ cleared: 1 });
+    expect(await clearStaleAssumeUnchanged(dir)).toEqual({ cleared: 1, found: 1 });
     expect(await tags(dir, "sub-01/eeg/a.edf")).toEqual({ "sub-01/eeg/a.edf": "H" });
   });
 
   test("a repository with no flags costs one index read and reports nothing cleared", async () => {
     const dir = await trackedRepo("stale-none", { "a.edf": 3_000 });
-    expect(await clearStaleAssumeUnchanged(dir)).toEqual({ cleared: 0 });
+    expect(await clearStaleAssumeUnchanged(dir)).toEqual({ cleared: 0, found: 0 });
   });
 
   test("a directory git cannot list reports the error instead of a clean result", async () => {
@@ -511,8 +506,8 @@ describe("planSaveSkip and the size gate", () => {
 
   test("a file edited since tracking fails the step and leaves dataset_save unstamped", async () => {
     const { dir, progress, annexed } = await bigRepo("gate-edit");
-    await new Promise((r) => setTimeout(r, 20));
     writeFileSync(join(dir, "sub-01/eeg/a.edf"), Buffer.alloc(2 * MIB, 3));
+    touchLater(dir, "sub-01/eeg/a.edf", progress.files["sub-01/eeg/a.edf"].mtimeMs as number);
 
     const step = await saveDatasetStep(dir, undefined, progress, {
       annexedPaths: annexed,

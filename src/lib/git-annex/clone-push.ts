@@ -1,10 +1,12 @@
 /**
  * git-annex service: clone, save, and push flows.
  *
- * Split from lib/git-annex.ts by concern (#908, epic #902); bodies moved
- * verbatim.
+ * Split from lib/git-annex.ts by concern (#908, epic #902). The clone and push flows
+ * were moved verbatim; the save flow has since gained the assume-unchanged skip and
+ * its guards (see {@link saveDataset}).
  */
 
+import { spawnSync } from "node:child_process";
 import { statSync } from "node:fs";
 import { join } from "node:path";
 import { getGitHubToken, resolveGitHubCloneAuth } from "./github.js";
@@ -13,8 +15,9 @@ import { getCurrentBranch } from "./repo-state.js";
 import { runCommand } from "./run-command.js";
 
 /**
- * An annexed path whose working-tree content `saveDataset` may skip re-reading,
- * with the size and mtime it had when it was tracked.
+ * An annexed path whose working-tree content `saveDataset` may skip re-reading, with
+ * the size and mtime the upload plan recorded for it. `path` is relative to the
+ * directory `saveDataset` is called with.
  */
 export interface SkipContentCheckEntry {
   path: string;
@@ -24,6 +27,9 @@ export interface SkipContentCheckEntry {
 
 /** Git's lowercase `ls-files -v` tag marks a path assume-unchanged. */
 const ASSUME_UNCHANGED_TAG = /^[a-z] /;
+
+/** Signals on which an interrupted save still takes its assume-unchanged bits back. */
+const INTERRUPT_SIGNALS: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"];
 
 /**
  * Save all changes to the dataset
@@ -38,29 +44,44 @@ const ASSUME_UNCHANGED_TAG = /^[a-z] /;
  * every one of them as possibly modified and streams its full content through
  * `git-annex filter-process` to find out it is not. On nm000358 (165 files,
  * 1.6 TB on Ceph) that was the hours-long "Saving dataset changes" step after
- * the S3 copy had already finished (#1455). These paths are marked
- * `assume-unchanged` for the duration of the add/status/commit and unmarked
- * afterwards, so the commit records exactly the pointers that were staged --
- * the ones whose content was just recorded at the S3 remote.
+ * the S3 copy had already finished. These paths are marked `assume-unchanged`
+ * for the duration of the add/status/commit and unmarked afterwards, so the
+ * commit records exactly the pointers that were staged, the ones whose content
+ * is recorded at the S3 remote.
+ *
+ * The skip DEFERS the re-read, it does not remove it: the entries stay zero-stat,
+ * so the first `git status` afterwards re-reads the annexed content once.
  *
  * Marking a path hides it from git, so the skip is only taken where it cannot
  * hide an edit, and cannot outlive the save:
  *
- *  - A path is skipped only if its size and mtime still match what the entry
- *    recorded at tracking time. A path that changed FAILS the save, naming the
- *    first few: the commit would otherwise carry the pointer that was uploaded
- *    while the tree held different bytes, and the user would see "Upload
- *    complete". The same comparison runs again after the commit, for a file
- *    that changed while the save itself ran.
- *  - A path that no longer exists is left unmarked, so its deletion is staged.
- *  - Every entry to this function first clears any assume-unchanged bit left on
- *    an annexed path by an earlier save that never got to unmark (Ctrl-C, a
- *    kill): the bit lives in the index and outlasts the process, and from then
- *    on `git add -A` silently omits that file's edits and deletion.
- *  - A failure to mark degrades to the plain add, with a warning, exactly as a
- *    failure to list the annexed files does upstream: the skip is an
+ *  - A path is skipped only if its size and mtime still match what the upload plan
+ *    recorded. The record predates a possibly multi-hour `git annex add`, and it
+ *    is still the right thing to compare with because `git annex add` leaves the
+ *    size, mtime and inode of an unlocked file unchanged (verified against
+ *    git-annex 10.20260901 on APFS; other filesystems unverified). A path that
+ *    changed FAILS the save, naming the first few: the commit would otherwise
+ *    carry the pointer that was uploaded while the tree held different bytes, and
+ *    the user would see "Upload complete". The comparison runs again after the
+ *    commit, for a file that changed (or disappeared, or became unreadable) while
+ *    the save itself ran.
+ *  - A path that no longer exists before the save is left unmarked, so its
+ *    deletion is staged.
+ *  - Every entry to this function first clears any assume-unchanged bit left on an
+ *    annexed path by an earlier save that never got to unmark (a kill, a power
+ *    loss): the bit lives in the index and outlasts the process, and from then on
+ *    `git add -A` silently omits that file's edits and deletion. If the bits cannot
+ *    be checked or cleared the save FAILS, because the alternative is a "saved"
+ *    result that is not.
+ *  - A failure to mark degrades to the plain add, with a warning: the skip is an
  *    optimization, never a reason to refuse a save.
- *  - The bits are cleared in a `finally`.
+ *  - The bits are cleared in a `finally`, retried once, and a failure to clear
+ *    them after the commit FAILS the save with the way out; on SIGINT, SIGTERM and
+ *    SIGHUP they are cleared before the process dies.
+ *
+ * The stale-bit check and the clear run at the repository's top level, and
+ * `git add -A` stages the whole tree, so a save started from a subdirectory sees and
+ * clears flags everywhere, not only under its own path.
  */
 export async function saveDataset(
   path: string,
@@ -68,12 +89,14 @@ export async function saveDataset(
   author?: { name: string; email: string },
   options: { skipContentCheck?: SkipContentCheckEntry[] } = {},
 ): Promise<{ success: boolean; error?: string }> {
-  const stale = await clearStaleAssumeUnchanged(path);
-  if (stale.error) {
-    console.warn(`Warning: could not check for stale assume-unchanged flags: ${stale.error}`);
-  } else if (stale.cleared > 0) {
+  const top = await repositoryRoot(path);
+  if ("error" in top) return { success: false, error: top.error };
+
+  const stale = await clearStaleAssumeUnchanged(top.root);
+  if (stale.error) return { success: false, error: describeStaleFlagFailure(stale) };
+  if (stale.cleared > 0) {
     console.warn(
-      `Warning: cleared ${stale.cleared} assume-unchanged flag(s) an interrupted save left on annexed files, so their changes are saved.`,
+      `Warning: cleared ${stale.cleared} assume-unchanged flag(s) on annexed files, so their changes are saved.`,
     );
   }
 
@@ -98,73 +121,160 @@ export async function saveDataset(
         );
         // git writes the index only after every path is marked, so a failure marks
         // nothing; this keeps that from being an assumption.
-        await clearStaleAssumeUnchanged(path);
+        const cleanup = await clearStaleAssumeUnchanged(top.root);
+        if (cleanup.error) return { success: false, error: describeStaleFlagFailure(cleanup) };
       }
     }
   }
 
+  const disarm = marked.length > 0 ? armUnmarkOnInterrupt(path, marked) : () => {};
+  let outcome: { success: boolean; error?: string };
+  let unmarkError: string | undefined;
   try {
-    const saved = await stageAndCommit(path, message, author);
-    if (!saved.success || marked.length === 0) return saved;
-    const after = compareRecordedStat(path, marked);
-    if (after.changed.length > 0) {
-      return { success: false, error: describeChangedSinceTracked(after.changed, "during") };
-    }
-    return saved;
-  } finally {
-    if (marked.length > 0) {
-      const unmark = await setAssumeUnchanged(
-        path,
-        marked.map((e) => e.path),
-        false,
-      );
-      if (!unmark.success) {
-        console.warn(
-          `Warning: could not clear assume-unchanged on ${marked.length} path(s): ${unmark.error}. The next save clears them.`,
-        );
+    outcome = await stageAndCommit(path, message, author);
+    if (outcome.success && marked.length > 0) {
+      const after = compareRecordedStat(path, marked);
+      const moved = [...after.changed, ...after.vanished, ...after.unreadable];
+      if (moved.length > 0) {
+        outcome = { success: false, error: describeChangedSinceTracked(moved, "during") };
       }
     }
+  } finally {
+    disarm();
+    if (marked.length > 0) {
+      unmarkError = await unmarkWithRetry(
+        path,
+        marked.map((e) => e.path),
+      );
+    }
+  }
+
+  if (unmarkError) {
+    const stuck = describeUnmarkFailure(marked.length, unmarkError, outcome.success);
+    return { success: false, error: outcome.error ? `${outcome.error}\n${stuck}` : stuck };
+  }
+  return outcome;
+}
+
+/** The repository's top-level directory, or git's complaint when `path` is in none. */
+async function repositoryRoot(path: string): Promise<{ root: string } | { error: string }> {
+  try {
+    const top = await runCommand(["git", "rev-parse", "--show-toplevel"], { cwd: path });
+    if (top.exitCode !== 0) {
+      return { error: top.stderr.trim() || "Not inside a git repository" };
+    }
+    return { root: top.stdout.trim() || path };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
   }
 }
 
+/** Clear the bits, and try once more if git refuses. Returns git's complaint, or nothing. */
+async function unmarkWithRetry(path: string, paths: string[]): Promise<string | undefined> {
+  let last = await setAssumeUnchanged(path, paths, false);
+  if (!last.success) last = await setAssumeUnchanged(path, paths, false);
+  return last.success ? undefined : last.error;
+}
+
 /**
- * Split `entries` by comparing each file's current size and mtime with the ones
- * recorded when it was tracked. A path that is gone, or whose stat cannot be read,
- * is in neither list: it is not skipped, and git (which will stage the deletion or
- * fail loudly on the unreadable file) is left to deal with it. Exported for tests.
+ * Take the bits back if the process is interrupted while they are set. A signal
+ * handler cannot await, so this is a synchronous `git update-index`; the handler
+ * then removes itself and re-raises the signal, so the process still dies the way
+ * the signal says and any other handler still runs. Returns the function that
+ * disarms it.
+ */
+function armUnmarkOnInterrupt(path: string, entries: SkipContentCheckEntry[]): () => void {
+  const input = entries.map((e) => `${e.path}\0`).join("");
+  function disarm(): void {
+    for (const signal of INTERRUPT_SIGNALS) process.removeListener(signal, onSignal);
+  }
+  function onSignal(signal: NodeJS.Signals): void {
+    spawnSync("git", ["update-index", "--no-assume-unchanged", "-z", "--stdin"], {
+      cwd: path,
+      input,
+      stdio: ["pipe", "ignore", "ignore"],
+    });
+    disarm();
+    process.kill(process.pid, signal);
+  }
+  for (const signal of INTERRUPT_SIGNALS) process.on(signal, onSignal);
+  return disarm;
+}
+
+/**
+ * Split `entries` by comparing each file's current size and mtime with the ones the
+ * upload plan recorded. A path that is gone (`vanished`) or whose stat cannot be
+ * read (`unreadable`) is in neither of the other lists: before a save it is simply
+ * not skipped, and git (which stages the deletion, or fails loudly on the
+ * unreadable file) deals with it; after a save, for a path that WAS skipped, either
+ * means the tree no longer matches the commit. Exported for tests.
  */
 export function compareRecordedStat(
   path: string,
   entries: SkipContentCheckEntry[],
-): { unchanged: SkipContentCheckEntry[]; changed: string[] } {
+): {
+  unchanged: SkipContentCheckEntry[];
+  changed: string[];
+  vanished: string[];
+  unreadable: string[];
+} {
   const unchanged: SkipContentCheckEntry[] = [];
   const changed: string[] = [];
+  const vanished: string[] = [];
+  const unreadable: string[] = [];
   for (const entry of entries) {
     let st: ReturnType<typeof statSync>;
     try {
       st = statSync(join(path, entry.path));
-    } catch {
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") vanished.push(entry.path);
+      else unreadable.push(entry.path);
       continue;
     }
     if (st.size !== entry.size || st.mtimeMs !== entry.mtimeMs) changed.push(entry.path);
     else unchanged.push(entry);
   }
-  return { unchanged, changed };
+  return { unchanged, changed, vanished, unreadable };
 }
 
 /**
  * The failure text for annexed files that changed under a save that skips
- * re-reading them. `when` says whether it was found before the save began or
- * after the commit. Exported for tests.
+ * re-reading them. `when` says whether it was found before the save began or after
+ * the commit. Exported for tests.
  */
 export function describeChangedSinceTracked(changed: string[], when: "before" | "during"): string {
   const shown = changed.slice(0, 3).join(", ");
   const more = changed.length > 3 ? ` (and ${changed.length - 3} more)` : "";
-  const what =
-    when === "before"
-      ? "changed since they were tracked, so the commit would not match the tree"
-      : "changed while the save was running, so the commit does not match the tree";
-  return `${changed.length} annexed file(s) ${what}: ${shown}${more}. Re-run the upload command to re-track them.`;
+  if (when === "during") {
+    return `${changed.length} annexed file(s) changed, disappeared or became unreadable while the save was running, so the commit does not match the tree: ${shown}${more}. Re-run the upload command to re-track them.`;
+  }
+  return `${changed.length} annexed file(s) changed since the upload plan recorded them, so the commit would not match the tree: ${shown}${more}. Re-run the upload command to re-track them (add --restart if a file is no longer a data file, for example after shrinking below the size threshold).`;
+}
+
+/** What `clearStaleAssumeUnchanged` reports. */
+export interface StaleFlagResult {
+  /** How many flags it cleared. */
+  cleared: number;
+  /** How many annexed paths carried a flag; those it could not clear are the difference. */
+  found: number;
+  /** Git's complaint, when the check or the clear failed. */
+  error?: string;
+  /** Which stage failed: reading the flags, deciding which are annexed, or clearing them. */
+  stage?: "list" | "classify" | "clear";
+}
+
+/** The failure text for a stale-flag check or clear that did not complete. */
+export function describeStaleFlagFailure(result: StaleFlagResult): string {
+  if (result.stage === "clear") {
+    return `Found ${result.found} assume-unchanged flag(s) on annexed files but could not clear them (${result.error}). They would hide edits from this save, so nothing was saved. Run the save again: every save clears them first.`;
+  }
+  return `Could not check this repository for assume-unchanged flags (${result.error}). A flag left behind would hide edits from this save, so nothing was saved. Run the save again; if git keeps failing, the repository needs attention.`;
+}
+
+/** The failure text for flags a finished save could not take back. */
+function describeUnmarkFailure(count: number, error: string, committed: boolean): string {
+  return `${committed ? "The save was committed, but " : ""}${count} assume-unchanged flag(s) it set could not be cleared (${error}). Until they are, git hides later edits to those files. Run \`nemar dataset commit\` in this directory, or the upload again: both clear stale flags before they save.`;
 }
 
 /**
@@ -174,23 +284,28 @@ export function describeChangedSinceTracked(changed: string[], when: "before" | 
  * that is not annexed is not ours (nothing in NEMAR sets one) and is left alone.
  * Annexed is decided from the index, never the working tree, so it still answers
  * for a path whose file has been deleted: a symlink entry is a locked annexed
- * file, and any other entry is an unlocked one when its staged blob starts with
- * git-annex's pointer line, `/annex/objects/KEY` (`git grep --cached`). Returns how
- * many were cleared.
+ * file, and any other entry is an unlocked one when it holds git-annex's pointer
+ * line, `/annex/objects/KEY` (`git grep --cached`, which matches any line, not only
+ * the first). Run it at the repository's top level: `ls-files` lists only the
+ * subtree under the directory it runs in.
  */
-export async function clearStaleAssumeUnchanged(
-  path: string,
-): Promise<{ cleared: number; error?: string }> {
+export async function clearStaleAssumeUnchanged(path: string): Promise<StaleFlagResult> {
+  const fail = (stage: "list" | "classify" | "clear", error: string, found = 0) => ({
+    cleared: 0,
+    found,
+    error,
+    stage,
+  });
   try {
     const listed = await runCommand(["git", "ls-files", "-v", "-z"], { cwd: path });
     if (listed.exitCode !== 0) {
-      return { cleared: 0, error: listed.stderr.trim() || "git ls-files failed" };
+      return fail("list", listed.stderr.trim() || "git ls-files failed");
     }
     const flagged = listed.stdout
       .split("\0")
       .filter((entry) => ASSUME_UNCHANGED_TAG.test(entry))
       .map((entry) => entry.slice(2));
-    if (flagged.length === 0) return { cleared: 0 };
+    if (flagged.length === 0) return { cleared: 0, found: 0 };
 
     const annexed: string[] = [];
     for (const chunk of chunkAddTargets(flagged)) {
@@ -199,7 +314,7 @@ export async function clearStaleAssumeUnchanged(
         { cwd: path },
       );
       if (staged.exitCode !== 0) {
-        return { cleared: 0, error: staged.stderr.trim() || "git ls-files -s failed" };
+        return fail("classify", staged.stderr.trim() || "git ls-files -s failed");
       }
       const regular: string[] = [];
       for (const entry of staged.stdout.split("\0").filter(Boolean)) {
@@ -227,17 +342,18 @@ export async function clearStaleAssumeUnchanged(
       );
       // Exit 1 is "no match", which is an answer; anything else is not.
       if (grep.exitCode > 1) {
-        return { cleared: 0, error: grep.stderr.trim() || "git grep failed" };
+        return fail("classify", grep.stderr.trim() || `git grep exited ${grep.exitCode}`);
       }
       annexed.push(...grep.stdout.split("\0").filter(Boolean));
     }
-    if (annexed.length === 0) return { cleared: 0 };
+    if (annexed.length === 0) return { cleared: 0, found: 0 };
 
     const cleared = await setAssumeUnchanged(path, annexed, false);
-    if (!cleared.success) return { cleared: 0, error: cleared.error };
-    return { cleared: annexed.length };
+    if (!cleared.success)
+      return fail("clear", cleared.error ?? "git update-index failed", annexed.length);
+    return { cleared: annexed.length, found: annexed.length };
   } catch (e) {
-    return { cleared: 0, error: e instanceof Error ? e.message : String(e) };
+    return fail("classify", e instanceof Error ? e.message : String(e));
   }
 }
 
@@ -250,14 +366,18 @@ export async function setAssumeUnchanged(
   paths: string[],
   on: boolean,
 ): Promise<{ success: boolean; error?: string }> {
-  const { stderr, exitCode } = await runCommand(
-    ["git", "update-index", on ? "--assume-unchanged" : "--no-assume-unchanged", "-z", "--stdin"],
-    { cwd: path, stdin: paths.map((p) => `${p}\0`).join("") },
-  );
-  if (exitCode !== 0) {
-    return { success: false, error: stderr.trim() || "git update-index failed" };
+  try {
+    const { stderr, exitCode } = await runCommand(
+      ["git", "update-index", on ? "--assume-unchanged" : "--no-assume-unchanged", "-z", "--stdin"],
+      { cwd: path, stdin: paths.map((p) => `${p}\0`).join("") },
+    );
+    if (exitCode !== 0) {
+      return { success: false, error: stderr.trim() || `git update-index exited ${exitCode}` };
+    }
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e instanceof Error ? e.message : String(e) };
   }
-  return { success: true };
 }
 
 async function stageAndCommit(
