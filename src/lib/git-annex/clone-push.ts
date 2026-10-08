@@ -6,7 +6,7 @@
 import { spawnSync } from "node:child_process";
 import { statSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import { displayNames } from "../display-name.js";
+import { displayName, displayNames, isPrintableInCommand } from "../display-name.js";
 import { getGitHubToken, resolveGitHubCloneAuth } from "./github.js";
 import { chunkAddTargets } from "./init.js";
 import { getCurrentBranch } from "./repo-state.js";
@@ -180,12 +180,12 @@ export async function clearStaleFlags(
     return {
       success: false,
       cleared: 0,
-      error: `Could not find the git repository to check for assume-unchanged flags (${top.error}).`,
+      error: `Could not find the git repository to check for assume-unchanged flags (${top.error}). A flag left behind would make git skip a file, so the upload stopped before tracking anything. Run the upload again from the dataset directory.`,
     };
   }
   const stale = await clearStaleAssumeUnchanged(top.root);
   if (stale.error) {
-    return { success: false, cleared: 0, error: describeStaleFlagFailure(stale) };
+    return { success: false, cleared: 0, error: describeStaleFlagFailure(stale, "upload") };
   }
   return { success: true, cleared: stale.cleared };
 }
@@ -222,6 +222,10 @@ const SIGNAL_UNMARK_PAUSE_MS = 100;
 /** The most paths a recovery message spells out as a command. */
 const MAX_RECOVERY_PATHS = 10;
 
+/** How long the handler keeps trying to get its message out, and the pause between tries. */
+const STDERR_WRITE_MS = 500;
+const STDERR_WRITE_PAUSE_MS = 20;
+
 /** Sleep without leaving the signal handler: it cannot await. */
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -248,7 +252,12 @@ function stopChildren(): void {
   spawnSync("pkill", ["-TERM", "-P", String(process.pid)], { stdio: "ignore", timeout: 1_000 });
 }
 
-/** The recovery a person needs when the signal handler could not clear the bits. */
+/**
+ * What a person needs when the signal handler could not clear the bits: always the two
+ * nemar commands that clear them, and, for at most {@link MAX_RECOVERY_PATHS} paths none
+ * of which (nor the repository path) has a character a command cannot carry, the
+ * `git update-index` command itself.
+ */
 function describeStuckFlags(
   path: string,
   entries: SkipContentCheckEntry[],
@@ -256,11 +265,32 @@ function describeStuckFlags(
 ): string {
   const quoted = (p: string) => `'${p.replace(/'/g, `'\\''`)}'`;
   const printable =
-    entries.length <= MAX_RECOVERY_PATHS && entries.every((e) => !/\p{Cc}/u.test(e.path));
+    entries.length <= MAX_RECOVERY_PATHS &&
+    isPrintableInCommand(path) &&
+    entries.every((e) => isPrintableInCommand(e.path));
   const manual = printable
     ? ` To clear them by hand: git -C ${quoted(path)} update-index --no-assume-unchanged -- ${entries.map((e) => quoted(e.path)).join(" ")}`
     : "";
-  return `\nInterrupted while ${entries.length} annexed file(s) were marked assume-unchanged, and git would not clear them (${reason}). Until they are cleared, git hides later edits to those files. Run \`nemar dataset commit\` in ${path}, or run the upload again: both clear them first.${manual}\n`;
+  return `\nInterrupted while ${entries.length} annexed file(s) were marked assume-unchanged, and git would not clear them (${displayName(reason)}). Until they are cleared, git hides later edits to those files. Run \`nemar dataset commit\` in ${displayName(path)}, or run the upload again: both clear them first.${manual}\n`;
+}
+
+/**
+ * Write to stderr from a signal handler, which cannot await. A pipe can take part of a
+ * write or answer EAGAIN, so this loops on the byte count for a short while; a stderr
+ * that is closed (EPIPE) or stays unwritable ends it, and then the text is lost.
+ */
+function writeStderrSync(text: string): void {
+  const bytes = Buffer.from(text);
+  const deadline = Date.now() + STDERR_WRITE_MS;
+  let offset = 0;
+  while (offset < bytes.length && Date.now() < deadline) {
+    try {
+      offset += writeSync(2, bytes, offset);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EAGAIN") return;
+      sleepSync(STDERR_WRITE_PAUSE_MS);
+    }
+  }
 }
 
 /**
@@ -269,8 +299,9 @@ function describeStuckFlags(
  * that fails (an `index.lock` held by the `git add` the signal interrupted is the usual
  * reason: a signal sent to the CLI alone, unlike a terminal's Ctrl-C, does not reach its
  * children), the in-flight git children are asked to stop, which releases the lock, and
- * the unmark is retried for {@link SIGNAL_UNMARK_RETRY_MS}. If it still fails the exact
- * recovery is written to stderr. Each attempt has a timeout.
+ * the unmark is retried for {@link SIGNAL_UNMARK_RETRY_MS}. If it still fails the
+ * recovery is written to stderr (see {@link describeStuckFlags}). Each attempt has a
+ * timeout.
  *
  * The handler then removes itself and re-raises the signal. The process dies the way the
  * signal says only if no other handler for it is registered; any other handler runs, and
@@ -292,13 +323,7 @@ function armUnmarkOnInterrupt(path: string, entries: SkipContentCheckEntry[]): (
         failure = unmarkSync(path, input, SIGNAL_UNMARK_TIMEOUT_MS);
       }
     }
-    if (failure) {
-      try {
-        writeSync(2, describeStuckFlags(path, entries, failure));
-      } catch {
-        // stderr is gone (a closed terminal); there is nowhere left to say it.
-      }
-    }
+    if (failure) writeStderrSync(describeStuckFlags(path, entries, failure));
     disarm();
     process.kill(process.pid, signal);
   }
@@ -369,8 +394,21 @@ export interface StaleFlagResult {
   stage?: "list" | "classify" | "clear";
 }
 
-/** The failure text for a stale-flag check or clear that did not complete. */
-export function describeStaleFlagFailure(result: StaleFlagResult): string {
+/**
+ * The failure text for a stale-flag check or clear that did not complete, worded for
+ * what the person ran: a save (the default) that saved nothing, or an upload that stopped
+ * before it tracked anything.
+ */
+export function describeStaleFlagFailure(
+  result: StaleFlagResult,
+  context: "save" | "upload" = "save",
+): string {
+  if (context === "upload") {
+    if (result.stage === "clear") {
+      return `Could not clear ${result.found} assume-unchanged flag(s) on annexed files (${result.error}). git skips those files until they are cleared, so the upload stopped before tracking anything. Run the upload again.`;
+    }
+    return `Could not check this repository for assume-unchanged flags (${result.error}). A flag left behind would make git skip a file, so the upload stopped before tracking anything. Run the upload again; if git keeps failing, the repository needs attention.`;
+  }
   if (result.stage === "clear") {
     return `Found ${result.found} assume-unchanged flag(s) on annexed files but could not clear them (${result.error}). They would hide edits from this save, so nothing was saved. Run the save again: every save clears them first.`;
   }

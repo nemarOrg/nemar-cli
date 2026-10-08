@@ -23,7 +23,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { clearStaleFlags } from "../src/lib/git-annex/clone-push";
+import { clearStaleFlags, setAssumeUnchanged } from "../src/lib/git-annex/clone-push";
 import { annexRemoteExists, configureS3Remote } from "../src/lib/git-annex/s3-remote";
 import { collectFileManifest } from "../src/lib/git-annex/transfer";
 import {
@@ -405,6 +405,57 @@ describe("a run that cannot check for stale flags", () => {
     expect(open.calls).toBe(0);
     expect(await annexedSet(dir)).toEqual(new Set());
   });
+
+  test("tells an upload that it stopped before tracking, not that nothing was saved", async () => {
+    // Guards the wording for the caller. The same failure text served a save ("nothing was
+    // saved, run the save again"), which is wrong advice to someone who ran an upload.
+    const dir = await dataset("flags-wording", { "a.edf": 3_000 });
+    const restore = installGitShim(scratch.root, [{ match: "ls-files -v" }]);
+    const lines: string[] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => {
+      lines.push(args.join(" "));
+    };
+    try {
+      await runSteps(dir, { openRemote: directoryRemote(dir) });
+    } finally {
+      console.log = log;
+      restore();
+    }
+    const text = lines.join("\n");
+    expect(text).toContain("Could not check this repository for assume-unchanged flags");
+    expect(text).toContain("the upload stopped before tracking anything. Run the upload again");
+    expect(text).not.toContain("nothing was saved");
+    expect(text).not.toContain("Run the save again");
+  });
+
+  test("flags it cannot clear are reported as an upload that stopped, with the way out", async () => {
+    const dir = await dataset("flags-uncleared", { "a.edf": 3_000 });
+    expect((await trackDataFiles(dir, ["a.edf"])).success).toBe(true);
+    expect((await setAssumeUnchanged(dir, ["a.edf"], true)).success).toBe(true);
+    const restore = installGitShim(scratch.root, [{ match: "update-index --no-assume-unchanged" }]);
+    try {
+      const result = await clearStaleFlags(dir);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Could not clear 1 assume-unchanged flag(s) on annexed files");
+      expect(result.error).toContain(
+        "the upload stopped before tracking anything. Run the upload again.",
+      );
+      expect(result.error).not.toContain("nothing was saved");
+    } finally {
+      restore();
+    }
+  });
+
+  test("a directory outside any repository is reported with why it matters and what to do", async () => {
+    const outside = join(scratch.root, "outside-any-repo");
+    mkdirSync(outside, { recursive: true });
+    const result = await clearStaleFlags(outside);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("Could not find the git repository");
+    expect(result.error).toContain("the upload stopped before tracking anything");
+    expect(result.error).toContain("Run the upload again from the dataset directory");
+  });
 });
 
 describe("a run killed inside the save", () => {
@@ -530,9 +581,9 @@ describe("a run signaled inside the save", () => {
 
   test("an index lock that clears within the retry window does not leave the flags behind", async () => {
     // Guards the retry. With `index.lock` held (the usual state when the signal lands
-    // during `git add -A`) the handler's single unmark failed silently, the process died,
-    // and every annexed file stayed flagged. The handler now stops the in-flight git and
-    // retries, so a lock released a second later is enough.
+    // during `git add -A`) a single unmark attempt fails; the handler stops the in-flight
+    // git and retries, so a lock released a second later is enough. Without the retry the
+    // process would die with every annexed file still flagged.
     const { dir, child, release } = await inTheWindow("signal-lock-clears");
     const lock = join(dir, ".git", "index.lock");
     writeFileSync(lock, "", { flag: "wx" });
@@ -550,10 +601,10 @@ describe("a run signaled inside the save", () => {
     expect(Object.values(await tags(dir, "a.edf", "b.edf"))).toEqual(["H", "H"]);
   });
 
-  test("a lock that never clears is reported with the exact way out, and the next save repairs it", async () => {
+  test("a lock that never clears is reported with the way out, and the next entry clear repairs it", async () => {
     // Guards the message and the bound. After the retry window the handler stops waiting,
     // says what is wrong and what to run, and the process still dies by the signal. The
-    // flags it could not clear are the next save's entry clear to fix.
+    // flags it could not clear are left for the next entry clear to repair.
     const { dir, child, release } = await inTheWindow("signal-lock-stays");
     const lock = join(dir, ".git", "index.lock");
     writeFileSync(lock, "", { flag: "wx" });
@@ -571,10 +622,35 @@ describe("a run signaled inside the save", () => {
     expect(stderr).toContain("update-index --no-assume-unchanged -- 'a.edf' 'b.edf'");
     expect(Object.values(await tags(dir, "a.edf", "b.edf"))).toEqual(["h", "h"]);
 
-    // The lock goes away (the person fixed it); the next save repairs the flags.
+    // The lock goes away (the person fixed it); the entry clear every upload step and
+    // save starts with repairs the flags.
     rmSync(lock, { force: true });
     expect((await clearStaleFlags(dir)).cleared).toBe(2);
     expect(Object.values(await tags(dir, "a.edf", "b.edf"))).toEqual(["H", "H"]);
+  });
+
+  test("a repository path with an ESCAPE or an override in it is shown escaped, with no command to paste", async () => {
+    // Guards displayName and isPrintableInCommand on the repository path in the recovery
+    // message. The path is the user's data: printed raw it reaches the terminal, and
+    // quoted into a command it would be pasted with the control character in it.
+    const { dir, child, release } = await inTheWindow("signal-hostile-path-\u001b[2J-\u202e");
+    const lock = join(dir, ".git", "index.lock");
+    writeFileSync(lock, "", { flag: "wx" });
+    child.kill("SIGTERM");
+    await child.exited;
+    const output = await new Response(child.stderr).text();
+    release();
+    rmSync(lock, { force: true });
+
+    expect(child.signalCode).toBe("SIGTERM");
+    // What the handler wrote: the child's own progress lines before it carry chalk's
+    // colors, which are not file names.
+    const stderr = output.slice(output.indexOf("Interrupted while"));
+    expect(stderr).toContain("nemar dataset commit");
+    expect(stderr).toContain("signal-hostile-path-\\x1b[2J-\\u202e");
+    expect(stderr).not.toContain("\u001b");
+    expect(stderr).not.toContain("\u202e");
+    expect(stderr).not.toContain("To clear them by hand");
   });
 
   test("an unmark that hangs cannot hang the handler", async () => {
