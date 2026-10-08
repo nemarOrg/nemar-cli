@@ -143,7 +143,11 @@ export function recorded(dir: string, paths: string[]): SkipContentCheckEntry[] 
 
 /** `git ls-files -v` tags, one per path: "H" ordinary, lowercase "h" assume-unchanged. */
 export async function tags(dir: string, ...paths: string[]): Promise<Record<string, string>> {
-  const out = await run(["git", "ls-files", "-v", "-z", "--", ...paths], dir);
+  // Literal: the names a test cares about include `*`, `?` and `[...]`.
+  const out = await run(
+    ["git", "--literal-pathspecs", "ls-files", "-v", "-z", "--", ...paths],
+    dir,
+  );
   const result: Record<string, string> = {};
   for (const entry of out.stdout.split("\0").filter(Boolean)) result[entry.slice(2)] = entry[0];
   return result;
