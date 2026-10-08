@@ -820,7 +820,7 @@ Examples:
         datasetInfo,
       );
       if (uploaded.status === "fail") process.exit(1);
-      uploadProgress = uploaded.value;
+      uploadProgress = uploaded.value.progress;
 
       // Step 10b: Ensure .nemar metadata is on disk and .bidsignore covers it
       writeNemarMetadata(absolutePath, coAuthorEnrichment, uploadProgress);
