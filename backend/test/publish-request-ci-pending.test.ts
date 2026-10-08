@@ -47,6 +47,7 @@ let server: Server;
 let runs: Runs = "none";
 let descriptionBody: string | null = NAMED;
 let descriptionStatus = 200;
+let runsStatus = 200;
 let dispatches = 0;
 
 let db: Database;
@@ -66,6 +67,7 @@ beforeAll(() => {
         return Response.json({ name: "bids-validation.yml" });
       }
       if (/\/actions\/workflows\/bids-validation\.yml\/runs$/.test(p)) {
+        if (runsStatus !== 200) return new Response("no", { status: runsStatus });
         const workflow_runs =
           runs === "none"
             ? []
@@ -102,10 +104,11 @@ afterEach(() => {
   runs = "none";
   descriptionBody = NAMED;
   descriptionStatus = 200;
+  runsStatus = 200;
   dispatches = 0;
 });
 
-function env(): Bindings {
+function env(overrides: Partial<Bindings> = {}): Bindings {
   return {
     DB: realD1(db),
     ENVIRONMENT: "production",
@@ -114,6 +117,7 @@ function env(): Bindings {
     API_BASE_URL: "https://api.test.nemar.org",
     RESEND_API_KEY: "re_test",
     FROM_EMAIL: "NEMAR <noreply@nemar.org>",
+    ...overrides,
   } as Bindings;
 }
 
@@ -173,7 +177,7 @@ interface RequestBody {
 }
 
 async function requestPublication(
-  opts: { id?: string; key?: string; anonymous?: boolean } = {},
+  opts: { id?: string; key?: string; anonymous?: boolean; bindings?: Bindings } = {},
 ): Promise<{ status: number; body: RequestBody }> {
   const res = await app.request(
     `/datasets/${opts.id ?? DATASET}/publish/request`,
@@ -185,7 +189,7 @@ async function requestPublication(
       },
       ...(opts.anonymous ? { body: JSON.stringify({ anonymous: true }) } : {}),
     },
-    env(),
+    opts.bindings ?? env(),
   );
   return { status: res.status, body: (await res.json()) as RequestBody };
 }
@@ -514,5 +518,80 @@ describe("the sweep checks the same minimums before it releases a request", () =
         swept.status === "requested" ? "bids_validation_pending" : swept.block_reason;
       expect(sweepVerdict, label).toBe(routeVerdict ?? "");
     }
+  });
+});
+
+describe("a readiness check that cannot run is not reported as pending", () => {
+  // `bids_validation_pending` means GitHub answered and there is no run yet,
+  // and the sweep then carries the request on. When the check itself fails (no
+  // credential, workflow deploy, an outage) the sweep would fail the same way,
+  // so the depositor is not promised a continuation: 503, no block reason.
+  const NO_GITHUB_AUTH = { GITHUB_ADMIN_PAT: undefined } as Partial<Bindings>;
+
+  test("no GitHub credential: 503 ci_check_unavailable, and the request is still recorded", async () => {
+    const { status, body } = await requestPublication({ bindings: env(NO_GITHUB_AUTH) });
+    expect(status).toBe(503);
+    expect(Object.keys(body).sort()).toEqual([
+      "anonymous",
+      "ci_url",
+      "dataset_id",
+      "error",
+      "message",
+    ]);
+    expect(body).toMatchObject({
+      error: "ci_check_unavailable",
+      dataset_id: DATASET,
+      anonymous: false,
+      ci_url: `https://github.com/nemarDatasets/${DATASET}/actions`,
+    });
+    expect((body as { message: string }).message).toContain(
+      "NEMAR could not check BIDS validation status right now",
+    );
+    expect((body as { message: string }).message).toContain("Your request is recorded");
+    // Recorded, as the message says, and blocked on the existing reason.
+    expect(row().status).toBe("blocked");
+    expect(row().block_reason).toBe("bids_validation_pending");
+  });
+
+  test("GitHub refusing the workflow-run read is the same", async () => {
+    runsStatus = 403;
+    const { status, body } = await requestPublication();
+    expect(status).toBe(503);
+    expect((body as { error: string }).error).toBe("ci_check_unavailable");
+    expect(row().status).toBe("blocked");
+  });
+
+  test("it carries no block reason, so nothing reads it as pending", async () => {
+    runsStatus = 403;
+    const { body } = await requestPublication();
+    expect(body.block_reason).toBeUndefined();
+    expect(body.status).toBeUndefined();
+  });
+
+  test("the minimums are not read when the check could not run", async () => {
+    // A description that would fail them must not turn a 503 into a verdict
+    // drawn from a GitHub that just failed.
+    runsStatus = 403;
+    descriptionBody = SHORT_NAME;
+    const { status, body } = await requestPublication();
+    expect(status).toBe(503);
+    expect((body as { error: string }).error).toBe("ci_check_unavailable");
+    expect(row().min_requirements_reasons).toBeNull();
+  });
+
+  test("an anonymous request is told the same and its intent is recorded", async () => {
+    const { status, body } = await requestPublication({
+      anonymous: true,
+      bindings: env(NO_GITHUB_AUTH),
+    });
+    expect(status).toBe(503);
+    expect(body.anonymous).toBe(true);
+    expect(row().anonymous).toBe(1);
+  });
+
+  test("control: a check that runs and finds no run is still a 422 pending", async () => {
+    const { status, body } = await requestPublication();
+    expect(status).toBe(422);
+    expect(body.block_reason).toBe("bids_validation_pending");
   });
 });
