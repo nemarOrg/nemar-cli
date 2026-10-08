@@ -16,7 +16,9 @@ import { join } from "node:path";
 export interface ShimRule {
   /** A substring of the space-joined arguments, for example `ls-files -v`. */
   match: string;
-  /** How many matching calls to break before passing through; default: all of them. */
+  /** How many matching calls to let through untouched before breaking any; default 0. */
+  after?: number;
+  /** How many matching calls to break before passing through again; default: all of them. */
   times?: number;
   /** Exit status to fail with (default 128). Ignored when `kill` is set. */
   exit?: number;
@@ -44,7 +46,9 @@ export function installGitShim(root: string, rules: ShimRule[]): () => void {
   mkdirSync(dir, { recursive: true });
   const blocks = rules.map((rule, i) => {
     const counter = join(dir, `rule-${i}.count`);
+    const skipped = join(dir, `rule-${i}.skip`);
     writeFileSync(counter, String(rule.times ?? -1));
+    writeFileSync(skipped, String(rule.after ?? 0));
     let action: string;
     if (rule.kill) action = "kill -KILL $$";
     else if (rule.stdout !== undefined) {
@@ -54,10 +58,13 @@ export function installGitShim(root: string, rules: ShimRule[]): () => void {
     }
     return [
       `case "$args" in *${quote(rule.match)}*)`,
+      `  skip=$(cat ${quote(skipped)})`,
+      `  if [ "$skip" -gt 0 ]; then echo $((skip - 1)) > ${quote(skipped)}; else`,
       `  n=$(cat ${quote(counter)})`,
       `  if [ "$n" != "0" ]; then`,
       `    if [ "$n" -gt 0 ]; then echo $((n - 1)) > ${quote(counter)}; fi`,
       `    ${action}`,
+      "  fi",
       "  fi;;",
       "esac",
     ].join("\n");
