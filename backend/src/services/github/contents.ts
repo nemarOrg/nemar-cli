@@ -331,6 +331,10 @@ export async function getFileContent(
   }
 
   const data = await response.json<{ content: string; encoding: string }>();
+  // A zero-byte file comes back as base64 with `content: ""`. That is a file
+  // that exists and is empty, which is an answer; only a response with no
+  // content field at all is not one.
+  if (data.encoding === "base64" && data.content === "") return "";
   if (!data.content) {
     throw new Error(`No content field in GitHub response for ${filePath} in ${repo}`);
   }

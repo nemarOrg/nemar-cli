@@ -416,7 +416,12 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         anonymous: anonymousRequested,
         caller: "publish-request",
       });
-      if (gate.kind !== "clear") {
+      // An anonymous release is never granted on a blind nobody verified, so
+      // for it "could not verify" blocks like a failure. A native submission
+      // that could not be read goes on to the admin review (ADR 0026): the CI
+      // check just proved GitHub reachable, so a later hiccup is not worth a
+      // spurious block.
+      if (gate.kind === "blocked" || (gate.kind === "unverified" && anonymousRequested)) {
         blocked = true;
         blockReason = "min_requirements_failed";
         minReasons = gate.reasons;

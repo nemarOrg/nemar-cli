@@ -372,11 +372,12 @@ describe("anonymity is requested at publication, not refused there", () => {
     expect(GATE).toContain(
       'return anonymous || (dataset.source !== "openneuro" && !dataset.is_exemplar);',
     );
-    // Only a native submission fails open on a failed read; an anonymous
-    // release is `unverified`, which the route blocks.
-    expect(GATE).toContain('if (!anonymous) return { kind: "clear" };');
+    // A failed read is `unverified` for everyone. Only a native submission
+    // fails open on it (the route's policy); an anonymous release is blocked.
     expect(GATE).toContain('kind: "unverified"');
-    expect(PUBLICATION).toContain('if (gate.kind !== "clear") {');
+    expect(PUBLICATION).toContain(
+      'if (gate.kind === "blocked" || (gate.kind === "unverified" && anonymousRequested)) {',
+    );
   });
 
   test("the intent is persisted, because approval runs a different publication", () => {
