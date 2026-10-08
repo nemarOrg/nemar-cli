@@ -1,10 +1,8 @@
 /**
- * git-annex key size and chunk-aware presence, shared by the CLI
+ * git-annex key size and chunk-aware presence, one definition shared by the CLI
  * (`src/lib/s3-server-copy.ts`) and the Worker
- * (`backend/src/services/import-integrity.ts`).
- *
- * Pure on purpose: no `node:` import, so the Workers bundle can take it. One
- * definition, shared by the CLI and the Worker; both re-export it.
+ * (`backend/src/services/import-integrity.ts`), which both re-export it. Pure on
+ * purpose: no `node:` import, so the Workers bundle can take it.
  *
  * KEY GRAMMAR. A key is `<fields>--<name>`, split at the FIRST `--`:
  *
@@ -12,12 +10,8 @@
  *
  * A special remote configured with `chunk=<size>` stores each piece of a file as
  * `<fields>-S<chunksize>-C<n>--<name>` (n counts from 1) and never the plain key.
- * `scripts/zarr/generate_zarr.py` is the other implementation of this grammar.
- * `annex_key_size` and `annex_chunk_key` read only the fields before the first
- * `--`, as `annexKeyFieldSize` and `annexChunkKey` do. `annex_chunk_sizes` and
- * `_complete_chunk_size` are the chunk geometry. `annexKeyDeclaredSize` is the one
- * deliberate exception: it scans the whole key, so a `-sN--` in a free-text name
- * can be read as a size.
+ * `scripts/zarr/generate_zarr.py` implements the same grammar; each function names
+ * its twin.
  *
  * PRESENCE. A key is present when its plain object exists at the declared size,
  * or, only when the plain object is ABSENT, when some chunking of it is complete
@@ -25,8 +19,10 @@
  * the chunks, not servable: the data plane still addresses the plain key (#1565).
  */
 
+type KeyParts = { fields: string; name: string };
+
 /** The fields and name of a key, split at the first `--`; null when there is none. */
-function splitKey(key: string): { fields: string; name: string } | null {
+function splitKey(key: string): KeyParts | null {
   const sep = key.indexOf("--");
   if (sep < 0) return null;
   return { fields: key.slice(0, sep), name: key.slice(sep + 2) };
@@ -101,7 +97,7 @@ export function isKeyPresentAtDeclaredSize(key: string, existing: Map<string, nu
 }
 
 /** A chunk object name split into the whole-file key it belongs to. */
-export interface ParsedChunkKey {
+interface ParsedChunkKey {
   baseKey: string;
   chunkSize: number;
   chunkNumber: number;
@@ -128,23 +124,9 @@ export function parseChunkKey(name: string): ParsedChunkKey | null {
   return { baseKey: `${match[1]}--${parts.name}`, chunkSize, chunkNumber };
 }
 
-/** The name chunk `chunkNumber` of a split key is stored under. */
-function chunkObjectName(
-  parts: { fields: string; name: string },
-  chunkSize: number,
-  chunkNumber: number,
-): string {
+/** The name chunk `chunkNumber` of a split key is stored under: `annex_chunk_key`. */
+function chunkObjectName(parts: KeyParts, chunkSize: number, chunkNumber: number): string {
   return `${parts.fields}-S${chunkSize}-C${chunkNumber}--${parts.name}`;
-}
-
-/**
- * The object name git-annex stores chunk `chunkNumber` of `key` under: the twin of
- * `annex_chunk_key` in `scripts/zarr/generate_zarr.py`. Null when `key` has no
- * `--` and so is not a git-annex key.
- */
-export function annexChunkKey(key: string, chunkSize: number, chunkNumber: number): string | null {
-  const parts = splitKey(key);
-  return parts ? chunkObjectName(parts, chunkSize, chunkNumber) : null;
 }
 
 /** The index of one listing, keyed by the Map itself; see {@link firstChunksIn}. */
@@ -201,7 +183,7 @@ function firstChunksIn(existing: Map<string, number>): ReadonlyMap<string, reado
  * oversized chunk means the file cannot be reassembled at that chunk size.
  */
 function isChunkSetComplete(
-  parts: { fields: string; name: string },
+  parts: KeyParts,
   declared: number,
   chunkSize: number,
   existing: Map<string, number>,
@@ -222,7 +204,7 @@ function isChunkSetComplete(
  * tried in. False for a key with no declared size: without it there is no way to
  * know how many chunks to expect.
  */
-export function isChunkedKeyPresent(key: string, existing: Map<string, number>): boolean {
+function isChunkedKeyPresent(key: string, existing: Map<string, number>): boolean {
   const parts = splitKey(key);
   if (!parts) return false;
   const declared = sizeOfFields(parts.fields);
