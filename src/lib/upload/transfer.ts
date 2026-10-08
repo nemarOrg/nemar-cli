@@ -24,7 +24,7 @@ import { ApiError, errorDetail } from "../api/errors.js";
 import type { DepositAttestation } from "../attestation.js";
 import { printStepFailure } from "../cli-output.js";
 import { type LocalDatasetConfig, writeLocalConfig } from "../dataset-config.js";
-import { displayName } from "../display-name.js";
+import { displayName, isPrintableInCommand } from "../display-name.js";
 import { acceptGitHubInvitation, configureGitHubRemote } from "../git-annex/github.js";
 import {
   configureLargefiles,
@@ -47,8 +47,13 @@ import {
   configureS3Remote,
   toS3Credentials,
 } from "../git-annex/s3-remote.js";
-import { checkRemoteHolds, copyPathsToAnnexRemote } from "../git-annex/transfer.js";
 import {
+  type OutputState,
+  checkRemoteHolds,
+  copyPathsToAnnexRemote,
+} from "../git-annex/transfer.js";
+import {
+  RECORDED_CHECK_VALID_TEXT,
   type UploadProgress,
   clearStepCompleted,
   hasFileListChanged,
@@ -552,12 +557,19 @@ export interface UploadSummaryExtras {
   resent?: number;
   /** Recorded files whose content is not in this repository, checked with `git annex fsck`. */
   recordedNoLocal?: number;
-  /** True when the recorded files were not asked about, because the remote confirmed them recently. */
+  /** True when the recorded files were not asked about, because a recent check covered them. */
   recordedCheckSkipped?: boolean;
-  /** False when git-annex's output for the files sent as new could not be read. */
-  outputRecognized?: boolean;
-  /** False when git-annex's output for the check of the recorded files could not be read. */
-  recordedOutputRecognized?: boolean;
+  /** How much of git-annex's output for the files sent as new could be used; default `understood`. */
+  output?: OutputState;
+  /** The same for the check of the recorded files. */
+  recordedOutput?: OutputState;
+}
+
+/** Why a count git-annex printed cannot be trusted, in words. */
+function whyUnknown(state: OutputState): string {
+  return state === "partial"
+    ? "git-annex gave no result for some of them"
+    : "git-annex's output was not recognized";
 }
 
 /**
@@ -587,16 +599,16 @@ export function formatUploadSummary(
   const noLocal = extras.recordedNoLocal ?? 0;
   const sent = extras.sent ?? confirmed;
   const skipped = extras.recordedCheckSkipped === true;
-  const copyReadable = extras.outputRecognized !== false;
-  const checkReadable = extras.recordedOutputRecognized !== false;
+  const copyOutput = extras.output ?? "understood";
+  const checkOutput = extras.recordedOutput ?? "understood";
   const recorded = Math.max(0, total - attempted);
 
   if (attempted === 0 && resent === 0) {
     if (skipped) {
-      return `All ${total} data files are recorded at the S3 remote; they were not checked again, because the remote confirmed them in the last 6 hours`;
+      return `All ${total} data files are recorded at the S3 remote; not checked again, because a check of this many recorded files passed within the last ${RECORDED_CHECK_VALID_TEXT}`;
     }
-    if (!checkReadable) {
-      return `All ${total} data files are recorded at the S3 remote (git-annex's output was not recognized, so what its check found is unknown)`;
+    if (checkOutput !== "understood") {
+      return `All ${total} data files are recorded at the S3 remote (${whyUnknown(checkOutput)}, so what its check found is unknown)`;
     }
     let how: string;
     if (noLocal === 0) how = total === 1 ? "git-annex checked it" : "git-annex checked each one";
@@ -616,15 +628,16 @@ export function formatUploadSummary(
   const parts: string[] = [];
   if (attempted > 0) {
     const files = countDataFiles(attempted);
-    const hedge = !copyReadable
-      ? "git-annex's output was not recognized, so how many it transferred is unknown; the location log is what shows them recorded"
-      : confirmed < attempted
-        ? `git-annex confirmed ${confirmed} of ${attempted}; the rest are recorded in the location log`
-        : confirmed > attempted
-          ? `git-annex reported ${confirmed} successful copies for ${attempted} files`
-          : sent < attempted
-            ? `git-annex reported transferring ${sent}`
-            : "";
+    const hedge =
+      copyOutput !== "understood"
+        ? `${whyUnknown(copyOutput)}, so how many it transferred is unknown; the location log is what shows them recorded`
+        : confirmed < attempted
+          ? `git-annex confirmed ${confirmed} of ${attempted}; the rest are recorded in the location log`
+          : confirmed > attempted
+            ? `git-annex reported ${confirmed} successful copies for ${attempted} files`
+            : sent < attempted
+              ? `git-annex reported transferring ${sent}`
+              : "";
     parts.push(
       hedge
         ? `${files} not yet recorded at the S3 remote ${wasWere(attempted)} copied (${hedge})`
@@ -636,11 +649,11 @@ export function formatUploadSummary(
   if (recorded > 0) {
     if (skipped) {
       parts.push(
-        `${recorded} already recorded at the remote ${wasWere(recorded)} not checked again, because the remote confirmed them in the last 6 hours`,
+        `${recorded} already recorded at the remote ${wasWere(recorded)} not checked again, because a check of this many recorded files passed within the last ${RECORDED_CHECK_VALID_TEXT}`,
       );
-    } else if (!checkReadable) {
+    } else if (checkOutput !== "understood") {
       parts.push(
-        `${recorded} ${wasWere(recorded)} already recorded at the remote (git-annex's output was not recognized, so what its check found is unknown)`,
+        `${recorded} ${wasWere(recorded)} already recorded at the remote (${whyUnknown(checkOutput)}, so what its check found is unknown)`,
       );
     } else {
       const present = Math.max(0, recorded - noLocal - resent);
@@ -668,7 +681,8 @@ export interface S3CopyPlan {
   pending: number;
   /**
    * The ones the log already records. Unless `recordedCheckSkipped`, the remote itself is
-   * asked about each, after the pending copy, and any it has lost are sent again.
+   * asked about each, after the pending copy, and any it has lost are sent again or, with
+   * no local content to send, reported missing.
    */
   recorded: number;
   /**
@@ -676,7 +690,7 @@ export interface S3CopyPlan {
    * cannot check those, so they are asked with `git annex fsck --fast --from`.
    */
   recordedNoLocal: number;
-  /** True when the remote confirmed the recorded files recently enough that they are not asked again. */
+  /** True when a recent check of this many recorded files means they are not asked again. */
   recordedCheckSkipped: boolean;
   /** Data files at or under the size threshold that the annex did not take; see {@link SmallNotAnnexed}. */
   smallNotAnnexed: SmallNotAnnexed;
@@ -718,12 +732,12 @@ export type S3CopyOutcome =
       resent: number;
       /** Recorded files with no content here, whose presence was asked with `git annex fsck`. */
       recordedNoLocal: number;
-      /** The recorded files were not asked about, because the remote confirmed them recently. */
+      /** The recorded files were not asked about, because a recent check covered them. */
       recordedCheckSkipped: boolean;
-      /** False when git-annex printed output for the new files that did not parse as copy records. */
-      outputRecognized: boolean;
+      /** How much of git-annex's output for the new files could be used. */
+      output: OutputState;
       /** The same for the check of the recorded files. */
-      recordedOutputRecognized: boolean;
+      recordedOutput: OutputState;
       /**
        * Every annexed file was sent or asked about in THIS run and git-annex's output
        * for all of it was understood: the one state worth stamping as a passed check.
@@ -742,7 +756,15 @@ export type S3CopyOutcome =
       total: number;
       /** Of `missing`, the ones whose content is not in this repository. */
       notLocal: string[];
-      /** Of `missing`, the ones the log recorded at the remote and `fsck` found it no longer holds. */
+      /**
+       * False when the walk that finds `notLocal` failed, so it holds only the files known
+       * to have no content here (the ones `fsck` asked about) and may be short.
+       */
+      notLocalKnown: boolean;
+      /**
+       * Of `missing`, the ones the log recorded at the remote and `fsck` reported it no
+       * longer holds. `fsck` can also strike a key because the remote could not be read.
+       */
       lostAtRemote: string[];
     };
 
@@ -780,8 +802,11 @@ export async function copyAnnexedToRemote(args: {
   addTargets: Array<{ path: string; size: number; type?: string }>;
   jobs: number;
   credentials?: S3Credentials;
-  /** The remote confirmed the recorded files recently (see `isRecordedCheckFresh`); do not ask again. */
-  skipRecordedCheck?: boolean;
+  /**
+   * Whether a recent check covers this many recorded files (see `isRecordedCheckFresh`), so
+   * the remote is not asked about them again. Asked once, with the number the log records.
+   */
+  skipRecordedCheck?: (recordedCount: number) => boolean;
   onPlan?: (plan: S3CopyPlan) => void | Promise<void>;
 }): Promise<S3CopyOutcome> {
   const { absolutePath, remote, addTargets } = args;
@@ -819,7 +844,7 @@ export async function copyAnnexedToRemote(args: {
 
   const pendingSet = new Set(pending);
   const recorded = [...annexedBefore].filter((p) => !pendingSet.has(p)).sort();
-  const skipCheck = args.skipRecordedCheck === true && recorded.length > 0;
+  const skipCheck = recorded.length > 0 && args.skipRecordedCheck?.(recorded.length) === true;
   // Split the recorded files by whether this repository holds their content: `copy` can
   // check those that it does, and only `fsck` can check the others.
   let recordedWithContent = recorded;
@@ -854,8 +879,9 @@ export async function copyAnnexedToRemote(args: {
   }
 
   let resent = 0;
-  let recordedOutputRecognized = true;
+  let recordedOutput: OutputState = "understood";
   let notConfirmed: Array<{ file: string; errors: string[] }> = [];
+  let unanswered: string[] = [];
   if (!skipCheck) {
     const check = await copyPathsToAnnexRemote(
       absolutePath,
@@ -868,7 +894,7 @@ export async function copyAnnexedToRemote(args: {
       return { status: "copy_failed", error: check.error ?? "Failed to check the remote" };
     }
     resent = check.filesSent;
-    recordedOutputRecognized = check.outputRecognized;
+    recordedOutput = check.output;
 
     if (recordedNoLocal.length > 0) {
       const holds = await checkRemoteHolds(
@@ -886,7 +912,11 @@ export async function copyAnnexedToRemote(args: {
       // about (an unreachable remote) is NOT struck, so the walk cannot see it: it is
       // sorted out after the walk, never read as present.
       notConfirmed = holds.absent;
-      recordedOutputRecognized = recordedOutputRecognized && holds.outputRecognized;
+      // A path fsck printed no record for was not asked; it is never read as present.
+      unanswered = holds.unanswered;
+      if (holds.output !== "understood" && recordedOutput === "understood") {
+        recordedOutput = holds.output;
+      }
     }
   }
 
@@ -897,12 +927,17 @@ export async function copyAnnexedToRemote(args: {
     return { status: "unverifiable", error: errorDetail(verifyError) };
   }
   const missingSet = new Set(missing);
-  const unasked = notConfirmed.filter((a) => !missingSet.has(a.file));
+  const unasked: Array<{ file: string; why: string }> = [
+    ...notConfirmed
+      .filter((a) => !missingSet.has(a.file))
+      .map((a) => ({ file: a.file, why: a.errors[0] ?? "no reason given" })),
+    ...unanswered.map((file) => ({ file, why: "git-annex gave no result for it" })),
+  ];
   if (unasked.length > 0) {
     const first = unasked[0];
     return {
       status: "unverifiable",
-      error: `git-annex could not confirm that ${unasked.length} recorded ${unasked.length === 1 ? "file" : "files"} with no local content ${unasked.length === 1 ? "is" : "are"} at the remote (${displayName(first.file)}: ${first.errors[0] ?? "no reason given"})`,
+      error: `git-annex could not confirm that ${unasked.length} recorded ${unasked.length === 1 ? "file" : "files"} with no local content ${unasked.length === 1 ? "is" : "are"} at the remote (${displayName(first.file)}: ${first.why})`,
     };
   }
   if (missing.length > 0) {
@@ -911,17 +946,24 @@ export async function copyAnnexedToRemote(args: {
     // `copy` skips, silently and with exit 0, a path whose content is not in this
     // repository (dropped, or never fetched). Re-running cannot fix that, so say which.
     let notLocal: string[] = [];
+    let notLocalKnown = true;
     try {
       const absent = await listAnnexedPathsNotAt(absolutePath, "here");
       notLocal = missing.filter((p) => absent.has(p));
     } catch {
-      // The hint is a courtesy; the failure it accompanies is already being reported.
+      // The hint is a courtesy, but it must not point the wrong way: a file fsck asked
+      // about because it has no content here, or struck as lost, has none, so those are
+      // still known. The rest are not.
+      notLocalKnown = false;
+      const known = new Set([...recordedNoLocal, ...notConfirmed.map((a) => a.file)]);
+      notLocal = missing.filter((p) => known.has(p));
     }
     return {
       status: "incomplete",
       missing,
       total,
       notLocal,
+      notLocalKnown,
       lostAtRemote: notConfirmed.map((a) => a.file).sort(),
     };
   }
@@ -935,9 +977,9 @@ export async function copyAnnexedToRemote(args: {
     resent,
     recordedNoLocal: recordedNoLocal.length,
     recordedCheckSkipped: skipCheck,
-    outputRecognized: copy.outputRecognized,
-    recordedOutputRecognized,
-    remoteConfirmed: !skipCheck && copy.outputRecognized && recordedOutputRecognized,
+    output: copy.output,
+    recordedOutput,
+    remoteConfirmed: !skipCheck && copy.output === "understood" && recordedOutput === "understood",
     annexedPaths: annexedBefore,
     smallNotAnnexed,
   };
@@ -971,7 +1013,7 @@ export interface BlockedRecovery {
  * is still a no-op on a blob left staged, so it finds the file blocked once more;
  * {@link transferAnnexedData} answers a blocked verdict by calling this and then
  * adding the files again in the same run, so a cause fixed in the meantime takes
- * effect on that second run instead of waiting for a third. A file that was never
+ * effect in the same run. A file that was never
  * staged because `.gitignore` matches it (git-annex skips an ignored file silently,
  * while the upload plan is `find`-based and lists it) has nothing to unstage; the
  * stamp alone is what the re-run needs once the pattern is fixed. Never throws: what
@@ -1020,14 +1062,6 @@ function shellQuote(word: string): string {
   return `'${word.replace(/'/g, `'\\''`)}'`;
 }
 
-/**
- * Whether a name can be put in a command a person will copy and run. A control character
- * would reach the terminal raw (an ESCAPE) or split the command across lines (a newline),
- * and no quoting that works in every shell fixes that, so such a name is not printed in a
- * command at all.
- */
-const isPrintableInCommand = (name: string): boolean => displayName(name) === name;
-
 /** The most paths worth printing in a command; past it the re-run does the work. */
 const MAX_PRINTED_UNSTAGE_PATHS = 50;
 
@@ -1053,7 +1087,7 @@ export function describeBlockedTracking(
   if (recovery.unstaged !== null) {
     lines.push(
       recovery.unstaged > 0
-        ? `  ${recovery.unstaged} of them were unstaged so the next run can annex them; the files themselves are untouched.`
+        ? `  ${recovery.unstaged} of them ${wasWere(recovery.unstaged)} unstaged so the next run can annex them; the files themselves are untouched.`
         : "  None of them was staged, so nothing needed unstaging.",
     );
     if (recovery.error) lines.push(`  But: ${recovery.error}.`);
@@ -1105,16 +1139,21 @@ export const S3_REMOTE_NAME = "nemar-s3";
  * EMPTY value counts as not configured: `git config --get` exits 0 for it, and
  * git-annex then fails every call that names the remote with an internal trace that no
  * retry repairs, where treating the remote as absent lets `enableremote` write it again.
+ * Only exit status 1 means the key is absent; any other failure (3 and 128 are a config
+ * file git could not read or parse) throws, because "not configured" would send the
+ * caller to reconfigure a repository whose config could not be read.
  */
 export async function specialRemoteConfigured(
   absolutePath: string,
   remote: string,
 ): Promise<boolean> {
-  const { stdout, exitCode } = await runCommand(
+  const { stdout, stderr, exitCode } = await runCommand(
     ["git", "config", "--get", `remote.${remote}.annex-uuid`],
     { cwd: absolutePath },
   );
-  return exitCode === 0 && stdout.trim().length > 0;
+  if (exitCode === 1) return false;
+  if (exitCode !== 0) throw new Error(commandFailure("git config", stderr, exitCode));
+  return stdout.trim().length > 0;
 }
 
 /**
@@ -1202,15 +1241,16 @@ export function describeDuration(seconds: number): string {
  * The lines that say what the check of the already-recorded files will cost, or that it is
  * being skipped. Asking the remote about a recorded file costs one request each, so on a
  * dataset with tens of thousands of files a resume spends minutes on it before anything
- * else, and a silent wait of that size reads as a hang. Empty below
- * {@link ANNOUNCE_CHECK_ABOVE} files. Pure; exported for tests.
+ * else, and a silent wait of that size reads as a hang. Empty when nothing is recorded.
+ * Otherwise it says that the check is skipped, or how many files need `fsck` and, above
+ * {@link ANNOUNCE_CHECK_ABOVE} recorded files, the estimate. Pure; exported for tests.
  */
 export function describeRecordedCheck(plan: S3CopyPlan, jobs: number): string[] {
   const lines: string[] = [];
   if (plan.recorded === 0) return lines;
   if (plan.recordedCheckSkipped) {
     lines.push(
-      `  ${countDataFiles(plan.recorded)} already recorded at the S3 remote ${wasWere(plan.recorded)} confirmed there in the last 6 hours; not asking again.`,
+      `  A check of this many recorded files passed within the last ${RECORDED_CHECK_VALID_TEXT}; the remote is not asked about the ${plan.recorded} again.`,
     );
     return lines;
   }
@@ -1222,7 +1262,7 @@ export function describeRecordedCheck(plan: S3CopyPlan, jobs: number): string[] 
   if (plan.recorded > ANNOUNCE_CHECK_ABOVE) {
     const seconds = Math.ceil((plan.recorded * CHECK_SECONDS_PER_FILE) / Math.max(1, jobs));
     lines.push(
-      `  The remote is asked about each of the ${plan.recorded.toLocaleString("en-US")} files already recorded there, one request each: ${describeDuration(seconds)} with ${jobs} parallel ${jobs === 1 ? "job" : "jobs"} (50 to 100 ms a request; --jobs changes it). A run that gets through it lets a re-run within 6 hours skip it.`,
+      `  The remote is asked about each of the ${plan.recorded.toLocaleString("en-US")} files already recorded there, one request each: ${describeDuration(seconds)} with ${jobs} parallel ${jobs === 1 ? "job" : "jobs"} (50 to 100 ms a request; --jobs changes it). A run that gets through it, with git-annex's answers understood, lets a re-run within ${RECORDED_CHECK_VALID_TEXT} skip it.`,
     );
   }
   return lines;
@@ -1272,7 +1312,7 @@ export async function transferAnnexedData(args: {
       addTargets,
       jobs: args.jobs,
       credentials: opened.value.credentials,
-      skipRecordedCheck: isRecordedCheckFresh(progress),
+      skipRecordedCheck: (recordedCount: number) => isRecordedCheckFresh(progress, recordedCount),
       onPlan: (plan: S3CopyPlan) => {
         const { inGit, leftOut } = plan.smallNotAnnexed;
         if (inGit.length > 0) {
@@ -1313,6 +1353,10 @@ export async function transferAnnexedData(args: {
       const added = await trackDataFiles(absolutePath, blocked);
       if (!added.success) {
         console.log(chalk.red(`Failed to track data files: ${added.error}`));
+        // The recovery before it may have had its own trouble (an unsaved progress file);
+        // that account is the only record of it.
+        if (recovery.error)
+          console.log(chalk.yellow(`The recovery before it also reported: ${recovery.error}`));
         console.log(chalk.yellow("Re-run the same command to resume tracking."));
         return FAIL;
       }
@@ -1325,9 +1369,16 @@ export async function transferAnnexedData(args: {
     await clearAnnexCredentials(absolutePath);
   }
 
-  if (retracked > 0 && outcome.status !== "blocked") {
+  const blockedCheckRan =
+    outcome.status === "ok" ||
+    outcome.status === "copy_failed" ||
+    outcome.status === "incomplete" ||
+    outcome.status === "unverifiable";
+  if (retracked > 0 && blockedCheckRan) {
     // The recovery cleared the tracking stamp; the add that followed it is what completed
-    // the step, so say so, or the next run adds the whole list again.
+    // the step, so say so, or the next run adds the whole list again. Only a verdict that
+    // got past the not-annexed check says the files are annexed now: a second verdict that
+    // could not read the log says nothing.
     markStepCompleted(progress, "tracking");
     writeUploadProgress(absolutePath, progress);
     console.log(
@@ -1367,22 +1418,36 @@ export async function transferAnnexedData(args: {
       if (lost > 0) {
         console.log(
           chalk.red(
-            `${lost} of them ${lost === 1 ? "was" : "were"} recorded at the S3 remote, but the remote no longer holds ${lost === 1 ? "it" : "them"} (git-annex fsck found ${lost === 1 ? "it" : "them"} missing and corrected the location log).`,
+            `git-annex reports that the S3 remote no longer holds ${lost} of them: fsck did not find ${lost === 1 ? "it" : "them"} there and struck ${lost === 1 ? "it" : "them"} from the location log.`,
+          ),
+        );
+        console.log(
+          chalk.yellow(
+            `If the remote could not be read, rather than having lost the objects, \`git annex fsck --fast --from ${S3_REMOTE_NAME}\` puts back the keys that were struck only for that reason.`,
           ),
         );
       }
       const n = outcome.notLocal.length;
       if (n > 0) {
         const first = outcome.notLocal[0];
-        // One printable name is spelled out; anything else gets the command that means
-        // exactly this set (content absent here and absent at the remote).
-        const command =
-          n === 1 && isPrintableInCommand(first)
-            ? `git annex get -- ${shellQuote(first)}`
-            : `git annex get --not --in ${S3_REMOTE_NAME}`;
+        // One printable name that is known to be the only one is spelled out; anything
+        // else gets the command that means exactly this set (content absent here and
+        // absent at the remote).
+        const explicit = n === 1 && outcome.notLocalKnown && isPrintableInCommand(first);
+        const command = explicit
+          ? `git annex get -- ${shellQuote(first)}`
+          : `git annex get --not --in ${S3_REMOTE_NAME}`;
+        const atLeast = outcome.notLocalKnown ? "" : "At least ";
+        const some = `${atLeast}${n} of them ${n === 1 ? "has" : "have"} no content in this repository, so ${n === 1 ? "it cannot" : "they cannot"} be uploaded from here.`;
         console.log(
           chalk.yellow(
-            `${n} of them ${n === 1 ? "has" : "have"} no content in this repository, so ${n === 1 ? "it cannot" : "they cannot"} be uploaded from here. ${lost > 0 ? "Get the content from another copy of the dataset" : `Fetch ${n === 1 ? "it" : "them"}`} with \`${command}\`, then re-run.`,
+            `${some} ${lost > 0 ? "Get the content from another copy of the dataset" : `Fetch ${n === 1 ? "it" : "them"}`} with \`${command}\`, then re-run.`,
+          ),
+        );
+      } else if (!outcome.notLocalKnown) {
+        console.log(
+          chalk.yellow(
+            `Which of them have no content in this repository could not be read. If re-running does not help, fetch the missing content with \`git annex get --not --in ${S3_REMOTE_NAME}\`, then re-run.`,
           ),
         );
       } else {
@@ -1401,19 +1466,24 @@ export async function transferAnnexedData(args: {
     markFileUploaded(progress, file.path, { size: file.size, mtimeMs: file.mtimeMs });
   }
   // A run that had the remote answer for every file, and understood the answers, is what a
-  // re-run within six hours may rely on; a skipped or unreadable check must not refresh it.
-  if (outcome.remoteConfirmed) markRecordedChecked(progress);
+  // re-run may rely on for a while; a skipped or unreadable check must not refresh it. The
+  // stamp carries how many annexed files that was, so files recorded since do not ride on it.
+  if (outcome.remoteConfirmed) markRecordedChecked(progress, outcome.total);
   writeUploadProgress(absolutePath, progress);
   const summary = formatUploadSummary(outcome.total, outcome.attempted, outcome.confirmed, {
     sent: outcome.sent,
     resent: outcome.resent,
     recordedNoLocal: outcome.recordedNoLocal,
     recordedCheckSkipped: outcome.recordedCheckSkipped,
-    outputRecognized: outcome.outputRecognized,
-    recordedOutputRecognized: outcome.recordedOutputRecognized,
+    output: outcome.output,
+    recordedOutput: outcome.recordedOutput,
   });
-  if (spinner) (spinner as Ora).succeed(summary);
-  else console.log(summary);
+  // A summary that says something is unknown is a warning, not a success line.
+  const uncertain = outcome.output !== "understood" || outcome.recordedOutput !== "understood";
+  if (spinner) {
+    if (uncertain) (spinner as Ora).warn(summary);
+    else (spinner as Ora).succeed(summary);
+  } else console.log(uncertain ? chalk.yellow(summary) : summary);
   return ok({ annexedPaths: outcome.annexedPaths });
 }
 

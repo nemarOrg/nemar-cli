@@ -34,7 +34,7 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 
 const MODULE_EXPORTS: Record<string, string[]> = {
-  "run-command": ["runCommand"],
+  "run-command": ["credentialValues", "redactCredentials", "runCommand"],
   prereq: [
     "checkAWSCredentials",
     "checkDownloadPrerequisites",
@@ -129,7 +129,6 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "listAnnexedKeys",
     "parseCopyJson",
     "parseFsckJson",
-    "redactCredentials",
     "setKeyPresent",
   ],
   "repo-state": [
@@ -206,8 +205,11 @@ const INTERNAL_WIRING = [
   "extractCopyJsonError",
   "checkRemoteHolds",
   "parseFsckJson",
-  "redactCredentials",
   "setAssumeUnchanged",
+  // The credential redaction of what a subprocess prints, shared by the verbose log and
+  // the copy and presence-check errors: unit tested, consumed by sibling modules only.
+  "credentialValues",
+  "redactCredentials",
   // The stat guard, the stale-flag clear and the failure text of saveDataset's skip:
   // unit tested, consumed by saveDataset itself and the tests.
   "clearStaleAssumeUnchanged",

@@ -40,14 +40,13 @@ export interface ShimRule {
    */
   stdout?: string;
   /**
-   * Export these variables for the matching call and run the real git. Combines with
-   * nothing else on the rule: it neither fails nor counts.
+   * Export these variables for the matching call and run the real git. `env`, `sleep`,
+   * `log` and `holdLock` are the pass-through rules: they combine with each other (in the
+   * order lock, log, sleep, hold), and a rule that has any of them neither fails nor
+   * counts, so `after`, `times`, `exit`, `kill`, `message` and `stdout` are ignored on it.
    */
   env?: Record<string, string>;
-  /**
-   * Sleep this many seconds, then run the real git: a call that hangs. Like `env` it
-   * neither fails nor counts.
-   */
+  /** Sleep this many seconds, then run the real git: a call that hangs. */
   sleep?: number;
   /** Append the call's arguments, one line per call, to this file, then carry on. */
   log?: string;

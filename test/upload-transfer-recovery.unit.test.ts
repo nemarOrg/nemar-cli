@@ -7,7 +7,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { displayName } from "../src/lib/display-name";
 import { initUploadProgress, isStepCompleted, markStepCompleted } from "../src/lib/upload-progress";
@@ -85,6 +85,15 @@ async function captured<T>(fn: () => Promise<T>): Promise<{ value: T; text: stri
   }
 }
 
+const INFO = {
+  dataset_id: "nm000996",
+  ssh_url: "git@github.com:nemarDatasets/nm000996.git",
+  s3_prefix: "nm000996/objects",
+  github_url: "https://github.com/nemarDatasets/nm000996",
+  upload_urls: {},
+  s3_config: { bucket: "nemar-test", region: "us-east-2", public_url: "https://example.invalid" },
+};
+
 const transfer = (
   dir: string,
   targets: Target[],
@@ -118,10 +127,10 @@ describe("a blocked tracking is recovered and retried in the same run", () => {
     return { ...ds, targets, progress };
   }
 
-  test("a cause fixed since the run that staged the blob takes effect on this run, not the next", async () => {
+  test("a cause fixed since the run that staged the blob takes effect in the same run", async () => {
     // Guards the retry. `git annex add` is a no-op on a staged blob, so a run that finds
-    // the file blocked can only unstage it; unless it then adds it again the person has to
-    // run the upload a third time for a cause they fixed before the second.
+    // the file blocked can only unstage it; unless it then adds it again, the person has to
+    // run the upload once more for a cause they had already fixed.
     const { dir, store, targets, progress } = await blocked("fixed-cause");
     rmSync(join(dir, ".gitattributes"));
 
@@ -138,13 +147,22 @@ describe("a blocked tracking is recovered and retried in the same run", () => {
 
   test("a cause that is still there fails with the reason, the blob unstaged and the stamp cleared", async () => {
     const { dir, targets, progress } = await blocked("standing-cause");
-
-    const { value, text } = await transfer(dir, targets, progress);
+    const adds = join(scratch.root, `adds-${Math.random().toString(36).slice(2)}.log`);
+    const restore = installGitShim(scratch.root, [{ match: "annex add", log: adds }]);
+    let result: Awaited<ReturnType<typeof transfer>>;
+    try {
+      result = await transfer(dir, targets, progress);
+    } finally {
+      restore();
+    }
+    const { value, text } = result;
 
     expect(value.status).toBe("fail");
     expect(text).toContain("1 data file over 100,000 bytes was not added to git-annex");
-    expect(text).toContain("1 of them were unstaged");
-    // The retry added it again and the second verdict unstaged it a second time.
+    expect(text).toContain("1 of them was unstaged");
+    // The retry added the file again (exactly once), and the second verdict unstaged it
+    // a second time: the blob is out of the index.
+    expect(readFileSync(adds, "utf8").trim().split("\n")).toHaveLength(1);
     expect((await run(["git", "ls-files", "--", "big.edf"], dir)).stdout.trim()).toBe("");
     expect(isStepCompleted(progress, "tracking")).toBe(false);
     // Nothing was sent.
@@ -172,12 +190,52 @@ describe("a blocked tracking is recovered and retried in the same run", () => {
     expect((await run(["git", "ls-files", "--", "big.edf"], dir)).stdout.trim()).toBe("big.edf");
     expect(isStepCompleted(progress, "tracking")).toBe(false);
   });
+  test("a failed re-add after a recovery that had its own trouble prints both accounts", async () => {
+    // Guards the recovery's error. The progress file cannot be saved (a file sits where its
+    // directory should be), so the recovery reports that; the re-add then fails, and the
+    // recovery's account is the only record of the first trouble.
+    const { dir, targets, progress } = await blocked("retrack-fails");
+    rmSync(join(dir, ".nemar"), { recursive: true, force: true });
+    writeFileSync(join(dir, ".nemar"), "in the way");
+    const restore = installGitShim(scratch.root, [{ match: "annex add" }]);
+    try {
+      const { value, text } = await transfer(dir, targets, progress);
+      expect(value.status).toBe("fail");
+      expect(text).toContain("Failed to track data files:");
+      expect(text).toContain("The recovery before it also reported:");
+      expect(text).toContain("the upload progress could not be saved");
+    } finally {
+      restore();
+    }
+  });
+
+  test("a second verdict that could not read the log does not claim the files are annexed", async () => {
+    // Guards the gate on the verdicts that ran the not-annexed check. After a successful
+    // re-add the second decision cannot even list the annexed files; the tracking stamp
+    // must stay cleared and nothing may say "annexed now" about a check that never ran.
+    const { dir, targets, progress } = await blocked("second-unreadable");
+    // The first decision lists twice (annexed, then not at the remote) and is blocked; the
+    // second decision's first listing fails.
+    const restore = installGitShim(scratch.root, [
+      { match: "annex find", after: 2, message: "fatal: shim: the log is unreadable" },
+    ]);
+    try {
+      const { value, text } = await transfer(dir, targets, progress);
+      expect(value.status).toBe("fail");
+      expect(text).toContain("Could not read the annex location log");
+      expect(text).not.toContain("annexed now");
+      expect(text).not.toContain("added again");
+      expect(isStepCompleted(progress, "tracking")).toBe(false);
+    } finally {
+      restore();
+    }
+  });
 });
 
 describe("a failed read of git says how it ended", () => {
   test("a killed git annex find reports its exit status, not only that it failed", async () => {
-    // Guards `commandFailure`. A call killed by a signal prints nothing, so "git annex find
-    // failed" was all the person could be told about a walk that had been killed.
+    // Guards `commandFailure`. A call killed by a signal prints nothing, so the exit status
+    // is the only account there is of a walk that was killed.
     const { dir } = await dataset("killed-find", { "a.edf": 3_000 });
     expect((await trackDataFiles(dir, ["a.edf"])).success).toBe(true);
     const restore = installGitShim(scratch.root, [{ match: "annex find", kill: true }]);
@@ -244,6 +302,42 @@ describe("the remote's configuration", () => {
     expect(await specialRemoteConfigured(dir, REMOTE)).toBe(false);
   });
 
+  test("a config git could not read is an error, never 'not configured'", async () => {
+    // Guards the exit status. Only 1 means the key is absent; 3 and 128 are a config file
+    // git could not read or parse, and reading them as "absent" would send the caller to
+    // reconfigure a repository whose config it could not see.
+    const { dir } = await dataset("config-unreadable", { "a.edf": 3_000 });
+    const restore = installGitShim(scratch.root, [
+      { match: "config --get remote.nemar-s3.annex-uuid", exit: 3, message: "fatal: bad config" },
+    ]);
+    try {
+      await expect(specialRemoteConfigured(dir, REMOTE)).rejects.toThrow(
+        /fatal: bad config \(git config exited 3\)/,
+      );
+      const { value, text } = await captured(() =>
+        uploadDataToS3(dir, { jobs: "2" }, [], [], null, INFO, {
+          openRemote: async () => ok({}),
+        }),
+      );
+      expect(value.status).toBe("fail");
+      expect(text).toContain("Could not read the annex location log: fatal: bad config");
+    } finally {
+      restore();
+    }
+  });
+
+  test("exit status 1 is the one that means the key is absent", async () => {
+    const { dir } = await dataset("config-absent", { "a.edf": 3_000 });
+    const restore = installGitShim(scratch.root, [
+      { match: "config --get remote.nemar-s3.annex-uuid", exit: 1 },
+    ]);
+    try {
+      expect(await specialRemoteConfigured(dir, REMOTE)).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
   test("a resume on a clone without the remote says that, not that files are unrecorded", async () => {
     // Guards the reopen message. With the remote not set up, every annexed file counts as
     // not recorded there, and "N annexed data files are not recorded at the S3 remote"
@@ -265,21 +359,9 @@ describe("the remote's configuration", () => {
     const progress = initUploadProgress(dir, "nm000996", files);
     markStepCompleted(progress, "tracking");
     markStepCompleted(progress, "s3_upload");
-    const datasetInfo = {
-      dataset_id: "nm000996",
-      ssh_url: "git@github.com:nemarDatasets/nm000996.git",
-      s3_prefix: "nm000996/objects",
-      github_url: "https://github.com/nemarDatasets/nm000996",
-      upload_urls: {},
-      s3_config: {
-        bucket: "nemar-test",
-        region: "us-east-2",
-        public_url: "https://example.invalid",
-      },
-    };
 
     const { value, text } = await captured(() =>
-      uploadDataToS3(dir, { jobs: "2" }, files, [], progress, datasetInfo, {
+      uploadDataToS3(dir, { jobs: "2" }, files, [], progress, INFO, {
         openRemote: async () => {
           await initDirectoryRemote(scratch.root, dir, REMOTE);
           return ok({});
@@ -304,8 +386,10 @@ describe("file names that are printed", () => {
     // C1 controls: 0x85 is NEXT LINE, which several terminals honor.
     expect(displayName("c1\u0085end")).toBe("c1\\x85end");
     // Line separators and a right-to-left override reorder or split what is shown.
-    expect(displayName("ls ps end")).toBe("ls\\u2028ps\\u2029end");
-    expect(displayName("rtl‮exe.txt")).toBe("rtl\\u202eexe.txt");
+    expect(displayName("ls\u2028ps\u2029end")).toBe("ls\\u2028ps\\u2029end");
+    expect(displayName("rtl\u202eexe.txt")).toBe("rtl\\u202eexe.txt");
+    // Embeddings and isolates too.
+    expect(displayName("a\u202ab\u2066c")).toBe("a\\u202ab\\u2066c");
     // Ordinary names, including non-ASCII ones, a backslash and a space, are untouched.
     for (const plain of [
       "sub-01/eeg/a b.edf",
@@ -317,7 +401,7 @@ describe("file names that are printed", () => {
     }
   });
 
-  /** Two files that were never copied and whose content is dropped, so the step is incomplete. */
+  /** Files that were never copied and whose content is dropped, so the step is incomplete. */
   async function stranded(name: string, paths: string[]) {
     const files: Record<string, number> = {};
     for (const p of paths) files[p] = 3_000;
@@ -360,12 +444,19 @@ describe("file names that are printed", () => {
       "2 of them have no content in this repository, so they cannot be uploaded from here",
     );
     expect(text).toContain("Fetch them with `git annex get --not --in nemar-s3`, then re-run");
-    // And that command really selects those two files and no other.
-    const wanted = await run(
-      ["git", "annex", "find", "--not", "--in", REMOTE, "--not", "--in", "here"],
+    // And that command, run for real, selects those two files and no other. Nothing can be
+    // fetched (no remote has the content), so each selected file comes back as a failed
+    // record, and the records name the set.
+    const get = await run(
+      ["git", "annex", "get", "--json", "--json-error-messages", "--not", "--in", REMOTE],
       dir,
     );
-    expect(wanted.stdout.split("\n").filter(Boolean).sort()).toEqual(["a.edf", "b.edf"]);
+    const selected = get.stdout
+      .split("\n")
+      .filter((l) => l.startsWith("{"))
+      .map((l) => (JSON.parse(l) as { file: string }).file)
+      .sort();
+    expect(selected).toEqual(["a.edf", "b.edf"]);
   });
 
   test("the get hint for one file quotes its name for a shell and uses the singular", async () => {
@@ -398,7 +489,7 @@ describe("file names that are printed", () => {
 
 describe("what the step says while it works", () => {
   test("one recorded file is checked with a spinner that counts it correctly", async () => {
-    // Guards the wording: "Checking that 1 data file are at ..." was ungrammatical for one.
+    // Guards the wording for a single file: "1 data file", not "1 data files" or "are".
     const { dir, targets } = await dataset("one-file", { "a.edf": 3_000 });
     expect(
       (
