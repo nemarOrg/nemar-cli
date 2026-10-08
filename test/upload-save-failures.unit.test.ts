@@ -144,6 +144,26 @@ describe("a save that cannot look for stale flags fails instead of saying it sav
   });
 });
 
+describe("a save that finds stale flags does not skip anything", () => {
+  test("an edit the flag hid is committed even though the plan's record already matches it", async () => {
+    // Guards dropping the skip when flags were cleared on entry. The record in `entries`
+    // was taken AFTER the edit the flag had been hiding, so its size and mtime match the
+    // file and the stat guard alone would re-mark the path and `git add -A` would skip the
+    // edit a second time. Reading every file on a save that found stale flags is the cure.
+    const dir = await trackedRepo("stale-then-skip", { "a.edf": 3_000, "b.edf": 3_000 });
+    expect((await saveDataset(dir, "first")).success).toBe(true);
+    expect((await setAssumeUnchanged(dir, ["a.edf", "b.edf"], true)).success).toBe(true);
+    writeFileSync(join(dir, "a.edf"), "edited".repeat(500));
+    const entries = recorded(dir, ["a.edf", "b.edf"]);
+
+    const res = await saveDataset(dir, "second", undefined, { skipContentCheck: entries });
+
+    expect(res.success).toBe(true);
+    expect(await lastCommitPaths(dir)).toEqual(["a.edf"]);
+    expect(Object.values(await tags(dir))).toEqual(["H", "H"]);
+  });
+});
+
 describe("stale flags on file names git would read as patterns", () => {
   test("names with brackets, stars, question marks, spaces and accents are cleared literally", async () => {
     // Guards `--literal-pathspecs` on the classification step. Under git's own matching

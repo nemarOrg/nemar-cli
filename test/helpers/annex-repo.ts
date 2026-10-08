@@ -177,11 +177,15 @@ export async function trackedRepo(
  * The hook runs INSIDE the save's window, after the paths are marked and before the
  * commit exists, which makes it the one place a test can act "during the save".
  */
-export function prependPreCommit(dir: string, script: string): void {
+export function prependPreCommit(dir: string, script: string): () => void {
   const hook = join(dir, ".git", "hooks", "pre-commit");
   const original = readFileSync(hook, "utf-8");
   writeFileSync(hook, `#!/bin/sh\n${script}\n${original.replace(/^#!.*\n/, "")}`);
   chmodSync(hook, 0o755);
+  return () => {
+    writeFileSync(hook, original);
+    chmodSync(hook, 0o755);
+  };
 }
 
 /** Route this repo's filter-process through `tee` so re-read content is countable. */

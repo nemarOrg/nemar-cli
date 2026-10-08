@@ -5,7 +5,9 @@
  * can be run, rather than two lines in a command action nothing drives.
  */
 
+import chalk from "chalk";
 import type { NemarMetadataPayload } from "../api/datasets.js";
+import { clearStaleFlags } from "../git-annex/clone-push.js";
 import type { UploadProgress } from "../upload-progress.js";
 import { saveDatasetStep, writeNemarMetadata } from "./finalize.js";
 import {
@@ -42,6 +44,26 @@ export async function runDataSteps(
   args: DataStepsArgs,
   deps: DataStepsDeps = {},
 ): Promise<Step<UploadProgress>> {
+  // Before anything asks git to look at a file. A previous run killed inside the save
+  // leaves assume-unchanged flags in the index; `git annex add` on a flagged file exits 0
+  // and changes nothing, so an edit made since would be stamped as uploaded and never
+  // tracked, copied or committed, and the run would say it saved.
+  const flags = await clearStaleFlags(args.absolutePath);
+  if (!flags.success) {
+    console.log(
+      chalk.red(`Could not check this repository for assume-unchanged flags: ${flags.error}`),
+    );
+    console.log(chalk.yellow("Re-run the same command to retry."));
+    return FAIL;
+  }
+  if (flags.cleared > 0) {
+    console.log(
+      chalk.yellow(
+        `  Cleared ${flags.cleared} assume-unchanged flag(s) an earlier, interrupted save left on annexed files`,
+      ),
+    );
+  }
+
   // Step 9: Upload data files to S3 via the git-annex S3 special remote
   const uploaded = await uploadDataToS3(
     args.absolutePath,
