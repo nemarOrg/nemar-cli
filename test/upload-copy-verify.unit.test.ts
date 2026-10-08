@@ -25,72 +25,15 @@ import { dirname, join } from "node:path";
 import { spawn } from "bun";
 import { saveDataset, setAssumeUnchanged } from "../src/lib/git-annex/clone-push";
 import { configureLargefiles, gitAnnexAdd, initDataset } from "../src/lib/git-annex/init";
-import {
-  copyPathsToAnnexRemote,
-  copyToAnnexRemote,
-  extractCopyJsonError,
-  parseCopyJson,
-} from "../src/lib/git-annex/transfer";
+import { copyPathsToAnnexRemote, copyToAnnexRemote } from "../src/lib/git-annex/transfer";
 import {
   findDataFilesNotAnnexed,
   formatUploadSummary,
   listAnnexedPaths,
 } from "../src/lib/upload/transfer";
 
-describe("parseCopyJson", () => {
-  test("reads one record per JSON line and ignores bookkeeping text", () => {
-    const stdout = [
-      '{"command":"copy","error-messages":[],"file":"sub-01/a.edf","input":["."],"key":"SHA256E-s1--a.edf","success":true}',
-      "(recording state in git...)",
-      '{"command":"copy","error-messages":["S3 error: AccessDenied"],"file":"sub-02/b.edf","key":"SHA256E-s1--b.edf","success":false}',
-      "",
-      "{not json",
-    ].join("\n");
-    expect(parseCopyJson(stdout)).toEqual([
-      { file: "sub-01/a.edf", key: "SHA256E-s1--a.edf", success: true, errors: [] },
-      {
-        file: "sub-02/b.edf",
-        key: "SHA256E-s1--b.edf",
-        success: false,
-        errors: ["S3 error: AccessDenied"],
-      },
-    ]);
-  });
-
-  test("records of another command are not counted as copies", () => {
-    const stdout = '{"command":"drop","file":"x","success":true}\n';
-    expect(parseCopyJson(stdout)).toEqual([]);
-  });
-});
-
-describe("extractCopyJsonError", () => {
-  test("names each failed file with its git-annex error", () => {
-    const records = parseCopyJson(
-      '{"command":"copy","error-messages":["ExpiredToken"],"file":"sub-01/a.edf","success":false}\n',
-    );
-    const msg = extractCopyJsonError(records, "", "git-annex: copy: 1 failed");
-    expect(msg).toContain("1 file(s) failed to copy");
-    expect(msg).toContain("sub-01/a.edf: ExpiredToken");
-    expect(msg).toContain("git-annex: copy: 1 failed");
-  });
-
-  test("falls back to the human-output extraction when no record failed", () => {
-    expect(extractCopyJsonError([], "", "fatal: not a git repository")).toBe(
-      "fatal: not a git repository",
-    );
-  });
-
-  test("bounds a many-file failure", () => {
-    const stdout = Array.from(
-      { length: 30 },
-      (_, i) => `{"command":"copy","error-messages":["x"],"file":"f${i}","success":false}`,
-    ).join("\n");
-    const lines = extractCopyJsonError(parseCopyJson(stdout), stdout, "").split("\n");
-    expect(lines[0]).toBe("30 file(s) failed to copy:");
-    expect(lines[1]).toContain("10 earlier failed files omitted");
-    expect(lines).toHaveLength(22);
-  });
-});
+// parseCopyJson and extractCopyJsonError are exercised against captured, real git-annex
+// output in test/copy-json-real.unit.test.ts: hand-written error JSON hid a bug here.
 
 describe("formatUploadSummary", () => {
   test("a resume with nothing left says so instead of 'Uploaded 0'", () => {
