@@ -10,8 +10,9 @@
  * every other call to the real git, except the few a test makes it answer
  * itself to reach an error path. Every repository below is initialized by the
  * real git. The fallback must key on that exit status and never on the message,
- * because git localizes its messages: the stand-in is run with English, German
- * and French text and with no text at all.
+ * because git localizes its messages: the stand-in is run with English and
+ * German text and with no text at all, and the real git is asked for its status
+ * under English, German and French.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -40,7 +41,7 @@ const AUTHOR = { name: "Test", email: "test@test.com" };
 /** What every failure after the fallback began starts with. */
 const FALLBACK_NOTE = "git init -b main was rejected (exit 129); ";
 
-/** The usage error of a git without `-b` (English, as git 2.25 words it), and localized wordings of it. */
+/** The usage error of a git without `-b`: English as git 2.25 words it, a German wording, and no text. */
 const OLD_GIT_STDERR = {
   english: [
     "error: unknown switch `b'",
@@ -49,10 +50,6 @@ const OLD_GIT_STDERR = {
   german: [
     "Fehler: Unbekannter Schalter `b'",
     "Verwendung: git init [-q | --quiet] [--bare] [--template=<Vorlagenverzeichnis>] [--shared[=<Berechtigungen>]] [<Verzeichnis>]",
-  ].join("\n"),
-  french: [
-    "erreur : bascule inconnue « b »",
-    "usage : git init [-q | --quiet] [--bare] [--template=<répertoire-de-modèles>] [--shared[=<permissions>]] [<répertoire>]",
   ].join("\n"),
   // A git or wrapper whose stderr is discarded.
   empty: "",
@@ -246,13 +243,6 @@ describe("what the real git answers", () => {
       expect(r.stderr.toString()).not.toBe("");
     });
   }
-
-  test("a path git cannot create exits 128", () => {
-    const blocker = join(root, "blocker-file");
-    writeFileSync(blocker, "x");
-    const r = spawnSync([REAL_GIT, "init", "-b", "main", join(blocker, "sub")]);
-    expect(r.exitCode).toBe(128);
-  });
 });
 
 // Guards the stand-ins themselves: if one stopped answering `git init -b` with
@@ -329,7 +319,8 @@ describe("initDataset when a step of git init fails", () => {
     // The report is git's own stderr, in whatever language git speaks here. A
     // later step failing on the missing directory would word it differently.
     const direct = spawnSync([REAL_GIT, "init", "-b", "main", "--", target]);
-    expect(direct.exitCode).not.toBe(0);
+    // 128, not the usage error 129 the fallback keys on: a fatal error is not retried.
+    expect(direct.exitCode).toBe(128);
     expect(direct.stderr.toString().trim()).not.toBe("");
     expect(res).toEqual({ success: false, error: direct.stderr.toString().trim() });
     expect(initCalls(shim)).toEqual([`init -b main -- ${target}`]);
@@ -507,7 +498,7 @@ describe("initDataset where HEAD names a branch with no commits", () => {
   // main is an orphan that does not absorb develop, and develop is untouched.
   for (const [name, make] of [
     ["modern git", () => makeShim()],
-    ["git that rejects --initial-branch", () => oldGit(OLD_GIT_STDERR.french)],
+    ["git that rejects --initial-branch", () => oldGit(OLD_GIT_STDERR.german)],
   ] as const) {
     test(`${name}: unborn master over a populated develop leaves develop alone`, async () => {
       const dir = freshDir();
