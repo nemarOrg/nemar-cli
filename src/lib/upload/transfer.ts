@@ -484,6 +484,11 @@ export async function trackDataFiles(
   const regular = paths.filter((p) => !isCaseVariantData(p));
   const added = await gitAnnexAdd(absolutePath, regular);
   if (!added.success || forced.length === 0) return added;
+  // `{}` is gitAnnexAdd's chunking slot and the object after it its options. Another
+  // change to `gitAnnexAdd` (#1649) reshapes that signature; when it does, this call
+  // must keep meaning "default chunking, --force-large", and the test in
+  // test/upload-track-data.unit.test.ts that annexes a small `UPPER.EDF` is what fails
+  // if it stops.
   return gitAnnexAdd(absolutePath, forced, {}, { forceLarge: true });
 }
 
