@@ -2,17 +2,20 @@
  * `git annex copy --json --json-error-messages`, parsed from what git-annex really
  * prints.
  *
- * The first version of these tests fed `parseCopyJson` error JSON written by hand
- * (`"error-messages":["S3 error: AccessDenied"]`), and that hid a bug: when git-annex
- * declines to use a remote before trying (its store directory is gone) the record has
- * EMPTY `error-messages` and the reason in `note`, so the message came out as
- * "file: failed" with no cause. Every failing record below is captured from a real
- * failing copy against a real `directory` special remote: a read-only store, which
- * fails mid-transfer, and a missing store, which is declined up front.
+ * Every failing record below is captured from a real failing copy against a real
+ * `directory` special remote: a read-only store, which fails mid-transfer, and a
+ * missing store, which git-annex declines up front. The two differ in where the
+ * reason lives (`error-messages` against `note`), which is exactly what error JSON
+ * written by hand cannot be trusted to get right.
+ *
+ * Assertions that read git-annex's own prose, or the shape of a record, rather than
+ * ours are marked "version-coupled": they hold on git-annex 10.20260901 and are the
+ * ones to look at first if a different git-annex build fails this file.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, renameSync } from "node:fs";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { chmodSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { gitAnnexAdd } from "../src/lib/git-annex/init";
 import {
   copyPathsToAnnexRemote,
@@ -21,15 +24,23 @@ import {
   parseCopyJson,
 } from "../src/lib/git-annex/transfer";
 import {
+  chmodTreeWritable,
   initDirectoryRemote,
   makeScratch,
   newDatasetRepo,
   run,
   writeFile,
 } from "./helpers/annex-repo";
+import { installGitShim } from "./helpers/git-shim";
+
+// Each test builds a repository and runs git-annex a few times; CI machines are slower
+// than the 5 s default allows.
+setDefaultTimeout(60_000);
 
 const scratch = makeScratch("nemar-copy-json");
-// A read-only directory does not stop root, so that capture cannot run as root.
+// A read-only directory does not stop root, so the read-only captures cannot run as
+// root; under root the test of the de-duplication (which only that failure shape
+// exercises) is skipped, and removing the de-duplication goes unnoticed there.
 const canBlockWrites = process.getuid?.() !== 0;
 
 beforeAll(async () => {
@@ -45,6 +56,22 @@ interface Capture {
   stdout: string;
   stderr: string;
   exitCode: number;
+}
+
+function copyArgs(paths: string[]): string[] {
+  return [
+    "git",
+    "annex",
+    "copy",
+    "--to",
+    "store",
+    "-J",
+    "2",
+    "--json",
+    "--json-error-messages",
+    "--",
+    ...paths,
+  ];
 }
 
 /**
@@ -101,6 +128,40 @@ describe("parseCopyJson against real output", () => {
     }
   });
 
+  test("a record says whether git-annex moved the content or found it already there", async () => {
+    // Guards `transferred`. The first copy sends everything; the second finds it all
+    // already at the store and moves nothing; with the store emptied behind git-annex's
+    // back the third is a re-send, even though the location log still says "present".
+    const cap = await captureCopy("none", 3);
+    expect(parseCopyJson(cap.stdout).map((r) => r.transferred)).toEqual([true, true, true]);
+
+    const again = await run(copyArgs(cap.paths), cap.repo);
+    expect(again.exitCode).toBe(0);
+    const present = parseCopyJson(again.stdout);
+    expect(present).toHaveLength(3);
+    expect(present.every((r) => r.success && !r.transferred)).toBe(true);
+
+    chmodTreeWritable(cap.store);
+    for (const entry of readdirSync(cap.store)) {
+      rmSync(join(cap.store, entry), { recursive: true, force: true });
+    }
+    const resent = await run(copyArgs(cap.paths), cap.repo);
+    expect(parseCopyJson(resent.stdout).every((r) => r.success && r.transferred)).toBe(true);
+    // The functions built on it carry the count.
+    const counted = await copyPathsToAnnexRemote(cap.repo, "store", cap.paths, 2);
+    expect(counted).toMatchObject({ success: true, filesCopied: 3, filesSent: 0 });
+  });
+
+  test("a failed record that carries only the progress note has no reason to report", () => {
+    // Pure on purpose: no real failure was found that puts ONLY the progress note in a
+    // failed record, so this guards the filter against that shape rather than a capture.
+    const stdout =
+      '{"command":"copy","error-messages":[],"file":"a.edf","key":"K","note":"to store...","success":false}\n';
+    expect(parseCopyJson(stdout)).toEqual([
+      { file: "a.edf", key: "K", success: false, transferred: false, errors: [] },
+    ]);
+  });
+
   test("lines that are not JSON records are ignored around real ones", async () => {
     const cap = await captureCopy("none", 2);
     const noisy = `(recording state in git...)\n${cap.stdout}\n{not json\n{"command":"copy"}\n`;
@@ -133,7 +194,9 @@ describe("parseCopyJson against real output", () => {
         expect(raw[i]["error-messages"].length).toBeGreaterThan(1);
         // ...and the parse keeps it once.
         expect(r.errors).toHaveLength(1);
-        expect(r.errors[0]).toContain("permission denied");
+        // Version-coupled: the OS wording. What matters is that a reason is present
+        // and names the store it could not write to.
+        expect(r.errors[0]).toContain(cap.store);
       }
     },
   );
@@ -141,7 +204,9 @@ describe("parseCopyJson against real output", () => {
   test("a remote git-annex declined up front has its reason in the note, not in error-messages", async () => {
     const cap = await captureCopy("missing", 2);
     expect(cap.exitCode).not.toBe(0);
-    // The shape that broke the first parse: success false, error-messages empty.
+    // Version-coupled: the shape that broke the first parse (success false,
+    // error-messages empty, reason in the note). An older git-annex may put the
+    // reason in error-messages, and then this premise, not the parse, is what moves.
     const raw = cap.stdout
       .split("\n")
       .filter((l) => l.startsWith("{"))
@@ -155,7 +220,43 @@ describe("parseCopyJson against real output", () => {
     for (const r of records) {
       expect(r.success).toBe(false);
       expect(r.errors).toHaveLength(1);
-      expect(r.errors[0]).toContain("is not accessible");
+      // Version-coupled: git-annex's wording; the store it names is the stable part.
+      expect(r.errors[0]).toContain(cap.store);
+    }
+  });
+});
+
+describe("a git-annex that exits 0 and says something unexpected", () => {
+  test("is reported as unrecognized, so a count of zero is not read as a verdict", async () => {
+    // The shim stands in for a git-annex whose output format changed. The location log
+    // is still the authority on what arrived; this only keeps "confirmed 0 of N" from
+    // being printed as though it measured something.
+    const cap = await captureCopy("none", 2);
+    const restore = installGitShim(scratch.root, [
+      { match: "annex copy", stdout: "Wir haben kopiert (pretend new format)" },
+    ]);
+    try {
+      const result = await copyPathsToAnnexRemote(cap.repo, "store", cap.paths, 2);
+      expect(result).toMatchObject({
+        success: true,
+        filesCopied: 0,
+        filesSent: 0,
+        outputRecognized: false,
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  test("empty output is not unrecognized: nothing to say is a valid answer", async () => {
+    const cap = await captureCopy("none", 1);
+    const restore = installGitShim(scratch.root, [{ match: "annex copy", stdout: "" }]);
+    try {
+      // printf prints a bare newline, which is whitespace and carries no content.
+      const result = await copyPathsToAnnexRemote(cap.repo, "store", cap.paths, 2);
+      expect(result.outputRecognized).toBe(true);
+    } finally {
+      restore();
     }
   });
 });
@@ -165,10 +266,11 @@ describe("extractCopyJsonError against real output", () => {
     const cap = await captureCopy("missing", 2);
     const msg = extractCopyJsonError(parseCopyJson(cap.stdout), cap.stdout, cap.stderr);
     expect(msg).toContain("2 file(s) failed to copy:");
-    for (const p of cap.paths) expect(msg).toContain(`${p}: directory`);
-    expect(msg).toContain("is not accessible");
+    for (const p of cap.paths) expect(msg).toContain(`${p}: `);
+    expect(msg).toContain(cap.store);
     expect(msg).not.toMatch(/: failed$/m);
-    expect(msg).toContain("copy: 2 failed");
+    // git-annex's own stderr summary is appended whatever it says.
+    expect(msg).toContain(cap.stderr.trim());
   });
 
   test.skipIf(!canBlockWrites)(
@@ -178,17 +280,49 @@ describe("extractCopyJsonError against real output", () => {
       const msg = extractCopyJsonError(parseCopyJson(cap.stdout), cap.stdout, cap.stderr);
       expect(msg).toContain("2 file(s) failed to copy:");
       for (const p of cap.paths) expect(msg).toContain(`${p}: `);
-      expect(msg).toContain("permission denied");
       // Once per file, not twice: the duplicate inside each record is dropped.
-      expect(msg.match(/permission denied/g)).toHaveLength(2);
+      expect(msg.split(cap.store).length - 1).toBe(cap.paths.length);
     },
   );
 
-  test("falls back to the human-output extraction when no record failed", async () => {
+  test("with no failed record it says what it knows: stderr and the exit code", async () => {
     const cap = await captureCopy("none", 1);
-    expect(extractCopyJsonError(parseCopyJson(cap.stdout), "", "fatal: not a git repository")).toBe(
-      "fatal: not a git repository",
+    expect(
+      extractCopyJsonError(parseCopyJson(cap.stdout), "", "fatal: not a git repository", 128),
+    ).toBe("git annex copy failed with exit code 128: fatal: not a git repository");
+  });
+
+  test("success-only output with a non-zero exit never turns a JSON line into the message", async () => {
+    // Every record carries an `error-messages` key, so searching stdout for error words
+    // would match a SUCCESS record and surface the raw JSON as the error.
+    const cap = await captureCopy("none", 2);
+    expect(cap.stdout).toContain("error-messages");
+    const msg = extractCopyJsonError(parseCopyJson(cap.stdout), cap.stdout, "", 1);
+    expect(msg).toBe("git annex copy failed with exit code 1 without saying why");
+    expect(msg).not.toContain("{");
+  });
+
+  test("output that is not copy records is called what it is", () => {
+    expect(extractCopyJsonError([], "something unexpected\n", "", 1)).toBe(
+      "git annex copy failed with exit code 1; its output was not recognized as copy records",
     );
+    expect(extractCopyJsonError([], "something unexpected\n", "boom", 2)).toBe(
+      "git annex copy failed with exit code 2; its output was not recognized as copy records: boom",
+    );
+  });
+
+  test("a killed git-annex is reported with its exit code, not as a generic failure", async () => {
+    // The shim kills only `git annex copy`; everything else runs the real git.
+    const cap = await captureCopy("none", 2);
+    const restore = installGitShim(scratch.root, [{ match: "annex copy", kill: true }]);
+    try {
+      const result = await copyPathsToAnnexRemote(cap.repo, "store", cap.paths, 2);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("exit code 137");
+      expect(result.error).not.toBe("Failed to copy to remote");
+    } finally {
+      restore();
+    }
   });
 
   test("bounds a many-file failure to the last failures, and says how many it left out", async () => {
@@ -211,7 +345,7 @@ describe("the copy functions report the cause end to end", () => {
     const result = await copyPathsToAnnexRemote(cap.repo, "store", cap.paths, 2);
     expect(result.success).toBe(false);
     expect(result.filesCopied).toBe(0);
-    expect(result.error).toContain("is not accessible");
+    expect(result.error).toContain(cap.store);
   });
 
   test("copyToAnnexRemote returns the declined-remote reason too", async () => {
@@ -219,6 +353,6 @@ describe("the copy functions report the cause end to end", () => {
     renameSync(cap.store, `${cap.store}.gone`);
     const result = await copyToAnnexRemote(cap.repo, "store", 2);
     expect(result.success).toBe(false);
-    expect(result.error).toContain("is not accessible");
+    expect(result.error).toContain(cap.store);
   });
 });

@@ -1,13 +1,10 @@
 /**
- * Upload S3 step: copy accounting, the not-annexed guard, and the save step
- * that must not re-read annexed content.
+ * Upload S3 step: copy accounting, the not-annexed guard, and the save step that
+ * must not re-read annexed content.
  *
- * nm000358 (165 files, 1.6 TB on Ceph) logged "Uploaded 0 data files to S3"
- * although the git-annex branch recorded all 165 keys at nemar-s3 during that
- * copy, and then spent hours in "Saving dataset changes" because `git add -A`
- * streamed every freshly annexed unlocked file through git-annex
- * filter-process (their index entries carry zero stat data after
- * `git annex add`).
+ * `git annex add` stages unlocked files with zero stat data, so the save's
+ * `git add -A` streams every annexed file through git-annex filter-process to learn
+ * that it is unchanged. The tee-metered test below counts those bytes.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";

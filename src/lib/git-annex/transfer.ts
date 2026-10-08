@@ -786,26 +786,34 @@ export interface CopyJsonRecord {
   file: string | null;
   key: string | null;
   success: boolean;
-  /** Why a failed record failed (empty on success); see {@link parseCopyJson}. */
+  /**
+   * True when git-annex moved the content in this copy, false when it found the
+   * remote already holding it. A transfer carries the progress note ("to nemar-s3...");
+   * an object found already present carries no note at all (measured against
+   * git-annex 10.20260901 with a `directory` remote).
+   */
+  transferred: boolean;
+  /**
+   * Why a failed record failed. Empty on success, and also possibly empty on a
+   * failure that gave no reason; see {@link parseCopyJson}.
+   */
   errors: string[];
 }
 
 /**
- * Progress text git-annex puts in `note` on every record ("to nemar-s3..."). It is
- * not a reason, so a failed record that carries only this has none.
+ * Progress text git-annex puts in `note` of a record that moved content ("to
+ * nemar-s3..."). It is not a reason, so a failed record that carries only this has
+ * none.
  */
 const COPY_PROGRESS_NOTE = /^(?:to|from) \S+\.\.\.$/;
 
 /**
  * Parse the `--json --json-error-messages` output of `git annex copy`.
  *
- * The human-readable output used to be scraped with `/^copy .+ ok$/`, which is
- * not a stable interface: an upload of nm000358 (165 files, 1.6 TB, git-annex
- * 10.20260717, `-J 16`) reported "Uploaded 0 data files to S3" while the
- * git-annex branch recorded all 165 keys at nemar-s3 during that same copy.
- * The JSON records are the documented machine interface, one object per line.
- * Lines that are not JSON objects (git-annex can still print bookkeeping such
- * as "(recording state in git...)") are ignored. Exported for unit tests.
+ * The JSON records are git-annex's machine interface, one object per line; the
+ * `copy <file> ok` lines it prints for people are display text. Lines that are not
+ * JSON objects (git-annex can still print bookkeeping such as "(recording state in
+ * git...)") are ignored. Exported for unit tests.
  *
  * A failed record's reason is in one of two places, both measured against
  * git-annex 10.20260901 with a `directory` remote. A transfer that was attempted
@@ -846,6 +854,7 @@ export function parseCopyJson(stdout: string): CopyJsonRecord[] {
       file: typeof rec.file === "string" ? rec.file : null,
       key: typeof rec.key === "string" ? rec.key : null,
       success: rec.success,
+      transferred: rec.success && COPY_PROGRESS_NOTE.test(note),
       errors,
     });
   }
@@ -855,12 +864,19 @@ export function parseCopyJson(stdout: string): CopyJsonRecord[] {
 /**
  * Error text for a failed JSON-mode copy: the per-file error messages git-annex
  * reported (bounded like extractCopyError), falling back to the human-output
- * extraction when no record carried a message. Exported for unit tests.
+ * extraction when no record failed. Exported for unit tests.
+ *
+ * When no record failed, stdout is NOT searched for error words: in JSON mode every
+ * record carries an `error-messages` key, so the word "error" matches a success
+ * record and the raw JSON line would become the message. What is left to say is
+ * stderr, the exit code (a killed process has no other trace), and, when stdout had
+ * content but none of it was a copy record, that the output was not recognized.
  */
 export function extractCopyJsonError(
   records: CopyJsonRecord[],
   stdout: string,
   stderr: string,
+  exitCode?: number,
 ): string {
   const failed = records.filter((r) => !r.success);
   const lines = failed.map((r) => {
@@ -871,7 +887,16 @@ export function extractCopyJsonError(
         .join("; ") || "failed";
     return `${r.file ?? r.key ?? "(unknown file)"}: ${why}`;
   });
-  if (lines.length === 0) return extractCopyError(stdout, stderr);
+  const err = stderr.trim();
+  if (lines.length === 0) {
+    const code = exitCode === undefined ? "" : ` with exit code ${exitCode}`;
+    if (records.length === 0 && stdout.trim()) {
+      return `git annex copy failed${code}; its output was not recognized as copy records${err ? `: ${err}` : ""}`;
+    }
+    return err
+      ? `git annex copy failed${code}: ${err}`
+      : `git annex copy failed${code} without saying why`;
+  }
   const shown =
     lines.length > MAX_COPY_ERROR_LINES
       ? [
@@ -879,8 +904,71 @@ export function extractCopyJsonError(
           ...lines.slice(-MAX_COPY_ERROR_LINES),
         ]
       : lines;
-  const err = stderr.trim();
   return [`${failed.length} file(s) failed to copy:`, ...shown, ...(err ? [err] : [])].join("\n");
+}
+
+/** What a JSON-mode `git annex copy` run amounted to. */
+export interface CopyOutcome {
+  success: boolean;
+  error?: string;
+  /** Successful records: files git-annex reported at the remote after this run. */
+  filesCopied: number;
+  /** Of those, the ones git-annex actually transferred rather than found already there. */
+  filesSent: number;
+  /**
+   * False when git-annex exited 0, printed something, and none of it parsed as copy
+   * records. The count above is then not evidence of anything.
+   */
+  outputRecognized: boolean;
+}
+
+/**
+ * Run one JSON-mode `git annex copy --to <remote>` over `pathspecs` and say what it
+ * amounted to. Deliberately NOT `--fast`: without it git-annex checks the remote
+ * for the content of each key and re-sends one the location log wrongly says is
+ * there, which is the only thing that notices a store that lost objects.
+ */
+async function runJsonCopy(
+  datasetPath: string,
+  remoteName: string,
+  jobs: number,
+  pathspecs: string[],
+  env: Record<string, string> | undefined,
+): Promise<CopyOutcome> {
+  const { stdout, stderr, exitCode } = await runCommand(
+    [
+      "git",
+      "annex",
+      "copy",
+      "--to",
+      remoteName,
+      "-J",
+      jobs.toString(),
+      "--json",
+      "--json-error-messages",
+      "--",
+      ...pathspecs,
+    ],
+    { cwd: datasetPath, env },
+  );
+  const records = parseCopyJson(stdout);
+  const filesCopied = records.filter((r) => r.success).length;
+  const filesSent = records.filter((r) => r.transferred).length;
+  if (exitCode !== 0) {
+    return {
+      success: false,
+      error: extractCopyJsonError(records, stdout, stderr, exitCode),
+      filesCopied,
+      filesSent,
+      outputRecognized: records.length > 0 || !stdout.trim(),
+    };
+  }
+  return {
+    success: true,
+    filesCopied,
+    filesSent,
+    outputRecognized: records.length > 0 || !stdout.trim(),
+  };
 }
 
 /**
@@ -899,39 +987,18 @@ export async function copyToAnnexRemote(
   remoteName: string,
   jobs = 4,
   credentials?: S3Credentials,
-): Promise<{ success: boolean; error?: string; filesCopied: number }> {
+): Promise<CopyOutcome> {
   try {
-    const args = [
-      "git",
-      "annex",
-      "copy",
-      "--to",
-      remoteName,
-      "-J",
-      jobs.toString(),
-      "--json",
-      "--json-error-messages",
-      ".",
-    ];
-
-    const env = awsCredentialEnv(credentials);
-
-    const { stdout, stderr, exitCode } = await runCommand(args, { cwd: datasetPath, env });
-    const records = parseCopyJson(stdout);
-    const filesCopied = records.filter((r) => r.success).length;
-
-    if (exitCode !== 0) {
-      return {
-        success: false,
-        error: extractCopyJsonError(records, stdout, stderr),
-        filesCopied,
-      };
-    }
-
-    return { success: true, filesCopied };
+    return await runJsonCopy(datasetPath, remoteName, jobs, ["."], awsCredentialEnv(credentials));
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    return { success: false, error: msg || "Unknown error during copy", filesCopied: 0 };
+    return {
+      success: false,
+      error: msg || "Unknown error during copy",
+      filesCopied: 0,
+      filesSent: 0,
+      outputRecognized: true,
+    };
   }
 }
 
@@ -1537,10 +1604,12 @@ export async function listAnnexedKeys(datasetPath: string): Promise<Map<string, 
  *
  * `filesCopied` counts the successful `--json` copy records, which means "the
  * remote has it", not "it was transferred now" -- an already-present key
- * reports success too. It is a number for the operator, NOT evidence the
- * content arrived: a path git-annex does not consider annexed is skipped
- * silently with exit 0 and simply never appears. A caller that needs proof
- * should ask the location log afterwards (`listAnnexedPaths(path, remote)`).
+ * reports success too; `filesSent` counts the ones git-annex actually moved. Both
+ * are numbers for the operator, NOT evidence the content arrived: a path git-annex
+ * does not consider annexed is skipped silently with exit 0 and simply never
+ * appears. A caller that needs proof should ask the location log afterwards
+ * (`listAnnexedPaths(path, remote)`). The paths go in argv-safe chunks, each run
+ * with `-J jobs`.
  */
 export async function copyPathsToAnnexRemote(
   datasetPath: string,
@@ -1548,42 +1617,34 @@ export async function copyPathsToAnnexRemote(
   paths: string[],
   jobs = 4,
   credentials?: S3Credentials,
-): Promise<{ success: boolean; error?: string; filesCopied: number }> {
-  if (paths.length === 0) return { success: true, filesCopied: 0 };
+): Promise<CopyOutcome> {
+  if (paths.length === 0) {
+    return { success: true, filesCopied: 0, filesSent: 0, outputRecognized: true };
+  }
 
   const env = awsCredentialEnv(credentials);
   let filesCopied = 0;
+  let filesSent = 0;
+  let outputRecognized = true;
   try {
     for (const chunk of chunkAddTargets(paths)) {
-      const { stdout, stderr, exitCode } = await runCommand(
-        [
-          "git",
-          "annex",
-          "copy",
-          "--to",
-          remoteName,
-          "-J",
-          jobs.toString(),
-          "--json",
-          "--json-error-messages",
-          "--",
-          ...chunk,
-        ],
-        { cwd: datasetPath, env },
-      );
-      const records = parseCopyJson(stdout);
-      filesCopied += records.filter((r) => r.success).length;
-      if (exitCode !== 0) {
-        return {
-          success: false,
-          error: extractCopyJsonError(records, stdout, stderr),
-          filesCopied,
-        };
+      const run = await runJsonCopy(datasetPath, remoteName, jobs, chunk, env);
+      filesCopied += run.filesCopied;
+      filesSent += run.filesSent;
+      outputRecognized = outputRecognized && run.outputRecognized;
+      if (!run.success) {
+        return { success: false, error: run.error, filesCopied, filesSent, outputRecognized };
       }
     }
-    return { success: true, filesCopied };
+    return { success: true, filesCopied, filesSent, outputRecognized };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    return { success: false, error: msg || "Unknown error during copy", filesCopied };
+    return {
+      success: false,
+      error: msg || "Unknown error during copy",
+      filesCopied,
+      filesSent,
+      outputRecognized,
+    };
   }
 }
