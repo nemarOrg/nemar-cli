@@ -88,10 +88,6 @@ export class MisplacedShadowedOptionError extends Error {
   }
 }
 
-function optionFlags(option: Option): string[] {
-  return [option.long, option.short].filter((f): f is string => typeof f === "string");
-}
-
 /**
  * Whether `token` can stand as an option's value. A lone "-" can: Commander
  * itself reads it as a value (it is the usual spelling of stdin). Any other
@@ -100,7 +96,7 @@ function optionFlags(option: Option): string[] {
  * empty one: a caller testing the option for truthiness reads it as absent.
  */
 function isValue(token: string | undefined): token is string {
-  return token !== undefined && token !== "" && (token === "-" || !token.startsWith("-"));
+  return token === "-" || (!!token && !token.startsWith("-"));
 }
 
 function findSubcommand(cmd: Command, name: string): Command | undefined {
@@ -120,12 +116,12 @@ function findSubcommand(cmd: Command, name: string): Command | undefined {
 function shadowedOptions(command: Command, ancestors: readonly Command[]): Map<string, Option> {
   const claimedBy = new Map<string, Option>();
   for (const ancestor of ancestors) {
-    for (const o of ancestor.options as readonly Option[]) {
-      for (const f of optionFlags(o)) if (!claimedBy.has(f)) claimedBy.set(f, o);
+    for (const o of ancestor.options) {
+      if (o.long && !claimedBy.has(o.long)) claimedBy.set(o.long, o);
     }
   }
   const shadowed = new Map<string, Option>();
-  for (const o of command.options as readonly Option[]) {
+  for (const o of command.options) {
     if (!(o.required || o.optional) || !o.long) continue;
     const claimant = claimedBy.get(o.long);
     if (claimant && !(claimant.required || claimant.optional)) shadowed.set(o.long, o);
