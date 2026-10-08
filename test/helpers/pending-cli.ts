@@ -20,6 +20,7 @@
  * CLI-runner helper), comments included.
  */
 
+import { afterAll, afterEach, beforeEach, setDefaultTimeout } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,6 +28,7 @@ import { spawn } from "bun";
 import { SUBMISSION_POLICY_URL } from "../../backend/src/services/submission-minimums";
 import { OWNER_NAME_MISSING_MESSAGE } from "../../backend/src/services/uploader-identity";
 import { describeScreen } from "../../shared/identifier-screen-report";
+import { ciPendingHint } from "../../src/lib/publish-pending";
 
 export { OWNER_NAME_MISSING_MESSAGE, SUBMISSION_POLICY_URL };
 
@@ -177,6 +179,8 @@ export interface StandIn {
   reply: Reply;
   /** The answer to GET /datasets/<id>/publish/status. */
   statusReply: Reply;
+  /** Forget what was asked and go back to answering an accepted request and a pending status. */
+  reset: () => void;
   stop: () => void;
 }
 
@@ -187,6 +191,12 @@ export function startStandIn(): StandIn {
     bodies: [],
     reply: { status: 200, body: ACCEPTED_BODY },
     statusReply: { status: 200, body: statusBody() },
+    reset: () => {
+      standIn.hits.length = 0;
+      standIn.bodies.length = 0;
+      standIn.reply = { status: 200, body: ACCEPTED_BODY };
+      standIn.statusReply = { status: 200, body: statusBody() };
+    },
     stop: () => {},
   };
   const server = Bun.serve({
@@ -231,10 +241,15 @@ export function removeConfigDir(configDir: string): void {
   rmSync(configDir, { recursive: true, force: true });
 }
 
-export async function spawnCli(
+/**
+ * Run `cmd` in the repository root as a subprocess against `configDir`, with the
+ * environment of this process scrubbed of everything that could reroute it and a
+ * dead proxy for everything but loopback. `env` adds variables to the child.
+ */
+export async function spawnBun(
+  cmd: string[],
   configDir: string,
-  args: string[],
-  opts: { color?: boolean } = {},
+  opts: { color?: boolean; env?: Record<string, string> } = {},
 ): Promise<Run> {
   // Drop every TEST_* variable and the scrubbed set (matched in any case), so
   // nothing ambient can override the config.json URL or reroute the request.
@@ -250,8 +265,9 @@ export async function spawnCli(
   env.NO_PROXY = "127.0.0.1,localhost";
   if (opts.color) env.FORCE_COLOR = "1";
   else env.NO_COLOR = "1";
+  Object.assign(env, opts.env);
   const proc = spawn({
-    cmd: ["bun", "run", CLI_ENTRY, ...args],
+    cmd,
     cwd: REPO_ROOT,
     env,
     stdin: "ignore",
@@ -267,11 +283,48 @@ export async function spawnCli(
   // Bun's timeout ends the process with SIGTERM. A command that waits or polls
   // would end up here, which is the failure to report as itself.
   if (proc.signalCode) {
-    throw new Error(
-      `nemar ${args.join(" ")} was ended by ${proc.signalCode} after ${SPAWN_KILL_MS}ms`,
-    );
+    throw new Error(`${cmd.join(" ")} was ended by ${proc.signalCode} after ${SPAWN_KILL_MS}ms`);
   }
   return { stdout, stderr, exitCode };
+}
+
+export function spawnCli(
+  configDir: string,
+  args: string[],
+  opts: { color?: boolean } = {},
+): Promise<Run> {
+  return spawnBun(["bun", "run", CLI_ENTRY, ...args], configDir, opts);
+}
+
+/**
+ * The hooks every test file of the pending-validation CLI output repeats: one
+ * stand-in backend for the file, reset before each test, and a fresh config
+ * directory pointed at it for each. `run` spawns the real CLI against them.
+ * Also gives each test the time a subprocess needs.
+ */
+export function usePendingCliHarness(): {
+  standIn: StandIn;
+  run: (args: string[], opts?: { color?: boolean }) => Promise<Run>;
+} {
+  setDefaultTimeout(SPAWN_TEST_TIMEOUT_MS);
+  const standIn = startStandIn();
+  let configDir = "";
+  afterAll(() => standIn.stop());
+  beforeEach(() => {
+    standIn.reset();
+    configDir = makeConfigDir(standIn.url);
+  });
+  afterEach(() => removeConfigDir(configDir));
+  return { standIn, run: (args, opts) => spawnCli(configDir, args, opts) };
+}
+
+/**
+ * What a pending `publish request` prints on stdout: the hint, then the CI link
+ * when the refusal carried one. The headline is on stderr.
+ */
+export function pendingStdout(anonymous = false, ciUrl: string | null = CI_URL): string {
+  const lines = [...ciPendingHint(DATASET_ID, anonymous), ...(ciUrl ? [`  CI: ${ciUrl}`] : [])];
+  return `${lines.join("\n")}\n`;
 }
 
 /** The text of both streams, for assertions that do not care which one a line is on. */
