@@ -52,6 +52,9 @@ const GIT_USAGE_ERROR_EXIT = 129;
 /** What to report when a failed git call said nothing: its exit status. */
 const exitNote = (r: { exitCode: number }): string => `exit ${r.exitCode}`;
 
+/** The `env` option for `runCommand`, present only when there is something to add. */
+type EnvOptions = { env?: Record<string, string> };
+
 type HeadState = { kind: "resolves" } | { kind: "unborn" } | { kind: "unreadable"; reason: string };
 
 /**
@@ -64,11 +67,8 @@ type HeadState = { kind: "resolves" } | { kind: "unborn" } | { kind: "unreadable
  * strand whatever the old branch held and report success. Only exit statuses
  * are read here, never text, because git localizes its messages.
  */
-async function readHeadState(
-  path: string,
-  envOpt: { env?: Record<string, string> },
-): Promise<HeadState> {
-  const opts = { cwd: path, ...envOpt };
+async function readHeadState(path: string, envOpts: EnvOptions): Promise<HeadState> {
+  const opts = { cwd: path, ...envOpts };
   const resolved = await runCommand(["git", "rev-parse", "-q", "--verify", "HEAD"], opts);
   if (resolved.exitCode === 0) {
     return { kind: "resolves" };
@@ -118,10 +118,9 @@ async function readHeadState(
  */
 async function initGitRepoOnMain(
   path: string,
-  env: Record<string, string> = {},
+  envOpts: EnvOptions,
 ): Promise<{ success: boolean; error?: string }> {
-  const envOpt = Object.keys(env).length > 0 ? { env } : {};
-  const withBranch = await runCommand(["git", "init", "-b", "main", "--", path], envOpt);
+  const withBranch = await runCommand(["git", "init", "-b", "main", "--", path], envOpts);
   if (withBranch.exitCode === 0) {
     return { success: true };
   }
@@ -136,7 +135,7 @@ async function initGitRepoOnMain(
   // the text under "Failed to initialize git-annex dataset", where a bare git
   // error such as "cannot lock ref 'HEAD'" reads like a git-annex problem.
   const fallback = `git init -b main was rejected (exit ${GIT_USAGE_ERROR_EXIT}); `;
-  const plain = await runCommand(["git", "init", "--", path], envOpt);
+  const plain = await runCommand(["git", "init", "--", path], envOpts);
   if (plain.exitCode !== 0) {
     return {
       success: false,
@@ -150,7 +149,7 @@ async function initGitRepoOnMain(
   // strand the history on the old branch and make main a one-commit root. Only
   // an unborn HEAD is ours to name, and a HEAD that cannot be read is neither
   // ours to rename nor safe to guess about.
-  const state = await readHeadState(path, envOpt);
+  const state = await readHeadState(path, envOpts);
   if (state.kind === "unreadable") {
     return { success: false, error: `${fallback}${state.reason}` };
   }
@@ -159,7 +158,7 @@ async function initGitRepoOnMain(
   }
   const head = await runCommand(["git", "symbolic-ref", "HEAD", "refs/heads/main"], {
     cwd: path,
-    ...envOpt,
+    ...envOpts,
   });
   if (head.exitCode !== 0) {
     return {
@@ -195,14 +194,15 @@ export async function initDataset(
       env.GIT_COMMITTER_EMAIL = options.author.email;
     }
 
+    const envOpts: EnvOptions = Object.keys(env).length > 0 ? { env } : {};
+
     // Initialize git repository with explicit "main" branch name
-    const gitInit = await initGitRepoOnMain(path, env);
+    const gitInit = await initGitRepoOnMain(path, envOpts);
     if (!gitInit.success) {
       return gitInit;
     }
 
     // Initialize git-annex
-    const envOpts = Object.keys(env).length > 0 ? { env } : {};
     const { stderr: initStderr, exitCode: initExitCode } = await runCommand(
       ["git", "annex", "init"],
       {
