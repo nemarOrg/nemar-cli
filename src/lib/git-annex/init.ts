@@ -445,7 +445,7 @@ export async function gitAnnexAdd(
 export async function unstageTrackedPaths(datasetPath: string, paths: string[]): Promise<void> {
   for (const chunk of chunkAddTargets(paths)) {
     const { exitCode, stderr } = await runCommand(
-      ["git", "rm", "--cached", "--quiet", "--", ...chunk],
+      ["git", "--literal-pathspecs", "rm", "--cached", "--quiet", "--", ...chunk],
       { cwd: datasetPath },
     );
     if (exitCode !== 0) {

@@ -768,8 +768,18 @@ export async function copyAnnexedToRemote(args: {
   };
 }
 
+/** What {@link recoverBlockedTracking} managed to do. */
+export interface BlockedRecovery {
+  /** Files taken out of the index, or null when that did not complete. */
+  unstaged: number | null;
+  /** The blocked files that were staged, so the ones that needed unstaging. */
+  staged: string[];
+  /** What went wrong, when something did. */
+  error?: string;
+}
+
 /**
- * Make a blocked upload re-runnable, and say what to do.
+ * Make a blocked upload re-runnable.
  *
  * A data file git-annex refused is left staged as a plain git blob, and the
  * tracking step is stamped complete. Re-running after fixing the cause would then
@@ -779,22 +789,40 @@ export async function copyAnnexedToRemote(args: {
  * stays on disk, untouched) and the stamp is cleared; the next run finds the file
  * untracked, adds it afresh, and annexes it if the cause is gone.
  *
- * A file that was never staged because `.gitignore` matches it (git-annex skips an
- * ignored file silently, while the upload plan is `find`-based and lists it) has
+ * The stamp is cleared FIRST, before anything that can fail. Unstaging can stop
+ * half way (an index lock, a later chunk), and a user who then fixes it by hand
+ * leaves nothing untracked, so nothing would ever reopen the tracking step; with the
+ * stamp already gone, the next run adds the files again whatever state the index is
+ * in. A file that was never staged because `.gitignore` matches it (git-annex skips
+ * an ignored file silently, while the upload plan is `find`-based and lists it) has
  * nothing to unstage; the stamp alone is what the re-run needs once the pattern is
- * fixed. Returns the number of files unstaged. Throws when git refuses to unstage.
+ * fixed. Never throws: what failed comes back in `error`.
  */
 export async function recoverBlockedTracking(
   absolutePath: string,
   progress: UploadProgress,
   blockedPaths: string[],
-): Promise<number> {
-  const tracked = await listTrackedPaths(absolutePath);
-  const staged = blockedPaths.filter((p) => tracked.has(p));
-  await unstageTrackedPaths(absolutePath, staged);
+): Promise<BlockedRecovery> {
   clearStepCompleted(progress, "tracking");
-  writeUploadProgress(absolutePath, progress);
-  return staged.length;
+  const saved = writeUploadProgress(absolutePath, progress);
+
+  let staged = blockedPaths;
+  let unstaged: number | null = null;
+  const problems: string[] = [];
+  try {
+    const tracked = await listTrackedPaths(absolutePath);
+    staged = blockedPaths.filter((p) => tracked.has(p));
+    await unstageTrackedPaths(absolutePath, staged);
+    unstaged = staged.length;
+  } catch (e) {
+    problems.push(errorDetail(e));
+  }
+  if (!saved) {
+    problems.push(
+      "the upload progress could not be saved, so the next run may skip the tracking step; if it does, run the upload with --restart",
+    );
+  }
+  return { unstaged, staged, ...(problems.length > 0 ? { error: problems.join("; ") } : {}) };
 }
 
 /** First few paths, then a count of the rest; shared by the step's failure messages. */
@@ -804,31 +832,50 @@ function previewPaths(paths: string[], limit = 5): string[] {
   return lines;
 }
 
+/** A word for a POSIX shell: single-quoted, so spaces, globs and quotes survive. */
+function shellQuote(word: string): string {
+  return `'${word.replace(/'/g, `'\\''`)}'`;
+}
+
+/** The most paths worth printing in a command; past it the re-run does the work. */
+const MAX_PRINTED_UNSTAGE_PATHS = 50;
+
 /**
- * The lines printed when large data files were not annexed. `unstaged` is how many
- * `recoverBlockedTracking` took out of the index, or null when it could not, in
- * which case the exact manual command is printed instead. Pure; exported for tests.
+ * The lines printed when large data files were not annexed, from what
+ * {@link recoverBlockedTracking} did. When unstaging did not complete, the exact
+ * command is printed with every path quoted for a shell (and `--literal-pathspecs`,
+ * so a name with a `*` in it means itself); past {@link MAX_PRINTED_UNSTAGE_PATHS}
+ * paths it says instead that the re-run unstages them. Pure; exported for tests.
  */
 export function describeBlockedTracking(
   blocking: Array<{ path: string; size: number }>,
-  unstaged: number | null,
+  recovery: BlockedRecovery,
 ): string[] {
   const paths = blocking.map((f) => f.path);
   const lines = [
     `${countDataFiles(blocking.length)} over ${describeAnnexSizeThreshold()} ${blocking.length === 1 ? "was" : "were"} not added to git-annex and would be committed to git instead of uploaded to S3:`,
     ...previewPaths(paths),
   ];
-  if (unstaged !== null) {
+  if (recovery.unstaged !== null && !recovery.error) {
     lines.push(
-      unstaged > 0
-        ? `  ${unstaged} of them were unstaged so the next run can annex them; the files themselves are untouched.`
+      recovery.unstaged > 0
+        ? `  ${recovery.unstaged} of them were unstaged so the next run can annex them; the files themselves are untouched.`
         : "  None of them was staged, so nothing needed unstaging.",
     );
   } else {
-    const more = paths.length > 5 ? " (and the rest)" : "";
-    lines.push(
-      `  Could not unstage them. Run: git rm --cached -- ${paths.slice(0, 5).join(" ")}${more}`,
-    );
+    lines.push(`  Could not finish making the next run able to annex them: ${recovery.error}.`);
+    if (recovery.staged.length === 0) {
+      lines.push("  None of them is staged, so fixing the cause is all that is left.");
+    } else if (recovery.staged.length <= MAX_PRINTED_UNSTAGE_PATHS) {
+      lines.push(
+        "  The next run tries again; to do it now, run this in the dataset directory:",
+        `    git --literal-pathspecs rm --cached --quiet --ignore-unmatch -- ${recovery.staged.map(shellQuote).join(" ")}`,
+      );
+    } else {
+      lines.push(
+        `  ${recovery.staged.length} paths are involved; the next run tries again, unstaging them.`,
+      );
+    }
   }
   lines.push(
     "  Find out why git-annex declined them, fix that, then re-run `nemar dataset upload`:",
@@ -1070,17 +1117,12 @@ export async function uploadDataToS3(
           console.log(chalk.yellow("Re-run the same command to retry."));
           return FAIL;
         case "blocked": {
-          let unstaged: number | null = null;
-          try {
-            unstaged = await recoverBlockedTracking(
-              absolutePath,
-              progress,
-              outcome.blocking.map((f) => f.path),
-            );
-          } catch (recoverError) {
-            console.log(chalk.dim(`  ${errorDetail(recoverError)}`));
-          }
-          for (const line of describeBlockedTracking(outcome.blocking, unstaged)) {
+          const recovery = await recoverBlockedTracking(
+            absolutePath,
+            progress,
+            outcome.blocking.map((f) => f.path),
+          );
+          for (const line of describeBlockedTracking(outcome.blocking, recovery)) {
             console.log(line.startsWith("    ") ? chalk.yellow(line) : chalk.red(line));
           }
           return FAIL;
