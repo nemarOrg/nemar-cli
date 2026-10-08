@@ -52,13 +52,14 @@ const OLD_GIT_STDERR = {
   empty: "",
 };
 
-interface ShimSpec {
-  /** Answer `git init -b ...` with this status and stderr. Absent: the real git runs it. */
-  initB?: { exit: number; stderr: string };
-  /** Fail a plain `git init <dir>` (the fallback's first step) with status 128. */
-  failPlainInit?: string;
-  /** Fail `git symbolic-ref HEAD refs/heads/main` (the fallback's second step) with status 128. */
-  failHeadRepoint?: string;
+/**
+ * A call the stand-in answers itself instead of passing it on: `when` is a shell
+ * `case` pattern matched against the call's arguments joined by spaces.
+ */
+interface Answer {
+  when: string;
+  exit: number;
+  stderr: string;
 }
 
 interface Shim {
@@ -70,42 +71,28 @@ let root = "";
 let gitConfig = "";
 let shimCount = 0;
 
-/** Lines of a heredoc that writes `stderr` and exits with `status`. */
-function refusal(status: number, stderr: string): string[] {
-  return [
-    ...(stderr ? ["  cat >&2 <<'NEMAR_SHIM_EOF'", stderr, "NEMAR_SHIM_EOF"] : []),
-    `  exit ${status}`,
-  ];
-}
+// The calls the stand-ins know how to answer.
+const INIT_WITH_BRANCH = "'init -b '*";
+const PLAIN_INIT = "'init '[!-]*";
+const HEAD_REPOINT = "'symbolic-ref HEAD refs/heads/main'";
 
-function makeShim(spec: ShimSpec): Shim {
+const answer = (when: string, exit: number, stderr: string): Answer => ({ when, exit, stderr });
+
+/** A git stand-in on PATH: logs every call, answers the listed ones, runs the real git for the rest. */
+function makeShim(answers: Answer[] = []): Shim {
   const dir = join(root, `shim-${shimCount++}`);
   const log = join(dir, "calls.log");
   mkdirSync(dir, { recursive: true });
+  const arms = answers.flatMap((a) => [
+    `  ${a.when})`,
+    ...(a.stderr ? ["cat >&2 <<'NEMAR_SHIM_EOF'", a.stderr, "NEMAR_SHIM_EOF"] : []),
+    `    exit ${a.exit}`,
+    "    ;;",
+  ]);
   const body = [
     "#!/bin/sh",
     `printf '%s\\n' "$*" >> '${log}'`,
-    ...(spec.initB
-      ? [
-          'if [ "$1" = "init" ] && [ "$2" = "-b" ]; then',
-          ...refusal(spec.initB.exit, spec.initB.stderr),
-          "fi",
-        ]
-      : []),
-    ...(spec.failPlainInit !== undefined
-      ? [
-          'if [ "$1" = "init" ] && [ "$2" != "-b" ]; then',
-          ...refusal(128, spec.failPlainInit),
-          "fi",
-        ]
-      : []),
-    ...(spec.failHeadRepoint !== undefined
-      ? [
-          'if [ "$1" = "symbolic-ref" ] && [ "$2" = "HEAD" ] && [ "$3" = "refs/heads/main" ]; then',
-          ...refusal(128, spec.failHeadRepoint),
-          "fi",
-        ]
-      : []),
+    ...(arms.length > 0 ? ['case "$*" in', ...arms, "esac"] : []),
     `exec '${REAL_GIT}' "$@"`,
     "",
   ];
@@ -116,14 +103,14 @@ function makeShim(spec: ShimSpec): Shim {
   return { dir, log };
 }
 
-/** An older-git stand-in: `git init -b` is a usage error with this text. */
-function oldGit(stderr: string, extra: Omit<ShimSpec, "initB"> = {}): Shim {
-  return makeShim({ initB: { exit: 129, stderr }, ...extra });
+/** An older-git stand-in: `git init -b` is a usage error (status 129) with this text. */
+function oldGit(stderr: string, ...more: Answer[]): Shim {
+  return makeShim([answer(INIT_WITH_BRANCH, 129, stderr), ...more]);
 }
 
-/** The same logging wrapper over a modern git: nothing is refused. */
-function loggingGit(): Shim {
-  return makeShim({});
+/** The same logging wrapper over the modern git on this host: nothing is refused. */
+function loggingGit(...answers: Answer[]): Shim {
+  return makeShim(answers);
 }
 
 function calls(shim: Shim): string[] {
@@ -232,7 +219,7 @@ describe("initDataset when git init fails for any other reason", () => {
 
   for (const c of cases) {
     test(`${c.name}: reported once, not retried`, async () => {
-      const shim = makeShim({ initB: { exit: c.exit, stderr: c.stderr } });
+      const shim = makeShim([answer(INIT_WITH_BRANCH, c.exit, c.stderr)]);
       const dir = freshDir();
       const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
 
@@ -265,7 +252,10 @@ describe("initDataset when git init fails for any other reason", () => {
   );
 
   test("a failing plain git init in the fallback is reported", async () => {
-    const shim = oldGit(OLD_GIT_STDERR.english, { failPlainInit: "fatal: plain init refused" });
+    const shim = oldGit(
+      OLD_GIT_STDERR.english,
+      answer(PLAIN_INIT, 128, "fatal: plain init refused"),
+    );
     const dir = freshDir();
     const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
 
@@ -275,7 +265,7 @@ describe("initDataset when git init fails for any other reason", () => {
   });
 
   test("a failing HEAD re-point in the fallback is reported", async () => {
-    const shim = oldGit(OLD_GIT_STDERR.english, { failHeadRepoint: "fatal: head refused" });
+    const shim = oldGit(OLD_GIT_STDERR.english, answer(HEAD_REPOINT, 128, "fatal: head refused"));
     const dir = freshDir();
     const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
 
