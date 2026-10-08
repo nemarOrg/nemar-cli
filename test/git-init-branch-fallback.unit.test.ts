@@ -37,6 +37,9 @@ if (foundGit === null) {
 const REAL_GIT: string = foundGit;
 const AUTHOR = { name: "Test", email: "test@test.com" };
 
+/** What every failure after the fallback began starts with. */
+const FALLBACK_NOTE = "git init -b main was rejected (exit 129); ";
+
 /** How git 2.25 answers `git init -b main`, and how a localized git words the same refusal. */
 const OLD_GIT_STDERR = {
   english: [
@@ -276,7 +279,7 @@ describe("initDataset when git init fails for any other reason", () => {
       name: "status 1 with no message",
       exit: 1,
       stderr: "",
-      error: "Failed to initialize git repository",
+      error: "Failed to initialize git repository (exit 1)",
     },
   ];
 
@@ -309,27 +312,40 @@ describe("initDataset when git init fails for any other reason", () => {
     expect(headRepoints(shim)).toHaveLength(0);
   });
 
-  test("a failing plain git init in the fallback is reported", async () => {
-    const shim = oldGit(
-      OLD_GIT_STDERR.english,
-      answer(PLAIN_INIT, 128, "fatal: plain init refused"),
-    );
-    const dir = freshDir();
-    const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
+  // A failure after the fallback began says so, and says what failed: the
+  // callers print it under "Failed to initialize git-annex dataset".
+  const failingSteps = [
+    {
+      step: "plain git init",
+      rule: PLAIN_INIT,
+      said: "plain git init failed: ",
+      repoints: 0,
+    },
+    {
+      step: "HEAD re-point",
+      rule: HEAD_REPOINT,
+      said: "could not point HEAD at main: ",
+      repoints: 1,
+    },
+  ];
 
-    expect(res).toEqual({ success: false, error: "fatal: plain init refused" });
-    expect(initCalls(shim)).toEqual([`init -b main -- ${dir}`, `init -- ${dir}`]);
-    expect(headRepoints(shim)).toHaveLength(0);
-  });
+  for (const f of failingSteps) {
+    for (const [words, expected] of [
+      ["git's words", "fatal: step refused"],
+      ["no words at all", "exit 128"],
+    ] as const) {
+      test(`a failing ${f.step} in the fallback is reported with ${words}`, async () => {
+        const stderr = words === "no words at all" ? "" : expected;
+        const shim = oldGit(OLD_GIT_STDERR.english, answer(f.rule, 128, stderr));
+        const dir = freshDir();
+        const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
 
-  test("a failing HEAD re-point in the fallback is reported", async () => {
-    const shim = oldGit(OLD_GIT_STDERR.english, answer(HEAD_REPOINT, 128, "fatal: head refused"));
-    const dir = freshDir();
-    const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
-
-    expect(res).toEqual({ success: false, error: "fatal: head refused" });
-    expect(headRepoints(shim)).toHaveLength(1);
-  });
+        expect(res).toEqual({ success: false, error: `${FALLBACK_NOTE}${f.said}${expected}` });
+        expect(initCalls(shim)).toEqual([`init -b main -- ${dir}`, `init -- ${dir}`]);
+        expect(headRepoints(shim)).toHaveLength(f.repoints);
+      });
+    }
+  }
 });
 
 describe("initDataset with a path that starts with a dash", () => {
@@ -540,6 +556,7 @@ describe("initDataset where HEAD cannot be told apart from unborn", () => {
     expect(probe.exit).not.toBe(0);
     expect(probe.err).not.toBe("");
     expect(res.success).toBe(false);
+    expect(res.error).toStartWith(FALLBACK_NOTE);
     expect(res.error).toContain(probe.err);
     expect(headRepoints(shim)).toHaveLength(0);
     expect(readFileSync(join(dir, ".git", "HEAD"), "utf8").trim()).toBe("ref: refs/heads/master");
@@ -555,6 +572,7 @@ describe("initDataset where HEAD cannot be told apart from unborn", () => {
     const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
 
     expect(res.success).toBe(false);
+    expect(res.error).toStartWith(FALLBACK_NOTE);
     expect(res.error).toContain("fatal: simulated unreadable repository");
     // Neither the follow-up probes nor any write ran.
     expect(calls(shim).filter((l) => l.startsWith("symbolic-ref"))).toEqual([]);
@@ -570,6 +588,7 @@ describe("initDataset where HEAD cannot be told apart from unborn", () => {
     const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
 
     expect(res.success).toBe(false);
+    expect(res.error).toStartWith(FALLBACK_NOTE);
     expect(res.error).toContain("refs/heads/master");
     expect(headRepoints(shim)).toHaveLength(0);
   });
@@ -583,6 +602,7 @@ describe("initDataset where HEAD cannot be told apart from unborn", () => {
     const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
 
     expect(res.success).toBe(false);
+    expect(res.error).toStartWith(FALLBACK_NOTE);
     expect(res.error).toContain("fatal: simulated bad ref store");
     expect(headRepoints(shim)).toHaveLength(0);
   });
