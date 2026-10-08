@@ -73,6 +73,23 @@ Examples:
 // Main sandbox training action
 // ============================================================================
 
+/**
+ * Commit the dataset and push it. Throws, with the reason, when either step fails.
+ * `saveDataset` and `pushToGitHub` report failure in their result rather than by throwing,
+ * and a save that failed closed (a changed file it would not commit, a git that could not
+ * clear its flags) must not be reported as "Pushed to GitHub".
+ */
+export async function saveAndPush(
+  datasetPath: string,
+  message: string,
+  author?: { name: string; email: string },
+): Promise<void> {
+  const saved = await saveDataset(datasetPath, message, author);
+  if (!saved.success) throw new Error(`Saving the dataset failed: ${saved.error}`);
+  const pushed = await pushToGitHub(datasetPath);
+  if (!pushed.success) throw new Error(`Pushing to GitHub failed: ${pushed.error}`);
+}
+
 async function sandboxAction(options: { verbose?: boolean } = {}): Promise<void> {
   if (options.verbose) {
     setVerbose(true);
@@ -370,8 +387,7 @@ async function sandboxAction(options: { verbose?: boolean } = {}): Promise<void>
   const pushSpinner = ora("Saving and pushing...").start();
 
   try {
-    await saveDataset(datasetPath, "Initial sandbox training upload", author);
-    await pushToGitHub(datasetPath);
+    await saveAndPush(datasetPath, "Initial sandbox training upload", author);
     pushSpinner.succeed("Pushed to GitHub");
   } catch (error) {
     pushSpinner.fail("Failed to push to GitHub");
