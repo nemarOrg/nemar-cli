@@ -627,3 +627,102 @@ describe("a readiness check that cannot run is not reported as pending", () => {
     expect(body.block_reason).toBe("bids_validation_pending");
   });
 });
+
+describe("the exact bodies the CLI is tested against", () => {
+  // test/publish-request-pending-cli.test.ts answers the CLI with these shapes
+  // from a stand-in server. They are pinned here, from the real route, so the
+  // stand-in cannot drift from what the Worker sends without this test saying
+  // so.
+  test("pending: status, block_reason, message, dataset_id, anonymous and ci_url", async () => {
+    runs = "none";
+    const { status, body } = await requestPublication();
+    expect(status).toBe(422);
+    expect(Object.keys(body).sort()).toEqual([
+      "anonymous",
+      "block_reason",
+      "ci_url",
+      "dataset_id",
+      "message",
+      "status",
+    ]);
+    expect(body).toMatchObject({
+      status: "blocked",
+      block_reason: "bids_validation_pending",
+      dataset_id: DATASET,
+      anonymous: false,
+      ci_url: `https://github.com/nemarDatasets/${DATASET}/actions`,
+    });
+  });
+
+  test("pending, anonymous: the echo is true", async () => {
+    descriptionBody = BLINDED;
+    const { body } = await requestPublication({ anonymous: true });
+    expect(body.block_reason).toBe("bids_validation_pending");
+    expect(body.anonymous).toBe(true);
+  });
+
+  test("min_requirements_failed: the pending keys plus reasons, policy_url and details", async () => {
+    descriptionBody = SHORT_NAME;
+    const { body } = await requestPublication();
+    expect(Object.keys(body).sort()).toEqual([
+      "anonymous",
+      "block_reason",
+      "ci_url",
+      "dataset_id",
+      "details",
+      "message",
+      "policy_url",
+      "reasons",
+      "status",
+    ]);
+    expect(body.details).toEqual({ reasons: body.reasons, policy_url: body.policy_url });
+  });
+
+  test("a request that is already open: error, status and message", async () => {
+    runs = "success";
+    await withFakeResend(async () => {
+      expect((await requestPublication()).status).toBe(200);
+    });
+    const res = await app.request(
+      `/datasets/${DATASET}/publish/request`,
+      { method: "POST", headers: { Authorization: `Bearer ${OWNER_KEY}` } },
+      env(),
+    );
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: "A publication request already exists",
+      status: "requested",
+      message: "Use 'resend' to remind admins",
+    });
+  });
+
+  test("not the owner: a single error sentence", async () => {
+    await seedUser("bystander", "bystander-key-0123456789abcdef0123456789abcdef", true);
+    const res = await app.request(
+      `/datasets/${DATASET}/publish/request`,
+      {
+        method: "POST",
+        headers: { Authorization: "Bearer bystander-key-0123456789abcdef0123456789abcdef" },
+      },
+      env(),
+    );
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "Only the dataset owner can request publication" });
+  });
+
+  test("a missing owner name: owner_name_missing in the same shape as the other blocks", async () => {
+    const nameless = await seedUser("nameless2", NAMELESS_KEY, false);
+    seedDataset("nm000486", { owner: nameless });
+    const { status, body } = await requestPublication({ id: "nm000486", key: NAMELESS_KEY });
+    expect(status).toBe(422);
+    expect(body.block_reason).toBe("owner_name_missing");
+    expect(Object.keys(body).sort()).toEqual([
+      "anonymous",
+      "block_reason",
+      "ci_url",
+      "dataset_id",
+      "message",
+      "status",
+    ]);
+  });
+});
