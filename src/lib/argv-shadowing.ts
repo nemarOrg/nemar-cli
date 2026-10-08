@@ -29,8 +29,7 @@
  *   value than a value. A value that really starts with "-" is spelled
  *   `--flag=value`. A lone "-" counts as a value, as it does for Commander.
  * - A shadowed flag typed before the command that declares it (`dataset
- *   --version 2.0.0 release`). At the root it stays the root's own flag:
- *   `nemar --version dataset release ...` still prints the version.
+ *   --version 2.0.0 release`). At the root it stays the root's own flag.
  * Asking for help (`--help` or `-h` before `--`) outranks a missing value; the
  * bare flag is dropped so the root does not print the version instead.
  *
@@ -129,7 +128,11 @@ function shadowedOptions(command: Command, ancestors: readonly Command[]): Map<s
   return shadowed;
 }
 
-/** Every long flag that some command below `command` takes a value for while an ancestor's boolean claims it. */
+/**
+ * Every long flag that some command below `command` takes a value for while an
+ * ancestor's boolean claims it. Tree-wide on purpose: the walk meets a flag
+ * before it knows which command will end up taking it.
+ */
 function shadowedFlagsInTree(command: Command, ancestors: readonly Command[]): Set<string> {
   const flags = new Set(shadowedOptions(command, ancestors).keys());
   for (const sub of command.commands) {
