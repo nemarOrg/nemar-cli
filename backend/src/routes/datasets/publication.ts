@@ -655,7 +655,8 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     // The CLI prints a different line for each value (`src/commands/dataset.ts`).
     //
     // `request_notice` is what an accepted request is told, from the one
-    // definition the CLI prints (ADR 0090, amendment 2026-10-07). It is the
+    // definition the CLI prints (ADR 0090, amendment "what an accepted request is
+    // told"). It is the
     // same neutral words for a new request and for a re-request of a blocked
     // one, and it never depends on `screen`: the screen has not reported, and
     // a result shown now could be stale by the time anyone acts on it. It is

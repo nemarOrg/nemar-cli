@@ -153,7 +153,7 @@ describe("nemar dataset publish request", () => {
   });
   const key = (id: string) => `POST /datasets/${id}/publish/request`;
   const flat = (text: string) => text.replace(/\s+/g, " ");
-  // The maintainer's wording of 2026-10-07, spelled out here on purpose: the
+  // The maintainer's wording of the notice, spelled out here on purpose: the
   // test must fail if the shared definition changes, so it cannot import it.
   const NOTICE = (id: string) =>
     `Your request was received. NEMAR is checking publication eligibility. If every check passes, an administrator is notified to approve it. You will be emailed if a check needs your attention, and when an administrator decides. Run 'nemar dataset publish status ${id}' to see where it stands.`;

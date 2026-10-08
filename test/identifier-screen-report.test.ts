@@ -711,7 +711,7 @@ describe("describeScreen carries the warning and changes nothing else", () => {
   });
 });
 
-describe("publicationRequestNotice: what an accepted request is told (ADR 0090, 2026-10-07)", () => {
+describe("publicationRequestNotice: what an accepted request is told (ADR 0090)", () => {
   test("the wording is pinned, one sentence per line, and names the real status command", () => {
     expect(publicationRequestNotice("nm000321")).toEqual([
       "Your request was received.",
