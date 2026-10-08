@@ -12,7 +12,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { readFileSync, renameSync, rmSync } from "node:fs";
+import { chmodSync, readFileSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { gitAnnexAdd } from "../src/lib/git-annex/init";
 import {
@@ -32,6 +32,7 @@ import {
 } from "../src/lib/upload/transfer";
 import {
   annexedSet,
+  chmodTreeWritable,
   initDirectoryRemote,
   makeScratch,
   newDatasetRepo,
@@ -124,7 +125,7 @@ describe("copyAnnexedToRemote: what is copied", () => {
     expect(first).toMatchObject({ status: "ok", total: 3, attempted: 1, confirmed: 1 });
 
     const second = await step(dir, targets);
-    expect(second).toMatchObject({ status: "ok", total: 3, attempted: 0, confirmed: 0 });
+    expect(second).toMatchObject({ status: "ok", total: 3, attempted: 0, confirmed: 0, resent: 0 });
   });
 
   test("an annexed file from an earlier run that never reached the remote is copied too", async () => {
@@ -144,6 +145,123 @@ describe("copyAnnexedToRemote: what is copied", () => {
     // The set handed on to the save step is every annexed path, not this run's targets.
     if (outcome.status !== "ok") throw new Error("unreachable");
     expect(outcome.annexedPaths).toEqual(new Set(["old.edf", "new.edf"]));
+  });
+});
+
+describe("copyAnnexedToRemote: the remote is asked, not only the log", () => {
+  /** Empty a directory remote behind git-annex's back: a reset bucket, expired objects. */
+  function emptyStore(store: string): void {
+    chmodTreeWritable(store);
+    for (const entry of readdirSync(store))
+      rmSync(join(store, entry), { recursive: true, force: true });
+  }
+
+  test("a store that lost every object is sent them again, and the result says so", async () => {
+    // Guards the non-fast check of the paths the log already records. `pending` comes
+    // from the log, so a log that still says "present" for content the store no longer
+    // holds would otherwise end in "nothing to copy" with an empty bucket.
+    const { dir, store, targets } = await dataset("store-lost", {
+      "a.edf": 3_000,
+      "b.edf": 3_000,
+      "c.edf": 3_000,
+    });
+    expect(
+      (
+        await trackDataFiles(
+          dir,
+          targets.map((t) => t.path),
+        )
+      ).success,
+    ).toBe(true);
+    expect(await step(dir, targets)).toMatchObject({ status: "ok", attempted: 3, resent: 0 });
+    const objects = (): number => readdirSync(store, { recursive: true }).length;
+    expect(objects()).toBeGreaterThan(0);
+
+    emptyStore(store);
+    expect(readdirSync(store)).toEqual([]);
+    // The log has not noticed.
+    expect(await listAnnexedPathsNotAt(dir, REMOTE)).toEqual(new Set());
+
+    const outcome = await step(dir, targets);
+
+    expect(outcome).toMatchObject({ status: "ok", total: 3, attempted: 0, resent: 3 });
+    expect(objects()).toBeGreaterThan(0);
+    expect(await listAnnexedPaths(dir, REMOTE)).toEqual(new Set(targets.map((t) => t.path)));
+    if (outcome.status !== "ok") throw new Error("unreachable");
+    const summary = formatUploadSummary(outcome.total, outcome.attempted, outcome.confirmed, {
+      resent: outcome.resent,
+    });
+    expect(summary).toContain("3 were recorded but missing at the remote and were sent again");
+    expect(summary).not.toContain("nothing to copy");
+  });
+
+  test("a store that lost only some objects is sent only those", async () => {
+    const { dir, store, targets } = await dataset("store-partly-lost", {
+      "a.edf": 3_000,
+      "b.edf": 3_000,
+      "c.edf": 3_000,
+    });
+    expect(
+      (
+        await trackDataFiles(
+          dir,
+          targets.map((t) => t.path),
+        )
+      ).success,
+    ).toBe(true);
+    expect((await step(dir, targets)).status).toBe("ok");
+    // Remove exactly one key's object from the store.
+    const key = (await run(["git", "annex", "lookupkey", "b.edf"], dir)).stdout.trim();
+    chmodTreeWritable(store);
+    const victims = (readdirSync(store, { recursive: true }) as string[]).filter(
+      (e) => e.endsWith(`/${key}`) || e.endsWith(`/${key}/${key}`),
+    );
+    expect(victims.length).toBeGreaterThan(0);
+    for (const v of victims) rmSync(join(store, v), { recursive: true, force: true });
+
+    expect(await step(dir, targets)).toMatchObject({ status: "ok", attempted: 0, resent: 1 });
+  });
+
+  test("when the lost objects cannot be sent again the step fails and claims nothing", async () => {
+    const { dir, store, targets } = await dataset("store-lost-readonly", { "a.edf": 3_000 });
+    expect(
+      (
+        await trackDataFiles(
+          dir,
+          targets.map((t) => t.path),
+        )
+      ).success,
+    ).toBe(true);
+    expect((await step(dir, targets)).status).toBe("ok");
+    emptyStore(store);
+    chmodSync(store, 0o555);
+    try {
+      const outcome = await step(dir, targets);
+      // Not "ok" with a log that still says present: git-annex tried and failed.
+      expect(outcome.status).toBe("copy_failed");
+    } finally {
+      chmodSync(store, 0o755);
+    }
+  });
+
+  test("the plan counts what will be copied and what will only be checked", async () => {
+    const { dir, targets } = await dataset("plan-counts", { "a.edf": 3_000, "b.edf": 3_000 });
+    expect(
+      (
+        await trackDataFiles(
+          dir,
+          targets.map((t) => t.path),
+        )
+      ).success,
+    ).toBe(true);
+    expect((await run(["git", "annex", "copy", "--to", REMOTE, "--", "a.edf"], dir)).exitCode).toBe(
+      0,
+    );
+    const plans: Array<{ total: number; pending: number; recorded: number }> = [];
+    await step(dir, targets, (p) => {
+      plans.push({ total: p.total, pending: p.pending, recorded: p.recorded });
+    });
+    expect(plans).toEqual([{ total: 2, pending: 1, recorded: 1 }]);
   });
 });
 
@@ -169,7 +287,12 @@ describe("copyAnnexedToRemote: every annexed file must be recorded at the remote
       expect((await gitAnnexAdd(dir, ["late.edf"])).success).toBe(true);
     });
 
-    expect(outcome).toEqual({ status: "incomplete", missing: ["late.edf"], total: 3 });
+    expect(outcome).toEqual({
+      status: "incomplete",
+      missing: ["late.edf"],
+      total: 3,
+      notLocal: [],
+    });
     // The two planned files did arrive; only the late one is missing.
     expect(await listAnnexedPaths(dir, REMOTE)).toEqual(new Set(["a.edf", "b.edf"]));
   });
@@ -205,9 +328,11 @@ describe("copyAnnexedToRemote: every annexed file must be recorded at the remote
     const outcome = await step(dir, []);
     expect(outcome).toMatchObject({ status: "ok", total: 0, attempted: 0 });
     if (outcome.status !== "ok") throw new Error("unreachable");
-    expect(formatUploadSummary(outcome.total, outcome.attempted, outcome.confirmed)).toBe(
-      "No annexed data files, so nothing was copied to S3",
-    );
+    expect(
+      formatUploadSummary(outcome.total, outcome.attempted, outcome.confirmed, {
+        resent: outcome.resent,
+      }),
+    ).toBe("No annexed data files, so nothing was copied to S3");
   });
 });
 
@@ -445,30 +570,48 @@ describe("what the step says", () => {
     expect(text).toContain("None of them was staged");
   });
 
-  test("the summary covers every relation between sent, confirmed and total", () => {
+  test("the summary covers every relation between sent, confirmed, present and re-sent", () => {
     expect(formatUploadSummary(0, 0, 0)).toBe("No annexed data files, so nothing was copied to S3");
     expect(formatUploadSummary(1, 0, 0)).toBe(
-      "All 1 data file was already recorded at the S3 remote (nothing to copy)",
+      "The 1 data file is already at the S3 remote (git-annex checked it; nothing to copy)",
     );
     expect(formatUploadSummary(165, 0, 0)).toBe(
-      "All 165 data files were already recorded at the S3 remote (nothing to copy)",
+      "All 165 data files are already at the S3 remote (git-annex checked each one; nothing to copy)",
     );
     // confirmed == attempted: nothing to qualify.
     expect(formatUploadSummary(10, 4, 4)).toBe(
-      "Uploaded 4 data files to S3; 6 already there; all 10 recorded at the remote",
+      "Uploaded 4 data files to S3; 6 were already at the remote; all recorded at the remote",
     );
     expect(formatUploadSummary(1, 1, 1)).toBe(
-      "Uploaded 1 data file to S3; all 1 recorded at the remote",
+      "Uploaded 1 data file to S3; all recorded at the remote",
+    );
+    expect(formatUploadSummary(2, 1, 1)).toBe(
+      "Uploaded 1 data file to S3; 1 was already at the remote; all recorded at the remote",
     );
     // confirmed < attempted: git-annex confirmed fewer than the log shows.
     expect(formatUploadSummary(4, 4, 0)).toBe(
-      "Uploaded 4 data files to S3 (git-annex confirmed 0 of 4; the rest are recorded in the location log); all 4 recorded at the remote",
+      "Uploaded 4 data files to S3 (git-annex confirmed 0 of 4; the rest are recorded in the location log); all recorded at the remote",
     );
     // confirmed > attempted: never claim more than was sent.
     expect(formatUploadSummary(3, 2, 3)).toBe(
-      "Uploaded 2 data files to S3 (git-annex reported 3 successful copies for 2 files); 1 already there; all 3 recorded at the remote",
+      "Uploaded 2 data files to S3 (git-annex reported 3 successful copies for 2 files); 1 was already at the remote; all recorded at the remote",
     );
-    // The word "verified" claims a bucket HEAD this step does not make.
+    // Files the log recorded but the remote had lost are said separately, and are never
+    // folded into "nothing to copy".
+    expect(formatUploadSummary(3, 0, 0, { resent: 3 })).toBe(
+      "Sent no new files to S3; 3 were recorded but missing at the remote and were sent again; all recorded at the remote",
+    );
+    expect(formatUploadSummary(1, 0, 0, { resent: 1 })).toBe(
+      "Sent no new files to S3; 1 was recorded but missing at the remote and was sent again; all recorded at the remote",
+    );
+    expect(formatUploadSummary(10, 4, 4, { resent: 2 })).toBe(
+      "Uploaded 4 data files to S3; 4 were already at the remote; 2 were recorded but missing at the remote and were sent again; all recorded at the remote",
+    );
+    // A git-annex whose output could not be read gives counts that mean nothing.
+    expect(formatUploadSummary(3, 3, 0, { outputRecognized: false })).toBe(
+      "Uploaded 3 data files to S3 (git-annex's output was not recognized, so its count is unknown; the location log is what shows them recorded); all recorded at the remote",
+    );
+    // The word "verified" claims a bucket HEAD of this run that the summary does not make.
     for (const [t, a, c] of [
       [10, 4, 4],
       [4, 4, 0],

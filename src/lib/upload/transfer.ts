@@ -515,28 +515,64 @@ function countDataFiles(n: number): string {
   return `${n} data ${n === 1 ? "file" : "files"}`;
 }
 
+/** Extra facts the success line can state; see {@link formatUploadSummary}. */
+export interface UploadSummaryExtras {
+  /** Files the location log recorded at the remote that were missing there and were sent again. */
+  resent?: number;
+  /** False when git-annex's copy output could not be read, so its counts mean nothing. */
+  outputRecognized?: boolean;
+}
+
 /**
  * The success line of the S3 step, stated from the location log rather than
  * from a count of copy records: `total` annexed files are now recorded at the
- * remote, of which `attempted` were sent in this run and `confirmed` were
- * reported as successful copies by git-annex. "Recorded", not "verified": the
- * evidence is git-annex's location log, which S3's acknowledged, MD5-checked PUT
- * makes trustworthy but which is not a bucket HEAD. Pure; exported for unit tests.
+ * remote, of which `attempted` were sent as new and `confirmed` of those were
+ * reported as successful copies by git-annex. The remaining `total - attempted`
+ * were already recorded; git-annex checked each against the remote, and `resent` of
+ * them turned out to be missing there and were sent again. "Recorded", not
+ * "verified": the evidence is git-annex's location log, which S3's acknowledged,
+ * MD5-checked PUT makes trustworthy but which is not a bucket HEAD of this run.
+ * "Nothing to copy" is said only when that check found nothing to send.
+ * Pure; exported for unit tests.
  */
-export function formatUploadSummary(total: number, attempted: number, confirmed: number): string {
+export function formatUploadSummary(
+  total: number,
+  attempted: number,
+  confirmed: number,
+  extras: UploadSummaryExtras = {},
+): string {
+  const resent = extras.resent ?? 0;
   if (total === 0) return "No annexed data files, so nothing was copied to S3";
-  if (attempted === 0) {
-    return `All ${countDataFiles(total)} ${total === 1 ? "was" : "were"} already recorded at the S3 remote (nothing to copy)`;
+  if (attempted === 0 && resent === 0) {
+    return total === 1
+      ? "The 1 data file is already at the S3 remote (git-annex checked it; nothing to copy)"
+      : `All ${total} data files are already at the S3 remote (git-annex checked each one; nothing to copy)`;
   }
-  const already = total - attempted;
-  const tail = already > 0 ? `; ${already} already there` : "";
-  let confirmation = "";
-  if (confirmed < attempted) {
-    confirmation = ` (git-annex confirmed ${confirmed} of ${attempted}; the rest are recorded in the location log)`;
-  } else if (confirmed > attempted) {
-    confirmation = ` (git-annex reported ${confirmed} successful copies for ${attempted} files)`;
+  const parts: string[] = [];
+  if (attempted > 0) {
+    let confirmation = "";
+    if (extras.outputRecognized === false) {
+      confirmation =
+        " (git-annex's output was not recognized, so its count is unknown; the location log is what shows them recorded)";
+    } else if (confirmed < attempted) {
+      confirmation = ` (git-annex confirmed ${confirmed} of ${attempted}; the rest are recorded in the location log)`;
+    } else if (confirmed > attempted) {
+      confirmation = ` (git-annex reported ${confirmed} successful copies for ${attempted} files)`;
+    }
+    parts.push(`Uploaded ${countDataFiles(attempted)} to S3${confirmation}`);
+  } else {
+    parts.push("Sent no new files to S3");
   }
-  return `Uploaded ${countDataFiles(attempted)} to S3${confirmation}${tail}; all ${total} recorded at the remote`;
+  const present = Math.max(0, total - attempted - resent);
+  if (present > 0) {
+    parts.push(`${present} ${present === 1 ? "was" : "were"} already at the remote`);
+  }
+  if (resent > 0) {
+    const verb = resent === 1 ? "was" : "were";
+    parts.push(`${resent} ${verb} recorded but missing at the remote and ${verb} sent again`);
+  }
+  parts.push("all recorded at the remote");
+  return parts.join("; ");
 }
 
 /** What the S3 step decided before copying, for the caller's progress line. */
@@ -545,6 +581,11 @@ export interface S3CopyPlan {
   total: number;
   /** Of those, the ones the location log does not yet record at the remote. */
   pending: number;
+  /**
+   * The ones the log already records. git-annex checks each against the remote after
+   * the pending copy and sends again any the remote has lost.
+   */
+  recorded: number;
   /** Data files this run added that git-annex put in git, at or under the size threshold. */
   smallNotAnnexed: string[];
 }
@@ -557,8 +598,14 @@ export type S3CopyOutcome =
   | {
       status: "ok";
       total: number;
+      /** Sent as new: the files the location log did not record at the remote. */
       attempted: number;
+      /** Of `attempted`, the ones git-annex reported as successful copies. */
       confirmed: number;
+      /** Recorded at the remote by the log but missing there, and sent again. */
+      resent: number;
+      /** False when git-annex printed output that did not parse as copy records. */
+      outputRecognized: boolean;
       annexedPaths: Set<string>;
       smallNotAnnexed: string[];
     }
@@ -566,23 +613,27 @@ export type S3CopyOutcome =
   | { status: "blocked"; blocking: Array<{ path: string; size: number }> }
   | { status: "copy_failed"; error: string }
   | { status: "unverifiable"; error: string }
-  | { status: "incomplete"; missing: string[]; total: number };
+  | { status: "incomplete"; missing: string[]; total: number; notLocal: string[] };
 
 /**
  * The decisions of upload step 9, in order, against git-annex's own records:
  *
  *  1. Read what is annexed and what the location log does not yet record at
- *     `remote`. On a resume that is exactly the remainder; on a fresh upload it
+ *     `remote`. On a resume the second set is the remainder; on a fresh upload it
  *     is every annexed data file.
  *  2. Refuse, BEFORE copying anything, a data file over the size threshold that
- *     git-annex did not annex: it would be committed to git and never reach S3.
- *     (A small one is only reported; see {@link findDataFilesNotAnnexed}.)
+ *     git-annex did not annex. It would be committed to git and never reach S3, and
+ *     step 4 cannot see it: it only looks at annexed files. Failing here costs
+ *     nothing; failing after the copy would have spent the whole STS window first.
  *  3. Copy exactly the pending paths.
- *  4. Require EVERY annexed file to be recorded at the remote, not only this run's
- *     targets. A zero exit from `git annex copy` is not proof of availability: it
- *     skips working-tree files it does not consider annexed and still exits 0
- *     (#884 review), and an annexed file left behind by an earlier interrupted run
- *     is as missing from S3 as one added today.
+ *  4. Have git-annex check every path the log already records against the remote
+ *     itself (a `copy` WITHOUT `--fast`: one presence check per key, bounded by `-J`)
+ *     and send again any the remote has lost. The log only says what git-annex
+ *     recorded; a bucket that was emptied, an object that expired, or a wrong
+ *     `setpresentkey` all leave the log claiming content the store does not hold.
+ *  5. Require EVERY annexed file to be recorded at the remote, not only this run's
+ *     targets: an annexed file left behind by an earlier interrupted run, or annexed
+ *     since the plan was made, is as missing from S3 as one added today.
  *
  * The caller owns the spinner, the credentials and the words; `onPlan` fires once,
  * after step 2 and before the copy, so the progress line can say how much is left.
@@ -615,7 +666,14 @@ export async function copyAnnexedToRemote(args: {
   }
   const smallNotAnnexed = notAnnexed.small.map((f) => f.path);
 
-  await args.onPlan?.({ total: annexedBefore.size, pending: pending.length, smallNotAnnexed });
+  const pendingSet = new Set(pending);
+  const recorded = [...annexedBefore].filter((p) => !pendingSet.has(p)).sort();
+  await args.onPlan?.({
+    total: annexedBefore.size,
+    pending: pending.length,
+    recorded: recorded.length,
+    smallNotAnnexed,
+  });
 
   const copy = await copyPathsToAnnexRemote(
     absolutePath,
@@ -628,6 +686,23 @@ export async function copyAnnexedToRemote(args: {
     return { status: "copy_failed", error: copy.error ?? "Failed to copy to remote" };
   }
 
+  let resent = 0;
+  let outputRecognized = copy.outputRecognized;
+  if (recorded.length > 0) {
+    const check = await copyPathsToAnnexRemote(
+      absolutePath,
+      remote,
+      recorded,
+      args.jobs,
+      args.credentials,
+    );
+    if (!check.success) {
+      return { status: "copy_failed", error: check.error ?? "Failed to check the remote" };
+    }
+    resent = check.filesSent;
+    outputRecognized = outputRecognized && check.outputRecognized;
+  }
+
   let missing: string[];
   try {
     missing = [...(await listAnnexedPathsNotAt(absolutePath, remote))].sort();
@@ -635,8 +710,18 @@ export async function copyAnnexedToRemote(args: {
     return { status: "unverifiable", error: errorDetail(verifyError) };
   }
   if (missing.length > 0) {
+    // A file annexed since the plan counts toward the total as well as the missing.
     const total = annexedBefore.size + missing.filter((p) => !annexedBefore.has(p)).length;
-    return { status: "incomplete", missing, total };
+    // `copy` skips, silently and with exit 0, a path whose content is not in this
+    // repository (dropped, or never fetched). Re-running cannot fix that, so say which.
+    let notLocal: string[] = [];
+    try {
+      const absent = await listAnnexedPathsNotAt(absolutePath, "here");
+      notLocal = missing.filter((p) => absent.has(p));
+    } catch {
+      // The hint is a courtesy; the failure it accompanies is already being reported.
+    }
+    return { status: "incomplete", missing, total, notLocal };
   }
 
   return {
@@ -644,6 +729,8 @@ export async function copyAnnexedToRemote(args: {
     total: annexedBefore.size,
     attempted: pending.length,
     confirmed: copy.filesCopied,
+    resent,
+    outputRecognized,
     annexedPaths: annexedBefore,
     smallNotAnnexed,
   };
@@ -927,11 +1014,10 @@ export async function uploadDataToS3(
                 console.log(chalk.dim(line));
               }
             }
-            const already = plan.total - plan.pending;
             spinner = ora(
-              already === 0
-                ? `Uploading ${countDataFiles(plan.pending)} to S3...`
-                : `Uploading ${countDataFiles(plan.pending)} to S3 (${already} already recorded there)...`,
+              plan.pending === 0
+                ? `Checking that ${countDataFiles(plan.recorded)} are at the S3 remote...`
+                : `Uploading ${countDataFiles(plan.pending)} to S3${plan.recorded > 0 ? ` (then checking ${plan.recorded} already recorded)` : ""}...`,
             ).start();
           },
         });
@@ -965,7 +1051,7 @@ export async function uploadDataToS3(
           console.log(chalk.yellow("Re-run the same command to resume uploading."));
           return FAIL;
         case "unverifiable":
-          spinner.fail(`Could not verify the S3 upload: ${outcome.error}`);
+          spinner.fail(`Could not confirm the S3 upload is recorded: ${outcome.error}`);
           console.log(chalk.yellow("Re-run the same command to retry."));
           return FAIL;
         case "incomplete":
@@ -973,7 +1059,15 @@ export async function uploadDataToS3(
             `S3 upload incomplete: ${outcome.missing.length} of ${outcome.total} annexed data files are not recorded at the S3 remote`,
           );
           for (const line of previewPaths(outcome.missing)) console.log(chalk.red(line));
-          console.log(chalk.yellow("Re-run the same command to resume uploading."));
+          if (outcome.notLocal.length > 0) {
+            console.log(
+              chalk.yellow(
+                `${outcome.notLocal.length} of them have no content in this repository, so they cannot be uploaded from here. Fetch it with \`git annex get\` (for example \`git annex get -- ${outcome.notLocal[0]}\`), then re-run.`,
+              ),
+            );
+          } else {
+            console.log(chalk.yellow("Re-run the same command to resume uploading."));
+          }
           return FAIL;
         case "ok":
           break;
@@ -986,7 +1080,12 @@ export async function uploadDataToS3(
         markFileUploaded(progress, file.path, { size: file.size, mtimeMs: file.mtimeMs });
       }
       writeUploadProgress(absolutePath, progress);
-      spinner.succeed(formatUploadSummary(outcome.total, outcome.attempted, outcome.confirmed));
+      spinner.succeed(
+        formatUploadSummary(outcome.total, outcome.attempted, outcome.confirmed, {
+          resent: outcome.resent,
+          outputRecognized: outcome.outputRecognized,
+        }),
+      );
     } else {
       console.log(chalk.dim("No data files to upload to S3"));
     }
