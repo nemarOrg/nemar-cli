@@ -97,6 +97,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "compareRecordedStat",
     "createRevertBranch",
     "describeChangedSinceTracked",
+    "describeStaleFlagFailure",
     "isNonFastForwardPush",
     "pushBranch",
     "pushToGitHub",
@@ -204,6 +205,7 @@ const INTERNAL_WIRING = [
   "clearStaleAssumeUnchanged",
   "compareRecordedStat",
   "describeChangedSinceTracked",
+  "describeStaleFlagFailure",
 ];
 
 /**
