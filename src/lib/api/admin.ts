@@ -28,6 +28,13 @@ import type {
   NeurobagelStatus,
   NeurobagelVerifyResult,
 } from "../../../shared/contract/neurobagel-admin.js";
+import type {
+  ClearOverrideResponse,
+  ContributorStanding,
+  PrReviewDetail,
+  QueueResponse,
+  SetOverrideResponse,
+} from "../../../shared/contract/pr-review-admin.js";
 import type { BackfillNameOutcome } from "../../../shared/contract/publication.js";
 import type { NeurobagelWeekly } from "../../../shared/contract/weekly-attention.js";
 import { request } from "./client.js";
@@ -2129,6 +2136,76 @@ export async function anonymitySweepReset(): Promise<{ reset: number }> {
   return request<{ reset: number }>(
     "/admin/datasets/anonymity-sweep?reset=1",
     { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
+// ============================================================================
+// Dataset pull-request review queue (ADR 0093, following ADR 0092)
+// ============================================================================
+
+export type {
+  ClearOverrideResponse,
+  ContributorStanding,
+  PrReviewDetail,
+  QueueEntry,
+  QueueResponse,
+  QueueVerdict,
+  SetOverrideResponse,
+} from "../../../shared/contract/pr-review-admin.js";
+
+/** Every open pull request to `main` in `nemarDatasets`, with its latest automated review. */
+export async function listPrReviews(filters: {
+  verdicts?: string[];
+  dataset?: string;
+  author?: string;
+  needsMe?: boolean;
+}): Promise<QueueResponse> {
+  const params = new URLSearchParams();
+  if (filters.verdicts && filters.verdicts.length > 0) {
+    params.set("verdict", filters.verdicts.join(","));
+  }
+  if (filters.dataset) params.set("dataset", filters.dataset);
+  if (filters.author) params.set("author", filters.author);
+  if (filters.needsMe) params.set("needs_me", "1");
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return request<QueueResponse>(`/admin/pr-reviews${query}`, { method: "GET" }, true);
+}
+
+/** One pull request: its stored review and history, what GitHub says now, and its author's standing. */
+export async function getPrReview(datasetId: string, prNumber: number): Promise<PrReviewDetail> {
+  return request<PrReviewDetail>(
+    `/admin/pr-reviews/${encodeURIComponent(datasetId)}/${prNumber}`,
+    { method: "GET" },
+    true,
+  );
+}
+
+export async function getPrReviewAuthor(login: string): Promise<ContributorStanding> {
+  return request<ContributorStanding>(
+    `/admin/pr-review-authors/${encodeURIComponent(login)}`,
+    { method: "GET" },
+    true,
+  );
+}
+
+/** Allow or block a contributor outright; the tally no longer decides until it is cleared. */
+export async function setPrReviewAuthor(
+  login: string,
+  mode: "allow" | "block",
+  reason?: string,
+): Promise<SetOverrideResponse> {
+  return request<SetOverrideResponse>(
+    `/admin/pr-review-authors/${encodeURIComponent(login)}`,
+    { method: "PUT", body: JSON.stringify(reason ? { mode, reason } : { mode }) },
+    true,
+  );
+}
+
+export async function clearPrReviewAuthor(login: string): Promise<ClearOverrideResponse> {
+  return request<ClearOverrideResponse>(
+    `/admin/pr-review-authors/${encodeURIComponent(login)}`,
+    { method: "DELETE" },
     true,
   );
 }
