@@ -314,6 +314,11 @@ describe("the repository does not follow the catalog row", () => {
 describe("anonymity is requested at publication, not refused there", () => {
   const PUBLICATION = readFileSync(join(SRC, "routes", "datasets", "publication.ts"), "utf8");
   const MINIMUMS = readFileSync(join(SRC, "services", "submission-minimums.ts"), "utf8");
+  // The gate moved out of the route into one function the request route and
+  // the blocked-request sweep both call, so the two cannot disagree. The
+  // behavior is driven through both in publish-request-ci-pending.test.ts;
+  // these are the source pins that follow the code to its new home.
+  const GATE = readFileSync(join(SRC, "services", "submission-gate.ts"), "utf8");
 
   test("the request route reads an --anonymous intent off the body", () => {
     // Phase 2 blocked every publication request from an anonymous dataset.
@@ -362,11 +367,16 @@ describe("anonymity is requested at publication, not refused there", () => {
     // that `dataset_description.json` does not still name the depositor. A
     // transient GitHub error, or an OpenNeuro/exemplar exemption, would have
     // granted a blind nobody verified.
-    expect(PUBLICATION).toContain("const anonymousNeedsBlindCheck = anonymousRequested;");
-    expect(PUBLICATION).toContain("if (anonymousNeedsBlindCheck) {");
-    expect(PUBLICATION).toMatch(
-      /anonymousNeedsBlindCheck \|\| \(dataset\.source !== "openneuro" && !dataset\.is_exemplar\)/,
+    expect(PUBLICATION).toContain("anonymous: anonymousRequested,");
+    expect(PUBLICATION).toContain("await checkSubmissionGate({");
+    expect(GATE).toContain(
+      'return anonymous || (dataset.source !== "openneuro" && !dataset.is_exemplar);',
     );
+    // Only a native submission fails open on a failed read; an anonymous
+    // release is `unverified`, which the route blocks.
+    expect(GATE).toContain('if (!anonymous) return { kind: "clear" };');
+    expect(GATE).toContain('kind: "unverified"');
+    expect(PUBLICATION).toContain('if (gate.kind !== "clear") {');
   });
 
   test("the intent is persisted, because approval runs a different publication", () => {
@@ -392,7 +402,7 @@ describe("anonymity is requested at publication, not refused there", () => {
     // not. ADR 0065's first draft claimed this came for free from ADR 0026,
     // which was false twice over -- the regex is anchored and the gate reads
     // the repository file, never `datasets.authors`.
-    expect(PUBLICATION).toContain("anonymousRelease: anonymousRequested,");
+    expect(GATE).toContain("anonymousRelease: anonymous,");
     expect(MINIMUMS).toContain("anonymousRelease?: boolean;");
     // The rule INVERTS, it does not relax: a release refuses real names and a
     // publication requires them. Permitting was the first draft and it let a

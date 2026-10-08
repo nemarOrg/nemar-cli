@@ -165,7 +165,10 @@ The admin email, the status views and the requester's blocked-request mail there
 ## Amendment 2026-10-07 (#1646): a CI-pending refusal is a state the CLI reports, not an error
 
 A request made before the dataset's BIDS validation has concluded is refused with `bids_validation_pending` or `bids_validation_in_progress`, and that refusal is recorded: the request row is `blocked`, and the blocked-request sweep re-reads the latest run and unblocks it when CI passes.
-Unblocking starts the identifier screen exactly as a re-request would, so the request carries on by itself.
+Both places that decide a request put it through the submission minimums of ADR 0026 and, for an anonymous request, the blind check of ADR 0065, with one function (`checkSubmissionGate`): the request route does so even when CI is the only thing blocking (a missing minimum then replaces the pending reason and is answered at once as `min_requirements_failed` with its reasons), and the sweep does so before it releases a request, because the depositor may have edited the data since.
+A request that fails is re-blocked as `min_requirements_failed` and stops being a sweep candidate until the depositor requests again; an anonymous blind that cannot be read is left blocked for the next run and counted as an error, never released.
+OpenNeuro imports and exemplars keep their exemption, except that an anonymous request is always checked.
+A request that passes is unblocked, and unblocking starts the identifier screen exactly as a re-request would, so the request carries on by itself.
 The refusal means "recorded, waiting", and the CLI used to print it as a failure and exit 1, which sent depositors into retry loops of their own.
 
 The maintainer decided that `nemar dataset publish request` reports it in the info style and exits 0.
