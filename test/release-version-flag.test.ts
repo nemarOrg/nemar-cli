@@ -74,8 +74,6 @@ function declareRoot(): Command {
     .option("--debug", "Write a diagnostic log for this run");
 }
 
-class StoppedBeforeAction extends Error {}
-
 /** What Commander had parsed for the command that was about to run. */
 interface Reached {
   name: string;
@@ -84,8 +82,14 @@ interface Reached {
   processedArgs: unknown[];
 }
 
+/** Thrown to stop a parse before the action runs, carrying what it had parsed. */
+class StoppedBeforeAction extends Error {
+  constructor(readonly reached: Reached) {
+    super("stopped before the action");
+  }
+}
+
 let program: Command;
-const reached: Reached[] = [];
 const originalParents = SHARED_GROUPS.map((c) => c.parent);
 
 beforeAll(() => {
@@ -100,13 +104,12 @@ beforeAll(() => {
   // Stop at the command that would run, before its action touches the network
   // or the account. What Commander parsed for that command is the evidence.
   program.hook("preAction", (_root, actionCommand) => {
-    reached.push({
+    throw new StoppedBeforeAction({
       name: actionCommand.name(),
       opts: { ...actionCommand.opts() },
       optsWithGlobals: { ...actionCommand.optsWithGlobals() },
       processedArgs: [...actionCommand.processedArgs],
     });
-    throw new StoppedBeforeAction();
   });
 });
 
@@ -141,13 +144,13 @@ function forgetParsedOptions(command: Command): void {
 
 /**
  * Parse `argv` the way src/index.ts does and return what Commander had parsed
- * for the command it reached. Only the throwaway root has exitOverride(); a usage error raised by
- * a shared command (a missing <dataset-id>, say) calls process.exit(1), which
- * would abort every test file in the run, so process.exit and stderr are
- * trapped for the length of the parse and the exit surfaces as a failure.
+ * for the command it reached. Only the throwaway root has exitOverride(); a
+ * usage error raised by a shared command (a missing <dataset-id>, say) calls
+ * process.exit(1), which would abort every test file in the run, so
+ * process.exit and stderr are trapped for the length of the parse and the exit
+ * surfaces as a failure.
  */
 async function reach(argv: string[]): Promise<Reached> {
-  reached.length = 0;
   const realExit = process.exit;
   const realWrite = process.stderr.write;
   let stderr = "";
@@ -166,12 +169,10 @@ async function reach(argv: string[]): Promise<Reached> {
   } finally {
     process.exit = realExit;
     process.stderr.write = realWrite;
+    forgetParsedOptions(program);
   }
-  forgetParsedOptions(program);
-  if (!(outcome instanceof StoppedBeforeAction)) {
-    throw outcome ?? new Error("the parse finished without reaching a command");
-  }
-  return reached[0];
+  if (outcome instanceof StoppedBeforeAction) return outcome.reached;
+  throw outcome ?? new Error("the parse finished without reaching a command");
 }
 
 describe("bindShadowedOptionValues on the real command tree", () => {
