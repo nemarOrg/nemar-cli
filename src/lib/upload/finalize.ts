@@ -81,7 +81,10 @@ export function writeNemarMetadata(
 }
 
 /**
- * Annexed bytes below which the save step reads every file as it always has.
+ * Recorded data bytes below which the save step reads every file, as a save without the
+ * skip does. The first gate is the sum of every data file's recorded size (an upper bound
+ * on the annexed bytes, free to compute); `planSaveSkip` then applies the same figure to
+ * the annexed files' recorded sizes.
  *
  * Skipping the re-read (see `saveDataset`) costs a pass over the annexed files to
  * compare their stat and two index rewrites to mark and unmark them, plus, when the
