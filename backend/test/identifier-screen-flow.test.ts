@@ -378,12 +378,15 @@ describe("every way of not getting a report still mails the admins, and says so"
     test(`dispatch impossible (${label}): error, dispatch-unconfigured, mailed at once`, async () => {
       envOverrides = override as Partial<Bindings>;
       await withFakeResend(async (calls) => {
-        // Without a credential the CI readiness check blocks first; the screen
-        // cases that reach the dispatch are the other two. Both are asserted on
-        // what the row and the mail say, not on the status code.
+        // Without a credential the CI readiness check cannot run and blocks
+        // first (a recorded request, answered 503 because nothing promises it
+        // continues); the screen cases that reach the dispatch are the other
+        // two. Both are asserted on what the row and the mail say.
         const res = await requestPublication();
         if (label === "no GitHub credential") {
-          expect(res.status).toBe(422);
+          expect(res.status).toBe(503);
+          expect(((await res.json()) as { error: string }).error).toBe("ci_check_unavailable");
+          expect(row().status).toBe("blocked");
           expect(row().identifier_screen_status).toBeNull();
           return;
         }
