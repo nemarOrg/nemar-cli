@@ -829,6 +829,7 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
     reblocked: 0,
     errors: 0,
     deferred: 0,
+    skipped: 0,
     gateReads: 0,
   };
   try {
@@ -860,7 +861,7 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
     console.error("Scheduled cleanup: failed to write audit log:", err);
   }
   console.log(
-    `Scheduled cleanup: ${deleted} deleted, ${failed} failed; staleness warned=${staleness.warned} adminNotified=${staleness.adminNotified} reset=${staleness.reset}; importsSwept=${importsSwept}; blockedSweep unblocked=${blockedSweep.unblocked} reblocked=${blockedSweep.reblocked} errors=${blockedSweep.errors} deferred=${blockedSweep.deferred}`,
+    `Scheduled cleanup: ${deleted} deleted, ${failed} failed; staleness warned=${staleness.warned} adminNotified=${staleness.adminNotified} reset=${staleness.reset}; importsSwept=${importsSwept}; blockedSweep unblocked=${blockedSweep.unblocked} reblocked=${blockedSweep.reblocked} errors=${blockedSweep.errors} deferred=${blockedSweep.deferred} skipped=${blockedSweep.skipped}`,
   );
 }
 

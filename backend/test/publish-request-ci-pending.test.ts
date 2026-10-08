@@ -72,6 +72,9 @@ let descriptionStatus = 200;
 let runsStatus = 200;
 // Seconds GitHub asks a caller to wait, sent with a failing description read.
 let descriptionRetryAfter: number | null = null;
+// Runs inside the stand-in when the workflow runs are asked for: after the sweep
+// has read its candidate rows, before it writes to any of them.
+let onRunsRead: (() => Promise<void> | void) | null = null;
 let readmeMode: ReadmeMode = "text";
 let readmeText = "# README";
 // Every `/contents/<path>` the stand-in was asked for, in order.
@@ -99,6 +102,9 @@ beforeAll(() => {
         return Response.json({ name: "bids-validation.yml" });
       }
       if (/\/actions\/workflows\/bids-validation\.yml\/runs$/.test(p)) {
+        const hook = onRunsRead;
+        onRunsRead = null;
+        await hook?.();
         if (runsStatus !== 200) return new Response("no", { status: runsStatus });
         const workflow_runs =
           runs === "none"
@@ -153,6 +159,7 @@ afterEach(() => {
   descriptionStatus = 200;
   runsStatus = 200;
   descriptionRetryAfter = null;
+  onRunsRead = null;
   __resetRateLimitStateForTests();
   readmeMode = "text";
   readmeText = "# README";
@@ -1058,5 +1065,135 @@ describe("the sweep's reads never sleep, and share a budget", () => {
     expect(result.deferred).toBe(0);
     expect(contentReads).toHaveLength(0);
     expect(row().status).toBe("blocked");
+  });
+});
+
+describe("a request that changes while the sweep works on it is not overwritten", () => {
+  // The sweep reads its candidates, spends GitHub calls on each, and writes
+  // afterwards. A request made again in between rewrites the row. The writes are
+  // conditional on the row still being as it was read, so the verdict reached
+  // for the old row is never applied to the new one.
+
+  async function pending(): Promise<void> {
+    runs = "none";
+    descriptionBody = NAMED;
+    expect((await requestPublication()).body.block_reason).toBe("bids_validation_pending");
+  }
+
+  test("an anonymous request made mid-run is not released on a verdict about the native one", async () => {
+    // The irreversible case: released as `requested`, the name the file still
+    // carries would be published under the blind label.
+    await pending();
+    runs = "success";
+    onRunsRead = async () => {
+      runs = "none";
+      const again = await requestPublication({ anonymous: true });
+      expect(again.body.block_reason).toBe("min_requirements_failed");
+      runs = "success";
+    };
+    await withFakeResend(async () => {
+      const result = await sweepBlockedBidsValidationRequests(env());
+      expect(result.unblocked).toBe(0);
+      expect(result.skipped).toBe(1);
+    });
+    expect(dispatches).toBe(0);
+    const r = row();
+    expect(r.status).toBe("blocked");
+    expect(r.block_reason).toBe("min_requirements_failed");
+    expect(r.anonymous).toBe(1);
+    expect(reasonsOf(r).join(" ")).toContain("still names Ada Lovelace");
+  });
+
+  // Each column of the observed row, changed alone so that only its own term of
+  // the condition can catch it.
+  const CHANGES: Array<[string, string, (r: Row) => void]> = [
+    [
+      "anonymous",
+      "UPDATE publication_requests SET anonymous = 1 WHERE dataset_id = ?",
+      (r) => expect(r.anonymous).toBe(1),
+    ],
+    [
+      "block_reason",
+      "UPDATE publication_requests SET block_reason = 'bids_validation_in_progress' WHERE dataset_id = ?",
+      (r) => expect(r.block_reason).toBe("bids_validation_in_progress"),
+    ],
+    [
+      "updated_at",
+      "UPDATE publication_requests SET updated_at = datetime('now', '+1 hour') WHERE dataset_id = ?",
+      () => {},
+    ],
+  ];
+
+  for (const [column, sql, afterwards] of CHANGES) {
+    test(`release: a change to ${column} alone stops it`, async () => {
+      await pending();
+      runs = "success";
+      onRunsRead = () => {
+        db.run(sql, [DATASET]);
+      };
+      const result = await sweepBlockedBidsValidationRequests(env());
+      expect(result.unblocked).toBe(0);
+      expect(result.skipped).toBe(1);
+      expect(dispatches).toBe(0);
+      expect(row().status).toBe("blocked");
+      afterwards(row());
+    });
+
+    test(`minimums re-block: a change to ${column} alone stops it`, async () => {
+      await pending();
+      runs = "success";
+      descriptionBody = SHORT_NAME;
+      onRunsRead = () => {
+        db.run(sql, [DATASET]);
+      };
+      const result = await sweepBlockedBidsValidationRequests(env());
+      expect(result.reblocked).toBe(0);
+      expect(result.skipped).toBe(1);
+      // The reasons for the old row were not written onto the new one.
+      expect(row().min_requirements_reasons).toBeNull();
+      expect(row().block_reason).not.toBe("min_requirements_failed");
+      afterwards(row());
+    });
+
+    test(`failing-validation relabel: a change to ${column} alone stops it`, async () => {
+      await pending();
+      runs = "failure";
+      onRunsRead = () => {
+        db.run(sql, [DATASET]);
+      };
+      const result = await sweepBlockedBidsValidationRequests(env());
+      expect(result.reblocked).toBe(0);
+      expect(result.skipped).toBe(1);
+      expect(row().block_reason).not.toBe("bids_validation_failed");
+      afterwards(row());
+    });
+  }
+
+  test("control: with no change in between, the same three writes go through", async () => {
+    await pending();
+    runs = "failure";
+    expect((await sweepBlockedBidsValidationRequests(env())).reblocked).toBe(1);
+    expect(row().block_reason).toBe("bids_validation_failed");
+    runs = "success";
+    descriptionBody = SHORT_NAME;
+    // Re-block as failing validation was a relabel; now green with a short Name.
+    const second = await sweepBlockedBidsValidationRequests(env());
+    expect(second.reblocked).toBe(1);
+    expect(second.skipped).toBe(0);
+    expect(row().block_reason).toBe("min_requirements_failed");
+  });
+
+  test("a release clears the minimums verdict an earlier request recorded", async () => {
+    await pending();
+    db.run(
+      "UPDATE publication_requests SET min_requirements_reasons = '[\"stale reason\"]' WHERE dataset_id = ?",
+      [DATASET],
+    );
+    runs = "success";
+    await withFakeResend(async () => {
+      expect((await sweepBlockedBidsValidationRequests(env())).unblocked).toBe(1);
+    });
+    expect(row().status).toBe("requested");
+    expect(row().min_requirements_reasons).toBeNull();
   });
 });

@@ -81,6 +81,37 @@ export function evaluateBlockedBidsValidation(args: {
   return { kind: "keep" };
 }
 
+/** A blocked request as the candidate query returns it. */
+interface Candidate {
+  id: number;
+  dataset_id: string;
+  block_reason: string;
+  anonymous: number | null;
+  updated_at: string;
+  github_repo: string | null;
+  source: string | null;
+  is_exemplar: number | null;
+}
+
+/**
+ * The request as the sweep read it, as a WHERE clause. The sweep reads a row,
+ * spends GitHub calls on it, and only then writes; a request can be made again
+ * in between (`POST /datasets/:id/publish/request` rewrites the row, and may
+ * turn it anonymous). Every write is conditional on the row still being what
+ * was read, so a verdict about the old row is never applied to the new one.
+ * `IS` rather than `=` because `anonymous` is nullable. Status alone was not
+ * enough: a request re-blocked as anonymous is still `blocked`, and the sweep
+ * would have released it on a verdict reached for a native one.
+ */
+const AS_READ_SQL =
+  "id = ? AND status = 'blocked' AND anonymous IS ? AND block_reason IS ? AND updated_at IS ?";
+const asRead = (row: Candidate): (string | number | null)[] => [
+  row.id,
+  row.anonymous,
+  row.block_reason,
+  row.updated_at,
+];
+
 export interface BlockedSweepResult {
   scanned: number;
   unblocked: number;
@@ -90,6 +121,8 @@ export interface BlockedSweepResult {
   screened?: number;
   /** Requests left for the next run because the gate's read budget was spent. */
   deferred: number;
+  /** Requests that changed between the sweep reading them and writing: left as they now are. */
+  skipped: number;
   /** GitHub reads the submission gate made. */
   gateReads: number;
 }
@@ -131,7 +164,7 @@ export function blockedCandidateQuery(
   const { clause, ids } = blockedSweepScope(nonProduction);
   const placeholders = BIDS_VALIDATION_BLOCK_REASONS.map(() => "?").join(", ");
   return {
-    sql: `SELECT pr.id, pr.dataset_id, pr.block_reason, pr.anonymous, d.github_repo,
+    sql: `SELECT pr.id, pr.dataset_id, pr.block_reason, pr.anonymous, pr.updated_at, d.github_repo,
                  d.source, d.is_exemplar
            FROM publication_requests pr
            JOIN datasets d ON d.dataset_id = pr.dataset_id
@@ -174,6 +207,7 @@ export async function sweepBlockedBidsValidationRequests(
     reblocked: 0,
     errors: 0,
     deferred: 0,
+    skipped: 0,
     gateReads: 0,
   };
   const budget: GateReadBudget = { remaining: gateReadBudget };
@@ -204,30 +238,12 @@ export async function sweepBlockedBidsValidationRequests(
   // Guard the initial query so a D1 outage / schema drift surfaces as errors>0
   // in the cron tally rather than an all-zero result indistinguishable from
   // "nothing to do". This keeps the "never throws" contract honest.
-  let rows: {
-    results: Array<{
-      id: number;
-      dataset_id: string;
-      block_reason: string;
-      anonymous: number | null;
-      github_repo: string | null;
-      source: string | null;
-      is_exemplar: number | null;
-    }>;
-  };
+  let rows: { results: Candidate[] };
   try {
     rows = await db
       .prepare(candidate.sql)
       .bind(...candidate.binds)
-      .all<{
-        id: number;
-        dataset_id: string;
-        block_reason: string;
-        anonymous: number | null;
-        github_repo: string | null;
-        source: string | null;
-        is_exemplar: number | null;
-      }>();
+      .all<Candidate>();
   } catch (err) {
     result.errors++;
     console.error(`[publish-sweep] initial query failed; sweep aborted: ${errMsg(err)}`);
@@ -314,34 +330,37 @@ export async function sweepBlockedBidsValidationRequests(
               `UPDATE publication_requests
                   SET block_reason = 'min_requirements_failed', min_requirements_reasons = ?,
                       updated_at = datetime('now')
-                WHERE id = ? AND status = 'blocked'`,
+                WHERE ${AS_READ_SQL}`,
             )
-            .bind(JSON.stringify(gate.reasons), row.id)
+            .bind(JSON.stringify(gate.reasons), ...asRead(row))
             .run();
           if ((reblock.meta.changes ?? 0) > 0) {
             result.reblocked++;
             console.log(
               `[publish-sweep] ${row.dataset_id}: BIDS validation green but submission minimums failing; request ${row.id} block_reason -> min_requirements_failed`,
             );
+          } else {
+            result.skipped++;
           }
           continue;
         }
         // Mirror the interactive re-request unblock (routes/datasets/publication.ts): also
         // clear stale prescreen and identifier-screen state, so a previously
         // screened request doesn't carry an old verdict back to 'requested'.
-        // Guard on status='blocked' so a concurrent re-request can't be
-        // clobbered.
+        // Guarded on the row being as it was read, so a concurrent re-request
+        // can't be clobbered, and the minimums verdict a re-request recorded
+        // is cleared with the release, as the route clears it.
         const upd = await db
           .prepare(
             `UPDATE publication_requests
-                SET status = 'requested', block_reason = NULL,
+                SET status = 'requested', block_reason = NULL, min_requirements_reasons = NULL,
                     prescreen_status = NULL, prescreen_nonce = NULL,
                     prescreen_issue_url = NULL, prescreen_reasons = NULL,
                     ${RESET_SCREEN_COLUMNS_SQL},
                     updated_at = datetime('now')
-              WHERE id = ? AND status = 'blocked'`,
+              WHERE ${AS_READ_SQL}`,
           )
-          .bind(row.id)
+          .bind(...asRead(row))
           .run();
         if ((upd.meta.changes ?? 0) > 0) {
           unblocks++;
@@ -358,21 +377,25 @@ export async function sweepBlockedBidsValidationRequests(
           });
           if (started.kind === "dispatched") result.screened++;
           else if (started.kind !== "exempt") result.errors++;
+        } else {
+          result.skipped++;
         }
       } else if (action.kind === "reblock" && row.block_reason !== action.blockReason) {
         const upd = await db
           .prepare(
             `UPDATE publication_requests
                 SET block_reason = ?, updated_at = datetime('now')
-              WHERE id = ? AND status = 'blocked'`,
+              WHERE ${AS_READ_SQL}`,
           )
-          .bind(action.blockReason, row.id)
+          .bind(action.blockReason, ...asRead(row))
           .run();
         if ((upd.meta.changes ?? 0) > 0) {
           result.reblocked++;
           console.log(
             `[publish-sweep] ${row.dataset_id}: BIDS validation failing; request ${row.id} block_reason -> ${action.blockReason}`,
           );
+        } else {
+          result.skipped++;
         }
       }
     } catch (err) {
