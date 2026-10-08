@@ -1108,19 +1108,32 @@ describe("a request that changes while the sweep works on it is not overwritten"
   // the condition can catch it.
   const CHANGES: Array<[string, string, (r: Row) => void]> = [
     [
+      // A denial leaves block_reason and anonymous as they were, and within the
+      // same second even updated_at: only the status term can see it.
+      "status",
+      "UPDATE publication_requests SET status = 'denied' WHERE dataset_id = ?",
+      (r) => expect(r.status).toBe("denied"),
+    ],
+    [
       "anonymous",
       "UPDATE publication_requests SET anonymous = 1 WHERE dataset_id = ?",
-      (r) => expect(r.anonymous).toBe(1),
+      (r) => {
+        expect(r.status).toBe("blocked");
+        expect(r.anonymous).toBe(1);
+      },
     ],
     [
       "block_reason",
       "UPDATE publication_requests SET block_reason = 'bids_validation_in_progress' WHERE dataset_id = ?",
-      (r) => expect(r.block_reason).toBe("bids_validation_in_progress"),
+      (r) => {
+        expect(r.status).toBe("blocked");
+        expect(r.block_reason).toBe("bids_validation_in_progress");
+      },
     ],
     [
       "updated_at",
       "UPDATE publication_requests SET updated_at = datetime('now', '+1 hour') WHERE dataset_id = ?",
-      () => {},
+      (r) => expect(r.status).toBe("blocked"),
     ],
   ];
 
@@ -1135,7 +1148,6 @@ describe("a request that changes while the sweep works on it is not overwritten"
       expect(result.unblocked).toBe(0);
       expect(result.skipped).toBe(1);
       expect(dispatches).toBe(0);
-      expect(row().status).toBe("blocked");
       afterwards(row());
     });
 
