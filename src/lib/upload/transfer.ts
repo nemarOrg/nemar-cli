@@ -34,7 +34,11 @@ import {
   initDataset,
   isGitAnnexDataset,
 } from "../git-annex/init.js";
-import { ANNEX_SIZE_THRESHOLD_BYTES, describeAnnexSizeThreshold } from "../git-annex/policy.js";
+import {
+  ANNEX_SIZE_THRESHOLD_BYTES,
+  describeAnnexSizeThreshold,
+  isCaseVariantData,
+} from "../git-annex/policy.js";
 import { ensureLocalMainBranch, getCurrentBranch } from "../git-annex/repo-state.js";
 import { runCommand } from "../git-annex/run-command.js";
 import {
@@ -431,6 +435,32 @@ export function computeAddTargets<T extends { path: string }>(
 }
 
 /**
+ * Hand the data files to git-annex, with the CLI's reading of the policy
+ * authoritative for the files where git-annex cannot read it.
+ *
+ * git-annex's `include=` and `exclude=` globs are case-sensitive, so `UPPER.EDF`,
+ * `Mixed.Edf` and `X_MOTION.tsv` are not data to it by name, while the upload plan
+ * (`shouldAnnex`, which folds case) has promised them to S3. Measured with the
+ * production expression: `UPPER.EDF` under the size threshold stays in git, and
+ * `X_MOTION.tsv` stays in git at ANY size because `exclude=*.tsv` matches it and
+ * `include=*_motion.tsv` does not. Those files are added with `--force-large`;
+ * everything else is added under the repository's own `annex.largefiles`, so an
+ * override of the policy (an inherited `.gitattributes`) is still seen by the
+ * not-annexed check rather than papered over. Re-running is a no-op for a file
+ * already annexed and unmodified. See ADR 0031, amendment of 2026-10-07.
+ */
+export async function trackDataFiles(
+  absolutePath: string,
+  paths: string[],
+): Promise<{ success: boolean; error?: string }> {
+  const forced = paths.filter(isCaseVariantData);
+  const regular = paths.filter((p) => !isCaseVariantData(p));
+  const added = await gitAnnexAdd(absolutePath, regular);
+  if (!added.success || forced.length === 0) return added;
+  return gitAnnexAdd(absolutePath, forced, {}, { forceLarge: true });
+}
+
+/**
  * Data files from this run's add targets that git-annex did not annex, split by
  * whether that matters. The targets are data by NEMAR's annex policy
  * (`shouldAnnex`), so a file larger than the policy's size threshold that is
@@ -592,7 +622,7 @@ export async function uploadDataToS3(
       // whole-tree add re-reads every unlocked file's content (#884).
       if (!isStepCompleted(progress, "tracking")) {
         spinner = ora(`Tracking ${addTargets.length} data files with git-annex...`).start();
-        const addResult = await gitAnnexAdd(
+        const addResult = await trackDataFiles(
           absolutePath,
           addTargets.map((f) => f.path),
         );

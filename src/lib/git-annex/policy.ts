@@ -157,6 +157,31 @@ function globOverrides(dataGlob: string, metadataGlob: string): boolean {
   return dataGlob.endsWith(metadataGlob.slice(1));
 }
 
+/** What a file's NAME says about its plane, before its size is consulted. */
+type NameVerdict = "data" | "metadata" | "size";
+
+/**
+ * Read the name clauses of the policy. `foldCase` is the one thing that differs
+ * between the two readers: the CLI folds case (`shouldAnnex` has always lowercased
+ * the path, so `X.EDF` is a recording), while git-annex's `include=` and
+ * `exclude=` globs are case-sensitive and have no case-insensitive form. Measured
+ * against git-annex 10.20260901, `include=*.edf` annexes `lower.edf` but not
+ * `UPPER.EDF` or `Mixed.Edf`, and `iinclude=` is not a working spelling.
+ */
+function nameVerdict(path: string, foldCase: boolean): NameVerdict {
+  const name = foldCase ? path.toLowerCase() : path;
+
+  // The metadata clause vetoes everything except an explicit data glob.
+  const isDataGlob = ANNEX_DATA_GLOBS.some((glob) => matchesGlob(name, glob, foldCase));
+  if (!isDataGlob && NEVER_ANNEX_GLOBS.some((glob) => matchesGlob(name, glob, foldCase))) {
+    return "metadata";
+  }
+
+  if (isDataGlob) return "data";
+  if (ANNEX_DATA_EXTENSIONS.some((ext) => name.endsWith(ext))) return "data";
+  return "size";
+}
+
 /**
  * Evaluate the policy for one file. Mirrors {@link buildLargefilesExpression}
  * exactly; `test/annex-policy.test.ts` proves the two agree against real
@@ -164,34 +189,44 @@ function globOverrides(dataGlob: string, metadataGlob: string): boolean {
  *
  * `path` is relative to the dataset root and matched the way git-annex matches
  * its globs -- against the whole path, with `*` spanning `/`, so `*_motion.tsv`
- * catches `sub-01/motion/sub-01_task-walk_tracksys-imu_motion.tsv`.
+ * catches `sub-01/motion/sub-01_task-walk_tracksys-imu_motion.tsv`. The one place
+ * the two differ is letter case, which is what {@link isCaseVariantData} names.
  */
 export function shouldAnnex(path: string, size: number): boolean {
-  const name = path.toLowerCase();
-
-  // The metadata clause vetoes everything except an explicit data glob.
-  const isDataGlob = ANNEX_DATA_GLOBS.some((glob) => matchesGlob(name, glob));
-  if (!isDataGlob && NEVER_ANNEX_GLOBS.some((glob) => matchesGlob(name, glob))) {
-    return false;
-  }
-
-  if (isDataGlob) return true;
-  if (ANNEX_DATA_EXTENSIONS.some((ext) => name.endsWith(ext))) return true;
+  const verdict = nameVerdict(path, true);
+  if (verdict === "metadata") return false;
+  if (verdict === "data") return true;
   return size > ANNEX_SIZE_THRESHOLD_BYTES;
+}
+
+/**
+ * True when the CLI calls a file data on the strength of its NAME but git-annex's
+ * case-sensitive globs would not: `UPPER.EDF`, `Mixed.Edf`, `X_MOTION.tsv`.
+ *
+ * For these the CLI's decision is authoritative (ADR 0031, amendment of
+ * 2026-10-07), so the upload hands them to `git annex add --force-large`. Left to
+ * git-annex, a case variant that is not over the size threshold stays in git while
+ * the upload plan promised S3, and a variant git-annex's metadata exclusion still
+ * matches (`X_MOTION.tsv`: `exclude=*.tsv` matches, `include=*_motion.tsv` does
+ * not) stays in git at ANY size. Files over the threshold with no such exclusion
+ * annex by size and need no help, but forcing them is harmless and keeps one rule.
+ */
+export function isCaseVariantData(path: string): boolean {
+  return nameVerdict(path, true) === "data" && nameVerdict(path, false) !== "data";
 }
 
 /**
  * Match one git-annex-style glob against a path. git-annex globs `*` across `/`
  * (unlike gitignore), which is why `exclude=*.tsv` reaches nested sidecars.
- * Only `*` and `?` are used by this policy.
+ * Only `*` and `?` are used by this policy. Case-folding by default, as every
+ * caller before {@link isCaseVariantData} was; `foldCase: false` is git-annex's.
  */
-function matchesGlob(path: string, glob: string): boolean {
+function matchesGlob(path: string, glob: string, foldCase = true): boolean {
   const pattern = glob
-    .toLowerCase()
     .replace(/[.+^${}()|[\]\\]/g, "\\$&")
     .replace(/\*/g, ".*")
     .replace(/\?/g, ".");
-  return new RegExp(`^${pattern}$`).test(path);
+  return new RegExp(`^${pattern}$`, foldCase ? "i" : "").test(path);
 }
 
 /**
