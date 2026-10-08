@@ -26,7 +26,7 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { chunkAddTargets, configureLargefiles, gitAnnexAdd } from "./git-annex/init.js";
+import { configureLargefiles, gitAnnexAdd, unstageTrackedPaths } from "./git-annex/init.js";
 import { buildLargefilesExpression } from "./git-annex/policy.js";
 import { runCommand } from "./git-annex/run-command.js";
 import type { S3Credentials } from "./git-annex/s3-remote.js";
@@ -318,32 +318,6 @@ export async function applyNemarAnnexPolicy(datasetPath: string): Promise<AnnexP
   }
 
   return { changed, stripped, skipped, expression };
-}
-
-/**
- * Drop paths from the index while leaving them in the working tree, so git-annex
- * will look at them again.
- *
- * This is the step without which none of this works. `git annex add` only
- * considers files git sees as new or modified, so on a file that is committed as a
- * plain blob and unmodified it does nothing at all -- exit 0, no output, no change
- * -- and `--force-large` does not alter that: the flag decides which plane a
- * considered file goes to, not whether it is considered. Verified against
- * git-annex 10.20260901. Un-caching the path makes it new again, and the resulting
- * commit is a plain typechange on the same path.
- */
-async function unstageTrackedPaths(datasetPath: string, paths: string[]): Promise<void> {
-  for (const chunk of chunkAddTargets(paths)) {
-    const { exitCode, stderr } = await runCommand(
-      ["git", "rm", "--cached", "--quiet", "--", ...chunk],
-      { cwd: datasetPath },
-    );
-    if (exitCode !== 0) {
-      throw new Error(
-        `Failed to uncache ${chunk.length} path(s) from the git index: ${stderr.trim()}`,
-      );
-    }
-  }
 }
 
 /**
