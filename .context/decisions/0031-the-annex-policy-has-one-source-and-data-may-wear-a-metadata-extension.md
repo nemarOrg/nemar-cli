@@ -162,7 +162,7 @@ The tracking step therefore passes the files for which `isCaseVariantData` holds
 Forcing only the case variants keeps the not-annexed check meaningful: an inherited `.gitattributes` `annex.largefiles` override (ADR 0060) still leaves an ordinary data file in git, and the upload still refuses it.
 The not-annexed check therefore fires only on a file whose name git-annex itself reads as data and which it still did not annex (an inherited override or an ignore pattern); letter case alone cannot trigger it.
 Re-running is idempotent: `git annex add` skips an annexed, unmodified file.
-The Decision's `"data" in the upload manifest means exactly "git-annex will take this."` now reads "data" means what git-annex will take, or what the upload forces into the annex with `--force-large`.
+The Decision's sentence now reads: "data" in the upload manifest means "git-annex will take this, or the upload forces it into the annex with `--force-large`."
 
 Bracket classes were not adopted in the expression.
 They change the expression string for every dataset and for every comparison of it: the fleet sweep would read every configured `nm` dataset as drifted again, and an older admin CLI, which compares against its own spelling, would disagree with a newer one.
@@ -182,7 +182,7 @@ That case is covered, because the upload plan calls it data and hands it to `git
 What is exposed is the mirror image of the section above: a name the CLI calls metadata only after folding case.
 The CLI never hands it to `git annex add`, git-annex's case-sensitive exclusions do not match it, and the size clause annexes it at the save, after the S3 step has run.
 That is any name that matches a `NEVER_ANNEX_GLOBS` entry only after case folding (`BIG.JSON`, `BIG.TSV`, `NOTES.TXT`, `x.YML`, and a 200 KB `readme`, `license` or `changes` were all annexed by a plain save) and is over the threshold.
-Dotfiles are the exception: `.BIDSIGNORE` and `.GITIGNORE` stay in git at any size, because git-annex never annexes a dotfile.
+Dotfiles are the exception: `.BIDSIGNORE` and `.GITIGNORE` stay in git at any size, because git-annex does not annex a dotfile by default (unless `annex.dotfiles` is true).
 Its content is then in the local annex only, and the commit carries a pointer nothing can resolve.
 
 The gap is now detected and a re-run clears it.
