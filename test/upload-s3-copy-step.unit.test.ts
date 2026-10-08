@@ -12,10 +12,18 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { saveDataset } from "../src/lib/git-annex/clone-push";
-import { gitAnnexAdd } from "../src/lib/git-annex/init";
+import { gitAnnexAdd, unstageTrackedPaths } from "../src/lib/git-annex/init";
 import {
   type UploadProgress,
   initUploadProgress,
@@ -23,6 +31,7 @@ import {
   markStepCompleted,
 } from "../src/lib/upload-progress";
 import {
+  type BlockedRecovery,
   type SmallNotAnnexed,
   copyAnnexedToRemote,
   describeBlockedTracking,
@@ -589,7 +598,10 @@ describe("recoverBlockedTracking: a blocked upload can be re-run", () => {
     const { dir, all, progress } = await blockedByAttributes("recover");
     const before = readFileSync(join(dir, "big.edf"));
 
-    expect(await recoverBlockedTracking(dir, progress, ["big.edf"])).toBe(1);
+    expect(await recoverBlockedTracking(dir, progress, ["big.edf"])).toEqual({
+      unstaged: 1,
+      staged: ["big.edf"],
+    });
 
     // The blob is out of the index, the stamp is cleared, and the file is untouched.
     const tracked = (await run(["git", "ls-files", "--", "big.edf"], dir)).stdout;
@@ -629,7 +641,10 @@ describe("recoverBlockedTracking: a blocked upload can be re-run", () => {
     // git-annex skipped it without a word, so the step is blocked on a file that was
     // never staged: nothing to unstage, but the stamp still has to be cleared.
     expect((await step(dir, all)).status).toBe("blocked");
-    expect(await recoverBlockedTracking(dir, progress, ["big.edf"])).toBe(0);
+    expect(await recoverBlockedTracking(dir, progress, ["big.edf"])).toEqual({
+      unstaged: 0,
+      staged: [],
+    });
     expect(isStepCompleted(progress, "tracking")).toBe(false);
 
     rmSync(join(dir, ".gitignore"));
@@ -645,11 +660,13 @@ describe("recoverBlockedTracking: a blocked upload can be re-run", () => {
   });
 });
 
-describe("what the step says", () => {
+describe("what a blocked step says", () => {
+  const ok: BlockedRecovery = { unstaged: 7, staged: [] };
+
   test("the blocked message names both causes, the threshold, and what was done", () => {
     const lines = describeBlockedTracking(
       Array.from({ length: 7 }, (_, i) => ({ path: `sub-0${i}/eeg/big.edf`, size: 200_000 })),
-      7,
+      ok,
     );
     const text = lines.join("\n");
     expect(text).toContain("7 data files over 100,000 bytes were not added to git-annex");
@@ -661,18 +678,164 @@ describe("what the step says", () => {
     expect(text).toContain("re-run `nemar dataset upload`");
   });
 
-  test("when unstaging failed it prints the exact command instead of claiming it was done", () => {
-    const text = describeBlockedTracking([{ path: "big.edf", size: 200_000 }], null).join("\n");
-    expect(text).toContain("1 data file over 100,000 bytes was not added");
-    expect(text).toContain("Could not unstage them. Run: git rm --cached -- big.edf");
-    expect(text).not.toContain("were unstaged");
-  });
-
   test("when nothing was staged it says so", () => {
-    const text = describeBlockedTracking([{ path: "big.edf", size: 200_000 }], 0).join("\n");
+    const text = describeBlockedTracking([{ path: "big.edf", size: 200_000 }], {
+      unstaged: 0,
+      staged: [],
+    }).join("\n");
     expect(text).toContain("None of them was staged");
   });
 
+  test("when unstaging failed it never claims it was done, and says why", () => {
+    const text = describeBlockedTracking([{ path: "big.edf", size: 200_000 }], {
+      unstaged: null,
+      staged: ["big.edf"],
+      error: "fatal: Unable to create index.lock",
+    }).join("\n");
+    expect(text).toContain("1 data file over 100,000 bytes was not added");
+    expect(text).toContain("fatal: Unable to create index.lock");
+    expect(text).not.toContain("were unstaged");
+  });
+
+  test("a failure with an unsaved progress file is reported even when unstaging worked", () => {
+    const text = describeBlockedTracking([{ path: "big.edf", size: 200_000 }], {
+      unstaged: 1,
+      staged: ["big.edf"],
+      error: "the upload progress could not be saved",
+    }).join("\n");
+    expect(text).toContain("the upload progress could not be saved");
+    expect(text).not.toContain("1 of them were unstaged");
+  });
+
+  test("past fifty paths it does not print a command, it says the re-run unstages them", () => {
+    const staged = Array.from({ length: 51 }, (_, i) => `f${i}.edf`);
+    const text = describeBlockedTracking(
+      staged.map((path) => ({ path, size: 200_000 })),
+      { unstaged: null, staged, error: "boom" },
+    ).join("\n");
+    expect(text).not.toContain("git --literal-pathspecs rm");
+    expect(text).toContain("51 paths are involved; the next run tries again, unstaging them");
+  });
+});
+
+describe("recovery that does not complete", () => {
+  /** n blocked files with spaces, quotes and glob characters in their names. */
+  async function blockedMany(name: string, names: string[]) {
+    const { dir } = await dataset(name, {});
+    writeFile(dir, ".gitattributes", "*.edf annex.largefiles=nothing\n");
+    const all: Target[] = [];
+    for (const rel of names) {
+      writeFile(dir, rel, 200_000);
+      all.push({ path: rel, size: 200_000, type: "data" });
+    }
+    expect((await trackDataFiles(dir, names)).success).toBe(true);
+    const progress = initUploadProgress(dir, "nm000997", all);
+    markStepCompleted(progress, "tracking");
+    const outcome = await step(dir, all);
+    expect(outcome.status).toBe("blocked");
+    return { dir, all, progress };
+  }
+
+  test("the printed command runs in a shell on names with spaces, quotes and stars", async () => {
+    // Guards the quoting. The first version printed the paths bare, cut at five, with a
+    // parenthetical after them, which no shell runs. This one EXECUTES what is printed.
+    const names = [
+      "sub-0/eeg/my file 0.edf",
+      "sub-1/eeg/it's 1.edf",
+      "sub-2/eeg/star*2.edf",
+      "sub-3/eeg/x [3].edf",
+      "sub-4/eeg/plain4.edf",
+      "sub-5/eeg/tab\tfive.edf",
+    ];
+    const { dir, progress } = await blockedMany("printed-command", names);
+    const restore = installGitShim(scratch.root, [{ match: "rm --cached" }]);
+    let recovery: BlockedRecovery;
+    try {
+      recovery = await recoverBlockedTracking(dir, progress, names);
+    } finally {
+      restore();
+    }
+    expect(recovery.unstaged).toBeNull();
+    expect(recovery.error).toContain("fatal: shim: injected failure");
+    // The stamp is gone although unstaging failed.
+    expect(isStepCompleted(progress, "tracking")).toBe(false);
+
+    const lines = describeBlockedTracking(
+      names.map((path) => ({ path, size: 200_000 })),
+      recovery,
+    );
+    const command = lines.find((l) => l.includes("git --literal-pathspecs rm --cached"));
+    expect(command).toBeDefined();
+    // Every path is in the command, not the first five.
+    for (const n of names) expect(command).toContain(n.includes("'") ? "it'\\''s 1.edf" : n);
+
+    const before = (await run(["git", "ls-files"], dir)).stdout.split("\n").filter(Boolean);
+    expect(before).toContain("sub-0/eeg/my file 0.edf");
+    const ran = await run(["sh", "-c", (command as string).trim()], dir);
+    expect(ran.exitCode).toBe(0);
+    const after = (await run(["git", "ls-files"], dir)).stdout.split("\n").filter(Boolean);
+    expect(after.filter((p) => p.endsWith(".edf"))).toEqual([]);
+    // The files themselves are untouched.
+    for (const n of names) expect(existsSync(join(dir, n))).toBe(true);
+  });
+
+  test("a failure in a later chunk still clears the stamp, and the next run finishes the job", async () => {
+    // 501 files: one more than the add chunk holds, so the second `git rm` is a separate
+    // call. Breaking it leaves 500 unstaged and one staged, which is exactly the state
+    // a hand fix would find nothing untracked to reopen from.
+    const names = Array.from({ length: 501 }, (_, i) => `sub-${i % 7}/eeg/f${i}.edf`);
+    const { dir, progress } = await blockedMany("later-chunk", names);
+    const restore = installGitShim(scratch.root, [{ match: "rm --cached", after: 1 }]);
+    let first: BlockedRecovery;
+    try {
+      first = await recoverBlockedTracking(dir, progress, names);
+    } finally {
+      restore();
+    }
+    expect(first.unstaged).toBeNull();
+    expect(first.error).toBeTruthy();
+    expect(isStepCompleted(progress, "tracking")).toBe(false);
+    const stillStaged = (await run(["git", "ls-files"], dir)).stdout
+      .split("\n")
+      .filter((p) => p.endsWith(".edf"));
+    expect(stillStaged.length).toBe(1);
+
+    // The next blocked run unstages the remainder.
+    const second = await recoverBlockedTracking(dir, progress, names);
+    expect(second.error).toBeUndefined();
+    expect(second.unstaged).toBe(1);
+  });
+
+  test("an unwritable progress file is reported, and the stamp is cleared in memory regardless", async () => {
+    const { dir, progress } = await blockedMany("unsaved-progress", ["big.edf"]);
+    // A file where the progress directory should be makes every write fail.
+    rmSync(join(dir, ".nemar"), { recursive: true, force: true });
+    writeFileSync(join(dir, ".nemar"), "in the way");
+    const recovery = await recoverBlockedTracking(dir, progress, ["big.edf"]);
+    expect(isStepCompleted(progress, "tracking")).toBe(false);
+    expect(recovery.unstaged).toBe(1);
+    expect(recovery.error).toContain("the upload progress could not be saved");
+    expect(recovery.error).toContain("--restart");
+  });
+});
+
+describe("unstageTrackedPaths takes names literally", () => {
+  test("a name with a star unstages that file and no other", async () => {
+    // Guards `--literal-pathspecs`. Under git's own matching, `star*.txt` also removes
+    // starfish.txt and starlight.txt from the index, and the upload now hands this
+    // function arbitrary user file names.
+    const { dir } = await dataset("literal", {});
+    for (const f of ["star*.txt", "starfish.txt", "starlight.txt"]) writeFile(dir, f, f);
+    expect((await run(["git", "add", "-A"], dir)).exitCode).toBe(0);
+    await unstageTrackedPaths(dir, ["star*.txt"]);
+    const tracked = (await run(["git", "ls-files"], dir)).stdout.split("\n").filter(Boolean);
+    expect(tracked).toContain("starfish.txt");
+    expect(tracked).toContain("starlight.txt");
+    expect(tracked).not.toContain("star*.txt");
+  });
+});
+
+describe("what the step says", () => {
   test("the summary covers every relation between sent, confirmed, present and re-sent", () => {
     expect(formatUploadSummary(0, 0, 0)).toBe("No annexed data files, so nothing was copied to S3");
     expect(formatUploadSummary(1, 0, 0)).toBe(
