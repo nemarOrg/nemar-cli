@@ -945,10 +945,10 @@ export function extractCopyJsonError(
 }
 
 /**
- * How much of what git-annex printed could be used: all paths answered (`understood`),
- * only some paths answered (`partial`), or nothing parsed from nonempty output
- * (`unrecognized`). The exit status is reported separately and does not change whether
- * parsed records cover the paths.
+ * Whether git-annex answered for every requested path (`understood`), fewer than all
+ * requested paths, including none (`partial`), or printed nonempty output with no parsed
+ * records (`unrecognized`). The exit status is reported separately and does not change
+ * whether parsed records cover the paths.
  */
 export type OutputState = "understood" | "partial" | "unrecognized";
 
