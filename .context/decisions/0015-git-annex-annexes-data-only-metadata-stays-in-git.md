@@ -6,7 +6,9 @@
 
 Amended by [ADR 0031](0031-the-annex-policy-has-one-source-and-data-may-wear-a-metadata-extension.md),
 which carves out data that wears a metadata extension (`*_motion.tsv`) and moves the
-policy into a single module. The decision below stands.
+policy into a single module, and by [ADR 0093](0093-a-metadata-file-over-10-mib-under-sourcedata-derivatives-or-code-is-annexed.md),
+which annexes a metadata-named file over 10 MiB under `sourcedata/`, `derivatives/` or `code/`.
+The decision below stands for the BIDS tree.
 
 ## Context
 

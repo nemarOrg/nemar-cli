@@ -154,7 +154,9 @@ held import is not a failure),
 0090 (an acquisition date finer than year and month is a review finding that warns and never
 gates, and nothing already published is rewritten),
 0091 (a new recording's day-level acquisition dates are set to 1 January of their year on upload
-and import, and nothing already published is changed).
+and import, and nothing already published is changed),
+0093 (a metadata-named file over 10 MiB under `sourcedata/`, `derivatives/` or `code/` is
+annexed; the BIDS tree keeps its metadata in git at any size).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and

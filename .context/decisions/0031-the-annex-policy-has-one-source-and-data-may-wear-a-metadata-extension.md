@@ -8,6 +8,9 @@ Amends ADR 0015, which stands. This narrows "metadata never annexes" to
 "metadata never annexes, except where the extension is lying", and puts the
 policy in one place.
 
+Amended by [ADR 0093](0093-a-metadata-file-over-10-mib-under-sourcedata-derivatives-or-code-is-annexed.md):
+a metadata-named file over 10 MiB under `sourcedata/`, `derivatives/` or `code/` is annexed.
+
 ## Context
 
 ADR 0015 decided that git-annex takes recognised data extensions or anything over
