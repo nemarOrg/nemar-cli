@@ -786,8 +786,15 @@ export interface CopyJsonRecord {
   file: string | null;
   key: string | null;
   success: boolean;
+  /** Why a failed record failed (empty on success); see {@link parseCopyJson}. */
   errors: string[];
 }
+
+/**
+ * Progress text git-annex puts in `note` on every record ("to nemar-s3..."). It is
+ * not a reason, so a failed record that carries only this has none.
+ */
+const COPY_PROGRESS_NOTE = /^(?:to|from) \S+\.\.\.$/;
 
 /**
  * Parse the `--json --json-error-messages` output of `git annex copy`.
@@ -799,6 +806,14 @@ export interface CopyJsonRecord {
  * The JSON records are the documented machine interface, one object per line.
  * Lines that are not JSON objects (git-annex can still print bookkeeping such
  * as "(recording state in git...)") are ignored. Exported for unit tests.
+ *
+ * A failed record's reason is in one of two places, both measured against
+ * git-annex 10.20260901 with a `directory` remote. A transfer that was attempted
+ * and failed (a read-only store) fills `error-messages`, with each message
+ * repeated; a remote git-annex declined to use before trying (a store directory
+ * that is gone) leaves `error-messages` EMPTY and says why in `note`. Reading only
+ * the first would turn the second into "file: failed" with no cause, so the reason
+ * is the de-duplicated messages, else the note unless it is progress text.
  */
 export function parseCopyJson(stdout: string): CopyJsonRecord[] {
   const records: CopyJsonRecord[] = [];
@@ -815,9 +830,18 @@ export function parseCopyJson(stdout: string): CopyJsonRecord[] {
     const rec = parsed as Record<string, unknown>;
     if (rec.command !== undefined && rec.command !== "copy") continue;
     if (typeof rec.success !== "boolean") continue;
-    const errors = Array.isArray(rec["error-messages"])
-      ? (rec["error-messages"] as unknown[]).filter((m): m is string => typeof m === "string")
+    const messages = Array.isArray(rec["error-messages"])
+      ? (rec["error-messages"] as unknown[])
+          .filter((m): m is string => typeof m === "string")
+          .map((m) => m.trim())
+          .filter(Boolean)
       : [];
+    const note = typeof rec.note === "string" ? rec.note.trim() : "";
+    let errors: string[] = [];
+    if (!rec.success) {
+      errors = [...new Set(messages)];
+      if (errors.length === 0 && note && !COPY_PROGRESS_NOTE.test(note)) errors = [note];
+    }
     records.push({
       file: typeof rec.file === "string" ? rec.file : null,
       key: typeof rec.key === "string" ? rec.key : null,
