@@ -96,11 +96,14 @@ export async function saveDataset(
   if (stale.error) return { success: false, error: describeStaleFlagFailure(stale) };
   if (stale.cleared > 0) {
     console.warn(
-      `Warning: cleared ${stale.cleared} assume-unchanged flag(s) on annexed files, so their changes are saved.`,
+      `Warning: cleared ${stale.cleared} assume-unchanged flag(s) on annexed files, so this save includes their changes.`,
     );
   }
 
-  const candidates = options.skipContentCheck ?? [];
+  // A flag cleared just now was hiding its file from git for some time, so the upload
+  // plan's record of that file (taken, perhaps, AFTER an edit the flag hid) cannot be
+  // trusted to say the file is unchanged. A save that found stale flags reads every file.
+  const candidates = stale.cleared > 0 ? [] : (options.skipContentCheck ?? []);
   let marked: SkipContentCheckEntry[] = [];
   if (candidates.length > 0) {
     const check = compareRecordedStat(path, candidates);
@@ -154,6 +157,25 @@ export async function saveDataset(
     return { success: false, error: outcome.error ? `${outcome.error}\n${stuck}` : stuck };
   }
   return outcome;
+}
+
+/**
+ * Clear every stale assume-unchanged flag in the repository `path` belongs to, failing
+ * closed. A caller about to ask git to look at a file (`git annex add`, `git add`) must
+ * do this first: a flag left by a killed save makes git skip the file, exit 0 and
+ * report nothing, so an edit made since is neither tracked, uploaded nor committed.
+ * `saveDataset` does it on entry too; this is for the steps before it.
+ */
+export async function clearStaleFlags(
+  path: string,
+): Promise<{ success: boolean; cleared: number; error?: string }> {
+  const top = await repositoryRoot(path);
+  if ("error" in top) return { success: false, cleared: 0, error: top.error };
+  const stale = await clearStaleAssumeUnchanged(top.root);
+  if (stale.error) {
+    return { success: false, cleared: 0, error: describeStaleFlagFailure(stale) };
+  }
+  return { success: true, cleared: stale.cleared };
 }
 
 /** The repository's top-level directory, or git's complaint when `path` is in none. */

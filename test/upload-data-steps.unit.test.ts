@@ -44,10 +44,13 @@ import {
 import { type DatasetInfo, FAIL, ok } from "../src/lib/upload/types";
 import {
   annexedSet,
+  commitCount,
   initDirectoryRemote,
   makeScratch,
   newDatasetRepo,
+  prependPreCommit,
   run,
+  tags,
   writeFile,
 } from "./helpers/annex-repo";
 import { installGitShim } from "./helpers/git-shim";
@@ -378,6 +381,75 @@ describe("what the copy step does with each outcome", () => {
       restore();
     }
     expect(readdirSync(join(dir, ".git", "annex", "creds"))).toEqual([]);
+  });
+});
+
+describe("a run that cannot check for stale flags", () => {
+  test("stops before it tracks anything", async () => {
+    // Guards the failure branch of the early clear. If git cannot report the flags, no
+    // `git annex add` may run: it could be silently skipped for a flagged file.
+    const dir = await dataset("flags-unreadable", { "a.edf": 3_000 });
+    const open = directoryRemote(dir);
+    const restore = installGitShim(scratch.root, [{ match: "ls-files -v" }]);
+    let result: Awaited<ReturnType<typeof runSteps>>;
+    try {
+      result = await runSteps(dir, { openRemote: open });
+    } finally {
+      restore();
+    }
+    expect(result.status).toBe("fail");
+    expect(open.calls).toBe(0);
+    expect(await annexedSet(dir)).toEqual(new Set());
+  });
+});
+
+describe("a run killed inside the save", () => {
+  test("an edit made afterwards is tracked, uploaded and committed by the resumed run", async () => {
+    // The loss this guards: a run killed while the annexed paths are marked
+    // assume-unchanged leaves the bits in the index; the user edits a file (same size,
+    // new bytes); the resumed run's `git annex add` on that file exits 0 and changes
+    // nothing, the progress record is then stamped with the post-edit size and mtime, the
+    // save's stat guard matches, and `git add -A` skips the file again. HEAD keeps the old
+    // bytes, the store never gets the edit, and the run says it saved. The resumed run
+    // must clear the bits before it asks git to look at anything.
+    const dir = await dataset("killed-in-the-save", { "a.edf": 3_000, "b.edf": 3_000 });
+    const pidFile = join(dir, "..", `runner-${Math.random().toString(36).slice(2)}.pid`);
+    const store = join(dir, "..", `store-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(store, { recursive: true });
+    const restoreHook = prependPreCommit(dir, `kill -9 "$(cat "${pidFile}")"; exit 1`);
+
+    // Run 1: killed by its own pre-commit hook, with the paths marked and nothing committed.
+    const commitsBefore = await commitCount(dir);
+    const child = Bun.spawn(
+      ["bun", "run", join(import.meta.dir, "helpers", "data-steps-runner.ts"), dir, pidFile, store],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    await child.exited;
+    expect(child.signalCode).toBe("SIGKILL");
+    restoreHook();
+    expect(Object.values(await tags(dir, "a.edf", "b.edf"))).toEqual(["h", "h"]);
+    expect(await commitCount(dir)).toBe(commitsBefore);
+
+    // The user edits a file: same size, different bytes, so size alone cannot tell.
+    writeFileSync(join(dir, "a.edf"), "e".repeat(3_000));
+    // The bit hides the edit: git shows the file as staged and NOT modified.
+    const hidden = (await run(["git", "status", "--porcelain"], dir)).stdout;
+    expect(hidden).toContain("A  a.edf");
+    expect(hidden).not.toContain("AM a.edf");
+
+    // Run 2: the resume.
+    const open = directoryRemote(dir);
+    const result = await runSteps(dir, { openRemote: open, skipMinBytes: 1 });
+
+    expect(result.status).toBe("ok");
+    const key = (await run(["git", "annex", "lookupkey", "a.edf"], dir)).stdout.trim();
+    const pointer = await run(["git", "cat-file", "-p", "HEAD:a.edf"], dir);
+    expect(pointer.stdout.trim()).toBe(`/annex/objects/${key}`);
+    expect(readdirSync(store, { recursive: true }).some((e) => String(e).endsWith(`/${key}`))).toBe(
+      true,
+    );
+    expect((await run(["git", "status", "--porcelain"], dir)).stdout.trim()).toBe("");
+    expect(Object.values(await tags(dir, "a.edf", "b.edf"))).toEqual(["H", "H"]);
   });
 });
 
