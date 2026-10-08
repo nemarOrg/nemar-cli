@@ -15,14 +15,27 @@
  * is replaced. `deployCiStep` is driven against a local stand-in for the API.
  */
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  setDefaultTimeout,
+  test,
+} from "bun:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { UploadProgress } from "../src/lib/upload-progress";
 import { deployCiStep, printUploadSuccess } from "../src/lib/upload/finalize";
 import type { CiOutcome } from "../src/lib/upload/finalize";
 import type { DatasetInfo } from "../src/lib/upload/types";
+
+import { makeConfigDir, removeConfigDir, spawnBun } from "./helpers/pending-cli";
+
+// The tests that run a subprocess need more than the default five seconds.
+setDefaultTimeout(30_000);
 
 let dir: string;
 
@@ -175,76 +188,39 @@ describe("deployCiStep reports how the CI step ended", () => {
   });
 
   async function outcome(opts: { stepDone?: boolean } = {}): Promise<string> {
-    const configDir = mkdtempSync(join(tmpdir(), "nemar-upload-ci-config-"));
+    const configDir = makeConfigDir(`http://127.0.0.1:${server.port}`);
     try {
-      writeFileSync(
-        join(configDir, "config.json"),
-        JSON.stringify({
-          activeAccount: "ci-step",
-          accounts: {
-            "ci-step": { apiUrl: `http://127.0.0.1:${server.port}`, apiKey: "placeholder-key" },
-          },
-        }),
-      );
-      const env: Record<string, string | undefined> = Object.fromEntries(
-        Object.entries(process.env).filter(
-          ([key]) =>
-            !key.startsWith("TEST_") &&
-            !["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "FORCE_COLOR"].includes(
-              key.toUpperCase(),
-            ),
-        ),
-      );
-      env.NEMAR_CONFIG_DIR = configDir;
-      env.NEMAR_NO_UPDATE_CHECK = "1";
-      env.NO_COLOR = "1";
-      env.UPLOAD_DIR = dir;
-      env.CI_STEP_DONE = opts.stepDone ? "1" : "0";
-      for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"])
-        env[name] = "http://127.0.0.1:9";
-      env.NO_PROXY = "127.0.0.1,localhost";
-      const proc = Bun.spawn({
-        cmd: ["bun", "-e", SCRIPT],
-        cwd: join(import.meta.dir, ".."),
-        env,
-        stdin: "ignore",
-        stdout: "pipe",
-        stderr: "pipe",
-        timeout: 20_000,
+      const run = await spawnBun(["bun", "-e", SCRIPT], configDir, {
+        env: { UPLOAD_DIR: dir, CI_STEP_DONE: opts.stepDone ? "1" : "0" },
       });
-      const [stdout, stderr] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-        proc.exited,
-      ]);
-      const found = /OUTCOME=(\S+)/.exec(stdout);
-      if (!found) throw new Error(`no outcome printed:\n${stdout}\n${stderr}`);
+      const found = /OUTCOME=(\S+)/.exec(run.stdout);
+      if (!found) throw new Error(`no outcome printed:\n${run.stdout}\n${run.stderr}`);
       return found[1] as string;
     } finally {
-      rmSync(configDir, { recursive: true, force: true });
+      removeConfigDir(configDir);
     }
   }
 
   test("CI set up: configured", async () => {
     expect(await outcome()).toBe("configured");
     expect(calls).toBe(1);
-  }, 30_000);
+  });
 
   test("an owner refused by the admin-only route: not-configured", async () => {
     answer = 403;
     expect(await outcome()).toBe("not-configured");
     expect(calls).toBe(1);
-  }, 30_000);
+  });
 
   test("any other failure: not-configured", async () => {
     answer = 500;
     expect(await outcome()).toBe("not-configured");
-  }, 30_000);
+  });
 
   test("a resumed upload whose CI step already ran: unknown, and no second call", async () => {
     expect(await outcome({ stepDone: true })).toBe("unknown");
     expect(calls).toBe(0);
-  }, 30_000);
+  });
 });
 
 describe("the upload command", () => {
