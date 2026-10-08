@@ -834,10 +834,10 @@ Examples:
       if ((await pushMetadata(absolutePath, uploadProgress)).status === "fail") process.exit(1);
 
       // Step 12b: Deploy BIDS validation CI
-      await deployCiStep(absolutePath, datasetInfo.dataset_id, uploadProgress);
+      const ciOutcome = await deployCiStep(absolutePath, datasetInfo.dataset_id, uploadProgress);
 
       // Step 13: Success!
-      printUploadSuccess(absolutePath, datasetInfo);
+      printUploadSuccess(absolutePath, datasetInfo, ciOutcome);
     });
 }
 
