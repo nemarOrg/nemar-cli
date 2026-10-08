@@ -127,7 +127,7 @@ than the bloat. Issue #1159 carries the real fix.
 - ADR 0015 - the decision this amends
 - Issue #1158 (this fix), issue #1159 (import normalisation and the `on007788` backfill)
 
-## Amendment 2026-10-07 (#1642): the size threshold is 100,000 bytes
+## Amendment 2026-10-07 (#1642): the size threshold is 100,000 bytes, and the CLI's selection is authoritative for case variants
 
 The "100 kB" above is literally 100,000 bytes, and the policy module now says so.
 git-annex reads the `kb` in `largerthan=100kb` as SI (1 kB = 1000 bytes), not as 1024.
@@ -141,3 +141,19 @@ This preserves what git-annex does today, so no dataset's tracking changes; it o
 Repositories configured before this amendment carry `largerthan=100kb`, which git-annex evaluates identically; `isCurrentLargefilesExpression` accepts that spelling so the fleet sweep does not report the `nm` datasets as drifted.
 `test/annex-policy.test.ts` runs both spellings against real git-annex at 99,999, 100,000, 100,001, 102,400 and 102,401 bytes, with the expected outcome written as a literal rather than derived from the constant.
 The prose copies on `https://docs.nemar.org/admin/operations/validated-workflows/` live outside this repository and still say `largerthan=100kb`; both spellings are correct, and the page should move to the byte count when it is next edited.
+
+### The CLI's selection is authoritative for case variants of data globs
+
+git-annex's `include=` and `exclude=` globs are case-sensitive, and there is no case-insensitive form (`iinclude=` is not a working spelling).
+`shouldAnnex` has always folded case, so the upload plan calls `UPPER.EDF`, `Mixed.Edf` and `X_MOTION.tsv` data while git-annex does not read them that way by name.
+Measured against git-annex 10.20260901 with the production expression, which ORs the data terms with the size clause:
+
+- `UPPER.EDF` and `Mixed.Edf` over the threshold annex by size, so they need no help; under the threshold they stay in git, which `findDataFilesNotAnnexed` reports as small files stored in git.
+- `X_MOTION.tsv` stays in git at any size, because `exclude=*.tsv` matches it while `include=*_motion.tsv` does not.
+  A large one is the case where the upload would otherwise commit a recording to git while the plan promised S3.
+
+The tracking step therefore passes the files for which `isCaseVariantData` holds to `git annex add --force-large`, and every other data file to a plain `git annex add`.
+Forcing only the case variants keeps the not-annexed check meaningful: an inherited `.gitattributes` `annex.largefiles` override (ADR 0060) still leaves an ordinary data file in git, and the upload still refuses it.
+The check itself fires only on a file git-annex had no name-based reason to refuse and did not annex anyway.
+Re-running is idempotent: `git annex add` skips an annexed, unmodified file.
+`test/upload-track-data.unit.test.ts` runs both readers against real git-annex.
