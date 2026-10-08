@@ -90,6 +90,20 @@ describe("runCommand under --verbose", () => {
     }
     expect(chunks.join("")).toBe("");
   });
+
+  test("a sensitive command keeps its result for callers but does not log its output", async () => {
+    const { value, log } = await verboseLog(() =>
+      runCommand(["git", "rev-parse", "--is-inside-work-tree"], {
+        cwd: process.cwd(),
+        sensitiveOutput: true,
+      }),
+    );
+
+    expect(value.exitCode).toBe(0);
+    expect(value.stdout.trim()).toBe("true");
+    expect(log).toContain("[sensitive subprocess output suppressed]");
+    expect(log).not.toContain("true");
+  });
 });
 
 describe("credentialValues", () => {
