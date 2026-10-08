@@ -739,4 +739,35 @@ describe("the location log decides, not the add targets", () => {
     expect(isStepCompleted(done, "s3_upload")).toBe(true);
     expect(isStepCompleted(done, "dataset_save")).toBe(true);
   });
+
+  test("the names of files the save stranded are shown escaped", async () => {
+    // Guards displayNames in the stranded-files message: the name is the user's data, and a
+    // newline in it must not split the message into a line that is not part of it.
+    const dir = await dataset("stranded-hostile-name", {
+      "ok.edf": 3_000,
+      "BIG\nNAME.JSON": 200_000,
+    });
+    const lines: string[] = [];
+    const log = console.log;
+    const write = process.stderr.write.bind(process.stderr);
+    console.log = (...args: unknown[]) => {
+      lines.push(args.join(" "));
+    };
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      lines.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    let status: string;
+    try {
+      status = (await runSteps(dir, { openRemote: directoryRemote(dir) })).status;
+    } finally {
+      console.log = log;
+      process.stderr.write = write;
+    }
+
+    expect(status).toBe("fail");
+    const text = lines.join("\n");
+    expect(text).toContain("not recorded at the remote: BIG\\nNAME.JSON");
+    expect(text).not.toContain("BIG\nNAME");
+  });
 });
