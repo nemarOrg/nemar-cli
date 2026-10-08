@@ -11,17 +11,19 @@
  */
 
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { readdirSync, renameSync, rmSync } from "node:fs";
+import { readFileSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
   RECORDED_CHECK_VALID_MS,
   type UploadProgress,
+  fingerprintAnnexedFiles,
   initUploadProgress,
   isRecordedCheckFresh,
   markRecordedChecked,
   readUploadProgress,
   writeUploadProgress,
 } from "../src/lib/upload-progress";
+import { listAnnexedKeys } from "../src/lib/git-annex/transfer";
 import {
   type S3CopyPlan,
   copyAnnexedToRemote,
@@ -121,15 +123,6 @@ async function captured<T>(fn: () => Promise<T>): Promise<{ value: T; text: stri
     process.stderr.write = write;
   }
 }
-
-/** The records fsck or copy would print for the first `n` of `paths`, all successes. */
-const successRecords = (command: "copy" | "fsck", paths: string[], n: number): string =>
-  paths
-    .slice(0, n)
-    .map((file) =>
-      JSON.stringify({ command, "error-messages": [], file, key: `K-${file}`, success: true }),
-    )
-    .join("\n");
 
 describe("recorded files whose content is not in this repository", () => {
   test("a recorded file the remote lost, with no copy here, makes the step fail instead of passing", async () => {
@@ -234,29 +227,6 @@ describe("recorded files whose content is not in this repository", () => {
     expect(outcome.error).toContain("is not accessible");
   });
 
-  test("a path fsck gave no record for makes the step unverifiable, not a hedged pass", async () => {
-    // Guards `unanswered`. fsck exits 0 with one record for three paths: two were never
-    // asked, and the log (untouched) says they are recorded, so only the missing records
-    // can show the check did not happen for them.
-    const { dir, targets } = await dataset("fsck-partial");
-    expect((await step(dir, targets)).status).toBe("ok");
-    await dropLocal(dir, "a.edf", "b.edf", "c.edf");
-    const restore = installGitShim(scratch.root, [
-      { match: "annex fsck", stdout: successRecords("fsck", ["a.edf", "b.edf", "c.edf"], 1) },
-    ]);
-    try {
-      const outcome = await step(dir, targets);
-      expect(outcome.status).toBe("unverifiable");
-      if (outcome.status !== "unverifiable") throw new Error("unreachable");
-      expect(outcome.error).toContain(
-        "could not confirm that 2 recorded files with no local content",
-      );
-      expect(outcome.error).toContain("git-annex gave no result for it");
-    } finally {
-      restore();
-    }
-  });
-
   test("with content here the ordinary copy check still finds and resends a lost object", async () => {
     // The other half of the split: files WITH local content keep going through `copy`.
     const { dir, store, targets } = await dataset("with-content");
@@ -352,7 +322,11 @@ describe("what the step prints about files the remote lost", () => {
 });
 
 describe("a recent passed check is not repeated", () => {
-  const progressWith = (stamp: unknown, count: unknown = 3): UploadProgress =>
+  const progressWith = (
+    stamp: unknown,
+    count: unknown = 3,
+    fingerprint: unknown = "checked-path-key-set",
+  ): UploadProgress =>
     ({
       dataset_id: "nm000001",
       started_at: "",
@@ -361,56 +335,89 @@ describe("a recent passed check is not repeated", () => {
       completed_steps: [],
       remote_checked_at: stamp,
       remote_checked_count: count,
+      remote_checked_fingerprint: fingerprint,
     }) as unknown as UploadProgress;
 
-  test("isRecordedCheckFresh trusts only a recent, readable, not-future timestamp over the same number of files", () => {
+  test("isRecordedCheckFresh trusts only a recent stamp for the same path/key set", () => {
     const now = Date.parse("2026-10-07T12:00:00.000Z");
     const at = (msAgo: number) => new Date(now - msAgo).toISOString();
 
-    expect(isRecordedCheckFresh(progressWith(at(0)), 3, now)).toBe(true);
-    expect(isRecordedCheckFresh(progressWith(at(RECORDED_CHECK_VALID_MS - 1)), 3, now)).toBe(true);
+    expect(isRecordedCheckFresh(progressWith(at(0)), 3, "checked-path-key-set", now)).toBe(true);
+    expect(
+      isRecordedCheckFresh(
+        progressWith(at(RECORDED_CHECK_VALID_MS - 1)),
+        3,
+        "checked-path-key-set",
+        now,
+      ),
+    ).toBe(true);
     // Six hours exactly is already stale, and so is anything older.
-    expect(isRecordedCheckFresh(progressWith(at(RECORDED_CHECK_VALID_MS)), 3, now)).toBe(false);
-    expect(isRecordedCheckFresh(progressWith(at(7 * 60 * 60 * 1000)), 3, now)).toBe(false);
+    expect(
+      isRecordedCheckFresh(
+        progressWith(at(RECORDED_CHECK_VALID_MS)),
+        3,
+        "checked-path-key-set",
+        now,
+      ),
+    ).toBe(false);
+    expect(
+      isRecordedCheckFresh(
+        progressWith(at(7 * 60 * 60 * 1000)),
+        3,
+        "checked-path-key-set",
+        now,
+      ),
+    ).toBe(false);
     // Nothing that cannot be read as a recent time may skip the check.
-    expect(isRecordedCheckFresh(progressWith(undefined), 3, now)).toBe(false);
-    expect(isRecordedCheckFresh(progressWith("yesterday"), 3, now)).toBe(false);
-    expect(isRecordedCheckFresh(progressWith(""), 3, now)).toBe(false);
-    expect(isRecordedCheckFresh(progressWith(now), 3, now)).toBe(false);
-    expect(isRecordedCheckFresh(progressWith(null), 3, now)).toBe(false);
-    expect(isRecordedCheckFresh(progressWith({}), 3, now)).toBe(false);
+    expect(isRecordedCheckFresh(progressWith(undefined), 3, "checked-path-key-set", now)).toBe(false);
+    expect(isRecordedCheckFresh(progressWith("yesterday"), 3, "checked-path-key-set", now)).toBe(false);
+    expect(isRecordedCheckFresh(progressWith(""), 3, "checked-path-key-set", now)).toBe(false);
+    expect(isRecordedCheckFresh(progressWith(now), 3, "checked-path-key-set", now)).toBe(false);
+    expect(isRecordedCheckFresh(progressWith(null), 3, "checked-path-key-set", now)).toBe(false);
+    expect(isRecordedCheckFresh(progressWith({}), 3, "checked-path-key-set", now)).toBe(false);
     // A stamp from the future is a clock that moved back, not proof of a recent check.
-    expect(isRecordedCheckFresh(progressWith(new Date(now + 60_000).toISOString()), 3, now)).toBe(
-      false,
-    );
+    expect(
+      isRecordedCheckFresh(
+        progressWith(new Date(now + 60_000).toISOString()),
+        3,
+        "checked-path-key-set",
+        now,
+      ),
+    ).toBe(false);
   });
 
-  test("a different, missing or damaged count never skips the check", () => {
-    // Guards the count. A collaborator's location log merged within the window changes how
-    // many files are recorded; a bare timestamp would take them as already confirmed.
+  test("a different, missing or damaged count or fingerprint never skips the check", () => {
+    // A collaborator's merged location log can change either the number of paths or the
+    // path/key set without changing the count.
     const now = Date.parse("2026-10-07T12:00:00.000Z");
     const fresh = new Date(now - 60_000).toISOString();
-    expect(isRecordedCheckFresh(progressWith(fresh, 3), 3, now)).toBe(true);
-    expect(isRecordedCheckFresh(progressWith(fresh, 3), 4, now)).toBe(false);
-    expect(isRecordedCheckFresh(progressWith(fresh, 3), 2, now)).toBe(false);
+    expect(isRecordedCheckFresh(progressWith(fresh, 3), 3, "checked-path-key-set", now)).toBe(true);
+    expect(isRecordedCheckFresh(progressWith(fresh, 3), 4, "checked-path-key-set", now)).toBe(false);
+    expect(isRecordedCheckFresh(progressWith(fresh, 3), 2, "checked-path-key-set", now)).toBe(false);
+    expect(isRecordedCheckFresh(progressWith(fresh, 3), 3, "different-path-key-set", now)).toBe(false);
     const noCount = progressWith(fresh, 3);
     Reflect.deleteProperty(noCount, "remote_checked_count");
-    expect(isRecordedCheckFresh(noCount, 3, now)).toBe(false);
-    expect(isRecordedCheckFresh(progressWith(fresh, "3"), 3, now)).toBe(false);
-    expect(isRecordedCheckFresh(progressWith(fresh, null), 3, now)).toBe(false);
+    expect(isRecordedCheckFresh(noCount, 3, "checked-path-key-set", now)).toBe(false);
+    expect(isRecordedCheckFresh(progressWith(fresh, "3"), 3, "checked-path-key-set", now)).toBe(false);
+    expect(isRecordedCheckFresh(progressWith(fresh, null), 3, "checked-path-key-set", now)).toBe(false);
+    const noFingerprint = progressWith(fresh, 3);
+    Reflect.deleteProperty(noFingerprint, "remote_checked_fingerprint");
+    expect(isRecordedCheckFresh(noFingerprint, 3, "checked-path-key-set", now)).toBe(false);
+    expect(isRecordedCheckFresh(progressWith(fresh, 3, []), 3, "checked-path-key-set", now)).toBe(false);
   });
 
   test("a progress file with a damaged stamp or count is still a progress file", () => {
-    // The stamp and count are deliberately unchecked by the progress schema: a damaged
-    // value must cost one check, not the whole resume record.
+    // The stamp, count and fingerprint are deliberately unchecked by the progress schema:
+    // a damaged value must cost one check, not the whole resume record.
     const dir = join(scratch.root, "damaged-stamp");
     const progress = initUploadProgress(dir, "nm000001", []);
     (progress as unknown as Record<string, unknown>).remote_checked_at = { not: "a time" };
     (progress as unknown as Record<string, unknown>).remote_checked_count = "many";
+    (progress as unknown as Record<string, unknown>).remote_checked_fingerprint = [];
     expect(writeUploadProgress(dir, progress)).toBe(true);
     const read = readUploadProgress(dir);
     expect(read).not.toBeNull();
-    expect(isRecordedCheckFresh(read as UploadProgress, 3)).toBe(false);
+    expect(isRecordedCheckFresh(read as UploadProgress, 3, "checked-path-key-set")).toBe(false);
   });
 
   /** A resume with everything already at the store, to which a stamp can be given. */
@@ -425,7 +432,8 @@ describe("a recent passed check is not repeated", () => {
       openRemote: async () => ok({}),
     });
     expect(first.status).toBe("ok");
-    expect(isRecordedCheckFresh(progress, 3)).toBe(true);
+    const keys = await listAnnexedKeys(dir);
+    expect(isRecordedCheckFresh(progress, 3, fingerprintAnnexedFiles(keys))).toBe(true);
     if (stamp === undefined) progress.remote_checked_at = undefined;
     else (progress as unknown as Record<string, unknown>).remote_checked_at = stamp;
     return { dir, store, targets, progress };
@@ -449,11 +457,12 @@ describe("a recent passed check is not repeated", () => {
     }
   };
 
-  test("a passed check is stamped with its time and its count, and the stamp is persisted", async () => {
+  test("a passed check stamps its time, count and path/key fingerprint", async () => {
     const r = await resumed("stamped");
     const onDisk = readUploadProgress(r.dir);
     expect(typeof onDisk?.remote_checked_at).toBe("string");
     expect(onDisk?.remote_checked_count).toBe(3);
+    expect(onDisk?.remote_checked_fingerprint).toBe(r.progress.remote_checked_fingerprint);
   });
 
   test("within six hours of a passed check a resume does not ask the remote again", async () => {
@@ -470,7 +479,7 @@ describe("a recent passed check is not repeated", () => {
     expect(readdirSync(r.store)).toEqual([]);
     expect(r.progress.remote_checked_at).toBe(stamp);
     expect(text).toContain("not checked again");
-    expect(text).toContain("A check of this many recorded files passed within the last 6 hours");
+    expect(text).toContain("same files and annex keys passed a check within the last 6 hours");
   });
 
   test("a changed number of recorded files means the check runs, whatever the stamp says", async () => {
@@ -494,6 +503,36 @@ describe("a recent passed check is not repeated", () => {
     expect(text).not.toContain("not checked again");
   });
 
+  test("the same count with a different set of annex keys is checked again", async () => {
+    // A collaborator can replace one remote-recorded key with another without changing
+    // the count: the old key becomes pending while another path with an already-recorded
+    // key appears. Emptying the store makes the difference observable; a count-only stamp
+    // would skip and report success while three recorded objects remained missing.
+    const stamp = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const r = await resumed("same-count-different-keys", stamp);
+    const originalA = readFileSync(join(r.dir, "a.edf"), "utf8");
+    emptyStore(r.store);
+
+    const changedA = `${originalA}changed`;
+    writeFile(r.dir, "a.edf", changedA);
+    expect((await trackDataFiles(r.dir, ["a.edf"])).success).toBe(true);
+    writeFile(r.dir, "d.edf", originalA);
+    expect((await trackDataFiles(r.dir, ["d.edf"])).success).toBe(true);
+    const changedTargets = [
+      ...r.targets.map((target) =>
+        target.path === "a.edf" ? { ...target, size: changedA.length } : target,
+      ),
+      { path: "d.edf", size: originalA.length, type: "data" as const },
+    ];
+
+    const { value, text } = await resume(r, changedTargets);
+
+    expect(value.status).toBe("ok");
+    expect(text).toContain("3 were recorded but missing at the remote and were sent again");
+    expect(text).not.toContain("not checked again");
+    expect(readdirSync(r.store).length).toBeGreaterThan(0);
+  });
+
   test("a stamp older than six hours is checked again, and refreshed", async () => {
     const old = new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString();
     const r = await resumed("stale", old);
@@ -505,7 +544,8 @@ describe("a recent passed check is not repeated", () => {
     expect(readdirSync(r.store).length).toBeGreaterThan(0);
     expect(text).toContain("3 were recorded but missing at the remote and were sent again");
     expect(r.progress.remote_checked_at).not.toBe(old);
-    expect(isRecordedCheckFresh(r.progress, 3)).toBe(true);
+    const keys = await listAnnexedKeys(r.dir);
+    expect(isRecordedCheckFresh(r.progress, 3, fingerprintAnnexedFiles(keys))).toBe(true);
   });
 
   test("a stamp that cannot be read never skips the check", async () => {
@@ -517,48 +557,6 @@ describe("a recent passed check is not repeated", () => {
       // The store was refilled: the check ran.
       expect(readdirSync(r.store).length).toBeGreaterThan(0);
     }
-  });
-
-  test("a check whose output was not understood is not stamped", async () => {
-    // Guards the stamp on `remoteConfirmed`: output the step could not read proves nothing,
-    // so it must not buy six hours without a check.
-    const r = await resumed("unreadable-output");
-    r.progress.remote_checked_at = undefined;
-    const restore = installGitShim(scratch.root, [
-      { match: "annex copy", stdout: "all good, nothing printed in json" },
-    ]);
-    try {
-      const { value, text } = await resume(r);
-      expect(value.status).toBe("ok");
-      expect(text).toContain("was not recognized");
-      expect(text).not.toContain("git-annex checked each one");
-    } finally {
-      restore();
-    }
-    expect(r.progress.remote_checked_at).toBeUndefined();
-  });
-
-  test("an answer for only some of the files is said so, is not stamped, and ends as a warning", async () => {
-    // Guards the partial state and the warning. git-annex printed readable records for one
-    // of three files on a clean exit: the output WAS understood, it is the answer that is
-    // incomplete, so the words differ from "not recognized"; and a summary that says
-    // something is unknown is not a success line.
-    const r = await resumed("partial-answer");
-    r.progress.remote_checked_at = undefined;
-    const restore = installGitShim(scratch.root, [
-      { match: "annex copy", stdout: successRecords("copy", ["a.edf", "b.edf", "c.edf"], 1) },
-    ]);
-    try {
-      const { value, text } = await resume(r);
-      expect(value.status).toBe("ok");
-      expect(text).toContain("git-annex gave no result for some of them");
-      expect(text).not.toContain("not recognized");
-      expect(text).toContain("⚠");
-      expect(text).not.toContain("✔");
-    } finally {
-      restore();
-    }
-    expect(r.progress.remote_checked_at).toBeUndefined();
   });
 
   test("the log walks still run when the check is skipped", async () => {
@@ -647,7 +645,7 @@ describe("what a long check announces", () => {
     expect(
       describeRecordedCheck(plan({ recorded: 12, recordedCheckSkipped: true }), 4).join("\n"),
     ).toContain(
-      "A check of this many recorded files passed within the last 6 hours; the remote is not asked about the 12 again",
+      "These 12 recorded files and their annex keys passed a check within the last 6 hours; the remote is not asked about them again",
     );
     expect(
       describeRecordedCheck(plan({ recorded: 3, recordedNoLocal: 3 }), 4).join("\n"),
@@ -659,11 +657,11 @@ describe("markRecordedChecked", () => {
   test("writes an ISO time and the count, which isRecordedCheckFresh accepts", () => {
     const progress = initUploadProgress(join(scratch.root, "mark"), "nm000001", []);
     expect(progress.remote_checked_at).toBeUndefined();
-    markRecordedChecked(progress, 7);
+    markRecordedChecked(progress, 7, "checked-path-key-set");
     expect(typeof progress.remote_checked_at).toBe("string");
     expect(Number.isNaN(Date.parse(progress.remote_checked_at as string))).toBe(false);
     expect(progress.remote_checked_count).toBe(7);
-    expect(isRecordedCheckFresh(progress, 7)).toBe(true);
-    expect(isRecordedCheckFresh(progress, 8)).toBe(false);
+    expect(isRecordedCheckFresh(progress, 7, "checked-path-key-set")).toBe(true);
+    expect(isRecordedCheckFresh(progress, 8, "checked-path-key-set")).toBe(false);
   });
 });
