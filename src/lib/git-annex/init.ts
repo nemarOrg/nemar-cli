@@ -49,8 +49,10 @@ export async function isGitAnnexDataset(path: string): Promise<boolean> {
  */
 const GIT_USAGE_ERROR_EXIT = 129;
 
-/** What to report when a failed git call said nothing: its exit status. */
-const exitNote = (r: { exitCode: number }): string => `exit ${r.exitCode}`;
+/** What a failed git call said, or its exit status when it said nothing. */
+function said(r: { stderr: string; exitCode: number }): string {
+  return r.stderr.trim() || `exit ${r.exitCode}`;
+}
 
 /** The `env` option for `runCommand`, present only when there is something to add. */
 type EnvOptions = { env?: Record<string, string> };
@@ -74,10 +76,7 @@ async function readHeadState(path: string, envOpts: EnvOptions): Promise<HeadSta
     return { kind: "resolves" };
   }
   if (resolved.exitCode !== 1) {
-    return {
-      kind: "unreadable",
-      reason: `cannot read HEAD: ${resolved.stderr.trim() || exitNote(resolved)}`,
-    };
+    return { kind: "unreadable", reason: `cannot read HEAD: ${said(resolved)}` };
   }
   // Exit 1: HEAD does not resolve. Find the branch it names...
   const target = await runCommand(["git", "symbolic-ref", "-q", "HEAD"], opts);
@@ -85,9 +84,7 @@ async function readHeadState(path: string, envOpts: EnvOptions): Promise<HeadSta
   if (target.exitCode !== 0 || ref === "") {
     return {
       kind: "unreadable",
-      reason: `HEAD does not resolve and its branch cannot be read: ${
-        target.stderr.trim() || exitNote(target)
-      }`,
+      reason: `HEAD does not resolve and its branch cannot be read: ${said(target)}`,
     };
   }
   // ...and confirm that ref is absent (exit 1) rather than present or broken.
@@ -95,14 +92,12 @@ async function readHeadState(path: string, envOpts: EnvOptions): Promise<HeadSta
   if (exists.exitCode === 1) {
     return { kind: "unborn" };
   }
+  if (exists.exitCode === 0) {
+    return { kind: "unreadable", reason: `HEAD does not resolve although ${ref} exists` };
+  }
   return {
     kind: "unreadable",
-    reason:
-      exists.exitCode === 0
-        ? `HEAD does not resolve although ${ref} exists`
-        : `HEAD does not resolve and ${ref} cannot be checked: ${
-            exists.stderr.trim() || exitNote(exists)
-          }`,
+    reason: `HEAD does not resolve and ${ref} cannot be checked: ${said(exists)}`,
   };
 }
 
@@ -134,7 +129,8 @@ async function initGitRepoOnMain(
     return {
       success: false,
       error:
-        withBranch.stderr.trim() || `Failed to initialize git repository (${exitNote(withBranch)})`,
+        withBranch.stderr.trim() ||
+        `Failed to initialize git repository (exit ${withBranch.exitCode})`,
     };
   }
   // From here on a failure came after the fallback began. Say so: callers print
@@ -145,7 +141,7 @@ async function initGitRepoOnMain(
   if (plain.exitCode !== 0) {
     return {
       success: false,
-      error: `${fallback}plain git init failed: ${plain.stderr.trim() || exitNote(plain)}`,
+      error: `${fallback}plain git init failed: ${said(plain)}`,
     };
   }
   // `-b` only names the branch of a repository that is being created. Modern git
@@ -170,7 +166,7 @@ async function initGitRepoOnMain(
   if (head.exitCode !== 0) {
     return {
       success: false,
-      error: `${fallback}could not point HEAD at main: ${head.stderr.trim() || exitNote(head)}`,
+      error: `${fallback}could not point HEAD at main: ${said(head)}`,
     };
   }
   return { success: true };
