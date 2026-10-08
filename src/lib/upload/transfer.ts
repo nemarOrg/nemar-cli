@@ -490,12 +490,13 @@ export async function trackDataFiles(
  * (`shouldAnnex`), so a file larger than the policy's size threshold that is
  * NOT annexed was routed into git by something overriding the policy (an
  * inherited `.gitattributes`, ADR 0060): it would be pushed to GitHub instead
- * of reaching S3, which is a hard failure. Committing a file at or under the
- * size threshold to git is harmless, so a small one is only reported. (The CLI
- * folds case where git-annex's globs do not, but `trackDataFiles` forces those
- * case variants into the annex, so what is left here is an override of the policy
- * or an ignore pattern, on a file too small to matter.) Pure; exported for unit
- * tests.
+ * of reaching S3, which is a hard failure. A file at or under the size threshold
+ * does not block, because committing it to git is harmless, but it is not harmless
+ * to say nothing: it is either in git or, when a `.gitignore` pattern matches it, in
+ * no commit at all (see {@link SmallNotAnnexed}). The CLI folds case where
+ * git-annex's globs do not, but `trackDataFiles` forces those case variants into the
+ * annex, so what lands here is an override of the policy or an ignore pattern.
+ * Pure; exported for unit tests.
  */
 export function findDataFilesNotAnnexed<T extends { path: string; size: number; type?: string }>(
   addTargets: T[],
@@ -586,8 +587,26 @@ export interface S3CopyPlan {
    * the pending copy and sends again any the remote has lost.
    */
   recorded: number;
-  /** Data files this run added that git-annex put in git, at or under the size threshold. */
-  smallNotAnnexed: string[];
+  /** Data files at or under the size threshold that the annex did not take; see {@link SmallNotAnnexed}. */
+  smallNotAnnexed: SmallNotAnnexed;
+}
+
+/**
+ * Data files at or under the size threshold that git-annex did not annex, split by
+ * where they ended up. A file over the threshold in this state blocks the upload; a
+ * small one does not, because committing it to git is harmless, but the two groups
+ * must not be described alike.
+ */
+export interface SmallNotAnnexed {
+  /** Tracked by git: committed as ordinary files, so they travel with the metadata push. */
+  inGit: string[];
+  /**
+   * Tracked by neither git nor the annex, most likely because a `.gitignore` pattern
+   * matches them (git-annex skips an ignored file without a word, while the upload
+   * plan, which walks the directory, still lists it). They are in no commit and not at
+   * the remote: the published dataset will not have them.
+   */
+  leftOut: string[];
 }
 
 /**
@@ -607,7 +626,7 @@ export type S3CopyOutcome =
       /** False when git-annex printed output that did not parse as copy records. */
       outputRecognized: boolean;
       annexedPaths: Set<string>;
-      smallNotAnnexed: string[];
+      smallNotAnnexed: SmallNotAnnexed;
     }
   | { status: "unreadable"; error: string }
   | { status: "blocked"; blocking: Array<{ path: string; size: number }> }
@@ -664,7 +683,20 @@ export async function copyAnnexedToRemote(args: {
       blocking: notAnnexed.blocking.map((f) => ({ path: f.path, size: f.size })),
     };
   }
-  const smallNotAnnexed = notAnnexed.small.map((f) => f.path);
+  const smallNotAnnexed: SmallNotAnnexed = { inGit: [], leftOut: [] };
+  if (notAnnexed.small.length > 0) {
+    let tracked: Set<string>;
+    try {
+      tracked = await listTrackedPaths(absolutePath);
+    } catch (listError) {
+      return { status: "unreadable", error: errorDetail(listError) };
+    }
+    for (const file of notAnnexed.small) {
+      (tracked.has(file.path) ? smallNotAnnexed.inGit : smallNotAnnexed.leftOut).push(file.path);
+    }
+    smallNotAnnexed.inGit.sort();
+    smallNotAnnexed.leftOut.sort();
+  }
 
   const pendingSet = new Set(pending);
   const recorded = [...annexedBefore].filter((p) => !pendingSet.has(p)).sort();
@@ -1004,15 +1036,22 @@ export async function uploadDataToS3(
           jobs: Number.parseInt(options.jobs, 10),
           credentials: toS3Credentials(creds.credentials),
           onPlan: (plan) => {
-            if (plan.smallNotAnnexed.length > 0) {
+            const { inGit, leftOut } = plan.smallNotAnnexed;
+            if (inGit.length > 0) {
               console.log(
                 chalk.dim(
-                  `  ${plan.smallNotAnnexed.length} small data file(s) (<= ${describeAnnexSizeThreshold()}) were stored in git rather than the annex:`,
+                  `  ${inGit.length} small data file(s) (<= ${describeAnnexSizeThreshold()}) were stored in git rather than the annex:`,
                 ),
               );
-              for (const line of previewPaths(plan.smallNotAnnexed, 3)) {
-                console.log(chalk.dim(line));
-              }
+              for (const line of previewPaths(inGit, 3)) console.log(chalk.dim(line));
+            }
+            if (leftOut.length > 0) {
+              console.log(
+                chalk.yellow(
+                  `  Warning: ${leftOut.length} small data file(s) (<= ${describeAnnexSizeThreshold()}) are in neither git nor the annex and will NOT be uploaded; a .gitignore pattern probably matches them:`,
+                ),
+              );
+              for (const line of previewPaths(leftOut, 3)) console.log(chalk.yellow(line));
             }
             spinner = ora(
               plan.pending === 0
