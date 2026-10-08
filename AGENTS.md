@@ -158,7 +158,11 @@ and import, and nothing already published is changed),
 0092 (a pull request to a dataset is reviewed by a model through a Worker gate: the verdict is derived
 from the report and from git facts and never read from the model, unknown is `action_required` and
 never green, the Anthropic identity is minted only in `nemarDatasets/.github`, and a contributor is
-paused after more than 5 rejected pull requests AND more than 10 percent of their decided ones).
+paused after more than 5 rejected pull requests AND more than 10 percent of their decided ones),
+0093 (`nemar admin pr-reviews` lists and manages the pull requests awaiting approval: a verdict belongs
+to the commit it read, an approval is the administrator's OWN act from their machine with their own
+GitHub login and never the Worker's or the App's, nothing merges without `--merge` and never around
+the ruleset, and each Worker lists only the datasets it owns).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and
