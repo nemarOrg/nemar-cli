@@ -15,7 +15,7 @@
  * under English, German and French.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
@@ -40,6 +40,29 @@ const AUTHOR = { name: "Test", email: "test@test.com" };
 
 /** What every failure after the fallback began starts with. */
 const FALLBACK_NOTE = "git init -b main was rejected (exit 129); ";
+
+const root = mkdtempSync(join(tmpdir(), "nemar-git-init-"));
+// A host default that is not "main": plain `git init` then leaves HEAD on
+// "trunk", so a fallback that forgot to re-point HEAD cannot pass by accident.
+const gitConfig = join(root, "gitconfig");
+writeFileSync(gitConfig, "[init]\n\tdefaultBranch = trunk\n[commit]\n\tgpgsign = false\n");
+
+// Canary. A plain init that lands on trunk proves the host git honors both
+// init.defaultBranch (2.28) and GIT_CONFIG_GLOBAL (2.32); a git that ignores the
+// override would leave the trunk default inert and the "never re-point HEAD"
+// mistake would pass unseen. `init -b`, which the modern-git assertions rely on,
+// predates both. Such a host skips this file with a warning; CI must not.
+git(root, "init", "-q", "canary");
+const gitIsNewEnough = git(root, "-C", "canary", "symbolic-ref", "HEAD").out === "refs/heads/trunk";
+if (!gitIsNewEnough) {
+  const why = `${REAL_GIT} ignores GIT_CONFIG_GLOBAL (needs git >= 2.32)`;
+  if (process.env.CI) {
+    rmSync(root, { recursive: true, force: true });
+    throw new Error(`git-init-branch-fallback tests: ${why}`);
+  }
+  console.warn(`SKIPPING test/git-init-branch-fallback.unit.test.ts: ${why}`);
+}
+const describeGit = describe.skipIf(!gitIsNewEnough);
 
 /** The usage error of a git without `-b`: English as git 2.25 words it, a German wording, and no text. */
 const OLD_GIT_STDERR = {
@@ -70,8 +93,6 @@ interface Shim {
   log: string;
 }
 
-let root = "";
-let gitConfig = "";
 let shimCount = 0;
 
 // The calls the stand-ins know how to answer.
@@ -197,39 +218,16 @@ function freshDir(): string {
   return join(root, `repo-${dirCount++}`);
 }
 
-beforeAll(() => {
-  root = mkdtempSync(join(tmpdir(), "nemar-git-init-"));
-  // A host default that is not "main": plain `git init` then leaves HEAD on
-  // "trunk", so a fallback that forgot to re-point HEAD cannot pass by accident.
-  gitConfig = join(root, "gitconfig");
-  writeFileSync(gitConfig, "[init]\n\tdefaultBranch = trunk\n[commit]\n\tgpgsign = false\n");
-
-  // Canary. GIT_CONFIG_GLOBAL needs git 2.32, and a git that ignores it would
-  // leave the trunk default inert, so the "never re-point HEAD" mistake would
-  // pass unseen. 2.32 also covers `init -b` (2.28), which the modern-git
-  // assertions rely on. Fail loudly instead of weakening the tests.
-  const canary = join(root, "canary");
-  const plain = git(root, "init", "-q", canary);
-  const modern = git(root, "init", "-q", "-b", "main", join(root, "canary-b"));
-  const head = git(canary, "symbolic-ref", "HEAD").out;
-  if (plain.exit !== 0 || modern.exit !== 0 || head !== "refs/heads/trunk") {
-    throw new Error(
-      `these tests need git >= 2.32 (GIT_CONFIG_GLOBAL and init -b); ${REAL_GIT} gave HEAD ` +
-        `${head || "(none)"} and exits ${plain.exit}/${modern.exit}: ${plain.err || modern.err}`,
-    );
-  }
-});
-
 afterAll(() => {
   // git-annex makes annexed content read-only; make the tree removable first.
   spawnSync(["chmod", "-R", "u+w", root]);
   rmSync(root, { recursive: true, force: true });
 });
 
-describe("what the real git answers", () => {
-  // The fallback rests on two facts: a switch git does not know exits 129 in
-  // every locale, and a fatal error exits 128. The stand-ins below only hand-write
-  // the first, so the real git is asked here. A real git older than 2.28 is the
+describeGit("what the real git answers", () => {
+  // The fallback rests on a switch git does not know exiting 129 in every
+  // locale (a fatal error exits 128, asserted with the path test below). The
+  // stand-ins only hand-write that status, so the real git is asked here. A real git older than 2.28 is the
   // one case no test in this file can reach; check it by hand in a container
   // that has one (Ubuntu 20.04 ships 2.25): `git init -b main /tmp/x; echo $?`
   // should print 129.
@@ -248,7 +246,7 @@ describe("what the real git answers", () => {
 // Guards the stand-ins themselves: if one stopped answering `git init -b` with
 // status 129 and its text, the fallback tests below would pass or fail for the
 // wrong reason.
-describe("the older-git stand-ins", () => {
+describeGit("the older-git stand-ins", () => {
   for (const [name, stderr] of Object.entries(OLD_GIT_STDERR)) {
     test(`${name}: refuse git init -b with status 129 and say so on stderr`, async () => {
       const shim = oldGit(stderr);
@@ -261,7 +259,7 @@ describe("the older-git stand-ins", () => {
   }
 });
 
-describe("initDataset on a git that rejects --initial-branch (exit status 129)", () => {
+describeGit("initDataset on a git that rejects --initial-branch (exit status 129)", () => {
   for (const [name, stderr] of Object.entries(OLD_GIT_STDERR)) {
     test(`${name} text: falls back, and the fresh dataset is on main`, async () => {
       const shim = oldGit(stderr);
@@ -281,7 +279,7 @@ describe("initDataset on a git that rejects --initial-branch (exit status 129)",
   }
 });
 
-describe("initDataset when a step of git init fails", () => {
+describeGit("initDataset when a step of git init fails", () => {
   const cases = [
     {
       name: "fatal status 128 that happens to carry the old usage text",
@@ -362,7 +360,7 @@ describe("initDataset when a step of git init fails", () => {
   }
 });
 
-describe("initDataset with a path that starts with a dash", () => {
+describeGit("initDataset with a path that starts with a dash", () => {
   // `--bare` as a switch would create a bare repository in the working directory
   // and then fail on the missing dataset directory; any other dash word is a
   // usage error (exit 129). Either way the path must be a path: the cwd is a
@@ -394,7 +392,7 @@ describe("initDataset with a path that starts with a dash", () => {
   }
 });
 
-describe("initDataset on a modern git", () => {
+describeGit("initDataset on a modern git", () => {
   test("uses -b main directly: the fallback never runs", async () => {
     const shim = makeShim();
     const dir = freshDir();
@@ -421,7 +419,7 @@ async function initThenEnsureMain(shim: Shim, dir: string): Promise<boolean> {
   });
 }
 
-describe("initDataset where the branch name was not chosen by git init", () => {
+describeGit("initDataset where the branch name was not chosen by git init", () => {
   test("a fresh directory is already on main, so the upload renames nothing", async () => {
     const shim = oldGit(OLD_GIT_STDERR.english);
     const dir = freshDir();
@@ -479,7 +477,7 @@ describe("initDataset where the branch name was not chosen by git init", () => {
   }, 60_000);
 });
 
-describe("initDataset where HEAD names a branch with no commits", () => {
+describeGit("initDataset where HEAD names a branch with no commits", () => {
   test("an existing but unborn master is named main at once, with one re-point", async () => {
     const shim = oldGit(OLD_GIT_STDERR.english);
     const dir = freshDir();
@@ -513,7 +511,7 @@ describe("initDataset where HEAD names a branch with no commits", () => {
   }
 });
 
-describe("initDataset where HEAD cannot be told apart from unborn", () => {
+describeGit("initDataset where HEAD cannot be told apart from unborn", () => {
   test("a corrupt branch ref is refused with git's error and HEAD is left alone", async () => {
     const shim = oldGit(OLD_GIT_STDERR.english);
     const dir = freshDir();
