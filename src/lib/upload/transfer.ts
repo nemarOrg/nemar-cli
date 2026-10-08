@@ -44,6 +44,7 @@ import { ensureLocalMainBranch, getCurrentBranch } from "../git-annex/repo-state
 import { runCommand } from "../git-annex/run-command.js";
 import {
   type S3Credentials,
+  annexRemoteExists,
   clearAnnexCredentials,
   configureS3Remote,
   toS3Credentials,
@@ -895,12 +896,199 @@ export interface S3StepState {
   annexedPaths: Set<string> | null;
 }
 
+/** The special remote the upload copies to. */
+export const S3_REMOTE_NAME = "nemar-s3";
+
+/**
+ * Annexed paths the location log does not record at `remote`. When the remote is not
+ * configured in this repository at all, nothing can be recorded there, so every
+ * annexed path is pending. Throws when git-annex cannot be read, which callers must
+ * not take for "nothing pending".
+ */
+export async function listPendingAtRemote(absolutePath: string, remote: string): Promise<string[]> {
+  const known = await annexRemoteExists(absolutePath, remote);
+  const pending = known
+    ? await listAnnexedPathsNotAt(absolutePath, remote)
+    : await listAnnexedPaths(absolutePath);
+  return [...pending].sort();
+}
+
+/**
+ * Makes the special remote ready to copy to and says which credentials to use (none
+ * for a remote that needs none). The production version asks the backend for STS
+ * credentials and configures the S3 remote with them; a test supplies one that
+ * registers a `directory` remote, which is all that differs between the two.
+ */
+export type OpenRemote = () => Promise<Step<{ credentials?: S3Credentials }>>;
+
+/** The production {@link OpenRemote}: STS credentials from the backend, then the S3 remote. */
+function openS3Remote(absolutePath: string, datasetInfo: DatasetInfo): OpenRemote {
+  return async () => {
+    // Get STS credentials for S3 access
+    let spinner = ora("Requesting upload credentials...").start();
+    let creds: Awaited<ReturnType<typeof requestUploadCredentials>>;
+    try {
+      creds = await requestUploadCredentials(datasetInfo.dataset_id);
+      spinner.succeed("Upload credentials received (2h expiry)");
+    } catch (credError) {
+      spinner.fail(`Could not get upload credentials: ${errorDetail(credError)}`);
+      console.log(chalk.red("  Upload credentials are required for S3 access."));
+      console.log(chalk.dim("  Re-run the command to retry."));
+      return FAIL;
+    }
+
+    // Configure S3 special remote (idempotent: enables existing if already created)
+    spinner = ora("Configuring S3 remote...").start();
+    const s3Result = await configureS3Remote(
+      absolutePath,
+      {
+        name: S3_REMOTE_NAME,
+        bucket: creds.s3.bucket,
+        prefix: `${datasetInfo.dataset_id}/objects`,
+        region: creds.s3.region,
+        publicUrl: datasetInfo.s3_config.public_url,
+      },
+      toS3Credentials(creds.credentials),
+    );
+    if (!s3Result.success) {
+      spinner.fail(`Failed to configure S3 remote: ${s3Result.error}`);
+      console.log(chalk.dim("  Re-run the command to retry."));
+      return FAIL;
+    }
+    spinner.succeed("S3 remote configured");
+    return ok({ credentials: toS3Credentials(creds.credentials) });
+  };
+}
+
+/**
+ * Open the remote, copy, and turn what happened into side effects: what to print, which
+ * files to record as uploaded, what to undo. All of it hangs off the outcome of
+ * {@link copyAnnexedToRemote}, which decides; this function only acts, and is exported
+ * so a test can drive it with a real directory remote.
+ *
+ * The credentials git-annex caches under `.git/annex/creds` are removed on EVERY exit
+ * after the remote was opened, including a remote that failed to open: a failed
+ * `initremote` has already written them (mode 600, STS keys) by the time it fails.
+ */
+export async function transferAnnexedData(args: {
+  absolutePath: string;
+  progress: UploadProgress;
+  addTargets: Array<{ path: string; size: number; mtimeMs?: number; type?: string }>;
+  jobs: number;
+  openRemote: OpenRemote;
+}): Promise<Step<{ annexedPaths: Set<string> }>> {
+  const { absolutePath, progress, addTargets } = args;
+  let spinner: Ora | null = null;
+  const fail = (message: string): void => {
+    if (spinner) spinner.fail(message);
+    else console.log(chalk.red(message));
+  };
+
+  let outcome: S3CopyOutcome;
+  try {
+    const opened = await args.openRemote();
+    if (opened.status === "fail") return FAIL;
+    outcome = await copyAnnexedToRemote({
+      absolutePath,
+      remote: S3_REMOTE_NAME,
+      addTargets,
+      jobs: args.jobs,
+      credentials: opened.value.credentials,
+      onPlan: (plan) => {
+        const { inGit, leftOut } = plan.smallNotAnnexed;
+        if (inGit.length > 0) {
+          console.log(
+            chalk.dim(
+              `  ${inGit.length} small data file(s) (<= ${describeAnnexSizeThreshold()}) were stored in git rather than the annex:`,
+            ),
+          );
+          for (const line of previewPaths(inGit, 3)) console.log(chalk.dim(line));
+        }
+        if (leftOut.length > 0) {
+          console.log(
+            chalk.yellow(
+              `  Warning: ${leftOut.length} small data file(s) (<= ${describeAnnexSizeThreshold()}) are in neither git nor the annex and will NOT be uploaded; a .gitignore pattern probably matches them:`,
+            ),
+          );
+          for (const line of previewPaths(leftOut, 3)) console.log(chalk.yellow(line));
+        }
+        spinner = ora(
+          plan.pending === 0
+            ? `Checking that ${countDataFiles(plan.recorded)} are at the S3 remote...`
+            : `Uploading ${countDataFiles(plan.pending)} to S3${plan.recorded > 0 ? ` (then checking ${plan.recorded} already recorded)` : ""}...`,
+        ).start();
+      },
+    });
+  } finally {
+    // Cached STS credentials are cleared whatever the outcome, so downloads use the
+    // public URL.
+    await clearAnnexCredentials(absolutePath);
+  }
+
+  switch (outcome.status) {
+    case "unreadable":
+      console.log(chalk.red(`Could not read the annex location log: ${outcome.error}`));
+      console.log(chalk.yellow("Re-run the same command to retry."));
+      return FAIL;
+    case "blocked": {
+      const recovery = await recoverBlockedTracking(
+        absolutePath,
+        progress,
+        outcome.blocking.map((f) => f.path),
+      );
+      for (const line of describeBlockedTracking(outcome.blocking, recovery)) {
+        console.log(line.startsWith("    ") ? chalk.yellow(line) : chalk.red(line));
+      }
+      return FAIL;
+    }
+    case "copy_failed":
+      fail(`S3 upload failed: ${outcome.error}`);
+      console.log(chalk.yellow("Re-run the same command to resume uploading."));
+      return FAIL;
+    case "unverifiable":
+      fail(`Could not confirm the S3 upload is recorded: ${outcome.error}`);
+      console.log(chalk.yellow("Re-run the same command to retry."));
+      return FAIL;
+    case "incomplete":
+      fail(
+        `S3 upload incomplete: ${outcome.missing.length} of ${outcome.total} annexed data files are not recorded at the S3 remote`,
+      );
+      for (const line of previewPaths(outcome.missing)) console.log(chalk.red(line));
+      if (outcome.notLocal.length > 0) {
+        console.log(
+          chalk.yellow(
+            `${outcome.notLocal.length} of them have no content in this repository, so they cannot be uploaded from here. Fetch it with \`git annex get\` (for example \`git annex get -- ${outcome.notLocal[0]}\`), then re-run.`,
+          ),
+        );
+      } else {
+        console.log(chalk.yellow("Re-run the same command to resume uploading."));
+      }
+      return FAIL;
+    case "ok":
+      break;
+  }
+
+  // Only now, with every file recorded at the remote, is anything marked uploaded.
+  for (const file of addTargets) {
+    // Refresh the recorded size/mtime so a re-uploaded changed file
+    // stops registering as changed on the next run (#884).
+    markFileUploaded(progress, file.path, { size: file.size, mtimeMs: file.mtimeMs });
+  }
+  writeUploadProgress(absolutePath, progress);
+  const summary = formatUploadSummary(outcome.total, outcome.attempted, outcome.confirmed, {
+    resent: outcome.resent,
+    outputRecognized: outcome.outputRecognized,
+  });
+  if (spinner) (spinner as Ora).succeed(summary);
+  else console.log(summary);
+  return ok({ annexedPaths: outcome.annexedPaths });
+}
+
 /**
  * Step 9: Upload data files to S3 via the git-annex S3 special remote,
  * gated by the persisted "s3_upload" step. Returns the (possibly newly
- * initialized) progress so the finalize steps share one instance.
- * (`uploadProgress` is copied to a local `progress` binding — the one
- * mechanical rename in this move.)
+ * initialized) progress so the finalize steps share one instance, and the annexed
+ * paths it listed (see {@link S3StepState}).
  *
  * git-annex tracking (#884) is its own persisted "tracking" step, adds only
  * the files that need it (not the whole tree), and runs BEFORE the
@@ -908,9 +1096,13 @@ export interface S3StepState {
  * the 2h STS window. On resume with an unchanged file list the add is
  * skipped entirely; a changed list clears the step (see the merge loop
  * below). The skip decision never trusts the progress file alone: the git
- * index is consulted first (computeAddTargets) and the post-copy location
- * log is verified before anything is marked uploaded, so a progress file
- * that outlived its .git state cannot fake availability.
+ * index is consulted first (computeAddTargets), the location log is asked what
+ * the remote lacks (`listPendingAtRemote`, even when there is nothing to add), and
+ * the log is verified after the copy before anything is marked uploaded, so a
+ * progress file that outlived its .git state cannot fake availability.
+ *
+ * `deps.openRemote` replaces how the remote is opened (credentials and S3
+ * configuration); nothing else differs.
  */
 export async function uploadDataToS3(
   absolutePath: string,
@@ -919,6 +1111,7 @@ export async function uploadDataToS3(
   filesToUpload: Array<{ path: string; size: number; mtimeMs?: number }>,
   uploadProgress: UploadProgress | null,
   datasetInfo: DatasetInfo,
+  deps: { openRemote?: OpenRemote } = {},
 ): Promise<Step<S3StepState>> {
   let progress = uploadProgress;
   let spinner: Ora;
@@ -968,9 +1161,25 @@ export async function uploadDataToS3(
     return FAIL;
   }
   const addTargets = computeAddTargets(filesToUpload, dataFiles, trackedPaths);
+
+  // The same reconcile against the OTHER record: the location log. An annexed file
+  // the log does not record at the remote needs copying whether or not anything is
+  // left to add, and "no add targets" says nothing about it (a file tracked in an
+  // earlier run and never copied, or annexed by the save's `git add -A` after the
+  // copy). Asking costs one walk of the log.
+  let notAtRemote: string[];
+  try {
+    notAtRemote = await listPendingAtRemote(absolutePath, S3_REMOTE_NAME);
+  } catch (listError) {
+    console.log(chalk.red(`Could not read the annex location log: ${errorDetail(listError)}`));
+    console.log(chalk.yellow("Re-run the same command to retry."));
+    return FAIL;
+  }
+  const needsCopy = addTargets.length > 0 || notAtRemote.length > 0;
+
   const untrackedCount = addTargets.length - filesToUpload.length;
   const reopenTracking = untrackedCount > 0 && isStepCompleted(progress, "tracking");
-  const reopenUpload = addTargets.length > 0 && isStepCompleted(progress, "s3_upload");
+  const reopenUpload = needsCopy && isStepCompleted(progress, "s3_upload");
   if (reopenTracking) {
     clearStepCompleted(progress, "tracking");
   }
@@ -1004,20 +1213,22 @@ export async function uploadDataToS3(
   if (reopenUpload) {
     console.log(
       chalk.yellow(
-        `  ${addTargets.length} data file(s) still need upload despite a completed s3_upload step; resuming`,
+        addTargets.length > 0
+          ? `  ${addTargets.length} data file(s) still need upload despite a completed s3_upload step; resuming`
+          : `  ${notAtRemote.length} annexed data file(s) are not recorded at the S3 remote despite a completed s3_upload step; resuming`,
       ),
     );
   }
 
   if (!isStepCompleted(progress, "s3_upload")) {
-    if (addTargets.length > 0) {
+    if (needsCopy) {
       // Track data files with git-annex before anything else: the add can
       // take hours on multi-TB datasets, so it must not eat into the 2h STS
       // credential window, and its own persisted step lets a resume skip it.
       // Only files still needing upload (plus any untracked stragglers found
       // above) are added -- already-copied files are annexed already, and a
       // whole-tree add re-reads every unlocked file's content (#884).
-      if (!isStepCompleted(progress, "tracking")) {
+      if (addTargets.length > 0 && !isStepCompleted(progress, "tracking")) {
         spinner = ora(`Tracking ${addTargets.length} data files with git-annex...`).start();
         const addResult = await trackDataFiles(
           absolutePath,
@@ -1031,142 +1242,19 @@ export async function uploadDataToS3(
         spinner.succeed("Data files tracked by git-annex");
         markStepCompleted(progress, "tracking");
         writeUploadProgress(absolutePath, progress);
-      } else {
+      } else if (addTargets.length > 0) {
         console.log(chalk.dim("  Data files already tracked by git-annex (skipping)"));
       }
 
-      // Get STS credentials for S3 access
-      spinner = ora("Requesting upload credentials...").start();
-      let creds: Awaited<ReturnType<typeof requestUploadCredentials>>;
-      try {
-        creds = await requestUploadCredentials(datasetInfo.dataset_id);
-        spinner.succeed("Upload credentials received (2h expiry)");
-      } catch (credError) {
-        spinner.fail(`Could not get upload credentials: ${errorDetail(credError)}`);
-        console.log(chalk.red("  Upload credentials are required for S3 access."));
-        console.log(chalk.dim("  Re-run the command to retry."));
-        return FAIL;
-      }
-
-      // Configure S3 special remote (idempotent: enables existing if already created)
-      spinner = ora("Configuring S3 remote...").start();
-      const s3Result = await configureS3Remote(
+      const transferred = await transferAnnexedData({
         absolutePath,
-        {
-          name: "nemar-s3",
-          bucket: creds.s3.bucket,
-          prefix: `${datasetInfo.dataset_id}/objects`,
-          region: creds.s3.region,
-          publicUrl: datasetInfo.s3_config.public_url,
-        },
-        toS3Credentials(creds.credentials),
-      );
-
-      if (!s3Result.success) {
-        spinner.fail(`Failed to configure S3 remote: ${s3Result.error}`);
-        console.log(chalk.dim("  Re-run the command to retry."));
-        return FAIL;
-      }
-      spinner.succeed("S3 remote configured");
-
-      // The step's decisions live in copyAnnexedToRemote (what to copy comes
-      // from the location log, a large data file git-annex refused fails before
-      // any byte moves, and EVERY annexed file must end up recorded at the
-      // remote); this block only says what happened. Cached STS credentials are
-      // cleared whatever the outcome, so downloads use the public URL.
-      let outcome: S3CopyOutcome;
-      try {
-        outcome = await copyAnnexedToRemote({
-          absolutePath,
-          remote: "nemar-s3",
-          addTargets,
-          jobs: Number.parseInt(options.jobs, 10),
-          credentials: toS3Credentials(creds.credentials),
-          onPlan: (plan) => {
-            const { inGit, leftOut } = plan.smallNotAnnexed;
-            if (inGit.length > 0) {
-              console.log(
-                chalk.dim(
-                  `  ${inGit.length} small data file(s) (<= ${describeAnnexSizeThreshold()}) were stored in git rather than the annex:`,
-                ),
-              );
-              for (const line of previewPaths(inGit, 3)) console.log(chalk.dim(line));
-            }
-            if (leftOut.length > 0) {
-              console.log(
-                chalk.yellow(
-                  `  Warning: ${leftOut.length} small data file(s) (<= ${describeAnnexSizeThreshold()}) are in neither git nor the annex and will NOT be uploaded; a .gitignore pattern probably matches them:`,
-                ),
-              );
-              for (const line of previewPaths(leftOut, 3)) console.log(chalk.yellow(line));
-            }
-            spinner = ora(
-              plan.pending === 0
-                ? `Checking that ${countDataFiles(plan.recorded)} are at the S3 remote...`
-                : `Uploading ${countDataFiles(plan.pending)} to S3${plan.recorded > 0 ? ` (then checking ${plan.recorded} already recorded)` : ""}...`,
-            ).start();
-          },
-        });
-      } finally {
-        await clearAnnexCredentials(absolutePath);
-      }
-
-      switch (outcome.status) {
-        case "unreadable":
-          console.log(chalk.red(`Could not read the annex location log: ${outcome.error}`));
-          console.log(chalk.yellow("Re-run the same command to retry."));
-          return FAIL;
-        case "blocked": {
-          const recovery = await recoverBlockedTracking(
-            absolutePath,
-            progress,
-            outcome.blocking.map((f) => f.path),
-          );
-          for (const line of describeBlockedTracking(outcome.blocking, recovery)) {
-            console.log(line.startsWith("    ") ? chalk.yellow(line) : chalk.red(line));
-          }
-          return FAIL;
-        }
-        case "copy_failed":
-          spinner.fail(`S3 upload failed: ${outcome.error}`);
-          console.log(chalk.yellow("Re-run the same command to resume uploading."));
-          return FAIL;
-        case "unverifiable":
-          spinner.fail(`Could not confirm the S3 upload is recorded: ${outcome.error}`);
-          console.log(chalk.yellow("Re-run the same command to retry."));
-          return FAIL;
-        case "incomplete":
-          spinner.fail(
-            `S3 upload incomplete: ${outcome.missing.length} of ${outcome.total} annexed data files are not recorded at the S3 remote`,
-          );
-          for (const line of previewPaths(outcome.missing)) console.log(chalk.red(line));
-          if (outcome.notLocal.length > 0) {
-            console.log(
-              chalk.yellow(
-                `${outcome.notLocal.length} of them have no content in this repository, so they cannot be uploaded from here. Fetch it with \`git annex get\` (for example \`git annex get -- ${outcome.notLocal[0]}\`), then re-run.`,
-              ),
-            );
-          } else {
-            console.log(chalk.yellow("Re-run the same command to resume uploading."));
-          }
-          return FAIL;
-        case "ok":
-          break;
-      }
-      annexedPaths = outcome.annexedPaths;
-
-      for (const file of addTargets) {
-        // Refresh the recorded size/mtime so a re-uploaded changed file
-        // stops registering as changed on the next run (#884).
-        markFileUploaded(progress, file.path, { size: file.size, mtimeMs: file.mtimeMs });
-      }
-      writeUploadProgress(absolutePath, progress);
-      spinner.succeed(
-        formatUploadSummary(outcome.total, outcome.attempted, outcome.confirmed, {
-          resent: outcome.resent,
-          outputRecognized: outcome.outputRecognized,
-        }),
-      );
+        progress,
+        addTargets,
+        jobs: Number.parseInt(options.jobs, 10),
+        openRemote: deps.openRemote ?? openS3Remote(absolutePath, datasetInfo),
+      });
+      if (transferred.status === "fail") return FAIL;
+      annexedPaths = transferred.value.annexedPaths;
     } else {
       console.log(chalk.dim("No data files to upload to S3"));
     }
