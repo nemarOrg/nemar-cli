@@ -450,10 +450,6 @@ interface Collision {
   claimant: Option;
 }
 
-function flagsOf(option: Option): string[] {
-  return [option.long, option.short].filter((f): f is string => typeof f === "string");
-}
-
 const takesValue = (option: Option) => !!(option.required || option.optional);
 
 /**
@@ -468,13 +464,11 @@ function collisions(root: Command): Collision[] {
   const visit = (cmd: Command, path: string[], ancestors: Command[]) => {
     const outermost = new Map<string, Option>();
     for (const a of ancestors) {
-      for (const o of a.options) {
-        for (const f of flagsOf(o)) if (!outermost.has(f)) outermost.set(f, o);
-      }
+      for (const o of a.options) if (o.long && !outermost.has(o.long)) outermost.set(o.long, o);
     }
     for (const option of cmd.options) {
       const claimant = option.long ? outermost.get(option.long) : undefined;
-      if (takesValue(option) && claimant) found.push({ path, option, claimant });
+      if (claimant && takesValue(option)) found.push({ path, option, claimant });
     }
     for (const sub of cmd.commands) visit(sub, [...path, sub.name()], [...ancestors, cmd]);
   };
