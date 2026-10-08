@@ -28,6 +28,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { SUBMISSION_POLICY_URL } from "../backend/src/services/submission-minimums";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const CLI_ENTRY = join(REPO_ROOT, "src", "index.ts");
@@ -81,10 +82,10 @@ const MINIMUMS_BODY = {
   message:
     "The dataset does not meet the minimum submission requirements. Fix the stated items and re-request publication.",
   reasons: ["The dataset name is shorter than 25 characters.", "No ethics statement was found."],
-  policy_url: "https://docs.nemar.org/policy/submission/",
+  policy_url: SUBMISSION_POLICY_URL,
   details: {
     reasons: ["The dataset name is shorter than 25 characters.", "No ethics statement was found."],
-    policy_url: "https://docs.nemar.org/policy/submission/",
+    policy_url: SUBMISSION_POLICY_URL,
   },
 };
 const SCREEN_BODY = {
@@ -343,7 +344,7 @@ describe("a real refusal still exits 1 with its own text", () => {
       expect(r.stdout).toContain("Not accepted for publication:");
       expect(r.stdout).toContain("The dataset name is shorter than 25 characters.");
       expect(r.stdout).toContain("No ethics statement was found.");
-      expect(r.stdout).toContain("Policy: https://docs.nemar.org/policy/submission/");
+      expect(r.stdout).toContain(`Policy: ${SUBMISSION_POLICY_URL}`);
       expect(all(r)).not.toContain("Request recorded");
     },
     SPAWN_TEST_TIMEOUT_MS,
