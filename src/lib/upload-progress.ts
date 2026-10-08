@@ -35,6 +35,34 @@ export interface UploadProgress {
   updated_at: string;
   files: Record<string, FileProgress>;
   completed_steps: UploadStep[];
+  /**
+   * When step 9 last had the remote itself confirm the files the location log already
+   * recorded there (an ISO timestamp). A resume within {@link RECORDED_CHECK_VALID_MS}
+   * of it skips that check, which costs one request per recorded file. Read only through
+   * {@link isRecordedCheckFresh}: anything that is not a recent timestamp means "check".
+   */
+  remote_checked_at?: string;
+}
+
+/** How long a passed check of the recorded files stays good: six hours. */
+export const RECORDED_CHECK_VALID_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Whether a check of the recorded files passed recently enough to skip the next one.
+ * A missing, unparseable or future stamp (a clock that moved back) is not fresh: the
+ * check is the safe direction, and a stamp that cannot be read must never skip it.
+ */
+export function isRecordedCheckFresh(progress: UploadProgress, now: number = Date.now()): boolean {
+  const stamp: unknown = progress.remote_checked_at;
+  if (typeof stamp !== "string") return false;
+  const at = Date.parse(stamp);
+  if (Number.isNaN(at)) return false;
+  return at <= now && now - at < RECORDED_CHECK_VALID_MS;
+}
+
+/** Record that the remote has just confirmed everything the location log lists there. */
+export function markRecordedChecked(progress: UploadProgress, now: number = Date.now()): void {
+  progress.remote_checked_at = new Date(now).toISOString();
 }
 
 const PROGRESS_DIR = ".nemar";
@@ -337,6 +365,9 @@ const uploadProgressSchema = z.object({
   updated_at: z.string(),
   files: z.record(z.string(), fileProgressSchema),
   completed_steps: z.array(uploadStepSchema),
+  // Deliberately unchecked: isRecordedCheckFresh treats anything but a recent timestamp as
+  // "no stamp", so a damaged value must cost one check, not the whole progress file.
+  remote_checked_at: z.unknown().optional(),
 });
 
 /**

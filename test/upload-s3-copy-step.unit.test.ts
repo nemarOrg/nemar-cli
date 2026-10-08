@@ -358,6 +358,7 @@ describe("copyAnnexedToRemote: every annexed file must be recorded at the remote
       missing: ["late.edf"],
       total: 3,
       notLocal: [],
+      lostAtRemote: [],
     });
     // The two planned files did arrive; only the late one is missing.
     expect(await listAnnexedPaths(dir, REMOTE)).toEqual(new Set(["a.edf", "b.edf"]));
@@ -385,6 +386,7 @@ describe("copyAnnexedToRemote: every annexed file must be recorded at the remote
       missing: ["b.edf"],
       total: 2,
       notLocal: ["b.edf"],
+      lostAtRemote: [],
     });
     // a.edf did go.
     expect(await listAnnexedPaths(dir, REMOTE)).toEqual(new Set(["a.edf"]));
@@ -802,14 +804,19 @@ describe("what a blocked step says", () => {
     expect(text).not.toContain("were unstaged");
   });
 
-  test("a failure with an unsaved progress file is reported even when unstaging worked", () => {
+  test("an unsaved progress file is reported, and no command is offered for work already done", () => {
+    // Guards the split on `unstaged`. Unstaging worked here and only the progress file
+    // could not be written, so the files are NOT staged any more: printing the unstage
+    // command anyway sent the person to undo something that was already undone.
     const text = describeBlockedTracking([{ path: "big.edf", size: 200_000 }], {
       unstaged: 1,
       staged: ["big.edf"],
       error: "the upload progress could not be saved",
     }).join("\n");
+    expect(text).toContain("1 of them were unstaged");
     expect(text).toContain("the upload progress could not be saved");
-    expect(text).not.toContain("1 of them were unstaged");
+    expect(text).not.toContain("git --literal-pathspecs rm");
+    expect(text).not.toContain("Could not finish making the next run able to annex them");
   });
 
   test("past fifty paths it does not print a command, it says the re-run unstages them", () => {
@@ -850,7 +857,6 @@ describe("recovery that does not complete", () => {
       "sub-2/eeg/star*2.edf",
       "sub-3/eeg/x [3].edf",
       "sub-4/eeg/plain4.edf",
-      "sub-5/eeg/tab\tfive.edf",
     ];
     const { dir, progress } = await blockedMany("printed-command", names);
     const restore = installGitShim(scratch.root, [{ match: "rm --cached" }]);
@@ -949,7 +955,7 @@ describe("what the step says", () => {
     expect(formatUploadSummary(165, 0, 0)).toBe(
       "All 165 data files are already at the S3 remote (git-annex checked each one; nothing to copy)",
     );
-    // confirmed == attempted: nothing to qualify.
+    // confirmed == sent == attempted: git-annex moved every file it was given.
     expect(formatUploadSummary(10, 4, 4)).toBe(
       "Uploaded 4 data files to S3; 6 were already at the remote; all recorded at the remote",
     );
@@ -959,13 +965,18 @@ describe("what the step says", () => {
     expect(formatUploadSummary(2, 1, 1)).toBe(
       "Uploaded 1 data file to S3; 1 was already at the remote; all recorded at the remote",
     );
-    // confirmed < attempted: git-annex confirmed fewer than the log shows.
+    // confirmed < attempted: git-annex confirmed fewer than the log shows. Not "Uploaded".
     expect(formatUploadSummary(4, 4, 0)).toBe(
-      "Uploaded 4 data files to S3 (git-annex confirmed 0 of 4; the rest are recorded in the location log); all recorded at the remote",
+      "4 data files not yet recorded at the S3 remote were copied (git-annex confirmed 0 of 4; the rest are recorded in the location log); all recorded at the remote",
     );
     // confirmed > attempted: never claim more than was sent.
     expect(formatUploadSummary(3, 2, 3)).toBe(
-      "Uploaded 2 data files to S3 (git-annex reported 3 successful copies for 2 files); 1 was already at the remote; all recorded at the remote",
+      "2 data files not yet recorded at the S3 remote were copied (git-annex reported 3 successful copies for 2 files); 1 was already at the remote; all recorded at the remote",
+    );
+    // Confirmed, but git-annex transferred fewer than it was given: the others were
+    // recorded in the log only, so "Uploaded" would be false for them.
+    expect(formatUploadSummary(3, 3, 3, { sent: 1 })).toBe(
+      "3 data files not yet recorded at the S3 remote were copied (git-annex reported transferring 1); all recorded at the remote",
     );
     // Files the log recorded but the remote had lost are said separately, and are never
     // folded into "nothing to copy".
@@ -978,11 +989,7 @@ describe("what the step says", () => {
     expect(formatUploadSummary(10, 4, 4, { resent: 2 })).toBe(
       "Uploaded 4 data files to S3; 4 were already at the remote; 2 were recorded but missing at the remote and were sent again; all recorded at the remote",
     );
-    // A git-annex whose output could not be read gives counts that mean nothing.
-    expect(formatUploadSummary(3, 3, 0, { outputRecognized: false })).toBe(
-      "Uploaded 3 data files to S3 (git-annex's output was not recognized, so its count is unknown; the location log is what shows them recorded); all recorded at the remote",
-    );
-    // The word "verified" claims a bucket HEAD of this run that the summary does not make.
+    // The word "verified" claims a bucket listing that the summary does not make.
     for (const [t, a, c] of [
       [10, 4, 4],
       [4, 4, 0],
@@ -991,5 +998,50 @@ describe("what the step says", () => {
     ] as const) {
       expect(formatUploadSummary(t, a, c)).not.toContain("verified");
     }
+  });
+
+  test("output git-annex printed that was not understood is never rounded to the good case", () => {
+    // Guards the order of checks: the readable-output flag is looked at BEFORE the early
+    // return for "nothing to copy", or an exit-0 run that printed plain text still says
+    // "git-annex checked each one".
+    const checkedNothing = formatUploadSummary(2, 0, 0, { recordedOutputRecognized: false });
+    expect(checkedNothing).toBe(
+      "All 2 data files are recorded at the S3 remote (git-annex's output was not recognized, so what its check found is unknown)",
+    );
+    expect(checkedNothing).not.toContain("checked each one");
+    expect(checkedNothing).not.toContain("already at the S3 remote");
+
+    expect(formatUploadSummary(3, 3, 0, { outputRecognized: false })).toBe(
+      "3 data files not yet recorded at the S3 remote were copied (git-annex's output was not recognized, so how many it transferred is unknown; the location log is what shows them recorded); all recorded at the remote",
+    );
+    expect(formatUploadSummary(5, 2, 2, { recordedOutputRecognized: false })).toBe(
+      "Uploaded 2 data files to S3; 3 were already recorded at the remote (git-annex's output was not recognized, so what its check found is unknown); all recorded at the remote",
+    );
+  });
+
+  test("files with no local content are said to be checked with fsck, never with copy", () => {
+    expect(formatUploadSummary(3, 0, 0, { recordedNoLocal: 3 })).toBe(
+      "All 3 data files are already at the S3 remote (none has local content, so git-annex fsck checked them; nothing to copy)",
+    );
+    expect(formatUploadSummary(1, 0, 0, { recordedNoLocal: 1 })).toBe(
+      "The 1 data file is already at the S3 remote (it has no local content, so it was checked with git-annex fsck; nothing to copy)",
+    );
+    expect(formatUploadSummary(5, 0, 0, { recordedNoLocal: 2 })).toBe(
+      "All 5 data files are already at the S3 remote (3 checked by git-annex copy, 2 without local content checked with git-annex fsck; nothing to copy)",
+    );
+    expect(formatUploadSummary(5, 1, 1, { recordedNoLocal: 2 })).toBe(
+      "Uploaded 1 data file to S3; 2 were already at the remote; 2 recorded files with no local content were checked with git-annex fsck; all recorded at the remote",
+    );
+  });
+
+  test("a check skipped because the remote confirmed the files recently says so", () => {
+    expect(formatUploadSummary(8, 0, 0, { recordedCheckSkipped: true })).toBe(
+      "All 8 data files are recorded at the S3 remote; they were not checked again, because the remote confirmed them in the last 6 hours",
+    );
+    const mixed = formatUploadSummary(8, 2, 2, { recordedCheckSkipped: true });
+    expect(mixed).toBe(
+      "Uploaded 2 data files to S3; 6 already recorded at the remote were not checked again, because the remote confirmed them in the last 6 hours; all recorded at the remote",
+    );
+    expect(mixed).not.toContain("already at the remote");
   });
 });
