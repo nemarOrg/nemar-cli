@@ -208,6 +208,7 @@ import {
   readUploadProgress,
   writeUploadProgress,
 } from "../lib/upload-progress.js";
+import { runDataSteps } from "../lib/upload/data-steps.js";
 import { applyUploadDates, planUploadDates } from "../lib/upload/date-normalization.js";
 import {
   analyzeDataset,
@@ -215,13 +216,7 @@ import {
   collectProvenance,
   resolveLicenseStep,
 } from "../lib/upload/enrich.js";
-import {
-  deployCiStep,
-  printUploadSuccess,
-  pushMetadata,
-  saveDatasetStep,
-  writeNemarMetadata,
-} from "../lib/upload/finalize.js";
+import { deployCiStep, printUploadSuccess, pushMetadata } from "../lib/upload/finalize.js";
 import {
   ACKNOWLEDGE_FLAG,
   collectAcknowledgment,
@@ -245,7 +240,6 @@ import {
   configureRemotes,
   createOrResumeDataset,
   initializeAnnexDataset,
-  uploadDataToS3,
 } from "../lib/upload/transfer.js";
 
 /**
@@ -810,29 +804,19 @@ Examples:
         process.exit(1);
       }
 
-      // Step 9: Upload data files to S3 via git-annex S3 special remote
-      const uploaded = await uploadDataToS3(
+      // Steps 9 to 11: copy the data to S3, write the NEMAR metadata, save
+      const dataSteps = await runDataSteps({
         absolutePath,
         options,
         dataFiles,
         filesToUpload,
         uploadProgress,
         datasetInfo,
-      );
-      if (uploaded.status === "fail") process.exit(1);
-      uploadProgress = uploaded.value.progress;
-      const annexedPaths = uploaded.value.annexedPaths;
-
-      // Step 10b: Ensure .nemar metadata is on disk and .bidsignore covers it
-      writeNemarMetadata(absolutePath, coAuthorEnrichment, uploadProgress);
-
-      // Step 11: Save dataset changes
-      if (
-        (await saveDatasetStep(absolutePath, author, uploadProgress, { annexedPaths })).status ===
-        "fail"
-      ) {
-        process.exit(1);
-      }
+        coAuthorEnrichment,
+        author,
+      });
+      if (dataSteps.status === "fail") process.exit(1);
+      uploadProgress = dataSteps.value;
 
       // Step 12: Push metadata to GitHub
       if ((await pushMetadata(absolutePath, uploadProgress)).status === "fail") process.exit(1);

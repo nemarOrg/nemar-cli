@@ -22,12 +22,13 @@ import { type SkipContentCheckEntry, pushToGitHub, saveDataset } from "../git-an
 import { shouldAnnex } from "../git-annex/policy.js";
 import {
   type UploadProgress,
+  clearStepCompleted,
   clearUploadProgress,
   isStepCompleted,
   markStepCompleted,
   writeUploadProgress,
 } from "../upload-progress.js";
-import { listAnnexedPaths } from "./transfer.js";
+import { listAnnexedPaths, listPendingAtRemote } from "./transfer.js";
 import { type DatasetInfo, FAIL, type Step, ok } from "./types.js";
 
 /** Step 10b: Write .nemar/metadata.json if missing and update .bidsignore (gated, warn-only). */
@@ -158,12 +159,24 @@ function recordedDataBytes(progress: UploadProgress): number {
  * when the data is large enough for that to matter; below the threshold this step
  * does no listing, no stat pass and no index rewrite. `skipMinBytes` exists so a
  * test can reach the large-tree branch without a gigabyte of fixtures.
+ *
+ * `verifyRemote` names the remote the upload copied to. After the commit the step asks
+ * the location log what that remote still lacks and FAILS if anything is annexed but
+ * not recorded there: `git add -A` runs git-annex's clean filter, which annexes by
+ * size any file the upload plan did not hand to `git annex add` (a name the CLI calls
+ * metadata and git-annex's case-sensitive exclusions miss), after the copy has
+ * finished. Left alone that is a pointer nothing can resolve. The `s3_upload` stamp is
+ * cleared so the re-run copies it. Costs one walk of the location log.
  */
 export async function saveDatasetStep(
   absolutePath: string,
   author: { name: string; email: string } | undefined,
   progress: UploadProgress,
-  options: { annexedPaths?: ReadonlySet<string> | null; skipMinBytes?: number } = {},
+  options: {
+    annexedPaths?: ReadonlySet<string> | null;
+    skipMinBytes?: number;
+    verifyRemote?: string;
+  } = {},
 ): Promise<Step> {
   if (!isStepCompleted(progress, "dataset_save")) {
     const spinner = ora("Saving dataset changes...").start();
@@ -203,6 +216,37 @@ export async function saveDatasetStep(
       console.log();
       console.log(chalk.yellow("Re-run the same command to resume from this step."));
       return FAIL;
+    }
+
+    if (options.verifyRemote) {
+      let stranded: string[];
+      try {
+        stranded = await listPendingAtRemote(absolutePath, options.verifyRemote);
+      } catch (listError) {
+        writeUploadProgress(absolutePath, progress);
+        printStepFailure(
+          spinner,
+          "Could not confirm the saved files are at the S3 remote",
+          listError,
+        );
+        console.log();
+        console.log(chalk.yellow("Re-run the same command to resume from this step."));
+        return FAIL;
+      }
+      if (stranded.length > 0) {
+        clearStepCompleted(progress, "s3_upload");
+        writeUploadProgress(absolutePath, progress);
+        const shown = stranded.slice(0, 5).join(", ");
+        const more = stranded.length > 5 ? ` (and ${stranded.length - 5} more)` : "";
+        printStepFailure(
+          spinner,
+          "Saved files are not at the S3 remote",
+          `${stranded.length} annexed file(s) in the commit are not recorded at the remote: ${shown}${more}. The save itself annexed them, after the upload step had run.`,
+        );
+        console.log();
+        console.log(chalk.yellow("Re-run the same command: it uploads them and saves again."));
+        return FAIL;
+      }
     }
 
     spinner.succeed("Dataset changes saved");
