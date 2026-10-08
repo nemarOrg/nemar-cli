@@ -170,7 +170,13 @@ export async function clearStaleFlags(
   path: string,
 ): Promise<{ success: boolean; cleared: number; error?: string }> {
   const top = await repositoryRoot(path);
-  if ("error" in top) return { success: false, cleared: 0, error: top.error };
+  if ("error" in top) {
+    return {
+      success: false,
+      cleared: 0,
+      error: `Could not find the git repository to check for assume-unchanged flags (${top.error}).`,
+    };
+  }
   const stale = await clearStaleAssumeUnchanged(top.root);
   if (stale.error) {
     return { success: false, cleared: 0, error: describeStaleFlagFailure(stale) };

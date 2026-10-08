@@ -50,9 +50,8 @@ export async function runDataSteps(
   // tracked, copied or committed, and the run would say it saved.
   const flags = await clearStaleFlags(args.absolutePath);
   if (!flags.success) {
-    console.log(
-      chalk.red(`Could not check this repository for assume-unchanged flags: ${flags.error}`),
-    );
+    // `flags.error` is the whole account (what failed, why it matters, what to do).
+    console.log(chalk.red(flags.error));
     console.log(chalk.yellow("Re-run the same command to retry."));
     return FAIL;
   }
