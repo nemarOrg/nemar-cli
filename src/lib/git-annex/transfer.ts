@@ -945,10 +945,10 @@ export function extractCopyJsonError(
 }
 
 /**
- * How much of what git-annex printed could be used: all of it (`understood`), records
- * for only some of the paths it was given on a clean exit (`partial`: it was readable
- * and incomplete, so the counts say nothing about the paths with no record), or nothing
- * that parsed as records (`unrecognized`).
+ * How much of what git-annex printed could be used: all paths answered (`understood`),
+ * only some paths answered (`partial`), or nothing parsed from nonempty output
+ * (`unrecognized`). The exit status is reported separately and does not change whether
+ * parsed records cover the paths.
  */
 export type OutputState = "understood" | "partial" | "unrecognized";
 
@@ -1005,7 +1005,7 @@ async function runJsonCopy(
   const complete = expectedRecords === undefined || records.length >= expectedRecords;
   let output: OutputState = "understood";
   if (!printed) output = "unrecognized";
-  else if (exitCode === 0 && !complete) output = "partial";
+  else if (!complete) output = "partial";
   // A failed record means a failed copy, whatever the exit status says.
   if (exitCode !== 0 || records.some((r) => !r.success)) {
     return {
@@ -1037,7 +1037,7 @@ export interface RemoteHoldsOutcome {
    * A caller must not read these as present.
    */
   unanswered: string[];
-  /** `partial` when `unanswered` is not empty, `unrecognized` when nothing parsed as records. */
+  /** `partial` when any path has no record; `unrecognized` when nonempty output has no records. */
   output: OutputState;
 }
 

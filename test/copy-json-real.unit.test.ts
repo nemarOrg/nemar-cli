@@ -228,7 +228,7 @@ describe("parseCopyJson against real output", () => {
   });
 });
 
-describe("a git-annex that exits 0 and says something unexpected", () => {
+describe("git-annex copy output that cannot prove every path succeeded", () => {
   test("is reported as unrecognized, so a count of zero is not read as a verdict", async () => {
     // The shim stands in for a git-annex whose output format changed. The location log
     // is still the authority on what arrived; this only keeps "confirmed 0 of N" from
@@ -250,20 +250,18 @@ describe("a git-annex that exits 0 and says something unexpected", () => {
     }
   });
 
-  test("a clean exit with fewer records than paths is partial: readable and incomplete", async () => {
-    // `git annex copy` skips a path whose content is not here, with exit 0 and no record.
-    // Two paths and one record means one path went unreported, so the counts are partial.
-    // The output WAS understood; it is the answer that is incomplete, and the two are
-    // worded differently for the person reading them.
+  test("a clean exit with a path whose content is not here is partial: readable and incomplete", async () => {
+    // With real git-annex, a path whose content is absent and whose remote location is
+    // already recorded is skipped with exit 0 and no record. The other path still returns
+    // its real record, so the answer is partial rather than unrecognized.
     const cap = await captureCopy("none", 2);
-    const one = `{"command":"copy","error-messages":[],"file":"${cap.paths[0]}","key":"K","success":true}`;
-    const restore = installGitShim(scratch.root, [{ match: "annex copy", stdout: one }]);
-    try {
-      const result = await copyPathsToAnnexRemote(cap.repo, "store", cap.paths, 2);
-      expect(result).toMatchObject({ success: true, filesCopied: 1, output: "partial" });
-    } finally {
-      restore();
-    }
+    expect(
+      (await run(["git", "annex", "drop", "--force", "--", cap.paths[1]], cap.repo)).exitCode,
+    ).toBe(0);
+
+    const result = await copyPathsToAnnexRemote(cap.repo, "store", cap.paths, 2);
+
+    expect(result).toMatchObject({ success: true, filesCopied: 1, output: "partial" });
   });
 
   test("a clean exit with a failed record is a failure, whatever the exit status says", async () => {
