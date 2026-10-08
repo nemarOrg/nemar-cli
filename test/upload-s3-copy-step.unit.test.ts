@@ -26,6 +26,7 @@ import {
   describeBlockedTracking,
   formatUploadSummary,
   listAnnexedPaths,
+  listAnnexedPathsNotAt,
   recoverBlockedTracking,
   trackDataFiles,
 } from "../src/lib/upload/transfer";
@@ -206,6 +207,40 @@ describe("copyAnnexedToRemote: every annexed file must be recorded at the remote
     if (outcome.status !== "ok") throw new Error("unreachable");
     expect(formatUploadSummary(outcome.total, outcome.attempted, outcome.confirmed)).toBe(
       "No annexed data files, so nothing was copied to S3",
+    );
+  });
+});
+
+describe("listAnnexedPathsNotAt", () => {
+  test("names annexed files the remote lacks, including ones whose content is not local, and never a git file", async () => {
+    // The step relies on one `git annex find --not --in` walk both to plan and to
+    // verify. It must not depend on the content being present here (a file dropped
+    // locally and never copied is just as missing), and a plain git file is not annexed.
+    const { dir, targets } = await dataset("not-at", {
+      "a.edf": 3_000,
+      "b.edf": 3_000,
+      "c.edf": 3_000,
+    });
+    writeFile(dir, "notes.json", 100);
+    expect(
+      (
+        await trackDataFiles(
+          dir,
+          targets.map((t) => t.path),
+        )
+      ).success,
+    ).toBe(true);
+    expect((await run(["git", "annex", "copy", "--to", REMOTE, "--", "a.edf"], dir)).exitCode).toBe(
+      0,
+    );
+    expect((await run(["git", "annex", "drop", "--force", "--", "c.edf"], dir)).exitCode).toBe(0);
+
+    expect(await listAnnexedPathsNotAt(dir, REMOTE)).toEqual(new Set(["b.edf", "c.edf"]));
+    // Agrees with the two-list difference it replaces.
+    const annexed = await listAnnexedPaths(dir);
+    const atRemote = await listAnnexedPaths(dir, REMOTE);
+    expect(await listAnnexedPathsNotAt(dir, REMOTE)).toEqual(
+      new Set([...annexed].filter((p) => !atRemote.has(p))),
     );
   });
 });
