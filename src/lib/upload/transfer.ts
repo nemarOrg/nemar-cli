@@ -34,7 +34,7 @@ import {
   initDataset,
   isGitAnnexDataset,
 } from "../git-annex/init.js";
-import { ANNEX_SIZE_THRESHOLD_BYTES } from "../git-annex/policy.js";
+import { ANNEX_SIZE_THRESHOLD_BYTES, describeAnnexSizeThreshold } from "../git-annex/policy.js";
 import { ensureLocalMainBranch, getCurrentBranch } from "../git-annex/repo-state.js";
 import { runCommand } from "../git-annex/run-command.js";
 import {
@@ -438,8 +438,8 @@ export function computeAddTargets<T extends { path: string }>(
  * inherited `.gitattributes`, ADR 0060): it would be pushed to GitHub instead
  * of reaching S3, which is a hard failure. A small one can differ for a benign
  * reason (the CLI matches data extensions case-insensitively, git-annex's
- * `include=` globs do not), and committing a <100 KB file to git is harmless,
- * so it is only reported. Pure; exported for unit tests.
+ * `include=` globs do not), and committing a file at or under the size threshold
+ * to git is harmless, so it is only reported. Pure; exported for unit tests.
  */
 export function findDataFilesNotAnnexed<T extends { path: string; size: number; type?: string }>(
   addTargets: T[],
@@ -664,7 +664,7 @@ export async function uploadDataToS3(
       if (notAnnexed.small.length > 0) {
         console.log(
           chalk.dim(
-            `  ${notAnnexed.small.length} small data file(s) (<= 100 KB) were stored in git rather than the annex`,
+            `  ${notAnnexed.small.length} small data file(s) (<= ${describeAnnexSizeThreshold()}) were stored in git rather than the annex`,
           ),
         );
       }

@@ -126,3 +126,18 @@ than the bloat. Issue #1159 carries the real fix.
 - `test/import-unannexed-data.test.ts` - the detector, against a reproduced upstream split
 - ADR 0015 - the decision this amends
 - Issue #1158 (this fix), issue #1159 (import normalisation and the `on007788` backfill)
+
+## Amendment 2026-10-07 (#1642): the size threshold is 100,000 bytes
+
+The "100 kB" above is literally 100,000 bytes, and the policy module now says so.
+git-annex reads the `kb` in `largerthan=100kb` as SI (1 kB = 1000 bytes), not as 1024.
+Measured against git-annex 10.20260901 with the production expression: files of 99,999 and 100,000 bytes stay in git, and files of 100,001, 102,399, 102,400 and 102,401 bytes annex.
+With the exact-bytes form `largerthan=102400` the boundary moves to 102,400, which is what `ANNEX_SIZE_THRESHOLD_BYTES = 100 * 1024` implied.
+The module therefore disagreed with git-annex for every file of 100,001 to 102,400 bytes: `shouldAnnex` called it small while git-annex annexed it, and the upload step reported it as stored in git when it was not.
+The disagreement was invisible because the expression was rendered as `largerthan=${bytes / 1024}kb`, so both sides printed "100".
+
+`ANNEX_SIZE_THRESHOLD_BYTES` is now 100_000 and the expression carries the exact byte count, `largerthan=100000`, so there is no unit left to misread.
+This preserves what git-annex does today, so no dataset's tracking changes; it only corrects the CLI's classification and the text derived from the constant (`describeAnnexSizeThreshold`).
+Repositories configured before this amendment carry `largerthan=100kb`, which git-annex evaluates identically; `isCurrentLargefilesExpression` accepts that spelling so the fleet sweep does not report the `nm` datasets as drifted.
+`test/annex-policy.test.ts` runs both spellings against real git-annex at 99,999, 100,000, 100,001, 102,400 and 102,401 bytes, with the expected outcome written as a literal rather than derived from the constant.
+The prose copies on `https://docs.nemar.org/admin/operations/validated-workflows/` live outside this repository and still say `largerthan=100kb`; both spellings are correct, and the page should move to the byte count when it is next edited.
