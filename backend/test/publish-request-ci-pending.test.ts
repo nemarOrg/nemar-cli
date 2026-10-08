@@ -1033,6 +1033,22 @@ describe("the sweep's reads never sleep, and share a budget", () => {
   });
 
   test("a spent budget does not hold back a row that needs no read", async () => {
+    // An exempt dataset is released without the gate reading anything.
+    seedDataset("nm000520", { exemplar: true });
+    expect((await requestPublication({ id: "nm000520" })).body.block_reason).toBe(
+      "bids_validation_pending",
+    );
+    runs = "success";
+    contentReads = [];
+    await withFakeResend(async () => {
+      const result = await sweepBlockedBidsValidationRequests(env(), 50, 0);
+      expect(result.unblocked).toBe(1);
+      expect(result.deferred).toBe(0);
+    });
+    expect(contentReads).toHaveLength(0);
+  });
+
+  test("a spent budget does not hold back a row CI keeps blocked", async () => {
     // Only a row CI would release needs the gate; one whose validation is still
     // running is kept as it is, with no read, however the budget stands.
     await pendingRequests([DATASET]);

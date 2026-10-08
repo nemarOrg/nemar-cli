@@ -291,11 +291,9 @@ export async function sweepBlockedBidsValidationRequests(
         // request is left blocked for the next sweep rather than given a
         // verdict (native or anonymous: a daily batch loses a day by waiting,
         // and a release on a partial look is the one mistake that cannot be
-        // taken back). Its reads never sleep or retry, and share one budget.
-        if (budget.remaining <= 0) {
-          result.deferred++;
-          continue;
-        }
+        // taken back). Its reads never sleep or retry, and share one budget; a
+        // row that needs none (an exempt dataset) is not held back by a spent
+        // one.
         const gate = await checkSubmissionGate({
           datasetId: row.dataset_id,
           repoName,
