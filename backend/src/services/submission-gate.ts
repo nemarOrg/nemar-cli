@@ -16,7 +16,7 @@
  * the files and decides what a failure to fetch means.
  */
 
-import { getFileContent } from "./github";
+import { LOOKUP_ONCE, getFileContent } from "./github";
 import { describesEthicsApproval, evaluateSubmissionMinimums } from "./submission-minimums";
 
 const README_CANDIDATES = ["README.md", "README", "README.txt", "README.rst"];
@@ -33,13 +33,26 @@ export type SubmissionGateOutcome =
   /** A stated minimum is missing, or the blind is not in place: block as `min_requirements_failed`. */
   | { kind: "blocked"; reasons: string[] }
   /**
-   * No verdict: there was nothing to read, or `dataset_description.json` could
-   * not be. Nothing is known about the data, so what to do is the caller's
-   * policy. The request route blocks an anonymous release (a blind nobody
-   * verified is never granted) and lets a native submission through to the
-   * admin review, as ADR 0026 does; the `reasons` are for the first of those.
+   * No verdict: there was nothing to read, or a file could not be (or, for the
+   * sweep, was not allowed to be: `budget`). Nothing is known about the data, so
+   * what to do is the caller's policy. The request route blocks an anonymous
+   * release (a blind nobody verified is never granted) and lets a native
+   * submission through to the admin review, as ADR 0026 does; the `reasons` are
+   * for the first of those. The sweep leaves the row for its next run.
    */
-  | { kind: "unverified"; reasons: string[] };
+  | { kind: "unverified"; reasons: string[]; cause: "unreadable" | "no-repository" | "budget" };
+
+/**
+ * How many GitHub reads a batch of gate calls may still make. The sweep shares
+ * one across its rows so that a pass over many requests stays under the
+ * platform's per-invocation request limit; each read takes one, and a gate that
+ * finds none left reports `unverified` with cause `budget`.
+ */
+export interface GateReadBudget {
+  remaining: number;
+}
+
+class ReadBudgetSpent extends Error {}
 
 /**
  * Does the gate apply to this dataset?
@@ -64,22 +77,49 @@ export async function checkSubmissionGate(args: {
   pat: string | null;
   dataset: { source: string | null; is_exemplar: number | boolean | null };
   anonymous: boolean;
-  /** Which caller is asking, for the log line only. */
+  /**
+   * Which caller is asking. The request route is interactive: it keeps the
+   * default GitHub retry policy and treats an unreadable README as one with no
+   * statement. The sweep is a daily batch: its reads never sleep or retry
+   * (`LOOKUP_ONCE`), they draw on `budget`, and any read that fails leaves the
+   * row for the next run instead of giving a verdict from a partial look.
+   */
   caller: "publish-request" | "publish-sweep";
+  budget?: GateReadBudget;
 }): Promise<SubmissionGateOutcome> {
-  const { datasetId, repoName, pat, anonymous, caller } = args;
+  const { datasetId, repoName, pat, anonymous, caller, budget } = args;
   if (!submissionGateApplies(args.dataset, anonymous)) return { kind: "clear" };
-  if (!repoName || !pat) return { kind: "unverified", reasons: [NO_REPOSITORY_REASON] };
+  if (!repoName || !pat) {
+    return { kind: "unverified", reasons: [NO_REPOSITORY_REASON], cause: "no-repository" };
+  }
+  const sweep = caller === "publish-sweep";
+
+  const read = async (path: string): Promise<string | null> => {
+    if (budget) {
+      if (budget.remaining <= 0) throw new ReadBudgetSpent();
+      budget.remaining -= 1;
+    }
+    return getFileContent(repoName, path, pat, "main", sweep ? LOOKUP_ONCE : undefined);
+  };
+  const unverified = (err: unknown): SubmissionGateOutcome => {
+    if (!(err instanceof ReadBudgetSpent)) {
+      console.error(
+        `[${caller}] submission-minimums check failed for ${datasetId}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+    return {
+      kind: "unverified",
+      reasons: [UNREADABLE_REASON],
+      cause: err instanceof ReadBudgetSpent ? "budget" : "unreadable",
+    };
+  };
 
   let descriptionJson: string | null;
   try {
-    descriptionJson = await getFileContent(repoName, "dataset_description.json", pat);
+    descriptionJson = await read("dataset_description.json");
   } catch (err) {
-    console.error(
-      `[${caller}] submission-minimums check failed for ${datasetId}:`,
-      err instanceof Error ? err.message : err,
-    );
-    return { kind: "unverified", reasons: [UNREADABLE_REASON] };
+    return unverified(err);
   }
 
   // The README matters for one rule only: an ethics statement, when
@@ -91,8 +131,11 @@ export async function checkSubmissionGate(args: {
   if (!describesEthicsApproval(descriptionJson)) {
     for (const candidate of README_CANDIDATES) {
       try {
-        readme = await getFileContent(repoName, candidate, pat);
+        readme = await read(candidate);
       } catch (err) {
+        // The sweep gives no verdict from a partial look, and a spent budget is
+        // not a README without a statement.
+        if (sweep || err instanceof ReadBudgetSpent) return unverified(err);
         console.error(
           `[${caller}] README read failed for ${datasetId} (${candidate}):`,
           err instanceof Error ? err.message : err,

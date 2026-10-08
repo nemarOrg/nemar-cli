@@ -309,6 +309,8 @@ export async function getFileContent(
   filePath: string,
   pat: string,
   ref = "main",
+  /** Retry policy; the default is the background one. A caller in a batch passes {@link LOOKUP_ONCE}. */
+  options?: FetchPolicy,
 ): Promise<string | null> {
   // No retryOn404 here: 404 is a valid "file not present" signal returned as null.
   const response = await githubFetchWithRetry(
@@ -320,6 +322,7 @@ export async function getFileContent(
         "User-Agent": "NEMAR-API",
       },
     },
+    options,
   );
 
   if (response.status === 404) return null;
@@ -352,8 +355,8 @@ export async function getFileContent(
 type FetchPolicy = NonNullable<Parameters<typeof githubFetchWithRetry>[2]>;
 
 /**
- * How `branchExists` talks to GitHub: the interactive kind and ONE attempt, so
- * it never sleeps. The default (background) kind sleeps up to a minute before a
+ * How `branchExists` (and a sweep's file reads) talk to GitHub: the interactive
+ * kind and ONE attempt, so it never sleeps. The default (background) kind sleeps up to a minute before a
  * call when the cached rate-limit bucket is nearly drained, and again between
  * retries; asked once per row of a sweep, that stalls a 30-row pass for the
  * better part of an hour (measured: about 60 s per row). Interactive turns a
@@ -361,7 +364,7 @@ type FetchPolicy = NonNullable<Parameters<typeof githubFetchWithRetry>[2]>;
  * 5xx, 429 or secondary rate limit into the response itself, so every one of
  * them becomes a per-row error that leaves the row unstamped for the next pass.
  */
-const LOOKUP_ONCE: FetchPolicy = { kind: "interactive", maxAttempts: 1 };
+export const LOOKUP_ONCE: FetchPolicy = { kind: "interactive", maxAttempts: 1 };
 
 /**
  * GET the ref of `branch`: the one request `branchExists` and

@@ -91,6 +91,7 @@ export {
   getMainBranchSha,
   getTreeAtRef,
   isContentsApiShaConflict,
+  LOOKUP_ONCE,
 } from "./github/contents";
 export type {
   EnrichmentCommitResult,

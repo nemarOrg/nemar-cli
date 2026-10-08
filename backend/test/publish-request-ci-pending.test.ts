@@ -32,7 +32,14 @@ import {
   statusBody,
 } from "../../test/helpers/pending-cli";
 import { datasetRoutes } from "../src/routes/datasets";
-import { sweepBlockedBidsValidationRequests } from "../src/services/publication-sweep";
+import {
+  __resetRateLimitStateForTests,
+  __seedRateLimitStateForTests,
+} from "../src/services/github/transport";
+import {
+  MAX_GATE_READS_PER_SWEEP,
+  sweepBlockedBidsValidationRequests,
+} from "../src/services/publication-sweep";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -63,6 +70,8 @@ let runs: Runs = "none";
 let descriptionBody: string | null = NAMED;
 let descriptionStatus = 200;
 let runsStatus = 200;
+// Seconds GitHub asks a caller to wait, sent with a failing description read.
+let descriptionRetryAfter: number | null = null;
 let readmeMode: ReadmeMode = "text";
 let readmeText = "# README";
 // Every `/contents/<path>` the stand-in was asked for, in order.
@@ -107,7 +116,15 @@ beforeAll(() => {
       if (read) contentReads.push(read);
       if (read === "dataset_description.json") {
         onDescriptionRead?.();
-        if (descriptionStatus !== 200) return new Response("no", { status: descriptionStatus });
+        if (descriptionStatus !== 200) {
+          return new Response("no", {
+            status: descriptionStatus,
+            headers:
+              descriptionRetryAfter === null
+                ? undefined
+                : { "Retry-After": String(descriptionRetryAfter) },
+          });
+        }
         if (descriptionBody === null) return new Response("not found", { status: 404 });
         return Response.json({ encoding: "base64", content: btoa(descriptionBody) });
       }
@@ -135,6 +152,8 @@ afterEach(() => {
   descriptionBody = NAMED;
   descriptionStatus = 200;
   runsStatus = 200;
+  descriptionRetryAfter = null;
+  __resetRateLimitStateForTests();
   readmeMode = "text";
   readmeText = "# README";
   contentReads = [];
@@ -907,5 +926,121 @@ describe("the bodies the CLI tests are answered with are the route's", () => {
     );
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: "Only the dataset owner can request publication" });
+  });
+});
+
+describe("the sweep's reads never sleep, and share a budget", () => {
+  /** Make a pending request for each id with a description that is valid now. */
+  async function pendingRequests(ids: string[]): Promise<void> {
+    descriptionBody = NAMED;
+    for (const id of ids) {
+      if (id !== DATASET) seedDataset(id);
+      expect((await requestPublication({ id })).body.block_reason).toBe("bids_validation_pending");
+    }
+  }
+  const reads = (path: string) => contentReads.filter((r) => r === path).length;
+
+  test("a failing read is tried once, however long GitHub asks the caller to wait", async () => {
+    // Under the default policy a 503 with Retry-After: 2 is retried twice, with
+    // a two-second sleep before each. In a daily batch of many rows that is the
+    // difference between a pass and a stall, so the sweep's reads make one
+    // attempt and the row waits for the next run.
+    await pendingRequests([DATASET]);
+    runs = "success";
+    contentReads = [];
+    descriptionStatus = 503;
+    descriptionRetryAfter = 2;
+    const started = Date.now();
+    const result = await sweepBlockedBidsValidationRequests(env());
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(reads("dataset_description.json")).toBe(1);
+    expect(result.errors).toBe(1);
+    expect(result.unblocked).toBe(0);
+    expect(row().status).toBe("blocked");
+  });
+
+  test("a nearly drained rate-limit bucket defers the row instead of sleeping until it resets", async () => {
+    await pendingRequests([DATASET]);
+    runs = "success";
+    contentReads = [];
+    // The shared bucket is nearly drained and resets in three seconds: a call
+    // under the default policy sleeps until then; an interactive one is refused
+    // at once. (The workflow-run lookup does not go through this policy.)
+    __seedRateLimitStateForTests({
+      resource: "core",
+      remaining: 0,
+      resetEpoch: Math.ceil(Date.now() / 1000) + 3,
+      limit: 5000,
+    });
+    const started = Date.now();
+    const result = await sweepBlockedBidsValidationRequests(env());
+    // The bucket resets in three seconds; the default policy would sleep them.
+    expect(Date.now() - started).toBeLessThan(1500);
+    expect(reads("dataset_description.json")).toBe(0);
+    expect(result.errors).toBe(1);
+    expect(row().status).toBe("blocked");
+  });
+
+  test("a README that cannot be read defers the row; the sweep gives no verdict from a partial look", async () => {
+    await pendingRequests([DATASET]);
+    runs = "success";
+    descriptionBody = NO_ETHICS_FIELD;
+    readmeMode = "forbidden";
+    const result = await sweepBlockedBidsValidationRequests(env());
+    expect(result.errors).toBe(1);
+    expect(result.reblocked).toBe(0);
+    expect(result.unblocked).toBe(0);
+    expect(row().block_reason).toBe("bids_validation_pending");
+  });
+
+  test("the reads of all rows share one budget, and the rows after it are left for the next run", async () => {
+    const ids = ["nm000500", "nm000501", "nm000502", "nm000503"];
+    await pendingRequests(ids);
+    runs = "success";
+    // Each row now costs five reads (the description and four README names).
+    descriptionBody = NO_ETHICS_FIELD;
+    readmeMode = "missing";
+    contentReads = [];
+    const first = await sweepBlockedBidsValidationRequests(env(), 50, 3);
+    expect(contentReads).toHaveLength(3);
+    expect(first.gateReads).toBe(3);
+    expect(first.deferred).toBe(ids.length);
+    expect(first.unblocked + first.reblocked + first.errors).toBe(0);
+    // Nothing was decided and nothing was touched.
+    for (const id of ids) expect(row(id).block_reason, id).toBe("bids_validation_pending");
+
+    // The next run, with budget, decides them.
+    contentReads = [];
+    const second = await sweepBlockedBidsValidationRequests(env(), 50, 100);
+    expect(second.deferred).toBe(0);
+    expect(second.reblocked).toBe(ids.length);
+    expect(second.gateReads).toBe(5 * ids.length);
+    for (const id of ids) expect(row(id).block_reason, id).toBe("min_requirements_failed");
+  });
+
+  test("rows that need one read each stay well inside the default budget", async () => {
+    const ids = ["nm000510", "nm000511", "nm000512"];
+    await pendingRequests(ids);
+    runs = "success";
+    contentReads = [];
+    await withFakeResend(async () => {
+      const result = await sweepBlockedBidsValidationRequests(env());
+      expect(result.unblocked).toBe(ids.length);
+      expect(result.deferred).toBe(0);
+      expect(result.gateReads).toBe(ids.length);
+    });
+    expect(MAX_GATE_READS_PER_SWEEP).toBeGreaterThan(ids.length);
+  });
+
+  test("a spent budget does not hold back a row that needs no read", async () => {
+    // Only a row CI would release needs the gate; one whose validation is still
+    // running is kept as it is, with no read, however the budget stands.
+    await pendingRequests([DATASET]);
+    runs = "running";
+    contentReads = [];
+    const result = await sweepBlockedBidsValidationRequests(env(), 50, 0);
+    expect(result.deferred).toBe(0);
+    expect(contentReads).toHaveLength(0);
+    expect(row().status).toBe("blocked");
   });
 });
