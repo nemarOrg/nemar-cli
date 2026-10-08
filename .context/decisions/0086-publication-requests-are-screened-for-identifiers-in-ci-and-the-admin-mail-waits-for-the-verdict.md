@@ -166,7 +166,7 @@ The admin email, the status views and the requester's blocked-request mail there
 
 A request made before the dataset's BIDS validation has concluded is refused with `bids_validation_pending` or `bids_validation_in_progress`, and that refusal is recorded: the request row is `blocked`, and the blocked-request sweep (`sweepBlockedBidsValidationRequests`) re-reads the latest run and unblocks it when CI passes.
 Unblocking starts the identifier screen exactly as a re-request would, so the request carries on by itself.
-The sweep runs today from the daily scheduled cleanup (03:00 UTC), so a recorded request can wait up to a day, and a run takes at most 50 rows and releases at most 10 requests, the rest waiting for the next run.
+The sweep runs today from the daily scheduled cleanup (03:00 UTC in production, per `backend/wrangler-sccn.toml`), so a recorded request can wait up to a day, and a run takes at most 50 rows and releases at most 10 requests, the rest waiting for the next run.
 The cadence is the server's to change and is not part of this decision, which is why the CLI promises no time.
 (The half-hourly sweep earlier in this ADR is another one: it covers screens that did not report.)
 
