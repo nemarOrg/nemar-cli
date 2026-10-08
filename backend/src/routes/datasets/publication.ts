@@ -12,6 +12,7 @@
 import {
   CI_CHECK_UNAVAILABLE_CODE,
   type PublicationBlockReason,
+  isCiPendingReason,
 } from "../../../../shared/contract/publication.js";
 import { publicationRequestNotice } from "../../../../shared/identifier-screen-report.js";
 import { authMiddleware } from "../../middleware/auth";
@@ -417,10 +418,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     // have a fix to make, and the last has nothing trustworthy to read with.
     // A missing minimum replaces the pending reason, so the depositor is told
     // at once and the verdict is re-recorded on every request.
-    const ciOnlyPending =
-      blocked &&
-      !ciCheckFailed &&
-      (blockReason === "bids_validation_pending" || blockReason === "bids_validation_in_progress");
+    const ciOnlyPending = blocked && !ciCheckFailed && isCiPendingReason(blockReason);
     let minReasons: string[] | null = null;
     if (!blocked || ciOnlyPending) {
       const gate = await checkSubmissionGate({

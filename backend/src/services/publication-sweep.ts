@@ -19,6 +19,7 @@
  * would otherwise skip both.
  */
 
+import { CI_PENDING_BLOCK_REASONS } from "../../../shared/contract/publication.js";
 import type { Bindings } from "../types/bindings.js";
 import { DEV_OWNED_FIXTURE_IDS } from "./datasetId.js";
 import { isNonProductionEnv } from "./environment.js";
@@ -38,8 +39,7 @@ export const MAX_SCREENED_UNBLOCKS_PER_SWEEP = 10;
 
 /** The block_reason values produced by the BIDS-validation readiness check. */
 export const BIDS_VALIDATION_BLOCK_REASONS = [
-  "bids_validation_pending",
-  "bids_validation_in_progress",
+  ...CI_PENDING_BLOCK_REASONS,
   "bids_validation_failed",
 ] as const;
 
