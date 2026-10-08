@@ -26,7 +26,7 @@
  * exactly 5000ms).
  */
 
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "bun";
@@ -57,29 +57,34 @@ export async function runRenameScript(
   writeFileSync(configFile, opts.awsConfig ?? "");
   writeFileSync(credsFile, "");
 
-  const proc = spawn({
-    cmd: ["bun", SCRIPT_PATH, ...args],
-    cwd: REPO_ROOT,
-    env: {
-      PATH: process.env.PATH ?? "",
-      HOME: tmp,
-      AWS_ACCESS_KEY_ID: "ASIATESTDUMMY000001",
-      AWS_SECRET_ACCESS_KEY: "dummySecretAccessKeyForRenameArchivesTest",
-      AWS_CONFIG_FILE: configFile,
-      AWS_SHARED_CREDENTIALS_FILE: credsFile,
-      AWS_EC2_METADATA_DISABLED: "true",
-      AWS_MAX_ATTEMPTS: "1",
-      AWS_ENDPOINT_URL_S3: standin.s3Url,
-      AWS_ENDPOINT_URL_STS: standin.stsUrl,
-      // AWS_PROFILE and AWS_DEFAULT_REGION deliberately not set.
-    },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { exitCode, stdout, stderr };
+  try {
+    const proc = spawn({
+      cmd: ["bun", SCRIPT_PATH, ...args],
+      cwd: REPO_ROOT,
+      env: {
+        PATH: process.env.PATH ?? "",
+        HOME: tmp,
+        AWS_ACCESS_KEY_ID: "ASIATESTDUMMY000001",
+        AWS_SECRET_ACCESS_KEY: "dummySecretAccessKeyForRenameArchivesTest",
+        AWS_CONFIG_FILE: configFile,
+        AWS_SHARED_CREDENTIALS_FILE: credsFile,
+        AWS_EC2_METADATA_DISABLED: "true",
+        AWS_MAX_ATTEMPTS: "1",
+        AWS_ENDPOINT_URL_S3: standin.s3Url,
+        AWS_ENDPOINT_URL_STS: standin.stsUrl,
+        // AWS_PROFILE and AWS_DEFAULT_REGION deliberately not set.
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { exitCode, stdout, stderr };
+  } finally {
+    // The private HOME and config of this one run.
+    rmSync(tmp, { recursive: true, force: true });
+  }
 }

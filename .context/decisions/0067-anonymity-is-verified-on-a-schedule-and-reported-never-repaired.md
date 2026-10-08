@@ -402,3 +402,7 @@ The candidate predicate, the cadence, the verdict names, the declared scope limi
   blinded, and the no-funding/not-applicable declarations (both directions, including "No
   funding from NIH" and "Not funded by the Wellcome Trust" still reported). All four were
   confirmed to fail when the corresponding code was disabled, then restored.
+
+## Amendment 2026-10-04 (#1610): privacy corrections
+
+"Never repaired" is about depositor anonymity and the sweep. The manual privacy correction in [ADR 0085](0085-a-privacy-correction-scrubs-every-version-in-place.md) is a separate, deliberate action by the owner and is not a sweep.

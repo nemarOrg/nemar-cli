@@ -173,6 +173,7 @@ import {
   denyPublication,
   getPublishStatus,
   listPublishRequests,
+  rerunIdentifierScreen,
 } from "../lib/api/publish.js";
 import { getConfig, isAuthenticated } from "../lib/config.js";
 import {
@@ -195,6 +196,7 @@ import {
 } from "../lib/git-annex/clone-push.js";
 import { checkDownloadPrerequisites } from "../lib/git-annex/prereq.js";
 import { getVersionCommit, listDatasetVersions } from "../lib/git-annex/repo-state.js";
+import { identifierScreenLines } from "../lib/identifier-screen-display.js";
 import {
   type RecoverDatasetEntry,
   loadRecoverDatasets,
@@ -2606,6 +2608,8 @@ Examples:
             )}`,
           );
         }
+        // Epic #1610 phase 4: the identifier screen, in the backend's words.
+        for (const line of identifierScreenLines(req.identifier_screen, 4)) console.log(line);
         if (req.current_step && req.status === "approving") {
           console.log(
             `    ${chalk.yellow(">")} ${req.current_step.replace(/_/g, " ")}${req.last_error ? chalk.red(` (${req.last_error})`) : ""}`,
@@ -2692,12 +2696,54 @@ Examples:
   });
 
 publishCommand
+  .command("screen")
+  .description("Re-run the identifier screen of a publication request")
+  .argument("<dataset-id>", "Dataset ID")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Dispatch the identifier screen again for the dataset's active publication
+  request (requested or blocked). Use it when the screen did not run, did not
+  report, or read a commit that is no longer the repository's main. The admins
+  are mailed when it reports, as for a new request.
+
+  Refused while a screen is already running and recent, and for sandbox (xx)
+  datasets, which are not screened.
+
+Examples:
+  $ nemar admin publish screen nm000104`,
+  )
+  .action(async (datasetId: string) => {
+    if (!requireAuth()) return;
+    const spinner = ora(`Re-running the identifier screen for ${datasetId}...`).start();
+    try {
+      const result = await rerunIdentifierScreen(datasetId);
+      if (result.status === "pending") {
+        spinner.succeed(`Identifier screen dispatched for ${datasetId}`);
+        console.log(chalk.dim("  The admins are mailed when it reports."));
+      } else {
+        spinner.warn(`The identifier screen for ${datasetId} could not be started`);
+        for (const line of identifierScreenLines(result.identifier_screen)) console.log(line);
+        console.log(chalk.dim("  The admins have been mailed this result."));
+      }
+    } catch (error) {
+      handleCommandError(error, spinner, "Failed to re-run the identifier screen");
+      process.exitCode = 1;
+    }
+  });
+
+publishCommand
   .command("approve")
   .description("Approve and publish a dataset (runs orchestrator)")
   .argument("<dataset-id>", "Dataset ID")
   .option("--resume", "Resume from last failed step")
   .option("--sandbox", "Use Zenodo sandbox for testing")
   .option("--skip-ci-check", "Skip BIDS validation CI check (admin override)")
+  .option(
+    "--acknowledge-identifier-screen <reason>",
+    "Approve over an identifier screen that needs review, recording why (10 to 500 characters)",
+  )
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .addHelpText(
@@ -2706,6 +2752,14 @@ publishCommand
 Description:
   Approve a publication request and run the automated orchestrator
   to make the dataset publicly accessible with a permanent DOI.
+
+  The request's IDENTIFIER SCREEN must allow it first. A clean screen passes.
+  A screen that needs review, or could not look at everything, passes only with
+  --acknowledge-identifier-screen "<reason>", which is recorded with your name.
+  Direct identifiers cannot be acknowledged: the depositor fixes the data and
+  requests again. A screen that did not run or did not report must be re-run
+  with 'nemar admin publish screen <dataset-id>', and so must one whose commit
+  is no longer the repository's main. 'nemar admin publish list' shows it.
 
   An ANONYMOUS RELEASE runs a smaller step set: the GitHub repository stays
   private, no identifier is published, and the depositor is not named. The
@@ -2767,9 +2821,23 @@ After Approval:
   .action(
     async (
       datasetId,
-      options: ConfirmOptions & { resume?: boolean; sandbox?: boolean; skipCiCheck?: boolean },
+      options: ConfirmOptions & {
+        resume?: boolean;
+        sandbox?: boolean;
+        skipCiCheck?: boolean;
+        acknowledgeIdentifierScreen?: string;
+      },
     ) => {
       if (!requireAuth()) return;
+
+      const ack = options.acknowledgeIdentifierScreen?.trim();
+      if (ack !== undefined && (ack.length < 10 || ack.length > 500)) {
+        console.log(
+          chalk.red("--acknowledge-identifier-screen needs a reason of 10 to 500 characters."),
+        );
+        process.exitCode = 1;
+        return;
+      }
 
       const action = options.resume
         ? `Resume publication of ${datasetId}`
@@ -2918,6 +2986,7 @@ After Approval:
             currentSpinnerText = renderProgress(info);
             spinner.text = currentSpinnerText;
           },
+          ack,
         );
         spinner.succeed(result.message);
 
@@ -4123,7 +4192,11 @@ adminCommand
   )
   .option(
     "--normalize-max-gb <n>",
-    "Raise the ceiling on how much data the prepare phase will annex and upload from this host (default 5 GiB). Only needed for a dataset that keeps an unusual amount of data in git; the import aborts rather than silently spending hours uploading (ADR 0060).",
+    "Raise the ceiling on how much data the prepare phase will move from this host (default 5 GiB): data git holds, and recordings the identifier scrub downloads to rewrite their headers. The import aborts rather than silently spending hours on it (ADR 0060, ADR 0089). Recordings whose only change would be their acquisition date are downloaded only if they all fit, and otherwise keep the date (ADR 0091).",
+  )
+  .option(
+    "--screen-wait-minutes <n>",
+    "How long finalize waits for the identifier screen's verdict before leaving the publication for an admin (default: what the finalize job's 90-minute timeout leaves, at most 45; ADR 0089).",
   )
   .action(
     async (
@@ -4136,6 +4209,7 @@ adminCommand
         phase?: string;
         shard?: string;
         normalizeMaxGb?: string;
+        screenWaitMinutes?: string;
       },
     ) => {
       if (!requireAuth()) return;
@@ -4174,6 +4248,20 @@ adminCommand
         normalizeMaxBytes = Math.floor(gb * 1024 ** 3);
       }
 
+      let screenWaitMs: number | undefined;
+      if (options.screenWaitMinutes !== undefined) {
+        const minutes = Number(options.screenWaitMinutes);
+        if (!Number.isFinite(minutes) || minutes <= 0) {
+          console.error(
+            chalk.red(
+              `Invalid --screen-wait-minutes "${options.screenWaitMinutes}". Expected a positive number of minutes.`,
+            ),
+          );
+          process.exit(1);
+        }
+        screenWaitMs = Math.floor(minutes * 60_000);
+      }
+
       // Single-phase execution for the sharded CI workflow (prepare/copy/finalize).
       if (options.phase) {
         const validPhases = ["prepare", "copy", "finalize"];
@@ -4206,6 +4294,7 @@ adminCommand
           trustUpstream: options.trustUpstream,
           persistStaging: true,
           normalizeMaxBytes,
+          screenWaitMs,
         };
         try {
           if (options.phase === "prepare") {
@@ -4236,6 +4325,7 @@ adminCommand
             skipData: options.skipData,
             trustUpstream: options.trustUpstream,
             normalizeMaxBytes,
+            screenWaitMs,
           });
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
@@ -7625,6 +7715,7 @@ emailPrefsCommand
         { key: "publication_request", label: "Publication request notifications" },
         { key: "announcements", label: "Announcement emails" },
         { key: "dataset_anonymity", label: "Anonymity sweep findings" },
+        { key: "identifier_sweep", label: "Identifier sweep weekly report" },
       ];
 
       for (const cat of categories) {
@@ -7648,6 +7739,7 @@ emailPrefsCommand
   .option("--publication-request <bool>", "Enable/disable publication request notifications")
   .option("--announcements <bool>", "Enable/disable announcement emails")
   .option("--dataset-anonymity <bool>", "Enable/disable anonymity sweep findings")
+  .option("--identifier-sweep <bool>", "Enable/disable the identifier sweep weekly report")
   .option("--all <bool>", "Enable/disable all notifications")
   .option("--user <username>", "(owner only) update another user's preferences")
   .action(
@@ -7656,6 +7748,7 @@ emailPrefsCommand
       publicationRequest?: string;
       announcements?: string;
       datasetAnonymity?: string;
+      identifierSweep?: string;
       all?: string;
       user?: string;
     }) => {
@@ -7683,18 +7776,27 @@ emailPrefsCommand
         updates.publication_request = val;
         updates.announcements = val;
         updates.dataset_anonymity = val;
+        updates.identifier_sweep = val;
       } else {
         const ua = parseBool(options.userApproval);
         const pr = parseBool(options.publicationRequest);
         const ann = parseBool(options.announcements);
         const anon = parseBool(options.datasetAnonymity);
+        const sweep = parseBool(options.identifierSweep);
 
-        if (ua === undefined && pr === undefined && ann === undefined && anon === undefined) {
+        if (
+          ua === undefined &&
+          pr === undefined &&
+          ann === undefined &&
+          anon === undefined &&
+          sweep === undefined
+        ) {
           console.error(chalk.red("No preferences specified."));
           console.log("  --user-approval <bool>        User approval notifications");
           console.log("  --publication-request <bool>   Publication request notifications");
           console.log("  --announcements <bool>         Announcement emails");
           console.log("  --dataset-anonymity <bool>     Anonymity sweep findings");
+          console.log("  --identifier-sweep <bool>      Identifier sweep weekly report");
           console.log("  --all <bool>                   All notifications");
           process.exit(1);
         }
@@ -7703,6 +7805,7 @@ emailPrefsCommand
         if (pr !== undefined) updates.publication_request = pr;
         if (ann !== undefined) updates.announcements = ann;
         if (anon !== undefined) updates.dataset_anonymity = anon;
+        if (sweep !== undefined) updates.identifier_sweep = sweep;
       }
 
       const spinner = ora("Updating email preferences...").start();
@@ -7719,6 +7822,12 @@ emailPrefsCommand
         );
         console.log(
           `  Announcements:         ${result.announcements ? chalk.green("enabled") : chalk.dim("disabled")}`,
+        );
+        console.log(
+          `  Anonymity findings:    ${result.dataset_anonymity ? chalk.green("enabled") : chalk.dim("disabled")}`,
+        );
+        console.log(
+          `  Identifier sweep:      ${result.identifier_sweep ? chalk.green("enabled") : chalk.dim("disabled")}`,
         );
       } catch (err) {
         spinner.fail("Failed to update preferences");

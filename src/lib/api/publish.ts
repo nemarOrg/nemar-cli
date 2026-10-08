@@ -8,12 +8,18 @@
 
 import { APPROVE_RETRY_DELAY_MS } from "../../../shared/publication-retry.js";
 import { PUBLICATION_STEPS } from "../../../shared/publication-steps.js";
+import type { IdentifierScreenView } from "../identifier-screen-display.js";
 import { request } from "./client.js";
 import { ApiError } from "./errors.js";
 
 // ============================================================================
 // Publication Workflow
 // ============================================================================
+
+// `identifier_screen` (epic #1610, phase 4) is the request's identifier screen as
+// the backend's `describeScreen` worded it. Optional on every response below,
+// because an older backend does not send it.
+export type { IdentifierScreenView };
 
 export interface PublishStatusResponse {
   dataset_id: string;
@@ -45,6 +51,7 @@ export interface PublishStatusResponse {
   // Optional because an older backend does not send it -- absent means
   // unknown, never "no".
   anonymous?: boolean;
+  identifier_screen?: IdentifierScreenView;
 }
 
 export interface PublishRequestsResponse {
@@ -66,6 +73,7 @@ export interface PublishRequestsResponse {
     // wire and merely unrendered -- which left an admin approving the two
     // outcomes from an identical line.
     anonymous?: number | null;
+    identifier_screen?: IdentifierScreenView;
   }>;
   count: number;
 }
@@ -76,6 +84,21 @@ export interface StepResult {
   attempts: number;
   duration_ms: number;
   error?: string;
+}
+
+/**
+ * The 200 answer of `POST /datasets/:id/publish/request`. `request_notice` is the
+ * Worker's copy of the neutral notice (ADR 0090, amendment 2026-10-07), for API
+ * clients; the CLI prints its own from the same shared definition, so it does not
+ * read this field and an older Worker cannot make it print less.
+ */
+export interface PublishRequestResponse {
+  message: string;
+  dataset_id: string;
+  status: string;
+  anonymous?: boolean;
+  identifier_screen?: IdentifierScreenView;
+  request_notice?: string[];
 }
 
 export interface PublishApproveResponse {
@@ -124,13 +147,13 @@ export interface PublishApproveResponse {
 export async function requestPublication(
   datasetId: string,
   options: { anonymous?: boolean } = {},
-): Promise<{ message: string; dataset_id: string; status: string; anonymous?: boolean }> {
+): Promise<PublishRequestResponse> {
   // `anonymous` is echoed by the server (#1408). The caller must print from
   // the ECHO rather than from `options.anonymous`: what matters to a depositor
   // is what was recorded, not what was typed, and the two diverge exactly in
   // the cases worth catching -- a dropped body, a proxy that rewrites it, an
   // older backend that does not know the flag.
-  return request<{ message: string; dataset_id: string; status: string; anonymous?: boolean }>(
+  return request<PublishRequestResponse>(
     `/datasets/${datasetId}/publish/request`,
     options.anonymous
       ? {
@@ -185,6 +208,19 @@ export async function denyPublication(
     },
     true,
   );
+}
+
+/**
+ * Re-run the identifier screen of a dataset's active publication request
+ * (admin; epic #1610, phase 4). The admins are mailed when it reports.
+ */
+export async function rerunIdentifierScreen(datasetId: string): Promise<{
+  dataset_id: string;
+  request_id: number;
+  status: string;
+  identifier_screen: IdentifierScreenView;
+}> {
+  return request(`/admin/publish/${datasetId}/identifier-screen`, { method: "POST" }, true);
 }
 
 /**
@@ -314,6 +350,7 @@ export async function approvePublication(
   skipCiCheck = false,
   onRetry?: (info: PublishRetryInfo) => void,
   onProgress?: (info: PublishProgressInfo) => void,
+  acknowledgeIdentifierScreen?: string,
 ): Promise<PublishApproveResponse> {
   const MAX_ATTEMPTS = 5;
   const RETRY_DELAY_MS = APPROVE_RETRY_DELAY_MS;
@@ -381,6 +418,13 @@ export async function approvePublication(
               s3_lock_continuation_token,
               s3_lock_total,
               skip_ci_check: skipCiCheck,
+              // Epic #1610 phase 4: the admin's recorded reason for approving
+              // over a screen that needs a person to look. Sent on every call:
+              // a retry that lands before the run is marked approving passes
+              // the gate again, and must carry the same reason.
+              ...(acknowledgeIdentifierScreen !== undefined
+                ? { acknowledge_identifier_screen: acknowledgeIdentifierScreen }
+                : {}),
             }),
           },
           true,

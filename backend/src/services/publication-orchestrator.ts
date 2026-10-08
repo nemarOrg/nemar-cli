@@ -68,6 +68,7 @@ import {
   setRepoVisibility,
 } from "./github";
 import { getDatasetsToken } from "./github-auth";
+import { checkApprovalScreenGate, hasStartedPublishing } from "./identifier-screen";
 import { generateManifest } from "./manifest";
 import { scheduleNeurobagelSync } from "./neurobagel-hooks.js";
 import { BIDS_METADATA_UNAVAILABLE, errorMessage, readRepoMetadata } from "./repo-metadata";
@@ -214,6 +215,14 @@ export function makeRespond(body: unknown, status?: number): RespondOutcome {
 export function isRespond(v: unknown): v is RespondOutcome {
   return typeof v === "object" && v !== null && RESPOND in v;
 }
+
+/** An acknowledgment of the identifier screen: a stated reason, 10 to 500 characters once trimmed. */
+export const acknowledgeIdentifierScreenSchema = z
+  .string()
+  .trim()
+  .min(10, "The acknowledgment needs a reason of at least 10 characters")
+  .max(500, "The acknowledgment is limited to 500 characters");
+
 /**
  * POST /admin/publish/:id/approve - Approve and run publication orchestrator
  *
@@ -249,6 +258,11 @@ export const approveSchema = z.object({
   // success.
   s3_lock_offset: z.number().optional(),
   skip_ci_check: z.boolean().optional().default(false),
+  // Epic #1610 phase 4: an admin's reason for approving over an identifier
+  // screen that needs a person to look (`screenGate` answers "acknowledge").
+  // Recorded on the request with the admin and audited; ignored for any other
+  // screen state, and never enough for direct identifiers.
+  acknowledge_identifier_screen: acknowledgeIdentifierScreenSchema.optional(),
 });
 
 export type ApproveBody = z.infer<typeof approveSchema>;
@@ -2465,6 +2479,34 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
       status: "published",
       ...(retryWarnings.length > 0 ? { warnings: retryWarnings } : {}),
     });
+  }
+
+  // The identifier screen gate (epic #1610 phase 4, ADR 0086), before anything
+  // is marked: a request whose screen is not clear for its CURRENT content
+  // never starts approving. It is skipped only for a resume of a run that has
+  // already started publishing (`hasStartedPublishing`: a step after the
+  // validation-only ones completed). From then on the run must be able to
+  // finish, and its own steps commit to main, so a head check would strand it
+  // halfway. Before that point nothing is public, and the depositor may have
+  // pushed since the earlier attempt stopped (a failed ci_check leaves the row
+  // `approving`), so a resume, or the import pipeline's resume-flagged retry of
+  // a request that never started, is gated like a fresh run. Sandbox (`xx`)
+  // datasets are exempt inside the check.
+  const startedPublishing =
+    resume && request.status === "approving" && hasStartedPublishing(request.steps_completed);
+  if (!startedPublishing) {
+    const gate = await checkApprovalScreenGate(env, {
+      requestId: request.id,
+      datasetId,
+      adminUserId: c.approver.id,
+      acknowledgment: body.acknowledge_identifier_screen,
+    });
+    if (!gate.ok) {
+      console.warn(
+        `[publish] ${datasetId}: approval refused by the identifier screen (${gate.refusal.gate})`,
+      );
+      return c.json(gate.refusal, 409);
+    }
   }
 
   // Mark as approving

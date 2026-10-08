@@ -40,3 +40,9 @@ Two facts about this failure shaped what follows. First, it was invisible from o
 - Issue #1392 (the defect, the fleet measurement, and the repair), issue #1396 (the missing-content population), issue #1380 (the session-token trap behind the fsck alternative).
 - `src/lib/git-annex/transfer.ts` (`batchSetKeysPresent`), `src/lib/fleet-key-registration.ts`, `src/lib/aws-cli.ts` (`listS3ObjectKeys`).
 - Rollout: 519 datasets repaired, 629,620 keys, verified by an independent re-scan that moved fully-registered datasets from 266 to 785 -- a delta matching the repaired count exactly.
+
+## Amendment 2026-10-04 (#1610): privacy corrections
+
+Registration reads the purge list and refuses a purged key.
+**Not built in Phase 2 of #1610:** there is no purge list yet, and registration does not read one ([ADR 0085](0085-a-privacy-correction-scrubs-every-version-in-place.md), "Build status").
+A privacy correction registers its new keys with `setpresentkey` and reads the log back, and marks the old keys dead ([ADR 0085](0085-a-privacy-correction-scrubs-every-version-in-place.md)).

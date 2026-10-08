@@ -260,12 +260,16 @@ export function chunkAddTargets(
  * already tracked (gitignore never applied to them) but are momentarily
  * untracked because the caller uncached them to make the add look again.
  * Without it such a path is skipped silently and ends up in neither plane.
+ *
+ * `backend` passes `--backend`, which outranks an inherited `annex.backend`
+ * attribute. The import's identifier scrub (ADR 0089) names `SHA256E` so the key
+ * that replaces a scrubbed recording is one ADR 0085's tools can follow.
  */
 export async function gitAnnexAdd(
   path: string,
   targets: string | string[] = ".",
   chunking: { maxPaths?: number; maxBytes?: number } = {},
-  options: { forceLarge?: boolean; checkGitignore?: boolean } = {},
+  options: { forceLarge?: boolean; checkGitignore?: boolean; backend?: "SHA256E" } = {},
 ): Promise<{ success: boolean; error?: string }> {
   const chunks =
     typeof targets === "string"
@@ -278,6 +282,7 @@ export async function gitAnnexAdd(
   const addFlags = [
     ...(options.forceLarge ? ["--force-large"] : []),
     ...(options.checkGitignore === false ? ["--no-check-gitignore"] : []),
+    ...(options.backend ? [`--backend=${options.backend}`] : []),
   ];
   try {
     for (const chunk of chunks) {

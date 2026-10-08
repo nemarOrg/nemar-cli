@@ -11,6 +11,15 @@ viewer downtime), then optionally purges the CDN so the viewer sees it at once.
 This is the first piece of the admin zarr backfill (epic #684, Task E). It runs
 where the driver runs (Hallu / Actions): git + aws + uv/python + nemar CLI.
 
+WARNING: with --apply this is an unconditional read-modify-write of LIVE root
+`zarr.json` objects: it reads a store's root, edits it, and puts the whole
+document back, with no ETag condition. NEVER run it while anything else may
+rewrite the same roots, in particular the Phase 8 subject-information strip of
+existing stores (#1626) or a reconversion of the same dataset: a root it read
+before the strip finished would be written back over the stripped one, putting
+the removed subject members back on the public bucket. It also never removes
+subject members itself, so it is no substitute for that strip.
+
 Per dataset:
   nemar dataset download <id> --no-data -o <tmp>   # working tree w/ json sidecars
   read s3://<bucket>/<id>/zarr/index.json          # the list of stores

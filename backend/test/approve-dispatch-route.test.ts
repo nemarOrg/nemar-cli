@@ -17,6 +17,11 @@
  * tests use, so the request each case sends is read off the wire. Ages are set
  * with SQLite's own `datetime('now', '-N minutes')`, 20 and 1 minutes against
  * the 15-minute lease, so no case sits on the edge.
+ *
+ * Every seeded request carries a clean identifier screen of the commit the
+ * stand-in reports as `main` (epic #1610 phase 4), whose one read the stand-in
+ * answers without recording it as a dispatch; the screen gate on this route is
+ * pinned in identifier-screen-gate.test.ts.
  */
 
 import type { Database } from "bun:sqlite";
@@ -28,6 +33,7 @@ import { hashApiKey } from "../src/services/token";
 import { issueSession } from "../src/services/web-session";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, interceptingD1, realD1, yieldingD1 } from "./helpers/d1";
+import { SCREENED_HEAD, mainRefAnswer, markScreen } from "./helpers/identifier-screen";
 
 const ADMIN_KEY = "dispatch-admin-key-0123456789abcdef0123456789abcdef";
 const SECOND_ADMIN_KEY = "dispatch-admin2-key-0123456789abcdef0123456789abcdef";
@@ -56,6 +62,10 @@ beforeAll(() => {
   server = Bun.serve({
     port: 0,
     async fetch(request) {
+      // The identifier screen gate's read of `main` is not a dispatch, and it
+      // answers whatever `githubStatus` a case sets for the dispatch itself.
+      const ref = mainRefAnswer(request);
+      if (ref) return ref;
       dispatches.push({
         path: new URL(request.url).pathname,
         authorization: request.headers.get("authorization"),
@@ -132,8 +142,10 @@ function seedRequest(seed: Seed = {}): number {
              ${seed.requestedBy ?? "NULL"}, ${modifier(seed.dispatchedAt)}, ?)`,
     [seed.dataset ?? DATASET, seed.status ?? "requested", adminId, seed.lastError ?? null],
   );
-  return db.query<{ id: number }, []>("SELECT MAX(id) AS id FROM publication_requests").get()
+  const id = db.query<{ id: number }, []>("SELECT MAX(id) AS id FROM publication_requests").get()
     ?.id as number;
+  markScreen(db, id, seed.dataset ?? DATASET);
+  return id;
 }
 
 function row(id: number) {
@@ -710,15 +722,23 @@ describe("when GitHub's answer is lost", () => {
   let dropper: ReturnType<typeof Bun.listen>;
 
   beforeAll(() => {
-    // Accepts the TCP connection and closes it without a response.
+    // Accepts the TCP connection and closes it without a response, except for
+    // the identifier screen gate's read of `main` (epic #1610 phase 4), which
+    // it answers so the case reaches the dispatch whose answer is lost.
     dropper = Bun.listen({
       hostname: "127.0.0.1",
       port: 0,
       socket: {
-        open(socket) {
+        data(socket, data) {
+          const head = new TextDecoder().decode(data).split("\r\n")[0] ?? "";
+          if (/^GET \/repos\/nemarDatasets\/[^/]+\/git\/ref\/heads\/main /.test(head)) {
+            const body = JSON.stringify({ object: { sha: SCREENED_HEAD } });
+            socket.write(
+              `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n${body}`,
+            );
+          }
           socket.end();
         },
-        data() {},
       },
     });
   });

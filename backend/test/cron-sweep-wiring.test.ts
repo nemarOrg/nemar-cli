@@ -74,8 +74,15 @@ const INDEX_PATH = join(import.meta.dir, "../src/index.ts");
  *  - `helper`       not a sweep at all: a SQL/query builder, or an output
  *                   formatter for a sweep's result, that happens to carry the
  *                   word in its name
+ *  - `tick-prod-only` driven from the 30-minute `AUTO_IMPORT_CRON` branch of
+ *                   `scheduled()` (which returns before the daily block), inside
+ *                   that branch's own `if (!isNonProductionEnv(env)) {` guard: a
+ *                   production-only job whose cadence the daily tick cannot meet
  */
-const SWEEP_WIRING: Record<string, "prod-only" | "all-envs" | "cron-wrapped" | "helper"> = {
+const SWEEP_WIRING: Record<
+  string,
+  "prod-only" | "all-envs" | "cron-wrapped" | "helper" | "tick-prod-only"
+> = {
   archiveRetrySweep: "prod-only",
   manifestIntegritySweep: "prod-only",
   sweepImportRetries: "prod-only",
@@ -106,6 +113,26 @@ const SWEEP_WIRING: Record<string, "prod-only" | "all-envs" | "cron-wrapped" | "
   runNeurobagelVerificationSweep: "cron-wrapped",
   runNeurobagelVerificationSweepCron: "prod-only",
   sweepBlockedBidsValidationRequests: "all-envs",
+  // Epic #1610 phase 4: the identifier-screen watchdog. Its deadline is 50
+  // minutes, so it rides the 30-minute tick; it mails admins, so it is
+  // production-only there and absent from DEV_CRON_ALLOWLIST.
+  sweepIdentifierScreens: "tick-prod-only",
+  // Epic #1610 phase 5 (ADR 0088): the scheduled identifier sweep and its weekly
+  // report. Both ride the 30-minute tick: the sweep's deadline is the screen's 50
+  // minutes, and the report retries on a later tick when a send reached nobody. The
+  // sweep dispatches against the shared nemarDatasets org and the report mails
+  // admins, so both are production-only there and absent from DEV_CRON_ALLOWLIST;
+  // each also refuses outside production on its own.
+  runIdentifierSweepTick: "tick-prod-only",
+  sendIdentifierSweepWeeklyReport: "tick-prod-only",
+  // The sweep callback's store, called by POST /webhooks/identifier-sweep-result;
+  // not a cron entry point.
+  storeSweepResult: "helper",
+  // The sweep's mail body sender and its callback token's pair; called by the weekly
+  // report, the tick and the callback route, never cron entry points themselves.
+  sendIdentifierSweepReportEmail: "helper",
+  signIdentifierSweepCallbackToken: "helper",
+  verifyIdentifierSweepCallbackToken: "helper",
   // #1440: the non-production scope clause for sweepBlockedBidsValidationRequests,
   // exported so the test imports the REAL clause rather than retyping it. Pure,
   // driven only by the sweep above, and never a cron entry point of its own.
@@ -212,9 +239,34 @@ function prodOnlyBlockLines(lines: string[]): string[] {
   return lines.slice(start + 1, end);
 }
 
+/**
+ * The lines of the block that opens with `opener` (trimmed), delimited by
+ * indentation the same way {@link prodOnlyBlockLines} is, searching from
+ * `from`. Returns the body lines and the index of the opener.
+ */
+function blockAfter(lines: string[], opener: string, from = 0): { body: string[]; start: number } {
+  const start = lines.findIndex((l, i) => i >= from && l.trim() === opener);
+  if (start === -1) throw new Error(`block "${opener}" not found in index.ts`);
+  const indent = " ".repeat(lines[start].length - lines[start].trimStart().length);
+  const end = lines.findIndex((l, i) => i > start && l === `${indent}}`);
+  if (end === -1) throw new Error(`block "${opener}" has no closing brace at its indent`);
+  return { body: lines.slice(start + 1, end), start };
+}
+
+/**
+ * The production-only guard INSIDE the 30-minute tick's branch. The branch
+ * returns before `prodOnlyJobs` is computed, so a production-only job on this
+ * tick needs a guard of its own, and this is the region that guard encloses.
+ */
+function tickProdOnlyBlockLines(lines: string[]): string[] {
+  const branch = blockAfter(lines, "if (event.cron === AUTO_IMPORT_CRON) {");
+  return blockAfter(branch.body, "if (!isNonProductionEnv(env)) {").body;
+}
+
 const indexLines = readFileSync(INDEX_PATH, "utf-8").split("\n");
 const allCode = codeLines(indexLines).join("\n");
 const prodOnlyCode = codeLines(prodOnlyBlockLines(indexLines)).join("\n");
+const tickProdOnlyCode = codeLines(tickProdOnlyBlockLines(indexLines)).join("\n");
 
 /** A call that is actually scheduled: `ctx.waitUntil(` wrapping it, possibly
  *  across a line break. An async call in `scheduled()` that is NOT handed to
@@ -279,6 +331,23 @@ describe("every sweep service is declared and driven", () => {
       expect(callCount(allCode, name)).toBeGreaterThanOrEqual(1);
     });
 
+    if (kind === "tick-prod-only") {
+      test(`${name} is wrapped in ctx.waitUntil inside the 30-minute tick's production guard`, () => {
+        expect(isScheduled(tickProdOnlyCode, name)).toBe(true);
+      });
+
+      test(`${name} is called ONLY inside the 30-minute tick's production guard`, () => {
+        // Anywhere else it would either run on the dev worker's tick or, in the
+        // daily block, miss the deadline it exists to meet.
+        expect(callCount(allCode, name)).toBe(callCount(tickProdOnlyCode, name));
+      });
+
+      test(`${name} is NOT in DEV_CRON_ALLOWLIST`, () => {
+        const allowlist = /DEV_CRON_ALLOWLIST[^;]*;/s.exec(allCode)?.[0] ?? "";
+        expect(allowlist).not.toContain(name);
+      });
+    }
+
     if (kind === "prod-only") {
       test(`${name} is wrapped in ctx.waitUntil inside the prod-only block`, () => {
         expect(isScheduled(prodOnlyCode, name)).toBe(true);
@@ -337,6 +406,14 @@ describe("every sweep service is declared and driven", () => {
 });
 
 describe("the prod-only gate keeps its polarity", () => {
+  test("the 30-minute tick's production guard is the negation of isNonProductionEnv", () => {
+    // `tickProdOnlyBlockLines` finds the guard by this exact text, so an
+    // inverted guard (`if (isNonProductionEnv(env))`) is not found at all and
+    // fails the whole file loudly; this states the expectation by name.
+    const branch = blockAfter(indexLines, "if (event.cron === AUTO_IMPORT_CRON) {");
+    expect(branch.body.map((l) => l.trim())).toContain("if (!isNonProductionEnv(env)) {");
+  });
+
   test("prodOnlyJobs is the negation of isNonProductionEnv", () => {
     // Inverting this runs every prod-only job ONLY outside production, which
     // no call-site assertion can see. `isNonProductionEnv` is itself an

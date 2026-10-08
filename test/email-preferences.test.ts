@@ -24,6 +24,7 @@ describe("parseEmailPreferences", () => {
       publication_request: true,
       announcements: true,
       dataset_anonymity: true,
+      identifier_sweep: true,
     });
   });
 
@@ -36,6 +37,7 @@ describe("parseEmailPreferences", () => {
       publication_request: true,
       announcements: true,
       dataset_anonymity: true,
+      identifier_sweep: true,
     });
   });
 
@@ -53,6 +55,7 @@ describe("parseEmailPreferences", () => {
       publication_request: false,
       announcements: false,
       dataset_anonymity: true,
+      identifier_sweep: true,
     });
   });
 
@@ -65,6 +68,17 @@ describe("parseEmailPreferences", () => {
     expect(result.announcements).toBe(true);
   });
 
+  test("an explicit identifier_sweep: false is honored, and a row that predates it opts in", () => {
+    // Epic #1610 phase 5 (ADR 0088): the identifier sweep's weekly report. Same
+    // default as dataset_anonymity above, and the same control in both directions.
+    expect(
+      parseEmailPreferences(JSON.stringify({ identifier_sweep: false })).identifier_sweep,
+    ).toBe(false);
+    expect(
+      parseEmailPreferences(JSON.stringify({ dataset_anonymity: false })).identifier_sweep,
+    ).toBe(true);
+  });
+
   test("missing fields default to true", () => {
     const result = parseEmailPreferences(JSON.stringify({}));
     expect(result).toEqual({
@@ -72,6 +86,7 @@ describe("parseEmailPreferences", () => {
       publication_request: true,
       announcements: true,
       dataset_anonymity: true,
+      identifier_sweep: true,
     });
   });
 
@@ -82,6 +97,7 @@ describe("parseEmailPreferences", () => {
       publication_request: true,
       announcements: true,
       dataset_anonymity: true,
+      identifier_sweep: true,
     });
   });
 
@@ -92,6 +108,7 @@ describe("parseEmailPreferences", () => {
       publication_request: false,
       announcements: true,
       dataset_anonymity: true,
+      identifier_sweep: true,
     });
   });
 
@@ -102,6 +119,7 @@ describe("parseEmailPreferences", () => {
       publication_request: true,
       announcements: true,
       dataset_anonymity: true,
+      identifier_sweep: true,
     });
   });
 
@@ -112,6 +130,7 @@ describe("parseEmailPreferences", () => {
       publication_request: true,
       announcements: true,
       dataset_anonymity: true,
+      identifier_sweep: true,
     });
   });
 
@@ -124,6 +143,7 @@ describe("parseEmailPreferences", () => {
       publication_request: true,
       announcements: true,
       dataset_anonymity: true,
+      identifier_sweep: true,
     });
   });
 
@@ -136,6 +156,7 @@ describe("parseEmailPreferences", () => {
       publication_request: true,
       announcements: true,
       dataset_anonymity: true,
+      identifier_sweep: true,
     });
   });
 
@@ -149,6 +170,7 @@ describe("parseEmailPreferences", () => {
       publication_request: true,
       announcements: true,
       dataset_anonymity: true,
+      identifier_sweep: true,
     });
   });
 });

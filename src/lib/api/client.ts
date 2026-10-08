@@ -17,6 +17,7 @@ import {
   deviceGrantErrorSchema,
 } from "../../../shared/contract/device-auth.js";
 import { IDENTITY_CONFLICT_CODES } from "../../../shared/contract/identity.js";
+import { IDENTIFIER_SCREEN_ERROR_CODES } from "../../../shared/contract/publication.js";
 import {
   ACCOUNT_KIND_ERROR_CODES,
   PROFILE_EDIT_ERROR_CODES,
@@ -232,11 +233,16 @@ export async function request<T>(
     // `same_kind`, ...), not a sentence.
     const isAccountKindCode =
       typeof data.error === "string" && ACCOUNT_KIND_ERROR_CODES.includes(data.error);
+    // The identifier screen's refusals (epic #1610 phase 4): a code in
+    // `error`, the reason and the next command in `message`.
+    const isScreenCode =
+      typeof data.error === "string" && IDENTIFIER_SCREEN_ERROR_CODES.includes(data.error);
     const prefersMessage =
       hasBlockReason ||
       isProfileEditCode ||
       isDeviceCode ||
       isAccountKindCode ||
+      isScreenCode ||
       (missing !== undefined &&
         typeof data.error === "string" &&
         UPLOAD_ACCESS_ERROR_CODES.includes(data.error));

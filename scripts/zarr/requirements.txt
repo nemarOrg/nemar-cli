@@ -157,13 +157,35 @@
 # channels.tsv with the store's labels). The XDF/EEGLAB/neo/Trigno collision
 # has no detector. Either way the fix is a targeted `--dataset` or requeue
 # run, one dataset at a time, not the stamp.
-# <1.2.11 is a CAP, not a floor, raised deliberately per release: a biosigIO
-# patch release has changed what a store contains twice in a row (1.2.9,
-# 1.2.10), so the next one is read before the converter takes it. Raise it in
-# three places at once: here, `BIOSIGIO_SPEC`, `BIOSIGIO_FLOOR` and `BIOSIGIO_CAP`
-# in hallu-zarr.sh (setup() refuses an installed biosigIO outside [floor, cap)
-# after install, and any pre-release), and test_hallu_zarr_config.py.
-biosigio[zarr,meg,mef3,hdf5]>=1.2.10,<1.2.11
+# >=1.2.11: a store carries no subject information (#1626). biosigIO's three
+# store writers (`Recording.to_zarr`, `ZarrExporter.export`, `stream_to_zarr`)
+# take `exclude_subject_info`, which removes the members
+# `biosigio.SUBJECT_INFO_KEYS` names (patient code and name, sex, birth date,
+# age, the EDF operator and administrative fields, EEGLAB subject and group,
+# WFDB comments, and the read-recovery provenance `brainvision_header_recovered`
+# and `eeglab_fdt_recovered`) from `recording_metadata` at any depth, reduces
+# `source_file` and `bti_pdf_file` to their final path component, and marks the
+# store root `subject_info_excluded: true`. The converter passes it on EVERY
+# write (`generate_zarr.write_store`) and refuses to convert on a biosigIO that
+# lacks it (`biosigio_subject_info_problems`, exit 78), so this is a FLOOR the
+# converter enforces itself, not only a pin. Its technical members stay:
+# `channels_tsv_units` and `channel_labels_deduplicated`, which the converter
+# reads back, are label-keyed maps biosigIO never descends into, and
+# `source_file` is still rewritten to the BIDS path afterwards. No converter,
+# index or backend code reads a removed member. The default (option off) writes
+# exactly what 1.2.10 wrote, so nothing else in a store changes.
+# ZARR_ENGINE_VERSION is NOT bumped (ADR 0033): the stamp records a widening of
+# discovery, and 1.2.11 discovers exactly what 1.2.10 did. Stores already
+# published keep their subject members until they are reconverted or stripped
+# in place by a fleet tool that #1626 lists and this release does not build (the scrub's
+# `zarr` stage strips one dataset at a time), not by the stamp.
+# <1.2.12 is a CAP, not a floor, raised deliberately per release: a biosigIO
+# patch release has changed what a store contains three times in a row (1.2.9,
+# 1.2.10, 1.2.11), so the next one is read before the converter takes it. Raise
+# it in three places at once: here, `BIOSIGIO_SPEC`, `BIOSIGIO_FLOOR` and
+# `BIOSIGIO_CAP` in hallu-zarr.sh (setup() refuses an installed biosigIO outside
+# [floor, cap) after install, and any pre-release), and test_hallu_zarr_config.py.
+biosigio[zarr,meg,mef3,hdf5]>=1.2.11,<1.2.12
 
 # Draft 2020-12 validator for the converter's own pre-upload self-check: the index
 # it is about to publish is validated against `shared/zarr-index.schema.json` (and

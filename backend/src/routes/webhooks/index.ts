@@ -14,6 +14,8 @@
 import { Hono } from "hono";
 import type { Bindings } from "../../types/bindings.js";
 import { registerArchiveReadyRoutes } from "../callbacks/archive-ready.js";
+import { registerIdentifierScreenRoutes } from "../callbacks/identifier-screen.js";
+import { registerIdentifierSweepCallbackRoutes } from "../callbacks/identifier-sweep.js";
 import { registerImportStateRoutes } from "../callbacks/import-state.js";
 import { registerLlmEnrichRoutes } from "../callbacks/llm-enrich.js";
 import { registerManifestCallbackRoutes } from "../callbacks/manifest.js";
@@ -32,6 +34,8 @@ const webhooks = new Hono<{ Bindings: Bindings }>();
 registerVersionDoiRoutes(webhooks);
 registerManifestCallbackRoutes(webhooks);
 registerPrescreenRoutes(webhooks);
+registerIdentifierScreenRoutes(webhooks);
+registerIdentifierSweepCallbackRoutes(webhooks);
 registerImportStateRoutes(webhooks);
 registerLlmEnrichRoutes(webhooks);
 registerGithubWebhookRoutes(webhooks);

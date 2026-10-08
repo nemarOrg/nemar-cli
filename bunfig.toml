@@ -1,0 +1,8 @@
+# A bare `bun test` (package.json "test", the bump-validator workflow) does not run the scrub
+# toolchain's suites: they need git-annex, uv, git-filter-repo and the aws CLI, take minutes, and
+# run in their own sharded CI jobs (`scrub-tools-shard`, gated by `scrub-tools`). Those jobs, and
+# anyone running them by hand, use `bun run test:scrub`, which overrides this list with
+# `--path-ignore-patterns` (the flag replaces the list here). Measured with bun 1.4.2: an ignore
+# pattern here also hides an explicit path, so the override is what makes the explicit run work.
+[test]
+pathIgnorePatterns = ["test/scrub/**"]

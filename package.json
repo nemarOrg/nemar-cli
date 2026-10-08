@@ -1,6 +1,6 @@
 {
   "name": "nemar-cli",
-  "version": "0.10.14",
+  "version": "0.10.15-dev14",
   "description": "CLI for NEMAR (Neuroelectromagnetic Data Archive and Tools Resource) dataset management",
   "type": "module",
   "main": "dist/index.js",
@@ -12,6 +12,8 @@
     "build": "bun build src/index.ts --outdir dist --target bun --minify && sed '1s|#!/usr/bin/env node|#!/usr/bin/env bun|' dist/index.js > dist/index.js.tmp && mv dist/index.js.tmp dist/index.js",
     "test": "bun test",
     "lint": "biome check src/",
+    "lint:scrub": "biome check scripts/scrub shared/identifier-scrub.ts test/scrub",
+    "test:scrub": "bun test --preload ./test/scrub/helpers/temp-dirs-preload.ts --path-ignore-patterns='__run_every_scrub_suite__' test/scrub test/identifier-scan.test.ts test/identifier-scrub.test.ts test/identifier-dates.test.ts test/identifier-fleet.test.ts",
     "migrations:d1-check": "bun run scripts/d1-migration-check.ts",
     "zarr:geometry-check": "bun run backend/scripts/zarr-geometry-conformance.ts",
     "lint:fix": "biome check --fix src/",

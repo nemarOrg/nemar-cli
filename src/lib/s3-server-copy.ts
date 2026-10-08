@@ -633,11 +633,25 @@ export function selectShardCopyItems(
   return { shardItems, localSkipped };
 }
 
+/**
+ * What prepare's identifier scrub tells finalize (ADR 0089). Absent on a manifest an older prepare
+ * wrote, which finalize reads as "the scrub did not run" and never approves automatically.
+ */
+export interface ImportPrivacyRecord {
+  version: 1;
+  /**
+   * The scrub changed content git tracks (a JSON value, a recording git held), so the pushed
+   * history still holds the original: a person decides before publication.
+   */
+  historyHoldsOriginals: boolean;
+}
+
 export interface ImportManifest {
   openneuroId: string;
   nemarId: string;
   nemarUuid: string;
   items: ImportManifestItem[];
+  privacy?: ImportPrivacyRecord;
 }
 
 function manifestUri(bucket: string, nemarId: string): string {

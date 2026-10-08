@@ -10,6 +10,7 @@
  */
 
 import type { PublicationBlockReason } from "../../../../shared/contract/publication.js";
+import { publicationRequestNotice } from "../../../../shared/identifier-screen-report.js";
 import { authMiddleware } from "../../middleware/auth";
 import {
   FIRST_PUBLICATION_STAMP_SQL,
@@ -18,11 +19,6 @@ import {
   isAnonymous,
 } from "../../services/anonymity";
 import { isValidDatasetId } from "../../services/datasetId";
-import {
-  getAdminEmailsForCategory,
-  resolveEmailConfig,
-  sendPublicationRequestEmail,
-} from "../../services/email";
 import { isExemplarPublishAllowed } from "../../services/exemplar";
 import {
   checkWorkflowExists,
@@ -35,6 +31,14 @@ import {
   triggerPrescreenRun,
 } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
+import {
+  RESET_SCREEN_COLUMNS_SQL,
+  type ScreenView,
+  mailPublicationRequest,
+  screenEmailSection,
+  screenView,
+  startScreenAndNotify,
+} from "../../services/identifier-screen";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../services/repo-spec";
 import { markDatasetPrivate, markDatasetPublic } from "../../services/s3";
 import {
@@ -80,6 +84,10 @@ const BLOCK_MESSAGES: Record<PublicationBlockReason, string> = {
   // given_name/family_name cannot be attributed at all. The message is the
   // one place a user is told how to supply it, so it lives with the reason.
   [OWNER_NAME_MISSING_REASON]: OWNER_NAME_MISSING_MESSAGE,
+  // Epic #1610 phase 4. The counts are on the status view's
+  // `identifier_screen`; the message says where to look and what clears it.
+  identifier_screen_findings:
+    "The identifier screen found information that identifies a participant (a name, birth date or record number, for example in EDF/BDF headers or sidecar files). Remove it, push the change, and request publication again; that re-runs the screen. The kinds and counts it found are listed under the identifier screen below.",
 };
 
 /**
@@ -437,9 +445,14 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         // /publish/status view stays as specific as this rejection; NULL for
         // CI blocks, and stale reasons from a prior minimums block are
         // overwritten either way.
+        //
+        // The identifier screen is reset here too (epic #1610 phase 4): the
+        // depositor may have changed the data since the last screen, and a
+        // result left on a blocked row would be read as current once the row
+        // is unblocked by anything other than a re-request.
         await db
           .prepare(
-            "UPDATE publication_requests SET status = 'blocked', block_reason = ?, min_requirements_reasons = ?, anonymous = ?, updated_at = datetime('now') WHERE id = ?",
+            `UPDATE publication_requests SET status = 'blocked', block_reason = ?, min_requirements_reasons = ?, anonymous = ?, ${RESET_SCREEN_COLUMNS_SQL}, updated_at = datetime('now') WHERE id = ?`,
           )
           .bind(
             blockReason,
@@ -452,13 +465,18 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         // Unblock: transition to requested. Also clear any prior pre-screen
         // state so a re-request gets a clean screen (and a disabled-feature
         // re-request doesn't leave a stale 'failed'/nonce on a 'requested' row).
+        //
+        // Every identifier-screen column is reset in this SAME statement
+        // (epic #1610 phase 4): a re-request is new content, so a stale 'clean',
+        // an old acknowledgment or an old email claim must never carry over to
+        // it. The screen is dispatched afresh below.
         await db
           .prepare(
             // `anonymous` is re-stated rather than left alone: a depositor who
             // re-requests WITHOUT the flag is asking for a normal publication,
             // and a stale 1 here would silently give them an anonymous release
             // instead -- the one mistake this flow must not make quietly.
-            "UPDATE publication_requests SET status = 'requested', block_reason = NULL, min_requirements_reasons = NULL, prescreen_status = NULL, prescreen_nonce = NULL, prescreen_issue_url = NULL, prescreen_reasons = NULL, anonymous = ?, updated_at = datetime('now') WHERE id = ?",
+            `UPDATE publication_requests SET status = 'requested', block_reason = NULL, min_requirements_reasons = NULL, prescreen_status = NULL, prescreen_nonce = NULL, prescreen_issue_url = NULL, prescreen_reasons = NULL, ${RESET_SCREEN_COLUMNS_SQL}, anonymous = ?, updated_at = datetime('now') WHERE id = ?`,
           )
           .bind(anonymousRequested ? 1 : 0, requestId)
           .run();
@@ -559,36 +577,76 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       }
     }
 
-    // Notify admins who have publication_request notifications enabled
-    try {
-      const adminEmails = await getAdminEmailsForCategory(db, "publication_request", c.env);
-      if (adminEmails.length > 0) {
-        const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
-        await sendPublicationRequestEmail(
-          adminEmails,
+    // The identifier screen (epic #1610 phase 4) decides WHEN the admins are
+    // mailed. A dispatched screen mails them when its report lands (the
+    // callback, or the watchdog when it never does), stating the result. A
+    // screen that could not be started is mailed NOW, saying so. A sandbox
+    // exemplar is not screened and is mailed now, as before. Never gated on
+    // PRESCREEN_ENABLED: the screen must not be silently switchable off.
+    //
+    // `startScreenAndNotify` never throws: a start that throws before anything
+    // is recorded (a database error) is mailed there as NOT RUN.
+    let screen: ScreenView;
+    const started =
+      prId === null
+        ? null
+        : await startScreenAndNotify(c.env, {
+            requestId: prId,
+            datasetId,
+            githubRepo: dataset.github_repo,
+          });
+    if (started === null || started.kind === "exempt") {
+      // Exempt, or (prId null) a request the screen cannot be tied to: the
+      // mail goes now, and the section says which ("not applicable (sandbox)"
+      // for an exempt dataset, "NOT RUN" otherwise).
+      try {
+        await mailPublicationRequest(c.env, {
           datasetId,
-          currentUser.username,
-          c.env.RESEND_API_KEY,
-          fromEmail,
-          replyTo,
-          isDev,
-          c.env,
-          { anonymous: anonymousRequested },
+          username: currentUser.username,
+          anonymous: anonymousRequested,
+          screen: screenEmailSection(datasetId, null, null),
+        });
+      } catch (mailError) {
+        console.error(
+          `[publish-request] admin mail failed for ${datasetId}:`,
+          mailError instanceof Error ? mailError.message : mailError,
         );
       }
-    } catch (emailError) {
-      console.error("Failed to send publication request notification:", emailError);
+    }
+    if (prId !== null) {
+      const row = await db
+        .prepare(
+          "SELECT identifier_screen_status, identifier_screen_report FROM publication_requests WHERE id = ?",
+        )
+        .bind(prId)
+        .first<{
+          identifier_screen_status: string | null;
+          identifier_screen_report: string | null;
+        }>();
+      screen = screenView(datasetId, row?.identifier_screen_status, row?.identifier_screen_report);
+    } else {
+      screen = screenView(datasetId, null, null);
     }
 
     // The flag is ECHOED, not assumed. A depositor whose client lost it would
     // otherwise see a success message byte-identical to a correct request and
     // find out at approval, when the outcome is no longer theirs to change.
     // The CLI prints a different line for each value (`src/commands/dataset.ts`).
+    //
+    // `request_notice` is what an accepted request is told, from the one
+    // definition the CLI prints (ADR 0090, amendment 2026-10-07). It is the
+    // same neutral words for a new request and for a re-request of a blocked
+    // one, and it never depends on `screen`: the screen has not reported, and
+    // a result shown now could be stale by the time anyone acts on it. It is
+    // on this response only. A request refused above (403, 404, 409, 422)
+    // returned its own text and never reaches here.
     return c.json({
       message: anonymousRequested ? "Anonymous release requested" : "Publication request submitted",
       dataset_id: datasetId,
       status: "requested",
       anonymous: anonymousRequested,
+      identifier_screen: screen,
+      request_notice: publicationRequestNotice(datasetId),
     });
   });
 
@@ -644,6 +702,8 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         updated_at: string;
         anonymous: number | null;
         github_repo: string | null;
+        identifier_screen_status: string | null;
+        identifier_screen_report: string | null;
       }>();
 
     if (!request) {
@@ -721,6 +781,13 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       // Without it the flag is write-only: nothing between `--anonymous` and
       // the published result reports which of the two runs is queued.
       anonymous: request.anonymous === 1,
+      // Epic #1610 phase 4: the screen as describeScreen words it -- headline,
+      // tone and count lines. Never the stored report, and never the nonce.
+      identifier_screen: screenView(
+        datasetId,
+        request.identifier_screen_status,
+        request.identifier_screen_report,
+      ),
       steps_completed: JSON.parse(request.steps_completed || "[]"),
       current_step: request.current_step,
       last_error: request.last_error,
@@ -754,13 +821,36 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         // `anonymous` rides along so the reminder says the same thing the
         // original notification did: an admin reading only the resend must
         // not approve an anonymous release believing it is a publication.
-        "SELECT id, status, updated_at, anonymous FROM publication_requests WHERE dataset_id = ? AND status = 'requested' ORDER BY requested_at DESC LIMIT 1",
+        // The screen columns ride along so the reminder carries the result as
+        // stored (epic #1610 phase 4).
+        "SELECT id, status, updated_at, anonymous, identifier_screen_status, identifier_screen_report FROM publication_requests WHERE dataset_id = ? AND status = 'requested' ORDER BY requested_at DESC LIMIT 1",
       )
       .bind(datasetId)
-      .first<{ id: number; status: string; updated_at: string; anonymous: number | null }>();
+      .first<{
+        id: number;
+        status: string;
+        updated_at: string;
+        anonymous: number | null;
+        identifier_screen_status: string | null;
+        identifier_screen_report: string | null;
+      }>();
 
     if (!request) {
       return c.json({ error: "No pending publication request found" }, 404);
+    }
+
+    // While the screen runs there is nothing to remind the admins of: they
+    // have not been mailed yet, and they will be when it finishes. Checked
+    // before the cooldown so the depositor hears the real reason.
+    if (request.identifier_screen_status === "pending") {
+      return c.json(
+        {
+          error: "identifier_screen_pending",
+          message:
+            "The identifier screen is still running. The admins are mailed when it finishes, with its result, so there is nothing to resend yet.",
+        },
+        409,
+      );
     }
 
     // Rate limit: 30 minutes between resends
@@ -776,22 +866,29 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       .bind(request.id)
       .run();
 
-    // Resend notification to admins who have publication_request notifications enabled
+    // Resend notification to admins who have publication_request notifications
+    // enabled, with the screen section as stored: a request that predates the
+    // screen says "NOT RUN for this request", never nothing.
     try {
-      const adminEmails = await getAdminEmailsForCategory(db, "publication_request", c.env);
-      if (adminEmails.length > 0) {
-        const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
-        await sendPublicationRequestEmail(
-          adminEmails,
+      const outcome = await mailPublicationRequest(c.env, {
+        datasetId,
+        username: currentUser.username,
+        anonymous: request.anonymous === 1,
+        screen: screenEmailSection(
           datasetId,
-          currentUser.username,
-          c.env.RESEND_API_KEY,
-          fromEmail,
-          replyTo,
-          isDev,
-          c.env,
-          { anonymous: request.anonymous === 1 },
-        );
+          request.identifier_screen_status,
+          request.identifier_screen_report,
+        ),
+      });
+      if (outcome.delivered > 0 && request.identifier_screen_status !== null) {
+        // A result whose first mail was lost has now reached an admin, so the
+        // watchdog must not send it a third time.
+        await db
+          .prepare(
+            "UPDATE publication_requests SET identifier_screen_emailed_at = COALESCE(identifier_screen_emailed_at, datetime('now')) WHERE id = ?",
+          )
+          .bind(request.id)
+          .run();
       }
     } catch (emailError) {
       console.error("Failed to resend publication notification:", emailError);
@@ -903,6 +1000,10 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
    * 2. Updates S3 bucket policy for public read
    * 3. Sets visibility='public' in database
    * 4. Logs action in audit_log
+   *
+   * A break-glass admin tool: it does NOT pass the identifier screen gate a
+   * publication approval does (ADR 0086 states the exception). Use the
+   * publication request flow for a dataset that has not been screened.
    */
   datasetRoutes.post("/:id/publish", authMiddleware, async (c) => {
     const datasetId = c.req.param("id");
