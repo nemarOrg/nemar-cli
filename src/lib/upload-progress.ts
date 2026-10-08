@@ -146,9 +146,10 @@ export function markFileUploaded(
     entry.error = undefined;
     if (fileInfo) {
       entry.size = fileInfo.size;
-      if (fileInfo.mtimeMs !== undefined) {
-        entry.mtimeMs = fileInfo.mtimeMs;
-      }
+      // The mtime is replaced with the new one even when there is none: leaving the old
+      // one beside the new size would describe a file that never existed. A record with
+      // no mtime fails toward a harmless re-add (see fileEntryChanged).
+      entry.mtimeMs = fileInfo.mtimeMs;
     }
   }
 }
