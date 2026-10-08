@@ -74,20 +74,29 @@ Examples:
 // ============================================================================
 
 /**
- * Commit the dataset and push it. Throws, with the reason, when either step fails.
- * `saveDataset` and `pushToGitHub` report failure in their result rather than by throwing,
- * and a save that failed closed (a changed file it would not commit, a git that could not
- * clear its flags) must not be reported as "Pushed to GitHub".
+ * What {@link saveAndPush} did: it worked (`warning` is set when the main branch was
+ * pushed and the git-annex branch was not), or the named step failed.
+ */
+export type SaveAndPushResult =
+  | { ok: true; warning?: string }
+  | { ok: false; step: "save" | "push"; error: string };
+
+/**
+ * Commit the dataset and push it. `saveDataset` and `pushToGitHub` report failure in
+ * their result rather than by throwing, so each result is read here: a save that failed
+ * closed (a git that could not report or clear its flags, or a failed commit) must not be
+ * reported as "Pushed to GitHub", and a push that only half worked says so.
  */
 export async function saveAndPush(
   datasetPath: string,
   message: string,
   author?: { name: string; email: string },
-): Promise<void> {
+): Promise<SaveAndPushResult> {
   const saved = await saveDataset(datasetPath, message, author);
-  if (!saved.success) throw new Error(`Saving the dataset failed: ${saved.error}`);
+  if (!saved.success) return { ok: false, step: "save", error: saved.error ?? "unknown error" };
   const pushed = await pushToGitHub(datasetPath);
-  if (!pushed.success) throw new Error(`Pushing to GitHub failed: ${pushed.error}`);
+  if (!pushed.success) return { ok: false, step: "push", error: pushed.error ?? "unknown error" };
+  return { ok: true, ...(pushed.warning ? { warning: pushed.warning } : {}) };
 }
 
 async function sandboxAction(options: { verbose?: boolean } = {}): Promise<void> {
@@ -387,10 +396,23 @@ async function sandboxAction(options: { verbose?: boolean } = {}): Promise<void>
   const pushSpinner = ora("Saving and pushing...").start();
 
   try {
-    await saveAndPush(datasetPath, "Initial sandbox training upload", author);
-    pushSpinner.succeed("Pushed to GitHub");
+    const published = await saveAndPush(datasetPath, "Initial sandbox training upload", author);
+    if (!published.ok) {
+      pushSpinner.fail(
+        published.step === "save" ? "Failed to save the dataset" : "Failed to push to GitHub",
+      );
+      console.log(chalk.red(`  ${published.error}`));
+      cleanupSandboxDataset(datasetPath);
+      return;
+    }
+    if (published.warning) {
+      pushSpinner.warn("Pushed to GitHub (with warning)");
+      console.log(chalk.yellow(`  ${published.warning}`));
+    } else {
+      pushSpinner.succeed("Pushed to GitHub");
+    }
   } catch (error) {
-    pushSpinner.fail("Failed to push to GitHub");
+    pushSpinner.fail("Failed to save and push");
     console.log(chalk.red(`  ${error instanceof Error ? error.message : "Unknown error"}`));
     cleanupSandboxDataset(datasetPath);
     return;
