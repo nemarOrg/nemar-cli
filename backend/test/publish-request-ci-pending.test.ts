@@ -67,6 +67,8 @@ type ReadmeMode = "text" | "empty" | "forbidden" | "missing";
 
 let server: Server;
 let runs: Runs = "none";
+// A dataset's own run state, where it differs from `runs`.
+let runsFor: Record<string, Runs> = {};
 let descriptionBody: string | null = NAMED;
 let descriptionStatus = 200;
 let runsStatus = 200;
@@ -106,13 +108,15 @@ beforeAll(() => {
         onRunsRead = null;
         await hook?.();
         if (runsStatus !== 200) return new Response("no", { status: runsStatus });
+        const repo = /\/repos\/nemarDatasets\/([^/]+)\//.exec(p)?.[1] ?? "";
+        const state = runsFor[repo] ?? runs;
         const workflow_runs =
-          runs === "none"
+          state === "none"
             ? []
             : [
                 {
-                  status: runs === "running" ? "in_progress" : "completed",
-                  conclusion: runs === "running" ? null : runs,
+                  status: state === "running" ? "in_progress" : "completed",
+                  conclusion: state === "running" ? null : state,
                   html_url: "x",
                 },
               ];
@@ -155,6 +159,7 @@ afterAll(() => {
 
 afterEach(() => {
   runs = "none";
+  runsFor = {};
   descriptionBody = NAMED;
   descriptionStatus = 200;
   runsStatus = 200;
@@ -1207,5 +1212,137 @@ describe("a request that changes while the sweep works on it is not overwritten"
     });
     expect(row().status).toBe("requested");
     expect(row().min_requirements_reasons).toBeNull();
+  });
+});
+
+describe("rows the sweep looks at and leaves are queued behind the rest", () => {
+  // Candidates are taken oldest `updated_at` first, `limit` at a time, and a row
+  // left as it is used to keep its old `updated_at`, so enough of them filled
+  // every run and nothing behind them was ever reached.
+
+  const setAge = (id: string, hoursAgo: number) =>
+    db.run("UPDATE publication_requests SET updated_at = datetime('now', ?) WHERE dataset_id = ?", [
+      `-${hoursAgo} hours`,
+      id,
+    ]);
+
+  async function threeRows(): Promise<void> {
+    descriptionBody = NAMED;
+    runs = "none";
+    for (const id of ["nm000530", "nm000531", "nm000532"]) {
+      seedDataset(id, { exemplar: id === "nm000532" });
+      expect((await requestPublication({ id })).body.block_reason).toBe("bids_validation_pending");
+    }
+    // The last is the newest, so it is last in line.
+    setAge("nm000530", 3);
+    setAge("nm000531", 2);
+    setAge("nm000532", 1);
+  }
+
+  test("rows still waiting on validation do not starve the one behind them", async () => {
+    await threeRows();
+    runsFor = { nm000530: "running", nm000531: "none", nm000532: "success" };
+    const first = await sweepBlockedBidsValidationRequests(env(), 2);
+    expect(first.scanned).toBe(2);
+    expect(first.unblocked).toBe(0);
+    await withFakeResend(async () => {
+      const second = await sweepBlockedBidsValidationRequests(env(), 2);
+      expect(second.unblocked).toBe(1);
+    });
+    expect(row("nm000532").status).toBe("requested");
+    expect(row("nm000530").status).toBe("blocked");
+  });
+
+  test("rows whose files could not be read do not starve the one behind them", async () => {
+    await threeRows();
+    runs = "success";
+    descriptionStatus = 403;
+    const first = await sweepBlockedBidsValidationRequests(env(), 2);
+    expect(first.scanned).toBe(2);
+    expect(first.errors).toBe(2);
+    // The third is an exemplar: released without reading anything.
+    await withFakeResend(async () => {
+      const second = await sweepBlockedBidsValidationRequests(env(), 2);
+      expect(second.unblocked).toBe(1);
+    });
+    expect(row("nm000532").status).toBe("requested");
+  });
+
+  test("rows already labelled as failing do not starve the one behind them", async () => {
+    await threeRows();
+    // Two requests CI already failed and the sweep already relabelled.
+    db.run(
+      "UPDATE publication_requests SET block_reason = 'bids_validation_failed' WHERE dataset_id IN ('nm000530', 'nm000531')",
+    );
+    runsFor = { nm000530: "failure", nm000531: "failure", nm000532: "success" };
+    expect((await sweepBlockedBidsValidationRequests(env(), 2)).scanned).toBe(2);
+    await withFakeResend(async () => {
+      expect((await sweepBlockedBidsValidationRequests(env(), 2)).unblocked).toBe(1);
+    });
+  });
+
+  test("rows whose CI lookup failed do not starve the one behind them", async () => {
+    await threeRows();
+    runs = "success";
+    runsStatus = 403;
+    const first = await sweepBlockedBidsValidationRequests(env(), 2);
+    expect(first.errors).toBe(2);
+    runsStatus = 200;
+    // Everything is green now. The row behind the two is reached first; the
+    // second place goes to the one of the two the sweep looked at earliest.
+    await withFakeResend(async () => {
+      expect((await sweepBlockedBidsValidationRequests(env(), 2)).unblocked).toBe(2);
+    });
+    expect(row("nm000532").status).toBe("requested");
+    expect(row("nm000530").status).toBe("requested");
+    expect(row("nm000531").status).toBe("blocked");
+  });
+
+  test("rows whose dataset has no repository do not starve the one behind them", async () => {
+    await threeRows();
+    db.run("UPDATE datasets SET github_repo = NULL WHERE dataset_id IN ('nm000530', 'nm000531')");
+    runs = "success";
+    expect((await sweepBlockedBidsValidationRequests(env(), 2)).scanned).toBe(2);
+    await withFakeResend(async () => {
+      expect((await sweepBlockedBidsValidationRequests(env(), 2)).unblocked).toBe(1);
+    });
+  });
+
+  test("a looked-at row keeps its status, reason and flag, and only its position changes", async () => {
+    await threeRows();
+    runsFor = { nm000530: "running" };
+    const before = row("nm000530");
+    await sweepBlockedBidsValidationRequests(env(), 1);
+    const after = row("nm000530");
+    expect(after.status).toBe(before.status);
+    expect(after.block_reason).toBe(before.block_reason);
+    expect(after.anonymous).toBe(before.anonymous);
+    const ages = db
+      .query<{ dataset_id: string; age: number }, []>(
+        `SELECT dataset_id, strftime('%s','now') - strftime('%s', updated_at) AS age
+           FROM publication_requests ORDER BY dataset_id`,
+      )
+      .all();
+    const age = (id: string) => ages.find((a) => a.dataset_id === id)?.age ?? -1;
+    // Looked at: the newest of the three now. Not looked at: unchanged.
+    expect(age("nm000530")).toBeLessThan(age("nm000532"));
+    expect(age("nm000531")).toBeGreaterThanOrEqual(2 * 3600 - 5);
+  });
+
+  test("rows not looked at are left where they are: the unblock cap and the read budget", async () => {
+    await threeRows();
+    runs = "success";
+    descriptionBody = NO_ETHICS_FIELD;
+    readmeMode = "missing";
+    // Budget spent on the first row: the other native one is deferred, not queued.
+    const result = await sweepBlockedBidsValidationRequests(env(), 50, 2);
+    expect(result.deferred).toBeGreaterThanOrEqual(1);
+    const age = db
+      .query<{ age: number }, [string]>(
+        `SELECT strftime('%s','now') - strftime('%s', updated_at) AS age
+           FROM publication_requests WHERE dataset_id = ?`,
+      )
+      .get("nm000531")?.age;
+    expect(age).toBeGreaterThanOrEqual(2 * 3600 - 5);
   });
 });
