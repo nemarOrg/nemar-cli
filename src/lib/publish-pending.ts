@@ -52,14 +52,20 @@ export function ciPendingHeadline(reason: CiPendingReason): string {
 
 /**
  * The lines that follow the headline. It promises no time: the server re-checks
- * blocked requests on its own schedule, and only says what it does when CI
- * passes. The second sentence is for a depositor who would rather not wait for
- * that: follow CI with the command that shows it, then ask again.
+ * blocked requests on its own schedule, and this says only what it does once CI
+ * passes. The rest is for a depositor who would rather not wait for that:
+ * follow CI with the command that shows it, then ask again.
+ *
+ * Asking again re-states the request, and a request made WITHOUT `--anonymous`
+ * is a normal publication whatever the earlier one said (the backend resets the
+ * flag on every re-request). An anonymous depositor must therefore be handed the
+ * flag back, or the line meant to help would turn a blind request into a named one.
  */
-export function ciPendingHint(datasetId: string): string[] {
+export function ciPendingHint(datasetId: string, anonymous = false): string[] {
+  const again = `nemar dataset publish request ${datasetId}${anonymous ? " --anonymous" : ""}`;
   return [
-    "  NEMAR re-checks it automatically and continues once validation passes.",
+    "  NEMAR re-checks the request automatically and continues once validation passes.",
     `  To request right after CI completes instead, follow it with 'nemar dataset ci ${datasetId}',`,
-    `  then run 'nemar dataset publish request ${datasetId}' again.`,
+    `  then run '${again}' again.`,
   ];
 }
