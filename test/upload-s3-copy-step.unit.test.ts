@@ -12,7 +12,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, readFileSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { chmodSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { gitAnnexAdd } from "../src/lib/git-annex/init";
 import {
@@ -39,6 +39,7 @@ import {
   run,
   writeFile,
 } from "./helpers/annex-repo";
+import { installGitShim } from "./helpers/git-shim";
 
 const REMOTE = "nemar-s3";
 const scratch = makeScratch("nemar-s3-step");
@@ -316,6 +317,53 @@ describe("copyAnnexedToRemote: every annexed file must be recorded at the remote
     expect(await listAnnexedPaths(dir, REMOTE)).toEqual(new Set());
   });
 
+  test("a verify walk that fails is reported as unverifiable, not read as nothing missing", async () => {
+    // Guards the catch around the post-copy walk. The shim lets the plan's walk through
+    // and breaks the verify walk that follows it; every other git call is the real one.
+    // Reading the failure as "nothing is missing" would print success for a log nobody
+    // could read.
+    const { dir, targets } = await dataset("verify-fails", { "a.edf": 3_000 });
+    expect(
+      (
+        await trackDataFiles(
+          dir,
+          targets.map((t) => t.path),
+        )
+      ).success,
+    ).toBe(true);
+    const restore = installGitShim(scratch.root, [
+      { match: "annex find --not --in", after: 1, message: "fatal: shim: the log is unreadable" },
+    ]);
+    try {
+      const outcome = await step(dir, targets);
+      expect(outcome.status).toBe("unverifiable");
+      if (outcome.status !== "unverifiable") throw new Error("unreachable");
+      expect(outcome.error).toContain("the log is unreadable");
+    } finally {
+      restore();
+    }
+  });
+
+  test("the same failure through a damaged index, with nothing left to copy", async () => {
+    // The real-state version of the test above: the index is destroyed at the plan, when
+    // nothing is pending, and every later git-annex call that needs it fails.
+    const { dir, targets } = await dataset("verify-index", { "a.edf": 3_000 });
+    expect(
+      (
+        await trackDataFiles(
+          dir,
+          targets.map((t) => t.path),
+        )
+      ).success,
+    ).toBe(true);
+    expect((await step(dir, targets)).status).toBe("ok");
+    const outcome = await step(dir, targets, () => {
+      writeFileSync(join(dir, ".git", "index"), "x");
+    });
+    expect(["unverifiable", "copy_failed"]).toContain(outcome.status);
+    expect(outcome.status).not.toBe("ok");
+  });
+
   test("a repository git cannot list is reported, not read as an empty dataset", async () => {
     const notARepo = join(scratch.root, "not-a-repo");
     writeFile(notARepo, "x.edf", 100);
@@ -333,6 +381,20 @@ describe("copyAnnexedToRemote: every annexed file must be recorded at the remote
         resent: outcome.resent,
       }),
     ).toBe("No annexed data files, so nothing was copied to S3");
+  });
+});
+
+describe("the walks refuse to answer when git-annex cannot", () => {
+  test("a remote that does not exist is an error, never an empty set", async () => {
+    const { dir } = await dataset("no-remote", { "a.edf": 3_000 });
+    await expect(listAnnexedPathsNotAt(dir, "no-such-remote")).rejects.toThrow();
+  });
+
+  test("a directory that is not a repository is an error too", async () => {
+    await expect(listAnnexedPaths(join(scratch.root, "not-a-repo-either"))).rejects.toThrow();
+    await expect(
+      listAnnexedPathsNotAt(join(scratch.root, "not-a-repo-either"), REMOTE),
+    ).rejects.toThrow();
   });
 });
 
