@@ -212,3 +212,5 @@ The prepare step also scrubs identifying fields in place and then runs the ident
 
 The scrub named by the amendment above runs in prepare's step 5b, before this ADR's annex-policy commit, and is [ADR 0089](0089-an-import-scrubs-before-it-copies-and-waits-for-the-identifier-screen.md).
 Its downloads count against `NORMALIZE_MAX_BYTES` together with the data git holds, and `--normalize-max-gb` raises the one bound for both.
+As built, prepare re-checks its own scrub (`verifyScrub`, and a re-scan of the blanked JSON), and the identifier screen runs at finalize through the publication request (ADR 0086), not in prepare.
+A key the git-annex branch records as dead is dropped from the copy, not refused; a replaced key that the tree still names refuses (`old-key-still-named`).

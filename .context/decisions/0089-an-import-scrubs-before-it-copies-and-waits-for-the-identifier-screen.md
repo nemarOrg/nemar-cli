@@ -170,3 +170,10 @@ outcome per dataset, and the mirrored data is public upstream. Suppressing it is
   a directory special remote, and HTTP stand-ins for the upstream bucket and the API.
 - ADR 0085 (rules, annex-registry, provenance sentences, ledger), ADR 0086 (`screenGate`), ADR 0060
   (the upload leg and its bound), ADR 0010, ADR 0051 to 0054.
+
+## Amendment 2026-10-07 (Phase 9): a first import also sets acquisition dates
+
+[ADR 0091](0091-a-new-recordings-acquisition-dates-are-set-to-1-january-and-nothing-published-is-changed.md) adds `normalizeEdfDates` after `scrubEdfHeader` on a first import.
+A recording is downloaded and given a new key when either rule changes its header, so a recording whose only change is its date gets one too.
+The patch then covers the start-date bytes 168 to 176 and the EDF+ `Startdate` token as well as bytes 8 to 168, each step proven (`verifyScrub`, `verifyDateNormalization`).
+A re-import is unchanged.

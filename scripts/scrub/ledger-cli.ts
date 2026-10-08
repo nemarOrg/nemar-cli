@@ -52,6 +52,7 @@ import {
   LedgerRefused,
   appendLedger,
   ledgerS3Key,
+  parseLedgerText,
   readLedger,
 } from "./ledger";
 import {
@@ -294,7 +295,10 @@ export async function run(argv: string[], log: (line: string) => void): Promise<
   }
   if (command === "publish") {
     const dataset = need(v.dataset, "dataset");
-    const entries = readLedger(file); // validates every line
+    // Read ONCE: the text that is validated is the text that is put, so a line written to the
+    // file between two reads cannot be published unvalidated.
+    const local = readFileSync(file, "utf8");
+    const entries = parseLedgerText(local); // validates every line
     if (entries.length === 0) throw new Refused("ledger-empty");
     if (entries.some((e) => e.dataset !== dataset)) throw new Refused("ledger-other-dataset");
     const bucket = v.bucket ?? "nemar";
@@ -302,7 +306,6 @@ export async function run(argv: string[], log: (line: string) => void): Promise<
     const timeoutSec = v["timeout-sec"] ?? String(DEFAULT_TIMEOUT_MS / 1000);
     if (!/^\d+$/.test(timeoutSec) || Number(timeoutSec) < 1) throw new Usage("bad --timeout-sec");
     const key = ledgerS3Key(dataset);
-    const local = readFileSync(file, "utf8");
     await requireAwsCliVersion();
     const tmp = await TempArea.create();
     try {

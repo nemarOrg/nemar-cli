@@ -516,13 +516,13 @@ function identifierValueSpans(text: string): KeyValueSpan[] {
  * byte outside the replaced values stay as they were, and a leading byte-order mark is kept.
  *
  * The rule is ADR 0085's history rewrite (`blank_json` in `rewrite_history.py`) for one document,
- * and gives the same bytes on the documents that rewrite was built for. It differs in three edge
- * cases, each so that nothing the scanner calls an identifier survives: the key is matched by the
- * scanner's own canonical spelling (the rewrite drops only spaces, underscores and hyphens, so a key
- * with a tab in it is flagged by the scanner and left by the rewrite); every occurrence of a
- * duplicated key is judged on its own content (the rewrite's targets come from a parse, which keeps
- * only the last duplicate); and a value that holds nothing (`null`, `[]`) is left as it is rather
- * than turned into `""`.
+ * and gives the same bytes on the documents that rewrite was built for. The key is matched by the
+ * scanner's own canonical spelling in both (the rewrite's `canon` is tested against it on every
+ * code point, test/scrub/git/canonical-key.test.ts). It differs in two edge cases, each so that
+ * nothing the scanner calls an identifier survives: every occurrence of a duplicated key is judged
+ * on its own content (the rewrite's targets come from a parse, which keeps only the last
+ * duplicate); and a value that holds nothing (`null`, `[]`) is left as it is rather than turned
+ * into `""`.
  *
  * The result is proven before it is returned: it parses, no identifier key in it holds content, and
  * the scanner finds no identifier-severity key in it. A blank that cannot be proven throws

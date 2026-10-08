@@ -206,6 +206,7 @@ async function uploadAtTerminal(answer: string, apiUrl: string) {
   const raw = await new Response(proc.stdout).text();
   await new Response(proc.stderr).text();
   // Terminal control sequences out, so what is asserted is the text a person reads.
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: the escape character is the point
   const output = raw.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
   return { output, exitCode: await proc.exited };
 }

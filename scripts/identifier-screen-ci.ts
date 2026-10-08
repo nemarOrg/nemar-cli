@@ -39,5 +39,14 @@ try {
   process.exit(2);
 }
 
-const outcome = await runScreen(config, { log: (line) => console.log(line) });
-process.exit(outcome.delivered === false ? 1 : 0);
+// Anything that escapes the library would be printed by the runtime with its message and stack,
+// and a message can name a path. The workflow's failure step posts the `workflow-failed` report
+// when this exits non-zero, so a fixed word is all the log needs.
+let delivered: boolean | null;
+try {
+  ({ delivered } = await runScreen(config, { log: (line) => console.log(line) }));
+} catch {
+  console.error("identifier-screen: internal failure");
+  process.exit(1);
+}
+process.exit(delivered === false ? 1 : 0);

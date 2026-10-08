@@ -179,6 +179,8 @@ export interface S3Standin {
   setIgnoreIfMatch(ignore: boolean): void;
   /** Entries per ListObjectVersions / ListObjectsV2 page. */
   setPageSize(n: number): void;
+  /** A truncated ListObjectVersions page names its next key but not its next version id. */
+  omitNextVersionIdMarker(on?: boolean): void;
   /** Hold the next `times` requests with this HTTP method for `ms` before answering (a hung server). */
   stallNext(method: string, ms: number, times?: number): void;
   /**
@@ -269,6 +271,7 @@ export function startS3Standin(): S3Standin {
   let denyBypass = false;
   let ignoreIfMatch = false;
   let pageSize = 1000;
+  let omitVersionIdMarker = false;
   const stalls: Array<{ method: string; ms: number; times: number }> = [];
   const bodyStalls: Array<{ keyPrefix: string; bytes: number; ms: number }> = [];
 
@@ -491,7 +494,7 @@ export function startS3Standin(): S3Standin {
             .join("");
           record({ op: "ListObjectVersions", key: prefix, status: 200 });
           return xml(
-            `<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>${xmlEscape(bucket)}</Name><Prefix>${xmlEscape(prefix)}</Prefix><MaxKeys>${limit}</MaxKeys>${encode ? "<EncodingType>url</EncodingType>" : ""}<IsTruncated>${truncated}</IsTruncated>${truncated && last ? `<NextKeyMarker>${keyOut(last.key, encode)}</NextKeyMarker><NextVersionIdMarker>${last.v.versionId}</NextVersionIdMarker>` : ""}${body}</ListVersionsResult>`,
+            `<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>${xmlEscape(bucket)}</Name><Prefix>${xmlEscape(prefix)}</Prefix><MaxKeys>${limit}</MaxKeys>${encode ? "<EncodingType>url</EncodingType>" : ""}<IsTruncated>${truncated}</IsTruncated>${truncated && last ? `<NextKeyMarker>${keyOut(last.key, encode)}</NextKeyMarker>${omitVersionIdMarker ? "" : `<NextVersionIdMarker>${last.v.versionId}</NextVersionIdMarker>`}` : ""}${body}</ListVersionsResult>`,
           );
         }
         if (q.has("uploads") && req.method === "GET") {
@@ -1042,6 +1045,9 @@ export function startS3Standin(): S3Standin {
     },
     setPageSize(n) {
       pageSize = n;
+    },
+    omitNextVersionIdMarker(on = true) {
+      omitVersionIdMarker = on;
     },
     stallNext(method, ms, times = 1) {
       stalls.push({ method, ms, times });

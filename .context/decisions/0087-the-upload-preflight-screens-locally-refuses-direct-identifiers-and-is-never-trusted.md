@@ -108,7 +108,7 @@ and records the verdict inside the deposit attestation, where nothing reads it a
 - A dry run whose verdict needs an acknowledgment goes on past the preflight to the remaining local steps of the preview;
   at a terminal that includes the co-author ORCID lookup, which reads author names (public by design) from `dataset_description.json`.
 - The record is readable today and read by nothing that decides.
-  Showing it beside the publication screen, and comparing it in the sweep, are later work (Phase 5).
+  Showing it beside the publication screen, and comparing it in the sweep, are not built: Phase 5 (ADR 0088) shipped without either, so neither has an owner.
 
 ## Alternatives considered
 

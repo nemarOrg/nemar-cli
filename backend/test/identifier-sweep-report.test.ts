@@ -22,6 +22,7 @@ import { Hono } from "hono";
 import { parseScreenReport } from "../../shared/identifier-screen-report";
 import { adminRoutes } from "../src/routes/admin";
 import webhooks from "../src/routes/webhooks";
+import { IDENTIFIER_SWEEP_EMAIL_TIMEOUT_MS } from "../src/services/email";
 import {
   IDENTIFIER_SWEEP_CYCLE_DAYS,
   IDENTIFIER_SWEEP_REPORT_CLAIM_ACTION,
@@ -877,6 +878,24 @@ describe("the weekly send", () => {
     expect(claims).toHaveLength(1);
     expect(claims[0]?.details).toBeNull();
   });
+
+  test("a send Resend never answers is cut off, and counts as one that may have landed", async () => {
+    seedDataset("nm000798");
+    const when = nextWeek();
+    const started = Date.now();
+    await withFakeResend(
+      async (calls: CapturedEmail[]) => {
+        const out = await sendIdentifierSweepWeeklyReport(env(), when);
+        expect(out).toMatchObject({ claimed: true, delivered: 0, ambiguous: 1 });
+        expect(calls).toHaveLength(1);
+      },
+      { hang: true },
+    );
+    // Cut off by the send's own timeout, not by the test waiting for a network error.
+    expect(Date.now() - started).toBeGreaterThanOrEqual(IDENTIFIER_SWEEP_EMAIL_TIMEOUT_MS - 500);
+    // Unmarked, so it counts toward the cap: the mail may have been accepted.
+    expect(auditRows(IDENTIFIER_SWEEP_REPORT_CLAIM_ACTION)[0]?.details).toBeNull();
+  }, 30_000);
 
   test("a delivered report whose record cannot be written counts toward the cap, and may be sent again", async () => {
     seedDataset("nm000791");

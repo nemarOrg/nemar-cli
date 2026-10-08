@@ -13,11 +13,11 @@ dropped, so each ref keeps its commit count, and every tag keeps its name and me
      the new key. A symlink target carries the key twice and a hash directory derived from
      the key's md5, so all three change.
   b. A path in `dropPaths` is deleted from the commit.
-  c. For a path in `blankJsonKeys`, every key whose canonical spelling (lowercase, spaces,
-     underscores and hyphens removed) is listed has its value replaced by an empty string,
-     at any depth. The edit is made on the TEXT of the value, so key order, indentation,
-     spacing and every other byte are untouched. Content that is not UTF-8 or not JSON is
-     left alone and counted.
+  c. For a path in `blankJsonKeys`, every key whose canonical spelling (lowercase, whitespace,
+     underscores and hyphens removed, as the scanner spells it) is listed has its value replaced
+     by an empty string, at any depth. The edit is made on the TEXT of the value, so key order,
+     indentation, spacing and every other byte are untouched. Content that is not UTF-8 or not
+     JSON is left alone and counted.
   c2. For a path in `jsonOps`, the listed structural edits are applied in order to the JSON
      object: `drop-array-entries` removes the entries of a top-level array whose field equals
      one of the values, `recount` sets a count key and a sum key from that array, `set` sets a
@@ -100,9 +100,19 @@ class AfterRewrite(Exception):
 # --------------------------------------------------------------------------------------
 
 
+# JavaScript's `\s`, spelled out: Python's `\s` adds U+001C to U+001F and U+0085 and lacks U+FEFF.
+_JS_WHITESPACE = (
+    "\t\n\x0b\x0c\r \xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+_CANON_REMOVED = re.compile(f"[{_JS_WHITESPACE}_\\-]+")
+
+
 def canon(name: str) -> str:
-    """Canonical spelling of a JSON key: lowercase, with spaces, underscores, hyphens removed."""
-    return re.sub(r"[ _\-]", "", name.lower())
+    """Canonical spelling of a JSON key: lowercase, with whitespace, underscores and hyphens
+    removed. The same rule as `canonical` in shared/identifier-scan.ts, which names the keys a plan
+    lists: a key spelled with a no-break space or a tab must match here exactly when the scanner
+    flagged it, or the rewrite leaves its value in the history."""
+    return _CANON_REMOVED.sub("", name.lower())
 
 
 _DIR_CHARS = "0123456789zqjxkmvwgpfZQJXKMVWGPF"

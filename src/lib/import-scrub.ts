@@ -641,6 +641,11 @@ function patchHeader(
  * header byte for byte. Throws a refusal otherwise, or when the patch would change nothing.
  */
 function patchInPlace(path: string, dates: boolean): void {
+  // Never through a link: the write would land on the target, which is outside the dataset when
+  // git tracks a link named like a recording.
+  if (!isRegularFile(path)) {
+    throw new ImportScrubRefused("scrub-unverified", "a header to patch is not a regular file");
+  }
   const before = readLocalHeader(path);
   if (!before || before.length < EDF_HEADER_BYTES) {
     throw new ImportScrubRefused("scrub-unverified", "a header to patch could not be read back");

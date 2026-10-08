@@ -177,7 +177,8 @@
 # ZARR_ENGINE_VERSION is NOT bumped (ADR 0033): the stamp records a widening of
 # discovery, and 1.2.11 discovers exactly what 1.2.10 did. Stores already
 # published keep their subject members until they are reconverted or stripped
-# in place by the Phase 8 fleet tool (#1626), not by the stamp.
+# in place by a fleet tool that #1626 lists and this release does not build (the scrub's
+# `zarr` stage strips one dataset at a time), not by the stamp.
 # <1.2.12 is a CAP, not a floor, raised deliberately per release: a biosigIO
 # patch release has changed what a store contains three times in a row (1.2.9,
 # 1.2.10, 1.2.11), so the next one is read before the converter takes it. Raise

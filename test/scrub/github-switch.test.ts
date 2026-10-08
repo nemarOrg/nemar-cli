@@ -113,8 +113,13 @@ function standIn(bypassBranch: "always" | "never"): Stand {
       if (req.headers.get("authorization") !== "Bearer test-token")
         return new Response("no", { status: 401 });
       if (req.method === "GET" && !m[2]) {
+        // Paged as GitHub pages it: the default page is 30 unless `per_page` asks for more.
+        const perPage = Math.min(100, Number(url.searchParams.get("per_page") ?? 30));
+        const page = Number(url.searchParams.get("page") ?? 1);
         return Response.json(
-          [...rulesets.values()].map((r) => ({ id: r.id, name: r.name, target: r.target })),
+          [...rulesets.values()]
+            .map((r) => ({ id: r.id, name: r.name, target: r.target }))
+            .slice((page - 1) * perPage, page * perPage),
         );
       }
       const id = Number(m[2]);
@@ -552,6 +557,81 @@ describe("refusals before anything is touched", () => {
     expect((await snap(world)).rulesets.length).toBe(2);
   });
 
+  test("every page of the rulesets is read, and an inherited blocking ruleset is refused up front", async () => {
+    // 130 more rulesets, past the default page of 30 and GitHub's maximum page of 100: a list cut
+    // at one page would leave rulesets out of the snapshot, and what the snapshot lacks is never
+    // restored.
+    for (let id = 10; id < 140; id++) {
+      world.stand.rulesets.set(id, {
+        id,
+        name: `later ${id}`,
+        target: "branch",
+        enforcement: "disabled",
+        current_user_can_bypass: "always",
+      });
+    }
+    const snapshot = await snap(world);
+    expect(snapshot.rulesets.length).toBe(132);
+
+    // A ruleset the organization owns cannot be lifted through the repository's endpoint.
+    const tag = world.stand.rulesets.get(2) as RulesetBody;
+    world.stand.rulesets.set(2, { ...tag, source_type: "Organization" });
+    const error = (await snap(world).catch((e) => e)) as SwitchRefused;
+    expect(error).toBeInstanceOf(SwitchRefused);
+    expect(error.reason).toBe("ruleset-not-repository");
+    expect(world.stand.calls).toEqual([]);
+    // The twin: the same ruleset owned by the repository is the ordinary case.
+    world.stand.rulesets.set(2, { ...tag, source_type: "Repository" });
+    expect((await snap(world)).rulesets.length).toBe(132);
+  });
+
+  test("a usage error leaves no empty snapshot behind, and the admin token goes only to GitHub or this machine", async () => {
+    const out = join(world.dir, "usage-snapshot.json");
+    // No --before: the process exits 2 before the file is created, so the corrected run is not
+    // refused for a file that is already there.
+    const missing = await cliRun(world, [
+      "snapshot",
+      "--repo",
+      REPO,
+      "--clone",
+      world.work,
+      "--out",
+      out,
+    ]).exited;
+    expect(missing.code, missing.stderr).toBe(2);
+    expect(existsSyncPath(out)).toBe(false);
+    const args = [
+      "snapshot",
+      "--repo",
+      REPO,
+      "--clone",
+      world.work,
+      "--before",
+      world.before,
+      "--out",
+      out,
+    ];
+    const ok = await cliRun(world, args).exited;
+    expect(ok.code, ok.stderr).toBe(0);
+
+    // A base that is neither GitHub nor a loopback address would receive the token: another
+    // host, the same host in plain http, a host that only starts like a loopback name, a loopback
+    // name that is only the user part of the URL, and text that is not a URL at all.
+    for (const base of [
+      "https://example.org",
+      "http://api.github.com",
+      "http://localhost.example.org",
+      "http://127.0.0.1@example.org",
+      "https://127.0.0.1",
+      "not a url",
+    ]) {
+      const elsewhere = await cliRun(world, args, { GITHUB_API_BASE: base }).exited;
+      expect(elsewhere.code, `${base}: ${elsewhere.stderr}`).toBe(2);
+      expect(elsewhere.stderr).toContain("GITHUB_API_BASE");
+    }
+    expect(world.stand.calls).toEqual([]);
+  });
+
   test("the CLI never writes a snapshot over an existing file, and a new one is owner-only (I5)", async () => {
     const out = join(world.dir, "snapshot.json");
     writeFileSync(out, "keep me");
@@ -786,6 +866,118 @@ describe("a failure leaves the protection on", () => {
     expect(remoteRef(world, "refs/tags/v1.0.1")).toBe(world.originTips["refs/tags/v1.0.1"]);
   });
 
+  test("a head or a tag deleted on the remote since the clone is drift, in the snapshot and in the switch", async () => {
+    world = build("never");
+    // A head the clone knew, then deleted on GitHub: it is in before.json's tips, not on the remote.
+    const tips = {
+      ...world.originTips,
+      "refs/heads/add-sourcedata-original": world.originTips["refs/heads/main"] as string,
+    };
+    const refused = (await takeSnapshot(world.api, REPO, world.work, "origin", tips).catch(
+      (e) => e,
+    )) as SwitchRefused;
+    expect(refused).toBeInstanceOf(SwitchRefused);
+    expect(refused.reason).toBe("remote-moved-since-clone (1 ref(s))");
+
+    const snapshot = await snap(world);
+    const gone = (await switchRefs({
+      api: world.api,
+      repo: REPO,
+      cloneDir: world.work,
+      remote: "origin",
+      snapshot: { ...snapshot, originTips: tips },
+      execute: true,
+    }).catch((e) => e)) as SwitchRefused;
+    expect(gone).toBeInstanceOf(SwitchRefused);
+    expect(gone.reason).toBe("remote-moved-since-clone (1 ref(s))");
+
+    // A tag deleted on the remote after the clone is drift too.
+    run(world.remote, "update-ref", "-d", "refs/tags/v1.0.0");
+    const tagGone = (await snap(world).catch((e) => e)) as SwitchRefused;
+    expect(tagGone).toBeInstanceOf(SwitchRefused);
+    expect(tagGone.reason).toMatch(/^remote-moved-since-clone/);
+    expect(world.stand.calls).toEqual([]);
+  });
+
+  test("a switch that stopped part way is finished by running it again, and a ref that moved is still refused", async () => {
+    world = build("never", "refs/tags/v1.0.1");
+    const snapshot = await snap(world);
+    const run1 = (await switchRefs({
+      api: world.api,
+      repo: REPO,
+      cloneDir: world.work,
+      remote: "origin",
+      snapshot,
+      execute: true,
+    }).catch((e) => e)) as PushFailed;
+    expect(run1).toBeInstanceOf(PushFailed);
+    expect(run1.pushed).toEqual(["refs/heads/main", "refs/tags/v1.0.0"]);
+
+    // The cause is fixed (the hook no longer refuses the tag). Another person pushes a third
+    // SHA to the ref the run had not reached: the lease still refuses, and nothing is lifted.
+    const hook = join(world.remote, "hooks", "pre-receive");
+    const blocked = readFileSync(hook, "utf8");
+    writeFileSync(hook, blocked.replace("refs/tags/v1.0.1", "refs/none"));
+    // Straight into the bare repository (a fetch runs no receive hook): the ruleset's hook would
+    // refuse a tag update by a push, and this is somebody else's, not the switch's.
+    const third = run(world.work, "commit-tree", "main^{tree}", "-p", "main", "-m", "someone else");
+    run(world.work, "tag", "someone-else", third);
+    run(world.remote, "fetch", "-q", world.work, "+refs/tags/someone-else:refs/tags/v1.0.1");
+    world.stand.calls.length = 0;
+    const refused = (await switchRefs({
+      api: world.api,
+      repo: REPO,
+      cloneDir: world.work,
+      remote: "origin",
+      snapshot,
+      execute: true,
+    }).catch((e) => e)) as SwitchRefused;
+    expect(refused).toBeInstanceOf(SwitchRefused);
+    expect(refused.reason).toMatch(/^remote-moved-since-clone|a remote ref moved/);
+    expect(world.stand.calls).toEqual([]);
+
+    // Put the ref back where the first run left it (the snapshot's SHA) and run again: it pushes
+    // only what is left, and every ref ends at the rewrite.
+    run(world.work, "tag", "at-the-snapshot", world.originTips["refs/tags/v1.0.1"] as string);
+    run(world.remote, "fetch", "-q", world.work, "+refs/tags/at-the-snapshot:refs/tags/v1.0.1");
+    const done = await switchRefs({
+      api: world.api,
+      repo: REPO,
+      cloneDir: world.work,
+      remote: "origin",
+      snapshot,
+      execute: true,
+    });
+    expect(done.pushed).toEqual(["refs/tags/v1.0.1"]);
+    for (const ref of ["refs/heads/main", "refs/tags/v1.0.0", "refs/tags/v1.0.1"]) {
+      expect(remoteRef(world, ref)).toBe(localSha(world, ref));
+    }
+    expect(enforcement(world)).toEqual({ branch: "active", tag: "active" });
+  }, 60_000);
+
+  test("a switch that already finished, run again, pushes nothing and does not touch the protection", async () => {
+    world = build("never");
+    const snapshot = await snap(world);
+    const options = {
+      api: world.api,
+      repo: REPO,
+      cloneDir: world.work,
+      remote: "origin",
+      snapshot,
+      execute: true,
+    };
+    const first = await switchRefs(options);
+    expect(first.pushed.length).toBe(3);
+    expect(first.lifted.length).toBe(2);
+    world.stand.calls.length = 0;
+    // Every ref is at the rewrite: nothing is drift, nothing is left to push, so nothing is lifted
+    // (a lift for a push that does not happen is a window with the protection off for no reason).
+    const again = await switchRefs(options);
+    expect(again).toMatchObject({ executed: true, lifted: [], pushed: [], restored: [] });
+    expect(world.stand.calls).toEqual([]);
+    expect(enforcement(world)).toEqual({ branch: "active", tag: "active" });
+  }, 60_000);
+
   test("git's stderr is classed into a fixed word, never kept", () => {
     const cases: Array<[string, string]> = [
       [" ! [rejected]        main -> main (stale info)\nerror: failed to push", "non-fast-forward"],
@@ -868,7 +1060,7 @@ describe("a failure leaves the protection on", () => {
 });
 
 /** The switch CLI as a real process, with the stand-in API and an isolated environment. */
-function cliRun(w: World, args: string[]) {
+function cliRun(w: World, args: string[], env: Record<string, string> = {}) {
   const cli = join(import.meta.dir, "../../scripts/scrub/github/switch.ts");
   const child = spawn("bun", ["run", cli, ...args], {
     // No FORCE_COLOR: Bun colors console.error under it, and the tests read the exact words.
@@ -877,6 +1069,7 @@ function cliRun(w: World, args: string[]) {
       NO_COLOR: "1",
       GITHUB_TOKEN: "test-token",
       GITHUB_API_BASE: w.stand.url,
+      ...env,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

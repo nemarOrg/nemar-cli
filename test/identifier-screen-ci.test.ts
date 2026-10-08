@@ -1150,6 +1150,25 @@ describe("the screen: when it cannot produce a verdict", () => {
   );
 
   test(
+    "a scratch directory that cannot be made is a workflow-failed report, and its path is not printed",
+    async () => {
+      fresh();
+      const repo = cleanDataset();
+      // The runtime's own message for a failed mkdtemp names the directory it tried.
+      const result = await runScript(repo, { env: { TMPDIR: join(outDir, "no-such-dir", "tmp") } });
+      expect(result.code).toBe(0);
+      expect(result.report).toMatchObject({ error: "workflow-failed", head: null });
+      expect(result.posted).toHaveLength(1);
+      expect(result.posted[0]?.body.report.error).toBe("workflow-failed");
+      const printed = result.stdout + result.stderr;
+      expect(printed).not.toContain("no-such-dir");
+      expect(printed).not.toContain("ENOENT");
+      expect(printed).not.toContain(" at ");
+    },
+    T,
+  );
+
+  test(
     "a submodule is a path the screen cannot read: unchecked, never no-recordings or clean",
     async () => {
       /** A gitlink committed from the index: `git add -A` would drop it, there is no checkout. */

@@ -161,6 +161,27 @@ export function redactRecipient(to: string): string {
   return `${to[0]}***${to.slice(at)}`;
 }
 
+/**
+ * `message` with every occurrence of `address` redacted (whatever its letter case), for a
+ * log line or a stored failure. `sendEmail`'s error text names the recipient in full, so a
+ * caller that logs the text after redacting only the address it prints beside it would
+ * still log the address once. It takes the text: `sendEmail` sets no `cause` on what it
+ * throws, and every caller below logs `message` and never the error object, whose `stack`
+ * repeats the message as it was built.
+ */
+export function redactAddressIn(message: string, address: string): string {
+  if (address === "") return message;
+  const literal = address.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const redacted = redactRecipient(address);
+  // A function, so a `$` in the replacement is never read as a pattern.
+  return message.replace(new RegExp(literal, "gi"), () => redacted);
+}
+
+/** A failed send as text for a log line or a stored failure: its message, the recipient redacted. */
+function sendFailureText(error: unknown, address: string): string {
+  return redactAddressIn(error instanceof Error ? error.message : String(error), address);
+}
+
 export interface EmailPreferences {
   user_approval: boolean;
   publication_request: boolean;
@@ -319,19 +340,6 @@ export async function getAdminEmailsForCategory(
 }
 
 /**
- * Send email via Resend API.
- *
- * `deliveryEnv` (issue #957) is the delivery-level fence: when set and not
- * production, a recipient not on DEV_EMAIL_ALLOWLIST is refused BEFORE the
- * Resend fetch ever fires -- see isEmailDeliveryAllowed's doc comment for
- * why an unset/unrecognized ENVIRONMENT fails toward refusing, not
- * allowing. `deliveryEnv` is optional only so this function's own type
- * signature doesn't force every caller to thread it through in one commit;
- * every exported wrapper below does pass it, and an OMITTED deliveryEnv
- * still fails closed (isEmailDeliveryAllowed treats undefined ENVIRONMENT
- * as non-production with an empty allow-list, i.e. refuses).
- */
-/**
  * Resend ANSWERED a send with a 4xx: it refused the message itself (a bad key,
  * a bad address, a malformed body) and delivered nothing. The message keeps the
  * plain error's words. A thrown fetch, a timeout or a 5xx is not this class:
@@ -347,6 +355,23 @@ export class EmailRejectedError extends Error {
   }
 }
 
+/**
+ * Send email via Resend API.
+ *
+ * `deliveryEnv` (issue #957) is the delivery-level fence: when set and not
+ * production, a recipient not on DEV_EMAIL_ALLOWLIST is refused BEFORE the
+ * Resend fetch ever fires -- see isEmailDeliveryAllowed's doc comment for
+ * why an unset/unrecognized ENVIRONMENT fails toward refusing, not
+ * allowing. `deliveryEnv` is optional only so this function's own type
+ * signature doesn't force every caller to thread it through in one commit;
+ * every exported wrapper below does pass it, and an OMITTED deliveryEnv
+ * still fails closed (isEmailDeliveryAllowed treats undefined ENVIRONMENT
+ * as non-production with an empty allow-list, i.e. refuses).
+ *
+ * `timeoutMs`, when given, bounds the Resend call (the identifier sweep's weekly
+ * report passes one). A 4xx answer throws {@link EmailRejectedError}: Resend
+ * refused the message, so nothing was delivered.
+ */
 async function sendEmail(
   to: string,
   subject: string,
@@ -855,7 +880,9 @@ export async function sendAdminNotificationEmail(
         deliveryEnv,
       );
     } catch (error) {
-      console.error(`Failed to send admin notification to ${adminEmail}:`, error);
+      console.error(
+        `Failed to send admin notification to ${redactRecipient(adminEmail)}: ${sendFailureText(error, adminEmail)}`,
+      );
     }
   }
 }
@@ -1005,7 +1032,7 @@ export async function sendUploadAccessRequestEmail(
     } catch (error) {
       // Still per-recipient, so one bad address does not cost the others their
       // copy -- the failure is now REPORTED as well as logged.
-      const detail = error instanceof Error ? error.message : String(error);
+      const detail = sendFailureText(error, adminEmail);
       console.error(
         `Failed to send upload-access request to ${redactRecipient(adminEmail)}: ${detail}`,
       );
@@ -1069,7 +1096,9 @@ export async function sendImportQuarantineEmail(
         deliveryEnv,
       );
     } catch (error) {
-      console.error(`Failed to send import-quarantine alert to ${adminEmail}:`, error);
+      console.error(
+        `Failed to send import-quarantine alert to ${redactRecipient(adminEmail)}: ${sendFailureText(error, adminEmail)}`,
+      );
     }
   }
 }
@@ -1322,7 +1351,7 @@ ${screenSection}
       );
       outcome.delivered++;
     } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
+      const detail = sendFailureText(error, adminEmail);
       console.error(
         `Failed to send publication request email to ${redactRecipient(adminEmail)}: ${detail}`,
       );
@@ -1397,16 +1426,22 @@ export async function sendIdentifierScreenBlockedEmail(
 </html>
   `;
 
-  await sendEmail(
-    to,
-    `Publication on hold: ${datasetId} - identifying information found`,
-    html,
-    resendApiKey,
-    fromEmail,
-    replyTo,
-    isDev,
-    deliveryEnv,
-  );
+  try {
+    await sendEmail(
+      to,
+      `Publication on hold: ${datasetId} - identifying information found`,
+      html,
+      resendApiKey,
+      fromEmail,
+      replyTo,
+      isDev,
+      deliveryEnv,
+    );
+  } catch (error) {
+    // The caller logs this message; the depositor's address is not for a log.
+    if (error instanceof Error) error.message = redactAddressIn(error.message, to);
+    throw error;
+  }
 }
 
 /**
@@ -2088,7 +2123,9 @@ export async function sendStalenessAdminReviewEmail(
       );
       delivered++;
     } catch (error) {
-      console.error(`Failed to send staleness review email to ${adminEmail}:`, error);
+      console.error(
+        `Failed to send staleness review email to ${redactRecipient(adminEmail)}: ${sendFailureText(error, adminEmail)}`,
+      );
     }
   }
   return delivered;
@@ -2148,7 +2185,9 @@ export async function sendExemplarInvariantAlertEmail(
       );
       delivered++;
     } catch (error) {
-      console.error(`Failed to send exemplar-invariant alert to ${adminEmail}:`, error);
+      console.error(
+        `Failed to send exemplar-invariant alert to ${redactRecipient(adminEmail)}: ${sendFailureText(error, adminEmail)}`,
+      );
     }
   }
   return delivered;
@@ -2376,10 +2415,9 @@ export async function sendIdentifierSweepReportEmail(
         ambiguous++;
       }
       // `sendEmail`'s message names the recipient; redact it in the message too.
-      const message = error instanceof Error ? error.message : String(error);
       console.error(
         `Failed to send the identifier sweep report to ${redactRecipient(adminEmail)}:`,
-        message.split(adminEmail).join(redactRecipient(adminEmail)),
+        sendFailureText(error, adminEmail),
       );
     }
   }

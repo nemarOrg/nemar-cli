@@ -113,7 +113,7 @@ const SWEEP_WIRING: Record<
   runNeurobagelVerificationSweep: "cron-wrapped",
   runNeurobagelVerificationSweepCron: "prod-only",
   sweepBlockedBidsValidationRequests: "all-envs",
-  // Epic #1610 phase 4: the identifier-screen watchdog. Its deadline is 40
+  // Epic #1610 phase 4: the identifier-screen watchdog. Its deadline is 50
   // minutes, so it rides the 30-minute tick; it mails admins, so it is
   // production-only there and absent from DEV_CRON_ALLOWLIST.
   sweepIdentifierScreens: "tick-prod-only",

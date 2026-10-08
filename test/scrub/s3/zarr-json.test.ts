@@ -13,6 +13,7 @@ import {
   EDF_MIRROR_MEMBERS,
   KNOWN_BENIGN,
   ZarrJsonError,
+  parseZarrJsonBytes,
   removeIdentifierKeys,
   unknownRecordingMembers,
   zarrIdentifierCount,
@@ -223,6 +224,32 @@ describe("removeIdentifierKeys: exact text", () => {
     // Nested past the limit: refused, not recursed into.
     const deep = `{"attributes":${"[".repeat(300)}${"]".repeat(300)}}`;
     expect(() => cut(deep)).toThrow(ZarrJsonError);
+  });
+
+  test("a repeated member name is refused: JSON.parse would keep only the last one", () => {
+    // `doc` would say `gender` is empty while the first, filled member is in the bytes.
+    const twice = `{"attributes":{"recording_metadata":{"gender":"F","gender":""}}}`;
+    expect(JSON.parse(twice).attributes.recording_metadata.gender).toBe("");
+    expect(zarrIdentifierCount(JSON.parse(twice))).toBe(0);
+    for (const run of [
+      () => cut(twice),
+      () => parseZarrJsonBytes(new TextEncoder().encode(twice)),
+      // Spelled differently, the same name once decoded.
+      () => cut(`{"attributes":{"a\\u0062":1,"ab":2}}`),
+    ]) {
+      let err: unknown;
+      try {
+        run();
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(ZarrJsonError);
+      expect(String((err as Error).message)).toBe("zarr-json-malformed");
+    }
+    // The twin: the same name in two different objects is two members, and is fine.
+    const apart = `{"attributes":{"x":{"gender":"F"},"y":{"gender":"M"}}}`;
+    expect(cut(apart).removed).toBe(2);
+    expect(parseZarrJsonBytes(new TextEncoder().encode(apart)).text).toBe(apart);
   });
 });
 

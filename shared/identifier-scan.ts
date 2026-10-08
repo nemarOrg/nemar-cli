@@ -819,7 +819,13 @@ export function scanEdfHeader(bytes: Uint8Array): Finding[] {
   return findings;
 }
 
-/** Lowercase with spaces, underscores and hyphens removed: the canonical spelling of a name. */
+/**
+ * Lowercase with every whitespace character (all that JavaScript's `\s` matches, so a no-break
+ * space, a tab and a byte order mark too), underscore and hyphen removed: the canonical spelling
+ * of a name. `canon` in scripts/scrub/git/rewrite_history.py and `canonicalKey` in
+ * scripts/scrub/git/git-lib.ts spell it the same way, and test/scrub/git/canonical-key.test.ts
+ * holds the three together; change this and that test shows what else to change.
+ */
 export const canonical = (raw: string) =>
   raw
     .trim()

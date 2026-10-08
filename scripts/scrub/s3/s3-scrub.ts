@@ -108,9 +108,10 @@ const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|raw-verify|delete-old|za
              and this run does not replace is current at its size (raw-duplicate-missing), and
              refuses any raw version or marker it did not record (raw-copy-not-in-plan).
              --max-prune N (default 1000) refuses to prune more noncurrent versions than N. For
-             ID/zarr/ expect about one per store root the zarr step rewrote (zarr-plan.json counts
-             them, and the dry run prints the exact number) plus any older versions a Zarr
-             re-conversion left, so a large dataset needs a larger N than the default.
+             ID/zarr/ expect at least one per zarr.json document the zarr step rewrote
+             (zarr-plan.json counts them, and the dry run prints the exact number) plus every
+             older version and delete marker earlier conversions left, so a dataset converted
+             more than once needs a much larger N than the default.
              Every refusal is evaluated and listed, one line each, and the stop line joins the
              words with +; the bucket is read once the working files agree.
   zarr       --dir DIR [--execute] [--concurrency 4] [--allow-member NAME]...
@@ -213,12 +214,11 @@ function common(v: Values, log: (line: string) => void): CommonOptions {
     // Tests point the CLI at a local stand-in; the CLI itself honors the variable, so this
     // only makes the override explicit.
     endpointUrl: process.env.AWS_ENDPOINT_URL_S3 || undefined,
-    // Against real S3 with no key in the environment, every call shares one serialized
-    // credential export instead of each `aws` child refreshing the login session itself.
-    credentials:
-      process.env.AWS_ENDPOINT_URL_S3 || process.env.AWS_ACCESS_KEY_ID
-        ? undefined
-        : cliCredentialSource(),
+    // With no key in the environment, every call shares one serialized credential export
+    // instead of each `aws` child refreshing the login session itself, and that export accepts
+    // only a short-lived (`ASIA`) key. An endpoint override does not lift that: it can name a
+    // real S3 endpoint, and a profile with a long-lived key must not slip past the rule.
+    credentials: process.env.AWS_ACCESS_KEY_ID ? undefined : cliCredentialSource(),
     log,
   };
 }

@@ -1107,6 +1107,18 @@ function unchecked(
   return { ...base, status: "unchecked", incomplete: true, incomplete_reasons: [reason] };
 }
 
+/**
+ * Append `items` to `target` one by one. `target.push(...items)` is not a substitute: a call spreads
+ * its arguments onto the stack, and Bun throws a RangeError once there are somewhere between
+ * 500,000 and 1,000,000 of them. A participants table of 16 MB can yield more findings than that,
+ * and the scrub's `appendAll` (#1640) was written for the same reason. A throw here would be read
+ * as an unreadable file and the record would be `unchecked`, which is safe but wrong for a table
+ * that was read in full.
+ */
+function addFindings(target: Finding[], items: readonly Finding[]): void {
+  for (const item of items) target.push(item);
+}
+
 /** What a caller adds to a scan of a tree that the tree itself cannot say. */
 export interface ScanExtras {
   /**
@@ -1205,7 +1217,7 @@ export async function scanDatasetFromManifest(
         flaggedFileCount++;
         flaggedPatientValues.add(patient);
       }
-      findings.push(...found);
+      addFindings(findings, found);
       for (const kind of new Set(found.map((f) => f.kind))) {
         flaggedKinds[kind] = (flaggedKinds[kind] ?? 0) + 1;
       }
@@ -1231,8 +1243,8 @@ export async function scanDatasetFromManifest(
       const { text, truncated } = await readText(ctx, participants, ctx.limits.participantsBytes);
       const newline = text.indexOf("\n");
       if (newline < 0 && truncated) throw new ReadFailure("header-truncated");
-      findings.push(...scanTableColumns(newline < 0 ? text : text.slice(0, newline)));
-      findings.push(...scanParticipantIds(text));
+      addFindings(findings, scanTableColumns(newline < 0 ? text : text.slice(0, newline)));
+      addFindings(findings, scanParticipantIds(text));
       participantsTruncated = truncated;
     } catch (error) {
       participantsUnread = true;
@@ -1252,7 +1264,7 @@ export async function scanDatasetFromManifest(
       const { text } = await readText(ctx, entry, ctx.limits.sideFileBytes);
       // The decoder already drops a leading BOM; `acqTimeCells` drops one more, so the header
       // match is independent of it. The same reading is what the importer's date rule edits.
-      findings.push(...scanScansTable(text));
+      addFindings(findings, scanScansTable(text));
       scansScanned++;
     } catch (error) {
       fail("scans", error);
@@ -1287,7 +1299,7 @@ export async function scanDatasetFromManifest(
       } catch {
         throw new ReadFailure("json-parse");
       }
-      findings.push(...scanJsonKeys(doc));
+      addFindings(findings, scanJsonKeys(doc));
       jsonScanned++;
     } catch (error) {
       fail("json", error);
@@ -1300,7 +1312,7 @@ export async function scanDatasetFromManifest(
     }
     try {
       const { text } = await readText(ctx, entry, sideBytes);
-      findings.push(...scanTextForLocalPaths(text));
+      addFindings(findings, scanTextForLocalPaths(text));
       textScanned++;
     } catch (error) {
       fail("text", error);
