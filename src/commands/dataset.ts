@@ -4274,12 +4274,12 @@ Examples:
       // screen starts when validation passes and the request is released; the
       // backend words that absence as "NOT RUN for this request", in red, which
       // reads as a fault in a state that is only waiting.
-      const waitingOnValidation =
-        result.status === "blocked" && isCiPendingReason(result.block_reason);
+      const pendingReason =
+        result.status === "blocked" && isCiPendingReason(result.block_reason)
+          ? result.block_reason
+          : undefined;
       // Epic #1610 phase 4: the identifier screen, in the backend's words.
-      const screenLines = waitingOnValidation
-        ? []
-        : identifierScreenLines(result.identifier_screen);
+      const screenLines = pendingReason ? [] : identifierScreenLines(result.identifier_screen);
       if (screenLines.length > 0) {
         console.log();
         for (const line of screenLines) console.log(line);
@@ -4291,9 +4291,8 @@ Examples:
       // said the way `publish request` says it (info, not red, no "re-request"
       // from the server's message) and clears on its own once CI passes. Any
       // other reason stays a red block.
-      const againCommand = `nemar dataset publish request ${datasetId}${result.anonymous === true ? " --anonymous" : ""}`;
-      if (waitingOnValidation && isCiPendingReason(result.block_reason)) {
-        console.log(`\n  ${chalk.cyan("ℹ")} ${ciPendingHeadline(result.block_reason)}`);
+      if (pendingReason) {
+        console.log(`\n  ${chalk.cyan("ℹ")} ${ciPendingHeadline(pendingReason)}`);
         for (const line of ciPendingHint(datasetId, result.anonymous === true)) console.log(line);
         if (result.ci_url) console.log(`  ${chalk.dim("CI:")} ${result.ci_url}`);
       } else if (result.status === "blocked") {
@@ -4315,9 +4314,10 @@ Examples:
         if (result.ci_url) {
           console.log(`  ${chalk.dim("CI:")} ${result.ci_url}`);
         }
+        const again = `nemar dataset publish request ${datasetId}${result.anonymous === true ? " --anonymous" : ""}`;
         console.log(
           chalk.dim(
-            `  This re-checks automatically once CI passes; or re-run '${againCommand}' to retry now.`,
+            `  This re-checks automatically once CI passes; or re-run '${again}' to retry now.`,
           ),
         );
       }
