@@ -459,13 +459,18 @@ describe("a run killed inside the save", () => {
 
 describe("a run signaled inside the save", () => {
   /**
-   * Start the runner in a dataset whose pre-commit hook announces itself (a `ready` file)
-   * and then waits for the test to let it go (a `stop` file). The save is then inside its
-   * window with the paths marked assume-unchanged, and the test chooses what happens to
-   * it. `shimRules` are installed BEFORE the runner starts, because a child inherits the
-   * PATH it was spawned with.
+   * Start the runner on a dataset and wait until its save is inside the window, with the
+   * paths marked assume-unchanged. By default the window is held open by a pre-commit hook
+   * that announces itself (a `ready` file) and waits for the test to let it go (a `stop`
+   * file). With `lockHolder` a stand-in git holds `index.lock` during `git add -A`, as the
+   * real one does while it reads content, and announces itself the same way. `shimRules`
+   * are installed BEFORE the runner starts, because a child inherits the PATH it was
+   * spawned with.
    */
-  async function inTheWindow(name: string, shimRules: ShimRule[] = []) {
+  async function inTheWindow(
+    name: string,
+    opts: { shimRules?: ShimRule[]; lockHolder?: boolean } = {},
+  ) {
     const dir = await dataset(name, { "a.edf": 3_000, "b.edf": 3_000 });
     const tag = Math.random().toString(36).slice(2);
     const pidFile = join(dir, "..", `runner-${tag}.pid`);
@@ -473,11 +478,17 @@ describe("a run signaled inside the save", () => {
     const stop = join(dir, "..", `stop-${tag}`);
     const store = join(dir, "..", `store-${tag}`);
     mkdirSync(store, { recursive: true });
-    const restoreHook = prependPreCommit(
-      dir,
-      `touch "${ready}"; i=0; while [ ! -e "${stop}" ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i + 1)); done; exit 1`,
-    );
-    const restoreShim = shimRules.length > 0 ? installGitShim(scratch.root, shimRules) : () => {};
+    const restoreHook = opts.lockHolder
+      ? () => {}
+      : prependPreCommit(
+          dir,
+          `touch "${ready}"; i=0; while [ ! -e "${stop}" ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i + 1)); done; exit 1`,
+        );
+    const rules: ShimRule[] = [
+      ...(opts.lockHolder ? [{ match: " add -A ", holdLock: 30, log: ready }] : []),
+      ...(opts.shimRules ?? []),
+    ];
+    const restoreShim = rules.length > 0 ? installGitShim(scratch.root, rules) : () => {};
     const child = Bun.spawn(
       ["bun", "run", join(import.meta.dir, "helpers", "data-steps-runner.ts"), dir, pidFile, store],
       // The environment is passed explicitly: it carries the PATH with the shim in front.
@@ -485,17 +496,27 @@ describe("a run signaled inside the save", () => {
     );
     const deadline = Date.now() + 40_000;
     while (!existsSync(ready)) {
-      if (Date.now() > deadline) throw new Error("the runner never reached the pre-commit hook");
+      if (Date.now() > deadline) throw new Error("the runner never reached the window");
       await new Promise((r) => setTimeout(r, 50));
     }
     // The premise: the paths are marked and the save has not committed.
     expect(Object.values(await tags(dir, "a.edf", "b.edf"))).toEqual(["h", "h"]);
+    const letHookGo = () => writeFileSync(stop, "");
     const release = () => {
-      writeFileSync(stop, "");
+      letHookGo();
       restoreHook();
       restoreShim();
     };
-    return { dir, child, release };
+    return { dir, child, release, letHookGo };
+  }
+
+  /** Wait until `file` has a line in it: a stand-in git logs there when it is called. */
+  async function untilLogged(file: string): Promise<void> {
+    const deadline = Date.now() + 40_000;
+    while (!existsSync(file) || readFileSync(file, "utf8").trim() === "") {
+      if (Date.now() > deadline) throw new Error(`${file} was never written`);
+      await new Promise((r) => setTimeout(r, 50));
+    }
   }
 
   test("a signal with nothing in the way takes the flags back before the process dies", async () => {
@@ -559,9 +580,9 @@ describe("a run signaled inside the save", () => {
   test("an unmark that hangs cannot hang the handler", async () => {
     // Guards the spawnSync timeout. A git that never returns would make Ctrl-C do
     // nothing at all while the handler waited on it.
-    const { dir, child, release } = await inTheWindow("signal-hung-git", [
-      { match: "update-index --no-assume-unchanged", sleep: 40 },
-    ]);
+    const { dir, child, release } = await inTheWindow("signal-hung-git", {
+      shimRules: [{ match: "update-index --no-assume-unchanged", sleep: 40 }],
+    });
     try {
       const sent = Date.now();
       child.kill("SIGTERM");
@@ -572,6 +593,48 @@ describe("a run signaled inside the save", () => {
     } finally {
       release();
     }
+    expect(Object.values(await tags(dir, "a.edf", "b.edf"))).toEqual(["h", "h"]);
+  });
+  test("a git that holds the lock is stopped by the handler, so the flags still come back", async () => {
+    // Guards stopChildren. A signal sent to the CLI alone does not reach the `git add -A`
+    // it interrupted, which holds `index.lock` for as long as it reads content; waiting
+    // for the lock to clear would wait out the whole read. The handler asks its children
+    // to stop, git removes its lock as it exits, and the retry then succeeds. The stand-in
+    // git here holds the lock for 30 s and releases it on SIGTERM, as git does.
+    const { dir, child, release } = await inTheWindow("signal-real-lock", { lockHolder: true });
+    const lock = join(dir, ".git", "index.lock");
+    expect(existsSync(lock)).toBe(true);
+    const sent = Date.now();
+    child.kill("SIGTERM");
+    await child.exited;
+    const waited = Date.now() - sent;
+    release();
+
+    expect(child.signalCode).toBe("SIGTERM");
+    expect(waited).toBeLessThan(10_000);
+    expect(existsSync(lock)).toBe(false);
+    expect(Object.values(await tags(dir, "a.edf", "b.edf"))).toEqual(["H", "H"]);
+  });
+
+  test("a signal that lands during the final unmark still finds the handler", async () => {
+    // Guards the order in saveDataset's `finally`: the handler is disarmed AFTER the final
+    // unmark. Disarmed first, a signal during the unmark meets no handler, the default
+    // action kills the process, and nothing says the flags are still set. The unmark here
+    // hangs (a stand-in git that logs and sleeps), so the signal lands inside it.
+    const log = join(scratch.root, `unmark-${Math.random().toString(36).slice(2)}.log`);
+    const { dir, child, release, letHookGo } = await inTheWindow("signal-final-unmark", {
+      shimRules: [{ match: "update-index --no-assume-unchanged", log, sleep: 40 }],
+    });
+    // The hook fails the commit; the save then runs its final unmark, which hangs.
+    letHookGo();
+    await untilLogged(log);
+    child.kill("SIGTERM");
+    await child.exited;
+    const stderr = await new Response(child.stderr).text();
+    release();
+
+    expect(child.signalCode).toBe("SIGTERM");
+    expect(stderr).toContain("nemar dataset commit");
     expect(Object.values(await tags(dir, "a.edf", "b.edf"))).toEqual(["h", "h"]);
   });
 });

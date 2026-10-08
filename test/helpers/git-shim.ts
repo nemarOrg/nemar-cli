@@ -7,7 +7,9 @@
  * letting every other call (including the ones git-annex makes internally) run the
  * real git untouched. A rule can fail the call, kill it, make it succeed with output
  * nobody expected (`stdout`), run it for real with extra environment variables (`env`),
- * or make it hang first (`sleep`). The repository, the index and the commits are all real.
+ * make it hang first (`sleep`), note that it happened (`log`), or make it hold
+ * `index.lock` the way a slow git does (`holdLock`). The repository, the index and the
+ * commits are all real.
  *
  * `env` exists so a test can steer ONE child process (for example point git-annex's
  * HTTP client at a dead local proxy) without writing to `process.env`: Bun keeps a
@@ -44,9 +46,18 @@ export interface ShimRule {
   env?: Record<string, string>;
   /**
    * Sleep this many seconds, then run the real git: a call that hangs. Like `env` it
-   * neither fails nor counts, and combines with nothing else on the rule.
+   * neither fails nor counts.
    */
   sleep?: number;
+  /** Append the call's arguments, one line per call, to this file, then carry on. */
+  log?: string;
+  /**
+   * Instead of running git, hold `.git/index.lock` for this many seconds and then fail:
+   * a stand-in for a git busy with slow work. Like the real one it removes its lock and
+   * exits when it receives SIGTERM, SIGINT or SIGHUP. `log`, when given, is written once
+   * the lock exists, so a test can wait on it.
+   */
+  holdLock?: number;
 }
 
 const quote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
@@ -61,22 +72,30 @@ export function installGitShim(root: string, rules: ShimRule[]): () => void {
   const dir = join(root, `git-shim-${Math.random().toString(36).slice(2, 8)}`);
   mkdirSync(dir, { recursive: true });
   const blocks = rules.map((rule, i) => {
-    if (rule.env) {
-      const exports = Object.entries(rule.env).map(([k, v]) => `export ${k}=${quote(v)}`);
-      return [
-        `case "$args" in *${quote(rule.match)}*)`,
-        ...exports.map((e) => `  ${e}`),
-        "  ;;",
-        "esac",
-      ].join("\n");
-    }
-    if (rule.sleep !== undefined) {
-      return [
-        `case "$args" in *${quote(rule.match)}*)`,
-        `  sleep ${rule.sleep}`,
-        "  ;;",
-        "esac",
-      ].join("\n");
+    if (
+      rule.env ||
+      rule.sleep !== undefined ||
+      rule.log !== undefined ||
+      rule.holdLock !== undefined
+    ) {
+      const lines: string[] = Object.entries(rule.env ?? {}).map(
+        ([k, v]) => `  export ${k}=${quote(v)}`,
+      );
+      if (rule.holdLock !== undefined) {
+        lines.push('  gd=$("$real" rev-parse --absolute-git-dir)', '  : > "$gd/index.lock"');
+      }
+      if (rule.log !== undefined) lines.push(`  printf '%s\\n' "$args" >> ${quote(rule.log)}`);
+      if (rule.sleep !== undefined) lines.push(`  sleep ${rule.sleep}`);
+      if (rule.holdLock !== undefined) {
+        lines.push(
+          `  sleep ${rule.holdLock} & pid=$!`,
+          `  trap 'kill $pid 2>/dev/null; rm -f "$gd/index.lock"; exit 143' TERM INT HUP`,
+          "  wait $pid",
+          '  rm -f "$gd/index.lock"',
+          "  exit 1",
+        );
+      }
+      return [`case "$args" in *${quote(rule.match)}*)`, ...lines, "  ;;", "esac"].join("\n");
     }
     const counter = join(dir, `rule-${i}.count`);
     const skipped = join(dir, `rule-${i}.skip`);

@@ -153,7 +153,11 @@ describe("a blocked tracking is recovered and retried in the same run", () => {
 
   test("when unstaging fails the add is not retried, and the command to run is printed", async () => {
     const { dir, targets, progress } = await blocked("unstage-fails");
-    const restore = installGitShim(scratch.root, [{ match: "rm --cached" }]);
+    const adds = join(scratch.root, `adds-${Math.random().toString(36).slice(2)}.log`);
+    const restore = installGitShim(scratch.root, [
+      { match: "rm --cached" },
+      { match: "annex add", log: adds },
+    ]);
     try {
       const { value, text } = await transfer(dir, targets, progress);
       expect(value.status).toBe("fail");
@@ -162,7 +166,9 @@ describe("a blocked tracking is recovered and retried in the same run", () => {
     } finally {
       restore();
     }
-    // Still staged: nothing was retried against a failed recovery.
+    // Guards the break on `unstaged === null`: no `git annex add` ran against a recovery
+    // that failed, and the blob is still staged.
+    expect(existsSync(adds)).toBe(false);
     expect((await run(["git", "ls-files", "--", "big.edf"], dir)).stdout.trim()).toBe("big.edf");
     expect(isStepCompleted(progress, "tracking")).toBe(false);
   });
