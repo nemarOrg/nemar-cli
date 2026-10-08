@@ -26,7 +26,7 @@ import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { getWorkflowRuns } from "./github.js";
 import { RESET_SCREEN_COLUMNS_SQL, startScreenAndNotify } from "./identifier-screen.js";
-import { checkSubmissionGate } from "./submission-gate.js";
+import { type GateReadBudget, checkSubmissionGate } from "./submission-gate.js";
 
 /**
  * Requests one sweep may unblock, and therefore screen (epic #1610 phase 4).
@@ -36,6 +36,18 @@ import { checkSubmissionGate } from "./submission-gate.js";
  * later sweep, so it is never left `requested` with no screen.
  */
 export const MAX_SCREENED_UNBLOCKS_PER_SWEEP = 10;
+
+/**
+ * GitHub reads the submission gate may make in ONE sweep, across all rows. A
+ * row costs one read when its description lists an ethics approval and up to
+ * five when it does not (the description and four README candidates), and the
+ * sweep also makes one CI lookup per row; unbounded, 50 rows with no README is
+ * about 300 requests in a single scheduled invocation, which is over the
+ * platform's per-invocation subrequest limit. When it is spent the rows not yet
+ * evaluated are left for the next run (`deferred`), which starts where this one
+ * stopped because they are not touched.
+ */
+export const MAX_GATE_READS_PER_SWEEP = 100;
 
 /** The block_reason values produced by the BIDS-validation readiness check. */
 export const BIDS_VALIDATION_BLOCK_REASONS = [
@@ -76,6 +88,10 @@ export interface BlockedSweepResult {
   errors: number;
   /** Unblocked requests whose identifier screen was dispatched. */
   screened?: number;
+  /** Requests left for the next run because the gate's read budget was spent. */
+  deferred: number;
+  /** GitHub reads the submission gate made. */
+  gateReads: number;
 }
 
 function errMsg(err: unknown): string {
@@ -149,9 +165,18 @@ export function blockedCandidateQuery(
 export async function sweepBlockedBidsValidationRequests(
   env: Bindings,
   limit = 50,
+  gateReadBudget = MAX_GATE_READS_PER_SWEEP,
 ): Promise<BlockedSweepResult> {
   const db = env.DB;
-  const result: BlockedSweepResult = { scanned: 0, unblocked: 0, reblocked: 0, errors: 0 };
+  const result: BlockedSweepResult = {
+    scanned: 0,
+    unblocked: 0,
+    reblocked: 0,
+    errors: 0,
+    deferred: 0,
+    gateReads: 0,
+  };
+  const budget: GateReadBudget = { remaining: gateReadBudget };
 
   // Production only (epic #923 Phase 7). The candidate query filters on request
   // status alone, with no dataset-id prefix restriction, so on the dev/staging
@@ -262,9 +287,15 @@ export async function sweepBlockedBidsValidationRequests(
         // blind or a Name only if it passes NOW. A request that does not is
         // re-blocked with the reasons, as the route would have, and is no longer
         // a candidate here: the depositor fixes the data and requests again.
-        // An anonymous blind that could not be VERIFIED (a failed read) says
-        // nothing about the data, so the request is left blocked for the next
-        // sweep rather than given a verdict.
+        // A file that could not be READ says nothing about the data, so the
+        // request is left blocked for the next sweep rather than given a
+        // verdict (native or anonymous: a daily batch loses a day by waiting,
+        // and a release on a partial look is the one mistake that cannot be
+        // taken back). Its reads never sleep or retry, and share one budget.
+        if (budget.remaining <= 0) {
+          result.deferred++;
+          continue;
+        }
         const gate = await checkSubmissionGate({
           datasetId: row.dataset_id,
           repoName,
@@ -272,9 +303,11 @@ export async function sweepBlockedBidsValidationRequests(
           dataset: row,
           anonymous: row.anonymous === 1,
           caller: "publish-sweep",
+          budget,
         });
         if (gate.kind === "unverified") {
-          result.errors++;
+          if (gate.cause === "budget") result.deferred++;
+          else result.errors++;
           continue;
         }
         if (gate.kind === "blocked") {
@@ -352,5 +385,11 @@ export async function sweepBlockedBidsValidationRequests(
     }
   }
 
+  result.gateReads = gateReadBudget - budget.remaining;
+  if (result.deferred > 0) {
+    console.warn(
+      `[publish-sweep] ${result.deferred} request(s) left for the next run (gate read budget of ${gateReadBudget} spent after ${result.gateReads} reads)`,
+    );
+  }
   return result;
 }
