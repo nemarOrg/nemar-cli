@@ -132,7 +132,7 @@ function chunkObjectName(parts: KeyParts, chunkSize: number, chunkNumber: number
 /** The index of one listing, keyed by the Map itself; see {@link firstChunksIn}. */
 const firstChunksCache = new WeakMap<
   Map<string, number>,
-  { listingSize: number; chunkSizesByKey: ReadonlyMap<string, readonly number[]> }
+  { listingSize: number; chunkSizesByKey: ReadonlyMap<string, ReadonlySet<number>> }
 >();
 
 /**
@@ -156,19 +156,17 @@ const firstChunksCache = new WeakMap<
  * the index only nominates chunk sizes to try, and every chunk is then looked up
  * in the live Map. No caller mutates a listing after its first lookup.
  */
-function firstChunksIn(existing: Map<string, number>): ReadonlyMap<string, readonly number[]> {
+function firstChunksIn(existing: Map<string, number>): ReadonlyMap<string, ReadonlySet<number>> {
   const cached = firstChunksCache.get(existing);
   if (cached && cached.listingSize === existing.size) return cached.chunkSizesByKey;
-  const sets = new Map<string, Set<number>>();
+  const chunkSizesByKey = new Map<string, Set<number>>();
   for (const name of existing.keys()) {
     const parsed = parseChunkKey(name);
     if (!parsed || parsed.chunkNumber !== 1) continue;
-    const sizes = sets.get(parsed.baseKey);
+    const sizes = chunkSizesByKey.get(parsed.baseKey);
     if (sizes) sizes.add(parsed.chunkSize);
-    else sets.set(parsed.baseKey, new Set([parsed.chunkSize]));
+    else chunkSizesByKey.set(parsed.baseKey, new Set([parsed.chunkSize]));
   }
-  const chunkSizesByKey = new Map<string, readonly number[]>();
-  for (const [baseKey, sizes] of sets) chunkSizesByKey.set(baseKey, [...sizes]);
   firstChunksCache.set(existing, { listingSize: existing.size, chunkSizesByKey });
   return chunkSizesByKey;
 }
