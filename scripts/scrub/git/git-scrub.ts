@@ -138,7 +138,9 @@ export async function main(argv: string[]): Promise<number> {
         const fresh = values["fresh-clone"] === true;
         const proofPath = values["proof-out"] ?? join(dirname(keymapPath), "git-verified.json");
         // A proof from an earlier run must not outlive a run that does not pass, a usage error
-        // included: nothing below may leave one behind.
+        // raised below included: nothing below may leave one behind. A bad or missing flag above
+        // is raised before the proof's path is known, so it leaves an earlier proof in place; run
+        // verify again until it passes, and read the proof's `mode` before using it.
         rmSync(proofPath, { force: true });
         if (fresh && values.before) throw new UsageError("--fresh-clone takes no --before");
         // The names are never echoed: a tag name is part of what the output keeps to counts.

@@ -1203,7 +1203,7 @@ describe("verify-new", () => {
   );
 
   test(
-    "a malformed assembled.json is refused with status 2 and no proof",
+    "a malformed assembled.json is refused with status 3 and no proof",
     async () => {
       const s = assembledSetup(1);
       writeFileSync(

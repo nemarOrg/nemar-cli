@@ -166,6 +166,46 @@ describe("canary", () => {
   );
 
   test(
+    "a lock that is not enforced fails the canary: the delete without the bypass must be refused",
+    async () => {
+      standin = startS3Standin();
+      // The lock is stripped just before the first delete, as a bucket without Object Lock would
+      // behave: the delete then succeeds, and a canary that took that for a pass would approve
+      // every irreversible stage that follows.
+      standin.beforeOp(
+        "DeleteObject",
+        () => {
+          for (const v of standin.versions(BUCKET, `${prefix}probe.txt`)) {
+            standin.clearLock(BUCKET, `${prefix}probe.txt`, v.versionId);
+          }
+        },
+        1,
+      );
+      const r = await runScrub(standin, canary(["--execute"]));
+      expectStopped(r, 1, "lock-not-enforced");
+      // The twin is the first test of this file: with the lock in place the same run exits 0.
+    },
+    SLOW,
+  );
+
+  test(
+    "--multipart fails when the object built by the multipart path carries no lock",
+    async () => {
+      standin = startS3Standin();
+      // The lock vanishes from the multipart object before the canary reads it back.
+      const strip = () => {
+        for (const v of standin.versions(BUCKET, `${prefix}multipart.bin`)) {
+          standin.clearLock(BUCKET, `${prefix}multipart.bin`, v.versionId);
+        }
+      };
+      for (let nth = 1; nth <= 8; nth++) standin.beforeOp("HeadObject", strip, nth);
+      const r = await runScrub(standin, canary(["--execute", "--multipart"]));
+      expectStopped(r, 1, "multipart-lock-missing");
+    },
+    SLOW,
+  );
+
+  test(
     "a version left under the prefix after the deletes fails the canary",
     async () => {
       standin = startS3Standin();

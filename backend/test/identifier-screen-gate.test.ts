@@ -645,7 +645,11 @@ describe("the web dispatch's gate (POST /approve-dispatch)", () => {
 });
 
 describe("direct identifiers block the request and tell the depositor", () => {
-  async function requestAndReport(status: string, findings: Record<string, number>) {
+  async function requestAndReport(
+    status: string,
+    findings: Record<string, number>,
+    beforeReport?: (requestId: number) => void,
+  ) {
     const res = await app.request(
       `/datasets/${DATASET}/publish/request`,
       { method: "POST", headers: { Authorization: `Bearer ${OWNER_KEY}` } },
@@ -657,6 +661,7 @@ describe("direct identifiers block the request and tell the depositor", () => {
     const report = cleanScreenReportBody(DATASET, SCREENED_HEAD, status);
     (report.scan as Record<string, unknown>).findings_by_kind = findings;
     (report.scan as Record<string, unknown>).edf_bdf_files_flagged = 4;
+    beforeReport?.(id);
     const cb = await app.request(
       "/webhooks/identifier-screen-result",
       {
@@ -707,6 +712,39 @@ describe("direct identifiers block the request and tell the depositor", () => {
     });
   });
 
+  test("a finding that lands after the request stopped being active blocks nothing and tells nobody", async () => {
+    await withFakeResend(async (calls) => {
+      const id = await requestAndReport("direct-identifiers", { "edf-patient-name": 4 }, (rid) =>
+        db.run("UPDATE publication_requests SET status = 'denied' WHERE id = ?", [rid]),
+      );
+      const row = requestRow(id);
+      // The result is stored (the gate would refuse it), but a denied request is not reopened as
+      // blocked and its depositor gets no notice about a request that no longer exists.
+      expect(row?.identifier_screen_status).toBe("direct-identifiers");
+      expect(row?.status).toBe("denied");
+      expect(row?.block_reason).toBeNull();
+      expect(sendsTo(calls, OWNER_EMAIL)).toHaveLength(0);
+    });
+  });
+
+  test("a re-request that is blocked up front clears the old screen result too", async () => {
+    const id = seedRequest({ status: "blocked", blockReason: "identifier_screen_findings" });
+    markScreen(db, id, DATASET, { status: "direct-identifiers" });
+    bidsConclusion = "failure";
+    const res = await app.request(
+      `/datasets/${DATASET}/publish/request`,
+      { method: "POST", headers: { Authorization: `Bearer ${OWNER_KEY}` } },
+      env(),
+    );
+    expect(res.status).toBe(422);
+    const row = requestRow(id);
+    expect(row?.status).toBe("blocked");
+    expect(row?.block_reason).toBe("bids_validation_failed");
+    // The old result was about the content before this push; nothing may read it as current.
+    expect(row?.identifier_screen_status).toBeNull();
+    expect(dispatches).toHaveLength(0);
+  });
+
   test("a finding that needs review does not block", async () => {
     await withFakeResend(async (calls) => {
       const id = await requestAndReport("review", { "edf-patient-freetext": 2 });
@@ -731,6 +769,32 @@ describe("direct identifiers block the request and tell the depositor", () => {
       expect(row?.identifier_screen_status).toBe("pending");
       expect(dispatches).toHaveLength(1);
     });
+  });
+
+  test("a failed notice is logged without the depositor's or an admin's address", async () => {
+    const logged: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+    };
+    try {
+      // Resend refuses every send, so the admin mail and the depositor's notice both fail.
+      await withFakeResend(
+        async () => {
+          await requestAndReport("direct-identifiers", { "edf-patient-name": 4 });
+        },
+        { status: 500 },
+      );
+    } finally {
+      console.error = realError;
+    }
+    const text = logged.join("\n");
+    // Both failures were logged (the control: an empty log would prove nothing) ...
+    expect(text).toContain("Failed to send publication request email to g***@example.org");
+    expect(text).toContain("requester notice");
+    // ... and neither names an address in full.
+    expect(text).not.toContain(OWNER_EMAIL);
+    expect(text).not.toContain(ADMIN_EMAIL);
   });
 
   test("outside production the depositor's notice obeys the delivery fence", async () => {
@@ -778,6 +842,33 @@ describe("direct identifiers block the request and tell the depositor", () => {
       expect(requestRow(id)?.identifier_screen_status).toBe("error");
       expect(sendsTo(calls, ADMIN_EMAIL)[0]?.subject).toEndWith("IDENTIFIER SCREEN: DID NOT RUN");
     });
+  });
+
+  test("the daily BIDS sweep never leaves an old result on a request it unblocks, even if the new screen cannot be recorded", async () => {
+    const OTHER = "nm000463";
+    seedDataset(OTHER);
+    const id = seedRequest({
+      status: "blocked",
+      blockReason: "bids_validation_pending",
+      dataset: OTHER,
+    });
+    // A result from earlier content. If it survived the unblock, the gate would read it as the
+    // screen of whatever the depositor pushed since.
+    markScreen(db, id, OTHER, { status: "clean" });
+    const failing = {
+      ...env(),
+      DB: interceptingD1(realD1(db), (sql) => {
+        if (sql.includes("identifier_screen_status = 'pending', identifier_screen_nonce = ?")) {
+          throw new Error("D1 unavailable");
+        }
+      }),
+    } as Bindings;
+    await withFakeResend(async () => {
+      await sweepBlockedBidsValidationRequests(failing);
+    });
+    const row = requestRow(id);
+    expect(row?.status).toBe("requested");
+    expect(row?.identifier_screen_status).toBeNull();
   });
 
   test("the daily BIDS sweep leaves an identifier block alone", async () => {
@@ -855,6 +946,19 @@ describe("the admin re-run (POST /admin/publish/:id/identifier-screen)", () => {
       expect(cb.status).toBe(200);
       expect(sendsTo(calls, ADMIN_EMAIL)[0].subject).toEndWith("IDENTIFIER SCREEN: clean");
     });
+  });
+
+  test("a screen pending with no dispatch time is overdue and can be re-run (NULL-safe)", async () => {
+    const id = seedRequest();
+    db.run(
+      `UPDATE publication_requests SET identifier_screen_status = 'pending', identifier_screen_nonce = 'n',
+              identifier_screen_dispatched_at = NULL WHERE id = ?`,
+      [id],
+    );
+    const res = await rerun();
+    expect(res.status).toBe(202);
+    expect(requestRow(id)?.identifier_screen_nonce).not.toBe("n");
+    expect(dispatches).toHaveLength(1);
   });
 
   test("refuses while a screen is running and recent, and allows it once that one is overdue", async () => {

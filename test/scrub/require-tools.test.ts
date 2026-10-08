@@ -75,6 +75,7 @@ describe("the scanner suites outside test/scrub obey the same rule (T12)", () =>
 
   for (const [file, tool] of [
     ["test/identifier-scrub.test.ts", "uv"],
+    ["test/identifier-dates.test.ts", "uv"],
     ["test/identifier-fleet.test.ts", "aws"],
   ] as const) {
     test(`${file}: a missing ${tool} skips on a laptop and FAILS under NEMAR_REQUIRE_SCRUB_TOOLS=1`, async () => {

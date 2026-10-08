@@ -24,7 +24,12 @@
  *   what the clone saw, reporting each ref as it lands, and restores whatever happens, verifying
  *   each ruleset reads back as it was. SIGINT, SIGTERM and SIGHUP restore too, for the whole window
  *   including the restore itself (a second signal is ignored), and any exit that may leave a
- *   ruleset lifted prints {@link RESTORE_ADVICE}.
+ *   ruleset lifted prints {@link RESTORE_ADVICE}. A switch that stopped part way is finished by
+ *   running it again: a ref the remote already holds at the rewrite's SHA is neither drift nor
+ *   pushed twice, and a run with nothing left to push lifts nothing.
+ * - The rulesets are listed page by page, and a ruleset the organization owns that would block the
+ *   push is refused at the snapshot (`ruleset-not-repository`): it cannot be lifted through the
+ *   repository's endpoint.
  * - `restore` re-applies a snapshot on its own, for the day the process died.
  *
  * It talks to the GitHub REST API with `fetch` (the base URL is a parameter, so tests point it
@@ -172,12 +177,24 @@ async function call(api: Api, method: string, path: string, body?: unknown): Pro
   return res.json();
 }
 
+/** GitHub's page size for the rulesets list is 30 unless asked for more; 100 is its maximum. */
+const RULESETS_PER_PAGE = 100;
+
 export async function listRulesets(api: Api, repo: string): Promise<RulesetBody[]> {
-  const list = (await call(api, "GET", `/repos/${repo}/rulesets`)) as { id: number }[];
   const out: RulesetBody[] = [];
-  for (const r of list)
-    out.push((await call(api, "GET", `/repos/${repo}/rulesets/${r.id}`)) as RulesetBody);
-  return out;
+  // Every page: a list cut at the first page would hide a ruleset from the snapshot, and one the
+  // snapshot does not know is never restored.
+  for (let page = 1; ; page++) {
+    const list = (await call(
+      api,
+      "GET",
+      `/repos/${repo}/rulesets?per_page=${RULESETS_PER_PAGE}&page=${page}`,
+    )) as { id: number }[];
+    for (const r of list) {
+      out.push((await call(api, "GET", `/repos/${repo}/rulesets/${r.id}`)) as RulesetBody);
+    }
+    if (list.length < RULESETS_PER_PAGE) return out;
+  }
 }
 
 export async function setEnforcement(
@@ -330,14 +347,24 @@ export async function checkRemote(
   return remoteNow;
 }
 
-/** How many heads and tags differ between the remote now and what the clone knew before. */
+/**
+ * How many heads and tags differ between the remote now and what the clone knew before. A ref the
+ * remote already holds at the SHA of the rewrite (`rewritten`) is not drift: it is a ref an earlier
+ * run of the switch pushed before it stopped, and counting it would refuse the re-run that finishes
+ * the job.
+ */
 export function originDrift(
   remoteNow: Record<string, string>,
   originTips: Record<string, string>,
+  rewritten: Record<string, string> = {},
 ): number {
   let n = 0;
   for (const ref of new Set([...Object.keys(remoteNow), ...Object.keys(originTips)])) {
-    if (remoteNow[ref] !== originTips[ref]) n++;
+    if (remoteNow[ref] === originTips[ref]) continue;
+    // `ref in rewritten`: a ref that is gone from the remote and not part of the rewrite is a
+    // deletion, and `undefined === undefined` must not read as "already pushed".
+    if (ref in rewritten && remoteNow[ref] === rewritten[ref]) continue;
+    n++;
   }
   return n;
 }
@@ -362,6 +389,16 @@ export async function takeSnapshot(
   const rulesets = await listRulesets(api, repo);
   if (!opts.acceptDisabled && rulesets.some((r) => wouldBlock(r) && r.enforcement !== "active")) {
     throw new SwitchRefused("ruleset-already-lifted");
+  }
+  // The list includes rulesets inherited from the organization. They cannot be lifted through the
+  // repository's endpoint, so a PUT on one would fail and the restore would report a ruleset that
+  // never changed as unrestorable.
+  if (
+    rulesets.some(
+      (r) => wouldBlock(r) && r.source_type !== undefined && r.source_type !== "Repository",
+    )
+  ) {
+    throw new SwitchRefused("ruleset-not-repository");
   }
   const local = await localRefs(cloneDir);
   const refs: Record<string, string | null> = {};
@@ -466,16 +503,23 @@ export async function switchRefs(opts: SwitchOptions): Promise<SwitchReport> {
     throw new SwitchRefused("ruleset-not-in-snapshot");
   }
   const remoteNow = await checkRemote(opts.cloneDir, opts.remote, repo);
-  const drift = originDrift(remoteNow, snapshot.originTips);
-  if (drift > 0) throw new SwitchRefused(`remote-moved-since-clone (${drift} ref(s))`);
   const local = await localRefs(opts.cloneDir);
+  const drift = originDrift(remoteNow, snapshot.originTips, local);
+  if (drift > 0) throw new SwitchRefused(`remote-moved-since-clone (${drift} ref(s))`);
   for (const ref of Object.keys(local)) {
-    if ((remoteNow[ref] ?? null) !== (snapshot.refs[ref] ?? null)) {
+    // A ref already at the rewrite was pushed by an earlier run that stopped part way; any other
+    // SHA than the snapshot's or the rewrite's is somebody else's push.
+    if (
+      (remoteNow[ref] ?? null) !== (snapshot.refs[ref] ?? null) &&
+      remoteNow[ref] !== local[ref]
+    ) {
       throw new SwitchRefused("a remote ref moved since the snapshot");
     }
   }
-  const toLift = live.filter(needsLifting);
   const refsToPush = Object.keys(local).filter((r) => local[r] !== remoteNow[r]);
+  // Nothing to push (an earlier run finished the job): the protection is not touched at all, not
+  // lifted and put back for a push that does not happen.
+  const toLift = refsToPush.length === 0 ? [] : live.filter(needsLifting);
   log(`plan: lift ${toLift.length} ruleset(s), push ${refsToPush.length} ref(s)`);
   if (!opts.execute)
     return { executed: false, lifted: toLift.map((r) => r.id), pushed: refsToPush, restored: [] };

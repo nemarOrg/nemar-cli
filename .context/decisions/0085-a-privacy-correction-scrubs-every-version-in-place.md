@@ -41,8 +41,9 @@ that cannot be bounded. A tombstone alone is never the remedy.
 
 **The scrub replaces keys, it does not edit locked objects.** For EDF and BDF files only
 bytes 8 to 88 (patient identification) and 88 to 168 (recording identification) change, and
-only when the scanner finds a name, a birth date finer than year, a record number or non-ASCII
-text in them; the start date and time, the record count and every byte after offset 256 stay
+only when the scanner finds in them a name or a name-like patient code, a birth date finer than
+year, a record number, an age over 89, other free text, a technician or non-ASCII text
+(`PATIENT_DIRTY` and `RECORDING_DIRTY` in `shared/identifier-scrub.ts`); the start date and time, the record count and every byte after offset 256 stay
 identical, which is proven byte for byte (`shared/identifier-scrub.ts`). The new content has a
 new SHA256E key, so the order is add, verify, switch, delete:
 
@@ -221,7 +222,7 @@ A store is clean when every `zarr.json` in it, the root and every array's or nes
   Whether to add them to the list is the maintainer's decision.
 
 `zarr-public` reads store roots only, because an anonymous reader cannot list the nested documents.
-Nothing yet stops the converter writing the removed members again on a reconversion; that is Phase 8 (#1626), which also covers a fleet-wide strip of the stores nobody has scrubbed.
+Since release 0.10.15 the converter writes no subject or operator member into a store (Phase 8, #1627, biosigIO 1.2.11 or later); the fleet-wide strip of the stores nobody has scrubbed is not built (#1626).
 
 **The Zarr census (names only, read-only, 2026-10-05).**
 A read-only census read the member names of every store root of two datasets, never a value.
@@ -369,7 +370,7 @@ The rule is that `git-scrub verify --fresh-clone --allow-tag NAME` accepts a ver
 Built in Phase 2 (PR #1625, issue #1612): the S3 stages (`plan`, `assemble`, `verify`, `zarr`, `drop-archives`, `delete-old`, `zarr-public`, `canary`), the hash stage, the git stages (`snapshot`, `rewrite`, `verify`, `annex-registry`), the ruleset switch, the git plan, the ledger file and object, the shared header scrub, and the runbook.
 Built on 2026-10-06 for the raw copies (amendment of that date): the plan's `rawCopies`, the hash stage's `raw-hash`, `s3-scrub raw-verify`, and their checks in `delete-old` and the ledger.
 The two deleting stages, `drop-archives` and `delete-old`, check the proofs of every copy for themselves and report every refusal at once (runbook steps 15a and 15b); neither is left to the operator.
-The maintainer's go is the one precondition of an irreversible step that no tool checks.
+The maintainer's go, and the real-bucket checklist run with the current checkout (the canary among it), are the preconditions of an irreversible step that no tool checks.
 
 **NOT BUILT in Phase 2, with the phase that owns each** (phases and issues from epic #1610):
 
@@ -381,9 +382,9 @@ The maintainer's go is the one precondition of an irreversible step that no tool
 | The ledger's count and pointer on the catalog row | not built | none in the phase list |
 | Remap `zarr_source_commit` and the index `source_commit` | not built; the next reconversion repairs them | none; Phase 8 (#1626) changes the converter but does not list it |
 | The importer scrubs in place on every import and re-pull | not built | Phase 7 (#1618) |
-| `identifier_screen`, the publication gate | not built | Phase 4 (#1614) |
-| The converter never writes subject members, and a fleet-wide strip of existing stores | not built | Phase 8 (#1626) |
-| The uploader's preflight, admin triage | not built | Phases 3 (#1613) and 6 (#1616) |
+| `identifier_screen`, the publication gate | built in Phase 4 (#1614, ADR 0086) | Phase 4 (#1614) |
+| The converter never writes subject members, and a fleet-wide strip of existing stores | the converter: built in Phase 8 (#1627, release 0.10.15); the strip of stores converted before it: not built | Phase 8 (#1626) |
+| The uploader's preflight, admin triage | the preflight: built in Phase 3 (#1613, ADR 0087); admin triage: not built | Phases 3 (#1613) and 6 (#1616) |
 | The scheduled sweep | built in Phase 5 (#1615, ADR 0088): it reports and never repairs | Phase 5 (#1615) |
 
 **Deferred inside Phase 2, none a blocker for the first real run on nm000186:**
@@ -404,3 +405,12 @@ An earlier canary, without the conditional-write steps, passed against the real 
 
 The row "The importer scrubs in place on every import and re-pull" of the build-status table is built by [ADR 0089](0089-an-import-scrubs-before-it-copies-and-waits-for-the-identifier-screen.md): prepare applies this ADR's header rule, the JSON rule of the history rewrite and the provenance sentences, retires each replaced key the way `annex-registry` does, and writes an `import-scrubbed` ledger line.
 The purge list itself is still not built. The importer reads the dead marks in the dataset's git-annex branch, which `annex-registry` and the importer write, and never copies a key marked dead; the list as a document with a catalog pointer, and its readers in recovery, registration and the availability count, keep the owner this table gives them: none.
+
+## Amendment 2026-10-07 (release 0.10.15): the gate, the preflight and the converter are built
+
+The rows `identifier_screen`, the uploader's preflight and the converter of the build-status table are built by [ADR 0086](0086-publication-requests-are-screened-for-identifiers-in-ci-and-the-admin-mail-waits-for-the-verdict.md), [ADR 0087](0087-the-upload-preflight-screens-locally-refuses-direct-identifiers-and-is-never-trusted.md) and #1627.
+Since biosigIO 1.2.11 the converter writes every store with `exclude_subject_info` and refuses to convert without it, so a reconversion no longer writes the removed members.
+The fleet-wide strip of stores converted before it, admin triage and the purge list's readers keep the owners the table gives them.
+Two corrections to the text above.
+The publication gate is not a publication step named `identifier_screen` before `s3_public_read`: it is `screenStateGate` at approval and on resume until `s3_public_read`, as ADR 0086 records.
+And issue #1616 became the acquisition-date warning (ADR 0090), not admin triage, which ADR 0090 leaves to be done outside the repository.

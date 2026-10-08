@@ -302,6 +302,25 @@ describe("the git plan", () => {
     });
   });
 
+  test("a JSON committed executable is read like any other: its identifier keys are planned", () => {
+    const dir = repo();
+    writeFileSync(join(dir, "plain.json"), JSON.stringify({ PatientName: "alice" }));
+    mkdirSync(join(dir, "sourcedata"), { recursive: true });
+    writeFileSync(join(dir, "sourcedata", "exec.json"), JSON.stringify({ PatientName: "bob" }));
+    chmodSync(join(dir, "sourcedata", "exec.json"), 0o755);
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "two sidecars");
+    git(dir, "tag", "v1.0.0");
+    expect(git(dir, "ls-files", "-s", "sourcedata/exec.json")).toStartWith("100755");
+    const { plan } = buildGitPlan(dir, "nm000001", "2026-10-04", {
+      s3PlanPath: s3PlanFile("nm000001", [POINTER_KEY], false),
+    });
+    expect(plan.blankJsonKeys).toEqual({
+      "plain.json": ["patientname"],
+      "sourcedata/exec.json": ["patientname"],
+    });
+  });
+
   test("a blob that exists only in a merge's own result is read", () => {
     const dir = repo();
     commit(dir, { "README.md": "r\n" }, "v1", "v1.0.0");
@@ -452,6 +471,29 @@ describe("the git plan refuses what it could not read (I4, S5, S6)", () => {
       unparseable: ["sub-01/bad.json"],
     });
     expect(existsSync(`${out}.skipped.json`)).toBe(false);
+  });
+
+  test("a flag the tool does not know is a usage error, and a refused run leaves no old plan", () => {
+    const dir = repo();
+    commit(dir, { CHANGES: "x\n" }, "one", "v1.0.0");
+    const outDir = mkdtempSync(join(tmpdir(), "plan-flags-"));
+    dirs.push(outDir);
+    const out = join(outDir, "git-plan.json");
+    // `--s3plan` is a misspelling of `--s3-plan`: it must not silently skip the orphan-key check.
+    const typo = cliPlan(dir, out, ["--s3plan", "plan.json"]);
+    expect(typo.status, typo.stderr).toBe(2);
+    expect(typo.stderr).toContain("usage: build-git-plan.ts");
+    expect(typo.stderr).not.toContain("s3plan");
+    expect(existsSync(out)).toBe(false);
+    // The twin: the same run without the typo writes a plan.
+    expect(cliPlan(dir, out).status).toBe(0);
+    expect(existsSync(out)).toBe(true);
+
+    // A plan from an earlier clone does not outlive a re-plan that is refused.
+    commit(dir, { CHANGES: "y\n" }, "two", "v1.1");
+    const refused = cliPlan(dir, out);
+    expect(refused.status, refused.stderr).toBe(3);
+    expect(existsSync(out)).toBe(false);
   });
 
   test("a v* tag that is not vX.Y.Z is refused with a count, never filtered", () => {

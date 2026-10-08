@@ -127,7 +127,11 @@ export function parseZarrJsonBytes(bytes: Uint8Array): { text: string; doc: unkn
     // ignoreBOM keeps a mark in the text rather than eating it, so even a BOM this check missed
     // would reach JSON.parse and be refused there.
     const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
-    return { text, doc: JSON.parse(text) as unknown };
+    const doc = JSON.parse(text) as unknown;
+    // `JSON.parse` keeps the LAST of two members with one name, so `doc` would show the empty
+    // one and hide the other from every count. The span scan refuses a repeated name.
+    parseSpans(text);
+    return { text, doc };
   } catch {
     throw new ZarrJsonError("zarr-json-malformed");
   }
@@ -186,10 +190,13 @@ function parseSpans(text: string): Node {
         i++;
         return { kind: "object", start, end: i, members };
       }
+      const names = new Set<string>();
       for (;;) {
         ws();
         const memberStart = i;
         const key = string();
+        if (names.has(key)) bad();
+        names.add(key);
         ws();
         if (text.charAt(i) !== ":") bad();
         i++;
@@ -383,7 +390,8 @@ export function removeIdentifierKeys(text: string): Removal {
         isRemovableName(m.key) &&
         hasContent(JSON.parse(text.slice(m.value.start, m.value.end)) as unknown),
     );
-    cuts.push(...cutsFor(node, gone));
+    // A loop, not `cuts.push(...)`: the number of cuts is the document's to choose.
+    for (const cutAt of cutsFor(node, gone)) cuts.push(cutAt);
     removed += gone.filter(Boolean).length;
     node.members.forEach((m, i) => {
       if (!gone[i]) walk(m.value);

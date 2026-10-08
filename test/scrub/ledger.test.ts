@@ -12,6 +12,7 @@ import {
   changeLogEntry,
   ledgerLine,
   ledgerS3Key,
+  parseLedgerText,
   readLedger,
   validateLedgerEntry,
 } from "../../scripts/scrub/ledger";
@@ -162,6 +163,28 @@ describe("a deletion line carries its proof (I9)", () => {
       expect(() => validateLedgerEntry(entry(over as Partial<LedgerEntry>)), label).toThrow(
         LedgerRefused,
       );
+    }
+  });
+});
+
+describe("parseLedgerText", () => {
+  test("validates every line of the text it is given, and agrees with the file reader", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ledger-parse-"));
+    try {
+      const text = `${ledgerLine(entry())}\n${ledgerLine(entry({ action: "files-removed" }))}\n`;
+      expect(parseLedgerText(text).map((e) => e.action)).toEqual([
+        "headers-scrubbed",
+        "files-removed",
+      ]);
+      appendLedger(join(dir, "l.jsonl"), entry());
+      expect(parseLedgerText(readFileSync(join(dir, "l.jsonl"), "utf8"))).toEqual(
+        readLedger(join(dir, "l.jsonl")),
+      );
+      // One bad line refuses the whole text, the good one before it notwithstanding.
+      const bad = `${ledgerLine(entry())}\n${JSON.stringify({ ...entry(), counts: { files_removed: -1 } })}\n`;
+      expect(() => parseLedgerText(bad)).toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

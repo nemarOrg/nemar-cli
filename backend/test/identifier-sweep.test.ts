@@ -30,11 +30,17 @@ import {
   verifyPrescreenCallbackToken,
 } from "../src/services/github";
 import {
+  IDENTIFIER_SWEEP_BACKOFF_HOURS,
   IDENTIFIER_SWEEP_CALLBACK_PATH,
   IDENTIFIER_SWEEP_CLAIM_SQL,
+  IDENTIFIER_SWEEP_CYCLE_DAYS,
+  IDENTIFIER_SWEEP_DEADLINE_MINUTES,
   IDENTIFIER_SWEEP_DISPATCH_TIMEOUT_MS,
   IDENTIFIER_SWEEP_LATE_REPORT_HOURS,
   IDENTIFIER_SWEEP_MAX_IN_FLIGHT,
+  IDENTIFIER_SWEEP_REFRESH_DAYS,
+  IDENTIFIER_SWEEP_REPORT_LEASE_MINUTES,
+  IDENTIFIER_SWEEP_REPORT_MAX_CLAIMS,
   IDENTIFIER_SWEEP_SLICE,
   runIdentifierSweepTick,
 } from "../src/services/identifier-sweep";
@@ -266,6 +272,23 @@ beforeEach(async () => {
   app.route("/admin", adminRoutes);
   ownerId = await seedUser("sweepowner", "member");
   adminId = await seedUser("sweepadmin", "admin", ADMIN_KEY);
+});
+
+describe("the numbers ADR 0088 states", () => {
+  // The rest of this file follows these constants (a cap test loops to the cap it imports), so a
+  // changed number would move every test with it. This is the one place the literal values are
+  // pinned, so a change to a published rule is a change to this test, in the open.
+  test("cadence, cycle, deadlines and caps are the ADR's", () => {
+    expect(IDENTIFIER_SWEEP_REFRESH_DAYS).toBe(21);
+    expect(IDENTIFIER_SWEEP_CYCLE_DAYS).toBe(28);
+    expect([...IDENTIFIER_SWEEP_BACKOFF_HOURS]).toEqual([6, 6, 12, 24, 48, 96]);
+    expect(IDENTIFIER_SWEEP_SLICE).toBe(3);
+    expect(IDENTIFIER_SWEEP_MAX_IN_FLIGHT).toBe(6);
+    expect(IDENTIFIER_SWEEP_DEADLINE_MINUTES).toBe(50);
+    expect(IDENTIFIER_SWEEP_LATE_REPORT_HOURS).toBe(24);
+    expect(IDENTIFIER_SWEEP_REPORT_LEASE_MINUTES).toBe(120);
+    expect(IDENTIFIER_SWEEP_REPORT_MAX_CLAIMS).toBe(12);
+  });
 });
 
 describe("the callback token", () => {
@@ -1307,19 +1330,24 @@ describe("round two: what a carried finding may hold", () => {
 });
 
 describe("round two: dispatch edges", () => {
-  test("a refused credential (401) closes one attempt without counting it and claims nobody else", async () => {
-    seedDataset("nm000734");
-    seedDataset("nm000735");
-    seedDataset("nm000736");
-    dispatchStatus = 401;
-    const r = await runIdentifierSweepTick(env());
-    expect(r.blocked).toBe("dispatch-failed");
-    expect(r.failed).toEqual([{ dataset_id: "nm000734", error: "dispatch-failed" }]);
-    expect(githubRequests).toHaveLength(1);
-    expect(stamps("nm000734").identifier_sweep_failures).toBe(0);
-    expect(rawStamps("nm000735")).toBeNull();
-    expect(rawStamps("nm000736")).toBeNull();
-  });
+  // Each of the three statuses that say the credential cannot reach the central repository, so
+  // dropping any one from SYSTEMIC_DISPATCH_STATUSES fails here (a 422 is the dataset's own
+  // failure and is counted: "GitHub refusing the dispatch" above).
+  for (const status of [401, 403, 404]) {
+    test(`a refused credential (${status}) closes one attempt without counting it and claims nobody else`, async () => {
+      seedDataset("nm000734");
+      seedDataset("nm000735");
+      seedDataset("nm000736");
+      dispatchStatus = status;
+      const r = await runIdentifierSweepTick(env());
+      expect(r.blocked).toBe("dispatch-failed");
+      expect(r.failed).toEqual([{ dataset_id: "nm000734", error: "dispatch-failed" }]);
+      expect(githubRequests).toHaveLength(1);
+      expect(stamps("nm000734").identifier_sweep_failures).toBe(0);
+      expect(rawStamps("nm000735")).toBeNull();
+      expect(rawStamps("nm000736")).toBeNull();
+    });
+  }
 
   test("no GitHub credential at all (no PAT, no App) blocks the tick as dispatch-unconfigured", async () => {
     seedDataset("nm000737");
@@ -1434,6 +1462,41 @@ describe("the callback's size bound", () => {
     );
     expect(lying.status).toBe(413);
     expect(stamps("nm000760").identifier_sweep_attempt).toBe("pending");
+  });
+
+  test("a body with no length is cut off at the bound, not read whole first", async () => {
+    seedDataset("nm000761");
+    await runIdentifierSweepTick(env());
+    const token = (dispatches[0] as Dispatch).client_payload.callback_token;
+    // 400 chunks of 4 KB (1.6 MB) with no Content-Length, as a chunked upload arrives. The stream
+    // is pull-driven, so the count of chunks handed out is the count the route read.
+    const chunk = new Uint8Array(4096).fill(120);
+    let pulled = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pulled >= 400) {
+          controller.close();
+          return;
+        }
+        pulled++;
+        controller.enqueue(chunk);
+      },
+    });
+    const res = await app.request(
+      "/webhooks/identifier-sweep-result",
+      {
+        method: "POST",
+        headers: { "X-Webhook-Token": token, "Content-Type": "application/json" },
+        body,
+        // @ts-expect-error `duplex` is required for a streamed body and is not in the DOM typings.
+        duplex: "half",
+      },
+      env(),
+    );
+    expect(res.status).toBe(413);
+    // 256 KB is 64 chunks; a few more may have been in flight, and nothing like the 400 offered.
+    expect(pulled).toBeLessThan(100);
+    expect(stamps("nm000761").identifier_sweep_attempt).toBe("pending");
   });
 });
 

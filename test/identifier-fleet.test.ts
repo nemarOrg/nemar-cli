@@ -1342,6 +1342,21 @@ describe("sampling caps are counted and make the dataset incomplete", () => {
     expect(coded.record.status).toBe("clean");
   });
 
+  test("a participants table with more name-like labels than a call can spread is read in full", async () => {
+    // 1.1 million rows is past the point where Bun throws on `push(...findings)` (between 500,000
+    // and 1,000,000 arguments); a throw would make the table unreadable and the record unchecked.
+    const rows = 1_100_000;
+    const table = `participant_id\n${"sub-abcd\n".repeat(rows)}`;
+    const { record } = await scanFiles(
+      { [EDF]: CLEAN, "participants.tsv": table },
+      { limits: { participantsBytes: 16 * 1024 * 1024 } },
+    );
+    expect(record.incomplete_reasons).toEqual([]);
+    expect(record.read_failures).toEqual({});
+    expect(record.status).toBe("review");
+    expect(record.findings_by_kind?.["path-subject-label"]).toBe(rows);
+  }, 60_000);
+
   test("an empty side file has nothing to read: not requested, not a cap, not a failure", async () => {
     const { w, record } = await scanFiles({
       [EDF]: CLEAN,

@@ -14,6 +14,7 @@ import {
   type DeletedFile,
   TEST_LOOPBACK_PUBLIC_BASE_ENV,
   checkPublicBase,
+  publicObjectUrl,
 } from "../../../scripts/scrub/s3/s3-stages";
 import {
   a,
@@ -252,6 +253,22 @@ describe("delete-old: what must be true before an old key may go", () => {
     },
     SLOW,
   );
+
+  test("the anonymous URL of an object encodes each path segment, and only the segments", () => {
+    const base = "https://nemar.s3.us-east-2.amazonaws.com";
+    // The plain key: nothing to encode, and a trailing slash on the base makes no difference.
+    const plain = "nm000001/objects/SHA256E-s7--0123abcd.edf";
+    expect(publicObjectUrl(base, plain)).toBe(`${base}/${plain}`);
+    expect(publicObjectUrl(`${base}//`, plain)).toBe(`${base}/${plain}`);
+    // An annex key may carry `+` in its extension, which S3 reads as a space in a path; a space,
+    // `%`, `&` and non-ASCII are encoded too. The slashes between segments stay slashes.
+    expect(publicObjectUrl(base, "nm000001/objects/SHA256E-s7--0123abcd.ed+f")).toBe(
+      `${base}/nm000001/objects/SHA256E-s7--0123abcd.ed%2Bf`,
+    );
+    expect(publicObjectUrl(base, "nm000001/zarr/sub 01/a&b%c/\u00e9.zarr/zarr.json")).toBe(
+      `${base}/nm000001/zarr/sub%2001/a%26b%25c/%C3%A9.zarr/zarr.json`,
+    );
+  });
 
   test(
     "refuses while the dataset has any archive version or marker, current or not",

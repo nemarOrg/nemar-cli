@@ -1647,6 +1647,15 @@ export function checkPublicBase(base: string, bucket: string): void {
   bad();
 }
 
+/**
+ * The URL an anonymous reader uses for an object: each path segment encoded. S3 reads a bare `+`
+ * in a path as a space, so the unencoded URL of a key that has one asks for an object that does not
+ * exist, answers 403, and reads as a private dataset.
+ */
+export function publicObjectUrl(publicBase: string, key: string): string {
+  return `${publicBase.replace(/\/+$/, "")}/${key.split("/").map(encodeURIComponent).join("/")}`;
+}
+
 /** The status of an anonymous HEAD, or null when there was none (network, timeout). */
 async function anonymousHeadStatus(url: string, timeoutMs: number): Promise<number | null> {
   try {
@@ -1689,7 +1698,7 @@ async function checkPrivate(
     return undefined;
   };
   const askAnonymously = async (key: string, which: string): Promise<void> => {
-    const url = `${o.publicBase.replace(/\/+$/, "")}/${objectKey(dataset, key)}`;
+    const url = publicObjectUrl(o.publicBase, objectKey(dataset, key));
     const status = await anonymousHeadStatus(url, o.timeoutMs);
     if (status === 403) return;
     if (status === 200) refusals.add("dataset-is-public", `${which} answered 200`);

@@ -13122,12 +13122,14 @@ class TestMainRetryPendingRound(unittest.TestCase):
         self.assertEqual((body["pending_count"], body["not_attempted_count"]), (2, 2))
 
     def _make_b_enormous(self):
-        """B's pointer now declares 500 GB, so admission charges it more than any
+        """B's pointer now declares 1 PB, so admission charges it more than any
         volume holds while A (a real 10 s EDF) still fits: the first recording
-        fits and the second does not."""
+        fits and the second does not. (500 GB was not enough: charged at 3 times
+        its bytes it still fit a 3.7 TB scratch volume, and the run then
+        deferred B as merely too big for now instead of refusing it.)"""
         link = os.path.join(self.repo, self.B)
         os.remove(link)
-        key = "SHA256E-s500000000000--" + "b" * 32 + ".edf"
+        key = "SHA256E-s1000000000000000--" + "b" * 32 + ".edf"
         os.symlink(f"../../.git/annex/objects/bb/bb/{key}/{key}", link)
         self._git("add", "-A")
         self._git("commit", "-q", "-m", "B is enormous")
