@@ -101,6 +101,7 @@ const PLAIN_INIT = "init -- ";
 const HEAD_REPOINT = "symbolic-ref HEAD refs/heads/main";
 const REV_PARSE_HEAD = "rev-parse -q --verify HEAD";
 const SHOW_REF = "show-ref --verify -q ";
+const SYMBOLIC_REF_HEAD = "symbolic-ref -q HEAD";
 
 const answer = (when: string, exit: number, stderr: string): Answer => ({ when, exit, stderr });
 
@@ -562,6 +563,14 @@ describeGit("initDataset where HEAD cannot be told apart from unborn", () => {
     const dir = freshDir();
     seed(dir, "master", "c1", "c2");
     await expectRefusal(shim, dir, "refs/heads/master");
+  });
+
+  test("a symbolic-ref that names no branch is refused, not read as unborn", async () => {
+    // `git show-ref --verify -q ""` exits 1, the same status as an absent branch,
+    // so an empty branch name would read as unborn if it were not refused first.
+    // Stand-in for symbolic-ref succeeding without naming anything.
+    const shim = oldGit(OLD_GIT_STDERR.english, answer(SYMBOLIC_REF_HEAD, 0, ""));
+    await expectRefusal(shim, freshDir(), "its branch cannot be read");
   });
 
   test("a show-ref that cannot tell is refused, not read as unborn", async () => {
