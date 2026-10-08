@@ -179,6 +179,17 @@ export function printUploadSuccess(absolutePath: string, datasetInfo: DatasetInf
   console.log(chalk.dim("To download this dataset:"));
   console.log(chalk.dim(`  nemar dataset download ${datasetInfo.dataset_id}`));
   console.log();
+  // Issue #1646: a request made before validation finishes is only recorded, so
+  // say what runs after an upload and in what order. A sandbox (xx) dataset
+  // cannot be published, so it is not told to request publication.
+  console.log("BIDS validation runs on GitHub after the upload.");
+  console.log(`  Follow it with: ${chalk.cyan(`nemar dataset ci ${datasetInfo.dataset_id}`)}`);
+  if (!datasetInfo.dataset_id.startsWith("xx")) {
+    console.log(
+      `  Once it has completed, request publication: ${chalk.cyan(`nemar dataset publish request ${datasetInfo.dataset_id}`)}`,
+    );
+  }
+  console.log();
   console.log(
     chalk.yellow("Note: This dataset is private. Only the owner and designated collaborators can"),
   );
