@@ -59,6 +59,8 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "ANNEX_SIZE_THRESHOLD_BYTES",
     "NEVER_ANNEX_GLOBS",
     "buildLargefilesExpression",
+    "describeAnnexSizeThreshold",
+    "isCurrentLargefilesExpression",
     "isNeverAnnexedMetadata",
     "shouldAnnex",
   ],
@@ -173,6 +175,8 @@ const INTERNAL_WIRING = [
   "ANNEX_SIZE_THRESHOLD_BYTES",
   "NEVER_ANNEX_GLOBS",
   "buildLargefilesExpression",
+  "describeAnnexSizeThreshold",
+  "isCurrentLargefilesExpression",
   "isNeverAnnexedMetadata",
   "shouldAnnex",
   // Also post-split (#1159): the path-scoped copy and the path->key map exist for

@@ -68,8 +68,30 @@ export const NEVER_ANNEX_GLOBS = [
   ".gitignore",
 ] as const;
 
-/** Anything larger than this annexes unless it matches {@link NEVER_ANNEX_GLOBS}. */
-export const ANNEX_SIZE_THRESHOLD_BYTES = 100 * 1024;
+/**
+ * Anything larger than this annexes unless it matches {@link NEVER_ANNEX_GLOBS}.
+ *
+ * 100,000 bytes, not 100 KiB: git-annex reads the `kb` in `largerthan=100kb` as
+ * SI (1 kB = 1000 bytes). Measured against git-annex 10.20260901 with the
+ * production expression, 99,999 and 100,000 bytes stay in git while 100,001
+ * annexes. This constant used to say `100 * 1024`, so the TypeScript predicate
+ * called a 100,001 to 102,400 byte file small while git-annex annexed it, and the
+ * expression was rendered as `largerthan=${bytes / 1024}kb`, which hid the
+ * disagreement because both sides printed "100". The expression now carries the
+ * exact byte count, so no unit is left to misread (ADR 0031, amendment of
+ * 2026-10-07).
+ */
+export const ANNEX_SIZE_THRESHOLD_BYTES = 100_000;
+
+/**
+ * The threshold as text for a message, from the constant, never retyped.
+ * Exact bytes rather than a rounded unit: the CLI's byte formatter divides by
+ * 1024, and "97.7 KB" for a rule git-annex states as 100,000 bytes would be a
+ * new way to disagree with it.
+ */
+export function describeAnnexSizeThreshold(): string {
+  return `${ANNEX_SIZE_THRESHOLD_BYTES.toLocaleString("en-US")} bytes`;
+}
 
 /**
  * Render the policy as a git-annex preferred-content expression.
@@ -86,7 +108,7 @@ export function buildLargefilesExpression(): string {
   const dataTerms = [
     ...ANNEX_DATA_EXTENSIONS.map((ext) => `include=*${ext}`),
     ...ANNEX_DATA_GLOBS.map((glob) => `include=${glob}`),
-    `largerthan=${ANNEX_SIZE_THRESHOLD_BYTES / 1024}kb`,
+    `largerthan=${ANNEX_SIZE_THRESHOLD_BYTES}`,
   ].join(" or ");
 
   const metadataTerms = NEVER_ANNEX_GLOBS.map((glob) => {
@@ -99,6 +121,29 @@ export function buildLargefilesExpression(): string {
   }).join(" and ");
 
   return `(${dataTerms}) and ${metadataTerms}`;
+}
+
+/**
+ * True when a repository's configured `annex.largefiles` is NEMAR's policy.
+ *
+ * Exact equality with {@link buildLargefilesExpression}, plus the one spelling
+ * every dataset configured before the amendment of ADR 0031 on 2026-10-07 still
+ * carries: `largerthan=100kb`. git-annex evaluates that as 100,000 bytes (SI), the
+ * same rule the expression now states in bytes, so a repository holding it is
+ * governed correctly and must not be reported as drifted. The fleet sweep
+ * (`classifyAnnexPolicy`) would otherwise read every `nm` dataset as needing a
+ * rewrite on the strength of a spelling alone, and clone it to commit a
+ * config.log line that changes nothing. `test/annex-policy.test.ts` proves the two
+ * spellings annex the same files, byte for byte around the boundary.
+ */
+export function isCurrentLargefilesExpression(configured: string): boolean {
+  const current = buildLargefilesExpression();
+  if (configured === current) return true;
+  const legacy = current.replace(
+    `largerthan=${ANNEX_SIZE_THRESHOLD_BYTES}`,
+    `largerthan=${ANNEX_SIZE_THRESHOLD_BYTES / 1000}kb`,
+  );
+  return configured === legacy;
 }
 
 /**

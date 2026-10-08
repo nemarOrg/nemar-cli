@@ -26,7 +26,7 @@
  */
 
 import { rmSync } from "node:fs";
-import { buildLargefilesExpression, shouldAnnex } from "./git-annex/policy.js";
+import { isCurrentLargefilesExpression, shouldAnnex } from "./git-annex/policy.js";
 import { runCommand } from "./git-annex/run-command.js";
 import { stripLargefilesAttributes } from "./import-normalize.js";
 import { normalizeDatasetRepo, planDatasetNormalization } from "./normalize-dataset.js";
@@ -65,7 +65,10 @@ export interface AnnexPolicyState {
   datasetId: string;
   /** Tracked `.gitattributes` files carrying a content-governing largefiles rule. */
   attributeFiles: AttributeFileFinding[];
-  /** True when the git-annex branch configures exactly NEMAR's current expression. */
+  /**
+   * True when the git-annex branch configures NEMAR's current expression, or the
+   * `largerthan=100kb` spelling of it that git-annex reads identically.
+   */
   policyConfigured: boolean;
   /** What the git-annex branch configures, when it configures anything. */
   configuredExpression: string | null;
@@ -179,7 +182,8 @@ export function classifyAnnexPolicy(input: {
   return {
     datasetId: input.datasetId,
     attributeFiles,
-    policyConfigured: configuredExpression === buildLargefilesExpression(),
+    policyConfigured:
+      configuredExpression !== null && isCurrentLargefilesExpression(configuredExpression),
     configuredExpression,
     gitResidentData,
     pointerSuspects,
