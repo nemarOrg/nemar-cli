@@ -496,12 +496,16 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     }
 
     // The row above is written either way, so "recorded" is true. What is not
-    // true is that anything will carry it on: the sweep makes the same GitHub
-    // calls and would fail the same way. A depositor told "pending, continues
-    // on its own" by a 422 would wait for a transition that may not come, so
+    // known is that anything will carry it on. The sweep reads the run list
+    // with the same credential, so it recovers when GitHub does, but it does
+    // not deploy the workflow: a request recorded because the deploy failed
+    // waits for a run nothing starts. A depositor told "pending, continues on
+    // its own" by a 422 would be promised a transition that may not come, so
     // this is answered as the temporary fault it is, with no block reason (the
     // reason vocabulary is shared with the website and is deliberately not
-    // extended here). The CLI prints the message and exits 1.
+    // extended here). The CLI prints the message and exits 1. The row carries
+    // the pending reason, so `publish status` still shows it as waiting on
+    // validation; telling the two apart would take a stored marker.
     if (ciCheckFailed) {
       return c.json(
         {
