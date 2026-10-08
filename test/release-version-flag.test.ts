@@ -626,8 +626,8 @@ describe("bindShadowedOptionValues on a minimal tree", () => {
 // environment variable, the request helper or the CLI-runner helper, and that
 // grep matches comments too, so none of those three names may appear anywhere
 // in this file. The file stays in the offline unit-pure tier.
-const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
+const CLI_ENTRY = join(REPO_ROOT, "src", "index.ts");
 const DATASET_ID = "nm099999";
 // The stand-in backend names this repository for the dataset. It must not
 // exist: if a release got past its version check (the bug these tests guard),
@@ -637,26 +637,32 @@ const NO_SUCH_REPO = "nemarOrg/argv-shadowing-1493-no-such-repo";
 const HAS_RELEASE_TOOLS = !!Bun.which("git") && !!Bun.which("gh");
 const SPAWN_KILL_MS = 20_000;
 const SPAWN_TEST_TIMEOUT_MS = 30_000;
-// A proxy in the environment can send even a loopback request elsewhere (an
-// unroutable one made a spawn take a second), so none reaches the child.
-const PROXY_VARS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
+// Variables kept out of the child. A proxy can send even a loopback request
+// elsewhere (an unroutable one made a spawn take a second); color forcing
+// would change the text the tests read.
+const SCRUBBED_ENV = [
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "NO_PROXY",
+  "FORCE_COLOR",
+  "CLICOLOR_FORCE",
+];
 let configDir: string;
 let backendUrl: string;
 
 async function spawnCli(args: string[]) {
-  // Drop every TEST_* and proxy variable so nothing ambient can override the
-  // config.json URL or reroute the request to it.
+  // Drop every TEST_* variable and the scrubbed set, in either case, so
+  // nothing ambient can override the config.json URL or reroute the request.
   const env: Record<string, string | undefined> = Object.fromEntries(
     Object.entries(process.env).filter(
-      ([key]) => !key.startsWith("TEST_") && !PROXY_VARS.includes(key.toUpperCase()),
+      ([key]) => !key.startsWith("TEST_") && !SCRUBBED_ENV.includes(key.toUpperCase()),
     ),
   );
   env.NEMAR_CONFIG_DIR = configDir;
   env.NEMAR_NO_UPDATE_CHECK = "1";
   env.GIT_TERMINAL_PROMPT = "0";
   env.NO_COLOR = "1";
-  env.FORCE_COLOR = undefined;
-  env.CLICOLOR_FORCE = undefined;
   const proc = spawn({
     cmd: ["bun", "run", CLI_ENTRY, ...args],
     cwd: REPO_ROOT,
@@ -664,21 +670,21 @@ async function spawnCli(args: string[]) {
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
+    timeout: SPAWN_KILL_MS,
   });
-  let killed = false;
-  const timer = setTimeout(() => {
-    killed = true;
-    proc.kill();
-  }, SPAWN_KILL_MS);
-  try {
-    const stdout = await new Response(proc.stdout).text();
-    const stderr = await new Response(proc.stderr).text();
-    const exitCode = await proc.exited;
-    if (killed) throw new Error(`nemar ${args.join(" ")} did not finish in ${SPAWN_KILL_MS}ms`);
-    return { stdout, stderr, exitCode };
-  } finally {
-    clearTimeout(timer);
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  // Bun's timeout ends the process with SIGTERM. (`proc.killed` is true after
+  // ANY exit, so it cannot tell a timeout from a normal finish.)
+  if (proc.signalCode) {
+    throw new Error(
+      `nemar ${args.join(" ")} was ended by ${proc.signalCode} after ${SPAWN_KILL_MS}ms`,
+    );
   }
+  return { stdout, stderr, exitCode };
 }
 
 describe("spawned CLI", () => {
