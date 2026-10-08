@@ -36,25 +36,30 @@ export async function isGitAnnexDataset(path: string): Promise<boolean> {
 }
 
 /**
- * True when `git init` rejected `-b`/`--initial-branch`: the option arrived in
- * git 2.28, and git 2.25 (Ubuntu 20.04's system git, still common on HPC login
- * and compute images) answers "error: unknown switch `b'". Exported for tests.
+ * The exit status git uses for a usage error: a switch it does not know.
+ * That is how git older than 2.28 answers `git init -b` (Ubuntu 20.04's 2.25,
+ * still common on HPC login and compute images).
+ *
+ * The fallback keys on the status and never on stderr: git localizes its
+ * messages ("Unbekannter Schalter", "bascule inconnue"), so any text match
+ * fails on a non-English LANG exactly as the unfixed code did. The arguments
+ * here are fixed, so a usage error can only mean the switch; fatal errors (a
+ * path that cannot be created) exit 128. A SIGHUP also reads as 129, and the
+ * cost of that misreading is one more `git init`.
  */
-export function isInitialBranchUnsupported(stderr: string): boolean {
-  return /unknown switch [`']b'|unknown option [`']?(-b|initial-branch)|usage: git init/i.test(
-    stderr,
-  );
-}
+const GIT_USAGE_ERROR_EXIT = 129;
 
 /**
  * `git init` with `main` as the unborn branch, on any git version.
  *
  * Tries `git init -b main` first; when this git predates `-b` (< 2.28) it
- * falls back to a plain `git init` followed by pointing the unborn HEAD at
- * `refs/heads/main`, which is exactly what `-b` does. Previously the upload
- * failed outright on git 2.25 and depositors had to put a git shim on PATH.
+ * falls back to a plain `git init` followed by pointing an unborn HEAD at
+ * `refs/heads/main`, which is what `-b` does. Previously the upload failed
+ * outright on git 2.25 and depositors had to put a git shim on PATH.
+ *
+ * Module-private: it is exercised through `initDataset`, the one caller.
  */
-export async function initGitRepoOnMain(
+async function initGitRepoOnMain(
   path: string,
   env: Record<string, string> = {},
 ): Promise<{ success: boolean; error?: string }> {
@@ -63,7 +68,7 @@ export async function initGitRepoOnMain(
   if (withBranch.exitCode === 0) {
     return { success: true };
   }
-  if (!isInitialBranchUnsupported(withBranch.stderr)) {
+  if (withBranch.exitCode !== GIT_USAGE_ERROR_EXIT) {
     return {
       success: false,
       error: withBranch.stderr.trim() || "Failed to initialize git repository",
