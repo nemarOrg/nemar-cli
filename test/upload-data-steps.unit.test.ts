@@ -50,6 +50,7 @@ import {
   run,
   writeFile,
 } from "./helpers/annex-repo";
+import { installGitShim } from "./helpers/git-shim";
 
 setDefaultTimeout(60_000);
 
@@ -62,6 +63,29 @@ beforeAll(async () => {
 afterAll(() => scratch.cleanup());
 
 const MIB = 1024 * 1024;
+/** A local port nothing listens on: a connection to it is refused at once. */
+const DEAD_PROXY = "http://127.0.0.1:1";
+
+// A leak guard. A proxy variable left set in this process would redirect every later
+// `fetch` of the whole test run (Bun retains it), failing unrelated files.
+const PROXY_VARIABLES = [
+  "https_proxy",
+  "HTTPS_PROXY",
+  "http_proxy",
+  "HTTP_PROXY",
+  "ALL_PROXY",
+  "all_proxy",
+  "NO_PROXY",
+  "no_proxy",
+] as const;
+const proxyAtLoad = Object.fromEntries(PROXY_VARIABLES.map((name) => [name, process.env[name]]));
+afterAll(() => {
+  for (const name of PROXY_VARIABLES) {
+    if (process.env[name] !== proxyAtLoad[name]) {
+      throw new Error(`${name} was changed in-process and not restored`);
+    }
+  }
+});
 const info: DatasetInfo = {
   dataset_id: "nm000996",
   ssh_url: "git@github.com:nemarDatasets/nm000996.git",
@@ -312,10 +336,16 @@ describe("what the copy step does with each outcome", () => {
     // refused connection, and the keys in the file are made up.
     const dir = await dataset("creds-initremote-fails", { "a.edf": 3_000 });
     await run(["git", "config", "annex.security.allowed-ip-addresses", "all"], dir);
-    const saved = {
-      https_proxy: process.env.https_proxy,
-      HTTPS_PROXY: process.env.HTTPS_PROXY,
-    };
+    // The dead proxy goes to git-annex's initremote ONLY, through the shim. Setting it on
+    // process.env would also route every later `fetch` of this test run through it:
+    // Bun keeps the proxy setting after the variable is restored, and test/openneuro.test.ts
+    // then fails with ConnectionRefused when the files run in the same process.
+    const restore = installGitShim(scratch.root, [
+      {
+        match: "annex initremote",
+        env: { https_proxy: DEAD_PROXY, HTTPS_PROXY: DEAD_PROXY },
+      },
+    ]);
     const open: OpenRemote = async () => {
       const configured = await configureS3Remote(
         dir,
@@ -332,8 +362,6 @@ describe("what the copy step does with each outcome", () => {
       expect(readdirSync(join(dir, ".git", "annex", "creds")).length).toBeGreaterThan(0);
       return FAIL;
     };
-    process.env.https_proxy = "http://127.0.0.1:1";
-    process.env.HTTPS_PROXY = "http://127.0.0.1:1";
     try {
       const p = await plan(dir);
       const result = await uploadDataToS3(
@@ -347,10 +375,7 @@ describe("what the copy step does with each outcome", () => {
       );
       expect(result.status).toBe("fail");
     } finally {
-      for (const [key, value] of Object.entries(saved)) {
-        if (value === undefined) Reflect.deleteProperty(process.env, key);
-        else process.env[key] = value;
-      }
+      restore();
     }
     expect(readdirSync(join(dir, ".git", "annex", "creds"))).toEqual([]);
   });

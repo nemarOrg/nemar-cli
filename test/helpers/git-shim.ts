@@ -1,13 +1,19 @@
 /**
  * A `git` that behaves exactly like the real one except for the invocations a test
- * asks it to break.
+ * asks it to change.
  *
- * Fault injection for the failure paths of code that shells out to git: the shim
- * sits first on PATH, matches the argument string against each rule, and fails or
- * kills only those calls, letting every other call (including the ones git-annex
- * makes internally) run the real git untouched. Nothing is simulated beyond the
- * exit status of the calls named; the repository, the index and the commits are all
- * real.
+ * Fault injection for code that shells out to git: the shim sits first on PATH,
+ * matches the argument string against each rule, and changes only those calls,
+ * letting every other call (including the ones git-annex makes internally) run the
+ * real git untouched. A rule can fail the call, kill it, make it succeed with output
+ * nobody expected (`stdout`), or run it for real with extra environment variables
+ * (`env`). The repository, the index and the commits are all real.
+ *
+ * `env` exists so a test can steer ONE child process (for example point git-annex's
+ * HTTP client at a dead local proxy) without writing to `process.env`: Bun keeps a
+ * proxy variable set in-process for every later `fetch` of the whole test run, even
+ * after the variable is restored, so a proxy written there fails unrelated tests that
+ * happen to run later in the same process.
  */
 
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
@@ -31,6 +37,11 @@ export interface ShimRule {
    * that succeeds and says something nobody expected.
    */
   stdout?: string;
+  /**
+   * Export these variables for the matching call and run the real git. Combines with
+   * nothing else on the rule: it neither fails nor counts.
+   */
+  env?: Record<string, string>;
 }
 
 const quote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
@@ -45,6 +56,15 @@ export function installGitShim(root: string, rules: ShimRule[]): () => void {
   const dir = join(root, `git-shim-${Math.random().toString(36).slice(2, 8)}`);
   mkdirSync(dir, { recursive: true });
   const blocks = rules.map((rule, i) => {
+    if (rule.env) {
+      const exports = Object.entries(rule.env).map(([k, v]) => `export ${k}=${quote(v)}`);
+      return [
+        `case "$args" in *${quote(rule.match)}*)`,
+        ...exports.map((e) => `  ${e}`),
+        "  ;;",
+        "esac",
+      ].join("\n");
+    }
     const counter = join(dir, `rule-${i}.count`);
     const skipped = join(dir, `rule-${i}.skip`);
     writeFileSync(counter, String(rule.times ?? -1));
