@@ -91,9 +91,12 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "verifyGitHubAuth",
   ],
   "clone-push": [
+    "clearStaleAssumeUnchanged",
     "cloneDataset",
     "commitRevert",
+    "compareRecordedStat",
     "createRevertBranch",
+    "describeChangedSinceTracked",
     "isNonFastForwardPush",
     "pushBranch",
     "pushToGitHub",
@@ -196,6 +199,11 @@ const INTERNAL_WIRING = [
   "parseCopyJson",
   "extractCopyJsonError",
   "setAssumeUnchanged",
+  // The stat guard, the stale-flag clear and the failure text of saveDataset's skip:
+  // unit tested, consumed by saveDataset itself and the tests.
+  "clearStaleAssumeUnchanged",
+  "compareRecordedStat",
+  "describeChangedSinceTracked",
 ];
 
 /**
