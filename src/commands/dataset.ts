@@ -185,7 +185,12 @@ import {
 import { checkPrerequisitesForCommand } from "../lib/prerequisites.js";
 import { DownloadProgressTracker } from "../lib/progress.js";
 import { promptForProvenance } from "../lib/provenance.js";
-import { ciPendingHeadline, ciPendingHint, isCiPendingBlock } from "../lib/publish-pending.js";
+import {
+  ciPendingHeadline,
+  ciPendingHint,
+  ciUrlOf,
+  isCiPendingBlock,
+} from "../lib/publish-pending.js";
 import { renderSnippetLine, truncateTokenList } from "../lib/render/snippet.js";
 import { resolveSandboxCompletion } from "../lib/sandbox-status.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
@@ -4054,8 +4059,9 @@ Description:
 
   You can only have one active publication request per dataset.
 
-  BIDS validation runs after the upload and must complete first. A request made
-  earlier is recorded and proceeds on its own; follow CI with: nemar dataset ci <dataset-id>
+  BIDS validation runs on GitHub after the upload. A request made before it has
+  completed is recorded, and NEMAR continues it once validation passes.
+  Check validation with: nemar dataset ci <dataset-id>
 
 Status Flow:
   requested → approving → published (or denied)
@@ -4096,7 +4102,8 @@ Examples:
       // request whose body never arrived would otherwise succeed with a
       // message indistinguishable from a correct one, and the depositor would
       // find out when their name appeared on the published record.
-      if (options.anonymous && result.anonymous !== true) {
+      const anonymityUnconfirmed = options.anonymous === true && result.anonymous !== true;
+      if (anonymityUnconfirmed) {
         printAnonymousNotConfirmed(datasetId);
       } else if (result.anonymous === true) {
         console.log(
@@ -4121,21 +4128,31 @@ Examples:
       // one threw above and prints its own text.
       console.log();
       for (const line of publicationRequestNotice(datasetId)) console.log(`  ${line}`);
+      // An anonymous release that was not confirmed would be published under
+      // the real name, so a script must not read this run as a success.
+      if (anonymityUnconfirmed) process.exit(1);
     } catch (error) {
       if (isCiPendingBlock(error)) {
-        // Not an error (issue #1646): the request IS recorded, and the server
-        // re-checks it and continues once BIDS validation passes. Said in the
-        // info style and left to exit 0, so a script does not retry it and a
-        // depositor does not read it as a rejection. A validation FAILURE is a
-        // different reason and takes the error path below.
+        // Not an error: the request IS recorded, and the server re-checks it
+        // and continues once BIDS validation passes. Said in the info style and
+        // left to exit 0, so a script does not retry it and a depositor does
+        // not read it as a rejection. A validation FAILURE is a different
+        // reason and takes the error path below.
         spinner.info(ciPendingHeadline(error.blockReason));
+        // The command to run again takes its `--anonymous` from what was
+        // typed, never from the server's echo, which may be missing.
         for (const line of ciPendingHint(datasetId, options.anonymous === true)) {
           console.log(line);
         }
-        // Same check as for an accepted request: what was recorded, not what
-        // was typed. A recorded request is the one an admin later sees.
+        const ciUrl = ciUrlOf(error);
+        if (ciUrl) console.log(`  CI: ${ciUrl}`);
+        // What was recorded, not what was typed: the recorded request is the
+        // one an administrator later approves.
         const recorded = (error.rawBody as { anonymous?: unknown } | undefined)?.anonymous;
-        if (options.anonymous && recorded !== true) printAnonymousNotConfirmed(datasetId);
+        if (options.anonymous && recorded !== true) {
+          printAnonymousNotConfirmed(datasetId);
+          process.exit(1);
+        }
         return;
       }
       if (error instanceof ApiError) {
