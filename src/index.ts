@@ -366,11 +366,9 @@ async function main() {
     argv = bindShadowedOptionValues(program, rawArgs);
   } catch (err) {
     if (err instanceof MissingShadowedValueError || err instanceof MisplacedShadowedOptionError) {
-      // A mistyped option, reported the way Commander reports one. error()
-      // prints the message and EXITS; it never returns. Going through it runs
-      // the exitOverride installed by markCommanderExitsRecursively, whose
-      // markUsageExit() makes the exit handler skip the bug-report nudge: a
-      // wrong flag is not a bug.
+      // A mistyped option, reported as Commander reports one. error() exits;
+      // routing through it runs the exitOverride whose markUsageExit() skips
+      // the bug-report nudge, since a wrong flag is not a bug.
       err.command.error(err.message, { code: err.code });
     }
     // Anything else is a defect in the pre-pass itself, not in the user's
