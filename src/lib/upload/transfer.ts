@@ -490,10 +490,12 @@ export async function trackDataFiles(
  * (`shouldAnnex`), so a file larger than the policy's size threshold that is
  * NOT annexed was routed into git by something overriding the policy (an
  * inherited `.gitattributes`, ADR 0060): it would be pushed to GitHub instead
- * of reaching S3, which is a hard failure. A small one can differ for a benign
- * reason (the CLI matches data extensions case-insensitively, git-annex's
- * `include=` globs do not), and committing a file at or under the size threshold
- * to git is harmless, so it is only reported. Pure; exported for unit tests.
+ * of reaching S3, which is a hard failure. Committing a file at or under the
+ * size threshold to git is harmless, so a small one is only reported. (The CLI
+ * folds case where git-annex's globs do not, but `trackDataFiles` forces those
+ * case variants into the annex, so what is left here is an override of the policy
+ * or an ignore pattern, on a file too small to matter.) Pure; exported for unit
+ * tests.
  */
 export function findDataFilesNotAnnexed<T extends { path: string; size: number; type?: string }>(
   addTargets: T[],
