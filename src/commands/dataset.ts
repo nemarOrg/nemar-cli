@@ -190,6 +190,7 @@ import {
   ciPendingHint,
   ciUrlOf,
   isCiPendingBlock,
+  isCiPendingReason,
 } from "../lib/publish-pending.js";
 import { renderSnippetLine, truncateTokenList } from "../lib/render/snippet.js";
 import { resolveSandboxCompletion } from "../lib/sandbox-status.js";
@@ -4269,18 +4270,33 @@ Examples:
         console.log(`\n  ${chalk.red("Reason:")} ${result.denied_reason}`);
       }
 
+      // A request waiting on validation has had no screen yet, because the
+      // screen starts when validation passes and the request is released; the
+      // backend words that absence as "NOT RUN for this request", in red, which
+      // reads as a fault in a state that is only waiting.
+      const waitingOnValidation =
+        result.status === "blocked" && isCiPendingReason(result.block_reason);
       // Epic #1610 phase 4: the identifier screen, in the backend's words.
-      const screenLines = identifierScreenLines(result.identifier_screen);
+      const screenLines = waitingOnValidation
+        ? []
+        : identifierScreenLines(result.identifier_screen);
       if (screenLines.length > 0) {
         console.log();
         for (const line of screenLines) console.log(line);
       }
 
       // Blocked requests: surface WHY (e.g. BIDS validation pending/failed) plus
-      // the CI link and what to do next (#428). A pending/in-progress block now
-      // clears automatically once CI goes green (daily sweep), but the user can
-      // re-request to retry immediately.
-      if (result.status === "blocked") {
+      // the CI link and what to do next. A request that is blocked only because
+      // validation has not finished is a pending state, not a failure: it is
+      // said the way `publish request` says it (info, not red, no "re-request"
+      // from the server's message) and clears on its own once CI passes. Any
+      // other reason stays a red block.
+      const againCommand = `nemar dataset publish request ${datasetId}${result.anonymous === true ? " --anonymous" : ""}`;
+      if (waitingOnValidation && isCiPendingReason(result.block_reason)) {
+        console.log(`\n  ${chalk.cyan("ℹ")} ${ciPendingHeadline(result.block_reason)}`);
+        for (const line of ciPendingHint(datasetId, result.anonymous === true)) console.log(line);
+        if (result.ci_url) console.log(`  ${chalk.dim("CI:")} ${result.ci_url}`);
+      } else if (result.status === "blocked") {
         if (result.message) {
           console.log(`\n  ${chalk.red("Blocked:")} ${result.message}`);
         } else if (result.block_reason) {
@@ -4301,7 +4317,7 @@ Examples:
         }
         console.log(
           chalk.dim(
-            `  This re-checks automatically once CI passes; or re-run 'nemar dataset publish request ${datasetId}' to retry now.`,
+            `  This re-checks automatically once CI passes; or re-run '${againCommand}' to retry now.`,
           ),
         );
       }
