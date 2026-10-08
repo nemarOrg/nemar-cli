@@ -16,6 +16,7 @@ import {
 import { isNonProductionEnv } from "../../services/environment.js";
 import { getDatasetsToken } from "../../services/github-auth.js";
 import { triggerEnrichmentRun, triggerVersionDoiRun } from "../../services/github.js";
+import { handlePullRequestEvent } from "../../services/pr-review.js";
 import { verifyGitHubWebhookSignature } from "../../services/webhook-signature.js";
 import type { WebhookRouter } from "./shared.js";
 
@@ -403,10 +404,11 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
       return c.json({ error: "Invalid signature" }, 401);
     }
 
-    // Only `push` is wired today. Other events (pull_request, release, …) land
-    // here without action so the App can subscribe to them in advance of any
-    // future centralization phase.
-    if (eventType !== "push") {
+    // `push` drives enrichment and version DOIs; `pull_request` drives the dataset
+    // pull-request review (ADR 0092), which is itself off unless PR_REVIEW_ENABLED is "1".
+    // Other events (release, …) land here without action so the App can subscribe to
+    // them in advance of any future centralization phase.
+    if (eventType !== "push" && eventType !== "pull_request") {
       return c.json({ ok: true, dispatched: false, reason: "event_ignored", event: eventType });
     }
 
@@ -508,6 +510,21 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
     // prod — an operational control, not a code one.
     if (isNonProductionEnv(c.env) && !isDevOwnedDatasetId(payload.repository?.name ?? "")) {
       return c.json({ ok: true, dispatched: false, reason: "prod_range_repo_on_dev_worker" });
+    }
+
+    // A pull request is taken up by the review, after the same ownership fences as a push:
+    // production leaves dev-owned repositories to the dev Worker, and the dev Worker answers
+    // only for repositories it owns. Never 5xx: a retried delivery only repeats the work, and a
+    // failed review is published as a check that needs a person, not lost.
+    if (eventType === "pull_request") {
+      try {
+        return c.json(await handlePullRequestEvent(c.env, payload));
+      } catch (err) {
+        console.error(
+          `[github-webhook] pull_request delivery ${deliveryId} failed: ${err instanceof Error ? err.message.slice(0, 120) : "unknown"}`,
+        );
+        return c.json({ ok: true, dispatched: false, reason: "pr_review_error" });
+      }
     }
 
     // Evaluate both decision functions. A given push delivery should only
