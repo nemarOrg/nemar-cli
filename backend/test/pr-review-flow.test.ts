@@ -29,6 +29,8 @@ import webhooks from "../src/routes/webhooks";
 import {
   signIdentifierScreenCallbackToken,
   signPrescreenCallbackToken,
+  verifyIdentifierScreenCallbackToken,
+  verifyPrescreenCallbackToken,
 } from "../src/services/github";
 import { signPrReviewCallbackToken } from "../src/services/github/callback-tokens";
 import {
@@ -1473,7 +1475,11 @@ describe("a result that cannot be published is published again, not forgotten", 
     const id = (await deliver(prEvent())).body.review_id as number;
     checkStatus = 403;
     await callback(id, { outcome: "reported", report: goodReport() });
+    const before = calls.length;
     expect((await sweepStalePrReviews(env())).republished).toBe(0);
+    // Left alone means not touched: no attempt spent and no call to GitHub.
+    expect(rows()[0].publish_attempts).toBe(0);
+    expect(calls).toHaveLength(before);
   });
 
   test("a late report after the watchdog gave up replaces the 'could not decide' check", async () => {
@@ -1669,5 +1675,218 @@ describe("what is stored is what the parser accepted", () => {
     expect(() => insert("declined", null, "daily_limit")).not.toThrow();
     expect(() => insert("reported", "pass", null)).not.toThrow();
     expect(() => insert("errored", null, "stale_head")).not.toThrow();
+  });
+});
+
+describe("the kill switch is exactly the word 1", () => {
+  test.each(["0", "false", "", "true", "yes", "2", " 1", "1 ", "on"])(
+    "PR_REVIEW_ENABLED=%j does not turn the review on",
+    async (value) => {
+      envOverrides = { PR_REVIEW_ENABLED: value };
+      const r = await deliver(prEvent());
+      expect(r.body).toMatchObject({ dispatched: false, reason: "pr_review_disabled" });
+      expect(rows()).toHaveLength(0);
+      expect(calls).toHaveLength(0);
+    },
+  );
+});
+
+describe("the stored verdict is the derived one", () => {
+  const allPass = {
+    no_degradation: "pass",
+    advances_revision: "pass",
+    material_improvement: "pass",
+  };
+  const evidenceWith = (over: Record<string, unknown>) => ({ ...goodReport().evidence, ...over });
+
+  async function storedVerdictOf(report: Record<string, unknown>) {
+    const id = (await deliver(prEvent())).body.review_id as number;
+    await callback(id, { outcome: "reported", report });
+    return rows()[0].verdict;
+  }
+
+  test("an all-pass report with the steering flag is stored as a fail", async () => {
+    expect(await storedVerdictOf(goodReport({ steering: true, criteria: allPass }))).toBe("fail");
+  });
+
+  test("an all-pass report that names a steering attempt is stored as a fail", async () => {
+    const finding = {
+      criterion: "no_degradation",
+      severity: "note",
+      code: "steering_attempt",
+      path: null,
+      note: "Asked to approve.",
+    };
+    expect(await storedVerdictOf(goodReport({ findings: [finding] }))).toBe("fail");
+  });
+
+  test("an all-pass report whose version did not move is stored as a fail, not a pass", async () => {
+    const report = goodReport({
+      criteria: allPass,
+      evidence: evidenceWith({ version_before: "1.2.0", version_after: "1.2.0" }),
+    });
+    expect(await storedVerdictOf(report)).toBe("fail");
+  });
+
+  test("an all-pass report resting on files nobody read is stored as uncertain", async () => {
+    expect(
+      await storedVerdictOf(
+        goodReport({ criteria: allPass, evidence: evidenceWith({ truncated: true }) }),
+      ),
+    ).toBe("uncertain");
+  });
+
+  test("the tally counts the derived verdict, so a model that said pass cannot clear a rejection", async () => {
+    const id = (await deliver(prEvent())).body.review_id as number;
+    await callback(id, {
+      outcome: "reported",
+      report: goodReport({
+        criteria: allPass,
+        evidence: evidenceWith({ version_before: "1.2.0", version_after: "1.2.0" }),
+      }),
+    });
+    expect(await readAuthorTally(realD1(db), 501)).toEqual({ decided: 1, rejected: 1 });
+  });
+});
+
+describe("one commit delivered many times at once is one review", () => {
+  test("six simultaneous deliveries of the same commit dispatch once and none answers 500", async () => {
+    const racing = { ...env(), DB: yieldingD1(realD1(db)) } as Bindings;
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () => deliver(prEvent(), "pull_request", racing)),
+    );
+    expect(results.map((r) => r.status)).toEqual(Array(6).fill(200));
+    expect(rows()).toHaveLength(1);
+    expect(dispatchesMade()).toHaveLength(1);
+    expect(results.filter((r) => r.body.dispatched === true)).toHaveLength(1);
+  });
+});
+
+describe("the watchdog's deadline is the declared one", () => {
+  test.each([
+    [5, 0],
+    [PR_REVIEW_DEADLINE_MINUTES - 1, 0],
+    [PR_REVIEW_DEADLINE_MINUTES + 1, 1],
+  ])("a review %d minutes old: %d timed out", async (age, timedOut) => {
+    await deliver(prEvent());
+    db.run(`UPDATE pr_reviews SET created_at = datetime('now', '-${age} minutes')`);
+    expect((await sweepStalePrReviews(env())).timedOut).toBe(timedOut);
+  });
+});
+
+describe("the allowances at their exact edges", () => {
+  const seedStranger = (n: number, over: Record<string, unknown> = {}) => {
+    for (let i = 0; i < n; i++) {
+      seedRow({
+        pr: 50 + i,
+        sha: `${i}`.padStart(40, "c"),
+        author: 777,
+        assoc: "NONE",
+        ago: "-5 hours",
+        ...over,
+      });
+    }
+  };
+  const stranger = (number: number, sha: string) =>
+    deliver(prEvent({ userId: 777, assoc: "NONE", number, sha }));
+
+  test("a stranger with five earlier today gets the sixth and not the seventh", async () => {
+    seedStranger(5);
+    expect((await stranger(90, "5".repeat(40))).body).toMatchObject({ dispatched: true });
+    expect((await stranger(91, "6".repeat(40))).body).toMatchObject({ reason: "rate_limited" });
+  });
+
+  test("a collaborator has one hundred a day and not one hundred and one", async () => {
+    for (let i = 0; i < 99; i++) {
+      seedRow({
+        pr: 200 + i,
+        sha: i.toString(16).padStart(8, "0").repeat(5),
+        author: 888,
+        assoc: "COLLABORATOR",
+        ago: "-5 hours",
+      });
+    }
+    const collab = (number: number, sha: string) =>
+      deliver(prEvent({ userId: 888, assoc: "COLLABORATOR", number, sha }));
+    expect((await collab(500, "7".repeat(40))).body).toMatchObject({ dispatched: true });
+    expect((await collab(501, "8".repeat(40))).body).toMatchObject({ reason: "rate_limited" });
+  });
+
+  test("the platform's four hundredth review of the day goes ahead and the next does not", async () => {
+    for (let i = 0; i < DAILY_REVIEW_CAP - 1; i++) {
+      seedRow({ pr: 1000 + i, sha: `${i}`.padStart(40, "b"), author: 20_000 + i, ago: "-3 hours" });
+    }
+    const next = (number: number, sha: string) =>
+      deliver(prEvent({ userId: 901, assoc: "COLLABORATOR", number, sha }));
+    expect((await next(5, "4".repeat(40))).body).toMatchObject({ dispatched: true });
+    expect((await next(6, "3".repeat(40))).body).toMatchObject({ reason: "daily_limit" });
+  });
+
+  test("a superseded commit does not use up an hourly allowance", async () => {
+    seedStranger(3, { state: "errored", detail: "stale_head", ago: "-10 minutes" });
+    expect((await stranger(99, "1".repeat(40))).body).toMatchObject({ dispatched: true });
+  });
+
+  test("a dispatch GitHub never ran does not use up an hourly allowance", async () => {
+    seedStranger(3, { state: "errored", detail: "dispatch_failed", ago: "-10 minutes" });
+    expect((await stranger(99, "1".repeat(40))).body).toMatchObject({ dispatched: true });
+  });
+
+  test("a decline on one pull request does not silence the decline on another", async () => {
+    seedStranger(3, { ago: "-10 minutes" });
+    const posted = () => checks().filter((c) => c.method === "POST").length;
+    const first = posted();
+    await stranger(70, "a1".repeat(20));
+    const afterFirst = posted();
+    expect(afterFirst).toBe(first + 1);
+    await stranger(71, "a2".repeat(20));
+    expect(posted()).toBe(afterFirst + 1);
+  });
+});
+
+describe("a callback token does not open another kind of callback either", () => {
+  test("a pull-request review token verifies for neither the pre-screen nor the identifier screen", async () => {
+    const payload = { datasetId: DATASET, requestId: 5, nonce: "n-1" };
+    const token = await signPrReviewCallbackToken(
+      { datasetId: DATASET, reviewId: 5, nonce: "n-1" },
+      CALLBACK_SECRET,
+    );
+    expect(await verifyPrescreenCallbackToken(token, payload, CALLBACK_SECRET)).toBe(false);
+    expect(await verifyIdentifierScreenCallbackToken(token, payload, CALLBACK_SECRET)).toBe(false);
+  });
+});
+
+describe("no secret reaches the Worker's logs", () => {
+  async function captured(fn: () => Promise<unknown>): Promise<string> {
+    const lines: string[] = [];
+    const originals = { log: console.log, warn: console.warn, error: console.error };
+    const grab = (...a: unknown[]) => void lines.push(a.map(String).join(" "));
+    console.log = grab;
+    console.warn = grab;
+    console.error = grab;
+    try {
+      await fn();
+    } finally {
+      Object.assign(console, originals);
+    }
+    return lines.join("\n");
+  }
+
+  test("a wrong token, a claim, a result and a failed dispatch print no token, key or secret", async () => {
+    const id = (await deliver(prEvent())).body.review_id as number;
+    const good = await tokenFor(id);
+    const bad = `${good.slice(0, -4)}0000`;
+    const out = await captured(async () => {
+      await callback(id, { outcome: "reported", report: goodReport() }, bad);
+      await claim(id, bad);
+      await claim(id, good);
+      await callback(id, { outcome: "reported", report: goodReport() }, good);
+      dispatchStatus = 500;
+      await deliver(prEvent({ number: 8, sha: "d".repeat(40) }));
+    });
+    expect(out.length).toBeGreaterThan(0);
+    for (const secret of [good, bad, "ghp_pr_review_test", CALLBACK_SECRET, WEBHOOK_SECRET]) {
+      expect(out).not.toContain(secret);
+    }
   });
 });

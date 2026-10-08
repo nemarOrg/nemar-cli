@@ -16,6 +16,7 @@ import {
   FINDING_CODES,
   HOURLY_REVIEW_CAP,
   MAX_FINDINGS,
+  MAX_LISTED,
   MAX_MODEL_FILES,
   NOTE_MAX,
   OVERRIDE_MODES,
@@ -632,6 +633,29 @@ describe("rate caps", () => {
   });
 });
 
+describe("the sanitiser is bounded on hostile input", () => {
+  test.each(["![", "[", "<a ", "&#", "(", "]("])(
+    "200,000 repetitions of %j are cut and fast",
+    (unit) => {
+      const started = performance.now();
+      const out = sanitizeNote(unit.repeat(200_000));
+      expect(performance.now() - started).toBeLessThan(2_000);
+      expect(Array.from(out).length).toBeLessThanOrEqual(NOTE_MAX);
+    },
+  );
+
+  test("a cut that splits a surrogate pair leaves no lone half behind", () => {
+    const out = sanitizeNote(`${"a".repeat(NOTE_MAX * 8 - 1)}\u{1F600}tail`, NOTE_MAX);
+    expect(out).not.toMatch(/\p{Cs}/u);
+  });
+
+  test("the text a person reads is still the start of the note, cut at the limit", () => {
+    const out = sanitizeNote(`start ${"x".repeat(5_000)}`, 50);
+    expect(out.startsWith("start xxx")).toBe(true);
+    expect(Array.from(out)).toHaveLength(50);
+  });
+});
+
 describe("the sanitiser cannot rebuild a link, and is a fixed point", () => {
   // Stripping characters AFTER finding links rebuilds them, and entities decode to the characters
   // the function removes, so each of these has to come out without a link.
@@ -864,10 +888,21 @@ describe("facts lower a criterion and never raise one", () => {
     expect(v).toBe("fail");
   });
 
-  test("removing a derivative or an unrelated file is not a loss of data", () => {
-    const areas = { ...emptyAreasLocal(), derivatives: { added: 0, modified: 0, removed: 3 } };
-    const e = evidence({ files_changed: 3, files_read: 0, areas, listed: [] });
-    expect(verdictFor(e)).toBe("pass");
+  test.each(["sidecars", "derivatives", "sourcedata", "code", "other"])(
+    "removing a file in %s needs a person: it is a loss somebody should look at",
+    (area) => {
+      const areas = { ...emptyAreasLocal(), [area]: { added: 0, modified: 0, removed: 3 } };
+      const e = evidence({ files_changed: 3, files_read: 0, areas, listed: [] });
+      expect(verdictFor(e)).toBe("uncertain");
+    },
+  );
+
+  test("adding or changing files in any area is left to the model's answer", () => {
+    for (const area of ["sidecars", "derivatives", "sourcedata", "code", "other"]) {
+      const areas = { ...emptyAreasLocal(), [area]: { added: 2, modified: 1, removed: 0 } };
+      const e = evidence({ files_changed: 3, files_read: 0, areas, listed: [] });
+      expect(verdictFor(e), area).toBe("pass");
+    }
   });
 });
 
@@ -978,5 +1013,178 @@ describe("the brand on a parsed report", () => {
     };
     for (const d of ["shared", "src", "backend/src", "scripts"]) walk(join(root, d));
     expect(offenders).toEqual([]);
+  });
+});
+
+describe("the parser refuses a hostile value in every field, not only the notes", () => {
+  const finding = (over: Record<string, unknown> = {}) => ({
+    criterion: "no_degradation",
+    severity: "note",
+    code: "other",
+    path: null,
+    note: "x",
+    ...over,
+  });
+  const areasWith = (area: string, counts: Record<string, unknown>, files_changed = 12) => {
+    const e = evidence({ files_changed });
+    (e.areas as Record<string, unknown>)[area] = counts;
+    return e;
+  };
+
+  const cases: Array<[string, Record<string, unknown>, string]> = [
+    [
+      "a severity that is markup and a mention",
+      { findings: [finding({ severity: "@everyone [approve](https://evil.example)" })] },
+      "bad_findings",
+    ],
+    [
+      "a finding criterion outside the three",
+      { findings: [finding({ criterion: "approve" })] },
+      "bad_findings",
+    ],
+    ["a finding with an extra key", { findings: [finding({ verdict: "pass" })] }, "bad_findings"],
+    [
+      "a finding with a missing key",
+      { findings: [{ criterion: "no_degradation", severity: "note", code: "other", path: null }] },
+      "bad_findings",
+    ],
+    ["findings that are not a list", { findings: { 0: finding() } }, "bad_findings"],
+    ["a path that is a number", { findings: [finding({ path: 7 })] }, "bad_findings"],
+    ["a note that is not text", { findings: [finding({ note: { a: 1 } })] }, "bad_findings"],
+    ["a version that is not 2", { v: 2 }, "bad_version"],
+    ["a version given as text", { v: "1" }, "bad_version"],
+    ["a summary that is not text", { summary: 3 }, "bad_summary"],
+    ["steering as the word false", { steering: "false" }, "bad_steering"],
+    ["steering as zero", { steering: 0 }, "bad_steering"],
+    ["steering left out", { steering: undefined }, "unknown_key"],
+    [
+      "a fractional count",
+      { evidence: areasWith("recordings", { added: 10.5, modified: 0, removed: 0 }) },
+      "bad_evidence",
+    ],
+    [
+      "a negative count",
+      { evidence: areasWith("recordings", { added: -1, modified: 0, removed: 0 }) },
+      "bad_evidence",
+    ],
+    [
+      "a count above the cap",
+      { evidence: areasWith("recordings", { added: 1e9, modified: 0, removed: 0 }, 1e9) },
+      "bad_evidence",
+    ],
+    [
+      "a count given as text",
+      { evidence: areasWith("recordings", { added: "11", modified: 0, removed: 0 }) },
+      "bad_evidence",
+    ],
+    [
+      "an area with an extra key",
+      { evidence: areasWith("recordings", { added: 11, modified: 0, removed: 0, approved: 1 }) },
+      "bad_evidence",
+    ],
+    [
+      "an evidence block with an extra key",
+      { evidence: evidence({ approved: true }) },
+      "bad_evidence",
+    ],
+    [
+      "a listed file with an extra key",
+      { evidence: evidence({ listed: [{ status: "added", path: "a", note: "x" }] }) },
+      "bad_evidence",
+    ],
+    [
+      "a listed file status that is invented",
+      { evidence: evidence({ listed: [{ status: "approved", path: "a" }] }) },
+      "bad_evidence",
+    ],
+    ["truncated given as text", { evidence: evidence({ truncated: "false" }) }, "bad_evidence"],
+    [
+      "a subject count that is negative",
+      { evidence: evidence({ subjects_before: -2 }) },
+      "bad_evidence",
+    ],
+    [
+      "a subject count that is fractional",
+      { evidence: evidence({ subjects_after: 2.5 }) },
+      "bad_evidence",
+    ],
+  ];
+  for (const [label, over, code] of cases) {
+    test(`${label} is refused as ${code}`, () => {
+      const raw = report(over);
+      if (over.steering === undefined && "steering" in over)
+        Reflect.deleteProperty(raw, "steering");
+      expect(refusal(raw)).toBe(code);
+    });
+  }
+
+  test.each(["1.0", "v1.0.0", "1.0.0-rc1", "1.0.0 ", "1.0.0\n", "1.x.0", "1..0", "", " "])(
+    "the version %j is refused",
+    (v) => {
+      expect(refusal(report({ evidence: evidence({ version_after: v }) }))).toBe("bad_evidence");
+      expect(refusal(report({ evidence: evidence({ version_before: v }) }))).toBe("bad_evidence");
+    },
+  );
+
+  test("a list longer than the cap is refused", () => {
+    const listed = Array.from({ length: MAX_LISTED + 1 }, (_, i) => ({
+      status: "added",
+      path: `sub-${i}/f.json`,
+    }));
+    expect(refusal(report({ evidence: evidence({ files_changed: 80, listed }) }))).toBe(
+      "bad_evidence",
+    );
+  });
+});
+
+describe("the revision must go up, in every component of the version", () => {
+  const verdictFor = (before: string, after: string) =>
+    verdictOf(parsed({ evidence: evidence({ version_before: before, version_after: after }) }));
+
+  test.each([
+    ["1.0.0", "1.0.1", "pass"],
+    ["1.0.0", "1.1.0", "pass"],
+    ["1.0.0", "2.0.0", "pass"],
+    ["1.9.9", "1.10.0", "pass"],
+    ["1.99.99", "2.0.0", "pass"],
+    ["1.0.1", "1.0.0", "fail"],
+    ["1.0.0", "1.0.0", "fail"],
+    ["2.0.0", "1.99.99", "fail"],
+    ["1.10.0", "1.9.9", "fail"],
+  ])("%s to %s is %s", (before, after, expected) => {
+    expect(verdictFor(before, after)).toBe(expected as "pass" | "fail");
+  });
+});
+
+describe("the check shows what the facts left of an answer, not what the model said", () => {
+  test("a criterion a fact lowered reads as lowered in the table", () => {
+    const r = parsed({ evidence: evidence({ version_before: "1.0.0", version_after: "1.0.0" }) });
+    const check = renderCheck({ kind: "reported", report: r });
+    const text = `${check.summary}\n${check.text}`;
+    // The model answered pass; the version did not move.
+    expect(r.criteria.advances_revision).toBe("pass");
+    expect(text).toMatch(/The revision advances[^\n]*\bNo\b/);
+    expect(text).not.toMatch(/The revision advances[^\n]*\bYes\b/);
+  });
+});
+
+describe("who counts as trusted, as numbers", () => {
+  test.each([
+    ["OWNER", 20, 100],
+    ["MEMBER", 20, 100],
+    ["COLLABORATOR", 20, 100],
+    ["CONTRIBUTOR", 3, 6],
+    ["FIRST_TIME_CONTRIBUTOR", 3, 6],
+    ["NONE", 3, 6],
+    ["", 3, 6],
+    [null, 3, 6],
+    [undefined, 3, 6],
+  ])("%j gets %d an hour and %d a day", (assoc, hourly, daily) => {
+    expect(hourlyCapFor(assoc as string | null | undefined)).toBe(hourly);
+    expect(dailyAuthorCapFor(assoc as string | null | undefined)).toBe(daily);
+  });
+
+  test("the platform's daily ceiling is 400", () => {
+    expect(DAILY_REVIEW_CAP).toBe(400);
   });
 });

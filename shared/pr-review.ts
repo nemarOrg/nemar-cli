@@ -261,7 +261,11 @@ function hasExactKeys(o: Record<string, unknown>, keys: readonly string[]): bool
  */
 export function sanitizeNote(input: unknown, max: number = NOTE_MAX): string {
   if (typeof input !== "string") return "";
-  let s = input.normalize("NFKC").replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ");
+  // The loop below is quadratic on input like "![![![...", and a callback body may be 256 KB.
+  // Only the start of a note is ever shown, so cut it before the work begins. The cut may split a
+  // surrogate pair; \p{Cs} removes a lone half.
+  const bounded = input.length > max * 8 ? input.slice(0, max * 8) : input;
+  let s = bounded.normalize("NFKC").replace(/[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu, " ");
   for (let i = 0; i < 8; i++) {
     const before = s;
     s = s
@@ -500,10 +504,10 @@ function compareVersions(a: string, b: string): number {
  *    unknown.
  *  - Something a reviewer needed was not shown (`truncated`): a pass about nothing being lost
  *    (`no_degradation`) rests on evidence nobody saw, so it is unknown.
- *  - Data or the files that describe the dataset were REMOVED (a recording, the dataset
- *    description, README or CHANGES, the participants table) or the subject count fell: a removal
- *    can be right (a privacy correction) but it is never something to pass on a model's word, so
- *    `no_degradation` is unknown and a person confirms it.
+ *  - Any file was REMOVED (the dataset description, README or CHANGES, the participants table, a
+ *    recording, a sidecar, anything) or the subject count fell: a removal can be right (a privacy
+ *    correction) but it is never something to pass on a model's word, so `no_degradation` is
+ *    unknown and a person confirms it.
  */
 export function factsOf(report: PrReviewReport): {
   criteria: Record<Criterion, CriterionResult>;
@@ -536,6 +540,11 @@ export function factsOf(report: PrReviewReport): {
   ) {
     lower("no_degradation", "metadata_removed", "unknown");
   }
+  // Any other removal is a loss somebody should look at too. The areas above are the ones the
+  // classifier is sure about; files it could not place (a format outside the annex policy's
+  // extension list), sidecars, derivatives, source data and code count the same, so a mass
+  // deletion cannot ride on a model's "nothing is lost".
+  if (AREAS.some((a) => e.areas[a].removed > 0)) lower("no_degradation", "data_removed", "unknown");
   if (
     e.subjects_before !== null &&
     e.subjects_after !== null &&

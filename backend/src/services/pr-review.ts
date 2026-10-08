@@ -875,6 +875,8 @@ export async function storePrReviewResult(
               decided_at = datetime('now'), published_at = NULL, publish_attempts = 0
         WHERE id = ? AND dataset_id = ? AND nonce = ? AND state IN ('dispatched', 'unreported')`,
     )
+    // The verdict is stored beside the report so the tally is a query. A republish recomputes it
+    // from the report, so a later change to the facts moves new rows only, never the tally.
     .bind(
       outcome.kind === "reported" ? "reported" : "errored",
       outcome.kind === "reported" ? verdictOf(outcome.report) : null,

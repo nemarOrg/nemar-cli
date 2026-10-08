@@ -149,10 +149,7 @@ interface PullRequestJson {
 }
 
 /** Review one pull request. Never throws: every failure is a fixed word. */
-export async function runReview(
-  args: ReviewArgs,
-  callModel: (system: string, user: string) => Promise<unknown> = callReviewModel,
-): Promise<ReviewResult> {
+export async function runReview(args: ReviewArgs): Promise<ReviewResult> {
   try {
     if (!SHA40.test(args.base) || !SHA40.test(args.head) || !SHA40.test(args.fetchedHead)) {
       throw new RunFailure("evidence_unavailable");
@@ -188,7 +185,7 @@ export async function runReview(
       fromFork,
       nonce: randomUUID().replaceAll("-", ""),
     });
-    const modelOutput = await callModel(system, user);
+    const modelOutput = await callReviewModel(system, user);
     return { outcome: "reported", report: assembleReport(modelOutput, evidence) };
   } catch (e) {
     return { outcome: "error", error: mapError(e), diag: describeError(e) };
@@ -234,7 +231,15 @@ function need(argv: string[], name: string): string {
   return v;
 }
 
-async function main(argv: string[]): Promise<number> {
+/**
+ * Run the script. `origins` is the callback table; production code never passes it, and a test
+ * points it at a server of its own, which is the only way to run this end to end without sending
+ * a report to a real Worker.
+ */
+export async function main(
+  argv: string[],
+  origins: Record<Environment, string> = CALLBACK_ORIGINS,
+): Promise<number> {
   const cmd = argv[0];
   const rest = argv.slice(1);
   if (cmd !== "review") {
@@ -272,7 +277,7 @@ async function main(argv: string[]): Promise<number> {
     outcome: result.outcome,
     ...(result.outcome === "reported" ? { report: result.report } : { error: result.error }),
   };
-  const sent = await postCallback(CALLBACK_ORIGINS[environment], token, body);
+  const sent = await postCallback(origins[environment], token, body);
   // A review id and fixed words only: this log is public.
   console.log(
     `review ${reviewId}: ${result.outcome}${result.outcome === "error" ? ` (${result.error}${result.diag ? `; ${result.diag}` : ""})` : ""}; callback ${

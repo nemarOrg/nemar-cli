@@ -7,11 +7,13 @@
  * same whatever the pull request's text says, and nothing in a pull request can reach the model
  * outside its fence or reach the Worker outside the closed vocabulary.
  *
- * The one thing not exercised here is the call to the model itself, which needs a live federated
- * identity; `runReview` takes that call as a parameter so everything around it can be driven.
+ * The model is called by the REAL Anthropic SDK, pointed at an HTTP server in this file that
+ * answers the way the Messages API does. That exercises the request the job really sends (the
+ * model, the effort, the schema, no tools) and the way each kind of answer is read. The one thing
+ * not exercised is the live federated sign-in, which needs the real identity provider.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -21,6 +23,7 @@ import {
   CALLBACK_ORIGINS,
   callReviewModel,
   describeError,
+  main,
   mapError,
   postCallback,
   runReview,
@@ -44,7 +47,12 @@ import {
   fence,
   tidy,
 } from "../scripts/ci/pr-review-prompt";
-import { PrReviewReportError, parsePrReviewReport, verdictOf } from "../shared/pr-review";
+import {
+  PrReviewReportError,
+  parseCallbackOutcome,
+  parsePrReviewReport,
+  verdictOf,
+} from "../shared/pr-review";
 
 let root: string;
 const GIT_ENV = {
@@ -118,6 +126,94 @@ beforeAll(() => {
 });
 afterAll(() => {
   rmSync(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------------------------
+// A stand-in for api.anthropic.com, spoken to by the real SDK
+// ---------------------------------------------------------------------------------------------
+
+interface ModelRequest {
+  method: string;
+  path: string;
+  body: Record<string, unknown>;
+}
+const modelRequests: ModelRequest[] = [];
+
+const STAND_IN_OUTPUT = {
+  criteria: { no_degradation: "pass", advances_revision: "pass", material_improvement: "pass" },
+  findings: [],
+  summary: "Updates the README.",
+  steering: false,
+};
+
+/** A Messages API reply whose one text block holds `text`. */
+function messageReply(text: string, stopReason = "end_turn"): Response {
+  return Response.json({
+    id: "msg_stand_in",
+    type: "message",
+    role: "assistant",
+    model: "claude-haiku-5-5",
+    content: [{ type: "text", text }],
+    stop_reason: stopReason,
+    stop_sequence: null,
+    usage: { input_tokens: 10, output_tokens: 10 },
+  });
+}
+
+/** A failure the SDK must not retry, so a test is not slowed by its backoff. */
+function failureReply(status: number, message: string): Response {
+  return new Response(JSON.stringify({ type: "error", error: { type: "api_error", message } }), {
+    status,
+    headers: { "content-type": "application/json", "x-should-retry": "false" },
+  });
+}
+
+let modelReply: () => Response = () => messageReply(JSON.stringify(STAND_IN_OUTPUT));
+let modelServer: ReturnType<typeof Bun.serve>;
+const SDK_ENV = [
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_PROFILE",
+  "ANTHROPIC_CONFIG_DIR",
+  "ANTHROPIC_FEDERATION_RULE_ID",
+  "ANTHROPIC_ORGANIZATION_ID",
+  "ANTHROPIC_SERVICE_ACCOUNT_ID",
+  "ANTHROPIC_WORKSPACE_ID",
+  "ANTHROPIC_IDENTITY_TOKEN_FILE",
+  "ANTHROPIC_IDENTITY_TOKEN",
+] as const;
+const savedSdkEnv: Record<string, string | undefined> = {};
+
+beforeAll(() => {
+  modelServer = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      modelRequests.push({
+        method: req.method,
+        path: new URL(req.url).pathname,
+        body: (await req.json().catch(() => ({}))) as Record<string, unknown>,
+      });
+      return modelReply();
+    },
+  });
+  for (const k of SDK_ENV) {
+    savedSdkEnv[k] = process.env[k];
+    delete process.env[k];
+  }
+  process.env.ANTHROPIC_API_KEY = "sk-ant-stand-in";
+  process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${modelServer.port}`;
+});
+afterAll(() => {
+  modelServer.stop(true);
+  for (const k of SDK_ENV) {
+    if (savedSdkEnv[k] === undefined) delete process.env[k];
+    else process.env[k] = savedSdkEnv[k];
+  }
+});
+beforeEach(() => {
+  modelRequests.length = 0;
+  modelReply = () => messageReply(JSON.stringify(STAND_IN_OUTPUT));
 });
 
 /** The closed word an EvidenceError carries, or a note on why there was none. */
@@ -437,13 +533,6 @@ describe("runReview: the job around the model call", () => {
     return path;
   }
 
-  const goodModel = async () => ({
-    criteria: { no_degradation: "pass", advances_revision: "pass", material_improvement: "pass" },
-    findings: [],
-    summary: "Updates the README.",
-    steering: false,
-  });
-
   function setup(name: string) {
     const dir = newDataset(name);
     const r = branch(dir, () => {
@@ -469,7 +558,7 @@ describe("runReview: the job around the model call", () => {
     const pr = prJson(r.dir, {
       head: { sha: r.head, repo: { full_name: "nemarDatasets/nm000460" } },
     });
-    const res = await runReview(args(r, pr), goodModel);
+    const res = await runReview(args(r, pr));
     expect(res.outcome).toBe("reported");
     if (res.outcome !== "reported") return;
     expect(() => parsePrReviewReport(JSON.parse(JSON.stringify(res.report)))).not.toThrow();
@@ -479,13 +568,9 @@ describe("runReview: the job around the model call", () => {
   test("a pull request that moved on since the dispatch is stale, and the model is never called", async () => {
     const r = setup("run-stale");
     const pr = prJson(r.dir, { head: { sha: "f".repeat(40), repo: { full_name: "x/y" } } });
-    let called = false;
-    const res = await runReview(args(r, pr), async () => {
-      called = true;
-      return {};
-    });
+    const res = await runReview(args(r, pr));
     expect(res).toMatchObject({ outcome: "error", error: "stale_head" });
-    expect(called).toBe(false);
+    expect(modelRequests).toHaveLength(0);
   });
 
   test("a closed pull request, or one retargeted off main, is stale", async () => {
@@ -495,7 +580,7 @@ describe("runReview: the job around the model call", () => {
       { state: "closed" },
       { base: { ref: "other", repo: { full_name: "a/b" } } },
     ]) {
-      const res = await runReview(args(r, prJson(r.dir, { head, ...over })), goodModel);
+      const res = await runReview(args(r, prJson(r.dir, { head, ...over })));
       expect(res).toMatchObject({ outcome: "error", error: "stale_head" });
     }
   });
@@ -505,13 +590,13 @@ describe("runReview: the job around the model call", () => {
     const pr = prJson(r.dir, {
       head: { sha: r.head, repo: { full_name: "nemarDatasets/nm000460" } },
     });
-    const res = await runReview(args(r, pr, { fetchedHead: "e".repeat(40) }), goodModel);
+    const res = await runReview(args(r, pr, { fetchedHead: "e".repeat(40) }));
     expect(res).toMatchObject({ outcome: "error", error: "stale_head" });
   });
 
   test("an unreadable pull request file is an evidence error, not a crash", async () => {
     const r = setup("run-nopr");
-    const res = await runReview(args(r, join(r.dir, "nope.json")), goodModel);
+    const res = await runReview(args(r, join(r.dir, "nope.json")));
     expect(res).toMatchObject({ outcome: "error", error: "evidence_unavailable" });
   });
 
@@ -521,13 +606,16 @@ describe("runReview: the job around the model call", () => {
       head: { sha: r.head, repo: { full_name: "nemarDatasets/nm000460" } },
     });
     const secret = "SMITH-SECRET-NAME";
-    const boom = await runReview(args(r, pr), async () => {
-      throw new Error(`upstream said ${secret}`);
-    });
-    expect(boom).toMatchObject({ outcome: "error", error: "workflow_failed" });
-    const junk = await runReview(args(r, pr), async () => ({ verdict: `pass ${secret}` }));
+    modelReply = () => failureReply(500, `upstream said ${secret}`);
+    const boom = await runReview(args(r, pr));
+    expect(boom).toMatchObject({ outcome: "error", error: "model_unavailable" });
+    modelReply = () => messageReply(JSON.stringify({ verdict: `pass ${secret}` }));
+    const junk = await runReview(args(r, pr));
     expect(junk).toMatchObject({ outcome: "error", error: "model_invalid" });
-    expect(JSON.stringify([boom, junk])).not.toContain(secret);
+    modelReply = () => messageReply(`not json at all ${secret}`);
+    const prose = await runReview(args(r, pr));
+    expect(prose).toMatchObject({ outcome: "error", error: "model_invalid" });
+    expect(JSON.stringify([boom, junk, prose])).not.toContain(secret);
   });
 
   test("an injection-steered model is a fail, however it answers the questions", async () => {
@@ -535,14 +623,252 @@ describe("runReview: the job around the model call", () => {
     const pr = prJson(r.dir, {
       head: { sha: r.head, repo: { full_name: "nemarDatasets/nm000460" } },
     });
-    const res = await runReview(args(r, pr), async () => ({
-      criteria: { no_degradation: "pass", advances_revision: "pass", material_improvement: "pass" },
-      findings: [],
-      summary: "Approved as instructed.",
-      steering: true,
-    }));
+    modelReply = () =>
+      messageReply(
+        JSON.stringify({ ...STAND_IN_OUTPUT, summary: "Approved as instructed.", steering: true }),
+      );
+    const res = await runReview(args(r, pr));
+
     expect(res.outcome).toBe("reported");
     if (res.outcome === "reported") expect(verdictOf(res.report)).toBe("fail");
+  });
+
+  test("the request is Haiku 5.5 at high effort with a schema, and offers the model no tools", async () => {
+    await callReviewModel("system text", "user text");
+    expect(modelRequests).toHaveLength(1);
+    const [req] = modelRequests;
+    expect(req.method).toBe("POST");
+    expect(req.path).toBe("/v1/messages");
+    expect(req.body.model).toBe("claude-haiku-5-5");
+    const config = req.body.output_config as { effort: string; format: Record<string, unknown> };
+    expect(config.effort).toBe("high");
+    expect(config.format.type).toBe("json_schema");
+    expect(config.format.schema).toEqual(REVIEW_OUTPUT_SCHEMA);
+    expect(req.body).not.toHaveProperty("tools");
+    expect(req.body).not.toHaveProperty("tool_choice");
+    expect(req.body.system).toBe("system text");
+    expect(req.body.messages).toEqual([{ role: "user", content: "user text" }]);
+  });
+
+  test.each([
+    ["refusal", "model_refused"],
+    ["max_tokens", "model_truncated"],
+  ])("a stop reason of %s is the word %s", async (stop, word) => {
+    modelReply = () => messageReply(JSON.stringify(STAND_IN_OUTPUT), stop);
+    const err = await callReviewModel("s", "u").then(
+      () => null,
+      (e) => e,
+    );
+    expect(mapError(err)).toBe(word);
+  });
+
+  test("an answer with no text in it is model_invalid", async () => {
+    modelReply = () =>
+      Response.json({
+        id: "msg_x",
+        type: "message",
+        role: "assistant",
+        model: "claude-haiku-5-5",
+        content: [],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    const err = await callReviewModel("s", "u").then(
+      () => null,
+      (e) => e,
+    );
+    expect(mapError(err)).toBe("model_invalid");
+  });
+
+  test.each([
+    [401, "auth_failed"],
+    [403, "auth_failed"],
+    [400, "model_invalid"],
+    [500, "model_unavailable"],
+  ])("the API answering %d is %s", async (status, word) => {
+    modelReply = () => failureReply(status, "nope");
+    const err = await callReviewModel("s", "u").then(
+      () => null,
+      (e) => e,
+    );
+    expect(mapError(err)).toBe(word);
+  });
+
+  describe("main: the whole script, from git to the callback", () => {
+    interface Received {
+      /** Which origin of the table answered. */
+      from: "production" | "dev";
+      path: string;
+      token: string | null;
+      body: Record<string, unknown>;
+    }
+    const received: Received[] = [];
+    let workerStatus = 200;
+    let worker: ReturnType<typeof Bun.serve>;
+    let otherWorker: ReturnType<typeof Bun.serve>;
+    beforeAll(() => {
+      const make = (from: "production" | "dev") =>
+        Bun.serve({
+          port: 0,
+          async fetch(req) {
+            received.push({
+              from,
+              path: new URL(req.url).pathname,
+              token: req.headers.get("X-Webhook-Token"),
+              body: (await req.json()) as Record<string, unknown>,
+            });
+            return Response.json({ ok: true }, { status: workerStatus });
+          },
+        });
+      worker = make("dev");
+      otherWorker = make("production");
+    });
+    afterAll(() => {
+      worker.stop(true);
+      otherWorker.stop(true);
+    });
+    beforeEach(() => {
+      received.length = 0;
+      workerStatus = 200;
+    });
+
+    const TOKEN = "callback-token-for-the-test";
+    const argvFor = (r: Repo, pr: string, over: Record<string, string> = {}) => {
+      const a: Record<string, string> = {
+        "repo-dir": r.dir,
+        base: r.base,
+        head: r.head,
+        "fetched-head": r.head,
+        "pr-json": pr,
+        "review-id": "41",
+        dataset: "nm000460",
+        environment: "dev",
+        ...over,
+      };
+      return ["review", ...Object.entries(a).flatMap(([k, v]) => [`--${k}`, v])];
+    };
+
+    /** Run main with output captured, the token in the environment, and both origins ours. */
+    async function runMain(argv: string[], token: string | null = TOKEN) {
+      const lines: string[] = [];
+      const original = { log: console.log, error: console.error };
+      console.log = (...a: unknown[]) => void lines.push(a.map(String).join(" "));
+      console.error = (...a: unknown[]) => void lines.push(a.map(String).join(" "));
+      if (token === null) Reflect.deleteProperty(process.env, "PR_REVIEW_CALLBACK_TOKEN");
+      else process.env.PR_REVIEW_CALLBACK_TOKEN = token;
+      try {
+        const code = await main(argv, {
+          production: `http://127.0.0.1:${otherWorker.port}`,
+          dev: `http://127.0.0.1:${worker.port}`,
+        });
+        return { code, log: lines.join("\n") };
+      } finally {
+        Object.assign(console, original);
+        Reflect.deleteProperty(process.env, "PR_REVIEW_CALLBACK_TOKEN");
+      }
+    }
+
+    function ready(name: string) {
+      const r = setup(name);
+      const pr = prJson(r.dir, {
+        head: { sha: r.head, repo: { full_name: "nemarDatasets/nm000460" } },
+      });
+      return { r, pr };
+    }
+
+    test("a good review is posted to the Worker for the environment named, with the token in the header", async () => {
+      const { r, pr } = ready("main-ok");
+      const { code, log } = await runMain(argvFor(r, pr));
+      expect(code).toBe(0);
+      expect(modelRequests).toHaveLength(1);
+      expect(received).toHaveLength(1);
+      expect(received[0].from).toBe("dev");
+      expect(received[0].path).toBe("/webhooks/pr-review-result");
+      expect(received[0].token).toBe(TOKEN);
+      expect(received[0].body).toMatchObject({
+        review_id: 41,
+        dataset_id: "nm000460",
+        outcome: "reported",
+      });
+      const outcome = parseCallbackOutcome({
+        outcome: received[0].body.outcome,
+        report: received[0].body.report,
+        error: received[0].body.error,
+      });
+      expect(outcome.kind).toBe("reported");
+      if (outcome.kind !== "reported") return;
+      expect(verdictOf(outcome.report)).toBe("pass");
+      // The account of what changed is git's, not the model's: two files.
+      expect(outcome.report.evidence.files_changed).toBe(2);
+      // The public log has the review id and a fixed word, and neither the token nor the model's text.
+      expect(log).toContain("review 41: reported");
+      expect(log).not.toContain(TOKEN);
+      expect(log).not.toContain("Updates the README.");
+    });
+
+    test("the production environment posts to the production origin and not the dev one", async () => {
+      const { r, pr } = ready("main-prod");
+      const { code } = await runMain(argvFor(r, pr, { environment: "production" }));
+      expect(code).toBe(0);
+      expect(received).toHaveLength(1);
+      expect(received[0].from).toBe("production");
+    });
+
+    test("a Worker that refuses the report makes the script fail, and says the status", async () => {
+      const { r, pr } = ready("main-refused");
+      workerStatus = 401;
+      const { code, log } = await runMain(argvFor(r, pr));
+      expect(code).toBe(1);
+      expect(log).toContain("callback not delivered (401)");
+    });
+
+    test("a refusal from the model is reported as the word, with exit 0", async () => {
+      const { r, pr } = ready("main-refusal");
+      modelReply = () => messageReply(JSON.stringify(STAND_IN_OUTPUT), "refusal");
+      const { code } = await runMain(argvFor(r, pr));
+      expect(code).toBe(0);
+      expect(received[0].body).toMatchObject({ outcome: "error", error: "model_refused" });
+      expect(received[0].body).not.toHaveProperty("report");
+    });
+
+    test("a fetched commit that is not the dispatched one is reported stale, and the model is never asked", async () => {
+      const { r, pr } = ready("main-stale");
+      const { code } = await runMain(argvFor(r, pr, { "fetched-head": "e".repeat(40) }));
+      expect(code).toBe(0);
+      expect(received[0].body).toMatchObject({ outcome: "error", error: "stale_head" });
+      expect(modelRequests).toHaveLength(0);
+    });
+
+    test("the dispatched commit is --head: a pull request and a ref that agree with each other but not with it are stale", async () => {
+      const r = setup("main-head-source");
+      const pr = prJson(r.dir, {
+        head: { sha: "e".repeat(40), repo: { full_name: "nemarDatasets/nm000460" } },
+      });
+      const { code } = await runMain(argvFor(r, pr, { "fetched-head": "e".repeat(40) }));
+      expect(code).toBe(0);
+      expect(received[0].body).toMatchObject({ outcome: "error", error: "stale_head" });
+      expect(modelRequests).toHaveLength(0);
+    });
+
+    test.each([
+      ["a bad environment", { environment: "staging" }, TOKEN],
+      ["a bad dataset id", { dataset: "../../x" }, TOKEN],
+      ["a bad review id", { "review-id": "0" }, TOKEN],
+      ["no callback token", {}, null],
+    ])("%s exits 2 and contacts nobody", async (_label, over, token) => {
+      const { r, pr } = ready(`main-bad-${Math.random().toString(36).slice(2)}`);
+      const { code } = await runMain(argvFor(r, pr, over), token);
+      expect(code).toBe(2);
+      expect(received).toHaveLength(0);
+      expect(modelRequests).toHaveLength(0);
+    });
+
+    test("any command but review is refused", async () => {
+      const { code } = await runMain(["fail", "--error", "workflow_failed"]);
+      expect(code).toBe(2);
+      expect(received).toHaveLength(0);
+    });
   });
 
   test("mapError gives every unknown failure the generic word", () => {
@@ -834,6 +1160,83 @@ describe("what the reviewer was not shown is a fact", () => {
     });
     expect(user).toContain('"changed_metadata_not_shown_in_full": true');
     expect(system).toContain("changed_metadata_not_shown_in_full");
+  });
+});
+
+describe("renames, and the edges of what the model is shown", () => {
+  test("a renamed recording is a removal and an addition, so the loss is seen", () => {
+    const dir = newDataset("renamed");
+    const r = branch(dir, () => {
+      git(
+        dir,
+        "mv",
+        "sub-01/eeg/sub-01_task-rest_eeg.edf",
+        "sub-01/eeg/sub-01_task-renamed_eeg.edf",
+      );
+      write(dir, "dataset_description.json", desc("1.1.0"));
+    });
+    const facts = gatherGitFacts(r.dir, r.base, r.head);
+    const e = buildEvidence(facts);
+    // Without --no-renames git reports the move as one rename and the removal never shows.
+    expect(e.files_changed).toBe(3);
+    expect(e.areas.recordings.removed).toBe(1);
+    expect(e.areas.recordings.added).toBe(1);
+    // And a removed recording needs a person, whatever the model said.
+    expect(verdictOf(assembleReport(allPass, e))).toBe("uncertain");
+  });
+
+  test("exactly the most files the model is shown is not cut, and one more is", () => {
+    const dir = newDataset("edge");
+    const at = (n: number) =>
+      branch(
+        dir,
+        () => {
+          for (let i = 0; i < n; i++) write(dir, `extra/f-${pad(i)}.txt`, `${i}`);
+        },
+        `edge-${n}`,
+      );
+    const exact = at(MAX_MODEL_FILES);
+    const factsExact = gatherGitFacts(exact.dir, exact.base, exact.head);
+    expect(factsExact.changes).toHaveLength(MAX_MODEL_FILES);
+    expect(factsExact.listCut).toBe(false);
+    expect(buildEvidence(factsExact).truncated).toBe(false);
+
+    const over = at(MAX_MODEL_FILES + 1);
+    const factsOver = gatherGitFacts(over.dir, over.base, over.head);
+    expect(factsOver.listCut).toBe(true);
+    const evidence = buildEvidence(factsOver);
+    expect(evidence.truncated).toBe(true);
+    expect(evidence.files_changed).toBe(MAX_MODEL_FILES + 1);
+
+    // The prompt lists no more than the model is allowed to see.
+    const { user } = buildReviewMessages({
+      facts: factsOver,
+      evidence,
+      pr: { title: "t", body: "b" },
+      fromFork: false,
+      nonce: "abc123def456",
+    });
+    const listedRows = user.split("\n").filter((l) => /^added\tother\textra\/f-/.test(l));
+    expect(listedRows).toHaveLength(MAX_MODEL_FILES);
+  });
+
+  test("a ninth finding is dropped, not a reason to refuse the whole answer", () => {
+    const dir = newDataset("nine");
+    const r = branch(dir, () => write(dir, "README.md", "# E\n"));
+    const e = buildEvidence(gatherGitFacts(r.dir, r.base, r.head));
+    const finding = (i: number) => ({
+      criterion: "no_degradation",
+      severity: "note",
+      code: "other",
+      path: null,
+      note: `finding ${i}`,
+    });
+    const report = assembleReport(
+      { ...allPass, findings: Array.from({ length: 9 }, (_, i) => finding(i)) },
+      e,
+    );
+    expect(report.findings).toHaveLength(8);
+    expect(report.findings.at(-1)?.note).toBe("finding 7");
   });
 });
 

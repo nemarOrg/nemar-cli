@@ -12,7 +12,15 @@
  */
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { parse } from "yaml";
@@ -220,6 +228,16 @@ describe("what it is allowed to hold", () => {
     expect(mint.with?.owner).toBe("nemarDatasets");
   });
 
+  test("both secrets are registered as such by a statement that always runs", () => {
+    // `toContain` would pass for `if (false) core.setSecret(token)`.
+    expect(job.steps[0].with?.script).toMatch(
+      /^\s*if \(typeof token === 'string' && token\.length > 0\) core\.setSecret\(token\);$/m,
+    );
+    expect(step("Fetch the GitHub OIDC token for Anthropic").with?.script).toMatch(
+      /^\s*core\.setSecret\(token\);$/m,
+    );
+  });
+
   test("the OIDC token is requested for Anthropic's audience", () => {
     const oidc = step("Fetch the GitHub OIDC token for Anthropic");
     expect(oidc.with?.script).toContain("getIDToken('https://api.anthropic.com')");
@@ -299,6 +317,28 @@ describe("the dispatch payload is untrusted", () => {
     expect(Object.fromEntries(table)).toEqual(CALLBACK_ORIGINS);
     // Nothing from the payload is concatenated into a URL.
     expect(run).not.toMatch(/origin="[^"]*\$/);
+  });
+
+  test("the script gets the fetched commits and the dispatch's coordinates, each from the right place", () => {
+    const review = step("Review");
+    expect(review.env?.BASE_SHA).toBe("${{ steps.fetch.outputs.base }}");
+    expect(review.env?.FETCHED_SHA).toBe("${{ steps.fetch.outputs.fetched }}");
+    for (const arg of [
+      '--repo-dir "$RUNNER_TEMP/repo"',
+      '--base "$BASE_SHA"',
+      '--head "$HEAD_SHA"',
+      '--fetched-head "$FETCHED_SHA"',
+      '--pr-json "$RUNNER_TEMP/pr.json"',
+      '--review-id "$REVIEW_ID"',
+      '--dataset "$DATASET_ID"',
+      '--environment "$ENVIRONMENT"',
+    ]) {
+      expect(review.run, arg).toContain(arg);
+    }
+    // And nothing else is passed.
+    expect([...(review.run ?? "").matchAll(/--[a-z-]+ /g)]).toHaveLength(8);
+    expect(review.run).toContain('--repo-dir "$RUNNER_TEMP/repo"');
+    expect(review.run).toContain('--pr-json "$RUNNER_TEMP/pr.json"');
   });
 
   test("the pull request is re-read from the API and handed to the script, not taken from the payload", () => {
@@ -465,6 +505,7 @@ describe("the shell steps, run for real", () => {
       env: {
         PATH: process.env.PATH ?? "",
         RUNNER_TEMP: dir,
+        HOME: dir,
         GITHUB_OUTPUT: out,
         GITHUB_ENV: genv,
         ...env,
@@ -594,6 +635,89 @@ describe("the shell steps, run for real", () => {
     const r = await claim("a-token-that-must-not-print");
     expect(seen[0].token).toBe("a-token-that-must-not-print");
     expect(r.stdout + r.stderr).not.toContain("a-token-that-must-not-print");
+  });
+
+  /** A dataset repository as GitHub would serve it: `main`, and a pull request's head under refs/pull. */
+  function servedDataset(prNumber: number) {
+    const dir = mkdtempSync(join(tmpdir(), "pr-review-remote-"));
+    const run = (...args: string[]) =>
+      execFileSync("git", args, {
+        cwd: dir,
+        encoding: "utf8",
+        env: {
+          PATH: process.env.PATH ?? "",
+          HOME: dir,
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@example.com",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@example.com",
+        },
+      }).trim();
+    run("init", "-q", "-b", "main");
+    run("config", "uploadpack.allowFilter", "true");
+    run("config", "uploadpack.allowAnySHA1InWant", "true");
+    writeFileSync(join(dir, "dataset_description.json"), '{"Name":"d","Version":"1.0.0"}');
+    run("add", ".");
+    run("commit", "-q", "-m", "base");
+    const base = run("rev-parse", "HEAD");
+    run("checkout", "-q", "-b", "contribution");
+    writeFileSync(join(dir, "dataset_description.json"), '{"Name":"d","Version":"1.1.0"}');
+    run("commit", "-q", "-am", "bump");
+    const head = run("rev-parse", "HEAD");
+    run("update-ref", `refs/pull/${prNumber}/head`, head);
+    // main moves on after the branch was cut, so base and head cannot be confused for each other.
+    run("checkout", "-q", "main");
+    writeFileSync(join(dir, "README.md"), "# later\n");
+    run("add", ".");
+    run("commit", "-q", "-m", "main moved");
+    const mainTip = run("rev-parse", "HEAD");
+    return { dir, base, head, mainTip };
+  }
+
+  test("fetch: main's tip and the pull ref are fetched as git data, with no working tree", async () => {
+    const remote = servedDataset(12);
+    const r = await runStepScript("Fetch the pull request as git data", {
+      ...GOOD,
+      GH_TOKEN: "ghs_read_only_for_the_test",
+      // Stand in for github.com: the step's URL is rewritten to the local repository.
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: `url.file://${remote.dir}.insteadOf`,
+      GIT_CONFIG_VALUE_0: "https://github.com/nemarDatasets/nm000108.git",
+    });
+    expect(r.status, r.stderr).toBe(0);
+    const out = Object.fromEntries(
+      r.output
+        .trim()
+        .split("\n")
+        .map((l) => l.split("=")),
+    );
+    // `base` is main's current tip, and `fetched` is the pull request's head: different commits.
+    expect(out.base).toBe(remote.mainTip);
+    expect(out.fetched).toBe(remote.head);
+    expect(out.base).not.toBe(out.fetched);
+    const repo = join(r.dir, "repo");
+    // Nothing was checked out: the only entry is .git, so no hook, filter or script can run.
+    expect(readdirSync(repo)).toEqual([".git"]);
+    // The clone is blob-less and keeps the read-only token for lazy blob reads (see the header).
+    const cfg = readFileSync(join(repo, ".git", "config"), "utf8");
+    expect(cfg).toContain("partialClone = origin");
+    expect(cfg).toContain("hooksPath = /dev/null");
+    // The token does not appear in the log.
+    expect(r.stdout + r.stderr).not.toContain("ghs_read_only_for_the_test");
+  });
+
+  test("fetch: a pull request number with no pull ref fails the step instead of reviewing main", async () => {
+    const remote = servedDataset(12);
+    const r = await runStepScript("Fetch the pull request as git data", {
+      ...GOOD,
+      PR_NUMBER: "13",
+      GH_TOKEN: "ghs_read_only_for_the_test",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: `url.file://${remote.dir}.insteadOf`,
+      GIT_CONFIG_VALUE_0: "https://github.com/nemarDatasets/nm000108.git",
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.output).not.toContain("fetched=");
   });
 
   async function report(word: string, origin = LOCAL_ORIGIN) {

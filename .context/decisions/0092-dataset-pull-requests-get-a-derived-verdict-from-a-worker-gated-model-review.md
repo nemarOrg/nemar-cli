@@ -50,12 +50,15 @@ decide" cannot be expressed with either.
 - **The reviewer is `run-pr-review.yml` in `nemarDatasets/.github`**, authored in this repository
   and deployed by whole-file copy like the onboarding workflow. The Anthropic identity is minted
   there and nowhere else, by workload identity federation (`claude-haiku-5-5`, effort `high`). Each
-  step holds only what it uses: the step that calls the model has the federated identity and the
-  callback token and no GitHub credential, and the read-only token for ONE repository (contents and
-  pull requests) reaches only the two steps that read it. The job has no credential that writes to
-  GitHub or NEMAR beyond the one-shot callback token, which can post one report for one review.
-  Nothing from the pull request is executed: the repository is fetched with `init` and `fetch`,
-  never checked out.
+  step is given only what it uses: the step that calls the model has the federated identity and the
+  callback token in its environment and no GitHub credential in it, and the read-only token for ONE
+  repository (contents and pull requests, an hour at most) is passed to the two steps that read it.
+  The fetch step also leaves that token in the clone's git config, because the clone is blob-less
+  and the model step's git reads fetch blobs lazily; so the model step can use the read-only token
+  through git, though it cannot print it, send it anywhere or write with it. The job has no
+  credential that writes to GitHub or NEMAR beyond the one-shot callback token, which can post one
+  report for one review. Nothing from the pull request is executed: the repository is fetched with
+  `init` and `fetch`, never checked out.
 - **The callback token is masked before anything can print it.** `nemarDatasets/.github` is public
   and Actions prints a step's `env:` in its header, so a token in job-level env would sit in every
   public log. The first step registers it as a secret with no env of its own, and only the steps that
@@ -67,8 +70,12 @@ decide" cannot be expressed with either.
   write the evidence block, the version, the model name or a verdict.
 - **The verdict is derived** by `verdictOf` from those answers and from facts computed from git. A
   fact overrules the model: no changed file cannot be an improvement, an unchanged version cannot
-  advance the revision, a truncated list cannot certify that nothing was lost, and a steering
-  attempt fails the review. The report is a closed vocabulary; free text is sanitised to plain words.
+  advance the revision, a truncated list cannot certify that nothing was lost, any removed file
+  needs a person, and a steering attempt fails the review. The parser also makes a report agree
+  with itself in the safe direction: a finding that names a steering attempt sets the steering flag,
+  and a criterion the model passed while filing a blocker against it becomes unknown. The report is
+  a closed vocabulary; free text is sanitised to plain words, and only the start of a long note is
+  ever read.
 - **Every change is accounted for.** The report carries exact per-area counts, the version and
   subject change, how much content the model read, and a file list. The Worker refuses a report whose
   areas do not add up to its file total.
@@ -91,11 +98,18 @@ decide" cannot be expressed with either.
   `pr_review_overrides`, written with `wrangler d1 execute`; an admin command is a follow-up.
 - The tally and the rate caps live in D1 on the production Worker. The dev Worker answers only for
   repositories it owns, and the watchdog is production-only.
+- A workflow that cannot reach the Worker at the claim, or is answered with an error, fails its
+  job after three tries, so the failure is visible in the Actions tab. Only a refusal that proves the
+  dispatch is not this review's to run (HTTP 401 or 409) ends green.
 - Anything that stops a review after it was claimed (a missing org variable, a federation rule that
   does not match this workflow, an unreadable file) shows as a check that needs a person, never as a
   pass. A missing App permission for the comment is the exception: the check still lands, the
   comment's refusal is logged, and the stored verdict is kept.
 - The review sees names, counts and the content of a few metadata files, not recordings. It says so.
+- Green means the model found nothing wrong AND git found nothing it could not clear: no removed
+  file, a version that went up, a change list that fits. A pull request that deletes anything needs a
+  person even when the deletion is right, which costs some noise and keeps a mass deletion from
+  riding on a model's word.
 - Accepted risks, stated so nobody has to rediscover them:
   - **Many new accounts.** The per-author caps and the tally are keyed on the GitHub account id, so
     someone who opens accounts can buy reviews. The platform cap of 400 a day bounds the cost, and
@@ -105,6 +119,20 @@ decide" cannot be expressed with either.
     10 percent threshold. The thresholds are a rate limiter, not a reputation system.
   - **Attribution when a maintainer edits.** The author of record is whoever opened the pull
     request; commits a maintainer pushes to it count against that author.
+  - **A redelivered older commit.** The latest commit is the last one SEEN. If the delivery for
+    commit A fails and B is processed, a manual redelivery of A makes A the latest, B's claim is
+    refused as superseded and A's job finds the pull request at B. Both end as "push again". It fails
+    safe and wastes one review; ordering by the payload's `updated_at` would fix it and is not done.
+  - **Reviews are not atomic with GitHub.** A retried check-run create can leave an orphan
+    "in progress" check if the response was lost; a repeat decline for a new commit is suppressed
+    without a check of its own; a claim whose answer was lost is refused on retry and the review is
+    later reported as not finished. All end as "needs a person" or as no check, never as a pass, and
+    only matter once the check is required.
+  - **A new sidecar can override an inherited one.** Added files do not mark the evidence as
+    incomplete, though under BIDS inheritance a new sidecar can change what a recording means. The
+    model sees added metadata files it was given; it does not see every one.
+  - **The OIDC token is short-lived.** The workflow fetches it just before the model step; whether
+    it outlives a long review is unverified, and a failure to exchange it reports `auth_failed`.
   - **A model can be wrong in the green direction.** Facts cover what git can establish (nothing
     changed, version not advanced, files or subjects lost, a truncated list); a plausible-looking but
     harmful change in a sidecar value is not one of them. This is why the check is not required.
