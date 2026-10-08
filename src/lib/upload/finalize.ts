@@ -9,8 +9,8 @@
  * and the `uploadProgress` -> `progress` parameter rename.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import chalk from "chalk";
 import ora from "ora";
 import { addCi } from "../api/admin.js";
@@ -19,6 +19,7 @@ import { ApiError, errorDetail } from "../api/errors.js";
 import { printStepFailure } from "../cli-output.js";
 import { updateLastUpload } from "../dataset-config.js";
 import { type SkipContentCheckEntry, pushToGitHub, saveDataset } from "../git-annex/clone-push.js";
+import { shouldAnnex } from "../git-annex/policy.js";
 import {
   type UploadProgress,
   clearUploadProgress,
@@ -120,6 +121,28 @@ export function planSaveSkip(
   return bytes >= minBytes ? entries : null;
 }
 
+/**
+ * Leave out of the skip a file that has stopped being data since it was tracked.
+ *
+ * A 150 KB annexed `.bin` that was then cut to 50 KB is no longer called data, so it
+ * drops out of the upload's data list: nothing re-tracks it, and a skip that kept it
+ * would fail every save with "changed since the upload plan recorded them" for a file
+ * the re-run can never fix. Saved normally it is simply committed as what it now is.
+ * A file that is gone, or cannot be read, stays in: the save deals with those itself.
+ */
+export function dropFilesNoLongerData(
+  absolutePath: string,
+  entries: SkipContentCheckEntry[],
+): SkipContentCheckEntry[] {
+  return entries.filter((entry) => {
+    try {
+      return shouldAnnex(entry.path, statSync(join(absolutePath, entry.path)).size);
+    } catch {
+      return true;
+    }
+  });
+}
+
 /** Every data file's recorded size: an upper bound on the annexed bytes, free to compute. */
 function recordedDataBytes(progress: UploadProgress): number {
   let bytes = 0;
@@ -164,7 +187,12 @@ export async function saveDatasetStep(
           );
         }
       }
-      if (annexed !== null) skipContentCheck = planSaveSkip(progress, annexed, minBytes) ?? [];
+      if (annexed !== null) {
+        skipContentCheck = dropFilesNoLongerData(
+          absolutePath,
+          planSaveSkip(progress, annexed, minBytes) ?? [],
+        );
+      }
     }
     const saveResult = await saveDataset(absolutePath, "Initial NEMAR dataset upload", author, {
       skipContentCheck,

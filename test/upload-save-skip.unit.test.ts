@@ -504,6 +504,40 @@ describe("planSaveSkip and the size gate", () => {
     }
   });
 
+  test("a file that stopped being data since it was tracked is saved normally, not failed", async () => {
+    // Guards dropFilesNoLongerData. A 150 KB annexed .bin cut to 50 KB is no longer data,
+    // so it leaves the upload's data list; hasFileListChanged then says nothing changed and
+    // nothing re-tracks it, and a skip that kept it would fail EVERY save for a file the
+    // re-run cannot fix.
+    const dir = await newDatasetRepo(scratch.root, "gate-shrunk");
+    writeFile(dir, "sub-01/eeg/a.edf", Buffer.alloc(2 * MIB, 7));
+    writeFile(dir, "big.bin", Buffer.alloc(150_000, 3));
+    expect((await trackDataFiles(dir, ["sub-01/eeg/a.edf", "big.bin"])).success).toBe(true);
+    const data = (await collectFileManifest(dir)).files.filter((f) => f.type === "data");
+    expect(data.map((f) => f.path).sort()).toEqual(["big.bin", "sub-01/eeg/a.edf"]);
+    const progress = initUploadProgress(dir, "nm000994", data);
+    const annexed = await listAnnexedPaths(dir);
+    const probe = join(dir, "..", `${Math.random().toString(36).slice(2)}.flags`);
+    prependPreCommit(dir, `git ls-files -v -z > "${probe}"`);
+
+    writeFileSync(join(dir, "big.bin"), Buffer.alloc(50_000, 4));
+    touchLater(dir, "big.bin", progress.files["big.bin"].mtimeMs as number);
+    // The premise: the upload's own manifest no longer lists it, so nothing re-tracks it.
+    const now = (await collectFileManifest(dir)).files.filter((f) => f.type === "data");
+    expect(now.map((f) => f.path)).toEqual(["sub-01/eeg/a.edf"]);
+
+    const step = await saveDatasetStep(dir, undefined, progress, {
+      annexedPaths: annexed,
+      skipMinBytes: MIB,
+    });
+
+    expect(step.status).toBe("ok");
+    expect(skippedDuringSave(probe)).toEqual(["sub-01/eeg/a.edf"]);
+    // Committed as what it is now: a plain 50 KB file.
+    const blob = await run(["git", "cat-file", "-s", "HEAD:big.bin"], dir);
+    expect(blob.stdout.trim()).toBe("50000");
+  });
+
   test("a file edited since tracking fails the step and leaves dataset_save unstamped", async () => {
     const { dir, progress, annexed } = await bigRepo("gate-edit");
     writeFileSync(join(dir, "sub-01/eeg/a.edf"), Buffer.alloc(2 * MIB, 3));
