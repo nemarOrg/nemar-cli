@@ -36,6 +36,7 @@ import {
   formatUploadSummary,
   listAnnexedPaths,
   listAnnexedPathsNotAt,
+  listPendingAtRemote,
   recoverBlockedTracking,
   trackDataFiles,
 } from "../src/lib/upload/transfer";
@@ -486,6 +487,30 @@ describe("the walks refuse to answer when git-annex cannot", () => {
     await expect(
       listAnnexedPathsNotAt(join(scratch.root, "not-a-repo-either"), REMOTE),
     ).rejects.toThrow();
+  });
+});
+
+describe("listPendingAtRemote", () => {
+  test("with no remote configured every annexed file is pending; with one, only the remainder", async () => {
+    // Guards the configured-remote test. Without it a repository that never had the
+    // remote would throw "not a valid remote" and a first run could not start.
+    const dir = await newDatasetRepo(scratch.root, "pending-no-remote");
+    writeFile(dir, "a.edf", "a".repeat(3_000));
+    writeFile(dir, "b.edf", "b".repeat(3_000));
+    expect((await trackDataFiles(dir, ["a.edf", "b.edf"])).success).toBe(true);
+    expect(await listPendingAtRemote(dir, REMOTE)).toEqual(["a.edf", "b.edf"]);
+
+    await initDirectoryRemote(scratch.root, dir, REMOTE);
+    expect(await listPendingAtRemote(dir, REMOTE)).toEqual(["a.edf", "b.edf"]);
+    expect((await run(["git", "annex", "copy", "--to", REMOTE, "--", "a.edf"], dir)).exitCode).toBe(
+      0,
+    );
+    expect(await listPendingAtRemote(dir, REMOTE)).toEqual(["b.edf"]);
+  });
+
+  test("a repository with nothing annexed has nothing pending, remote or not", async () => {
+    const dir = await newDatasetRepo(scratch.root, "pending-nothing");
+    expect(await listPendingAtRemote(dir, REMOTE)).toEqual([]);
   });
 });
 

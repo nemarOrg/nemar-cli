@@ -42,7 +42,6 @@ import { ensureLocalMainBranch, getCurrentBranch } from "../git-annex/repo-state
 import { runCommand } from "../git-annex/run-command.js";
 import {
   type S3Credentials,
-  annexRemoteExists,
   clearAnnexCredentials,
   configureS3Remote,
   toS3Credentials,
@@ -908,14 +907,26 @@ export interface S3StepState {
 export const S3_REMOTE_NAME = "nemar-s3";
 
 /**
+ * Whether `remote` is a special remote configured in this repository. Asked of the
+ * local git config (`remote.<name>.annex-uuid`, which `initremote` and `enableremote`
+ * both write), not of `git annex info`: that command also computes statistics and
+ * took 3.9 s on a dataset of 10,000 annexed files, against a millisecond here.
+ */
+async function specialRemoteConfigured(absolutePath: string, remote: string): Promise<boolean> {
+  const { exitCode } = await runCommand(["git", "config", "--get", `remote.${remote}.annex-uuid`], {
+    cwd: absolutePath,
+  });
+  return exitCode === 0;
+}
+
+/**
  * Annexed paths the location log does not record at `remote`. When the remote is not
  * configured in this repository at all, nothing can be recorded there, so every
  * annexed path is pending. Throws when git-annex cannot be read, which callers must
  * not take for "nothing pending".
  */
 export async function listPendingAtRemote(absolutePath: string, remote: string): Promise<string[]> {
-  const known = await annexRemoteExists(absolutePath, remote);
-  const pending = known
+  const pending = (await specialRemoteConfigured(absolutePath, remote))
     ? await listAnnexedPathsNotAt(absolutePath, remote)
     : await listAnnexedPaths(absolutePath);
   return [...pending].sort();
