@@ -22,10 +22,22 @@ import {
 } from "../src/lib/git-annex/clone-push";
 import { gitAnnexAdd } from "../src/lib/git-annex/init";
 import { collectFileManifest } from "../src/lib/git-annex/transfer";
-import { initUploadProgress, isStepCompleted } from "../src/lib/upload-progress";
+import {
+  getFilesNeedingUpload,
+  hasFileListChanged,
+  initUploadProgress,
+  isStepCompleted,
+  markFileUploaded,
+} from "../src/lib/upload-progress";
 import { SAVE_SKIP_MIN_BYTES, planSaveSkip, saveDatasetStep } from "../src/lib/upload/finalize";
-import { listAnnexedPaths } from "../src/lib/upload/transfer";
-import { makeScratch, newDatasetRepo, run, writeFile } from "./helpers/annex-repo";
+import { copyAnnexedToRemote, listAnnexedPaths, trackDataFiles } from "../src/lib/upload/transfer";
+import {
+  initDirectoryRemote,
+  makeScratch,
+  newDatasetRepo,
+  run,
+  writeFile,
+} from "./helpers/annex-repo";
 
 const scratch = makeScratch("nemar-save-skip");
 
@@ -141,6 +153,70 @@ describe("the stat guard: a changed file fails the save", () => {
     expect(res.error).toContain("changed while the save was running");
     expect(res.error).toContain("a.edf");
     expect(await tags(dir, "a.edf", "b.edf")).toEqual({ "a.edf": "H", "b.edf": "H" });
+  });
+
+  test("the re-run the message asks for does re-track the file, and the save then passes", async () => {
+    // The failure text promises that re-running re-tracks the file. That promise is made
+    // of pieces that live elsewhere (the changed-list check, the upload list, the add, the
+    // copy, the refreshed record), so walk them in the order a re-run does and watch the
+    // commit end up with the NEW key, not the one that was uploaded first.
+    const dir = await trackedRepo("rerun", { "a.edf": 3_000, "b.edf": 3_000 });
+    await initDirectoryRemote(scratch.root, dir, "nemar-s3");
+    const dataOf = async () =>
+      (await collectFileManifest(dir)).files.filter((f) => f.type === "data");
+    const first = await dataOf();
+    const progress = initUploadProgress(dir, "nm000993", first);
+    const copied = await copyAnnexedToRemote({
+      absolutePath: dir,
+      remote: "nemar-s3",
+      addTargets: first,
+      jobs: 1,
+    });
+    expect(copied.status).toBe("ok");
+    if (copied.status !== "ok") throw new Error("unreachable");
+    for (const f of first) markFileUploaded(progress, f.path, f);
+    const oldKey = (await run(["git", "annex", "lookupkey", "a.edf"], dir)).stdout.trim();
+
+    await new Promise((r) => setTimeout(r, 20));
+    writeFileSync(join(dir, "a.edf"), "e".repeat(3_000));
+    const failed = await saveDatasetStep(dir, undefined, progress, {
+      annexedPaths: copied.annexedPaths,
+      skipMinBytes: 1,
+    });
+    expect(failed.status).toBe("fail");
+
+    // The re-run: a fresh manifest sees the edit, the upload list names the file...
+    const second = await dataOf();
+    expect(hasFileListChanged(progress, second)).toBe(true);
+    const todo = getFilesNeedingUpload(progress, second);
+    expect(todo.map((f) => f.path)).toEqual(["a.edf"]);
+    // ...it is re-added under a new key, copied, recorded, and the save passes.
+    expect(
+      (
+        await trackDataFiles(
+          dir,
+          todo.map((f) => f.path),
+        )
+      ).success,
+    ).toBe(true);
+    const newKey = (await run(["git", "annex", "lookupkey", "a.edf"], dir)).stdout.trim();
+    expect(newKey).not.toBe(oldKey);
+    const again = await copyAnnexedToRemote({
+      absolutePath: dir,
+      remote: "nemar-s3",
+      addTargets: todo,
+      jobs: 1,
+    });
+    expect(again).toMatchObject({ status: "ok", attempted: 1 });
+    if (again.status !== "ok") throw new Error("unreachable");
+    for (const f of todo) markFileUploaded(progress, f.path, f);
+    const saved = await saveDatasetStep(dir, undefined, progress, {
+      annexedPaths: again.annexedPaths,
+      skipMinBytes: 1,
+    });
+    expect(saved.status).toBe("ok");
+    const pointer = await run(["git", "cat-file", "-p", "HEAD:a.edf"], dir);
+    expect(pointer.stdout.trim()).toBe(`/annex/objects/${newKey}`);
   });
 
   test("compareRecordedStat sorts unchanged from changed, and leaves a deleted path out of both", async () => {
