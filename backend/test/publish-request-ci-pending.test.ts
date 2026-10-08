@@ -45,19 +45,32 @@ const OWNER_EMAIL = "pendinggate@example.org";
 
 const NAME = "A sufficiently descriptive dataset title";
 const ETHICS = ["Approved by an institutional review board"];
-const describe_ = (name: string, authors: string[]) =>
-  JSON.stringify({ Name: name, Authors: authors, EthicsApprovals: ETHICS });
-const NAMED = describe_(NAME, ["Ada Lovelace"]);
-const BLINDED = describe_(NAME, ["Anonymous"]);
-const SHORT_NAME = describe_("Short", ["Ada Lovelace"]);
+const descriptionJson = (name: string, authors: string[], ethics: string[] = ETHICS) =>
+  JSON.stringify({ Name: name, Authors: authors, EthicsApprovals: ethics });
+const NAMED = descriptionJson(NAME, ["Ada Lovelace"]);
+const BLINDED = descriptionJson(NAME, ["Anonymous"]);
+const SHORT_NAME = descriptionJson("Short", ["Ada Lovelace"]);
+// No EthicsApprovals, so only a README can supply the ethics statement.
+const NO_ETHICS_FIELD = descriptionJson(NAME, ["Ada Lovelace"], []);
+const NO_ETHICS_BLINDED = descriptionJson(NAME, ["Anonymous"], []);
+const README_WITH_ETHICS = "# README\n\nThis study had institutional review board approval.\n";
 
 type Runs = "none" | "running" | "success" | "failure";
+type ReadmeMode = "text" | "empty" | "forbidden" | "missing";
 
 let server: Server;
 let runs: Runs = "none";
 let descriptionBody: string | null = NAMED;
 let descriptionStatus = 200;
 let runsStatus = 200;
+let readmeMode: ReadmeMode = "text";
+let readmeText = "# README";
+// Every `/contents/<path>` the stand-in was asked for, in order.
+let contentReads: string[] = [];
+// Runs inside the stand-in when `dataset_description.json` is asked for, which
+// is after the sweep has read its candidate rows and before it writes: the
+// moment a concurrent request lands in the races below.
+let onDescriptionRead: (() => void) | null = null;
 let dispatches = 0;
 
 let db: Database;
@@ -90,13 +103,20 @@ beforeAll(() => {
               ];
         return Response.json({ workflow_runs });
       }
-      if (/\/contents\/dataset_description\.json$/.test(p)) {
+      const read = /\/contents\/([^/]+)$/.exec(p)?.[1];
+      if (read) contentReads.push(read);
+      if (read === "dataset_description.json") {
+        onDescriptionRead?.();
         if (descriptionStatus !== 200) return new Response("no", { status: descriptionStatus });
         if (descriptionBody === null) return new Response("not found", { status: 404 });
         return Response.json({ encoding: "base64", content: btoa(descriptionBody) });
       }
-      if (/\/contents\/README\.md$/.test(p)) {
-        return Response.json({ encoding: "base64", content: btoa("# README") });
+      if (read === "README.md") {
+        if (readmeMode === "forbidden") return new Response("no", { status: 403 });
+        if (readmeMode === "missing") return new Response("not found", { status: 404 });
+        // A zero-byte file comes back as base64 with an empty content field.
+        const content = readmeMode === "empty" ? "" : btoa(readmeText);
+        return Response.json({ encoding: "base64", content });
       }
       return new Response("not found", { status: 404 });
     },
@@ -115,6 +135,10 @@ afterEach(() => {
   descriptionBody = NAMED;
   descriptionStatus = 200;
   runsStatus = 200;
+  readmeMode = "text";
+  readmeText = "# README";
+  contentReads = [];
+  onDescriptionRead = null;
   dispatches = 0;
 });
 
@@ -371,6 +395,97 @@ describe("the request route checks the minimums while CI is pending", () => {
     }
   });
 
+  test("an empty README does not switch the whole gate off", async () => {
+    // A zero-byte README.md comes back from GitHub as base64 with empty
+    // content. Reading it used to throw, the throw fell through to "native
+    // submissions fail open", and Name, Authors and ethics were never checked.
+    descriptionBody = descriptionJson("Short", ["TBD"], []);
+    readmeMode = "empty";
+    const { body } = await requestPublication();
+    expect(body.block_reason).toBe("min_requirements_failed");
+    const text = body.reasons?.join(" ") ?? "";
+    expect(text).toContain("Dataset Name must be a descriptive title");
+    expect(text).toContain("Authors in dataset_description.json must name");
+    expect(text).toContain("An ethics approval statement is required");
+  });
+
+  test("the same file with a README that states the approval gives the same verdict, less the ethics reason", async () => {
+    // The control for the test above: the empty README is the only difference,
+    // and what it changes is the ethics reason.
+    descriptionBody = descriptionJson("Short", ["TBD"], []);
+    readmeText = README_WITH_ETHICS;
+    const { body } = await requestPublication();
+    expect(body.block_reason).toBe("min_requirements_failed");
+    const text = body.reasons?.join(" ") ?? "";
+    expect(text).toContain("Dataset Name must be a descriptive title");
+    expect(text).toContain("Authors in dataset_description.json must name");
+    expect(text).not.toContain("An ethics approval statement is required");
+  });
+
+  test("a README that cannot be read counts as one with no statement; the other rules still run", async () => {
+    descriptionBody = descriptionJson("Short", ["TBD"], []);
+    readmeMode = "forbidden";
+    const { status, body } = await requestPublication();
+    expect(status).toBe(422);
+    expect(body.block_reason).toBe("min_requirements_failed");
+    const text = body.reasons?.join(" ") ?? "";
+    expect(text).toContain("Dataset Name must be a descriptive title");
+    expect(text).toContain("Authors in dataset_description.json must name");
+    expect(text).toContain("An ethics approval statement is required");
+  });
+
+  test("an anonymous request with an empty README is judged on its file, not left unverified", async () => {
+    descriptionBody = NO_ETHICS_BLINDED;
+    readmeMode = "empty";
+    const { body } = await requestPublication({ anonymous: true });
+    expect(body.block_reason).toBe("min_requirements_failed");
+    // The reason is the missing statement, not "could not read".
+    expect(body.reasons?.join(" ")).toContain("An ethics approval statement is required");
+    expect(body.reasons?.join(" ")).not.toContain("could not read");
+  });
+
+  test("an anonymous request whose Authors names someone is refused even though its README cannot be read", async () => {
+    // The blind check is decided by the description alone.
+    descriptionBody = descriptionJson(NAME, ["Ada Lovelace"], []);
+    readmeMode = "forbidden";
+    const { body } = await requestPublication({ anonymous: true });
+    expect(body.block_reason).toBe("min_requirements_failed");
+    expect(body.reasons?.join(" ")).toContain("still names Ada Lovelace");
+  });
+
+  test("an empty dataset_description.json is a file with a problem, not one that cannot be read", async () => {
+    // GitHub answers a zero-byte file with base64 and empty content. That is an
+    // answer ("not valid JSON"), for a native and an anonymous request alike.
+    descriptionBody = "";
+    const native = await requestPublication();
+    expect(native.body.block_reason).toBe("min_requirements_failed");
+    expect(native.body.reasons?.join(" ")).toContain("is not valid JSON");
+    const anonymous = await requestPublication({ anonymous: true });
+    expect(anonymous.body.reasons?.join(" ")).toContain("is not valid JSON");
+    expect(anonymous.body.reasons?.join(" ")).not.toContain("could not read");
+  });
+
+  test("the README is not read when the description already lists an approval", async () => {
+    descriptionBody = NAMED;
+    readmeMode = "forbidden";
+    const { body } = await requestPublication();
+    expect(body.block_reason).toBe("bids_validation_pending");
+    expect(contentReads).toEqual(["dataset_description.json"]);
+  });
+
+  test("when the description lists no approval, the README candidates are tried in order", async () => {
+    descriptionBody = NO_ETHICS_FIELD;
+    readmeMode = "missing";
+    await requestPublication();
+    expect(contentReads).toEqual([
+      "dataset_description.json",
+      "README.md",
+      "README",
+      "README.txt",
+      "README.rst",
+    ]);
+  });
+
   test("re-requesting while CI runs keeps the minimums verdict instead of erasing it", async () => {
     runs = "running";
     descriptionBody = SHORT_NAME;
@@ -486,14 +601,50 @@ describe("the sweep checks the same minimums before it releases a request", () =
     });
   });
 
-  test("a native request whose description cannot be read is released, as the route would", async () => {
+  test("a native request whose description cannot be read is deferred, not released", async () => {
+    // The route lets a native submission through to the admin review when the
+    // description cannot be read (an interactive call, ADR 0026). A daily batch
+    // defers instead: leaving the row for the next run costs a day, and a
+    // release on a failed read would be a verdict nobody reached.
     runs = "none";
     await requestPublication();
     runs = "success";
     descriptionStatus = 403;
-    await withFakeResend(async () => {
-      expect((await sweepBlockedBidsValidationRequests(env())).unblocked).toBe(1);
-    });
+    const result = await sweepBlockedBidsValidationRequests(env());
+    expect(result.unblocked).toBe(0);
+    expect(result.errors).toBe(1);
+    expect(row().status).toBe("blocked");
+    expect(row().block_reason).toBe("bids_validation_pending");
+  });
+
+  test("an empty README does not hold a request the sweep can already judge", async () => {
+    // Native: made valid, then the file loses its approval and its Name while
+    // the README is empty. The sweep reaches a verdict instead of releasing it.
+    runs = "none";
+    descriptionBody = NAMED;
+    await requestPublication();
+    runs = "success";
+    descriptionBody = descriptionJson("Short", ["TBD"], []);
+    readmeMode = "empty";
+    const result = await sweepBlockedBidsValidationRequests(env());
+    expect(result.unblocked).toBe(0);
+    expect(result.reblocked).toBe(1);
+    expect(result.errors).toBe(0);
+    expect(row().block_reason).toBe("min_requirements_failed");
+    expect(reasonsOf(row()).join(" ")).toContain("An ethics approval statement is required");
+  });
+
+  test("an anonymous request with an empty README is judged, not counted as an error every day", async () => {
+    runs = "none";
+    descriptionBody = BLINDED;
+    await requestPublication({ anonymous: true });
+    runs = "success";
+    descriptionBody = NO_ETHICS_BLINDED;
+    readmeMode = "empty";
+    const result = await sweepBlockedBidsValidationRequests(env());
+    expect(result.errors).toBe(0);
+    expect(result.reblocked).toBe(1);
+    expect(row().block_reason).toBe("min_requirements_failed");
   });
 
   test("an OpenNeuro import and an exemplar are released without the check", async () => {
@@ -535,8 +686,8 @@ describe("the sweep checks the same minimums before it releases a request", () =
     const cases: Array<[string, string | null]> = [
       ["valid", NAMED],
       ["short name", SHORT_NAME],
-      ["no authors", describe_(NAME, [])],
-      ["placeholder author", describe_(NAME, ["TBD"])],
+      ["no authors", descriptionJson(NAME, [])],
+      ["placeholder author", descriptionJson(NAME, ["TBD"])],
       ["missing file", null],
     ];
     for (const [label, body] of cases) {
