@@ -658,8 +658,9 @@ export function dateNormalizationLine(count: number): string {
 
 /**
  * What a person is told when a publication request has been ACCEPTED, one sentence per line (ADR
- * 0090, amendment 2026-10-07). The terminal and the route's `request_notice` both come from here,
- * and nothing else in the repository spells these sentences.
+ * 0090, amendment "what an accepted request is told"). The terminal and the route's
+ * `request_notice` both come from here, and no other source file spells these sentences (a test
+ * enforces it).
  *
  * It is neutral on purpose and takes no screen as input: the identifier screen runs after the
  * request is made and its verdict is bound to a commit, so a finding, a verdict, a count or the

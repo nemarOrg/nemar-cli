@@ -4121,7 +4121,7 @@ Examples:
         for (const line of identifierScreenLines(screen)) console.log(line);
       }
       // What happens next, in neutral words that name no finding, verdict or
-      // date warning (ADR 0090, amendment 2026-10-07): the screen runs after
+      // date warning (ADR 0090, amendment "what an accepted request is told"): the screen runs after
       // this request and its verdict is bound to a commit, so the outcome is
       // read from `publish status` or the mail, never guessed at here. Made
       // from the shared definition rather than read off the response, so every

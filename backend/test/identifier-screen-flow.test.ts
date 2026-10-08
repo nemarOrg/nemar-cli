@@ -1437,7 +1437,7 @@ describe("re-requesting a blocked request resets the screen", () => {
   });
 });
 
-/** The notice of ADR 0090 (amendment 2026-10-07), spelled out so a change to the shared words fails here. */
+/** The notice of ADR 0090 (amendment "what an accepted request is told"), spelled out so a change to the shared words fails here. */
 const NOTICE = (id: string) => [
   "Your request was received.",
   "NEMAR is checking publication eligibility.",
@@ -1454,7 +1454,7 @@ type RequestBody = {
   status?: string;
 };
 
-describe("an accepted request answers with the neutral notice (ADR 0090, 2026-10-07)", () => {
+describe("an accepted request answers with the neutral notice (ADR 0090, what an accepted request is told)", () => {
   test("a new request: the notice, for this dataset, beside a screen that is still running", async () => {
     await withFakeResend(async () => {
       const res = await requestPublication();

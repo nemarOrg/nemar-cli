@@ -253,9 +253,9 @@ describe("the request route checks the minimums while CI is pending", () => {
   });
 
   test("the pending messages say the request is recorded, and do not ask for another request", async () => {
-    // The message is also what the website's badge shows, and it used to tell
-    // the depositor to "re-request publication", which contradicts a request
-    // that continues on its own.
+    // The message is also what the website's badge shows. Telling the depositor
+    // to "re-request publication" contradicts a request that continues on its
+    // own.
     runs = "none";
     const pending = (await requestPublication()).body.message ?? "";
     expect(pending).toBe(
