@@ -175,35 +175,45 @@ async function reach(argv: string[]): Promise<Reached> {
   throw outcome ?? new Error("the parse finished without reaching a command");
 }
 
+/** The pre-pass over the real tree, unless another tree is named. */
+const bind = (argv: string[], tree: Command = program) => bindShadowedOptionValues(tree, argv);
+
+/** Every case comes back from the pre-pass exactly as it went in. */
+function unchanged(cases: string[][], tree: Command = program): void {
+  for (const argv of cases) expect(bind(argv, tree)).toEqual(argv);
+}
+
+/** The error the pre-pass throws for `argv`; fails if it returns instead. */
+function thrown(argv: string[], tree: Command = program): unknown {
+  try {
+    bind(argv, tree);
+  } catch (err) {
+    return err;
+  }
+  throw new Error(`the pre-pass returned for ${JSON.stringify(argv)} instead of throwing`);
+}
+
 describe("bindShadowedOptionValues on the real command tree", () => {
   // The flag belongs to `release`, but typed before that name it lands on
   // `dataset`, which does not declare it, so the root claims it and prints the
   // CLI version (the equals spelling is rejected by `dataset` as an unknown
   // option, so it cannot be rewritten into place either). Fail instead.
   test("a shadowed flag typed before its command is an error", () => {
-    const cases = [
+    for (const argv of [
       ["dataset", "--version", "2.0.0", "release", "nm1", "-y"],
       ["dataset", "--version", "release", "nm1", "-y"],
       ["--debug", "dataset", "--verbose", "--version", "2.0.0", "release", "nm1"],
-    ];
-    for (const argv of cases) {
-      let caught: unknown;
-      try {
-        bindShadowedOptionValues(program, argv);
-      } catch (err) {
-        caught = err;
-      }
-      expect(caught).toBeInstanceOf(MisplacedShadowedOptionError);
-      expect((caught as MisplacedShadowedOptionError).message).toBe(
-        "error: option '--version <version>' must come after 'release'",
-      );
-      expect((caught as MisplacedShadowedOptionError).command.name()).toBe("release");
+    ]) {
+      const err = thrown(argv) as MisplacedShadowedOptionError;
+      expect(err).toBeInstanceOf(MisplacedShadowedOptionError);
+      expect(err.message).toBe("error: option '--version <version>' must come after 'release'");
+      expect(err.command.name()).toBe("release");
     }
   });
 
   // Shapes that must keep meaning what they meant before the pre-pass existed.
   test("root-level and out-of-position flags keep their meaning", () => {
-    const cases = [
+    unchanged([
       // The root's own --version, ahead of any command.
       ["--version", "dataset", "release", "nm1"],
       ["--version", "2.0.0", "dataset", "release", "nm1", "-y"],
@@ -218,71 +228,68 @@ describe("bindShadowedOptionValues on the real command tree", () => {
       // The equals spelling typed early is `dataset`'s unknown option to
       // report, not ours.
       ["dataset", "--version=2.0.0", "release", "nm1", "-y"],
-    ];
-    for (const argv of cases) {
-      expect(bindShadowedOptionValues(program, argv)).toEqual(argv);
-    }
+    ]);
     // After the command's own name it is that command's, whatever else follows.
-    expect(
-      bindShadowedOptionValues(program, ["dataset", "release", "--version", "6.0.0", "nm1"]),
-    ).toEqual(["dataset", "release", "--version=6.0.0", "nm1"]);
+    expect(bind(["dataset", "release", "--version", "6.0.0", "nm1"])).toEqual([
+      "dataset",
+      "release",
+      "--version=6.0.0",
+      "nm1",
+    ]);
   });
 
   // A value that starts with "-" has to be spelled --flag=value: the next
   // token is read as a flag, so `--version -1.0.0` is a missing value. A lone
   // "-" is the exception, because Commander reads it as a value too.
   test("a lone dash is a value; any other dash-leading token is not", () => {
-    expect(
-      bindShadowedOptionValues(program, ["dataset", "release", "nm1", "--version", "-"]),
-    ).toEqual(["dataset", "release", "nm1", "--version=-"]);
-    expect(
-      bindShadowedOptionValues(program, ["dataset", "release", "nm1", "--version", "-", "-y"]),
-    ).toEqual(["dataset", "release", "nm1", "--version=-", "-y"]);
-    expect(() =>
-      bindShadowedOptionValues(program, ["dataset", "release", "nm1", "--version", "-1.0.0"]),
-    ).toThrow(MissingShadowedValueError);
-    const spelled = ["dataset", "release", "nm1", "--version=-1.0.0"];
-    expect(bindShadowedOptionValues(program, spelled)).toEqual(spelled);
+    expect(bind(["dataset", "release", "nm1", "--version", "-"])).toEqual([
+      "dataset",
+      "release",
+      "nm1",
+      "--version=-",
+    ]);
+    expect(bind(["dataset", "release", "nm1", "--version", "-", "-y"])).toEqual([
+      "dataset",
+      "release",
+      "nm1",
+      "--version=-",
+      "-y",
+    ]);
+    expect(thrown(["dataset", "release", "nm1", "--version", "-1.0.0"])).toBeInstanceOf(
+      MissingShadowedValueError,
+    );
+    unchanged([["dataset", "release", "nm1", "--version=-1.0.0"]]);
   });
 
   test("joins a shadowed value option of the addressed subcommand", () => {
-    expect(
-      bindShadowedOptionValues(program, [
-        "dataset",
-        "release",
-        "nm099999",
-        "--version",
-        "2.0.0",
-        "-y",
-      ]),
-    ).toEqual(["dataset", "release", "nm099999", "--version=2.0.0", "-y"]);
+    expect(bind(["dataset", "release", "nm099999", "--version", "2.0.0", "-y"])).toEqual([
+      "dataset",
+      "release",
+      "nm099999",
+      "--version=2.0.0",
+      "-y",
+    ]);
   });
 
   test("works with global flags before and after the subcommand", () => {
-    expect(
-      bindShadowedOptionValues(program, [
-        "--debug",
-        "dataset",
-        "release",
-        "--version",
-        "1.2.3",
-        "nm1",
-      ]),
-    ).toEqual(["--debug", "dataset", "release", "--version=1.2.3", "nm1"]);
-    expect(
-      bindShadowedOptionValues(program, [
-        "dataset",
-        "release",
-        "nm1",
-        "--version",
-        "1.2.3",
-        "--verbose",
-      ]),
-    ).toEqual(["dataset", "release", "nm1", "--version=1.2.3", "--verbose"]);
+    expect(bind(["--debug", "dataset", "release", "--version", "1.2.3", "nm1"])).toEqual([
+      "--debug",
+      "dataset",
+      "release",
+      "--version=1.2.3",
+      "nm1",
+    ]);
+    expect(bind(["dataset", "release", "nm1", "--version", "1.2.3", "--verbose"])).toEqual([
+      "dataset",
+      "release",
+      "nm1",
+      "--version=1.2.3",
+      "--verbose",
+    ]);
   });
 
   test("leaves everything else alone", () => {
-    const cases = [
+    unchanged([
       // The root's own flag, with no command ahead of it.
       ["--version"],
       ["-v"],
@@ -304,10 +311,7 @@ describe("bindShadowedOptionValues on the real command tree", () => {
       ["dataset", "validate", "./x", "--version-info"],
       // Not a command of this program.
       ["unknown", "--version", "1"],
-    ];
-    for (const argv of cases) {
-      expect(bindShadowedOptionValues(program, argv)).toEqual(argv);
-    }
+    ]);
   });
 
   // Left alone, a bare shadowed --version is claimed by the root, which
@@ -315,7 +319,7 @@ describe("bindShadowedOptionValues on the real command tree", () => {
   // form for a scripted -y release. So it fails like any option missing its
   // argument.
   test("a shadowed value option with no value is an error", () => {
-    const cases = [
+    for (const argv of [
       ["dataset", "release", "nm1", "--version"],
       ["dataset", "release", "nm1", "--version", "-y"],
       ["dataset", "release", "nm1", "--version", "--yes"],
@@ -325,19 +329,11 @@ describe("bindShadowedOptionValues on the real command tree", () => {
       // read it as "no --version" and bump by --type, or prompt.
       ["dataset", "release", "nm1", "--version", "", "--type", "patch", "-y"],
       ["dataset", "release", "nm1", "--version", ""],
-    ];
-    for (const argv of cases) {
-      let caught: unknown;
-      try {
-        bindShadowedOptionValues(program, argv);
-      } catch (err) {
-        caught = err;
-      }
-      expect(caught).toBeInstanceOf(MissingShadowedValueError);
-      expect((caught as MissingShadowedValueError).message).toBe(
-        "error: option '--version <version>' argument missing",
-      );
-      expect((caught as MissingShadowedValueError).command.name()).toBe("release");
+    ]) {
+      const err = thrown(argv) as MissingShadowedValueError;
+      expect(err).toBeInstanceOf(MissingShadowedValueError);
+      expect(err.message).toBe("error: option '--version <version>' argument missing");
+      expect(err.command.name()).toBe("release");
     }
   });
 
@@ -345,23 +341,34 @@ describe("bindShadowedOptionValues on the real command tree", () => {
   // missing value. The bare flag is dropped: left in, the root would claim it
   // and print the CLI version instead of the help.
   test("help wins over a missing value, but only before `--`", () => {
-    expect(
-      bindShadowedOptionValues(program, ["dataset", "release", "--help", "--version"]),
-    ).toEqual(["dataset", "release", "--help"]);
-    expect(
-      bindShadowedOptionValues(program, ["dataset", "release", "nm1", "--version", "--help"]),
-    ).toEqual(["dataset", "release", "nm1", "--help"]);
-    expect(
-      bindShadowedOptionValues(program, ["dataset", "release", "nm1", "--version", "-h"]),
-    ).toEqual(["dataset", "release", "nm1", "-h"]);
+    expect(bind(["dataset", "release", "--help", "--version"])).toEqual([
+      "dataset",
+      "release",
+      "--help",
+    ]);
+    expect(bind(["dataset", "release", "nm1", "--version", "--help"])).toEqual([
+      "dataset",
+      "release",
+      "nm1",
+      "--help",
+    ]);
+    expect(bind(["dataset", "release", "nm1", "--version", "-h"])).toEqual([
+      "dataset",
+      "release",
+      "nm1",
+      "-h",
+    ]);
     // A value that is present is still joined.
-    expect(
-      bindShadowedOptionValues(program, ["dataset", "release", "--help", "--version", "5.0.0"]),
-    ).toEqual(["dataset", "release", "--help", "--version=5.0.0"]);
+    expect(bind(["dataset", "release", "--help", "--version", "5.0.0"])).toEqual([
+      "dataset",
+      "release",
+      "--help",
+      "--version=5.0.0",
+    ]);
     // `--help` after `--` is an operand, not a request for help.
-    expect(() =>
-      bindShadowedOptionValues(program, ["dataset", "release", "nm1", "--version", "--", "--help"]),
-    ).toThrow(MissingShadowedValueError);
+    expect(thrown(["dataset", "release", "nm1", "--version", "--", "--help"])).toBeInstanceOf(
+      MissingShadowedValueError,
+    );
   });
 
   // A BOOLEAN option that collides with an ancestor's (#1220: `dataset
@@ -370,13 +377,11 @@ describe("bindShadowedOptionValues on the real command tree", () => {
   // path argument `--verbose=./x`: `validate` allows unknown options, so
   // Commander passes that through as the path and validate checks a bogus one.
   test("a boolean collision followed by a positional is untouched", async () => {
-    for (const argv of [
+    unchanged([
       ["dataset", "validate", "--verbose", "./x"],
       ["dataset", "search", "--verbose", "covid"],
       ["--verbose", "dataset", "validate", "./x"],
-    ]) {
-      expect(bindShadowedOptionValues(program, argv)).toEqual(argv);
-    }
+    ]);
     const validate = await reach(["dataset", "validate", "--verbose", "./x"]);
     expect(validate.name).toBe("validate");
     expect(validate.processedArgs).toEqual(["./x"]);
@@ -412,14 +417,12 @@ describe("bindShadowedOptionValues on the real command tree", () => {
   // it back through optsWithGlobals() (src/commands/admin.ts), so there is
   // nothing for the pre-pass to rewrite, and no new way for it to fail.
   test("an ancestor option that takes the value itself is left alone", async () => {
-    for (const argv of [
+    unchanged([
       ["admin", "recover", "status", "--recover-file", "recover-1.json"],
       ["admin", "recover", "status", "--recover-file", "recover-2.json", "--json"],
       ["admin", "recover", "status", "--recover-file", "--json"],
       ["admin", "recover", "status", "--recover-file"],
-    ]) {
-      expect(bindShadowedOptionValues(program, argv)).toEqual(argv);
-    }
+    ]);
     const plain = await reach(["admin", "recover", "status", "--recover-file", "recover-3.json"]);
     expect(plain.name).toBe("status");
     expect(plain.optsWithGlobals.recoverFile).toBe("recover-3.json");
@@ -511,10 +514,7 @@ describe("every same-named value option in the real tree", () => {
       const flag = option.long as string;
       // Every spelling of the path: a command can be named by its alias.
       for (const spelled of pathSpellings(program, path)) {
-        expect(bindShadowedOptionValues(program, [...spelled, flag, "some-value"])).toEqual([
-          ...spelled,
-          `${flag}=some-value`,
-        ]);
+        expect(bind([...spelled, flag, "some-value"])).toEqual([...spelled, `${flag}=some-value`]);
       }
     }
   });
@@ -522,10 +522,7 @@ describe("every same-named value option in the real tree", () => {
   test("past a VALUE-taking ancestor option, --flag value is left unchanged", () => {
     const valued = collisions(program).filter((c) => takesValue(c.claimant));
     expect(valued.map(describeCollision)).toContain("admin recover status --recover-file");
-    for (const { path, option } of valued) {
-      const argv = [...path, option.long as string, "some-value"];
-      expect(bindShadowedOptionValues(program, argv)).toEqual(argv);
-    }
+    unchanged(valued.map(({ path, option }) => [...path, option.long as string, "some-value"]));
   });
 
   test("none that a boolean claims takes an OPTIONAL value, which cannot be delivered bare", () => {
@@ -578,17 +575,12 @@ describe("bindShadowedOptionValues on a minimal tree", () => {
       ["grp", "run"],
       ["g", "run"],
     ]) {
-      expect(bindShadowedOptionValues(tiny, [...path, "--tag", "t1"])).toEqual([
-        ...path,
-        "--tag=t1",
-      ]);
+      expect(bind([...path, "--tag", "t1"], tiny)).toEqual([...path, "--tag=t1"]);
     }
   });
 
   test("a flag typed before an aliased command is still caught", () => {
-    expect(() => bindShadowedOptionValues(tiny, ["g", "--tag", "t1", "run"])).toThrow(
-      MisplacedShadowedOptionError,
-    );
+    expect(thrown(["g", "--tag", "t1", "run"], tiny)).toBeInstanceOf(MisplacedShadowedOptionError);
   });
 
   test("only the long flag is shadowed: a short flag is never joined", () => {
@@ -596,46 +588,36 @@ describe("bindShadowedOptionValues on a minimal tree", () => {
     // Joining would make `-q=5`, and Commander reads that as the root's `-q`
     // combined with more short flags, so the root still claims it. A short
     // flag cannot be rescued by rewriting; none exists in the real tree.
-    for (const argv of [
-      ["grp", "go", "-q", "5"],
-      ["grp", "go", "-q"],
-      ["grp", "go", "--quality", "5"],
-    ]) {
-      expect(bindShadowedOptionValues(tiny, argv)).toEqual(argv);
-    }
+    unchanged(
+      [
+        ["grp", "go", "-q", "5"],
+        ["grp", "go", "-q"],
+        ["grp", "go", "--quality", "5"],
+      ],
+      tiny,
+    );
   });
 
   test("an optional value is joined when given, and cannot be delivered bare", () => {
-    expect(bindShadowedOptionValues(tiny, ["grp", "go", "--maybe", "m1"])).toEqual([
-      "grp",
-      "go",
-      "--maybe=m1",
-    ]);
+    expect(bind(["grp", "go", "--maybe", "m1"], tiny)).toEqual(["grp", "go", "--maybe=m1"]);
     // Never an error (a bare optional flag is legal), and never rewritten
     // (nothing the root does not claim can spell it): the gap the real-tree
     // test above keeps empty.
-    for (const argv of [
-      ["grp", "go", "--maybe"],
-      ["grp", "go", "--maybe", "-y"],
-    ]) {
-      expect(bindShadowedOptionValues(tiny, argv)).toEqual(argv);
-    }
+    unchanged(
+      [
+        ["grp", "go", "--maybe"],
+        ["grp", "go", "--maybe", "-y"],
+      ],
+      tiny,
+    );
     // Help still wins: the bare flag would otherwise print the root's version.
-    expect(bindShadowedOptionValues(tiny, ["grp", "go", "--maybe", "--help"])).toEqual([
-      "grp",
-      "go",
-      "--help",
-    ]);
+    expect(bind(["grp", "go", "--maybe", "--help"], tiny)).toEqual(["grp", "go", "--help"]);
   });
 
   test("the OUTERMOST ancestor option of a flag decides, not the nearest", () => {
     // The root's boolean --lvl parses the flag first, though `grp` also takes
     // a value for it, so the leaf's value must be joined.
-    expect(bindShadowedOptionValues(tiny, ["grp", "go", "--lvl", "3"])).toEqual([
-      "grp",
-      "go",
-      "--lvl=3",
-    ]);
+    expect(bind(["grp", "go", "--lvl", "3"], tiny)).toEqual(["grp", "go", "--lvl=3"]);
   });
 });
 
