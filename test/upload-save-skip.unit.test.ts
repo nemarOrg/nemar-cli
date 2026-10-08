@@ -293,6 +293,27 @@ describe("stale flags: an interrupted save does not hide later edits", () => {
     expect(await tags(dir, "notes.txt")).toEqual({ "notes.txt": "h" });
   });
 
+  test("a locked (symlink) annexed file is recognized as annexed too", async () => {
+    // The dataset repos here are unlocked, but a clone made elsewhere can hold locked
+    // files, and the recognition must not depend on which kind the index holds.
+    const dir = join(scratch.root, "locked-repo");
+    expect((await run(["git", "init", "-q", "-b", "main", dir])).exitCode).toBe(0);
+    await run(["git", "config", "user.email", "test@test.com"], dir);
+    await run(["git", "config", "user.name", "Test"], dir);
+    expect((await run(["git", "annex", "init"], dir)).exitCode).toBe(0);
+    writeFile(dir, "sub-01/eeg/a.edf", 3_000);
+    expect(
+      (await run(["git", "annex", "add", "--force-large", "sub-01/eeg/a.edf"], dir)).exitCode,
+    ).toBe(0);
+    expect((await run(["git", "commit", "-q", "-m", "add"], dir)).exitCode).toBe(0);
+    const mode = (await run(["git", "ls-files", "-s", "sub-01/eeg/a.edf"], dir)).stdout;
+    expect(mode.startsWith("120000")).toBe(true);
+    expect((await setAssumeUnchanged(dir, ["sub-01/eeg/a.edf"], true)).success).toBe(true);
+
+    expect(await clearStaleAssumeUnchanged(dir)).toEqual({ cleared: 1 });
+    expect(await tags(dir, "sub-01/eeg/a.edf")).toEqual({ "sub-01/eeg/a.edf": "H" });
+  });
+
   test("a repository with no flags costs one index read and reports nothing cleared", async () => {
     const dir = await trackedRepo("stale-none", { "a.edf": 3_000 });
     expect(await clearStaleAssumeUnchanged(dir)).toEqual({ cleared: 0 });

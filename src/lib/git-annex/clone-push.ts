@@ -172,10 +172,11 @@ export function describeChangedSinceTracked(changed: string[], when: "before" | 
  *
  * `git ls-files -v` tags such a path with a lowercase letter. A flag on a path
  * that is not annexed is not ours (nothing in NEMAR sets one) and is left alone.
- * Annexed is decided from the index, by looking for git-annex's object path in the
- * staged blob (`git grep --cached`): that holds for an unlocked pointer file and
- * for a locked symlink alike, and, unlike `git annex find`, still answers for a
- * path whose working-tree file has been deleted. Returns how many were cleared.
+ * Annexed is decided from the index, never the working tree, so it still answers
+ * for a path whose file has been deleted: a symlink entry is a locked annexed
+ * file, and any other entry is an unlocked one when its staged blob starts with
+ * git-annex's pointer line, `/annex/objects/KEY` (`git grep --cached`). Returns how
+ * many were cleared.
  */
 export async function clearStaleAssumeUnchanged(
   path: string,
@@ -193,6 +194,22 @@ export async function clearStaleAssumeUnchanged(
 
     const annexed: string[] = [];
     for (const chunk of chunkAddTargets(flagged)) {
+      const staged = await runCommand(
+        ["git", "--literal-pathspecs", "ls-files", "-s", "-z", "--", ...chunk],
+        { cwd: path },
+      );
+      if (staged.exitCode !== 0) {
+        return { cleared: 0, error: staged.stderr.trim() || "git ls-files -s failed" };
+      }
+      const regular: string[] = [];
+      for (const entry of staged.stdout.split("\0").filter(Boolean)) {
+        const match = entry.match(/^(\d{6}) \S+ \d\t(.*)$/s);
+        if (!match) continue;
+        if (match[1] === "120000") annexed.push(match[2]);
+        else regular.push(match[2]);
+      }
+      if (regular.length === 0) continue;
+
       const grep = await runCommand(
         [
           "git",
@@ -202,9 +219,9 @@ export async function clearStaleAssumeUnchanged(
           "-l",
           "-z",
           "-e",
-          "annex/objects/",
+          "^/annex/objects/",
           "--",
-          ...chunk,
+          ...regular,
         ],
         { cwd: path },
       );
