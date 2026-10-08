@@ -16,7 +16,8 @@
  * the files and decides what a failure to fetch means.
  */
 
-import { LOOKUP_ONCE, getFileContent } from "./github";
+import { getFileContent } from "./github";
+import { LOOKUP_ONCE } from "./github/contents";
 import { describesEthicsApproval, evaluateSubmissionMinimums } from "./submission-minimums";
 
 const README_CANDIDATES = ["README.md", "README", "README.txt", "README.rst"];
