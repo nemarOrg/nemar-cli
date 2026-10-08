@@ -92,6 +92,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
   ],
   "clone-push": [
     "clearStaleAssumeUnchanged",
+    "clearStaleFlags",
     "cloneDataset",
     "commitRevert",
     "compareRecordedStat",
@@ -108,6 +109,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "MAX_UNAVAILABLE_SAMPLE",
     "batchSetKeysAbsent",
     "batchSetKeysPresent",
+    "checkRemoteHolds",
     "classifyGetOutcome",
     "collectFileManifest",
     "copyPathsToAnnexRemote",
@@ -126,6 +128,8 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "getRemoteUuid",
     "listAnnexedKeys",
     "parseCopyJson",
+    "parseFsckJson",
+    "redactCredentials",
     "setKeyPresent",
   ],
   "repo-state": [
@@ -195,14 +199,19 @@ const INTERNAL_WIRING = [
   "copyPathsToAnnexRemote",
   "getAnnexKeysForPaths",
   "listAnnexedKeys",
-  // The upload S3 step's JSON copy accounting and its save-step helper: unit
-  // tested, consumed by sibling modules only.
+  // The upload S3 step's JSON copy accounting, its presence check for files with no
+  // local content, the credential redaction of what both print, and its save-step
+  // helper: unit tested, consumed by sibling modules only.
   "parseCopyJson",
   "extractCopyJsonError",
+  "checkRemoteHolds",
+  "parseFsckJson",
+  "redactCredentials",
   "setAssumeUnchanged",
   // The stat guard, the stale-flag clear and the failure text of saveDataset's skip:
   // unit tested, consumed by saveDataset itself and the tests.
   "clearStaleAssumeUnchanged",
+  "clearStaleFlags",
   "compareRecordedStat",
   "describeChangedSinceTracked",
   "describeStaleFlagFailure",
