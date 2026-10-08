@@ -33,18 +33,18 @@ import {
 // output in test/copy-json-real.unit.test.ts: hand-written error JSON hid a bug here.
 
 describe("formatUploadSummary", () => {
-  test("a resume with nothing left says so instead of 'Uploaded 0'", () => {
+  test("a resume where git-annex checked everything says so instead of 'Uploaded 0'", () => {
     expect(formatUploadSummary(165, 0, 0)).toBe(
-      "All 165 data files were already recorded at the S3 remote (nothing to copy)",
+      "All 165 data files are already at the S3 remote (git-annex checked each one; nothing to copy)",
     );
   });
 
   test("states sent, already-present and recorded totals", () => {
     expect(formatUploadSummary(10, 4, 4)).toBe(
-      "Uploaded 4 data files to S3; 6 already there; all 10 recorded at the remote",
+      "Uploaded 4 data files to S3; 6 were already at the remote; all recorded at the remote",
     );
     expect(formatUploadSummary(4, 4, 0)).toBe(
-      "Uploaded 4 data files to S3 (git-annex confirmed 0 of 4; the rest are recorded in the location log); all 4 recorded at the remote",
+      "Uploaded 4 data files to S3 (git-annex confirmed 0 of 4; the rest are recorded in the location log); all recorded at the remote",
     );
   });
 });
@@ -178,9 +178,10 @@ describe("copy accounting against a real special remote", () => {
     await initDirectoryRemote(dir, "store");
 
     const first = await copyPathsToAnnexRemote(dir, "store", files, 2);
-    expect(first).toEqual({ success: true, filesCopied: 3 });
+    expect(first).toMatchObject({ success: true, filesCopied: 3, filesSent: 3 });
     const again = await copyToAnnexRemote(dir, "store", 2);
-    expect(again).toEqual({ success: true, filesCopied: 3 });
+    // Found already at the store: reported as copied, but nothing was sent.
+    expect(again).toMatchObject({ success: true, filesCopied: 3, filesSent: 0 });
     expect(await listAnnexedPaths(dir, "store")).toEqual(new Set(files));
   });
 });
