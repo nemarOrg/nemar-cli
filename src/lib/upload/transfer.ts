@@ -24,6 +24,7 @@ import { ApiError, errorDetail } from "../api/errors.js";
 import type { DepositAttestation } from "../attestation.js";
 import { printStepFailure } from "../cli-output.js";
 import { type LocalDatasetConfig, writeLocalConfig } from "../dataset-config.js";
+import { displayName } from "../display-name.js";
 import { acceptGitHubInvitation, configureGitHubRemote } from "../git-annex/github.js";
 import {
   configureLargefiles,
@@ -539,31 +540,6 @@ function countDataFiles(n: number): string {
 
 /** "was" / "were", by count. */
 const wasWere = (n: number): string => (n === 1 ? "was" : "were");
-
-/**
- * Characters that must not reach a terminal or break a one-name-per-line list: C0 and C1
- * controls (a newline, an ESCAPE that starts a terminal sequence) and the Unicode line
- * separators and bidirectional overrides that reorder or split what is displayed.
- */
-const UNSAFE_NAME_CHARACTERS = /[\p{Cc}\u2028\u2029\u202a-\u202e\u2066-\u2069]/gu;
-
-/**
- * A file name as it is shown to a person: control characters written out as escapes
- * (`\n`, `\x1b`), everything else as it is. A name is data from the user's directory, and
- * printing it raw lets a newline split a bullet in two and an ESCAPE sequence reach the
- * terminal.
- */
-export function displayName(name: string): string {
-  return name.replace(UNSAFE_NAME_CHARACTERS, (c) => {
-    if (c === "\n") return "\\n";
-    if (c === "\r") return "\\r";
-    if (c === "\t") return "\\t";
-    const code = c.codePointAt(0) ?? 0;
-    return code <= 0xff
-      ? `\\x${code.toString(16).padStart(2, "0")}`
-      : `\\u${code.toString(16).padStart(4, "0")}`;
-  });
-}
 
 /** Extra facts the success line can state; see {@link formatUploadSummary}. */
 export interface UploadSummaryExtras {

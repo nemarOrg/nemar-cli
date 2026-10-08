@@ -9,11 +9,11 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { displayName } from "../src/lib/display-name";
 import { initUploadProgress, isStepCompleted, markStepCompleted } from "../src/lib/upload-progress";
 import {
   type UploadFileEntry,
   describeBlockedTracking,
-  displayName,
   listAnnexedPaths,
   listAnnexedPathsNotAt,
   listPendingAtRemote,
