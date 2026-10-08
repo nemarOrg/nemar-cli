@@ -1,16 +1,14 @@
 /**
  * `nemar dataset publish request` right after an upload: a CI-pending refusal.
  *
- * A publication request right after an upload is refused with block_reason
- * `bids_validation_pending` ("BIDS validation has not run yet") or
- * `bids_validation_in_progress` until the dataset's validation run concludes.
- * The refusal is recorded (the request row is `blocked`, and the blocked-request
- * sweep clears it once CI is green), but the CLI exited 1 with "re-request
- * publication", so a depositor read it as a rejection and scripted uploads
- * wrapped the command in their own retry loops (issue #1646).
+ * A publication request made before the dataset's BIDS validation has concluded
+ * is refused with block_reason `bids_validation_pending` (no run yet) or
+ * `bids_validation_in_progress` (a run is going). The request is recorded as
+ * `blocked`, and the blocked-request sweep releases it once validation passes.
  *
- * It is a pending state, not an error. The CLI says so and exits 0; it does not
- * wait or poll. Following CI is `nemar dataset ci <id>`, which already exists.
+ * It is a pending state, not an error: the request is recorded, the CLI says so
+ * and exits 0, so neither a depositor nor a script reads it as a rejection. The
+ * CLI does not wait or poll. Checking validation is `nemar dataset ci <id>`.
  */
 
 import type { PublicationBlockReason } from "../../shared/contract/publication.js";
@@ -22,26 +20,41 @@ export type CiPendingReason = Extract<
   "bids_validation_pending" | "bids_validation_in_progress"
 >;
 
-/** Block reasons that mean "CI has not concluded yet", not "CI failed". */
 export const CI_PENDING_BLOCK_REASONS: ReadonlySet<string> = new Set<CiPendingReason>([
   "bids_validation_pending",
   "bids_validation_in_progress",
 ]);
 
-/** True for a publication refusal that only says CI has not finished. */
+/** Is this block reason one of the two that only say CI has not finished? */
+export function isCiPendingReason(reason: unknown): reason is CiPendingReason {
+  return typeof reason === "string" && CI_PENDING_BLOCK_REASONS.has(reason);
+}
+
+/**
+ * True for a publication refusal that only says CI has not finished: a 422
+ * whose body is a recorded block (`status: "blocked"`) with a pending reason.
+ * The status is read as well as the reason so that the same word in some other
+ * kind of answer is not taken for this one.
+ */
 export function isCiPendingBlock(
   error: unknown,
 ): error is ApiError & { blockReason: CiPendingReason } {
   return (
     error instanceof ApiError &&
     error.statusCode === 422 &&
-    error.blockReason !== undefined &&
-    CI_PENDING_BLOCK_REASONS.has(error.blockReason)
+    (error.rawBody as { status?: unknown } | undefined)?.status === "blocked" &&
+    isCiPendingReason(error.blockReason)
   );
 }
 
+/** The link to the dataset's CI runs that the refusal carried, if it is a plain https URL. */
+export function ciUrlOf(error: ApiError): string | undefined {
+  const url = (error.rawBody as { ci_url?: unknown } | undefined)?.ci_url;
+  return typeof url === "string" && /^https:\/\/\S+$/.test(url) ? url : undefined;
+}
+
 /**
- * The first line printed for a CI-pending refusal. It tells the two reasons
+ * The first line printed for a CI-pending request. It tells the two reasons
  * apart in one clause: no run has been seen yet, or a run is going.
  */
 export function ciPendingHeadline(reason: CiPendingReason): string {
@@ -51,21 +64,29 @@ export function ciPendingHeadline(reason: CiPendingReason): string {
 }
 
 /**
- * The lines that follow the headline. It promises no time: the server re-checks
- * blocked requests on its own schedule, and this says only what it does once CI
- * passes. The rest is for a depositor who would rather not wait for that:
- * follow CI with the command that shows it, then ask again.
+ * The lines that follow the headline. They start with "Your request is
+ * recorded" because the headline goes to stderr and these to stdout, so a
+ * caller that drops stderr still reads that a request exists. No time is
+ * promised: the server re-checks blocked requests on its own schedule.
  *
  * Asking again re-states the request, and a request made WITHOUT `--anonymous`
  * is a normal publication whatever the earlier one said (the backend resets the
  * flag on every re-request). An anonymous depositor must therefore be handed the
- * flag back, or the line meant to help would turn a blind request into a named one.
+ * flag back, or the line meant to help would turn a blind request into a named
+ * one. `anonymous` is what the depositor TYPED (or, for `publish status`, what
+ * the recorded request says), never an echo that might be missing.
+ *
+ * If validation fails, the sweep relabels the request and mails nobody, so the
+ * last lines say where to look.
  */
 export function ciPendingHint(datasetId: string, anonymous = false): string[] {
   const again = `nemar dataset publish request ${datasetId}${anonymous ? " --anonymous" : ""}`;
   return [
-    "  NEMAR re-checks the request automatically and continues once validation passes.",
-    `  To request right after CI completes instead, follow it with 'nemar dataset ci ${datasetId}',`,
-    `  then run '${again}' again.`,
+    "  Your request is recorded. NEMAR re-checks it automatically and continues once validation passes.",
+    `  If you would rather not wait for that, check validation with: nemar dataset ci ${datasetId}`,
+    `  Once it has passed, request again: ${again}`,
+    "  If it says a request already exists, nothing more is needed.",
+    "  If validation fails, the request stays blocked and nothing is emailed:",
+    `  check nemar dataset ci ${datasetId} or nemar dataset publish status ${datasetId}.`,
   ];
 }
