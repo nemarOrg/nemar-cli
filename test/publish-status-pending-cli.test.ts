@@ -160,6 +160,8 @@ describe("publish status for a request blocked for another reason", () => {
       expect(r.stdout).toMatch(RED);
       expect(r.stdout).not.toContain("Request recorded");
       expect(r.stdout).toContain("nemar dataset publish request nm099999' to retry now");
+      // Only a request waiting on validation leaves its screen unmentioned.
+      expect(r.stdout).toContain("Identifier screen");
     },
     SPAWN_TEST_TIMEOUT_MS,
   );
