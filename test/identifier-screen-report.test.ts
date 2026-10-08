@@ -717,20 +717,21 @@ describe("publicationRequestNotice: what an accepted request is told (ADR 0090, 
       "Your request was received.",
       "NEMAR is checking publication eligibility.",
       "If every check passes, an administrator is notified to approve it.",
+      "You will be emailed if a check needs your attention, and when an administrator decides.",
       "Run 'nemar dataset publish status nm000321' to see where it stands.",
     ]);
     // The maintainer's paragraph, as one piece.
     expect(publicationRequestNotice("nm000321").join(" ")).toBe(
-      "Your request was received. NEMAR is checking publication eligibility. If every check passes, an administrator is notified to approve it. Run 'nemar dataset publish status nm000321' to see where it stands.",
+      "Your request was received. NEMAR is checking publication eligibility. If every check passes, an administrator is notified to approve it. You will be emailed if a check needs your attention, and when an administrator decides. Run 'nemar dataset publish status nm000321' to see where it stands.",
     );
   });
 
   test("the dataset id is the only thing that varies", () => {
     const a = publicationRequestNotice("nm000321");
     const b = publicationRequestNotice("xx099901");
-    expect(b.slice(0, 3)).toEqual(a.slice(0, 3));
-    expect(b[3]).toBe("Run 'nemar dataset publish status xx099901' to see where it stands.");
-    expect(a.slice(0, 3).join(" ")).not.toMatch(/\d/);
+    expect(b.slice(0, 4)).toEqual(a.slice(0, 4));
+    expect(b[4]).toBe("Run 'nemar dataset publish status xx099901' to see where it stands.");
+    expect(a.slice(0, 4).join(" ")).not.toMatch(/\d/);
   });
 
   test("it is neutral: no verdict, finding kind, count or date warning", () => {
@@ -758,6 +759,7 @@ describe("publicationRequestNotice: what an accepted request is told (ADR 0090, 
       /Your request was received/i,
       /publication eligibility/i,
       /If every check passes/i,
+      /emailed if a check needs your attention/i,
       /to see where it stands/i,
     ];
     const root = join(import.meta.dir, "..");

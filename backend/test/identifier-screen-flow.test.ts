@@ -1439,6 +1439,7 @@ const NOTICE = (id: string) => [
   "Your request was received.",
   "NEMAR is checking publication eligibility.",
   "If every check passes, an administrator is notified to approve it.",
+  "You will be emailed if a check needs your attention, and when an administrator decides.",
   `Run 'nemar dataset publish status ${id}' to see where it stands.`,
 ];
 
