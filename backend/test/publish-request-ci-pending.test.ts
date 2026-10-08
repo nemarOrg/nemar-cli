@@ -21,6 +21,16 @@ import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Server } from "bun";
 import { Hono } from "hono";
+import {
+  ACCEPTED_BODY,
+  CI_UNAVAILABLE_BODY,
+  FAILED_BODY,
+  IN_PROGRESS_BODY,
+  MINIMUMS_BODY,
+  OWNER_NAME_BODY,
+  PENDING_BODY,
+  statusBody,
+} from "../../test/helpers/pending-cli";
 import { datasetRoutes } from "../src/routes/datasets";
 import { sweepBlockedBidsValidationRequests } from "../src/services/publication-sweep";
 import { hashApiKey } from "../src/services/token";
@@ -628,54 +638,92 @@ describe("a readiness check that cannot run is not reported as pending", () => {
   });
 });
 
-describe("the exact bodies the CLI is tested against", () => {
-  // test/publish-request-pending-cli.test.ts answers the CLI with these shapes
-  // from a stand-in server. They are pinned here, from the real route, so the
-  // stand-in cannot drift from what the Worker sends without this test saying
-  // so.
-  test("pending: status, block_reason, message, dataset_id, anonymous and ci_url", async () => {
-    runs = "none";
-    const { status, body } = await requestPublication();
-    expect(status).toBe(422);
-    expect(Object.keys(body).sort()).toEqual([
-      "anonymous",
-      "block_reason",
-      "ci_url",
-      "dataset_id",
-      "message",
-      "status",
-    ]);
-    expect(body).toMatchObject({
-      status: "blocked",
-      block_reason: "bids_validation_pending",
-      dataset_id: DATASET,
-      anonymous: false,
-      ci_url: `https://github.com/nemarDatasets/${DATASET}/actions`,
-    });
+describe("the bodies the CLI tests are answered with are the route's", () => {
+  // test/publish-pending-cli.test.ts and test/publish-status-pending-cli.test.ts
+  // answer the real CLI from a stand-in server with the bodies in
+  // test/helpers/pending-cli.ts. They are compared here with what the real route
+  // sends, so the stand-in cannot drift from the Worker without this saying so.
+  // Only the dataset id and the repository link, which belong to the dataset
+  // under test, are substituted.
+  const forDataset = (id: string) => ({
+    dataset_id: id,
+    ci_url: `https://github.com/nemarDatasets/${id}/actions`,
+  });
+
+  test("pending, in progress and failed: equal, field for field", async () => {
+    for (const [reason, runState, stand] of [
+      ["bids_validation_pending", "none", PENDING_BODY],
+      ["bids_validation_in_progress", "running", IN_PROGRESS_BODY],
+      ["bids_validation_failed", "failure", FAILED_BODY],
+    ] as const) {
+      runs = runState;
+      const { status, body } = await requestPublication();
+      expect(status, reason).toBe(422);
+      expect(body, reason).toEqual({ ...stand, ...forDataset(DATASET) });
+    }
   });
 
   test("pending, anonymous: the echo is true", async () => {
     descriptionBody = BLINDED;
     const { body } = await requestPublication({ anonymous: true });
-    expect(body.block_reason).toBe("bids_validation_pending");
-    expect(body.anonymous).toBe(true);
+    expect(body).toEqual({ ...PENDING_BODY, ...forDataset(DATASET), anonymous: true });
   });
 
-  test("min_requirements_failed: the pending keys plus reasons, policy_url and details", async () => {
+  test("min_requirements_failed: the same keys, and details mirrors reasons", async () => {
     descriptionBody = SHORT_NAME;
     const { body } = await requestPublication();
-    expect(Object.keys(body).sort()).toEqual([
-      "anonymous",
-      "block_reason",
-      "ci_url",
-      "dataset_id",
-      "details",
-      "message",
-      "policy_url",
-      "reasons",
-      "status",
-    ]);
+    expect(Object.keys(body).sort()).toEqual(Object.keys(MINIMUMS_BODY).sort());
+    expect(body.message).toBe(MINIMUMS_BODY.message);
+    expect(body.policy_url).toBe(MINIMUMS_BODY.policy_url);
     expect(body.details).toEqual({ reasons: body.reasons, policy_url: body.policy_url });
+  });
+
+  test("a missing owner name: equal, field for field", async () => {
+    const nameless = await seedUser("nameless2", NAMELESS_KEY, false);
+    seedDataset("nm000486", { owner: nameless });
+    const { status, body } = await requestPublication({ id: "nm000486", key: NAMELESS_KEY });
+    expect(status).toBe(422);
+    expect(body).toEqual({ ...OWNER_NAME_BODY, ...forDataset("nm000486") });
+  });
+
+  test("validation status that could not be checked: equal, field for field", async () => {
+    runsStatus = 403;
+    const { status, body } = await requestPublication();
+    expect(status).toBe(503);
+    expect(body).toEqual({ ...CI_UNAVAILABLE_BODY, ...forDataset(DATASET) });
+  });
+
+  test("an accepted request: the same keys, with the notice", async () => {
+    runs = "success";
+    await withFakeResend(async () => {
+      const { status, body } = await requestPublication();
+      expect(status).toBe(200);
+      expect(Object.keys(body).sort()).toEqual(Object.keys(ACCEPTED_BODY).sort());
+      expect(body.message).toBe(ACCEPTED_BODY.message);
+    });
+  });
+
+  test("publish status of a request waiting on validation: the same keys", async () => {
+    runs = "none";
+    await requestPublication();
+    const res = await app.request(
+      `/datasets/${DATASET}/publish/status`,
+      { headers: { Authorization: `Bearer ${OWNER_KEY}` } },
+      env(),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(Object.keys(body).sort()).toEqual(Object.keys(statusBody()).sort());
+    expect(body).toMatchObject({
+      status: "blocked",
+      block_reason: "bids_validation_pending",
+      message: PENDING_BODY.message,
+      anonymous: false,
+      ...forDataset(DATASET),
+    });
+    // The screen view the CLI test sends for a request that has not been
+    // released: not the stand-in's word for it, the route's.
+    expect(body.identifier_screen).toEqual(statusBody().identifier_screen);
   });
 
   test("a request that is already open: error, status and message", async () => {
@@ -708,21 +756,5 @@ describe("the exact bodies the CLI is tested against", () => {
     );
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: "Only the dataset owner can request publication" });
-  });
-
-  test("a missing owner name: owner_name_missing in the same shape as the other blocks", async () => {
-    const nameless = await seedUser("nameless2", NAMELESS_KEY, false);
-    seedDataset("nm000486", { owner: nameless });
-    const { status, body } = await requestPublication({ id: "nm000486", key: NAMELESS_KEY });
-    expect(status).toBe(422);
-    expect(body.block_reason).toBe("owner_name_missing");
-    expect(Object.keys(body).sort()).toEqual([
-      "anonymous",
-      "block_reason",
-      "ci_url",
-      "dataset_id",
-      "message",
-      "status",
-    ]);
   });
 });
