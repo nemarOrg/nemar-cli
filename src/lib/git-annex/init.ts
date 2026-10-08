@@ -427,3 +427,31 @@ export async function gitAnnexAdd(
     return { success: false, error: (e as Error).message };
   }
 }
+
+/**
+ * Drop paths from the index while leaving them in the working tree, so git-annex
+ * will look at them again.
+ *
+ * This is the step without which moving a tracked file into the annex does nothing.
+ * `git annex add` only considers files git sees as new or modified, so on a file
+ * that is committed or staged as a plain blob and unmodified it does nothing at all
+ * -- exit 0, no output, no change -- and `--force-large` does not alter that: the
+ * flag decides which plane a CONSIDERED file goes to, not whether it is considered.
+ * Verified against git-annex 10.20260901. Un-caching the path makes it new again,
+ * and the resulting commit is a plain typechange on the same path. Shared by the
+ * import's normalization (ADR 0060) and the upload's recovery from a data file the
+ * annex refused (`recoverBlockedTracking`).
+ */
+export async function unstageTrackedPaths(datasetPath: string, paths: string[]): Promise<void> {
+  for (const chunk of chunkAddTargets(paths)) {
+    const { exitCode, stderr } = await runCommand(
+      ["git", "rm", "--cached", "--quiet", "--", ...chunk],
+      { cwd: datasetPath },
+    );
+    if (exitCode !== 0) {
+      throw new Error(
+        `Failed to uncache ${chunk.length} path(s) from the git index: ${stderr.trim()}`,
+      );
+    }
+  }
+}
