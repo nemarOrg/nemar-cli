@@ -8,26 +8,25 @@
  */
 
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
-import { dirname, join } from "node:path";
-import { spawn } from "bun";
+import { readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { saveDataset, setAssumeUnchanged } from "../src/lib/git-annex/clone-push";
-import { configureLargefiles, gitAnnexAdd, initDataset } from "../src/lib/git-annex/init";
+import { gitAnnexAdd } from "../src/lib/git-annex/init";
 import { copyPathsToAnnexRemote, copyToAnnexRemote } from "../src/lib/git-annex/transfer";
 import {
   findDataFilesNotAnnexed,
   formatUploadSummary,
   listAnnexedPaths,
 } from "../src/lib/upload/transfer";
+import {
+  initDirectoryRemote,
+  newDatasetRepo as makeRepo,
+  makeScratch,
+  meterFilterProcess,
+  recorded,
+  run,
+  writeFile,
+} from "./helpers/annex-repo";
 
 // parseCopyJson and extractCopyJsonError are exercised against captured, real git-annex
 // output in test/copy-json-real.unit.test.ts: hand-written error JSON hid a bug here.
@@ -61,6 +60,19 @@ describe("findDataFilesNotAnnexed", () => {
     expect(out.blocking.map((f) => f.path)).toEqual(["b.edf"]);
     expect(out.small.map((f) => f.path)).toEqual(["tiny.EDF"]);
   });
+
+  test("the boundary is the annex size threshold: 100,000 bytes is small, 100,001 blocks", () => {
+    // Literals, not the constant: git-annex annexes more than 100,000 bytes and nothing
+    // less (test/annex-policy.test.ts runs it), so a file the annex left out at exactly
+    // these sizes is small at the first and blocking at the second.
+    const targets = [
+      { path: "at.edf", size: 100_000 },
+      { path: "over.edf", size: 100_001 },
+    ];
+    const out = findDataFilesNotAnnexed(targets, new Set());
+    expect(out.small.map((f) => f.path)).toEqual(["at.edf"]);
+    expect(out.blocking.map((f) => f.path)).toEqual(["over.edf"]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -71,107 +83,15 @@ describe("findDataFilesNotAnnexed", () => {
 // than the 5 s default allows.
 setDefaultTimeout(60_000);
 
-const TMP_DIR = join(import.meta.dir, ".test-upload-copy-verify");
-
-async function runCmd(
-  cmd: string[],
-  cwd?: string,
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const proc = spawn({ cmd, cwd, stdout: "pipe", stderr: "pipe" });
-  const stdout = await new Response(proc.stdout).text();
-  const stderr = await new Response(proc.stderr).text();
-  const exitCode = await proc.exited;
-  return { stdout, stderr, exitCode };
-}
-
-function chmodTreeWritable(dir: string): void {
-  for (const name of readdirSync(dir)) {
-    const full = join(dir, name);
-    let st: ReturnType<typeof statSync>;
-    try {
-      st = statSync(full);
-    } catch {
-      continue;
-    }
-    if (st.isDirectory()) {
-      try {
-        chmodSync(full, 0o755);
-      } catch {}
-      chmodTreeWritable(full);
-    } else {
-      try {
-        chmodSync(full, 0o644);
-      } catch {}
-    }
-  }
-}
-
-async function newDatasetRepo(name: string): Promise<string> {
-  const dir = join(TMP_DIR, `${name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
-  mkdirSync(dir, { recursive: true });
-  const init = await initDataset(dir, { author: { name: "Test", email: "test@test.com" } });
-  if (!init.success) throw new Error(`initDataset failed: ${init.error}`);
-  await runCmd(["git", "config", "user.email", "test@test.com"], dir);
-  await runCmd(["git", "config", "user.name", "Test"], dir);
-  const largefiles = await configureLargefiles(dir);
-  if (!largefiles.success) throw new Error(`configureLargefiles failed: ${largefiles.error}`);
-  return dir;
-}
-
-function writeFile(dir: string, relPath: string, content: string | Buffer): void {
-  const full = join(dir, relPath);
-  mkdirSync(dirname(full), { recursive: true });
-  writeFileSync(full, content);
-}
-
-async function initDirectoryRemote(dir: string, name: string): Promise<void> {
-  const remoteDir = join(TMP_DIR, `${name}-store-${Date.now()}`);
-  mkdirSync(remoteDir, { recursive: true });
-  const init = await runCmd(
-    [
-      "git",
-      "annex",
-      "initremote",
-      name,
-      "type=directory",
-      `directory=${remoteDir}`,
-      "encryption=none",
-    ],
-    dir,
-  );
-  expect(init.exitCode).toBe(0);
-}
-
-/**
- * Route this repo's git-annex filter-process through `tee`, so every byte git
- * streams to the filter is also appended to `logFile`. Content re-read by
- * `git add -A` shows up as bytes in the log.
- */
-async function meterFilterProcess(dir: string, logFile: string): Promise<void> {
-  writeFileSync(logFile, "");
-  const set = await runCmd(
-    [
-      "git",
-      "config",
-      "filter.annex.process",
-      `sh -c 'tee -a "${logFile}" | git-annex filter-process'`,
-    ],
-    dir,
-  );
-  expect(set.exitCode).toBe(0);
-}
+const scratch = makeScratch("nemar-upload-copy-verify");
+const newDatasetRepo = (name: string) => makeRepo(scratch.root, name);
 
 beforeAll(async () => {
-  const probe = await runCmd(["git", "annex", "version"]);
+  const probe = await run(["git", "annex", "version"]);
   if (probe.exitCode !== 0) throw new Error("git-annex is required for this test file");
 });
 
-afterAll(() => {
-  if (existsSync(TMP_DIR)) {
-    chmodTreeWritable(TMP_DIR);
-    rmSync(TMP_DIR, { recursive: true, force: true });
-  }
-});
+afterAll(() => scratch.cleanup());
 
 describe("copy accounting against a real special remote", () => {
   test("filesCopied counts every file the remote now has, including a re-run", async () => {
@@ -179,7 +99,7 @@ describe("copy accounting against a real special remote", () => {
     const files = ["sub-01/eeg/a.edf", "sub-01/eeg/b.edf", "sub-02/eeg/c.edf"];
     for (const f of files) writeFile(dir, f, f.repeat(500));
     expect((await gitAnnexAdd(dir, files)).success).toBe(true);
-    await initDirectoryRemote(dir, "store");
+    await initDirectoryRemote(scratch.root, dir, "store");
 
     const first = await copyPathsToAnnexRemote(dir, "store", files, 2);
     expect(first).toMatchObject({ success: true, filesCopied: 3, filesSent: 3 });
@@ -190,14 +110,6 @@ describe("copy accounting against a real special remote", () => {
   });
 });
 
-/** The size and mtime a tracked file has right now, as the upload records them. */
-function recorded(dir: string, paths: string[]) {
-  return paths.map((path) => {
-    const st = statSync(join(dir, path));
-    return { path, size: st.size, mtimeMs: st.mtimeMs };
-  });
-}
-
 describe("saveDataset with skipContentCheck", () => {
   test("commits the staged pointers without streaming annexed content to the filter", async () => {
     const big = Buffer.alloc(2 * 1024 * 1024, 7);
@@ -207,8 +119,7 @@ describe("saveDataset with skipContentCheck", () => {
       writeFile(dir, "sub-01/eeg/b.edf", Buffer.alloc(2 * 1024 * 1024, 9));
       writeFile(dir, "dataset_description.json", '{"Name":"x"}');
       expect((await gitAnnexAdd(dir, ["sub-01/eeg/a.edf", "sub-01/eeg/b.edf"])).success).toBe(true);
-      const log = join(dir, "..", `${skip ? "skip" : "plain"}-${Date.now()}.filterlog`);
-      await meterFilterProcess(dir, log);
+      const log = await meterFilterProcess(dir);
       const annexed = [...(await listAnnexedPaths(dir))];
       expect(annexed.sort()).toEqual(["sub-01/eeg/a.edf", "sub-01/eeg/b.edf"]);
       const res = await saveDataset(
@@ -223,24 +134,25 @@ describe("saveDataset with skipContentCheck", () => {
 
     const plain = await runOnce(false);
     const skipped = await runOnce(true);
-    // Control: the plain add re-reads both 2 MiB files through the filter.
-    expect(plain.bytes).toBeGreaterThan(4 * 1024 * 1024);
+    // Control: the plain add re-reads both 2 MiB files through the filter. The margin over
+    // exactly 4 MiB is only the protocol's framing, so the bound is "at least".
+    expect(plain.bytes).toBeGreaterThanOrEqual(4 * 1024 * 1024);
     // With the skip, only the small metadata file goes through it.
     expect(skipped.bytes).toBeLessThan(64 * 1024);
 
     // Same commit either way: two annex pointers plus the metadata file in git.
     for (const { dir } of [plain, skipped]) {
-      const tree = await runCmd(["git", "ls-tree", "-r", "--name-only", "HEAD"], dir);
+      const tree = await run(["git", "ls-tree", "-r", "--name-only", "HEAD"], dir);
       const paths = tree.stdout.split("\n").filter(Boolean);
       for (const p of ["dataset_description.json", "sub-01/eeg/a.edf", "sub-01/eeg/b.edf"]) {
         expect(paths).toContain(p);
       }
-      const blob = await runCmd(["git", "cat-file", "-p", "HEAD:sub-01/eeg/a.edf"], dir);
+      const blob = await run(["git", "cat-file", "-p", "HEAD:sub-01/eeg/a.edf"], dir);
       expect(blob.stdout.startsWith("/annex/objects/")).toBe(true);
     }
 
     // The assume-unchanged bits are cleared afterwards (lowercase tag = set).
-    const tags = await runCmd(["git", "ls-files", "-v", "sub-01/eeg"], skipped.dir);
+    const tags = await run(["git", "ls-files", "-v", "sub-01/eeg"], skipped.dir);
     expect(
       tags.stdout
         .split("\n")
@@ -259,7 +171,7 @@ describe("saveDataset with skipContentCheck", () => {
     rmSync(join(dir, "sub-01/eeg/b.edf"), { force: true });
     const res = await saveDataset(dir, "second", undefined, { skipContentCheck: entries });
     expect(res.success).toBe(true);
-    const tree = await runCmd(["git", "ls-tree", "-r", "--name-only", "HEAD"], dir);
+    const tree = await run(["git", "ls-tree", "-r", "--name-only", "HEAD"], dir);
     expect(tree.stdout).toContain("sub-01/eeg/a.edf");
     expect(tree.stdout).not.toContain("sub-01/eeg/b.edf");
   });
@@ -269,12 +181,8 @@ describe("saveDataset with skipContentCheck", () => {
     writeFile(dir, "x.edf", "x".repeat(200_000));
     expect((await gitAnnexAdd(dir, ["x.edf"])).success).toBe(true);
     expect((await setAssumeUnchanged(dir, ["x.edf"], true)).success).toBe(true);
-    expect((await runCmd(["git", "ls-files", "-v", "x.edf"], dir)).stdout.startsWith("h ")).toBe(
-      true,
-    );
+    expect((await run(["git", "ls-files", "-v", "x.edf"], dir)).stdout.startsWith("h ")).toBe(true);
     expect((await setAssumeUnchanged(dir, ["x.edf"], false)).success).toBe(true);
-    expect((await runCmd(["git", "ls-files", "-v", "x.edf"], dir)).stdout.startsWith("H ")).toBe(
-      true,
-    );
+    expect((await run(["git", "ls-files", "-v", "x.edf"], dir)).stdout.startsWith("H ")).toBe(true);
   });
 });

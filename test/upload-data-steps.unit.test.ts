@@ -16,6 +16,7 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -175,6 +176,40 @@ describe("a whole run of steps 9 to 11", () => {
     expect(seen).toHaveLength(1);
     expect(seen[0]?.annexedPaths).toEqual(new Set(["a.edf", "b.edf"]));
     expect(seen[0]?.verifyRemote).toBe(S3_REMOTE_NAME);
+  });
+
+  test("the re-run a failed save asks for re-tracks the changed file, and the commit gets the NEW key", async () => {
+    // The save's failure text promises that re-running re-tracks the file. That promise is
+    // made of steps in other modules (the changed-list check, the upload list, the add, the
+    // copy, the refreshed record), so drive the whole thing twice, the way the command does.
+    // The wrapper edits the file in the window between the copy and the save, the real
+    // window the stat guard exists for, and then calls the real save.
+    const dir = await dataset("rerun", { "a.edf": 3_000, "b.edf": 3_000 });
+    const open = directoryRemote(dir);
+    let oldKey = "";
+    const result = await runSteps(dir, {
+      openRemote: open,
+      skipMinBytes: 1,
+      saveStep: async (...args) => {
+        oldKey = (await run(["git", "annex", "lookupkey", "a.edf"], dir)).stdout.trim();
+        writeFileSync(join(dir, "a.edf"), "e".repeat(3_000));
+        const later = ((args[2].files["a.edf"].mtimeMs as number) + 5_000) / 1000;
+        utimesSync(join(dir, "a.edf"), later, later);
+        return saveDatasetStep(...args);
+      },
+    });
+    expect(result.status).toBe("fail");
+    expect(isStepCompleted(progressOf(dir), "dataset_save")).toBe(false);
+
+    // The re-run: a fresh manifest sees the edit and the file goes round again.
+    const second = await runSteps(dir, { openRemote: open, skipMinBytes: 1 });
+
+    expect(second.status).toBe("ok");
+    const newKey = (await run(["git", "annex", "lookupkey", "a.edf"], dir)).stdout.trim();
+    expect(newKey).not.toBe(oldKey);
+    const pointer = await run(["git", "cat-file", "-p", "HEAD:a.edf"], dir);
+    expect(pointer.stdout.trim()).toBe(`/annex/objects/${newKey}`);
+    expect(await listAnnexedPaths(dir, S3_REMOTE_NAME)).toEqual(new Set(["a.edf", "b.edf"]));
   });
 
   test("a dataset with no data files never opens the remote", async () => {

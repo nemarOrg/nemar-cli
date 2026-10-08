@@ -12,6 +12,8 @@
  */
 
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { statSync } from "node:fs";
+import { join } from "node:path";
 import { saveDataset } from "../src/lib/git-annex/clone-push";
 import { gitAnnexAdd } from "../src/lib/git-annex/init";
 import { isCaseVariantData, shouldAnnex } from "../src/lib/git-annex/policy";
@@ -184,6 +186,30 @@ describe("trackDataFiles", () => {
       expect(blob.stdout.startsWith("/annex/objects/"), f.path).toBe(true);
     }
     expect(await annexedSet(dir)).toEqual(new Set(FIXTURES.map((f) => f.path)));
+  });
+
+  test("tracking leaves the size, mtime and inode the upload plan recorded exactly as they were", async () => {
+    // The premise of the stat guard in saveDataset. The plan records each file's stat
+    // BEFORE a possibly multi-hour `git annex add`, and the guard compares that record
+    // with the file after the copy; if add moved the mtime, every file would look edited.
+    // Checked here on the filesystem the tests run on, for ordinary and forced adds alike.
+    const dir = await repoWithFixtures("track-stat");
+    const paths = FIXTURES.map((f) => f.path);
+    const before = paths.map((p) => {
+      const st = statSync(join(dir, p));
+      return { p, size: st.size, mtimeMs: st.mtimeMs, ino: st.ino };
+    });
+
+    expect((await trackDataFiles(dir, paths)).success).toBe(true);
+
+    for (const b of before) {
+      const st = statSync(join(dir, b.p));
+      expect({ size: st.size, mtimeMs: st.mtimeMs, ino: st.ino }, b.p).toEqual({
+        size: b.size,
+        mtimeMs: b.mtimeMs,
+        ino: b.ino,
+      });
+    }
   });
 
   test("a re-run is idempotent: same annexed set, no change to the tree", async () => {
