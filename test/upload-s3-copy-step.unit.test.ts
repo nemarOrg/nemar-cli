@@ -143,6 +143,32 @@ describe("copyAnnexedToRemote: what is copied", () => {
     expect(await listAnnexedPathsNotAt(dir, REMOTE)).toEqual(new Set());
   });
 
+  test("the plan is announced once, after the checks and before anything is copied", async () => {
+    // Guards where `onPlan` runs. The progress line it feeds ("Uploading N files...")
+    // must not be printed after the work it announces, and the late-annex test below only
+    // means what it says if the callback fires between the plan and the copy.
+    const { dir, targets } = await dataset("plan-position", { "a.edf": 3_000, "b.edf": 3_000 });
+    expect(
+      (
+        await trackDataFiles(
+          dir,
+          targets.map((t) => t.path),
+        )
+      ).success,
+    ).toBe(true);
+    let calls = 0;
+    let atRemoteDuringPlan: Set<string> | null = null;
+
+    const outcome = await step(dir, targets, async () => {
+      calls += 1;
+      atRemoteDuringPlan = await listAnnexedPaths(dir, REMOTE);
+    });
+
+    expect(outcome.status).toBe("ok");
+    expect(calls).toBe(1);
+    expect(atRemoteDuringPlan).toEqual(new Set());
+  });
+
   test("a resume copies exactly the remainder, and a second run copies nothing", async () => {
     const { dir, targets } = await dataset("resume", {
       "a.edf": 3_000,

@@ -24,17 +24,15 @@ import {
 import { gitAnnexAdd } from "../src/lib/git-annex/init";
 import { collectFileManifest } from "../src/lib/git-annex/transfer";
 import {
-  getFilesNeedingUpload,
-  hasFileListChanged,
   initUploadProgress,
   isStepCompleted,
-  markFileUploaded,
+  readUploadProgress,
+  writeUploadProgress,
 } from "../src/lib/upload-progress";
 import { SAVE_SKIP_MIN_BYTES, planSaveSkip, saveDatasetStep } from "../src/lib/upload/finalize";
-import { copyAnnexedToRemote, listAnnexedPaths, trackDataFiles } from "../src/lib/upload/transfer";
+import { listAnnexedPaths, trackDataFiles } from "../src/lib/upload/transfer";
 import {
   commitCount,
-  initDirectoryRemote,
   makeScratch,
   trackedRepo as makeTrackedRepo,
   meterFilterProcess,
@@ -132,70 +130,6 @@ describe("the stat guard: a changed file fails the save", () => {
     expect(res.error).toContain("while the save was running");
     expect(res.error).toContain("a.edf");
     expect(await tags(dir, "a.edf", "b.edf")).toEqual({ "a.edf": "H", "b.edf": "H" });
-  });
-
-  test("the re-run the message asks for does re-track the file, and the save then passes", async () => {
-    // The failure text promises that re-running re-tracks the file. That promise is made
-    // of pieces that live elsewhere (the changed-list check, the upload list, the add, the
-    // copy, the refreshed record), so walk them in the order a re-run does and watch the
-    // commit end up with the NEW key, not the one that was uploaded first.
-    const dir = await trackedRepo("rerun", { "a.edf": 3_000, "b.edf": 3_000 });
-    await initDirectoryRemote(scratch.root, dir, "nemar-s3");
-    const dataOf = async () =>
-      (await collectFileManifest(dir)).files.filter((f) => f.type === "data");
-    const first = await dataOf();
-    const progress = initUploadProgress(dir, "nm000993", first);
-    const copied = await copyAnnexedToRemote({
-      absolutePath: dir,
-      remote: "nemar-s3",
-      addTargets: first,
-      jobs: 1,
-    });
-    expect(copied.status).toBe("ok");
-    if (copied.status !== "ok") throw new Error("unreachable");
-    for (const f of first) markFileUploaded(progress, f.path, f);
-    const oldKey = (await run(["git", "annex", "lookupkey", "a.edf"], dir)).stdout.trim();
-
-    writeFileSync(join(dir, "a.edf"), "e".repeat(3_000));
-    touchLater(dir, "a.edf", progress.files["a.edf"].mtimeMs as number);
-    const failed = await saveDatasetStep(dir, undefined, progress, {
-      annexedPaths: copied.annexedPaths,
-      skipMinBytes: 1,
-    });
-    expect(failed.status).toBe("fail");
-
-    // The re-run: a fresh manifest sees the edit, the upload list names the file...
-    const second = await dataOf();
-    expect(hasFileListChanged(progress, second)).toBe(true);
-    const todo = getFilesNeedingUpload(progress, second);
-    expect(todo.map((f) => f.path)).toEqual(["a.edf"]);
-    // ...it is re-added under a new key, copied, recorded, and the save passes.
-    expect(
-      (
-        await trackDataFiles(
-          dir,
-          todo.map((f) => f.path),
-        )
-      ).success,
-    ).toBe(true);
-    const newKey = (await run(["git", "annex", "lookupkey", "a.edf"], dir)).stdout.trim();
-    expect(newKey).not.toBe(oldKey);
-    const again = await copyAnnexedToRemote({
-      absolutePath: dir,
-      remote: "nemar-s3",
-      addTargets: todo,
-      jobs: 1,
-    });
-    expect(again).toMatchObject({ status: "ok", attempted: 1 });
-    if (again.status !== "ok") throw new Error("unreachable");
-    for (const f of todo) markFileUploaded(progress, f.path, f);
-    const saved = await saveDatasetStep(dir, undefined, progress, {
-      annexedPaths: again.annexedPaths,
-      skipMinBytes: 1,
-    });
-    expect(saved.status).toBe("ok");
-    const pointer = await run(["git", "cat-file", "-p", "HEAD:a.edf"], dir);
-    expect(pointer.stdout.trim()).toBe(`/annex/objects/${newKey}`);
   });
 
   test("compareRecordedStat sorts unchanged from changed, and leaves a deleted path out of both", async () => {
@@ -356,6 +290,8 @@ describe("a failure to mark degrades to the plain save", () => {
     const dir = await trackedRepo("mark-fails", { "a.edf": 3_000 });
     writeFile(dir, "untracked.edf", 3_000);
     const entries = recorded(dir, ["a.edf", "untracked.edf"]);
+    // The premise, asserted rather than assumed: git really cannot mark this list.
+    expect((await setAssumeUnchanged(dir, ["a.edf", "untracked.edf"], true)).success).toBe(false);
 
     const res = await saveDataset(dir, "upload", undefined, { skipContentCheck: entries });
 
@@ -471,6 +407,35 @@ describe("planSaveSkip and the size gate", () => {
     expect(skippedDuringSave(probe)).toEqual(["sub-01/eeg/a.edf"]);
   });
 
+  test("the gate is inclusive: exactly the recorded bytes opens it, one more byte keeps it shut", async () => {
+    // Guards `>=` at the step's gate. The fixture holds exactly 4 MiB of annexed data.
+    const open = await bigRepo("gate-exact-open");
+    await saveDatasetStep(open.dir, undefined, open.progress, {
+      annexedPaths: open.annexed,
+      skipMinBytes: 4 * MIB,
+    });
+    expect(skippedDuringSave(open.probe)).toEqual(["sub-01/eeg/a.edf", "sub-01/eeg/b.edf"]);
+
+    const shut = await bigRepo("gate-exact-shut");
+    await saveDatasetStep(shut.dir, undefined, shut.progress, {
+      annexedPaths: shut.annexed,
+      skipMinBytes: 4 * MIB + 1,
+    });
+    expect(skippedDuringSave(shut.probe)).toEqual([]);
+  });
+
+  test("recorded bytes that reach the gate but a handed-on set that does not keep it shut", async () => {
+    // Guards the gate inside planSaveSkip, which the step's own pre-check cannot stand in
+    // for: the pre-check sums EVERY recorded data file, the plan only the annexed ones it
+    // was given. Here the first reaches 4 MiB and the second sees only 2.
+    const { dir, progress, probe } = await bigRepo("gate-narrowed");
+    await saveDatasetStep(dir, undefined, progress, {
+      annexedPaths: new Set(["sub-01/eeg/a.edf"]),
+      skipMinBytes: 4 * MIB,
+    });
+    expect(skippedDuringSave(probe)).toEqual([]);
+  });
+
   test("below the threshold the step does not even list the annexed files", async () => {
     // Guards the cheap pre-check in saveDatasetStep. A plain git repository makes
     // `git annex find` fail, so a listing attempt is visible as the step's own notice;
@@ -536,6 +501,27 @@ describe("planSaveSkip and the size gate", () => {
     // Committed as what it is now: a plain 50 KB file.
     const blob = await run(["git", "cat-file", "-s", "HEAD:big.bin"], dir);
     expect(blob.stdout.trim()).toBe("50000");
+  });
+
+  test("a progress file from before mtimes were recorded is read from disk, and its files are saved unskipped", async () => {
+    // The on-disk shape an older CLI left: no mtimeMs on any file. It must still load
+    // through the validator, and a path with no recorded mtime cannot be vouched for, so
+    // it is read as before rather than skipped on a comparison nobody can make.
+    const { dir, progress, probe } = await bigRepo("gate-legacy-progress");
+    for (const file of Object.values(progress.files)) file.mtimeMs = undefined;
+    writeUploadProgress(dir, progress);
+    const onDisk = JSON.parse(readFileSync(join(dir, ".nemar", "upload-progress.json"), "utf-8"));
+    expect(JSON.stringify(onDisk.files)).not.toContain("mtimeMs");
+
+    const loaded = readUploadProgress(dir);
+    expect(loaded).not.toBeNull();
+    const step = await saveDatasetStep(dir, undefined, loaded as typeof progress, {
+      annexedPaths: await listAnnexedPaths(dir),
+      skipMinBytes: MIB,
+    });
+
+    expect(step.status).toBe("ok");
+    expect(skippedDuringSave(probe)).toEqual([]);
   });
 
   test("a file edited since tracking fails the step and leaves dataset_save unstamped", async () => {

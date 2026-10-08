@@ -15,7 +15,11 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { saveDataset, setAssumeUnchanged } from "../src/lib/git-annex/clone-push";
+import {
+  clearStaleAssumeUnchanged,
+  saveDataset,
+  setAssumeUnchanged,
+} from "../src/lib/git-annex/clone-push";
 import {
   commitCount,
   makeScratch,
@@ -137,6 +141,27 @@ describe("a save that cannot look for stale flags fails instead of saying it sav
     expect(healed.success).toBe(true);
     expect(await lastCommitPaths(dir)).toEqual(["edit.edf"]);
     expect(await tags(dir, "edit.edf")).toEqual({ "edit.edf": "H" });
+  });
+});
+
+describe("stale flags on file names git would read as patterns", () => {
+  test("names with brackets, stars, question marks, spaces and accents are cleared literally", async () => {
+    // Guards `--literal-pathspecs` on the classification step. Under git's own matching
+    // `star*.edf` also selects `starfish.edf`, and `[1] \u00e9.edf` is a character class that
+    // matches a different name than itself, so the clear would miss some flagged files
+    // and touch others.
+    const names = ["[1] \u00e9.edf", "star*.edf", "q?.edf", "sp ace.edf"];
+    const files: Record<string, number> = { "starfish.edf": 3_000 };
+    for (const n of names) files[n] = 3_000;
+    const dir = await trackedRepo("pattern-names", files);
+    expect((await saveDataset(dir, "first")).success).toBe(true);
+    expect((await setAssumeUnchanged(dir, names, true)).success).toBe(true);
+    expect(Object.values(await tags(dir, ...names)).every((t) => t === "h")).toBe(true);
+
+    const result = await clearStaleAssumeUnchanged(dir);
+
+    expect(result).toEqual({ cleared: 4, found: 4 });
+    expect(Object.values(await tags(dir)).every((t) => t === "H")).toBe(true);
   });
 });
 
