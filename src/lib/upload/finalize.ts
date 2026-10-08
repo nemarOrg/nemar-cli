@@ -18,6 +18,7 @@ import type { NemarMetadataPayload } from "../api/datasets.js";
 import { ApiError, errorDetail } from "../api/errors.js";
 import { printStepFailure } from "../cli-output.js";
 import { updateLastUpload } from "../dataset-config.js";
+import { displayNames } from "../display-name.js";
 import { type SkipContentCheckEntry, pushToGitHub, saveDataset } from "../git-annex/clone-push.js";
 import { shouldAnnex } from "../git-annex/policy.js";
 import {
@@ -241,7 +242,7 @@ export async function saveDatasetStep(
       if (stranded.length > 0) {
         clearStepCompleted(progress, "s3_upload");
         writeUploadProgress(absolutePath, progress);
-        const shown = stranded.slice(0, 5).join(", ");
+        const shown = displayNames(stranded.slice(0, 5));
         const more = stranded.length > 5 ? ` (and ${stranded.length - 5} more)` : "";
         printStepFailure(
           spinner,

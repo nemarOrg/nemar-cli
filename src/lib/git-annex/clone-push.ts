@@ -6,6 +6,7 @@
 import { spawnSync } from "node:child_process";
 import { statSync, writeSync } from "node:fs";
 import { join } from "node:path";
+import { displayNames } from "../display-name.js";
 import { getGitHubToken, resolveGitHubCloneAuth } from "./github.js";
 import { chunkAddTargets } from "./init.js";
 import { getCurrentBranch } from "./repo-state.js";
@@ -348,7 +349,7 @@ export function compareRecordedStat(
  * the commit. Exported for tests.
  */
 export function describeChangedSinceTracked(changed: string[], when: "before" | "during"): string {
-  const shown = changed.slice(0, 3).join(", ");
+  const shown = displayNames(changed.slice(0, 3));
   const more = changed.length > 3 ? ` (and ${changed.length - 3} more)` : "";
   if (when === "during") {
     return `${changed.length} annexed file(s) changed, disappeared or became unreadable while the save was running, so the commit does not match the tree: ${shown}${more}. Re-run the upload command to re-track them.`;
