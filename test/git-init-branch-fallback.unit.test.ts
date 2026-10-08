@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "bun";
 import { initDataset } from "../src/lib/git-annex/init";
+import { ensureLocalMainBranch } from "../src/lib/git-annex/repo-state";
 
 const REAL_GIT = Bun.which("git") ?? "";
 const AUTHOR = { name: "Test", email: "test@test.com" };
@@ -290,5 +291,91 @@ describe("initDataset on a modern git", () => {
       expect(hasBranch(dir, "trunk")).toBe(false);
     },
     30_000,
+  );
+});
+
+/**
+ * What the upload does next: `initializeAnnexDataset` initializes, then
+ * `ensureLocalMainBranch` makes sure the branch is main, renaming it if not.
+ */
+async function initThenEnsureMain(shim: Shim, dir: string): Promise<boolean> {
+  return withShim(shim, async () => {
+    const res = await initDataset(dir, { author: AUTHOR });
+    expect(res).toEqual({ success: true });
+    return ensureLocalMainBranch(dir, { yes: true });
+  });
+}
+
+describe("initDataset where the branch name was not chosen by git init", () => {
+  /** A plain repository with two commits on master, made by the real git. */
+  function seedMasterWithHistory(dir: string): void {
+    mkdirSync(dir, { recursive: true });
+    git(dir, "init", "-q", "-b", "master", ".");
+    for (const message of ["c1", "c2"]) {
+      git(
+        dir,
+        ...["-c", "user.name=t", "-c", "user.email=t@t"],
+        ...["commit", "-q", "--allow-empty", "-m", message],
+      );
+    }
+  }
+
+  test("a fresh directory is already on main, so the upload renames nothing", async () => {
+    const shim = oldGit(OLD_GIT_STDERR.english);
+    const dir = freshDir();
+    const renamedOrKept = await initThenEnsureMain(shim, dir);
+
+    expect(renamedOrKept).toBe(true);
+    expect(git(dir, "symbolic-ref", "--short", "HEAD").out).toStartWith("adjusted/main");
+    expect(subjects(dir, "refs/heads/main")).toEqual(["Initialize dataset"]);
+    expect(hasBranch(dir, "trunk")).toBe(false);
+    expect(hasBranch(dir, "master")).toBe(false);
+  });
+
+  test("a repository with history keeps it: HEAD is not re-pointed at a new root", async () => {
+    const shim = oldGit(OLD_GIT_STDERR.english);
+    const dir = freshDir();
+    seedMasterWithHistory(dir);
+    const renamedOrKept = await initThenEnsureMain(shim, dir);
+
+    expect(renamedOrKept).toBe(true);
+    // Plain init re-initialized the repository and HEAD was left where it was.
+    expect(initCalls(shim)).toEqual([`init -b main ${dir}`, `init ${dir}`]);
+    expect(headRepoints(shim)).toHaveLength(0);
+    // The history sits under the initial commit on master, three commits deep...
+    expect(subjects(dir, "refs/heads/master")).toEqual(["Initialize dataset", "c2", "c1"]);
+    // ...and the upload's rename path carries all of it to main. Re-pointing HEAD
+    // at an unborn main would have made main a one-commit root and stranded c1
+    // and c2 on master.
+    const onMain = subjects(dir, "refs/heads/main");
+    expect(onMain).toEqual(expect.arrayContaining(["Initialize dataset", "c2", "c1"]));
+    expect(Number(git(dir, "rev-list", "--count", "refs/heads/main").out)).toBeGreaterThanOrEqual(
+      3,
+    );
+  }, 30_000);
+
+  test.skipIf(!REAL_GIT_HAS_INITIAL_BRANCH)(
+    "the fallback ends where a modern git does on the same repository",
+    async () => {
+      // On a modern git `init -b main` is ignored for an existing repository
+      // (it warns "re-init: ignored --initial-branch=main"), so this is the
+      // reference outcome for the fallback to match.
+      const modernDir = freshDir();
+      seedMasterWithHistory(modernDir);
+      await initThenEnsureMain(loggingGit(), modernDir);
+
+      const oldDir = freshDir();
+      seedMasterWithHistory(oldDir);
+      await initThenEnsureMain(oldGit(OLD_GIT_STDERR.german), oldDir);
+
+      expect(subjects(oldDir, "refs/heads/main")).toEqual(subjects(modernDir, "refs/heads/main"));
+      expect(subjects(oldDir, "refs/heads/master")).toEqual(
+        subjects(modernDir, "refs/heads/master"),
+      );
+      expect(git(oldDir, "symbolic-ref", "HEAD").out).toBe(
+        git(modernDir, "symbolic-ref", "HEAD").out,
+      );
+    },
+    60_000,
   );
 });

@@ -78,6 +78,19 @@ async function initGitRepoOnMain(
   if (plain.exitCode !== 0) {
     return { success: false, error: plain.stderr.trim() || "Failed to initialize git repository" };
   }
+  // `-b` only names the branch of a repository that is being created. Modern git
+  // ignores it for an existing one ("re-init: ignored --initial-branch=main") and
+  // HEAD stays where it was, so the later branch check renames that branch to
+  // main with its history intact. Re-pointing a HEAD that resolves would instead
+  // strand the history on the old branch and make main a one-commit root. Only
+  // an unborn HEAD is ours to name.
+  const resolved = await runCommand(["git", "rev-parse", "-q", "--verify", "HEAD"], {
+    cwd: path,
+    ...envOpt,
+  });
+  if (resolved.exitCode === 0) {
+    return { success: true };
+  }
   const head = await runCommand(["git", "symbolic-ref", "HEAD", "refs/heads/main"], {
     cwd: path,
     ...envOpt,
