@@ -175,6 +175,26 @@ const subjects = (dir: string, ref: string): string[] =>
 const hasBranch = (dir: string, name: string): boolean =>
   git(dir, "show-ref", "--verify", "--quiet", `refs/heads/${name}`).exit === 0;
 
+/**
+ * An existing repository whose HEAD names `branch`, with one empty commit per
+ * message, made by the real git under the test's config. With no messages the
+ * branch is unborn. Plain `git init` plus `symbolic-ref` rather than `init -b`,
+ * so the seed does not depend on the git version under test; `gitOk` throws on
+ * any failing step, so a failing seed is not mistaken for a failing fallback.
+ */
+function seed(dir: string, branch: string, ...messages: string[]): void {
+  mkdirSync(dir, { recursive: true });
+  gitOk(dir, "init", "-q", ".");
+  gitOk(dir, "symbolic-ref", "HEAD", `refs/heads/${branch}`);
+  for (const message of messages) {
+    gitOk(
+      dir,
+      ...["-c", "user.name=t", "-c", "user.email=t@t"],
+      ...["commit", "-q", "--allow-empty", "-m", message],
+    );
+  }
+}
+
 let dirCount = 0;
 function freshDir(): string {
   return join(root, `repo-${dirCount++}`);
@@ -410,26 +430,6 @@ async function initThenEnsureMain(shim: Shim, dir: string): Promise<boolean> {
   });
 }
 
-/**
- * A plain repository with two commits on master, made by the real git under the
- * test's config. Plain `git init` plus `symbolic-ref` rather than `init -b`, so
- * the seed does not depend on the git version under test; every step must
- * succeed, so a failing seed is not mistaken for a failing fallback.
- */
-function seedMasterWithHistory(dir: string): void {
-  mkdirSync(dir, { recursive: true });
-  gitOk(dir, "init", "-q", ".");
-  gitOk(dir, "symbolic-ref", "HEAD", "refs/heads/master");
-  for (const message of ["c1", "c2"]) {
-    gitOk(
-      dir,
-      ...["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"],
-      ...["commit", "-q", "--allow-empty", "-m", message],
-    );
-  }
-  expect(gitOk(dir, "rev-list", "--count", "refs/heads/master")).toBe("2");
-}
-
 describe("initDataset where the branch name was not chosen by git init", () => {
   test("a fresh directory is already on main, so the upload renames nothing", async () => {
     const shim = oldGit(OLD_GIT_STDERR.english);
@@ -446,7 +446,7 @@ describe("initDataset where the branch name was not chosen by git init", () => {
   test("a repository with history keeps it: HEAD is not re-pointed at a new root", async () => {
     const shim = oldGit(OLD_GIT_STDERR.english);
     const dir = freshDir();
-    seedMasterWithHistory(dir);
+    seed(dir, "master", "c1", "c2");
     const renamedOrKept = await initThenEnsureMain(shim, dir);
 
     expect(renamedOrKept).toBe(true);
@@ -469,7 +469,7 @@ describe("initDataset where the branch name was not chosen by git init", () => {
     // (it warns "re-init: ignored --initial-branch=main"), so this is the
     // reference outcome for the fallback to match.
     const modernDir = freshDir();
-    seedMasterWithHistory(modernDir);
+    seed(modernDir, "master", "c1", "c2");
     await initThenEnsureMain(makeShim(), modernDir);
     // Equal because both kept the history, not because both came out empty.
     expect(subjects(modernDir, "refs/heads/main")).toEqual(
@@ -477,7 +477,7 @@ describe("initDataset where the branch name was not chosen by git init", () => {
     );
 
     const oldDir = freshDir();
-    seedMasterWithHistory(oldDir);
+    seed(oldDir, "master", "c1", "c2");
     await initThenEnsureMain(oldGit(OLD_GIT_STDERR.german), oldDir);
 
     expect(subjects(oldDir, "refs/heads/main")).toEqual(subjects(modernDir, "refs/heads/main"));
@@ -488,31 +488,11 @@ describe("initDataset where the branch name was not chosen by git init", () => {
   }, 60_000);
 });
 
-/** An existing repository whose HEAD names `master`, a branch that has no commits yet. */
-function seedUnbornMaster(dir: string): void {
-  mkdirSync(dir, { recursive: true });
-  gitOk(dir, "init", "-q", ".");
-  gitOk(dir, "symbolic-ref", "HEAD", "refs/heads/master");
-}
-
-/** Unborn master next to a populated develop: HEAD is unborn, the repository is not empty. */
-function seedUnbornMasterOverDevelop(dir: string): void {
-  mkdirSync(dir, { recursive: true });
-  gitOk(dir, "init", "-q", ".");
-  gitOk(dir, "symbolic-ref", "HEAD", "refs/heads/develop");
-  gitOk(
-    dir,
-    ...["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"],
-    ...["commit", "-q", "--allow-empty", "-m", "d1"],
-  );
-  gitOk(dir, "symbolic-ref", "HEAD", "refs/heads/master");
-}
-
 describe("initDataset where HEAD names a branch with no commits", () => {
   test("an existing but unborn master is named main at once, with one re-point", async () => {
     const shim = oldGit(OLD_GIT_STDERR.english);
     const dir = freshDir();
-    seedUnbornMaster(dir);
+    seed(dir, "master");
     await initThenEnsureMain(shim, dir);
 
     expect(headRepoints(shim)).toHaveLength(1);
@@ -531,7 +511,8 @@ describe("initDataset where HEAD names a branch with no commits", () => {
   ] as const) {
     test(`${name}: unborn master over a populated develop leaves develop alone`, async () => {
       const dir = freshDir();
-      seedUnbornMasterOverDevelop(dir);
+      seed(dir, "develop", "d1");
+      gitOk(dir, "symbolic-ref", "HEAD", "refs/heads/master");
       await initThenEnsureMain(make(), dir);
 
       expect(subjects(dir, "refs/heads/develop")).toEqual(["d1"]);
@@ -545,7 +526,7 @@ describe("initDataset where HEAD cannot be told apart from unborn", () => {
   test("a corrupt branch ref is refused with git's error and HEAD is left alone", async () => {
     const shim = oldGit(OLD_GIT_STDERR.english);
     const dir = freshDir();
-    seedMasterWithHistory(dir);
+    seed(dir, "master", "c1", "c2");
     // The state a modern git refuses on at its first commit ("reference broken").
     writeFileSync(join(dir, ".git", "refs", "heads", "master"), "not-a-sha\n");
 
@@ -586,7 +567,7 @@ describe("initDataset where HEAD cannot be told apart from unborn", () => {
     // "does not resolve" (exit 1) while the branch ref it names exists.
     const shim = oldGit(OLD_GIT_STDERR.english, answer(REV_PARSE_HEAD, 1, ""));
     const dir = freshDir();
-    seedMasterWithHistory(dir);
+    seed(dir, "master", "c1", "c2");
     const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
 
     expect(res.success).toBe(false);
