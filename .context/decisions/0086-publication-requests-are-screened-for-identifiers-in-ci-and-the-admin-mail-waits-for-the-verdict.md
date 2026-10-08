@@ -164,21 +164,28 @@ The admin email, the status views and the requester's blocked-request mail there
 
 ## Amendment 2026-10-07 (#1646): a CI-pending refusal is a state the CLI reports, not an error
 
-A request made before the dataset's BIDS validation has concluded is refused with `bids_validation_pending` or `bids_validation_in_progress`, and that refusal is recorded: the request row is `blocked`, and the blocked-request sweep re-reads the latest run and unblocks it when CI passes.
+A request made before the dataset's BIDS validation has concluded is refused with `bids_validation_pending` or `bids_validation_in_progress`, and that refusal is recorded: the request row is `blocked`, and the blocked-request sweep (`sweepBlockedBidsValidationRequests`) re-reads the latest run and unblocks it when CI passes.
+Unblocking starts the identifier screen exactly as a re-request would, so the request carries on by itself.
+The sweep runs today from the daily scheduled cleanup (03:00 UTC), so a recorded request can wait up to a day, and a run takes at most 50 rows and releases at most 10 requests, the rest waiting for the next run.
+The cadence is the server's to change and is not part of this decision, which is why the CLI promises no time.
+(The half-hourly sweep earlier in this ADR is another one: it covers screens that did not report.)
+
 Both places that decide a request put it through the submission minimums of ADR 0026 and, for an anonymous request, the blind check of ADR 0065, with one function (`checkSubmissionGate`): the request route does so even when CI is the only thing blocking (a missing minimum then replaces the pending reason and is answered at once as `min_requirements_failed` with its reasons), and the sweep does so before it releases a request, because the depositor may have edited the data since.
 A request that fails is re-blocked as `min_requirements_failed` and stops being a sweep candidate until the depositor requests again; an anonymous blind that cannot be read is left blocked for the next run and counted as an error, never released.
 OpenNeuro imports and exemplars keep their exemption, except that an anonymous request is always checked.
-A request that passes is unblocked, and unblocking starts the identifier screen exactly as a re-request would, so the request carries on by itself.
-The refusal means "recorded, waiting", and the CLI used to print it as a failure and exit 1, which sent depositors into retry loops of their own.
+
+The refusal means "recorded, waiting".
+Printed as a failure with exit 1, it sent depositors into retry loops of their own.
 That holds only when GitHub answered.
 When the readiness check itself cannot run (no credential, a failed workflow deploy, an outage) the request is still recorded, but the route answers 503 `ci_check_unavailable` with no block reason instead of the pending 422, because the sweep makes the same calls and would fail the same way, so nothing promises that the request carries on.
 The block-reason vocabulary is shared with the website and is not extended for it.
 
-The maintainer decided that `nemar dataset publish request` reports it in the info style and exits 0.
-A failed validation (`bids_validation_failed`), a missing minimum, a request already open, an identifier finding and every other refusal keep their text and exit 1.
-The CLI does not wait, retry or poll: a `--wait` option that re-requested on a timer was built first and removed.
-The depositor follows CI with `nemar dataset ci <id>` and requests again if they would rather not wait for the sweep, and the upload's success output names both commands.
-The text promises no time, because the sweep's cadence is the server's and is not a contract.
-A re-request restates the anonymous flag, so the command printed for an anonymous depositor carries `--anonymous`.
+The maintainer decided that `nemar dataset publish request` reports a CI-pending refusal in the info style and exits 0, and that `nemar dataset publish status` shows a request in that state the same way.
+A failed validation (`bids_validation_failed`), a missing minimum, a missing owner name, a request already open and every other refusal keep their text and exit 1.
+An identifier finding is never a refusal of this command: the request is accepted, the screen runs after it, and a finding blocks the request later, which `nemar dataset publish status` and the requester's mail report.
+The CLI does not wait, retry or poll: the server already records the request and owns the transition, and every re-request repeats the GitHub readiness check and rewrites the row, so a client-side loop (an earlier `--wait` re-requested every minute for up to 24 hours) is rejected.
+The depositor checks validation with `nemar dataset ci <id>` and requests again if they would rather not wait for the sweep, and the upload's success output names both commands.
+A re-request restates the anonymous flag, so the command printed for an anonymous depositor carries `--anonymous`, and a request that asked for anonymity and was not recorded as anonymous exits 1.
+If validation fails, the sweep relabels the request `bids_validation_failed` and mails nobody, so the text says where to look.
 
-The pending state is `isCiPendingBlock` in `src/lib/publish-pending.ts`, guarded through the real CLI by `test/publish-request-pending-cli.test.ts`.
+The pending state is `isCiPendingBlock` in `src/lib/publish-pending.ts`, guarded through the real CLI by `test/publish-pending-cli.test.ts` and `test/publish-status-pending-cli.test.ts`.
