@@ -1,0 +1,196 @@
+# Dataset pull-request review (ADR 0092)
+#
+# Deploy to: nemarDatasets/.github/.github/workflows/run-pr-review.yml
+#
+# The NEMAR Worker receives every pull_request event for a dataset repository (forks included),
+# decides whether to spend a review on it, and dispatches this workflow with the review's
+# coordinates. This job reads the change as git data, asks Claude Haiku 5.5 (high effort) three
+# questions about it, and posts a closed-vocabulary report back to the Worker, which derives the
+# verdict and publishes the check-run and the pull-request comment.
+#
+# WHAT THIS JOB CAN AND CANNOT DO. It runs in nemarDatasets, which is where the federation rule
+# trusts it, and it is the only place an Anthropic identity is minted. It holds a read-only token
+# for ONE dataset repository (contents and pull requests: read) and the federated identity. It
+# holds no credential that can write to GitHub or to NEMAR; its only way to be heard is the
+# one-shot callback token the Worker signed for this review.
+#
+# NOTHING FROM THE PULL REQUEST IS EXECUTED. The repository is fetched with no working tree
+# (init + fetch, never checkout), so no hook, filter or script in the pull request can run, and a
+# fork's commits are read through the pull ref on the BASE repository exactly like a branch's. The
+# only code that runs is checked out of nemarOrg/nemar-cli main into ./tool.
+#
+# THE DISPATCH PAYLOAD IS UNTRUSTED. The shims in the dataset repositories hold the credentials
+# to send any dispatch, so every field is validated here, reaches the shell only through env, and
+# is cross-checked against GitHub's own record of the pull request (it must still be open, still
+# target main, and still be at head_sha) before the model is called.
+#
+# ORG VARIABLES (nemarDatasets, visible to this repository), the identifiers the federation rule
+# was created with. They name the rule; the rule's own conditions are what authorize this job:
+#   ANTHROPIC_FEDERATION_RULE_ID  ANTHROPIC_ORGANIZATION_ID
+#   ANTHROPIC_SERVICE_ACCOUNT_ID  ANTHROPIC_WORKSPACE_ID
+# The rule should accept only this repository's default branch and this workflow file
+# (subject repo:nemarDatasets/.github:ref:refs/heads/main, job_workflow_ref
+# nemarDatasets/.github/.github/workflows/run-pr-review.yml@refs/heads/main).
+#
+# THIS LOG IS PUBLIC. Nothing here prints a dataset's content, a pull request's text, or the
+# model's output; the script prints a review id and a fixed word.
+
+name: Run PR Review
+
+on:
+  repository_dispatch:
+    types: [run-pr-review]
+
+permissions: {}
+
+# A newer commit on the same pull request supersedes this run. The cancelled run never reports,
+# and the Worker's watchdog marks its check as undecided; the newer review is the one that counts.
+concurrency:
+  group: pr-review-${{ github.event.client_payload.dataset_id }}-${{ github.event.client_payload.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: Review
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      DATASET_ID: ${{ github.event.client_payload.dataset_id }}
+      PR_NUMBER: ${{ github.event.client_payload.pr_number }}
+      HEAD_SHA: ${{ github.event.client_payload.head_sha }}
+      REVIEW_ID: ${{ github.event.client_payload.review_id }}
+      ENVIRONMENT: ${{ github.event.client_payload.environment }}
+      PR_REVIEW_CALLBACK_TOKEN: ${{ github.event.client_payload.callback_token }}
+    steps:
+      - name: Validate the dispatch
+        run: |
+          set -euo pipefail
+          [[ "$DATASET_ID" =~ ^(nm|xx|on)[0-9]{6}$ ]] || { echo "::error::malformed dataset id"; exit 1; }
+          [[ "$PR_NUMBER" =~ ^[0-9]{1,9}$ ]] || { echo "::error::malformed pull request number"; exit 1; }
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::malformed head sha"; exit 1; }
+          [[ "$REVIEW_ID" =~ ^[0-9]{1,12}$ ]] || { echo "::error::malformed review id"; exit 1; }
+          [[ "$ENVIRONMENT" == "production" || "$ENVIRONMENT" == "dev" ]] || { echo "::error::malformed environment"; exit 1; }
+          [[ -n "$PR_REVIEW_CALLBACK_TOKEN" ]] || { echo "::error::no callback token"; exit 1; }
+          echo "::add-mask::$PR_REVIEW_CALLBACK_TOKEN"
+
+      - name: Check out the review script
+        uses: actions/checkout@v4
+        with:
+          repository: nemarOrg/nemar-cli
+          ref: main
+          path: tool
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install the review script's dependencies
+        working-directory: tool
+        run: bun install --frozen-lockfile
+
+      # Fail early and say why, rather than let the SDK fail to find a credential. The Worker turns
+      # this into a check that says the review service could not sign in.
+      - name: Check the federation configuration
+        working-directory: tool
+        env:
+          RULE: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          ORG: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          ACCOUNT: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          WORKSPACE: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
+        run: |
+          if [[ -z "$RULE" || -z "$ORG" || -z "$ACCOUNT" || -z "$WORKSPACE" ]]; then
+            echo "::error::the ANTHROPIC_* organization variables are not all set"
+            bun run scripts/ci/pr-review.ts fail \
+              --review-id "$REVIEW_ID" --dataset "$DATASET_ID" --environment "$ENVIRONMENT" --error auth_failed
+            exit 1
+          fi
+
+      # Read-only, one repository. This token is used by the next two steps and by no other.
+      - name: Mint a read-only token for the dataset repository
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.NEMAR_APP_ID }}
+          private-key: ${{ secrets.NEMAR_APP_PRIVATE_KEY }}
+          owner: nemarDatasets
+          repositories: ${{ env.DATASET_ID }}
+          permission-contents: read
+          permission-pull-requests: read
+
+      # init + fetch, never checkout: there is no working tree, so nothing in the pull request can
+      # run. The base is main's tip; the head is the pull ref on THIS repository, which is where
+      # GitHub puts a fork's commits too.
+      - name: Fetch the pull request as git data
+        id: fetch
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          repo="$RUNNER_TEMP/repo"
+          mkdir -p "$repo"
+          cd "$repo"
+          git init -q .
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          git config core.hooksPath /dev/null
+          git config extensions.partialClone origin
+          git remote add origin "https://github.com/nemarDatasets/${DATASET_ID}.git"
+          git config http.https://github.com/.extraheader "AUTHORIZATION: basic $auth"
+          git fetch -q --no-tags --filter=blob:none origin \
+            "+refs/heads/main:refs/remotes/origin/main" \
+            "+refs/pull/${PR_NUMBER}/head:refs/remotes/pr/head"
+          echo "base=$(git rev-parse refs/remotes/origin/main)" >> "$GITHUB_OUTPUT"
+          echo "fetched=$(git rev-parse refs/remotes/pr/head)" >> "$GITHUB_OUTPUT"
+
+      - name: Read the pull request from the API
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/nemarDatasets/${DATASET_ID}/pulls/${PR_NUMBER}" > "$RUNNER_TEMP/pr.json"
+
+      # Minted last, so it has not aged when the script exchanges it. The audience is the one the
+      # federation rule expects.
+      - name: Fetch the GitHub OIDC token for Anthropic
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const token = await core.getIDToken('https://api.anthropic.com');
+            core.setSecret(token);
+            fs.writeFileSync(`${process.env.RUNNER_TEMP}/anthropic-oidc.jwt`, token, { mode: 0o600 });
+
+      # The model step: the federated identity and the callback token, and no GitHub credential.
+      - name: Review
+        working-directory: tool
+        env:
+          BASE_SHA: ${{ steps.fetch.outputs.base }}
+          FETCHED_SHA: ${{ steps.fetch.outputs.fetched }}
+          ANTHROPIC_FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          ANTHROPIC_ORGANIZATION_ID: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          ANTHROPIC_WORKSPACE_ID: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
+          ANTHROPIC_IDENTITY_TOKEN_FILE: ${{ runner.temp }}/anthropic-oidc.jwt
+        run: |
+          bun run scripts/ci/pr-review.ts review \
+            --repo-dir "$RUNNER_TEMP/repo" \
+            --base "$BASE_SHA" \
+            --head "$HEAD_SHA" \
+            --fetched-head "$FETCHED_SHA" \
+            --pr-json "$RUNNER_TEMP/pr.json" \
+            --review-id "$REVIEW_ID" \
+            --dataset "$DATASET_ID" \
+            --environment "$ENVIRONMENT"
+
+      # If anything above failed before the script could report, say so. A report already
+      # delivered makes this a harmless 401; a cancelled run never gets here, and the Worker's
+      # watchdog turns its check into one that needs a person.
+      - name: Report that the job failed
+        if: failure()
+        working-directory: tool
+        run: |
+          bun run scripts/ci/pr-review.ts fail \
+            --review-id "$REVIEW_ID" --dataset "$DATASET_ID" --environment "$ENVIRONMENT" --error workflow_failed
