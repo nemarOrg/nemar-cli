@@ -49,6 +49,9 @@ export async function isGitAnnexDataset(path: string): Promise<boolean> {
  */
 const GIT_USAGE_ERROR_EXIT = 129;
 
+/** What to report when a failed git call said nothing: its exit status. */
+const exitNote = (r: { exitCode: number }): string => `exit ${r.exitCode}`;
+
 type HeadState = { kind: "resolves" } | { kind: "unborn" } | { kind: "unreadable"; reason: string };
 
 /**
@@ -73,7 +76,7 @@ async function readHeadState(
   if (resolved.exitCode !== 1) {
     return {
       kind: "unreadable",
-      reason: `cannot read HEAD: ${resolved.stderr.trim() || `exit ${resolved.exitCode}`}`,
+      reason: `cannot read HEAD: ${resolved.stderr.trim() || exitNote(resolved)}`,
     };
   }
   // Exit 1: HEAD does not resolve. Find the branch it names...
@@ -83,7 +86,7 @@ async function readHeadState(
     return {
       kind: "unreadable",
       reason: `HEAD does not resolve and its branch cannot be read: ${
-        target.stderr.trim() || `exit ${target.exitCode}`
+        target.stderr.trim() || exitNote(target)
       }`,
     };
   }
@@ -98,7 +101,7 @@ async function readHeadState(
       exists.exitCode === 0
         ? `HEAD does not resolve although ${ref} exists`
         : `HEAD does not resolve and ${ref} cannot be checked: ${
-            exists.stderr.trim() || `exit ${exists.exitCode}`
+            exists.stderr.trim() || exitNote(exists)
           }`,
   };
 }
@@ -125,12 +128,20 @@ async function initGitRepoOnMain(
   if (withBranch.exitCode !== GIT_USAGE_ERROR_EXIT) {
     return {
       success: false,
-      error: withBranch.stderr.trim() || "Failed to initialize git repository",
+      error:
+        withBranch.stderr.trim() || `Failed to initialize git repository (${exitNote(withBranch)})`,
     };
   }
+  // From here on a failure came after the fallback began. Say so: callers print
+  // the text under "Failed to initialize git-annex dataset", where a bare git
+  // error such as "cannot lock ref 'HEAD'" reads like a git-annex problem.
+  const fallback = `git init -b main was rejected (exit ${GIT_USAGE_ERROR_EXIT}); `;
   const plain = await runCommand(["git", "init", "--", path], envOpt);
   if (plain.exitCode !== 0) {
-    return { success: false, error: plain.stderr.trim() || "Failed to initialize git repository" };
+    return {
+      success: false,
+      error: `${fallback}plain git init failed: ${plain.stderr.trim() || exitNote(plain)}`,
+    };
   }
   // `-b` only names the branch of a repository that is being created. Modern git
   // ignores it for an existing one ("re-init: ignored --initial-branch=main") and
@@ -141,7 +152,7 @@ async function initGitRepoOnMain(
   // ours to rename nor safe to guess about.
   const state = await readHeadState(path, envOpt);
   if (state.kind === "unreadable") {
-    return { success: false, error: state.reason };
+    return { success: false, error: `${fallback}${state.reason}` };
   }
   if (state.kind === "resolves") {
     return { success: true };
@@ -153,7 +164,7 @@ async function initGitRepoOnMain(
   if (head.exitCode !== 0) {
     return {
       success: false,
-      error: head.stderr.trim() || "Failed to set the initial branch to main",
+      error: `${fallback}could not point HEAD at main: ${head.stderr.trim() || exitNote(head)}`,
     };
   }
   return { success: true };
