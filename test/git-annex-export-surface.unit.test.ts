@@ -51,9 +51,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "ensureGitAnnexInitialized",
     "gitAnnexAdd",
     "initDataset",
-    "initGitRepoOnMain",
     "isGitAnnexDataset",
-    "isInitialBranchUnsupported",
   ],
   policy: [
     "ANNEX_DATA_EXTENSIONS",
@@ -164,9 +162,6 @@ const INTERNAL_WIRING = [
   "ADD_CHUNK_MAX_PATHS",
   "ADD_CHUNK_MAX_BYTES",
   "isVersionCompatible",
-  // git < 2.28 fallback for `git init -b main`: used by initDataset, unit tested.
-  "initGitRepoOnMain",
-  "isInitialBranchUnsupported",
   // policy.ts postdates the split (#1158). Its surface is consumed by sibling
   // git-annex modules and by import-openneuro, never by the CLI directly, so
   // none of it belongs to the pre-split monolith surface below.
