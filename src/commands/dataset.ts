@@ -191,7 +191,7 @@ import {
   isCiPendingBlock,
   parseWaitOption,
   requestWaitingForCi,
-} from "../lib/publish-wait.js";
+} from "../lib/publish-pending.js";
 import { renderSnippetLine, truncateTokenList } from "../lib/render/snippet.js";
 import { resolveSandboxCompletion } from "../lib/sandbox-status.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";

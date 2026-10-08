@@ -20,7 +20,7 @@ import {
   isCiPendingBlock,
   parseWaitOption,
   requestWaitingForCi,
-} from "../src/lib/publish-wait";
+} from "../src/lib/publish-pending";
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -69,7 +69,7 @@ function startCaptureServer(body: unknown, status = 200): CaptureServer {
 let configDir: string;
 
 beforeEach(() => {
-  configDir = mkdtempSync(join(tmpdir(), "nemar-publish-wait-cli-"));
+  configDir = mkdtempSync(join(tmpdir(), "nemar-publish-pending-cli-"));
   writeFileSync(
     join(configDir, "config.json"),
     JSON.stringify({
