@@ -12,6 +12,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { saveDataset } from "../src/lib/git-annex/clone-push";
 import { gitAnnexAdd } from "../src/lib/git-annex/init";
 import { isCaseVariantData, shouldAnnex } from "../src/lib/git-annex/policy";
 import { findDataFilesNotAnnexed, trackDataFiles } from "../src/lib/upload/transfer";
@@ -156,6 +157,29 @@ describe("trackDataFiles", () => {
     const annexed = await annexedSet(dir);
     for (const f of FIXTURES) expect(annexed.has(f.path), f.path).toBe(true);
     expect(findDataFilesNotAnnexed(toTargets(), annexed)).toEqual({ blocking: [], small: [] });
+  });
+
+  test("the forced files are still pointers after the save, not converted back to git blobs", async () => {
+    // The save's `git add -A` runs git-annex's clean filter, which re-reads
+    // `annex.largefiles`; a forced file that the expression would not annex must keep the
+    // key it was given. Measured here rather than assumed, because the other way round
+    // would commit the recording to git after the plan promised S3.
+    const dir = await repoWithFixtures("track-save");
+    expect(
+      (
+        await trackDataFiles(
+          dir,
+          FIXTURES.map((f) => f.path),
+        )
+      ).success,
+    ).toBe(true);
+    expect((await saveDataset(dir, "upload")).success).toBe(true);
+
+    for (const f of FIXTURES) {
+      const blob = await run(["git", "cat-file", "-p", `HEAD:${f.path}`], dir);
+      expect(blob.stdout.startsWith("/annex/objects/"), f.path).toBe(true);
+    }
+    expect(await annexedSet(dir)).toEqual(new Set(FIXTURES.map((f) => f.path)));
   });
 
   test("a re-run is idempotent: same annexed set, no change to the tree", async () => {

@@ -157,3 +157,15 @@ Forcing only the case variants keeps the not-annexed check meaningful: an inheri
 The check itself fires only on a file git-annex had no name-based reason to refuse and did not annex anyway.
 Re-running is idempotent: `git annex add` skips an annexed, unmodified file.
 `test/upload-track-data.unit.test.ts` runs both readers against real git-annex.
+
+### Known gap, measured and not fixed here: the save annexes by size too
+
+The Context above says `git add -A` "does **not** honour `annex.largefiles` in these repos (no `* filter=annex` in `.gitattributes`)".
+That holds for `.gitattributes` and not for the repository: `git annex init` writes `* filter=annex` to `.git/info/attributes`, so the save's `git add -A` runs git-annex's clean filter, which does annex by `annex.largefiles`.
+Measured against git-annex 10.20260901: a plain save of fresh `BIG.JSON`, `BIG.TSV` and `unknown.xyz` files of 200 KB annexed all three.
+For a case variant of a METADATA glob this is the mirror image of the section above.
+The CLI folds case, so it calls `BIG.JSON` metadata and never hands it to `git annex add`; git-annex's case-sensitive `exclude=*.json` does not match it, so the size clause annexes it at the save, after the S3 step has run.
+Its content is then in the local annex only, and the commit carries a pointer nothing can resolve.
+It needs an uppercase metadata extension over the threshold, which BIDS validation should reject, so it is rare.
+A post-save `git annex find --not --in nemar-s3` would catch it (0.2 s at 600 annexed files, 3.7 s at 10,000), but a re-run of the upload does not copy a file that no add target names, so a failing check could not be cleared by running the upload again.
+To be filed as a follow-up of #1642.
