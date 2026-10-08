@@ -22,8 +22,7 @@ import { join } from "node:path";
 import { annexKeyDeclaredSize, isKeyPresentAtDeclaredSize } from "../../shared/annex-key.js";
 import { runCommand } from "./git-annex/run-command.js";
 
-// Defined once in shared/annex-key.ts, which the Worker's import-integrity.ts
-// shares; re-exported so the CLI's existing importers keep their path.
+// Re-exported from shared/annex-key.ts so existing importers keep their path.
 export { annexKeyDeclaredSize, isKeyPresentAtDeclaredSize };
 
 /** A parsed S3 location. `region` is undefined when the URL didn't encode one. */
