@@ -57,6 +57,14 @@ import { extractRepoName } from "./shared";
 import type { DatasetsRouter } from "./shared";
 
 /**
+ * What a depositor is told when the BIDS-validation readiness check could not
+ * run at all (token, workflow deploy, GitHub outage). Not a block reason: see
+ * the 503 below.
+ */
+const CI_CHECK_UNAVAILABLE_MESSAGE =
+  "NEMAR could not check BIDS validation status right now (a temporary GitHub or credential problem). Your request is recorded; try again later or contact an administrator.";
+
+/**
  * User-facing message for each publication block reason.
  *
  * Keyed by the shared vocabulary (`PublicationBlockReason`) so a reason added
@@ -65,14 +73,6 @@ import type { DatasetsRouter } from "./shared";
  * takes the free-TEXT column value (legacy rows exist) and degrades to a
  * generic sentence for anything it does not recognise.
  */
-/**
- * What a depositor is told when the BIDS-validation readiness check could not
- * run at all (token, workflow deploy, GitHub outage). Not a block reason: see
- * the 503 below.
- */
-const CI_CHECK_UNAVAILABLE_MESSAGE =
-  "NEMAR could not check BIDS validation status right now (a temporary GitHub or credential problem). Your request is recorded; try again later or contact an administrator.";
-
 const BLOCK_MESSAGES: Record<PublicationBlockReason, string> = {
   bids_validation_failed:
     "BIDS validation is failing on your dataset. Please check the repository CI and fix validation errors, then re-request publication.",
@@ -391,23 +391,10 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       console.warn(`[publish-request] Skipping CI checks for ${datasetId}: no GitHub repo`);
     }
 
-    // Deterministic submission minimums for NATIVE submissions (#1087, ADR
-    // 0026): Name >= 25 chars, non-placeholder Authors, ethics statement.
-    // OpenNeuro imports and exemplars passed an upstream review and are
-    // exempt. Fail-open on a fetch error: the CI check above already proved
-    // GitHub reachable, so a later hiccup is logged and left to the admin
-    // review rather than adding a spurious block.
-    //
-    // #1408 inverts BOTH of those exceptions for an anonymous release, because
-    // for it this gate is the blind check, not a quality check. The rule it
-    // enforces is that `dataset_description.json` -- git-tracked, and served
-    // publicly from the data plane -- does not still name the depositor who
-    // asked to be concealed. Failing open on a GitHub hiccup would mean
-    // granting a blind nobody verified, and an upstream review (OpenNeuro, an
-    // exemplar) says a dataset was curated, never that it was blinded. So for
-    // an anonymous release the check always runs and an infrastructure failure
-    // BLOCKS. The rules live in `checkSubmissionGate`, shared with the sweep
-    // that later moves a blocked request on.
+    // Submission minimums (#1087, ADR 0026) and the anonymity blind check (ADR
+    // 0065). The rules, their exemptions and what an unreadable file means are
+    // in `checkSubmissionGate`, which the sweep that later moves a blocked
+    // request on calls too.
     //
     // It runs when nothing blocks the request AND when the only block is that
     // CI has not finished. The second case is the common one (a request made
@@ -510,7 +497,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     // this is answered as the temporary fault it is, with no block reason (the
     // reason vocabulary is shared with the website and is deliberately not
     // extended here). The CLI prints the message and exits 1.
-    if (blocked && ciCheckFailed) {
+    if (ciCheckFailed) {
       return c.json(
         {
           error: CI_CHECK_UNAVAILABLE_CODE,
