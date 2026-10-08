@@ -16,7 +16,6 @@
 
 import { describe, expect, test } from "bun:test";
 import {
-  annexChunkKey,
   annexKeyDeclaredSize,
   annexKeyFieldSize,
   isKeyPresentAtDeclaredSize,
@@ -113,16 +112,15 @@ describe("key grammar", () => {
     });
   });
 
-  test("annexChunkKey writes the name parseChunkKey reads", () => {
-    expect(annexChunkKey("SHA256E-s982--ba3d.vhdr", GiB, 1)).toBe(
-      "SHA256E-s982-S1073741824-C1--ba3d.vhdr",
-    );
-    expect(annexChunkKey("WORM-s10-m17--rec.edf", 4, 3)).toBe("WORM-s10-m17-S4-C3--rec.edf");
-    expect(annexChunkKey("git:abc", 4, 1)).toBeNull();
-    // Round trip, including a name that itself contains -- and chunk-shaped text.
+  test("a key whose name contains -- and chunk-shaped text is found by its chunks", () => {
+    // The key is split at the FIRST --, and every chunk name is written back with
+    // the whole name after it.
     const key = "SHA256E-s5--a--b-S2-C1--c.edf";
-    const name = annexChunkKey(key, 4, 2) as string;
-    expect(parseChunkKey(name)).toEqual({ baseKey: key, chunkSize: 4, chunkNumber: 2 });
+    const chunks = new Map([
+      ["SHA256E-s5-S4-C1--a--b-S2-C1--c.edf", 4],
+      ["SHA256E-s5-S4-C2--a--b-S2-C1--c.edf", 1],
+    ]);
+    expect(isKeyPresentAtDeclaredSize(key, chunks)).toBe(true);
   });
 
   test("annexKeyFieldSize reads -s past -m, from the fields only", () => {
