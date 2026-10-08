@@ -138,7 +138,7 @@ The "100 kB" above is literally 100,000 bytes, and the policy module now says so
 git-annex reads the `kb` in `largerthan=100kb` as SI (1 kB = 1000 bytes), not as 1024.
 With the production expression, files of 99,999 and 100,000 bytes stay in git, and files of 100,001, 102,399, 102,400 and 102,401 bytes annex.
 With the exact-bytes form `largerthan=102400` the boundary moves to 102,400, which is what `ANNEX_SIZE_THRESHOLD_BYTES = 100 * 1024` implied.
-The module therefore disagreed with git-annex for every file of 100,001 to 102,400 bytes: `shouldAnnex` called it small while git-annex annexed it, and the upload step reported it as stored in git when it was not.
+The module therefore disagreed with git-annex for every file of 100,001 to 102,400 bytes: `shouldAnnex` called it small while git-annex annexed it, and the file was never handed to `git annex add`, so the save annexed it by size after the copy, which is the known gap below.
 The disagreement was invisible because the expression was rendered as `largerthan=${bytes / 1024}kb`, so both sides printed "100".
 
 `ANNEX_SIZE_THRESHOLD_BYTES` is now 100_000 and the expression carries the exact byte count, `largerthan=100000`, so there is no unit left to misread.
@@ -162,12 +162,13 @@ The tracking step therefore passes the files for which `isCaseVariantData` holds
 Forcing only the case variants keeps the not-annexed check meaningful: an inherited `.gitattributes` `annex.largefiles` override (ADR 0060) still leaves an ordinary data file in git, and the upload still refuses it.
 The not-annexed check therefore fires only on a file whose name git-annex itself reads as data and which it still did not annex (an inherited override or an ignore pattern); letter case alone cannot trigger it.
 Re-running is idempotent: `git annex add` skips an annexed, unmodified file.
-The Decision's "data means exactly what git-annex will take" now reads "what git-annex will take, or the upload forces".
+The Decision's `"data" in the upload manifest means exactly "git-annex will take this."` now reads "data" means what git-annex will take, or what the upload forces into the annex with `--force-large`.
 
 Bracket classes were not adopted in the expression.
 They change the expression string for every dataset and for every comparison of it: the fleet sweep would read every configured `nm` dataset as drifted again, and an older admin CLI, which compares against its own spelling, would disagree with a newer one.
 `--force-large` covers the tracking step without touching the expression.
-A case-folded expression would also close the known gap below, because the save's `git add -A` filter reads the same expression: with bracket classes in the `.json`, `.tsv` and data-extension terms, a plain save of a 200 KB `BIG.JSON` and `big.json` left both in git while a 50-byte `UPPER.EDF` was still annexed.
+A case-folded expression would also close the known gap below, because the save's `git add -A` filter reads the same expression: with bracket classes in every glob of the expression, a plain save of a 200 KB `BIG.JSON` and `big.json` left both in git while a 50-byte `UPPER.EDF` was still annexed.
+With brackets in only some terms (the `.json`, `.tsv` and data-extension ones), `NOTES.TXT` and `readme` were still annexed.
 That is a fleet-wide expression change, with ADR 0020's blast radius, and belongs in its own decision.
 
 ### Known gap: the save annexes by size too, and what now catches it
@@ -181,6 +182,7 @@ That case is covered, because the upload plan calls it data and hands it to `git
 What is exposed is the mirror image of the section above: a name the CLI calls metadata only after folding case.
 The CLI never hands it to `git annex add`, git-annex's case-sensitive exclusions do not match it, and the size clause annexes it at the save, after the S3 step has run.
 That is any name that matches a `NEVER_ANNEX_GLOBS` entry only after case folding (`BIG.JSON`, `BIG.TSV`, `NOTES.TXT`, `x.YML`, and a 200 KB `readme`, `license` or `changes` were all annexed by a plain save) and is over the threshold.
+Dotfiles are the exception: `.BIDSIGNORE` and `.GITIGNORE` stay in git at any size, because git-annex never annexes a dotfile.
 Its content is then in the local annex only, and the commit carries a pointer nothing can resolve.
 
 The gap is now detected and a re-run clears it.
