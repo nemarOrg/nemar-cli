@@ -39,6 +39,8 @@ export interface PullState {
   unknownReads?: number;
   /** Set after the approval is recorded, to simulate a push landing in between. */
   movesToAfterReview?: string;
+  /** The head every read AFTER THE FIRST sees: a push that lands between two readers' reads. */
+  headAfterFirstRead?: string;
 }
 
 export interface GitHubStandin {
@@ -53,6 +55,12 @@ export interface GitHubStandin {
   reviewStatus: number | null;
   /** When set, the review POST records this state instead of APPROVED. */
   reviewState: string | null;
+  /** When set, the review POST answers with this commit instead of the one it was asked about. */
+  reviewCommit: string | null;
+  /** When set, `GET /user` answers this status whatever the token (an outage, a rate limit). */
+  userStatus: number | null;
+  /** The message body of that answer. */
+  userMessage: string;
   mergeStatus: number;
   reset(): void;
   stop(): void;
@@ -76,6 +84,9 @@ export function startGitHubStandin(): GitHubStandin {
     users: {} as GitHubStandin["users"],
     reviewStatus: null as number | null,
     reviewState: null as string | null,
+    reviewCommit: null as string | null,
+    userStatus: null as number | null,
+    userMessage: "Server Error",
     mergeStatus: 200,
   };
   const reads: Record<string, number> = {};
@@ -106,6 +117,9 @@ export function startGitHubStandin(): GitHubStandin {
       }
 
       if (req.method === "GET" && url.pathname === "/user") {
+        if (state.userStatus !== null) {
+          return Response.json({ message: state.userMessage }, { status: state.userStatus });
+        }
         const who = token ? IDENTITIES[token] : undefined;
         if (typeof who === "number") {
           return Response.json(
@@ -142,7 +156,7 @@ export function startGitHubStandin(): GitHubStandin {
             user: { login: p.author ?? "contributor", id: 501, type: "User" },
             base: { ref: p.base ?? "main" },
             head: {
-              sha: p.sha,
+              sha: p.headAfterFirstRead && reads[key] > 1 ? p.headAfterFirstRead : p.sha,
               ref: "add-subjects",
               repo: { full_name: `nemarDatasets/${pull[1]}`, owner: { login: "nemarDatasets" } },
             },
@@ -162,7 +176,7 @@ export function startGitHubStandin(): GitHubStandin {
           return Response.json({
             id: 1,
             state: state.reviewState ?? "APPROVED",
-            commit_id: commit,
+            commit_id: state.reviewCommit ?? commit,
             user: { login },
           });
         }
@@ -208,6 +222,24 @@ export function startGitHubStandin(): GitHubStandin {
     set reviewState(v) {
       state.reviewState = v;
     },
+    get reviewCommit() {
+      return state.reviewCommit;
+    },
+    set reviewCommit(v) {
+      state.reviewCommit = v;
+    },
+    get userStatus() {
+      return state.userStatus;
+    },
+    set userStatus(v) {
+      state.userStatus = v;
+    },
+    get userMessage() {
+      return state.userMessage;
+    },
+    set userMessage(v) {
+      state.userMessage = v;
+    },
     get mergeStatus() {
       return state.mergeStatus;
     },
@@ -219,6 +251,9 @@ export function startGitHubStandin(): GitHubStandin {
       state.searchPages = [];
       state.reviewStatus = null;
       state.reviewState = null;
+      state.reviewCommit = null;
+      state.userStatus = null;
+      state.userMessage = "Server Error";
       state.mergeStatus = 200;
       for (const k of Object.keys(state.pulls)) delete state.pulls[k];
       for (const k of Object.keys(state.users)) delete state.users[k];

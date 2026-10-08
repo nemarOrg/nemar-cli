@@ -51,6 +51,8 @@ let db: Database;
 let configDir: string;
 let emptyPath: string;
 let envOverrides: Partial<Bindings> = {};
+/** Answers a request itself, ahead of the real routes, to stand in for a proxy or an older backend. */
+let apiOverride: ((req: Request) => Response | null) | null = null;
 /** Every request the NEMAR API received, `METHOD /path?query`. */
 let apiRequests: string[] = [];
 let handle: ReturnType<typeof makePrQueueApp>;
@@ -76,7 +78,7 @@ beforeAll(() => {
       if (url.pathname === "/notices") return Response.json({ notices: [] });
       if (url.pathname === "/datasets/facets") return Response.json({});
       apiRequests.push(`${req.method} ${url.pathname}${url.search}`);
-      return handle(req, env());
+      return apiOverride?.(req) ?? handle(req, env());
     },
   });
 });
@@ -90,6 +92,7 @@ afterAll(() => {
 beforeEach(async () => {
   db = freshDb();
   envOverrides = {};
+  apiOverride = null;
   apiRequests = [];
   gh.reset();
   configDir = mkdtempSync(join(tmpdir(), "nemar-pr-reviews-cli-"));
@@ -248,22 +251,29 @@ describe("nemar admin pr-reviews (list)", () => {
     expect(repeated.stdout).toContain("nm000202");
     expect(repeated.stdout).not.toContain("nm000203");
 
-    expect((await cli([...PR, "--dataset", "nm000203"])).stdout).not.toContain("nm000201");
-    expect((await cli([...PR, "--author", "ALICE"])).stdout).not.toContain("nm000202");
+    const byDataset = await cli([...PR, "--dataset", "nm000203"]);
+    expect(byDataset.exitCode).toBe(0);
+    expect(byDataset.stdout).toContain("nm000203");
+    expect(byDataset.stdout).not.toContain("nm000201");
+    const byAuthor = await cli([...PR, "--author", "ALICE"]);
+    expect(byAuthor.exitCode).toBe(0);
+    expect(byAuthor.stdout).toContain("nm000201");
+    expect(byAuthor.stdout).not.toContain("nm000202");
     const none = await cli([...PR, "--author", "nobody"]);
     expect(none.exitCode).toBe(0);
     expect(none.stdout).toContain("No pull requests match (3 open in all).");
   });
 
   test("a bad filter is refused before anything is asked of the API", async () => {
-    for (const args of [
-      ["--verdict", "great"],
-      ["--dataset", "nm1"],
-      ["--author", "-x-"],
-    ]) {
+    for (const [args, message] of [
+      [["--verdict", "great"], "is not a verdict"],
+      [["--dataset", "nm1"], "is not a dataset id"],
+      [["--author", "-x-"], "is not a GitHub login"],
+    ] as const) {
       apiRequests = [];
       const r = await cli([...PR, ...args]);
       expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain(message);
       expect(apiRequests.filter((x) => x.includes("/admin/"))).toHaveLength(0);
     }
   });
@@ -285,11 +295,51 @@ describe("nemar admin pr-reviews (list)", () => {
     expect(r.stdout).toContain("The automated review is off in this environment");
   });
 
-  test("says what is wrong when the search cannot be read", async () => {
-    seedQueue();
+  test("an empty queue is said to be empty only when nothing could have been missed", async () => {
     gh.searchPages = [];
     const empty = await cli(PR);
+    expect(empty.exitCode).toBe(0);
     expect(empty.stdout).toContain("No open pull requests to main.");
+  });
+
+  test("when the search cannot be read it says so and exits 1, never the empty-queue message", async () => {
+    envOverrides = { GITHUB_ADMIN_PAT: undefined };
+    const r = await cli(PR);
+    expect(r.exitCode).toBe(1);
+    // The spinner reports the failure on stderr, as it does for every admin command.
+    expect(r.stdout + r.stderr).toContain("NEMAR could not get a GitHub token");
+    expect(r.stdout).not.toContain("No open pull requests");
+  });
+
+  test("with --json an error goes to stderr and stdout stays empty", async () => {
+    envOverrides = { GITHUB_ADMIN_PAT: undefined };
+    const r = await cli([...PR, "--json"]);
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toContain("NEMAR could not get a GitHub token");
+    const bad = await cli([...PR, "--verdict", "great", "--json"]);
+    expect(bad.exitCode).toBe(1);
+    expect(bad.stdout).toBe("");
+  });
+
+  test("a list that may be incomplete says so, and an empty one is not a green all-clear", async () => {
+    // Twenty-five pages of one pull request each: the Worker stops at its page bound.
+    gh.searchPages = Array.from({ length: 25 }, (_, i) => [prNode({ ds: "nm000201", n: i + 1 })]);
+    const truncated = await cli(PR);
+    expect(truncated.exitCode).toBe(0);
+    expect(truncated.stdout).toContain("this list is incomplete");
+
+    // Nothing this Worker owns, and one it does not: not "no open pull requests".
+    gh.searchPages = [[prNode({ ds: "xx090001", n: 1 })]];
+    const foreign = await cli(PR);
+    expect(foreign.stdout).toContain("No open pull requests found in what this Worker can see.");
+    expect(foreign.stdout).not.toContain("No open pull requests to main.");
+    expect(foreign.stdout).toContain("1 pull request(s) belong to the other environment's Worker");
+
+    // A result that could not be read as a pull request.
+    gh.searchPages = [[prNode({ ds: "nm000201", n: 1 }), { __typename: "Issue", number: 5 }]];
+    const unreadable = await cli(PR);
+    expect(unreadable.stdout).toContain("1 search result(s) could not be read as pull requests");
   });
 
   test("a hostile title, branch or login cannot put a control sequence on the terminal", async () => {
@@ -354,7 +404,7 @@ describe("nemar admin pr-reviews show", () => {
     expect(r.stdout).toMatch(/^- changed `dataset_description.json`$/m);
     expect(r.stdout).toMatch(/^Changed files \(1 of 3\)$/m);
     // The author's record rides along.
-    expect(r.stdout).toContain("0 of 1 decided pull request rejected (0%)");
+    expect(r.stdout).toContain("0 of 1 decided pull request rejected (0.0%)");
   });
 
   test("says plainly when the review read an earlier commit", async () => {
@@ -370,7 +420,7 @@ describe("nemar admin pr-reviews show", () => {
     });
     const r = await cli([...PR, "show", "nm000201", "7"]);
     expect(r.stdout).toContain("not reviewed (older commit)");
-    expect(r.stdout).toContain("an EARLIER commit");
+    expect(r.stdout).toContain("a DIFFERENT commit");
     expect(r.stdout).toContain("it does not apply to the current commit");
   });
 
@@ -479,7 +529,7 @@ describe("who is reviewed", () => {
     seedRecord(6, 4);
     const r = await cli([...PR, "standing", "alice"]);
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).toContain("6 of 10 decided pull requests rejected (60%)");
+    expect(r.stdout).toContain("6 of 10 decided pull requests rejected (60.0%)");
     expect(r.stdout).toContain("MORE than 5 are rejected AND more than 10%");
     expect(r.stdout).toContain("paused by the record");
     expect(r.stdout).toContain("Decision:  none, the record decides");
@@ -604,8 +654,43 @@ describe("nemar admin pr-reviews approve", () => {
     reviewed("pass");
     const r = await cli([...PR, "approve", "nm000201", "7", "--dry-run"]);
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).toContain("Dry run: nothing was approved.");
+    expect(r.stdout).toContain("Dry run: nothing was approved or merged.");
     expect(reviewPosts()).toHaveLength(0);
+  });
+
+  test("--dry-run with --merge and --force sends nothing at all to GitHub but reads", async () => {
+    reviewed("fail");
+    const r = await cli([
+      ...PR,
+      "approve",
+      "nm000201",
+      "7",
+      "--dry-run",
+      "--merge",
+      "--force",
+      "--yes",
+    ]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("Then:     merge (merge) if GitHub reports it clean");
+    expect(r.stdout).toContain("Dry run: nothing was approved or merged.");
+    expect(gh.seen.filter((s) => s.token === ADMIN_TOKEN && s.method !== "GET")).toHaveLength(0);
+  });
+
+  test("the default text of the approval claims only what is known", async () => {
+    reviewed("pass");
+    await approve();
+    expect((reviewPosts()[0].body as { body: string }).body).toBe(
+      "Approved with nemar admin pr-reviews approve. Automated review of this commit: pass.",
+    );
+  });
+
+  test("an approval GitHub records on a different commit than asked is not reported as done, and nothing is merged", async () => {
+    reviewed("pass");
+    gh.reviewCommit = SHA_B;
+    const r = await approve(["--merge"]);
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("not the approval that was asked for");
+    expect(mergePuts()).toHaveLength(0);
   });
 
   test("an app token is not accepted as a person, and the way to do it by hand is printed", async () => {
@@ -618,14 +703,15 @@ describe("nemar admin pr-reviews approve", () => {
     expect(reviewPosts()).toHaveLength(0);
   });
 
-  test("another person's login than the one linked to the NEMAR account is refused", async () => {
+  test("another person's token than the login linked to the NEMAR account is refused, and says where the token came from", async () => {
     reviewed("pass");
     const r = await approve([], { env: { GH_TOKEN: OTHER_TOKEN } });
     expect(r.exitCode).toBe(1);
     expect(r.stdout).toContain(
-      "gh is signed in as @someone-else, but your NEMAR account is linked to @queueadmin-gh",
+      "GH_TOKEN belongs to @someone-else, but your NEMAR account is linked to @queueadmin-gh",
     );
-    expect(r.stdout).toContain("gh auth switch");
+    expect(r.stdout).toContain("Unset GH_TOKEN");
+    expect(r.stdout).not.toContain("gh auth switch"); // that would not help: the environment wins
     expect(reviewPosts()).toHaveLength(0);
   });
 
@@ -690,20 +776,95 @@ describe("nemar admin pr-reviews approve", () => {
     reviewed("pass", SHA_B); // reviewed an earlier commit; the pull request is now at SHA_A
     const stale = await approve();
     expect(stale.exitCode).toBe(0);
-    expect(stale.stdout).toContain("read an earlier commit of this pull request (it said: pass)");
+    expect(stale.stdout).toContain("read a different commit of this pull request (it said: pass)");
     expect(stale.stdout).toContain("not reviewed (older commit)");
     // The approval is on the commit the administrator was shown, not the one that was reviewed.
     expect(reviewPosts().pop()?.body).toMatchObject({ commit_id: SHA_A });
   });
 
-  test("the non-production Worker, which cannot see a production review, does not stop an approval", async () => {
+  test("a Worker that cannot see the review leaves its verdict UNKNOWN, which needs --force and is never read as 'not reviewed'", async () => {
     reviewed("pass");
-    envOverrides = { ENVIRONMENT: "staging" };
+    envOverrides = { ENVIRONMENT: "staging" }; // the non-production Worker holds no production review
+    const refused = await approve();
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stdout).toContain("The automated review could not be read");
+    expect(refused.stdout).toContain("belongs to the production Worker");
+    expect(refused.stdout).toContain("--force");
+    expect(reviewPosts()).toHaveLength(0);
+
+    const forced = await approve(["--force"]);
+    expect(forced.exitCode).toBe(0);
+    expect(forced.stdout).toContain("unknown (could not be read)");
+    expect(forced.stdout).not.toContain("has not read this commit");
+    expect((reviewPosts()[0].body as { body: string }).body).toBe(
+      "Approved with nemar admin pr-reviews approve. Automated review of this commit: unknown.",
+    );
+  });
+
+  test("a stored rejection cannot be hidden behind a failed read of it", async () => {
+    // The Worker holds a `fail` for this commit. Each way of not hearing it must stop the approval.
+    reviewed("fail");
+
+    // The Worker fails reading its own reviews (a 500), while authentication still works.
+    db.run("ALTER TABLE pr_reviews RENAME TO pr_reviews_gone");
+    const down = await approve();
+    expect(down.exitCode).toBe(1);
+    expect(reviewPosts()).toHaveLength(0);
+    db.run("ALTER TABLE pr_reviews_gone RENAME TO pr_reviews");
+
+    // The account is not an administrator (a 403), however the key got there.
+    db.run("UPDATE users SET role = 'member', status = 'verified'");
+    const member = await approve();
+    expect(member.exitCode).toBe(1);
+    expect(member.stdout).toContain("requires admin privileges");
+    expect(reviewPosts()).toHaveLength(0);
+  });
+
+  test("an answer that is not the Worker's own cannot stand in for 'there is no review'", async () => {
+    // A stored rejection exists, and what comes back is a 404 with no error word (a backend older
+    // than this CLI, which lacks the route) or a bare 502 from an edge in front of the Worker.
+    reviewed("fail");
+    for (const answer of [
+      new Response('{"error":"Not found"}', { status: 404 }),
+      new Response("Bad gateway", { status: 502 }),
+    ]) {
+      apiOverride = (req) =>
+        new URL(req.url).pathname.startsWith("/admin/pr-reviews") ? answer.clone() : null;
+      const r = await approve(["--force"]);
+      expect(r.exitCode).toBe(1);
+      expect(reviewPosts()).toHaveLength(0);
+    }
+  });
+
+  test("the review is asked about the commit that was read, not whatever the head is a moment later", async () => {
+    // The Worker holds a rejection of A. A push lands after the CLI read A and before the Worker
+    // reads the head; asked about the head it would find B, which nobody reviewed, and show A's
+    // rejection as another commit's.
+    livePull(SHA_A);
+    gh.pulls["nm000201#7"].headAfterFirstRead = SHA_B;
+    seed({
+      ds: "nm000201",
+      n: 7,
+      sha: SHA_A,
+      authorId: 42,
+      login: "alice",
+      state: "reported",
+      verdict: "fail",
+    });
     const r = await approve();
-    expect(r.exitCode).toBe(0);
-    expect(r.stdout).toContain("The NEMAR API has no review to show");
-    expect(r.stdout).toContain("has not read this commit");
-    expect(reviewPosts()).toHaveLength(1);
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("The automated review says this pull request needs changes");
+    expect(reviewPosts()).toHaveLength(0);
+    expect(apiRequests.some((x) => x.includes(`?head=${SHA_A}`))).toBe(true);
+  });
+
+  test("GitHub unreadable by the Worker, with no stored review, is unknown too", async () => {
+    livePull();
+    envOverrides = { GITHUB_ADMIN_PAT: undefined }; // the Worker cannot ask GitHub, and holds no row
+    const r = await approve();
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("The automated review could not be read");
+    expect(reviewPosts()).toHaveLength(0);
   });
 
   test("a closed, merged, draft or non-main pull request is refused", async () => {
@@ -768,6 +929,142 @@ describe("nemar admin pr-reviews approve", () => {
       expect(r.exitCode).toBe(1);
       expect(r.stdout).toContain("is not a merge method");
       expect(gh.seen.filter((s) => s.token === ADMIN_TOKEN)).toHaveLength(0);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The token gh holds, and what a token that is not usable looks like
+// ---------------------------------------------------------------------------------------------
+
+describe("the GitHub credential", () => {
+  /** A `gh` on PATH that runs `script`, so the real subprocess path is the one under test. */
+  function withGh<T>(script: string, run: (path: string) => Promise<T>): Promise<T> {
+    const dir = mkdtempSync(join(tmpdir(), "nemar-gh-shim-"));
+    writeFileSync(join(dir, "gh"), `#!/bin/sh\n${script}\n`, { mode: 0o755 });
+    return run(dir).finally(() => rmSync(dir, { recursive: true, force: true }));
+  }
+
+  function reviewedPass() {
+    livePull(SHA_A);
+    seed({
+      ds: "nm000201",
+      n: 7,
+      sha: SHA_A,
+      authorId: 42,
+      login: "alice",
+      state: "reported",
+      verdict: "pass",
+    });
+  }
+  const approveWith = (extra: Record<string, string | undefined>, path?: string) =>
+    cli([...PR, "approve", "nm000201", "7", "--yes"], {
+      env: { GH_TOKEN: undefined, ...(path ? { PATH: path } : {}), ...extra },
+    });
+
+  // Emulates gh's own precedence: it answers GITHUB_TOKEN and GH_TOKEN before the login it stores.
+  const GH_LIKE =
+    'if [ -n "$GITHUB_TOKEN" ]; then echo "$GITHUB_TOKEN"; elif [ -n "$GH_TOKEN" ]; then echo "$GH_TOKEN"; else echo gho_admin_own_token; fi';
+
+  test("asks gh for the account it is signed in as, not whatever GITHUB_TOKEN is in the environment", async () => {
+    reviewedPass();
+    await withGh(GH_LIKE, async (path) => {
+      // GITHUB_TOKEN is another person's. gh would answer it; the command must not let it.
+      const r = await approveWith({ GITHUB_TOKEN: OTHER_TOKEN }, path);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("Approved nm000201 #7 at aaaaaaa as @queueadmin-gh.");
+      expect(reviewPosts()[0].token).toBe(ADMIN_TOKEN);
+    });
+  });
+
+  test("a mismatch with the token gh holds says to switch accounts in gh", async () => {
+    reviewedPass();
+    await withGh(`echo ${OTHER_TOKEN}`, async (path) => {
+      const r = await approveWith({}, path);
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain(
+        "gh is signed in as @someone-else, but your NEMAR account is linked to @queueadmin-gh",
+      );
+      expect(r.stdout).toContain("gh auth switch");
+      expect(reviewPosts()).toHaveLength(0);
+    });
+  });
+
+  test("a gh that is signed out falls back to the link and the command", async () => {
+    reviewedPass();
+    await withGh('echo "You are not logged into any GitHub hosts." >&2; exit 1', async (path) => {
+      const r = await approveWith({}, path);
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain(
+        "Cannot approve from here: gh has no signed-in account for github.com (You are not logged into any GitHub hosts.)",
+      );
+      expect(r.stdout).toContain("gh pr review 7 --repo nemarDatasets/nm000201 --approve");
+      expect(reviewPosts()).toHaveLength(0);
+    });
+  });
+
+  test("a rejected token says where it came from, and how to use gh's own", async () => {
+    reviewedPass();
+    const r = await approveWith({ GH_TOKEN: "expired-token" });
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("GitHub rejected this token.");
+    expect(r.stdout).toContain("(the token came from GH_TOKEN)");
+    expect(r.stdout).toContain("Unset GH_TOKEN");
+    // A rejected token is not an app token: no "do it by hand" fallback for it.
+    expect(r.stdout).not.toContain("Approve it on GitHub with your own account");
+  });
+
+  test("a GitHub outage is not reported as a verdict on the token", async () => {
+    reviewedPass();
+    gh.userStatus = 503;
+    const outage = await approveWith({ GH_TOKEN: ADMIN_TOKEN });
+    expect(outage.exitCode).toBe(1);
+    expect(outage.stdout).toContain("answered HTTP 503");
+    expect(outage.stdout).not.toContain("cannot approve for you");
+    expect(outage.stdout).not.toContain("Approve it on GitHub with your own account");
+
+    gh.userStatus = 403;
+    gh.userMessage = "You have exceeded a secondary rate limit.";
+    const limited = await approveWith({ GH_TOKEN: ADMIN_TOKEN });
+    expect(limited.stdout).toContain("answered HTTP 403");
+    expect(limited.stdout).not.toContain("cannot approve for you");
+    expect(reviewPosts()).toHaveLength(0);
+  });
+
+  test("a rejected GITHUB_API URL is an error, not a quiet use of the real GitHub", async () => {
+    reviewedPass();
+    const r = await approveWith({
+      GH_TOKEN: ADMIN_TOKEN,
+      NEMAR_GITHUB_API_URL: "https://evil.test",
+    });
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("NEMAR_GITHUB_API_URL is set but is not");
+    expect(gh.seen).toHaveLength(0);
+  });
+});
+
+describe("show, when GitHub cannot be read", () => {
+  test("a stored pass is not presented as the current commit's", async () => {
+    // The Worker holds a pass, and GitHub has no answer for the pull request.
+    seed({
+      ds: "nm000201",
+      n: 7,
+      authorId: 42,
+      login: "alice",
+      state: "reported",
+      verdict: "pass",
+    });
+    const r = await cli([...PR, "show", "nm000201", "7"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("GitHub could not be read");
+    expect(r.stdout).toContain("whether that is the current commit is unknown");
+    expect(r.stdout).not.toMatch(/Review:\s+pass of/);
+
+    const json = JSON.parse((await cli([...PR, "show", "nm000201", "7", "--json"])).stdout);
+    expect(json).toMatchObject({
+      verdict: "not_reviewed",
+      stale_verdict: "pass",
+      review_current: null,
     });
   });
 });

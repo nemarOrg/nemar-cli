@@ -2172,10 +2172,19 @@ export async function listPrReviews(filters: {
   return request<QueueResponse>(`/admin/pr-reviews${query}`, { method: "GET" }, true);
 }
 
-/** One pull request: its stored review and history, what GitHub says now, and its author's standing. */
-export async function getPrReview(datasetId: string, prNumber: number): Promise<PrReviewDetail> {
+/**
+ * One pull request: its stored review and history, what GitHub says now, and its author's standing.
+ * Pass `head` (a full commit id) to ask what the review concluded about THAT commit, which is how
+ * `approve` avoids relying on a head the Worker read a moment earlier or later.
+ */
+export async function getPrReview(
+  datasetId: string,
+  prNumber: number,
+  head?: string,
+): Promise<PrReviewDetail> {
+  const query = head ? `?head=${encodeURIComponent(head)}` : "";
   return request<PrReviewDetail>(
-    `/admin/pr-reviews/${encodeURIComponent(datasetId)}/${prNumber}`,
+    `/admin/pr-reviews/${encodeURIComponent(datasetId)}/${prNumber}${query}`,
     { method: "GET" },
     true,
   );
@@ -2189,7 +2198,7 @@ export async function getPrReviewAuthor(login: string): Promise<ContributorStand
   );
 }
 
-/** Allow or block a contributor outright; the tally no longer decides until it is cleared. */
+/** Allow or block a contributor; the tally no longer decides the pause until it is cleared (rate limits still apply). */
 export async function setPrReviewAuthor(
   login: string,
   mode: "allow" | "block",

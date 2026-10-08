@@ -3,15 +3,17 @@
  *
  *   GET    /admin/pr-reviews                      every open pull request to `main`, with its review
  *   GET    /admin/pr-reviews/:dataset/:pr         one pull request: stored report, history, author
+ *                                                 (`?head=<sha>` asks about that commit, not GitHub's)
  *   GET    /admin/pr-review-authors/:login        a contributor's tally, override and standing
  *   PUT    /admin/pr-review-authors/:login        allow or block a contributor (`{mode, reason?}`)
  *   DELETE /admin/pr-review-authors/:login        remove that decision; the tally decides again
  *
  * Admin-only through the router's `authMiddleware` and `adminMiddleware`. The reads need no switch:
  * `PR_REVIEW_ENABLED` gates the REVIEW, not the view of it, so with the review off the queue lists
- * the same pull requests and shows them all as `not_reviewed`. Nothing here approves, merges or
- * comments on a pull request: an approval is the administrator's own act with their own GitHub
- * identity, taken by the CLI (ADR 0093), and the Worker holds no credential that could make one.
+ * the same pull requests and those with no stored review show as `not_reviewed`. Nothing here
+ * approves, merges or comments on a pull request: no Worker code path approves, and the Worker holds
+ * nothing that belongs to an individual administrator. An approval is the administrator's own act
+ * with their own GitHub identity, taken by the CLI (ADR 0093).
  *
  * The contributor routes live under their own prefix (`pr-review-authors`) rather than under
  * `pr-reviews/authors/...`, because `pr-reviews/:dataset/:pr` has the same shape and a router that
@@ -21,6 +23,7 @@
 import { zValidator } from "@hono/zod-validator";
 import type { Context } from "hono";
 import { z } from "zod";
+import type { SetOverrideRequest } from "../../../../shared/contract/pr-review-admin";
 import { isValidDatasetId } from "../../services/datasetId";
 import {
   QueueError,
@@ -39,7 +42,7 @@ const overrideSchema = z
     mode: z.enum(["allow", "block"]),
     reason: z.string().max(500).optional(),
   })
-  .strict();
+  .strict() satisfies z.ZodType<SetOverrideRequest>;
 
 /** A thrown `QueueError` becomes its status and sentence; anything else is a 500 that says no more. */
 function fail(c: Context, err: unknown) {
@@ -87,7 +90,8 @@ export function registerPrReviewRoutes(admin: AdminRouter): void {
       if (!Number.isSafeInteger(pr) || pr <= 0) {
         throw new QueueError(400, "bad_pr", "A pull request number is a positive whole number.");
       }
-      return c.json(await readPrReviewDetail(c.env, dataset, pr));
+      const head = c.req.query("head") ?? null;
+      return c.json(await readPrReviewDetail(c.env, dataset, pr, head));
     } catch (err) {
       return fail(c, err);
     }

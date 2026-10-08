@@ -11,6 +11,7 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import {
   adminGitHubToken,
   approvalGate,
+  asVerdict,
   fetchPullRequest,
   githubApiBase,
   identityMatches,
@@ -52,6 +53,10 @@ describe("the GitHub origin", () => {
     );
   });
 
+  test("an empty value is no value", () => {
+    expect(githubApiBase({ NEMAR_GITHUB_API_URL: "  " })).toBe("https://api.github.com");
+  });
+
   test("never sends an administrator's token to a host that is not this machine", () => {
     for (const evil of [
       "http://evil.test",
@@ -62,7 +67,10 @@ describe("the GitHub origin", () => {
       "file:///etc/passwd",
       "not a url",
     ]) {
-      expect(githubApiBase({ NEMAR_GITHUB_API_URL: evil })).toBe("https://api.github.com");
+      // Refused, not ignored: a typo must not turn a rehearsal into a request to the real GitHub.
+      expect(() => githubApiBase({ NEMAR_GITHUB_API_URL: evil })).toThrow(
+        "NEMAR_GITHUB_API_URL is set but is not",
+      );
     }
   });
 });
@@ -71,6 +79,17 @@ describe("the administrator's own token", () => {
   const ghThatFails = async () => {
     throw new Error("gh must not be run when GH_TOKEN is set");
   };
+
+  test("gh is asked for its own stored login, with the variables it would prefer taken away", async () => {
+    let asked: { cmd: string[]; unsetEnv?: string[] } | null = null;
+    const run = (async (cmd: string[], options?: { unsetEnv?: string[] }) => {
+      asked = { cmd, unsetEnv: options?.unsetEnv };
+      return { stdout: "gho_from_gh\n", stderr: "", exitCode: 0 };
+    }) as never;
+    await adminGitHubToken({}, run);
+    expect(asked).toMatchObject({ cmd: ["gh", "auth", "token", "--hostname", "github.com"] });
+    expect([...(asked?.unsetEnv ?? [])].sort()).toEqual(["GITHUB_TOKEN", "GH_TOKEN"].sort());
+  });
 
   test("GH_TOKEN wins and gh is not asked", async () => {
     const r = await adminGitHubToken({ GH_TOKEN: " tok " }, ghThatFails as never);
@@ -131,12 +150,33 @@ describe("who a token is", () => {
     expect(botByType).toMatchObject({ ok: false, kind: "not_a_person" });
     const botByLogin = await whoAmI(BOT_LOGIN_TOKEN, base());
     expect(botByLogin).toMatchObject({ ok: false, kind: "not_a_person" });
+  });
+
+  test("a rejected token is told apart from an app token and from an outage", async () => {
     const bad = await whoAmI("nonsense", base());
     expect(bad).toMatchObject({
       ok: false,
-      kind: "not_a_person",
+      kind: "rejected",
       reason: "GitHub rejected this token.",
     });
+
+    // Neither a server error, nor a rate limit, says anything about whose token this is.
+    for (const [status, message] of [
+      [500, "Server Error"],
+      [502, "Bad Gateway"],
+      [429, "Too Many Requests"],
+      [403, "You have exceeded a secondary rate limit."],
+    ] as const) {
+      gh.userStatus = status;
+      gh.userMessage = message;
+      const r = await whoAmI(ADMIN_TOKEN, base());
+      expect(r).toMatchObject({ ok: false, kind: "unreachable" });
+      if (!r.ok) expect(r.reason).toContain(`HTTP ${status}`);
+    }
+
+    // The 403 an App installation token gets is a verdict on the token.
+    gh.userStatus = null;
+    expect(await whoAmI(APP_TOKEN, base())).toMatchObject({ ok: false, kind: "not_a_person" });
   });
 
   test("an unreachable GitHub is said to be unreachable, which is not a verdict on the token", async () => {
@@ -164,18 +204,41 @@ describe("what the review's verdict allows", () => {
     }
   });
 
-  test("a stale review says which earlier verdict it was, so a stale pass is not read as a pass", () => {
+  test("a review of a different commit says what it concluded, so its pass is not read as this one's", () => {
     const gate = approvalGate({ verdict: "not_reviewed", staleVerdict: "pass" });
     expect(gate.kind).toBe("confirm");
-    if (gate.kind === "confirm") expect(gate.warning).toContain("earlier commit");
+    if (gate.kind === "confirm") expect(gate.warning).toContain("a different commit");
     expect(gate.kind).not.toBe("proceed");
+    // A different commit's review that reached no verdict has nothing to report.
+    const none = approvalGate({ verdict: "not_reviewed", staleVerdict: null });
+    if (none.kind === "confirm") expect(none.warning).toContain("has not read this commit");
+  });
+
+  test("a review that could not be read is unknown, whatever else is said, and needs --force", () => {
+    for (const verdict of ["pass", "fail", "not_reviewed", "uncertain"] as const) {
+      const gate = approvalGate({ verdict, staleVerdict: null, unread: "the API is down" });
+      expect(gate.kind).toBe("needs_force");
+      if (gate.kind === "needs_force") {
+        expect(gate.reason).toContain("could not be read (the API is down)");
+        expect(gate.reason).toContain("verdict is unknown");
+      }
+    }
+  });
+
+  test("a verdict this version does not know reads as needing a person, never as a pass", () => {
+    expect(asVerdict("pass")).toBe("pass");
+    expect(asVerdict("great")).toBe("could_not_decide");
+    expect(asVerdict(undefined)).toBe("could_not_decide");
+    expect(asVerdict(null)).toBe("could_not_decide");
+    expect(approvalGate({ verdict: asVerdict("brilliant"), staleVerdict: null }).kind).toBe(
+      "confirm",
+    );
   });
 });
 
 describe("a pull request that cannot be approved", () => {
   const open = {
-    open: true,
-    merged: false,
+    state: "open" as const,
     draft: false,
     baseRef: "main",
     headSha: SHA_A,
@@ -184,8 +247,8 @@ describe("a pull request that cannot be approved", () => {
   };
   test("is refused for the right reason, and an ordinary one is not", () => {
     expect(refusalFor(open)).toBeNull();
-    expect(refusalFor({ ...open, merged: true })).toContain("already merged");
-    expect(refusalFor({ ...open, open: false })).toContain("closed");
+    expect(refusalFor({ ...open, state: "merged" })).toContain("already merged");
+    expect(refusalFor({ ...open, state: "closed" })).toContain("closed");
     expect(refusalFor({ ...open, baseRef: "dev" })).toContain("not main");
     expect(refusalFor({ ...open, draft: true })).toContain("draft");
   });
@@ -205,8 +268,7 @@ describe("reading the pull request", () => {
     expect(r).toEqual({
       ok: true,
       value: {
-        open: true,
-        merged: false,
+        state: "open",
         draft: false,
         baseRef: "main",
         headSha: SHA_A,
@@ -254,6 +316,46 @@ describe("approving", () => {
     gh.pulls["nm000201#7"] = { sha: SHA_A };
     const r = await approve(SHA_A, "someone-else");
     expect(r.ok).toBe(false);
+  });
+
+  test("an approval recorded on a different commit than asked is a failure", async () => {
+    gh.pulls["nm000201#7"] = { sha: SHA_A };
+    gh.reviewCommit = SHA_B;
+    const r = await approve();
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("not the approval that was asked for");
+  });
+
+  test("a connection that drops is an unknown outcome (status 0), not a refusal", async () => {
+    const dead = Bun.listen({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: {
+        open(socket) {
+          socket.end();
+        },
+        data() {},
+      },
+    });
+    try {
+      const r = await submitApproval(
+        ADMIN_TOKEN,
+        "nm000201",
+        7,
+        SHA_A,
+        "queueadmin-gh",
+        "ok",
+        `http://127.0.0.1:${dead.port}`,
+      );
+      expect(r).toMatchObject({ ok: false, status: 0 });
+      const m = await mergeWhenClean(ADMIN_TOKEN, "nm000201", 7, SHA_A, "merge", {
+        base: `http://127.0.0.1:${dead.port}`,
+        sleep: async () => {},
+      });
+      expect(m).toMatchObject({ ok: false, status: 0 });
+    } finally {
+      dead.stop(true);
+    }
   });
 
   test("GitHub's refusal comes through in plain words", async () => {

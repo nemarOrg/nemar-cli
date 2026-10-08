@@ -2,32 +2,33 @@
  * Approving a dataset pull request as the administrator themselves (ADR 0093).
  *
  * **Why this runs on the administrator's machine and not in the Worker.** An approval is a person
- * vouching for a change, and GitHub records whose. The Worker can act only as the NEMAR App or as
- * the shared datasets token, and either one approving would put the App's name on a judgment it
- * did not make, and would turn the automated review (which the App publishes) into its own
- * approval. The Worker holds no credential for any one administrator, and must not be given one.
- * So the approval is a request from here to GitHub, made with the token the administrator already
- * holds for `gh`, and the only thing the NEMAR API contributes is the automated verdict to show
- * them first.
+ * vouching for a change, and GitHub records whose. No Worker code path approves, and the Worker
+ * holds nothing that belongs to an individual administrator; the tokens it does hold (the NEMAR App
+ * and the datasets token) could submit a review, which is exactly why one must never be made with
+ * them: it would put the App's name on a judgment a person made, and turn the automated review
+ * (which the App publishes) into its own approval. So the approval is a request from here to
+ * GitHub, with the token the administrator already holds, and the only thing the NEMAR API
+ * contributes is the automated verdict to show them first.
  *
- * **The token is checked before it is used.** `GET /user` answers for a person's token and refuses
- * a GitHub App installation token (403), which is how a CI or bot credential left in `GH_TOKEN` is
- * stopped from approving "as" someone. The login it names must also be the one the administrator's
- * NEMAR account is linked to. `GITHUB_TOKEN` is deliberately NOT read: in a workflow it is the
- * Actions bot's token.
- *
- * **The approval is pinned to a commit.** It is submitted with `commit_id` set to the head the
- * administrator was shown, so a push that lands in between leaves the approval on the commit they
- * read, and the ruleset's dismiss-stale-reviews does the rest.
- *
- * **Nothing here merges unless asked, and nothing here bypasses.** A merge needs the explicit
- * `merge` step, waits for GitHub to say the pull request is `clean` (every required check
- * passing), and sends the reviewed `sha` so GitHub refuses it if the branch moved. An administrator
- * may be a bypass actor on the ruleset, so `clean` is required rather than assumed: a blocked pull
- * request is reported, never forced through.
+ * - **The token is checked before it is used.** `GET /user` answers for a person's token and refuses
+ *   an App installation token (403), so a CI or bot credential left in `GH_TOKEN` cannot approve "as"
+ *   someone. The login it names is also compared with the one the administrator's NEMAR account is
+ *   linked to. `gh auth token` is run with `GH_TOKEN` and `GITHUB_TOKEN` removed from its
+ *   environment: `gh` itself prefers them to its stored login, and `GITHUB_TOKEN` is the Actions
+ *   bot's in a workflow.
+ * - **The approval is pinned to a commit.** It is submitted with `commit_id` set to the head the
+ *   administrator was shown, so a push that lands in between leaves the approval on the commit they
+ *   read.
+ * - **A merge is a client-side check, not enforcement.** It is attempted once, only if GitHub
+ *   reports the pull request `clean` (or `has_hooks`); it re-asks for a few seconds while GitHub is
+ *   still working the state out, does not wait for pending checks, sends the approved `sha`, and
+ *   otherwise stops with the approval standing. An administrator can be a bypass actor on the
+ *   ruleset, so this does not attempt a merge GitHub reports as blocked; the ruleset is what
+ *   enforces, and it is not this code's job to defeat it.
  */
 
-import type { QueueVerdict } from "../../shared/contract/pr-review-admin.js";
+import type { QueueVerdict, ReadVerdict } from "../../shared/contract/pr-review-admin.js";
+import { QUEUE_VERDICTS } from "../../shared/contract/pr-review-admin.js";
 import { sanitizeNote } from "../../shared/pr-review.js";
 import { runCommand } from "./git-annex/run-command.js";
 
@@ -46,8 +47,10 @@ export function manualApprovalCommand(datasetId: string, prNumber: number): stri
 
 /**
  * GitHub's API origin. `NEMAR_GITHUB_API_URL` exists so a test can point this at a local stand-in,
- * and it is honoured ONLY for a loopback address: an environment variable that could send an
- * administrator's token to an arbitrary host would be an exfiltration path, not a test seam.
+ * and it is honoured ONLY for a loopback http address: an environment variable that could send an
+ * administrator's token to an arbitrary host would be an exfiltration path, not a test seam. A
+ * value that is set and not acceptable is an ERROR, not a fall-through to the real GitHub: a typo
+ * must not turn a rehearsal into a real approval.
  */
 export function githubApiBase(env: Record<string, string | undefined> = process.env): string {
   const override = env.NEMAR_GITHUB_API_URL?.trim();
@@ -57,17 +60,21 @@ export function githubApiBase(env: Record<string, string | undefined> = process.
     const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(u.hostname);
     if (u.protocol === "http:" && loopback) return override.replace(/\/+$/, "");
   } catch {
-    // fall through to the real origin
+    // fall through to the error below
   }
-  return "https://api.github.com";
+  throw new Error(
+    "NEMAR_GITHUB_API_URL is set but is not an http://127.0.0.1, http://localhost or http://[::1] address. It is only for tests, so it is refused rather than ignored; unset it to use GitHub.",
+  );
 }
 
 // ---------------------------------------------------------------------------------------------
 // The token and who it belongs to
 // ---------------------------------------------------------------------------------------------
 
+export type TokenSource = "GH_TOKEN" | "gh";
+
 export type TokenResult =
-  | { ok: true; token: string; source: "GH_TOKEN" | "gh" }
+  | { ok: true; token: string; source: TokenSource }
   | { ok: false; reason: string };
 
 export async function adminGitHubToken(
@@ -77,13 +84,12 @@ export async function adminGitHubToken(
   const fromEnv = env.GH_TOKEN?.trim();
   if (fromEnv) return { ok: true, token: fromEnv, source: "GH_TOKEN" };
   try {
-    const { stdout, exitCode, stderr } = await run([
-      "gh",
-      "auth",
-      "token",
-      "--hostname",
-      "github.com",
-    ]);
+    const { stdout, exitCode, stderr } = await run(
+      ["gh", "auth", "token", "--hostname", "github.com"],
+      // `gh` prefers these to the login it stores, which would answer with a token that is not
+      // the account `gh auth status` shows. Ask for the stored one.
+      { unsetEnv: ["GH_TOKEN", "GITHUB_TOKEN"] },
+    );
     if (exitCode === 0 && stdout.trim()) return { ok: true, token: stdout.trim(), source: "gh" };
     return {
       ok: false,
@@ -106,9 +112,15 @@ export interface GitHubPerson {
   id: number;
 }
 
+/**
+ * Why a token was not accepted as a person's: `not_a_person` (an App or workflow token, a bot, or
+ * an organisation), `rejected` (GitHub refused it: expired or revoked), or `unreachable` (GitHub did
+ * not answer, or answered with an error that says nothing about the token). Only the first calls for
+ * the manual fallback; the others are the administrator's to fix or retry.
+ */
 export type IdentityResult =
   | { ok: true; user: GitHubPerson }
-  | { ok: false; kind: "not_a_person" | "unreachable"; reason: string };
+  | { ok: false; kind: "not_a_person" | "rejected" | "unreachable"; reason: string };
 
 function headers(token: string): Record<string, string> {
   return {
@@ -120,7 +132,7 @@ function headers(token: string): Record<string, string> {
   };
 }
 
-/** Who a token is, if it is a person's. An app, an Actions token or a rejected token is not. */
+/** Who a token is, if it is a person's. An App or Actions token, a bot, or a rejected token is not. */
 export async function whoAmI(token: string, base = githubApiBase()): Promise<IdentityResult> {
   let res: Response;
   try {
@@ -135,14 +147,24 @@ export async function whoAmI(token: string, base = githubApiBase()): Promise<Ide
       reason: `GitHub could not be reached (${err instanceof Error ? err.message : String(err)}).`,
     };
   }
+  if (res.status === 401) {
+    return { ok: false, kind: "rejected", reason: "GitHub rejected this token." };
+  }
   if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    // A 403 that is a rate limit says nothing about the token; the integration-token 403 does.
+    if (res.status === 403 && !/rate limit|abuse/i.test(text)) {
+      return {
+        ok: false,
+        kind: "not_a_person",
+        reason:
+          "This token does not belong to a GitHub user (an app or workflow token cannot approve for you).",
+      };
+    }
     return {
       ok: false,
-      kind: "not_a_person",
-      reason:
-        res.status === 401
-          ? "GitHub rejected this token."
-          : "This token does not belong to a GitHub user (an app or workflow token cannot approve for you).",
+      kind: "unreachable",
+      reason: `GitHub answered HTTP ${res.status} when asked whose token this is. Try again in a moment.`,
     };
   }
   const u = (await res.json().catch(() => null)) as {
@@ -168,7 +190,7 @@ export async function whoAmI(token: string, base = githubApiBase()): Promise<Ide
 /**
  * Whether the GitHub login is the one the administrator's NEMAR account is linked to. `unlinked`
  * means the account names no GitHub login (an ORCID or email account): nothing to compare, so the
- * caller shows the login and asks.
+ * caller shows the login being used.
  */
 export function identityMatches(
   linked: string | null | undefined,
@@ -183,8 +205,7 @@ export function identityMatches(
 // ---------------------------------------------------------------------------------------------
 
 export interface PullRequestFacts {
-  open: boolean;
-  merged: boolean;
+  state: "open" | "closed" | "merged";
   draft: boolean;
   baseRef: string;
   headSha: string;
@@ -242,8 +263,7 @@ export async function fetchPullRequest(
   return {
     ok: true,
     value: {
-      open: body?.state === "open",
-      merged: body?.merged === true,
+      state: body?.merged === true ? "merged" : body?.state === "open" ? "open" : "closed",
       draft: body?.draft === true,
       baseRef: typeof baseInfo?.ref === "string" ? baseInfo.ref : "",
       headSha: head.sha,
@@ -255,8 +275,8 @@ export async function fetchPullRequest(
 
 /** Why a pull request cannot be approved at all, or null when it can. */
 export function refusalFor(pr: PullRequestFacts): string | null {
-  if (pr.merged) return "This pull request is already merged.";
-  if (!pr.open) return "This pull request is closed.";
+  if (pr.state === "merged") return "This pull request is already merged.";
+  if (pr.state === "closed") return "This pull request is closed.";
   if (pr.baseRef !== "main") {
     return `This pull request targets ${sanitizeNote(pr.baseRef, 40) || "another branch"}, not main. The review queue covers pull requests to main.`;
   }
@@ -268,9 +288,20 @@ export function refusalFor(pr: PullRequestFacts): string | null {
 // What the automated verdict allows
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * A verdict word from the NEMAR API as one this CLI knows. The CLI ships on npm independently of
+ * the Worker, so a newer server may say something this version has never heard of; that must read
+ * as "needs a person", never crash the gate and never read as a pass.
+ */
+export function asVerdict(raw: unknown): QueueVerdict {
+  return typeof raw === "string" && (QUEUE_VERDICTS as readonly string[]).includes(raw)
+    ? (raw as QueueVerdict)
+    : "could_not_decide";
+}
+
 export type ApprovalGate =
   | { kind: "proceed" }
-  /** Allowed after the administrator confirms, with this sentence shown first. */
+  /** Allowed after the administrator confirms (`--yes` skips the question), with this sentence shown first. */
   | { kind: "confirm"; warning: string }
   /** Refused unless the administrator says `--force`. */
   | { kind: "needs_force"; reason: string };
@@ -278,13 +309,23 @@ export type ApprovalGate =
 /**
  * What the automated review's verdict, as it stands for the commit about to be approved, means for
  * approving. A person is the final authority, so nothing is forbidden outright; but an approval
- * that goes against the review's finding needs an explicit `--force`, and one the review did not
- * clear needs a confirmation that says so.
+ * that goes against the review's finding, or that cannot see the review at all, needs an explicit
+ * `--force`, and one the review did not clear needs a confirmation that says so.
+ *
+ * `unread` is why the NEMAR API could not say what the review concluded. That is "unknown", which
+ * is never rendered as "not reviewed": a stored rejection could be hiding behind it.
  */
 export function approvalGate(input: {
   verdict: QueueVerdict;
-  staleVerdict: QueueVerdict | null;
+  staleVerdict: ReadVerdict | null;
+  unread?: string;
 }): ApprovalGate {
+  if (input.unread) {
+    return {
+      kind: "needs_force",
+      reason: `The automated review could not be read (${input.unread}), so its verdict is unknown. Pass --force to approve without it.`,
+    };
+  }
   switch (input.verdict) {
     case "pass":
       return { kind: "proceed" };
@@ -313,7 +354,7 @@ export function approvalGate(input: {
         warning:
           input.staleVerdict === null
             ? "The automated review has not read this commit."
-            : `The automated review read an earlier commit of this pull request (it said: ${input.staleVerdict.replaceAll("_", " ")}), not this one.`,
+            : `The automated review read a different commit of this pull request (it said: ${input.staleVerdict}), not this one.`,
       };
   }
 }
@@ -322,6 +363,10 @@ export function approvalGate(input: {
 // Writing to GitHub, as the administrator
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * A failed write. `status` 0 means GitHub did not answer, and for a write that is NOT "it did not
+ * happen": the request may have been applied before the connection dropped. Callers say so.
+ */
 export type WriteResult = { ok: true } | { ok: false; status: number; reason: string };
 
 /** Approve the pull request on the exact commit the administrator was shown. */
@@ -346,7 +391,7 @@ export async function submitApproval(
     return {
       ok: false,
       status: 0,
-      reason: `GitHub could not be reached (${err instanceof Error ? err.message : String(err)}).`,
+      reason: `GitHub did not answer (${err instanceof Error ? err.message : String(err)}).`,
     };
   }
   const answer = (await res.json().catch(() => null)) as {
@@ -378,6 +423,12 @@ export type MergeMethod = (typeof MERGE_METHODS)[number];
 /** `clean` is GitHub saying every required check and review is satisfied; `has_hooks` is the same with a post-receive hook. */
 const MERGEABLE: ReadonlySet<string> = new Set(["clean", "has_hooks"]);
 
+/**
+ * A merge that did not happen. `status` mirrors GitHub's codes where GitHub answered (405 not
+ * mergeable, 409 the branch moved) and is 405 or 409 here WITHOUT a request having been sent when
+ * this code decided not to ask; it is 0 when GitHub did not answer, which, as for the approval, does
+ * not prove nothing was merged.
+ */
 export type MergeResult =
   | { ok: true }
   | { ok: false; status: number; reason: string; mergeableState?: string };
@@ -442,7 +493,7 @@ export async function mergeWhenClean(
     return {
       ok: false,
       status: 0,
-      reason: `GitHub could not be reached (${err instanceof Error ? err.message : String(err)}).`,
+      reason: `GitHub did not answer (${err instanceof Error ? err.message : String(err)}).`,
     };
   }
   const answer = (await res.json().catch(() => null)) as { merged?: unknown } | null;

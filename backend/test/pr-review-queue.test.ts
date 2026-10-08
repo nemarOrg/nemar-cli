@@ -27,6 +27,7 @@ import {
 } from "../src/services/github/transport";
 import { decideReview } from "../src/services/pr-review";
 import {
+  __setGraphqlTimeoutForTests,
   checkStateOf,
   classify,
   filterQueue,
@@ -68,7 +69,8 @@ let calls: Recorded[] = [];
 /** Pages of search nodes, in order; the cursor is the index of the next page. */
 let searchPages: unknown[][] = [];
 let issueCount: number | null = null;
-let graphqlResponder: ((attempt: number) => Response | null) | null = null;
+let graphqlResponder: ((attempt: number) => Response | null | Promise<Response | null>) | null =
+  null;
 let graphqlAttempts = 0;
 let usersById: Record<string, { id: number; login: string; type: string } | number> = {};
 let pulls: Record<string, Record<string, unknown> | number> = {};
@@ -92,7 +94,7 @@ beforeAll(() => {
       });
       if (req.method === "POST" && url.pathname === "/graphql") {
         graphqlAttempts++;
-        const forced = graphqlResponder?.(graphqlAttempts);
+        const forced = await graphqlResponder?.(graphqlAttempts);
         if (forced) return forced;
         const after = (body as { variables?: { after?: string | null } } | null)?.variables?.after;
         const index = after ? Number(after) : 0;
@@ -299,6 +301,17 @@ describe("the pure rules", () => {
     expect(stale.review_current).toBe(false);
     expect(stale.stale_verdict).toBe("pass");
     expect(classify(null, SHA_A)).toMatchObject({ verdict: "not_reviewed", review_current: null });
+    // With no head to compare against, nothing is asserted about the current commit: the stored
+    // verdict rides along as what the review concluded of ITS commit, and currency is unknown.
+    const unknownHead = classify(row, null);
+    expect(unknownHead).toMatchObject({
+      verdict: "not_reviewed",
+      review_current: null,
+      reviewed_sha: SHA_A,
+      stale_verdict: "pass",
+    });
+    // An older review that gave no verdict has no verdict to carry.
+    expect(classify({ ...row, state: "declined", verdict: null }, SHA_B).stale_verdict).toBeNull();
     // A column nobody can stand behind is "could not decide", not a pass.
     expect(classify({ ...row, verdict: "great" }, SHA_A).verdict).toBe("could_not_decide");
   });
@@ -603,8 +616,20 @@ describe("GET /admin/pr-reviews", () => {
     expect(entry.title).toContain("hello");
     expect(entry.head_label).toMatch(/^[A-Za-z0-9._\-/:?…]+$/);
     expect(entry.url).toBe("https://github.com/nemarDatasets/nm000201/pull/1");
-    // The pull request body is never read, so it cannot be returned.
-    expect(JSON.stringify(entry)).not.toContain("body");
+  });
+
+  test("a pull request's body is never asked for, so it cannot be returned", async () => {
+    nodes({ ds: "nm000201", n: 1, extra: { body: "@everyone SECRET-BODY-TEXT" } });
+    const res = await app.request(
+      "/admin/pr-reviews",
+      { headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+      env(),
+    );
+    expect(await res.text()).not.toContain("SECRET-BODY-TEXT");
+    const query = String(
+      (calls.find((c) => c.path === "/graphql")?.body as { query: string }).query,
+    );
+    expect(query).not.toMatch(/\bbody\b/);
   });
 
   test("waits out a secondary rate limit and answers", async () => {
@@ -767,6 +792,14 @@ describe("GET /admin/pr-reviews/:dataset/:pr", () => {
     expect(body.review?.outcome).toEqual({ kind: "error", error: "report_invalid" });
   });
 
+  test("an unreadable report never makes a stored rejection easier to approve", async () => {
+    seedReview({ ds: "nm000201", n: 7, state: "reported", verdict: "fail", report: "{not json" });
+    pulls["nm000201#7"] = livePull();
+    const { body } = await detail("nm000201", 7);
+    expect(body.verdict).toBe("fail");
+    expect(body.review?.outcome).toEqual({ kind: "error", error: "report_invalid" });
+  });
+
   test("shows a decline, an error and an unreported review by their closed words", async () => {
     pulls["nm000201#7"] = livePull();
     seedReview({ ds: "nm000201", n: 7, state: "declined", detail: "rate_limited" });
@@ -807,6 +840,10 @@ describe("GET /admin/pr-reviews/:dataset/:pr", () => {
     expect(status).toBe(200);
     expect(body.live).toBeNull();
     expect(body.review_current).toBeNull();
+    // No current commit to compare with, so no verdict is asserted about it: the stored pass is
+    // what the review concluded of ITS commit, not of this one.
+    expect(body).toMatchObject({ verdict: "not_reviewed", stale_verdict: "pass", head_sha: null });
+    expect(body.review?.verdict).toBe("pass");
   });
 
   test("with the REST budget nearly spent it still answers from what it stored, and says GitHub was not read", async () => {
@@ -1025,12 +1062,19 @@ describe("PUT and DELETE /admin/pr-review-authors/:login", () => {
     expect(db.query("SELECT COUNT(*) AS n FROM pr_review_overrides").get()).toEqual({ n: 0 });
   });
 
-  test("an organisation or a bot is not a contributor", async () => {
+  test("an organisation or a bot is not a contributor, and a refusal writes nothing, not even an audit row", async () => {
     usersById.acme = { id: 900, login: "acme", type: "Organization" };
     const r = await send("PUT", "/admin/pr-review-authors/acme", { mode: "block" });
     expect(r.status).toBe(422);
     expect(r.body.code).toBe("not_a_user");
     expect(db.query("SELECT COUNT(*) AS n FROM pr_review_overrides").get()).toEqual({ n: 0 });
+    usersById.helper = { id: 901, login: "helper", type: "Bot" };
+    const bot = await send("PUT", "/admin/pr-review-authors/helper", { mode: "block" });
+    expect(bot.status).toBe(422);
+    expect(bot.body.code).toBe("not_a_user");
+    expect(
+      db.query("SELECT COUNT(*) AS n FROM audit_log WHERE action LIKE 'pr_review_override%'").get(),
+    ).toEqual({ n: 0 });
   });
 
   test("the body is strict: an unknown mode or an extra key is refused, not read as intent", async () => {
@@ -1050,5 +1094,428 @@ describe("PUT and DELETE /admin/pr-review-authors/:login", () => {
     const r = await send("PUT", "/admin/pr-review-authors/alice", { mode: "allow" }, MEMBER_KEY);
     expect(r.status).toBe(403);
     expect(db.query("SELECT COUNT(*) AS n FROM pr_review_overrides").get()).toEqual({ n: 0 });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Which review counts for a commit
+// ---------------------------------------------------------------------------------------------
+
+const liveAt = (sha: string) =>
+  livePull({
+    head: {
+      sha,
+      ref: "x",
+      repo: { full_name: "nemarDatasets/nm000201", owner: { login: "nemarDatasets" } },
+    },
+  });
+
+/** A commit id that is not one of the named ones, numbered so a test can seed many. */
+const sha = (n: number) => n.toString(16).padStart(40, "0");
+
+describe("which review counts for a commit", () => {
+  test("after a force-push back to a reviewed commit, that commit's own review counts, not the newest row", async () => {
+    // The table is unique per commit and a repeated commit adds no row, so the review of A is OLDER
+    // than the review of B once the branch is back at A.
+    seedReview({ ds: "nm000201", n: 7, sha: SHA_A, state: "reported", verdict: "fail" });
+    seedReview({ ds: "nm000201", n: 7, sha: SHA_B, state: "reported", verdict: "pass" });
+
+    nodes({ ds: "nm000201", n: 7, sha: SHA_A });
+    const atA = (await queue()).body.entries[0];
+    expect(atA).toMatchObject({
+      verdict: "fail",
+      review_current: true,
+      reviewed_sha: SHA_A,
+      stale_verdict: null,
+      needs_you: false,
+    });
+
+    nodes({ ds: "nm000201", n: 7, sha: SHA_B });
+    expect((await queue()).body.entries[0]).toMatchObject({ verdict: "pass", needs_you: true });
+  });
+
+  test("a push that is reviewed and rejected replaces an earlier pass", async () => {
+    seedReview({ ds: "nm000201", n: 7, sha: SHA_A, state: "reported", verdict: "pass" });
+    seedReview({ ds: "nm000201", n: 7, sha: SHA_B, state: "reported", verdict: "fail" });
+    nodes({ ds: "nm000201", n: 7, sha: SHA_B });
+    expect((await queue()).body.entries[0]).toMatchObject({ verdict: "fail", needs_you: false });
+  });
+
+  test("a commit nobody reviewed shows the NEWEST review as another commit's, with what it said", async () => {
+    seedReview({ ds: "nm000201", n: 7, sha: SHA_A, state: "reported", verdict: "fail" });
+    seedReview({ ds: "nm000201", n: 7, sha: SHA_B, state: "reported", verdict: "pass" });
+    nodes({ ds: "nm000201", n: 7, sha: SHA_C });
+    expect((await queue()).body.entries[0]).toMatchObject({
+      verdict: "not_reviewed",
+      review_current: false,
+      reviewed_sha: SHA_B,
+      stale_verdict: "pass",
+    });
+  });
+
+  test("the detail view picks the same review, and `?head=` asks about the commit the caller holds", async () => {
+    seedReview({ ds: "nm000201", n: 7, sha: SHA_A, state: "reported", verdict: "fail" });
+    seedReview({ ds: "nm000201", n: 7, sha: SHA_B, state: "reported", verdict: "pass" });
+    pulls["nm000201#7"] = liveAt(SHA_A);
+
+    const live = await detail("nm000201", 7);
+    expect(live.body).toMatchObject({ verdict: "fail", head_sha: SHA_A, review_current: true });
+    expect(live.body.review?.head_sha).toBe(SHA_A);
+
+    // The caller names a commit; the answer is about THAT one, whatever GitHub says the head is.
+    const asked = await get(`/admin/pr-reviews/nm000201/7?head=${SHA_B}`);
+    expect(asked.status).toBe(200);
+    expect(asked.body).toMatchObject({ verdict: "pass", head_sha: SHA_B, review_current: true });
+
+    const unreviewed = await get(`/admin/pr-reviews/nm000201/7?head=${SHA_C}`);
+    expect(unreviewed.body).toMatchObject({
+      verdict: "not_reviewed",
+      review_current: false,
+      stale_verdict: "pass",
+    });
+  });
+
+  test("`?head=` names a commit or is refused", async () => {
+    pulls["nm000201#7"] = livePull();
+    for (const bad of ["nope", "ABC", "a".repeat(39), `${"a".repeat(40)}0`]) {
+      const r = await get(`/admin/pr-reviews/nm000201/7?head=${bad}`);
+      expect(r.status).toBe(400);
+      expect(r.body.code).toBe("bad_head");
+    }
+  });
+
+  test("a head whose review is older than the history shown is still found", async () => {
+    // 22 reviews; the pull request's current head is the OLDEST of them.
+    for (let i = 1; i <= 22; i++) {
+      seedReview({
+        ds: "nm000201",
+        n: 7,
+        sha: sha(i),
+        state: "reported",
+        verdict: i === 1 ? "pass" : "fail",
+      });
+    }
+    pulls["nm000201#7"] = liveAt(sha(1));
+    const { body } = await detail("nm000201", 7);
+    expect(body.verdict).toBe("pass");
+    expect(body.review?.head_sha).toBe(sha(1));
+    expect(body.history).toHaveLength(20);
+    expect(body.history_truncated).toBe(true);
+  });
+
+  test("the history says when it is complete", async () => {
+    seedReview({ ds: "nm000201", n: 7, sha: SHA_A, state: "reported", verdict: "pass" });
+    pulls["nm000201#7"] = livePull();
+    expect((await detail("nm000201", 7)).body.history_truncated).toBe(false);
+  });
+
+  test("an author's standing is labelled by where the login came from", async () => {
+    // From a stored review: the Worker's own record. From the live pull request alone: GitHub.
+    seedReview({ ds: "nm000201", n: 7, state: "reported", verdict: "pass" });
+    pulls["nm000201#7"] = livePull();
+    expect((await detail("nm000201", 7)).body.author?.resolved_from).toBe("history");
+    pulls["nm000202#3"] = livePull({ user: { login: "newcomer", id: 612, type: "User" } });
+    const fresh = await get("/admin/pr-reviews/nm000202/3");
+    expect((fresh.body as unknown as PrReviewDetail).author).toMatchObject({
+      login: "newcomer",
+      resolved_from: "github",
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The GitHub search, when it goes wrong or lies
+// ---------------------------------------------------------------------------------------------
+
+describe("the GitHub search", () => {
+  test("a page that fails after the first one succeeded fails the whole read", async () => {
+    searchPages = [[prNode({ ds: "nm000201", n: 1 })], [prNode({ ds: "nm000202", n: 2 })]];
+    graphqlResponder = (attempt) =>
+      attempt >= 2 ? new Response("{}", { status: 500, headers: { "Retry-After": "0" } }) : null;
+    const r = await get("/admin/pr-reviews");
+    expect(r.status).toBe(502);
+    expect(r.body.entries).toBeUndefined();
+  });
+
+  test("an answer that is not a search result is an error, not an empty queue", async () => {
+    graphqlResponder = () => new Response("<html>gateway</html>", { status: 200 });
+    const notJson = await get("/admin/pr-reviews");
+    expect(notJson.status).toBe(502);
+    expect(notJson.body.code).toBe("github_bad_response");
+
+    graphqlResponder = () => Response.json({ data: { search: null } });
+    const empty = await get("/admin/pr-reviews");
+    expect(empty.status).toBe(502);
+    expect(empty.body.code).toBe("github_bad_response");
+  });
+
+  test("stops at the page bound and says the list is incomplete", async () => {
+    searchPages = Array.from({ length: 25 }, (_, i) => [prNode({ ds: "nm000201", n: i + 1 })]);
+    const { body } = await queue();
+    expect(graphqlAttempts).toBe(20);
+    expect(body.truncated).toBe(true);
+    expect(body.entries).toHaveLength(20);
+  });
+
+  test("a next page with no cursor to ask for is an incomplete list, not a complete one", async () => {
+    graphqlResponder = () =>
+      Response.json({
+        data: {
+          search: {
+            issueCount: 2,
+            pageInfo: { hasNextPage: true, endCursor: null },
+            nodes: [prNode({ ds: "nm000201", n: 1 })],
+          },
+        },
+      });
+    const { body } = await queue();
+    expect(body.truncated).toBe(true);
+    expect(graphqlAttempts).toBe(1);
+  });
+
+  test("a result that cannot be read as a pull request is counted, not silently dropped", async () => {
+    searchPages = [
+      [
+        prNode({ ds: "nm000201", n: 1 }),
+        prNode({ ds: "nm000202", n: 2, sha: "not-a-sha" }),
+        prNode({ ds: "nm000203", n: 0 }),
+        { __typename: "Issue", number: 5 },
+      ],
+    ];
+    const { body } = await queue();
+    expect(body.entries.map((e) => e.dataset_id)).toEqual(["nm000201"]);
+    expect(body.skipped.unreadable).toBe(3);
+  });
+
+  test("a pull request the search index has not caught up on is left out and not counted as unreadable", async () => {
+    searchPages = [
+      [
+        prNode({ ds: "nm000201", n: 1 }),
+        prNode({ ds: "nm000202", n: 2, prState: "MERGED" }),
+        prNode({ ds: "nm000203", n: 3, baseRef: "dev" }),
+      ],
+    ];
+    const { body } = await queue();
+    expect(body.entries.map((e) => e.dataset_id)).toEqual(["nm000201"]);
+    expect(body.skipped.unreadable).toBe(0);
+  });
+
+  test("checks that belong to a different commit than the head are not read as the head's", async () => {
+    nodes({ ds: "nm000201", n: 1, commitOid: SHA_B }); // the head is SHA_A
+    const e = (await queue()).body.entries[0];
+    expect([e.bids, e.version]).toEqual(["unknown", "unknown"]);
+  });
+
+  test("the BIDS column counts only the NEMAR App's check, because the ruleset does", async () => {
+    // A workflow job anyone with push access can add, with the same name, passing.
+    const spoof = { ...bidsOk("nm000201"), appId: 15368 };
+    nodes(
+      // The App's real check is absent; only the spoof exists.
+      { ds: "nm000201", n: 1, checks: [spoof, versionOk] },
+      // The App's real check failed after the spoof started.
+      {
+        ds: "nm000202",
+        n: 2,
+        checks: [
+          { ...bidsOk("nm000202"), conclusion: "FAILURE", at: "2026-10-01T00:00:00Z" },
+          { ...spoof, name: "Run BIDS Validation", at: "2026-10-01T01:00:00Z" },
+          versionOk,
+        ],
+      },
+      // A commit status named like the check is not the App's check run either.
+      {
+        ds: "nm000203",
+        n: 3,
+        checks: [{ type: "status", name: "Run BIDS Validation", state: "SUCCESS" }, versionOk],
+      },
+    );
+    const by = Object.fromEntries((await queue()).body.entries.map((e) => [e.dataset_id, e]));
+    expect(by.nm000201.bids).toBe("missing");
+    expect(by.nm000202.bids).toBe("fail");
+    expect(by.nm000203.bids).toBe("missing");
+    // `version-check` is not pinned (the ruleset accepts it from any source), so it still counts.
+    expect(by.nm000201.version).toBe("pass");
+  });
+
+  test("a re-run that is queued, with no start time, is the newest run", async () => {
+    nodes({
+      ds: "nm000201",
+      n: 1,
+      checks: [
+        bidsOk("nm000201"),
+        { ...versionOk, conclusion: "FAILURE", at: "2026-10-01T00:00:00Z" },
+        { ...versionOk, status: "QUEUED", conclusion: null },
+      ],
+    });
+    const e = (await queue()).body.entries[0];
+    expect(e.version).toBe("pending");
+  });
+
+  test("a GitHub that accepts the connection and never answers is an error within a bound", async () => {
+    __setGraphqlTimeoutForTests(150);
+    try {
+      graphqlResponder = () => new Promise<Response>(() => {});
+      const started = Date.now();
+      const r = await get("/admin/pr-reviews");
+      expect(r.status).toBe(502);
+      expect(r.body.code).toBe("github_timeout");
+      expect(Date.now() - started).toBeLessThan(8000);
+    } finally {
+      __setGraphqlTimeoutForTests(null);
+    }
+  });
+
+  test("with no GitHub token configured it says so instead of listing nothing", async () => {
+    envOverrides = { GITHUB_ADMIN_PAT: undefined };
+    const r = await get("/admin/pr-reviews");
+    expect(r.status).toBe(502);
+    expect(r.body.code).toBe("github_unavailable");
+  });
+});
+
+describe("the order of the queue", () => {
+  test("pull requests with the same verdict are ordered by their required checks, then age, then id", async () => {
+    nodes(
+      { ds: "nm000204", n: 4, created: "2026-10-02T00:00:00Z" },
+      {
+        ds: "nm000203",
+        n: 3,
+        created: "2026-10-01T00:00:00Z",
+        checks: [{ ...bidsOk("nm000203"), conclusion: "FAILURE" }, versionOk],
+      },
+      { ds: "nm000202", n: 9, created: "2026-10-02T00:00:00Z" },
+      { ds: "nm000202", n: 2, created: "2026-10-02T00:00:00Z" },
+      { ds: "nm000201", n: 1, created: "2026-10-03T00:00:00Z" },
+    );
+    // All "not reviewed". The failing-check one sinks below the rest even though it is the oldest;
+    // among the passing ones the oldest comes first, and equal ages fall back to dataset then number.
+    expect((await queue()).body.entries.map((e) => `${e.dataset_id}#${e.pr_number}`)).toEqual([
+      "nm000202#2",
+      "nm000202#9",
+      "nm000204#4",
+      "nm000201#1",
+      "nm000203#3",
+    ]);
+  });
+
+  test("a review that could not decide is something a person must look at", async () => {
+    nodes({ ds: "nm000201", n: 1 });
+    seedReview({ ds: "nm000201", n: 1, state: "errored", detail: "model_unavailable" });
+    const e = (await queue()).body.entries[0];
+    expect(e).toMatchObject({ verdict: "could_not_decide", needs_you: true });
+    expect((await queue("?needs_me=1")).body.entries).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Contributors: the details
+// ---------------------------------------------------------------------------------------------
+
+describe("contributor decisions, in detail", () => {
+  function overrideRow(id: number, login: string, mode: "allow" | "block") {
+    db.run(
+      "INSERT INTO pr_review_overrides (author_id, author_login, mode, set_by) VALUES (?, ?, ?, ?)",
+      [id, login, mode, adminId],
+    );
+  }
+
+  test("`clear` follows who holds a login NOW, so a reused name does not clear the old owner's decision", async () => {
+    // Account 77 was `alice` when it was blocked, and has since been renamed. Account 99 is `alice` now.
+    overrideRow(77, "alice", "block");
+    usersById.alice = { id: 99, login: "alice", type: "User" };
+    const r = await send("DELETE", "/admin/pr-review-authors/alice");
+    expect(r.status).toBe(200);
+    const body = r.body as unknown as ClearOverrideResponse;
+    expect(body.removed).toBeNull();
+    expect(body.standing.author_id).toBe(99);
+    expect(db.query("SELECT author_id FROM pr_review_overrides").all()).toEqual([
+      { author_id: 77 },
+    ]);
+    expect(
+      db
+        .query("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'pr_review_override_clear'")
+        .get(),
+    ).toEqual({ n: 0 });
+  });
+
+  test("with GitHub unable to say, two accounts that once used the name are not guessed between", async () => {
+    overrideRow(77, "alice", "block");
+    overrideRow(99, "alice", "allow");
+    usersById.alice = 500;
+    const r = await send("DELETE", "/admin/pr-review-authors/alice");
+    expect(r.status).toBe(409);
+    expect(r.body.code).toBe("ambiguous_login");
+    expect(db.query("SELECT COUNT(*) AS n FROM pr_review_overrides").get()).toEqual({ n: 2 });
+  });
+
+  test("the audit row says who, what, and what it replaced", async () => {
+    usersById.alice = { id: 77, login: "Alice", type: "User" };
+    await send("PUT", "/admin/pr-review-authors/alice", { mode: "allow", reason: "Vetted" });
+    await send("PUT", "/admin/pr-review-authors/alice", { mode: "block" });
+    await send("DELETE", "/admin/pr-review-authors/alice");
+    const rows = db
+      .query(
+        "SELECT action, details FROM audit_log WHERE action LIKE 'pr_review_override%' ORDER BY id",
+      )
+      .all() as Array<{ action: string; details: string }>;
+    expect(rows.map((r) => [r.action, JSON.parse(r.details)])).toEqual([
+      [
+        "pr_review_override_set",
+        { login: "Alice", mode: "allow", previous: null, reason: "Vetted" },
+      ],
+      [
+        "pr_review_override_set",
+        { login: "Alice", mode: "block", previous: "allow", reason: null },
+      ],
+      ["pr_review_override_clear", { login: "Alice", removed: "block" }],
+    ]);
+  });
+
+  test("the record shows the most recent decided pull requests once each, newest first", async () => {
+    usersById.alice = { id: 77, login: "alice", type: "User" };
+    // Twelve pull requests; the first fails and is then fixed, so it counts once, as a pass.
+    seedReview({
+      ds: "nm000301",
+      n: 100,
+      authorId: 77,
+      login: "alice",
+      sha: SHA_A,
+      state: "reported",
+      verdict: "fail",
+    });
+    seedReview({
+      ds: "nm000301",
+      n: 100,
+      authorId: 77,
+      login: "alice",
+      sha: SHA_B,
+      state: "reported",
+      verdict: "pass",
+    });
+    for (let n = 101; n <= 111; n++) {
+      seedReview({
+        ds: "nm000301",
+        n,
+        authorId: 77,
+        login: "alice",
+        sha: sha(n),
+        state: "reported",
+        verdict: "pass",
+      });
+    }
+    const { body } = await standing("alice");
+    expect(body.tally).toEqual({ rejected: 0, decided: 12 });
+    expect(body.recent).toHaveLength(10);
+    expect(body.recent[0]).toMatchObject({ pr_number: 111, verdict: "pass" });
+    expect(body.by_record).toEqual({ paused: false });
+  });
+
+  test("the standing by the record alone is reported beside the one the gate applies", async () => {
+    usersById.alice = { id: 77, login: "alice", type: "User" };
+    seedHistory(77, "alice", 6, 4);
+    await send("PUT", "/admin/pr-review-authors/alice", { mode: "allow" });
+    const { body } = await standing("alice");
+    expect(body.standing).toEqual({ paused: false });
+    expect(body.by_record).toEqual({ paused: true, because: "tally" });
   });
 });

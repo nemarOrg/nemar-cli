@@ -1,6 +1,6 @@
 /**
- * `nemar admin pr-reviews`: one place to see and manage every dataset pull request waiting for
- * approval (ADR 0093, following ADR 0092).
+ * `nemar admin pr-reviews`: one place to see and manage the open dataset pull requests and the
+ * automated review of each (ADR 0093, following ADR 0092).
  *
  *   nemar admin pr-reviews [list]            open pull requests to main, with the automated review
  *   nemar admin pr-reviews show <ds> <pr>    the stored report, in the pull-request comment's words
@@ -9,22 +9,23 @@
  *   nemar admin pr-reviews standing <login>  a contributor's record and what it means
  *
  * The list, the report and the contributor controls come from the NEMAR API. The approval does
- * not: it is made from this machine with the GitHub token `gh` holds, because an approval is a
- * person's and the NEMAR App must not approve on one's behalf (see `lib/pr-review-approve.ts`).
+ * not: it is made from this machine with your own GitHub token (see `lib/pr-review-approve.ts`).
  */
 
 import chalk from "chalk";
 import { Command } from "commander";
 import ora, { type Ora } from "ora";
 import {
+  type CheckState,
   type ContributorStanding,
   type PrReviewDetail,
   QUEUE_VERDICTS,
   type QueueEntry,
   type QueueResponse,
   type QueueVerdict,
+  type ReadVerdict,
 } from "../../shared/contract/pr-review-admin.js";
-import { renderCheck, standingOf } from "../../shared/pr-review.js";
+import { type ReviewOutcome, renderCheck } from "../../shared/pr-review.js";
 import {
   clearPrReviewAuthor,
   getPrReview,
@@ -42,6 +43,7 @@ import {
   type MergeMethod,
   adminGitHubToken,
   approvalGate,
+  asVerdict,
   fetchPullRequest,
   githubApiBase,
   identityMatches,
@@ -93,7 +95,7 @@ const DETAIL_WORDS: Record<string, string> = {
 };
 
 function detailWord(detail: string): string {
-  return DETAIL_WORDS[detail] ?? detail.replaceAll("_", " ");
+  return DETAIL_WORDS[detail] ?? plain(detail).replaceAll("_", " ");
 }
 
 const VERDICT_WORD: Record<QueueVerdict, string> = {
@@ -105,7 +107,12 @@ const VERDICT_WORD: Record<QueueVerdict, string> = {
   could_not_decide: "could not decide",
 };
 
-function verdictColor(v: QueueVerdict): (s: string) => string {
+/** A verdict as a word. One a newer server invents is shown as itself, never as a pass. */
+function verdictWord(v: string): string {
+  return VERDICT_WORD[v as QueueVerdict] ?? plain(v).replaceAll("_", " ");
+}
+
+function verdictColor(v: string): (s: string) => string {
   switch (v) {
     case "pass":
       return chalk.green;
@@ -116,21 +123,23 @@ function verdictColor(v: QueueVerdict): (s: string) => string {
       return chalk.yellow;
     case "in_progress":
       return chalk.cyan;
-    default:
+    case "not_reviewed":
       return chalk.dim;
+    default:
+      return chalk.yellow;
   }
 }
 
 /** The verdict as a person reads it, with the closed word behind it when there is one. */
 export function verdictText(e: Pick<QueueEntry, "verdict" | "detail" | "review_current">): string {
-  const word = VERDICT_WORD[e.verdict];
+  const word = verdictWord(e.verdict);
   if (e.verdict === "not_reviewed" && e.review_current === false) {
     return `${word} (older commit)`;
   }
   return e.detail ? `${word} (${detailWord(e.detail)})` : word;
 }
 
-const CHECK_WORD: Record<string, [string, (s: string) => string]> = {
+const CHECK_WORD: Record<CheckState, [string, (s: string) => string]> = {
   pass: ["ok", chalk.green],
   fail: ["FAIL", chalk.red],
   pending: ["pending", chalk.yellow],
@@ -139,7 +148,7 @@ const CHECK_WORD: Record<string, [string, (s: string) => string]> = {
 };
 
 function checkCell(state: string, width: number): string {
-  const [word, color] = CHECK_WORD[state] ?? ["?", chalk.yellow];
+  const [word, color] = CHECK_WORD[state as CheckState] ?? ["?", chalk.yellow];
   return color(word.padEnd(width));
 }
 
@@ -150,7 +159,7 @@ export function renderQueue(entries: QueueEntry[], now: number = Date.now()): st
     e,
     mark: e.needs_you ? "*" : " ",
     ds: plain(e.dataset_id),
-    pr: `#${e.pr_number}`,
+    pr: `#${plain(String(e.pr_number))}`,
     author: clip(e.author_login, 20),
     from: clip(e.from_fork ? `fork ${e.head_label}` : `branch ${e.head_label}`, 34),
     verdict: clip(`${verdictText(e)}${e.draft ? " [draft]" : ""}`, 40),
@@ -193,32 +202,52 @@ export function terminalize(markdown: string): string {
     .trim();
 }
 
+/**
+ * A stored outcome as the report a person reads: the shared renderer's words. A server newer than
+ * this CLI can send an outcome this version cannot render; that is said, not a stack trace.
+ */
+export function reportLines(outcome: ReviewOutcome): string[] {
+  try {
+    const r = renderCheck(outcome);
+    return [chalk.bold(plain(r.title)), "", terminalize(r.summary), "", terminalize(r.text)];
+  } catch {
+    return [
+      chalk.yellow(
+        "The stored report could not be rendered by this version of the CLI. Update it, or read the review on the pull request.",
+      ),
+    ];
+  }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Contributor standing
 // ---------------------------------------------------------------------------------------------
 
+/** One decimal, so 10.2% is not shown as the "10%" it is said to exceed. */
+function percent(rejected: number, decided: number): string {
+  return decided > 0 ? `${((rejected / decided) * 100).toFixed(1)}%` : "0%";
+}
+
 export function standingLines(s: ContributorStanding): string[] {
   const out: string[] = [];
   out.push(
-    `${chalk.bold(plain(s.login))} ${chalk.dim(`(GitHub id ${s.author_id}${s.resolved_from === "history" ? ", from the review history" : ""})`)}`,
+    `${chalk.bold(plain(s.login))} ${chalk.dim(`(GitHub id ${plain(String(s.author_id))}${s.resolved_from === "history" ? ", from the Worker's records because GitHub was not asked or could not say" : ""})`)}`,
   );
   const { rejected, decided } = s.tally;
-  const pct = decided > 0 ? Math.round((rejected / decided) * 100) : 0;
   out.push(
-    `  Record:    ${rejected} of ${decided} decided pull request${decided === 1 ? "" : "s"} rejected${decided > 0 ? ` (${pct}%)` : ""}`,
+    `  Record:    ${rejected} of ${decided} decided pull request${decided === 1 ? "" : "s"} rejected${decided > 0 ? ` (${percent(rejected, decided)})` : ""}`,
   );
   out.push(
     chalk.dim(
       `             reviews pause when MORE than ${s.thresholds.rejected_more_than} are rejected AND more than ${s.thresholds.percent_more_than}% of the decided ones`,
     ),
   );
-  const byTally = standingOf(s.tally, null);
   if (s.override) {
     const by = s.override.set_by ? ` by ${plain(s.override.set_by)}` : "";
     out.push(
       `  Decision:  ${s.override.mode === "allow" ? chalk.green("allowed") : chalk.red("blocked")}${by} on ${plain(s.override.set_at)}${s.override.reason ? `: ${plain(s.override.reason)}` : ""}`,
     );
-    if (s.override.mode === "allow" && byTally.paused) {
+    if (s.override.mode === "allow" && s.by_record.paused) {
       out.push(chalk.dim("             the record alone would pause them; the decision wins"));
     }
   } else {
@@ -232,7 +261,7 @@ export function standingLines(s: ContributorStanding): string[] {
               ? "paused by a maintainer: their pull requests need a person"
               : "paused by the record: their pull requests need a person",
           )
-        : chalk.green("reviewed automatically")
+        : chalk.green("not paused: reviewed automatically, within the rate limits")
     }`,
   );
   if (s.recent.length > 0) {
@@ -240,7 +269,7 @@ export function standingLines(s: ContributorStanding): string[] {
       `  Recent:    ${s.recent
         .map(
           (r) =>
-            `${plain(r.dataset_id)}#${r.pr_number} ${r.verdict === "fail" ? chalk.red("fail") : chalk.green("pass")}`,
+            `${plain(r.dataset_id)}#${plain(String(r.pr_number))} ${r.verdict === "fail" ? chalk.red("fail") : chalk.green("pass")}`,
         )
         .join(", ")}`,
     );
@@ -261,40 +290,55 @@ function requireAuth(): boolean {
   return true;
 }
 
-function die(message: string, hint?: string): never {
-  console.log(chalk.red(message));
-  if (hint) console.log(chalk.dim(`  ${hint}`));
+/** Where an error goes: stderr when the caller asked for JSON, so stdout stays machine-readable. */
+function say(json: boolean | undefined): (line: string) => void {
+  return json ? (line) => console.error(line) : (line) => console.log(line);
+}
+
+function die(message: string, hint?: string, json?: boolean): never {
+  const out = say(json);
+  out(chalk.red(message));
+  if (hint) out(chalk.dim(`  ${hint}`));
   process.exit(1);
 }
 
-function failApi(err: unknown, spinner: Ora | null, fallback: string): never {
+/** The closed error word a NEMAR route answered with (`code`), not the sentence in `error`. */
+function errorWord(err: unknown): string | undefined {
+  if (!(err instanceof ApiError)) return undefined;
+  const body = err.rawBody as { code?: unknown } | undefined;
+  return typeof body?.code === "string" ? body.code : undefined;
+}
+
+function failApi(err: unknown, spinner: Ora | null, fallback: string, json?: boolean): never {
   const message = err instanceof ApiError ? plain(err.message) : fallback;
+  const out = say(json);
   if (spinner) spinner.fail(message);
-  else console.log(chalk.red(message));
+  else out(chalk.red(message));
   if (err instanceof ApiError) {
-    if (err.statusCode === 403) console.log(chalk.dim("  This command requires admin privileges"));
+    if (err.statusCode === 403) out(chalk.dim("  This command requires admin privileges"));
   } else {
-    console.log(chalk.dim(`  Error details: ${errorDetail(err)}`));
+    out(chalk.dim(`  Error details: ${errorDetail(err)}`));
   }
   process.exit(1);
 }
 
-function checkDataset(id: string): string {
-  if (!DATASET_ID_RE.test(id)) die(`"${plain(id)}" is not a dataset id (like nm000108).`);
+function checkDataset(id: string, json?: boolean): string {
+  if (!DATASET_ID_RE.test(id))
+    die(`"${plain(id)}" is not a dataset id (like nm000108).`, undefined, json);
   return id;
 }
 
-function checkPr(raw: string): number {
+function checkPr(raw: string, json?: boolean): number {
   const n = Number(raw);
   if (!/^\d+$/.test(raw) || !Number.isSafeInteger(n) || n <= 0) {
-    die(`"${plain(raw)}" is not a pull request number.`);
+    die(`"${plain(raw)}" is not a pull request number.`, undefined, json);
   }
   return n;
 }
 
-function checkLogin(raw: string): string {
+function checkLogin(raw: string, json?: boolean): string {
   const login = raw.replace(/^@/, "");
-  if (!LOGIN_RE.test(login)) die(`"${plain(raw)}" is not a GitHub login.`);
+  if (!LOGIN_RE.test(login)) die(`"${plain(raw)}" is not a GitHub login.`, undefined, json);
   return login;
 }
 
@@ -308,12 +352,16 @@ function envNote(environment: string): void {
   }
 }
 
+function short(sha: string): string {
+  return plain(sha).slice(0, 7);
+}
+
 // ---------------------------------------------------------------------------------------------
 // The command group
 // ---------------------------------------------------------------------------------------------
 
 export const prReviewsCommand = new Command("pr-reviews")
-  .description("Dataset pull requests waiting for approval, with the automated review (ADR 0092)")
+  .description("Open dataset pull requests to main, with the automated review of each (ADR 0092)")
   .addHelpText(
     "after",
     `
@@ -323,21 +371,24 @@ REVIEW column (the automated review of the pull request's CURRENT commit):
   pass              nothing lost, the revision advances, the dataset is materially better
   fail              the review found a problem; the author needs to change something
   uncertain         the review could not decide whether it is a good change
-  not reviewed      no review of this commit: the review is off, the contributor is paused or
-                    rate limited, or only an older commit was reviewed (shown in brackets)
+  not reviewed      no review of this commit is on record: the review is off, the contributor is
+                    paused or rate limited, or the review on record is of another commit (shown
+                    as "older commit")
   in progress       the review is running
   could not decide  the review ended without a verdict (an error, or it never reported)
 A verdict is never carried over to a commit it did not read. '*' marks the pull requests you can
-act on now: a pass to approve, or one nobody has decided for you.
+act on now: a pass to approve, or one nobody has decided for you (drafts are never marked).
 
 APPROVING is YOUR act, made with your own GitHub login from this machine, never as the NEMAR
-App. It uses the token 'gh' holds (or GH_TOKEN), checks it belongs to the GitHub account linked
-to your NEMAR account, and approves the exact commit you were shown. Nothing merges unless you
-add --merge, and a merge waits for GitHub to say every required check is satisfied; it never
-bypasses the ruleset. If there is no usable token, 'approve' prints the PR link and the
-equivalent 'gh pr review --approve' command instead.
+App. It uses GH_TOKEN if set, otherwise the token 'gh' holds, checks it belongs to a person and to
+the GitHub account linked to your NEMAR account, and approves the exact commit you were shown. A
+failing review, a running one, or one that could not be read needs --force. Nothing merges unless
+you add --merge, and then it is attempted once, only if GitHub reports the pull request clean; it
+never tries a merge GitHub reports as blocked. If there is no usable personal token, 'approve'
+prints the PR link and the equivalent 'gh pr review --approve' command (and, in a terminal, opens
+the link).
 
-The list needs the GitHub search index, which can lag a minute behind a new pull request.
+The list comes from GitHub's search index, which can lag a minute behind a new pull request.
 `,
   );
 
@@ -381,11 +432,12 @@ prReviewsCommand
           die(
             `"${plain(v)}" is not a verdict.`,
             `Use: ${QUEUE_VERDICTS.join(", ").replaceAll("_", "-")}`,
+            options.json,
           );
         }
       }
-      const dataset = options.dataset ? checkDataset(options.dataset) : undefined;
-      const author = options.author ? checkLogin(options.author) : undefined;
+      const dataset = options.dataset ? checkDataset(options.dataset, options.json) : undefined;
+      const author = options.author ? checkLogin(options.author, options.json) : undefined;
 
       const spinner = options.json ? null : ora("Reading open pull requests...").start();
       let q: QueueResponse;
@@ -393,7 +445,7 @@ prReviewsCommand
         q = await listPrReviews({ verdicts, dataset, author, needsMe: options.needsMe });
         spinner?.stop();
       } catch (err) {
-        failApi(err, spinner, "Could not read the pull-request queue");
+        failApi(err, spinner, "Could not read the pull-request queue", options.json);
       }
       if (options.json) {
         console.log(JSON.stringify(q, null, 2));
@@ -401,11 +453,15 @@ prReviewsCommand
       }
 
       const lines = renderQueue(q.entries);
+      // Anything that means this list may not be the whole queue.
+      const incomplete = q.truncated || q.skipped.unreadable > 0 || q.skipped.not_owned_here > 0;
       console.log();
       if (lines.length === 0) {
         console.log(
           q.total_open === 0
-            ? chalk.green("No open pull requests to main.")
+            ? incomplete
+              ? chalk.yellow("No open pull requests found in what this Worker can see.")
+              : chalk.green("No open pull requests to main.")
             : chalk.yellow(`No pull requests match (${q.total_open} open in all).`),
         );
       } else {
@@ -427,10 +483,17 @@ prReviewsCommand
           ),
         );
       }
+      if (q.skipped.unreadable > 0) {
+        console.log(
+          chalk.yellow(
+            `  ${q.skipped.unreadable} search result(s) could not be read as pull requests and are not listed.`,
+          ),
+        );
+      }
       if (!q.review_enabled) {
         console.log(
           chalk.dim(
-            "  The automated review is off in this environment (PR_REVIEW_ENABLED), so pull requests show as not reviewed.",
+            "  The automated review is off in this environment (PR_REVIEW_ENABLED), so pull requests with no stored review show as not reviewed.",
           ),
         );
       }
@@ -461,25 +524,21 @@ prReviewsCommand
 
 // -- show ---------------------------------------------------------------------------------------
 
-function short(sha: string): string {
-  return plain(sha).slice(0, 7);
-}
-
 prReviewsCommand
   .command("show <dataset> <pr>")
-  .description("Show the stored automated review of a pull request, in the comment's own words")
+  .description("Show the stored automated review of a pull request, in the words of its PR comment")
   .option("--json", "Output the raw JSON instead of the report")
   .action(async (datasetArg: string, prArg: string, options: { json?: boolean }) => {
     if (!requireAuth()) process.exit(1);
-    const dataset = checkDataset(datasetArg);
-    const pr = checkPr(prArg);
+    const dataset = checkDataset(datasetArg, options.json);
+    const pr = checkPr(prArg, options.json);
     const spinner = options.json ? null : ora("Reading the review...").start();
     let d: PrReviewDetail;
     try {
       d = await getPrReview(dataset, pr);
       spinner?.stop();
     } catch (err) {
-      failApi(err, spinner, "Could not read the review");
+      failApi(err, spinner, "Could not read the review", options.json);
     }
     if (options.json) {
       console.log(JSON.stringify(d, null, 2));
@@ -489,17 +548,11 @@ prReviewsCommand
     console.log();
     console.log(`${chalk.bold(`${dataset} #${pr}`)}  ${chalk.dim(pullRequestUrl(dataset, pr))}`);
     if (d.live) {
-      const state = d.live.merged
-        ? "merged"
-        : d.live.state === "closed"
-          ? "closed"
-          : d.live.draft
-            ? "open, draft"
-            : "open";
+      const state = d.live.draft && d.live.state === "open" ? "open, draft" : d.live.state;
       console.log(
         `  Author:    ${plain(d.live.author_login)} (${d.live.from_fork ? "fork " : "branch "}${plain(d.live.head_label)})`,
       );
-      console.log(`  State:     ${state}, now at ${short(d.live.head_sha)}`);
+      console.log(`  State:     ${plain(state)}, now at ${short(d.live.head_sha)}`);
     } else {
       console.log(
         chalk.yellow("  GitHub could not be read, so the pull request's state is unknown."),
@@ -514,25 +567,33 @@ prReviewsCommand
         chalk.dim(
           d.review_enabled
             ? "             No automated review has been recorded for this pull request."
-            : "             The automated review is off in this environment (PR_REVIEW_ENABLED).",
+            : "             The automated review is off in this environment (PR_REVIEW_ENABLED), and none was recorded.",
         ),
       );
     } else {
-      const which =
-        d.review_current === false
-          ? chalk.yellow(
-              `of ${short(d.review.head_sha)}, an EARLIER commit (the pull request is now at ${short(d.live?.head_sha ?? "")})`,
-            )
-          : `of ${short(d.review.head_sha)}`;
-      console.log(
-        `  Review:    ${color(verdictText({ verdict: d.verdict, detail: d.detail, review_current: d.review_current }))} ${chalk.dim(which)}`,
-      );
-      if (d.review_current === false) {
+      const reviewed = short(d.review.head_sha);
+      if (d.review_current === null) {
+        // GitHub could not be read, so there is no current commit to compare with.
         console.log(
-          chalk.dim(
-            `             That review said ${VERDICT_WORD[d.review.verdict]}, and it does not apply to the current commit.`,
-          ),
+          `  Review:    ${chalk.yellow(`${verdictWord(d.review.verdict)} on ${reviewed}`)} ${chalk.yellow("(whether that is the current commit is unknown: GitHub could not be read)")}`,
         );
+      } else {
+        const which =
+          d.review_current === false
+            ? chalk.yellow(
+                `of ${reviewed}, a DIFFERENT commit (the pull request is now at ${short(d.head_sha ?? "")})`,
+              )
+            : `of ${reviewed}`;
+        console.log(
+          `  Review:    ${color(verdictText({ verdict: d.verdict, detail: d.detail, review_current: d.review_current }))} ${chalk.dim(which)}`,
+        );
+        if (d.review_current === false) {
+          console.log(
+            chalk.dim(
+              `             That review said ${verdictWord(d.review.verdict)}, and it does not apply to the current commit.`,
+            ),
+          );
+        }
       }
       console.log();
       if (d.review.outcome === null) {
@@ -540,12 +601,7 @@ prReviewsCommand
           "The review is still running. It will update the pull request's check when it finishes.",
         );
       } else {
-        const r = renderCheck(d.review.outcome);
-        console.log(chalk.bold(plain(r.title)));
-        console.log();
-        console.log(terminalize(r.summary));
-        console.log();
-        console.log(terminalize(r.text));
+        for (const l of reportLines(d.review.outcome)) console.log(l);
       }
     }
 
@@ -558,9 +614,10 @@ prReviewsCommand
       console.log(chalk.bold("History"));
       for (const h of d.history) {
         console.log(
-          `  ${short(h.head_sha)}  ${verdictColor(h.verdict)(VERDICT_WORD[h.verdict].padEnd(16))}  ${chalk.dim(plain(h.created_at))}`,
+          `  ${short(h.head_sha)}  ${verdictColor(h.verdict)(verdictWord(h.verdict).padEnd(16))}  ${chalk.dim(plain(h.created_at))}`,
         );
       }
+      if (d.history_truncated) console.log(chalk.dim("  (older reviews not shown)"));
     }
     envNote(d.environment);
     console.log();
@@ -571,12 +628,18 @@ prReviewsCommand
 prReviewsCommand
   .command("approve <dataset> <pr>")
   .description("Approve a pull request as YOURSELF (your GitHub login); merges only with --merge")
-  .option("--merge", "After approving, merge it if GitHub says it can be merged cleanly")
-  .option("--method <method>", `How to merge: ${MERGE_METHODS.join(", ")}`, "merge")
+  .option("--merge", "After approving, merge it if GitHub reports it clean (attempted once)")
+  .option("--method <method>", `How to merge, with --merge: ${MERGE_METHODS.join(", ")}`, "merge")
   .option("--message <text>", "The text of your approval")
-  .option("--force", "Approve even though the review failed or is still running")
-  .option("--dry-run", "Do every check and show what would be approved, but approve nothing")
-  .option("-y, --yes", "Do not ask for confirmation")
+  .option("--force", "Approve although the review failed, is running, or could not be read")
+  .option(
+    "--dry-run",
+    "Check your token, the pull request and the review and show what would be approved; approve and merge nothing",
+  )
+  .option(
+    "-y, --yes",
+    "Do not ask for confirmation (a failing, running or unreadable review still needs --force)",
+  )
   .action(
     async (
       datasetArg: string,
@@ -601,7 +664,12 @@ prReviewsCommand
         );
       }
       const url = pullRequestUrl(dataset, pr);
-      const base = githubApiBase();
+      let base: string;
+      try {
+        base = githubApiBase();
+      } catch (err) {
+        return die(err instanceof Error ? err.message : String(err));
+      }
 
       // 1. Your own GitHub credential. Without one there is no safe way to approve from here.
       const tokenResult = await adminGitHubToken();
@@ -610,12 +678,17 @@ prReviewsCommand
         manualFallback(dataset, pr, url);
         process.exit(1);
       }
-      const { token } = tokenResult;
+      const { token, source } = tokenResult;
+      const sourceName = source === "GH_TOKEN" ? "GH_TOKEN" : "the token gh holds";
 
       // 2. Whose it is: a person, and the one this NEMAR account is linked to.
       const me = await whoAmI(token, base);
       if (!me.ok) {
         console.log(chalk.red(me.reason));
+        console.log(chalk.dim(`  (the token came from ${sourceName})`));
+        if (me.kind === "rejected" && source === "GH_TOKEN") {
+          console.log(chalk.dim("  Unset GH_TOKEN to use the account gh is signed in as."));
+        }
         if (me.kind === "not_a_person") manualFallback(dataset, pr, url);
         process.exit(1);
       }
@@ -628,8 +701,12 @@ prReviewsCommand
       const match = identityMatches(linked, me.user.login);
       if (match === "mismatch") {
         die(
-          `gh is signed in as @${me.user.login}, but your NEMAR account is linked to @${plain(linked)}.`,
-          "Switch with 'gh auth switch', or set GH_TOKEN to your own token. An approval is recorded under the login that makes it.",
+          source === "GH_TOKEN"
+            ? `GH_TOKEN belongs to @${me.user.login}, but your NEMAR account is linked to @${plain(linked)}.`
+            : `gh is signed in as @${me.user.login}, but your NEMAR account is linked to @${plain(linked)}.`,
+          source === "GH_TOKEN"
+            ? "Unset GH_TOKEN, or set it to your own token. An approval is recorded under the login that makes it."
+            : "Switch with 'gh auth switch'. An approval is recorded under the login that makes it.",
         );
       }
 
@@ -640,26 +717,30 @@ prReviewsCommand
       if (refusal) die(refusal);
       const head = live.value.headSha;
 
-      // 4. What the automated review concluded about THIS commit.
+      // 4. What the automated review concluded about THIS commit. The Worker is asked about the
+      //    head just read, so its answer cannot be about a commit that has since moved on.
       let verdict: QueueVerdict = "not_reviewed";
-      let staleVerdict: QueueVerdict | null = null;
-      let reviewNote: string | null = null;
+      let staleVerdict: ReadVerdict | null = null;
+      let reviewCurrent: boolean | null = null;
+      let unread: string | undefined;
       try {
-        const d = await getPrReview(dataset, pr);
-        if (d.review && d.review.head_sha === head) {
-          verdict = d.review.verdict;
-        } else if (d.review) {
-          staleVerdict = d.review.verdict;
-        }
+        const d = await getPrReview(dataset, pr, head);
+        verdict = asVerdict(d.verdict);
+        staleVerdict = d.stale_verdict ?? null;
+        reviewCurrent = d.review_current ?? null;
       } catch (err) {
-        if (err instanceof ApiError && (err.statusCode === 404 || err.statusCode === 502)) {
-          reviewNote = `The NEMAR API has no review to show (${plain(err.message)})`;
+        // Only the two answers that mean "the Worker cannot say what the review found" continue,
+        // and as an unknown. A 404 from a backend older than this CLI, an expired key or an edge
+        // error stops here: a stored rejection could be hiding behind any of them.
+        const word = errorWord(err);
+        if (word === "not_owned_here" || word === "github_unavailable") {
+          unread = err instanceof ApiError ? plain(err.message) : "the NEMAR API did not answer";
         } else {
           return failApi(err, null, "Could not read the automated review");
         }
       }
 
-      const gate = approvalGate({ verdict, staleVerdict });
+      const gate = approvalGate({ verdict, staleVerdict, unread });
       if (gate.kind === "needs_force" && !options.force) die(gate.reason);
 
       console.log();
@@ -667,19 +748,24 @@ prReviewsCommand
       console.log(`  Author:   @${plain(live.value.authorLogin)}`);
       console.log(`  Commit:   ${short(head)}`);
       console.log(
-        `  Review:   ${verdictColor(verdict)(verdictText({ verdict, detail: null, review_current: staleVerdict === null ? null : false }))}`,
+        `  Review:   ${
+          unread
+            ? chalk.yellow("unknown (could not be read)")
+            : verdictColor(verdict)(
+                verdictText({ verdict, detail: null, review_current: reviewCurrent }),
+              )
+        }`,
       );
       console.log(
         `  You are:  @${me.user.login} ${match === "match" ? chalk.dim("(linked to your NEMAR account)") : chalk.yellow("(your NEMAR account names no GitHub login, so this cannot be checked)")}`,
       );
-      if (reviewNote) console.log(chalk.yellow(`  ${reviewNote}`));
       if (gate.kind === "confirm") console.log(chalk.yellow(`  ${gate.warning}`));
       if (gate.kind === "needs_force") console.log(chalk.yellow("  Approving anyway (--force)."));
-      if (options.merge) console.log(`  Then:     merge (${method}) if GitHub says it is clean`);
+      if (options.merge) console.log(`  Then:     merge (${method}) if GitHub reports it clean`);
 
       if (options.dryRun) {
         console.log();
-        console.log(chalk.cyan("Dry run: nothing was approved."));
+        console.log(chalk.cyan("Dry run: nothing was approved or merged."));
         return;
       }
       const answer = await confirm(`Approve ${dataset} #${pr} as @${me.user.login}?`, {
@@ -687,14 +773,25 @@ prReviewsCommand
       });
       if (answer !== "confirmed") {
         console.log(chalk.dim("Not approved."));
-        process.exit(answer === "declined" ? 0 : 1);
+        process.exit(1);
       }
 
       const text =
         options.message?.slice(0, 2000) ||
-        `Approved with nemar admin pr-reviews approve after reading the automated review (${VERDICT_WORD[verdict]}).`;
+        `Approved with nemar admin pr-reviews approve. Automated review of this commit: ${unread ? "unknown" : verdictWord(verdict)}.`;
       const approved = await submitApproval(token, dataset, pr, head, me.user.login, text, base);
-      if (!approved.ok) die(`Not approved: ${approved.reason}`);
+      if (!approved.ok) {
+        if (approved.status === 0) {
+          console.log(chalk.yellow(`${approved.reason}`));
+          console.log(
+            chalk.yellow(
+              `Outcome unknown: GitHub may have recorded the approval. Check ${url} before trying again.`,
+            ),
+          );
+          process.exit(1);
+        }
+        die(`Not approved: ${approved.reason}`);
+      }
       console.log(
         chalk.green(`Approved ${dataset} #${pr} at ${short(head)} as @${me.user.login}.`),
       );
@@ -706,6 +803,13 @@ prReviewsCommand
       const merged = await mergeWhenClean(token, dataset, pr, head, method, { base });
       if (!merged.ok) {
         console.log(chalk.yellow(merged.reason));
+        if (merged.status === 0) {
+          console.log(
+            chalk.yellow(
+              `Outcome unknown: GitHub may have merged it. Check ${url} before trying again.`,
+            ),
+          );
+        }
         process.exit(1);
       }
       console.log(chalk.green(`Merged ${dataset} #${pr} (${method}).`));
@@ -715,7 +819,7 @@ prReviewsCommand
 /** When there is no safe way to approve from here: where to do it by hand. */
 function manualFallback(dataset: string, pr: number, url: string): void {
   console.log();
-  console.log("Approve it yourself, as you:");
+  console.log("Approve it on GitHub with your own account:");
   console.log(`  ${url}`);
   console.log(`  ${manualApprovalCommand(dataset, pr)}`);
   if (process.stdout.isTTY) openInBrowser(url);
@@ -728,14 +832,14 @@ function overrideCommand(mode: "allow" | "block"): void {
     .command(`${mode} <login>`)
     .description(
       mode === "allow"
-        ? "Always review this contributor's pull requests, whatever their record"
+        ? "Review this contributor's pull requests even when their record would pause them (rate limits still apply)"
         : "Never review this contributor's pull requests automatically; each needs a person",
     )
-    .option("--reason <text>", "Why (kept with the decision, in plain words)")
+    .option("--reason <text>", "Why, in plain words (up to 200 characters; kept with the decision)")
     .option("--json", "Output the raw JSON")
     .action(async (loginArg: string, options: { reason?: string; json?: boolean }) => {
       if (!requireAuth()) process.exit(1);
-      const login = checkLogin(loginArg);
+      const login = checkLogin(loginArg, options.json);
       const spinner = options.json ? null : ora(`Setting ${mode} for ${login}...`).start();
       try {
         const r = await setPrReviewAuthor(login, mode, options.reason);
@@ -747,7 +851,7 @@ function overrideCommand(mode: "allow" | "block"): void {
         console.log(
           mode === "allow"
             ? chalk.green(
-                `Allowed ${plain(r.standing.login)}: their pull requests are reviewed whatever their record.`,
+                `Allowed ${plain(r.standing.login)}: their pull requests are reviewed even when their record would pause them (rate limits still apply).`,
               )
             : chalk.red(
                 `Blocked ${plain(r.standing.login)}: none of their pull requests is reviewed automatically; each needs a person.`,
@@ -755,12 +859,14 @@ function overrideCommand(mode: "allow" | "block"): void {
         );
         if (r.previous && r.previous !== mode)
           console.log(chalk.dim(`  (it was ${r.previous} before)`));
-        console.log(chalk.dim("  Pull requests they already opened keep the review they have."));
+        console.log(
+          chalk.dim("  Pull requests already opened are not re-reviewed until their next push."),
+        );
         console.log();
         for (const l of standingLines(r.standing)) console.log(l);
         envNote(r.environment);
       } catch (err) {
-        failApi(err, spinner, `Could not ${mode} ${login}`);
+        failApi(err, spinner, `Could not ${mode} ${login}`, options.json);
       }
     });
 }
@@ -774,7 +880,7 @@ prReviewsCommand
   .option("--json", "Output the raw JSON")
   .action(async (loginArg: string, options: { json?: boolean }) => {
     if (!requireAuth()) process.exit(1);
-    const login = checkLogin(loginArg);
+    const login = checkLogin(loginArg, options.json);
     const spinner = options.json ? null : ora(`Clearing ${login}...`).start();
     try {
       const r = await clearPrReviewAuthor(login);
@@ -788,13 +894,17 @@ prReviewsCommand
           ? chalk.green(
               `Removed the ${r.removed} for ${plain(r.standing.login)}. Their record decides again.`,
             )
-          : chalk.dim(`${plain(r.standing.login)} had no allow or block.`),
+          : r.standing.resolved_from === "history"
+            ? chalk.yellow(
+                `No allow or block found for ${plain(r.standing.login)} under the id the Worker has on file (GitHub could not be asked).`,
+              )
+            : chalk.dim(`${plain(r.standing.login)} had no allow or block.`),
       );
       console.log();
       for (const l of standingLines(r.standing)) console.log(l);
       envNote(r.environment);
     } catch (err) {
-      failApi(err, spinner, `Could not clear ${login}`);
+      failApi(err, spinner, `Could not clear ${login}`, options.json);
     }
   });
 
@@ -806,7 +916,7 @@ prReviewsCommand
   .option("--json", "Output the raw JSON")
   .action(async (loginArg: string, options: { json?: boolean }) => {
     if (!requireAuth()) process.exit(1);
-    const login = checkLogin(loginArg);
+    const login = checkLogin(loginArg, options.json);
     const spinner = options.json ? null : ora(`Reading ${login}...`).start();
     try {
       const s = await getPrReviewAuthor(login);
@@ -819,6 +929,6 @@ prReviewsCommand
       for (const l of standingLines(s)) console.log(l);
       console.log();
     } catch (err) {
-      failApi(err, spinner, `Could not read ${login}`);
+      failApi(err, spinner, `Could not read ${login}`, options.json);
     }
   });

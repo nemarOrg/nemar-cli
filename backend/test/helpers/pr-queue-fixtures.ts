@@ -8,6 +8,10 @@
  */
 
 import type { Database } from "bun:sqlite";
+import { NEMAR_APP_ID } from "../../src/services/github/branch-protection";
+
+/** GitHub Actions, the app that posts a workflow job's check run (and `version-check`). */
+export const GITHUB_ACTIONS_APP_ID = 15368;
 
 export const SHA_A = "a".repeat(40);
 export const SHA_B = "b".repeat(40);
@@ -20,6 +24,8 @@ export interface CheckSpec {
   conclusion?: string | null;
   state?: string;
   at?: string;
+  /** The GitHub App that posted a check run. Defaults to GitHub Actions. */
+  appId?: number;
 }
 
 export interface PrSpec {
@@ -38,6 +44,13 @@ export interface PrSpec {
   checks?: CheckSpec[] | null;
   moreChecks?: boolean;
   repoOwner?: string;
+  /** GraphQL `state` (OPEN, MERGED, CLOSED) and `baseRefName`: the search index can lag. */
+  prState?: string;
+  baseRef?: string;
+  /** The commit the connection returns, when it is not the head the search names. */
+  commitOid?: string;
+  /** Fields a pull request has that the query never asks for; the response must not carry them. */
+  extra?: Record<string, unknown>;
 }
 
 export function bidsOk(ds: string): CheckSpec {
@@ -49,6 +62,10 @@ export function bidsOk(ds: string): CheckSpec {
       : "Run BIDS Validation",
     status: "COMPLETED",
     conclusion: "SUCCESS",
+    // The ruleset pins the central BIDS check to the NEMAR App; the legacy one is a plain job.
+    appId: ["nm000103", "nm000105", "nm000106", "nm000107"].includes(ds)
+      ? GITHUB_ACTIONS_APP_ID
+      : NEMAR_APP_ID,
   };
 }
 export const versionOk: CheckSpec = {
@@ -65,7 +82,8 @@ export function checkNode(c: CheckSpec): Record<string, unknown> {
         name: c.name,
         status: c.status ?? "COMPLETED",
         conclusion: c.conclusion ?? null,
-        startedAt: c.at ?? "2026-10-01T00:00:00Z",
+        startedAt: c.status === "QUEUED" ? null : (c.at ?? "2026-10-01T00:00:00Z"),
+        checkSuite: { app: { databaseId: c.appId ?? GITHUB_ACTIONS_APP_ID } },
       }
     : {
         __typename: "StatusContext",
@@ -88,6 +106,9 @@ export function prNode(o: PrSpec): Record<string, unknown> {
   return {
     __typename: "PullRequest",
     number: o.n,
+    state: o.prState ?? "OPEN",
+    baseRefName: o.baseRef ?? "main",
+    ...o.extra,
     title: o.title ?? `Update ${o.ds}`,
     isDraft: o.draft ?? false,
     createdAt: o.created ?? "2026-10-01T00:00:00Z",
@@ -102,6 +123,7 @@ export function prNode(o: PrSpec): Record<string, unknown> {
       nodes: [
         {
           commit: {
+            oid: o.commitOid ?? o.sha ?? SHA_A,
             statusCheckRollup:
               checks === null
                 ? null
