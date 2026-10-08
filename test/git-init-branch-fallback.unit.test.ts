@@ -59,8 +59,8 @@ const OLD_GIT_STDERR = {
 };
 
 /**
- * A call the stand-in answers itself instead of passing it on: `when` is a shell
- * `case` pattern matched against the call's arguments joined by spaces.
+ * A call the stand-in answers itself instead of passing it on: `when` is the
+ * start of the call's arguments joined by spaces, such as "init -b ".
  */
 interface Answer {
   when: string;
@@ -78,19 +78,25 @@ let gitConfig = "";
 let shimCount = 0;
 
 // The calls the stand-ins know how to answer.
-const INIT_WITH_BRANCH = "'init -b '*";
-const PLAIN_INIT = "'init -- '*";
-const HEAD_REPOINT = "'symbolic-ref HEAD refs/heads/main'";
+const INIT_WITH_BRANCH = "init -b ";
+const PLAIN_INIT = "init -- ";
+const HEAD_REPOINT = "symbolic-ref HEAD refs/heads/main";
+const REV_PARSE_HEAD = "rev-parse -q --verify HEAD";
+const SHOW_REF = "show-ref --verify -q ";
 
 const answer = (when: string, exit: number, stderr: string): Answer => ({ when, exit, stderr });
 
-/** A git stand-in on PATH: logs every call, answers the listed ones, runs the real git for the rest. */
+/**
+ * A git stand-in on PATH: logs every call, answers the listed ones, runs the real
+ * git for the rest. With no answers it is a plain logging wrapper over the host's
+ * git, the stand-in for a modern git.
+ */
 function makeShim(answers: Answer[] = []): Shim {
   const dir = join(root, `shim-${shimCount++}`);
   const log = join(dir, "calls.log");
   mkdirSync(dir, { recursive: true });
   const arms = answers.flatMap((a) => [
-    `  ${a.when})`,
+    `  '${a.when}'*)`,
     ...(a.stderr ? ["cat >&2 <<'NEMAR_SHIM_EOF'", a.stderr, "NEMAR_SHIM_EOF"] : []),
     `    exit ${a.exit}`,
     "    ;;",
@@ -112,11 +118,6 @@ function makeShim(answers: Answer[] = []): Shim {
 /** An older-git stand-in: `git init -b` is a usage error (status 129) with this text. */
 function oldGit(stderr: string, ...more: Answer[]): Shim {
   return makeShim([answer(INIT_WITH_BRANCH, 129, stderr), ...more]);
-}
-
-/** The same logging wrapper over the modern git on this host: nothing is refused. */
-function loggingGit(...answers: Answer[]): Shim {
-  return makeShim(answers);
 }
 
 function calls(shim: Shim): string[] {
@@ -299,7 +300,7 @@ describe("initDataset when a step of git init fails", () => {
   }
 
   test("a path that cannot be created is reported by the real git, once", async () => {
-    const shim = loggingGit();
+    const shim = makeShim();
     const blocker = join(root, "a-file");
     writeFileSync(blocker, "x");
     const target = join(blocker, "sub");
@@ -333,12 +334,11 @@ describe("initDataset when a step of git init fails", () => {
   ];
 
   for (const f of failingSteps) {
-    for (const [words, expected] of [
-      ["git's words", "fatal: step refused"],
-      ["no words at all", "exit 128"],
+    for (const [words, stderr, expected] of [
+      ["git's words", "fatal: step refused", "fatal: step refused"],
+      ["no words at all", "", "exit 128"],
     ] as const) {
       test(`a failing ${f.step} in the fallback is reported with ${words}`, async () => {
-        const stderr = words === "no words at all" ? "" : expected;
         const shim = oldGit(OLD_GIT_STDERR.english, answer(f.rule, 128, stderr));
         const dir = freshDir();
         const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
@@ -357,7 +357,7 @@ describe("initDataset with a path that starts with a dash", () => {
   // usage error (exit 129). Either way the path must be a path: the cwd is a
   // scratch directory, since a mistake here writes into the cwd.
   const gits = [
-    { name: "modern git", make: () => loggingGit() },
+    { name: "modern git", make: () => makeShim() },
     { name: "git that rejects --initial-branch", make: () => oldGit(OLD_GIT_STDERR.english) },
   ];
 
@@ -385,7 +385,7 @@ describe("initDataset with a path that starts with a dash", () => {
 
 describe("initDataset on a modern git", () => {
   test("uses -b main directly: the fallback never runs", async () => {
-    const shim = loggingGit();
+    const shim = makeShim();
     const dir = freshDir();
     const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
 
@@ -470,7 +470,7 @@ describe("initDataset where the branch name was not chosen by git init", () => {
     // reference outcome for the fallback to match.
     const modernDir = freshDir();
     seedMasterWithHistory(modernDir);
-    await initThenEnsureMain(loggingGit(), modernDir);
+    await initThenEnsureMain(makeShim(), modernDir);
     // Equal because both kept the history, not because both came out empty.
     expect(subjects(modernDir, "refs/heads/main")).toEqual(
       expect.arrayContaining(["c1", "c2", "Initialize dataset"]),
@@ -526,7 +526,7 @@ describe("initDataset where HEAD names a branch with no commits", () => {
   // committed to and then renamed; the fallback names main directly. Either way
   // main is an orphan that does not absorb develop, and develop is untouched.
   for (const [name, make] of [
-    ["modern git", () => loggingGit()],
+    ["modern git", () => makeShim()],
     ["git that rejects --initial-branch", () => oldGit(OLD_GIT_STDERR.french)],
   ] as const) {
     test(`${name}: unborn master over a populated develop leaves develop alone`, async () => {
@@ -568,7 +568,7 @@ describe("initDataset where HEAD cannot be told apart from unborn", () => {
   test("a rev-parse that fails for another reason than 'unresolved' is reported at once", async () => {
     const shim = oldGit(
       OLD_GIT_STDERR.english,
-      answer("'rev-parse -q --verify HEAD'", 128, "fatal: simulated unreadable repository"),
+      answer(REV_PARSE_HEAD, 128, "fatal: simulated unreadable repository"),
     );
     const dir = freshDir();
     const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
@@ -584,7 +584,7 @@ describe("initDataset where HEAD cannot be told apart from unborn", () => {
   test("an unresolved HEAD whose branch exists is refused, not re-pointed", async () => {
     // Stand-in for a state git cannot easily be walked into: rev-parse says
     // "does not resolve" (exit 1) while the branch ref it names exists.
-    const shim = oldGit(OLD_GIT_STDERR.english, answer("'rev-parse -q --verify HEAD'", 1, ""));
+    const shim = oldGit(OLD_GIT_STDERR.english, answer(REV_PARSE_HEAD, 1, ""));
     const dir = freshDir();
     seedMasterWithHistory(dir);
     const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
@@ -598,7 +598,7 @@ describe("initDataset where HEAD cannot be told apart from unborn", () => {
   test("a show-ref that cannot tell is refused, not read as unborn", async () => {
     const shim = oldGit(
       OLD_GIT_STDERR.english,
-      answer("'show-ref --verify -q '*", 128, "fatal: simulated bad ref store"),
+      answer(SHOW_REF, 128, "fatal: simulated bad ref store"),
     );
     const dir = freshDir();
     const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
