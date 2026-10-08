@@ -7,6 +7,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import {
   CRITERIA,
   DAILY_AUTHOR_CAP,
@@ -408,6 +410,61 @@ describe("the verdict is derived, and git facts override the model", () => {
   });
 });
 
+describe("a report cannot disagree with itself in the direction of a pass", () => {
+  const finding = (over: Record<string, unknown>) => ({
+    criterion: "no_degradation",
+    severity: "note",
+    code: "other",
+    path: null,
+    note: "Something.",
+    ...over,
+  });
+
+  test("a steering finding fails the review even when the model said steering is false", () => {
+    const r = parsed({ steering: false, findings: [finding({ code: "steering_attempt" })] });
+    expect(r.steering).toBe(true);
+    expect(verdictOf(r)).toBe("fail");
+    expect(conclusionOf({ kind: "reported", report: r })).toBe("failure");
+  });
+
+  test("the flag alone still fails, and parsing a stored report again changes nothing", () => {
+    expect(verdictOf(parsed({ steering: true }))).toBe("fail");
+    const once = parsed({ steering: false, findings: [finding({ code: "steering_attempt" })] });
+    expect(parsePrReviewReport(JSON.parse(JSON.stringify(once)))).toEqual(once);
+  });
+
+  test("a blocker against a criterion the model passed makes that criterion unknown", () => {
+    for (const c of CRITERIA) {
+      const r = parsed({
+        findings: [finding({ criterion: c, severity: "blocker", code: "data_removed" })],
+      });
+      expect(r.criteria[c], c).toBe("unknown");
+      expect(verdictOf(r), c).toBe("uncertain");
+      expect(conclusionOf({ kind: "reported", report: r }), c).toBe("action_required");
+    }
+  });
+
+  test("concerns and notes do not change an answer, and a blocker never raises one", () => {
+    expect(verdictOf(parsed({ findings: [finding({ severity: "concern" })] }))).toBe("pass");
+    expect(verdictOf(parsed({ findings: [finding({ severity: "note" })] }))).toBe("pass");
+    const failing = parsed({
+      criteria: { no_degradation: "fail", advances_revision: "pass", material_improvement: "pass" },
+      findings: [finding({ severity: "blocker" })],
+    });
+    expect(failing.criteria.no_degradation).toBe("fail");
+    expect(verdictOf(failing)).toBe("fail");
+  });
+
+  test("a steering finding is kept when findings are cut to make room for the explanations", () => {
+    const filler = Array.from({ length: 7 }, () => finding({ severity: "note" }));
+    const r = parsed({
+      criteria: { no_degradation: "fail", advances_revision: "fail", material_improvement: "pass" },
+      findings: [...filler, finding({ code: "steering_attempt" })],
+    });
+    expect(r.steering).toBe(true);
+  });
+});
+
 describe("conclusions: only a clear pass is green, nothing unknown ever satisfies a required check", () => {
   test("pass is success and fail is failure", () => {
     expect(conclusionOf({ kind: "reported", report: parsed() })).toBe("success");
@@ -576,8 +633,8 @@ describe("rate caps", () => {
 });
 
 describe("the sanitiser cannot rebuild a link, and is a fixed point", () => {
-  // Every one of these was found by the review of PR 1682: stripping characters AFTER finding
-  // links rebuilt them, and entities decode to the characters the function removes.
+  // Stripping characters AFTER finding links rebuilds them, and entities decode to the characters
+  // the function removes, so each of these has to come out without a link.
   const attacks = [
     "ht@tp://evil.example/x",
     "w@ww.evil.example",
@@ -861,6 +918,22 @@ describe("the callback body becomes an outcome, and never a verdict by itself", 
     }
   });
 
+  test("a job cannot report the Worker's own dispatch_failed", () => {
+    expect(
+      parseCallbackOutcome({ outcome: "error", report: undefined, error: "dispatch_failed" }),
+    ).toEqual({ kind: "error", error: "workflow_failed" });
+  });
+
+  test("a refused report tells the caller the parser's fixed word, and nothing else changes", () => {
+    const told: string[] = [];
+    const o = parseCallbackOutcome(
+      { outcome: "reported", report: { ...report(), summary: 3 }, error: undefined },
+      (code) => told.push(code),
+    );
+    expect(o).toEqual({ kind: "error", error: "report_invalid" });
+    expect(told).toEqual(["bad_summary"]);
+  });
+
   test("isRunError accepts exactly the vocabulary", () => {
     expect(isRunError("dispatch_failed")).toBe(true);
     expect(isRunError("model_refused")).toBe(true);
@@ -886,5 +959,24 @@ describe("closed lists the SQL and the code share", () => {
     expect(dailyAuthorCapFor("COLLABORATOR")).toBe(DAILY_AUTHOR_CAP.trusted);
     expect(dailyAuthorCapFor("NONE")).toBe(DAILY_AUTHOR_CAP.other);
     expect(DAILY_AUTHOR_CAP.other).toBeLessThan(DAILY_AUTHOR_CAP.trusted);
+  });
+});
+
+describe("the brand on a parsed report", () => {
+  test("only the parser mints one: no other source file casts to PrReviewReport", () => {
+    const root = join(import.meta.dir, "..");
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (["node_modules", ".git", "test", "dist"].includes(entry.name)) continue;
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) walk(path);
+        else if (/\.(ts|tsx)$/.test(entry.name) && !path.endsWith("shared/pr-review.ts")) {
+          if (/\bas\s+PrReviewReport\b/.test(readFileSync(path, "utf8"))) offenders.push(path);
+        }
+      }
+    };
+    for (const d of ["shared", "src", "backend/src", "scripts"]) walk(join(root, d));
+    expect(offenders).toEqual([]);
   });
 });

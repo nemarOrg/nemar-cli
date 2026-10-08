@@ -278,6 +278,9 @@ function goodReport(over: Record<string, unknown> = {}) {
   };
 }
 
+/** A stored report as the Worker would have written it, for rows seeded straight into the table. */
+const STORED_REPORT = JSON.stringify(goodReport());
+
 async function tokenFor(reviewId: number, datasetId = DATASET) {
   const nonce = (
     db.query("SELECT nonce FROM pr_reviews WHERE id = ?").get(reviewId) as { nonce: string }
@@ -665,9 +668,16 @@ describe("who is reviewed: the contributor tally, the overrides and the caps", (
     for (let i = 0; i < decided; i++) {
       db.run(
         `INSERT INTO pr_reviews (dataset_id, pr_number, head_sha, author_id, author_login,
-                                 state, verdict, created_at)
-         VALUES (?, ?, ?, ?, 'someone', 'reported', ?, datetime('now', '-3 days'))`,
-        [DATASET, 100 + i, `${i}`.padStart(40, "c"), authorId, i < rejected ? "fail" : "pass"],
+                                 state, verdict, report, created_at)
+         VALUES (?, ?, ?, ?, 'someone', 'reported', ?, ?, datetime('now', '-3 days'))`,
+        [
+          DATASET,
+          100 + i,
+          `${i}`.padStart(40, "c"),
+          authorId,
+          i < rejected ? "fail" : "pass",
+          STORED_REPORT,
+        ],
       );
     }
   }
@@ -695,15 +705,15 @@ describe("who is reviewed: the contributor tally, the overrides and the caps", (
   test("five pushes to one rejected pull request are one rejection, and fixing it clears it", async () => {
     for (let i = 0; i < 5; i++) {
       db.run(
-        `INSERT INTO pr_reviews (dataset_id, pr_number, head_sha, author_id, author_login, state, verdict)
-         VALUES (?, 50, ?, 501, 'someone', 'reported', 'fail')`,
-        [DATASET, `${i}`.padStart(40, "d")],
+        `INSERT INTO pr_reviews (dataset_id, pr_number, head_sha, author_id, author_login, state, verdict, report)
+         VALUES (?, 50, ?, 501, 'someone', 'reported', 'fail', ?)`,
+        [DATASET, `${i}`.padStart(40, "d"), STORED_REPORT],
       );
     }
     db.run(
-      `INSERT INTO pr_reviews (dataset_id, pr_number, head_sha, author_id, author_login, state, verdict)
-       VALUES (?, 50, ?, 501, 'someone', 'reported', 'pass')`,
-      [DATASET, "e".repeat(40)],
+      `INSERT INTO pr_reviews (dataset_id, pr_number, head_sha, author_id, author_login, state, verdict, report)
+       VALUES (?, 50, ?, 501, 'someone', 'reported', 'pass', ?)`,
+      [DATASET, "e".repeat(40), STORED_REPORT],
     );
     const tally = await readAuthorTally(realD1(db), 501);
     expect(tally).toEqual({ decided: 1, rejected: 0 });
@@ -811,7 +821,7 @@ describe("the watchdog", () => {
 });
 
 // ---------------------------------------------------------------------------------------------
-// Added with the fixes from the PR 1682 review
+// Claim, allowances and republish
 // ---------------------------------------------------------------------------------------------
 
 const OTHER_DATASET = "nm000461";
@@ -840,8 +850,8 @@ function seedRow(o: {
       : o.detail;
   db.run(
     `INSERT INTO pr_reviews (dataset_id, pr_number, head_sha, author_id, author_login,
-                             author_association, state, verdict, detail, created_at, seen_at)
-     VALUES (?, ?, ?, ?, 'seeded', ?, ?, ?, ?, datetime('now', ?),
+                             author_association, state, verdict, detail, report, created_at, seen_at)
+     VALUES (?, ?, ?, ?, 'seeded', ?, ?, ?, ?, ?, datetime('now', ?),
              strftime('%Y-%m-%d %H:%M:%f', 'now', ?))`,
     [
       o.dataset ?? DATASET,
@@ -852,6 +862,7 @@ function seedRow(o: {
       state,
       verdict,
       detail,
+      state === "reported" ? STORED_REPORT : null,
       o.ago ?? "-5 hours",
       o.ago ?? "-5 hours",
     ],
@@ -902,7 +913,7 @@ function posts(pathPart: string) {
 describe("the claim: a dispatch buys nothing until the Worker accepts it", () => {
   const start = async (o: PrOpts = {}) => (await deliver(prEvent(o))).body.review_id as number;
 
-  test("the first claim with a valid token succeeds and marks the row started", async () => {
+  test("the first claim with a valid token succeeds and records when it was made", async () => {
     const id = await start();
     const r = await claim(id);
     expect(r).toMatchObject({ status: 200, body: { ok: true, claimed: true } });
@@ -996,7 +1007,7 @@ describe("the claim: a dispatch buys nothing until the Worker accepts it", () =>
 
 describe("the allowances: scoped, windowed, and not raceable", () => {
   test("twelve pull requests opened at once by a stranger get exactly three reviews", async () => {
-    // The check and the insert used to be separate statements; a burst all passed the same check.
+    // The caps are ranked after the insert, so a burst cannot all pass the same check.
     const racing = { ...env(), DB: yieldingD1(realD1(db)) } as Bindings;
     const results = await Promise.all(
       Array.from({ length: 12 }, (_, i) =>
@@ -1244,6 +1255,81 @@ describe("pushing back to an earlier commit makes that commit's result the curre
     expect(rows()[0]).toMatchObject({ state: "dispatched", detail: null });
     expect(rows()[0].nonce).not.toBeNull();
   });
+
+  test("a redispatched review starts its clock again, so the watchdog does not call it late", async () => {
+    dispatchStatus = 500;
+    await deliver(prEvent());
+    db.run(`UPDATE pr_reviews SET created_at = datetime('now', '-3 hours')`);
+    dispatchStatus = 204;
+    await deliver(prEvent());
+    const age = db
+      .query("SELECT (julianday('now') - julianday(created_at)) * 1440 AS minutes FROM pr_reviews")
+      .get() as { minutes: number };
+    expect(age.minutes).toBeLessThan(2);
+    const swept = await sweepStalePrReviews(env());
+    expect(swept.timedOut).toBe(0);
+    expect(rows()[0]).toMatchObject({ state: "dispatched" });
+  });
+});
+
+describe("a failure after the row exists", () => {
+  /** Deliver the pull request to a Worker whose database throws on the statements `fails` names. */
+  async function deliverBroken(fails: (sql: string) => boolean, deliveryId: string) {
+    const broken = wrapD1(realD1(db), (sql) => {
+      if (fails(sql)) throw new Error("D1 is unavailable");
+    });
+    const body = JSON.stringify(prEvent());
+    const original = console.error;
+    console.error = () => {};
+    try {
+      return await app.request(
+        "/webhooks/github",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-GitHub-Event": "pull_request",
+            "X-GitHub-Delivery": deliveryId,
+            "X-Hub-Signature-256": await sign(body),
+          },
+          body,
+        },
+        { ...env(), DB: broken } as Bindings,
+      );
+    } finally {
+      console.error = original;
+    }
+  }
+
+  test("is recorded as a dispatch that did not happen, and a redelivery runs the review", async () => {
+    const res = await deliverBroken(
+      (sql) => sql.includes("COUNT(*) AS n FROM pr_reviews"),
+      "d-late",
+    );
+    expect(res.status).toBe(500);
+    // Not left 'dispatched' with a live nonce, counting against the caps and waiting to be
+    // called late.
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]).toMatchObject({ state: "errored", detail: "dispatch_failed", nonce: null });
+    expect(dispatchesMade()).toHaveLength(0);
+
+    const again = await deliver(prEvent());
+    expect(again.body).toMatchObject({ dispatched: true, reason: "redispatched" });
+    expect(dispatchesMade()).toHaveLength(1);
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]).toMatchObject({ state: "dispatched", detail: null });
+  });
+
+  test("is recorded even when the database keeps failing, and the original error still surfaces", async () => {
+    // Everything after the insert fails, including the recording itself.
+    const res = await deliverBroken(
+      (sql) =>
+        sql.includes("COUNT(*) AS n FROM pr_reviews") || sql.includes("SET state = 'errored'"),
+      "d-late-2",
+    );
+    expect(res.status).toBe(500);
+    expect(rows()[0]).toMatchObject({ state: "dispatched" });
+  });
 });
 
 describe("the check-run and comment lifecycle", () => {
@@ -1345,14 +1431,42 @@ describe("a result that cannot be published is published again, not forgotten", 
     expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "success" });
   });
 
-  test("it gives up after a few tries and says so by leaving the count", async () => {
+  test("it gives up after a few tries, and says so once, with the review and the pull request", async () => {
     const id = (await deliver(prEvent())).body.review_id as number;
     checkStatus = 403;
     await callback(id, { outcome: "reported", report: goodReport() });
     db.run(`UPDATE pr_reviews SET decided_at = datetime('now', '-5 minutes')`);
-    for (let i = 0; i < PUBLISH_MAX_ATTEMPTS + 3; i++) await sweepStalePrReviews(env());
+    const logged: string[] = [];
+    const original = console.error;
+    console.error = (...a: unknown[]) => void logged.push(a.join(" "));
+    let abandoned = 0;
+    try {
+      for (let i = 0; i < PUBLISH_MAX_ATTEMPTS + 3; i++) {
+        abandoned += (await sweepStalePrReviews(env())).abandoned;
+      }
+    } finally {
+      console.error = original;
+    }
     expect(rows()[0].publish_attempts).toBe(PUBLISH_MAX_ATTEMPTS);
     expect(rows()[0].published_at).toBeNull();
+    expect(abandoned).toBe(1);
+    const giveUps = logged.filter((l) => l.includes("giving up"));
+    expect(giveUps).toHaveLength(1);
+    expect(giveUps[0]).toContain(`review ${id} (nm000460#7)`);
+  });
+
+  test("a review the watchdog calls late is logged with its dataset and pull request", async () => {
+    const id = (await deliver(prEvent())).body.review_id as number;
+    db.run(`UPDATE pr_reviews SET created_at = datetime('now', '-2 hours')`);
+    const logged: string[] = [];
+    const original = console.warn;
+    console.warn = (...a: unknown[]) => void logged.push(a.join(" "));
+    try {
+      await sweepStalePrReviews(env());
+    } finally {
+      console.warn = original;
+    }
+    expect(logged.join("\n")).toContain(`review ${id} (nm000460#7) did not report in time`);
   });
 
   test("a result decided a moment ago is left for the callback's own publish to finish", async () => {
@@ -1530,17 +1644,29 @@ describe("what is stored is what the parser accepted", () => {
   });
 
   test("a row cannot say a verdict without having reported, or a reason without having failed", () => {
-    const insert = (state: string, verdict: string | null, detail: string | null) =>
+    const insert = (
+      state: string,
+      verdict: string | null,
+      detail: string | null,
+      report: string | null = state === "reported" ? STORED_REPORT : null,
+    ) =>
       db.run(
-        `INSERT INTO pr_reviews (dataset_id, pr_number, head_sha, author_id, author_login, state, verdict, detail)
-         VALUES ('nm000460', 1, lower(hex(randomblob(20))), 1, 'a', ?, ?, ?)`,
-        [state, verdict, detail],
+        `INSERT INTO pr_reviews (dataset_id, pr_number, head_sha, author_id, author_login, state, verdict, detail, report)
+         VALUES ('nm000460', 1, lower(hex(randomblob(20))), 1, 'a', ?, ?, ?, ?)`,
+        [state, verdict, detail, report],
       );
     expect(() => insert("dispatched", "pass", null)).toThrow();
     expect(() => insert("reported", null, null)).toThrow();
     expect(() => insert("errored", null, null)).toThrow();
     expect(() => insert("dispatched", null, "stale_head")).toThrow();
     expect(() => insert("errored", null, "not a word")).toThrow();
+    // Each kind of row holds only the reasons of its own kind, so no row can publish the wrong
+    // sentence, and a stored report exists exactly when the review reported.
+    expect(() => insert("declined", null, "workflow_failed")).toThrow();
+    expect(() => insert("errored", null, "rate_limited")).toThrow();
+    expect(() => insert("reported", "pass", null, null)).toThrow();
+    expect(() => insert("dispatched", null, null, STORED_REPORT)).toThrow();
+    expect(() => insert("declined", null, "daily_limit")).not.toThrow();
     expect(() => insert("reported", "pass", null)).not.toThrow();
     expect(() => insert("errored", null, "stale_head")).not.toThrow();
   });

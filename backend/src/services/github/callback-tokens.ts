@@ -285,8 +285,8 @@ export async function verifyIdentifierSweepCallbackToken(
 // PR-review callback HMAC tokens (ADR 0092)
 // ============================================================================
 //
-// The pull-request review workflow posts its report to /webhooks/pr-review-result with a
-// one-shot token. Signed with the same secret as the pre-screen and identifier-screen tokens
+// The pull-request review workflow claims its review at /webhooks/pr-review-claim and posts its
+// report to /webhooks/pr-review-result with one token. Signed with the same secret as the pre-screen and identifier-screen tokens
 // (PRESCREEN_CALLBACK_SECRET, one fewer secret to provision on two Workers) and
 // DOMAIN-SEPARATED the same way: the message begins with a tag line no other kind's message can
 // begin with, so a token minted for any other callback cannot answer for a review, and a review

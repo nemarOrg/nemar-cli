@@ -388,19 +388,24 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
    * POST /webhooks/github — entry point for GitHub App webhook deliveries.
    *
    * Verifies the HMAC-SHA256 signature in `X-Hub-Signature-256` against
-   * `GITHUB_WEBHOOK_SECRET`, then inspects the event. Today we only act on
-   * `push` events; other event types respond 200 so we can subscribe to more
-   * event types in the App config later without redeploying the Worker.
+   * `GITHUB_WEBHOOK_SECRET`, then inspects the event. We act on `push` and
+   * `pull_request` events; other event types respond 200 so we can subscribe
+   * to more event types in the App config later without redeploying the Worker.
    *
-   * Always responds 200 (or 401 on bad signature) so GitHub doesn't retry on
+   * Responds 200 (or 401 on bad signature) so GitHub doesn't retry on
    * filter-misses. The response body indicates whether a dispatch happened so
    * operators can correlate with GitHub Actions runs.
    *
-   * Errors during dispatch (e.g. rate limit, transient 5xx from GitHub) are
-   * logged and surfaced in the response body but DO NOT 5xx the webhook — a
+   * Errors during a `push` dispatch (e.g. rate limit, transient 5xx from GitHub)
+   * are logged and surfaced in the response body but DO NOT 5xx the webhook: a
    * retried delivery would just duplicate the dispatch attempt, and the App's
    * single-delivery-per-event guarantee plus the workflow's source_hash guard
    * make a missed-dispatch self-heal on the next push.
+   *
+   * The `pull_request` path is the exception, on purpose: an unexpected failure
+   * (a database error) answers 500 so the delivery shows as failed in the App's
+   * delivery log, where it can be redelivered. Redelivery is safe because
+   * (dataset, pull request, commit) is unique (ADR 0092).
    */
   webhooks.post("/github", async (c) => {
     const rawBody = await c.req.text();

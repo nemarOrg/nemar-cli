@@ -80,10 +80,12 @@ describe("what triggers it", () => {
     expect(dispatch).toContain('event_type: "run-pr-review"');
   });
 
-  test("a run is keyed on its review id and is never cancelled by another dispatch", () => {
+  test("a run is keyed on its environment and review id and is never cancelled by another dispatch", () => {
     // Keyed on the pull request, a forged dispatch naming the same pull request would cancel the
-    // real run. The Worker refuses a superseded commit at the claim instead.
+    // real run. The Worker refuses a superseded commit at the claim instead. Both environments
+    // number reviews from 1, so the environment is part of the key.
     expect(wf.concurrency.group).toContain("client_payload.review_id");
+    expect(wf.concurrency.group).toContain("client_payload.environment");
     expect(wf.concurrency.group).not.toContain("pr_number");
     expect(wf.concurrency.group).not.toContain("dataset_id");
     expect(wf.concurrency["cancel-in-progress"]).toBe(false);
@@ -172,12 +174,15 @@ describe("the claim comes first", () => {
     const run = step("Claim the review").run ?? "";
     expect(step("Claim the review").id).toBe("claim");
     expect(run).toContain("X-Webhook-Token");
-    expect(run).toContain('"$code" = "200"');
+    expect(run).toMatch(/\n\s*200\)[\s\S]*?claimed=true/);
     expect(run).toContain("claimed=true");
     expect(run).toContain("claimed=false");
-    // A refused or unreachable claim must not fail the job: nothing was spent, and a red job on a
-    // forged dispatch would only add noise.
-    expect(run).not.toMatch(/\bexit\s+[1-9]/);
+    // Only a refusal that proves the dispatch is not this review's to run (401 forged or
+    // replayed, 409 claimed or superseded) ends green. Anything else could not be decided, and a
+    // green run would hide a review that is waiting.
+    expect(run).toMatch(/401\|409\)[\s\S]*claimed=false/);
+    expect(run).toMatch(/\*\)[\s\S]*::error::[\s\S]*exit 1/);
+    expect(run).toContain("for attempt in 1 2 3");
   });
 
   test("every later step runs only when the review was claimed", () => {
@@ -354,6 +359,7 @@ describe("failure and logging", () => {
     expect(REPORTER).not.toMatch(/\b(bun|node|npm|npx|python|gh)\b/);
     expect(REPORTER).toContain('"outcome\\":\\"error\\"');
     expect(REPORTER).toContain('-H "X-Webhook-Token: $PR_REVIEW_CALLBACK_TOKEN"');
+    expect(REPORTER).toContain("%{http_code}");
     const last = job.steps[job.steps.length - 1];
     expect(last.run).toContain('"$RUNNER_TEMP/report-error.sh" workflow_failed');
   });
@@ -413,6 +419,8 @@ describe("the shell steps, run for real", () => {
   }
   const seen: Seen[] = [];
   let answer = 200;
+  /** When set, decides the status of each request in turn instead of {@link answer}. */
+  let answerFor: (() => number) | null = null;
   const server = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -422,7 +430,7 @@ describe("the shell steps, run for real", () => {
         token: req.headers.get("X-Webhook-Token"),
         body: await req.text(),
       });
-      return new Response("{}", { status: answer });
+      return new Response("{}", { status: answerFor ? answerFor() : answer });
     },
   });
   const LOCAL_ORIGIN = `http://127.0.0.1:${server.port}`;
@@ -527,17 +535,49 @@ describe("the shell steps, run for real", () => {
     expect(JSON.parse(seen[0].body)).toEqual({ review_id: 77, dataset_id: "nm000108" });
   });
 
-  test.each([401, 409, 500, 302])(
-    "claim: HTTP %d is not claimed, and the job still ends green",
+  test.each([401, 409])(
+    "claim: HTTP %d is a dispatch that is not this review's to run, and the job ends green",
     async (code) => {
       answer = code;
       const r = await claim();
       expect(r.status).toBe(0);
       expect(r.output).toBe("claimed=false\n");
+      expect(r.stdout).toContain("nothing was spent");
+      // A refusal is final: it is not retried.
+      expect(seen).toHaveLength(1);
     },
   );
 
-  test("claim: an unreachable Worker is not claimed, and the job still ends green", async () => {
+  test.each([500, 503, 400, 302])(
+    "claim: HTTP %d could not be decided, so the job fails loudly instead of hiding a waiting review",
+    async (code) => {
+      answer = code;
+      const r = await claim();
+      expect(r.status).not.toBe(0);
+      expect(r.output).toBe("claimed=false\n");
+      // A server error is tried three times; any other answer is final.
+      expect(seen).toHaveLength(code >= 500 ? 3 : 1);
+      expect(r.stdout).toContain(
+        `::error::the claim for review 77 could not be decided (HTTP ${code})`,
+      );
+    },
+    20_000,
+  );
+
+  test("claim: a transient error is retried, and a later 200 claims the review", async () => {
+    let calls = 0;
+    answerFor = () => (++calls < 3 ? 503 : 200);
+    try {
+      const r = await claim();
+      expect(r.status).toBe(0);
+      expect(r.output).toBe("claimed=true\n");
+      expect(seen).toHaveLength(3);
+    } finally {
+      answerFor = null;
+    }
+  }, 20_000);
+
+  test("claim: an unreachable Worker fails the job, with the status word 000", async () => {
     const dead = Bun.serve({ port: 0, fetch: () => new Response("") });
     const port = dead.port;
     dead.stop(true);
@@ -545,9 +585,10 @@ describe("the shell steps, run for real", () => {
       ...GOOD,
       ORIGIN: `http://127.0.0.1:${port}`,
     });
-    expect(r.status).toBe(0);
+    expect(r.status).not.toBe(0);
     expect(r.output).toBe("claimed=false\n");
-  });
+    expect(r.stdout).toContain("(HTTP 000)");
+  }, 20_000);
 
   test("claim: the token reaches the Worker and not the log", async () => {
     const r = await claim("a-token-that-must-not-print");
@@ -568,7 +609,8 @@ describe("the shell steps, run for real", () => {
         PR_REVIEW_CALLBACK_TOKEN: GOOD.PR_REVIEW_CALLBACK_TOKEN,
       },
     });
-    return { exitCode: await proc.exited };
+    const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+    return { exitCode, stdout };
   }
 
   test("reporter: posts the closed-vocabulary error the Worker's parser accepts", async () => {
@@ -585,6 +627,16 @@ describe("the shell steps, run for real", () => {
       error: "workflow_failed",
     });
     expect(parseCallbackOutcome(body)).toEqual({ kind: "error", error: "workflow_failed" });
+    // And says what the Worker answered, with no token in it.
+    expect(r.stdout).toBe("review 77: reported workflow_failed (HTTP 200)\n");
+  });
+
+  test("reporter: a report the Worker refuses is visible in the log, and does not fail the step", async () => {
+    answer = 401;
+    const r = await report("workflow_failed");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("(HTTP 401)");
+    expect(r.stdout).not.toContain(GOOD.PR_REVIEW_CALLBACK_TOKEN);
   });
 
   test("reporter: auth_failed is also accepted, and a dead Worker does not fail the step", async () => {
@@ -596,8 +648,10 @@ describe("the shell steps, run for real", () => {
     const dead = Bun.serve({ port: 0, fetch: () => new Response("") });
     const port = dead.port;
     dead.stop(true);
-    expect((await report("workflow_failed", `http://127.0.0.1:${port}`)).exitCode).toBe(0);
-  });
+    const gone = await report("workflow_failed", `http://127.0.0.1:${port}`);
+    expect(gone.exitCode).toBe(0);
+    expect(gone.stdout).toContain("(HTTP 000)");
+  }, 20_000);
 });
 
 // ---------------------------------------------------------------------------------------------

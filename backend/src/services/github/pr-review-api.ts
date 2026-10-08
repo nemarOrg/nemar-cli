@@ -5,7 +5,7 @@
  * edited by each later commit's result.
  *
  * Two surfaces, and each can fail on its own. A check-run needs the App's `checks: write`, which
- * the BIDS and version checks already use. The comment needs `pull_requests: write` or
+ * the central BIDS validation already uses. The comment needs `pull_requests: write` or
  * `issues: write`, which an installation may not have been granted; when it has not, the check
  * still lands and the caller logs the comment's refusal. Neither failure is allowed to lose the
  * stored verdict, so these functions throw and the caller decides what each failure costs.

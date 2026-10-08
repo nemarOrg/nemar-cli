@@ -905,16 +905,16 @@ export default {
         // reports is marked unreported and its check turned to "needs a person", because a
         // dispatch is answered 204 whether or not a workflow listens and the check would
         // otherwise stay "in progress" for good. It also republishes a stored result whose
-        // check never reached GitHub. PRODUCTION-ONLY for the same reason as the identifier
-        // sweep above (it writes to the shared nemarDatasets org, which the dev worker would
-        // also reach). It does NOT read PR_REVIEW_ENABLED: switching the review off must not
+        // check never reached GitHub. PRODUCTION-ONLY, by AGENTS.md's default for a new cron
+        // job: it writes check-runs and comments to the shared nemarDatasets org, which the dev
+        // worker would also reach. It does NOT read PR_REVIEW_ENABLED: switching the review off must not
         // strand the checks of reviews already in flight.
         ctx.waitUntil(
           sweepStalePrReviews(env)
             .then((r) => {
-              if (r.timedOut + r.republished + r.errors > 0) {
+              if (r.timedOut + r.republished + r.abandoned + r.errors > 0) {
                 console.log(
-                  `[pr-review-sweep] timedOut=${r.timedOut} republished=${r.republished} errors=${r.errors}`,
+                  `[pr-review-sweep] timedOut=${r.timedOut} republished=${r.republished} abandoned=${r.abandoned} errors=${r.errors}`,
                 );
               }
             })

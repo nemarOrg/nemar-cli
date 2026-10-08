@@ -10,17 +10,25 @@
 # publishes the check-run and the pull-request comment.
 #
 # THE CLAIM COMES FIRST. The dispatch carries a one-shot token the Worker signed for this review.
-# The first thing this job does is present it to the Worker; the Worker accepts it once. A
-# dispatch that cannot (it was forged by someone holding a dataset repository's workflow
-# credentials, it was already claimed, or its commit was superseded) stops there, before anything
-# is installed, minted or sent to a model. That is what makes the Worker's spend caps binding.
+# Once the token is masked and the fields are checked, the first real step presents it to the
+# Worker, which accepts it once. A dispatch that cannot (it was forged by someone holding a dataset
+# repository's workflow credentials, it was already claimed, or its commit was superseded) stops
+# there, before anything is installed, minted or sent to a model. That is what makes the Worker's
+# spend caps binding. A claim that could not be decided (the Worker was unreachable or answered
+# with an error) fails the job loudly instead: it is neither forged nor stale, and nobody would
+# otherwise learn that the review never started.
 #
-# WHAT EACH STEP CAN HOLD. The step that calls the model holds the federated Anthropic identity and
-# the callback token, and no GitHub credential. The GitHub App's private key is used by exactly one
-# step, which mints a read-only token (contents and pull requests: read) for ONE dataset
-# repository; that token reaches only the two steps that read the repository. The job has no
-# credential that can write to GitHub or to NEMAR, apart from the one-shot callback token, which
-# can post one report for this review and nothing else.
+# WHAT EACH STEP CAN HOLD. The step that calls the model has the federated Anthropic identity and
+# the callback token in its environment, and no GitHub credential in it. The GitHub App's private
+# key is used by exactly one step, which mints a read-only token (contents and pull requests:
+# read) for ONE dataset repository, one hour at most. That token is passed to the two steps that
+# read the repository, and the fetch step also leaves it in the repository's git config, because
+# the model step's git reads fetch blobs lazily (the clone is blob-less) and need it. So the model
+# step can USE the read-only token through git; it cannot print it, send it anywhere, or write with
+# it, and nothing from the pull request runs. Apart from the one-shot callback token, which can
+# post one report for this review and nothing else, the job has no credential that can write to
+# GitHub or to NEMAR. `id-token: write` puts the OIDC request variables in every step's
+# environment, which the federation rule's conditions (this repository, this workflow, main) bound.
 #
 # THE CALLBACK TOKEN IS MASKED BEFORE ANYTHING CAN PRINT IT. This repository's logs are public and
 # Actions prints a step's `env:` in its header, so the token is never in job-level env, the first
@@ -56,11 +64,12 @@ on:
 
 permissions: {}
 
-# One run per review. The group is the review id, so a forged dispatch cannot cancel a real run by
-# naming the same pull request (the earlier grouping by pull request let it). A superseded commit
-# is refused by the Worker at the claim instead of being cancelled here.
+# One run per review. The group is the environment and the review id, so a forged dispatch cannot
+# cancel a real run by naming the same pull request (the earlier grouping by pull request let it),
+# and a dev review cannot collide with a production one that has the same small id. A superseded
+# commit is refused by the Worker at the claim instead of being cancelled here.
 concurrency:
-  group: pr-review-${{ github.event.client_payload.review_id }}
+  group: pr-review-${{ github.event.client_payload.environment }}-${{ github.event.client_payload.review_id }}
   cancel-in-progress: false
 
 jobs:
@@ -99,47 +108,77 @@ jobs:
           [[ "$REVIEW_ID" =~ ^[0-9]{1,12}$ ]] || { echo "::error::malformed review id"; exit 1; }
           [[ "$ENVIRONMENT" == "production" || "$ENVIRONMENT" == "dev" ]] || { echo "::error::malformed environment"; exit 1; }
           [[ -n "$PR_REVIEW_CALLBACK_TOKEN" ]] || { echo "::error::no callback token"; exit 1; }
-          # The only place the API origin is chosen: a fixed table keyed by the environment's NAME.
-          # scripts/ci/pr-review.ts holds the same table; a test keeps the two equal.
+          # The workflow's copy of the API origin table, keyed by the environment's NAME and never
+          # built from the payload. scripts/ci/pr-review.ts holds the same table; a test keeps the
+          # two equal.
           case "$ENVIRONMENT" in
             production) origin="https://api.nemar.org" ;;
             dev) origin="https://api-test.nemar.org" ;;
           esac
           echo "ORIGIN=$origin" >> "$GITHUB_ENV"
           # A dependency-free reporter, written now so it works however far the job gets: it needs
-          # no checkout and no install, which a failure may have been about.
+          # no checkout and no install, which a failure may have been about. It never fails the
+          # step it runs in, and it says what the Worker answered, so a report that was refused
+          # shows in the log instead of leaving the Worker to time the review out.
           cat > "$RUNNER_TEMP/report-error.sh" <<'REPORTER'
           #!/usr/bin/env bash
           # usage: report-error.sh <error word from the Worker's closed list>
-          curl -sS -o /dev/null --max-time 30 --retry 3 --retry-delay 2 -X POST \
-            "$ORIGIN/webhooks/pr-review-result" \
-            -H 'Content-Type: application/json' \
-            -H "X-Webhook-Token: $PR_REVIEW_CALLBACK_TOKEN" \
-            --data "{\"review_id\":$REVIEW_ID,\"dataset_id\":\"$DATASET_ID\",\"outcome\":\"error\",\"error\":\"$1\"}" || true
+          code=000
+          for attempt in 1 2 3; do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 60 -X POST \
+              "$ORIGIN/webhooks/pr-review-result" \
+              -H 'Content-Type: application/json' \
+              -H "X-Webhook-Token: $PR_REVIEW_CALLBACK_TOKEN" \
+              --data "{\"review_id\":$REVIEW_ID,\"dataset_id\":\"$DATASET_ID\",\"outcome\":\"error\",\"error\":\"$1\"}") || code=000
+            case "$code" in 2??|4??) break ;; esac
+            if [ "$attempt" -lt 3 ]; then sleep "$attempt"; fi
+          done
+          echo "review $REVIEW_ID: reported $1 (HTTP $code)"
+          exit 0
           REPORTER
           chmod +x "$RUNNER_TEMP/report-error.sh"
 
       # Present the token to the Worker before anything is installed, minted or sent anywhere. The
-      # Worker accepts it once. A dispatch that is refused (HTTP 401 forged or replayed, 409
-      # already claimed or superseded) ends the job here, green, having spent nothing.
+      # Worker accepts it once. A dispatch it refuses (HTTP 401: forged or replayed; 409: already
+      # claimed, or its commit was superseded) ends the job here, green, having spent nothing. Any
+      # other answer, or none, means the Worker could not decide: the job fails, because the review
+      # exists and is waiting, and a green run would hide that. A transient error is retried first.
+      # (If the Worker claimed and the answer was lost, the retry is refused as already claimed and
+      # the review is later reported as not finished; the watchdog says so.)
       - name: Claim the review
         id: claim
         env:
           PR_REVIEW_CALLBACK_TOKEN: ${{ github.event.client_payload.callback_token }}
         run: |
           set -uo pipefail
-          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 -X POST \
-            "$ORIGIN/webhooks/pr-review-claim" \
-            -H 'Content-Type: application/json' \
-            -H "X-Webhook-Token: $PR_REVIEW_CALLBACK_TOKEN" \
-            --data "{\"review_id\":$REVIEW_ID,\"dataset_id\":\"$DATASET_ID\"}") || code=000
-          if [ "$code" = "200" ]; then
-            echo "claimed=true" >> "$GITHUB_OUTPUT"
-            echo "review $REVIEW_ID claimed"
-          else
-            echo "claimed=false" >> "$GITHUB_OUTPUT"
-            echo "review $REVIEW_ID not claimed (HTTP $code); nothing was spent"
-          fi
+          # Three tries for a Worker that is briefly unreachable or answers with a server error. Any
+          # answer below 500 is final. (curl's own --retry fails with -o /dev/null on a retried
+          # transfer, which is why this is a loop.)
+          code=000
+          for attempt in 1 2 3; do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 -X POST \
+              "$ORIGIN/webhooks/pr-review-claim" \
+              -H 'Content-Type: application/json' \
+              -H "X-Webhook-Token: $PR_REVIEW_CALLBACK_TOKEN" \
+              --data "{\"review_id\":$REVIEW_ID,\"dataset_id\":\"$DATASET_ID\"}") || code=000
+            case "$code" in 2??|3??|4??) break ;; esac
+            if [ "$attempt" -lt 3 ]; then sleep "$attempt"; fi
+          done
+          case "$code" in
+            200)
+              echo "claimed=true" >> "$GITHUB_OUTPUT"
+              echo "review $REVIEW_ID claimed"
+              ;;
+            401|409)
+              echo "claimed=false" >> "$GITHUB_OUTPUT"
+              echo "review $REVIEW_ID not claimed (HTTP $code); nothing was spent"
+              ;;
+            *)
+              echo "claimed=false" >> "$GITHUB_OUTPUT"
+              echo "::error::the claim for review $REVIEW_ID could not be decided (HTTP $code)"
+              exit 1
+              ;;
+          esac
 
       - name: Check out the review script
         if: steps.claim.outputs.claimed == 'true'
@@ -176,7 +215,8 @@ jobs:
             exit 1
           fi
 
-      # Read-only, one repository. This token is used by the next two steps and by no other.
+      # Read-only, one repository. This token is handed to the next two steps and to no other; the
+      # fetch step also stores it in the repository's git config (see the header).
       - name: Mint a read-only token for the dataset repository
         if: steps.claim.outputs.claimed == 'true'
         id: app-token
@@ -235,7 +275,8 @@ jobs:
             core.setSecret(token);
             fs.writeFileSync(`${process.env.RUNNER_TEMP}/anthropic-oidc.jwt`, token, { mode: 0o600 });
 
-      # The model step: the federated identity and the callback token, and no GitHub credential.
+      # The model step: the federated identity and the callback token in its environment, and no
+      # GitHub credential in it (git reads the stored read-only token, see the header).
       - name: Review
         if: steps.claim.outputs.claimed == 'true'
         working-directory: tool

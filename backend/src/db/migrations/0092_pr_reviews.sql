@@ -4,7 +4,7 @@
 -- (which the NEMAR GitHub App delivers pull_request events to once it is subscribed to them, forks
 -- included) decides whether to review it, records the attempt here, and dispatches a workflow to
 -- nemarDatasets/.github. That workflow first CLAIMS the review (the Worker accepts the one-shot
--- token and marks the row started), then reads the change as git data, asks a model three
+-- token and the row records the time), then reads the change as git data, asks a model three
 -- questions (is anything lost or broken, does the revision advance, is the dataset materially
 -- better) and posts a report back to /webhooks/pr-review-result. The Worker stores what
 -- `parsePrReviewReport` accepted and publishes the result as a check-run and one pull-request
@@ -23,7 +23,8 @@
 --   * `verdict`: pass, fail or uncertain, DERIVED by `verdictOf` from the report and the git facts
 --     and stored beside it so the tally is a query. Set exactly when `state` is 'reported'.
 --   * `detail`: the closed word for a declined or errored row (`DECLINE_REASONS`, `RUN_ERRORS`).
---     Set exactly when `state` is 'declined' or 'errored'.
+--     Set exactly when `state` is 'declined' or 'errored', and a declined row holds a decline word
+--     and an errored row a run-error word, so no row can publish the wrong sentence.
 --   * `nonce`: signed into the callback token, the one-shot handshake the other callbacks use.
 --     Cleared when a result is stored. KEPT when the watchdog marks a row 'unreported', so a late
 --     but valid report is still accepted and then replaces the "could not decide" check.
@@ -36,7 +37,8 @@
 --   * `from_fork`: 1 when the head lives in another repository. The review is identical either
 --     way, because the workflow reads `refs/pull/N/head` from the BASE repository and never runs
 --     anything from the pull request.
---   * `report`: the parsed report, re-serialized JSON, never the raw callback body.
+--   * `report`: the parsed report, re-serialized JSON, never the raw callback body. Set exactly
+--     when `state` is 'reported'.
 --   * `check_run_id`: THIS commit's check-run, created as "in progress" and then updated to its
 --     conclusion. `comment_id`: the pull request's one comment, created by the first review that
 --     could publish it and reused by the reviews of later commits.
@@ -85,8 +87,12 @@ CREATE TABLE pr_reviews (
   UNIQUE (dataset_id, pr_number, head_sha),
   -- A verdict exists exactly when the review reported one.
   CHECK ((state = 'reported') = (verdict IS NOT NULL)),
-  -- A reason exists exactly when the row was declined or errored.
-  CHECK ((state IN ('declined', 'errored')) = (detail IS NOT NULL))
+  -- A reason exists exactly when the row was declined or errored, and it is a reason of that kind.
+  CHECK ((state IN ('declined', 'errored')) = (detail IS NOT NULL)),
+  CHECK (state <> 'declined' OR detail IN ('contributor_paused', 'rate_limited', 'daily_limit')),
+  CHECK (state <> 'errored' OR detail NOT IN ('contributor_paused', 'rate_limited', 'daily_limit')),
+  -- A stored report exists exactly when the review reported.
+  CHECK ((state = 'reported') = (report IS NOT NULL))
 );
 
 CREATE INDEX idx_pr_reviews_author ON pr_reviews (author_id, created_at);

@@ -31,6 +31,7 @@ import {
   MAX_LISTED,
   MAX_MODEL_FILES,
   type ReviewEvidence,
+  SEMVER,
 } from "../../shared/pr-review";
 import { shouldAnnex } from "../../src/lib/git-annex/policy";
 
@@ -39,18 +40,34 @@ export { MAX_MODEL_FILES };
 export const MAX_PATCH_FILES = 40;
 /** Characters of one file's diff shown to the model. */
 export const MAX_PATCH_FILE_CHARS = 12_000;
-/** Characters of diff shown to the model in all (about 20,000 tokens: pennies for Haiku). */
+/** Characters of diff shown to the model in all (about 20,000 tokens). */
 export const MAX_PATCH_TOTAL_CHARS = 80_000;
 /** Commit subjects shown to the model. */
 export const MAX_COMMITS = 30;
 
-const SHA40 = /^[0-9a-f]{40}$/;
-const SEMVER = /^\d{1,9}\.\d{1,9}\.\d{1,9}$/;
+/** A full commit id. Every revision this module hands to git has this shape. */
+export const SHA40 = /^[0-9a-f]{40}$/;
+
+/**
+ * Why the evidence could not be read. A closed list, because the word is printed in a public log:
+ * an error built from a path or a git message would put a pull request's text there.
+ */
+export const EVIDENCE_ERRORS = [
+  "bad_commit_id",
+  "tree_unreadable",
+  "description_unreadable",
+  "no_merge_base",
+  "changes_unreadable",
+  "commits_unreadable",
+] as const;
+export type EvidenceErrorCode = (typeof EVIDENCE_ERRORS)[number];
 
 export class EvidenceError extends Error {
-  constructor(message: string) {
-    super(message);
+  readonly code: EvidenceErrorCode;
+  constructor(code: EvidenceErrorCode) {
+    super(code);
     this.name = "EvidenceError";
+    this.code = code;
   }
 }
 
@@ -167,8 +184,8 @@ function tryGit(dir: string, args: string[]): string | null {
   }
 }
 
-function requireSha(name: string, value: string): void {
-  if (!SHA40.test(value)) throw new EvidenceError(`${name} is not a 40-hex commit id`);
+function requireSha(value: string): void {
+  if (!SHA40.test(value)) throw new EvidenceError("bad_commit_id");
 }
 
 /** Parse `git diff --name-status -z --no-renames` output. */
@@ -199,10 +216,10 @@ function versionAt(dir: string, rev: string): string | null {
   // Ask the TREE whether the file exists: that needs no blob, so a blob that cannot be fetched
   // is told apart from a file that is not there.
   const entry = tryGit(dir, ["ls-tree", rev, "--", "dataset_description.json"]);
-  if (entry === null) throw new EvidenceError("could not read the tree");
+  if (entry === null) throw new EvidenceError("tree_unreadable");
   if (entry.trim() === "") return null;
   const raw = tryGit(dir, ["show", `${rev}:dataset_description.json`]);
-  if (raw === null) throw new EvidenceError("could not read dataset_description.json");
+  if (raw === null) throw new EvidenceError("description_unreadable");
   try {
     const v = (JSON.parse(raw) as { Version?: unknown }).Version;
     return typeof v === "string" && SEMVER.test(v) ? v : null;
@@ -211,9 +228,11 @@ function versionAt(dir: string, rev: string): string | null {
   }
 }
 
-function subjectsAt(dir: string, rev: string): number | null {
+/** How many `sub-*` directories the commit has. An unreadable tree is an error, not "unknown". */
+function subjectsAt(dir: string, rev: string): number {
   const raw = tryGit(dir, ["ls-tree", "-d", "--name-only", rev]);
-  return raw === null ? null : raw.split("\n").filter((n) => /^sub-/.test(n)).length;
+  if (raw === null) throw new EvidenceError("tree_unreadable");
+  return raw.split("\n").filter((n) => /^sub-/.test(n)).length;
 }
 
 function clip(text: string, max: number): { text: string; truncated: boolean } {
@@ -224,6 +243,15 @@ function clip(text: string, max: number): { text: string; truncated: boolean } {
 
 const STATUS_RANK: Record<ChangeStatus, number> = { removed: 0, modified: 1, added: 2 };
 
+/** The order a reviewer would open files in: removed, then modified, then added; within each, the files that describe the dataset first and recordings last. */
+function byReviewOrder(a: RawChange, b: RawChange): number {
+  return (
+    STATUS_RANK[a.status] - STATUS_RANK[b.status] ||
+    AREA_PRIORITY[classifyPath(a.path)] - AREA_PRIORITY[classifyPath(b.path)] ||
+    a.path.localeCompare(b.path)
+  );
+}
+
 /**
  * Read what `headSha` changes relative to the point it branched from `baseSha`.
  *
@@ -232,25 +260,20 @@ const STATUS_RANK: Record<ChangeStatus, number> = { removed: 0, modified: 1, add
  * when the commits are not present or share no history.
  */
 export function gatherGitFacts(dir: string, baseSha: string, headSha: string): GitFacts {
-  requireSha("base", baseSha);
-  requireSha("head", headSha);
+  requireSha(baseSha);
+  requireSha(headSha);
   const mergeBase = tryGit(dir, ["merge-base", baseSha, headSha])?.trim();
-  if (!mergeBase || !SHA40.test(mergeBase)) throw new EvidenceError("no merge base");
+  if (!mergeBase || !SHA40.test(mergeBase)) throw new EvidenceError("no_merge_base");
 
   const raw = tryGit(dir, ["diff", "--name-status", "-z", "--no-renames", mergeBase, headSha]);
-  if (raw === null) throw new EvidenceError("could not list changes");
+  if (raw === null) throw new EvidenceError("changes_unreadable");
   const changes = parseNameStatus(raw);
 
   // Removals and modifications first: that is where a loss hides. Added files come last, so a
   // budget that runs out costs the least important reads.
   const wanted = changes
     .filter((c) => READABLE_AREAS.has(classifyPath(c.path)))
-    .sort(
-      (a, b) =>
-        STATUS_RANK[a.status] - STATUS_RANK[b.status] ||
-        AREA_PRIORITY[classifyPath(a.path)] - AREA_PRIORITY[classifyPath(b.path)] ||
-        a.path.localeCompare(b.path),
-    );
+    .sort(byReviewOrder);
 
   const patches: Patch[] = [];
   const read = new Map<string, Patch>();
@@ -282,11 +305,13 @@ export function gatherGitFacts(dir: string, baseSha: string, headSha: string): G
     return patch === undefined || patch.truncated;
   });
 
+  // An empty list would read to the model as "no commits", so a failed read is an error.
   const log = tryGit(dir, ["log", "--format=%s", `-n${MAX_COMMITS}`, `${mergeBase}..${headSha}`]);
+  if (log === null) throw new EvidenceError("commits_unreadable");
   return {
     changes,
     patches,
-    commits: log === null ? [] : log.split("\n").filter(Boolean),
+    commits: log.split("\n").filter(Boolean),
     versionBefore: versionAt(dir, mergeBase),
     versionAfter: versionAt(dir, headSha),
     subjectsBefore: subjectsAt(dir, mergeBase),
@@ -309,26 +334,13 @@ function emptyAreas(): Record<Area, AreaCounts> {
 /**
  * The report's evidence block, from git alone. Every change is counted in exactly one area, so
  * the areas add up to `files_changed` by construction (the Worker refuses a report where they do
- * not). The file list is the first {@link MAX_LISTED} a reviewer would open: removals first, then
- * the files that describe the dataset, then the rest, recordings last.
+ * not). The file list is the first {@link MAX_LISTED} a reviewer would open, in
+ * {@link byReviewOrder}.
  */
 export function buildEvidence(facts: GitFacts): ReviewEvidence {
   const areas = emptyAreas();
-  for (const c of facts.changes) {
-    const bucket = areas[classifyPath(c.path)];
-    if (c.status === "added") bucket.added++;
-    else if (c.status === "removed") bucket.removed++;
-    else bucket.modified++;
-  }
-  const listed: ChangedFile[] = [...facts.changes]
-    .sort(
-      (a, b) =>
-        STATUS_RANK[a.status] - STATUS_RANK[b.status] ||
-        AREA_PRIORITY[classifyPath(a.path)] - AREA_PRIORITY[classifyPath(b.path)] ||
-        a.path.localeCompare(b.path),
-    )
-    .slice(0, MAX_LISTED)
-    .map((c) => ({ status: c.status, path: c.path }));
+  for (const c of facts.changes) areas[classifyPath(c.path)][c.status]++;
+  const listed: ChangedFile[] = [...facts.changes].sort(byReviewOrder).slice(0, MAX_LISTED);
   return {
     files_changed: facts.changes.length,
     files_read: facts.patches.length,

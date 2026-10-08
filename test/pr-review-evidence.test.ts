@@ -26,6 +26,7 @@ import {
   runReview,
 } from "../scripts/ci/pr-review";
 import {
+  EVIDENCE_ERRORS,
   EvidenceError,
   MAX_MODEL_FILES,
   MAX_PATCH_FILES,
@@ -118,6 +119,16 @@ beforeAll(() => {
 afterAll(() => {
   rmSync(root, { recursive: true, force: true });
 });
+
+/** The closed word an EvidenceError carries, or a note on why there was none. */
+function codeOf(fn: () => unknown): string {
+  try {
+    fn();
+  } catch (e) {
+    return e instanceof EvidenceError ? e.code : "not an EvidenceError";
+  }
+  return "no error";
+}
 
 describe("classifyPath follows the repository's annex policy", () => {
   const cases: [string, string][] = [
@@ -251,11 +262,22 @@ describe("reading a real pull request as git data", () => {
     const dir = newDataset("badsha");
     expect(() => gatherGitFacts(dir, "main; rm -rf /", "a".repeat(40))).toThrow(EvidenceError);
     expect(() => gatherGitFacts(dir, "a".repeat(40), "HEAD")).toThrow(EvidenceError);
+    expect(codeOf(() => gatherGitFacts(dir, "a".repeat(40), "HEAD"))).toBe("bad_commit_id");
   });
 
   test("commits that do not exist are an evidence error, not a crash", () => {
     const dir = newDataset("missing");
     expect(() => gatherGitFacts(dir, "a".repeat(40), "b".repeat(40))).toThrow(EvidenceError);
+    expect(codeOf(() => gatherGitFacts(dir, "a".repeat(40), "b".repeat(40)))).toBe("no_merge_base");
+  });
+
+  test("an evidence error carries a word from a closed list and nothing else", () => {
+    for (const code of EVIDENCE_ERRORS) {
+      const e = new EvidenceError(code);
+      expect(e.message).toBe(code);
+      expect(e.code).toBe(code);
+      expect(describeError(e)).toBe(`EvidenceError: ${code}`);
+    }
   });
 
   test("a file named like a shell command or a flag is only ever data", () => {
@@ -438,9 +460,6 @@ describe("runReview: the job around the model call", () => {
       head: r.head,
       fetchedHead: r.head,
       prJson: pr,
-      reviewId: 1,
-      dataset: "nm000460",
-      environment: "dev" as const,
       ...over,
     };
   }
@@ -528,7 +547,7 @@ describe("runReview: the job around the model call", () => {
 
   test("mapError gives every unknown failure the generic word", () => {
     expect(mapError(new Error("anything"))).toBe("workflow_failed");
-    expect(mapError(new EvidenceError("x"))).toBe("evidence_unavailable");
+    expect(mapError(new EvidenceError("no_merge_base"))).toBe("evidence_unavailable");
     expect(mapError(new PrReviewReportError("bad_evidence"))).toBe("report_invalid");
     expect(mapError(new PrReviewReportError("bad_criteria"))).toBe("model_invalid");
   });
@@ -627,7 +646,7 @@ describe("the callback goes only where the environment name says", () => {
 });
 
 // ---------------------------------------------------------------------------------------------
-// What the reviewer was not shown is a fact (found by the PR 1682 review)
+// What the reviewer was not shown is a fact
 // ---------------------------------------------------------------------------------------------
 
 function pad(i: number): string {
@@ -671,9 +690,9 @@ const allPass = {
 };
 
 describe("what the reviewer was not shown is a fact", () => {
-  test("a green pass cannot rest on metadata nobody read: 61 files changed, 12 or 40 read, all-pass", () => {
-    // The scenario the review reproduced: every events table emptied, many sidecars gutted, and a
-    // model answer of pass. Before the fix: truncated=false and a green check.
+  test("a green pass cannot rest on metadata nobody read: 49 files changed, not all read, all-pass", () => {
+    // Every events table emptied, many sidecars gutted, and a model answer of pass: the check
+    // must not be green.
     const dir = newBigDataset("unread-damage", 30);
     const r = branch(dir, () => {
       for (let i = 0; i < 30; i++) {
@@ -781,6 +800,7 @@ describe("what the reviewer was not shown is a fact", () => {
     const oid = git(dir, "rev-parse", `${r.head}:dataset_description.json`);
     unlinkSync(join(dir, ".git", "objects", oid.slice(0, 2), oid.slice(2)));
     expect(() => gatherGitFacts(r.dir, r.base, r.head)).toThrow(EvidenceError);
+    expect(codeOf(() => gatherGitFacts(r.dir, r.base, r.head))).toBe("description_unreadable");
   });
 
   test("a repository with no dataset_description.json has no version, which is not an error", () => {

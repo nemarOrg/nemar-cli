@@ -1,7 +1,7 @@
 /**
  * Pull-request review callbacks, called by the `run-pr-review` workflow (ADR 0092).
  *
- *   POST /pr-review-claim    the workflow's first act, before it mints an identity or reads
+ *   POST /pr-review-claim    the workflow's first real step, before it mints an identity or reads
  *                            anything: take the review. A dispatch that cannot present the token
  *                            gets 401 and buys nothing; a commit that is no longer the pull
  *                            request's latest is refused with 409 `superseded`.
@@ -9,10 +9,11 @@
  *
  * Both are authed like the identifier-screen callback: a per-review HMAC token in X-Webhook-Token,
  * signed over {dataset_id, review_id, nonce} with PRESCREEN_CALLBACK_SECRET under the `pr-review`
- * domain tag, whose nonce is recovered from the row the token was issued for. One-shot: the row
- * is found only while it waits for its report (`dispatched`, or `unreported` after the watchdog
- * gave up), and storing a result clears the nonce, so a replay or a late duplicate finds nothing
- * to verify and gets 401.
+ * domain tag, whose nonce is recovered from the row the token was issued for. The token is spent
+ * by the RESULT: the row is found only while it waits for its report (`dispatched`, or
+ * `unreported` after the watchdog gave up), and storing a result clears the nonce, so a replayed
+ * or late result finds nothing to verify and gets 401. The CLAIM is one-shot by `claimed_at`
+ * instead: a replayed claim still finds the row and gets 409 `already_claimed`.
  *
  * Body: `{ review_id, dataset_id, outcome: "reported" | "error", report?, error? }`. Every field
  * is untrusted. `dataset_id` and `review_id` are validated against their exact shapes BEFORE they
@@ -90,15 +91,16 @@ export function registerPrReviewRoutes(webhooks: WebhookRouter): void {
     const v = await verify(c, "pr-review-result");
     if (v instanceof Response) return v;
 
-    const outcome = parseCallbackOutcome({
-      outcome: v.body.outcome,
-      report: v.body.report,
-      error: v.body.error,
-    });
-    // parseCallbackOutcome returns only these two kinds; the narrowing is for the compiler.
-    if (outcome.kind !== "reported" && outcome.kind !== "error") {
-      return c.json({ error: "Unusable outcome" }, 400);
-    }
+    const outcome = parseCallbackOutcome(
+      { outcome: v.body.outcome, report: v.body.report, error: v.body.error },
+      // The parser's reason is a fixed word, so it is safe to log, and without it a contract that
+      // drifted between the script (deployed from main) and the Worker looks like a silent
+      // "report_invalid" for every review.
+      (code) =>
+        console.warn(
+          `[pr-review-result] review ${v.reviewId} (${v.datasetId}): report refused (${code})`,
+        ),
+    );
     const stored = await storePrReviewResult(c.env, v.reviewId, v.datasetId, v.nonce, outcome);
     if (!stored.stored) {
       // Verified, but another writer (a duplicate callback) won the one conditional UPDATE

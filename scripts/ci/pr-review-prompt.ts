@@ -17,7 +17,6 @@ import {
   FINDING_CODES,
   MAX_FINDINGS,
   type PrReviewReport,
-  PrReviewReportError,
   REPORT_VERSION,
   REVIEW_MODELS,
   type ReviewEvidence,
@@ -182,5 +181,3 @@ export function assembleReport(modelOutput: unknown, evidence: ReviewEvidence): 
     evidence,
   });
 }
-
-export { PrReviewReportError };

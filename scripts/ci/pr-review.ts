@@ -2,9 +2,10 @@
 /**
  * The pull-request review job's script (ADR 0092). Run by the central workflow
  * `run-pr-review.yml` in `nemarDatasets/.github`, after the workflow has claimed the review. This
- * step holds a federated Anthropic identity and the one-shot callback token, and no GitHub
- * credential: the repository was fetched by an earlier step, and the token it used is not in this
- * step's environment.
+ * step's environment holds a federated Anthropic identity and the one-shot callback token, and no
+ * GitHub credential. The repository was fetched by an earlier step, whose read-only token stays in
+ * the clone's git config for the lazy blob reads this script's git calls make; this script never
+ * reads it, prints it or sends it.
  *
  *   bun run scripts/ci/pr-review.ts review \
  *     --repo-dir DIR --base SHA --head SHA --fetched-head SHA --pr-json FILE \
@@ -23,14 +24,15 @@
  * **The public log carries no value.** `nemarDatasets/.github` is public, so this prints a review
  * id and a fixed word, never a dataset's content, a pull request's text, or the model's output.
  *
- * Exits 0 when the callback was delivered (whatever it said), 1 when it could not be.
+ * Exits 0 when the callback was delivered (whatever it said), 1 when it could not be, and 2 for
+ * bad arguments or a missing callback token.
  */
 
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import Anthropic from "@anthropic-ai/sdk";
 import { type PrReviewReport, PrReviewReportError, type RunError } from "../../shared/pr-review";
-import { EvidenceError, buildEvidence, gatherGitFacts } from "./pr-review-evidence";
+import { EvidenceError, SHA40, buildEvidence, gatherGitFacts } from "./pr-review-evidence";
 import {
   REVIEW_MODEL,
   REVIEW_OUTPUT_SCHEMA,
@@ -46,7 +48,6 @@ export const CALLBACK_ORIGINS = {
 export type Environment = keyof typeof CALLBACK_ORIGINS;
 
 const DATASET_ID = /^(nm|xx|on)\d{6}$/;
-const SHA40 = /^[0-9a-f]{40}$/;
 
 /** A change this large is not reviewed by a model; a person has to look. */
 export const MAX_REVIEWABLE_FILES = 500_000;
@@ -71,9 +72,6 @@ export interface ReviewArgs {
   head: string;
   fetchedHead: string;
   prJson: string;
-  reviewId: number;
-  dataset: string;
-  environment: Environment;
 }
 
 /** Map anything that went wrong to a fixed word. The error's text is never forwarded. */
@@ -89,8 +87,7 @@ export function mapError(e: unknown): RunError {
   }
   // The SDK's federation failures (an identity token it cannot read, an exchange the rule
   // rejects) are plain AnthropicErrors named "Error", not API errors: there is no HTTP response of
-  // the messages API yet. Matching on a class name here was dead code; a test now provokes the
-  // real error from the real SDK.
+  // the messages API yet.
   if (e instanceof Anthropic.AnthropicError && !(e instanceof Anthropic.APIError)) {
     return "auth_failed";
   }
@@ -118,7 +115,7 @@ export function describeError(e: unknown): string {
  * model can read the prompt and write a JSON object; it cannot do anything else.
  */
 export async function callReviewModel(system: string, user: string): Promise<unknown> {
-  // The zero-argument client resolves workload identity federation from the environment
+  // A client given no credentials resolves workload identity federation from the environment
   // (ANTHROPIC_FEDERATION_RULE_ID, _ORGANIZATION_ID, _SERVICE_ACCOUNT_ID, _WORKSPACE_ID and
   // ANTHROPIC_IDENTITY_TOKEN_FILE), exchanges the job's OIDC token, and refreshes it.
   const client = new Anthropic({ maxRetries: 2, timeout: 180_000 });
@@ -213,7 +210,8 @@ export async function postCallback(
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Webhook-Token": token },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(30_000),
+        // The Worker publishes the check and the comment before it answers.
+        signal: AbortSignal.timeout(60_000),
       });
       status = res.status;
       if (res.ok) return { delivered: true, status };
@@ -266,9 +264,6 @@ async function main(argv: string[]): Promise<number> {
     head: need(rest, "head"),
     fetchedHead: need(rest, "fetched-head"),
     prJson: need(rest, "pr-json"),
-    reviewId,
-    dataset,
-    environment,
   });
 
   const body: Record<string, unknown> = {

@@ -115,7 +115,8 @@ const SWEEP_WIRING: Record<
   // ADR 0092: the pull-request review watchdog. Its deadline is 30 minutes, so it rides
   // the 30-minute tick; it writes check-runs and comments to the shared nemarDatasets org,
   // so it is production-only there and absent from DEV_CRON_ALLOWLIST. It also refuses
-  // outside production, and when PR_REVIEW_ENABLED is not "1", on its own.
+  // outside production on its own. It deliberately ignores PR_REVIEW_ENABLED, so switching the
+  // review off does not strand the checks of reviews already in flight.
   sweepStalePrReviews: "tick-prod-only",
   sweepBlockedBidsValidationRequests: "all-envs",
   // Epic #1610 phase 4: the identifier-screen watchdog. Its deadline is 50

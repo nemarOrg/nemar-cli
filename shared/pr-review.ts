@@ -20,7 +20,7 @@
  *     {@link sanitizeNote}, removes links, mentions, cross-references, HTML and emphasis, so a
  *     note cannot ping someone, link anywhere or hide the verdict.
  *
- * **Unknown is never green** (ADR 0053, ADR 0086). Anything that is not a clear pass maps to a
+ * **Unknown is never green** (ADR 0053, ADR 0054, ADR 0086). Anything that is not a clear pass maps to a
  * conclusion that does not satisfy a required check: `neutral` and `skipped` DO satisfy one on
  * GitHub, which is why neither appears in {@link conclusionOf}.
  *
@@ -92,6 +92,10 @@ export type ReviewState = (typeof REVIEW_STATES)[number];
 /** A maintainer's standing decision about one contributor. */
 export const OVERRIDE_MODES = ["allow", "block"] as const;
 export type OverrideMode = (typeof OVERRIDE_MODES)[number];
+
+export function isOverrideMode(x: unknown): x is OverrideMode {
+  return isOneOf(OVERRIDE_MODES, x);
+}
 
 export interface ReviewFinding {
   criterion: Criterion;
@@ -179,11 +183,13 @@ export interface ReportShape {
 declare const validated: unique symbol;
 
 /**
- * A report that {@link parsePrReviewReport} accepted. The brand makes that a fact of the type: an
- * object literal, a spread of one or a cast cannot be handed to {@link verdictOf},
- * {@link renderCheck} or a stored {@link ReviewOutcome} without going through the parser, so the
- * closed vocabulary and the counts-must-add-up rule cannot be skipped by accident. It is
- * `Readonly` (shallowly) so a parsed report is not edited into something the parser never saw.
+ * A report that {@link parsePrReviewReport} accepted. The brand makes that a fact of the type for
+ * an object literal: one cannot be handed to {@link verdictOf}, {@link renderCheck} or a stored
+ * {@link ReviewOutcome} without going through the parser, so the closed vocabulary and the
+ * counts-must-add-up rule cannot be skipped by accident. It does NOT stop a cast, and it does
+ * not stop a spread of a parsed report (`{ ...report, steering: false }` keeps the brand in its
+ * type), and `Readonly` is shallow. The brand guards against forgetting to parse, not against
+ * someone who means to bypass it; a test keeps `as PrReviewReport` out of every other file.
  */
 export type PrReviewReport = Readonly<ReportShape> & { readonly [validated]: true };
 
@@ -214,16 +220,21 @@ export class PrReviewReportError extends Error {
   }
 }
 
-const SEMVER = /^\d{1,9}\.\d{1,9}\.\d{1,9}$/;
+/** A plain `X.Y.Z` version, the only shape a report may carry. The evidence reader uses the same. */
+export const SEMVER = /^\d{1,9}\.\d{1,9}\.\d{1,9}$/;
 /** A BIDS-shaped path. Anything else is dropped from a finding, not trusted into a check-run. */
 const SAFE_PATH = /^[A-Za-z0-9._\-/]{1,200}$/;
 const MAX_FILES = 10_000_000;
 
-const CRITERION_SET: ReadonlySet<string> = new Set(CRITERIA);
-const RESULT_SET: ReadonlySet<string> = new Set(CRITERION_RESULTS);
-const SEVERITY_SET: ReadonlySet<string> = new Set(SEVERITIES);
-const CODE_SET: ReadonlySet<string> = new Set(FINDING_CODES);
-const MODEL_SET: ReadonlySet<string> = new Set(REVIEW_MODELS);
+/** Whether `x` is one of the words in a closed list, as a type guard. */
+export function isOneOf<T extends string>(all: readonly T[], x: unknown): x is T {
+  return typeof x === "string" && (all as readonly string[]).includes(x);
+}
+
+/** A path the report may show, or null: BIDS-shaped, no traversal. */
+function safePath(p: unknown): string | null {
+  return typeof p === "string" && SAFE_PATH.test(p) && !p.includes("..") ? p : null;
+}
 
 function isRecord(x: unknown): x is Record<string, unknown> {
   return typeof x === "object" && x !== null && !Array.isArray(x);
@@ -281,39 +292,27 @@ function parseFinding(raw: unknown): ReviewFinding {
   }
   const { criterion, severity, code, path, note } = raw;
   if (
-    typeof criterion !== "string" ||
-    !CRITERION_SET.has(criterion) ||
-    typeof severity !== "string" ||
-    !SEVERITY_SET.has(severity) ||
-    typeof code !== "string" ||
-    !CODE_SET.has(code)
+    !isOneOf(CRITERIA, criterion) ||
+    !isOneOf(SEVERITIES, severity) ||
+    !isOneOf(FINDING_CODES, code)
   ) {
     throw new PrReviewReportError("bad_findings");
   }
   if (path !== null && typeof path !== "string") throw new PrReviewReportError("bad_findings");
   if (typeof note !== "string") throw new PrReviewReportError("bad_findings");
-  return {
-    criterion: criterion as Criterion,
-    severity: severity as Severity,
-    code: code as FindingCode,
-    path: typeof path === "string" && SAFE_PATH.test(path) && !path.includes("..") ? path : null,
-    note: sanitizeNote(note),
-  };
+  return { criterion, severity, code, path: safePath(path), note: sanitizeNote(note) };
 }
 
-const AREA_SET: ReadonlySet<string> = new Set(AREAS);
-const STATUS_SET: ReadonlySet<string> = new Set(CHANGE_STATUSES);
-const MAX_SUBJECTS = 10_000_000;
-
-function count(v: unknown, max: number = MAX_FILES): number {
-  if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0 || v > max) {
+/** A count of files or subjects: a non-negative integer no larger than {@link MAX_FILES}. */
+function count(v: unknown): number {
+  if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0 || v > MAX_FILES) {
     throw new PrReviewReportError("bad_evidence");
   }
   return v;
 }
 
-function nullableCount(v: unknown, max: number): number | null {
-  return v === null ? null : count(v, max);
+function nullableCount(v: unknown): number | null {
+  return v === null ? null : count(v);
 }
 
 function nullableVersion(v: unknown): string | null {
@@ -334,14 +333,9 @@ function parseListed(raw: unknown): ChangedFile {
     throw new PrReviewReportError("bad_evidence");
   }
   const { status, path } = raw;
-  if (typeof status !== "string" || !STATUS_SET.has(status)) {
-    throw new PrReviewReportError("bad_evidence");
-  }
+  if (!isOneOf(CHANGE_STATUSES, status)) throw new PrReviewReportError("bad_evidence");
   if (path !== null && typeof path !== "string") throw new PrReviewReportError("bad_evidence");
-  return {
-    status: status as ChangeStatus,
-    path: typeof path === "string" && SAFE_PATH.test(path) && !path.includes("..") ? path : null,
-  };
+  return { status, path: safePath(path) };
 }
 
 function parseEvidence(raw: unknown): ReviewEvidence {
@@ -394,8 +388,8 @@ function parseEvidence(raw: unknown): ReviewEvidence {
     truncated: raw.truncated,
     version_before: nullableVersion(raw.version_before),
     version_after: nullableVersion(raw.version_after),
-    subjects_before: nullableCount(raw.subjects_before, MAX_SUBJECTS),
-    subjects_after: nullableCount(raw.subjects_after, MAX_SUBJECTS),
+    subjects_before: nullableCount(raw.subjects_before),
+    subjects_after: nullableCount(raw.subjects_after),
     areas,
     listed: raw.listed.map(parseListed),
   };
@@ -416,9 +410,7 @@ export function parsePrReviewReport(raw: unknown): PrReviewReport {
   const keys = ["v", "model", "criteria", "findings", "summary", "steering", "evidence"];
   if (!hasExactKeys(raw, keys)) throw new PrReviewReportError("unknown_key");
   if (raw.v !== REPORT_VERSION) throw new PrReviewReportError("bad_version");
-  if (typeof raw.model !== "string" || !MODEL_SET.has(raw.model)) {
-    throw new PrReviewReportError("bad_model");
-  }
+  if (!isOneOf(REVIEW_MODELS, raw.model)) throw new PrReviewReportError("bad_model");
   const rawCriteria = raw.criteria;
   if (!isRecord(rawCriteria) || !hasExactKeys(rawCriteria, CRITERIA)) {
     throw new PrReviewReportError("bad_criteria");
@@ -426,8 +418,8 @@ export function parsePrReviewReport(raw: unknown): PrReviewReport {
   const criteria = {} as Record<Criterion, CriterionResult>;
   for (const c of CRITERIA) {
     const r = rawCriteria[c];
-    if (typeof r !== "string" || !RESULT_SET.has(r)) throw new PrReviewReportError("bad_criteria");
-    criteria[c] = r as CriterionResult;
+    if (!isOneOf(CRITERION_RESULTS, r)) throw new PrReviewReportError("bad_criteria");
+    criteria[c] = r;
   }
   if (!Array.isArray(raw.findings) || raw.findings.length > MAX_FINDINGS) {
     throw new PrReviewReportError("bad_findings");
@@ -436,6 +428,17 @@ export function parsePrReviewReport(raw: unknown): PrReviewReport {
   if (typeof raw.summary !== "string") throw new PrReviewReportError("bad_summary");
   if (typeof raw.steering !== "boolean") throw new PrReviewReportError("bad_steering");
   const evidence = parseEvidence(raw.evidence);
+
+  // The report must agree with itself, because the verdict reads the flags and not the prose.
+  // A finding that says the pull request tried to instruct the reviewer IS a steering attempt
+  // whatever the flag says, and a criterion cannot pass while a blocker is filed against it.
+  // Both coerce toward "needs a person"; neither can raise anything.
+  const steering = raw.steering || findings.some((f) => f.code === "steering_attempt");
+  for (const f of findings) {
+    if (f.severity === "blocker" && criteria[f.criterion] === "pass") {
+      criteria[f.criterion] = "unknown";
+    }
+  }
 
   const unexplained = CRITERIA.filter(
     (c) => criteria[c] === "fail" && !findings.some((f) => f.criterion === c),
@@ -453,11 +456,11 @@ export function parsePrReviewReport(raw: unknown): PrReviewReport {
 
   const report: ReportShape = {
     v: REPORT_VERSION,
-    model: raw.model as ReviewModel,
+    model: raw.model,
     criteria,
     findings,
     summary: sanitizeNote(raw.summary, SUMMARY_MAX),
-    steering: raw.steering,
+    steering,
     evidence,
   };
   return report as PrReviewReport;
@@ -564,7 +567,7 @@ export function verdictOf(report: PrReviewReport): Verdict {
 export const DECLINE_REASONS = ["contributor_paused", "rate_limited", "daily_limit"] as const;
 export type DeclineReason = (typeof DECLINE_REASONS)[number];
 
-/** Why a run that started produced no report. */
+/** Why a review ended without a report. Some are the Worker's own words (see the callback). */
 export const RUN_ERRORS = [
   "evidence_unavailable",
   "stale_head",
@@ -581,7 +584,11 @@ export const RUN_ERRORS = [
 export type RunError = (typeof RUN_ERRORS)[number];
 
 export function isRunError(x: unknown): x is RunError {
-  return typeof x === "string" && (RUN_ERRORS as readonly string[]).includes(x);
+  return isOneOf(RUN_ERRORS, x);
+}
+
+export function isDeclineReason(x: unknown): x is DeclineReason {
+  return isOneOf(DECLINE_REASONS, x);
 }
 
 export type ReviewOutcome =
@@ -886,9 +893,10 @@ export function standingOf(tally: AuthorTally, override: AuthorOverride): Standi
 const TRUSTED_ASSOCIATIONS: ReadonlySet<string> = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 
 /**
- * Reviews one contributor may start per hour. Strangers (a fork from an account with no
- * relationship to the dataset) get a small allowance: any GitHub user can open a pull request
- * on a public dataset, and each review costs money.
+ * Reviews one contributor may start per hour. Anyone GitHub does not mark as the repository's
+ * owner, a member or a collaborator (a fork's author, or a past contributor) gets the small
+ * allowance: any GitHub user can open a pull request on a public dataset, and each review costs
+ * money.
  */
 export const HOURLY_REVIEW_CAP = { trusted: 20, other: 3 } as const;
 
@@ -914,24 +922,38 @@ export function dailyAuthorCapFor(authorAssociation: string | null | undefined):
 // The callback body
 // ---------------------------------------------------------------------------------------------
 
+/** What a callback can say: a parsed report, or the word for why there is none. */
+export type CallbackOutcome = Extract<ReviewOutcome, { kind: "reported" | "error" }>;
+
 /**
  * Turn a callback's untrusted `outcome`, `report` and `error` fields into an outcome. A report
  * goes through {@link parsePrReviewReport}; one it refuses is the run error `report_invalid`. An
- * error word that is not in the vocabulary is `workflow_failed`. Anything else (a missing or
+ * error word that is not in the vocabulary, or that only the Worker may use, is `workflow_failed`. Anything else (a missing or
  * unknown `outcome`) is also `workflow_failed`: it can never become a verdict.
  */
-export function parseCallbackOutcome(body: {
-  outcome: unknown;
-  report: unknown;
-  error: unknown;
-}): ReviewOutcome {
+export function parseCallbackOutcome(
+  body: {
+    outcome: unknown;
+    report: unknown;
+    error: unknown;
+  },
+  /** Told the parser's fixed-word reason when a report is refused; the outcome does not carry it. */
+  onRefused?: (code: ReportErrorCode) => void,
+): CallbackOutcome {
   if (body.outcome === "reported") {
     try {
       return { kind: "reported", report: parsePrReviewReport(body.report) };
     } catch (err) {
       if (!(err instanceof PrReviewReportError)) throw err;
+      onRefused?.(err.code);
       return { kind: "error", error: "report_invalid" };
     }
   }
-  return { kind: "error", error: isRunError(body.error) ? body.error : "workflow_failed" };
+  // `dispatch_failed` is the Worker's own word for "GitHub never ran the workflow" and is retried
+  // on redelivery and refunded from the caps: a job must not be able to say it.
+  return {
+    kind: "error",
+    error:
+      isRunError(body.error) && body.error !== "dispatch_failed" ? body.error : "workflow_failed",
+  };
 }
