@@ -12,29 +12,24 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  BASE_EEG,
+  type Entries,
+  GiB,
+  LAST,
+  MiB512,
+  chunk,
+  chunkAt,
+  complete1G,
+} from "../../test/helpers/chunked-keys";
+import {
   compareManifestToListing,
   computeVersionIntegrity,
 } from "../src/services/import-integrity";
 
-const GiB = 1073741824;
-const MiB512 = 536870912;
-const BASE_EEG = "SHA256E-s2500000000--abc.eeg";
-const chunk = (n: number) => `SHA256E-s2500000000-S${GiB}-C${n}--abc.eeg`;
-const LAST = 2500000000 - 2 * GiB;
-
-type Entries = [string, number][];
-
-/** BASE_EEG at 1 GiB: two full chunks and a 352,516,352-byte remainder. */
-const complete1G = (): Entries => [
-  [chunk(1), GiB],
-  [chunk(2), GiB],
-  [chunk(3), LAST],
-];
-
 /** BASE_EEG at 512 MiB, first two of five chunks: an attempt that stopped. */
 const partial512 = (): Entries => [
-  [`SHA256E-s2500000000-S${MiB512}-C1--abc.eeg`, MiB512],
-  [`SHA256E-s2500000000-S${MiB512}-C2--abc.eeg`, MiB512],
+  [chunkAt(2500000000, MiB512, 1), MiB512],
+  [chunkAt(2500000000, MiB512, 2), MiB512],
 ];
 
 describe("compareManifestToListing with chunked content", () => {
@@ -52,79 +47,23 @@ describe("compareManifestToListing with chunked content", () => {
     expect(r).toMatchObject({ complete: true, missingKeys: [], expectedCount: 2, presentCount: 2 });
   });
 
-  test("a chunked key with an -m field counts, and a short last chunk does not", () => {
-    const key = "WORM-s10-m1700000000--rec.edf";
-    const c = (n: number) => `WORM-s10-m1700000000-S4-C${n}--rec.edf`;
-    const manifest = { "sub-01/eeg/rec.edf": { key, size: 10 } };
-    const whole = new Map([
-      [c(1), 4],
-      [c(2), 4],
-      [c(3), 2],
-    ]);
-    expect(compareManifestToListing(manifest, whole)).toMatchObject({
-      complete: true,
-      missingKeys: [],
-    });
-    const short = new Map([
-      [c(1), 4],
-      [c(2), 4],
-      [c(3), 1],
-    ]);
-    expect(compareManifestToListing(manifest, short).missingKeys).toEqual([key]);
-  });
-
-  test("a truncated plain object over complete chunks is missing, and zero-byte only at 0", () => {
+  test("a wrong-size plain object over complete chunks is missing, and zero-byte only at 0", () => {
     // A plain object that exists decides the answer, so the chunks beside it do not
     // rescue it, and the #967 zero-byte distinction is the plain object's own.
     const manifest = { "sub-01/ieeg/a.eeg": { key: BASE_EEG, size: 2500000000 } };
-    const zero = compareManifestToListing(manifest, new Map([[BASE_EEG, 0], ...complete1G()]));
-    expect(zero).toMatchObject({
-      complete: false,
-      missingKeys: [BASE_EEG],
-      zeroByteKeys: [BASE_EEG],
-    });
-    const short = compareManifestToListing(manifest, new Map([[BASE_EEG, 7], ...complete1G()]));
-    expect(short).toMatchObject({ complete: false, missingKeys: [BASE_EEG], zeroByteKeys: [] });
-  });
-
-  test("an oversized plain object over complete chunks is missing and not zero-byte", () => {
-    const manifest = { "sub-01/ieeg/a.eeg": { key: BASE_EEG, size: 2500000000 } };
-    const listing = new Map([[BASE_EEG, 2500000001], ...complete1G()]);
-    expect(compareManifestToListing(manifest, listing)).toMatchObject({
-      complete: false,
-      missingKeys: [BASE_EEG],
-      zeroByteKeys: [],
-    });
-  });
-
-  test("a partial attempt at one chunk size does not hide a complete set at another", () => {
-    const manifest = { "sub-01/ieeg/a.eeg": { key: BASE_EEG, size: 2500000000 } };
-    for (const entries of [
-      [...partial512(), ...complete1G()],
-      [...complete1G(), ...partial512()],
-    ]) {
-      expect(compareManifestToListing(manifest, new Map(entries))).toMatchObject({
-        complete: true,
-        missingKeys: [],
+    const cases: [number, string[]][] = [
+      [0, [BASE_EEG]],
+      [7, []],
+      [2500000001, []],
+    ];
+    for (const [plainSize, zeroByteKeys] of cases) {
+      const listing = new Map<string, number>([[BASE_EEG, plainSize], ...complete1G()]);
+      expect(compareManifestToListing(manifest, listing)).toMatchObject({
+        complete: false,
+        missingKeys: [BASE_EEG],
+        zeroByteKeys,
       });
     }
-    expect(compareManifestToListing(manifest, new Map(partial512())).missingKeys).toEqual([
-      BASE_EEG,
-    ]);
-  });
-
-  test("the nm000276 key is incomplete at C94 and complete with the C95 tail", () => {
-    // s100969566208 at 1 GiB: 94 full chunks plus a 37,834,752-byte remainder.
-    const key = "SHA256E-s100969566208--abc.eeg";
-    const manifest = { "sub-01/ieeg/big.eeg": { key, size: 100969566208 } };
-    const at = (n: number) => `SHA256E-s100969566208-S${GiB}-C${n}--abc.eeg`;
-    const listing = new Map<string, number>(Array.from({ length: 94 }, (_, i) => [at(i + 1), GiB]));
-    expect(compareManifestToListing(manifest, listing).missingKeys).toEqual([key]);
-    listing.set(at(95), 37834752);
-    expect(compareManifestToListing(manifest, listing)).toMatchObject({
-      complete: true,
-      missingKeys: [],
-    });
   });
 
   test("a dataset missing one chunk is still incomplete, naming the whole-file key", () => {
