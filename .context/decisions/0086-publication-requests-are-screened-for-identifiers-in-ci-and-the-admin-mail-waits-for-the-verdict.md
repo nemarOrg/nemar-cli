@@ -177,7 +177,8 @@ OpenNeuro imports and exemplars keep their exemption, except that an anonymous r
 The refusal means "recorded, waiting".
 Printed as a failure with exit 1, it sent depositors into retry loops of their own.
 That holds only when GitHub answered.
-When the readiness check itself cannot run (no credential, a failed workflow deploy, an outage) the request is still recorded, but the route answers 503 `ci_check_unavailable` with no block reason instead of the pending 422, because the sweep makes the same calls and would fail the same way, so nothing promises that the request carries on.
+When the readiness check itself cannot run (no credential, a failed workflow deploy, an outage) the request is still recorded, but the route answers 503 `ci_check_unavailable` with no block reason instead of the pending 422, because the cause can be one the sweep does not cure: it reads the run list with the same credential and recovers when GitHub does, but it does not deploy the workflow, so a request recorded after a failed deploy waits for a run that nothing starts, and nothing promises that the request carries on.
+The row is written with the pending reason, so `nemar dataset publish status` still shows it as waiting on validation; telling the two apart would take a stored marker, and is left as a follow-up.
 The block-reason vocabulary is shared with the website and is not extended for it.
 
 The maintainer decided that `nemar dataset publish request` reports a CI-pending refusal in the info style and exits 0, and that `nemar dataset publish status` shows a request in that state the same way.
