@@ -134,7 +134,7 @@ describe("ciPendingHint", () => {
       "  If you would rather not wait for that, check validation with: nemar dataset ci nm000358",
       "  Once it has passed, request again: nemar dataset publish request nm000358",
       "  If it says a request already exists, nothing more is needed.",
-      "  If validation fails, the request stays blocked and nothing is emailed:",
+      "  If validation fails or a submission minimum fails, the request stays blocked and nothing is emailed:",
       "  check nemar dataset ci nm000358 or nemar dataset publish status nm000358.",
     ]);
   });
