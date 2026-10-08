@@ -171,8 +171,15 @@ The cadence is the server's to change and is not part of this decision, which is
 (The half-hourly sweep earlier in this ADR is another one: it covers screens that did not report.)
 
 Both places that decide a request put it through the submission minimums of ADR 0026 and, for an anonymous request, the blind check of ADR 0065, with one function (`checkSubmissionGate`): the request route does so even when CI is the only thing blocking (a missing minimum then replaces the pending reason and is answered at once as `min_requirements_failed` with its reasons), and the sweep does so before it releases a request, because the depositor may have edited the data since.
-A request that fails is re-blocked as `min_requirements_failed` and stops being a sweep candidate until the depositor requests again; an anonymous blind that cannot be read is left blocked for the next run and counted as an error, never released.
+A request that fails is re-blocked as `min_requirements_failed` and stops being a sweep candidate until the depositor requests again.
 OpenNeuro imports and exemplars keep their exemption, except that an anonymous request is always checked.
+The request route reads a README only when `EthicsApprovals` lists no approval, and one it cannot read counts as one with no statement; it never takes the Name and Authors rules with it.
+A description it cannot read blocks an anonymous release and lets a native submission go on to the admin review (ADR 0026).
+
+The sweep is a daily batch and reads more carefully.
+Its reads never sleep or retry, and share a budget of 100 per run (the tally reports `gateReads` and `deferred`); a file it cannot read, native or anonymous, or a run that spends the budget, leaves the row untouched for the next run and counts it as an error or as deferred, and a verdict is never given from a partial look.
+Every write it makes is conditional on the row being as it read it (status, anonymous flag, block reason and `updated_at`), so a request made again in the meantime, possibly anonymously, is never released or relabelled on a verdict reached for the old row; a write that finds the row changed is counted as skipped.
+A row it looked at and left as it was moves to the back of the queue, so enough of them cannot fill every run and starve the ones behind.
 
 The refusal means "recorded, waiting".
 Printed as a failure with exit 1, it sent depositors into retry loops of their own.
