@@ -15,7 +15,15 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "bun";
@@ -68,7 +76,7 @@ let shimCount = 0;
 
 // The calls the stand-ins know how to answer.
 const INIT_WITH_BRANCH = "'init -b '*";
-const PLAIN_INIT = "'init '[!-]*";
+const PLAIN_INIT = "'init -- '*";
 const HEAD_REPOINT = "'symbolic-ref HEAD refs/heads/main'";
 
 const answer = (when: string, exit: number, stderr: string): Answer => ({ when, exit, stderr });
@@ -245,7 +253,7 @@ describe("initDataset on a git that rejects --initial-branch (exit status 129)",
 
       expect(res).toEqual({ success: true });
       // -b was tried and refused, then the plain init, then HEAD was re-pointed.
-      expect(initCalls(shim)).toEqual([`init -b main ${dir}`, `init ${dir}`]);
+      expect(initCalls(shim)).toEqual([`init -b main -- ${dir}`, `init -- ${dir}`]);
       expect(headRepoints(shim)).toHaveLength(1);
       // The unborn branch was main although the host's default is trunk, so
       // the initial commit and the adjusted branch both sit on main.
@@ -279,7 +287,7 @@ describe("initDataset when git init fails for any other reason", () => {
       const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
 
       expect(res).toEqual({ success: false, error: c.error });
-      expect(initCalls(shim)).toEqual([`init -b main ${dir}`]);
+      expect(initCalls(shim)).toEqual([`init -b main -- ${dir}`]);
       expect(headRepoints(shim)).toHaveLength(0);
     }, 30_000);
   }
@@ -293,11 +301,11 @@ describe("initDataset when git init fails for any other reason", () => {
 
     // The report is git's own stderr, in whatever language git speaks here. A
     // later step failing on the missing directory would word it differently.
-    const direct = spawnSync([REAL_GIT, "init", "-b", "main", target]);
+    const direct = spawnSync([REAL_GIT, "init", "-b", "main", "--", target]);
     expect(direct.exitCode).not.toBe(0);
     expect(direct.stderr.toString().trim()).not.toBe("");
     expect(res).toEqual({ success: false, error: direct.stderr.toString().trim() });
-    expect(initCalls(shim)).toEqual([`init -b main ${target}`]);
+    expect(initCalls(shim)).toEqual([`init -b main -- ${target}`]);
     expect(headRepoints(shim)).toHaveLength(0);
   });
 
@@ -310,7 +318,7 @@ describe("initDataset when git init fails for any other reason", () => {
     const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
 
     expect(res).toEqual({ success: false, error: "fatal: plain init refused" });
-    expect(initCalls(shim)).toEqual([`init -b main ${dir}`, `init ${dir}`]);
+    expect(initCalls(shim)).toEqual([`init -b main -- ${dir}`, `init -- ${dir}`]);
     expect(headRepoints(shim)).toHaveLength(0);
   });
 
@@ -324,6 +332,38 @@ describe("initDataset when git init fails for any other reason", () => {
   });
 });
 
+describe("initDataset with a path that starts with a dash", () => {
+  // `--bare` as a switch would create a bare repository in the working directory
+  // and then fail on the missing dataset directory; any other dash word is a
+  // usage error (exit 129). Either way the path must be a path: the cwd is a
+  // scratch directory, since a mistake here writes into the cwd.
+  const gits = [
+    { name: "modern git", make: () => loggingGit() },
+    { name: "git that rejects --initial-branch", make: () => oldGit(OLD_GIT_STDERR.english) },
+  ];
+
+  for (const g of gits) {
+    test(`${g.name}: the path is a path, not a switch`, async () => {
+      const work = freshDir();
+      mkdirSync(work, { recursive: true });
+      const shim = g.make();
+      const before = process.cwd();
+      process.chdir(work);
+      let res: Awaited<ReturnType<typeof initDataset>>;
+      try {
+        res = await withShim(shim, () => initDataset("--bare", { author: AUTHOR }));
+      } finally {
+        process.chdir(before);
+      }
+
+      expect(res).toEqual({ success: true });
+      expect(existsSync(join(work, "--bare", ".git"))).toBe(true);
+      expect(existsSync(join(work, "HEAD"))).toBe(false);
+      expect(initCalls(shim)[0]).toBe("init -b main -- --bare");
+    }, 30_000);
+  }
+});
+
 describe("initDataset on a modern git", () => {
   test("uses -b main directly: the fallback never runs", async () => {
     const shim = loggingGit();
@@ -332,7 +372,7 @@ describe("initDataset on a modern git", () => {
 
     expect(res).toEqual({ success: true });
     // Exactly one init, and it is the one with -b; no plain init, no re-point.
-    expect(initCalls(shim)).toEqual([`init -b main ${dir}`]);
+    expect(initCalls(shim)).toEqual([`init -b main -- ${dir}`]);
     expect(headRepoints(shim)).toHaveLength(0);
     expect(subjects(dir, "refs/heads/main")).toEqual(["Initialize dataset"]);
     expect(hasBranch(dir, "trunk")).toBe(false);
@@ -392,7 +432,7 @@ describe("initDataset where the branch name was not chosen by git init", () => {
 
     expect(renamedOrKept).toBe(true);
     // Plain init re-initialized the repository and HEAD was left where it was.
-    expect(initCalls(shim)).toEqual([`init -b main ${dir}`, `init ${dir}`]);
+    expect(initCalls(shim)).toEqual([`init -b main -- ${dir}`, `init -- ${dir}`]);
     expect(headRepoints(shim)).toHaveLength(0);
     // The history sits under the initial commit on master, three commits deep...
     expect(subjects(dir, "refs/heads/master")).toEqual(["Initialize dataset", "c2", "c1"]);

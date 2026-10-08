@@ -64,7 +64,7 @@ async function initGitRepoOnMain(
   env: Record<string, string> = {},
 ): Promise<{ success: boolean; error?: string }> {
   const envOpt = Object.keys(env).length > 0 ? { env } : {};
-  const withBranch = await runCommand(["git", "init", "-b", "main", path], envOpt);
+  const withBranch = await runCommand(["git", "init", "-b", "main", "--", path], envOpt);
   if (withBranch.exitCode === 0) {
     return { success: true };
   }
@@ -74,7 +74,7 @@ async function initGitRepoOnMain(
       error: withBranch.stderr.trim() || "Failed to initialize git repository",
     };
   }
-  const plain = await runCommand(["git", "init", path], envOpt);
+  const plain = await runCommand(["git", "init", "--", path], envOpt);
   if (plain.exitCode !== 0) {
     return { success: false, error: plain.stderr.trim() || "Failed to initialize git repository" };
   }
