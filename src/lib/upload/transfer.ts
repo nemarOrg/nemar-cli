@@ -1,13 +1,11 @@
 /**
  * Upload pipeline: dataset creation and data-transfer steps.
  *
- * Moved verbatim from the upload action in commands/dataset.ts (#907,
- * epic #902); the only intentional changes are import paths, the
- * step-function wrappers (process.exit -> return FAIL), printStepFailure
- * at the resume/create/annex-init/github-remote failure sites, and the
- * uploadProgress -> progress parameter rename in uploadDataToS3. Steps
- * print their own output and never call process.exit (the command
- * sequencer owns exits).
+ * Steps print their own output and never call process.exit (the command sequencer
+ * owns exits). The data-transfer step (step 9) keeps its decisions apart from what
+ * it prints: `copyAnnexedToRemote` decides from git-annex's own records and returns
+ * data, and `transferAnnexedData` turns that data into output, progress records and
+ * cleanup.
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -416,8 +414,11 @@ export async function listAnnexedPaths(
  * complement of `listAnnexedPaths(path, remote)` within `listAnnexedPaths(path)`,
  * in one walk. Any matching option makes git-annex consider every annexed file
  * rather than only those whose content is present, so `--not --in` alone is enough;
- * adding `--include '*'` to it doubles the cost (measured on 10,000 annexed files:
- * 2.4 s against 4.3 s) for the same answer. No content access and no network.
+ * adding `--include '*'` to it costs about 1.6 times as much for the same answer.
+ * Measured on 10,000 annexed files against a directory remote: 3.7 s against 6.1 s
+ * with nothing recorded at the remote, 3.65 s against 5.75 s with everything
+ * recorded there. (Absolute times move between runs of the same machine; the ratio
+ * does not.) No content access and no network.
  */
 export async function listAnnexedPathsNotAt(
   absolutePath: string,
@@ -1105,7 +1106,7 @@ export async function transferAnnexedData(args: {
  * below). The skip decision never trusts the progress file alone: the git
  * index is consulted first (computeAddTargets), the location log is asked what
  * the remote lacks (`listPendingAtRemote`, even when there is nothing to add), and
- * the log is verified after the copy before anything is marked uploaded, so a
+ * the log is checked again after the copy before anything is marked uploaded, so a
  * progress file that outlived its .git state cannot fake availability.
  *
  * `deps.openRemote` replaces how the remote is opened (credentials and S3

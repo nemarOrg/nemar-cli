@@ -33,8 +33,8 @@ beforeAll(async () => {
 afterAll(() => scratch.cleanup());
 
 /**
- * The names the review asked about, plus the motion case that is a hard failure
- * rather than a report: `X_MOTION.tsv` is excluded by name at any size.
+ * Case variants of the data names, plus the motion case that is a refusal rather than a
+ * report: `X_MOTION.tsv` is excluded by name at any size.
  */
 const FIXTURES: Array<{ path: string; size: number; why: string }> = [
   { path: "sub-01/eeg/normal.edf", size: 5_000, why: "ordinary recording" },
@@ -86,8 +86,10 @@ describe("what git-annex does with case variants on its own", () => {
     ).toBe(true);
     const annexed = await annexedSet(dir);
 
-    // The premise, measured rather than assumed: if git-annex ever grows
-    // case-insensitive globs these stop holding and the force step is dead weight.
+    // Version-coupled premise, measured rather than assumed: git-annex matches these names
+    // as written. If it ever matched them case-insensitively on its own (today only a
+    // bracket class does, and the expression has none) these stop holding and the force
+    // step is dead weight.
     expect(annexed.has("sub-01/eeg/normal.edf")).toBe(true);
     expect(annexed.has("sub-01/eeg/small_UPPER.EDF")).toBe(false);
     expect(annexed.has("sub-03/motion/sub-03_task-rest_tracksys-imu_MOTION.tsv")).toBe(false);
@@ -120,8 +122,8 @@ describe("what git-annex does with case variants on its own", () => {
       ).success,
     ).toBe(true);
     const { blocking } = findDataFilesNotAnnexed(toTargets(), await annexedSet(dir));
-    // The review's concern, reproduced: a large file the CLI calls data that git-annex
-    // kept in git. It is the MOTION file, not the uppercase .EDF, that is in this set.
+    // Without the force step: a large file the CLI calls data that git-annex kept in git.
+    // It is the MOTION file, not the uppercase .EDF, that is in this set.
     expect(blocking.map((f) => f.path)).toEqual([
       "sub-03/motion/sub-03_task-walk_tracksys-imu_MOTION.tsv",
     ]);

@@ -272,9 +272,8 @@ describe("annex policy: the shell copy cannot drift", () => {
  * Every spelling of the threshold that a repository can carry is checked against
  * real git-annex at the bytes around the boundary. The expected outcome is written
  * as a literal (more than 100,000 bytes annexes), never derived from the constant:
- * git-annex reads `kb` as SI, so `largerthan=100kb` is 100,000 bytes, and the
- * constant used to say 102,400. A test that computed its expectation from the
- * constant would have agreed with the bug.
+ * git-annex reads `kb` as SI, so `largerthan=100kb` is 100,000 bytes. An expectation
+ * computed from the constant could not disagree with a wrong constant.
  */
 const BOUNDARY_SIZES = [99_999, 100_000, 100_001, 102_399, 102_400, 102_401] as const;
 

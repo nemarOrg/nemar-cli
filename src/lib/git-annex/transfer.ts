@@ -1115,15 +1115,12 @@ export async function collectFileManifest(datasetPath: string): Promise<{
       const size = stats.size;
       totalSize += size;
 
-      // "data" means exactly "git-annex will take this", so the caller's
-      // addTargets are the files that genuinely end up in S3. This used to be a
-      // second, looser rule (any extension in a local list, or >100 kB), and the
-      // disagreement was the #1158 bug: a `_motion.tsv` counted as data here,
-      // was handed to `git annex add`, and annex then routed it into plain git
-      // because the largefiles expression excluded every `*.tsv`. Worse, a file
-      // this rule calls metadata never reaches `git annex add` at all -- the
-      // later `git add -A` in commitChanges does NOT honour annex.largefiles --
-      // so the two rules have to be the same rule.
+      // "data" means "git-annex will take this, or the upload forces it" (see
+      // `isCaseVariantData`), so the caller's addTargets are the files that end up in
+      // S3. A file this rule calls metadata never reaches `git annex add`, but the
+      // save's `git add -A` still runs git-annex's clean filter, which annexes it when
+      // it is over the size threshold under a name the case-sensitive exclusions miss
+      // (ADR 0031, amendment of 2026-10-07).
       const isDataFile = shouldAnnex(relativePath, size);
       const fileType: "metadata" | "data" = isDataFile ? "data" : "metadata";
 
