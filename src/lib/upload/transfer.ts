@@ -51,11 +51,13 @@ import {
   type OutputState,
   checkRemoteHolds,
   copyPathsToAnnexRemote,
+  listAnnexedKeys,
 } from "../git-annex/transfer.js";
 import {
   RECORDED_CHECK_VALID_TEXT,
   type UploadProgress,
   clearStepCompleted,
+  fingerprintAnnexedFiles,
   hasFileListChanged,
   initUploadProgress,
   isRecordedCheckFresh,
@@ -605,7 +607,7 @@ export function formatUploadSummary(
 
   if (attempted === 0 && resent === 0) {
     if (skipped) {
-      return `All ${total} data files are recorded at the S3 remote; not checked again, because a check of this many recorded files passed within the last ${RECORDED_CHECK_VALID_TEXT}`;
+      return `All ${total} data files are recorded at the S3 remote; not checked again, because the same files and annex keys passed a check within the last ${RECORDED_CHECK_VALID_TEXT}`;
     }
     if (checkOutput !== "understood") {
       return `All ${total} data files are recorded at the S3 remote (${whyUnknown(checkOutput)}, so what its check found is unknown)`;
@@ -649,7 +651,7 @@ export function formatUploadSummary(
   if (recorded > 0) {
     if (skipped) {
       parts.push(
-        `${recorded} already recorded at the remote ${wasWere(recorded)} not checked again, because a check of this many recorded files passed within the last ${RECORDED_CHECK_VALID_TEXT}`,
+        `${recorded} already recorded at the remote ${wasWere(recorded)} not checked again, because the same files and annex keys passed a check within the last ${RECORDED_CHECK_VALID_TEXT}`,
       );
     } else if (checkOutput !== "understood") {
       parts.push(
@@ -690,7 +692,7 @@ export interface S3CopyPlan {
    * cannot check those, so they are asked with `git annex fsck --fast --from`.
    */
   recordedNoLocal: number;
-  /** True when a recent check of this many recorded files means they are not asked again. */
+  /** True when a recent check of these recorded files and annex keys means they are not asked again. */
   recordedCheckSkipped: boolean;
   /** Data files at or under the size threshold that the annex did not take; see {@link SmallNotAnnexed}. */
   smallNotAnnexed: SmallNotAnnexed;
@@ -743,6 +745,8 @@ export type S3CopyOutcome =
        * for all of it was understood: the one state worth stamping as a passed check.
        */
       remoteConfirmed: boolean;
+      /** Fingerprint of the annexed path/key set this run checked, or null if it could not be read. */
+      recordedCheckFingerprint: string | null;
       annexedPaths: Set<string>;
       smallNotAnnexed: SmallNotAnnexed;
     }
@@ -803,10 +807,10 @@ export async function copyAnnexedToRemote(args: {
   jobs: number;
   credentials?: S3Credentials;
   /**
-   * Whether a recent check covers this many recorded files (see `isRecordedCheckFresh`), so
-   * the remote is not asked about them again. Asked once, with the number the log records.
+   * Whether a recent check covers this count and path/key fingerprint (see
+   * `isRecordedCheckFresh`), so the remote is not asked about them again.
    */
-  skipRecordedCheck?: (recordedCount: number) => boolean;
+  skipRecordedCheck?: (recordedCount: number, fingerprint: string) => boolean;
   onPlan?: (plan: S3CopyPlan) => void | Promise<void>;
 }): Promise<S3CopyOutcome> {
   const { absolutePath, remote, addTargets } = args;
@@ -819,6 +823,31 @@ export async function copyAnnexedToRemote(args: {
   } catch (listError) {
     return { status: "unreadable", error: errorDetail(listError) };
   }
+
+  // The count alone cannot identify what the remote check covered: a collaborator can
+  // replace one recorded key with another without changing the count. This local key walk
+  // gives the resume stamp a stable identity; if it cannot be read, the upload still
+  // performs the remote check but does not cache it.
+  let annexedKeys: Map<string, string> | null = null;
+  if (annexedBefore.size > 0) {
+    try {
+      annexedKeys = await listAnnexedKeys(absolutePath);
+    } catch {
+      // This lookup only enables the resume optimization. The ordinary copy and remote
+      // checks below remain the source of truth.
+    }
+  }
+  const fingerprintPaths = (paths: Iterable<string>): string | null => {
+    if (!annexedKeys) return null;
+    const entries: Array<readonly [string, string]> = [];
+    for (const path of paths) {
+      const key = annexedKeys.get(path);
+      if (key === undefined) return null;
+      entries.push([path, key]);
+    }
+    return fingerprintAnnexedFiles(entries);
+  };
+  const checkedFingerprint = fingerprintPaths(annexedBefore);
 
   const notAnnexed = findDataFilesNotAnnexed(addTargets, annexedBefore);
   if (notAnnexed.blocking.length > 0) {
@@ -844,7 +873,12 @@ export async function copyAnnexedToRemote(args: {
 
   const pendingSet = new Set(pending);
   const recorded = [...annexedBefore].filter((p) => !pendingSet.has(p)).sort();
-  const skipCheck = recorded.length > 0 && args.skipRecordedCheck?.(recorded.length) === true;
+  const recordedFingerprint = fingerprintPaths(recorded);
+  const skipCheck =
+    recorded.length > 0 &&
+    checkedFingerprint !== null &&
+    recordedFingerprint !== null &&
+    args.skipRecordedCheck?.(recorded.length, recordedFingerprint) === true;
   // Split the recorded files by whether this repository holds their content: `copy` can
   // check those that it does, and only `fsck` can check the others.
   let recordedWithContent = recorded;
@@ -980,6 +1014,7 @@ export async function copyAnnexedToRemote(args: {
     output: copy.output,
     recordedOutput,
     remoteConfirmed: !skipCheck && copy.output === "understood" && recordedOutput === "understood",
+    recordedCheckFingerprint: checkedFingerprint,
     annexedPaths: annexedBefore,
     smallNotAnnexed,
   };
@@ -1250,7 +1285,7 @@ export function describeRecordedCheck(plan: S3CopyPlan, jobs: number): string[] 
   if (plan.recorded === 0) return lines;
   if (plan.recordedCheckSkipped) {
     lines.push(
-      `  A check of this many recorded files passed within the last ${RECORDED_CHECK_VALID_TEXT}; the remote is not asked about the ${plan.recorded} again.`,
+      `  These ${plan.recorded} recorded files and their annex keys passed a check within the last ${RECORDED_CHECK_VALID_TEXT}; the remote is not asked about them again.`,
     );
     return lines;
   }
@@ -1312,7 +1347,8 @@ export async function transferAnnexedData(args: {
       addTargets,
       jobs: args.jobs,
       credentials: opened.value.credentials,
-      skipRecordedCheck: (recordedCount: number) => isRecordedCheckFresh(progress, recordedCount),
+      skipRecordedCheck: (recordedCount: number, fingerprint: string) =>
+        isRecordedCheckFresh(progress, recordedCount, fingerprint),
       onPlan: (plan: S3CopyPlan) => {
         const { inGit, leftOut } = plan.smallNotAnnexed;
         if (inGit.length > 0) {
@@ -1467,8 +1503,10 @@ export async function transferAnnexedData(args: {
   }
   // A run that had the remote answer for every file, and understood the answers, is what a
   // re-run may rely on for a while; a skipped or unreadable check must not refresh it. The
-  // stamp carries how many annexed files that was, so files recorded since do not ride on it.
-  if (outcome.remoteConfirmed) markRecordedChecked(progress, outcome.total);
+  // count and path/key fingerprint keep later or replaced annex keys from riding on it.
+  if (outcome.remoteConfirmed && outcome.recordedCheckFingerprint !== null) {
+    markRecordedChecked(progress, outcome.total, outcome.recordedCheckFingerprint);
+  }
   writeUploadProgress(absolutePath, progress);
   const summary = formatUploadSummary(outcome.total, outcome.attempted, outcome.confirmed, {
     sent: outcome.sent,
