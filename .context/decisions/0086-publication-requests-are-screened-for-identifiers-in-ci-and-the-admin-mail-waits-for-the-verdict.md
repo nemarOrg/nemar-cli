@@ -170,6 +170,9 @@ A request that fails is re-blocked as `min_requirements_failed` and stops being 
 OpenNeuro imports and exemplars keep their exemption, except that an anonymous request is always checked.
 A request that passes is unblocked, and unblocking starts the identifier screen exactly as a re-request would, so the request carries on by itself.
 The refusal means "recorded, waiting", and the CLI used to print it as a failure and exit 1, which sent depositors into retry loops of their own.
+That holds only when GitHub answered.
+When the readiness check itself cannot run (no credential, a failed workflow deploy, an outage) the request is still recorded, but the route answers 503 `ci_check_unavailable` with no block reason instead of the pending 422, because the sweep makes the same calls and would fail the same way, so nothing promises that the request carries on.
+The block-reason vocabulary is shared with the website and is not extended for it.
 
 The maintainer decided that `nemar dataset publish request` reports it in the info style and exits 0.
 A failed validation (`bids_validation_failed`), a missing minimum, a request already open, an identifier finding and every other refusal keep their text and exit 1.

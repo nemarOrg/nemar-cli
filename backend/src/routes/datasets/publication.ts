@@ -9,7 +9,10 @@
  * intentional changes are import paths and the register-function wrapper.
  */
 
-import type { PublicationBlockReason } from "../../../../shared/contract/publication.js";
+import {
+  CI_CHECK_UNAVAILABLE_CODE,
+  type PublicationBlockReason,
+} from "../../../../shared/contract/publication.js";
 import { publicationRequestNotice } from "../../../../shared/identifier-screen-report.js";
 import { authMiddleware } from "../../middleware/auth";
 import {
@@ -61,6 +64,14 @@ import type { DatasetsRouter } from "./shared";
  * takes the free-TEXT column value (legacy rows exist) and degrades to a
  * generic sentence for anything it does not recognise.
  */
+/**
+ * What a depositor is told when the BIDS-validation readiness check could not
+ * run at all (token, workflow deploy, GitHub outage). Not a block reason: see
+ * the 503 below.
+ */
+const CI_CHECK_UNAVAILABLE_MESSAGE =
+  "NEMAR could not check BIDS validation status right now (a temporary GitHub or credential problem). Your request is recorded; try again later or contact an administrator.";
+
 const BLOCK_MESSAGES: Record<PublicationBlockReason, string> = {
   bids_validation_failed:
     "BIDS validation is failing on your dataset. Please check the repository CI and fix validation errors, then re-request publication.",
@@ -489,6 +500,26 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
           `[publish-request] INSERT ... RETURNING id returned no id for ${datasetId}; pre-screen will not run`,
         );
       }
+    }
+
+    // The row above is written either way, so "recorded" is true. What is not
+    // true is that anything will carry it on: the sweep makes the same GitHub
+    // calls and would fail the same way. A depositor told "pending, continues
+    // on its own" by a 422 would wait for a transition that may not come, so
+    // this is answered as the temporary fault it is, with no block reason (the
+    // reason vocabulary is shared with the website and is deliberately not
+    // extended here). The CLI prints the message and exits 1.
+    if (blocked && ciCheckFailed) {
+      return c.json(
+        {
+          error: CI_CHECK_UNAVAILABLE_CODE,
+          message: CI_CHECK_UNAVAILABLE_MESSAGE,
+          dataset_id: datasetId,
+          anonymous: anonymousRequested,
+          ci_url: ciUrl,
+        },
+        503,
+      );
     }
 
     if (blocked) {
