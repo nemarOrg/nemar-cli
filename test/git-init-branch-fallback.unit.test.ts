@@ -511,6 +511,18 @@ describeGit("initDataset where HEAD names a branch with no commits", () => {
   }
 });
 
+/**
+ * `initDataset` under `shim` must refuse: fail with the fallback note and an
+ * error that mentions `mention`, without ever re-pointing HEAD.
+ */
+async function expectRefusal(shim: Shim, dir: string, mention: string): Promise<void> {
+  const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
+  expect(res.success).toBe(false);
+  expect(res.error).toStartWith(FALLBACK_NOTE);
+  expect(res.error).toContain(mention);
+  expect(headRepoints(shim)).toHaveLength(0);
+}
+
 describeGit("initDataset where HEAD cannot be told apart from unborn", () => {
   test("a corrupt branch ref is refused with git's error and HEAD is left alone", async () => {
     const shim = oldGit(OLD_GIT_STDERR.english);
@@ -519,18 +531,14 @@ describeGit("initDataset where HEAD cannot be told apart from unborn", () => {
     // The state a modern git refuses on at its first commit ("reference broken").
     writeFileSync(join(dir, ".git", "refs", "heads", "master"), "not-a-sha\n");
 
-    const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
-
     // rev-parse reports the broken branch as plain "does not resolve" (exit 1);
     // symbolic-ref is the probe that fails (exit 128 on git 2.54 and 2.56), and
     // its words, in whatever language git speaks here, are what the user gets.
     const probe = git(dir, "symbolic-ref", "-q", "HEAD");
     expect(probe.exit).not.toBe(0);
     expect(probe.err).not.toBe("");
-    expect(res.success).toBe(false);
-    expect(res.error).toStartWith(FALLBACK_NOTE);
-    expect(res.error).toContain(probe.err);
-    expect(headRepoints(shim)).toHaveLength(0);
+
+    await expectRefusal(shim, dir, probe.err);
     expect(readFileSync(join(dir, ".git", "HEAD"), "utf8").trim()).toBe("ref: refs/heads/master");
     expect(existsSync(join(dir, ".git", "annex"))).toBe(false);
   });
@@ -540,12 +548,8 @@ describeGit("initDataset where HEAD cannot be told apart from unborn", () => {
       OLD_GIT_STDERR.english,
       answer(REV_PARSE_HEAD, 128, "fatal: simulated unreadable repository"),
     );
-    const dir = freshDir();
-    const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
+    await expectRefusal(shim, freshDir(), "fatal: simulated unreadable repository");
 
-    expect(res.success).toBe(false);
-    expect(res.error).toStartWith(FALLBACK_NOTE);
-    expect(res.error).toContain("fatal: simulated unreadable repository");
     // Neither the follow-up probes nor any write ran.
     expect(calls(shim).filter((l) => l.startsWith("symbolic-ref"))).toEqual([]);
     expect(calls(shim).filter((l) => l.startsWith("show-ref"))).toEqual([]);
@@ -557,12 +561,7 @@ describeGit("initDataset where HEAD cannot be told apart from unborn", () => {
     const shim = oldGit(OLD_GIT_STDERR.english, answer(REV_PARSE_HEAD, 1, ""));
     const dir = freshDir();
     seed(dir, "master", "c1", "c2");
-    const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
-
-    expect(res.success).toBe(false);
-    expect(res.error).toStartWith(FALLBACK_NOTE);
-    expect(res.error).toContain("refs/heads/master");
-    expect(headRepoints(shim)).toHaveLength(0);
+    await expectRefusal(shim, dir, "refs/heads/master");
   });
 
   test("a show-ref that cannot tell is refused, not read as unborn", async () => {
@@ -570,12 +569,6 @@ describeGit("initDataset where HEAD cannot be told apart from unborn", () => {
       OLD_GIT_STDERR.english,
       answer(SHOW_REF, 128, "fatal: simulated bad ref store"),
     );
-    const dir = freshDir();
-    const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
-
-    expect(res.success).toBe(false);
-    expect(res.error).toStartWith(FALLBACK_NOTE);
-    expect(res.error).toContain("fatal: simulated bad ref store");
-    expect(headRepoints(shim)).toHaveLength(0);
+    await expectRefusal(shim, freshDir(), "fatal: simulated bad ref store");
   });
 });
