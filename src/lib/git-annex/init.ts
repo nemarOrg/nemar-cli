@@ -2,7 +2,8 @@
  * git-annex service: repository init and largefiles configuration.
  *
  * Split from lib/git-annex.ts by concern (#908, epic #902); bodies moved
- * verbatim.
+ * verbatim, except that initDataset's `git init` gained a fallback for a git
+ * without `-b` (#1645).
  */
 
 import { existsSync } from "node:fs";
@@ -36,16 +37,15 @@ export async function isGitAnnexDataset(path: string): Promise<boolean> {
 }
 
 /**
- * The exit status git uses for a usage error: a switch it does not know.
- * That is how git older than 2.28 answers `git init -b` (Ubuntu 20.04's 2.25,
- * still common on HPC login and compute images).
+ * The exit status git uses for a usage error: a switch it does not know. A git
+ * older than 2.28 (for example Ubuntu 20.04's 2.25) rejects `git init -b` this way.
  *
  * The fallback keys on the status and never on stderr: git localizes its
  * messages ("Unbekannter Schalter", "bascule inconnue"), so any text match
- * fails on a non-English LANG exactly as the unfixed code did. The arguments
- * here are fixed, so a usage error can only mean the switch; fatal errors (a
- * path that cannot be created) exit 128. A SIGHUP also reads as 129, and the
- * cost of that misreading is one more `git init`.
+ * would miss the fallback on a non-English LANG. Apart from the path, which is
+ * passed after `--`, the arguments are fixed, so 129 means git rejected `-b`;
+ * fatal errors (a path that cannot be created) exit 128. A SIGHUP also reads as
+ * 129, and the cost of that misreading is a redundant fallback attempt.
  */
 const GIT_USAGE_ERROR_EXIT = 129;
 
@@ -107,14 +107,20 @@ async function readHeadState(path: string, envOpts: EnvOptions): Promise<HeadSta
 }
 
 /**
- * `git init` with `main` as the unborn branch, on any git version.
+ * `git init` with `main` as the branch of a new repository, on any git version.
  *
- * Tries `git init -b main` first; when this git predates `-b` (< 2.28) it
- * falls back to a plain `git init` followed by pointing an unborn HEAD at
- * `refs/heads/main`, which is what `-b` does. Previously the upload failed
- * outright on git 2.25 and depositors had to put a git shim on PATH.
+ * Tries `git init -b main` first. When git answers with a usage error (exit
+ * 129, see GIT_USAGE_ERROR_EXIT) it falls back to a plain `git init` and names
+ * the branch by pointing an unborn HEAD at `refs/heads/main`, which is what
+ * `-b` does.
  *
- * Module-private: it is exercised through `initDataset`, the one caller.
+ * An existing repository keeps its branch, as under a modern git, which ignores
+ * `-b` there; the upload's later branch check deals with it. One measured
+ * difference: an existing repository whose HEAD names an unborn branch (a
+ * master with no commits) is named main at once, where a modern git commits on
+ * that branch and the branch check then renames the adjusted branch to main,
+ * leaving a stray master behind. The fallback's result, `adjusted/main(unlocked)`
+ * with no stray branch, is the tidier of the two.
  */
 async function initGitRepoOnMain(
   path: string,
@@ -144,11 +150,12 @@ async function initGitRepoOnMain(
   }
   // `-b` only names the branch of a repository that is being created. Modern git
   // ignores it for an existing one ("re-init: ignored --initial-branch=main") and
-  // HEAD stays where it was, so the later branch check renames that branch to
-  // main with its history intact. Re-pointing a HEAD that resolves would instead
-  // strand the history on the old branch and make main a one-commit root. Only
-  // an unborn HEAD is ours to name, and a HEAD that cannot be read is neither
-  // ours to rename nor safe to guess about.
+  // HEAD stays where it was: `git annex adjust --unlock` builds
+  // `adjusted/<branch>(unlocked)` on it, and the later branch check renames that
+  // adjusted branch to main, carrying its history. Re-pointing a HEAD that
+  // resolves would instead strand the history on the old branch and make main a
+  // one-commit root. Only an unborn HEAD is ours to name, and a HEAD that cannot
+  // be read is neither ours to rename nor safe to guess about.
   const state = await readHeadState(path, envOpts);
   if (state.kind === "unreadable") {
     return { success: false, error: `${fallback}${state.reason}` };
@@ -196,7 +203,7 @@ export async function initDataset(
 
     const envOpts: EnvOptions = Object.keys(env).length > 0 ? { env } : {};
 
-    // Initialize git repository with explicit "main" branch name
+    // Create the repository on main; an existing repository keeps the branch it has
     const gitInit = await initGitRepoOnMain(path, envOpts);
     if (!gitInit.success) {
       return gitInit;

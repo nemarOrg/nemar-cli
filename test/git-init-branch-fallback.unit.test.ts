@@ -1,15 +1,15 @@
 /**
- * `git init -b main` needs git >= 2.28. On git 2.25 (Ubuntu 20.04's system git,
- * common on HPC images) the upload's dataset init failed at "Initializing
- * git-annex dataset" with an unknown-switch error. `initDataset` now retries
- * with a plain `git init` and points an unborn HEAD at `refs/heads/main`.
+ * `git init -b main` needs git >= 2.28; an older git (for example Ubuntu 20.04's
+ * 2.25) rejects it with a usage error. `initDataset` falls back to a plain
+ * `git init` and points an unborn HEAD at `refs/heads/main`.
  *
  * What is under test is the production entry point, `initDataset`, run against
  * real git and real git-annex. The only stand-in is a `git` on PATH that stands
  * in for an OLDER git BINARY: it logs every call, answers `git init -b` the way
- * git 2.25 does (a hand-written usage error, exit status 129), and hands every
- * other call to the real git, so every repository below is initialized by real
- * git. The fallback must key on that exit status and never on the message,
+ * an older git does (a hand-written usage error, exit status 129), and passes
+ * every other call to the real git, except the few a test makes it answer
+ * itself to reach an error path. Every repository below is initialized by the
+ * real git. The fallback must key on that exit status and never on the message,
  * because git localizes its messages: the stand-in is run with English, German
  * and French text and with no text at all.
  */
@@ -40,7 +40,7 @@ const AUTHOR = { name: "Test", email: "test@test.com" };
 /** What every failure after the fallback began starts with. */
 const FALLBACK_NOTE = "git init -b main was rejected (exit 129); ";
 
-/** How git 2.25 answers `git init -b main`, and how a localized git words the same refusal. */
+/** The usage error of a git without `-b` (English, as git 2.25 words it), and localized wordings of it. */
 const OLD_GIT_STDERR = {
   english: [
     "error: unknown switch `b'",
@@ -54,7 +54,7 @@ const OLD_GIT_STDERR = {
     "erreur : bascule inconnue « b »",
     "usage : git init [-q | --quiet] [--bare] [--template=<répertoire-de-modèles>] [--shared[=<permissions>]] [<répertoire>]",
   ].join("\n"),
-  // A git whose catalog is missing, or whose stderr was discarded.
+  // A git or wrapper whose stderr is discarded.
   empty: "",
 };
 
@@ -234,6 +234,9 @@ describe("what the real git answers", () => {
   });
 });
 
+// Guards the stand-ins themselves: if one stopped answering `git init -b` with
+// status 129 and its text, the fallback tests below would pass or fail for the
+// wrong reason.
 describe("the older-git stand-ins", () => {
   for (const [name, stderr] of Object.entries(OLD_GIT_STDERR)) {
     test(`${name}: refuse git init -b with status 129 and say so on stderr`, async () => {
@@ -259,7 +262,7 @@ describe("initDataset on a git that rejects --initial-branch (exit status 129)",
       expect(initCalls(shim)).toEqual([`init -b main -- ${dir}`, `init -- ${dir}`]);
       expect(headRepoints(shim)).toHaveLength(1);
       // The unborn branch was main although the host's default is trunk, so
-      // the initial commit and the adjusted branch both sit on main.
+      // the "Initialize dataset" commit and the adjusted branch both sit on main.
       expect(subjects(dir, "refs/heads/main")).toEqual(["Initialize dataset"]);
       expect(hasBranch(dir, "trunk")).toBe(false);
       expect(git(dir, "symbolic-ref", "--short", "HEAD").out).toStartWith("adjusted/main");
@@ -267,7 +270,7 @@ describe("initDataset on a git that rejects --initial-branch (exit status 129)",
   }
 });
 
-describe("initDataset when git init fails for any other reason", () => {
+describe("initDataset when a step of git init fails", () => {
   const cases = [
     {
       name: "fatal status 128 that happens to carry the old usage text",
@@ -387,7 +390,6 @@ describe("initDataset on a modern git", () => {
     const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
 
     expect(res).toEqual({ success: true });
-    // Exactly one init, and it is the one with -b; no plain init, no re-point.
     expect(initCalls(shim)).toEqual([`init -b main -- ${dir}`]);
     expect(headRepoints(shim)).toHaveLength(0);
     expect(subjects(dir, "refs/heads/main")).toEqual(["Initialize dataset"]);
@@ -396,8 +398,9 @@ describe("initDataset on a modern git", () => {
 });
 
 /**
- * What the upload does next: `initializeAnnexDataset` initializes, then
- * `ensureLocalMainBranch` makes sure the branch is main, renaming it if not.
+ * `initDataset` followed by `ensureLocalMainBranch`, run back to back with
+ * `yes: true`. The upload runs the second later, in `configureRemotes`; it makes
+ * sure the branch is main and renames it if not.
  */
 async function initThenEnsureMain(shim: Shim, dir: string): Promise<boolean> {
   return withShim(shim, async () => {
@@ -450,15 +453,14 @@ describe("initDataset where the branch name was not chosen by git init", () => {
     // Plain init re-initialized the repository and HEAD was left where it was.
     expect(initCalls(shim)).toEqual([`init -b main -- ${dir}`, `init -- ${dir}`]);
     expect(headRepoints(shim)).toHaveLength(0);
-    // The history sits under the initial commit on master, three commits deep...
+    // master keeps its history with "Initialize dataset" on top...
     expect(subjects(dir, "refs/heads/master")).toEqual(["Initialize dataset", "c2", "c1"]);
-    // ...and the upload's rename path carries all of it to main. Re-pointing HEAD
-    // at an unborn main would have made main a one-commit root and stranded c1
-    // and c2 on master.
-    const onMain = subjects(dir, "refs/heads/main");
-    expect(onMain).toEqual(expect.arrayContaining(["Initialize dataset", "c2", "c1"]));
-    expect(Number(git(dir, "rev-list", "--count", "refs/heads/main").out)).toBeGreaterThanOrEqual(
-      3,
+    // ...and the branch check renames the adjusted branch built on it to main, so
+    // main carries all of it plus the adjusted branch's own commit (one more
+    // than master). Re-pointing HEAD at an unborn main would have made main a
+    // one-commit root and stranded c1 and c2 on master.
+    expect(subjects(dir, "refs/heads/main")).toEqual(
+      expect.arrayContaining(["Initialize dataset", "c2", "c1"]),
     );
   }, 30_000);
 
