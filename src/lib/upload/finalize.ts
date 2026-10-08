@@ -86,11 +86,14 @@ export function writeNemarMetadata(
  * compare their stat and two index rewrites to mark and unmark them, plus, when the
  * S3 step did not hand the annexed set on, a walk of the tree to list them. What it
  * saves is the content of those files streamed through git-annex filter-process.
- * On a tree of a few hundred megabytes the first outweighs the second: a
- * contributor's benchmark on a Ceph filesystem (600 annexed 120 KB files plus 600
- * JSON files) saved SLOWER with the skip, 33.5 s against 6.6 s. So the skip is taken
- * only when there is real content to avoid reading, and a small tree behaves exactly
- * as it did before the skip existed.
+ * On a small tree the first outweighs the second: on a Ceph filesystem, 600 annexed
+ * 120 KB files plus 600 JSON files saved in 33.5 s with the skip against 6.6 s
+ * without it. So the skip is taken only when there is real content to avoid
+ * reading, and a small tree saves exactly as it would without the skip.
+ *
+ * The skip DEFERS the re-read, it does not remove it: the entries stay zero-stat, so
+ * the first `git status` afterwards re-reads the annexed content once (0.47 s against
+ * 0.03 s at 600 x 120 KB; about 4.5 s at 15,000 files).
  *
  * 1 GiB is a deliberately conservative starting point, not a measured crossover:
  * nm000358 (1.6 TB) is three orders of magnitude above it and the Ceph benchmark
@@ -183,8 +186,8 @@ export async function saveDatasetStep(
 
     // Annexed files are already staged (by the tracking step) and recorded at the
     // S3 remote; on a large tree `git add -A` must not stream their content through
-    // git-annex filter-process again (#1455). A failure to list them only costs
-    // speed, so it falls back to the plain add.
+    // git-annex filter-process again. A failure to list them only costs speed, so it
+    // falls back to the plain add.
     const minBytes = options.skipMinBytes ?? SAVE_SKIP_MIN_BYTES;
     let skipContentCheck: SkipContentCheckEntry[] = [];
     if (recordedDataBytes(progress) >= minBytes) {

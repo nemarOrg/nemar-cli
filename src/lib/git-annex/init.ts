@@ -437,10 +437,12 @@ export async function gitAnnexAdd(
  * that is committed or staged as a plain blob and unmodified it does nothing at all
  * -- exit 0, no output, no change -- and `--force-large` does not alter that: the
  * flag decides which plane a CONSIDERED file goes to, not whether it is considered.
- * Verified against git-annex 10.20260901. Un-caching the path makes it new again,
- * and the resulting commit is a plain typechange on the same path. Shared by the
- * import's normalization (ADR 0060) and the upload's recovery from a data file the
- * annex refused (`recoverBlockedTracking`).
+ * Verified against git-annex 10.20260901. Un-caching the path makes it new again
+ * (for a blob that was already COMMITTED, the commit that follows is a plain
+ * typechange on the same path). Shared by the import's normalization (ADR 0060) and
+ * the upload's recovery from a data file the annex refused (`recoverBlockedTracking`).
+ * The paths are literal: with git's own pathspec matching, `star*.txt` would also
+ * unstage `starfish.txt`, and these are user-chosen file names.
  */
 export async function unstageTrackedPaths(datasetPath: string, paths: string[]): Promise<void> {
   for (const chunk of chunkAddTargets(paths)) {

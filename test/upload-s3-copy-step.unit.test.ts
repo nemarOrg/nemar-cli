@@ -2,13 +2,11 @@
  * Upload step 9, driven through its decisions against real git-annex and a real
  * `directory` special remote named `nemar-s3`.
  *
- * `copyAnnexedToRemote` is the function `uploadDataToS3` calls between configuring
- * the remote and printing the result: what to copy comes from the location log, a
- * large data file git-annex refused fails before any byte moves, and EVERY annexed
- * file has to end up recorded at the remote. The earlier tests of this step only
- * exercised pure helpers, so reverting `[...annexedPaths].filter(...)` to
- * `addTargets.filter(...)` left them all green. Each test below names the line it
- * guards; the mutation table in the PR says which revert turned which one red.
+ * `copyAnnexedToRemote` decides what step 9 does: what to copy comes from the location
+ * log, a large data file git-annex refused fails before any byte moves, git-annex
+ * itself checks the files the log already records, and EVERY annexed file has to end up
+ * recorded at the remote. Where a test guards one particular line, its first comment
+ * says which.
  */
 
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
@@ -819,8 +817,8 @@ describe("recovery that does not complete", () => {
   }
 
   test("the printed command runs in a shell on names with spaces, quotes and stars", async () => {
-    // Guards the quoting. The first version printed the paths bare, cut at five, with a
-    // parenthetical after them, which no shell runs. This one EXECUTES what is printed.
+    // Guards the quoting by EXECUTING what is printed: a command with bare paths, cut at
+    // five, or followed by a parenthetical is not one a shell runs.
     const names = [
       "sub-0/eeg/my file 0.edf",
       "sub-1/eeg/it's 1.edf",
