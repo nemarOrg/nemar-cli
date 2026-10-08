@@ -469,3 +469,121 @@ describe("initDataset where the branch name was not chosen by git init", () => {
     );
   }, 60_000);
 });
+
+/** An existing repository whose HEAD names `master`, a branch that has no commits yet. */
+function seedUnbornMaster(dir: string): void {
+  mkdirSync(dir, { recursive: true });
+  gitOk(dir, "init", "-q", ".");
+  gitOk(dir, "symbolic-ref", "HEAD", "refs/heads/master");
+}
+
+/** Unborn master next to a populated develop: HEAD is unborn, the repository is not empty. */
+function seedUnbornMasterOverDevelop(dir: string): void {
+  mkdirSync(dir, { recursive: true });
+  gitOk(dir, "init", "-q", ".");
+  gitOk(dir, "symbolic-ref", "HEAD", "refs/heads/develop");
+  gitOk(
+    dir,
+    ...["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"],
+    ...["commit", "-q", "--allow-empty", "-m", "d1"],
+  );
+  gitOk(dir, "symbolic-ref", "HEAD", "refs/heads/master");
+}
+
+describe("initDataset where HEAD names a branch with no commits", () => {
+  test("an existing but unborn master is named main at once, with one re-point", async () => {
+    const shim = oldGit(OLD_GIT_STDERR.english);
+    const dir = freshDir();
+    seedUnbornMaster(dir);
+    await initThenEnsureMain(shim, dir);
+
+    expect(headRepoints(shim)).toHaveLength(1);
+    expect(git(dir, "symbolic-ref", "--short", "HEAD").out).toStartWith("adjusted/main");
+    expect(subjects(dir, "refs/heads/main")).toEqual(["Initialize dataset"]);
+    expect(hasBranch(dir, "master")).toBe(false);
+    expect(hasBranch(dir, "trunk")).toBe(false);
+  }, 30_000);
+
+  // Modern git ignores -b for an existing repository, so its unborn master is
+  // committed to and then renamed; the fallback names main directly. Either way
+  // main is an orphan that does not absorb develop, and develop is untouched.
+  for (const [name, make] of [
+    ["modern git", () => loggingGit()],
+    ["git that rejects --initial-branch", () => oldGit(OLD_GIT_STDERR.french)],
+  ] as const) {
+    test(`${name}: unborn master over a populated develop leaves develop alone`, async () => {
+      const dir = freshDir();
+      seedUnbornMasterOverDevelop(dir);
+      await initThenEnsureMain(make(), dir);
+
+      expect(subjects(dir, "refs/heads/develop")).toEqual(["d1"]);
+      expect(subjects(dir, "refs/heads/main")).toContain("Initialize dataset");
+      expect(subjects(dir, "refs/heads/main")).not.toContain("d1");
+    }, 30_000);
+  }
+});
+
+describe("initDataset where HEAD cannot be told apart from unborn", () => {
+  test("a corrupt branch ref is refused with git's error and HEAD is left alone", async () => {
+    const shim = oldGit(OLD_GIT_STDERR.english);
+    const dir = freshDir();
+    seedMasterWithHistory(dir);
+    // The state a modern git refuses on at its first commit ("reference broken").
+    writeFileSync(join(dir, ".git", "refs", "heads", "master"), "not-a-sha\n");
+
+    const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
+
+    // rev-parse reports the broken branch as plain "does not resolve" (exit 1);
+    // symbolic-ref is the probe that fails (exit 128 on git 2.54 and 2.56), and
+    // its words, in whatever language git speaks here, are what the user gets.
+    const probe = git(dir, "symbolic-ref", "-q", "HEAD");
+    expect(probe.exit).not.toBe(0);
+    expect(probe.err).not.toBe("");
+    expect(res.success).toBe(false);
+    expect(res.error).toContain(probe.err);
+    expect(headRepoints(shim)).toHaveLength(0);
+    expect(readFileSync(join(dir, ".git", "HEAD"), "utf8").trim()).toBe("ref: refs/heads/master");
+    expect(existsSync(join(dir, ".git", "annex"))).toBe(false);
+  });
+
+  test("a rev-parse that fails for another reason than 'unresolved' is reported at once", async () => {
+    const shim = oldGit(
+      OLD_GIT_STDERR.english,
+      answer("'rev-parse -q --verify HEAD'", 128, "fatal: simulated unreadable repository"),
+    );
+    const dir = freshDir();
+    const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
+
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("fatal: simulated unreadable repository");
+    // Neither the follow-up probes nor any write ran.
+    expect(calls(shim).filter((l) => l.startsWith("symbolic-ref"))).toEqual([]);
+    expect(calls(shim).filter((l) => l.startsWith("show-ref"))).toEqual([]);
+  });
+
+  test("an unresolved HEAD whose branch exists is refused, not re-pointed", async () => {
+    // Stand-in for a state git cannot easily be walked into: rev-parse says
+    // "does not resolve" (exit 1) while the branch ref it names exists.
+    const shim = oldGit(OLD_GIT_STDERR.english, answer("'rev-parse -q --verify HEAD'", 1, ""));
+    const dir = freshDir();
+    seedMasterWithHistory(dir);
+    const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
+
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("refs/heads/master");
+    expect(headRepoints(shim)).toHaveLength(0);
+  });
+
+  test("a show-ref that cannot tell is refused, not read as unborn", async () => {
+    const shim = oldGit(
+      OLD_GIT_STDERR.english,
+      answer("'show-ref --verify -q '*", 128, "fatal: simulated bad ref store"),
+    );
+    const dir = freshDir();
+    const res = await withShim(shim, () => initDataset(dir, { author: AUTHOR }));
+
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("fatal: simulated bad ref store");
+    expect(headRepoints(shim)).toHaveLength(0);
+  });
+});

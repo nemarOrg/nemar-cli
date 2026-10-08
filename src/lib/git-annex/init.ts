@@ -49,6 +49,60 @@ export async function isGitAnnexDataset(path: string): Promise<boolean> {
  */
 const GIT_USAGE_ERROR_EXIT = 129;
 
+type HeadState = { kind: "resolves" } | { kind: "unborn" } | { kind: "unreadable"; reason: string };
+
+/**
+ * Is HEAD of the repository at `path` resolvable, unborn, or neither?
+ *
+ * Unborn means HEAD names a branch whose ref does not exist yet, which is the
+ * state of a fresh `git init`. A bare "does not resolve" is not enough: `git
+ * rev-parse` also exits 1 quietly for a branch ref that exists but is corrupt,
+ * and 128 for an unreadable repository. Re-pointing HEAD in either case would
+ * strand whatever the old branch held and report success. Only exit statuses
+ * are read here, never text, because git localizes its messages.
+ */
+async function readHeadState(
+  path: string,
+  envOpt: { env?: Record<string, string> },
+): Promise<HeadState> {
+  const opts = { cwd: path, ...envOpt };
+  const resolved = await runCommand(["git", "rev-parse", "-q", "--verify", "HEAD"], opts);
+  if (resolved.exitCode === 0) {
+    return { kind: "resolves" };
+  }
+  if (resolved.exitCode !== 1) {
+    return {
+      kind: "unreadable",
+      reason: `cannot read HEAD: ${resolved.stderr.trim() || `exit ${resolved.exitCode}`}`,
+    };
+  }
+  // Exit 1: HEAD does not resolve. Find the branch it names...
+  const target = await runCommand(["git", "symbolic-ref", "-q", "HEAD"], opts);
+  const ref = target.stdout.trim();
+  if (target.exitCode !== 0 || ref === "") {
+    return {
+      kind: "unreadable",
+      reason: `HEAD does not resolve and its branch cannot be read: ${
+        target.stderr.trim() || `exit ${target.exitCode}`
+      }`,
+    };
+  }
+  // ...and confirm that ref is absent (exit 1) rather than present or broken.
+  const exists = await runCommand(["git", "show-ref", "--verify", "-q", ref], opts);
+  if (exists.exitCode === 1) {
+    return { kind: "unborn" };
+  }
+  return {
+    kind: "unreadable",
+    reason:
+      exists.exitCode === 0
+        ? `HEAD does not resolve although ${ref} exists`
+        : `HEAD does not resolve and ${ref} cannot be checked: ${
+            exists.stderr.trim() || `exit ${exists.exitCode}`
+          }`,
+  };
+}
+
 /**
  * `git init` with `main` as the unborn branch, on any git version.
  *
@@ -83,12 +137,13 @@ async function initGitRepoOnMain(
   // HEAD stays where it was, so the later branch check renames that branch to
   // main with its history intact. Re-pointing a HEAD that resolves would instead
   // strand the history on the old branch and make main a one-commit root. Only
-  // an unborn HEAD is ours to name.
-  const resolved = await runCommand(["git", "rev-parse", "-q", "--verify", "HEAD"], {
-    cwd: path,
-    ...envOpt,
-  });
-  if (resolved.exitCode === 0) {
+  // an unborn HEAD is ours to name, and a HEAD that cannot be read is neither
+  // ours to rename nor safe to guess about.
+  const state = await readHeadState(path, envOpt);
+  if (state.kind === "unreadable") {
+    return { success: false, error: state.reason };
+  }
+  if (state.kind === "resolves") {
     return { success: true };
   }
   const head = await runCommand(["git", "symbolic-ref", "HEAD", "refs/heads/main"], {
