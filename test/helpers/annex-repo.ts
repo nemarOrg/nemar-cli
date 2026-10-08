@@ -5,7 +5,7 @@
  *
  * Nothing here replaces behavior: every repository is a real one, every remote is
  * git-annex's own `directory` remote, and the tests read their answers back from
- * git-annex. The helper only removes the boilerplate that six test files would
+ * git-annex. The helper only removes the boilerplate that the upload test files would
  * otherwise each retype.
  */
 
@@ -13,6 +13,7 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   rmSync,
   statSync,
@@ -20,7 +21,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { configureLargefiles, initDataset } from "../../src/lib/git-annex/init";
+import type { SkipContentCheckEntry } from "../../src/lib/git-annex/clone-push";
+import { configureLargefiles, gitAnnexAdd, initDataset } from "../../src/lib/git-annex/init";
 import { runCommand } from "../../src/lib/git-annex/run-command";
 
 /** Run a command and return its output; a thin alias so tests read like shell. */
@@ -129,4 +131,63 @@ export async function annexedSet(dir: string): Promise<Set<string>> {
   const { stdout, exitCode, stderr } = await run(["git", "annex", "find", "--include", "*"], dir);
   if (exitCode !== 0) throw new Error(`git annex find failed: ${stderr}`);
   return new Set(stdout.split("\n").filter(Boolean));
+}
+
+/** What the upload plan records for each tracked file: its size and mtime right now. */
+export function recorded(dir: string, paths: string[]): SkipContentCheckEntry[] {
+  return paths.map((path) => {
+    const st = statSync(join(dir, path));
+    return { path, size: st.size, mtimeMs: st.mtimeMs };
+  });
+}
+
+/** `git ls-files -v` tags, one per path: "H" ordinary, lowercase "h" assume-unchanged. */
+export async function tags(dir: string, ...paths: string[]): Promise<Record<string, string>> {
+  const out = await run(["git", "ls-files", "-v", "-z", "--", ...paths], dir);
+  const result: Record<string, string> = {};
+  for (const entry of out.stdout.split("\0").filter(Boolean)) result[entry.slice(2)] = entry[0];
+  return result;
+}
+
+export async function commitCount(dir: string): Promise<number> {
+  return Number((await run(["git", "rev-list", "--count", "HEAD"], dir)).stdout.trim());
+}
+
+/** A repo with `files` annexed (not yet committed), as the tracking step leaves it. */
+export async function trackedRepo(
+  root: string,
+  name: string,
+  files: Record<string, number>,
+): Promise<string> {
+  const dir = await newDatasetRepo(root, name);
+  for (const [path, size] of Object.entries(files)) {
+    writeFile(dir, path, `${path}:`.padEnd(size, "x"));
+  }
+  const added = await gitAnnexAdd(dir, Object.keys(files));
+  if (!added.success) throw new Error(`gitAnnexAdd failed: ${added.error}`);
+  return dir;
+}
+
+/**
+ * Make the next commit's pre-commit hook run `script` first, then git-annex's own hook.
+ * The hook runs INSIDE the save's window, after the paths are marked and before the
+ * commit exists, which makes it the one place a test can act "during the save".
+ */
+export function prependPreCommit(dir: string, script: string): void {
+  const hook = join(dir, ".git", "hooks", "pre-commit");
+  const original = readFileSync(hook, "utf-8");
+  writeFileSync(hook, `#!/bin/sh\n${script}\n${original.replace(/^#!.*\n/, "")}`);
+  chmodSync(hook, 0o755);
+}
+
+/** Route this repo's filter-process through `tee` so re-read content is countable. */
+export async function meterFilterProcess(dir: string): Promise<string> {
+  const log = join(dir, "..", `${Math.random().toString(36).slice(2)}.filterlog`);
+  writeFileSync(log, "");
+  const set = await run(
+    ["git", "config", "filter.annex.process", `sh -c 'tee -a "${log}" | git-annex filter-process'`],
+    dir,
+  );
+  if (set.exitCode !== 0) throw new Error(`git config failed: ${set.stderr}`);
+  return log;
 }
