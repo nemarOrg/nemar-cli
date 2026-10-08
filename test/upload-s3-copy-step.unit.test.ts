@@ -14,6 +14,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { saveDataset } from "../src/lib/git-annex/clone-push";
 import { gitAnnexAdd } from "../src/lib/git-annex/init";
 import {
   type UploadProgress,
@@ -22,6 +23,7 @@ import {
   markStepCompleted,
 } from "../src/lib/upload-progress";
 import {
+  type SmallNotAnnexed,
   copyAnnexedToRemote,
   describeBlockedTracking,
   formatUploadSummary,
@@ -489,8 +491,47 @@ describe("copyAnnexedToRemote: a data file git-annex refused", () => {
     const outcome = await step(dir, targets);
     expect(outcome.status).toBe("ok");
     if (outcome.status !== "ok") throw new Error("unreachable");
-    expect(outcome.smallNotAnnexed).toEqual(["UPPER-small.edf"]);
+    expect(outcome.smallNotAnnexed).toEqual({ inGit: ["UPPER-small.edf"], leftOut: [] });
     expect(outcome.annexedPaths).toEqual(new Set(["ok.edf"]));
+  });
+
+  test("a small data file a .gitignore hides is named as left out, not as stored in git", async () => {
+    // Guards the split by `listTrackedPaths`. git-annex skips an ignored file without a
+    // word, so such a file is in no commit and not at the remote, while the plan (which
+    // walks the directory) still lists it. Calling it "stored in git" was false.
+    const { dir, targets } = await dataset("ignored-small", {
+      "ok.edf": 3_000,
+      "ignored.edf": 3_000,
+      "Ignored_MOTION.tsv": 3_000,
+    });
+    writeFile(dir, ".gitignore", "ignored.edf\nIgnored_MOTION.tsv\n");
+    expect(
+      (
+        await trackDataFiles(
+          dir,
+          targets.map((t) => t.path),
+        )
+      ).success,
+    ).toBe(true);
+
+    const plans: SmallNotAnnexed[] = [];
+    const outcome = await step(dir, targets, (p) => {
+      plans.push(p.smallNotAnnexed);
+    });
+
+    expect(outcome.status).toBe("ok");
+    if (outcome.status !== "ok") throw new Error("unreachable");
+    expect(outcome.smallNotAnnexed).toEqual({
+      inGit: [],
+      leftOut: ["Ignored_MOTION.tsv", "ignored.edf"].sort(),
+    });
+    expect(plans).toEqual([outcome.smallNotAnnexed]);
+    // The claim behind the name: after the save neither file is in the commit.
+    expect((await saveDataset(dir, "upload")).success).toBe(true);
+    const tree = (await run(["git", "ls-tree", "-r", "--name-only", "HEAD"], dir)).stdout;
+    expect(tree).toContain("ok.edf");
+    expect(tree).not.toContain("ignored.edf");
+    expect(tree).not.toContain("Ignored_MOTION.tsv");
   });
 
   test("a metadata file in the targets is never held to the annexed standard", async () => {
