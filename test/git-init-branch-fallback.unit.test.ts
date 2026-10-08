@@ -242,18 +242,27 @@ describe("initDataset when git init fails for any other reason", () => {
     }, 30_000);
   }
 
-  test("a path that cannot be created is reported by the real git, once", async () => {
-    const shim = loggingGit();
-    const blocker = join(root, "a-file");
-    writeFileSync(blocker, "x");
-    const target = join(blocker, "sub");
-    const res = await withShim(shim, () => initDataset(target, { author: AUTHOR }));
+  // On a git without -b the same path fails the retry as well; this one pins the
+  // modern case, where the first and only init is the one that reports.
+  test.skipIf(!REAL_GIT_HAS_INITIAL_BRANCH)(
+    "a path that cannot be created is reported by the real git, once",
+    async () => {
+      const shim = loggingGit();
+      const blocker = join(root, "a-file");
+      writeFileSync(blocker, "x");
+      const target = join(blocker, "sub");
+      const res = await withShim(shim, () => initDataset(target, { author: AUTHOR }));
 
-    expect(res.success).toBe(false);
-    expect(res.error).toBeTruthy();
-    expect(initCalls(shim)).toEqual([`init -b main ${target}`]);
-    expect(headRepoints(shim)).toHaveLength(0);
-  });
+      // The report is git's own stderr, in whatever language git speaks here. A
+      // later step failing on the missing directory would word it differently.
+      const direct = spawnSync([REAL_GIT, "init", "-b", "main", target]);
+      expect(direct.exitCode).not.toBe(0);
+      expect(direct.stderr.toString().trim()).not.toBe("");
+      expect(res).toEqual({ success: false, error: direct.stderr.toString().trim() });
+      expect(initCalls(shim)).toEqual([`init -b main ${target}`]);
+      expect(headRepoints(shim)).toHaveLength(0);
+    },
+  );
 
   test("a failing plain git init in the fallback is reported", async () => {
     const shim = oldGit(OLD_GIT_STDERR.english, { failPlainInit: "fatal: plain init refused" });
