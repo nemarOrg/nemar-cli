@@ -50,7 +50,9 @@ async function testGitHubSsh(): Promise<{ works: boolean; error?: string }> {
  */
 export async function getGitHubToken(): Promise<{ token: string | null; error?: string }> {
   try {
-    const { stdout, exitCode, stderr } = await runCommand(["gh", "auth", "token"]);
+    const { stdout, exitCode, stderr } = await runCommand(["gh", "auth", "token"], {
+      sensitiveOutput: true,
+    });
 
     if (exitCode !== 0) {
       console.warn("gh CLI returned non-zero exit code:", exitCode);

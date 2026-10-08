@@ -82,6 +82,8 @@ export async function runCommand(
      * interfaces, which are the difference between one process and one per item.
      */
     stdin?: string;
+    /** Suppress both output streams from the verbose log when a command returns a secret. */
+    sensitiveOutput?: boolean;
   } = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean }> {
   const childEnv: Record<string, string | undefined> = {
@@ -126,8 +128,12 @@ export async function runCommand(
   if (timer) clearTimeout(timer);
 
   if (isVerbose()) {
-    if (stdout.trim()) vlog(chalk.dim(redactCredentials(stdout.trimEnd(), secrets)));
-    if (stderr.trim()) vlog(chalk.yellow(redactCredentials(stderr.trimEnd(), secrets)));
+    if (options.sensitiveOutput) {
+      vlog(chalk.dim("[sensitive subprocess output suppressed]"));
+    } else {
+      if (stdout.trim()) vlog(chalk.dim(redactCredentials(stdout.trimEnd(), secrets)));
+      if (stderr.trim()) vlog(chalk.yellow(redactCredentials(stderr.trimEnd(), secrets)));
+    }
     vlog(chalk.dim(`(exit ${exitCode})`));
   }
 
