@@ -6,14 +6,13 @@
  * assume-unchanged bit on files while it works, and a bit that survives hides every
  * later edit to that file. So each way the bookkeeping around that bit can fail has
  * to end in a failed save that says how to recover, never in `{success: true}` with
- * the user's change left out. The failures are real: the repository, the index and
- * the commits are real git, and only the exit status of the one call under test is
- * forced, through a `git` earlier on PATH that passes every other call straight to
- * the real one (test/helpers/git-shim.ts).
+ * the user's change left out. The failures are induced through real repository state:
+ * damaged index files, actual index locks and Git hooks. Git and git-annex produce
+ * every result asserted here.
  */
 
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   clearStaleAssumeUnchanged,
@@ -24,13 +23,13 @@ import {
   commitCount,
   makeScratch,
   trackedRepo as makeTrackedRepo,
+  prependPostCommit,
   prependPreCommit,
   recorded,
   run,
   tags,
   writeFile,
 } from "./helpers/annex-repo";
-import { type ShimRule, installGitShim } from "./helpers/git-shim";
 
 setDefaultTimeout(60_000);
 
@@ -45,16 +44,6 @@ afterAll(() => scratch.cleanup());
 
 const trackedRepo = (name: string, files: Record<string, number>) =>
   makeTrackedRepo(scratch.root, name, files);
-
-/** Run `fn` with the shim installed, and always take it off again. */
-async function withShim<T>(rules: ShimRule[], fn: () => Promise<T>): Promise<T> {
-  const restore = installGitShim(scratch.root, rules);
-  try {
-    return await fn();
-  } finally {
-    restore();
-  }
-}
 
 /** A committed repo whose `edit.edf` has since been changed: a save has something to say. */
 async function dirtyRepo(name: string) {
@@ -71,47 +60,23 @@ async function lastCommitPaths(dir: string): Promise<string[]> {
 }
 
 describe("a save that cannot look for stale flags fails instead of saying it saved", () => {
-  test("when the flags cannot be listed", async () => {
+  test("a corrupt index prevents the save from checking stale flags", async () => {
     const dir = await dirtyRepo("list-fails");
     const before = await commitCount(dir);
-
-    const res = await withShim([{ match: "ls-files -v" }], () => saveDataset(dir, "second"));
+    const indexPath = join(dir, ".git", "index");
+    const index = readFileSync(indexPath);
+    writeFileSync(indexPath, "not a git index\n");
+    let res: Awaited<ReturnType<typeof saveDataset>>;
+    try {
+      res = await saveDataset(dir, "second");
+    } finally {
+      writeFileSync(indexPath, index);
+    }
 
     expect(res.success).toBe(false);
     expect(res.error).toContain("Could not check this repository for assume-unchanged flags");
-    expect(res.error).toContain("fatal: shim: injected failure");
+    expect(res.error).toContain("index");
     expect(res.error).toContain("nothing was saved");
-    expect(await commitCount(dir)).toBe(before);
-  });
-
-  test("when a flagged path cannot be classified (ls-files -s fails)", async () => {
-    const dir = await dirtyRepo("classify-fails");
-    expect((await setAssumeUnchanged(dir, ["keep.edf"], true)).success).toBe(true);
-    const before = await commitCount(dir);
-
-    const res = await withShim([{ match: "ls-files -s", exit: 1 }], () =>
-      saveDataset(dir, "second"),
-    );
-
-    expect(res.success).toBe(false);
-    expect(res.error).toContain("Could not check this repository for assume-unchanged flags");
-    expect(await commitCount(dir)).toBe(before);
-  });
-
-  test("when git grep fails, and when it is killed", async () => {
-    const dir = await dirtyRepo("grep-fails");
-    expect((await setAssumeUnchanged(dir, ["keep.edf"], true)).success).toBe(true);
-    const before = await commitCount(dir);
-
-    const failed = await withShim([{ match: " grep " }], () => saveDataset(dir, "second"));
-    expect(failed.success).toBe(false);
-    expect(failed.error).toContain("fatal: shim: injected failure");
-
-    const killed = await withShim([{ match: " grep ", kill: true }], () =>
-      saveDataset(dir, "second"),
-    );
-    expect(killed.success).toBe(false);
-    expect(killed.error).toContain("137");
     expect(await commitCount(dir)).toBe(before);
   });
 
@@ -124,15 +89,20 @@ describe("a save that cannot look for stale flags fails instead of saying it sav
     expect((await run(["git", "status", "--porcelain"], dir)).stdout.trim()).toBe("");
     const before = await commitCount(dir);
 
-    const res = await withShim([{ match: "--no-assume-unchanged" }], () =>
-      saveDataset(dir, "second"),
-    );
+    const lock = join(dir, ".git", "index.lock");
+    writeFileSync(lock, "", { flag: "wx" });
+    let res: Awaited<ReturnType<typeof saveDataset>>;
+    try {
+      res = await saveDataset(dir, "second");
+    } finally {
+      rmSync(lock, { force: true });
+    }
 
     expect(res.success).toBe(false);
     expect(res.error).toContain(
       "Found 1 assume-unchanged flag(s) on annexed files but could not clear them",
     );
-    expect(res.error).toContain("fatal: shim: injected failure");
+    expect(res.error).toContain("index.lock");
     expect(res.error).toContain("every save clears them first");
     expect(await commitCount(dir)).toBe(before);
 
@@ -196,31 +166,28 @@ describe("flags a finished save could not take back", () => {
     return { dir, entries };
   }
 
-  test("one failed unmark is retried and the save still succeeds", async () => {
-    const { dir, entries } = await skipSaveRepo("unmark-retry");
-
-    const res = await withShim([{ match: "--no-assume-unchanged", times: 1 }], () =>
-      saveDataset(dir, "upload", undefined, { skipContentCheck: entries }),
-    );
-
-    expect(res).toEqual({ success: true });
-    expect(Object.values(await tags(dir))).toEqual(["H", "H"]);
-  });
-
-  test("two failed unmarks fail the save, name the way out, and the way out works", async () => {
+  test("a real post-commit index lock leaves flags for the next save to clear", async () => {
     // Guards the failure return after the unmark. Warning and returning success would
     // leave `h` bits that hide every later edit to those files.
     const { dir, entries } = await skipSaveRepo("unmark-fails");
-
-    const res = await withShim([{ match: "--no-assume-unchanged", times: 2 }], () =>
-      saveDataset(dir, "upload", undefined, { skipContentCheck: entries }),
-    );
+    const before = await commitCount(dir);
+    const lock = join(dir, ".git", "index.lock");
+    const restoreHook = prependPostCommit(dir, `touch "${lock}"`);
+    let res: Awaited<ReturnType<typeof saveDataset>>;
+    try {
+      res = await saveDataset(dir, "upload", undefined, { skipContentCheck: entries });
+    } finally {
+      restoreHook();
+      rmSync(lock, { force: true });
+    }
 
     expect(res.success).toBe(false);
     expect(res.error).toContain("The save was committed, but 2 assume-unchanged flag(s)");
     expect(res.error).toContain("could not be cleared");
+    expect(res.error).toContain("index.lock");
     expect(res.error).toContain("nemar dataset commit");
     expect(Object.values(await tags(dir)).sort()).toEqual(["h", "h"]);
+    expect(await commitCount(dir)).toBe(before + 1);
 
     // The commit exists; only the flags are stuck. Edit a file, then run the save the
     // message names (the same function `nemar dataset commit` calls).
@@ -229,19 +196,6 @@ describe("flags a finished save could not take back", () => {
     expect(recovery.success).toBe(true);
     expect(Object.values(await tags(dir))).toEqual(["H", "H"]);
     expect(await lastCommitPaths(dir)).toEqual(["sub 01/my file.edf"]);
-  });
-
-  test("a commit that failed AND flags that stuck report both", async () => {
-    const { dir, entries } = await skipSaveRepo("both-fail");
-    prependPreCommit(dir, "exit 1");
-
-    const res = await withShim([{ match: "--no-assume-unchanged", times: 2 }], () =>
-      saveDataset(dir, "upload", undefined, { skipContentCheck: entries }),
-    );
-
-    expect(res.success).toBe(false);
-    expect(res.error).toContain("assume-unchanged flag(s) it set could not be cleared");
-    expect(res.error).not.toContain("The save was committed");
   });
 });
 

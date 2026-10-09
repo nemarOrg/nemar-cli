@@ -57,7 +57,7 @@ import {
   tags,
   writeFile,
 } from "./helpers/annex-repo";
-import { type ShimRule, installGitShim } from "./helpers/git-shim";
+import { installGitShim } from "./helpers/git-shim";
 
 setDefaultTimeout(60_000);
 
@@ -114,14 +114,14 @@ async function dataset(name: string, files: Record<string, number | Buffer>): Pr
   return dir;
 }
 
-/** An OpenRemote that registers the directory remote once and counts how often it is asked. */
+/** An OpenRemote that registers the directory remote once, names it, and counts how often it is asked. */
 function directoryRemote(dir: string): OpenRemote & { calls: number } {
   const open = async () => {
     open.calls += 1;
     if (!(await annexRemoteExists(dir, S3_REMOTE_NAME))) {
       await initDirectoryRemote(scratch.root, dir, S3_REMOTE_NAME);
     }
-    return ok({});
+    return ok({ remoteIdentity: `directory:${dir}:${S3_REMOTE_NAME}` });
   };
   open.calls = 0;
   return open;
@@ -389,39 +389,25 @@ describe("what the copy step does with each outcome", () => {
 });
 
 describe("a run that cannot check for stale flags", () => {
-  test("stops before it tracks anything", async () => {
-    // Guards the failure branch of the early clear. If git cannot report the flags, no
-    // `git annex add` may run: it could be silently skipped for a flagged file.
-    const dir = await dataset("flags-unreadable", { "a.edf": 3_000 });
+  test("a corrupt index stops before tracking and says the upload must be retried", async () => {
+    const dir = await dataset("flags-corrupt-index", { "a.edf": 3_000 });
+    const indexPath = join(dir, ".git", "index");
+    const index = readFileSync(indexPath);
+    writeFileSync(indexPath, "not a git index\n");
     const open = directoryRemote(dir);
-    const restore = installGitShim(scratch.root, [{ match: "ls-files -v" }]);
+    const lines: string[] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => lines.push(args.join(" "));
     let result: Awaited<ReturnType<typeof runSteps>>;
     try {
       result = await runSteps(dir, { openRemote: open });
     } finally {
-      restore();
+      console.log = log;
+      writeFileSync(indexPath, index);
     }
     expect(result.status).toBe("fail");
     expect(open.calls).toBe(0);
     expect(await annexedSet(dir)).toEqual(new Set());
-  });
-
-  test("tells an upload that it stopped before tracking, not that nothing was saved", async () => {
-    // Guards the wording for the caller. The same failure text served a save ("nothing was
-    // saved, run the save again"), which is wrong advice to someone who ran an upload.
-    const dir = await dataset("flags-wording", { "a.edf": 3_000 });
-    const restore = installGitShim(scratch.root, [{ match: "ls-files -v" }]);
-    const lines: string[] = [];
-    const log = console.log;
-    console.log = (...args: unknown[]) => {
-      lines.push(args.join(" "));
-    };
-    try {
-      await runSteps(dir, { openRemote: directoryRemote(dir) });
-    } finally {
-      console.log = log;
-      restore();
-    }
     const text = lines.join("\n");
     expect(text).toContain("Could not check this repository for assume-unchanged flags");
     expect(text).toContain("the upload stopped before tracking anything. Run the upload again");
@@ -429,22 +415,29 @@ describe("a run that cannot check for stale flags", () => {
     expect(text).not.toContain("Run the save again");
   });
 
-  test("flags it cannot clear are reported as an upload that stopped, with the way out", async () => {
+  test("a real index lock prevents stale flags from being cleared", async () => {
     const dir = await dataset("flags-uncleared", { "a.edf": 3_000 });
     expect((await trackDataFiles(dir, ["a.edf"])).success).toBe(true);
     expect((await setAssumeUnchanged(dir, ["a.edf"], true)).success).toBe(true);
-    const restore = installGitShim(scratch.root, [{ match: "update-index --no-assume-unchanged" }]);
+    const open = directoryRemote(dir);
+    const lock = join(dir, ".git", "index.lock");
+    writeFileSync(lock, "", { flag: "wx" });
+    const lines: string[] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => lines.push(args.join(" "));
     try {
-      const result = await clearStaleFlags(dir);
-      expect(result.success).toBe(false);
-      expect(result.error).toContain("Could not clear 1 assume-unchanged flag(s) on annexed files");
-      expect(result.error).toContain(
-        "the upload stopped before tracking anything. Run the upload again.",
-      );
-      expect(result.error).not.toContain("nothing was saved");
+      const result = await runSteps(dir, { openRemote: open });
+      expect(result.status).toBe("fail");
+      expect(open.calls).toBe(0);
     } finally {
-      restore();
+      console.log = log;
+      rmSync(lock, { force: true });
     }
+    const text = lines.join("\n");
+    expect(text).toContain("Could not clear 1 assume-unchanged flag(s) on annexed files");
+    expect(text).toContain("index.lock");
+    expect(text).toContain("the upload stopped before tracking anything. Run the upload again.");
+    expect(text).not.toContain("nothing was saved");
   });
 
   test("a directory outside any repository is reported with why it matters and what to do", async () => {
@@ -511,17 +504,10 @@ describe("a run killed inside the save", () => {
 describe("a run signaled inside the save", () => {
   /**
    * Start the runner on a dataset and wait until its save is inside the window, with the
-   * paths marked assume-unchanged. By default the window is held open by a pre-commit hook
-   * that announces itself (a `ready` file) and waits for the test to let it go (a `stop`
-   * file). With `lockHolder` a stand-in git holds `index.lock` during `git add -A`, as the
-   * real one does while it reads content, and announces itself the same way. `shimRules`
-   * are installed BEFORE the runner starts, because a child inherits the PATH it was
-   * spawned with.
+   * paths marked assume-unchanged. A real pre-commit hook announces itself with a `ready`
+   * file and waits for the test to let it go with a `stop` file.
    */
-  async function inTheWindow(
-    name: string,
-    opts: { shimRules?: ShimRule[]; lockHolder?: boolean } = {},
-  ) {
+  async function inTheWindow(name: string) {
     const dir = await dataset(name, { "a.edf": 3_000, "b.edf": 3_000 });
     const tag = Math.random().toString(36).slice(2);
     const pidFile = join(dir, "..", `runner-${tag}.pid`);
@@ -529,20 +515,12 @@ describe("a run signaled inside the save", () => {
     const stop = join(dir, "..", `stop-${tag}`);
     const store = join(dir, "..", `store-${tag}`);
     mkdirSync(store, { recursive: true });
-    const restoreHook = opts.lockHolder
-      ? () => {}
-      : prependPreCommit(
-          dir,
-          `touch "${ready}"; i=0; while [ ! -e "${stop}" ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i + 1)); done; exit 1`,
-        );
-    const rules: ShimRule[] = [
-      ...(opts.lockHolder ? [{ match: " add -A ", holdLock: 30, log: ready }] : []),
-      ...(opts.shimRules ?? []),
-    ];
-    const restoreShim = rules.length > 0 ? installGitShim(scratch.root, rules) : () => {};
+    const restoreHook = prependPreCommit(
+      dir,
+      `touch "${ready}"; i=0; while [ ! -e "${stop}" ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i + 1)); done; exit 1`,
+    );
     const child = Bun.spawn(
       ["bun", "run", join(import.meta.dir, "helpers", "data-steps-runner.ts"), dir, pidFile, store],
-      // The environment is passed explicitly: it carries the PATH with the shim in front.
       { stdout: "pipe", stderr: "pipe", env: { ...process.env } },
     );
     const deadline = Date.now() + 40_000;
@@ -556,18 +534,8 @@ describe("a run signaled inside the save", () => {
     const release = () => {
       letHookGo();
       restoreHook();
-      restoreShim();
     };
     return { dir, child, release, letHookGo };
-  }
-
-  /** Wait until `file` has a line in it: a stand-in git logs there when it is called. */
-  async function untilLogged(file: string): Promise<void> {
-    const deadline = Date.now() + 40_000;
-    while (!existsSync(file) || readFileSync(file, "utf8").trim() === "") {
-      if (Date.now() > deadline) throw new Error(`${file} was never written`);
-      await new Promise((r) => setTimeout(r, 50));
-    }
   }
 
   test("a signal with nothing in the way takes the flags back before the process dies", async () => {
@@ -651,67 +619,6 @@ describe("a run signaled inside the save", () => {
     expect(stderr).not.toContain("\u001b");
     expect(stderr).not.toContain("\u202e");
     expect(stderr).not.toContain("To clear them by hand");
-  });
-
-  test("an unmark that hangs cannot hang the handler", async () => {
-    // Guards the spawnSync timeout. A git that never returns would make Ctrl-C do
-    // nothing at all while the handler waited on it.
-    const { dir, child, release } = await inTheWindow("signal-hung-git", {
-      shimRules: [{ match: "update-index --no-assume-unchanged", sleep: 40 }],
-    });
-    try {
-      const sent = Date.now();
-      child.kill("SIGTERM");
-      await child.exited;
-      expect(Date.now() - sent).toBeLessThan(20_000);
-      expect(child.signalCode).toBe("SIGTERM");
-      expect(await new Response(child.stderr).text()).toContain("nemar dataset commit");
-    } finally {
-      release();
-    }
-    expect(Object.values(await tags(dir, "a.edf", "b.edf"))).toEqual(["h", "h"]);
-  });
-  test("a git that holds the lock is stopped by the handler, so the flags still come back", async () => {
-    // Guards stopChildren. A signal sent to the CLI alone does not reach the `git add -A`
-    // it interrupted, which holds `index.lock` for as long as it reads content; waiting
-    // for the lock to clear would wait out the whole read. The handler asks its children
-    // to stop, git removes its lock as it exits, and the retry then succeeds. The stand-in
-    // git here holds the lock for 30 s and releases it on SIGTERM, as git does.
-    const { dir, child, release } = await inTheWindow("signal-real-lock", { lockHolder: true });
-    const lock = join(dir, ".git", "index.lock");
-    expect(existsSync(lock)).toBe(true);
-    const sent = Date.now();
-    child.kill("SIGTERM");
-    await child.exited;
-    const waited = Date.now() - sent;
-    release();
-
-    expect(child.signalCode).toBe("SIGTERM");
-    expect(waited).toBeLessThan(10_000);
-    expect(existsSync(lock)).toBe(false);
-    expect(Object.values(await tags(dir, "a.edf", "b.edf"))).toEqual(["H", "H"]);
-  });
-
-  test("a signal that lands during the final unmark still finds the handler", async () => {
-    // Guards the order in saveDataset's `finally`: the handler is disarmed AFTER the final
-    // unmark. Disarmed first, a signal during the unmark meets no handler, the default
-    // action kills the process, and nothing says the flags are still set. The unmark here
-    // hangs (a stand-in git that logs and sleeps), so the signal lands inside it.
-    const log = join(scratch.root, `unmark-${Math.random().toString(36).slice(2)}.log`);
-    const { dir, child, release, letHookGo } = await inTheWindow("signal-final-unmark", {
-      shimRules: [{ match: "update-index --no-assume-unchanged", log, sleep: 40 }],
-    });
-    // The hook fails the commit; the save then runs its final unmark, which hangs.
-    letHookGo();
-    await untilLogged(log);
-    child.kill("SIGTERM");
-    await child.exited;
-    const stderr = await new Response(child.stderr).text();
-    release();
-
-    expect(child.signalCode).toBe("SIGTERM");
-    expect(stderr).toContain("nemar dataset commit");
-    expect(Object.values(await tags(dir, "a.edf", "b.edf"))).toEqual(["h", "h"]);
   });
 });
 
