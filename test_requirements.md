@@ -69,12 +69,14 @@ and a warning-callback exception is reported without changing the child's result
 existing focused annex-add suite continues to exercise list-form `gitAnnexAdd` against
 real git-annex repositories.
 
-The full `uploadDataToS3` spinner orchestration and its warning persistence do not have
-an end-to-end real-data test. The only checked-in BIDS dataset is explicitly synthetic,
-and the NO MOCKS policy forbids using it as a real upload dataset. No suitable
-non-synthetic dataset fixture or isolated upload test environment is available in this
-checkout. The production wiring was verified by inspection from `uploadDataToS3` and
-blocked-file recovery through `trackDataFiles`, list-form `gitAnnexAdd`, and `runCommand`.
+`test/upload-data-steps.unit.test.ts` drives `uploadDataToS3` with a local real-git-annex
+repository and a real `directory` special remote. Its generated file inputs are
+synthetic, though, and are unsuitable under NO FAKE DATA for establishing real-dataset
+warning behavior. The only checked-in BIDS dataset is explicitly synthetic. No
+non-synthetic sample or owner-approved real upload environment is available, so warning
+persistence has no end-to-end real-data test. Production wiring was verified by
+inspection from `uploadDataToS3` and blocked-file recovery through `trackDataFiles`,
+list-form `gitAnnexAdd`, and `runCommand`.
 
 Close this gap when an owner-approved non-synthetic dataset and isolated local upload
 environment are available. Drive the real upload entry point and verify the warning is
