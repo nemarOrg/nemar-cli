@@ -60,6 +60,7 @@ let calls: Recorded[] = [];
 let dispatchStatus = 204;
 let commentStatus = 201;
 let checkStatus = 200;
+let claimDuringDispatchFailure = false;
 /** Which GitHub objects answer 404 to an update, as one deleted by hand would. */
 let patchNotFound = new Set<string>();
 let nextId = 9000;
@@ -76,6 +77,12 @@ beforeAll(() => {
       const body = req.method === "GET" ? null : ((await req.json().catch(() => null)) as never);
       calls.push({ method: req.method, path: url.pathname, body });
       if (req.method === "POST" && url.pathname === "/repos/nemarDatasets/.github/dispatches") {
+        if (claimDuringDispatchFailure && dispatchStatus >= 300) {
+          const pending = db
+            .query("SELECT id FROM pr_reviews WHERE state = 'dispatched' ORDER BY id DESC LIMIT 1")
+            .get() as { id: number } | null;
+          if (pending) await claim(pending.id);
+        }
         return new Response(dispatchStatus < 300 ? null : "{}", { status: dispatchStatus });
       }
       if (/\/check-runs(\/\d+)?$/.test(url.pathname)) {
@@ -106,6 +113,7 @@ afterAll(() => {
 afterEach(() => {
   calls = [];
   dispatchStatus = 204;
+  claimDuringDispatchFailure = false;
   commentStatus = 201;
   checkStatus = 200;
   patchNotFound = new Set();
@@ -131,8 +139,9 @@ function seedDataset(id: string) {
      VALUES (1, 'owner', 'owner@example.org', 'x', 'approved', 'member', 1)`,
   );
   db.run(
-    `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, is_sandbox, github_repo)
-     VALUES (?, ?, 1, 'active', 'public', 0, ?)`,
+    `INSERT INTO datasets
+       (dataset_id, name, owner_user_id, status, visibility, is_sandbox, github_repo, first_published_at)
+     VALUES (?, ?, 1, 'active', 'public', 0, ?, '2026-01-01 00:00:00')`,
     [id, `A sufficiently descriptive title for ${id}`, `nemarDatasets/${id}`],
   );
 }
@@ -352,6 +361,31 @@ describe("taking up a pull request", () => {
     expect(lastCheck()).toMatchObject({ status: "in_progress" });
   });
 
+  const ineligibleDatasets = [
+    ["private", "UPDATE datasets SET visibility = 'private'"],
+    ["unpublished", "UPDATE datasets SET first_published_at = NULL"],
+    ["archived", "UPDATE datasets SET status = 'archived'"],
+  ] as const;
+
+  for (const [name, update] of ineligibleDatasets) {
+    test(`a ${name} dataset is not sent to automated review`, async () => {
+      db.run(update);
+      const r = await deliver(prEvent());
+      expect(r.body).toMatchObject({ dispatched: false, reason: "dataset_not_reviewable" });
+      expect(rows()).toHaveLength(0);
+      expect(dispatchesMade()).toHaveLength(0);
+    });
+  }
+
+  test("an unpublished anonymous deposit is not sent to automated review", async () => {
+    db.run("UPDATE datasets SET first_published_at = NULL");
+    db.run("UPDATE datasets SET anonymous = 1");
+    const r = await deliver(prEvent());
+    expect(r.body).toMatchObject({ dispatched: false, reason: "dataset_not_reviewable" });
+    expect(rows()).toHaveLength(0);
+    expect(dispatchesMade()).toHaveLength(0);
+  });
+
   test("a pull request from a fork is reviewed exactly like one from a branch", async () => {
     const r = await deliver(prEvent({ headRepo: "stranger/nm000460", assoc: "NONE", userId: 777 }));
     expect(r.body).toMatchObject({ dispatched: true });
@@ -377,6 +411,33 @@ describe("taking up a pull request", () => {
     await deliver(prEvent({ action: "synchronize", sha: SHA_B }));
     expect(rows()).toHaveLength(2);
     expect(dispatchesMade()).toHaveLength(2);
+  });
+
+  test("a claimed dispatch is preserved when its response reports failure", async () => {
+    dispatchStatus = 500;
+    claimDuringDispatchFailure = true;
+
+    const r = await deliver(prEvent());
+    expect(r.body).toMatchObject({ dispatched: true, reason: "dispatch_claimed" });
+    const reviewId = r.body.review_id as number;
+    expect(rows()[0]).toMatchObject({
+      id: reviewId,
+      state: "dispatched",
+      claimed_at: expect.any(String),
+    });
+    expect(rows()[0].nonce).not.toBeNull();
+    expect(lastCheck()).toMatchObject({ status: "in_progress" });
+
+    // A timed-out dispatch may already be running; its original callback token must still work.
+    const payload = (dispatchesMade()[0].body as { client_payload: Record<string, unknown> })
+      .client_payload;
+    const result = await callback(
+      reviewId,
+      { outcome: "reported", report: goodReport() },
+      payload.callback_token as string,
+    );
+    expect(result.status).toBe(200);
+    expect(rows()[0]).toMatchObject({ state: "reported", verdict: "pass", nonce: null });
   });
 
   const skipped: [string, PrOpts, string][] = [
@@ -971,6 +1032,79 @@ describe("the claim: a dispatch buys nothing until the Worker accepts it", () =>
     });
     // The newer commit is unaffected and can still claim.
     expect((await claim(second)).status).toBe(200);
+  });
+
+  test("a newer delivery inserted between claim steps blocks the older claim", async () => {
+    const first = await start({ sha: SHA_A });
+    let deliveredNewer = false;
+    const interleaved = wrapD1(realD1(db), async (sql) => {
+      if (!deliveredNewer && sql.includes("UPDATE pr_reviews SET claimed_at")) {
+        deliveredNewer = true;
+        await deliver(prEvent({ action: "synchronize", sha: SHA_B }));
+      }
+    });
+
+    const r = await claim(first, undefined, { ...env(), DB: interleaved } as Bindings);
+    expect(r).toMatchObject({ status: 409, body: { reason: "superseded" } });
+    expect(rows()[0]).toMatchObject({ state: "errored", detail: "stale_head", nonce: null });
+    expect(rows()[1]).toMatchObject({ head_sha: SHA_B, state: "dispatched" });
+    expect(rows()[0].claimed_at).toBeNull();
+  });
+
+  test("a dataset that becomes ineligible before claim is terminalized without a model call", async () => {
+    const id = await start();
+    db.run("UPDATE datasets SET visibility = 'private'");
+
+    const r = await claim(id);
+    expect(r).toMatchObject({ status: 409, body: { reason: "dataset_not_reviewable" } });
+    expect(rows()[0]).toMatchObject({ state: "errored", detail: "stale_head", nonce: null });
+    expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "action_required" });
+  });
+
+  test("claim retries if eligibility returns before the refusal is recorded", async () => {
+    const id = await start();
+    db.run("UPDATE datasets SET visibility = 'private'");
+    let claimAttempts = 0;
+    const changing = wrapD1(realD1(db), (sql) => {
+      if (sql.includes("UPDATE pr_reviews SET claimed_at")) claimAttempts++;
+      if (
+        sql.includes("UPDATE pr_reviews SET state = 'errored', detail = 'stale_head'") &&
+        sql.includes("AND (")
+      ) {
+        db.run("UPDATE datasets SET visibility = 'public'");
+      }
+    });
+
+    const r = await claim(id, undefined, { ...env(), DB: changing } as Bindings);
+    expect(r).toMatchObject({ status: 200, body: { claimed: true } });
+    expect(claimAttempts).toBe(2);
+    expect(rows()[0].claimed_at).not.toBeNull();
+  });
+
+  test("claim closes as stale after repeated eligibility changes", async () => {
+    const id = await start();
+    let claimAttempts = 0;
+    let refusalAttempts = 0;
+    const changing = wrapD1(realD1(db), (sql) => {
+      if (sql.includes("UPDATE pr_reviews SET claimed_at")) {
+        claimAttempts++;
+        db.run("UPDATE datasets SET visibility = 'private'");
+      }
+      if (
+        sql.includes("UPDATE pr_reviews SET state = 'errored', detail = 'stale_head'") &&
+        sql.includes("AND (")
+      ) {
+        refusalAttempts++;
+        db.run("UPDATE datasets SET visibility = 'public'");
+      }
+    });
+
+    const r = await claim(id, undefined, { ...env(), DB: changing } as Bindings);
+    expect(r).toMatchObject({ status: 409, body: { reason: "claim_unsettled" } });
+    expect(claimAttempts).toBe(2);
+    expect(refusalAttempts).toBe(2);
+    expect(rows()[0]).toMatchObject({ state: "errored", detail: "stale_head", nonce: null });
+    expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "action_required" });
   });
 
   test("a superseded commit's late report finds nothing to verify", async () => {

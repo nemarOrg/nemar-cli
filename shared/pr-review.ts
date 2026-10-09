@@ -645,7 +645,8 @@ const DECLINE_COPY: Record<DeclineReason, string> = {
 
 const ERROR_COPY: Record<RunError, string> = {
   evidence_unavailable: "The changes could not be read.",
-  stale_head: "The pull request changed while the review was starting. Push again to re-run it.",
+  stale_head:
+    "The pull request or dataset changed while the review was starting. Check the current pull request and publication status; a new delivery may be needed.",
   too_large: "The change is too large for automated review. A maintainer needs to review it.",
   auth_failed:
     "The review service could not sign in. A maintainer needs to fix the review service.",

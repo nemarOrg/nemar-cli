@@ -92,6 +92,10 @@ const SWEEP_LIMIT = 20;
 /** How long the dispatch may wait for GitHub before the Worker answers the webhook. */
 const DISPATCH_TIMEOUT_MS = 10_000;
 
+/** A review may only use a dataset that is currently a named public publication (ADR 0092). */
+const REVIEWABLE_DATASET_PREDICATE = `d.status = 'active' AND d.visibility = 'public'
+  AND d.anonymous = 0 AND d.first_published_at IS NOT NULL`;
+
 type Db = D1Database;
 
 // ---------------------------------------------------------------------------------------------
@@ -209,7 +213,8 @@ export function readPullRequestEvent(payload: unknown): IntakeResult {
 
 /**
  * Rows that cost a model call, or may yet: everything except a decline (never sent) and a run
- * that errored before the model was reached (the commit was superseded, or the dispatch failed).
+ * that errored before the model was reached (the dataset was ineligible, a newer delivery
+ * superseded it, or the dispatch failed).
  */
 const COUNTS_TOWARD_CAPS = `state != 'declined' AND NOT (state = 'errored' AND detail IN ('stale_head', 'dispatch_failed'))`;
 
@@ -593,12 +598,18 @@ export async function handlePullRequestEvent(
     return no("misconfigured");
   }
 
-  // Only a dataset NEMAR holds. A repository that merely has a dataset-shaped name is not one.
-  const known = await db
-    .prepare("SELECT 1 AS ok FROM datasets WHERE dataset_id = ?")
+  // Only review a live, named publication. An anonymous deposit is public in the catalog while
+  // its GitHub repository remains private, and upload creates private unpublished rows; neither
+  // may send pull-request text or metadata to the model.
+  const dataset = await db
+    .prepare(
+      `SELECT CASE WHEN ${REVIEWABLE_DATASET_PREDICATE} THEN 1 ELSE 0 END AS reviewable
+         FROM datasets AS d WHERE d.dataset_id = ?`,
+    )
     .bind(pr.datasetId)
-    .first<{ ok: number }>();
-  if (!known) return no("unknown_dataset");
+    .first<{ reviewable: number }>();
+  if (!dataset) return no("unknown_dataset");
+  if (dataset.reviewable !== 1) return no("dataset_not_reviewable");
 
   const existing = await readRowByKey(db, pr.datasetId, pr.prNumber, pr.headSha);
   if (existing) return await handleRepeat(env, existing, secret);
@@ -768,16 +779,29 @@ async function startReview(
       `[pr-review] review ${row.id} (${row.datasetId}#${row.prNumber}): dispatch failed (${errName(err)})`,
     );
     try {
-      await db
+      const failed = await db
         .prepare(
           `UPDATE pr_reviews SET state = 'errored', detail = 'dispatch_failed', nonce = NULL,
                   decided_at = datetime('now')
-            WHERE id = ? AND state = 'dispatched'`,
+            WHERE id = ? AND state = 'dispatched' AND nonce = ? AND claimed_at IS NULL`,
         )
-        .bind(row.id)
+        .bind(row.id, nonce)
         .run();
-      const fresh = await readRow(db, row.id);
-      await publishOutcome(env, fresh ?? row, { kind: "error", error: "dispatch_failed" });
+      if ((failed.meta.changes ?? 0) === 1) {
+        const fresh = await readRow(db, row.id);
+        await publishOutcome(env, fresh ?? row, { kind: "error", error: "dispatch_failed" });
+      } else {
+        // GitHub may have accepted the dispatch and the workflow may already have claimed it
+        // before the response timed out. Preserve that claim: clearing its nonce would make the
+        // valid callback fail and a redelivery could buy a second model call.
+        const claim = await db
+          .prepare("SELECT claimed_at FROM pr_reviews WHERE id = ?")
+          .bind(row.id)
+          .first<{ claimed_at: string | null }>();
+        if (claim?.claimed_at) {
+          return { ok: true, dispatched: true, reason: "dispatch_claimed", review_id: row.id };
+        }
+      }
     } catch (inner) {
       console.error(`[pr-review] review ${row.id}: failure not recorded (${errName(inner)})`);
     }
@@ -807,13 +831,28 @@ export async function pendingNonce(
   return row?.nonce ?? null;
 }
 
-export type ClaimResult = "claimed" | "already_claimed" | "superseded";
+export type ClaimResult =
+  | "claimed"
+  | "already_claimed"
+  | "claim_unsettled"
+  | "dataset_not_reviewable"
+  | "superseded";
+
+/** A newer delivery for this pull request, ordered by the same key as `isLatestReview`. */
+const NEWER_REVIEW_EXISTS = `EXISTS (
+  SELECT 1 FROM pr_reviews AS newer
+   WHERE newer.dataset_id = pr_reviews.dataset_id
+     AND newer.pr_number = pr_reviews.pr_number
+     AND (newer.seen_at > pr_reviews.seen_at
+       OR (newer.seen_at = pr_reviews.seen_at AND newer.id > pr_reviews.id))
+)`;
 
 /**
  * The workflow's first real step, before it mints an identity or reads anything: take the review. The
  * caller has verified the token. A review is claimed once, so one dispatch buys one model call;
- * a dispatch for a commit that is no longer the pull request's latest is refused and recorded
- * as `stale_head`, so a superseded commit never spends a model call.
+ * a dispatch for a commit that is no longer the latest delivery recorded by the Worker is refused
+ * and recorded as `stale_head`. The workflow also compares the dispatched SHA against the fetched
+ * pull ref and current pull-request API response before the model call.
  */
 export async function claimPrReview(
   env: Bindings,
@@ -825,32 +864,74 @@ export async function claimPrReview(
   const row = await readRow(db, reviewId);
   if (!row || row.datasetId !== datasetId) return "already_claimed";
 
-  if (!(await isLatestReview(db, row))) {
-    const res = await db
+  // Retry once if eligibility changes between the claim and refusal updates. Without the retry, a
+  // dataset that becomes eligible in that gap would leave the row dispatched until the watchdog.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const claimed = await db
+      .prepare(
+        `UPDATE pr_reviews SET claimed_at = datetime('now')
+          WHERE id = ? AND dataset_id = ? AND nonce = ? AND claimed_at IS NULL
+            AND state IN ('dispatched', 'unreported')
+            AND EXISTS (
+              SELECT 1 FROM datasets AS d WHERE d.dataset_id = pr_reviews.dataset_id
+                AND ${REVIEWABLE_DATASET_PREDICATE}
+            )
+            AND NOT ${NEWER_REVIEW_EXISTS}`,
+      )
+      .bind(reviewId, datasetId, nonce)
+      .run();
+    if ((claimed.meta.changes ?? 0) === 1) return "claimed";
+
+    // The latest-recorded-delivery and current-dataset predicates are in the conditional claim
+    // itself. A newer delivery or a dataset that became private between intake and claim cannot
+    // slip through. Record the refusal only while this same unclaimed nonce is still current. The
+    // workflow separately checks GitHub's fetched pull ref and API head against this SHA before
+    // the model.
+    const stale = await db
       .prepare(
         `UPDATE pr_reviews SET state = 'errored', detail = 'stale_head', nonce = NULL,
                 decided_at = datetime('now'), published_at = NULL, publish_attempts = 0
           WHERE id = ? AND dataset_id = ? AND nonce = ? AND claimed_at IS NULL
-            AND state IN ('dispatched', 'unreported')`,
+            AND state IN ('dispatched', 'unreported')
+            AND (${NEWER_REVIEW_EXISTS} OR NOT EXISTS (
+              SELECT 1 FROM datasets AS d WHERE d.dataset_id = pr_reviews.dataset_id
+                AND ${REVIEWABLE_DATASET_PREDICATE}
+            ))`,
       )
       .bind(reviewId, datasetId, nonce)
       .run();
-    if ((res.meta.changes ?? 0) === 1) {
+    if ((stale.meta.changes ?? 0) === 1) {
       const fresh = await readRow(db, reviewId);
       await publishOutcome(env, fresh ?? row, { kind: "error", error: "stale_head" });
+      const reviewable = await db
+        .prepare(
+          `SELECT 1 AS ok FROM datasets AS d
+            WHERE d.dataset_id = ? AND ${REVIEWABLE_DATASET_PREDICATE}`,
+        )
+        .bind(datasetId)
+        .first<{ ok: number }>();
+      return reviewable ? "superseded" : "dataset_not_reviewable";
     }
-    return "superseded";
   }
 
-  const res = await db
+  // If the claim and stale predicates kept changing across both attempts, fail closed and finish
+  // this same unclaimed attempt. It must not remain dispatched until the watchdog or reach a model
+  // without a settled claim.
+  const unsettled = await db
     .prepare(
-      `UPDATE pr_reviews SET claimed_at = datetime('now')
+      `UPDATE pr_reviews SET state = 'errored', detail = 'stale_head', nonce = NULL,
+              decided_at = datetime('now'), published_at = NULL, publish_attempts = 0
         WHERE id = ? AND dataset_id = ? AND nonce = ? AND claimed_at IS NULL
           AND state IN ('dispatched', 'unreported')`,
     )
     .bind(reviewId, datasetId, nonce)
     .run();
-  return (res.meta.changes ?? 0) === 1 ? "claimed" : "already_claimed";
+  if ((unsettled.meta.changes ?? 0) === 1) {
+    const fresh = await readRow(db, reviewId);
+    await publishOutcome(env, fresh ?? row, { kind: "error", error: "stale_head" });
+    return "claim_unsettled";
+  }
+  return "already_claimed";
 }
 
 /**

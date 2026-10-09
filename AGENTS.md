@@ -155,10 +155,15 @@ held import is not a failure),
 gates, and nothing already published is rewritten),
 0091 (a new recording's day-level acquisition dates are set to 1 January of their year on upload
 and import, and nothing already published is changed),
-0092 (a pull request to a dataset is reviewed by a model through a Worker gate: the verdict is derived
-from the report and from git facts and never read from the model, unknown is `action_required` and
-never green, the Anthropic identity is minted only in `nemarDatasets/.github`, and a contributor is
-paused after more than 5 rejected pull requests AND more than 10 percent of their decided ones).
+0092 (only active, named, public datasets with `first_published_at` set reach the model and that
+eligibility is rechecked atomically at claim; the verdict is derived from the report and from git
+facts and never read from the model, unknown is `action_required` and never green, the latest
+Worker-recorded delivery is checked atomically with the one-shot claim and the workflow checks the
+GitHub head before the model call, an unsettled claim is closed as `stale_head`, a dispatch failure
+cannot erase an already claimed run, each Actions run has a unique concurrency group, and the
+Anthropic identity is minted only in `nemarDatasets/.github`; a contributor is paused after more
+than 5 rejected pull requests AND
+more than 10 percent of their decided ones).
 0093 (the upload save step skips re-reading annexed content only once recorded annexed bytes reach
 1 GiB, only for files whose size and mtime still match the upload plan, and only while it can clear
 `assume-unchanged` safely; failures to verify or clear the state fail the save).
