@@ -805,6 +805,7 @@ async function pushPreparedAnnexBranch(
       error: string;
       localRefAdvanced?: boolean;
       retryPreparationFailed?: boolean;
+      trackingRefUpdateFailed?: boolean;
     }
 > {
   let annexStderr = "";
@@ -837,6 +838,20 @@ async function pushPreparedAnnexBranch(
           error:
             "The checked git-annex history was pushed, but the local annex branch advanced during the push. Review and retry to publish the remaining changes.",
           localRefAdvanced: true,
+        };
+      }
+      // This push uses the verified URL instead of the remote name. Git versions
+      // that cannot map that URL back to its configured remote leave the
+      // remote-tracking ref stale, so a resumed normalization would push again.
+      const trackingRef = `refs/remotes/${remoteName}/git-annex`;
+      const tracking = await runCommand(["git", "update-ref", trackingRef, prepared.localOid], {
+        cwd: path,
+      });
+      if (tracking.exitCode !== 0) {
+        return {
+          success: false,
+          error: `${trackingRef} could not be updated after the checked annex push: ${tracking.stderr.trim() || `exit ${tracking.exitCode}`}`,
+          trackingRefUpdateFailed: true,
         };
       }
       return { success: true };
@@ -1016,6 +1031,12 @@ export async function pushToGitHub(
       }
       if (annexPush.localRefAdvanced) {
         return { success: false, error: annexPush.error };
+      }
+      if (annexPush.trackingRefUpdateFailed) {
+        return {
+          success: false,
+          error: `Main and git-annex branches were pushed, but ${annexPush.error}`,
+        };
       }
       // Not a fatal error, but return warning so callers can inform users.
       return {

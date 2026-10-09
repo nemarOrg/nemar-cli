@@ -408,11 +408,21 @@ describe("normalizeDatasetRepo", () => {
     );
     expect(first.pushed).toBe(true);
     const afterFirst = await run(["git", "rev-parse", "main", "git-annex"], clone);
+    const remoteAnnex = await run(
+      ["git", "ls-remote", "--heads", "origin", "refs/heads/git-annex"],
+      clone,
+    );
+    const trackingAnnex = await run(
+      ["git", "rev-parse", "--verify", "refs/remotes/origin/git-annex"],
+      clone,
+    );
+    expect(trackingAnnex.trim()).toBe(remoteAnnex.trim().split(/\s+/)[0]);
 
     // Idempotence is what makes a fleet run resumable: re-running over a dataset
     // that is already done must not move either branch. `git annex config --set`
     // to a value already configured writes no commit (measured on git-annex
-    // 10.20260901), so there is nothing for the second run to push.
+    // 10.20260901). The checked annex push also has to leave the tracking ref
+    // current, even on Git versions that do not map a raw URL back to its remote.
     const again = await normalizeDatasetRepo(
       {
         datasetId: "on999999",
