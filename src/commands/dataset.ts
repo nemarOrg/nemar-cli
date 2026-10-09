@@ -237,6 +237,7 @@ import {
   verifyGhCli,
 } from "../lib/upload/preflight.js";
 import {
+  DEFAULT_UPLOAD_ANNEX_JOBS,
   acceptRepoInvitation,
   configureRemotes,
   createOrResumeDataset,
@@ -552,7 +553,12 @@ export function createUploadCommand(): Command {
     .option("--skip-validation", "Skip BIDS validation (not recommended)")
     .option("--skip-orcid", "Skip co-author ORCID collection")
     .option("--dry-run", "Show what would be uploaded without doing it")
-    .option("-j, --jobs <number>", "Parallel upload streams (default: 4)", "4")
+    .option("-j, --jobs <number>", "Parallel S3 copy streams", "4")
+    .option(
+      "--annex-jobs <number>",
+      "Parallel local git-annex add workers",
+      String(DEFAULT_UPLOAD_ANNEX_JOBS),
+    )
     .option(YES_OPTION, YES_DESCRIPTION)
     .option("--restart", "Clear upload progress and re-upload all files")
     .option("--no", NO_DESCRIPTION) // Long form only; -n conflicts with --name
@@ -596,7 +602,7 @@ Process:
   1. Screens the files for identifiers on this machine, before anything is sent
   2. Validates BIDS format (unless --skip-validation)
   3. Creates GitHub repository for metadata
-  4. Uploads large files to S3 in parallel
+  4. Tracks files locally with git-annex, then copies them to S3 in parallel
   5. Enables PR-based versioning workflow
 
 Identifier preflight:
@@ -614,6 +620,9 @@ Identifier preflight:
   dataset again when you request publication.
 
 Note:
+  Local tracking workers and S3 copy streams are separate. --annex-jobs
+  controls git-annex add (default: 4); -j/--jobs controls S3 copies (default: 4).
+
   This command is for initial dataset creation only. To update an
   existing dataset, use 'nemar dataset commit' + 'nemar dataset push'
   (private) or 'nemar dataset update' (public).
@@ -622,10 +631,19 @@ Examples:
   $ ${invokedAs(command)} ./my-eeg-dataset
   $ ${invokedAs(command)} ./ds -n "My EEG Study" -d "64-channel EEG data"
   $ ${invokedAs(command)} ./ds --dry-run        # Preview without uploading
-  $ ${invokedAs(command)} ./ds -j 16            # More parallel streams
+  $ ${invokedAs(command)} ./ds -j 16            # More parallel S3 copy streams
+  $ ${invokedAs(command)} ./ds --annex-jobs 8   # More local git-annex add workers
   $ ${invokedAs(command)} ./ds --dataset-id nm099998   # Standing fixture (admin, staging)`,
     )
     .action(async (datasetPath, options) => {
+      const annexJobs = Number(options.annexJobs);
+      if (!Number.isSafeInteger(annexJobs) || annexJobs < 1) {
+        console.log(
+          chalk.red(`Error: --annex-jobs must be a positive integer (got "${options.annexJobs}").`),
+        );
+        process.exit(1);
+      }
+
       // Get config for GitHub username
       const config = getConfig();
 
