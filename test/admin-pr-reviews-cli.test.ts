@@ -1368,6 +1368,7 @@ describe("nemar admin pr-reviews next", () => {
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("Approved nm000201 #7");
     expect(r.stdout).toContain("a required check or review is not satisfied");
+    expect(r.stdout).not.toContain("Not merged: Not merged");
     expect(r.stdout).toContain("1 approved but not merged");
     expect(mergePuts()).toHaveLength(0);
   });

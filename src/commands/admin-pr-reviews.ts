@@ -1028,6 +1028,11 @@ function reportFailedWrite(
     console.log(chalk.dim(`  Check ${url}.`));
     return true;
   }
+  if (w.outcome === "not_sent") {
+    // Already a sentence of its own ("Not merged: GitHub says ..."), and nothing was sent.
+    console.log(chalk.yellow(w.reason));
+    return false;
+  }
   console.log(chalk.red(`Not ${didNot}: ${w.reason}`));
   return false;
 }
