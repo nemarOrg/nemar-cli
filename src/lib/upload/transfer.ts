@@ -32,6 +32,7 @@ import {
   gitAnnexAdd,
   initDataset,
   isGitAnnexDataset,
+  replaceDefaultAnnexDescription,
   unstageTrackedPaths,
 } from "../git-annex/init.js";
 import {
@@ -336,6 +337,19 @@ export async function initializeAnnexDataset(
     return FAIL;
   }
 
+  // A repository initialized by an older CLI (or by hand) carries git-annex's
+  // default `user@host:/path` description, which the push below would publish
+  // in uuid.log (#1399). Replace it before anything is pushed.
+  const description = await replaceDefaultAnnexDescription(absolutePath);
+  if (!description.success) {
+    printStepFailure(
+      spinner,
+      "Failed to set a non-identifying git-annex description",
+      description.error,
+    );
+    return FAIL;
+  }
+
   // Configure largefiles pattern
   const largefilesResult = await configureLargefiles(absolutePath);
   if (!largefilesResult.success) {
@@ -344,6 +358,9 @@ export async function initializeAnnexDataset(
   }
 
   spinner.succeed("git-annex dataset initialized");
+  if (description.changed) {
+    console.log(chalk.dim("  Replaced the repository's user@host:/path annex description (#1399)"));
+  }
 
   // Inform user that the adjusted branch name is normal
   const postInitBranch = await getCurrentBranch(absolutePath);
