@@ -88,6 +88,7 @@ import {
   verificationLogLine,
 } from "./services/neurobagel-verify";
 import { getActiveNotices } from "./services/notices";
+import { sweepStalePrReviews } from "./services/pr-review";
 import { sweepBlockedBidsValidationRequests } from "./services/publication-sweep";
 import { runRecordingStatsSweepCron } from "./services/recording-stats-sweep";
 import { runSignalDefaultsSweepCron } from "./services/signal-defaults-sweep";
@@ -904,6 +905,30 @@ export default {
             .catch((err) =>
               console.error(
                 "[identifier-screen-sweep] sweep failed:",
+                err instanceof Error ? (err.stack ?? err.message) : err,
+              ),
+            ),
+        );
+        // ADR 0092: the pull-request review watchdog. A review handed to GitHub that never
+        // reports is marked unreported and its check turned to "needs a person", because a
+        // dispatch is answered 204 whether or not a workflow listens and the check would
+        // otherwise stay "in progress" for good. It also republishes a stored result whose
+        // check never reached GitHub. PRODUCTION-ONLY, by AGENTS.md's default for a new cron
+        // job: it writes check-runs and comments to the shared nemarDatasets org, which the dev
+        // worker would also reach. It does NOT read PR_REVIEW_ENABLED: switching the review off must not
+        // strand the checks of reviews already in flight.
+        ctx.waitUntil(
+          sweepStalePrReviews(env)
+            .then((r) => {
+              if (r.timedOut + r.republished + r.abandoned + r.errors > 0) {
+                console.log(
+                  `[pr-review-sweep] timedOut=${r.timedOut} republished=${r.republished} abandoned=${r.abandoned} errors=${r.errors}`,
+                );
+              }
+            })
+            .catch((err) =>
+              console.error(
+                "[pr-review-sweep] sweep failed:",
                 err instanceof Error ? (err.stack ?? err.message) : err,
               ),
             ),

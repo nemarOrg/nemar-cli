@@ -130,7 +130,7 @@ than the bloat. Issue #1159 carries the real fix.
 ## Amendment 2026-10-07 (#1642): the size threshold is 100,000 bytes, the CLI's selection is authoritative for case variants of data names, and the save annexes by size too
 
 Three findings, all measured against git-annex 10.20260901, tracked under epic #1671.
-The save step's use of `assume-unchanged` is a separate decision: [ADR 0092](0092-the-save-step-skips-re-reading-annexed-content-only-on-large-unchanged-trees.md).
+The save step's use of `assume-unchanged` is a separate decision: [ADR 0093](0093-the-save-step-skips-re-reading-annexed-content-only-on-large-unchanged-trees.md).
 
 ### The size threshold is 100,000 bytes
 
