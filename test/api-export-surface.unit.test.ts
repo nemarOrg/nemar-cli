@@ -129,8 +129,10 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "dispatchManifest",
     "doctorFix",
     "doctorScan",
+    "editAdminUser",
     "enforceBulk",
     "enforceDataset",
+    "getAdminUserById",
     "getAdminUserByUsername",
     "getCiStatus",
     "getDoiInfo",
@@ -217,6 +219,8 @@ const POST_SPLIT_ADDITIONS = [
   "importWeeklySummary", // #1312, epic #1306 phase 4: POST /admin/imports/weekly-summary
   "doctorFix", // #1130, CLI wrapper for POST /admin/doctor/fix
   "doctorScan", // #1130, CLI wrapper for POST /admin/doctor/scan
+  "editAdminUser", // ADR 0093: PATCH /admin/users/by-id/:id, `nemar admin users edit`
+  "getAdminUserById", // ADR 0093: GET /admin/users/by-id/:id, `nemar admin users show` and `edit`
   "getAdminUserByUsername", // #1284 review, epic #1272 phase 4, ADR 0048: GET /admin/users/:username, read by `nemar admin doctor kinds`
   "getFacets", // #1149, epic #1144 phase 5b: GET /datasets/facets for shell completion
   "getUserDuplicates", // #1254, ADR 0043: GET /admin/users/duplicates

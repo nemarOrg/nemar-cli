@@ -12,6 +12,7 @@
  */
 
 import type { ZodType } from "zod";
+import { ADMIN_USER_ERROR_CODES } from "../../../shared/contract/admin-user.js";
 import {
   DEVICE_AUTH_REFUSAL_CODES,
   deviceGrantErrorSchema,
@@ -233,6 +234,13 @@ export async function request<T>(
     // `same_kind`, ...), not a sentence.
     const isAccountKindCode =
       typeof data.error === "string" && ACCOUNT_KIND_ERROR_CODES.includes(data.error);
+    // The admin account lookup and edit vocabulary (ADR 0093): `invalid_search`,
+    // `field_not_editable`, `owner_only_field`, ... Same shape again, same rule.
+    // The uniqueness refusals the edit route also raises (`email_in_use`,
+    // `username_taken`, ...) are already covered by the identity and profile
+    // sets above.
+    const isAdminUserCode =
+      typeof data.error === "string" && ADMIN_USER_ERROR_CODES.includes(data.error);
     // The identifier screen's refusals (epic #1610 phase 4): a code in
     // `error`, the reason and the next command in `message`.
     const isScreenCode =
@@ -242,6 +250,7 @@ export async function request<T>(
       isProfileEditCode ||
       isDeviceCode ||
       isAccountKindCode ||
+      isAdminUserCode ||
       isScreenCode ||
       (missing !== undefined &&
         typeof data.error === "string" &&

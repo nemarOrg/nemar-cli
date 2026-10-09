@@ -7,6 +7,14 @@
  */
 
 import {
+  type AdminUserEditBody,
+  type AdminUserEditResponse,
+  type AdminUserDetail as AdminUserFullDetail,
+  type AdminUserShowResponse,
+  adminUserEditResponseSchema,
+  adminUserShowResponseSchema,
+} from "../../../shared/contract/admin-user.js";
+import {
   type AccountKind,
   type AdminUserListItem,
   type AdminUsersListResponse,
@@ -72,14 +80,59 @@ export async function listUsers(
   awaitingApproval?: boolean,
   // What the account IS (epic #1272 phase 4, #1284; ADR 0048).
   kind?: AccountKind,
+  extra: {
+    /** Words to find in ANY text field of an account (ADR 0093). Every word
+     *  must match somewhere. Each matching row then carries `matched_in`. */
+    search?: string;
+    /** Include tombstoned accounts, which the listing hides by default. */
+    includeDeleted?: boolean;
+  } = {},
 ): Promise<UsersListResponse> {
   const params = new URLSearchParams();
   if (status) params.set("status", status);
   if (role) params.set("role", role);
   if (awaitingApproval) params.set("awaiting_approval", "1");
   if (kind) params.set("kind", kind);
+  // `!== undefined`, not truthiness: an empty search must reach the backend and
+  // be refused there, never be dropped here and answered with every account.
+  if (extra.search !== undefined) params.set("q", extra.search);
+  if (extra.includeDeleted) params.set("include_deleted", "true");
   const query = params.toString() ? `?${params.toString()}` : "";
   return request(`/admin/users${query}`, {}, true, adminUsersListResponseSchema);
+}
+
+export type { AdminUserFullDetail, AdminUserEditBody, AdminUserEditResponse };
+
+/**
+ * One account's full non-secret details, by numeric id (ADR 0093). By id and
+ * not username because a web/ORCID account has no username.
+ */
+export async function getAdminUserById(
+  id: number,
+  includeDeleted = false,
+): Promise<AdminUserShowResponse> {
+  return request(
+    `/admin/users/by-id/${id}${includeDeleted ? "?include_deleted=true" : ""}`,
+    {},
+    true,
+    adminUserShowResponseSchema,
+  );
+}
+
+/**
+ * Edit an account (ADR 0093). Descriptive fields: any admin. username, email
+ * and github_username: owner only, and never one's own account.
+ */
+export async function editAdminUser(
+  id: number,
+  fields: AdminUserEditBody,
+): Promise<AdminUserEditResponse> {
+  return request(
+    `/admin/users/by-id/${id}`,
+    { method: "PATCH", body: JSON.stringify(fields) },
+    true,
+    adminUserEditResponseSchema,
+  );
 }
 
 export interface ApproveResponse {
