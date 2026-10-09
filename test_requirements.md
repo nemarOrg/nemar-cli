@@ -85,24 +85,24 @@ subprocess, or mocked S3 service.
 
 # Remaining real-test requirements for #1644
 
-There is no automated regression test for renewed credentials during recorded-file checks. The
-available offline test would require synthetic lease values and a loopback S3 stand-in, which the
-repository's strict NO MOCKS policy excludes. `test/upload-recorded-check.unit.test.ts` covers
-recorded-file presence behavior, but not expiry during copy or `fsck`, stale partial-result
-replacement, retry progress, or unknown-size batching.
+There is no automated regression test for renewed credentials during recorded-file checks or
+pending copies against real S3. The former `test/upload-sts-refresh.integration.test.ts` used a
+loopback S3 stand-in and injected `ExpiredToken`; it was removed because `.rules/testing.md`
+excludes stub services. That test exercised API-issued leases through real git-annex, but it could
+not establish AWS SigV4 acceptance or real credential expiry. `test/upload-recorded-check.unit.test.ts`
+covers recorded-file presence behavior, but not expiry during copy or `fsck`, stale partial-result
+replacement, retry progress, or the one-path handling for unknown-size recorded checks.
 
-The resumed-copy size-map case also remains untested: a pending location-log path can be absent
-from the current `addTargets` list, so its current size must come from the complete data-file
+Under ADR 0094, recorded paths missing from the current upload plan have unknown sizes and are
+checked one at a time. That conservative batching path has no dedicated regression assertion. The
+resumed-copy size-map case also remains untested: a pending location-log path can be absent from
+the current `addTargets` list, so its current size must come from the complete data-file
 inventory. The available generated upload files and EDF stand-ins do not satisfy the strict
 NO FAKE DATA rule for this regression, and an empty upload-progress state with a hand-picked
 `filesToUpload` list would not represent the production resume path. Add coverage only when a
 non-synthetic sample and realistic interrupted-run state are available.
 
-`test/upload-sts-refresh.integration.test.ts` exercises API-issued leases through the upload
-transfer, but signs S3 requests to a loopback stand-in and covers pending copies rather than the
-recorded-file checks. It was skipped in this local run because `test/.env.test` and its dev API
-credentials are absent. It does not establish AWS expiry timing or SigV4 acceptance. S3
-`HeadObject` failures are generic, so the implementation uses the known lease timestamp when a
+S3 `HeadObject` failures are generic, so the implementation uses the known lease timestamp when a
 failed check returns after expiry rather than expecting a specific AWS error code.
 
 The owner selected “Keep gap documented” for the `sandboxCommand` end-to-end run and live-S3
