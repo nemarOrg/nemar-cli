@@ -1990,22 +1990,26 @@ describe("nemar auth signup", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 17: deprecation sentences
+// 17: the password command is gone (ADR 0095)
 // ---------------------------------------------------------------------------
 
-describe("password-era commands print a deprecation sentence", () => {
-  test("retrieve-key prints it before the closed-stdin prompt dies", async () => {
+describe("password sign-in is retired", () => {
+  test("retrieve-key is no longer a command, and no server is contacted for it", async () => {
     const result = await run(["auth", "retrieve-key"], "http://127.0.0.1:1");
-    expect(result.out).toContain(
-      "Password sign-in is deprecated and will be removed in the next release; run `nemar auth login`.",
-    );
+    expect(result.exitCode).not.toBe(0);
+    expect(result.out).toMatch(/unknown command/i);
+    expect(result.out).not.toContain("Password:");
   }, 15000);
 
-  test("regenerate-key prints it, plus the every-machine warning, before the prompt dies", async () => {
+  test("auth --help no longer lists retrieve-key and names no password", async () => {
+    const result = await run(["auth", "--help"], "http://127.0.0.1:1");
+    expect(result.out).not.toContain("retrieve-key");
+    expect(result.out).not.toMatch(/password/i);
+  }, 15000);
+
+  test("regenerate-key still warns that it revokes every machine's key, without a deprecation line", async () => {
     const result = await run(["auth", "regenerate-key"], "http://127.0.0.1:1");
-    expect(result.out).toContain(
-      "Password sign-in is deprecated and will be removed in the next release; run `nemar auth login`.",
-    );
+    expect(result.out).not.toContain("Password sign-in is deprecated");
     expect(result.out).toContain("EVERY machine");
     expect(result.out).toContain("nemar auth keys revoke");
   }, 15000);

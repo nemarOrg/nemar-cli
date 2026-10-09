@@ -1183,14 +1183,14 @@ adminCommand
       } else if (result.email_sent) {
         console.log(
           result.user.username
-            ? chalk.green("User notified to retrieve their API key via 'nemar auth retrieve-key'")
+            ? chalk.green("User notified to get their API key via 'nemar auth login'")
             : chalk.green("User notified to sign in at https://nemar.org/login"),
         );
       } else {
         console.log(chalk.yellow("Warning: Notification email failed to send."));
         console.log(
           result.user.username
-            ? chalk.yellow("Please notify the user manually to run 'nemar auth retrieve-key'")
+            ? chalk.yellow("Please notify the user manually to run 'nemar auth login'")
             : chalk.yellow("Please notify the user manually that their account is approved"),
         );
       }

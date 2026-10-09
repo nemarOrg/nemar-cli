@@ -187,10 +187,8 @@ const ZARR_PATH_RE = /^(?:\/zarrproxy)?\/[a-z]{2}\d+\/zarr(\/|$)/;
 // Stricter limits for auth endpoints
 const AUTH_MAX_REQUESTS = 10;
 const AUTH_PATHS = [
-  "/auth/signup",
   "/auth/login",
   "/auth/verify",
-  "/auth/retrieve-key",
   "/auth/request-key-regeneration",
   "/auth/confirm-key-regeneration",
   // Web-dashboard passwordless flow (#569). The route handler also
