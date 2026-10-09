@@ -70,9 +70,9 @@ existing focused annex-add suite continues to exercise list-form `gitAnnexAdd` a
 real git-annex repositories.
 
 `test/upload-data-steps.unit.test.ts` drives `uploadDataToS3` with a local real-git-annex
-repository and a real `directory` special remote. Its generated file inputs are
-The checked-in BIDS dataset and generated upload inputs are synthetic, so this test
-cannot establish real-dataset warning persistence. Separately, an owner-authorized
+repository and a real `directory` special remote. The checked-in BIDS dataset and the
+test's generated upload inputs are synthetic, so this test cannot establish real-dataset
+warning persistence. Separately, an owner-authorized
 offline NFS benchmark used a checksum-verified non-synthetic sample of 1,021 files
 (2,268,523,934 bytes) on one host. It covered a 12-cell raw-add matrix (argv and batch
 at J1/J4/J8) and a six-cell production-chunk-shaped batch matrix. Those results support
