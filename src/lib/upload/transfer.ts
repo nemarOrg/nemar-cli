@@ -751,6 +751,8 @@ export interface S3CopyPlan {
   total: number;
   /** Of those, the ones the location log does not yet record at the remote. */
   pending: number;
+  /** Bounded copy batches needed for those pending paths. */
+  copyBatchCount: number;
   /**
    * The ones the log already records. Unless `recordedCheckSkipped`, the remote itself is
    * asked about each, after the pending copy, and any it has lost are sent again or, with
@@ -1114,17 +1116,10 @@ async function checkRecordedWithoutLocalContent(args: {
 async function copyPendingInBatches(args: {
   absolutePath: string;
   remote: string;
-  pending: string[];
-  sizes: Map<string, number>;
+  batches: string[][];
   jobs: number;
   credentialSession: UploadCredentialSession;
-  batchMaxFiles?: number;
-  batchMaxBytes?: number;
 }): Promise<PendingCopyOutcome> {
-  const batches = planCopyBatches(args.pending, args.sizes, {
-    maxFiles: args.batchMaxFiles,
-    maxBytes: args.batchMaxBytes,
-  });
   let filesCopied = 0;
   let filesSent = 0;
   let output: OutputState = "understood";
@@ -1136,7 +1131,7 @@ async function copyPendingInBatches(args: {
     output,
   });
 
-  for (const batch of batches) {
+  for (const batch of args.batches) {
     let noProgressExpiredAttempts = 0;
     let useJustRenewedLease = false;
     for (;;) {
@@ -1252,12 +1247,16 @@ export async function copyAnnexedToRemote(args: {
   absolutePath: string;
   remote: string;
   addTargets: Array<{ path: string; size: number; type?: string }>;
+  /** Sizes for the complete current data-file inventory, including resumed paths. */
+  dataFiles: Array<{ path: string; size: number }>;
   jobs: number;
   credentials?: S3Credentials;
   lease?: CredentialLease;
   renewLease?: () => Promise<CredentialLease>;
   /** Smaller batch cap used by the real-API integration test. */
   batchMaxFiles?: number;
+  /** Smaller byte cap used by the real-API integration test. */
+  batchMaxBytes?: number;
   onCredentialsRenewed?: (count: number, reason: string) => void;
   /** Effective destination identity; absent for direct callers disables stamp reuse. */
   remoteIdentity?: string;
@@ -1349,9 +1348,21 @@ export async function copyAnnexedToRemote(args: {
       return { status: "unreadable", error: errorDetail(listError) };
     }
   }
+  // Pending paths come from the annex location log, not just this run's add
+  // targets. Use the complete current inventory so resumed paths keep their
+  // real sizes and the byte bound still applies.
+  const pendingSizes = new Map(args.dataFiles.map((file) => [file.path, file.size]));
+  // Recorded-file checks deliberately retain the upload-plan boundary. Paths
+  // outside addTargets stay unknown and are checked one at a time (ADR 0094).
+  const recordedCheckSizes = new Map(args.addTargets.map((file) => [file.path, file.size]));
+  const copyBatches = planCopyBatches(pending, pendingSizes, {
+    maxFiles: args.batchMaxFiles,
+    maxBytes: args.batchMaxBytes,
+  });
   await args.onPlan?.({
     total: annexedBefore.size,
     pending: pending.length,
+    copyBatchCount: copyBatches.length,
     recorded: recorded.length,
     recordedNoLocal: recordedNoLocal.length,
     recordedCheckSkipped: skipCheck,
@@ -1369,11 +1380,9 @@ export async function copyAnnexedToRemote(args: {
   const copy = await copyPendingInBatches({
     absolutePath,
     remote,
-    pending,
-    sizes: new Map(args.addTargets.map((file) => [file.path, file.size])),
+    batches: copyBatches,
     jobs: args.jobs,
     credentialSession,
-    batchMaxFiles: args.batchMaxFiles,
   });
   if (!copy.success) {
     return { status: "copy_failed", error: copy.error ?? "Failed to copy to remote" };
@@ -1388,7 +1397,7 @@ export async function copyAnnexedToRemote(args: {
       absolutePath,
       remote,
       paths: recordedWithContent,
-      sizes: new Map(args.addTargets.map((file) => [file.path, file.size])),
+      sizes: recordedCheckSizes,
       jobs: args.jobs,
       batchMaxFiles: args.batchMaxFiles,
       credentialSession,
@@ -1818,6 +1827,7 @@ export async function transferAnnexedData(args: {
   absolutePath: string;
   progress: UploadProgress;
   addTargets: Array<{ path: string; size: number; mtimeMs?: number; type?: string }>;
+  dataFiles: Array<{ path: string; size: number }>;
   jobs: number;
   annexJobs?: number;
   openRemote: OpenRemote;
@@ -1843,6 +1853,7 @@ export async function transferAnnexedData(args: {
       remote: S3_REMOTE_NAME,
       remoteIdentity: opened.value.remoteIdentity,
       addTargets,
+      dataFiles: args.dataFiles,
       jobs: args.jobs,
       credentials: opened.value.credentials,
       lease: opened.value.lease,
@@ -1881,7 +1892,7 @@ export async function transferAnnexedData(args: {
         const asking = plan.recordedCheckSkipped ? 0 : plan.recorded;
         if (plan.pending > 0) {
           spinner = ora(
-            `Uploading ${countDataFiles(plan.pending)} to S3${asking > 0 ? ` (then checking the S3 remote for ${countDataFiles(asking)} already recorded)` : ""}...`,
+            `Uploading ${countDataFiles(plan.pending)} in ${plan.copyBatchCount.toLocaleString()} ${plan.copyBatchCount === 1 ? "copy batch" : "copy batches"} to S3${asking > 0 ? ` (then checking the S3 remote for ${countDataFiles(asking)} already recorded)` : ""}...`,
           ).start();
         } else if (asking > 0) {
           spinner = ora(`Checking the S3 remote for ${countDataFiles(asking)}...`).start();
@@ -2218,6 +2229,7 @@ export async function uploadDataToS3(
         absolutePath,
         progress,
         addTargets,
+        dataFiles,
         jobs: Number.parseInt(options.jobs, 10),
         annexJobs,
         openRemote: deps.openRemote ?? openS3Remote(absolutePath, datasetInfo),

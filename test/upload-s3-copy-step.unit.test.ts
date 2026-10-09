@@ -85,7 +85,16 @@ const step = (
   dir: string,
   addTargets: Target[],
   onPlan?: Parameters<typeof copyAnnexedToRemote>[0]["onPlan"],
-) => copyAnnexedToRemote({ absolutePath: dir, remote: REMOTE, addTargets, jobs: 2, onPlan });
+  dataFiles = addTargets,
+) =>
+  copyAnnexedToRemote({
+    absolutePath: dir,
+    remote: REMOTE,
+    addTargets,
+    dataFiles,
+    jobs: 2,
+    onPlan,
+  });
 
 describe("copyAnnexedToRemote: what is copied", () => {
   test("a fresh upload copies every annexed file and records each at the remote", async () => {
@@ -197,14 +206,14 @@ describe("copyAnnexedToRemote: what is copied", () => {
     // Guards `pending` being the location log's remainder, not this run's add targets.
     // Reverting it to the targets leaves `old.edf` behind, and the verify-all check then
     // reports the step incomplete instead of ok.
-    const { dir } = await dataset("left-behind", { "old.edf": 3_000, "new.edf": 3_000 });
+    const { dir, targets } = await dataset("left-behind", { "old.edf": 3_000, "new.edf": 3_000 });
     expect((await trackDataFiles(dir, ["old.edf"])).success).toBe(true);
     // The earlier run died after tracking `old.edf` and before copying it. This run only
     // adds `new.edf`.
     expect((await trackDataFiles(dir, ["new.edf"])).success).toBe(true);
     const thisRunsTargets: Target[] = [{ path: "new.edf", size: 3_000, type: "data" }];
 
-    const outcome = await step(dir, thisRunsTargets);
+    const outcome = await step(dir, thisRunsTargets, undefined, targets);
     expect(outcome).toMatchObject({ status: "ok", total: 2, attempted: 2 });
     expect(await listAnnexedPaths(dir, REMOTE)).toEqual(new Set(["old.edf", "new.edf"]));
     // The set handed on to the save step is every annexed path, not this run's targets.

@@ -102,6 +102,7 @@ describe.skipIf(!canRun)("STS credential renewal through the real upload transfe
       absolutePath: repo,
       progress: initUploadProgress(repo, DATASET_ID, targets),
       addTargets: targets,
+      dataFiles: targets,
       jobs: 1,
       copyBatchMaxFiles: 1,
       openRemote: async () => {

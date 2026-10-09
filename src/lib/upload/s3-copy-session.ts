@@ -53,7 +53,19 @@ export function planCopyBatches(
   let current: string[] = [];
   let bytes = 0;
   for (const path of paths) {
-    const size = sizes.get(path) ?? 0;
+    const size = sizes.get(path);
+    if (size === undefined) {
+      // A legacy annexed path can be absent from today's data-file inventory.
+      // Unknown is not zero: isolate it so it cannot share a lease batch with
+      // another file whose transfer size is also unknown.
+      if (current.length > 0) {
+        batches.push(current);
+        current = [];
+        bytes = 0;
+      }
+      batches.push([path]);
+      continue;
+    }
     if (current.length > 0 && (current.length >= maxFiles || bytes + size > maxBytes)) {
       batches.push(current);
       current = [];
