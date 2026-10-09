@@ -1,6 +1,6 @@
 {
   "name": "nemar-cli",
-  "version": "0.10.16-dev3",
+  "version": "0.10.16-dev4",
   "description": "CLI for NEMAR (Neuroelectromagnetic Data Archive and Tools Resource) dataset management",
   "type": "module",
   "main": "dist/index.js",
@@ -82,7 +82,6 @@
     "@types/semver": "^7.8.0",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
-    "bcryptjs": "^3.0.3",
     "husky": "^9.1.7",
     "lint-staged": "^16.3.2",
     "typescript": "^5.5.4",
