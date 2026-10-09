@@ -23,7 +23,11 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "bun";
-import { isNonFastForwardPush, pushToGitHub } from "../src/lib/git-annex/clone-push";
+import {
+  isNonFastForwardPush,
+  pushAnnexBranchToGitHub,
+  pushToGitHub,
+} from "../src/lib/git-annex/clone-push";
 import {
   ANNEX_REMOTE_EXISTS_RE,
   annexRemoteExists,
@@ -35,6 +39,7 @@ import {
 } from "../src/lib/git-annex/s3-remote";
 import { extractWhereisKeyUrl } from "../src/lib/git-annex/transfer";
 import { decideReimportMainReset } from "../src/lib/import-openneuro";
+import { setVerbose } from "../src/lib/verbose";
 
 describe("extractWhereisKeyUrl (#808 streaming whereis mapping)", () => {
   const run = (line: string): Map<string, string> => {
@@ -696,6 +701,31 @@ describe("first git-annex branch push prunes unpublished description history (#1
     return false;
   }
 
+  async function divergentAnnexRepo(name: string): Promise<{ repo: string; bare: string }> {
+    const repo = await newAnnexRepo(`${name}-local`);
+    const bare = await bareOrigin(`${name}-origin`);
+    await Bun.write(join(repo, "README.md"), "divergent annex fixture\n");
+    expect((await runCmd(["git", "add", "README.md"], repo)).exitCode).toBe(0);
+    expect((await runCmd(["git", "commit", "-qm", "fixture"], repo)).exitCode).toBe(0);
+    expect((await runCmd(["git", "remote", "add", "origin", bare], repo)).exitCode).toBe(0);
+    expect((await runCmd(["git", "push", "origin", "git-annex"], repo)).exitCode).toBe(0);
+
+    const remoteUpdate = await cloneAnnexRepo(repo, `${name}-remote-update`);
+    expect(
+      (await runCmd(["git", "remote", "set-url", "origin", bare], remoteUpdate)).exitCode,
+    ).toBe(0);
+    expect(
+      (await runCmd(["git", "annex", "describe", "here", "nemar-remote-safe-update"], remoteUpdate))
+        .exitCode,
+    ).toBe(0);
+    expect((await runCmd(["git", "push", "origin", "git-annex"], remoteUpdate)).exitCode).toBe(0);
+    expect(
+      (await runCmd(["git", "annex", "describe", "here", "nemar-local-safe-update"], repo))
+        .exitCode,
+    ).toBe(0);
+    return { repo, bare };
+  }
+
   test("re-roots local annex history before its first remote push", async () => {
     const repo = await repoWithLegacyDescription("first-push-legacy");
     const bare = await bareOrigin("first-push-origin");
@@ -817,6 +847,141 @@ describe("first git-annex branch push prunes unpublished description history (#1
     expect(await remoteHasDescription(bare, personalDescription)).toBe(false);
   });
 
+  test("annex-only pushes withhold descriptions added after an earlier safe push", async () => {
+    const repo = await newAnnexRepo("annex-only-local-secret");
+    const bare = await bareOrigin("annex-only-local-secret-origin");
+    expect((await runCmd(["git", "remote", "add", "origin", bare], repo)).exitCode).toBe(0);
+    await Bun.write(join(repo, "README.md"), "published safe fixture\n");
+    expect((await runCmd(["git", "add", "README.md"], repo)).exitCode).toBe(0);
+    expect((await runCmd(["git", "commit", "-qm", "fixture"], repo)).exitCode).toBe(0);
+
+    const firstPush = await pushAnnexBranchToGitHub(repo, "origin");
+    expect(firstPush.success).toBe(true);
+    const publishedRef = (
+      await runCmd(["git", "--git-dir", bare, "rev-parse", "refs/heads/git-annex"])
+    ).stdout.trim();
+
+    expect(
+      (await runCmd(["git", "annex", "describe", "here", personalDescription], repo)).exitCode,
+    ).toBe(0);
+    expect(
+      (await runCmd(["git", "annex", "describe", "here", "nemar-deposit"], repo)).exitCode,
+    ).toBe(0);
+
+    const result = await pushAnnexBranchToGitHub(repo, "origin");
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("unpublished machine-specific description");
+    expect(result.error).not.toContain(personalDescription);
+    expect(
+      (await runCmd(["git", "--git-dir", bare, "rev-parse", "refs/heads/git-annex"])).stdout.trim(),
+    ).toBe(publishedRef);
+    expect(await remoteHasDescription(bare, personalDescription)).toBe(false);
+  });
+
+  test("refuses to check one remote and push the annex history to another", async () => {
+    const repo = await newAnnexRepo("split-push-url");
+    const fetchRemote = await bareOrigin("split-push-url-fetch");
+    const pushRemote = await bareOrigin("split-push-url-push");
+    expect((await runCmd(["git", "remote", "add", "origin", fetchRemote], repo)).exitCode).toBe(0);
+    expect(
+      (await runCmd(["git", "annex", "describe", "here", personalDescription], repo)).exitCode,
+    ).toBe(0);
+    expect((await runCmd(["git", "push", "origin", "git-annex"], repo)).exitCode).toBe(0);
+    expect(await remoteHasDescription(fetchRemote, personalDescription)).toBe(true);
+    expect(
+      (await runCmd(["git", "annex", "describe", "here", "nemar-deposit"], repo)).exitCode,
+    ).toBe(0);
+    expect(
+      (await runCmd(["git", "remote", "set-url", "--push", "origin", pushRemote], repo)).exitCode,
+    ).toBe(0);
+
+    const result = await pushAnnexBranchToGitHub(repo, "origin");
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("push target does not match");
+    const pushRefs = await runCmd([
+      "git",
+      "--git-dir",
+      pushRemote,
+      "for-each-ref",
+      "--format=%(refname)",
+      "refs/heads",
+    ]);
+    expect(pushRefs.exitCode).toBe(0);
+    expect(pushRefs.stdout).toBe("");
+  });
+
+  test("refuses a remote configured with multiple push URLs", async () => {
+    const repo = await newAnnexRepo("multiple-push-urls");
+    const firstPushRemote = await bareOrigin("multiple-push-urls-first");
+    const secondPushRemote = await bareOrigin("multiple-push-urls-second");
+    expect((await runCmd(["git", "remote", "add", "origin", firstPushRemote], repo)).exitCode).toBe(
+      0,
+    );
+    expect(
+      (await runCmd(["git", "remote", "set-url", "--push", "origin", firstPushRemote], repo))
+        .exitCode,
+    ).toBe(0);
+    expect(
+      (
+        await runCmd(
+          ["git", "remote", "set-url", "--add", "--push", "origin", secondPushRemote],
+          repo,
+        )
+      ).exitCode,
+    ).toBe(0);
+    expect(
+      (await runCmd(["git", "remote", "get-url", "--push", "--all", "origin"], repo)).stdout
+        .trim()
+        .split("\n"),
+    ).toEqual([firstPushRemote, secondPushRemote]);
+
+    const result = await pushAnnexBranchToGitHub(repo, "origin");
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("push target does not match one verified fetch URL");
+    for (const remote of [firstPushRemote, secondPushRemote]) {
+      const refs = await runCmd([
+        "git",
+        "--git-dir",
+        remote,
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/heads",
+      ]);
+      expect(refs.exitCode).toBe(0);
+      expect(refs.stdout).toBe("");
+    }
+  });
+
+  test("refuses remote URLs with embedded HTTP credentials without echoing them", async () => {
+    const repo = await newAnnexRepo("embedded-http-credentials");
+    const remote = "https://user:super-secret-token@example.invalid/nemar/dataset.git";
+    expect((await runCmd(["git", "remote", "add", "origin", remote], repo)).exitCode).toBe(0);
+
+    const chunks: string[] = [];
+    const write = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      chunks.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    setVerbose(true);
+    let result: Awaited<ReturnType<typeof pushAnnexBranchToGitHub>>;
+    try {
+      result = await pushAnnexBranchToGitHub(repo, "origin");
+    } finally {
+      setVerbose(false);
+      process.stderr.write = write;
+    }
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("embeds HTTP credentials");
+    expect(result.error).not.toContain("super-secret-token");
+    expect(chunks.join("")).toContain("[sensitive subprocess output suppressed]");
+    expect(chunks.join("")).not.toContain("super-secret-token");
+  });
+
   test("withholds a local-only default description from another merged annex UUID", async () => {
     const repo = await newAnnexRepo("other-uuid-local-secret");
     const bare = await bareOrigin("other-uuid-local-secret-origin");
@@ -923,7 +1088,7 @@ describe("first git-annex branch push prunes unpublished description history (#1
     writeFileSync(
       wrapper,
       `#!/bin/sh
-if [ "$(pwd)" = "${repo}" ] && [ "$1" = push ] && [ "$2" = origin ] && [ "$3" != "" ] && [ ! -e "${raceMarker}" ]; then
+if [ "$(pwd)" = "${repo}" ] && [ "$1" = push ] && [ "$2" = "${bare}" ] && [ "$3" != "" ] && [ ! -e "${raceMarker}" ]; then
   case "$3" in
     *:refs/heads/git-annex)
       "${realGit}" -C "${repo}" update-ref refs/heads/git-annex "${concurrentRef}" || exit 1

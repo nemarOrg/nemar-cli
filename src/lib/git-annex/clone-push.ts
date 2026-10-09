@@ -76,11 +76,11 @@ async function defaultDescriptionHistory(
 
 async function fetchRemoteAnnexOid(
   path: string,
-  remoteName: string,
+  remoteUrl: string,
 ): Promise<{ success: true; oid: string } | { success: false }> {
   const checkRef = `refs/nemar/git-annex-check/${randomUUID()}`;
   const fetch = await runCommand(
-    ["git", "fetch", "--no-tags", remoteName, `refs/heads/git-annex:${checkRef}`],
+    ["git", "fetch", "--no-tags", remoteUrl, `refs/heads/git-annex:${checkRef}`],
     { cwd: path },
   );
   if (fetch.exitCode !== 0) return { success: false };
@@ -93,12 +93,62 @@ async function fetchRemoteAnnexOid(
   return { success: true, oid: remote.stdout.trim() };
 }
 
+async function verifyAnnexPushTarget(
+  path: string,
+  remoteName: string,
+): Promise<{ success: true; url: string } | { success: false; error: string }> {
+  const [fetchUrls, pushUrls] = await Promise.all([
+    runCommand(["git", "remote", "get-url", "--all", remoteName], {
+      cwd: path,
+      sensitiveOutput: true,
+    }),
+    runCommand(["git", "remote", "get-url", "--push", "--all", remoteName], {
+      cwd: path,
+      sensitiveOutput: true,
+    }),
+  ]);
+  if (fetchUrls.exitCode !== 0 || pushUrls.exitCode !== 0) {
+    return { success: false, error: "the remote fetch and push URLs could not be verified" };
+  }
+  const fetchTargets = fetchUrls.stdout.trim().split(/\r?\n/).filter(Boolean);
+  const pushTargets = pushUrls.stdout.trim().split(/\r?\n/).filter(Boolean);
+  // The privacy preflight reads the fetch URL. Refuse split or multi-target
+  // remotes so the push cannot publish to a repository whose history was not checked.
+  if (fetchTargets.length !== 1 || pushTargets.length !== 1 || fetchTargets[0] !== pushTargets[0]) {
+    return {
+      success: false,
+      error: "the remote push target does not match one verified fetch URL",
+    };
+  }
+  if (/^https?:\/\//i.test(pushTargets[0])) {
+    let url: URL;
+    try {
+      url = new URL(pushTargets[0]);
+    } catch {
+      return { success: false, error: "the remote HTTP URL is invalid" };
+    }
+    if (url.username || url.password) {
+      return {
+        success: false,
+        error: "the remote URL embeds HTTP credentials; use a credential helper before pushing",
+      };
+    }
+  }
+  return { success: true, url: pushTargets[0] };
+}
+
 async function prepareAnnexBranchPush(
   path: string,
   remoteName: string,
-): Promise<{ success: true; localOid: string } | { success: false; error: string }> {
+): Promise<
+  { success: true; localOid: string; remoteUrl: string } | { success: false; error: string }
+> {
+  const target = await verifyAnnexPushTarget(path, remoteName);
+  if (!target.success) {
+    return target;
+  }
   const remoteRef = await runCommand(
-    ["git", "ls-remote", "--heads", remoteName, "refs/heads/git-annex"],
+    ["git", "ls-remote", "--heads", target.url, "refs/heads/git-annex"],
     { cwd: path },
   );
   if (remoteRef.exitCode !== 0) {
@@ -112,7 +162,7 @@ async function prepareAnnexBranchPush(
       return { success: false, error: "the local git-annex history could not be pruned" };
     }
   } else {
-    const remote = await fetchRemoteAnnexOid(path, remoteName);
+    const remote = await fetchRemoteAnnexOid(path, target.url);
     if (!remote.success) {
       return { success: false, error: "the existing git-annex branch could not be fetched" };
     }
@@ -158,7 +208,7 @@ async function prepareAnnexBranchPush(
     };
   }
 
-  return { success: true, localOid };
+  return { success: true, localOid, remoteUrl: target.url };
 }
 
 /** Signals on which an interrupted save still takes its assume-unchanged bits back. */
@@ -742,6 +792,96 @@ export function isNonFastForwardPush(stderr: string): boolean {
 /** How many fetch+rebase+retry cycles to attempt on a non-fast-forward push. */
 const PUSH_REBASE_RETRIES = 3;
 
+type PreparedAnnexBranchPush = { success: true; localOid: string; remoteUrl: string };
+
+async function pushPreparedAnnexBranch(
+  path: string,
+  remoteName: string,
+  initial: PreparedAnnexBranchPush,
+): Promise<
+  | { success: true }
+  | {
+      success: false;
+      error: string;
+      localRefAdvanced?: boolean;
+      retryPreparationFailed?: boolean;
+    }
+> {
+  let annexStderr = "";
+  let retryError: string | undefined;
+  let annexMergeCycles = 0;
+  let prepared = initial;
+  for (let attempt = 0; attempt <= PUSH_REBASE_RETRIES; attempt++) {
+    if (attempt > 0) {
+      const checked = await prepareAnnexBranchPush(path, remoteName);
+      if (!checked.success) {
+        return { success: false, error: checked.error, retryPreparationFailed: true };
+      }
+      prepared = checked;
+    }
+    // Pin both the local commit inspected by the privacy check and the remote
+    // tip used to classify already-published descriptions. A concurrent local
+    // update cannot make an unchecked commit the push source; after a merge
+    // retry this loop fetches and checks again.
+    const res = await runCommand(
+      ["git", "push", prepared.remoteUrl, `${prepared.localOid}:refs/heads/git-annex`],
+      { cwd: path },
+    );
+    if (res.exitCode === 0) {
+      const currentRef = await runCommand(["git", "rev-parse", "refs/heads/git-annex^{commit}"], {
+        cwd: path,
+      });
+      if (currentRef.exitCode !== 0 || currentRef.stdout.trim() !== prepared.localOid) {
+        return {
+          success: false,
+          error:
+            "The checked git-annex history was pushed, but the local annex branch advanced during the push. Review and retry to publish the remaining changes.",
+          localRefAdvanced: true,
+        };
+      }
+      return { success: true };
+    }
+    annexStderr = res.stderr;
+    if (attempt === PUSH_REBASE_RETRIES || !isNonFastForwardPush(res.stderr)) break;
+    const fetchRes = await runCommand(["git", "fetch", remoteName, "git-annex"], { cwd: path });
+    if (fetchRes.exitCode !== 0) {
+      retryError = `fetch ${remoteName} git-annex failed: ${fetchRes.stderr.trim() || `exit ${fetchRes.exitCode}`}`;
+      break;
+    }
+    const mergeRes = await runCommand(["git", "annex", "merge"], { cwd: path });
+    if (mergeRes.exitCode !== 0) {
+      retryError = `git annex merge failed: ${mergeRes.stderr.trim() || `exit ${mergeRes.exitCode}`}`;
+      break;
+    }
+    annexMergeCycles++;
+  }
+
+  const note =
+    annexMergeCycles > 0
+      ? ` (still rejected after ${annexMergeCycles} fetch+merge retry cycle(s))`
+      : "";
+  return {
+    success: false,
+    error: retryError
+      ? `${retryError} (after push was rejected: ${annexStderr.trim() || "unknown rejection"})`
+      : `${annexStderr.trim() || "Failed to push git-annex branch"}${note}`,
+  };
+}
+
+/** Push only git-annex after verifying the exact local history being published. */
+export async function pushAnnexBranchToGitHub(
+  path: string,
+  remoteName = "origin",
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const prepared = await prepareAnnexBranchPush(path, remoteName);
+    if (!prepared.success) return { success: false, error: prepared.error };
+    return await pushPreparedAnnexBranch(path, remoteName, prepared);
+  } catch (e) {
+    return { success: false, error: (e as Error).message };
+  }
+}
+
 export async function pushToGitHub(
   path: string,
   remoteName = "origin",
@@ -866,63 +1006,21 @@ export async function pushToGitHub(
     // ("Multiple remotes have that name"), permanently breaking the import.
     // This loop only helps for a genuine, unrelated divergence (e.g. two
     // concurrent pushes), not the retry-created-a-second-UUID case.
-    let annexStderr = "";
-    let annexPushed = false;
-    let annexMergeCycles = 0;
-    let prepared = annexPreflight;
-    for (let attempt = 0; attempt <= PUSH_REBASE_RETRIES; attempt++) {
-      if (attempt > 0) {
-        const checked = await prepareAnnexBranchPush(path, remoteName);
-        if (!checked.success) {
-          return {
-            success: false,
-            error: `Main branch pushed, but the git-annex branch was not pushed because ${checked.error}.`,
-          };
-        }
-        prepared = checked;
+    const annexPush = await pushPreparedAnnexBranch(path, remoteName, annexPreflight);
+    if (!annexPush.success) {
+      if (annexPush.retryPreparationFailed) {
+        return {
+          success: false,
+          error: `Main branch pushed, but the git-annex branch was not pushed because ${annexPush.error}.`,
+        };
       }
-      // Pin both the local commit inspected by the privacy check and the remote
-      // tip used to classify already-published descriptions. A concurrent local
-      // update cannot make an unchecked commit the push source; after a merge
-      // retry this loop fetches and checks again.
-      const res = await runCommand(
-        ["git", "push", remoteName, `${prepared.localOid}:refs/heads/git-annex`],
-        { cwd: path },
-      );
-      if (res.exitCode === 0) {
-        const currentRef = await runCommand(["git", "rev-parse", "refs/heads/git-annex^{commit}"], {
-          cwd: path,
-        });
-        if (currentRef.exitCode !== 0 || currentRef.stdout.trim() !== prepared.localOid) {
-          return {
-            success: false,
-            error:
-              "The checked git-annex history was pushed, but the local annex branch advanced during the push. Review and retry to publish the remaining changes.",
-          };
-        }
-        annexPushed = true;
-        break;
+      if (annexPush.localRefAdvanced) {
+        return { success: false, error: annexPush.error };
       }
-      annexStderr = res.stderr;
-      if (attempt === PUSH_REBASE_RETRIES || !isNonFastForwardPush(res.stderr)) {
-        break;
-      }
-      const fetchRes = await runCommand(["git", "fetch", remoteName, "git-annex"], { cwd: path });
-      if (fetchRes.exitCode !== 0) break;
-      const mergeRes = await runCommand(["git", "annex", "merge"], { cwd: path });
-      if (mergeRes.exitCode !== 0) break;
-      annexMergeCycles++;
-    }
-
-    if (!annexPushed) {
-      const note =
-        annexMergeCycles > 0
-          ? ` (still rejected after ${annexMergeCycles} fetch+merge retry cycle(s))`
-          : "";
-      // Not a fatal error, but return warning so callers can inform users
+      // Not a fatal error, but return warning so callers can inform users.
       return {
         success: true,
-        warning: `Main branch pushed, but git-annex branch failed: ${annexStderr.trim()}${note}. Clone operations may have issues.`,
+        warning: `Main branch pushed, but git-annex branch failed: ${annexPush.error}. Clone operations may have issues.`,
       };
     }
 

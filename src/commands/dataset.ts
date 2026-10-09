@@ -106,6 +106,7 @@ import {
 } from "../lib/facet-options.js";
 import {
   cloneDataset,
+  pushAnnexBranchToGitHub,
   pushBranch,
   pushToGitHub,
   saveDataset,
@@ -3557,14 +3558,11 @@ Examples:
 
       // Also push git-annex branch if data files were uploaded
       if (dataFiles.length > 0) {
-        const annexPush = spawn({
-          cmd: ["git", "push", "origin", "git-annex"],
-          cwd: workDir,
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-        if ((await annexPush.exited) !== 0) {
-          console.log(chalk.yellow("  Warning: Failed to push git-annex branch"));
+        const annexPush = await pushAnnexBranchToGitHub(workDir, "origin");
+        if (!annexPush.success) {
+          console.log(
+            chalk.yellow(`  Warning: Failed to push git-annex branch: ${annexPush.error}`),
+          );
         }
       }
       pushSpinner.succeed("Pushed branch");
@@ -5063,21 +5061,14 @@ Examples:
             // branch as it stood then; those new commits have to be pushed
             // separately or fresh clones won't know the S3 copies exist.
             const annexPushSpinner = ora("Pushing git-annex branch...").start();
-            const annexPush = spawn({
-              cmd: ["git", "push", "origin", "git-annex"],
-              cwd,
-              stdout: "pipe",
-              stderr: "pipe",
-            });
-            const annexPushStderr = await new Response(annexPush.stderr).text();
-            const annexPushExit = await annexPush.exited;
-            if (annexPushExit !== 0) {
+            const annexPush = await pushAnnexBranchToGitHub(cwd, "origin");
+            if (!annexPush.success) {
               annexPushSpinner.warn(
-                `Could not push git-annex branch: ${annexPushStderr.trim() || "unknown error"}`,
+                `Could not push git-annex branch: ${annexPush.error || "unknown error"}`,
               );
               console.log(
                 chalk.yellow(
-                  "  Run 'git push origin git-annex' manually so other clones can locate the new files.",
+                  "  The checked annex push was refused. Resolve the reported issue before retrying; do not push the branch manually.",
                 ),
               );
               s3PushFailed = true;

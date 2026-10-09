@@ -104,6 +104,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "describeChangedSinceTracked",
     "describeStaleFlagFailure",
     "isNonFastForwardPush",
+    "pushAnnexBranchToGitHub",
     "pushBranch",
     "pushToGitHub",
     "saveDataset",
@@ -188,6 +189,8 @@ const INTERNAL_WIRING = [
   "ANNEX_DEPOSIT_DESCRIPTION",
   "isDefaultAnnexDescription",
   "replaceDefaultAnnexDescription",
+  // Annex-only guarded push used after S3 copy has advanced git-annex.
+  "pushAnnexBranchToGitHub",
   // policy.ts postdates the split (#1158). Its surface is consumed by sibling
   // git-annex modules and by import-openneuro, never by the CLI directly, so
   // none of it belongs to the pre-split monolith surface below.
