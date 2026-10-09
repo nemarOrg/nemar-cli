@@ -86,8 +86,12 @@ subprocess, or mocked S3 service.
 # Remaining real-test requirements for #1644
 
 There is no automated regression test for renewed credentials during recorded-file checks or
-pending copies against real S3. The former `test/upload-sts-refresh.integration.test.ts` used a
-loopback S3 stand-in and injected `ExpiredToken`; it was removed because `.rules/testing.md`
+pending copies against real S3. In particular, retry transfer reporting must retain unique
+positive `git-annex copy --json` send records when the location log has not caught up yet. The
+available local directory remote does not reproduce that lag/retry condition, so a counting-helper
+test or ordinary repeated local copy would not cover it. The former
+`test/upload-sts-refresh.integration.test.ts` used a loopback S3 stand-in and injected
+`ExpiredToken`; it was removed because `.rules/testing.md`
 excludes stub services. That test exercised API-issued leases through real git-annex, but it could
 not establish AWS SigV4 acceptance or real credential expiry. `test/upload-recorded-check.unit.test.ts`
 covers recorded-file presence behavior, but not expiry during copy or `fsck`, stale partial-result
