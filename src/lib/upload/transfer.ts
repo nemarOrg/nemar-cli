@@ -545,6 +545,9 @@ export function computeAddTargets<T extends { path: string }>(
   return targets;
 }
 
+/** Upload-local git-annex add workers; separate from the S3-copy `--jobs` value. */
+export const DEFAULT_UPLOAD_ANNEX_JOBS = 4;
+
 /**
  * Hand the data files to git-annex, with the CLI's reading of the policy
  * authoritative for the files where git-annex cannot read it.
@@ -563,13 +566,14 @@ export function computeAddTargets<T extends { path: string }>(
 export async function trackDataFiles(
   absolutePath: string,
   paths: string[],
-  options: { onInactivityWarning?: (idleMs: number) => void } = {},
+  options: { annexJobs?: number; onInactivityWarning?: (idleMs: number) => void } = {},
 ): Promise<{ success: boolean; error?: string }> {
   const forced = paths.filter(isCaseVariantData);
   const regular = paths.filter((p) => !isCaseVariantData(p));
-  const addOptions = options.onInactivityWarning
-    ? { onInactivityWarning: options.onInactivityWarning }
-    : {};
+  const addOptions = {
+    annexJobs: options.annexJobs ?? DEFAULT_UPLOAD_ANNEX_JOBS,
+    ...(options.onInactivityWarning ? { onInactivityWarning: options.onInactivityWarning } : {}),
+  };
   const added = await gitAnnexAdd(absolutePath, regular, {}, addOptions);
   if (!added.success || forced.length === 0) return added;
   // `{}` is gitAnnexAdd's chunking slot and the object after it its options. This call
@@ -1815,6 +1819,7 @@ export async function transferAnnexedData(args: {
   progress: UploadProgress;
   addTargets: Array<{ path: string; size: number; mtimeMs?: number; type?: string }>;
   jobs: number;
+  annexJobs?: number;
   openRemote: OpenRemote;
   /** Test-only cap for exercising multiple genuine API leases in a small repo. */
   copyBatchMaxFiles?: number;
@@ -1892,6 +1897,7 @@ export async function transferAnnexedData(args: {
       // that staged them lets git-annex take them now. If it was not fixed, the verdict
       // below is the same and the loop ends, with the blobs unstaged once more.
       const added = await trackDataFiles(absolutePath, blocked, {
+        annexJobs: args.annexJobs,
         onInactivityWarning: (idleMs) => {
           spinner = persistOptionalSpinnerWarning(spinner, trackingInactivityWarning(idleMs));
         },
@@ -2056,7 +2062,7 @@ export async function transferAnnexedData(args: {
  */
 export async function uploadDataToS3(
   absolutePath: string,
-  options: { jobs: string },
+  options: { jobs: string; annexJobs?: string },
   dataFiles: UploadFileEntry[],
   filesToUpload: Array<{ path: string; size: number; mtimeMs?: number }>,
   uploadProgress: UploadProgress | null,
@@ -2111,6 +2117,8 @@ export async function uploadDataToS3(
     return FAIL;
   }
   const addTargets = computeAddTargets(filesToUpload, dataFiles, trackedPaths);
+  const annexJobs =
+    options.annexJobs === undefined ? DEFAULT_UPLOAD_ANNEX_JOBS : Number(options.annexJobs);
 
   // The same reconcile against the OTHER record: the location log. An annexed file
   // the log does not record at the remote needs copying whether or not anything is
@@ -2188,6 +2196,7 @@ export async function uploadDataToS3(
           absolutePath,
           addTargets.map((f) => f.path),
           {
+            annexJobs,
             onInactivityWarning: (idleMs) => {
               spinner = persistSpinnerWarning(spinner, trackingInactivityWarning(idleMs));
             },
@@ -2210,6 +2219,7 @@ export async function uploadDataToS3(
         progress,
         addTargets,
         jobs: Number.parseInt(options.jobs, 10),
+        annexJobs,
         openRemote: deps.openRemote ?? openS3Remote(absolutePath, datasetInfo),
       });
       if (transferred.status === "fail") return FAIL;

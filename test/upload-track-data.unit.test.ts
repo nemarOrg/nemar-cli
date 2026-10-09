@@ -12,7 +12,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { saveDataset } from "../src/lib/git-annex/clone-push";
 import { gitAnnexAdd } from "../src/lib/git-annex/init";
@@ -154,6 +154,39 @@ describe("isCaseVariantData", () => {
 });
 
 describe("trackDataFiles", () => {
+  test("uses the bounded local worker default and allows an explicit override", async () => {
+    const paths = ["sub-01/eeg/normal.edf", "sub-01/eeg/small_UPPER.EDF"];
+
+    for (const [name, annexJobs] of [
+      ["default-workers", undefined],
+      ["override-workers", 8],
+    ] as const) {
+      const dir = await repoWithFixtures(name);
+      const trace = join(scratch.root, `trace-${name}.log`);
+      const saved = process.env.GIT_TRACE;
+      process.env.GIT_TRACE = trace;
+      try {
+        const result = await trackDataFiles(dir, paths, { annexJobs });
+        expect(result).toEqual({ success: true });
+      } finally {
+        // biome-ignore lint/performance/noDelete: assigning undefined would leave the string "undefined"
+        if (saved === undefined) delete process.env.GIT_TRACE;
+        else process.env.GIT_TRACE = saved;
+      }
+
+      const adds = readFileSync(trace, "utf8")
+        .split("\n")
+        .filter((line) => /run_command: git-annex add/.test(line));
+      expect(adds).toHaveLength(2);
+      const expectedJobs = annexJobs ?? 4;
+      for (const line of adds) {
+        expect(line).toContain(`-J${expectedJobs}`);
+        expect(line).toContain("--batch");
+      }
+      expect([...(await annexedSet(dir))].sort()).toEqual([...paths].sort());
+    }
+  });
+
   test("annexes every file the CLI called data, so nothing is left to refuse or report", async () => {
     const dir = await repoWithFixtures("track");
     const result = await trackDataFiles(

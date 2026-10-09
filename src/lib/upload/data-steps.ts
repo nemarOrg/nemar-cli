@@ -20,7 +20,7 @@ import { type DatasetInfo, FAIL, type Step, ok } from "./types.js";
 
 export interface DataStepsArgs {
   absolutePath: string;
-  options: { jobs: string };
+  options: { jobs: string; annexJobs?: string };
   dataFiles: UploadFileEntry[];
   filesToUpload: Array<{ path: string; size: number; mtimeMs?: number }>;
   uploadProgress: UploadProgress | null;

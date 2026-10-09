@@ -194,6 +194,85 @@ describe("a blocked tracking is recovered and retried in the same run", () => {
   });
 });
 
+describe("local annex workers stay separate from S3 copy workers", () => {
+  test("the upload override reaches local tracking while --jobs controls the real copy", async () => {
+    const { dir, store, targets } = await dataset("separate-annex-jobs", { "a.edf": 3_000 });
+    const trace = join(scratch.root, "separate-annex-jobs.trace");
+    const saved = process.env.GIT_TRACE;
+    process.env.GIT_TRACE = trace;
+    let status: string;
+    try {
+      const { value } = await captured(() =>
+        uploadDataToS3(
+          dir,
+          { jobs: "2", annexJobs: "8" },
+          targets,
+          targets,
+          null,
+          INFO,
+          { openRemote: async () => ok({ remoteIdentity: `directory:${dir}:${REMOTE}` }) },
+        ),
+      );
+      status = value.status;
+    } finally {
+      // biome-ignore lint/performance/noDelete: assigning undefined would leave the string "undefined"
+      if (saved === undefined) delete process.env.GIT_TRACE;
+      else process.env.GIT_TRACE = saved;
+    }
+
+    expect(status).toBe("ok");
+    const commands = readFileSync(trace, "utf8").split("\n");
+    const add = commands.find((line) => /run_command: git-annex add/.test(line));
+    const copy = commands.find((line) => /run_command: git-annex copy/.test(line));
+    expect(add).toContain("-J8");
+    expect(copy).toContain("-J 2");
+    expect([...(await annexedSet(dir))]).toEqual(["a.edf"]);
+    expect(readdirSync(store, { recursive: true }).length).toBeGreaterThan(0);
+  });
+
+  test("blocked-file recovery keeps the upload override for its retry", async () => {
+    const { dir, store, targets } = await dataset("recovery-annex-jobs", { "big.edf": 200_000 });
+    writeFile(dir, ".gitattributes", "*.edf annex.largefiles=nothing\n");
+    const trace = join(scratch.root, "recovery-annex-jobs.trace");
+    const saved = process.env.GIT_TRACE;
+    process.env.GIT_TRACE = trace;
+    let status: string;
+    try {
+      const { value } = await captured(() =>
+        uploadDataToS3(
+          dir,
+          { jobs: "2", annexJobs: "8" },
+          targets,
+          targets,
+          null,
+          INFO,
+          {
+            openRemote: async () => {
+              rmSync(join(dir, ".gitattributes"));
+              return ok({ remoteIdentity: `directory:${dir}:${REMOTE}` });
+            },
+          },
+        ),
+      );
+      status = value.status;
+    } finally {
+      // biome-ignore lint/performance/noDelete: assigning undefined would leave the string "undefined"
+      if (saved === undefined) delete process.env.GIT_TRACE;
+      else process.env.GIT_TRACE = saved;
+    }
+
+    expect(status).toBe("ok");
+    const commands = readFileSync(trace, "utf8").split("\n");
+    const adds = commands.filter((line) => /run_command: git-annex add/.test(line));
+    const copy = commands.find((line) => /run_command: git-annex copy/.test(line));
+    expect(adds).toHaveLength(2);
+    expect(adds.every((line) => line.includes("-J8"))).toBe(true);
+    expect(copy).toContain("-J 2");
+    expect([...(await annexedSet(dir))]).toEqual(["big.edf"]);
+    expect(readdirSync(store, { recursive: true }).length).toBeGreaterThan(0);
+  });
+});
+
 describe("a failed read of git says how it ended", () => {
   test("a corrupt index makes the tracked-path read report git's real error", async () => {
     const { dir } = await dataset("failed-ls-files", { "a.edf": 3_000 });

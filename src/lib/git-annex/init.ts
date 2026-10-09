@@ -466,10 +466,10 @@ export function chunkAddTargets(
  * attribute. The import's identifier scrub (ADR 0089) names `SHA256E` so the key
  * that replaces a scrubbed recording is one ADR 0085's tools can follow.
  *
- * The list form deliberately leaves worker selection to git-annex configuration
- * for now. Do not infer local tracking concurrency from upload `-j`, which
- * controls S3 copies; choose a local worker default only after the controlled
- * argv-vs-batch × J1/J4/J8 benchmark recorded for #1455.
+ * The list form leaves worker selection to its caller. Dataset upload passes its
+ * measured local worker count; import callers omit it and retain git-annex's
+ * configured behavior. Do not infer local tracking concurrency from upload `-j`,
+ * which controls S3 copies.
  */
 export async function gitAnnexAdd(
   path: string,
@@ -479,13 +479,21 @@ export async function gitAnnexAdd(
     forceLarge?: boolean;
     checkGitignore?: boolean;
     backend?: "SHA256E";
+    annexJobs?: number;
     onInactivityWarning?: (idleMs: number) => void;
   } = {},
 ): Promise<{ success: boolean; error?: string }> {
+  if (
+    options.annexJobs !== undefined &&
+    (!Number.isSafeInteger(options.annexJobs) || options.annexJobs < 1)
+  ) {
+    return { success: false, error: "git-annex worker count must be a positive integer" };
+  }
   const addFlags = [
     ...(options.forceLarge ? ["--force-large"] : []),
     ...(options.checkGitignore === false ? ["--no-check-gitignore"] : []),
     ...(options.backend ? [`--backend=${options.backend}`] : []),
+    ...(options.annexJobs === undefined ? [] : [`-J${options.annexJobs}`]),
   ];
   try {
     if (typeof targets === "string") {
