@@ -69,6 +69,7 @@ import {
   markStepCompleted,
   writeUploadProgress,
 } from "../upload-progress.js";
+import { describeInactivityDuration, persistSpinnerWarning } from "./inactivity.js";
 import {
   type CredentialLease,
   DEFAULT_MAX_REFRESHES,
@@ -88,28 +89,12 @@ export interface UploadFileEntry {
   mtimeMs?: number;
 }
 
-function describeInactivityDuration(idleMs: number): string {
-  if (idleMs < 1_000) return `about ${Math.max(1, Math.round(idleMs))} ms`;
-  const minutes = Math.round(idleMs / 60_000);
-  if (minutes > 0) return `about ${minutes} minute${minutes === 1 ? "" : "s"}`;
-  const seconds = Math.round(idleMs / 1_000);
-  return `about ${seconds} second${seconds === 1 ? "" : "s"}`;
-}
-
 function trackingInactivityWarning(idleMs: number): string {
   return [
     "Warning: local git-annex tracking has produced no stdout or stderr for",
     `${describeInactivityDuration(idleMs)}. git-annex is still running and may be reading a large file.`,
     "Wait, or interrupt and rerun the upload; earlier completed batches remain resumable.",
   ].join(" ");
-}
-
-function persistSpinnerWarning(spinner: Ora, warning: string): Ora {
-  const activeText = spinner.text;
-  spinner.info(chalk.yellow(warning));
-  // Ora exposes this getter at runtime, but omits it from its public TypeScript interface.
-  if ((spinner as Ora & { readonly isEnabled: boolean }).isEnabled) spinner.start(activeText);
-  return spinner;
 }
 
 function persistOptionalSpinnerWarning(spinner: Ora | null, warning: string): Ora | null {

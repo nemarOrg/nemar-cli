@@ -12,6 +12,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { PassThrough } from "node:stream";
 import {
   existsSync,
   mkdirSync,
@@ -189,6 +190,34 @@ describe("a whole run of steps 9 to 11", () => {
     }
     const pointer = await run(["git", "cat-file", "-p", `HEAD:${data[2]}`], dir);
     expect(pointer.stdout.startsWith("/annex/objects/")).toBe(true);
+  });
+
+  test("the final save warns when git add is quiet and still completes", async () => {
+    const fixtureEdf = join(
+      import.meta.dir,
+      "fixtures/bids-minimal/sub-01/eeg/sub-01_task-rest_eeg.edf",
+    );
+    const dir = await dataset("quiet-save", {
+      "sub-01/eeg/sub-01_task-rest_eeg.edf": readFileSync(fixtureEdf),
+    });
+    const spinnerOutput = new PassThrough();
+    let renderedOutput = "";
+    spinnerOutput.on("data", (chunk: Buffer) => {
+      renderedOutput += chunk.toString();
+    });
+
+    const result = await runSteps(dir, {
+      openRemote: directoryRemote(dir),
+      saveInactivityWarningAfterMs: 1,
+      saveSpinnerStream: spinnerOutput,
+    });
+
+    expect(result.status).toBe("ok");
+    expect(renderedOutput).toContain(
+      "Warning: saving dataset changes has produced no stdout or stderr",
+    );
+    expect(renderedOutput).toContain("git add -A is still running");
+    expect(isStepCompleted(progressOf(dir), "dataset_save")).toBe(true);
   });
 
   test("hands the save the annexed set the copy listed, and the remote to check against", async () => {

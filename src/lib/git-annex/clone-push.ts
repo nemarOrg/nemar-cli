@@ -276,7 +276,12 @@ export async function saveDataset(
   path: string,
   message: string,
   author?: { name: string; email: string },
-  options: { skipContentCheck?: SkipContentCheckEntry[] } = {},
+  options: {
+    skipContentCheck?: SkipContentCheckEntry[];
+    onInactivityWarning?: (idleMs: number) => void;
+    /** Internal test threshold; production callers use the 120-second default. */
+    inactivityWarningAfterMs?: number;
+  } = {},
 ): Promise<{ success: boolean; error?: string }> {
   const top = await repositoryRoot(path);
   if ("error" in top) return { success: false, error: top.error };
@@ -323,7 +328,7 @@ export async function saveDataset(
   let outcome: { success: boolean; error?: string };
   let unmarkError: string | undefined;
   try {
-    outcome = await stageAndCommit(path, message, author);
+    outcome = await stageAndCommit(path, message, author, options);
     if (outcome.success && marked.length > 0) {
       const after = compareRecordedStat(path, marked);
       const moved = [...after.changed, ...after.vanished, ...after.unreadable];
@@ -712,6 +717,10 @@ async function stageAndCommit(
   path: string,
   message: string,
   author?: { name: string; email: string },
+  options: {
+    onInactivityWarning?: (idleMs: number) => void;
+    inactivityWarningAfterMs?: number;
+  } = {},
 ): Promise<{ success: boolean; error?: string }> {
   try {
     // Build environment with optional author override
@@ -727,6 +736,10 @@ async function stageAndCommit(
     const { stderr: addStderr, exitCode: addExitCode } = await runCommand(["git", "add", "-A"], {
       cwd: path,
       ...(Object.keys(env).length > 0 ? { env } : {}),
+      ...(options.onInactivityWarning ? { onInactivityWarning: options.onInactivityWarning } : {}),
+      ...(options.inactivityWarningAfterMs === undefined
+        ? {}
+        : { inactivityWarningAfterMs: options.inactivityWarningAfterMs }),
     });
 
     if (addExitCode !== 0) {
