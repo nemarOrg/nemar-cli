@@ -60,6 +60,12 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   // the first matching handler in registration order (pinned below).
   "GET /users/duplicates": 1,
   "POST /users/:id/clear-identity-conflict": 1,
+  // ADR 0096: one account's details and an admin edit of it, keyed by id because
+  // a web/ORCID account has no username. The PATCH is a single handler on
+  // purpose: owner-only applies to three of its eight fields, so the
+  // permission check lives in parseAdminUserEdit and not in a middleware.
+  "GET /users/by-id/:id": 1,
+  "PATCH /users/by-id/:id": 1,
 
   // DOI / enrichment
   "POST /datasets/:id/doi/concept": 2,
@@ -209,7 +215,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(139);
+    expect(adminRoutes.routes.length).toBe(141);
   });
 
   // The count pin above can't see a SWAP of the two router-level middleware
