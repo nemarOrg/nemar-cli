@@ -19,6 +19,9 @@ const CREDENTIAL_HEADER =
 /** The shortest value worth blanking: a shorter "secret" would blank half of any message. */
 const MIN_SECRET_LENGTH = 8;
 
+/** Warn once after two minutes without child stdout or stderr. */
+export const INACTIVITY_WARNING_AFTER_MS = 120_000;
+
 /**
  * Take credentials out of text a subprocess printed. A failed S3 request makes git-annex
  * print the whole request it built, and that dump carries `("X-Amz-Security-Token",
@@ -50,6 +53,24 @@ export function credentialValues(env?: Record<string, string | undefined>): stri
     }
   }
   return [...values];
+}
+
+/** Collect a subprocess stream while reporting each non-empty chunk as activity. */
+async function collectOutput(
+  stream: ReadableStream<Uint8Array>,
+  onOutput: () => void,
+): Promise<string> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let output = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value.byteLength === 0) continue;
+    onOutput();
+    output += decoder.decode(value, { stream: true });
+  }
+  return output + decoder.decode();
 }
 
 /**
@@ -84,6 +105,10 @@ export async function runCommand(
     stdin?: string;
     /** Suppress both output streams from the verbose log when a command returns a secret. */
     sensitiveOutput?: boolean;
+    /** Called once for each quiet period with its measured duration; either stream resets it. */
+    onInactivityWarning?: (idleMs: number) => void;
+    /** Internal test threshold; production callers use the 120-second default. */
+    inactivityWarningAfterMs?: number;
   } = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean }> {
   const childEnv: Record<string, string | undefined> = {
@@ -105,9 +130,35 @@ export async function runCommand(
 
   let timedOut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
+  let lastOutputAt = performance.now();
+  const clearInactivityTimer = (): void => {
+    if (inactivityTimer !== undefined) {
+      clearTimeout(inactivityTimer);
+      inactivityTimer = undefined;
+    }
+  };
+  const resetInactivityTimer = (): void => {
+    if (!options.onInactivityWarning) return;
+    clearInactivityTimer();
+    inactivityTimer = setTimeout(() => {
+      inactivityTimer = undefined;
+      try {
+        options.onInactivityWarning?.(performance.now() - lastOutputAt);
+      } catch {
+        // A warning callback must not change the child's result, but the user still needs a clue.
+        console.error(
+          "Could not display subprocess inactivity warning; the child result is unaffected.",
+        );
+      }
+    }, options.inactivityWarningAfterMs ?? INACTIVITY_WARNING_AFTER_MS);
+  };
+  resetInactivityTimer();
+
   if (options.timeout) {
     timer = setTimeout(() => {
       timedOut = true;
+      clearInactivityTimer();
       proc.kill();
     }, options.timeout);
   }
@@ -121,11 +172,27 @@ export async function runCommand(
     vlog(chalk.dim(redactCredentials(`$ ${cmd.join(" ")}${cwdHint}`, secrets)));
   }
 
-  const stdout = await new Response(proc.stdout).text();
-  const stderr = await new Response(proc.stderr).text();
-  const exitCode = await proc.exited;
-
-  if (timer) clearTimeout(timer);
+  const onOutput = (): void => {
+    lastOutputAt = performance.now();
+    resetInactivityTimer();
+  };
+  let stdout: string;
+  let stderr: string;
+  let exitCode: number;
+  const exit = proc.exited.then((code) => {
+    clearInactivityTimer();
+    return code;
+  });
+  try {
+    [stdout, stderr, exitCode] = await Promise.all([
+      collectOutput(proc.stdout, onOutput),
+      collectOutput(proc.stderr, onOutput),
+      exit,
+    ]);
+  } finally {
+    clearInactivityTimer();
+    if (timer) clearTimeout(timer);
+  }
 
   if (isVerbose()) {
     if (options.sensitiveOutput) {

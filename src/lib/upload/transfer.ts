@@ -88,6 +88,36 @@ export interface UploadFileEntry {
   mtimeMs?: number;
 }
 
+function describeInactivityDuration(idleMs: number): string {
+  if (idleMs < 1_000) return `about ${Math.max(1, Math.round(idleMs))} ms`;
+  const minutes = Math.round(idleMs / 60_000);
+  if (minutes > 0) return `about ${minutes} minute${minutes === 1 ? "" : "s"}`;
+  const seconds = Math.round(idleMs / 1_000);
+  return `about ${seconds} second${seconds === 1 ? "" : "s"}`;
+}
+
+function trackingInactivityWarning(idleMs: number): string {
+  return [
+    "Warning: local git-annex tracking has produced no stdout or stderr for",
+    `${describeInactivityDuration(idleMs)}. git-annex is still running and may be reading a large file.`,
+    "Wait, or interrupt and rerun the upload; earlier completed batches remain resumable.",
+  ].join(" ");
+}
+
+function persistSpinnerWarning(spinner: Ora, warning: string): Ora {
+  const activeText = spinner.text;
+  spinner.info(chalk.yellow(warning));
+  return ora(activeText).start();
+}
+
+function persistOptionalSpinnerWarning(spinner: Ora | null, warning: string): Ora | null {
+  if (!spinner) {
+    console.log(chalk.yellow(`  ${warning}`));
+    return null;
+  }
+  return persistSpinnerWarning(spinner, warning);
+}
+
 /**
  * Extract repo full name from github_url (e.g., "https://github.com/nemarDatasets/nm000123").
  * Validate URL format: must be a valid GitHub URL with owner/repo pattern.
@@ -542,16 +572,20 @@ export function computeAddTargets<T extends { path: string }>(
 export async function trackDataFiles(
   absolutePath: string,
   paths: string[],
+  options: { onInactivityWarning?: (idleMs: number) => void } = {},
 ): Promise<{ success: boolean; error?: string }> {
   const forced = paths.filter(isCaseVariantData);
   const regular = paths.filter((p) => !isCaseVariantData(p));
-  const added = await gitAnnexAdd(absolutePath, regular);
+  const addOptions = options.onInactivityWarning
+    ? { onInactivityWarning: options.onInactivityWarning }
+    : {};
+  const added = await gitAnnexAdd(absolutePath, regular, {}, addOptions);
   if (!added.success || forced.length === 0) return added;
   // `{}` is gitAnnexAdd's chunking slot and the object after it its options. This call
   // must keep meaning "default chunking, --force-large" whatever shape that signature
   // takes; the test in test/upload-track-data.unit.test.ts that annexes a small
   // `UPPER.EDF` is what fails if it stops.
-  return gitAnnexAdd(absolutePath, forced, {}, { forceLarge: true });
+  return gitAnnexAdd(absolutePath, forced, {}, { forceLarge: true, ...addOptions });
 }
 
 /**
@@ -1628,7 +1662,11 @@ export async function transferAnnexedData(args: {
       // The blobs are out of the index. Add the files again: a cause fixed since the run
       // that staged them lets git-annex take them now. If it was not fixed, the verdict
       // below is the same and the loop ends, with the blobs unstaged once more.
-      const added = await trackDataFiles(absolutePath, blocked);
+      const added = await trackDataFiles(absolutePath, blocked, {
+        onInactivityWarning: (idleMs) => {
+          spinner = persistOptionalSpinnerWarning(spinner, trackingInactivityWarning(idleMs));
+        },
+      });
       if (!added.success) {
         console.log(chalk.red(`Failed to track data files: ${added.error}`));
         // The recovery before it may have had its own trouble (an unsaved progress file);
@@ -1920,6 +1958,11 @@ export async function uploadDataToS3(
         const addResult = await trackDataFiles(
           absolutePath,
           addTargets.map((f) => f.path),
+          {
+            onInactivityWarning: (idleMs) => {
+              spinner = persistSpinnerWarning(spinner, trackingInactivityWarning(idleMs));
+            },
+          },
         );
         if (!addResult.success) {
           spinner.fail(`Failed to track data files: ${addResult.error}`);

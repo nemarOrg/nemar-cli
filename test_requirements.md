@@ -59,3 +59,24 @@ reaches the same eligibility predicate used by production. Replace this exceptio
 with isolated, owner-approved GitHub and Anthropic test endpoints before treating
 the PR-review flow as real-service acceptance. Until then, report stand-in suite
 results separately from real-service verification.
+
+# Remaining real-test requirements for #1455
+
+The inactivity warning is covered at the subprocess boundary with real Bun child
+processes: the test verifies the 120-second production constant, output on either
+stream resets the interval, later quiet intervals warn again, the child exits normally,
+and a warning-callback exception is reported without changing the child's result. The
+existing focused annex-add suite continues to exercise list-form `gitAnnexAdd` against
+real git-annex repositories.
+
+The full `uploadDataToS3` spinner orchestration and its warning persistence do not have
+an end-to-end real-data test. The only checked-in BIDS dataset is explicitly synthetic,
+and the NO MOCKS policy forbids using it as a real upload dataset. No suitable
+non-synthetic dataset fixture or isolated upload test environment is available in this
+checkout. The production wiring was verified by inspection from `uploadDataToS3` and
+blocked-file recovery through `trackDataFiles`, list-form `gitAnnexAdd`, and `runCommand`.
+
+Close this gap when an owner-approved non-synthetic dataset and isolated local upload
+environment are available. Drive the real upload entry point and verify the warning is
+persisted while its spinner continues; do not substitute an invented dataset, mocked
+subprocess, or mocked S3 service.
