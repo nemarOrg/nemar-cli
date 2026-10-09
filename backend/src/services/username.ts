@@ -19,7 +19,7 @@
 
 /**
  * The username rule, matching `GET /auth/check-username` exactly (and the CLI
- * signup form's schema, which has since been removed, ADR 0095): 3-30
+ * signup form's schema, which has since been removed, ADR 0097): 3-30
  * characters of letters, digits, underscore or hyphen.
  *
  * Spelled out here as bounds plus a character-class regex rather than one

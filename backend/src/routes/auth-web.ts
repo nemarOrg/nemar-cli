@@ -5,7 +5,7 @@
  * (moving to app.nemar.org per nemarOrg/website#46). The API-key routes in
  * `auth.ts` (verification, key login, key regeneration) are separate; these
  * routes exist alongside them under the same `/auth` mount. There is no
- * password anywhere (ADR 0095).
+ * password anywhere (ADR 0097).
  *
  *   POST  /auth/code/request          - mail a code
  *   POST  /auth/code/verify           - check the code, set a session cookie

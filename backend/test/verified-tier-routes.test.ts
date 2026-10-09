@@ -203,7 +203,7 @@ describe("POST /auth/login", () => {
   });
 });
 
-// `POST /auth/retrieve-key` used to be tested here. It is retired (ADR 0095) and
+// `POST /auth/retrieve-key` used to be tested here. It is retired (ADR 0097) and
 // is pinned through the production entry point in password-routes-retired.test.ts.
 
 describe("the sandbox routes", () => {

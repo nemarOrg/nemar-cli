@@ -41,7 +41,7 @@ export const authRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>
 
 /**
  * The two routes that took a password, answered with a 410 that says where to go
- * (ADR 0095).
+ * (ADR 0097).
  *
  * They are retired, not unrouted. An already-installed CLI still has the
  * commands that call them, and an unrouted path answers 404 `Not Found`, which
@@ -150,7 +150,7 @@ authRoutes.get("/check-github", async (c) => {
  * Written for the CLI's old signup form (#1255), alongside check-username and
  * check-github: ORCID is the canonical source of the researcher name that DOIs
  * cite, but a record may hide its name, so the form asked for one ONLY in that
- * case. The form went with the password routes (ADR 0095) and nothing in this
+ * case. The form went with the password routes (ADR 0097) and nothing in this
  * repository calls this route now; it stays because removing a public route is
  * a separate decision. It is idempotent and costs one public ORCID read.
  *

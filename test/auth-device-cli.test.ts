@@ -1991,7 +1991,7 @@ describe("nemar auth signup", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 17: the password command is gone (ADR 0095)
+// 17: the password command is gone (ADR 0097)
 // ---------------------------------------------------------------------------
 
 describe("password sign-in is retired", () => {

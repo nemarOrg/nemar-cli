@@ -3,7 +3,7 @@
  *
  * Reads the given and family name on a public ORCID record. It was written for
  * the CLI's old signup form, which asked for a name only when the record hid
- * one. The form went with the password routes (ADR 0095) but the route stays,
+ * one. The form went with the password routes (ADR 0097) but the route stays,
  * and these six cases lived in `signup-real-name.test.ts`, which was deleted
  * with `POST /auth/signup`, so they are kept here.
  *

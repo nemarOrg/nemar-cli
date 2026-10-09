@@ -1,5 +1,5 @@
 /**
- * The two routes that took a password answer 410 and do nothing (ADR 0095).
+ * The two routes that took a password answer 410 and do nothing (ADR 0097).
  *
  * Driven through `worker.fetch`, the production entry point, and not through a
  * local Hono app. A local app with `authRoutes` alone cannot see a route added

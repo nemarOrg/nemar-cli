@@ -52,9 +52,9 @@ function env(): Bindings {
 
 async function seedAdmin(): Promise<void> {
   db.run(
-    `INSERT INTO users (username, email, password_hash, github_username, status, role,
+    `INSERT INTO users (username, email, github_username, status, role,
                         email_verified, service_access)
-     VALUES ('mailadmin', ?, 'x', 'mailadmin-gh', 'approved', 'admin', 1, 1)`,
+     VALUES ('mailadmin', ?, 'mailadmin-gh', 'approved', 'admin', 1, 1)`,
     [ADMIN_EMAIL],
   );
   const row = db
@@ -68,13 +68,13 @@ async function seedAdmin(): Promise<void> {
   );
 }
 
-/** A CLI signup mid-flow: pending, holding a live verification token. */
+/** A historical CLI account mid-flow; migration 0093 has cleared its hash. */
 function seedUnverifiedCliUser(): void {
   db.run(
-    `INSERT INTO users (username, email, password_hash, github_username, description, status,
+    `INSERT INTO users (username, email, github_username, description, status,
                         signup_source, email_verified, verification_token,
                         verification_expires_at, service_access)
-     VALUES ('newcli', ?, 'x', 'newcli-gh', 'Studying auditory oddball responses', 'pending',
+     VALUES ('newcli', ?, 'newcli-gh', 'Studying auditory oddball responses', 'pending',
              'cli', 0, ?, datetime('now', '+1 day'), 0)`,
     [USER_EMAIL, VERIFY_TOKEN],
   );
@@ -83,9 +83,9 @@ function seedUnverifiedCliUser(): void {
 /** A verified CLI account awaiting the upload decision. */
 function seedVerifiedCliUser(): void {
   db.run(
-    `INSERT INTO users (username, email, password_hash, github_username, status, signup_source,
+    `INSERT INTO users (username, email, github_username, status, signup_source,
                         email_verified, service_access)
-     VALUES ('waiting', ?, 'x', 'waiting-gh', 'verified', 'cli', 1, 0)`,
+     VALUES ('waiting', ?, 'waiting-gh', 'verified', 'cli', 1, 0)`,
     ["waiting@nemar.test"],
   );
 }
