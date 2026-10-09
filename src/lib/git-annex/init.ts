@@ -475,7 +475,12 @@ export async function gitAnnexAdd(
   path: string,
   targets: string | string[] = ".",
   chunking: { maxPaths?: number; maxBytes?: number } = {},
-  options: { forceLarge?: boolean; checkGitignore?: boolean; backend?: "SHA256E" } = {},
+  options: {
+    forceLarge?: boolean;
+    checkGitignore?: boolean;
+    backend?: "SHA256E";
+    onInactivityWarning?: (idleMs: number) => void;
+  } = {},
 ): Promise<{ success: boolean; error?: string }> {
   const addFlags = [
     ...(options.forceLarge ? ["--force-large"] : []),
@@ -538,7 +543,13 @@ export async function gitAnnexAdd(
 
       const { stdout, stderr, exitCode } = await runCommand(
         ["git", "annex", "add", ...addFlags, "--batch", "-z", "--json", "--json-error-messages"],
-        { cwd: path, stdin: batchTargets.map((target) => `${target}\0`).join("") },
+        {
+          cwd: path,
+          stdin: batchTargets.map((target) => `${target}\0`).join(""),
+          ...(options.onInactivityWarning
+            ? { onInactivityWarning: options.onInactivityWarning }
+            : {}),
+        },
       );
       const { responsePaths, failures } = parseAddOutput(stdout);
       if (exitCode !== 0 || failures.length > 0) {

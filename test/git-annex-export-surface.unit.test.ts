@@ -34,7 +34,12 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 
 const MODULE_EXPORTS: Record<string, string[]> = {
-  "run-command": ["credentialValues", "redactCredentials", "runCommand"],
+  "run-command": [
+    "INACTIVITY_WARNING_AFTER_MS",
+    "credentialValues",
+    "redactCredentials",
+    "runCommand",
+  ],
   prereq: [
     "checkAWSCredentials",
     "checkDownloadPrerequisites",
@@ -228,6 +233,8 @@ const INTERNAL_WIRING = [
   // the copy and presence-check errors: unit tested, consumed by sibling modules only.
   "credentialValues",
   "redactCredentials",
+  // The focused runCommand test pins the production inactivity threshold.
+  "INACTIVITY_WARNING_AFTER_MS",
   // The stat guard, the stale-flag clear and the failure text of saveDataset's skip:
   // unit tested, consumed by saveDataset itself and the tests.
   "clearStaleAssumeUnchanged",
