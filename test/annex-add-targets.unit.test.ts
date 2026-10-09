@@ -394,6 +394,7 @@ describe("progress file outliving .git (#884 review blocker, real repos)", () =>
       absolutePath: dir,
       remote: "test-dir",
       addTargets,
+      dataFiles,
       jobs: 1,
     });
     expect(outcome).toMatchObject({ status: "ok", total: 2, attempted: 2 });
@@ -435,6 +436,7 @@ describe("progress file outliving .git (#884 review blocker, real repos)", () =>
       absolutePath: dir,
       remote: "test-dir",
       addTargets: dataFiles,
+      dataFiles,
       jobs: 1,
     });
     expect(outcome).toMatchObject({ status: "ok", total: 2, attempted: 1 });

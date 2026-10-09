@@ -91,6 +91,13 @@ repository's strict NO MOCKS policy excludes. `test/upload-recorded-check.unit.t
 recorded-file presence behavior, but not expiry during copy or `fsck`, stale partial-result
 replacement, retry progress, or unknown-size batching.
 
+The resumed-copy size-map case also remains untested: a pending location-log path can be absent
+from the current `addTargets` list, so its current size must come from the complete data-file
+inventory. The available generated upload files and EDF stand-ins do not satisfy the strict
+NO FAKE DATA rule for this regression, and an empty upload-progress state with a hand-picked
+`filesToUpload` list would not represent the production resume path. Add coverage only when a
+non-synthetic sample and realistic interrupted-run state are available.
+
 `test/upload-sts-refresh.integration.test.ts` exercises API-issued leases through the upload
 transfer, but signs S3 requests to a loopback stand-in and covers pending copies rather than the
 recorded-file checks. It was skipped in this local run because `test/.env.test` and its dev API

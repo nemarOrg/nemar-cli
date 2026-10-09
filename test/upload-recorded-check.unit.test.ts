@@ -94,6 +94,7 @@ const step = (
     remote: REMOTE,
     remoteIdentity: `directory:${dir}:${REMOTE}`,
     addTargets,
+    dataFiles: addTargets,
     jobs: 2,
     ...extra,
   });
@@ -258,6 +259,7 @@ describe("what the step prints about files the remote lost", () => {
         absolutePath: dir,
         progress,
         addTargets: targets,
+        dataFiles: targets,
         jobs: 2,
         openRemote: async () => ok({ remoteIdentity: `directory:${dir}:${REMOTE}` }),
       }),
@@ -402,6 +404,7 @@ describe("a recent passed check is not repeated", () => {
       absolutePath: dir,
       progress,
       addTargets: targets,
+      dataFiles: targets,
       jobs: 2,
       openRemote: async () => ok({ remoteIdentity: directoryIdentity(store) }),
     });
@@ -426,6 +429,7 @@ describe("a recent passed check is not repeated", () => {
         absolutePath: r.dir,
         progress: r.progress,
         addTargets: targets,
+        dataFiles: r.targets,
         jobs: 2,
         openRemote: async () => ok({ remoteIdentity }),
       }),
@@ -602,6 +606,7 @@ describe("what a long check announces", () => {
     recordedNoLocal: 0,
     recordedCheckSkipped: false,
     smallNotAnnexed: { inGit: [], leftOut: [] },
+    copyBatchCount: 0,
     ...over,
   });
 

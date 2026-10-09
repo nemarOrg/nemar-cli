@@ -102,7 +102,14 @@ const transfer = (
     ok({ remoteIdentity: `directory:${dir}:${REMOTE}` }),
 ) =>
   captured(() =>
-    transferAnnexedData({ absolutePath: dir, progress, addTargets: targets, jobs: 2, openRemote }),
+    transferAnnexedData({
+      absolutePath: dir,
+      progress,
+      addTargets: targets,
+      dataFiles: targets,
+      jobs: 2,
+      openRemote,
+    }),
   );
 
 describe("a blocked tracking is recovered and retried in the same run", () => {
@@ -203,15 +210,9 @@ describe("local annex workers stay separate from S3 copy workers", () => {
     let status: string;
     try {
       const { value } = await captured(() =>
-        uploadDataToS3(
-          dir,
-          { jobs: "2", annexJobs: "8" },
-          targets,
-          targets,
-          null,
-          INFO,
-          { openRemote: async () => ok({ remoteIdentity: `directory:${dir}:${REMOTE}` }) },
-        ),
+        uploadDataToS3(dir, { jobs: "2", annexJobs: "8" }, targets, targets, null, INFO, {
+          openRemote: async () => ok({ remoteIdentity: `directory:${dir}:${REMOTE}` }),
+        }),
       );
       status = value.status;
     } finally {
@@ -239,20 +240,12 @@ describe("local annex workers stay separate from S3 copy workers", () => {
     let status: string;
     try {
       const { value } = await captured(() =>
-        uploadDataToS3(
-          dir,
-          { jobs: "2", annexJobs: "8" },
-          targets,
-          targets,
-          null,
-          INFO,
-          {
-            openRemote: async () => {
-              rmSync(join(dir, ".gitattributes"));
-              return ok({ remoteIdentity: `directory:${dir}:${REMOTE}` });
-            },
+        uploadDataToS3(dir, { jobs: "2", annexJobs: "8" }, targets, targets, null, INFO, {
+          openRemote: async () => {
+            rmSync(join(dir, ".gitattributes"));
+            return ok({ remoteIdentity: `directory:${dir}:${REMOTE}` });
           },
-        ),
+        }),
       );
       status = value.status;
     } finally {
