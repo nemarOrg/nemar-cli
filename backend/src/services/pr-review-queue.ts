@@ -61,7 +61,12 @@ import { getDatasetsTokenWithRefresher } from "./github-auth.js";
 import { deriveContexts } from "./github/branch-protection.js";
 import { GITHUB_API, ORG_NAME, ghHeaders } from "./github/shared.js";
 import { githubFetchWithRetry } from "./github/transport.js";
-import { outcomeOfRow, readAuthorOverride, readAuthorTally } from "./pr-review.js";
+import {
+  PR_REVIEW_DEADLINE_MINUTES,
+  outcomeOfRow,
+  readAuthorOverride,
+  readAuthorTally,
+} from "./pr-review.js";
 
 /** The GitHub search that defines the queue: open pull requests to `main` across the datasets org. */
 export const OPEN_PR_SEARCH = `org:${ORG_NAME} is:pr is:open base:main`;
@@ -78,12 +83,22 @@ const CONTEXTS_PER_PR = 40;
 /** The longest a Retry-After is waited out inside an admin request. */
 const MAX_THROTTLE_MS = 15_000;
 const LIVE_TIMEOUT_MS = 10_000;
-/** One GraphQL page, retries and waits included, and the whole search. A hung GitHub is an error, not a wait. */
+/**
+ * One GraphQL page (the request, its retries and their waits share one timer), and the whole search,
+ * which is checked before each page starts. A hung GitHub is an error, not a wait.
+ */
 let graphqlPageTimeoutMs = 45_000;
 const GRAPHQL_TOTAL_MS = 90_000;
+/**
+ * A review handed to GitHub this long ago with no report is not "in progress". The watchdog gives up
+ * on it after {@link PR_REVIEW_DEADLINE_MINUTES}, on a 30-minute tick, and only in production; so
+ * this is deadline plus one tick, after which the queue says it never reported rather than showing a
+ * review that will not finish as one still running.
+ */
+const OVERDUE_AFTER_MS = (PR_REVIEW_DEADLINE_MINUTES + 30) * 60_000;
 /** How many reviews of one pull request `show` lists. */
 const HISTORY_LIMIT = 20;
-/** D1 allows 100 bound parameters per query; leave room for the others. */
+/** D1 allows 100 bound parameters per query; stay under it. */
 const IN_CHUNK = 90;
 
 export function __setGraphqlTimeoutForTests(ms: number | null): void {
@@ -129,7 +144,12 @@ export interface CheckContext {
   state: CheckState;
   /** ISO timestamp used to pick the newest run of a re-run check. */
   at: string;
-  /** The GitHub App that posted a check run. Null for a commit status, which has no app. */
+  /** A check run (posted by an App) or a commit status (posted by anyone with a token). */
+  kind: "run" | "status";
+  /**
+   * The GitHub App that posted a check run. Null for a commit status, which has none, and for a
+   * check run whose App could not be read.
+   */
   appId: number | null;
 }
 
@@ -157,26 +177,30 @@ export function readCheckContext(node: unknown): CheckContext | null {
     const started = typeof n.startedAt === "string" ? n.startedAt : "";
     const appId = appIdOf(n);
     if (n.status !== "COMPLETED") {
-      return { name: n.name, state: "pending", at: started || NEWEST, appId };
+      return { name: n.name, kind: "run", state: "pending", at: started || NEWEST, appId };
     }
-    if (n.conclusion === "SUCCESS") return { name: n.name, state: "pass", at: started, appId };
+    if (n.conclusion === "SUCCESS") {
+      return { name: n.name, kind: "run", state: "pass", at: started, appId };
+    }
     if (typeof n.conclusion === "string" && CHECK_FAIL.has(n.conclusion)) {
-      return { name: n.name, state: "fail", at: started, appId };
+      return { name: n.name, kind: "run", state: "fail", at: started, appId };
     }
     // NEUTRAL and SKIPPED count as passing for a required check on GitHub. Neither of NEMAR's
     // checks emits them, so seeing one means something else is posting under the name.
-    return { name: n.name, state: "unknown", at: started, appId };
+    return { name: n.name, kind: "run", state: "unknown", at: started, appId };
   }
   if (n.__typename === "StatusContext" && typeof n.context === "string") {
     const at = typeof n.createdAt === "string" ? n.createdAt : "";
-    if (n.state === "SUCCESS") return { name: n.context, state: "pass", at, appId: null };
+    if (n.state === "SUCCESS") {
+      return { name: n.context, kind: "status", state: "pass", at, appId: null };
+    }
     if (n.state === "PENDING" || n.state === "EXPECTED") {
-      return { name: n.context, state: "pending", at: at || NEWEST, appId: null };
+      return { name: n.context, kind: "status", state: "pending", at: at || NEWEST, appId: null };
     }
     if (n.state === "FAILURE" || n.state === "ERROR") {
-      return { name: n.context, state: "fail", at, appId: null };
+      return { name: n.context, kind: "status", state: "fail", at, appId: null };
     }
-    return { name: n.context, state: "unknown", at, appId: null };
+    return { name: n.context, kind: "status", state: "unknown", at, appId: null };
   }
   return null;
 }
@@ -185,9 +209,11 @@ export function readCheckContext(node: unknown): CheckContext | null {
  * The state of the check called one of `names`: the newest run wins (a re-run replaces the failure
  * before it, and a run still queued is the newest of all). When the ruleset pins the check to a
  * GitHub App (`appId`), only that App's check runs count: anyone with push access can add a workflow
- * job with the same name, and the ruleset would not accept it, so neither should this view. No such
- * check is `missing` when the whole list was read and `unknown` when it was cut short, because a
- * check that might be on the next page is not known to be absent.
+ * job with the same name, and the ruleset would not accept it, so neither should this view. A
+ * same-named run whose App could not be read is not counted either, but it is not ignored: if it is
+ * newer than what was found, the state is `unknown`. No such check is `missing` when the whole list
+ * was read and `unknown` when it was cut short, because a check that might be on the next page is
+ * not known to be absent.
  */
 export function checkStateOf(
   contexts: readonly CheckContext[],
@@ -196,11 +222,19 @@ export function checkStateOf(
   appId?: number,
 ): CheckState {
   let best: CheckContext | null = null;
+  // The newest same-named check run whose App could not be read: it may be the pinned App's.
+  let unattributed: CheckContext | null = null;
   for (const c of contexts) {
     if (!names.includes(c.name)) continue;
-    if (appId !== undefined && c.appId !== appId) continue;
+    if (appId !== undefined && c.appId !== appId) {
+      if (c.kind === "run" && c.appId === null && (!unattributed || c.at >= unattributed.at)) {
+        unattributed = c;
+      }
+      continue;
+    }
     if (!best || c.at >= best.at) best = c;
   }
+  if (unattributed && (!best || unattributed.at > best.at)) return "unknown";
   if (best) return best.state;
   return listComplete ? "missing" : "unknown";
 }
@@ -288,22 +322,23 @@ function rec(x: unknown): Record<string, unknown> | null {
 type SkipReason = "not_a_dataset" | "unreadable" | "no_longer_open";
 
 /**
- * One search node as an open dataset pull request, or the reason it is not one. `no_longer_open` is
- * the search index lagging a merge or a retarget by a minute; it is correct to leave out and is not
- * counted. `unreadable` is a node that SHOULD have been a pull request and was not, which is counted
- * and logged, because dropping it silently would make a partial queue look whole.
+ * One search node as an open dataset pull request, or the reason it is not one. A reason is given
+ * only when the node POSITIVELY says it: a repository whose name is readable and is not a dataset
+ * id, a state or base branch that is readable and is not `OPEN` and `main`. A field that is missing
+ * or not what it should be is `unreadable`, which is counted and shown, because reading an absence
+ * as "not mine" would let a response with no fields at all end as "No open pull requests".
+ * `no_longer_open` is the search index lagging a merge or a retarget; the fetch logs how many it
+ * left out.
  */
 function readOpenPullRequest(node: unknown): { pr: OpenPullRequest } | { skip: SkipReason } {
   const n = rec(node);
   if (!n || n.__typename !== "PullRequest") return { skip: "unreadable" };
   const repo = rec(n.repository);
   const owner = rec(repo?.owner);
-  if (
-    typeof repo?.name !== "string" ||
-    !isValidDatasetId(repo.name) ||
-    typeof owner?.login !== "string" ||
-    owner.login.toLowerCase() !== ORG_NAME.toLowerCase()
-  ) {
+  if (typeof repo?.name !== "string" || typeof owner?.login !== "string") {
+    return { skip: "unreadable" };
+  }
+  if (!isValidDatasetId(repo.name) || owner.login.toLowerCase() !== ORG_NAME.toLowerCase()) {
     return { skip: "not_a_dataset" };
   }
   const number = n.number;
@@ -311,6 +346,9 @@ function readOpenPullRequest(node: unknown): { pr: OpenPullRequest } | { skip: S
     return { skip: "unreadable" };
   }
   if (typeof n.headRefOid !== "string" || !SHA40.test(n.headRefOid)) return { skip: "unreadable" };
+  if (typeof n.state !== "string" || typeof n.baseRefName !== "string") {
+    return { skip: "unreadable" };
+  }
   if (n.state !== "OPEN" || n.baseRefName !== "main") return { skip: "no_longer_open" };
 
   const author = rec(n.author);
@@ -339,15 +377,18 @@ function readOpenPullRequest(node: unknown): { pr: OpenPullRequest } | { skip: S
   const checksAreHeads = commit !== null && commit.oid === n.headRefOid;
   const contexts = checksAreHeads ? rec(rec(commit.statusCheckRollup)?.contexts) : null;
   const list: CheckContext[] = [];
+  let dropped = false;
   if (Array.isArray(contexts?.nodes)) {
     for (const c of contexts.nodes) {
       const parsed = readCheckContext(c);
       if (parsed) list.push(parsed);
+      else dropped = true;
     }
   }
   const complete = contexts !== null && rec(contexts.pageInfo)?.hasNextPage === false;
-  // No rollup at all means no check has run on the commit, which is "missing", not "unknown".
-  const readable = checksAreHeads && (commit.statusCheckRollup === null || complete);
+  // No rollup at all means no check has run on the commit, which is "missing", not "unknown". A
+  // node that could not be read might have been the check, so then "none" is not known either.
+  const readable = checksAreHeads && !dropped && (commit.statusCheckRollup === null || complete);
   const [bidsCtx, versionCtx] = deriveContexts(repo.name);
   return {
     pr: {
@@ -369,6 +410,13 @@ function readOpenPullRequest(node: unknown): { pr: OpenPullRequest } | { skip: S
       version: checkStateOf(list, [versionCtx.context], readable, versionCtx.integration_id),
     },
   };
+}
+
+/** `repository#number` for a search node that names both, else null. Used to count a node once. */
+function searchNodeKey(node: unknown): string | null {
+  const n = rec(node);
+  const name = rec(n?.repository)?.name;
+  return typeof name === "string" && typeof n?.number === "number" ? `${name}#${n.number}` : null;
 }
 
 function isTimeout(err: unknown): boolean {
@@ -394,7 +442,9 @@ export async function fetchOpenPullRequests(env: Bindings): Promise<OpenPullRequ
   const prs: OpenPullRequest[] = [];
   let notADataset = 0;
   let unreadable = 0;
+  let noLongerOpen = 0;
   let nodesSeen = 0;
+  let shifted = false;
   let issueCount = 0;
   let after: string | null = null;
   let more = false;
@@ -434,14 +484,32 @@ export async function fetchOpenPullRequests(env: Bindings): Promise<OpenPullRequ
       throw new QueueError(502, "github_unavailable", "GitHub could not be reached.");
     }
     if (!res.ok) {
-      console.error(`[pr-queue] GraphQL answered HTTP ${res.status}`);
+      // The status alone cannot tell a permission the App lacks from a limit that will lift.
+      const said = sanitizeNote(await res.text().catch(() => ""), 160);
+      console.error(`[pr-queue] GraphQL answered HTTP ${res.status}: ${said || "no body"}`);
+      if (
+        res.status === 429 ||
+        (res.status === 403 &&
+          (/rate limit|abuse/i.test(said) || res.headers.get("x-ratelimit-remaining") === "0"))
+      ) {
+        throw new QueueError(
+          503,
+          "github_rate_limited",
+          "GitHub is rate limiting the search. Try again in a minute or two.",
+        );
+      }
       throw new QueueError(
         502,
         "github_refused",
-        `GitHub refused the search (HTTP ${res.status}).`,
+        `GitHub refused the search (HTTP ${res.status})${said ? `: ${said}` : ""}.`,
       );
     }
-    const body = rec(await res.json().catch(() => null));
+    const body = rec(
+      await res.json().catch((err) => {
+        console.error(`[pr-queue] GraphQL answer could not be read (${errMessage(err)})`);
+        return null;
+      }),
+    );
     const errors = body?.errors;
     if (Array.isArray(errors) && errors.length > 0) {
       const first = rec(errors[0]);
@@ -469,21 +537,30 @@ export async function fetchOpenPullRequests(env: Bindings): Promise<OpenPullRequ
         "GitHub's search answered in an unexpected shape.",
       );
     }
-    issueCount = typeof search.issueCount === "number" ? search.issueCount : issueCount;
+    const count = typeof search.issueCount === "number" ? search.issueCount : issueCount;
+    // GitHub's search cursors are positions. If the count moved between pages, a pull request
+    // closed or opened mid-read and the pages shifted, which can hide one that is still open.
+    if (page > 0 && count !== issueCount) shifted = true;
+    issueCount = count;
     for (const node of search.nodes) {
+      // A pull request listed twice (a page boundary moved while paging) counts once, so a pull
+      // request the shift hid is not covered for by the one seen twice.
+      const nodeKey = searchNodeKey(node);
+      if (nodeKey !== null) {
+        if (seen.has(nodeKey)) continue;
+        seen.add(nodeKey);
+      }
       nodesSeen++;
       const read = readOpenPullRequest(node);
       if ("skip" in read) {
         if (read.skip === "not_a_dataset") notADataset++;
-        else if (read.skip === "unreadable") {
+        else if (read.skip === "no_longer_open") noLongerOpen++;
+        else {
           unreadable++;
           console.warn("[pr-queue] a search result could not be read as a pull request");
         }
         continue;
       }
-      const key = `${read.pr.datasetId}#${read.pr.prNumber}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
       prs.push(read.pr);
     }
     const info = rec(search.pageInfo);
@@ -493,8 +570,14 @@ export async function fetchOpenPullRequests(env: Bindings): Promise<OpenPullRequ
     if (after === null) break;
   }
   // `more` still true means the page limit (or a missing cursor) stopped the read; `issueCount`
-  // above what was read means GitHub's own 1000-result cap did.
-  const truncated = more || issueCount > nodesSeen;
+  // above what was read means GitHub's own 1000-result cap did; `shifted` means the set changed
+  // while it was being read.
+  const truncated = more || shifted || issueCount > nodesSeen;
+  if (noLongerOpen > 0) {
+    console.info(
+      `[pr-queue] ${noLongerOpen} search result(s) were no longer open pull requests to main`,
+    );
+  }
   return { prs, truncated, notADataset, unreadable };
 }
 
@@ -523,14 +606,31 @@ const REVIEW_COLUMNS = `id, dataset_id, pr_number, head_sha, author_id, author_l
 
 const REVIEW_STATE_SET: ReadonlySet<string> = new Set(REVIEW_STATES);
 
-/** What a stored row means, in the queue's words, ignoring which commit it is about. */
-export function meaningOf(row: Pick<ReviewRow, "state" | "verdict" | "detail">): {
+/** D1 writes `datetime('now')` ("2026-10-09 02:10:00", UTC); a value with a zone is read as given. */
+function storedTime(value: string): number {
+  return Date.parse(/Z|[+-]\d\d:\d\d$/.test(value) ? value : `${value.replace(" ", "T")}Z`);
+}
+
+/**
+ * What a stored row means, in the queue's words, ignoring which commit it is about. A `dispatched`
+ * row older than {@link OVERDUE_AFTER_MS} reads as `could_not_decide` / `unreported`: the Worker
+ * never ages a row itself (the production watchdog does, the dev Worker never), so without this a
+ * review that will not finish shows as running forever and is never offered to an administrator.
+ */
+export function meaningOf(
+  row: Pick<ReviewRow, "state" | "verdict" | "detail"> & { created_at?: string },
+  now: number = Date.now(),
+): {
   verdict: QueueVerdict;
   detail: VerdictDetail | null;
 } {
   switch (row.state) {
-    case "dispatched":
-      return { verdict: "in_progress", detail: null };
+    case "dispatched": {
+      const started = row.created_at === undefined ? Number.NaN : storedTime(row.created_at);
+      return Number.isFinite(started) && now - started > OVERDUE_AFTER_MS
+        ? { verdict: "could_not_decide", detail: "unreported" }
+        : { verdict: "in_progress", detail: null };
+    }
     case "reported":
       // Anything that is not one of the three derived verdicts is a row nobody can stand behind.
       return row.verdict === "pass" || row.verdict === "fail" || row.verdict === "uncertain"
@@ -572,7 +672,11 @@ export interface Classified {
  * because a pass about a commit nobody can name is not a pass about this one. The stored verdict
  * rides along as `stale_verdict` and `review_current` stays null (unknown, not false).
  */
-export function classify(row: ReviewRow | null, headSha: string | null): Classified {
+export function classify(
+  row: ReviewRow | null,
+  headSha: string | null,
+  now: number = Date.now(),
+): Classified {
   if (!row) {
     return {
       verdict: "not_reviewed",
@@ -582,7 +686,7 @@ export function classify(row: ReviewRow | null, headSha: string | null): Classif
       stale_verdict: null,
     };
   }
-  const meant = meaningOf(row);
+  const meant = meaningOf(row, now);
   if (headSha === null || row.head_sha !== headSha) {
     return {
       verdict: "not_reviewed",
@@ -607,9 +711,10 @@ const headKey = (ds: string, pr: number, sha: string) => `${ds}#${pr}#${sha}`;
 /**
  * The reviews of the given datasets, without the (large) stored report. Two lookups are kept
  * because they answer different questions: `byHead` says whether the CURRENT commit was reviewed,
- * `newest` says what the last review concluded when it was not. A force-push back to a commit that
- * was already reviewed adds no row (the table is unique per commit), so the current commit's review
- * is then NOT the newest one.
+ * `newest` says what the last review concluded when it was not. A force-push back to a reviewed
+ * commit adds no row (the table is unique per commit); when GitHub's delivery for it arrives it
+ * refreshes that row's `seen_at`, so the row is the newest, and when the delivery was missed the
+ * newest row is still the other commit's, which is why `byHead` is consulted first.
  */
 async function loadReviews(db: D1Database, datasetIds: readonly string[]): Promise<Reviews> {
   const byHead = new Map<string, ReviewRow>();
@@ -881,6 +986,13 @@ function outcomeOf(row: ReviewRow & { report: string | null }): ReviewOutcome | 
 
 type StoredReview = ReviewRow & { report: string | null };
 
+/** Higher is stricter: what a reader would have to overcome to approve. */
+const STRICTNESS: Record<ReadVerdict, number> = { pass: 0, uncertain: 1, fail: 2 };
+
+function isReadVerdict(v: unknown): v is ReadVerdict {
+  return v === "pass" || v === "fail" || v === "uncertain";
+}
+
 export async function readPrReviewDetail(
   env: Bindings,
   datasetId: string,
@@ -940,21 +1052,29 @@ export async function readPrReviewDetail(
   }
   const row: StoredReview | null = stored ?? results[0] ?? null;
 
-  // The verdict an approval would lean on is re-derived from the stored report, not read from the
-  // column: a report that no longer parses is "could not decide", except that a stored `fail` stays
-  // a `fail`, because an unreadable report must never make a rejection easier to approve.
+  // The verdict an approval would lean on is the STRICTER of the stored column and the one
+  // re-derived from the stored report, so either source can lower it and neither can raise it: a
+  // report that no longer parses is "could not decide" unless the column says `fail`, and a later
+  // change to the rules that would now pass an old rejection does not make it easier to approve.
+  // The list reads the column alone; the two differ only when a rule changed or a report is corrupt.
   const outcome = row ? outcomeOf(row) : null;
   let derived: Pick<ReviewRow, "state" | "verdict" | "detail"> | null = row;
   if (row && row.state === "reported") {
-    derived = {
-      ...row,
-      verdict:
-        outcome?.kind === "reported"
-          ? verdictOf(outcome.report)
-          : row.verdict === "fail"
-            ? "fail"
-            : "could_not_decide",
-    };
+    const stored = isReadVerdict(row.verdict) ? row.verdict : null;
+    let verdict: QueueVerdict;
+    if (outcome?.kind === "reported") {
+      const fromReport = verdictOf(outcome.report);
+      if (stored !== null && stored !== fromReport) {
+        console.warn(
+          `[pr-queue] review ${row.id}: the stored verdict (${stored}) disagrees with the report (${fromReport}); showing the stricter`,
+        );
+      }
+      verdict =
+        stored !== null && STRICTNESS[stored] > STRICTNESS[fromReport] ? stored : fromReport;
+    } else {
+      verdict = stored === "fail" ? "fail" : "could_not_decide";
+    }
+    derived = { ...row, verdict };
   }
   const own = derived ? meaningOf(derived) : null;
   const review: ReviewRecord | null =
@@ -1006,6 +1126,8 @@ export async function readPrReviewDetail(
     history,
     history_truncated: results.length > HISTORY_LIMIT,
     live: livePr,
+    live_status:
+      live.kind === "found" ? "found" : live.kind === "missing" ? "missing" : "unreadable",
     review_current: effective.review_current,
     author,
   };
@@ -1151,7 +1273,9 @@ async function resolveInReviews(db: D1Database, login: string): Promise<Resolved
  * `clearing`: GitHub first, like `writing`, because GitHub is the one that knows who holds a login
  * NOW; a stored login can have been renamed away and reused. Only when GitHub cannot say (the
  * account is gone, or GitHub is down) is the login an override stored used, and only if exactly one
- * account stored it. A clear can delete only a decision that already exists.
+ * account stored it. If no override stored it, the review history is tried as for `reading`, which
+ * can name an account that has since been renamed; that is safe here because a clear deletes only a
+ * decision that already exists for the id it finds, and says when there was none.
  */
 export async function resolveAuthor(
   env: Bindings,
@@ -1173,7 +1297,9 @@ export async function resolveAuthor(
       throw new QueueError(
         409,
         "ambiguous_login",
-        `More than one account that once used the name ${login} has a decision on file, and GitHub could not say which holds it now. Try again when GitHub answers.`,
+        "missing" in at
+          ? `More than one account that once used the name ${login} has a decision on file, and GitHub has no account by that name now, so which one is meant cannot be told from here.`
+          : `More than one account that once used the name ${login} has a decision on file, and GitHub could not say which holds it now. Try again when GitHub answers.`,
       );
     }
     if (results.length === 1) {

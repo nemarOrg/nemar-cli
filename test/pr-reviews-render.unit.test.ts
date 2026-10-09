@@ -22,7 +22,9 @@ const ESC = String.fromCharCode(27);
 const ANSI = new RegExp(`${ESC}\\[[0-9;]*m`, "g");
 /** Anything a terminal could act on: control, format (zero-width, bidi overrides), line and paragraph separators. */
 const DANGEROUS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
-const HOSTILE = `${ESC}[2J${ESC}]0;title\u0007x‮y​z w`;
+// Escape sequences, a bidirectional override, a zero-width space and a line separator, written as
+// escapes so the fixture is readable in a diff.
+const HOSTILE = `${ESC}[2J${ESC}]0;title\u0007x\u202ey\u200bz\u2028w`;
 
 function entry(over: Partial<QueueEntry> = {}): QueueEntry {
   return {
@@ -116,7 +118,7 @@ describe("renderQueue", () => {
     for (const l of lines) expect(DANGEROUS.test(l.replace(ANSI, ""))).toBe(false);
   });
 
-  test("marks what you can act on, flags drafts, and names an older commit's review", () => {
+  test("marks what you can act on, flags drafts, and names another commit's review", () => {
     const rows = renderQueue([
       entry({ pr_number: 1 }),
       entry({ pr_number: 2, needs_you: false, verdict: "fail" }),
@@ -132,7 +134,7 @@ describe("renderQueue", () => {
     expect(rows[1]).toMatch(/^\* nm000201 +#1 /);
     expect(rows[2]).toMatch(/^ {2}nm000201 +#2 .* fail /);
     expect(rows[3]).toContain("pass [draft]");
-    expect(rows[4]).toContain("not reviewed (older commit)");
+    expect(rows[4]).toContain("not reviewed (other commit)");
     // Fork or branch.
     expect(rows[1]).toContain("branch add-subjects");
     expect(renderQueue([entry({ from_fork: true, head_label: "bob:fix" })])[1]).toContain(

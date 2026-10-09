@@ -1,6 +1,7 @@
 /**
  * Approving a dataset pull request as the administrator themselves (ADR 0093): the GitHub side,
- * driven against a local `Bun.serve()` stand-in for api.github.com that answers by WHO is asking.
+ * driven against a local `Bun.serve()` stand-in for api.github.com that answers `GET /user` by token
+ * and records every request with the token it carried.
  *
  * What is pinned is what keeps an approval honest: only a person's token is accepted, the approval
  * is recorded on the commit that was shown, the answer is checked rather than assumed, and a
@@ -19,6 +20,7 @@ import {
   mergeWhenClean,
   pullRequestUrl,
   refusalFor,
+  reviewForApproval,
   submitApproval,
   whoAmI,
 } from "../src/lib/pr-review-approve";
@@ -102,6 +104,18 @@ describe("the administrator's own token", () => {
     expect(r.ok).toBe(false);
   });
 
+  test("a gh that never answers (a locked keyring) is reported, not waited for", async () => {
+    let asked: { timeout?: number } | undefined;
+    const hung = (async (_cmd: string[], options: { timeout?: number }) => {
+      asked = options;
+      return { stdout: "", stderr: "timed out", exitCode: 1, timedOut: true };
+    }) as never;
+    const r = await adminGitHubToken({}, hung);
+    expect(asked?.timeout).toBeGreaterThan(0);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("did not answer");
+  });
+
   test("falls back to the token gh holds, and says why when it has none", async () => {
     const good = (async () => ({ stdout: "gho_from_gh\n", stderr: "", exitCode: 0 })) as never;
     expect(await adminGitHubToken({}, good)).toEqual({
@@ -179,6 +193,16 @@ describe("who a token is", () => {
     expect(await whoAmI(APP_TOKEN, base())).toMatchObject({ ok: false, kind: "not_a_person" });
   });
 
+  test("a 200 whose body cannot be read is unreadable, not 'an app token'", async () => {
+    const proxy = Bun.serve({ port: 0, fetch: () => new Response("<html>proxy</html>") });
+    try {
+      const r = await whoAmI(ADMIN_TOKEN, `http://127.0.0.1:${proxy.port}`);
+      expect(r).toMatchObject({ ok: false, kind: "unreachable" });
+    } finally {
+      proxy.stop(true);
+    }
+  });
+
   test("an unreachable GitHub is said to be unreachable, which is not a verdict on the token", async () => {
     const r = await whoAmI(ADMIN_TOKEN, "http://127.0.0.1:1");
     expect(r).toMatchObject({ ok: false, kind: "unreachable" });
@@ -225,14 +249,65 @@ describe("what the review's verdict allows", () => {
     }
   });
 
-  test("a verdict this version does not know reads as needing a person, never as a pass", () => {
+  test("a verdict word this version does not know is not a verdict", () => {
     expect(asVerdict("pass")).toBe("pass");
-    expect(asVerdict("great")).toBe("could_not_decide");
-    expect(asVerdict(undefined)).toBe("could_not_decide");
-    expect(asVerdict(null)).toBe("could_not_decide");
-    expect(approvalGate({ verdict: asVerdict("brilliant"), staleVerdict: null }).kind).toBe(
-      "confirm",
+    for (const odd of ["great", "", undefined, null, 3, {}]) expect(asVerdict(odd)).toBeNull();
+  });
+});
+
+describe("reading the review the API sent", () => {
+  const good = {
+    verdict: "pass",
+    head_sha: SHA_A,
+    detail: null,
+    stale_verdict: null,
+    review_current: true,
+    author: { standing: { paused: false, because: "record" } },
+  };
+
+  test("a well-formed answer about this commit is read", () => {
+    expect(reviewForApproval(good, SHA_A)).toEqual({
+      ok: true,
+      verdict: "pass",
+      detail: null,
+      staleVerdict: null,
+      reviewCurrent: true,
+      contributorNote: null,
+    });
+  });
+
+  test("a paused contributor is named, because that is what an approver most needs to know", () => {
+    const r = reviewForApproval(
+      {
+        ...good,
+        verdict: "not_reviewed",
+        detail: "contributor_paused",
+        review_current: null,
+        author: { standing: { paused: true, because: "maintainer" } },
+      },
+      SHA_A,
     );
+    expect(r).toMatchObject({ ok: true, detail: "contributor_paused" });
+    if (r.ok) expect(r.contributorNote).toContain("paused by a maintainer");
+  });
+
+  test("anything that cannot be read as an answer about THIS commit is unread, which needs --force", () => {
+    const cases: Array<[string, unknown]> = [
+      ["no body", null],
+      ["a verdict this CLI does not know", { ...good, verdict: "brilliant" }],
+      ["no verdict", { head_sha: SHA_A }],
+      ["a different commit (a Worker that ignored ?head)", { ...good, head_sha: SHA_B }],
+      ["no commit", { ...good, head_sha: null }],
+      ["a stale verdict that is not one", { ...good, stale_verdict: "great" }],
+      ["a review_current that is not a boolean", { ...good, review_current: "yes" }],
+    ];
+    for (const [label, body] of cases) {
+      const r = reviewForApproval(body, SHA_A);
+      expect(r.ok, label).toBe(false);
+    }
+    // An unknown word is not "could not decide": that is a question --yes would answer.
+    const unknown = reviewForApproval({ ...good, verdict: "brilliant" }, SHA_A);
+    if (!unknown.ok) expect(unknown.why).toContain("does not know");
   });
 });
 
@@ -347,23 +422,61 @@ describe("approving", () => {
         "ok",
         `http://127.0.0.1:${dead.port}`,
       );
-      expect(r).toMatchObject({ ok: false, status: 0 });
+      expect(r).toMatchObject({ ok: false, status: 0, outcome: "unknown" });
+      // The read before a merge failed, so no merge was sent: that is not "may have merged".
       const m = await mergeWhenClean(ADMIN_TOKEN, "nm000201", 7, SHA_A, "merge", {
         base: `http://127.0.0.1:${dead.port}`,
         sleep: async () => {},
       });
-      expect(m).toMatchObject({ ok: false, status: 0 });
+      expect(m).toMatchObject({ ok: false, status: 0, outcome: "not_sent" });
     } finally {
       dead.stop(true);
     }
   });
 
-  test("GitHub's refusal comes through in plain words", async () => {
+  test("GitHub's refusal comes through in plain words, as a refusal", async () => {
     gh.pulls["nm000201#7"] = { sha: SHA_A };
     gh.reviewStatus = 422;
     const r = await approve();
-    expect(r).toMatchObject({ ok: false, status: 422 });
+    expect(r).toMatchObject({ ok: false, status: 422, outcome: "refused" });
     if (!r.ok) expect(r.reason).toContain("Can not approve your own pull request");
+  });
+
+  test("a review that exists but is not the approval asked for says what it is", async () => {
+    gh.pulls["nm000201#7"] = { sha: SHA_A };
+    gh.reviewState = "COMMENTED";
+    const r = await approve();
+    expect(r).toMatchObject({ ok: false, outcome: "different" });
+    if (!r.ok) expect(r.reason).toContain("state COMMENTED");
+    gh.reviewState = null;
+    gh.reviewCommit = SHA_B;
+    const c = await approve();
+    expect(c).toMatchObject({ ok: false, outcome: "different" });
+    if (!c.ok) expect(c.reason).toContain("commit bbbbbbb");
+    const other = await approve(SHA_A, "someone-else");
+    expect(other).toMatchObject({ ok: false, outcome: "different" });
+    if (!other.ok) expect(other.reason).toContain("by @queueadmin-gh");
+  });
+
+  test("an answer that cannot be read, or a gateway error, may have been applied: unknown, not refused", async () => {
+    gh.pulls["nm000201#7"] = { sha: SHA_A };
+    // The approval IS recorded; only the answer is unreadable.
+    gh.unreadableAnswers = true;
+    const unreadable = await approve();
+    expect(unreadable).toMatchObject({ ok: false, status: 200, outcome: "unknown" });
+    expect(gh.seen.filter((s) => s.method === "POST" && s.path.endsWith("/reviews"))).toHaveLength(
+      1,
+    );
+
+    gh.unreadableAnswers = false;
+    for (const status of [500, 502, 504]) {
+      gh.reviewStatus = status;
+      expect(await approve(), String(status)).toMatchObject({ ok: false, outcome: "unknown" });
+    }
+    for (const status of [401, 403, 404, 422]) {
+      gh.reviewStatus = status;
+      expect(await approve(), String(status)).toMatchObject({ ok: false, outcome: "refused" });
+    }
   });
 });
 
@@ -397,7 +510,8 @@ describe("merging", () => {
   });
 
   test("never merges around the ruleset: anything but clean is reported and nothing is sent", async () => {
-    for (const state of ["blocked", "behind", "dirty", "unstable", "draft"]) {
+    // A state this code has never heard of is not clean either.
+    for (const state of ["blocked", "behind", "dirty", "unstable", "draft", "brand_new_state"]) {
       gh.reset();
       gh.pulls["nm000201#7"] = { sha: SHA_A, mergeableState: state };
       const r = await merge();
@@ -432,8 +546,88 @@ describe("merging", () => {
     gh.pulls["nm000201#7"] = { sha: SHA_A, mergeableState: "clean" };
     gh.mergeStatus = 405;
     const r = await merge();
-    expect(r).toMatchObject({ ok: false, status: 405 });
+    expect(r).toMatchObject({ ok: false, status: 405, outcome: "refused" });
     if (!r.ok) expect(r.reason).toContain("not mergeable");
+  });
+
+  test("only `clean` merges: has_hooks (a GitHub Enterprise Server value) is not clean", async () => {
+    gh.pulls["nm000201#7"] = { sha: SHA_A, mergeableState: "has_hooks" };
+    const r = await merge();
+    expect(r).toMatchObject({ ok: false, status: 405, outcome: "not_sent" });
+    expect(puts()).toHaveLength(0);
+  });
+
+  test("every decision not to ask says nothing was sent", async () => {
+    gh.pulls["nm000201#7"] = { sha: SHA_A, mergeableState: "blocked" };
+    expect(await merge()).toMatchObject({ ok: false, outcome: "not_sent" });
+    gh.pulls["nm000201#7"] = { sha: SHA_B, mergeableState: "clean" };
+    expect(await merge("merge", SHA_A)).toMatchObject({ ok: false, outcome: "not_sent" });
+  });
+
+  test("a merge answered by a gateway error, or by a body that cannot be read, may have happened", async () => {
+    gh.pulls["nm000201#7"] = { sha: SHA_A, mergeableState: "clean" };
+    gh.mergeStatus = 502;
+    expect(await merge()).toMatchObject({ ok: false, status: 502, outcome: "unknown" });
+    gh.mergeStatus = 200;
+    gh.unreadableAnswers = true;
+    const r = await merge();
+    expect(r).toMatchObject({ ok: false, status: 200, outcome: "unknown" });
+    if (!r.ok) expect(r.reason).toContain("did not say the pull request was merged");
+  });
+
+  test("a 200 that says merged: false is not a merge", async () => {
+    const srv = Bun.serve({
+      port: 0,
+      fetch(req) {
+        if (req.method === "PUT") return Response.json({ merged: false, message: "Not merged" });
+        return Response.json({
+          state: "open",
+          merged: false,
+          draft: false,
+          base: { ref: "main" },
+          head: { sha: SHA_A },
+          user: { login: "alice" },
+          mergeable_state: "clean",
+        });
+      },
+    });
+    try {
+      const r = await mergeWhenClean(ADMIN_TOKEN, "nm000201", 7, SHA_A, "merge", {
+        base: `http://127.0.0.1:${srv.port}`,
+        sleep: async () => {},
+      });
+      expect(r.ok).toBe(false);
+    } finally {
+      srv.stop(true);
+    }
+  });
+
+  test("a merge request that gets no answer is unknown", async () => {
+    // Serves the read, then drops the connection on the merge itself.
+    const srv = Bun.serve({
+      port: 0,
+      fetch(req) {
+        if (req.method === "PUT") {
+          queueMicrotask(() => srv.stop(true));
+          return new Promise<Response>(() => {});
+        }
+        return Response.json({
+          state: "open",
+          merged: false,
+          draft: false,
+          base: { ref: "main" },
+          head: { sha: SHA_A },
+          user: { login: "alice" },
+          mergeable_state: "clean",
+        });
+      },
+    });
+    const r = await mergeWhenClean(ADMIN_TOKEN, "nm000201", 7, SHA_A, "merge", {
+      base: `http://127.0.0.1:${srv.port}`,
+      sleep: async () => {},
+    });
+    srv.stop(true);
+    expect(r).toMatchObject({ ok: false, status: 0, outcome: "unknown" });
   });
 });
 

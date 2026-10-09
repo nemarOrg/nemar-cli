@@ -2154,7 +2154,7 @@ export type {
   SetOverrideResponse,
 } from "../../../shared/contract/pr-review-admin.js";
 
-/** Every open pull request to `main` in `nemarDatasets`, with its latest automated review. */
+/** Every open pull request to `main` in `nemarDatasets`, with the automated review of its current commit. */
 export async function listPrReviews(filters: {
   verdicts?: string[];
   dataset?: string;

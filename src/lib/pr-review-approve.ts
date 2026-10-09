@@ -20,11 +20,14 @@
  *   administrator was shown, so a push that lands in between leaves the approval on the commit they
  *   read.
  * - **A merge is a client-side check, not enforcement.** It is attempted once, only if GitHub
- *   reports the pull request `clean` (or `has_hooks`); it re-asks for a few seconds while GitHub is
- *   still working the state out, does not wait for pending checks, sends the approved `sha`, and
- *   otherwise stops with the approval standing. An administrator can be a bypass actor on the
+ *   reports the pull request `clean`; it re-asks for a few seconds while GitHub is still working
+ *   the state out, does not wait for pending checks, sends the approved `sha`, and otherwise stops
+ *   with the approval standing. An administrator can be a bypass actor on the
  *   ruleset, so this does not attempt a merge GitHub reports as blocked; the ruleset is what
  *   enforces, and it is not this code's job to defeat it.
+ * - **A write whose result is not known is said to be unknown.** A request that got no answer, or
+ *   an answer that cannot be read, may have been applied; it is reported as `unknown`, never as a
+ *   refusal, and so is a 5xx from a gateway in front of GitHub.
  */
 
 import type { QueueVerdict, ReadVerdict } from "../../shared/contract/pr-review-admin.js";
@@ -34,6 +37,7 @@ import { runCommand } from "./git-annex/run-command.js";
 
 export const DATASETS_ORG = "nemarDatasets";
 const REQUEST_TIMEOUT_MS = 20_000;
+const GH_TOKEN_TIMEOUT_MS = 15_000;
 
 /** The one place a GitHub URL for a dataset pull request is built. */
 export function pullRequestUrl(datasetId: string, prNumber: number): string {
@@ -84,12 +88,19 @@ export async function adminGitHubToken(
   const fromEnv = env.GH_TOKEN?.trim();
   if (fromEnv) return { ok: true, token: fromEnv, source: "GH_TOKEN" };
   try {
-    const { stdout, exitCode, stderr } = await run(
+    const { stdout, exitCode, stderr, timedOut } = await run(
       ["gh", "auth", "token", "--hostname", "github.com"],
       // `gh` prefers these to the login it stores, which would answer with a token that is not
-      // the account `gh auth status` shows. Ask for the stored one.
-      { unsetEnv: ["GH_TOKEN", "GITHUB_TOKEN"] },
+      // the account `gh auth status` shows. Ask for the stored one. The timeout is for a locked
+      // keyring that waits for a prompt nobody can see.
+      { unsetEnv: ["GH_TOKEN", "GITHUB_TOKEN"], timeout: GH_TOKEN_TIMEOUT_MS },
     );
+    if (timedOut) {
+      return {
+        ok: false,
+        reason: `gh did not answer within ${GH_TOKEN_TIMEOUT_MS / 1000} seconds (a locked keyring waiting for a prompt?). Set GH_TOKEN, or run 'gh auth status'.`,
+      };
+    }
     if (exitCode === 0 && stdout.trim()) return { ok: true, token: stdout.trim(), source: "gh" };
     return {
       ok: false,
@@ -167,11 +178,18 @@ export async function whoAmI(token: string, base = githubApiBase()): Promise<Ide
       reason: `GitHub answered HTTP ${res.status} when asked whose token this is. Try again in a moment.`,
     };
   }
-  const u = (await res.json().catch(() => null)) as {
-    login?: unknown;
-    id?: unknown;
-    type?: unknown;
-  } | null;
+  // A 200 whose body cannot be read says nothing about the token: it is not "an app token".
+  const unreadable = Symbol("unreadable");
+  const parsed = await res.json().catch(() => unreadable);
+  if (parsed === unreadable) {
+    return {
+      ok: false,
+      kind: "unreachable",
+      reason:
+        "GitHub answered, but the answer could not be read when asked whose token this is. Try again in a moment.",
+    };
+  }
+  const u = parsed as { login?: unknown; id?: unknown; type?: unknown } | null;
   if (
     typeof u?.login !== "string" ||
     typeof u.id !== "number" ||
@@ -289,14 +307,77 @@ export function refusalFor(pr: PullRequestFacts): string | null {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * A verdict word from the NEMAR API as one this CLI knows. The CLI ships on npm independently of
- * the Worker, so a newer server may say something this version has never heard of; that must read
- * as "needs a person", never crash the gate and never read as a pass.
+ * A verdict word from the NEMAR API as one this CLI knows, or null for anything else. The CLI ships
+ * on npm independently of the Worker, so a newer server may say something this version has never
+ * heard of. That is NOT a verdict: it reads as unknown (see {@link reviewForApproval}), which needs
+ * `--force`, and never as "could not decide", a question `--yes` would answer.
  */
-export function asVerdict(raw: unknown): QueueVerdict {
+export function asVerdict(raw: unknown): QueueVerdict | null {
   return typeof raw === "string" && (QUEUE_VERDICTS as readonly string[]).includes(raw)
     ? (raw as QueueVerdict)
-    : "could_not_decide";
+    : null;
+}
+
+const READ_VERDICT_WORDS: readonly string[] = ["pass", "fail", "uncertain"];
+
+export type ReviewForApproval =
+  | {
+      ok: true;
+      verdict: QueueVerdict;
+      /** The closed reason behind a `not_reviewed` or `could_not_decide`, as the server sent it. */
+      detail: string | null;
+      staleVerdict: ReadVerdict | null;
+      reviewCurrent: boolean | null;
+      /** Set when the contributor's reviews are paused, in words, so the approver sees why. */
+      contributorNote: string | null;
+    }
+  | { ok: false; why: string };
+
+/**
+ * The review a `GET /admin/pr-reviews/:dataset/:pr?head=<sha>` answer stands for, checked rather
+ * than cast. Anything that cannot be read as an answer about THIS commit is `ok: false`, which the
+ * caller treats as an unread review (it needs `--force`): a body with no verdict, a verdict this
+ * CLI does not know, or an answer about another commit (a Worker that ignored `head`) must not be
+ * softened into a gate that `--yes` skips.
+ */
+export function reviewForApproval(d: unknown, head: string): ReviewForApproval {
+  const r = typeof d === "object" && d !== null ? (d as Record<string, unknown>) : null;
+  if (!r) return { ok: false, why: "the NEMAR API sent no review" };
+  const verdict = asVerdict(r.verdict);
+  if (verdict === null) {
+    return {
+      ok: false,
+      why: "the NEMAR API sent a verdict this version of the CLI does not know; update the CLI",
+    };
+  }
+  if (r.head_sha !== head) {
+    return {
+      ok: false,
+      why: "the NEMAR API answered about a different commit than GitHub reports",
+    };
+  }
+  const stale = r.stale_verdict ?? null;
+  if (stale !== null && !READ_VERDICT_WORDS.includes(stale as string)) {
+    return { ok: false, why: "the NEMAR API sent a review this version of the CLI cannot read" };
+  }
+  const current = r.review_current ?? null;
+  if (current !== null && typeof current !== "boolean") {
+    return { ok: false, why: "the NEMAR API sent a review this version of the CLI cannot read" };
+  }
+  const standing = (r.author as { standing?: { paused?: unknown; because?: unknown } } | null)
+    ?.standing;
+  const contributorNote =
+    standing?.paused === true
+      ? `The contributor's pull requests are not reviewed automatically (paused ${standing.because === "maintainer" ? "by a maintainer" : "by their record"}).`
+      : null;
+  return {
+    ok: true,
+    verdict,
+    detail: typeof r.detail === "string" ? r.detail : null,
+    staleVerdict: stale as ReadVerdict | null,
+    reviewCurrent: current as boolean | null,
+    contributorNote,
+  };
 }
 
 export type ApprovalGate =
@@ -309,8 +390,9 @@ export type ApprovalGate =
 /**
  * What the automated review's verdict, as it stands for the commit about to be approved, means for
  * approving. A person is the final authority, so nothing is forbidden outright; but an approval
- * that goes against the review's finding, or that cannot see the review at all, needs an explicit
- * `--force`, and one the review did not clear needs a confirmation that says so.
+ * that goes against the review's finding, that the review has not finished, or that cannot see the
+ * review at all, needs an explicit `--force`, and one the review did not clear needs a confirmation
+ * that says so. A pass raises no warning, though every approval still asks unless `--yes`.
  *
  * `unread` is why the NEMAR API could not say what the review concluded. That is "unknown", which
  * is never rendered as "not reviewed": a stored rejection could be hiding behind it.
@@ -364,10 +446,26 @@ export function approvalGate(input: {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * A failed write. `status` 0 means GitHub did not answer, and for a write that is NOT "it did not
- * happen": the request may have been applied before the connection dropped. Callers say so.
+ * What is known of a write that did not succeed cleanly:
+ *  - `not_sent`: this code decided not to send it (merge only).
+ *  - `refused`: GitHub answered that it did not do it (a 4xx).
+ *  - `unknown`: there is no usable answer, so it MAY have been applied: the request got no answer
+ *    (`status` 0), GitHub answered 2xx with a body that cannot be read, or a gateway answered 5xx.
+ *  - `different`: GitHub recorded something, but not what was asked for.
  */
-export type WriteResult = { ok: true } | { ok: false; status: number; reason: string };
+export type WriteOutcome = "not_sent" | "refused" | "unknown" | "different";
+
+export type WriteFailure = { ok: false; outcome: WriteOutcome; status: number; reason: string };
+export type WriteResult = { ok: true } | WriteFailure;
+
+function noAnswer(err: unknown): WriteFailure {
+  return {
+    ok: false,
+    outcome: "unknown",
+    status: 0,
+    reason: `GitHub did not answer (${err instanceof Error ? err.message : String(err)}).`,
+  };
+}
 
 /** Approve the pull request on the exact commit the administrator was shown. */
 export async function submitApproval(
@@ -388,30 +486,49 @@ export async function submitApproval(
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (err) {
-    return {
-      ok: false,
-      status: 0,
-      reason: `GitHub did not answer (${err instanceof Error ? err.message : String(err)}).`,
-    };
+    return noAnswer(err);
   }
   const answer = (await res.json().catch(() => null)) as {
     state?: unknown;
     commit_id?: unknown;
     user?: { login?: unknown };
   } | null;
-  if (!res.ok) return { ok: false, status: res.status, reason: why(res.status, answer) };
-  // Trust the answer, not the request: the review must be an approval, by this person, of this commit.
-  if (
-    answer?.state !== "APPROVED" ||
-    answer.commit_id !== headSha ||
-    typeof answer.user?.login !== "string" ||
-    answer.user.login.toLowerCase() !== expectedLogin.toLowerCase()
-  ) {
+  if (!res.ok) {
     return {
       ok: false,
+      outcome: res.status >= 500 ? "unknown" : "refused",
       status: res.status,
-      reason:
-        "GitHub accepted the request but the review it recorded is not the approval that was asked for. Check the pull request.",
+      reason: why(res.status, answer),
+    };
+  }
+  // A 2xx whose answer cannot be read does not say what was recorded. The review may exist.
+  if (typeof answer?.state !== "string") {
+    return {
+      ok: false,
+      outcome: "unknown",
+      status: res.status,
+      reason: `GitHub answered HTTP ${res.status}, but its answer could not be read.`,
+    };
+  }
+  // Trust the answer, not the request: the review must be an approval, by this person, of this commit.
+  const by = typeof answer.user?.login === "string" ? answer.user.login : "";
+  if (
+    answer.state !== "APPROVED" ||
+    answer.commit_id !== headSha ||
+    by.toLowerCase() !== expectedLogin.toLowerCase()
+  ) {
+    const got = [
+      answer.state !== "APPROVED" ? `state ${sanitizeNote(answer.state, 20)}` : "",
+      by.toLowerCase() !== expectedLogin.toLowerCase() ? `by @${sanitizeNote(by, 40) || "?"}` : "",
+      answer.commit_id !== headSha
+        ? `commit ${typeof answer.commit_id === "string" ? sanitizeNote(answer.commit_id, 40).slice(0, 7) : "?"}`
+        : "",
+    ].filter(Boolean);
+    return {
+      ok: false,
+      outcome: "different",
+      status: res.status,
+      reason: `GitHub recorded a review, but not the approval that was asked for (${got.join(", ")}).`,
     };
   }
   return { ok: true };
@@ -420,18 +537,16 @@ export async function submitApproval(
 export const MERGE_METHODS = ["merge", "squash", "rebase"] as const;
 export type MergeMethod = (typeof MERGE_METHODS)[number];
 
-/** `clean` is GitHub saying every required check and review is satisfied; `has_hooks` is the same with a post-receive hook. */
-const MERGEABLE: ReadonlySet<string> = new Set(["clean", "has_hooks"]);
+/** `clean` is GitHub saying every required check and review is satisfied. */
+const MERGEABLE = "clean";
 
 /**
- * A merge that did not happen. `status` mirrors GitHub's codes where GitHub answered (405 not
- * mergeable, 409 the branch moved) and is 405 or 409 here WITHOUT a request having been sent when
- * this code decided not to ask; it is 0 when GitHub did not answer, which, as for the approval, does
- * not prove nothing was merged.
+ * A merge that did not happen, with what is known of it ({@link WriteOutcome}). `not_sent` covers
+ * every case where this code decided not to ask (a failed read of the pull request first, a branch
+ * that moved, a state that is not `clean`), so only `unknown` means "GitHub may have merged it".
+ * `status` is GitHub's where it answered, 405 or 409 where this code decided, and 0 for no answer.
  */
-export type MergeResult =
-  | { ok: true }
-  | { ok: false; status: number; reason: string; mergeableState?: string };
+export type MergeResult = { ok: true } | (WriteFailure & { mergeableState?: string });
 
 /**
  * Merge the pull request at `headSha`, only if GitHub says it is mergeable WITHOUT a bypass.
@@ -452,10 +567,11 @@ export async function mergeWhenClean(
   let state = "unknown";
   for (let i = 0; i < tries; i++) {
     const pr = await fetchPullRequest(token, datasetId, prNumber, base);
-    if (!pr.ok) return { ok: false, status: pr.status, reason: pr.reason };
+    if (!pr.ok) return { ok: false, outcome: "not_sent", status: pr.status, reason: pr.reason };
     if (pr.value.headSha !== headSha) {
       return {
         ok: false,
+        outcome: "not_sent",
         status: 409,
         reason: "The pull request changed after it was approved, so it was not merged.",
       };
@@ -464,7 +580,7 @@ export async function mergeWhenClean(
     if (state !== "unknown") break;
     await sleep(1000);
   }
-  if (!MERGEABLE.has(state)) {
+  if (state !== MERGEABLE) {
     const explain: Record<string, string> = {
       blocked: "a required check or review is not satisfied",
       behind: "the branch is behind main",
@@ -475,6 +591,7 @@ export async function mergeWhenClean(
     };
     return {
       ok: false,
+      outcome: "not_sent",
       status: 405,
       mergeableState: state,
       reason: `Not merged: GitHub says it cannot be merged cleanly (${explain[state] ?? sanitizeNote(state, 30)}). The approval stands.`,
@@ -490,15 +607,25 @@ export async function mergeWhenClean(
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (err) {
-    return {
-      ok: false,
-      status: 0,
-      reason: `GitHub did not answer (${err instanceof Error ? err.message : String(err)}).`,
-    };
+    return noAnswer(err);
   }
   const answer = (await res.json().catch(() => null)) as { merged?: unknown } | null;
-  if (!res.ok || answer?.merged !== true) {
-    return { ok: false, status: res.status, reason: why(res.status, answer) };
+  if (!res.ok) {
+    return {
+      ok: false,
+      outcome: res.status >= 500 ? "unknown" : "refused",
+      status: res.status,
+      reason: why(res.status, answer),
+    };
+  }
+  // A 2xx that does not say `merged: true` does not say it was not merged either.
+  if (answer?.merged !== true) {
+    return {
+      ok: false,
+      outcome: "unknown",
+      status: res.status,
+      reason: `GitHub answered HTTP ${res.status}, but did not say the pull request was merged.`,
+    };
   }
   return { ok: true };
 }

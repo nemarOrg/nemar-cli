@@ -230,8 +230,9 @@ export interface PrReviewDetail {
    * What the queue would call this pull request at `head_sha`: a stored verdict only when the review
    * on record read that commit. With no commit to compare against it is `not_reviewed`, never the
    * stored verdict, because a pass whose commit is unknown is not a pass about this one. Unlike the
-   * list, which reads the stored column, this is re-derived from the stored report, so a report that
-   * no longer parses reads as `could_not_decide` here (a stored `fail` stays `fail`).
+   * list, which reads the stored column, this is the STRICTER of that column and the verdict
+   * re-derived from the stored report: a report that no longer parses reads as `could_not_decide`
+   * here unless the column says `fail`, and a rule change that would now pass an old `fail` does not.
    */
   verdict: QueueVerdict;
   detail: VerdictDetail | null;
@@ -244,6 +245,12 @@ export interface PrReviewDetail {
   /** There are older stored reviews than `history` holds. */
   history_truncated: boolean;
   live: LivePullRequest | null;
+  /**
+   * Why `live` is what it is: `found`, `missing` (GitHub answered 404, so there is no such pull
+   * request or the datasets token cannot see it) or `unreadable` (GitHub could not be asked, or
+   * its answer could not be read). A `live` of null is not one thing.
+   */
+  live_status: "found" | "missing" | "unreadable";
   /** True when `review` is of `head_sha`; null when there is no review or no `head_sha`. */
   review_current: boolean | null;
   /** The pull request's author, with the standing the review gate would apply today. */

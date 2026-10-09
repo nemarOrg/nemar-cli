@@ -4,12 +4,13 @@
  * datasets token, and the calls the CLI makes with an administrator's own token (`GET /user`, the
  * pull request, a review, a merge).
  *
- * It answers by WHO is asking, because that is the property under test: a Worker token must never be
- * the one that approves, and an app token must not be accepted as a person. Every request is
- * recorded with the token it carried.
+ * It answers `GET /user` by token, so an app token is refused as a person's and a bot is not
+ * accepted, and it records every request with the token it carried. That record is the property
+ * under test: the tests show that the Worker's token never reached a review or a merge endpoint.
  */
 
 import type { Server } from "bun";
+import { projectOnto } from "../../backend/test/helpers/graphql-select";
 
 export const WORKER_TOKEN = "ghp_worker_datasets_token";
 export const ADMIN_TOKEN = "gho_admin_own_token";
@@ -62,6 +63,11 @@ export interface GitHubStandin {
   /** The message body of that answer. */
   userMessage: string;
   mergeStatus: number;
+  /**
+   * When true, the review POST and the merge PUT are APPLIED and answered 200 with a body that is
+   * not JSON: the case where a write happened and its answer cannot be read.
+   */
+  unreadableAnswers: boolean;
   reset(): void;
   stop(): void;
 }
@@ -88,6 +94,7 @@ export function startGitHubStandin(): GitHubStandin {
     userStatus: null as number | null,
     userMessage: "Server Error",
     mergeStatus: 200,
+    unreadableAnswers: false,
   };
   const reads: Record<string, number> = {};
 
@@ -102,8 +109,9 @@ export function startGitHubStandin(): GitHubStandin {
       if (req.method === "POST" && url.pathname === "/graphql") {
         const after = (body as { variables?: { after?: string | null } } | null)?.variables?.after;
         const index = after ? Number(after) : 0;
+        // Only the fields the query asks for, as GitHub sends them.
         return Response.json({
-          data: {
+          data: projectOnto(String((body as { query?: unknown } | null)?.query ?? ""), {
             search: {
               issueCount: state.searchPages.flat().length,
               pageInfo: {
@@ -112,7 +120,7 @@ export function startGitHubStandin(): GitHubStandin {
               },
               nodes: state.searchPages[index] ?? [],
             },
-          },
+          }),
         });
       }
 
@@ -173,6 +181,7 @@ export function startGitHubStandin(): GitHubStandin {
           const login = typeof who === "object" ? who.login : "unknown";
           const commit = (body as { commit_id?: string } | null)?.commit_id ?? p.sha;
           if (p.movesToAfterReview) p.sha = p.movesToAfterReview;
+          if (state.unreadableAnswers) return new Response("<html>proxy</html>", { status: 200 });
           return Response.json({
             id: 1,
             state: state.reviewState ?? "APPROVED",
@@ -181,6 +190,7 @@ export function startGitHubStandin(): GitHubStandin {
           });
         }
         if (req.method === "PUT" && pull[3] === "/merge") {
+          if (state.unreadableAnswers) return new Response("<html>proxy</html>", { status: 200 });
           return state.mergeStatus === 200
             ? Response.json({ merged: true, sha: "f".repeat(40) })
             : Response.json(
@@ -246,6 +256,12 @@ export function startGitHubStandin(): GitHubStandin {
     set mergeStatus(v) {
       state.mergeStatus = v;
     },
+    get unreadableAnswers() {
+      return state.unreadableAnswers;
+    },
+    set unreadableAnswers(v) {
+      state.unreadableAnswers = v;
+    },
     reset() {
       state.seen.length = 0;
       state.searchPages = [];
@@ -255,6 +271,7 @@ export function startGitHubStandin(): GitHubStandin {
       state.userStatus = null;
       state.userMessage = "Server Error";
       state.mergeStatus = 200;
+      state.unreadableAnswers = false;
       for (const k of Object.keys(state.pulls)) delete state.pulls[k];
       for (const k of Object.keys(state.users)) delete state.users[k];
       for (const k of Object.keys(reads)) delete reads[k];

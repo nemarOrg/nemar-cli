@@ -8,7 +8,10 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { NEMAR_APP_ID } from "../../src/services/github/branch-protection";
+import {
+  LEGACY_INLINE_BIDS_REPOS,
+  NEMAR_APP_ID,
+} from "../../src/services/github/branch-protection";
 
 /** GitHub Actions, the app that posts a workflow job's check run (and `version-check`). */
 export const GITHUB_ACTIONS_APP_ID = 15368;
@@ -57,15 +60,11 @@ export function bidsOk(ds: string): CheckSpec {
   // Every dataset in these tests except the four legacy ones runs the central BIDS shim.
   return {
     type: "run",
-    name: ["nm000103", "nm000105", "nm000106", "nm000107"].includes(ds)
-      ? "bids-validation"
-      : "Run BIDS Validation",
+    name: LEGACY_INLINE_BIDS_REPOS.has(ds) ? "bids-validation" : "Run BIDS Validation",
     status: "COMPLETED",
     conclusion: "SUCCESS",
     // The ruleset pins the central BIDS check to the NEMAR App; the legacy one is a plain job.
-    appId: ["nm000103", "nm000105", "nm000106", "nm000107"].includes(ds)
-      ? GITHUB_ACTIONS_APP_ID
-      : NEMAR_APP_ID,
+    appId: LEGACY_INLINE_BIDS_REPOS.has(ds) ? GITHUB_ACTIONS_APP_ID : NEMAR_APP_ID,
   };
 }
 export const versionOk: CheckSpec = {
@@ -206,6 +205,13 @@ export function seedReview(db: Database, r: RowSeed) {
                 : {},
           )
         : null;
+  // A review still waiting for its report is dated now unless a test says otherwise: an old one
+  // reads as never reported (the queue does not show an overdue review as running).
+  const created =
+    r.createdAt ??
+    (r.state === "dispatched"
+      ? new Date().toISOString().slice(0, 19).replace("T", " ")
+      : "2026-10-01 00:00:00");
   db.run(
     `INSERT INTO pr_reviews (dataset_id, pr_number, head_sha, author_id, author_login, state,
                              verdict, detail, report, created_at, decided_at, seen_at)
@@ -220,8 +226,8 @@ export function seedReview(db: Database, r: RowSeed) {
       r.verdict ?? null,
       r.detail ?? null,
       report === null ? null : typeof report === "string" ? report : JSON.stringify(report),
-      r.createdAt ?? "2026-10-01 00:00:00",
-      r.state === "dispatched" ? null : (r.createdAt ?? "2026-10-01 00:00:00"),
+      created,
+      r.state === "dispatched" ? null : created,
       r.seenAt ?? null,
     ],
   );

@@ -36,7 +36,8 @@ import {
 } from "../src/services/pr-review-queue";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
-import { freshDb, realD1 } from "./helpers/d1";
+import { freshDb, realD1, wrapD1 } from "./helpers/d1";
+import { projectOnto } from "./helpers/graphql-select";
 import {
   type PrSpec,
   SHA_A,
@@ -69,6 +70,8 @@ let calls: Recorded[] = [];
 /** Pages of search nodes, in order; the cursor is the index of the next page. */
 let searchPages: unknown[][] = [];
 let issueCount: number | null = null;
+/** The `issueCount` each page reports, when a test needs it to change between pages. */
+let pageCounts: number[] | null = null;
 let graphqlResponder: ((attempt: number) => Response | null | Promise<Response | null>) | null =
   null;
 let graphqlAttempts = 0;
@@ -100,17 +103,19 @@ beforeAll(() => {
         const index = after ? Number(after) : 0;
         const nodes = searchPages[index] ?? [];
         const seen = searchPages.flat().length;
+        // Only what the query asks for, as GitHub sends it: a field dropped from the query is a
+        // field the reader never sees.
         return Response.json({
-          data: {
+          data: projectOnto(String((body as { query?: unknown } | null)?.query ?? ""), {
             search: {
-              issueCount: issueCount ?? seen,
+              issueCount: pageCounts?.[index] ?? issueCount ?? seen,
               pageInfo: {
                 hasNextPage: index + 1 < searchPages.length,
                 endCursor: String(index + 1),
               },
               nodes,
             },
-          },
+          }),
         });
       }
       if (req.method === "POST" && url.pathname === "/repos/nemarDatasets/.github/dispatches") {
@@ -188,6 +193,7 @@ afterEach(() => {
   calls = [];
   searchPages = [];
   issueCount = null;
+  pageCounts = null;
   graphqlResponder = null;
   graphqlAttempts = 0;
   usersById = {};
@@ -220,7 +226,13 @@ const queue = async (qs = "") => {
 };
 
 /** What the webhook would hand the review for an opened pull request. */
-function openPullRequest(authorId: number, login: string, number: number, headSha: string) {
+function openPullRequest(
+  authorId: number,
+  login: string,
+  number: number,
+  headSha: string,
+  association = "COLLABORATOR",
+) {
   return handlePullRequestEvent(
     { ...env(), PRESCREEN_CALLBACK_SECRET: "queue-test-callback-secret" } as Bindings,
     {
@@ -236,7 +248,7 @@ function openPullRequest(authorId: number, login: string, number: number, headSh
         state: "open",
         draft: false,
         merged: false,
-        author_association: "COLLABORATOR",
+        author_association: association,
         user: { id: authorId, login, type: "User" },
         base: { ref: "main" },
         head: { sha: headSha, repo: { full_name: "nemarDatasets/nm000301" } },
@@ -562,6 +574,7 @@ describe("GET /admin/pr-reviews", () => {
       [prNode({ ds: "nm000201", n: 1 }), prNode({ ds: "nm000202", n: 2 })],
       [prNode({ ds: "nm000203", n: 3 }), prNode({ ds: "nm000202", n: 2 })], // a repeat as pages shift
     ];
+    issueCount = 3; // GitHub counts distinct pull requests
     const { body } = await queue();
     expect(body.entries.map((e) => e.dataset_id).sort()).toEqual([
       "nm000201",
@@ -603,6 +616,7 @@ describe("GET /admin/pr-reviews", () => {
     const { body } = await queue();
     expect(body.entries).toHaveLength(1);
     expect(body.skipped.not_a_dataset).toBe(2);
+    expect(body.truncated).toBe(false);
   });
 
   test("production leaves the dev Worker's datasets alone, and the dev Worker lists only its own", async () => {
@@ -628,7 +642,7 @@ describe("GET /admin/pr-reviews", () => {
       ds: "nm000201",
       n: 1,
       title: `${esc}[2J@everyone ![x](http://evil.test/a.png) <script>alert(1)</script> #12 hello`,
-      branch: `feat/${esc}[31mred‮evil name;rm -rf`,
+      branch: `feat/${esc}[31mred\u202eevil name;rm -rf`,
       forkOwner: "bob",
     });
     const res = await app.request(
@@ -638,7 +652,7 @@ describe("GET /admin/pr-reviews", () => {
     );
     const raw = await res.text();
     expect(raw.includes(esc)).toBe(false);
-    expect(raw.includes("‮")).toBe(false);
+    expect(raw.includes("\u202e")).toBe(false);
     const entry = (JSON.parse(raw) as QueueResponse).entries[0];
     // No mention, tag, issue reference, link or image survives; what is left is plain words.
     expect(entry.title).not.toMatch(/[@<>#[\]]|http/);
@@ -1051,9 +1065,35 @@ describe("PUT and DELETE /admin/pr-review-authors/:login", () => {
     expect(db.query("SELECT COUNT(*) AS n FROM pr_review_overrides").get()).toEqual({ n: 1 });
   });
 
+  test("allow lifts the pause and nothing else: a stranger's hourly allowance still applies", async () => {
+    usersById.alice = { id: 77, login: "alice", type: "User" };
+    seedHistory(77, "alice", 6, 4);
+    seedDataset("nm000301");
+    await send("PUT", "/admin/pr-review-authors/alice", { mode: "allow" });
+    const shas = [1, 2, 3, 4].map((n) => sha(900 + n));
+    const outcomes = [];
+    for (const [i, s] of shas.entries()) {
+      outcomes.push(await openPullRequest(77, "alice", i + 1, s, "NONE"));
+    }
+    expect(outcomes.map((o) => o.dispatched)).toEqual([true, true, true, false]);
+    expect(outcomes[3]).toMatchObject({ reason: "rate_limited" });
+
+    // The queue says so for the fourth, from the row the real gate wrote.
+    pulls["nm000301#4"] = livePull({
+      head: {
+        sha: shas[3],
+        ref: "x",
+        repo: { full_name: "nemarDatasets/nm000301", owner: { login: "nemarDatasets" } },
+      },
+    });
+    const { body } = await detail("nm000301", 4);
+    expect(body).toMatchObject({ verdict: "not_reviewed", detail: "rate_limited" });
+  });
+
   test("clearing hands the decision back to the tally", async () => {
     usersById.alice = { id: 77, login: "alice", type: "User" };
     seedHistory(77, "alice", 6, 4);
+    seedDataset("nm000301");
     await send("PUT", "/admin/pr-review-authors/alice", { mode: "allow" });
     const cleared = await send("DELETE", "/admin/pr-review-authors/alice");
     expect(cleared.status).toBe(200);
@@ -1061,6 +1101,11 @@ describe("PUT and DELETE /admin/pr-review-authors/:login", () => {
     expect(body.removed).toBe("allow");
     expect(body.standing.standing).toEqual({ paused: true, because: "tally" });
     expect(db.query("SELECT COUNT(*) AS n FROM pr_review_overrides").get()).toEqual({ n: 0 });
+    // The real gate pauses them again, not only the standing that is reported.
+    expect(await openPullRequest(77, "alice", 31, sha(31))).toMatchObject({
+      dispatched: false,
+      reason: "contributor_paused",
+    });
     expect(
       db
         .query("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'pr_review_override_clear'")
@@ -1151,8 +1196,9 @@ const sha = (n: number) => n.toString(16).padStart(40, "0");
 
 describe("which review counts for a commit", () => {
   test("after a force-push back to a reviewed commit, that commit's own review counts, not the newest row", async () => {
-    // The table is unique per commit and a repeated commit adds no row, so the review of A is OLDER
-    // than the review of B once the branch is back at A.
+    // Models a MISSED delivery: A was never seen again after B, so the newest row is B's although
+    // the branch is back at A. (When the delivery arrives it refreshes A's seen_at, and A is the
+    // newest; the next test covers that.)
     seedReview({ ds: "nm000201", n: 7, sha: SHA_A, state: "reported", verdict: "fail" });
     seedReview({ ds: "nm000201", n: 7, sha: SHA_B, state: "reported", verdict: "pass" });
 
@@ -1351,6 +1397,8 @@ describe("the GitHub search", () => {
     const { body } = await queue();
     expect(body.entries.map((e) => e.dataset_id)).toEqual(["nm000201"]);
     expect(body.skipped.unreadable).toBe(3);
+    // Reading fewer than the count is what makes a list incomplete; these were read and counted.
+    expect(body.truncated).toBe(false);
   });
 
   test("a pull request the search index has not caught up on is left out and not counted as unreadable", async () => {
@@ -1364,6 +1412,7 @@ describe("the GitHub search", () => {
     const { body } = await queue();
     expect(body.entries.map((e) => e.dataset_id)).toEqual(["nm000201"]);
     expect(body.skipped.unreadable).toBe(0);
+    expect(body.truncated).toBe(false);
   });
 
   test("checks that belong to a different commit than the head are not read as the head's", async () => {
@@ -1429,7 +1478,8 @@ describe("the GitHub search", () => {
     } finally {
       __setGraphqlTimeoutForTests(null);
     }
-  });
+    // Three attempts and two one-second back-offs: well past bun's default 5 seconds on a slow runner.
+  }, 20_000);
 
   test("with no GitHub token configured it says so instead of listing nothing", async () => {
     envOverrides = { GITHUB_ADMIN_PAT: undefined };
@@ -1539,7 +1589,20 @@ describe("contributor decisions, in detail", () => {
 
   test("the record shows the most recent decided pull requests once each, newest first", async () => {
     usersById.alice = { id: 77, login: "alice", type: "User" };
-    // Twelve pull requests; the first fails and is then fixed, so it counts once, as a pass.
+    // Twelve pull requests; the LAST one to be seen failed and was then fixed, so it counts once,
+    // as a pass, and it is the newest. (Seeded first it would be cut off by the limit of ten and
+    // the once-each rule would never be exercised.)
+    for (let n = 101; n <= 111; n++) {
+      seedReview({
+        ds: "nm000301",
+        n,
+        authorId: 77,
+        login: "alice",
+        sha: sha(n),
+        state: "reported",
+        verdict: "pass",
+      });
+    }
     seedReview({
       ds: "nm000301",
       n: 100,
@@ -1558,21 +1621,11 @@ describe("contributor decisions, in detail", () => {
       state: "reported",
       verdict: "pass",
     });
-    for (let n = 101; n <= 111; n++) {
-      seedReview({
-        ds: "nm000301",
-        n,
-        authorId: 77,
-        login: "alice",
-        sha: sha(n),
-        state: "reported",
-        verdict: "pass",
-      });
-    }
     const { body } = await standing("alice");
     expect(body.tally).toEqual({ rejected: 0, decided: 12 });
     expect(body.recent).toHaveLength(10);
-    expect(body.recent[0]).toMatchObject({ pr_number: 111, verdict: "pass" });
+    expect(body.recent[0]).toMatchObject({ pr_number: 100, verdict: "pass", head_sha: SHA_B });
+    expect(new Set(body.recent.map((r) => r.pr_number)).size).toBe(10);
     expect(body.by_record).toEqual({ paused: false });
   });
 
@@ -1583,5 +1636,263 @@ describe("contributor decisions, in detail", () => {
     const { body } = await standing("alice");
     expect(body.standing).toEqual({ paused: false });
     expect(body.by_record).toEqual({ paused: true, because: "tally" });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Second-round review: what the search stand-in sends, and what is never read as "nothing"
+// ---------------------------------------------------------------------------------------------
+
+describe("the search stand-in sends only what the query asks for", () => {
+  test("a field the query does not select is not in the answer", () => {
+    const data = {
+      search: {
+        issueCount: 1,
+        nodes: [
+          {
+            __typename: "PullRequest",
+            number: 1,
+            secret: "x",
+            commits: { nodes: [{ commit: { oid: "a", extra: 1 } }] },
+          },
+          { __typename: "Issue", number: 2 },
+        ],
+      },
+    };
+    const query =
+      "query Q($q: String!) { search(query: $q, first: 5) { issueCount nodes { __typename ... on PullRequest { number commits(last: 1) { nodes { commit { oid } } } } } } }";
+    expect(projectOnto(query, data)).toEqual({
+      search: {
+        issueCount: 1,
+        nodes: [
+          { __typename: "PullRequest", number: 1, commits: { nodes: [{ commit: { oid: "a" } }] } },
+          { __typename: "Issue" },
+        ],
+      },
+    });
+  });
+
+  test("the real query selects the check suite's App, which the BIDS pin depends on", async () => {
+    nodes({ ds: "nm000201", n: 1 });
+    await queue();
+    const query = String(
+      (calls.find((c) => c.path === "/graphql")?.body as { query: string }).query,
+    );
+    const sent = projectOnto(query, { search: { nodes: [prNode({ ds: "nm000201", n: 1 })] } }) as {
+      search: { nodes: Array<{ commits: { nodes: Array<{ commit: unknown }> } }> };
+    };
+    expect(JSON.stringify(sent)).toContain('"databaseId"');
+    expect(JSON.stringify(sent)).toContain('"statusCheckRollup"');
+  });
+});
+
+describe("a search node is left out only when it SAYS it is not ours", () => {
+  test("a node with no state, no base branch or no repository is unreadable, not 'no longer open'", async () => {
+    const noState = prNode({ ds: "nm000201", n: 1 });
+    noState.state = undefined;
+    const noBase = prNode({ ds: "nm000202", n: 2 });
+    noBase.baseRefName = undefined;
+    const noRepo = prNode({ ds: "nm000203", n: 3 });
+    noRepo.repository = null;
+    const noRepoName = prNode({ ds: "nm000204", n: 4 });
+    noRepoName.repository = { owner: { login: "nemarDatasets" } };
+    searchPages = [[noState, noBase, noRepo, noRepoName]];
+    const { body } = await queue();
+    expect(body.entries).toHaveLength(0);
+    expect(body.skipped).toEqual({ not_a_dataset: 0, not_owned_here: 0, unreadable: 4 });
+    expect(body.truncated).toBe(false);
+  });
+});
+
+describe("a list that may not be the whole list says so", () => {
+  test("a count that changes between pages is reported, because the pages may have shifted", async () => {
+    searchPages = [
+      [prNode({ ds: "nm000201", n: 1 }), prNode({ ds: "nm000202", n: 2 })],
+      [prNode({ ds: "nm000203", n: 3 })],
+    ];
+    pageCounts = [4, 3]; // one closed while reading: the one that moved up was skipped
+    expect((await queue()).body.truncated).toBe(true);
+    pageCounts = [3, 3];
+    expect((await queue()).body.truncated).toBe(false);
+  });
+
+  test("a pull request listed twice does not stand in for one that was missed", async () => {
+    searchPages = [
+      [prNode({ ds: "nm000201", n: 1 }), prNode({ ds: "nm000202", n: 2 })],
+      [prNode({ ds: "nm000202", n: 2 })], // seen again; nm000203 was never returned
+    ];
+    issueCount = 3;
+    const { body } = await queue();
+    expect(body.entries).toHaveLength(2);
+    expect(body.truncated).toBe(true);
+  });
+});
+
+describe("when GitHub refuses the search, the cause is kept", () => {
+  test("a rate limit that outlasts the retries is a 503, not a permission problem", async () => {
+    nodes({ ds: "nm000201", n: 1 });
+    graphqlResponder = () =>
+      new Response('{"message":"You have exceeded a secondary rate limit."}', {
+        status: 403,
+        headers: { "Retry-After": "0" },
+      });
+    const limited = await get("/admin/pr-reviews");
+    expect(limited.status).toBe(503);
+    expect(limited.body.code).toBe("github_rate_limited");
+
+    graphqlResponder = () => new Response("{}", { status: 429, headers: { "Retry-After": "0" } });
+    expect((await get("/admin/pr-reviews")).body.code).toBe("github_rate_limited");
+  });
+
+  test("a missing permission is a 502 that says what GitHub said", async () => {
+    nodes({ ds: "nm000201", n: 1 });
+    graphqlResponder = () =>
+      new Response('{"message":"Resource not accessible by integration"}', { status: 403 });
+    const r = await get("/admin/pr-reviews");
+    expect(r.status).toBe(502);
+    expect(r.body.code).toBe("github_refused");
+    expect(String(r.body.error)).toContain("Resource not accessible by integration");
+  });
+});
+
+describe("the checks columns do not read an unreadable check as 'none'", () => {
+  test("a node that could not be read makes a missing check unknown", async () => {
+    const node = prNode({ ds: "nm000201", n: 1, checks: [versionOk] });
+    const rollup = (
+      node.commits as {
+        nodes: Array<{ commit: { statusCheckRollup: { contexts: { nodes: unknown[] } } } }>;
+      }
+    ).nodes[0].commit.statusCheckRollup.contexts;
+    rollup.nodes.push(null); // a check node GitHub did not give us
+    searchPages = [[node]];
+    const { body } = await queue();
+    expect(body.entries[0]).toMatchObject({ bids: "unknown", version: "pass" });
+  });
+
+  test("a same-named run whose App could not be read is not counted, and is not ignored", () => {
+    const pinned = 15368;
+    const mine = {
+      name: "Run BIDS Validation",
+      kind: "run",
+      state: "pass",
+      at: "2026-10-01T00:00:00Z",
+      appId: pinned,
+    } as const;
+    const unattributed = {
+      ...mine,
+      state: "fail",
+      at: "2026-10-02T00:00:00Z",
+      appId: null,
+    } as const;
+    const status = { ...unattributed, kind: "status" } as const;
+    const names = ["Run BIDS Validation"];
+    // Newer than what was found: the answer is not known.
+    expect(checkStateOf([mine, unattributed], names, true, pinned)).toBe("unknown");
+    expect(checkStateOf([unattributed], names, true, pinned)).toBe("unknown");
+    // Older than what was found: the pinned App's run decides.
+    expect(
+      checkStateOf([{ ...unattributed, at: "2026-09-01T00:00:00Z" }, mine], names, true, pinned),
+    ).toBe("pass");
+    // A commit status never carries an App, and was never counted.
+    expect(checkStateOf([mine, status], names, true, pinned)).toBe("pass");
+    expect(checkStateOf([status], names, true, pinned)).toBe("missing");
+  });
+});
+
+describe("a review that will not finish is not shown as running", () => {
+  const long = "2026-10-01 00:00:00";
+
+  test("a dispatched review past the deadline and one tick reads as never reported, and needs you", async () => {
+    nodes({ ds: "nm000201", n: 1 }, { ds: "nm000202", n: 2 });
+    seedReview({ ds: "nm000201", n: 1, state: "dispatched" }); // dated now: still running
+    seedReview({ ds: "nm000202", n: 2, state: "dispatched", createdAt: long });
+    const { body } = await queue();
+    const by = Object.fromEntries(body.entries.map((e) => [e.dataset_id, e]));
+    expect(by.nm000201).toMatchObject({ verdict: "in_progress", needs_you: false });
+    expect(by.nm000202).toMatchObject({
+      verdict: "could_not_decide",
+      detail: "unreported",
+      needs_you: true,
+    });
+  });
+
+  test("the detail view and its history agree", async () => {
+    seedReview({ ds: "nm000201", n: 7, state: "dispatched", createdAt: long });
+    pulls["nm000201#7"] = livePull();
+    const { body } = await detail("nm000201", 7);
+    expect(body).toMatchObject({ verdict: "could_not_decide", detail: "unreported" });
+    expect(body.review).toMatchObject({ verdict: "could_not_decide", detail: "unreported" });
+    expect(body.review?.outcome).toBeNull();
+    expect(body.history[0].verdict).toBe("could_not_decide");
+  });
+});
+
+describe("the detail view never makes a rejection easier to approve than the list does", () => {
+  const cases: Array<[string, "pass" | "fail" | "uncertain", Record<string, string>, string]> = [
+    ["a stored fail whose report would now pass", "fail", {}, "fail"],
+    ["a stored pass whose report fails", "pass", { no_degradation: "fail" }, "fail"],
+    ["a stored uncertain whose report would now pass", "uncertain", {}, "uncertain"],
+    [
+      "a stored pass whose report is uncertain",
+      "pass",
+      { material_improvement: "unknown" },
+      "uncertain",
+    ],
+    ["a stored pass whose report passes", "pass", {}, "pass"],
+    ["a stored fail whose report fails", "fail", { no_degradation: "fail" }, "fail"],
+  ];
+  for (const [label, stored, criteria, shown] of cases) {
+    test(label, async () => {
+      seedReview({
+        ds: "nm000201",
+        n: 7,
+        state: "reported",
+        verdict: stored,
+        report: goodReport(criteria),
+      });
+      pulls["nm000201#7"] = livePull();
+      const { body } = await detail("nm000201", 7);
+      expect(body.verdict).toBe(shown);
+      expect(body.review?.verdict).toBe(shown);
+    });
+  }
+});
+
+describe("the review history is read in chunks D1 allows", () => {
+  test("more datasets than one query can bind (over 100) are all joined to their reviews", async () => {
+    const wide = Array.from({ length: 105 }, (_, i) => `nm${String(300 + i).padStart(6, "0")}`);
+    searchPages = [wide.map((ds, i) => prNode({ ds, n: i + 1 }))];
+    for (const [i, ds] of wide.entries()) {
+      seedReview({ ds, n: i + 1, state: "reported", verdict: "pass" });
+    }
+    const real = realD1(db);
+    envOverrides = {
+      DB: wrapD1(real, (sql) => {
+        // D1 refuses a statement with more than 100 bound parameters.
+        if ((sql.match(/\?/g) ?? []).length > 100) throw new Error("too many SQL variables");
+      }),
+    };
+    const { status, body } = await queue();
+    expect(status).toBe(200);
+    expect(body.entries).toHaveLength(105);
+    expect(body.entries.every((e) => e.verdict === "pass")).toBe(true);
+  });
+});
+
+describe("the detail view says why it has no live pull request", () => {
+  test("found, missing and unreadable are told apart", async () => {
+    seedReview({ ds: "nm000201", n: 7, state: "reported", verdict: "pass" });
+    pulls["nm000201#7"] = livePull();
+    expect((await detail("nm000201", 7)).body).toMatchObject({ live_status: "found" });
+    pulls["nm000201#7"] = 404;
+    expect((await detail("nm000201", 7)).body).toMatchObject({
+      live: null,
+      live_status: "missing",
+    });
+    pulls["nm000201#7"] = 500;
+    expect((await detail("nm000201", 7)).body).toMatchObject({
+      live: null,
+      live_status: "unreadable",
+    });
   });
 });
