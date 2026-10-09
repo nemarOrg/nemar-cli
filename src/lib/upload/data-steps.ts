@@ -33,11 +33,15 @@ export interface DataStepsArgs {
  * Hooks for tests. `openRemote` replaces how the remote is opened, `skipMinBytes`
  * lets a small tree reach the large-tree branch of the save, and `saveStep` is the
  * save to call (defaulting to the real one) so a test can see what it was handed.
+ * The inactivity threshold shortens the real save subprocess timer, and the
+ * optional spinner stream captures Ora's actual output without replacing it.
  */
 export interface DataStepsDeps {
   openRemote?: OpenRemote;
   skipMinBytes?: number;
   saveStep?: typeof saveDatasetStep;
+  saveInactivityWarningAfterMs?: number;
+  saveSpinnerStream?: NodeJS.WritableStream;
 }
 
 export async function runDataSteps(
@@ -86,6 +90,10 @@ export async function runDataSteps(
     annexedPaths,
     verifyRemote: S3_REMOTE_NAME,
     ...(deps.skipMinBytes === undefined ? {} : { skipMinBytes: deps.skipMinBytes }),
+    ...(deps.saveInactivityWarningAfterMs === undefined
+      ? {}
+      : { inactivityWarningAfterMs: deps.saveInactivityWarningAfterMs }),
+    ...(deps.saveSpinnerStream === undefined ? {} : { spinnerStream: deps.saveSpinnerStream }),
   });
   if (saved.status === "fail") return FAIL;
   return ok(progress);

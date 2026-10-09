@@ -29,6 +29,7 @@ import {
   markStepCompleted,
   writeUploadProgress,
 } from "../upload-progress.js";
+import { describeInactivityDuration, persistSpinnerWarning } from "./inactivity.js";
 import { listAnnexedPaths, listPendingAtRemote } from "./transfer.js";
 import { type DatasetInfo, FAIL, type Step, ok } from "./types.js";
 
@@ -160,6 +161,14 @@ function recordedDataBytes(progress: UploadProgress): number {
   return bytes;
 }
 
+function savingInactivityWarning(idleMs: number): string {
+  return [
+    "Warning: saving dataset changes has produced no stdout or stderr for",
+    `${describeInactivityDuration(idleMs)}. git add -A is still running.`,
+    "Wait, or interrupt and rerun the upload; the save step will run again.",
+  ].join(" ");
+}
+
 /**
  * Step 11: Save dataset changes (gated).
  *
@@ -185,10 +194,17 @@ export async function saveDatasetStep(
     annexedPaths?: ReadonlySet<string> | null;
     skipMinBytes?: number;
     verifyRemote?: string;
+    /** Internal test threshold; production callers use the 120-second default. */
+    inactivityWarningAfterMs?: number;
+    /** Test output capture; production uses Ora's default stderr stream. */
+    spinnerStream?: NodeJS.WritableStream;
   } = {},
 ): Promise<Step> {
   if (!isStepCompleted(progress, "dataset_save")) {
-    const spinner = ora("Saving dataset changes...").start();
+    let spinner = ora({
+      text: "Saving dataset changes...",
+      ...(options.spinnerStream ? { stream: options.spinnerStream } : {}),
+    }).start();
 
     // Annexed files are already staged (by the tracking step) and recorded at the
     // S3 remote; on a large tree `git add -A` must not stream their content through
@@ -218,6 +234,12 @@ export async function saveDatasetStep(
     }
     const saveResult = await saveDataset(absolutePath, "Initial NEMAR dataset upload", author, {
       skipContentCheck,
+      onInactivityWarning: (idleMs) => {
+        spinner = persistSpinnerWarning(spinner, savingInactivityWarning(idleMs));
+      },
+      ...(options.inactivityWarningAfterMs === undefined
+        ? {}
+        : { inactivityWarningAfterMs: options.inactivityWarningAfterMs }),
     });
     if (!saveResult.success) {
       writeUploadProgress(absolutePath, progress);
