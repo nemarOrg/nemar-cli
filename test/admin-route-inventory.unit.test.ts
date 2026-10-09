@@ -167,6 +167,16 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   // demand (read-only) and a rescreen request (a D1 write the production tick answers).
   "GET /identifier-sweep": 1,
   "POST /identifier-sweep/:id/rescreen": 1,
+
+  // Dataset pull-request review queue (ADR 0093, following ADR 0092): the open pull requests
+  // joined with their reviews, one pull request, and the controls over who is reviewed. The
+  // contributor routes sit under their own prefix because `pr-reviews/:dataset/:pr` has the same
+  // shape as `pr-reviews/authors/:login`. The PUT is zValidator + handler (a strict body).
+  "GET /pr-reviews": 1,
+  "GET /pr-reviews/:dataset/:pr": 1,
+  "GET /pr-review-authors/:login": 1,
+  "PUT /pr-review-authors/:login": 2,
+  "DELETE /pr-review-authors/:login": 1,
 };
 
 describe("admin route inventory", () => {
@@ -199,7 +209,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(133);
+    expect(adminRoutes.routes.length).toBe(139);
   });
 
   // The count pin above can't see a SWAP of the two router-level middleware

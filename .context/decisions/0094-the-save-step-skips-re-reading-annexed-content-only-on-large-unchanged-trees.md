@@ -1,4 +1,4 @@
-# ADR 0092: The save step skips re-reading annexed content only on large trees, only for files that have not changed, and only while it can take the skip back
+# ADR 0094: The save step skips re-reading annexed content only on large trees, only for files that have not changed, and only while it can take the skip back
 
 **Status:** accepted
 **Date:** 2026-10-07

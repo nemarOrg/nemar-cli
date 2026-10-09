@@ -19,6 +19,7 @@
  * - nemar admin email-preferences show/update - Email notification opt-out
  * - nemar admin notice list/set/clear - System notice management
  * - nemar admin notify              - Send broadcast email to users
+ * - nemar admin pr-reviews          - Dataset pull requests awaiting approval, with the automated review
  */
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -209,6 +210,7 @@ import {
   resolveWithdrawTargets,
   stillWithdrawn,
 } from "../lib/withdrawn-datasets.js";
+import { prReviewsCommand } from "./admin-pr-reviews.js";
 
 /**
  * Hints keyed on a publication `block_reason`, which outrank the status-code
@@ -9728,3 +9730,4 @@ neurobagelCommand
   );
 
 adminCommand.addCommand(neurobagelCommand);
+adminCommand.addCommand(prReviewsCommand);

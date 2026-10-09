@@ -41,3 +41,21 @@ Do not restore command shims that substitute stdout, stderr, exit codes, or proc
 signals to close these gaps. Add coverage when a deterministic real Git/git-annex or
 OS-level fixture can produce the required condition without changing the command's
 result.
+
+# Temporary PR-review test exception for epic #1671
+
+Owner authorized continuing the dev-sync PR on 2026-10-09 while this test gap stays
+documented. `backend/test/pr-review-flow.test.ts` drives a real local D1 schema and
+real WebCrypto, but uses synthetic dataset rows, deterministic D1 interleavings for
+claim-race coverage, and a `Bun.serve()` GitHub API stand-in;
+`test/pr-review-evidence.test.ts` uses real temporary Git repositories and
+the real Anthropic SDK against a `Bun.serve()` API stand-in. These suites are retained
+as a temporary exception so the PR-review flow remains exercised in CI. They do not
+prove behavior against GitHub or Anthropic, and the local stand-ins remain outside the
+repository's normal NO MOCKS policy.
+
+The flow fixture marks its rows published with a fixed `first_published_at` so it
+reaches the same eligibility predicate used by production. Replace this exception
+with isolated, owner-approved GitHub and Anthropic test endpoints before treating
+the PR-review flow as real-service acceptance. Until then, report stand-in suite
+results separately from real-service verification.
