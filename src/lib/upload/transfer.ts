@@ -71,8 +71,6 @@ import {
 } from "../upload-progress.js";
 import {
   type CredentialLease,
-  DEFAULT_BATCH_MAX_BYTES,
-  DEFAULT_BATCH_MAX_FILES,
   DEFAULT_MAX_REFRESHES,
   DEFAULT_REFRESH_MARGIN_MS,
   MAX_FRUITLESS_REFRESHES,
@@ -462,9 +460,11 @@ export async function listAnnexedPaths(
 /**
  * Annexed working-tree files the location log does NOT record at `remote`: the
  * complement of `listAnnexedPaths(path, remote)` within `listAnnexedPaths(path)`,
- * in one walk. Any matching option makes git-annex consider every annexed file
- * rather than only those whose content is present, so `--not --in` alone is enough;
- * adding `--include '*'` to it costs about 1.6 times as much for the same answer.
+ * in one walk. When `paths` is supplied, the literal pathspecs scope the answer
+ * to those paths so each bounded upload batch need not rescan the whole dataset.
+ * Any matching option makes git-annex consider every annexed file rather than
+ * only those whose content is present, so `--not --in` alone is enough; adding
+ * `--include '*'` to it costs about 1.6 times as much for the same answer.
  * Measured on 10,000 annexed files against a directory remote: 3.7 s against 6.1 s
  * with nothing recorded at the remote, 3.65 s against 5.75 s with everything
  * recorded there. (Absolute times move between runs of the same machine; the ratio
@@ -473,11 +473,23 @@ export async function listAnnexedPaths(
 export async function listAnnexedPathsNotAt(
   absolutePath: string,
   remote: string,
+  paths?: string[],
 ): Promise<Set<string>> {
-  const { stdout, stderr, exitCode } = await runCommand(
-    ["git", "annex", "find", "--not", "--in", remote, "--print0"],
-    { cwd: absolutePath },
-  );
+  const args = paths
+    ? [
+        "git",
+        "--literal-pathspecs",
+        "annex",
+        "find",
+        "--not",
+        "--in",
+        remote,
+        "--print0",
+        "--",
+        ...paths,
+      ]
+    : ["git", "annex", "find", "--not", "--in", remote, "--print0"];
+  const { stdout, stderr, exitCode } = await runCommand(args, { cwd: absolutePath });
   if (exitCode !== 0) {
     throw new Error(commandFailure("git annex find", stderr, exitCode));
   }
@@ -872,7 +884,7 @@ async function copyPendingInBatches(args: {
     for (;;) {
       let pendingBefore: Set<string>;
       try {
-        pendingBefore = await listAnnexedPathsNotAt(args.absolutePath, args.remote);
+        pendingBefore = await listAnnexedPathsNotAt(args.absolutePath, args.remote, batch);
       } catch (error) {
         return fail(`Could not read the annex location log before copying: ${errorDetail(error)}`);
       }
@@ -900,7 +912,7 @@ async function copyPendingInBatches(args: {
 
       let pendingAfter: Set<string>;
       try {
-        pendingAfter = await listAnnexedPathsNotAt(args.absolutePath, args.remote);
+        pendingAfter = await listAnnexedPathsNotAt(args.absolutePath, args.remote, batch);
       } catch (error) {
         return fail(`Could not read the annex location log after copying: ${errorDetail(error)}`);
       }
@@ -914,9 +926,10 @@ async function copyPendingInBatches(args: {
       // expired sibling after other paths in the same batch were already sent.
       if (remaining.length === 0) break;
       if (copied.success) {
-        return fail(
-          `git-annex copy finished successfully but ${remaining.length} path(s) remain pending at the remote`,
-        );
+        // A clean git-annex exit can omit a path whose content is not in this
+        // repository. Preserve the existing fsck/final-location-log diagnosis
+        // below instead of turning that condition into a generic copy error.
+        break;
       }
       if (!isExpiredCredentialError(copied.error)) {
         return fail(copied.error ?? "Failed to copy pending files to the remote");

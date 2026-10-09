@@ -7,20 +7,21 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { requestUploadCredentials } from "../src/lib/api/data";
 import { setConfig } from "../src/lib/config";
-import { awsCredentialEnv, buildS3RemoteArgs, toS3Credentials } from "../src/lib/git-annex/s3-remote";
 import { gitAnnexAdd } from "../src/lib/git-annex/init";
 import { runCommand } from "../src/lib/git-annex/run-command";
-import { requestUploadCredentials } from "../src/lib/api/data";
-import { initUploadProgress } from "../src/lib/upload-progress";
 import {
-  listAnnexedPaths,
-  transferAnnexedData,
-} from "../src/lib/upload/transfer";
+  awsCredentialEnv,
+  buildS3RemoteArgs,
+  toS3Credentials,
+} from "../src/lib/git-annex/s3-remote";
+import { initUploadProgress } from "../src/lib/upload-progress";
+import { listAnnexedPaths, transferAnnexedData } from "../src/lib/upload/transfer";
 import { ok } from "../src/lib/upload/types";
+import { makeScratch, newDatasetRepo, writeFile } from "./helpers/annex-repo";
 import { startS3Standin } from "./scrub/helpers/s3-standin";
 import { LIVE_TARGET_BLOCKED, TEST_CONFIG } from "./setup";
-import { makeScratch, newDatasetRepo, writeFile } from "./helpers/annex-repo";
 
 setDefaultTimeout(30_000);
 
@@ -77,7 +78,9 @@ describe.skipIf(!canRun)("STS credential renewal through the real upload transfe
     );
     expect(annexed.success).toBe(true);
 
-    standin = startS3Standin({ region: "us-east-2" });
+    const initial = await requestUploadCredentials(DATASET_ID, 900);
+    const initialCredentials = toS3Credentials(initial.credentials);
+    standin = startS3Standin({ region: initial.s3.region });
     const standinUrl = new URL(standin.url);
     expect(standinUrl.hostname).toBe("127.0.0.1");
     const allowLoopback = await runCommand(
@@ -86,7 +89,7 @@ describe.skipIf(!canRun)("STS credential renewal through the real upload transfe
     );
     expect(allowLoopback.exitCode).toBe(0);
 
-    let initialAccessKeyId = "";
+    const initialAccessKeyId = initial.credentials.access_key_id;
     const renewedAccessKeyIds: string[] = [];
     const transfer = await transferAnnexedData({
       absolutePath: repo,
@@ -95,9 +98,6 @@ describe.skipIf(!canRun)("STS credential renewal through the real upload transfe
       jobs: 1,
       copyBatchMaxFiles: 1,
       openRemote: async () => {
-        const initial = await requestUploadCredentials(DATASET_ID, 900);
-        initialAccessKeyId = initial.credentials.access_key_id;
-        const initialCredentials = toS3Credentials(initial.credentials);
         const remoteConfig = {
           name: REMOTE,
           bucket: initial.s3.bucket,
@@ -113,10 +113,10 @@ describe.skipIf(!canRun)("STS credential renewal through the real upload transfe
           `port=${standinUrl.port}`,
           "requeststyle=path",
         );
-        const configured = await runCommand(
-          ["git", "annex", "initremote", REMOTE, ...remoteArgs],
-          { cwd: repo, env: awsCredentialEnv(initialCredentials) },
-        );
+        const configured = await runCommand(["git", "annex", "initremote", REMOTE, ...remoteArgs], {
+          cwd: repo,
+          env: awsCredentialEnv(initialCredentials),
+        });
         if (configured.exitCode !== 0) {
           // Do not include subprocess output: it can contain credential material.
           throw new Error("Could not configure the local S3 stand-in remote");
