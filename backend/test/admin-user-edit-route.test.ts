@@ -20,6 +20,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { ADMIN_USER_ERROR_MESSAGES } from "../../shared/contract/admin-user.js";
 import { adminRoutes } from "../src/routes/admin";
+import { applyEditWithAudit } from "../src/routes/admin/user-edit";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -111,6 +112,7 @@ interface EditResponse {
   message?: string;
   changed: Record<string, { from: string | null; to: string | null }>;
   notes: string[];
+  old_address_notified?: boolean;
   holder?: { id: number; username: string | null };
   user: Record<string, unknown>;
 }
@@ -428,12 +430,18 @@ describe("bad requests and missing targets", () => {
     expect(row(gone).city).toBeNull();
   });
 
-  test("400 for an id that is not a positive integer", async () => {
-    for (const bad of ["abc", "0", "-1", "1.5"]) {
+  test("400 for an id that is not a whole number", async () => {
+    for (const bad of ["abc", "0", "1.5", "1e3", "12abc"]) {
       const res = await patch(bad, { city: "x" });
       expect(res.status).toBe(400);
       expect(res.body.error).toBe("invalid_user_id");
     }
+  });
+
+  test("the internal system account is refused by name, not as a malformed id", async () => {
+    const res = await patch(-1, { city: "x" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("system_account");
   });
 
   test("a member is refused", async () => {
@@ -472,5 +480,282 @@ describe("the database is the last word on uniqueness", () => {
     expect(body.error).toBe("github_in_use");
     expect(row(id).github_username).toBeNull();
     expect(audits()).toHaveLength(0);
+  });
+});
+
+describe("keys that are not fields never reach Object.prototype", () => {
+  test("constructor, toString and __proto__ get the generic sentence", async () => {
+    const id = seedTarget("subject");
+    // A raw string: JSON.stringify would drop the inherited-looking keys.
+    const res = await patch(id, '{"constructor":"x","toString":1,"__proto__":2}');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("field_not_editable");
+    expect(res.body.message).not.toContain("native code");
+    expect(res.body.message).not.toContain("[object");
+    expect(res.body.message).toContain("constructor: not an editable field");
+    expect(res.body.message).toContain("toString: not an editable field");
+  });
+});
+
+describe("re-sending current values is a 200 that writes nothing, whoever sends it", () => {
+  test("an ORCID-verified account's unchanged name", async () => {
+    const id = seedTarget("orcidperson", { orcid: "0000-0002-1825-0097", orcidVerified: 1 });
+    const res = await patch(id, { given_name: "Given", family_name: "Family" });
+    expect(res.status).toBe(200);
+    expect(res.body.changed).toEqual({});
+    expect(audits()).toHaveLength(0);
+  });
+
+  test("an owner's own unchanged email", async () => {
+    const res = await patch(idOf("editowner"), { email: "editowner@example.org" });
+    expect(res.status).toBe(200);
+    expect(res.body.changed).toEqual({});
+  });
+});
+
+describe("owner accounts are closed to identity edits", () => {
+  const OWNER2_KEY = "edit-owner2-key-0123456789abcdef0123456789a";
+  beforeEach(async () => {
+    await seedActor("editowner2", "owner", OWNER2_KEY);
+  });
+
+  test("one owner cannot re-point another owner's username, email or handle", async () => {
+    const other = idOf("editowner2");
+    const before = row(other);
+    for (const body of [
+      { email: "hijack@example.org" },
+      { username: "hijacked" },
+      { github_username: "hijack-gh" },
+    ]) {
+      const res = await patch(other, body);
+      expect(res.status).toBe(403);
+      expect(res.body.error).toBe("owner_account");
+    }
+    expect(row(other)).toEqual(before);
+    expect(audits()).toHaveLength(0);
+  });
+
+  test("an owner's descriptive fields can still be edited", async () => {
+    const res = await patch(idOf("editowner2"), { city: "Zurich" });
+    expect(res.status).toBe(200);
+  });
+
+  test("an owner can edit an admin's identity fields", async () => {
+    const res = await patch(idOf("editadmin"), { github_username: "admin-gh" });
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("an owner cannot edit their own identity by bundling it with another field", () => {
+  test("any identity field in the request refuses the whole request", async () => {
+    const self = idOf("editowner");
+    for (const body of [
+      { city: "X", email: "me2@example.org" },
+      { given_name: "X", username: "newname1" },
+      { country: "Y", github_username: "mine" },
+    ]) {
+      const res = await patch(self, body);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("edit_own_account");
+    }
+    const after = row(self);
+    expect(after.city).toBeNull();
+    expect(after.given_name).toBeNull();
+    expect(after.email).toBe("editowner@example.org");
+    expect(audits()).toHaveLength(0);
+  });
+});
+
+describe("changing an email address", () => {
+  test("voids a verification link already sent to the old address", async () => {
+    // A CLI sign-up with a typo: the link went to the wrong inbox.
+    const id = seedTarget("pendingtypo", { email: "tyop@example.org", emailVerified: 0 });
+    db.query(
+      `UPDATE users SET status = 'pending', verification_token = 'tok-mailed-to-old',
+              verification_expires_at = datetime('now', '+1 day') WHERE id = ?`,
+    ).run(id);
+    const res = await patch(id, { email: "typo@example.org" });
+    expect(res.status).toBe(200);
+    const after = row(id);
+    expect(after.email).toBe("typo@example.org");
+    expect(after.email_verified).toBe(0);
+    expect(after.verification_token).toBeNull();
+    expect(after.verification_expires_at).toBeNull();
+    expect(res.body.notes.join(" ")).toContain("void");
+  });
+
+  test("a change of letter case alone keeps the link, and the verification", async () => {
+    const id = seedTarget("casing", { email: "MiXeD@Example.org" });
+    db.query("UPDATE users SET verification_token = 'tok-keep' WHERE id = ?").run(id);
+    const res = await patch(id, { email: "mixed@example.org" });
+    expect(res.status).toBe(200);
+    const after = row(id);
+    expect(after.verification_token).toBe("tok-keep");
+    expect(after.email_verified).toBe(1);
+    expect(res.body.old_address_notified).toBeUndefined();
+  });
+
+  test("tells the previous address, and says plainly when it could not", async () => {
+    const id = seedTarget("moved", { email: "old@example.org" });
+    const res = await patch(id, { email: "new@example.org" });
+    expect(res.status).toBe(200);
+    expect(row(id).email).toBe("new@example.org");
+    // This engine is a non-production worker, which mails only allow-listed
+    // recipients: the notice is fenced, the edit stands, and the answer is honest.
+    expect(res.body.old_address_notified).toBe(false);
+    expect(res.body.notes.join(" ")).toContain("could NOT be sent a notice");
+  });
+
+  test("an edit that moves no inbox mentions no notice", async () => {
+    const id = seedTarget("stayed");
+    const res = await patch(id, { city: "Paris" });
+    expect(res.body.old_address_notified).toBeUndefined();
+    expect(res.body.notes ?? []).toEqual([]);
+  });
+});
+
+describe("the audit row follows the write", () => {
+  test("an update that matched nothing leaves no audit row, and says so", async () => {
+    const live = seedTarget("livetarget");
+    const gone = seedTarget("goneafter", { deleted: true });
+    const d1 = realD1(db);
+    const update = (id: number) =>
+      d1
+        .prepare("UPDATE users SET city = ?1 WHERE id = ?2 AND deleted_at IS NULL")
+        .bind("Paris", id);
+    const entry = (id: number) => ({
+      userId: idOf("editowner"),
+      action: "admin_user_edited",
+      resourceType: "user",
+      resourceId: String(id),
+      details: "{}",
+    });
+
+    // The window the route cannot reach on a single-writer engine: the account
+    // was tombstoned between the read and the write.
+    expect(await applyEditWithAudit(d1, update(gone), entry(gone))).toBe(false);
+    expect(audits()).toHaveLength(0);
+    expect(row(gone).city).toBeNull();
+
+    expect(await applyEditWithAudit(d1, update(live), entry(live))).toBe(true);
+    expect(audits()).toHaveLength(1);
+    expect(row(live).city).toBe("Paris");
+  });
+});
+
+describe("the success path changes only what it says", () => {
+  function changedColumns(before: Record<string, unknown>, after: Record<string, unknown>) {
+    return Object.keys(after)
+      .filter((key) => after[key] !== before[key])
+      .sort();
+  }
+
+  test("a descriptive edit moves updated_at and nothing else", async () => {
+    const id = seedTarget("subject", { autoAssigned: 1 });
+    db.query("UPDATE users SET updated_at = '2000-01-01 00:00:00' WHERE id = ?").run(id);
+    const before = row(id);
+    // `given_name` equals the stored value: not a change, not written, not audited.
+    const res = await patch(id, { city: "Paris", given_name: "Given" });
+    expect(res.status).toBe(200);
+    expect(changedColumns(before, row(id))).toEqual(["city", "updated_at"]);
+    expect(row(id).username_auto_assigned).toBe(1);
+    expect(Object.keys(res.body.changed)).toEqual(["city"]);
+    expect(audits()[0].resource_type).toBe("user");
+  });
+
+  test("an email edit changes exactly the email columns", async () => {
+    const id = seedTarget("subject");
+    db.query(
+      `UPDATE users SET verification_token = 'tok', verification_expires_at = '2099-01-01 00:00:00',
+              updated_at = '2000-01-01 00:00:00' WHERE id = ?`,
+    ).run(id);
+    const before = row(id);
+    await patch(id, { email: "elsewhere@example.org" });
+    expect(changedColumns(before, row(id))).toEqual([
+      "email",
+      "email_verified",
+      "updated_at",
+      "verification_expires_at",
+      "verification_token",
+    ]);
+  });
+
+  test("a username edit changes exactly the username columns", async () => {
+    const id = seedTarget("subject", { autoAssigned: 1 });
+    db.query("UPDATE users SET updated_at = '2000-01-01 00:00:00' WHERE id = ?").run(id);
+    const before = row(id);
+    await patch(id, { username: "renamed-user" });
+    expect(changedColumns(before, row(id))).toEqual([
+      "updated_at",
+      "username",
+      "username_auto_assigned",
+    ]);
+  });
+});
+
+describe("the ORCID name rule, edge by edge", () => {
+  test("a family name alone is refused", async () => {
+    const id = seedTarget("orcidone", { orcid: "0000-0002-1825-0097", orcidVerified: 1 });
+    const res = await patch(id, { family_name: "Changed" });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("name_is_orcid_canonical");
+  });
+
+  test("a name next to another field refuses the whole request", async () => {
+    const id = seedTarget("orcidtwo", { orcid: "0000-0002-1825-0097", orcidVerified: 1 });
+    const res = await patch(id, { given_name: "Changed", affiliation: "New Lab" });
+    expect(res.status).toBe(409);
+    expect(row(id).affiliation).toBe("Old Lab");
+    expect(row(id).given_name).toBe("Given");
+  });
+
+  test("a verified flag with no iD on file does not freeze the name", async () => {
+    const id = seedTarget("halfstate", { orcid: null, orcidVerified: 1 });
+    const res = await patch(id, { given_name: "Changed" });
+    expect(res.status).toBe(200);
+    expect(row(id).given_name).toBe("Changed");
+  });
+});
+
+describe("documented edit invariants", () => {
+  test("a change of letter case alone is a change, for a username and a handle", async () => {
+    const id = seedTarget("subject", { github: "octo-cat" });
+    const res = await patch(id, { username: "Subject", github_username: "Octo-Cat" });
+    expect(res.status).toBe(200);
+    expect(Object.keys(res.body.changed).sort()).toEqual(["github_username", "username"]);
+    expect(row(id).username).toBe("Subject");
+    expect(row(id).github_username).toBe("Octo-Cat");
+  });
+
+  test("an owner gives a username to an account that has none, by id", async () => {
+    db.query(
+      `INSERT INTO users (username, email, password_hash, status, role, email_verified, signup_source)
+       VALUES (NULL, 'webonly@example.org', 'x', 'verified', 'member', 1, 'web')`,
+    ).run();
+    const id = db
+      .query<{ id: number }, []>("SELECT id FROM users WHERE email = 'webonly@example.org'")
+      .get()?.id as number;
+    const res = await patch(id, { username: "webchosen" });
+    expect(res.status).toBe(200);
+    expect(res.body.message).toBe("Updated webonly@example.org: username");
+    expect(row(id).username).toBe("webchosen");
+    expect(row(id).username_auto_assigned).toBe(0);
+    expect(JSON.parse(audits()[0].details).target_username).toBeNull();
+  });
+
+  test("a taken username and a taken handle name their holders", async () => {
+    const userHolder = seedTarget("takenuser");
+    const ghHolder = seedTarget("ghholder", { github: "takengh" });
+    const id = seedTarget("subject");
+
+    const u = await patch(id, { username: "TAKENUSER" });
+    expect(u.status).toBe(409);
+    expect(u.body.error).toBe("username_taken");
+    expect(u.body.holder).toEqual({ id: userHolder, username: "takenuser" });
+
+    const g = await patch(id, { github_username: "TakenGh" });
+    expect(g.status).toBe(409);
+    expect(g.body.error).toBe("github_in_use");
+    expect(g.body.holder).toEqual({ id: ghHolder, username: "ghholder" });
   });
 });

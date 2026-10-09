@@ -7,48 +7,81 @@
  * the route, which is the only caller.
  *
  * THE RULE THIS FILE EXISTS TO HOLD: the admin edit reuses the self-service
- * field rules instead of restating them. A username is validated by
- * `normalizeProfilePatch` (the same function `PATCH /auth/profile` and CLI
- * signup use), an email by `normalizeEmail`, a handle by `normalizeGithubHandle`.
- * An admin therefore cannot store a value the person could not have typed
- * themselves, and the three rules cannot drift into two. What differs is only
- * WHO may change a field and what is deliberately left out, both declared in
- * `shared/contract/admin-user.ts`.
+ * field rules instead of restating them. The name, affiliation, location,
+ * username and GitHub handle go through `normalizeProfilePatch`, the function
+ * `PATCH /auth/profile` validates with; the email goes through
+ * `emailFieldSchema`, the one every auth route validates an address with. (CLI
+ * signup has its own schema for the username, which `validateUsernameFormat`
+ * mirrors.) An admin therefore cannot store a value the person could not have
+ * typed themselves.
+ *
+ * Two things differ from self-service, on purpose. WHO may change a field is
+ * declared in `shared/contract/admin-user.ts`. And there is NO username lock:
+ * `PATCH /auth/profile` refuses an approved account's rename with
+ * `username_locked` and tells the person to "contact an admin to change it",
+ * and this route is that admin.
  */
 
 import {
   ADMIN_USER_EDITABLE_FIELDS,
   ADMIN_USER_ERROR_MESSAGES,
-  ADMIN_USER_NOT_EDITABLE_HINTS,
   type AdminUserEditableField,
   type AdminUserErrorCode,
   adminUserEditBodySchema,
   isAdminUserEditableField,
   isAdminUserIdentityField,
+  notEditableHint,
 } from "../../../shared/contract/admin-user.js";
 import type { ProfileEditErrorCode } from "../../../shared/contract/user.js";
 import { emailFieldSchema } from "./identity";
-import { normalizeProfilePatch } from "./profile";
+import { type ProfilePatch, normalizeProfilePatch } from "./profile";
 
-/** The values to write: a field is present only if the caller sent it. `null`
- *  clears (affiliation and the GitHub handle only). */
-export type AdminUserPatch = Partial<Record<AdminUserEditableField, string | null>>;
+/**
+ * The values to write: a field is present only if the caller sent it.
+ *
+ * `ProfilePatch` already says which fields may be cleared with `null` (the
+ * affiliation and the GitHub handle, and nothing else), so this is that type
+ * plus the email, which is never null: `users.email` is NOT NULL.
+ */
+export type AdminUserPatch = ProfilePatch & { email?: string };
 
-export type AdminEditParse =
-  | { ok: true; patch: AdminUserPatch }
+/** Compile-time proof that the patch can carry every editable field. */
+export const _patchCoversEditableFields: AdminUserEditableField extends keyof AdminUserPatch
+  ? true
+  : never = true;
+
+/** A refused request. The 403 is always `owner_only_field`; everything else a
+ *  parse can refuse is a 400. Tying status to code keeps `403 invalid_edit`
+ *  from compiling. */
+export type AdminEditRefusal =
+  | { ok: false; status: 403; error: "owner_only_field"; message: string }
   | {
       ok: false;
-      status: 400 | 403;
-      error: AdminUserErrorCode | ProfileEditErrorCode;
+      status: 400;
+      error: Exclude<AdminUserErrorCode, "owner_only_field"> | ProfileEditErrorCode;
       message: string;
     };
 
-function refusal(
-  status: 400 | 403,
-  error: AdminUserErrorCode | ProfileEditErrorCode,
+export type AdminEditParse = { ok: true; patch: AdminUserPatch } | AdminEditRefusal;
+
+function badRequest(
+  error: Extract<AdminEditRefusal, { status: 400 }>["error"],
   message: string,
-): AdminEditParse {
-  return { ok: false, status, error, message };
+): AdminEditRefusal {
+  return { ok: false, status: 400, error, message };
+}
+
+/**
+ * The body of a refusal, with the code CHECKED. The same idea as
+ * `profileRefusal` (ADR 0044): a code that is not in the declared vocabulary,
+ * or a typo, is a compile error at the call site instead of a bare token the
+ * CLI prints at an operator.
+ */
+export function adminUserRefusal(
+  code: AdminUserErrorCode,
+  message: string,
+): { error: AdminUserErrorCode; message: string } {
+  return { error: code, message };
 }
 
 /**
@@ -62,38 +95,38 @@ function refusal(
  */
 export function parseAdminUserEdit(raw: unknown, actorIsOwner: boolean): AdminEditParse {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
-    return refusal(
-      400,
-      "invalid_edit",
-      "The request body must be a JSON object of fields to change",
-    );
+    return badRequest("invalid_edit", "The request body must be a JSON object of fields to change");
   }
   const keys = Object.keys(raw);
   if (keys.length === 0) {
-    return refusal(400, "empty_patch", "No fields provided");
+    return badRequest("empty_patch", "No fields provided");
   }
 
   const notEditable = keys.filter((key) => !isAdminUserEditableField(key));
   if (notEditable.length > 0) {
     const reasons = notEditable
-      .map((key) => `${key}: ${ADMIN_USER_NOT_EDITABLE_HINTS[key] ?? "not an editable field"}`)
+      .map((key) => `${key}: ${notEditableHint(key) ?? "not an editable field"}`)
       .join("; ");
-    return refusal(
-      400,
+    return badRequest(
       "field_not_editable",
       `Cannot edit ${notEditable.join(", ")} here (${reasons}). Editable fields: ${ADMIN_USER_EDITABLE_FIELDS.join(", ")}`,
     );
   }
 
   if (!actorIsOwner && keys.some(isAdminUserIdentityField)) {
-    return refusal(403, "owner_only_field", ADMIN_USER_ERROR_MESSAGES.owner_only_field);
+    return {
+      ok: false,
+      status: 403,
+      error: "owner_only_field",
+      message: ADMIN_USER_ERROR_MESSAGES.owner_only_field,
+    };
   }
 
   const shape = adminUserEditBodySchema.safeParse(raw);
   if (!shape.success) {
     const first = shape.error.issues[0];
     const where = first?.path.join(".") || "body";
-    return refusal(400, "invalid_edit", `${where}: ${first?.message ?? "invalid value"}`);
+    return badRequest("invalid_edit", `${where}: ${first?.message ?? "invalid value"}`);
   }
   const body = shape.data;
   const patch: AdminUserPatch = {};
@@ -104,7 +137,7 @@ export function parseAdminUserEdit(raw: unknown, actorIsOwner: boolean): AdminEd
   if (Object.values(profileFields).some((value) => value !== undefined)) {
     const normalized = normalizeProfilePatch(profileFields);
     if (!normalized.ok) {
-      return refusal(400, normalized.error, normalized.message);
+      return badRequest(normalized.error, normalized.message);
     }
     Object.assign(patch, normalized.patch);
   }
@@ -112,19 +145,24 @@ export function parseAdminUserEdit(raw: unknown, actorIsOwner: boolean): AdminEd
   if (email !== undefined) {
     const parsed = emailFieldSchema.safeParse(email);
     if (!parsed.success) {
-      return refusal(400, "invalid_edit", "email: not a valid email address");
+      return badRequest("invalid_edit", "email: not a valid email address");
     }
-    patch.email = parsed.data as string;
+    patch.email = parsed.data;
   }
 
   if (Object.keys(patch).length === 0) {
-    return refusal(400, "empty_patch", "No fields provided");
+    return badRequest("empty_patch", "No fields provided");
   }
   return { ok: true, patch };
 }
 
-/** The columns of the account that a patch is compared against. */
-export type AdminUserCurrent = Record<AdminUserEditableField, string | null>;
+/**
+ * The columns of the account that a patch is compared against. Every field may
+ * be NULL on the account except the email, which never is.
+ */
+export type AdminUserCurrent = {
+  [K in AdminUserEditableField]: K extends "email" ? string : string | null;
+};
 
 export interface FieldChange {
   from: string | null;

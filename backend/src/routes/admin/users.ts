@@ -49,6 +49,7 @@ import { emailFieldSchema, normalizeGithubHandle, normalizeOrcid } from "../../s
 import { PRIVATE_GRANTS_PURGE_SQL } from "../../services/private-auth";
 import { errorMessage } from "../../services/repo-metadata";
 import {
+  FUZZY_COLUMNS,
   type RankableUser,
   classifyStrictMatch,
   closestAccounts,
@@ -58,6 +59,7 @@ import {
 } from "../../services/user-fuzzy";
 import {
   ADMIN_USER_NON_SECRET_SELECT,
+  type UserColumn,
   buildExactIdentifierSql,
   buildUserSearchSql,
   parseSearchTerms,
@@ -764,6 +766,58 @@ export async function resolveEmailPrefsTarget(
 export const KIND_CHANGE_GUARDED_UPDATE_SQL =
   "UPDATE users SET account_kind = ?, updated_at = datetime('now') WHERE id = ? AND account_kind = ?";
 
+/**
+ * The columns of one row of the admin listing.
+ *
+ * service_access is what separates an uploader from a browse-only account now
+ * that they no longer track `status` one-for-one (ADR 0040); the identity
+ * columns are here because a web/ORCID row has username = NULL and is otherwise
+ * unidentifiable in the listing (#1251). upload_access_requested_at is what
+ * makes "awaiting approval" a fact rather than an inference (ADR 0042, #1253).
+ * account_kind is what this account IS (epic #1272 phase 4, #1284; ADR 0048).
+ *
+ * A tuple checked against the column classification, and the row type below is
+ * derived from it, so a column cannot be dropped from the SELECT while the code
+ * that ranks and labels hits still expects it.
+ */
+const LISTING_COLUMNS = [
+  "id",
+  "username",
+  "email",
+  "github_username",
+  "status",
+  "email_verified",
+  "role",
+  "created_at",
+  "approved_at",
+  "revoked_at",
+  "signup_source",
+  "service_access",
+  "service_access_granted_at",
+  "given_name",
+  "family_name",
+  "orcid",
+  "upload_access_requested_at",
+  "account_kind",
+] as const satisfies readonly UserColumn[];
+
+/** A listing row: what ranking needs, typed, plus the other columns as read. */
+type ListingRow = RankableUser &
+  Record<Exclude<(typeof LISTING_COLUMNS)[number], keyof RankableUser>, unknown> & {
+    matched_in?: unknown;
+  };
+
+/** Compile-time proof that every column ranking reads is in the SELECT. */
+const _listingCoversRankable: keyof RankableUser extends (typeof LISTING_COLUMNS)[number]
+  ? true
+  : never = true;
+
+/** What the close-match pass reads beyond the listing's columns. They are not
+ *  part of the listing's shape, so they are dropped from what it returns. */
+const NEAR_MISS_EXTRA_COLUMNS = FUZZY_COLUMNS.filter(
+  (column) => !(LISTING_COLUMNS as readonly string[]).includes(column),
+);
+
 export function registerUsersRoutes(admin: AdminRouter): void {
   /**
    * GET /admin/users - List users with optional status filter
@@ -800,8 +854,9 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     // same filters and no search words) cannot share the first one's list.
     // Numbered placeholders (`?1`, `?2`, ...) throughout, because a search word
     // is referenced from the WHERE and from the "matched in" column and must be
-    // bound once (ADR 0093); SQLite does not allow bare `?` and `?N` in one
-    // statement, so every parameter goes through `bind`.
+    // bound once (ADR 0093). Mixing bare `?` in would be a trap: a bare `?` takes
+    // the number after the highest so far and silently collides with a numbered
+    // one reused later, so every parameter goes through `bind`.
     const filters = () => {
       const conditions: string[] = [];
       const params: string[] = [];
@@ -861,19 +916,6 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       }
     };
 
-    // service_access is what separates an uploader from a browse-only account
-    // now that they no longer track `status` one-for-one (ADR 0040); the
-    // identity columns are here because a web/ORCID row has username = NULL
-    // and is otherwise unidentifiable in the listing (#1251).
-    // upload_access_requested_at is what makes "awaiting approval" a fact
-    // rather than an inference (ADR 0042, #1253). account_kind is what this
-    // account IS (epic #1272 phase 4, #1284; ADR 0048).
-    const LISTING_COLUMNS = `
-      id, username, email, github_username, status,
-      email_verified, role, created_at, approved_at, revoked_at,
-      signup_source, service_access, service_access_granted_at,
-      given_name, family_name, orcid, upload_access_requested_at, account_kind`;
-
     const main = filters();
     let matchedInSql = "";
     if (terms && rawQuery !== undefined) {
@@ -889,10 +931,10 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     const where = main.conditions.length > 0 ? ` WHERE ${main.conditions.join(" AND ")}` : "";
     const found = await db
       .prepare(
-        `SELECT ${LISTING_COLUMNS}${matchedInSql} FROM users${where} ORDER BY created_at DESC`,
+        `SELECT ${LISTING_COLUMNS.join(", ")}${matchedInSql} FROM users${where} ORDER BY created_at DESC, id DESC`,
       )
       .bind(...main.params)
-      .all<Record<string, unknown>>();
+      .all<ListingRow>();
 
     if (!terms || rawQuery === undefined) {
       return c.json({ users: found.results, count: found.results.length });
@@ -904,15 +946,13 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     if (found.results.length > 0) {
       const ranked = sortByMatchKind(
         found.results.map((row) => {
-          const user = row as unknown as RankableUser;
-          const matchKind = classifyStrictMatch(rawQuery, terms, user);
           const fromSql = splitMatchedIn(row.matched_in);
           return {
             ...row,
             // An exact hit the substring search did not itself see (a pasted
             // `@handle`) still says which identifier it is.
-            matched_in: fromSql.length > 0 ? fromSql : exactColumns(rawQuery, user),
-            match_kind: matchKind,
+            matched_in: fromSql.length > 0 ? fromSql : exactColumns(rawQuery, row),
+            match_kind: classifyStrictMatch(rawQuery, terms, row),
           };
         }),
       );
@@ -920,22 +960,27 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     }
 
     // Nothing matched. Offer the nearest accounts rather than an empty page
-    // (typos, accents), from the same filters minus the search words. Read as
-    // a second statement over at most a few hundred accounts, and only on a
-    // miss; the closeness itself is scored in code because SQLite has no edit
-    // distance. Fields beyond the listing's are read (affiliation, city,
-    // country) so a close match there is found, and dropped from the answer.
+    // (typos, accents), from the same filters minus the search words. A second
+    // statement over every account that passes the filters (about 600 today),
+    // and only on a miss; the closeness itself is scored in code because SQLite
+    // has no edit distance. Fields beyond the listing's are read (affiliation,
+    // city, country) so a close match there is found, and dropped from the
+    // answer.
     const near = filters();
     applyFilters(near);
     const nearWhere = near.conditions.length > 0 ? ` WHERE ${near.conditions.join(" AND ")}` : "";
     const candidates = await db
       .prepare(
-        `SELECT ${LISTING_COLUMNS}, affiliation, city, country FROM users${nearWhere} ORDER BY created_at DESC`,
+        `SELECT ${[...LISTING_COLUMNS, ...NEAR_MISS_EXTRA_COLUMNS].join(", ")} FROM users${nearWhere} ORDER BY created_at DESC, id DESC`,
       )
       .bind(...near.params)
-      .all<Record<string, unknown>>();
-    const close = closestAccounts(terms, candidates.results).map(
-      ({ affiliation: _a, city: _c, country: _k, ...row }) => row,
+      .all<ListingRow & Record<(typeof NEAR_MISS_EXTRA_COLUMNS)[number], unknown>>();
+    const close = closestAccounts(terms, candidates.results).map((row) =>
+      Object.fromEntries(
+        Object.entries(row).filter(
+          ([key]) => !(NEAR_MISS_EXTRA_COLUMNS as readonly string[]).includes(key),
+        ),
+      ),
     );
     return c.json({ users: close, count: close.length });
   });

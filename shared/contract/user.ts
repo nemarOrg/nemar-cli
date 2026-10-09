@@ -319,10 +319,12 @@ export const adminUserListItemSchema = z
      * How this row matched a `?q=` search, best first (ADR 0093): `exact` the
      * text IS the account's id, username, email, GitHub handle or ORCID iD;
      * `name` every word is a whole word of the name or username; `prefix` every
-     * word begins one; `substring` found somewhere inside a field; `fuzzy` a
-     * close match (a typo or an accent away) offered only when nothing else
-     * matched. Absent on a listing that is not a search. A plain string rather
-     * than an enum so a kind added later does not fail an older CLI's parse.
+     * word begins a word of the name, username, email or GitHub handle;
+     * `substring` found somewhere inside a field; `fuzzy` a close match (a typo
+     * or an accent away) offered only when nothing else matched. Absent on a
+     * listing that is not a search. A plain string rather than an enum so a kind
+     * added later does not fail an older CLI's parse; the known kinds are
+     * `MATCH_KINDS` in ./admin-user.ts, where the CLI types them.
      */
     match_kind: z.string().optional(),
   })

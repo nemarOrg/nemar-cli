@@ -337,3 +337,84 @@ describe("the edit-distance helper", () => {
     expect(fold("Ekström-Åsa_O'Brien")).toBe("ekstrom-asa_o'brien");
   });
 });
+
+describe("close matches are ordered by closeness, and the cap keeps the closest", () => {
+  test("fewer edits first, newest first among equals", async () => {
+    // "smithson" is one edit from Smithsun and Smithsin, two from Smythsun.
+    // The loosest is the NEWEST, so listing by recency would put it first.
+    seed("one-old", { family: "Smithsun", created: "2026-01-01 00:00:00" });
+    seed("one-new", { family: "Smithsin", created: "2026-02-01 00:00:00" });
+    seed("two-newest", { family: "Smythsun", created: "2026-03-01 00:00:00" });
+    const { users } = await search("?q=smithson");
+    expect(names(users)).toEqual(["one-new", "one-old", "two-newest"]);
+  });
+
+  test("when more are close than the cap allows, the closest survive, not the newest", async () => {
+    seed("closest-oldest", { family: "Smithsun", created: "2020-01-01 00:00:00" });
+    for (let i = 0; i < FUZZY_MAX_RESULTS + 4; i++) {
+      seed(`looser${i}`, {
+        family: "Smythsun",
+        created: `2026-01-${String(i + 1).padStart(2, "0")} 00:00:00`,
+      });
+    }
+    const { users } = await search("?q=smithson");
+    expect(users).toHaveLength(FUZZY_MAX_RESULTS);
+    expect(users[0].username).toBe("closest-oldest");
+  });
+
+  test("a typo in a PARTIAL word still finds the account", async () => {
+    // Too long for the whole-word distance (14 letters against 8), so only the
+    // comparison with the word's leading stretch can find it.
+    seed("longname", { family: "Lovelacewright" });
+    const { users } = await search("?q=lovelxce");
+    expect(names(users)).toEqual(["longname"]);
+    expect(users[0].match_kind).toBe("fuzzy");
+  });
+});
+
+describe("how a hit is classified", () => {
+  test("several words are a name match only if every one is a whole name word", async () => {
+    seed("alovelace", { given: "Ada", family: "Lovelace", affiliation: "UC San Diego" });
+    expect((await search("?q=ada+lovelace")).users[0].match_kind).toBe("name");
+    // "diego" is in the affiliation, which is not a name field.
+    expect((await search("?q=ada+diego")).users[0].match_kind).not.toBe("name");
+  });
+
+  test("a word of the username counts as a name word", async () => {
+    seed("quill-wright");
+    expect((await search("?q=quill")).users[0].match_kind).toBe("name");
+  });
+
+  test("an email word or a handle word that begins with the text is a prefix hit", async () => {
+    seed("somebody", { email: "zanzibar.ops@example.org" });
+    seed("anybody", { github: "quantum-labs" });
+    expect((await search("?q=zanz")).users[0].match_kind).toBe("prefix");
+    expect((await search("?q=quant")).users[0].match_kind).toBe("prefix");
+  });
+});
+
+describe("the fields close matching reads", () => {
+  test("exactly these, so adding one is a decision someone sees", () => {
+    expect([...FUZZY_COLUMNS]).toEqual([
+      "username",
+      "email",
+      "github_username",
+      "given_name",
+      "family_name",
+      "affiliation",
+      "city",
+      "country",
+    ]);
+  });
+
+  test("an ORCID digit run, a date or a description is never fuzzy-matched", async () => {
+    const id = seed("holder", {
+      orcid: "0000-0002-1825-0097",
+      created: "2031-05-06 07:08:09",
+    });
+    db.query("UPDATE users SET description = 'interested in photosynthesis' WHERE id = ?").run(id);
+    expect((await search("?q=0000-0002-1825-0098")).users).toEqual([]);
+    expect((await search("?q=photosynthesys")).users).toEqual([]);
+    expect((await search("?q=2031-05-07")).users).toEqual([]);
+  });
+});

@@ -131,7 +131,7 @@ describe("the column classification", () => {
       "aws_access_key_id_encrypted",
       "aws_secret_access_key_encrypted",
     ]) {
-      expect(USER_COLUMN_ROLES[column]).toBe("secret");
+      expect((USER_COLUMN_ROLES as Record<string, string>)[column]).toBe("secret");
       expect(USER_SEARCH_TEXT_COLUMNS).not.toContain(column);
       expect(ADMIN_USER_DETAIL_SELECT).not.toContain(column);
     }
@@ -341,6 +341,67 @@ describe("GET /admin/users?q= matching rules", () => {
     expect(long.status).toBe(400);
   });
 
+  test("a numeric word is ANDed with the other words, and matches the id on its own", async () => {
+    // The id's digits appear nowhere else in these rows, so only the
+    // `OR id = ...` branch can satisfy the numeric word.
+    db.query("UPDATE users SET id = 987654 WHERE username = 'alovelace'").run();
+    const hit = await search("?q=987654+lovelace");
+    expect(hit.users.map((u) => u.username)).toEqual(["alovelace"]);
+    const miss = await search("?q=987654+babbage");
+    expect(miss.users).toEqual([]);
+  });
+
+  test("a word never matches across two fields", async () => {
+    db.query(
+      `INSERT INTO users (username, email, password_hash, status, role, email_verified, given_name, family_name)
+       VALUES ('splitname', 'split@example.org', 'x', 'verified', 'member', 1, 'Ab', 'Cd')`,
+    ).run();
+    expect((await search("?q=abcd")).users).toEqual([]);
+    expect((await search("?q=ab+cd")).users.map((u) => u.username)).toEqual(["splitname"]);
+  });
+
+  test("a word of exactly the maximum length is accepted, one more is not", async () => {
+    const atLimit = "x".repeat(ADMIN_USER_SEARCH_MAX_TERM_CHARS);
+    expect((await search(`?q=${atLimit}`)).status).toBe(200);
+    expect((await search(`?q=${atLimit}x`)).status).toBe(400);
+  });
+
+  test("equal creation times list the newest account first", async () => {
+    for (const name of ["tie-a", "tie-b", "tie-c"]) {
+      db.query(
+        `INSERT INTO users (username, email, password_hash, status, role, email_verified, family_name, created_at)
+         VALUES (?, ?, 'x', 'verified', 'member', 1, 'Tiebreak', '2030-01-01 00:00:00')`,
+      ).run(name, `${name}@example.org`);
+    }
+    const { users } = await search("?q=tiebreak");
+    expect(users.map((u) => u.username)).toEqual(["tie-c", "tie-b", "tie-a"]);
+  });
+
+  test("real-world punctuation is searched as written", async () => {
+    const cases: Array<[string, string]> = [
+      ["o'brien", "obrien"],
+      ["R&D Lab", "randd"],
+      ["c++ group", "cppgroup"],
+      ["100% Open", "openpct"],
+      ["#1 Institute", "firstinst"],
+    ];
+    for (const [affiliation, username] of cases) {
+      db.query(
+        `INSERT INTO users (username, email, password_hash, status, role, email_verified, affiliation)
+         VALUES (?, ?, 'x', 'verified', 'member', 1, ?)`,
+      ).run(username, `${username}@example.org`, affiliation);
+    }
+    for (const [affiliation, username] of cases) {
+      const word = affiliation.split(" ")[0];
+      const { status, users } = await search(`?q=${encodeURIComponent(word)}`);
+      expect(status, word).toBe(200);
+      expect(
+        users.map((u) => u.username),
+        word,
+      ).toContain(username);
+    }
+  });
+
   test("the widest allowed search still runs", async () => {
     const words = Array.from({ length: ADMIN_USER_SEARCH_MAX_TERMS }, () => "a").join("+");
     const { status } = await search(`?q=${words}`);
@@ -540,12 +601,21 @@ describe("GET /admin/users/by-id/:id", () => {
     expect((await detail(id, "?include_deleted=true")).status).toBe(200);
   });
 
-  test("400 for an id that is not a positive integer", async () => {
-    for (const bad of ["abc", "0", "-3", "1e3", "12abc"]) {
+  test("400 for an id that is not a whole number", async () => {
+    for (const bad of ["abc", "0", "1.5", "1e3", "12abc"]) {
       const { status, body } = await detail(bad);
       expect(status).toBe(400);
       expect(body.error).toBe("invalid_user_id");
     }
+  });
+
+  test("the internal system account can be read, because search lists it", async () => {
+    const listed = await search("?q=nemar-system");
+    expect(listed.users.map((u) => u.username)).toContain("nemar-system");
+    const { status, body } = await detail(-1);
+    expect(status).toBe(200);
+    expect((body.user as Record<string, unknown>).username).toBe("nemar-system");
+    expect((await detail(-424242)).status).toBe(404);
   });
 
   test("a member cannot read it", async () => {

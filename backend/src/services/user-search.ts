@@ -6,22 +6,27 @@
  * true as the table grows. Both come from ONE classification of every `users`
  * column, {@link USER_COLUMN_ROLES}; the search SQL, the detail SELECT and the
  * test that fails on an unclassified column are all derived from it. A column
- * added by a migration with no entry here fails
- * `backend/test/admin-user-search.test.ts` until someone decides what it is.
+ * added by a migration with no entry here fails the "column classification"
+ * block of `backend/test/admin-user-search-route.test.ts` until someone decides
+ * what it is.
  *
- * WHY ONE HAYSTACK AND NOT A LIKE PER COLUMN. D1 allows 100 bound parameters
- * per statement. A `LIKE ?` on each of ~25 columns costs 25 per search word, so
- * a four-word query is already over the limit. Concatenating the searchable
- * columns into one lower-cased string costs one parameter per word, and a word
- * is looked for with `instr()` rather than `LIKE`, so `%` and `_` in what the
- * admin types are ordinary characters and need no escaping.
+ * WHY ONE HAYSTACK AND NOT A CONDITION PER COLUMN. "Is this word anywhere in the
+ * account" is one expression over one lower-cased string of the searchable
+ * columns, not a run of about 25 `OR`s per word. A word is looked for with
+ * `instr()` rather than `LIKE`, so `%` and `_` in what the admin types are
+ * ordinary characters and need no escaping. D1's limit of 100 bound parameters
+ * per statement is met a different way: by numbering. A word is bound once as
+ * `?N` and that placeholder is reused wherever the word appears, so a search
+ * costs one parameter per word however many columns it covers.
  *
  * MATCHING. Every word must be found somewhere in the account (AND), in any
  * column, so `ada lovelace` finds given name Ada with family name Lovelace and
- * `ucsd 2026-09` finds an affiliation plus a creation month. Case-insensitive
- * for ASCII only, exactly like SQLite's `LIKE`: both the stored text and the
- * word are folded by the same `lower()`, so `Ekström` is found by `ekström` but
- * not by `EKSTRÖM`.
+ * `ucsd 2026-09` finds an affiliation plus any date in September 2026 (created,
+ * approved, revoked, ...). Case-insensitive for ASCII only, exactly like SQLite's
+ * `LIKE`: the stored text is folded by SQLite's `lower()` and the word by the
+ * same ASCII-only rule in {@link parseSearchTerms}, so `Ekström` is found by
+ * `ekström` but not by `EKSTRÖM`. (When nothing matches, the close-match pass in
+ * ./user-fuzzy.ts does fold accents.)
  */
 
 import {
@@ -53,7 +58,7 @@ export type UserColumnRole = "id" | "text" | "flag" | "ref" | "secret" | "omit";
  * test compares this table's keys with `PRAGMA table_info(users)` on a fully
  * migrated database, in both directions.
  */
-export const USER_COLUMN_ROLES: Readonly<Record<string, UserColumnRole>> = {
+export const USER_COLUMN_ROLES = {
   id: "id",
 
   username: "text",
@@ -98,19 +103,42 @@ export const USER_COLUMN_ROLES: Readonly<Record<string, UserColumnRole>> = {
   aws_secret_access_key_encrypted: "secret",
 
   email_preferences: "omit",
-};
+} as const satisfies Record<string, UserColumnRole>;
 
-function columnsWithRole(...roles: UserColumnRole[]): string[] {
-  return Object.entries(USER_COLUMN_ROLES)
-    .filter(([, role]) => roles.includes(role))
-    .map(([column]) => column);
+/** A column of `users`, as the classification above spells it. Anything that
+ *  names a column and wants the compiler to check it uses this. */
+export type UserColumn = keyof typeof USER_COLUMN_ROLES;
+
+/** The columns the classification gives role `R`. */
+export type ColumnsOf<R extends UserColumnRole> = {
+  [K in UserColumn]: (typeof USER_COLUMN_ROLES)[K] extends R ? K : never;
+}[UserColumn];
+
+function columnsWithRole<R extends UserColumnRole>(...roles: R[]): ColumnsOf<R>[] {
+  // The one cast: Object.entries widens the keys to string. Filtering by the
+  // very table the type is derived from is what makes it sound.
+  return (Object.entries(USER_COLUMN_ROLES) as Array<[UserColumn, UserColumnRole]>)
+    .filter(([, role]) => (roles as UserColumnRole[]).includes(role))
+    .map(([column]) => column) as ColumnsOf<R>[];
 }
 
 /** Columns searched as text, in the order they are checked and reported. */
-export const USER_SEARCH_TEXT_COLUMNS: readonly string[] = columnsWithRole("text");
+export const USER_SEARCH_TEXT_COLUMNS: readonly ColumnsOf<"text">[] = columnsWithRole("text");
 
 /** Columns that must never be searched or returned. */
-export const USER_SECRET_COLUMNS: readonly string[] = columnsWithRole("secret");
+export const USER_SECRET_COLUMNS: readonly ColumnsOf<"secret">[] = columnsWithRole("secret");
+
+/**
+ * The columns an exact hit can be on besides the id: the identifiers a person
+ * is looked up by. The SQL that finds an exact hit and the code that labels one
+ * (./user-fuzzy.ts) both read this list, so they cannot disagree.
+ */
+export const EXACT_IDENTIFIER_COLUMNS = [
+  "username",
+  "email",
+  "github_username",
+  "orcid",
+] as const satisfies readonly ColumnsOf<"text">[];
 
 /**
  * The `SELECT` list for one account's details, prefixed with the table alias
@@ -141,15 +169,16 @@ export const ADMIN_USER_NON_SECRET_SELECT: string = columnsWithRole(
   .join(", ");
 
 /**
- * Columns whose SEARCHABLE value is not the stored one. A member's `role` is
- * stored as NULL (migration 0009 defaults it, older rows predate that), and
- * every surface calls that account a member, so the word `member` must find it.
+ * Columns whose SEARCHABLE value is not the stored one. A member's `role` may be
+ * NULL (nothing forbids it, and `GET /admin/users?role=member` already treats
+ * NULL as a member), and every surface calls that account a member, so the word
+ * `member` must find it.
  */
-const SEARCH_VALUE_SQL: Readonly<Record<string, string>> = {
+const SEARCH_VALUE_SQL: Readonly<Partial<Record<UserColumn, string>>> = {
   role: "COALESCE(role, 'member')",
 };
 
-function valueSql(column: string): string {
+function valueSql(column: UserColumn): string {
   return SEARCH_VALUE_SQL[column] ?? column;
 }
 
@@ -209,9 +238,10 @@ export interface UserSearchSql {
  *
  * `bind` registers one word and returns its numbered placeholder (`?3`). The
  * placeholder is reused wherever the word appears, so a search costs one bound
- * parameter per word however many columns it covers. The caller must use
+ * parameter per word however many columns it covers. The caller should use
  * numbered placeholders for every other parameter of the same statement too:
- * SQLite does not allow bare `?` and `?N` to be mixed safely.
+ * a bare `?` takes the number after the highest one so far, which silently
+ * collides with a numbered placeholder that is reused later.
  */
 export function buildUserSearchSql(
   terms: readonly string[],
@@ -259,11 +289,11 @@ export function buildExactIdentifierSql(
 ): string | null {
   if (keys.length === 0) return null;
   const list = keys.map(bind).join(", ");
-  return `(lower(COALESCE(username, '')) IN (${list})
-    OR lower(email) IN (${list})
-    OR lower(COALESCE(github_username, '')) IN (${list})
-    OR lower(COALESCE(orcid, '')) IN (${list})
-    OR CAST(id AS TEXT) IN (${list}))`;
+  const conditions = [
+    ...EXACT_IDENTIFIER_COLUMNS.map((column) => `lower(COALESCE(${column}, '')) IN (${list})`),
+    `CAST(id AS TEXT) IN (${list})`,
+  ];
+  return `(${conditions.join("\n    OR ")})`;
 }
 
 /** `matched_in` as it comes back from SQL (space separated) to the wire array. */

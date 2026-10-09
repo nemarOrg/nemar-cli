@@ -33,6 +33,8 @@ import { formatBytesCli } from "../../shared/bytes.js";
 import {
   ADMIN_USER_DESCRIPTIVE_FIELDS,
   ADMIN_USER_IDENTITY_FIELDS,
+  ADMIN_USER_SEARCH_MAX_TERMS,
+  ADMIN_USER_SEARCH_MAX_TERM_CHARS,
 } from "../../shared/contract/admin-user.js";
 import {
   ACCOUNT_KIND_VALUES,
@@ -53,14 +55,18 @@ import {
   stepsForRelease,
 } from "../../shared/publication-steps.js";
 import {
+  CLEAR_FLAGS,
   EDIT_FLAG_FIELDS,
+  type LookupMatch,
   allFuzzy,
   candidateLine,
   displayEditValue,
   editBodyFromOptions,
   exactHit,
+  flagName,
   planEdit,
   resolveLookup,
+  searchWasUnderstood,
   userDetailLines,
 } from "../lib/admin-user-lookup.js";
 import {
@@ -222,6 +228,7 @@ import {
   resolveImportSources,
   resolveRecoverTargets,
 } from "../lib/recover-datasets.js";
+import { sanitizeSnippetText as safeText } from "../lib/render/snippet.js";
 import {
   type WithdrawnDatasetEntry,
   loadWithdrawnDatasets,
@@ -378,9 +385,10 @@ Tiers (ADR 0040):
 
 Search (--search):
   Every word must be found, in any field of the account, in any order; case does
-  not matter, and part of a word is enough (a first name, "lovel"). Passwords,
-  tokens and keys are never searched or shown. Each result says which fields
-  matched; the best matches come first. Combine it with any filter below.
+  not matter, and part of a word is enough (a first name, or "lovel" for
+  Lovelace). Passwords, tokens and keys are never searched or shown. Each result
+  says which fields matched; the best matches come first. Combine it with any
+  filter above.
 
   If the text is exactly one account's id, username, email, GitHub handle or ORCID
   iD, that account's details are shown straight away, with any other matches
@@ -392,7 +400,7 @@ Examples:
   $ nemar admin users --search lovelace  # Find an account by anything
   $ nemar admin users -s "ada san diego" # Name plus affiliation
   $ nemar admin users -s 0000-0002-1825-0097  # By ORCID iD
-  $ nemar admin users -s 2026-09 --role admin # Admins created in September 2026
+  $ nemar admin users -s 2026-09 --role admin # Admins with any date in September 2026
   $ nemar admin users show lovelace      # One account's full details
   $ nemar admin users edit lovelace --affiliation "UC San Diego"  # Edit (see 'edit --help')
   $ nemar admin users --awaiting-approval # Open upload-access requests
@@ -465,6 +473,21 @@ Examples:
       console.error(chalk.red("--search needs at least one word to look for"));
       process.exit(1);
     }
+    // The same limits the backend enforces, refused here so it costs no request.
+    if (search !== undefined) {
+      const words = search.split(/\s+/).filter(Boolean);
+      if (
+        words.length > ADMIN_USER_SEARCH_MAX_TERMS ||
+        words.some((word) => word.length > ADMIN_USER_SEARCH_MAX_TERM_CHARS)
+      ) {
+        console.error(
+          chalk.red(
+            `--search takes at most ${ADMIN_USER_SEARCH_MAX_TERMS} words of ${ADMIN_USER_SEARCH_MAX_TERM_CHARS} characters; narrow it with --role or --kind instead`,
+          ),
+        );
+        process.exit(1);
+      }
+    }
     const includeDeleted = options.includeDeleted === true;
 
     const spinner = ora(search !== undefined ? "Searching users..." : "Fetching users...").start();
@@ -475,6 +498,22 @@ Examples:
         includeDeleted,
       });
       spinner.stop();
+
+      // A backend that predates `?q=` ignores it and returns every account, and
+      // printing that under a "search" label would hand an admin the whole
+      // directory as if it were the answer. The kind and tier filters below
+      // guard the same rollout case; a search response always carries
+      // `match_kind`, so its absence on every row is the tell.
+      if (search !== undefined && !searchWasUnderstood(result.users)) {
+        process.exitCode = 1;
+        markReportedExit();
+        console.error(
+          chalk.red(
+            "This NEMAR backend does not support --search yet, so the accounts it returned are not search results. Update the backend, or filter with --role or --kind.",
+          ),
+        );
+        return;
+      }
 
       // The TIER filters are applied here rather than server-side: the listing
       // is unpaginated, so there is nothing to gain from a new query param.
@@ -574,7 +613,7 @@ Examples:
         // heading falls back to the email and carries the numeric id — the
         // only key `nemar admin approve --id` can address them by. Printing
         // the raw field would put the literal "null" in the listing.
-        const heading = user.username ?? user.email;
+        const heading = safeText(user.username ?? user.email);
         // A search is how an admin finds the id `show` and `edit` take, so the
         // id is printed on every row of one; a plain listing keeps it to the
         // rows that have no username to address them by.
@@ -583,7 +622,7 @@ Examples:
             ? chalk.dim(` (id ${user.id})`)
             : ""
           : chalk.dim(` (no username, id ${user.id})`);
-        const realName = [user.given_name, user.family_name].filter(Boolean).join(" ");
+        const realName = safeText([user.given_name, user.family_name].filter(Boolean).join(" "));
         const tier = {
           upload: chalk.green("upload"),
           browse: chalk.dim("browse"),
@@ -592,8 +631,10 @@ Examples:
 
         console.log(`  ${chalk.cyan(heading)}${roleBadge}${idHint}`);
         if (realName) console.log(`    Name:    ${realName}`);
-        console.log(`    Email:   ${user.email}${verifiedBadge}`);
-        console.log(`    GitHub:  ${user.github_username ? `@${user.github_username}` : "-"}`);
+        console.log(`    Email:   ${safeText(user.email)}${verifiedBadge}`);
+        console.log(
+          `    GitHub:  ${user.github_username ? `@${safeText(user.github_username)}` : "-"}`,
+        );
         console.log(`    Status:  ${statusColor(user.status)}`);
         console.log(`    Tier:    ${tier}`);
         // Only when not `person` (epic #1272 phase 4, #1284; ADR 0048): the
@@ -615,7 +656,7 @@ Examples:
         // does not print (affiliation, a date, the ORCID iD) is otherwise
         // unexplained, and an admin cannot tell a real match from a surprise.
         if (user.matched_in && user.matched_in.length > 0) {
-          console.log(`    Matched: ${chalk.dim(user.matched_in.join(", "))}`);
+          console.log(`    Matched: ${chalk.dim(user.matched_in.map(safeText).join(", "))}`);
         }
         console.log();
       }
@@ -630,7 +671,10 @@ Examples:
         );
       }
     } catch (error) {
-      handleCommandError(error, spinner, "Failed to fetch users");
+      // A failed SEARCH is a lookup a script may be waiting on: empty output and
+      // exit 0 reads as "no such account". A plain listing keeps its old behaviour.
+      if (search !== undefined) failAccountCommand(error, spinner, "Failed to search users");
+      else handleCommandError(error, spinner, "Failed to fetch users");
     }
   });
 
@@ -639,13 +683,17 @@ Examples:
 // ----------------------------------------------------------------------------
 
 /**
- * `handleCommandError` plus the exit code a script reads.
+ * The exit code a script reads, and the message an operator reads.
  *
  * `handleCommandError` is shared by most admin commands and sets no exit code,
- * so a refused call there ends in 0. `show` and `edit` are what a script runs
- * to look up or change an account, and "it was refused" must not look like
- * success to it. A 4xx is the server answering no (not found, owner only, in
- * use), which is a verdict and not a crash, so it does not invite a bug report.
+ * so a refused call there ends in 0. Lookups and edits are what a script runs
+ * to find or change an account, and "it was refused" must not look like
+ * success to it. Differences from the shared helper, both deliberate:
+ *   - a 4xx is the server answering no (not found, owner only, in use): a
+ *     verdict and not a crash, so it does not invite a bug report;
+ *   - no generic "this requires admin privileges" line on a 403. The server's
+ *     own sentence says why (owner only, an owner's account, not an admin), and
+ *     the generic one is wrong for most of them.
  */
 function failAccountCommand(
   error: unknown,
@@ -653,52 +701,153 @@ function failAccountCommand(
   defaultMsg: string,
   hints?: Record<number, string>,
 ): void {
-  handleCommandError(error, spinner, defaultMsg, hints);
-  process.exitCode = 1;
-  if (error instanceof ApiError && error.statusCode >= 400 && error.statusCode < 500) {
-    markReportedExit();
+  if (error instanceof ApiError) {
+    spinner.fail(error.message);
+    const hint = hints?.[error.statusCode];
+    if (hint) console.log(chalk.dim(`  ${hint}`));
+    if (error.statusCode >= 400 && error.statusCode < 500) markReportedExit();
+  } else {
+    handleCommandError(error, spinner, defaultMsg);
   }
+  process.exitCode = 1;
+}
+
+/**
+ * The `users` listing's own options. Commander also accepts them AFTER a
+ * subcommand name and hands them to the parent, so `edit lovelace --role admin
+ * --city Paris -y` would change the city, drop `--role` without a word, and
+ * exit 0, leaving an admin sure they had changed a role. `show` and `edit`
+ * refuse them instead, and say where the change they were reaching for is made.
+ */
+const LISTING_ONLY_OPTIONS: ReadonlyArray<{
+  key: string;
+  flag: string;
+  hint?: string;
+  showOk?: boolean;
+}> = [
+  { key: "search", flag: "--search", hint: "Pass the text as the argument instead." },
+  {
+    key: "role",
+    flag: "--role",
+    hint: "A role is changed with 'nemar admin role <username> <role>' (owners only).",
+  },
+  {
+    key: "kind",
+    flag: "--kind",
+    hint: "An account kind is changed with 'nemar admin kind <username> <kind>' (owners only).",
+  },
+  {
+    key: "pending",
+    flag: "--pending",
+    hint: "Status is changed with 'nemar admin approve' or 'revoke'.",
+  },
+  {
+    key: "verified",
+    flag: "--verified",
+    hint: "Status is changed with 'nemar admin approve' or 'revoke'.",
+  },
+  {
+    key: "approved",
+    flag: "--approved",
+    hint: "Status is changed with 'nemar admin approve' or 'revoke'.",
+  },
+  {
+    key: "revoked",
+    flag: "--revoked",
+    hint: "Status is changed with 'nemar admin approve' or 'revoke'.",
+  },
+  {
+    key: "uploadAccess",
+    flag: "--no-upload-access",
+    hint: "Upload access is granted with 'nemar admin approve'.",
+  },
+  { key: "awaitingApproval", flag: "--awaiting-approval" },
+  // `show` honours this one (it can read a deleted account); `edit` cannot edit one.
+  {
+    key: "includeDeleted",
+    flag: "--include-deleted",
+    hint: "A deleted account cannot be edited.",
+    showOk: true,
+  },
+];
+
+/** True (after saying why, exit 1) if the admin passed a listing option to
+ *  `show` or `edit` that would otherwise be silently dropped. */
+function refuseListingOptions(command: Command, subcommand: "show" | "edit"): boolean {
+  const parent = command.parent;
+  if (!parent) return false;
+  const given = LISTING_ONLY_OPTIONS.filter(
+    (option) =>
+      !(subcommand === "show" && option.showOk) &&
+      parent.getOptionValueSource(option.key) === "cli",
+  );
+  if (given.length === 0) return false;
+  console.error(
+    chalk.red(
+      `${given.map((option) => option.flag).join(", ")} ${given.length === 1 ? "filters" : "filter"} the 'nemar admin users' listing and ${given.length === 1 ? "does" : "do"} nothing for '${subcommand}'.`,
+    ),
+  );
+  for (const option of given) {
+    if (option.hint) console.error(chalk.dim(`  ${option.flag}: ${option.hint}`));
+  }
+  process.exitCode = 1;
+  markReportedExit();
+  return true;
 }
 
 /**
  * Find the ONE account a query names, or say why not.
  *
  * Runs the same all-fields search as `nemar admin users --search`, then narrows
- * (lookup.ts): a query that is an account's id, username, email, GitHub handle
- * or ORCID iD picks it even when longer names also contain the text. Returns
- * null after printing the reason, with a non-zero exit code, so a script
- * running `show` or `edit` can tell "not found" and "ambiguous" from success.
+ * (src/lib/admin-user-lookup.ts): a query that is an account's id, username,
+ * email, GitHub handle or ORCID iD picks it even when longer names also contain
+ * the text. Returns null after printing the reason, with a non-zero exit code,
+ * so a script running `show` or `edit` can tell "not found" and "ambiguous"
+ * from success.
  */
 async function lookupOneAccount(
   query: string,
   includeDeleted: boolean,
   spinner: Ora,
-): Promise<{ user: UserListItem; exact: boolean; fuzzy: boolean } | null> {
+  opts: { mayIncludeDeleted: boolean },
+): Promise<{ user: UserListItem; match: LookupMatch } | null> {
   const result = await listUsers(undefined, undefined, false, undefined, {
     search: query,
     includeDeleted,
   });
   spinner.stop();
-  const resolved = resolveLookup(result.users);
-  if (resolved.kind === "one") {
-    return { user: resolved.user, exact: resolved.exact, fuzzy: resolved.fuzzy };
-  }
 
-  // The exit code IS the answer here ("nothing" or "several"), not a crash.
+  // The exit code IS the answer from here on ("nothing", "several", "cannot
+  // search"), not a crash.
+  if (!searchWasUnderstood(result.users)) {
+    process.exitCode = 1;
+    markReportedExit();
+    console.error(
+      chalk.red(
+        "This NEMAR backend does not support searching yet, so it cannot tell which account you mean. Update the backend, or pass the numeric id.",
+      ),
+    );
+    return null;
+  }
+  const resolved = resolveLookup(result.users);
+  if (resolved.kind === "one") return { user: resolved.user, match: resolved.match };
+
   process.exitCode = 1;
   markReportedExit();
   if (resolved.kind === "none") {
-    console.log(chalk.yellow(`No account matches "${query}", not even a close one.`));
+    console.log(chalk.yellow(`No account matches "${safeText(query)}", not even a close one.`));
     console.log(
-      chalk.dim("  Every field is searched; try fewer or shorter words, or --include-deleted."),
+      chalk.dim(
+        `  Every field is searched; try fewer or shorter words${opts.mayIncludeDeleted ? ", or --include-deleted" : ""}.`,
+      ),
     );
     return null;
   }
   console.log(
     chalk.yellow(
-      resolved.fuzzy
-        ? `No account matches "${query}" exactly. Did you mean one of these?\n`
-        : `${resolved.users.length} accounts match "${query}". Which one did you mean?\n`,
+      resolved.match === "fuzzy"
+        ? `No account matches "${safeText(query)}" exactly. Did you mean one of these?\n`
+        : `${resolved.users.length} accounts match "${safeText(query)}". Which one did you mean?\n`,
     ),
   );
   for (const user of resolved.users) console.log(candidateLine(user));
@@ -722,6 +871,9 @@ Looks the account up with the same all-fields search as 'nemar admin users
 --search'. If the text names exactly one account's id, username, email, GitHub
 handle or ORCID iD, that account is shown even when longer names also contain
 the text; if several accounts still match, they are listed and nothing is shown.
+If nothing matches but one account is close (a typo, a missing accent) it is
+shown with a note, and the command exits 1 so a script does not mistake it for
+the account it asked for.
 
 Passwords, sign-in tokens and API keys are never shown.
 
@@ -733,35 +885,40 @@ Examples:
   )
   .action(async (query: string, _options: unknown, command: Command) => {
     if (!requireAuth()) return;
+    if (refuseListingOptions(command, "show")) return;
     // A parent's option is recognised after the subcommand name too, so the
     // parent consumes `--include-deleted` and the subcommand never sees it.
     const includeDeleted = command.optsWithGlobals().includeDeleted === true;
 
     const spinner = ora("Looking up account...").start();
     try {
-      const found = await lookupOneAccount(query, includeDeleted, spinner);
+      const found = await lookupOneAccount(query, includeDeleted, spinner, {
+        mayIncludeDeleted: true,
+      });
       if (!found) return;
       const { user } = await getAdminUserById(found.user.id, includeDeleted);
       console.log();
       for (const line of userDetailLines(user)) console.log(line);
       console.log();
-      if (found.fuzzy) {
+      if (found.match === "fuzzy") {
+        // Details of a DIFFERENT account than the one named: shown for a human
+        // who mistyped, but not a success for a script that asked for one.
+        process.exitCode = 1;
+        markReportedExit();
         console.log(
           chalk.yellow(
-            `No account matches "${query}" exactly; this is the closest one (a typo or an accent away).\n`,
+            `No account matches "${safeText(query)}" exactly; this is the closest one (a typo or an accent away).\n`,
           ),
         );
-      } else if (!found.exact) {
+      } else if (found.match === "partial") {
         console.log(
           chalk.dim(
-            `Found by searching for "${query}"; it is not an exact username, email, GitHub handle, ORCID iD or id.\n`,
+            `Found by searching for "${safeText(query)}"; it is not an exact username, email, GitHub handle, ORCID iD or id.\n`,
           ),
         );
       }
     } catch (error) {
-      failAccountCommand(error, spinner, "Failed to look up the account", {
-        404: "User not found",
-      });
+      failAccountCommand(error, spinner, "Failed to look up the account");
     }
   });
 
@@ -771,11 +928,13 @@ adminUsersCommand
   .argument("<query>", "Username, email, GitHub handle, ORCID iD or numeric id of the account")
   .option("--given-name <text>", "Given name")
   .option("--family-name <text>", "Family name")
-  .option("--affiliation <text>", 'Affiliation ("" clears it)')
+  .option("--affiliation <text>", "Affiliation")
+  .option("--clear-affiliation", "Remove the affiliation")
   .option("--city <text>", "City")
   .option("--country <text>", "Country")
   .option("--username <name>", "Username (owner only)")
-  .option("--github <handle>", 'GitHub handle (owner only; "" clears it)')
+  .option("--github <handle>", "GitHub handle (owner only)")
+  .option("--clear-github", "Remove the GitHub handle (owner only)")
   .option("--email <address>", "Email address (owner only; marks it unconfirmed)")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
@@ -786,8 +945,10 @@ Who can change what:
   ${ADMIN_USER_DESCRIPTIVE_FIELDS.join(", ")}
       any admin
   ${ADMIN_USER_IDENTITY_FIELDS.join(", ")}
-      owners only, and never on your own account. These decide who can act as
-      the account, so they follow the same rule as role, kind and key minting.
+      owners only, never on your own account and never on another owner's. These
+      decide who can act as the account (sign-in is passwordless, so whoever holds
+      an email can sign in as it), so they follow the same rule as role, kind and
+      key minting. An owner changes their own in Settings ('nemar auth profile').
 
 What this does NOT change (each has its own command):
   role / status / upload access   nemar admin role | approve | revoke
@@ -800,111 +961,131 @@ Safeguards:
   - The account is shown with the exact changes and you confirm (-y skips the
     prompt, but only when the text names the account exactly).
   - Every edit is written to the audit log with the old and new values.
-  - A new email address is marked unconfirmed; the person confirms it in
-    Settings. No message is sent to either address.
+  - A new email address is marked unconfirmed and any verification link already
+    sent stops working; the person confirms the new address in Settings. The
+    PREVIOUS address is sent a notice that the email changed (the command says
+    when it could not be sent).
   - The GitHub handle is checked for format and uniqueness, NOT against GitHub.
+    Repository access already granted to the old handle is not changed.
+  - A flag with an empty value is refused. To remove an affiliation or a GitHub
+    handle use --clear-affiliation or --clear-github, so that an unset shell
+    variable can never wipe a field.
   - Nothing here deletes or merges accounts.
 
 Examples:
   $ nemar admin users edit lovelace --affiliation "UC San Diego"
   $ nemar admin users edit 42 --given-name Ada --family-name Lovelace
-  $ nemar admin users edit lovelace --affiliation ""      # Clear it
+  $ nemar admin users edit lovelace --clear-affiliation
   $ nemar admin users edit lovelace --email new@lab.org   # Owner only`,
   )
-  .action(async (query: string, options: Record<string, unknown> & ConfirmOptions) => {
-    if (!requireAuth()) return;
+  .action(
+    async (query: string, options: Record<string, unknown> & ConfirmOptions, command: Command) => {
+      if (!requireAuth()) return;
+      if (refuseListingOptions(command, "edit")) return;
 
-    const body = editBodyFromOptions(options);
-    if (Object.keys(body).length === 0) {
-      console.error(
-        chalk.red(
-          `Nothing to change. Pass at least one of: ${EDIT_FLAG_FIELDS.map(([flag]) => `--${flag.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`).join(", ")}`,
-        ),
-      );
-      process.exit(1);
-    }
+      const built = editBodyFromOptions(options);
+      if (!built.ok) {
+        console.error(chalk.red(built.message));
+        process.exit(1);
+      }
+      const body = built.body;
+      if (Object.keys(body).length === 0) {
+        const flags = [
+          ...EDIT_FLAG_FIELDS.map(([option]) => flagName(option)),
+          ...CLEAR_FLAGS.map(({ option }) => flagName(option)),
+        ];
+        console.error(chalk.red(`Nothing to change. Pass at least one of: ${flags.join(", ")}`));
+        process.exit(1);
+      }
 
-    const spinner = ora("Looking up account...").start();
-    try {
-      const found = await lookupOneAccount(query, false, spinner);
-      if (!found) return;
+      const spinner = ora("Looking up account...").start();
+      try {
+        const found = await lookupOneAccount(query, false, spinner, { mayIncludeDeleted: false });
+        if (!found) return;
 
-      // -y confirms WITHOUT looking, which is only safe if the admin named the
-      // account outright. A substring that happened to match one account is how
-      // `edit ada -y` changes the wrong person.
-      if (options.yes && !found.exact) {
-        process.exitCode = 1;
-        markReportedExit();
-        const label = `${found.user.username ?? found.user.email} (id ${found.user.id})`;
-        console.error(
-          chalk.red(
-            found.fuzzy
-              ? `"${query}" is not the username, email, GitHub handle, ORCID iD or id of any account; the closest is ${label}.`
-              : `"${query}" matched ${label} by search, not by an exact username, email, GitHub handle, ORCID iD or id.`,
-          ),
+        // -y confirms WITHOUT looking, which is only safe if the admin named the
+        // account outright. A substring that happened to match one account is how
+        // `edit ada -y` changes the wrong person.
+        if (options.yes && found.match !== "exact") {
+          process.exitCode = 1;
+          markReportedExit();
+          const label = `${safeText(found.user.username ?? found.user.email)} (id ${found.user.id})`;
+          console.error(
+            chalk.red(
+              found.match === "fuzzy"
+                ? `"${safeText(query)}" is not the username, email, GitHub handle, ORCID iD or id of any account; the closest is ${label}.`
+                : `"${safeText(query)}" matched ${label} by search, not by an exact username, email, GitHub handle, ORCID iD or id.`,
+            ),
+          );
+          console.error(
+            chalk.dim(
+              `  Repeat with the exact identifier, e.g. 'nemar admin users edit ${found.user.id} ...', or drop -y to confirm.`,
+            ),
+          );
+          return;
+        }
+
+        const { user: current } = await getAdminUserById(found.user.id);
+        const plan = planEdit(current, body);
+        const who = `${safeText(current.username ?? current.email)} (id ${current.id})`;
+        if (plan.length === 0) {
+          console.log(chalk.yellow(`Nothing to change: ${who} already has these values.`));
+          return;
+        }
+
+        console.log(`\n${chalk.cyan("Edit")} ${who}\n`);
+        if (found.match === "fuzzy") {
+          console.log(
+            chalk.yellow(
+              `  No account matches "${safeText(query)}" exactly; check this is the one you meant.\n`,
+            ),
+          );
+        }
+        for (const change of plan) {
+          console.log(
+            `  ${change.field.padEnd(16)} ${displayEditValue(change.from)} ${chalk.dim("->")} ${displayEditValue(change.to)}`,
+          );
+        }
+        console.log();
+
+        const confirmResult = await confirm(
+          `Apply ${plan.length} change${plan.length === 1 ? "" : "s"} to ${who}?`,
+          options,
         );
-        console.error(
-          chalk.dim(
-            `  Repeat with the exact identifier, e.g. 'nemar admin users edit ${found.user.id} ...', or drop -y to confirm.`,
-          ),
-        );
-        return;
-      }
+        if (confirmResult === "declined") {
+          console.log(chalk.dim("Skipped"));
+          return;
+        }
+        if (confirmResult !== "confirmed") {
+          // It could not ASK (no terminal, and neither --yes nor --no), or the
+          // admin cancelled. Nothing was changed, and a script that forgot -y
+          // must not read that as success.
+          process.exitCode = 1;
+          markReportedExit();
+          console.log(chalk.dim("Canceled: nothing was changed"));
+          return;
+        }
 
-      const { user: current } = await getAdminUserById(found.user.id);
-      const plan = planEdit(current, body);
-      const who = `${current.username ?? current.email} (id ${current.id})`;
-      if (plan.length === 0) {
-        console.log(chalk.yellow(`Nothing to change: ${who} already has these values.`));
-        return;
+        spinner.start(`Updating ${who}...`);
+        const result = await editAdminUser(current.id, body);
+        spinner.succeed(result.message);
+        // The server's report, not the preview, is what actually happened: it
+        // normalises (trim, lower-case an email, strip '@') and drops values that
+        // turned out to be unchanged.
+        for (const [field, change] of Object.entries(result.changed)) {
+          console.log(
+            `  ${field.padEnd(16)} ${displayEditValue(change.from)} ${chalk.dim("->")} ${displayEditValue(change.to)}`,
+          );
+        }
+        for (const note of result.notes ?? []) console.log(chalk.yellow(`  ! ${note}`));
+      } catch (error) {
+        // Every refusal sets `error.message` to its own sentence (owner_only_field,
+        // owner_account, email_in_use, name_is_orcid_canonical, ...), which
+        // spinner.fail already prints.
+        failAccountCommand(error, spinner, "Failed to edit the account");
       }
-
-      console.log(`\n${chalk.cyan("Edit")} ${who}\n`);
-      if (found.fuzzy) {
-        console.log(
-          chalk.yellow(
-            `  No account matches "${query}" exactly; check this is the one you meant.\n`,
-          ),
-        );
-      }
-      for (const change of plan) {
-        console.log(
-          `  ${change.field.padEnd(16)} ${displayEditValue(change.from)} ${chalk.dim("->")} ${displayEditValue(change.to)}`,
-        );
-      }
-      console.log();
-
-      const confirmResult = await confirm(
-        `Apply ${plan.length} change${plan.length === 1 ? "" : "s"} to ${who}?`,
-        options,
-      );
-      if (confirmResult !== "confirmed") {
-        console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Canceled"));
-        return;
-      }
-
-      spinner.start(`Updating ${who}...`);
-      const result = await editAdminUser(current.id, body);
-      spinner.succeed(result.message);
-      // The server's report, not the preview, is what actually happened: it
-      // normalises (trim, lower-case an email, strip '@') and drops values that
-      // turned out to be unchanged.
-      for (const [field, change] of Object.entries(result.changed)) {
-        console.log(
-          `  ${field.padEnd(16)} ${displayEditValue(change.from)} ${chalk.dim("->")} ${displayEditValue(change.to)}`,
-        );
-      }
-      for (const note of result.notes ?? []) console.log(chalk.yellow(`  ! ${note}`));
-    } catch (error) {
-      // Every refusal sets `error.message` to its own sentence (owner_only_field,
-      // email_in_use, name_is_orcid_canonical, ...), which spinner.fail already
-      // prints; the hints below only cover the codes that carry none.
-      failAccountCommand(error, spinner, "Failed to edit the account", {
-        403: "Admins can edit name, affiliation, city and country; username, email and GitHub handle are owner only",
-        404: "User not found",
-      });
-    }
-  });
+    },
+  );
 
 // ============================================================================
 // Approve

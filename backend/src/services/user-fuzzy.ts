@@ -19,10 +19,11 @@
  * ordinary text columns; a test pins that none is a secret.
  */
 
+import type { MatchKind } from "../../../shared/contract/admin-user.js";
 import { normalizeEmail, normalizeGithubHandle, normalizeOrcid } from "./identity";
+import { type ColumnsOf, EXACT_IDENTIFIER_COLUMNS } from "./user-search";
 
-/** How a returned account matched, best first. */
-export type MatchKind = "exact" | "name" | "prefix" | "substring" | "fuzzy";
+export type { MatchKind };
 
 const MATCH_KIND_RANK: Readonly<Record<MatchKind, number>> = {
   exact: 0,
@@ -52,17 +53,20 @@ export function wordsOf(value: string | null | undefined): string[] {
     .filter((word) => word.length > 0);
 }
 
-/** The columns a search result can be classified from. All are in the listing's
- *  SELECT, so ranking costs no extra read. */
-export interface RankableUser {
+/** The columns a search result is classified from. All are in the listing's
+ *  SELECT (`LISTING_COLUMNS` in routes/admin/users.ts, which is typed against
+ *  this), so ranking costs no extra read. Every one is required: an optional
+ *  field would let a column dropped from that SELECT turn exact hits and name
+ *  ranking off without a single error. */
+export type RankableUser = {
   id: number;
   username: string | null;
   email: string;
   github_username: string | null;
-  orcid?: string | null;
-  given_name?: string | null;
-  family_name?: string | null;
-}
+  orcid: string | null;
+  given_name: string | null;
+  family_name: string | null;
+};
 
 /**
  * Every spelling of the query that could equal a stored identifier: as typed,
@@ -82,8 +86,10 @@ export function identityKeys(query: string): string[] {
   return [...keys];
 }
 
-/** The identifier columns an exact hit can be on, in the order they are shown. */
-const IDENTIFIER_COLUMNS = ["id", "username", "email", "github_username", "orcid"] as const;
+/** The identifier columns an exact hit can be on, in the order they are shown:
+ *  the id, then the columns the exact-hit SQL looks in (one list, in
+ *  ./user-search.ts). */
+const IDENTIFIER_COLUMNS = ["id", ...EXACT_IDENTIFIER_COLUMNS] as const;
 
 /**
  * The identifier columns of this account that the query IS, empty when it is
@@ -154,7 +160,8 @@ export function sortByMatchKind<T extends { match_kind: MatchKind }>(rows: T[]):
  * Deliberately NOT dates, status or role (a typo of `2026-09` or `admin` is
  * noise), the ORCID iD (a near-miss digit string names someone else), or the
  * free-text description. Every entry must be a `text` column in
- * `USER_COLUMN_ROLES`; a test enforces it.
+ * `USER_COLUMN_ROLES`, which `satisfies` makes the compiler check; a test pins
+ * the exact list so adding a column here is a decision someone sees.
  */
 export const FUZZY_COLUMNS = [
   "username",
@@ -165,7 +172,7 @@ export const FUZZY_COLUMNS = [
   "affiliation",
   "city",
   "country",
-] as const;
+] as const satisfies readonly ColumnsOf<"text">[];
 export type FuzzyColumn = (typeof FUZZY_COLUMNS)[number];
 
 /** A close-match pass never returns more than this many accounts: it is a

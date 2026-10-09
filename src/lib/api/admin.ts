@@ -260,10 +260,11 @@ export async function setAccountKind(
 
 /** The fields `nemar admin doctor kinds` reads off `GET
  *  /admin/users/:username` (epic #1272 phase 4, #1284 review; ADR 0048).
- *  The route selects `u.*` plus two computed columns, so this is
- *  deliberately narrow rather than a full mirror of the row -- everything
- *  else is untyped here on purpose (`.passthrough()`-shaped, no contract
- *  schema exists for this endpoint yet). */
+ *  The route selects every NON-SECRET column (`ADMIN_USER_NON_SECRET_SELECT`;
+ *  credentials are never returned, ADR 0093) plus two computed columns, so
+ *  this is deliberately narrow rather than a full mirror of the row --
+ *  everything else is untyped here on purpose (`.passthrough()`-shaped).
+ *  `getAdminUserById` is the validated, fully typed read of one account. */
 export interface AdminUserDetail {
   username: string | null;
   account_kind?: AccountKind;

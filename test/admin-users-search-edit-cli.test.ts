@@ -23,12 +23,15 @@ import { adminRoutes } from "../backend/src/routes/admin";
 import { hashApiKey } from "../backend/src/services/token";
 import type { Bindings } from "../backend/src/types/bindings";
 import { freshDb, realD1 } from "../backend/test/helpers/d1";
+import { CLEAR_FLAGS, EDIT_FLAG_FIELDS, flagName } from "../src/lib/admin-user-lookup";
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
 
 const OWNER_KEY = "cli-edit-owner-key-0123456789abcdef0123456789";
 const ADMIN_KEY = "cli-edit-admin-key-0123456789abcdef0123456789";
+const MEMBER_KEY = "cli-edit-member-key-0123456789abcdef012345678";
+const OWNER2_KEY = "cli-edit-owner2-key-0123456789abcdef01234567";
 const SECRET_HASH = "SECRET-PASSWORD-HASH-DO-NOT-PRINT";
 
 let configDir: string;
@@ -42,7 +45,11 @@ function useKey(apiKey: string): void {
   );
 }
 
-async function seedActor(username: string, role: "owner" | "admin", apiKey: string): Promise<void> {
+async function seedActor(
+  username: string,
+  role: "owner" | "admin" | "member",
+  apiKey: string,
+): Promise<void> {
   db.query(
     `INSERT INTO users (username, email, password_hash, status, role, email_verified, service_access)
      VALUES (?, ?, 'x', 'approved', ?, 1, 1)`,
@@ -104,34 +111,39 @@ function auditCount(): number {
     .get()?.n as number;
 }
 
+/**
+ * Serve the REAL backend admin router, as the app mounts it at /admin.
+ * `predatesSearch` makes it behave like a backend deployed before search
+ * existed: the router is the same, but the `q` parameter never reaches it, which
+ * is exactly what an old deployment does with a query parameter it has never
+ * heard of.
+ */
+async function handleRequest(req: Request, predatesSearch: boolean): Promise<Response> {
+  const url = new URL(req.url);
+  // The two unauthenticated calls the CLI makes around any command.
+  if (url.pathname === "/notices") return Response.json({ notices: [] });
+  if (url.pathname === "/datasets/facets") return Response.json({});
+  if (!url.pathname.startsWith("/admin/")) {
+    return Response.json({ error: "Not Found", message: "no such route" }, { status: 404 });
+  }
+  if (predatesSearch) url.searchParams.delete("q");
+  const inner = new URL(url.pathname.slice("/admin".length) + url.search, url.origin);
+  const body = req.method === "GET" || req.method === "HEAD" ? undefined : await req.text();
+  return adminRoutes.fetch(new Request(inner, { method: req.method, headers: req.headers, body }), {
+    DB: realD1(db),
+    ENVIRONMENT: "test",
+  } as Bindings);
+}
+
 beforeEach(async () => {
   configDir = mkdtempSync(join(tmpdir(), "nemar-admin-users-cli-"));
   db = freshDb();
   await seedActor("cliowner", "owner", OWNER_KEY);
   await seedActor("cliadmin", "admin", ADMIN_KEY);
+  await seedActor("climember", "member", MEMBER_KEY);
+  await seedActor("cliowner2", "owner", OWNER2_KEY);
 
-  server = Bun.serve({
-    port: 0,
-    async fetch(req) {
-      const url = new URL(req.url);
-      // The two unauthenticated calls the CLI makes around any command.
-      if (url.pathname === "/notices") return Response.json({ notices: [] });
-      if (url.pathname === "/datasets/facets") return Response.json({});
-      if (!url.pathname.startsWith("/admin/")) {
-        return Response.json({ error: "Not Found", message: "no such route" }, { status: 404 });
-      }
-      // adminRoutes is mounted at /admin by the app; serve it directly.
-      const inner = new URL(url.pathname.slice("/admin".length) + url.search, url.origin);
-      const body = req.method === "GET" || req.method === "HEAD" ? undefined : await req.text();
-      return adminRoutes.fetch(
-        new Request(inner, { method: req.method, headers: req.headers, body }),
-        {
-          DB: realD1(db),
-          ENVIRONMENT: "test",
-        } as Bindings,
-      );
-    },
-  });
+  server = Bun.serve({ port: 0, fetch: (req) => handleRequest(req, false) });
 });
 
 afterEach(() => {
@@ -139,11 +151,11 @@ afterEach(() => {
   rmSync(configDir, { recursive: true, force: true });
 });
 
-async function runCli(args: string[]) {
+async function runCli(args: string[], base?: string) {
   const env = {
     ...process.env,
     NEMAR_CONFIG_DIR: configDir,
-    TEST_API_URL: `http://localhost:${server.port}`,
+    TEST_API_URL: base ?? `http://localhost:${server.port}`,
     NEMAR_NO_UPDATE_CHECK: "1",
     NO_COLOR: "1",
   };
@@ -319,10 +331,17 @@ describe("nemar admin users edit", () => {
     expect(auditCount()).toBe(1);
   });
 
-  test('--affiliation "" clears it', async () => {
+  test("--clear-affiliation removes it", async () => {
     useKey(ADMIN_KEY);
     const id = seedUser("alovelace", { affiliation: "Old Lab" });
-    const result = await runCli(["admin", "users", "edit", "alovelace", "--affiliation", "", "-y"]);
+    const result = await runCli([
+      "admin",
+      "users",
+      "edit",
+      "alovelace",
+      "--clear-affiliation",
+      "-y",
+    ]);
     expect(result.exitCode).toBe(0);
     expect(column(id, "affiliation")).toBeNull();
     expect(result.stdout).toContain("(cleared)");
@@ -366,7 +385,9 @@ describe("nemar admin users edit", () => {
     expect(column(id, "email")).toBe("new.ada@lab.org");
     expect(column(id, "email_verified")).toBe(0);
     expect(result.stdout).toContain("unconfirmed");
-    expect(result.stdout).toContain("No message was sent");
+    // The previous address is told; this engine is a non-production worker, so
+    // the notice is fenced, and the command says so rather than staying quiet.
+    expect(result.stdout).toContain("previous address could NOT be sent a notice");
   });
 
   test("an address another account holds is refused naming the holder", async () => {
@@ -453,6 +474,9 @@ describe("nemar admin users edit", () => {
     const id = seedUser("alovelace");
     const result = await runCli(["admin", "users", "edit", "alovelace", "--city", "Paris"]);
     expect(result.all).toContain("use --yes or --no");
+    expect(result.all).toContain("Canceled: nothing was changed");
+    // Could not ask is not success: a script that forgot -y must see a failure.
+    expect(result.exitCode).not.toBe(0);
     expect(column(id, "city")).toBeNull();
   });
 
@@ -549,7 +573,9 @@ describe("show and edit with a near miss", () => {
     useKey(ADMIN_KEY);
     seedUser("alovelace", { given: "Ada", family: "Lovelace" });
     const result = await runCli(["admin", "users", "show", "lovelase"]);
-    expect(result.exitCode).toBe(0);
+    // Shown for a human who mistyped, but not a success for a script that asked
+    // for a specific account.
+    expect(result.exitCode).toBe(1);
     expect(result.stdout).toContain("Ada Lovelace");
     expect(result.stdout).toContain("closest one");
   });
@@ -584,5 +610,320 @@ describe("show and edit with a near miss", () => {
     expect(result.stdout).toContain("check this is the one you meant");
     expect(result.stdout).toContain("Paris");
     expect(column(id, "city")).toBeNull();
+  });
+});
+
+describe("a failed lookup or edit is a failed command", () => {
+  test("a search refused by the server exits non-zero, without inviting a bug report", async () => {
+    useKey(MEMBER_KEY);
+    const result = await runCli(["admin", "users", "--search", "ada"]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.all).not.toContain("--debug");
+  });
+
+  test("a member running edit is not given the owner-only explanation", async () => {
+    useKey(MEMBER_KEY);
+    seedUser("alovelace");
+    const result = await runCli(["admin", "users", "edit", "alovelace", "--city", "Paris", "-y"]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.all).not.toContain("owner only");
+  });
+
+  test("a search wider than the limits is refused before any request", async () => {
+    useKey(ADMIN_KEY);
+    const result = await runCli(["admin", "users", "--search", "a b c d e f g h i"]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.all).toContain("at most 8 words");
+  });
+});
+
+describe("a backend that predates search", () => {
+  let old: ReturnType<typeof Bun.serve>;
+  beforeEach(() => {
+    old = Bun.serve({ port: 0, fetch: (req) => handleRequest(req, true) });
+  });
+  afterEach(() => old.stop(true));
+  const base = () => `http://localhost:${old.port}`;
+
+  test("--search says so instead of printing every account as a result", async () => {
+    useKey(ADMIN_KEY);
+    seedUser("alovelace", { given: "Ada", family: "Lovelace" });
+    seedUser("cbabbage", { given: "Charles", family: "Babbage" });
+    const result = await runCli(["admin", "users", "--search", "ada"], base());
+    expect(result.exitCode).not.toBe(0);
+    expect(result.all).toContain("does not support --search");
+    expect(result.stdout).not.toContain("NEMAR Users");
+    expect(result.stdout).not.toContain("cbabbage");
+  });
+
+  test("show says so and shows nothing", async () => {
+    useKey(ADMIN_KEY);
+    seedUser("alovelace", { given: "Ada", family: "Lovelace" });
+    const result = await runCli(["admin", "users", "show", "ada"], base());
+    expect(result.exitCode).toBe(1);
+    expect(result.all).toContain("does not support searching");
+    expect(result.stdout).not.toContain("Upload access");
+  });
+
+  test("edit changes nothing, even with -y", async () => {
+    useKey(ADMIN_KEY);
+    const id = seedUser("alovelace");
+    const result = await runCli(
+      ["admin", "users", "edit", "alovelace", "--city", "Paris", "-y"],
+      base(),
+    );
+    expect(result.exitCode).not.toBe(0);
+    expect(column(id, "city")).toBeNull();
+  });
+});
+
+describe("show and edit refuse listing options they would silently drop", () => {
+  test("edit --role is refused, changes nothing, and says where roles are changed", async () => {
+    useKey(OWNER_KEY);
+    const id = seedUser("alovelace");
+    const result = await runCli([
+      "admin",
+      "users",
+      "edit",
+      "alovelace",
+      "--role",
+      "admin",
+      "--city",
+      "Paris",
+      "-y",
+    ]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.all).toContain("--role");
+    expect(result.all).toContain("nemar admin role");
+    expect(column(id, "city")).toBeNull();
+    expect(column(id, "role")).toBe("member");
+  });
+
+  test("show --kind is refused rather than ignored", async () => {
+    useKey(ADMIN_KEY);
+    seedUser("alovelace");
+    const result = await runCli(["admin", "users", "show", "alovelace", "--kind", "test"]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.all).toContain("--kind");
+    expect(result.stdout).not.toContain("Upload access");
+  });
+
+  test("edit --include-deleted is refused: a deleted account cannot be edited", async () => {
+    useKey(OWNER_KEY);
+    const id = seedUser("gone", { deleted: true });
+    const result = await runCli([
+      "admin",
+      "users",
+      "edit",
+      "gone",
+      "--include-deleted",
+      "--city",
+      "Paris",
+      "-y",
+    ]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.all).toContain("cannot be edited");
+    expect(column(id, "city")).toBeNull();
+  });
+
+  test("a lookup that finds nothing does not suggest --include-deleted to edit", async () => {
+    useKey(OWNER_KEY);
+    const result = await runCli([
+      "admin",
+      "users",
+      "edit",
+      "zzznobodyzzz",
+      "--city",
+      "Paris",
+      "-y",
+    ]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain("No account matches");
+    expect(result.stdout).not.toContain("--include-deleted");
+  });
+});
+
+describe("emptying a field takes an explicit flag", () => {
+  const EMPTY: Array<[string, string, string]> = [
+    ["--github", "", "--clear-github"],
+    ["--github", "@", "--clear-github"],
+    ["--github", "   ", "--clear-github"],
+    ["--affiliation", "", "--clear-affiliation"],
+    ["--affiliation", "   ", "--clear-affiliation"],
+  ];
+  for (const [flag, value, instead] of EMPTY) {
+    test(`${flag} ${JSON.stringify(value)} is refused and names ${instead}`, async () => {
+      useKey(OWNER_KEY);
+      const id = seedUser("alovelace", { affiliation: "Old Lab" });
+      db.query("UPDATE users SET github_username = 'keepme' WHERE id = ?").run(id);
+      const result = await runCli(["admin", "users", "edit", "alovelace", flag, value, "-y"]);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.all).toContain(instead);
+      expect(column(id, "github_username")).toBe("keepme");
+      expect(column(id, "affiliation")).toBe("Old Lab");
+      expect(auditCount()).toBe(0);
+    });
+  }
+
+  test("--clear-github removes the handle", async () => {
+    useKey(OWNER_KEY);
+    const id = seedUser("alovelace");
+    db.query("UPDATE users SET github_username = 'octo-cat' WHERE id = ?").run(id);
+    const result = await runCli(["admin", "users", "edit", "alovelace", "--clear-github", "-y"]);
+    expect(result.exitCode).toBe(0);
+    expect(column(id, "github_username")).toBeNull();
+  });
+
+  test("a value and its clear flag together are refused", async () => {
+    useKey(OWNER_KEY);
+    const id = seedUser("alovelace", { affiliation: "Old Lab" });
+    const result = await runCli([
+      "admin",
+      "users",
+      "edit",
+      "alovelace",
+      "--affiliation",
+      "New Lab",
+      "--clear-affiliation",
+      "-y",
+    ]);
+    expect(result.exitCode).not.toBe(0);
+    expect(column(id, "affiliation")).toBe("Old Lab");
+  });
+});
+
+describe("every edit flag reaches its own field", () => {
+  const CASES: Array<[string, string, string]> = [
+    ["--given-name", "given_name", "Zed"],
+    ["--family-name", "family_name", "Quux"],
+    ["--affiliation", "affiliation", "Some Lab"],
+    ["--city", "city", "Oslo"],
+    ["--country", "country", "Norway"],
+    ["--username", "username", "newhandle1"],
+    ["--github", "github_username", "octo-new"],
+    ["--email", "email", "flag.test@example.org"],
+  ];
+  for (const [i, [flag, field, value]] of CASES.entries()) {
+    test(`${flag} sets ${field}`, async () => {
+      useKey(OWNER_KEY);
+      const id = seedUser(`flagtest${i}`);
+      const result = await runCli(["admin", "users", "edit", String(id), flag, value, "-y"]);
+      expect(result.exitCode).toBe(0);
+      expect(column(id, field)).toBe(value);
+    });
+  }
+
+  test("every flag in the flag table is declared on the command", async () => {
+    const help = await runCli(["admin", "users", "edit", "--help"]);
+    for (const [option] of EDIT_FLAG_FIELDS) expect(help.stdout).toContain(flagName(option));
+    for (const { option } of CLEAR_FLAGS) expect(help.stdout).toContain(flagName(option));
+  });
+});
+
+describe("-y is only for an account named exactly", () => {
+  test("two accounts that both match exactly are both refused", async () => {
+    useKey(OWNER_KEY);
+    const a = seedUser("shared");
+    const b = seedUser("other");
+    db.query("UPDATE users SET github_username = 'shared' WHERE id = ?").run(b);
+    const edit = await runCli(["admin", "users", "edit", "shared", "--city", "X", "-y"]);
+    expect(edit.exitCode).not.toBe(0);
+    expect(column(a, "city")).toBeNull();
+    expect(column(b, "city")).toBeNull();
+    const show = await runCli(["admin", "users", "show", "shared"]);
+    expect(show.exitCode).toBe(1);
+    expect(show.stdout).toContain("2 accounts match");
+  });
+
+  test("an id, an email in any case and an ORCID URL each name an account exactly", async () => {
+    useKey(OWNER_KEY);
+    const id = seedUser("alovelace", { email: "ada@lab.org", orcid: "0000-0002-1825-0097" });
+    for (const [query, city] of [
+      [String(id), "A"],
+      ["ADA@Lab.ORG", "B"],
+      ["https://orcid.org/0000-0002-1825-0097", "C"],
+    ]) {
+      const result = await runCli(["admin", "users", "edit", query, "--city", city, "-y"]);
+      expect(result.exitCode, query).toBe(0);
+      expect(column(id, "city"), query).toBe(city);
+    }
+  });
+
+  test("an owner editing their own email is told why it is refused", async () => {
+    useKey(OWNER_KEY);
+    const result = await runCli([
+      "admin",
+      "users",
+      "edit",
+      "cliowner",
+      "--email",
+      "me2@example.org",
+      "-y",
+    ]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.all).toContain("cannot change your own");
+    expect(db.query("SELECT email FROM users WHERE username = 'cliowner'").get()).toEqual({
+      email: "cliowner@example.org",
+    });
+  });
+
+  test("one owner cannot re-point another owner's email", async () => {
+    useKey(OWNER_KEY);
+    const result = await runCli([
+      "admin",
+      "users",
+      "edit",
+      "cliowner2",
+      "--email",
+      "hijack@example.org",
+      "-y",
+    ]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.all).toContain("owner account");
+    expect(db.query("SELECT email FROM users WHERE username = 'cliowner2'").get()).toEqual({
+      email: "cliowner2@example.org",
+    });
+  });
+});
+
+describe("what a member typed never reaches the terminal as a control sequence", () => {
+  test("show, the listing and the candidate list strip escape sequences", async () => {
+    useKey(ADMIN_KEY);
+    const evil = "\u001b[2J\u001b[1;1Hhacked\u001b]52;c;Zm9v\u0007";
+    seedUser("evilone", { given: evil, family: "Person", affiliation: evil });
+    seedUser("eviltwo", { given: evil, family: "Other" });
+    db.query("UPDATE users SET city = ?, description = ? WHERE username = 'evilone'").run(
+      evil,
+      `${evil} described`,
+    );
+
+    const show = await runCli(["admin", "users", "show", "evilone"]);
+    expect(show.exitCode).toBe(0);
+    expect(show.stdout).toContain("hacked");
+    expect(show.stdout).not.toContain("\u001b");
+    expect(show.stdout).not.toContain("\u0007");
+
+    const listing = await runCli(["admin", "users", "--search", "hacked"]);
+    expect(listing.stdout).toContain("evilone");
+    expect(listing.stdout).not.toContain("\u001b");
+    expect(listing.stdout).not.toContain("\u0007");
+
+    // Two accounts match, so this is the candidate list.
+    const candidates = await runCli(["admin", "users", "show", "hacked"]);
+    expect(candidates.stdout).toContain("2 accounts match");
+    expect(candidates.stdout).not.toContain("\u001b");
+    expect(candidates.stdout).not.toContain("\u0007");
+  });
+});
+
+describe("a deleted account found by search", () => {
+  test("--include-deleted shows an exact hit that is deleted; without it there is no match", async () => {
+    useKey(ADMIN_KEY);
+    seedUser("gonetwo", { deleted: true });
+    const without = await runCli(["admin", "users", "--search", "gonetwo"]);
+    expect(without.stdout).toContain("No users found");
+    const withFlag = await runCli(["admin", "users", "--search", "gonetwo", "--include-deleted"]);
+    expect(withFlag.exitCode).toBe(0);
+    expect(withFlag.stdout).toContain("tombstoned");
   });
 });

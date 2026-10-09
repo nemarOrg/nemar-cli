@@ -5,8 +5,9 @@
  * is `adminUserListItemSchema` in ./user.ts), `GET /admin/users/by-id/:id` (one
  * account's details) and `PATCH /admin/users/by-id/:id` (edit). The backend
  * route, the CLI client and the CLI renderer all read the field policy and the
- * refusal vocabulary from here, so a field cannot become editable on one side
- * and not the other.
+ * refusal vocabulary from here. The compiler ties the body schema below, and
+ * the backend's patch and current-value types, to the editable-field list; the
+ * CLI's flag table is tied to it by a test (a flag is not a type).
  *
  * Kept out of ./index.ts on purpose, like ./neurobagel-admin.ts: this is an
  * operator surface, not something the website or a third party renders.
@@ -70,8 +71,11 @@ export const ADMIN_USER_NAME_FIELDS = ["given_name", "family_name"] as const;
  * does not spell it): the route reads the raw keys itself so that a key it does
  * not edit gets a sentence saying where that change IS made, which zod's
  * `unrecognized_keys` message cannot say.
+ *
+ * `satisfies` is what ties the shape to {@link ADMIN_USER_EDITABLE_FIELDS}: a
+ * field added to one and not the other, or misspelled, stops compiling.
  */
-export const adminUserEditBodySchema = z.object({
+const editBodyShape = {
   given_name: z.string().max(200).optional(),
   family_name: z.string().max(200).optional(),
   affiliation: z.string().max(500).optional(),
@@ -80,7 +84,8 @@ export const adminUserEditBodySchema = z.object({
   username: z.string().max(100).optional(),
   github_username: z.string().max(100).optional(),
   email: z.string().max(320).optional(),
-});
+} satisfies Record<AdminUserEditableField, z.ZodOptional<z.ZodString>>;
+export const adminUserEditBodySchema = z.object(editBodyShape);
 export type AdminUserEditBody = z.infer<typeof adminUserEditBodySchema>;
 
 /**
@@ -89,7 +94,7 @@ export type AdminUserEditBody = z.infer<typeof adminUserEditBodySchema>;
  * real route, because "not editable" with no next step sends an admin to the
  * database.
  */
-export const ADMIN_USER_NOT_EDITABLE_HINTS: Readonly<Record<string, string>> = {
+const NOT_EDITABLE_HINTS: Readonly<Record<string, string>> = {
   orcid:
     "an ORCID iD is proven by signing in with ORCID and is never typed in; the person links it in Settings (ADR 0043)",
   orcid_verified:
@@ -104,6 +109,19 @@ export const ADMIN_USER_NOT_EDITABLE_HINTS: Readonly<Record<string, string>> = {
   description: "that is the person's own statement, and an admin does not rewrite it",
   id: "an account's id never changes",
 };
+
+/**
+ * The next step for a key that is not editable here, or undefined when there is
+ * none to give. An OWN-property lookup, because the key comes from a request
+ * body: indexing the table directly answers `constructor` and `toString` with
+ * the functions they inherit from Object.prototype, and that is what the
+ * refusal message would then print.
+ */
+export function notEditableHint(key: string): string | undefined {
+  return Object.prototype.hasOwnProperty.call(NOT_EDITABLE_HINTS, key)
+    ? NOT_EDITABLE_HINTS[key]
+    : undefined;
+}
 
 /**
  * Why an admin lookup or edit was refused.
@@ -122,15 +140,23 @@ export const ADMIN_USER_NOT_EDITABLE_HINTS: Readonly<Record<string, string>> = {
  *   edit_own_account    an owner tried to edit their OWN username, email or
  *                       GitHub handle here, which would skip the proof the
  *                       self-service path asks for. 400.
+ *   owner_account      the target is an OWNER account, whose username, email or
+ *                       GitHub handle are never changed here, so that the
+ *                       highest privilege cannot be redirected through this
+ *                       route. 403.
+ *   system_account      the target is NEMAR's internal system account (a
+ *                       negative id). 400.
  *   invalid_edit        a value the route cannot read at all (not a string, not
  *                       an address). 400.
  *   invalid_search      `?q=` was empty, too long or had too many words. 400.
- *   invalid_user_id     the `:id` in the path is not a positive integer. 400.
+ *   invalid_user_id     the `:id` in the path is not a whole number. 400.
  */
 export const adminUserErrorCodeSchema = z.enum([
   "field_not_editable",
   "owner_only_field",
   "edit_own_account",
+  "owner_account",
+  "system_account",
   "invalid_edit",
   "invalid_search",
   "invalid_user_id",
@@ -146,10 +172,23 @@ export const ADMIN_USER_ERROR_MESSAGES = {
     "Changing a username, email address or GitHub handle decides who can act as the account, so only an owner can do it. Ask an owner, or have the person change it in Settings.",
   edit_own_account:
     "You cannot change your own username, email address or GitHub handle here, because that skips the proof the self-service path asks for. Use 'nemar auth profile' instead.",
+  owner_account:
+    "An owner account's username, email address and GitHub handle are not changed here, so that the highest privilege cannot be redirected through this route. The owner changes them in Settings.",
+  system_account: "This is NEMAR's internal system account and cannot be edited.",
+  invalid_user_id: "The user id must be a whole number",
 } as const satisfies Partial<Record<AdminUserErrorCode, string>>;
 
-/** Bounds on a search, declared once so the CLI can refuse before the request
- *  and the route refuses the same inputs. */
+/**
+ * How a row matched a search, best first (`match_kind` on a `?q=` listing).
+ * Declared here, once, so the backend's ranking table and the CLI's checks use
+ * the same words; the wire schema stays a plain string so a kind added later
+ * does not fail an older CLI's parse.
+ */
+export const MATCH_KINDS = ["exact", "name", "prefix", "substring", "fuzzy"] as const;
+export type MatchKind = (typeof MATCH_KINDS)[number];
+
+/** Bounds on a search. The route refuses what exceeds them; the CLI checks the
+ *  same limits before sending, so the refusal comes without a round trip. */
 export const ADMIN_USER_SEARCH_MAX_TERMS = 8;
 export const ADMIN_USER_SEARCH_MAX_TERM_CHARS = 100;
 
@@ -230,6 +269,13 @@ export const adminUserEditResponseSchema = z
     message: z.string(),
     changed: z.record(z.string(), adminUserFieldChangeSchema),
     notes: z.array(z.string()).optional(),
+    /**
+     * Present only when the email address moved to a different inbox: whether
+     * the PREVIOUS address was sent the account-email-changed notice. False
+     * means it was not (a non-production worker fences any recipient off its
+     * allow-list, or the mail provider refused); the change itself stands.
+     */
+    old_address_notified: z.boolean().optional(),
     user: adminUserDetailSchema,
   })
   .passthrough();
