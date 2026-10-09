@@ -27,7 +27,8 @@ export interface SkipContentCheckEntry {
 /** Git's lowercase `ls-files -v` tag marks a path assume-unchanged. */
 const ASSUME_UNCHANGED_TAG = /^[a-z] /;
 
-// Issue #1399 explicitly treats this NEMAR-created import path as harmless.
+// #1399 exempts the NEMAR import runner: its generic account and /tmp scratch
+// path are not the depositor's account or project directory.
 function isNEMARImportRunnerDescription(description: string): boolean {
   return /^runner@[^:\s]+:\/tmp\/nemar-import-[^/\s]+(?:\/.*)?$/.test(description);
 }

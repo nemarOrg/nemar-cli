@@ -252,9 +252,9 @@ export async function initDataset(
  * The description `git annex init` records for a depositor's repository.
  *
  * With no description git-annex records `user@host:/absolute/path`, which is
- * committed to the `git-annex` branch's uuid.log and is public once the
- * dataset is (#1399; a cluster upload records the login name, the node
- * name and the full scratch path). A fixed, non-identifying string removes it.
+ * committed to the `git-annex` branch's uuid.log. Anyone can read it when the
+ * dataset repository is public (#1399); a cluster upload records the login
+ * name, node name and full scratch path. A fixed, non-identifying string removes it.
  */
 export const ANNEX_DEPOSIT_DESCRIPTION = "nemar-deposit";
 /** Same, for clones made by NEMAR tooling (download, admin fleet, CI). */
