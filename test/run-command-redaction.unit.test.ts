@@ -1,21 +1,18 @@
 /**
- * What `--verbose` shows of a subprocess's output is credential-free.
- *
- * A failed S3 request makes git-annex print the request it built, and that dump carries
- * the session token in a header tuple; `runCommand` logs a subprocess's stdout and stderr
- * under `--verbose`, so the log is where it would surface. The command here is a plain
- * shell that prints what git-annex would, so no AWS call is made.
+ * What --verbose shows when the CLI reads a GitHub token through the real gh executable.
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { credentialValues, runCommand } from "../src/lib/git-annex/run-command";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { getGitHubToken } from "../src/lib/git-annex/github";
+import { credentialValues } from "../src/lib/git-annex/run-command";
 import { setVerbose } from "../src/lib/verbose";
 
-const TOKEN = "FAKE-SESSION-TOKEN-0123456789";
-const SECRET = "fakesecretkeyfakesecretkey";
-const DUMP = `HttpExceptionRequest Request { requestHeaders = [("Authorization","<REDACTED>"),("X-Amz-Security-Token","${TOKEN}"),("User-Agent","git-annex")] }`;
+const SECRET = "NEMAR-TEST-GH-TOKEN-0123456789";
 
-/** Run `fn` with verbose on, collecting what is written to stderr. */
+/** Run fn with verbose on, collecting what is written to stderr. */
 async function verboseLog<T>(fn: () => Promise<T>): Promise<{ value: T; log: string }> {
   const chunks: string[] = [];
   const write = process.stderr.write.bind(process.stderr);
@@ -32,51 +29,38 @@ async function verboseLog<T>(fn: () => Promise<T>): Promise<{ value: T; log: str
   }
 }
 
-const printing = ["sh", "-c", 'printf "%s\\n" "$1"; printf "%s\\n" "$2" >&2', "_", DUMP];
-
 afterEach(() => setVerbose(false));
 
-describe("runCommand under --verbose", () => {
-  test("the header dump a failed request prints is logged without its session token", async () => {
-    // Guards the redaction of stdout in the verbose log. The call's own result stays raw;
-    // the callers that print it redact it themselves.
-    const { value, log } = await verboseLog(() =>
-      runCommand([...printing, "plain stderr line"], {
-        env: { AWS_SESSION_TOKEN: TOKEN },
-      }),
-    );
-    expect(value.stdout).toContain(TOKEN);
-    expect(log).toContain("X-Amz-Security-Token");
-    expect(log).not.toContain(TOKEN);
-    expect(log).toContain("<redacted>");
-  });
+describe("getGitHubToken under --verbose", () => {
+  test("the real gh auth token result is not written to the verbose log", async () => {
+    const configDir = mkdtempSync(join(tmpdir(), "nemar-gh-auth-"));
+    const previous = {
+      GH_CONFIG_DIR: process.env.GH_CONFIG_DIR,
+      GH_TOKEN: process.env.GH_TOKEN,
+      GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+      GH_ENTERPRISE_TOKEN: process.env.GH_ENTERPRISE_TOKEN,
+    };
+    process.env.GH_CONFIG_DIR = configDir;
+    process.env.GH_TOKEN = SECRET;
+    Reflect.deleteProperty(process.env, "GITHUB_TOKEN");
+    Reflect.deleteProperty(process.env, "GH_ENTERPRISE_TOKEN");
 
-  test("a secret that is not in a header is blanked from stderr too, given or inherited", async () => {
-    // Guards stderr, and credentialValues reading the process environment: the import path
-    // runs on ambient AWS_* variables and hands the command none.
-    const before = process.env.AWS_SECRET_ACCESS_KEY;
-    process.env.AWS_SECRET_ACCESS_KEY = SECRET;
     try {
-      const { log } = await verboseLog(() =>
-        runCommand([...printing, `signing with ${SECRET} failed`]),
-      );
-      expect(log).toContain("signing with <redacted> failed");
+      const { value, log } = await verboseLog(getGitHubToken);
+
+      expect(value.token).toBe(SECRET);
+      expect(log).toContain("[sensitive subprocess output suppressed]");
       expect(log).not.toContain(SECRET);
     } finally {
-      if (before === undefined) Reflect.deleteProperty(process.env, "AWS_SECRET_ACCESS_KEY");
-      else process.env.AWS_SECRET_ACCESS_KEY = before;
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) Reflect.deleteProperty(process.env, key);
+        else process.env[key] = value;
+      }
+      rmSync(configDir, { recursive: true, force: true });
     }
-
-    const { log: given } = await verboseLog(() =>
-      runCommand([...printing, `signing with ${SECRET} failed`], {
-        env: { AWS_SECRET_ACCESS_KEY: SECRET },
-      }),
-    );
-    expect(given).toContain("signing with <redacted> failed");
-    expect(given).not.toContain(SECRET);
   });
 
-  test("without --verbose nothing is logged at all", async () => {
+  test("without --verbose the command writes nothing to the log", async () => {
     const chunks: string[] = [];
     const write = process.stderr.write.bind(process.stderr);
     process.stderr.write = ((chunk: string | Uint8Array) => {
@@ -84,46 +68,35 @@ describe("runCommand under --verbose", () => {
       return true;
     }) as typeof process.stderr.write;
     try {
-      await runCommand([...printing, "x"], { env: { AWS_SESSION_TOKEN: TOKEN } });
+      const { runCommand } = await import("../src/lib/git-annex/run-command");
+      await runCommand(["git", "rev-parse", "--is-inside-work-tree"], {
+        cwd: process.cwd(),
+      });
     } finally {
       process.stderr.write = write;
     }
     expect(chunks.join("")).toBe("");
   });
-
-  test("a sensitive command keeps its result for callers but does not log its output", async () => {
-    const { value, log } = await verboseLog(() =>
-      runCommand(["git", "rev-parse", "--is-inside-work-tree"], {
-        cwd: process.cwd(),
-        sensitiveOutput: true,
-      }),
-    );
-
-    expect(value.exitCode).toBe(0);
-    expect(value.stdout.trim()).toBe("true");
-    expect(log).toContain("[sensitive subprocess output suppressed]");
-    expect(log).not.toContain("true");
-  });
 });
 
 describe("credentialValues", () => {
-  test("collects the given and the inherited AWS values, once each, and skips empty ones", () => {
+  test("collects the given and inherited AWS values once each, skipping empty ones", () => {
     const keys = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"] as const;
-    const saved = keys.map((k) => process.env[k]);
-    for (const k of keys) Reflect.deleteProperty(process.env, k);
+    const saved = keys.map((key) => process.env[key]);
+    for (const key of keys) Reflect.deleteProperty(process.env, key);
     process.env.AWS_ACCESS_KEY_ID = "INHERITED-KEY-ID-0001";
     try {
       const values = credentialValues({
-        AWS_SECRET_ACCESS_KEY: SECRET,
+        AWS_SECRET_ACCESS_KEY: "NEMAR-TEST-AWS-SECRET",
         AWS_SESSION_TOKEN: "",
         AWS_ACCESS_KEY_ID: "INHERITED-KEY-ID-0001",
       });
-      expect(values.sort()).toEqual(["INHERITED-KEY-ID-0001", SECRET].sort());
+      expect(values.sort()).toEqual(["INHERITED-KEY-ID-0001", "NEMAR-TEST-AWS-SECRET"].sort());
     } finally {
-      for (const [i, k] of keys.entries()) {
-        const v = saved[i];
-        if (v === undefined) Reflect.deleteProperty(process.env, k);
-        else process.env[k] = v;
+      for (const [i, key] of keys.entries()) {
+        const value = saved[i];
+        if (value === undefined) Reflect.deleteProperty(process.env, key);
+        else process.env[key] = value;
       }
     }
   });

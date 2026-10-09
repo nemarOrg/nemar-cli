@@ -11,6 +11,7 @@
 
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -185,6 +186,23 @@ export function prependPreCommit(dir: string, script: string): () => void {
   return () => {
     writeFileSync(hook, original);
     chmodSync(hook, 0o755);
+  };
+}
+
+/** Make the next commit's post-commit hook run `script` first, then any existing hook. */
+export function prependPostCommit(dir: string, script: string): () => void {
+  const hook = join(dir, ".git", "hooks", "post-commit");
+  const existed = existsSync(hook);
+  const original = existed ? readFileSync(hook, "utf-8") : "#!/bin/sh\n";
+  writeFileSync(hook, `#!/bin/sh\n${script}\n${original.replace(/^#!.*\n/, "")}`);
+  chmodSync(hook, 0o755);
+  return () => {
+    if (existed) {
+      writeFileSync(hook, original);
+      chmodSync(hook, 0o755);
+    } else {
+      rmSync(hook, { force: true });
+    }
   };
 }
 

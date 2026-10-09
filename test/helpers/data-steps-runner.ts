@@ -64,7 +64,7 @@ const result = await runDataSteps(
         );
         if (init.exitCode !== 0) throw new Error(init.stderr);
       }
-      return ok({});
+      return ok({ remoteIdentity: `directory:${store}` });
     },
   },
 );

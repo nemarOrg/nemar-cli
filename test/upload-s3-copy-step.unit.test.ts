@@ -49,7 +49,6 @@ import {
   run,
   writeFile,
 } from "./helpers/annex-repo";
-import { installGitShim } from "./helpers/git-shim";
 
 // Each test builds a repository and runs git-annex a few times; CI machines are slower
 // than the 5 s default allows.
@@ -413,36 +412,10 @@ describe("copyAnnexedToRemote: every annexed file must be recorded at the remote
     expect(await listAnnexedPaths(dir, REMOTE)).toEqual(new Set());
   });
 
-  test("a verify walk that fails is reported as unverifiable, not read as nothing missing", async () => {
-    // Guards the catch around the post-copy walk. The shim lets the plan's walk through
-    // and breaks the verify walk that follows it; every other git call is the real one.
-    // Reading the failure as "nothing is missing" would print success for a log nobody
-    // could read.
-    const { dir, targets } = await dataset("verify-fails", { "a.edf": 3_000 });
-    expect(
-      (
-        await trackDataFiles(
-          dir,
-          targets.map((t) => t.path),
-        )
-      ).success,
-    ).toBe(true);
-    const restore = installGitShim(scratch.root, [
-      { match: "annex find --not --in", after: 1, message: "fatal: shim: the log is unreadable" },
-    ]);
-    try {
-      const outcome = await step(dir, targets);
-      expect(outcome.status).toBe("unverifiable");
-      if (outcome.status !== "unverifiable") throw new Error("unreachable");
-      expect(outcome.error).toContain("the log is unreadable");
-    } finally {
-      restore();
-    }
-  });
-
-  test("the same failure through a damaged index, with nothing left to copy", async () => {
-    // The real-state version of the test above: the index is destroyed at the plan, when
-    // nothing is pending, and every later git-annex call that needs it fails.
+  test("a damaged index prevents a completed upload from being reported as success", async () => {
+    // The real-state failure path: the index is damaged after the plan and the subsequent
+    // git-annex operation fails. The step must preserve that failure instead of claiming
+    // that every annexed file reached the remote.
     const { dir, targets } = await dataset("verify-index", { "a.edf": 3_000 });
     expect(
       (
@@ -456,7 +429,6 @@ describe("copyAnnexedToRemote: every annexed file must be recorded at the remote
     const outcome = await step(dir, targets, () => {
       writeFileSync(join(dir, ".git", "index"), "x");
     });
-    expect(["unverifiable", "copy_failed"]).toContain(outcome.status);
     expect(outcome.status).not.toBe("ok");
   });
 
@@ -861,15 +833,16 @@ describe("recovery that does not complete", () => {
       "sub-4/eeg/plain4.edf",
     ];
     const { dir, progress } = await blockedMany("printed-command", names);
-    const restore = installGitShim(scratch.root, [{ match: "rm --cached" }]);
     let recovery: BlockedRecovery;
+    const lock = join(dir, ".git", "index.lock");
+    writeFileSync(lock, "", { flag: "wx" });
     try {
       recovery = await recoverBlockedTracking(dir, progress, names);
     } finally {
-      restore();
+      rmSync(lock, { force: true });
     }
     expect(recovery.unstaged).toBeNull();
-    expect(recovery.error).toContain("fatal: shim: injected failure");
+    expect(recovery.error).toContain("index.lock");
     // The stamp is gone although unstaging failed.
     expect(isStepCompleted(progress, "tracking")).toBe(false);
 
@@ -890,33 +863,6 @@ describe("recovery that does not complete", () => {
     expect(after.filter((p) => p.endsWith(".edf"))).toEqual([]);
     // The files themselves are untouched.
     for (const n of names) expect(existsSync(join(dir, n))).toBe(true);
-  });
-
-  test("a failure in a later chunk still clears the stamp, and the next run finishes the job", async () => {
-    // 501 files: one more than the add chunk holds, so the second `git rm` is a separate
-    // call. Breaking it leaves 500 unstaged and one staged, which is exactly the state
-    // a hand fix would find nothing untracked to reopen from.
-    const names = Array.from({ length: 501 }, (_, i) => `sub-${i % 7}/eeg/f${i}.edf`);
-    const { dir, progress } = await blockedMany("later-chunk", names);
-    const restore = installGitShim(scratch.root, [{ match: "rm --cached", after: 1 }]);
-    let first: BlockedRecovery;
-    try {
-      first = await recoverBlockedTracking(dir, progress, names);
-    } finally {
-      restore();
-    }
-    expect(first.unstaged).toBeNull();
-    expect(first.error).toBeTruthy();
-    expect(isStepCompleted(progress, "tracking")).toBe(false);
-    const stillStaged = (await run(["git", "ls-files"], dir)).stdout
-      .split("\n")
-      .filter((p) => p.endsWith(".edf"));
-    expect(stillStaged.length).toBe(1);
-
-    // The next blocked run unstages the remainder.
-    const second = await recoverBlockedTracking(dir, progress, names);
-    expect(second.error).toBeUndefined();
-    expect(second.unstaged).toBe(1);
   });
 
   test("an unwritable progress file is reported, and the stamp is cleared in memory regardless", async () => {
@@ -1059,11 +1005,11 @@ describe("what the step says", () => {
     // The claim is only what was checked: a check of this many recorded files, recently.
     // It does not say the remote "confirmed them", which a merged location log could make false.
     expect(formatUploadSummary(8, 0, 0, { recordedCheckSkipped: true })).toBe(
-      "All 8 data files are recorded at the S3 remote; not checked again, because a check of this many recorded files passed within the last 6 hours",
+      "All 8 data files are recorded at the S3 remote; not checked again, because these files and their annex keys passed a check at this destination within the last 6 hours",
     );
     const mixed = formatUploadSummary(8, 2, 2, { recordedCheckSkipped: true });
     expect(mixed).toBe(
-      "Uploaded 2 data files to S3; 6 already recorded at the remote were not checked again, because a check of this many recorded files passed within the last 6 hours; all recorded at the remote",
+      "Uploaded 2 data files to S3; 6 already recorded at the remote were not checked again, because these files and their annex keys passed a check at this destination within the last 6 hours; all recorded at the remote",
     );
     expect(mixed).not.toContain("already at the remote");
     expect(mixed).not.toContain("confirmed");

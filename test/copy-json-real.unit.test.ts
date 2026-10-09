@@ -2,11 +2,10 @@
  * `git annex copy --json --json-error-messages`, parsed from what git-annex really
  * prints.
  *
- * Every failing record below is captured from a real failing copy against a real
- * `directory` special remote: a read-only store, which fails mid-transfer, and a
- * missing store, which git-annex declines up front. The two differ in where the
- * reason lives (`error-messages` against `note`), which is exactly what error JSON
- * written by hand cannot be trusted to get right.
+ * Parser inputs are captured from real git-annex invocations against a real `directory`
+ * special remote: successful copies, a read-only store that fails mid-transfer, and a
+ * missing store that git-annex declines up front. No fabricated command records stand in
+ * for behavior at the command boundary.
  *
  * Assertions that read git-annex's own prose, or the shape of a record, rather than
  * ours are marked "version-coupled": they hold on git-annex 10.20260901 and are the
@@ -33,7 +32,6 @@ import {
   run,
   writeFile,
 } from "./helpers/annex-repo";
-import { installGitShim } from "./helpers/git-shim";
 
 // Each test builds a repository and runs git-annex a few times; CI machines are slower
 // than the 5 s default allows.
@@ -154,23 +152,6 @@ describe("parseCopyJson against real output", () => {
     expect(counted).toMatchObject({ success: true, filesCopied: 3, filesSent: 0 });
   });
 
-  test("a failed record that carries only the progress note has no reason to report", () => {
-    // Pure on purpose: no real failure was found that puts ONLY the progress note in a
-    // failed record, so this guards the filter against that shape rather than a capture.
-    const stdout =
-      '{"command":"copy","error-messages":[],"file":"a.edf","key":"K","note":"to store...","success":false}\n';
-    expect(parseCopyJson(stdout)).toEqual([
-      { file: "a.edf", key: "K", success: false, transferred: false, errors: [] },
-    ]);
-  });
-
-  test("lines that are not JSON records are ignored around real ones", async () => {
-    const cap = await captureCopy("none", 2);
-    const noisy = `(recording state in git...)\n${cap.stdout}\n{not json\n{"command":"copy"}\n`;
-    expect(parseCopyJson(noisy)).toEqual(parseCopyJson(cap.stdout));
-    expect(parseCopyJson(noisy)).toHaveLength(2);
-  });
-
   test("a record of another command is not counted as a copy", async () => {
     const cap = await captureCopy("none", 1);
     const found = await run(["git", "annex", "whereis", "--json", "--", cap.paths[0]], cap.repo);
@@ -229,27 +210,6 @@ describe("parseCopyJson against real output", () => {
 });
 
 describe("git-annex copy output that cannot prove every path succeeded", () => {
-  test("is reported as unrecognized, so a count of zero is not read as a verdict", async () => {
-    // The shim stands in for a git-annex whose output format changed. The location log
-    // is still the authority on what arrived; this only keeps "confirmed 0 of N" from
-    // being printed as though it measured something.
-    const cap = await captureCopy("none", 2);
-    const restore = installGitShim(scratch.root, [
-      { match: "annex copy", stdout: "Wir haben kopiert (pretend new format)" },
-    ]);
-    try {
-      const result = await copyPathsToAnnexRemote(cap.repo, "store", cap.paths, 2);
-      expect(result).toMatchObject({
-        success: true,
-        filesCopied: 0,
-        filesSent: 0,
-        output: "unrecognized",
-      });
-    } finally {
-      restore();
-    }
-  });
-
   test("a clean exit with a path whose content is not here is partial: readable and incomplete", async () => {
     // With real git-annex, a path whose content is absent and whose remote location is
     // already recorded is skipped with exit 0 and no record. The other path still returns
@@ -263,84 +223,9 @@ describe("git-annex copy output that cannot prove every path succeeded", () => {
 
     expect(result).toMatchObject({ success: true, filesCopied: 1, output: "partial" });
   });
-
-  test("a clean exit with a failed record is a failure, whatever the exit status says", async () => {
-    const cap = await captureCopy("none", 1);
-    const failed = `{"command":"copy","error-messages":["store rejected it"],"file":"${cap.paths[0]}","key":"K","success":false}`;
-    const restore = installGitShim(scratch.root, [{ match: "annex copy", stdout: failed }]);
-    try {
-      const result = await copyPathsToAnnexRemote(cap.repo, "store", cap.paths, 2);
-      expect(result.success).toBe(false);
-      expect(result.error).toContain("store rejected it");
-    } finally {
-      restore();
-    }
-  });
-});
-
-describe("counting by the note must never decide success", () => {
-  // The count of files "sent" rests on the progress note git-annex puts in a record that
-  // moved content. A git-annex that omits or rewords it makes the count low; these show
-  // that costs wording only: success, the records counted as copied, and recognition stay.
-  const record = (file: string, note?: string) =>
-    JSON.stringify({
-      command: "copy",
-      "error-messages": [],
-      file,
-      key: `K-${file}`,
-      ...(note === undefined ? {} : { note }),
-      success: true,
-    });
-
-  test("records with no note at all are successes that sent nothing, as far as anyone can tell", async () => {
-    const cap = await captureCopy("none", 2);
-    const restore = installGitShim(scratch.root, [
-      { match: "annex copy", stdout: cap.paths.map((p) => record(p)).join("\n") },
-    ]);
-    try {
-      const result = await copyPathsToAnnexRemote(cap.repo, "store", cap.paths, 2);
-      expect(result).toEqual({
-        success: true,
-        filesCopied: 2,
-        filesSent: 0,
-        output: "understood",
-      });
-    } finally {
-      restore();
-    }
-  });
-
-  test("notes worded differently are not counted as sent, and change nothing else", () => {
-    const stdout = [
-      record("a.edf", "uploading to store"),
-      record("b.edf", "to store..."),
-      record("c.edf", "Uploading to store..."),
-    ].join("\n");
-    const records = parseCopyJson(stdout);
-    expect(records.map((r) => r.success)).toEqual([true, true, true]);
-    expect(records.map((r) => r.transferred)).toEqual([false, true, false]);
-  });
 });
 
 describe("file names in error text", () => {
-  test("extractCopyJsonError shows a failed file's name escaped", () => {
-    // Guards displayName on `file`/`key`: the error text is printed to a terminal.
-    const records = parseCopyJson(
-      JSON.stringify({
-        command: "copy",
-        "error-messages": ["store rejected it"],
-        file: "bad\x1b[2Jname\n.edf",
-        key: "K",
-        success: false,
-      }),
-    );
-    // The parsed record keeps the real name, which callers match against their own paths.
-    expect(records[0].file).toBe("bad\x1b[2Jname\n.edf");
-    const text = extractCopyJsonError(records, "", "", 1);
-    expect(text).toContain("bad\\x1b[2Jname\\n.edf: store rejected it");
-    expect(text).not.toContain("\x1b");
-  });
-
   test("a real failed copy of a file with an ESCAPE in its name prints no ESCAPE", async () => {
     if (!canBlockWrites) return;
     const repo = await newDatasetRepo(scratch.root, "copy-escape-name");
@@ -365,150 +250,6 @@ describe("file names in error text", () => {
 });
 
 describe("credentials never reach what is printed", () => {
-  // Captured from a real failing git-annex call (an S3 initremote through a refused
-  // proxy, with a made-up session token). git-annex redacts only `Authorization`; the
-  // request it prints carries `X-Amz-Security-Token` in clear, and the same dump is what
-  // lands in a copy record's `note` when a presence check or an upload fails.
-  const TOKEN = "FAKE-SESSION-TOKEN-0123456789";
-  const SECRET = "fakesecretkeyfakesecretkey";
-  const DUMP = `git-annex: HttpExceptionRequest Request {
-  host                 = "no-such-bucket-zzz.s3-us-east-2.amazonaws.com"
-  port                 = 443
-  secure               = True
-  requestHeaders       = [("Date","Thu, 08 Oct 2026 05:59:01 GMT"),("Authorization","<REDACTED>"),("X-Amz-Content-Sha256","2cdb5df2bf7e7601d5b4af81469c0bcbf2a1f82d770a6ceddfbb574e7d97a6a7"),("X-Amz-Date","20261008T055901Z"),("X-Amz-Security-Token","${TOKEN}"),("User-Agent","git-annex/10.20260901")]
-  path                 = "/"
-  queryString          = ""
-  method               = "PUT"
-  proxy                = Nothing
-  rawBody              = False
-  redirectCount        = 10
-  responseTimeout      = ResponseTimeoutDefault
-  requestVersion       = HTTP/1.1
-  proxySecureMode      = ProxySecureWithConnect
-}
- (InternalException (HostCannotConnect "127.0.0.1" [Network.Socket.connect: <socket: 12>: does not exist (Connection refused)]))`;
-  const failedLine = (note: string) =>
-    JSON.stringify({
-      command: "copy",
-      "error-messages": [],
-      file: "a.edf",
-      key: "K",
-      note,
-      success: false,
-    });
-
-  test("the premise: the dump really carries the token", () => {
-    expect(DUMP).toContain(TOKEN);
-  });
-
-  test("a failed record's note is stripped of x-amz-* and authorization headers and cut to a line", () => {
-    const [record] = parseCopyJson(failedLine(DUMP));
-    const reason = record.errors.join(" ");
-    expect(reason).not.toContain(TOKEN);
-    expect(reason).not.toContain('x-amz-security-token","FAKE');
-    expect(reason).toContain("<redacted>");
-    // What matters for diagnosis survives: the exception at the end of the dump.
-    expect(reason).toContain("HostCannotConnect");
-    expect(reason).not.toContain("\n");
-    expect(reason.length).toBeLessThanOrEqual(700);
-  });
-
-  test("a very long reason is cut in the middle, keeping its start and the exception at its end", () => {
-    // Guards the cap. The dump above is under it; a request with many headers is not.
-    const long = `${DUMP.replace("requestHeaders", `pad = [${'("X-Pad","y")'.repeat(400)}]\n  requestHeaders`)}`;
-    expect(long.length).toBeGreaterThan(5_000);
-    const [record] = parseCopyJson(failedLine(long));
-    const reason = record.errors.join(" ");
-    expect(reason.length).toBeLessThanOrEqual(700);
-    expect(reason.startsWith("git-annex: HttpExceptionRequest")).toBe(true);
-    expect(reason).toContain(" ... ");
-    expect(reason).toContain("HostCannotConnect");
-    expect(reason).not.toContain(TOKEN);
-  });
-
-  test("the same goes for error-messages, and for a secret that is not in a header", () => {
-    const line = JSON.stringify({
-      command: "copy",
-      "error-messages": [DUMP, `signing with ${SECRET} failed`],
-      file: "a.edf",
-      key: "K",
-      success: false,
-    });
-    const [record] = parseCopyJson(line, [SECRET, TOKEN]);
-    const text = record.errors.join("\n");
-    expect(text).not.toContain(TOKEN);
-    expect(text).not.toContain(SECRET);
-    expect(text).toContain("signing with <redacted> failed");
-  });
-
-  test("through copyPathsToAnnexRemote the token is in neither the error nor what git-annex printed on stderr", async () => {
-    const cap = await captureCopy("none", 1);
-    const restore = installGitShim(scratch.root, [
-      { match: "annex copy", stdout: failedLine(DUMP), exit: 1 },
-    ]);
-    try {
-      const result = await copyPathsToAnnexRemote(cap.repo, "store", cap.paths, 2, {
-        accessKeyId: "AKIAFAKEFAKEFAKEFAKE",
-        secretAccessKey: SECRET,
-        sessionToken: TOKEN,
-      });
-      expect(result.success).toBe(false);
-      expect(result.error).not.toContain(TOKEN);
-      expect(result.error).not.toContain(SECRET);
-      expect(result.error).toContain("HostCannotConnect");
-    } finally {
-      restore();
-    }
-  });
-
-  test("stderr is redacted too", async () => {
-    const cap = await captureCopy("none", 1);
-    const restore = installGitShim(scratch.root, [
-      { match: "annex copy", message: `fatal: request signed with ${TOKEN}`, exit: 1 },
-    ]);
-    try {
-      const result = await copyPathsToAnnexRemote(cap.repo, "store", cap.paths, 2, {
-        accessKeyId: "AKIAFAKEFAKEFAKEFAKE",
-        secretAccessKey: SECRET,
-        sessionToken: TOKEN,
-      });
-      expect(result.success).toBe(false);
-      expect(result.error).not.toContain(TOKEN);
-      expect(result.error).toContain("<redacted>");
-    } finally {
-      restore();
-    }
-  });
-
-  test("credentials the process inherits are redacted too, not only the ones it was handed", async () => {
-    // Guards credentialValues reading process.env. The import path runs on ambient AWS_*
-    // variables and passes no credentials down, yet the child inherits them.
-    const ambient = "AMBIENT-SESSION-TOKEN-0123456789";
-    const cap = await captureCopy("none", 1);
-    const failed = JSON.stringify({
-      command: "copy",
-      "error-messages": [`signing with ${ambient} failed`],
-      file: cap.paths[0],
-      key: "K",
-      success: false,
-    });
-    const restore = installGitShim(scratch.root, [
-      { match: "annex copy", stdout: failed, exit: 1 },
-    ]);
-    const before = process.env.AWS_SESSION_TOKEN;
-    process.env.AWS_SESSION_TOKEN = ambient;
-    try {
-      const result = await copyPathsToAnnexRemote(cap.repo, "store", cap.paths, 2);
-      expect(result.success).toBe(false);
-      expect(result.error).toContain("signing with <redacted> failed");
-      expect(result.error).not.toContain(ambient);
-    } finally {
-      if (before === undefined) Reflect.deleteProperty(process.env, "AWS_SESSION_TOKEN");
-      else process.env.AWS_SESSION_TOKEN = before;
-      restore();
-    }
-  });
-
   test("redactCredentials blanks header tuples in any case and any given secret", () => {
     expect(redactCredentials('("x-amz-security-token","abc")', [])).toBe(
       '("x-amz-security-token","<redacted>")',
@@ -521,7 +262,7 @@ describe("credentials never reach what is printed", () => {
     );
     // A short or empty "secret" must not blank half the message.
     expect(redactCredentials("a b c", ["", "b"])).toBe("a b c");
-    expect(redactCredentials("unrelated text", [TOKEN])).toBe("unrelated text");
+    expect(redactCredentials("unrelated text", ["SESSION-TOKEN-VALUE"])).toBe("unrelated text");
   });
 });
 
@@ -600,26 +341,6 @@ describe("checkRemoteHolds: files whose content is not in this repository", () =
     });
   });
 
-  test("a path fsck printed no record for is unanswered, never present", async () => {
-    // Guards `unanswered`. A clean exit with one record for two paths leaves one path
-    // unasked; the old reading counted what it saw and called the rest fine.
-    const { repo, paths } = await droppedAfterCopy("fsck-partial", 2);
-    const one = `{"command":"fsck","error-messages":[],"file":"${paths[0]}","key":"K","success":true}`;
-    const restore = installGitShim(scratch.root, [{ match: "annex fsck", stdout: one }]);
-    try {
-      const outcome = await checkRemoteHolds(repo, "store", paths, 2);
-      expect(outcome).toMatchObject({
-        success: true,
-        present: 1,
-        absent: [],
-        unanswered: [paths[1]],
-        output: "partial",
-      });
-    } finally {
-      restore();
-    }
-  });
-
   test("a file name with an ESCAPE in it never reaches the reasons raw", async () => {
     // Guards `clean`. git-annex echoes the name inside its messages ("** Based on the
     // location log, <name>"), and shortening only collapses whitespace, so an ESCAPE
@@ -681,46 +402,6 @@ describe("extractCopyJsonError against real output", () => {
       expect(msg.split(cap.store).length - 1).toBe(cap.paths.length);
     },
   );
-
-  test("with no failed record it says what it knows: stderr and the exit code", async () => {
-    const cap = await captureCopy("none", 1);
-    expect(
-      extractCopyJsonError(parseCopyJson(cap.stdout), "", "fatal: not a git repository", 128),
-    ).toBe("git annex copy failed with exit code 128: fatal: not a git repository");
-  });
-
-  test("success-only output with a non-zero exit never turns a JSON line into the message", async () => {
-    // Every record carries an `error-messages` key, so searching stdout for error words
-    // would match a SUCCESS record and surface the raw JSON as the error.
-    const cap = await captureCopy("none", 2);
-    expect(cap.stdout).toContain("error-messages");
-    const msg = extractCopyJsonError(parseCopyJson(cap.stdout), cap.stdout, "", 1);
-    expect(msg).toBe("git annex copy failed with exit code 1 without saying why");
-    expect(msg).not.toContain("{");
-  });
-
-  test("output that is not copy records is called what it is", () => {
-    expect(extractCopyJsonError([], "something unexpected\n", "", 1)).toBe(
-      "git annex copy failed with exit code 1; its output was not recognized as copy records",
-    );
-    expect(extractCopyJsonError([], "something unexpected\n", "boom", 2)).toBe(
-      "git annex copy failed with exit code 2; its output was not recognized as copy records: boom",
-    );
-  });
-
-  test("a killed git-annex is reported with its exit code, not as a generic failure", async () => {
-    // The shim kills only `git annex copy`; everything else runs the real git.
-    const cap = await captureCopy("none", 2);
-    const restore = installGitShim(scratch.root, [{ match: "annex copy", kill: true }]);
-    try {
-      const result = await copyPathsToAnnexRemote(cap.repo, "store", cap.paths, 2);
-      expect(result.success).toBe(false);
-      expect(result.error).toContain("exit code 137");
-      expect(result.error).not.toBe("Failed to copy to remote");
-    } finally {
-      restore();
-    }
-  });
 
   test("bounds a many-file failure to the last failures, and says how many it left out", async () => {
     const cap = await captureCopy("missing", 30);

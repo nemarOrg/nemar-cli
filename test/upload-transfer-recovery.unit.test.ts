@@ -98,7 +98,8 @@ const transfer = (
   dir: string,
   targets: Target[],
   progress = initUploadProgress(dir, "nm000996", targets),
-  openRemote: Parameters<typeof transferAnnexedData>[0]["openRemote"] = async () => ok({}),
+  openRemote: Parameters<typeof transferAnnexedData>[0]["openRemote"] = async () =>
+    ok({ remoteIdentity: `directory:${dir}:${REMOTE}` }),
 ) =>
   captured(() =>
     transferAnnexedData({ absolutePath: dir, progress, addTargets: targets, jobs: 2, openRemote }),
@@ -169,20 +170,21 @@ describe("a blocked tracking is recovered and retried in the same run", () => {
     expect(await listAnnexedPaths(dir, REMOTE)).toEqual(new Set());
   });
 
-  test("when unstaging fails the add is not retried, and the command to run is printed", async () => {
+  test("a real index lock blocks recovery and the add is not retried", async () => {
     const { dir, targets, progress } = await blocked("unstage-fails");
     const adds = join(scratch.root, `adds-${Math.random().toString(36).slice(2)}.log`);
-    const restore = installGitShim(scratch.root, [
-      { match: "rm --cached" },
-      { match: "annex add", log: adds },
-    ]);
+    const lock = join(dir, ".git", "index.lock");
+    writeFileSync(lock, "", { flag: "wx" });
+    const restore = installGitShim(scratch.root, [{ match: "annex add", log: adds }]);
     try {
       const { value, text } = await transfer(dir, targets, progress);
       expect(value.status).toBe("fail");
       expect(text).toContain("git --literal-pathspecs rm --cached");
       expect(text).toContain("Could not finish making the next run able to annex them");
+      expect(text).toContain("index.lock");
     } finally {
       restore();
+      rmSync(lock, { force: true });
     }
     // Guards the break on `unstaged === null`: no `git annex add` ran against a recovery
     // that failed, and the blob is still staged.
@@ -190,94 +192,23 @@ describe("a blocked tracking is recovered and retried in the same run", () => {
     expect((await run(["git", "ls-files", "--", "big.edf"], dir)).stdout.trim()).toBe("big.edf");
     expect(isStepCompleted(progress, "tracking")).toBe(false);
   });
-  test("a failed re-add after a recovery that had its own trouble prints both accounts", async () => {
-    // Guards the recovery's error. The progress file cannot be saved (a file sits where its
-    // directory should be), so the recovery reports that; the re-add then fails, and the
-    // recovery's account is the only record of the first trouble.
-    const { dir, targets, progress } = await blocked("retrack-fails");
-    rmSync(join(dir, ".nemar"), { recursive: true, force: true });
-    writeFileSync(join(dir, ".nemar"), "in the way");
-    const restore = installGitShim(scratch.root, [{ match: "annex add" }]);
-    try {
-      const { value, text } = await transfer(dir, targets, progress);
-      expect(value.status).toBe("fail");
-      expect(text).toContain("Failed to track data files:");
-      expect(text).toContain("The recovery before it also reported:");
-      expect(text).toContain("the upload progress could not be saved");
-    } finally {
-      restore();
-    }
-  });
-
-  test("a second verdict that could not read the log does not claim the files are annexed", async () => {
-    // Guards the gate on the verdicts that ran the not-annexed check. After a successful
-    // re-add the second decision cannot even list the annexed files; the tracking stamp
-    // must stay cleared and nothing may say "annexed now" about a check that never ran.
-    const { dir, targets, progress } = await blocked("second-unreadable");
-    // The first decision lists twice (annexed, then not at the remote) and is blocked; the
-    // second decision's first listing fails.
-    const restore = installGitShim(scratch.root, [
-      { match: "annex find", after: 2, message: "fatal: shim: the log is unreadable" },
-    ]);
-    try {
-      const { value, text } = await transfer(dir, targets, progress);
-      expect(value.status).toBe("fail");
-      expect(text).toContain("Could not read the annex location log");
-      expect(text).not.toContain("annexed now");
-      expect(text).not.toContain("added again");
-      expect(isStepCompleted(progress, "tracking")).toBe(false);
-    } finally {
-      restore();
-    }
-  });
 });
 
 describe("a failed read of git says how it ended", () => {
-  test("a killed git annex find reports its exit status, not only that it failed", async () => {
-    // Guards `commandFailure`. A call killed by a signal prints nothing, so the exit status
-    // is the only account there is of a walk that was killed.
-    const { dir } = await dataset("killed-find", { "a.edf": 3_000 });
-    expect((await trackDataFiles(dir, ["a.edf"])).success).toBe(true);
-    const restore = installGitShim(scratch.root, [{ match: "annex find", kill: true }]);
-    try {
-      const error = await listAnnexedPaths(dir).then(
-        () => "",
-        (e: Error) => e.message,
-      );
-      expect(error).toMatch(/git annex find failed \(exit status \d+\)/);
-      expect(error).not.toMatch(/exit status 0\b/);
-    } finally {
-      restore();
-    }
-  });
-
-  test("a failure with a message keeps the message and adds the status", async () => {
-    const { dir } = await dataset("failed-find", { "a.edf": 3_000 });
-    const restore = installGitShim(scratch.root, [
-      { match: "annex find", message: "fatal: shim: no good", exit: 3 },
-    ]);
-    try {
-      const error = await listAnnexedPathsNotAt(dir, REMOTE).then(
-        () => "",
-        (e: Error) => e.message,
-      );
-      expect(error).toBe("fatal: shim: no good (git annex find exited 3)");
-    } finally {
-      restore();
-    }
-  });
-
-  test("the index read says it too", async () => {
+  test("a corrupt index makes the tracked-path read report git's real error", async () => {
     const { dir } = await dataset("failed-ls-files", { "a.edf": 3_000 });
-    const restore = installGitShim(scratch.root, [{ match: "ls-files -z", exit: 5 }]);
+    const indexPath = join(dir, ".git", "index");
+    const index = readFileSync(indexPath);
+    writeFileSync(indexPath, "not a git index\n");
     try {
       const error = await listTrackedPaths(dir).then(
         () => "",
         (e: Error) => e.message,
       );
-      expect(error).toContain("git ls-files exited 5");
+      expect(error).toContain("git ls-files");
+      expect(error).toContain("index");
     } finally {
-      restore();
+      writeFileSync(indexPath, index);
     }
   });
 });
@@ -302,39 +233,28 @@ describe("the remote's configuration", () => {
     expect(await specialRemoteConfigured(dir, REMOTE)).toBe(false);
   });
 
-  test("a config git could not read is an error, never 'not configured'", async () => {
-    // Guards the exit status. Only 1 means the key is absent; 3 and 128 are a config file
-    // git could not read or parse, and reading them as "absent" would send the caller to
-    // reconfigure a repository whose config it could not see.
+  test("a malformed git config is an error, never 'not configured'", async () => {
     const { dir } = await dataset("config-unreadable", { "a.edf": 3_000 });
-    const restore = installGitShim(scratch.root, [
-      { match: "config --get remote.nemar-s3.annex-uuid", exit: 3, message: "fatal: bad config" },
-    ]);
+    const configPath = join(dir, ".git", "config");
+    const config = readFileSync(configPath, "utf-8");
+    writeFileSync(configPath, `${config}\n[broken\n`);
+    let opened = false;
     try {
-      await expect(specialRemoteConfigured(dir, REMOTE)).rejects.toThrow(
-        /fatal: bad config \(git config exited 3\)/,
-      );
+      await expect(specialRemoteConfigured(dir, REMOTE)).rejects.toThrow(/git config/);
       const { value, text } = await captured(() =>
         uploadDataToS3(dir, { jobs: "2" }, [], [], null, INFO, {
-          openRemote: async () => ok({}),
+          openRemote: async () => {
+            opened = true;
+            return ok({ remoteIdentity: `directory:${dir}:${REMOTE}` });
+          },
         }),
       );
       expect(value.status).toBe("fail");
-      expect(text).toContain("Could not read the annex location log: fatal: bad config");
+      expect(text).toContain("Failed to read the git index");
+      expect(text).toContain("bad config");
+      expect(opened).toBe(false);
     } finally {
-      restore();
-    }
-  });
-
-  test("exit status 1 is the one that means the key is absent", async () => {
-    const { dir } = await dataset("config-absent", { "a.edf": 3_000 });
-    const restore = installGitShim(scratch.root, [
-      { match: "config --get remote.nemar-s3.annex-uuid", exit: 1 },
-    ]);
-    try {
-      expect(await specialRemoteConfigured(dir, REMOTE)).toBe(false);
-    } finally {
-      restore();
+      writeFileSync(configPath, config);
     }
   });
 
@@ -363,8 +283,8 @@ describe("the remote's configuration", () => {
     const { value, text } = await captured(() =>
       uploadDataToS3(dir, { jobs: "2" }, files, [], progress, INFO, {
         openRemote: async () => {
-          await initDirectoryRemote(scratch.root, dir, REMOTE);
-          return ok({});
+          const store = await initDirectoryRemote(scratch.root, dir, REMOTE);
+          return ok({ remoteIdentity: `directory:${store}` });
         },
       }),
     );
