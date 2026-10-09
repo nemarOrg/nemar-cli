@@ -16,7 +16,7 @@
  * PRESENCE. A key is present when its plain object exists at the declared size,
  * or, only when the plain object is ABSENT, when some chunking of it is complete
  * (ADR 0064, amendment 2026-10-07). "Present" means recoverable by reassembling
- * the chunks, not servable: the data plane still addresses the plain key (#1565).
+ * the chunks. The data plane uses the same geometry to serve those bytes (#1565).
  */
 
 type KeyParts = { fields: string; name: string };
@@ -83,9 +83,8 @@ export function annexKeyFieldSize(key: string): number | null {
  * through a chunked special remote (nm000276, #1565): present when a chunking of
  * it is complete (see isChunkedKeyPresent). A plain object that exists at the
  * wrong size stays missing even beside a complete chunk set. The data plane
- * serves the plain key, and a short plain object is served as a 200 with
- * truncated bytes, silently, where an absent plain key fails loudly. Complete
- * chunks elsewhere in the bucket do not make that object whole.
+ * also checks the plain object's exact size before redirecting; only an absent
+ * plain object can be served from chunks.
  */
 export function isKeyPresentAtDeclaredSize(key: string, existing: Map<string, number>): boolean {
   const actual = existing.get(key);
@@ -122,6 +121,32 @@ export function parseChunkKey(name: string): ParsedChunkKey | null {
   if (!Number.isSafeInteger(chunkSize) || chunkSize < 1) return null;
   if (!Number.isSafeInteger(chunkNumber) || chunkNumber < 1) return null;
   return { baseKey: `${match[1]}--${parts.name}`, chunkSize, chunkNumber };
+}
+
+/** One verified member of a complete chunk set, in whole-file byte coordinates. */
+export interface AnnexChunkPart {
+  name: string;
+  number: number;
+  offset: number;
+  size: number;
+}
+
+/** A complete, size-verified chunking of one annex key. */
+export interface AnnexChunkSet {
+  chunkSize: number;
+  totalSize: number;
+  chunks: AnnexChunkPart[];
+}
+
+/**
+ * The narrow S3 prefix that contains chunk objects for `key`, or null when the
+ * key has no declared size. Chunk sizes vary by upload, so the prefix stops at
+ * `-S` and callers must still parse each listed name and match its base key.
+ */
+export function annexChunkObjectPrefix(key: string): string | null {
+  const parts = splitKey(key);
+  if (!parts || sizeOfFields(parts.fields) === null) return null;
+  return `${parts.fields}-S`;
 }
 
 /** The name chunk `chunkNumber` of a split key is stored under: `annex_chunk_key`. */
@@ -172,45 +197,50 @@ function firstChunksIn(existing: Map<string, number>): ReadonlyMap<string, Reado
 }
 
 /**
- * True when every chunk of a key at `chunkSize` is in `existing` at the size
- * chunking gives it. A complete chunking is chunks C1..Cn, with n the size divided
- * by the chunk size, rounded up. Every chunk is exactly the chunk size except the
- * last, which holds whatever is left (a full chunk when the size divides evenly).
- * An empty file is a single empty chunk. Matches `annex_chunk_sizes` and
- * `_complete_chunk_size` in `scripts/zarr/generate_zarr.py`. A missing, short or
- * oversized chunk means the file cannot be reassembled at that chunk size.
- */
-function isChunkSetComplete(
-  parts: KeyParts,
-  declared: number,
-  chunkSize: number,
-  existing: Map<string, number>,
-): boolean {
-  const n = declared === 0 ? 1 : Math.ceil(declared / chunkSize);
-  for (let i = 1; i <= n; i++) {
-    const expected = i < n ? chunkSize : declared - (n - 1) * chunkSize;
-    if (existing.get(chunkObjectName(parts, chunkSize, i)) !== expected) return false;
-  }
-  return true;
-}
-
-/**
- * True when some chunking of `key` is complete in `existing`. A listing can hold
+ * The complete chunking of `key` in `existing`, if one exists. A listing can hold
  * more than one chunking of a key (a partial attempt at one chunk size and a
  * finished upload at another), so every chunk size the key's own C1 objects carry
- * is tried and the answer is true if ANY is complete, whatever order they are
- * tried in. False for a key with no declared size: without it there is no way to
- * know how many chunks to expect.
+ * is tried. The largest complete chunk size is preferred because it needs the
+ * fewest object requests when streamed. `maxChunks` lets a serving caller refuse
+ * a complete set whose sequential request count exceeds its bounded budget; the
+ * integrity checker leaves it unset and retains its historical behavior.
  */
-function isChunkedKeyPresent(key: string, existing: Map<string, number>): boolean {
+export function findCompleteChunkSet(
+  key: string,
+  existing: Map<string, number>,
+  maxChunks = Number.MAX_SAFE_INTEGER,
+): AnnexChunkSet | null {
   const parts = splitKey(key);
-  if (!parts) return false;
+  if (!parts) return null;
   const declared = sizeOfFields(parts.fields);
-  if (declared === null) return false;
+  if (declared === null) return null;
+  if (!Number.isSafeInteger(maxChunks) || maxChunks < 1) return null;
   const chunkSizes = firstChunksIn(existing).get(key);
-  if (!chunkSizes) return false;
-  for (const chunkSize of chunkSizes) {
-    if (isChunkSetComplete(parts, declared, chunkSize, existing)) return true;
+  if (!chunkSizes) return null;
+  const orderedSizes = [...chunkSizes].sort((a, b) => b - a);
+  for (const chunkSize of orderedSizes) {
+    const count = declared === 0 ? 1 : Math.ceil(declared / chunkSize);
+    if (count > maxChunks) continue;
+    const chunks: AnnexChunkPart[] = [];
+    let offset = 0;
+    let complete = true;
+    for (let i = 1; i <= count; i++) {
+      const size = i < count ? chunkSize : declared - (count - 1) * chunkSize;
+      const name = chunkObjectName(parts, chunkSize, i);
+      if (existing.get(name) !== size) {
+        complete = false;
+        break;
+      }
+      chunks.push({ name, number: i, offset, size });
+      offset += size;
+    }
+    if (complete && offset === declared) {
+      return { chunkSize, totalSize: declared, chunks };
+    }
   }
-  return false;
+  return null;
+}
+
+function isChunkedKeyPresent(key: string, existing: Map<string, number>): boolean {
+  return findCompleteChunkSet(key, existing) !== null;
 }

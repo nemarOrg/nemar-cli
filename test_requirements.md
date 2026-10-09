@@ -110,3 +110,23 @@ expiry acceptance. Close this gap only with an isolated, owner-approved staging 
 verified S3-side expiry behavior; do not run the live path from this phase or treat a generic
 `e2e-sandbox` CI pass as equivalent evidence. Add real coverage only when the test can exercise
 the affected path without synthetic lease state or a stub service.
+
+# Remaining real-test requirements for #1565
+
+The shared key parser and completeness rules establish that a chunk set is recoverable,
+but do not prove that the Worker can deliver its bytes. Existing route tests use the S3
+manifest stand-in and do not drive a real chunk-only object through the manifest URL and
+data-plane file route. No non-synthetic chunked sample in an isolated non-production S3
+environment was identified during phase setup. Do not use live S3 or `nm000276` for this
+acceptance.
+
+Close this gap with an owner-approved real chunked sample and isolated non-production S3
+environment. Fetch the URL emitted by `manifest.json` through the production route and
+verify the full-body checksum, a range within one chunk, a range crossing a chunk boundary,
+a range in the final short chunk, an unsatisfiable range, and missing or short chunk
+behavior. Exercise the real route and manifest entry point; a stand-in service, generated
+payload, pure helper test, or CI sandbox result is not this acceptance. Until that
+environment exists, report local and CI checks separately and keep real chunk-byte
+acceptance open. This real sample must also confirm a manifest-listed file with no backing
+plain object or complete chunk set fails as a storage error, not as a manifest-path 404
+that a downstream gather could treat as an optional table.

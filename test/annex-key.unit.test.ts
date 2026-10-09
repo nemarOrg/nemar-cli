@@ -14,8 +14,10 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  annexChunkObjectPrefix,
   annexKeyDeclaredSize,
   annexKeyFieldSize,
+  findCompleteChunkSet,
   isKeyPresentAtDeclaredSize,
   parseChunkKey,
 } from "../shared/annex-key";
@@ -103,6 +105,21 @@ describe("key grammar", () => {
       chunkSize: Number.MAX_SAFE_INTEGER,
       chunkNumber: 1,
     });
+  });
+
+  test("chunk discovery prefix and complete geometry match the annex key", () => {
+    expect(annexChunkObjectPrefix(BASE_EEG)).toBe("SHA256E-s2500000000-S");
+    expect(annexChunkObjectPrefix("git:abc")).toBeNull();
+    expect(findCompleteChunkSet(BASE_EEG, new Map(complete1G()), 3)).toEqual({
+      chunkSize: GiB,
+      totalSize: 2_500_000_000,
+      chunks: [
+        { name: chunk(1), number: 1, offset: 0, size: GiB },
+        { name: chunk(2), number: 2, offset: GiB, size: GiB },
+        { name: chunk(3), number: 3, offset: 2 * GiB, size: LAST },
+      ],
+    });
+    expect(findCompleteChunkSet(BASE_EEG, new Map(complete1G()), 2)).toBeNull();
   });
 
   test("a key whose name contains -- and chunk-shaped text is found by its chunks", () => {
