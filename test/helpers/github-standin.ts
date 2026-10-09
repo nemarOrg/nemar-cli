@@ -63,6 +63,12 @@ export interface GitHubStandin {
   /** The message body of that answer. */
   userMessage: string;
   mergeStatus: number;
+  /** When set, posting a comment answers this status instead of recording it. */
+  commentStatus: number | null;
+  /** When set, closing a pull request answers this status instead of closing it. */
+  closeStatus: number | null;
+  /** The comments recorded, in order: `{ dataset, number, body, token }`. */
+  comments: Array<{ dataset: string; number: number; body: string; token: string | null }>;
   /**
    * When true, the review POST and the merge PUT are APPLIED and answered 200 with a body that is
    * not JSON: the case where a write happened and its answer cannot be read.
@@ -94,6 +100,9 @@ export function startGitHubStandin(): GitHubStandin {
     userStatus: null as number | null,
     userMessage: "Server Error",
     mergeStatus: 200,
+    commentStatus: null as number | null,
+    closeStatus: null as number | null,
+    comments: [] as GitHubStandin["comments"],
     unreadableAnswers: false,
   };
   const reads: Record<string, number> = {};
@@ -146,6 +155,19 @@ export function startGitHubStandin(): GitHubStandin {
         return hit ? Response.json(hit) : new Response("{}", { status: 404 });
       }
 
+      const comment = url.pathname.match(
+        /^\/repos\/nemarDatasets\/([^/]+)\/issues\/(\d+)\/comments$/,
+      );
+      if (req.method === "POST" && comment) {
+        if (state.commentStatus !== null) {
+          return Response.json({ message: "Validation Failed" }, { status: state.commentStatus });
+        }
+        if (state.unreadableAnswers) return new Response("<html>proxy</html>", { status: 201 });
+        const text = (body as { body?: string } | null)?.body ?? "";
+        state.comments.push({ dataset: comment[1], number: Number(comment[2]), body: text, token });
+        return Response.json({ id: state.comments.length, body: text }, { status: 201 });
+      }
+
       const pull = url.pathname.match(/^\/repos\/nemarDatasets\/([^/]+)\/pulls\/(\d+)(\/[a-z]+)?$/);
       if (pull) {
         const key = `${pull[1]}#${pull[2]}`;
@@ -170,6 +192,14 @@ export function startGitHubStandin(): GitHubStandin {
             },
           });
         }
+        if (req.method === "PATCH" && !pull[3]) {
+          if (state.closeStatus !== null) {
+            return Response.json({ message: "Validation Failed" }, { status: state.closeStatus });
+          }
+          if (state.unreadableAnswers) return new Response("<html>proxy</html>", { status: 200 });
+          p.state = "closed";
+          return Response.json({ number: Number(pull[2]), state: "closed" });
+        }
         if (req.method === "POST" && pull[3] === "/reviews") {
           if (state.reviewStatus !== null) {
             return Response.json(
@@ -191,6 +221,10 @@ export function startGitHubStandin(): GitHubStandin {
         }
         if (req.method === "PUT" && pull[3] === "/merge") {
           if (state.unreadableAnswers) return new Response("<html>proxy</html>", { status: 200 });
+          if (state.mergeStatus === 200) {
+            p.merged = true;
+            p.state = "closed";
+          }
           return state.mergeStatus === 200
             ? Response.json({ merged: true, sha: "f".repeat(40) })
             : Response.json(
@@ -256,6 +290,21 @@ export function startGitHubStandin(): GitHubStandin {
     set mergeStatus(v) {
       state.mergeStatus = v;
     },
+    get commentStatus() {
+      return state.commentStatus;
+    },
+    set commentStatus(v) {
+      state.commentStatus = v;
+    },
+    get closeStatus() {
+      return state.closeStatus;
+    },
+    set closeStatus(v) {
+      state.closeStatus = v;
+    },
+    get comments() {
+      return state.comments;
+    },
     get unreadableAnswers() {
       return state.unreadableAnswers;
     },
@@ -272,6 +321,9 @@ export function startGitHubStandin(): GitHubStandin {
       state.userMessage = "Server Error";
       state.mergeStatus = 200;
       state.unreadableAnswers = false;
+      state.commentStatus = null;
+      state.closeStatus = null;
+      state.comments.length = 0;
       for (const k of Object.keys(state.pulls)) delete state.pulls[k];
       for (const k of Object.keys(state.users)) delete state.users[k];
       for (const k of Object.keys(reads)) delete reads[k];

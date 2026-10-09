@@ -162,7 +162,8 @@ paused after more than 5 rejected pull requests AND more than 10 percent of thei
 0093 (`nemar admin pr-reviews` lists the open dataset pull requests with the automated review: a verdict
 belongs to the commit it read, an approval is the administrator's OWN act from their machine with their
 own GitHub login and no Worker code path approves, a failing, running or unreadable review needs
-`--force`, nothing merges without `--merge`, and each Worker lists only the datasets it owns).
+`--force`, nothing merges without `--merge` or a `y` in `nemar admin pr-reviews next`, and each
+Worker lists only the datasets it owns).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and

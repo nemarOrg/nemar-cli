@@ -13,11 +13,13 @@ import {
   adminGitHubToken,
   approvalGate,
   asVerdict,
+  closePullRequest,
   fetchPullRequest,
   githubApiBase,
   identityMatches,
   manualApprovalCommand,
   mergeWhenClean,
+  postComment,
   pullRequestUrl,
   refusalFor,
   reviewForApproval,
@@ -273,6 +275,7 @@ describe("reading the review the API sent", () => {
       staleVerdict: null,
       reviewCurrent: true,
       contributorNote: null,
+      outcome: null,
     });
   });
 
@@ -477,6 +480,72 @@ describe("approving", () => {
       gh.reviewStatus = status;
       expect(await approve(), String(status)).toMatchObject({ ok: false, outcome: "refused" });
     }
+  });
+});
+
+describe("commenting and closing", () => {
+  const comment = (text = "Please add a CHANGES entry.") =>
+    postComment(ADMIN_TOKEN, "nm000201", 7, text, base());
+  const close = () => closePullRequest(ADMIN_TOKEN, "nm000201", 7, base());
+
+  test("a comment is posted under the administrator's token, exactly as typed", async () => {
+    gh.pulls["nm000201#7"] = { sha: SHA_A };
+    expect(await comment("  Two spaces, an @mention and `code`.  ")).toEqual({ ok: true });
+    expect(gh.comments).toEqual([
+      {
+        dataset: "nm000201",
+        number: 7,
+        body: "  Two spaces, an @mention and `code`.  ",
+        token: ADMIN_TOKEN,
+      },
+    ]);
+  });
+
+  test("closing sends state closed and checks the answer says closed", async () => {
+    gh.pulls["nm000201#7"] = { sha: SHA_A };
+    expect(await close()).toEqual({ ok: true });
+    const patch = gh.seen.find((x) => x.method === "PATCH");
+    expect(patch?.token).toBe(ADMIN_TOKEN);
+    expect(patch?.body).toEqual({ state: "closed" });
+    expect(gh.pulls["nm000201#7"].state).toBe("closed");
+  });
+
+  test("a refusal is a refusal, and a gateway error or an unreadable answer is unknown", async () => {
+    gh.pulls["nm000201#7"] = { sha: SHA_A };
+    for (const write of [comment, close]) {
+      gh.commentStatus = 422;
+      gh.closeStatus = 422;
+      expect(await write(), "422").toMatchObject({ ok: false, outcome: "refused", status: 422 });
+      gh.commentStatus = 502;
+      gh.closeStatus = 502;
+      expect(await write(), "502").toMatchObject({ ok: false, outcome: "unknown", status: 502 });
+      gh.commentStatus = null;
+      gh.closeStatus = null;
+      gh.unreadableAnswers = true;
+      expect(await write(), "unreadable").toMatchObject({ ok: false, outcome: "unknown" });
+      gh.unreadableAnswers = false;
+    }
+  });
+
+  test("a close that GitHub answers with another state is reported as that", async () => {
+    const srv = Bun.serve({ port: 0, fetch: () => Response.json({ state: "open" }) });
+    try {
+      const r = await closePullRequest(ADMIN_TOKEN, "nm000201", 7, `http://127.0.0.1:${srv.port}`);
+      expect(r).toMatchObject({ ok: false, outcome: "different" });
+      if (!r.ok) expect(r.reason).toContain("open, not closed");
+    } finally {
+      srv.stop(true);
+    }
+  });
+
+  test("a request that gets no answer is unknown", async () => {
+    const r = await postComment(ADMIN_TOKEN, "nm000201", 7, "hi", "http://127.0.0.1:1");
+    expect(r).toMatchObject({ ok: false, status: 0, outcome: "unknown" });
+    expect(await closePullRequest(ADMIN_TOKEN, "nm000201", 7, "http://127.0.0.1:1")).toMatchObject({
+      ok: false,
+      status: 0,
+      outcome: "unknown",
+    });
   });
 });
 

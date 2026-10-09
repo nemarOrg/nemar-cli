@@ -140,7 +140,7 @@ afterEach(() => {
 
 async function cli(
   args: string[],
-  opts: { env?: Record<string, string | undefined> } = {},
+  opts: { env?: Record<string, string | undefined>; input?: string } = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const childEnv: Record<string, string | undefined> = {
     ...process.env,
@@ -160,7 +160,8 @@ async function cli(
     cmd: [process.execPath, "run", CLI_ENTRY, ...args],
     cwd: REPO_ROOT,
     env: clean,
-    stdin: "ignore",
+    // Typed answers, for the commands that ask. Without any, stdin is closed.
+    stdin: opts.input === undefined ? "ignore" : new Blob([opts.input]),
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -1115,6 +1116,314 @@ describe("nemar admin pr-reviews approve", () => {
       expect(r.stdout).toContain("is not a merge method");
       expect(gh.seen.filter((s) => s.token === ADMIN_TOKEN)).toHaveLength(0);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// next
+// ---------------------------------------------------------------------------------------------
+
+describe("nemar admin pr-reviews next", () => {
+  /** A pull request that needs you: open on GitHub, reviewed `verdict` at SHA_A, checks green. */
+  function ready(ds: string, n: number, over: Partial<PrSpec> = {}, verdict = "pass") {
+    gh.pulls[`${ds}#${n}`] = { sha: SHA_A, author: "alice" };
+    seed({
+      ds,
+      n,
+      authorId: 42,
+      login: "alice",
+      state: "reported",
+      verdict: verdict as "pass" | "fail" | "uncertain",
+    });
+    return { ds, n, author: "alice", authorId: 42, title: `Update ${ds}`, ...over };
+  }
+  const next = (input: string, extra: string[] = [], opts: Parameters<typeof cli>[1] = {}) =>
+    cli([...PR, "next", ...extra], { ...opts, input });
+  const writes = () => gh.seen.filter((s) => s.method !== "GET" && s.token === ADMIN_TOKEN);
+
+  test("shows who, the review's summary and the checks, then y approves as you and squash-merges", async () => {
+    nodes(ready("nm000201", 7, { title: "Add two subjects" }));
+    const r = await next("y\n");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("[1 of 1] nm000201 #7");
+    expect(r.stdout).toContain("Title:    Add two subjects");
+    expect(r.stdout).toContain("Author:   @alice");
+    expect(r.stdout).toContain("Review:   pass");
+    expect(r.stdout).toContain("BIDS ok");
+    expect(r.stdout).toContain("version ok");
+    expect(r.stdout).toContain("Passes: nothing lost, revision advances, materially better");
+    expect(r.stdout).toContain("Adds two subjects and corrects the task description.");
+    expect(r.stdout).toContain("Approved nm000201 #7 at aaaaaaa as @queueadmin-gh.");
+    expect(r.stdout).toContain("Merged nm000201 #7 (squash).");
+    expect(r.stdout).toContain("Nothing left that needs you.");
+    expect(r.stdout).toContain("Done: 1 merged.");
+
+    expect(reviewPosts()).toHaveLength(1);
+    expect(reviewPosts()[0].token).toBe(ADMIN_TOKEN);
+    expect(reviewPosts()[0].body).toMatchObject({ commit_id: SHA_A, event: "APPROVE" });
+    expect(mergePuts()).toHaveLength(1);
+    expect(mergePuts()[0].body).toEqual({ sha: SHA_A, merge_method: "squash" });
+    expect(
+      gh.seen.filter(
+        (s) => s.token === WORKER_TOKEN && s.method !== "GET" && s.path !== "/graphql",
+      ),
+    ).toHaveLength(0);
+  });
+
+  test("n asks for a comment, posts it, and only then closes the pull request", async () => {
+    nodes(ready("nm000201", 7));
+    const r = await next("n\nPlease add a CHANGES entry.\n");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("Closed nm000201 #7, with your comment.");
+    expect(r.stdout).toContain("Done: 1 closed.");
+    expect(gh.comments).toEqual([
+      { dataset: "nm000201", number: 7, body: "Please add a CHANGES entry.", token: ADMIN_TOKEN },
+    ]);
+    const order = writes().map((w) => `${w.method} ${w.path.split("/").slice(-2).join("/")}`);
+    expect(order).toEqual(["POST 7/comments", "PATCH pulls/7"]);
+    expect(gh.pulls["nm000201#7"].state).toBe("closed");
+    expect(reviewPosts()).toHaveLength(0);
+    expect(mergePuts()).toHaveLength(0);
+  });
+
+  test("c is just a comment: the pull request stays open and nothing else is sent", async () => {
+    nodes(ready("nm000201", 7));
+    const r = await next("c\nCould you say which task the new subjects ran?\n");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("Commented on nm000201 #7.");
+    expect(r.stdout).toContain("Done: 1 commented.");
+    expect(gh.comments.map((c) => c.body)).toEqual([
+      "Could you say which task the new subjects ran?",
+    ]);
+    expect(writes()).toHaveLength(1);
+    expect(gh.pulls["nm000201#7"].state).toBeUndefined();
+  });
+
+  test("an empty comment cancels the n or c and asks again, so nothing is closed by accident", async () => {
+    nodes(ready("nm000201", 7));
+    const r = await next("n\n\nc\n   \nq\n");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout.match(/Cancelled\. Nothing was sent\./g)).toHaveLength(2);
+    expect(writes()).toHaveLength(0);
+    expect(r.stdout).toContain("Nothing was changed.");
+  });
+
+  test("s leaves it for now, q stops, and neither sends anything", async () => {
+    nodes(ready("nm000201", 7), ready("nm000202", 3));
+    const r = await next("s\nq\n");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("[1 of 2] nm000201 #7");
+    expect(r.stdout).toContain("[2 of 2] nm000202 #3");
+    expect(r.stdout).toContain("Done: 1 skipped.");
+    expect(writes()).toHaveLength(0);
+  });
+
+  test("goes through the queue: each answer is about the pull request on screen", async () => {
+    nodes(ready("nm000201", 7), ready("nm000202", 3), ready("nm000203", 4));
+    const r = await next("y\nc\nThanks, merging the rest later.\nn\nThis duplicates nm000201.\n");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("Merged nm000201 #7 (squash).");
+    expect(r.stdout).toContain("Commented on nm000202 #3.");
+    expect(r.stdout).toContain("Closed nm000203 #4, with your comment.");
+    expect(r.stdout).toContain("Done: 1 merged, 1 closed, 1 commented.");
+    expect(gh.comments.map((c) => [c.dataset, c.number])).toEqual([
+      ["nm000202", 3],
+      ["nm000203", 4],
+    ]);
+    expect(reviewPosts().map((p) => p.path)).toEqual([
+      "/repos/nemarDatasets/nm000201/pulls/7/reviews",
+    ]);
+    expect(gh.pulls["nm000202#3"].state).toBeUndefined();
+    expect(gh.pulls["nm000203#4"].state).toBe("closed");
+  });
+
+  test("--once handles one pull request and stops", async () => {
+    nodes(ready("nm000201", 7), ready("nm000202", 3));
+    const r = await next("s\ny\n", ["--once"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).not.toContain("nm000202");
+    expect(writes()).toHaveLength(0);
+  });
+
+  test("y is not offered when a required check is not green, and nothing is approved", async () => {
+    nodes({
+      ...ready("nm000201", 7),
+      checks: [{ ...bidsOk("nm000201"), conclusion: "FAILURE" }, versionOk],
+    });
+    const r = await next("y\nq\n", ["--force"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("BIDS FAIL");
+    expect(r.stdout).toContain("y is not available: A required check is not green (BIDS failing");
+    expect(r.stdout).toContain("Not approved: A required check is not green");
+    expect(writes()).toHaveLength(0);
+  });
+
+  test("n and c still work on a pull request whose checks are red", async () => {
+    nodes({
+      ...ready("nm000201", 7),
+      checks: [{ ...bidsOk("nm000201"), conclusion: "FAILURE" }, versionOk],
+    });
+    const r = await next("n\nThe BIDS validation fails on sub-03.\n");
+    expect(r.stdout).toContain("Closed nm000201 #7, with your comment.");
+  });
+
+  test("a failing review is not in the queue unless --all, and then y needs --force", async () => {
+    nodes(ready("nm000201", 7, {}, "fail"));
+    const hidden = await next("q\n");
+    expect(hidden.stdout).toContain("Nothing left that needs you.");
+
+    const shown = await next("y\nq\n", ["--all"]);
+    expect(shown.stdout).toContain("Review:   fail");
+    expect(shown.stdout).toContain("y is not available:");
+    expect(shown.stdout).toContain("--force");
+    expect(writes()).toHaveLength(0);
+
+    const forced = await next("y\n", ["--all", "--force"]);
+    expect(forced.stdout).toContain("Merged nm000201 #7 (squash).");
+  });
+
+  test("another commit's report is not shown as this commit's", async () => {
+    gh.pulls["nm000201#7"] = { sha: SHA_A, author: "alice" };
+    seed({
+      ds: "nm000201",
+      n: 7,
+      sha: SHA_B,
+      authorId: 42,
+      login: "alice",
+      state: "reported",
+      verdict: "pass",
+    });
+    nodes({ ds: "nm000201", n: 7, author: "alice", authorId: 42 });
+    const r = await next("q\n");
+    expect(r.stdout).toContain("not reviewed (other commit)");
+    expect(r.stdout).toContain("read a different commit of this pull request");
+    expect(r.stdout).not.toContain("Adds two subjects and corrects the task description.");
+  });
+
+  test("checks the list read for another commit are not trusted for the one now on GitHub", async () => {
+    // The search named SHA_B as the head; the administrator's own read finds SHA_A.
+    nodes({ ...ready("nm000201", 7), sha: SHA_B });
+    const r = await next("y\nq\n");
+    expect(r.stdout).toContain("changed since the list was read");
+    expect(r.stdout).toContain("BIDS ?");
+    expect(r.stdout).toContain("y is not available: A required check is not green (BIDS unknown");
+    expect(writes()).toHaveLength(0);
+  });
+
+  test("a pull request the search index has not caught up on is skipped with a note", async () => {
+    nodes(ready("nm000201", 7), ready("nm000202", 3));
+    gh.pulls["nm000201#7"].state = "closed";
+    gh.pulls["nm000201#7"].merged = true;
+    const r = await next("y\n");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("nm000201 #7: skipped, This pull request is already merged.");
+    expect(r.stdout).toContain("Merged nm000202 #3 (squash).");
+  });
+
+  test("a draft is never shown, with or without --all", async () => {
+    nodes(ready("nm000201", 7, { draft: true }));
+    for (const extra of [[], ["--all"]]) {
+      const r = await next("y\n", extra);
+      expect(r.stdout).toContain("Nothing left that needs you.");
+      expect(r.stdout).not.toContain("[1 of");
+    }
+    expect(writes()).toHaveLength(0);
+  });
+
+  test("a refused approval is reported and the run goes on to the next", async () => {
+    nodes(ready("nm000201", 7), ready("nm000202", 3));
+    gh.reviewStatus = 422;
+    const r = await next("y\ns\n");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("Not approved: Can not approve your own pull request");
+    expect(r.stdout).toContain("[2 of 2] nm000202 #3");
+    expect(r.stdout).toContain("1 skipped, 1 failed");
+    expect(mergePuts()).toHaveLength(0);
+  });
+
+  test("an approval whose outcome is unknown stops the run before the next pull request", async () => {
+    nodes(ready("nm000201", 7), ready("nm000202", 3));
+    gh.reviewStatus = 502;
+    const r = await next("y\ny\n");
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("Outcome unknown: GitHub may have recorded the approval");
+    expect(r.stdout).not.toContain("[2 of 2]");
+    expect(reviewPosts()).toHaveLength(1);
+  });
+
+  test("a comment that is posted but a close that is refused says the comment stands", async () => {
+    nodes(ready("nm000201", 7));
+    gh.closeStatus = 403;
+    const r = await next("n\nClosing, superseded.\n");
+    expect(r.stdout).toContain("The comment was posted, but the pull request is not closed.");
+    expect(r.stdout).toContain("Not closed:");
+    expect(gh.comments).toHaveLength(1);
+    expect(r.stdout).toContain("1 failed");
+  });
+
+  test("a merge GitHub will not do leaves the approval standing and goes on", async () => {
+    nodes(ready("nm000201", 7), ready("nm000202", 3));
+    gh.pulls["nm000201#7"].mergeableState = "blocked";
+    const r = await next("y\ns\n");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("Approved nm000201 #7");
+    expect(r.stdout).toContain("a required check or review is not satisfied");
+    expect(r.stdout).toContain("1 approved but not merged");
+    expect(mergePuts()).toHaveLength(0);
+  });
+
+  test("input that ends stops the run without sending anything", async () => {
+    nodes(ready("nm000201", 7));
+    const none = await next("");
+    expect(none.exitCode).toBe(0);
+    expect(none.stdout).toContain("Input ended; stopping.");
+    expect(writes()).toHaveLength(0);
+    const closed = await cli([...PR, "next"]); // stdin closed, as under cron or a pipe that ended
+    expect(closed.exitCode).toBe(0);
+    expect(writes()).toHaveLength(0);
+  });
+
+  test("an answer that is not one of the five is not guessed at", async () => {
+    nodes(ready("nm000201", 7));
+    const r = await next("approve it\nmaybe\nq\n");
+    expect(r.stdout.match(/Type y, n, c, s or q\./g)).toHaveLength(2);
+    expect(writes()).toHaveLength(0);
+  });
+
+  test("a token that is not yours is refused before any pull request is shown", async () => {
+    nodes(ready("nm000201", 7));
+    const r = await next("y\n", [], { env: { GH_TOKEN: OTHER_TOKEN } });
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("GH_TOKEN belongs to @someone-else");
+    expect(r.stdout).not.toContain("[1 of 1]");
+    expect(writes()).toHaveLength(0);
+  });
+
+  test("--dataset and --author narrow what is shown", async () => {
+    nodes(ready("nm000201", 7), ready("nm000202", 3, { author: "bob", authorId: 43 }));
+    const r = await next("q\n", ["--dataset", "nm000202"]);
+    expect(r.stdout).toContain("nm000202 #3");
+    expect(r.stdout).not.toContain("nm000201 #7");
+    const bob = await next("q\n", ["--author", "bob"]);
+    expect(bob.stdout).toContain("nm000202 #3");
+    expect((await next("q\n", ["--dataset", "nm1"])).exitCode).toBe(1);
+  });
+
+  test("with the list incomplete it says so before the first pull request", async () => {
+    gh.searchPages = [[prNode(ready("nm000201", 7))]];
+    const queue: QueueResponse = {
+      environment: "production",
+      review_enabled: true,
+      entries: [],
+      total_open: 0,
+      truncated: true,
+      skipped: { not_a_dataset: 0, not_owned_here: 0, unreadable: 0 },
+      filters: { verdicts: [], dataset: null, author: null, needs_me: true },
+    };
+    apiOverride = (req) =>
+      new URL(req.url).pathname === "/admin/pr-reviews" ? Response.json(queue) : null;
+    const r = await next("");
+    expect(r.stdout).toContain("this list is incomplete");
   });
 });
 

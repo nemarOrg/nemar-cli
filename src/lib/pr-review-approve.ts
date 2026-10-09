@@ -330,6 +330,12 @@ export type ReviewForApproval =
       reviewCurrent: boolean | null;
       /** Set when the contributor's reviews are paused, in words, so the approver sees why. */
       contributorNote: string | null;
+      /**
+       * The stored report of the review of THIS commit, for display; null when there is none, it
+       * is still running, or the review on record is of another commit (whose report is not a
+       * statement about this one). Not validated here: the renderer reports what it cannot read.
+       */
+      outcome: unknown;
     }
   | { ok: false; why: string };
 
@@ -377,6 +383,8 @@ export function reviewForApproval(d: unknown, head: string): ReviewForApproval {
     staleVerdict: stale as ReadVerdict | null,
     reviewCurrent: current as boolean | null,
     contributorNote,
+    outcome:
+      current === true ? ((r.review as { outcome?: unknown } | null)?.outcome ?? null) : null,
   };
 }
 
@@ -529,6 +537,92 @@ export async function submitApproval(
       outcome: "different",
       status: res.status,
       reason: `GitHub recorded a review, but not the approval that was asked for (${got.join(", ")}).`,
+    };
+  }
+  return { ok: true };
+}
+
+/** Post a comment on the pull request, as the administrator, with the text exactly as given. */
+export async function postComment(
+  token: string,
+  datasetId: string,
+  prNumber: number,
+  text: string,
+  base = githubApiBase(),
+): Promise<WriteResult> {
+  let res: Response;
+  try {
+    res = await fetch(`${base}/repos/${DATASETS_ORG}/${datasetId}/issues/${prNumber}/comments`, {
+      method: "POST",
+      headers: headers(token),
+      body: JSON.stringify({ body: text }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (err) {
+    return noAnswer(err);
+  }
+  const answer = (await res.json().catch(() => null)) as { id?: unknown } | null;
+  if (!res.ok) {
+    return {
+      ok: false,
+      outcome: res.status >= 500 ? "unknown" : "refused",
+      status: res.status,
+      reason: why(res.status, answer),
+    };
+  }
+  // A 2xx that does not name the comment does not say it was not posted either.
+  if (typeof answer?.id !== "number") {
+    return {
+      ok: false,
+      outcome: "unknown",
+      status: res.status,
+      reason: `GitHub answered HTTP ${res.status}, but its answer could not be read.`,
+    };
+  }
+  return { ok: true };
+}
+
+/** Close the pull request without merging it. The answer must say it is closed. */
+export async function closePullRequest(
+  token: string,
+  datasetId: string,
+  prNumber: number,
+  base = githubApiBase(),
+): Promise<WriteResult> {
+  let res: Response;
+  try {
+    res = await fetch(`${base}/repos/${DATASETS_ORG}/${datasetId}/pulls/${prNumber}`, {
+      method: "PATCH",
+      headers: headers(token),
+      body: JSON.stringify({ state: "closed" }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (err) {
+    return noAnswer(err);
+  }
+  const answer = (await res.json().catch(() => null)) as { state?: unknown } | null;
+  if (!res.ok) {
+    return {
+      ok: false,
+      outcome: res.status >= 500 ? "unknown" : "refused",
+      status: res.status,
+      reason: why(res.status, answer),
+    };
+  }
+  if (typeof answer?.state !== "string") {
+    return {
+      ok: false,
+      outcome: "unknown",
+      status: res.status,
+      reason: `GitHub answered HTTP ${res.status}, but its answer could not be read.`,
+    };
+  }
+  if (answer.state !== "closed") {
+    return {
+      ok: false,
+      outcome: "different",
+      status: res.status,
+      reason: `GitHub answered, but the pull request is ${sanitizeNote(answer.state, 20)}, not closed.`,
     };
   }
   return { ok: true };

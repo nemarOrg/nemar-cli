@@ -89,8 +89,21 @@ by the administrator, from their machine, with their own GitHub login.**
   `no_such_pull_request`, the last because the administrator's own token just read the pull
   request). The reason a pull request is not reviewed (a paused or rate-limited contributor) is
   shown beside the verdict.
-- **A merge is attempted only on request, and is a check, not an enforcement.** `--merge` is
-  attempted once, only if GitHub reports the pull request `clean` (not `has_hooks`, which is a
+- **`next` walks the queue and asks one question per pull request.** It shows who opened it, the
+  review's summary (only the report of THIS commit's review) and whether the two required checks
+  are green, then waits for one answer: `y` approves as the administrator and squash-merges, `n`
+  closes with a comment, `c` comments and leaves it open, `s` leaves it, `q` stops. `y` is offered
+  only when both required checks are green, because the merge that follows would be refused
+  otherwise, and a failing, running or unreadable review still needs `--force`, exactly as for
+  `approve`. A comment is typed by the administrator and posted as typed, and for `n` it is posted
+  BEFORE the pull request is closed, so the author never meets a closed pull request with no
+  reason; an empty comment cancels. Every write is made with the administrator's own token after
+  the same identity checks as `approve`. A write whose outcome is unknown, or that recorded
+  something other than what was asked, stops the run; a plain refusal is reported and the run
+  goes on. Each run remembers the pull requests it has shown, because the search index trails a
+  merge or a close and would show them again.
+- **A merge is attempted only on request, and is a check, not an enforcement.** `--merge` (and `y`
+  in `next`, which always squashes) is attempted once, only if GitHub reports the pull request `clean` (not `has_hooks`, which is a
   GitHub Enterprise Server value); it re-asks while GitHub is still
   working the state out, does not wait for pending checks, sends the approved `sha` so GitHub refuses
   a branch that moved, and otherwise stops with the approval standing. An administrator can be a
@@ -119,7 +132,8 @@ by the administrator, from their machine, with their own GitHub login.**
 ## Consequences
 
 - An administrator sees every open pull request in one table, with the ones they can act on first,
-  and approves from the same place under their own name. The `wrangler d1 execute` workaround in ADR
+  works through them with `next`, and approves, merges, comments or closes from the same place
+  under their own name. The `wrangler d1 execute` workaround in ADR
   0092 is retired.
 - The approval is recorded by GitHub and nowhere in NEMAR. The Worker never sees it, so there is no
   NEMAR audit row for an approval; the review on the pull request is the record.
