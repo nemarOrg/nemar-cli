@@ -101,6 +101,8 @@ logout's default only ever revokes the ACTIVE machine's own key, and only when t
 a pasted or password-era key may be shared with other machines and is kept, not silently killed by a different machine's logout.
 `retrieve-key` and `regenerate-key` survive this release, each printing a deprecation sentence before its first prompt,
 pointing at `nemar auth login` as the replacement for both.
+*Amendment (2026-10-09, ADR 0095):* that release has passed. `retrieve-key` and `POST /auth/signup` are removed, the stored password hashes are cleared,
+and `regenerate-key` stays (it takes no password) without the deprecation sentence.
 
 Phase 3's local config keys an account by `accountKeyFor(user) = username?.trim() || email`,
 since a brand-new ORCID account's `username` is `null` at collection time (this decision's own point above).
