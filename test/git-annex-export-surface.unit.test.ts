@@ -56,6 +56,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "isDefaultAnnexDescription",
     "isGitAnnexDataset",
     "parseAddFailures",
+    "parseAddOutput",
     "replaceDefaultAnnexDescription",
     "unstageTrackedPaths",
   ],
@@ -183,6 +184,8 @@ const INTERNAL_WIRING = [
   "ADD_CHUNK_MAX_BYTES",
   // Parses per-file errors from the list-form git-annex batch add.
   "parseAddFailures",
+  // Parses success paths and per-file failures from the batch-add JSON stream.
+  "parseAddOutput",
   "isVersionCompatible",
   // Moved from import-normalize.ts so the upload can share it without importing the
   // import pipeline; consumed by sibling modules only.

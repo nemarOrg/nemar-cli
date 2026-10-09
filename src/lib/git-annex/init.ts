@@ -583,7 +583,7 @@ function pathExists(path: string): boolean {
 }
 
 /** Parsed per-file records from `git annex add --batch --json`. */
-function parseAddOutput(stdout: string): {
+export function parseAddOutput(stdout: string): {
   responsePaths: Set<string>;
   failures: Array<{ file: string; error: string }>;
 } {

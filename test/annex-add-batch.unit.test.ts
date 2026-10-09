@@ -12,12 +12,14 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn } from "bun";
 import {
@@ -25,7 +27,9 @@ import {
   gitAnnexAdd,
   initDataset,
   parseAddFailures,
+  parseAddOutput,
 } from "../src/lib/git-annex/init";
+import { runCommand } from "../src/lib/git-annex/run-command";
 
 describe("parseAddFailures", () => {
   test("returns only failed records, with their messages", () => {
@@ -39,7 +43,7 @@ describe("parseAddFailures", () => {
   });
 });
 
-const TMP_DIR = join(import.meta.dir, ".test-annex-add-batch");
+const TMP_DIR = mkdtempSync(join(tmpdir(), "nemar-annex-add-batch-"));
 
 async function runCmd(cmd: string[], cwd?: string) {
   const proc = spawn({ cmd, cwd, stdout: "pipe", stderr: "pipe" });
@@ -120,6 +124,23 @@ afterAll(() => {
 });
 
 describe("gitAnnexAdd list form (real git-annex)", () => {
+  test("successful JSON responses identify the path they handled", async () => {
+    const dir = await newDatasetRepo("response-path");
+    const file = "sub-01/eeg/sub-01_task-rest_eeg.edf";
+    writeFile(dir, file, "real git-annex response".repeat(100));
+
+    const { stdout, stderr, exitCode } = await runCommand(
+      ["git", "annex", "add", "--batch", "-z", "--json", "--json-error-messages"],
+      { cwd: dir, stdin: `${file}\0` },
+    );
+
+    expect(exitCode, stderr).toBe(0);
+    expect(parseAddOutput(stdout)).toEqual({
+      responsePaths: new Set([file]),
+      failures: [],
+    });
+  });
+
   test("runs git-annex add with --batch across path-count chunks", async () => {
     const dir = await newDatasetRepo("batch");
     const files = Array.from({ length: 7 }, (_, i) => `sub-0${i}/eeg/sub-0${i}_eeg.edf`);
