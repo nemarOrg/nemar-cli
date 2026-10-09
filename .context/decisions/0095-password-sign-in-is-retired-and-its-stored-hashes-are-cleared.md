@@ -40,11 +40,22 @@ names `retrieve-key` is a follow-up (see Consequences).
 
 **Remove every route, command and helper that needed a password.**
 
-- `POST /auth/signup` and `POST /auth/retrieve-key` are deleted. They are not
-  mounted, so a request gets a 404, and a test dispatches both through the real
-  app to pin that.
-- `nemar auth retrieve-key` is deleted. `nemar auth regenerate-key` stays (it
-  uses an emailed link, not a password) and loses its deprecation sentence.
+- `POST /auth/signup` and `POST /auth/retrieve-key` keep a path and lose their
+  behaviour. Each answers 410 with `{ error: "Password sign-in was removed. Run
+  \`nemar auth login\` to sign in with your browser.", code:
+  "password_sign_in_retired" }`, reads no body and touches no table. An unrouted
+  path would answer 404 `Not Found`, which an already-installed CLI renders as
+  "This NEMAR backend does not support this command yet": it blames the server and
+  never names the command that works. The sentence is in `error` because that is
+  the field the client prints for a code it does not know. A test dispatches both
+  through the worker entry point, with a positive control, so a route added to
+  another router or mounted under another prefix cannot satisfy it.
+- `nemar auth retrieve-key` stays only as a hidden stub. The mail sent when an
+  account verified its email, and pages outside this repository, told people to
+  run it, so it prints that password sign-in is gone, names `nemar auth login` and
+  exits 1, without prompting or calling the API. It is not listed in `--help`.
+  `nemar auth regenerate-key` stays (it uses an emailed link, not a password) and
+  loses its deprecation sentence.
 - `services/password.ts`, the `signup` and `retrieveKey` client functions and
   `bcryptjs` are deleted.
 - Every message that named `retrieve-key` now names `nemar auth login`, which is
@@ -53,8 +64,12 @@ names `retrieve-key` is a follow-up (see Consequences).
 
 **Clear the stored hashes (migration 0093) and keep the column.** The migration
 sets every non-NULL `password_hash` to NULL. A hash of a password nobody can use
-is credential material with no purpose, and clearing it ends the exposure that
-ADR 0094 only stopped admins reading. It cannot be undone, and that is the point.
+is credential material with no purpose, and clearing it ends the live exposure
+that ADR 0094 only stopped admins reading. The migration is not reversible, and
+that is the point, with one qualification: copies taken before it ran live on as
+D1 Time Travel history (up to 30 days, see migration 0089) and in any
+`wrangler d1 export` (migration 0031 describes the runbook), and keep the hashes
+until they age out or are deleted.
 The column stays, nullable, and stays classified `secret` in `USER_COLUMN_ROLES`:
 dropping it means rebuilding `users` and every table that references it (migration
 0026 shows the cost), for no extra safety once every value is NULL. The tombstone
@@ -68,19 +83,32 @@ pair, the device flow, the passwordless web code flow, and the `check-username`,
 
 ## Consequences
 
-- A person with no key signs in with `nemar auth login`. A legacy `verified`
-  account that never fetched a key, which `retrieve-key` used to serve, gets one
-  the same way. A key minted before the device flow keeps working; the CLI still
-  labels it a password-era key because it has no `keySource`.
+- A `person` account with no key signs in with `nemar auth login`. That includes
+  a legacy `verified` account that never fetched a key, which `retrieve-key` used
+  to serve. The device flow is narrower than `retrieve-key` was: it refuses a
+  non-person account (`service_account`) and an account with `identity_conflict`
+  set. Those have two other routes. `nemar auth regenerate-key` checks only that
+  the account is active, so it still mints for them. A service or test account's
+  key is minted by an owner with `nemar admin keys create`. A key minted before
+  the device flow keeps working; the CLI still labels it a password-era key
+  because it has no `keySource`.
 - A person who lost a key and has no signed-in machine uses `nemar auth
   regenerate-key` (an emailed link). It revokes the key on every machine, as it
-  always did.
+  always did. It is now the only such route, so its follow-up instruction was
+  corrected: the new key is used with `nemar auth login -k <key>`, because a bare
+  `nemar auth login` starts the browser flow and ignores a pasted key. The
+  command also exits non-zero when the request fails.
 - The `key_retrieved` audit action is no longer written. Historical rows stay.
-- Rolling this back is not possible for the data: the hashes are gone. Restoring
-  password sign-in would be a new decision with a new way to set a password.
-- Migration 0093 and the code deploy are not atomic. In the gap, a request to the
-  still-running old worker for `retrieve-key` fails, because there is no hash to
-  compare. That is the same outcome as the 404 that follows, and nobody uses it.
+- Rolling this back does not restore the live data: the hashes are gone from the
+  table. Restoring password sign-in would be a new decision with a new way to set
+  a password.
+- Migration 0093 and the code deploy are not atomic. CI applies migrations before
+  it deploys the worker, so for a short time the old worker runs against a cleared
+  table. In that gap `retrieve-key` fails, because there is no hash to compare,
+  and `signup` could still write a new hash. Nothing calls `signup` (the CLI
+  stopped in phase 3 and neither the website nor `nemar-py` calls it), so none is
+  expected; if one were ever found, `UPDATE users SET password_hash = NULL WHERE
+  password_hash IS NOT NULL` is safe to run again.
 - Follow-ups, not decided here. Pages on `docs.nemar.org` that name `retrieve-key`
   need the same edit (the repository is private; an admin can read it with
   `nemar admin docs`). The client functions `checkUsername`, `checkGitHubUsername`
@@ -107,9 +135,16 @@ pair, the device flow, the passwordless web code flow, and the `check-username`,
 
 - `backend/src/routes/auth.ts`, `backend/src/db/migrations/0093_clear_password_hashes.sql`,
   `src/commands/auth.ts`, `src/lib/api/auth.ts`.
-- `backend/test/password-hashes-cleared-migration.test.ts`,
-  `backend/test/verified-tier-routes.test.ts` ("the password routes are gone"),
-  `backend/test/tier-emails.test.ts`, `test/auth-device-cli.test.ts`.
+- `backend/test/password-hashes-cleared-migration.test.ts` (every status and role
+  carries a hash; keys and `updated_at` are untouched),
+  `backend/test/password-routes-retired.test.ts` (the 410s through the worker
+  entry point, and the regenerate-key page), `backend/test/tier-emails.test.ts`,
+  `test/auth-device-cli.test.ts`.
+- Coverage that lived in `signup-real-name.test.ts` and
+  `identity-refusals-route.test.ts` and is kept:
+  `backend/test/orcid-name-route.test.ts`,
+  `backend/test/identity-normalizers.unit.test.ts`, and the soft-deleted cases in
+  `identity-refusals-route.test.ts` (now driven through ORCID finalize).
 - ADR 0047 (amended in place). ADR 0040's phase 2 record still lists `POST
   /auth/retrieve-key` among the routes that accepted `verified`; that is history
   and is left as written. ADR 0094.

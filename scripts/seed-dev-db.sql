@@ -13,9 +13,11 @@
 -- remove, and 'test-user' would 403 on the E2E upload to nm099999.
 -- 'test-verified' is the base-tier fixture: verified, no grant, so it can
 -- authenticate and be refused by the upload gate rather than by the
--- middleware. It deliberately holds no token row -- the CLI path to one is
--- `nemar auth login` (the device flow, ADR 0047), which works from 'verified'
--- since ADR 0040 phase 2 and is itself worth exercising.
+-- middleware. It deliberately holds no token row. Its account_kind is 'test'
+-- (set further down), which the device flow refuses, so a key for it is minted
+-- by an owner with `nemar admin keys create`; the first-key-from-'verified'
+-- path of the device flow itself is covered by backend/test/device-auth-routes
+-- .test.ts, not by this fixture.
 --
 -- INSERT OR IGNORE means a re-run is a no-op for rows that already exist, so
 -- adding the column here does NOT backfill an existing dev row: migration
