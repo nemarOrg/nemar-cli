@@ -120,14 +120,15 @@ never returns one: real datasets grow upward, fixtures are assigned downward fro
 `nm099999`, and the reservation is not environment-fenced because the GitHub org is shared),
 0072 (the data plane never reads a manifest whole: it streams it through a query that keeps
 only its answer, its edge copy is trusted for 60 seconds and otherwise answers only after S3
-says 304 for the copy's ETag because manifests are rewritten in place, and `manifest.json`'s
-entry bound is per branch, see 0074),
+says 304 for the copy's ETag because manifests are rewritten in place; the `manifest.json`
+entry bound is now 38,000 for every dataset under ADR 0095),
 0073 (a declared `.fdt` outside the raw tree is fetched for its `.set`, never discovered: only a
 reviewed, verified declaration in `eeglab-fdt-declarations.json` pairs one, and any disagreement
 refuses that recording rather than guessing the pairing by name),
-0074 (`manifest.json` emits the plain public S3 URL for a dataset the bucket policy does not
-exclude from public read, and keeps the legacy presigned URL, always, for one it does -- so
-correctness never depends on the catalog and the bucket policy agreeing),
+0074 (superseded by ADR 0095; it previously selected public S3 or presigned URLs by bucket policy),
+0095 (every served manifest `url` is its stable data-plane `bytes_url`; plain objects require
+an exact-size HEAD, absent plain objects may use a bounded complete chunk set, and the
+visibility/version/path gates precede storage access),
 0081 (Neurobagel artifacts come from one pure transform over data-plane documents: identity only
 from `metadata.json`, `anonymous` must be exactly `false` or the transform refuses before reading
 anything else, ids are uuid5 under one committed namespace, and a fact the rules cannot establish
