@@ -5,7 +5,7 @@
 **Owner:** Seyed Yahya Shirazi
 
 Follows ADR 0092 (the review this command lists and acts on), ADR 0001 (published datasets are
-PR-only), ADR 0053 and ADR 0086 (unknown is never clear).
+PR-only), ADR 0054 and ADR 0086 (unknown is never zero, and never clear).
 
 ## Context
 
@@ -38,50 +38,75 @@ by the administrator, from their machine, with their own GitHub login.**
   stops the read (a failed later page, a GraphQL `errors` array even with data beside it, a spent
   budget, a GitHub that does not answer) fails the whole read, because a partial queue that looks
   complete is worse than none. A result that cannot be read as a pull request is counted and shown,
-  not dropped.
+  not dropped, and a field that is missing is never read as "not a dataset pull request" or "no
+  longer open": only a node that says so is left out. The list is marked incomplete when the count
+  GitHub reports changes between pages, because its cursors are positions and a pull request can
+  be skipped when the pages shift.
 - **A verdict belongs to the commit it read, and the review used is that commit's.** `pr_reviews` has
   one row per commit, and a redelivery of a commit refreshes its `seen_at`: "latest" means the last
   commit seen (ADR 0092), so a force-push back to a reviewed commit makes that commit's review the
   newest. A delivery can still be missed, so the queue and the detail view use the review of the pull
   request's current head whenever one exists, whatever its place in that order, and otherwise show
-  the most recently seen review as `not_reviewed` with what it concluded as `stale_verdict`. When the current head cannot be
-  established no verdict is asserted at all. The detail view re-derives the verdict from the stored
-  report and treats a report that no longer parses as `could_not_decide`, except that a stored `fail`
-  stays a `fail`: an unreadable report must never make a rejection easier to approve. The list reads
-  the stored column and the detail view reads the report; they agree unless a report is corrupt.
-- **The checks shown are the ones the ruleset trusts.** The BIDS column counts only the check run
-  posted by the NEMAR App that branch protection pins, because anyone with push access can add a
-  workflow job with the same name. A commit status or another App's run does not count. The checks
-  read are the head commit's; if the connection returns another commit they are `unknown`.
+  the most recently seen review as `not_reviewed` with what it concluded as `stale_verdict`. When the
+  current head cannot be established no verdict is asserted at all. The detail view shows the
+  STRICTER of the stored column and the verdict re-derived from the stored report, so either source
+  can lower a verdict and neither can raise it: an unreadable report is `could_not_decide` unless
+  the column says `fail`, and a later change to the rules that would now pass an old rejection must
+  not make it easier to approve. The list reads the column alone; the two differ only when a rule
+  changed or a report is corrupt. A review handed to GitHub and not reported within the watchdog's
+  deadline and one tick reads as `could_not_decide` (never reported), because the dev Worker never
+  ages a row and a production sweep can fail; showing it as running would hide it from the people
+  it is waiting for.
+- **The checks shown are the ones the ruleset trusts.** The BIDS column applies the pinning branch
+  protection applies: for a central-flow dataset only the check run posted by the NEMAR App counts,
+  because anyone with push access can add a workflow job with the same name, and a commit status or
+  another App's run does not; for the four legacy repositories (`nm000103`, `nm000105`, `nm000106`,
+  `nm000107`) the check is `bids-validation` from any source, as their ruleset has it; and
+  `version-check` is never pinned. A same-named run whose App could not be read is not counted but
+  makes the state `unknown` if it is the newest. The checks read are the head commit's; if the
+  connection returns another commit, or a check node could not be read, they are `unknown`.
 - **Approval is the administrator's act and does not pass through the Worker.** No Worker code path
   approves, and the Worker holds nothing that belongs to an individual administrator. The tokens it
   does hold (the App and the datasets token) could submit a review, which is why none is ever made
   with them. `approve` takes `GH_TOKEN`, or else the token `gh` holds (asked for with `GH_TOKEN` and
   `GITHUB_TOKEN` removed from its environment, because `gh` itself prefers them to its stored login).
-  It refuses the token unless `GET /user` says it belongs to a person, and refuses it if the person is
-  not the GitHub login linked to the administrator's NEMAR account. It submits the review with
-  `commit_id` set to the head the administrator was shown and checks that GitHub recorded an approval,
-  by that login, of that commit. With no usable token it prints the pull request link and the
-  `gh pr review --approve` command.
-- **The verdict gates the approval without taking the decision.** A pass proceeds. An uncertain,
-  undecided, missing or different-commit review shows its reason and asks first; `--yes` skips the
-  question, not the reason. A failing review, one still running, or one the NEMAR API could not be
-  read for needs `--force`: an unknown verdict is never rendered as "not reviewed", because a stored
-  rejection could be hiding behind it. An error from the review read stops the approval unless it is
-  one of the two answers that mean the Worker cannot say (`not_owned_here`, `github_unavailable`).
+  It refuses the token unless `GET /user` says it belongs to a person, and, when the administrator's
+  NEMAR account is linked to a GitHub login, refuses it if the person is not that login. It submits
+  the review with `commit_id` set to the head the administrator was shown and checks that GitHub
+  recorded an approval, by that login, of that commit. If `gh` holds no signed-in account, or the
+  token is an app or workflow token, it prints the pull request link and the `gh pr review --approve`
+  command (and opens the link in a terminal); a token GitHub rejects, or a GitHub that cannot be
+  reached, is reported without it.
+- **The verdict gates the approval without taking the decision.** A pass shows no warning, and every
+  approval still asks for confirmation unless `--yes`. An uncertain, undecided, missing or
+  different-commit review shows its reason first; `--yes` skips the question, not the reason. A
+  failing review, one still running, or one the NEMAR API could not be read for needs `--force`: an
+  unknown verdict is never rendered as "not reviewed", because a stored rejection could be hiding
+  behind it. That includes an answer the CLI cannot read (no verdict, a verdict word it does not
+  know, or an answer about a different commit than the one GitHub reports), which is unread, not
+  "could not decide". An error from the review read stops the approval unless it is one of the
+  answers that mean the Worker cannot say (`not_owned_here`, `github_unavailable`,
+  `no_such_pull_request`, the last because the administrator's own token just read the pull
+  request). The reason a pull request is not reviewed (a paused or rate-limited contributor) is
+  shown beside the verdict.
 - **A merge is attempted only on request, and is a check, not an enforcement.** `--merge` is
-  attempted once, only if GitHub reports the pull request `clean`; it re-asks while GitHub is still
+  attempted once, only if GitHub reports the pull request `clean` (not `has_hooks`, which is a
+  GitHub Enterprise Server value); it re-asks while GitHub is still
   working the state out, does not wait for pending checks, sends the approved `sha` so GitHub refuses
   a branch that moved, and otherwise stops with the approval standing. An administrator can be a
   bypass actor, so this does not attempt a merge GitHub reports as blocked; the ruleset enforces, and
   this code does not try to defeat it.
-- **An outcome that is unknown is said to be unknown.** A write that gets no answer from GitHub may
-  have been applied, so it is reported as "outcome unknown, check the pull request", never as a
-  refusal.
+- **An outcome that is unknown is said to be unknown.** A write that gets no answer from GitHub, one
+  answered with a 2xx that cannot be read, and one answered 5xx by a gateway may all have been
+  applied, so each is reported as "outcome unknown, check the pull request", never as a refusal. A
+  merge that was never sent (the read before it failed, the branch moved, GitHub did not say
+  `clean`) says so and is not "may have merged". A review GitHub recorded that is not the approval
+  asked for (another state, login or commit) is reported as that.
 - **Overrides are keyed by GitHub's numeric id.** `allow`, `block` and `clear` ask GitHub who holds a
   login now, because a login can be renamed and reused. `allow` and `block` need GitHub's answer. The
   login an override stored is used only to `clear` a decision for an account GitHub no longer has or
-  cannot answer for, and only when exactly one account stored it. `allow` lifts the tally's pause and
+  cannot answer for, and only when exactly one account stored it; failing that, `clear` may take the
+  id from the review history, which deletes only a decision that already exists for that id. `allow` lifts the tally's pause and
   nothing else: the rate limits still apply. Each change writes an audit row, and the reason is
   reduced to plain words before it is stored.
 - **Each Worker lists the datasets it owns.** The dev Worker answers for dev-owned datasets and
@@ -98,14 +123,18 @@ by the administrator, from their machine, with their own GitHub login.**
   0092 is retired.
 - The approval is recorded by GitHub and nowhere in NEMAR. The Worker never sees it, so there is no
   NEMAR audit row for an approval; the review on the pull request is the record.
-- `approve` needs a GitHub login. An administrator whose NEMAR account names none is shown the login
-  being used, since nothing can be compared; `--yes` skips the question for them as for anyone.
-- The list depends on GitHub's search index, which can trail a new pull request by a minute and
-  returns at most 1000 results. The 1000-result cap and the page bound are reported (`truncated`);
-  the lag is only in the help text.
-- The Worker's GitHub credential (the App's installation or the `GITHUB_ADMIN_PAT` fallback) needs
-  read access to pull requests, checks and commit statuses for the GraphQL query. Without it the
-  list answers 502 and says why.
+- `approve` needs a GitHub token. If the administrator's NEMAR account is linked to a GitHub login,
+  the token must be that login's; if it is linked to none, nothing can be compared, so the login in
+  use is shown, and `--yes` skips the question for them as for anyone.
+- The list depends on GitHub's search index, which can lag behind a new pull request and
+  returns at most 1000 results. The 1000-result cap, the page bound and a count that changed while
+  reading are reported (`truncated`); the lag is only in the help text.
+- The Worker's GitHub credential (the App's installation or the `GITHUB_ADMIN_PAT` fallback) is
+  expected to need read access to pull requests, checks and commit statuses for the GraphQL query.
+  That has not been run against GitHub from this change: a credential without it may be refused
+  (the list then answers 502 or names the GraphQL error) or may read as a pull request with no
+  checks, which is shown as `none`, not as passing. Run the list once against production before
+  relying on the checks columns.
 - The dev Worker cannot show a production review. `approve` against it treats the verdict as unknown
   and needs `--force`.
 - A review that errored for a setup reason is still not re-run from here; a re-run command is not part
