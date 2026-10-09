@@ -82,3 +82,24 @@ Close this gap when an owner-approved non-synthetic dataset and isolated local u
 environment are available. Drive the real upload entry point and verify the warning is
 persisted while its spinner continues; do not substitute an invented dataset, mocked
 subprocess, or mocked S3 service.
+
+# Remaining real-test requirements for #1644
+
+There is no automated regression test for renewed credentials during recorded-file checks. The
+available offline test would require synthetic lease values and a loopback S3 stand-in, which the
+repository's strict NO MOCKS policy excludes. `test/upload-recorded-check.unit.test.ts` covers
+recorded-file presence behavior, but not expiry during copy or `fsck`, stale partial-result
+replacement, retry progress, or unknown-size batching.
+
+`test/upload-sts-refresh.integration.test.ts` exercises API-issued leases through the upload
+transfer, but signs S3 requests to a loopback stand-in and covers pending copies rather than the
+recorded-file checks. It was skipped in this local run because `test/.env.test` and its dev API
+credentials are absent. It does not establish AWS expiry timing or SigV4 acceptance. S3
+`HeadObject` failures are generic, so the implementation uses the known lease timestamp when a
+failed check returns after expiry rather than expecting a specific AWS error code.
+
+The owner selected “Keep gap documented” for the `sandboxCommand` end-to-end run and live-S3
+expiry acceptance. Close this gap only with an isolated, owner-approved staging fixture and
+verified S3-side expiry behavior; do not run the live path from this phase or treat a generic
+`e2e-sandbox` CI pass as equivalent evidence. Add real coverage only when the test can exercise
+the affected path without synthetic lease state or a stub service.

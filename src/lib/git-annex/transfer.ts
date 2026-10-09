@@ -959,6 +959,8 @@ export interface CopyOutcome {
   filesCopied: number;
   /** Of those, the ones git-annex actually transferred rather than found already there. */
   filesSent: number;
+  /** Paths transferred, retained so an expired-chunk retry can count unique sends. */
+  sentPaths: string[];
   /** Whether the counts above are evidence: anything but `understood` makes them not. */
   output: OutputState;
 }
@@ -999,6 +1001,7 @@ async function runJsonCopy(
   const secrets = credentialValues(env);
   const records = parseCopyJson(stdout, secrets);
   const filesCopied = records.filter((r) => r.success).length;
+  const sentPaths = records.flatMap((r) => (r.transferred && r.file !== null ? [r.file] : []));
   const filesSent = records.filter((r) => r.transferred).length;
   const printed = records.length > 0 || !stdout.trim();
   const complete = expectedRecords === undefined || records.length >= expectedRecords;
@@ -1012,10 +1015,11 @@ async function runJsonCopy(
       error: extractCopyJsonError(records, stdout, redactCredentials(stderr, secrets), exitCode),
       filesCopied,
       filesSent,
+      sentPaths,
       output,
     };
   }
-  return { success: true, filesCopied, filesSent, output };
+  return { success: true, filesCopied, filesSent, sentPaths, output };
 }
 
 /** What {@link checkRemoteHolds} found. */
@@ -1157,6 +1161,7 @@ export async function copyToAnnexRemote(
       error: msg || "Unknown error during copy",
       filesCopied: 0,
       filesSent: 0,
+      sentPaths: [],
       output: "understood",
     };
   }
@@ -1776,12 +1781,13 @@ export async function copyPathsToAnnexRemote(
   credentials?: S3Credentials,
 ): Promise<CopyOutcome> {
   if (paths.length === 0) {
-    return { success: true, filesCopied: 0, filesSent: 0, output: "understood" };
+    return { success: true, filesCopied: 0, filesSent: 0, sentPaths: [], output: "understood" };
   }
 
   const env = awsCredentialEnv(credentials);
   let filesCopied = 0;
   let filesSent = 0;
+  const sentPaths = new Set<string>();
   let output: OutputState = "understood";
   // The worst state of any chunk: unrecognized beats partial beats understood.
   const worse = (a: OutputState, b: OutputState): OutputState =>
@@ -1795,12 +1801,20 @@ export async function copyPathsToAnnexRemote(
       const run = await runJsonCopy(datasetPath, remoteName, jobs, chunk, env, chunk.length);
       filesCopied += run.filesCopied;
       filesSent += run.filesSent;
+      for (const path of run.sentPaths) sentPaths.add(path);
       output = worse(output, run.output);
       if (!run.success) {
-        return { success: false, error: run.error, filesCopied, filesSent, output };
+        return {
+          success: false,
+          error: run.error,
+          filesCopied,
+          filesSent,
+          sentPaths: [...sentPaths],
+          output,
+        };
       }
     }
-    return { success: true, filesCopied, filesSent, output };
+    return { success: true, filesCopied, filesSent, sentPaths: [...sentPaths], output };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return {
@@ -1808,6 +1822,7 @@ export async function copyPathsToAnnexRemote(
       error: msg || "Unknown error during copy",
       filesCopied,
       filesSent,
+      sentPaths: [...sentPaths],
       output,
     };
   }

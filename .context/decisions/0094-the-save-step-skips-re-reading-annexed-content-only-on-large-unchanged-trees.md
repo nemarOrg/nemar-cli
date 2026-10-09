@@ -99,3 +99,19 @@ fsck strikes a key from the location log when it finds the object missing, and a
 - `test/upload-save-failures.unit.test.ts` - git failing, a subdirectory, an interrupt
 - `test/upload-data-steps.unit.test.ts` - a run killed or signaled inside the save, then resumed
 - `test/upload-recorded-check.unit.test.ts` - the check of recorded files, the stamp
+
+## Amendment (issue #1644 follow-up, 2026-10-09)
+
+The recorded-file presence check shares the upload's renewable STS credential session with
+pending copies. It refreshes before a bounded check chunk when the remaining lease is shorter
+than the safety margin plus the longest observed batch, and retries only that chunk after an
+identifiable expired-credential result or a failed check that returns after the known lease has
+expired. S3 `HeadObject` failures are generic, so no exact error code is available for an
+`fsck` check; the lease timestamp is the signal for that case. Recorded paths missing from the
+current upload plan have unknown sizes and are checked one at a time, never grouped as zero-byte
+files. A newly transferred path reported in a parsed git-annex JSON record resets the chunk's
+fruitless-expiry counter, while the upload's overall renewal limit still bounds retries. This is
+only a retry-progress signal; durable progress and final confirmation still come from the
+location log. Copy retry summaries count unique transferred paths across attempts only when
+git-annex output remains understood; uncertain output remains unrecognized. Neither a loopback
+S3 stand-in nor CI closes the owner-selected live-S3 and `sandboxCommand` acceptance gap.
