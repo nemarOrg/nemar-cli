@@ -241,8 +241,8 @@ async function finalizeApproval(
     .run();
 
   // Note: API token is NOT created here, and no longer needs to be announced
-  // here either. A CLI account has been able to retrieve one since it
-  // verified its email (ADR 0040 phase 2, `nemar auth retrieve-key`), and web
+  // here either. A CLI account has been able to get one since it
+  // verified its email (ADR 0040 phase 2, `nemar auth login`), and web
   // users sign in with an email code and never hold an API key.
 
   // Send the upload-access notification. This used to be the key-ready mail,
@@ -1278,7 +1278,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
   );
 
   /**
-   * POST /admin/approve/:username - Approve a user (token created via retrieve-key)
+   * POST /admin/approve/:username - Approve a user (the token is made at sign-in, not here)
    *
    * Only reaches accounts that have a username, i.e. CLI signups. Web/ORCID
    * signups have username = NULL (migration 0026) and are approved via

@@ -126,7 +126,10 @@ describe("GET /auth/verify (the CLI verification link)", () => {
     const toUser = sendsTo(calls, USER_EMAIL);
     expect(toUser.length).toBe(1);
     expect(toUser[0].subject).toBe("Your NEMAR API key is ready");
-    expect(toUser[0].html).toContain("nemar auth retrieve-key");
+    expect(toUser[0].html).toContain("nemar auth login");
+    // The command that took a password is gone, and the mail must not name it.
+    expect(toUser[0].html).not.toContain("retrieve-key");
+    expect(toUser[0].html).not.toMatch(/password/i);
     // The claim it must NOT make: verification is not approval, and this
     // account cannot upload anything yet.
     expect(toUser[0].html).not.toContain("account has been approved");
@@ -224,7 +227,8 @@ describe("the signup verification email (the first one anyone gets)", () => {
     });
 
     expect(captured.length).toBe(1);
-    expect(captured[0].html).toContain("nemar auth retrieve-key");
+    expect(captured[0].html).toContain("nemar auth login");
+    expect(captured[0].html).not.toContain("retrieve-key");
     expect(captured[0].html).not.toContain("an administrator will review your account");
     expect(captured[0].html).not.toContain("Once approved, you'll receive your API key");
     // Not just the two old sentences: ANY sentence that ties the key to an
@@ -240,7 +244,7 @@ describe("the signup verification email (the first one anyone gets)", () => {
 });
 
 describe("GET /auth/verify when the mail does not go", () => {
-  test("the page tells the user to run retrieve-key, and promises no email", async () => {
+  test("the page tells the user to run `nemar auth login`, and promises no email", async () => {
     // RESEND_API_KEY unset is the dev/test shape, and the delivery fence and
     // a Resend outage land in the same place: the page is then the ONLY
     // remaining channel telling this user how to get their key, so it must
@@ -252,7 +256,8 @@ describe("GET /auth/verify when the mail does not go", () => {
       const res = await app.request(`/auth/verify?token=${VERIFY_TOKEN}`, {}, noMailEnv);
       expect(res.status).toBe(200);
       const html = await res.text();
-      expect(html).toContain("nemar auth retrieve-key");
+      expect(html).toContain("nemar auth login");
+      expect(html).not.toContain("retrieve-key");
       expect(html).not.toContain("we've emailed you");
       return calls;
     });
@@ -297,9 +302,10 @@ describe("POST /admin/approve/:username", () => {
     expect(toUser.length).toBe(1);
     expect(toUser[0].subject).toBe("Upload access granted on NEMAR");
     expect(toUser[0].html).toContain("nemar sandbox");
-    // Re-sending retrieve-key instructions to someone who has had a key since
+    // Re-sending sign-in instructions to someone who has had a key since
     // they verified reads as "your old key stopped working".
-    expect(toUser[0].html).not.toContain("nemar auth retrieve-key");
+    expect(toUser[0].html).not.toContain("nemar auth login");
+    expect(toUser[0].html).not.toContain("retrieve-key");
   });
 
   test("a web account gets the dashboard-flavoured variant", async () => {

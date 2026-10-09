@@ -1134,7 +1134,7 @@ adminCommand
     console.log("This will:");
     console.log("  1. Mark the account approved and grant upload access");
     if (username) {
-      console.log("  2. Notify them to retrieve their API key via CLI");
+      console.log("  2. Notify them that upload access is granted");
     } else {
       console.log("  2. Notify them to sign in to the dashboard");
     }
@@ -1183,14 +1183,14 @@ adminCommand
       } else if (result.email_sent) {
         console.log(
           result.user.username
-            ? chalk.green("User notified to retrieve their API key via 'nemar auth retrieve-key'")
+            ? chalk.green("User notified that upload access is granted")
             : chalk.green("User notified to sign in at https://nemar.org/login"),
         );
       } else {
         console.log(chalk.yellow("Warning: Notification email failed to send."));
         console.log(
           result.user.username
-            ? chalk.yellow("Please notify the user manually to run 'nemar auth retrieve-key'")
+            ? chalk.yellow("Please notify the user manually that upload access is granted")
             : chalk.yellow("Please notify the user manually that their account is approved"),
         );
       }

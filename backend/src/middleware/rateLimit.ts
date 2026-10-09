@@ -17,7 +17,7 @@
  *     1000/60s cap still bounds a malformed loop hammering the worker.
  *   - Auth endpoints (the explicit set in `AUTH_PATHS`) keep their
  *     stricter 10/60s cap and stay keyed by IP — those run pre-auth so
- *     a token isn't available, and they need to resist password
+ *     a token isn't available, and they need to resist key and code
  *     guessing across IPs without any single bucket being unbounded.
  *   - The device authorization grant (#1281, ADR 0047) is the one
  *     exception INSIDE its own family: `start`/`lookup`/`confirm`/`deny`
@@ -187,10 +187,8 @@ const ZARR_PATH_RE = /^(?:\/zarrproxy)?\/[a-z]{2}\d+\/zarr(\/|$)/;
 // Stricter limits for auth endpoints
 const AUTH_MAX_REQUESTS = 10;
 const AUTH_PATHS = [
-  "/auth/signup",
   "/auth/login",
   "/auth/verify",
-  "/auth/retrieve-key",
   "/auth/request-key-regeneration",
   "/auth/confirm-key-regeneration",
   // Web-dashboard passwordless flow (#569). The route handler also
@@ -350,7 +348,7 @@ export function __readBearerTokenFromHeader(authHeader: string | undefined): str
  * raw key value, and the cap.
  *
  *  - `auth-ip` for the strict-bucket paths (10/60s, IP-keyed). Mostly
- *    `/auth/*`, which stays pre-auth-friendly (signup/login have no token
+ *    `/auth/*`, which stays pre-auth-friendly (login/verify have no token
  *    yet), plus any authenticated endpoint whose per-request cost is an
  *    external call rather than a D1 read -- see AUTH_PATHS.
  *  - `token` for any request carrying a syntactically-valid bearer
