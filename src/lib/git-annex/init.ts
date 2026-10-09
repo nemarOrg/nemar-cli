@@ -277,23 +277,51 @@ export function isDefaultAnnexDescription(description: string): boolean {
  * does not scrub a branch that was already pushed (see #1399).
  * Returns true when it rewrote the description.
  */
-export async function replaceDefaultAnnexDescription(path: string): Promise<boolean> {
+export async function replaceDefaultAnnexDescription(
+  path: string,
+): Promise<{ success: boolean; changed: boolean; error?: string }> {
   const info = await runCommand(["git", "annex", "info", "here", "--json", "--fast"], {
     cwd: path,
   });
-  if (info.exitCode !== 0) return false;
-  let description = "";
+  if (info.exitCode !== 0) {
+    return {
+      success: false,
+      changed: false,
+      error: `git annex info here failed: ${said(info)}`,
+    };
+  }
+  let description: unknown;
   try {
     const parsed = JSON.parse(info.stdout) as { description?: unknown };
-    description = typeof parsed.description === "string" ? parsed.description : "";
+    description = parsed.description;
   } catch {
-    return false;
+    return {
+      success: false,
+      changed: false,
+      error:
+        "git annex info here returned invalid JSON; refusing to publish an unknown description",
+    };
   }
-  if (!isDefaultAnnexDescription(description)) return false;
+  if (typeof description !== "string" || description.trim() === "") {
+    return {
+      success: false,
+      changed: false,
+      error:
+        "git annex info here did not report a description; refusing to publish an unknown description",
+    };
+  }
+  if (!isDefaultAnnexDescription(description)) return { success: true, changed: false };
   const res = await runCommand(["git", "annex", "describe", "here", ANNEX_DEPOSIT_DESCRIPTION], {
     cwd: path,
   });
-  return res.exitCode === 0;
+  if (res.exitCode !== 0) {
+    return {
+      success: false,
+      changed: false,
+      error: `git annex describe here failed: ${said(res)}`,
+    };
+  }
+  return { success: true, changed: true };
 }
 
 /**

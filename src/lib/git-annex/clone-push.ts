@@ -4,11 +4,12 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { statSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { displayName, displayNames, isPrintableInCommand } from "../display-name.js";
 import { getGitHubToken, resolveGitHubCloneAuth } from "./github.js";
-import { ANNEX_CLONE_DESCRIPTION, chunkAddTargets } from "./init.js";
+import { ANNEX_CLONE_DESCRIPTION, chunkAddTargets, isDefaultAnnexDescription } from "./init.js";
 import { getCurrentBranch } from "./repo-state.js";
 import { runCommand } from "./run-command.js";
 
@@ -25,6 +26,139 @@ export interface SkipContentCheckEntry {
 
 /** Git's lowercase `ls-files -v` tag marks a path assume-unchanged. */
 const ASSUME_UNCHANGED_TAG = /^[a-z] /;
+
+// Issue #1399 explicitly treats this NEMAR-created import path as harmless.
+function isNEMARImportRunnerDescription(description: string): boolean {
+  return /^runner@[^:\s]+:\/tmp\/nemar-import-[^/\s]+(?:\/.*)?$/.test(description);
+}
+
+function defaultDescriptionsForUuidHistory(diff: string): Set<string> {
+  const descriptions = new Set<string>();
+  for (const line of diff.split("\n")) {
+    if (!line.startsWith("+") || line.startsWith("+++")) continue;
+    const addedLine = line.slice(1);
+    const separator = addedLine.indexOf(" ");
+    if (separator <= 0) continue;
+    const uuid = addedLine.slice(0, separator);
+    const entry = addedLine.slice(separator + 1);
+    const description = entry.replace(/\s+timestamp=\d+(?:\.\d+)?s?$/, "");
+    if (isDefaultAnnexDescription(description) && !isNEMARImportRunnerDescription(description)) {
+      descriptions.add(`${uuid}\0${description}`);
+    }
+  }
+  return descriptions;
+}
+
+async function defaultDescriptionHistory(
+  path: string,
+  revision: string,
+): Promise<{ success: true; descriptions: Set<string> } | { success: false }> {
+  const history = await runCommand(
+    [
+      "git",
+      "log",
+      "--format=",
+      "--no-color",
+      "--no-ext-diff",
+      "--no-renames",
+      "-m",
+      "-p",
+      revision,
+      "--",
+      "uuid.log",
+    ],
+    { cwd: path },
+  );
+  if (history.exitCode !== 0) return { success: false };
+  return { success: true, descriptions: defaultDescriptionsForUuidHistory(history.stdout) };
+}
+
+async function fetchRemoteAnnexOid(
+  path: string,
+  remoteName: string,
+): Promise<{ success: true; oid: string } | { success: false }> {
+  const checkRef = `refs/nemar/git-annex-check/${randomUUID()}`;
+  const fetch = await runCommand(
+    ["git", "fetch", "--no-tags", remoteName, `refs/heads/git-annex:${checkRef}`],
+    { cwd: path },
+  );
+  if (fetch.exitCode !== 0) return { success: false };
+
+  const remote = await runCommand(["git", "rev-parse", `${checkRef}^{commit}`], { cwd: path });
+  const cleanup = await runCommand(["git", "update-ref", "-d", checkRef], { cwd: path });
+  if (remote.exitCode !== 0 || remote.stdout.trim() === "" || cleanup.exitCode !== 0) {
+    return { success: false };
+  }
+  return { success: true, oid: remote.stdout.trim() };
+}
+
+async function prepareAnnexBranchPush(
+  path: string,
+  remoteName: string,
+): Promise<{ success: true; localOid: string } | { success: false; error: string }> {
+  const remoteRef = await runCommand(
+    ["git", "ls-remote", "--heads", remoteName, "refs/heads/git-annex"],
+    { cwd: path },
+  );
+  if (remoteRef.exitCode !== 0) {
+    return { success: false, error: "the remote git-annex branch could not be checked" };
+  }
+
+  let remoteOid: string | undefined;
+  if (remoteRef.stdout.trim() === "") {
+    const forget = await runCommand(["git", "annex", "forget", "--force"], { cwd: path });
+    if (forget.exitCode !== 0) {
+      return { success: false, error: "the local git-annex history could not be pruned" };
+    }
+  } else {
+    const remote = await fetchRemoteAnnexOid(path, remoteName);
+    if (!remote.success) {
+      return { success: false, error: "the existing git-annex branch could not be fetched" };
+    }
+    remoteOid = remote.oid;
+  }
+
+  const local = await runCommand(["git", "rev-parse", "refs/heads/git-annex^{commit}"], {
+    cwd: path,
+  });
+  if (local.exitCode !== 0 || local.stdout.trim() === "") {
+    return { success: false, error: "the local git-annex branch could not be identified" };
+  }
+  const localOid = local.stdout.trim();
+
+  const localHistory = await defaultDescriptionHistory(
+    path,
+    remoteOid ? `${remoteOid}..${localOid}` : localOid,
+  );
+  if (!localHistory.success) {
+    return { success: false, error: "the local git-annex description history could not be read" };
+  }
+  if (remoteOid) {
+    const remoteHistory = await defaultDescriptionHistory(path, remoteOid);
+    if (!remoteHistory.success) {
+      return {
+        success: false,
+        error: "the remote git-annex description history could not be read",
+      };
+    }
+    const hasUnpublished = [...localHistory.descriptions].some(
+      (description) => !remoteHistory.descriptions.has(description),
+    );
+    if (hasUnpublished) {
+      return {
+        success: false,
+        error: "the local history contains an unpublished machine-specific description",
+      };
+    }
+  } else if (localHistory.descriptions.size > 0) {
+    return {
+      success: false,
+      error: "first-push history still contains a machine-specific description after pruning",
+    };
+  }
+
+  return { success: true, localOid };
+}
 
 /** Signals on which an interrupted save still takes its assume-unchanged bits back. */
 const INTERRUPT_SIGNALS: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"];
@@ -661,6 +795,13 @@ export async function pushToGitHub(
     // Detached HEAD (HEAD:main) has no local branch to rebase, and adjusted
     // (DataLad) branches must not be rebased -- both keep the plain push behavior.
     const canRebase = !branchToPush.startsWith("adjusted/") && branchToPush !== "HEAD:main";
+    const annexPreflight = await prepareAnnexBranchPush(path, remoteName);
+    if (!annexPreflight.success) {
+      return {
+        success: false,
+        error: `Push stopped before the main branch was updated because ${annexPreflight.error}.`,
+      };
+    }
     let mainStderr = "";
     let pushed = false;
     let rebaseCycles = 0;
@@ -727,9 +868,37 @@ export async function pushToGitHub(
     let annexStderr = "";
     let annexPushed = false;
     let annexMergeCycles = 0;
+    let prepared = annexPreflight;
     for (let attempt = 0; attempt <= PUSH_REBASE_RETRIES; attempt++) {
-      const res = await runCommand(["git", "push", remoteName, "git-annex"], { cwd: path });
+      if (attempt > 0) {
+        const checked = await prepareAnnexBranchPush(path, remoteName);
+        if (!checked.success) {
+          return {
+            success: false,
+            error: `Main branch pushed, but the git-annex branch was not pushed because ${checked.error}.`,
+          };
+        }
+        prepared = checked;
+      }
+      // Pin both the local commit inspected by the privacy check and the remote
+      // tip used to classify already-published descriptions. A concurrent local
+      // update cannot make an unchecked commit the push source; after a merge
+      // retry this loop fetches and checks again.
+      const res = await runCommand(
+        ["git", "push", remoteName, `${prepared.localOid}:refs/heads/git-annex`],
+        { cwd: path },
+      );
       if (res.exitCode === 0) {
+        const currentRef = await runCommand(["git", "rev-parse", "refs/heads/git-annex^{commit}"], {
+          cwd: path,
+        });
+        if (currentRef.exitCode !== 0 || currentRef.stdout.trim() !== prepared.localOid) {
+          return {
+            success: false,
+            error:
+              "The checked git-annex history was pushed, but the local annex branch advanced during the push. Review and retry to publish the remaining changes.",
+          };
+        }
         annexPushed = true;
         break;
       }
