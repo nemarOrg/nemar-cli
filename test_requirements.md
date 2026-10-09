@@ -70,18 +70,23 @@ existing focused annex-add suite continues to exercise list-form `gitAnnexAdd` a
 real git-annex repositories.
 
 `test/upload-data-steps.unit.test.ts` drives `uploadDataToS3` with a local real-git-annex
-repository and a real `directory` special remote. Its generated file inputs are
-synthetic, though, and are unsuitable under NO FAKE DATA for establishing real-dataset
-warning behavior. The only checked-in BIDS dataset is explicitly synthetic. No
-non-synthetic sample or owner-approved real upload environment is available, so warning
-persistence has no end-to-end real-data test. Production wiring was verified by
-inspection from `uploadDataToS3` and blocked-file recovery through `trackDataFiles`,
-list-form `gitAnnexAdd`, and `runCommand`.
+repository and a real `directory` special remote. The checked-in BIDS dataset and the
+test's generated upload inputs are synthetic, so this test cannot establish real-dataset
+warning persistence. Separately, an owner-authorized
+offline NFS benchmark used a checksum-verified non-synthetic sample of 1,021 files
+(2,268,523,934 bytes) on one host. It covered a 12-cell raw-add matrix (argv and batch
+at J1/J4/J8) and a six-cell production-chunk-shaped batch matrix. Those results support
+the selected bounded upload-local worker setting, but the benchmark did not drive the
+upload entry point and does not establish real-upload warning persistence.
 
-Close this gap when an owner-approved non-synthetic dataset and isolated local upload
-environment are available. Drive the real upload entry point and verify the warning is
-persisted while its spinner continues; do not substitute an invented dataset, mocked
-subprocess, or mocked S3 service.
+Real upload/save acceptance remains open for the full 4,711-file/~550-GB corpus, files
+larger than 1 GiB, authenticated S3 transfer, and the later NFS-backed `git add -A`
+final save. The offline sample benchmark and local directory-remote test do not close
+these gaps. Keep #1455 open until that acceptance is completed. Close the warning
+persistence test gap only when an owner-approved isolated upload environment is
+available: drive the real upload entry point and verify the warning is persisted while
+its spinner continues. Do not substitute an invented dataset, mocked subprocess, or
+mocked S3 service.
 
 # Remaining real-test requirements for #1644
 
