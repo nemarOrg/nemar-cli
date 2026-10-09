@@ -154,7 +154,11 @@ held import is not a failure),
 0090 (an acquisition date finer than year and month is a review finding that warns and never
 gates, and nothing already published is rewritten),
 0091 (a new recording's day-level acquisition dates are set to 1 January of their year on upload
-and import, and nothing already published is changed).
+and import, and nothing already published is changed),
+0092 (a pull request to a dataset is reviewed by a model through a Worker gate: the verdict is derived
+from the report and from git facts and never read from the model, unknown is `action_required` and
+never green, the Anthropic identity is minted only in `nemarDatasets/.github`, and a contributor is
+paused after more than 5 rejected pull requests AND more than 10 percent of their decided ones).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and
