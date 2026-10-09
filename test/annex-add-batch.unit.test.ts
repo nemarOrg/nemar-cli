@@ -90,8 +90,20 @@ function writeFile(dir: string, rel: string, content: string): void {
 }
 
 async function annexed(dir: string): Promise<string[]> {
-  const { stdout } = await runCmd(["git", "annex", "find", "--include", "*"], dir);
-  return stdout.split("\n").filter(Boolean).sort();
+  const { stdout, stderr, exitCode } = await runCmd(
+    ["git", "annex", "find", "--include", "*", "--json"],
+    dir,
+  );
+  if (exitCode !== 0) throw new Error(`git annex find failed: ${stderr.trim()}`);
+  return stdout
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      const record = JSON.parse(line) as { file?: unknown };
+      if (typeof record.file !== "string") throw new Error("git annex find returned no file path");
+      return record.file;
+    })
+    .sort();
 }
 
 beforeAll(async () => {
@@ -108,7 +120,7 @@ afterAll(() => {
 });
 
 describe("gitAnnexAdd list form (real git-annex)", () => {
-  test("runs git-annex add with --batch across chunks", async () => {
+  test("runs git-annex add with --batch across path-count chunks", async () => {
     const dir = await newDatasetRepo("batch");
     const files = Array.from({ length: 7 }, (_, i) => `sub-0${i}/eeg/sub-0${i}_eeg.edf`);
     for (const f of files) writeFile(dir, f, f.repeat(100));
@@ -144,13 +156,58 @@ describe("gitAnnexAdd list form (real git-annex)", () => {
     }
   });
 
+  test("maxBytes also bounds batch stdin across chunks", async () => {
+    const dir = await newDatasetRepo("byte-chunks");
+    const files = ["a.edf", "b.edf", "c.edf", "d.edf"];
+    for (const file of files) writeFile(dir, file, file.repeat(100));
+
+    const trace = join(dir, "..", `trace-${Date.now()}.log`);
+    const saved = process.env.GIT_TRACE;
+    process.env.GIT_TRACE = trace;
+    try {
+      const res = await gitAnnexAdd(dir, files, { maxPaths: 99, maxBytes: 12 });
+      expect(res).toEqual({ success: true });
+    } finally {
+      // biome-ignore lint/performance/noDelete: assigning undefined would leave the string "undefined"
+      if (saved === undefined) delete process.env.GIT_TRACE;
+      else process.env.GIT_TRACE = saved;
+    }
+
+    expect(await annexed(dir)).toEqual(files);
+    const adds = readFileSync(trace, "utf8")
+      .split("\n")
+      .filter((line) => /run_command: git-annex add/.test(line));
+    expect(adds).toHaveLength(2);
+    expect(adds.every((line) => line.includes("--batch"))).toBe(true);
+  });
+
   test("a path that does not exist fails loudly instead of being skipped", async () => {
     const dir = await newDatasetRepo("missing");
     writeFile(dir, "a.edf", "a".repeat(1000));
     const res = await gitAnnexAdd(dir, ["a.edf", "nope/b.edf"]);
     expect(res.success).toBe(false);
     expect(res.error).toContain("nope/b.edf");
-    expect(await annexed(dir)).toEqual([]);
+    // Batch mode may finish valid siblings before identifying a missing path;
+    // the successful work remains resumable and no caller can treat this add as complete.
+    expect(await annexed(dir)).toEqual(["a.edf"]);
+  });
+
+  test("a filesystem inspection error is not reported as a missing path", async () => {
+    const dir = await newDatasetRepo("inaccessible");
+    mkdirSync(join(dir, "blocked"));
+    writeFile(dir, "blocked/a.edf", "a".repeat(1000));
+    chmodSync(join(dir, "blocked"), 0);
+
+    let res: Awaited<ReturnType<typeof gitAnnexAdd>>;
+    try {
+      res = await gitAnnexAdd(dir, ["blocked/a.edf"]);
+    } finally {
+      chmodSync(join(dir, "blocked"), 0o755);
+    }
+
+    expect(res.success).toBe(false);
+    expect(res.error).not.toContain("not found");
+    expect(res.error).toMatch(/EACCES|EPERM/i);
   });
 
   test("re-adding already annexed, unchanged files is a quiet success (resume)", async () => {
@@ -171,6 +228,17 @@ describe("gitAnnexAdd list form (real git-annex)", () => {
 
     expect(res).toEqual({ success: true });
     expect(await annexed(dir)).toEqual(["a.edf"]);
+  });
+
+  test("NUL-delimited batch input preserves newlines in filenames", async () => {
+    const dir = await newDatasetRepo("newline");
+    const file = "sub-01/eeg/sub-01\nsession_eeg.edf";
+    writeFile(dir, file, "newline payload".repeat(20_000));
+
+    const res = await gitAnnexAdd(dir, [file], {}, { forceLarge: true });
+
+    expect(res).toEqual({ success: true });
+    expect(await annexed(dir)).toEqual([file]);
   });
 
   test("batch mode respects .gitignore by default", async () => {

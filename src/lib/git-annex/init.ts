@@ -400,13 +400,13 @@ export const ADD_CHUNK_MAX_PATHS = 500;
 export const ADD_CHUNK_MAX_BYTES = 128 * 1024;
 
 /**
- * Split a path list into argv-safe chunks for `git annex add -- <paths...>`.
+ * Split a path list into bounded chunks for argv pathspecs and batch input.
  *
- * Multi-TB BIDS datasets can carry thousands of data files; a single argv
- * would blow past the OS argument-length limit (256 KB on macOS). Chunks are
- * bounded both by path count and by total byte length (with a per-path +1
- * for the argv NUL separator). A single path longer than maxBytes still
- * forms its own chunk -- paths cannot be split.
+ * Multi-TB BIDS datasets can carry thousands of data files. Chunks are bounded
+ * by path count and total byte length (including one NUL separator per path),
+ * keeping argv callers below the OS argument limit and batch stdin bounded.
+ * A single path longer than maxBytes still forms its own chunk -- paths cannot
+ * be split.
  */
 export function chunkAddTargets(
   paths: string[],
@@ -443,7 +443,7 @@ export function chunkAddTargets(
  * (index + inode cache). An interrupted add therefore resumes at O(remaining
  * files) instead of restarting (#884). An empty list is a successful no-op.
  *
- * `chunking` overrides the argv chunk bounds; production callers use the
+ * `chunking` overrides the path-list chunk bounds; production callers use the
  * defaults. Exposed so tests can drive the multi-chunk loop through this
  * entry point without thousands of fixture files.
  *
@@ -499,21 +499,11 @@ export async function gitAnnexAdd(
       chunking.maxPaths ?? ADD_CHUNK_MAX_PATHS,
       chunking.maxBytes ?? ADD_CHUNK_MAX_BYTES,
     );
-    for (const chunk of chunks) {
-      // `--batch` can skip a missing path without a useful nonzero exit. Keep
-      // the old argv form's fail-loudly behavior, and check per chunk so any
-      // earlier completed chunks remain available to resume.
-      const missing = chunk.filter((target) => !pathExists(join(path, target)));
-      if (missing.length > 0) {
-        const shown = missing.slice(0, 5).join(", ");
-        const more = missing.length > 5 ? ` and ${missing.length - 5} more` : "";
-        return { success: false, error: `File(s) to add not found: ${shown}${more}` };
-      }
+    if (chunks.length === 0) return { success: true };
 
-      // Batch mode can reclassify an unchanged blob already in the index;
-      // argv-form `git annex add` leaves that alone until recovery explicitly
-      // unstages it. Preserve that contract while still batching new paths and
-      // files changed in the working tree.
+    for (const chunk of chunks) {
+      // Keep index output bounded to this path chunk; a complete index listing
+      // can be much larger than the add request in a repository with a deep tree.
       const indexedResult = await runCommand(
         ["git", "--literal-pathspecs", "ls-files", "-z", "--", ...chunk],
         { cwd: path },
@@ -526,6 +516,10 @@ export async function gitAnnexAdd(
       }
       const indexedPaths = new Set(indexedResult.stdout.split("\0").filter(Boolean));
 
+      // Batch mode can reclassify an unchanged blob already in the index;
+      // argv-form `git annex add` leaves that alone until recovery explicitly
+      // unstages it. Preserve that contract while still batching new paths and
+      // files changed in the working tree.
       const changedResult = await runCommand(
         ["git", "--literal-pathspecs", "diff", "--name-only", "-z", "--", ...chunk],
         { cwd: path },
@@ -546,7 +540,7 @@ export async function gitAnnexAdd(
         ["git", "annex", "add", ...addFlags, "--batch", "-z", "--json", "--json-error-messages"],
         { cwd: path, stdin: batchTargets.map((target) => `${target}\0`).join("") },
       );
-      const failures = parseAddFailures(stdout);
+      const { responsePaths, failures } = parseAddOutput(stdout);
       if (exitCode !== 0 || failures.length > 0) {
         const detail = failures
           .slice(0, 5)
@@ -557,6 +551,17 @@ export async function gitAnnexAdd(
           error: detail || stderr.trim() || "Failed to add files to git-annex",
         };
       }
+
+      // git-annex batch mode leaves a blank response for both ignored and
+      // missing paths. Check only those unanswered targets, avoiding a serial
+      // filesystem stat pass over every large manifest before the add starts.
+      const unanswered = batchTargets.filter((target) => !responsePaths.has(target));
+      const missing = unanswered.filter((target) => !pathExists(join(path, target)));
+      if (missing.length > 0) {
+        const shown = missing.slice(0, 5).join(", ");
+        const more = missing.length > 5 ? ` and ${missing.length - 5} more` : "";
+        return { success: false, error: `File(s) to add not found: ${shown}${more}` };
+      }
     }
     return { success: true };
   } catch (e) {
@@ -564,27 +569,42 @@ export async function gitAnnexAdd(
   }
 }
 
-/** lstat-based existence: a dangling annex symlink still counts as present. */
+/** lstat-based existence: dangling annex symlinks count, while I/O errors propagate. */
 function pathExists(path: string): boolean {
   try {
     lstatSync(path);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
   }
 }
 
-/** Failed per-file records from `git annex add --batch --json`. */
-export function parseAddFailures(stdout: string): Array<{ file: string; error: string }> {
+/** Parsed per-file records from `git annex add --batch --json`. */
+function parseAddOutput(stdout: string): {
+  responsePaths: Set<string>;
+  failures: Array<{ file: string; error: string }>;
+} {
+  const responsePaths = new Set<string>();
   const failures: Array<{ file: string; error: string }> = [];
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed.startsWith("{")) continue;
-    let record: Record<string, unknown>;
+    let value: unknown;
     try {
-      record = JSON.parse(trimmed) as Record<string, unknown>;
+      value = JSON.parse(trimmed) as unknown;
     } catch {
       continue;
+    }
+    if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
+    const record = value as Record<string, unknown>;
+    if (typeof record.file === "string") responsePaths.add(record.file);
+    if (Array.isArray(record.input)) {
+      for (const input of record.input) {
+        if (typeof input === "string") responsePaths.add(input);
+      }
     }
     if (record.success !== false) continue;
     const messages = Array.isArray(record["error-messages"])
@@ -597,7 +617,12 @@ export function parseAddFailures(stdout: string): Array<{ file: string; error: s
       error: messages.join("; ").trim() || "failed",
     });
   }
-  return failures;
+  return { responsePaths, failures };
+}
+
+/** Failed per-file records from `git annex add --batch --json`. */
+export function parseAddFailures(stdout: string): Array<{ file: string; error: string }> {
+  return parseAddOutput(stdout).failures;
 }
 
 /**
