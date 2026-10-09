@@ -792,7 +792,111 @@ export function isNonFastForwardPush(stderr: string): boolean {
 /** How many fetch+rebase+retry cycles to attempt on a non-fast-forward push. */
 const PUSH_REBASE_RETRIES = 3;
 
-type PreparedAnnexBranchPush = { success: true; localOid: string; remoteUrl: string };
+type PreparedAnnexBranchPush = {
+  success: true;
+  localOid: string;
+  remoteUrl: string;
+};
+
+async function isAncestor(
+  path: string,
+  ancestorOid: string,
+  descendantOid: string,
+): Promise<boolean | undefined> {
+  if (ancestorOid === descendantOid) return true;
+  const ancestor = await runCommand(
+    ["git", "merge-base", "--is-ancestor", ancestorOid, descendantOid],
+    {
+      cwd: path,
+    },
+  );
+  if (ancestor.exitCode === 0) return true;
+  if (ancestor.exitCode === 1) return false;
+  return undefined;
+}
+
+async function advanceAnnexTrackingRef(
+  path: string,
+  remoteName: string,
+  remoteUrl: string,
+): Promise<{ success: true } | { success: false; error: string }> {
+  const trackingRef = `refs/remotes/${remoteName}/git-annex`;
+  const readTracking = async (): Promise<{ success: true; oid?: string } | { success: false }> => {
+    const result = await runCommand(
+      ["git", "rev-parse", "--verify", "--quiet", `${trackingRef}^{commit}`],
+      { cwd: path },
+    );
+    if (result.exitCode === 0) return { success: true, oid: result.stdout.trim() };
+    if (result.exitCode === 1) return { success: true };
+    return { success: false };
+  };
+  const failed = (detail: string) => ({
+    success: false as const,
+    error: `${trackingRef} could not be updated after the checked annex push: ${detail}`,
+  });
+  const initial = await readTracking();
+  if (!initial.success) return failed("its current value could not be read");
+  const remote = await fetchRemoteAnnexOid(path, remoteUrl);
+  if (!remote.success) return failed("the remote annex tip could not be refreshed");
+
+  let current = await readTracking();
+  if (!current.success) return failed("its current value could not be read");
+  let lastUpdateError = "the compare-and-swap failed without an error message";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (current.oid === remote.oid) return { success: true };
+    if (current.oid !== initial.oid) {
+      if (!current.oid) return failed("it was removed during the refresh and was preserved");
+      const trackingHasNewerTip = await isAncestor(path, remote.oid, current.oid);
+      if (trackingHasNewerTip === true) return { success: true };
+      if (trackingHasNewerTip === undefined) {
+        return failed("its current value could not be compared with the refreshed remote tip");
+      }
+      const remoteHasNewerTip = await isAncestor(path, current.oid, remote.oid);
+      if (remoteHasNewerTip !== true) {
+        return failed("it changed during the refresh and the divergent value was preserved");
+      }
+    }
+
+    const update = current.oid
+      ? `update ${trackingRef} ${remote.oid} ${current.oid}\n`
+      : `create ${trackingRef} ${remote.oid}\n`;
+    const updated = await runCommand(["git", "update-ref", "--stdin"], {
+      cwd: path,
+      stdin: update,
+    });
+    if (updated.exitCode === 0) return { success: true };
+    lastUpdateError = updated.stderr.trim() || `compare-and-swap exited ${updated.exitCode}`;
+
+    // A concurrent fetch can win between the read and compare-and-swap. Preserve
+    // its newer tip, or retry if it left an older ancestor that can fast-forward.
+    const after = await readTracking();
+    if (!after.success) return failed(lastUpdateError);
+    if (after.oid === remote.oid) return { success: true };
+    if (!after.oid) {
+      if (initial.oid) return failed("it was removed during the refresh and was preserved");
+      current = after;
+      continue;
+    }
+    const concurrentTipIsNewer = await isAncestor(path, remote.oid, after.oid);
+    if (concurrentTipIsNewer === true) return { success: true };
+    if (concurrentTipIsNewer === undefined) {
+      return failed(
+        `its value after the compare-and-swap could not be compared with the remote tip (${lastUpdateError})`,
+      );
+    }
+    const remoteTipIsNewer = await isAncestor(path, after.oid, remote.oid);
+    if (remoteTipIsNewer !== true) {
+      return failed(
+        `it changed during the compare-and-swap and the divergent value was preserved (${lastUpdateError})`,
+      );
+    }
+    current = after;
+  }
+
+  return failed(
+    `the update did not succeed after three compare-and-swap attempts (${lastUpdateError})`,
+  );
+}
 
 async function pushPreparedAnnexBranch(
   path: string,
@@ -840,17 +944,14 @@ async function pushPreparedAnnexBranch(
           localRefAdvanced: true,
         };
       }
-      // This push uses the verified URL instead of the remote name. Git versions
-      // that cannot map that URL back to its configured remote leave the
-      // remote-tracking ref stale, so a resumed normalization would push again.
-      const trackingRef = `refs/remotes/${remoteName}/git-annex`;
-      const tracking = await runCommand(["git", "update-ref", trackingRef, prepared.localOid], {
-        cwd: path,
-      });
-      if (tracking.exitCode !== 0) {
+      // This push uses the verified URL instead of the remote name. Older Git
+      // versions leave the tracking ref stale; refresh it from the verified URL
+      // without overwriting a concurrent fetch that records a newer remote tip.
+      const tracking = await advanceAnnexTrackingRef(path, remoteName, prepared.remoteUrl);
+      if (!tracking.success) {
         return {
           success: false,
-          error: `${trackingRef} could not be updated after the checked annex push: ${tracking.stderr.trim() || `exit ${tracking.exitCode}`}`,
+          error: tracking.error,
           trackingRefUpdateFailed: true,
         };
       }
