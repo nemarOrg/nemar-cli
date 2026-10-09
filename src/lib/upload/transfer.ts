@@ -881,6 +881,7 @@ async function copyPendingInBatches(args: {
 
   for (const batch of batches) {
     let noProgressExpiredAttempts = 0;
+    let useJustRenewedLease = false;
     for (;;) {
       let pendingBefore: Set<string>;
       try {
@@ -891,7 +892,12 @@ async function copyPendingInBatches(args: {
       const toCopy = batch.filter((path) => pendingBefore.has(path));
       if (toCopy.length === 0) break;
 
-      if (
+      if (useJustRenewedLease) {
+        // A retry must first try the lease just obtained for the expired-token error.
+        // This also avoids burning another API lease when the issued duration is shorter
+        // than the proactive refresh margin (as in the 15-minute integration case).
+        useJustRenewedLease = false;
+      } else if (
         lease &&
         args.renewLease &&
         lease.expiresAtMs - Date.now() < DEFAULT_REFRESH_MARGIN_MS + longestBatchMs
@@ -946,6 +952,7 @@ async function copyPendingInBatches(args: {
       }
       const renewalError = await renew("expired during copy");
       if (renewalError) return fail(renewalError);
+      useJustRenewedLease = true;
     }
   }
 

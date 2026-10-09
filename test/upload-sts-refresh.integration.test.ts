@@ -180,6 +180,12 @@ describe.skipIf(!canRun)("STS credential renewal through the real upload transfe
     expect(failedLeaseRequests.length).toBeGreaterThan(0);
     expect(failedLeaseRequests.every((entry) => entry.status === 403)).toBe(true);
     expect(successfulCopyRequests).toHaveLength(2);
+    expect(
+      successfulCopyRequests.some((entry) => entry.keyId === renewedCredentials[1]?.accessKeyId),
+    ).toBe(true);
+    expect(
+      successfulCopyRequests.some((entry) => entry.keyId === renewedCredentials[2]?.accessKeyId),
+    ).toBe(true);
     for (const entry of copyRequests) {
       const credentials = renewedCredentials.find(({ accessKeyId }) => accessKeyId === entry.keyId);
       expect(credentials).toBeDefined();
