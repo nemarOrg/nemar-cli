@@ -69,6 +69,17 @@ import {
   markStepCompleted,
   writeUploadProgress,
 } from "../upload-progress.js";
+import {
+  type CredentialLease,
+  DEFAULT_BATCH_MAX_BYTES,
+  DEFAULT_BATCH_MAX_FILES,
+  DEFAULT_MAX_REFRESHES,
+  DEFAULT_REFRESH_MARGIN_MS,
+  MAX_FRUITLESS_REFRESHES,
+  isExpiredCredentialError,
+  leaseFromResponse,
+  planCopyBatches,
+} from "./s3-copy-session.js";
 import { type DatasetInfo, FAIL, type Step, ok } from "./types.js";
 
 export interface UploadFileEntry {
@@ -790,6 +801,144 @@ export type S3CopyOutcome =
       lostAtRemote: string[];
     };
 
+interface PendingCopyOutcome {
+  success: boolean;
+  error?: string;
+  filesCopied: number;
+  filesSent: number;
+  output: OutputState;
+  lease?: CredentialLease;
+}
+
+/**
+ * Copy pending paths in bounded batches. After every attempt, the location log
+ * is the authority for what remains: JSON record counts never reset the
+ * fruitless-retry limit or claim durable progress.
+ */
+async function copyPendingInBatches(args: {
+  absolutePath: string;
+  remote: string;
+  pending: string[];
+  sizes: Map<string, number>;
+  jobs: number;
+  credentials?: S3Credentials;
+  lease?: CredentialLease;
+  renewLease?: () => Promise<CredentialLease>;
+  batchMaxFiles?: number;
+  batchMaxBytes?: number;
+  onCredentialsRenewed?: (count: number, reason: string) => void;
+}): Promise<PendingCopyOutcome> {
+  const batches = planCopyBatches(args.pending, args.sizes, {
+    maxFiles: args.batchMaxFiles,
+    maxBytes: args.batchMaxBytes,
+  });
+  let lease = args.lease;
+  let refreshes = 0;
+  let longestBatchMs = 0;
+  let filesCopied = 0;
+  let filesSent = 0;
+  let output: OutputState = "understood";
+  const worse = (a: OutputState, b: OutputState): OutputState =>
+    a === "unrecognized" || b === "unrecognized"
+      ? "unrecognized"
+      : a === "partial" || b === "partial"
+        ? "partial"
+        : "understood";
+  const fail = (error: string): PendingCopyOutcome => ({
+    success: false,
+    error,
+    filesCopied,
+    filesSent,
+    output,
+    lease,
+  });
+  const renew = async (reason: string): Promise<string | null> => {
+    if (!args.renewLease) return "Upload credentials cannot be renewed in this remote";
+    if (refreshes >= DEFAULT_MAX_REFRESHES) {
+      return `Upload credentials were renewed ${refreshes} times and the copy is still not done; re-run the command to continue`;
+    }
+    try {
+      lease = await args.renewLease();
+    } catch (error) {
+      return `Could not renew upload credentials (${reason}): ${errorDetail(error)}`;
+    }
+    refreshes++;
+    args.onCredentialsRenewed?.(refreshes, reason);
+    return null;
+  };
+
+  for (const batch of batches) {
+    let noProgressExpiredAttempts = 0;
+    for (;;) {
+      let pendingBefore: Set<string>;
+      try {
+        pendingBefore = await listAnnexedPathsNotAt(args.absolutePath, args.remote);
+      } catch (error) {
+        return fail(`Could not read the annex location log before copying: ${errorDetail(error)}`);
+      }
+      const toCopy = batch.filter((path) => pendingBefore.has(path));
+      if (toCopy.length === 0) break;
+
+      if (
+        lease &&
+        args.renewLease &&
+        lease.expiresAtMs - Date.now() < DEFAULT_REFRESH_MARGIN_MS + longestBatchMs
+      ) {
+        const renewalError = await renew("close to expiry");
+        if (renewalError) return fail(renewalError);
+      }
+
+      const started = Date.now();
+      const copied = await copyPathsToAnnexRemote(
+        args.absolutePath,
+        args.remote,
+        toCopy,
+        args.jobs,
+        lease?.credentials ?? args.credentials,
+      );
+      longestBatchMs = Math.max(longestBatchMs, Date.now() - started);
+
+      let pendingAfter: Set<string>;
+      try {
+        pendingAfter = await listAnnexedPathsNotAt(args.absolutePath, args.remote);
+      } catch (error) {
+        return fail(`Could not read the annex location log after copying: ${errorDetail(error)}`);
+      }
+      const remaining = toCopy.filter((path) => pendingAfter.has(path));
+      const delivered = toCopy.length - remaining.length;
+      filesCopied += delivered;
+      filesSent = Math.min(filesCopied, filesSent + copied.filesSent);
+      output = worse(output, copied.output);
+
+      // The location log wins over process status: git-annex can report an
+      // expired sibling after other paths in the same batch were already sent.
+      if (remaining.length === 0) break;
+      if (copied.success) {
+        return fail(
+          `git-annex copy finished successfully but ${remaining.length} path(s) remain pending at the remote`,
+        );
+      }
+      if (!isExpiredCredentialError(copied.error)) {
+        return fail(copied.error ?? "Failed to copy pending files to the remote");
+      }
+      if (!lease || !args.renewLease) {
+        return fail(copied.error ?? "Expired upload credentials cannot be renewed in this remote");
+      }
+
+      noProgressExpiredAttempts = delivered > 0 ? 0 : noProgressExpiredAttempts + 1;
+      if (noProgressExpiredAttempts >= MAX_FRUITLESS_REFRESHES) {
+        return fail(
+          `Copy keeps failing with expired credentials and the pending location-log set did not shrink: ${copied.error ?? "expired credentials"}`,
+        );
+      }
+      const renewalError = await renew("expired during copy");
+      if (renewalError) return fail(renewalError);
+    }
+  }
+
+  return { success: true, filesCopied, filesSent, output, lease };
+}
+
 /**
  * The decisions of upload step 9, in order, against git-annex's own records:
  *
@@ -824,6 +973,11 @@ export async function copyAnnexedToRemote(args: {
   addTargets: Array<{ path: string; size: number; type?: string }>;
   jobs: number;
   credentials?: S3Credentials;
+  lease?: CredentialLease;
+  renewLease?: () => Promise<CredentialLease>;
+  /** Smaller batch cap used by the real-API integration test. */
+  batchMaxFiles?: number;
+  onCredentialsRenewed?: (count: number, reason: string) => void;
   /** Effective destination identity; absent for direct callers disables stamp reuse. */
   remoteIdentity?: string;
   /**
@@ -923,16 +1077,22 @@ export async function copyAnnexedToRemote(args: {
     smallNotAnnexed,
   });
 
-  const copy = await copyPathsToAnnexRemote(
+  const copy = await copyPendingInBatches({
     absolutePath,
     remote,
     pending,
-    args.jobs,
-    args.credentials,
-  );
+    sizes: new Map(args.addTargets.map((file) => [file.path, file.size])),
+    jobs: args.jobs,
+    credentials: args.credentials,
+    lease: args.lease,
+    renewLease: args.renewLease,
+    batchMaxFiles: args.batchMaxFiles,
+    onCredentialsRenewed: args.onCredentialsRenewed,
+  });
   if (!copy.success) {
     return { status: "copy_failed", error: copy.error ?? "Failed to copy to remote" };
   }
+  const copyCredentials = copy.lease?.credentials ?? args.credentials;
 
   let resent = 0;
   let recordedOutput: OutputState = "understood";
@@ -944,7 +1104,7 @@ export async function copyAnnexedToRemote(args: {
       remote,
       recordedWithContent,
       args.jobs,
-      args.credentials,
+      copyCredentials,
     );
     if (!check.success) {
       return { status: "copy_failed", error: check.error ?? "Failed to check the remote" };
@@ -958,7 +1118,7 @@ export async function copyAnnexedToRemote(args: {
         remote,
         recordedNoLocal,
         args.jobs,
-        args.credentials,
+        copyCredentials,
       );
       if (!holds.success) {
         return { status: "copy_failed", error: holds.error ?? "Failed to check the remote" };
@@ -1233,9 +1393,15 @@ export async function listPendingAtRemote(absolutePath: string, remote: string):
  * production version asks the backend for STS credentials and configures the S3 remote;
  * a test can register a `directory` remote and return its directory as the identity.
  */
-export type OpenRemote = () => Promise<
-  Step<{ credentials?: S3Credentials; remoteIdentity?: string }>
->;
+export interface OpenedRemote {
+  credentials?: S3Credentials;
+  /** Present for STS-backed remotes so a bounded copy can renew before expiry. */
+  lease?: CredentialLease;
+  renewLease?: () => Promise<CredentialLease>;
+  remoteIdentity?: string;
+}
+
+export type OpenRemote = () => Promise<Step<OpenedRemote>>;
 
 /** The production {@link OpenRemote}: STS credentials from the backend, then the S3 remote. */
 function openS3Remote(absolutePath: string, datasetInfo: DatasetInfo): OpenRemote {
@@ -1273,8 +1439,17 @@ function openS3Remote(absolutePath: string, datasetInfo: DatasetInfo): OpenRemot
       return FAIL;
     }
     spinner.succeed("S3 remote configured");
+    const lease = leaseFromResponse(
+      toS3Credentials(creds.credentials),
+      creds.credentials.expiration,
+    );
     return ok({
-      credentials: toS3Credentials(creds.credentials),
+      credentials: lease.credentials,
+      lease,
+      renewLease: async () => {
+        const fresh = await requestUploadCredentials(datasetInfo.dataset_id);
+        return leaseFromResponse(toS3Credentials(fresh.credentials), fresh.credentials.expiration);
+      },
       // STS credentials authenticate the request but do not identify its destination.
       // Include every effective annex S3 option so a resume against another environment,
       // bucket, region, prefix, or public URL cannot reuse the previous target's stamp.
@@ -1358,6 +1533,8 @@ export async function transferAnnexedData(args: {
   addTargets: Array<{ path: string; size: number; mtimeMs?: number; type?: string }>;
   jobs: number;
   openRemote: OpenRemote;
+  /** Test-only cap for exercising multiple genuine API leases in a small repo. */
+  copyBatchMaxFiles?: number;
 }): Promise<Step<{ annexedPaths: Set<string> }>> {
   const { absolutePath, progress, addTargets } = args;
   let spinner: Ora | null = null;
@@ -1380,6 +1557,18 @@ export async function transferAnnexedData(args: {
       addTargets,
       jobs: args.jobs,
       credentials: opened.value.credentials,
+      lease: opened.value.lease,
+      renewLease: opened.value.renewLease,
+      batchMaxFiles: args.copyBatchMaxFiles,
+      onCredentialsRenewed: (count: number, reason: string) => {
+        const line = `Renewed upload credentials (${reason}; renewal ${count})`;
+        if (spinner) {
+          spinner.info(line);
+          spinner = ora("Uploading data files to S3...").start();
+        } else {
+          console.log(chalk.dim(`  ${line}`));
+        }
+      },
       skipRecordedCheck: (recordedCount: number, fingerprint: string) =>
         isRecordedCheckFresh(progress, recordedCount, fingerprint),
       onPlan: (plan: S3CopyPlan) => {

@@ -59,6 +59,8 @@ import { createHash } from "node:crypto";
 export const MIN_PART_BYTES = 5 * 1024 * 1024;
 
 export type StandinOp =
+  | "GetBucketLocation"
+  | "CreateBucket"
   | "ListObjectsV2"
   | "ListObjectVersions"
   | "HeadObject"
@@ -261,7 +263,7 @@ function parseRange(header: string | null, size: number): [number, number] | "ba
   return [start, end];
 }
 
-export function startS3Standin(): S3Standin {
+export function startS3Standin(options: { region?: string } = {}): S3Standin {
   const store = new Map<string, StoredVersion[]>(); // oldest -> newest
   const uploads = new Map<string, Upload>();
   const log: StandinLogEntry[] = [];
@@ -427,6 +429,21 @@ export function startS3Standin(): S3Standin {
 
       // ---- bucket-level: listings ----
       if (key === "") {
+        if (req.method === "GET" && q.has("location")) {
+          const fault = enter("GetBucketLocation", "");
+          if (fault) return fail("GetBucketLocation", fault);
+          record({ op: "GetBucketLocation", key: "", status: 200 });
+          const region = options.region === "us-east-1" ? "" : (options.region ?? "");
+          return xml(
+            `<LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">${xmlEscape(region)}</LocationConstraint>`,
+          );
+        }
+        if (req.method === "PUT") {
+          const fault = enter("CreateBucket", "");
+          if (fault) return fail("CreateBucket", fault);
+          record({ op: "CreateBucket", key: "", status: 200 });
+          return new Response(null, { status: 200 });
+        }
         const encode = q.get("encoding-type") === "url";
         const limit = Math.min(Number(q.get("max-keys") ?? pageSize), pageSize);
         const prefix = q.get("prefix") ?? "";
