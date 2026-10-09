@@ -22,6 +22,7 @@ import { Hono } from "hono";
 import {
   ADMIN_USER_SEARCH_MAX_TERMS,
   ADMIN_USER_SEARCH_MAX_TERM_CHARS,
+  adminUserDetailSchema,
 } from "../../shared/contract/admin-user.js";
 import { adminRoutes } from "../src/routes/admin";
 import { hashApiKey } from "../src/services/token";
@@ -121,6 +122,19 @@ describe("the column classification", () => {
     // unreturned by default; one in the classification and not the table is a
     // SELECT that fails at request time. Both are caught here, at test time.
     expect(classified).toEqual(live);
+  });
+
+  test("the detail contract names exactly the columns the detail route selects, plus its computed values", () => {
+    const selected = ADMIN_USER_DETAIL_SELECT.split(", ")
+      .map((column) => column.replace(/^u\./, ""))
+      .sort();
+    const computed = ["dataset_count", "active_tokens", "linked_identities"];
+    const declared = Object.keys(adminUserDetailSchema.shape)
+      .filter((key) => !computed.includes(key))
+      .sort();
+    // The contract's header leans on USER_COLUMN_ROLES being the single
+    // classification; this is what makes a drift between the two a failure.
+    expect(declared).toEqual(selected);
   });
 
   test("every credential column is a secret and none is searched or selected", () => {
