@@ -701,31 +701,6 @@ describe("first git-annex branch push prunes unpublished description history (#1
     return false;
   }
 
-  async function divergentAnnexRepo(name: string): Promise<{ repo: string; bare: string }> {
-    const repo = await newAnnexRepo(`${name}-local`);
-    const bare = await bareOrigin(`${name}-origin`);
-    await Bun.write(join(repo, "README.md"), "divergent annex fixture\n");
-    expect((await runCmd(["git", "add", "README.md"], repo)).exitCode).toBe(0);
-    expect((await runCmd(["git", "commit", "-qm", "fixture"], repo)).exitCode).toBe(0);
-    expect((await runCmd(["git", "remote", "add", "origin", bare], repo)).exitCode).toBe(0);
-    expect((await runCmd(["git", "push", "origin", "git-annex"], repo)).exitCode).toBe(0);
-
-    const remoteUpdate = await cloneAnnexRepo(repo, `${name}-remote-update`);
-    expect(
-      (await runCmd(["git", "remote", "set-url", "origin", bare], remoteUpdate)).exitCode,
-    ).toBe(0);
-    expect(
-      (await runCmd(["git", "annex", "describe", "here", "nemar-remote-safe-update"], remoteUpdate))
-        .exitCode,
-    ).toBe(0);
-    expect((await runCmd(["git", "push", "origin", "git-annex"], remoteUpdate)).exitCode).toBe(0);
-    expect(
-      (await runCmd(["git", "annex", "describe", "here", "nemar-local-safe-update"], repo))
-        .exitCode,
-    ).toBe(0);
-    return { repo, bare };
-  }
-
   test("re-roots local annex history before its first remote push", async () => {
     const repo = await repoWithLegacyDescription("first-push-legacy");
     const bare = await bareOrigin("first-push-origin");
