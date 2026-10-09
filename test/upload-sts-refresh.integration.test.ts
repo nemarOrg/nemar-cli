@@ -5,6 +5,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { requestUploadCredentials } from "../src/lib/api/data";
@@ -27,21 +28,25 @@ setDefaultTimeout(30_000);
 
 const DATASET_ID = "nm099999";
 const REMOTE = "nemar-s3";
-const API_HOST = (() => {
+const TEST_API_URL = (() => {
   try {
-    return new URL(TEST_CONFIG.apiUrl).hostname.toLowerCase();
+    return new URL(TEST_CONFIG.apiUrl);
   } catch {
-    return "";
+    return undefined;
   }
 })();
+const API_HOST = TEST_API_URL?.hostname.toLowerCase() ?? "";
 const gitAnnexAvailable = Bun.which("git-annex") !== null;
 const canRun =
   !LIVE_TARGET_BLOCKED &&
+  TEST_API_URL?.protocol === "https:" &&
   API_HOST === "nemar-api-dev.sccn-org.workers.dev" &&
   TEST_CONFIG.adminApiKey.length > 0 &&
   gitAnnexAvailable;
 const scratch = makeScratch("nemar-upload-sts-refresh");
 let standin: ReturnType<typeof startS3Standin> | undefined;
+const sessionTokenFingerprint = (token: string): string =>
+  createHash("sha256").update(token).digest("hex");
 
 beforeAll(() => {
   if (canRun) setConfig("apiKey", TEST_CONFIG.adminApiKey);
@@ -53,7 +58,7 @@ afterAll(() => {
 });
 
 describe.skipIf(!canRun)("STS credential renewal through the real upload transfer", () => {
-  test("renews 15-minute API leases between batches and signs only loopback S3 copies", async () => {
+  test("renews expired 15-minute API leases and signs loopback copies with the refreshed session", async () => {
     const repo = await newDatasetRepo(scratch.root, "lease-refresh");
     const samples = [
       {
@@ -90,7 +95,8 @@ describe.skipIf(!canRun)("STS credential renewal through the real upload transfe
     expect(allowLoopback.exitCode).toBe(0);
 
     const initialAccessKeyId = initial.credentials.access_key_id;
-    const renewedAccessKeyIds: string[] = [];
+    const initialTokenFingerprint = sessionTokenFingerprint(initial.credentials.session_token);
+    const renewedCredentials: Array<{ accessKeyId: string; sessionTokenFingerprint: string }> = [];
     const transfer = await transferAnnexedData({
       absolutePath: repo,
       progress: initUploadProgress(repo, DATASET_ID, targets),
@@ -130,7 +136,20 @@ describe.skipIf(!canRun)("STS credential renewal through the real upload transfe
           lease: initialLease,
           renewLease: async () => {
             const renewed = await requestUploadCredentials(DATASET_ID, 900);
-            renewedAccessKeyIds.push(renewed.credentials.access_key_id);
+            renewedCredentials.push({
+              accessKeyId: renewed.credentials.access_key_id,
+              sessionTokenFingerprint: sessionTokenFingerprint(renewed.credentials.session_token),
+            });
+            if (renewedCredentials.length === 1) {
+              // Keep returning ExpiredToken for the lease used by the first batch, including
+              // any retries git-annex makes internally. Only the application-level renewal
+              // can then make progress with the next API-issued access key and session token.
+              standin?.inject("PutObject", {
+                code: "ExpiredToken",
+                status: 403,
+                keyId: renewed.credentials.access_key_id,
+              });
+            }
             return {
               credentials: toS3Credentials(renewed.credentials),
               expiresAtMs: Date.parse(renewed.credentials.expiration),
@@ -148,14 +167,25 @@ describe.skipIf(!canRun)("STS credential renewal through the real upload transfe
     const setupUsedInitialLease = standin.log.some(
       (entry) =>
         entry.keyId === initialAccessKeyId &&
+        entry.sessionTokenFingerprint === initialTokenFingerprint &&
         (entry.op === "GetBucketLocation" || entry.op === "CreateBucket"),
     );
     expect(setupUsedInitialLease).toBe(true);
-    expect(renewedAccessKeyIds).toHaveLength(2);
+    expect(renewedCredentials).toHaveLength(3);
 
-    const copyKeyIds = standin.calls("PutObject").map((entry) => entry.keyId ?? "");
-    expect(copyKeyIds).toHaveLength(2);
-    expect(copyKeyIds.every((keyId) => renewedAccessKeyIds.includes(keyId))).toBe(true);
-    expect(copyKeyIds.every((keyId) => keyId !== initialAccessKeyId)).toBe(true);
+    const copyRequests = standin.calls("PutObject");
+    const expiredKeyId = renewedCredentials[0]?.accessKeyId;
+    const failedLeaseRequests = copyRequests.filter((entry) => entry.keyId === expiredKeyId);
+    const successfulCopyRequests = copyRequests.filter((entry) => entry.status === 200);
+    expect(failedLeaseRequests.length).toBeGreaterThan(0);
+    expect(failedLeaseRequests.every((entry) => entry.status === 403)).toBe(true);
+    expect(successfulCopyRequests).toHaveLength(2);
+    for (const entry of copyRequests) {
+      const credentials = renewedCredentials.find(({ accessKeyId }) => accessKeyId === entry.keyId);
+      expect(credentials).toBeDefined();
+      expect(entry.keyId).not.toBe(initialAccessKeyId);
+      expect(entry.sessionTokenFingerprint).toBe(credentials?.sessionTokenFingerprint);
+    }
+    expect(successfulCopyRequests.every((entry) => entry.keyId !== expiredKeyId)).toBe(true);
   });
 });

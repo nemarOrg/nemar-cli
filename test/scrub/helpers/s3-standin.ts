@@ -104,6 +104,8 @@ export interface StandinLogEntry {
   partNumber?: number;
   /** The access key id the request was signed with. */
   keyId?: string;
+  /** SHA-256 fingerprint of the session token header; token material is never logged. */
+  sessionTokenFingerprint?: string;
   /** A PutObject or UploadPart request that carried an `x-amz-checksum-*` header (or Content-MD5). */
   checksum?: boolean;
   size?: number;
@@ -121,6 +123,8 @@ export interface Fault {
   times?: number;
   /** Only calls for this key. */
   key?: string;
+  /** Only calls signed with this access key id. */
+  keyId?: string;
   /**
    * The request takes effect, THEN the error is returned: an answer lost on the way back. Only
    * CreateMultipartUpload honors it (the upload is created and left open).
@@ -296,12 +300,13 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
     return v.versionId;
   };
 
-  const enter = (op: StandinOp, key: string): Fault | null => {
+  const enter = (op: StandinOp, key: string, keyId?: string): Fault | null => {
     const n = (opCounts.get(op) ?? 0) + 1;
     opCounts.set(op, n);
     for (const h of hooks.get(op) ?? []) if (h.nth === n) h.fn();
     for (const f of faults.get(op) ?? []) {
       if (f.key !== undefined && f.key !== key) continue;
+      if (f.keyId !== undefined && f.keyId !== keyId) continue;
       f.seen += 1;
       if (f.seen <= (f.after ?? 0)) continue;
       if (f.times !== undefined && f.failed >= f.times) continue;
@@ -341,7 +346,12 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
       const q = url.searchParams;
       const versionId = q.get("versionId");
       const keyId = /Credential=([^/]+)\//.exec(req.headers.get("authorization") ?? "")?.[1];
-      const record = (e: Omit<StandinLogEntry, "bucket">) => log.push({ bucket, keyId, ...e });
+      const sessionToken = req.headers.get("x-amz-security-token");
+      const sessionTokenFingerprint = sessionToken
+        ? createHash("sha256").update(sessionToken).digest("hex")
+        : undefined;
+      const record = (e: Omit<StandinLogEntry, "bucket">) =>
+        log.push({ bucket, keyId, sessionTokenFingerprint, ...e });
       const fail = (op: StandinOp, f: Fault, extra: Partial<StandinLogEntry> = {}) => {
         record({ op, key, status: f.status, ...extra });
         return s3Error(f.code, f.status, `induced ${f.code} (test)`);
@@ -846,7 +856,7 @@ export function startS3Standin(options: { region?: string } = {}): S3Standin {
       // ---- PutObject ----
       if (req.method === "PUT" && !req.headers.has("x-amz-copy-source")) {
         const body = new Uint8Array(await req.arrayBuffer());
-        const fault = enter("PutObject", key);
+        const fault = enter("PutObject", key, keyId);
         if (fault) return fail("PutObject", fault);
         const lock = parseLock(req);
         if (lock === "bad") {
