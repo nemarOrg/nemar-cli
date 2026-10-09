@@ -48,6 +48,21 @@ import { revokeUserIamAccess } from "../../services/iam";
 import { emailFieldSchema, normalizeGithubHandle, normalizeOrcid } from "../../services/identity";
 import { PRIVATE_GRANTS_PURGE_SQL } from "../../services/private-auth";
 import { errorMessage } from "../../services/repo-metadata";
+import {
+  type RankableUser,
+  classifyStrictMatch,
+  closestAccounts,
+  exactColumns,
+  identityKeys,
+  sortByMatchKind,
+} from "../../services/user-fuzzy";
+import {
+  ADMIN_USER_NON_SECRET_SELECT,
+  buildExactIdentifierSql,
+  buildUserSearchSql,
+  parseSearchTerms,
+  splitMatchedIn,
+} from "../../services/user-search";
 import { type Bindings, type Variables, isDemotion, parseRole } from "../../types/bindings";
 import type { AdminRouter } from "./shared";
 
@@ -759,6 +774,93 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     const kind = c.req.query("kind"); // person, service, test
     const db = c.env.DB;
 
+    if (role && !["owner", "admin", "member"].includes(role)) {
+      return c.json({ error: "Invalid role. Must be: owner, admin, or member" }, 400);
+    }
+    if (kind && !(ACCOUNT_KIND_VALUES as readonly string[]).includes(kind)) {
+      return c.json({ error: `Invalid kind. Must be: ${ACCOUNT_KIND_VALUES.join(", ")}` }, 400);
+    }
+
+    // Search every text field of an account (ADR 0093). Parsed before anything
+    // else so a bad query is refused rather than quietly listing everyone,
+    // which is the opposite of what someone looking up one person wants.
+    const rawQuery = c.req.query("q");
+    let terms: string[] | null = null;
+    if (rawQuery !== undefined) {
+      const parsed = parseSearchTerms(rawQuery);
+      if (!parsed.ok) {
+        return c.json({ error: "invalid_search", message: parsed.message }, 400);
+      }
+      terms = parsed.terms;
+    }
+
+    // The status / tier / role / kind filters, on a FRESH parameter list. A
+    // statement numbers its parameters from 1 and must be given exactly the
+    // ones it uses, so the close-match pass below (a second statement with the
+    // same filters and no search words) cannot share the first one's list.
+    // Numbered placeholders (`?1`, `?2`, ...) throughout, because a search word
+    // is referenced from the WHERE and from the "matched in" column and must be
+    // bound once (ADR 0093); SQLite does not allow bare `?` and `?N` in one
+    // statement, so every parameter goes through `bind`.
+    const filters = () => {
+      const conditions: string[] = [];
+      const params: string[] = [];
+      const bind = (value: string): string => {
+        params.push(value);
+        return `?${params.length}`;
+      };
+      return { conditions, params, bind };
+    };
+    const applyFilters = (f: ReturnType<typeof filters>): void => {
+      const { conditions, bind } = f;
+
+      // Hide tombstoned (soft-deleted) users by default; ?include_deleted=true lets
+      // an admin audit them (they show as masked deleted+<id>@deleted.invalid rows).
+      if (c.req.query("include_deleted") !== "true") {
+        conditions.push("deleted_at IS NULL");
+      }
+
+      if (status) {
+        conditions.push(`status = ${bind(status)}`);
+      }
+
+      // An OPEN upload request: asked, and not yet answered (ADR 0042, #1253).
+      // Phase 1 could only approximate this as "verified with no grant", which
+      // was every base-tier account whether or not anyone wanted to upload. The
+      // grant itself is what closes a request, so `service_access = 0` is the
+      // "still open" half rather than a second status column.
+      //
+      // `status = 'verified'` is part of the filter and not left to the caller.
+      // Revoke clears the request stamps, so a revoked row should not match
+      // anyway -- but that is the CURRENT behaviour of one route, and this
+      // predicate is what nemarOrg/website#301 renders as "open requests". A
+      // consumer should get that meaning without having to know to add a status
+      // param, and a future path that revokes a row some other way must not be
+      // able to put a dead account back in an admin's queue. Belt and braces, on
+      // purpose. (`revoked_iam_pending` is excluded by the same clause.)
+      //
+      // Server-side, unlike the tier filters the CLI applies over the returned
+      // rows, because this one cannot be computed from what the listing used to
+      // return: the timestamp is new.
+      if (c.req.query("awaiting_approval") === "1") {
+        conditions.push("upload_access_requested_at IS NOT NULL");
+        conditions.push("service_access = 0");
+        conditions.push("status = 'verified'");
+      }
+
+      if (role) {
+        if (role === "member") {
+          conditions.push("(role = 'member' OR role IS NULL)");
+        } else {
+          conditions.push(`role = ${bind(role)}`);
+        }
+      }
+
+      if (kind) {
+        conditions.push(`account_kind = ${bind(kind)}`);
+      }
+    };
+
     // service_access is what separates an uploader from a browse-only account
     // now that they no longer track `status` one-for-one (ADR 0040); the
     // identity columns are here because a web/ORCID row has username = NULL
@@ -766,91 +868,85 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     // upload_access_requested_at is what makes "awaiting approval" a fact
     // rather than an inference (ADR 0042, #1253). account_kind is what this
     // account IS (epic #1272 phase 4, #1284; ADR 0048).
-    let query = `
-    SELECT
+    const LISTING_COLUMNS = `
       id, username, email, github_username, status,
       email_verified, role, created_at, approved_at, revoked_at,
       signup_source, service_access, service_access_granted_at,
-      given_name, family_name, orcid, upload_access_requested_at, account_kind
-    FROM users
-  `;
-    const conditions: string[] = [];
-    const params: string[] = [];
+      given_name, family_name, orcid, upload_access_requested_at, account_kind`;
 
-    // Hide tombstoned (soft-deleted) users by default; ?include_deleted=true lets
-    // an admin audit them (they show as masked deleted+<id>@deleted.invalid rows).
-    if (c.req.query("include_deleted") !== "true") {
-      conditions.push("deleted_at IS NULL");
+    const main = filters();
+    let matchedInSql = "";
+    if (terms && rawQuery !== undefined) {
+      const search = buildUserSearchSql(terms, main.bind);
+      // OR-ed with the substring search: an identifier as people paste it
+      // (`@name`, an ORCID URL) is not a substring of anything stored, yet names
+      // one account outright.
+      const exact = buildExactIdentifierSql(identityKeys(rawQuery), main.bind);
+      main.conditions.push(exact ? `((${search.where}) OR ${exact})` : `(${search.where})`);
+      matchedInSql = `, ${search.matchedIn} AS matched_in`;
+    }
+    applyFilters(main);
+    const where = main.conditions.length > 0 ? ` WHERE ${main.conditions.join(" AND ")}` : "";
+    const found = await db
+      .prepare(
+        `SELECT ${LISTING_COLUMNS}${matchedInSql} FROM users${where} ORDER BY created_at DESC`,
+      )
+      .bind(...main.params)
+      .all<Record<string, unknown>>();
+
+    if (!terms || rawQuery === undefined) {
+      return c.json({ users: found.results, count: found.results.length });
     }
 
-    if (status) {
-      conditions.push("status = ?");
-      params.push(status);
+    // A search. `matched_in` leaves SQL as a space separated string and goes
+    // out as an array; each row is classified (exact / name / prefix /
+    // substring) and the best come first, newest first among equals.
+    if (found.results.length > 0) {
+      const ranked = sortByMatchKind(
+        found.results.map((row) => {
+          const user = row as unknown as RankableUser;
+          const matchKind = classifyStrictMatch(rawQuery, terms, user);
+          const fromSql = splitMatchedIn(row.matched_in);
+          return {
+            ...row,
+            // An exact hit the substring search did not itself see (a pasted
+            // `@handle`) still says which identifier it is.
+            matched_in: fromSql.length > 0 ? fromSql : exactColumns(rawQuery, user),
+            match_kind: matchKind,
+          };
+        }),
+      );
+      return c.json({ users: ranked, count: ranked.length });
     }
 
-    // An OPEN upload request: asked, and not yet answered (ADR 0042, #1253).
-    // Phase 1 could only approximate this as "verified with no grant", which
-    // was every base-tier account whether or not anyone wanted to upload. The
-    // grant itself is what closes a request, so `service_access = 0` is the
-    // "still open" half rather than a second status column.
-    //
-    // `status = 'verified'` is part of the filter and not left to the caller.
-    // Revoke clears the request stamps, so a revoked row should not match
-    // anyway -- but that is the CURRENT behaviour of one route, and this
-    // predicate is what nemarOrg/website#301 renders as "open requests". A
-    // consumer should get that meaning without having to know to add a status
-    // param, and a future path that revokes a row some other way must not be
-    // able to put a dead account back in an admin's queue. Belt and braces, on
-    // purpose. (`revoked_iam_pending` is excluded by the same clause.)
-    //
-    // Server-side, unlike the tier filters the CLI applies over the returned
-    // rows, because this one cannot be computed from what the listing used to
-    // return: the timestamp is new.
-    if (c.req.query("awaiting_approval") === "1") {
-      conditions.push("upload_access_requested_at IS NOT NULL");
-      conditions.push("service_access = 0");
-      conditions.push("status = 'verified'");
-    }
-
-    if (role) {
-      if (!["owner", "admin", "member"].includes(role)) {
-        return c.json({ error: "Invalid role. Must be: owner, admin, or member" }, 400);
-      }
-      if (role === "member") {
-        conditions.push("(role = 'member' OR role IS NULL)");
-      } else {
-        conditions.push("role = ?");
-        params.push(role);
-      }
-    }
-
-    if (kind) {
-      if (!(ACCOUNT_KIND_VALUES as readonly string[]).includes(kind)) {
-        return c.json({ error: `Invalid kind. Must be: ${ACCOUNT_KIND_VALUES.join(", ")}` }, 400);
-      }
-      conditions.push("account_kind = ?");
-      params.push(kind);
-    }
-
-    if (conditions.length > 0) {
-      query += ` WHERE ${conditions.join(" AND ")}`;
-    }
-
-    query += " ORDER BY created_at DESC";
-
-    const users = await db
-      .prepare(query)
-      .bind(...params)
-      .all();
-
-    return c.json({
-      users: users.results,
-      count: users.results.length,
-    });
+    // Nothing matched. Offer the nearest accounts rather than an empty page
+    // (typos, accents), from the same filters minus the search words. Read as
+    // a second statement over at most a few hundred accounts, and only on a
+    // miss; the closeness itself is scored in code because SQLite has no edit
+    // distance. Fields beyond the listing's are read (affiliation, city,
+    // country) so a close match there is found, and dropped from the answer.
+    const near = filters();
+    applyFilters(near);
+    const nearWhere = near.conditions.length > 0 ? ` WHERE ${near.conditions.join(" AND ")}` : "";
+    const candidates = await db
+      .prepare(
+        `SELECT ${LISTING_COLUMNS}, affiliation, city, country FROM users${nearWhere} ORDER BY created_at DESC`,
+      )
+      .bind(...near.params)
+      .all<Record<string, unknown>>();
+    const close = closestAccounts(terms, candidates.results).map(
+      ({ affiliation: _a, city: _c, country: _k, ...row }) => row,
+    );
+    return c.json({ users: close, count: close.length });
   });
 
   /**
    * GET /admin/users/:username - Get details for a specific user
+   *
+   * An explicit column list, never the whole row: this route used to select
+   * every column and so returned `password_hash`, `verification_token` and the
+   * encrypted AWS key pair to any admin (ADR 0093). Which columns are secrets
+   * is classified once, in `USER_COLUMN_ROLES`.
    */
   admin.get("/users/:username", async (c) => {
     const username = c.req.param("username");
@@ -860,7 +956,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       .prepare(
         `
     SELECT
-      u.*,
+      ${ADMIN_USER_NON_SECRET_SELECT},
       (SELECT COUNT(*) FROM datasets WHERE owner_user_id = u.id) as dataset_count,
       (SELECT COUNT(*) FROM tokens WHERE user_id = u.id AND revoked_at IS NULL) as active_tokens
     FROM users u

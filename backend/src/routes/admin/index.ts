@@ -24,6 +24,7 @@ import { registerNoticeRoutes } from "./notices";
 import { registerPublishRoutes } from "./publish";
 import type { AdminRouter } from "./shared";
 import { registerUserDuplicateRoutes } from "./user-duplicates";
+import { registerUserEditRoutes } from "./user-edit";
 import { registerUserKeyRoutes } from "./user-keys";
 import { registerUserNameRoutes } from "./user-names";
 import { registerUserUsernameRoutes } from "./user-usernames";
@@ -47,6 +48,7 @@ adminRoutes.use("*", adminMiddleware);
 // through `GET /admin/users/:username`; the same trade backfill-names makes.
 registerUserDuplicateRoutes(adminRoutes);
 registerUsersRoutes(adminRoutes);
+registerUserEditRoutes(adminRoutes);
 registerUserKeyRoutes(adminRoutes);
 registerUserNameRoutes(adminRoutes);
 registerUserUsernameRoutes(adminRoutes);
