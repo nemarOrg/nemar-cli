@@ -597,6 +597,19 @@ describe("CLI Dataset Upload", () => {
     expect(stdout).toContain("--annex-jobs must be a positive integer");
   });
 
+  test("nemar dataset upload rejects a malformed S3 copy worker count before authentication", async () => {
+    const { stdout, exitCode } = await runCli([
+      "dataset",
+      "upload",
+      "/tmp/test",
+      "--jobs",
+      "4workers",
+    ]);
+
+    expect(exitCode).not.toBe(0);
+    expect(stdout).toContain("--jobs must be a positive integer");
+  });
+
   test("nemar dataset upload requires authentication", async () => {
     const ctx = createTestContext();
 

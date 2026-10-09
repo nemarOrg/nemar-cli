@@ -636,6 +636,13 @@ Examples:
   $ ${invokedAs(command)} ./ds --dataset-id nm099998   # Standing fixture (admin, staging)`,
     )
     .action(async (datasetPath, options) => {
+      const jobsValue = String(options.jobs);
+      const jobs = Number.parseInt(jobsValue, 10);
+      if (!/^\d+$/.test(jobsValue) || !Number.isSafeInteger(jobs) || jobs < 1) {
+        console.log(chalk.red(`Error: --jobs must be a positive integer (got "${options.jobs}").`));
+        process.exit(1);
+      }
+
       const annexJobs = Number(options.annexJobs);
       if (!Number.isSafeInteger(annexJobs) || annexJobs < 1) {
         console.log(
