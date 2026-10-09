@@ -27,6 +27,8 @@ import { type LocalDatasetConfig, writeLocalConfig } from "../dataset-config.js"
 import { displayName, isPrintableInCommand } from "../display-name.js";
 import { acceptGitHubInvitation, configureGitHubRemote } from "../git-annex/github.js";
 import {
+  ADD_CHUNK_MAX_PATHS,
+  chunkAddTargets,
   configureLargefiles,
   ensureGitAnnexInitialized,
   gitAnnexAdd,
@@ -50,7 +52,9 @@ import {
   toS3Credentials,
 } from "../git-annex/s3-remote.js";
 import {
+  type CopyOutcome,
   type OutputState,
+  type RemoteHoldsOutcome,
   checkRemoteHolds,
   copyPathsToAnnexRemote,
   listAnnexedKeys,
@@ -840,7 +844,262 @@ interface PendingCopyOutcome {
   filesCopied: number;
   filesSent: number;
   output: OutputState;
-  lease?: CredentialLease;
+}
+
+interface UploadCredentialSession {
+  credentials: S3Credentials | undefined;
+  lease: CredentialLease | undefined;
+  renewLease: (() => Promise<CredentialLease>) | undefined;
+  refreshes: number;
+  longestBatchMs: number;
+  onCredentialsRenewed: ((count: number, reason: string) => void) | undefined;
+}
+
+function currentUploadCredentials(session: UploadCredentialSession): S3Credentials | undefined {
+  return session.lease?.credentials ?? session.credentials;
+}
+
+function uploadCredentialsNeedRefresh(session: UploadCredentialSession): boolean {
+  return Boolean(
+    session.lease &&
+      session.renewLease &&
+      session.lease.expiresAtMs - Date.now() < DEFAULT_REFRESH_MARGIN_MS + session.longestBatchMs,
+  );
+}
+
+function recordUploadBatchDuration(session: UploadCredentialSession, durationMs: number): void {
+  session.longestBatchMs = Math.max(session.longestBatchMs, durationMs);
+}
+
+async function renewUploadCredentials(
+  session: UploadCredentialSession,
+  reason: string,
+  operation: string,
+): Promise<string | null> {
+  if (!session.renewLease) return "Upload credentials cannot be renewed in this remote";
+  if (session.refreshes >= DEFAULT_MAX_REFRESHES) {
+    return `Upload credentials were renewed ${session.refreshes} times and the ${operation} is still not done; re-run the command to continue`;
+  }
+  try {
+    session.lease = await session.renewLease();
+  } catch (error) {
+    return `Could not renew upload credentials (${reason}): ${errorDetail(error)}`;
+  }
+  session.refreshes++;
+  session.onCredentialsRenewed?.(session.refreshes, reason);
+  return null;
+}
+
+function expiredCredentialError(outcome: CopyOutcome | RemoteHoldsOutcome): string | undefined {
+  const errors = [
+    outcome.error,
+    ...("absent" in outcome ? outcome.absent.flatMap((file) => file.errors) : []),
+  ];
+  return errors.find(isExpiredCredentialError);
+}
+
+function planRecordedCheckBatches(
+  paths: string[],
+  sizes: Map<string, number>,
+  maxFiles?: number,
+): string[][] {
+  const batches: string[][] = [];
+  let knownSizePaths: string[] = [];
+  const flushKnownSizePaths = () => {
+    if (knownSizePaths.length === 0) return;
+    batches.push(
+      ...planCopyBatches(knownSizePaths, sizes, {
+        maxFiles: maxFiles ?? ADD_CHUNK_MAX_PATHS,
+      }),
+    );
+    knownSizePaths = [];
+  };
+
+  for (const path of paths) {
+    if (sizes.has(path)) {
+      knownSizePaths.push(path);
+    } else {
+      // Legacy annexed paths can be outside today's upload plan. A missing size is
+      // unknown, not zero: isolate it so it cannot hide inside a large lease batch.
+      flushKnownSizePaths();
+      batches.push([path]);
+    }
+  }
+  flushKnownSizePaths();
+  return batches;
+}
+
+/**
+ * Run one argv-bounded recorded-file check under the shared upload lease. A check
+ * that reports an expired lease is repeated only for this chunk; after refresh its
+ * result replaces the stale attempt, including any fsck location-log corrections.
+ */
+async function runRecordedCheckChunk<T extends CopyOutcome | RemoteHoldsOutcome>(args: {
+  session: UploadCredentialSession;
+  run: (credentials: S3Credentials | undefined) => Promise<T>;
+  operation: "copy check" | "presence check";
+}): Promise<{ success: true; outcome: T } | { success: false; error: string }> {
+  let fruitlessExpiredAttempts = 0;
+  let useJustRenewedLease = false;
+  const sentPaths = new Set<string>();
+  let sentCountReliable = true;
+  for (;;) {
+    if (!useJustRenewedLease && uploadCredentialsNeedRefresh(args.session)) {
+      const renewalError = await renewUploadCredentials(
+        args.session,
+        "close to expiry",
+        "recorded-file verification",
+      );
+      if (renewalError) return { success: false, error: renewalError };
+    }
+    useJustRenewedLease = false;
+
+    const started = Date.now();
+    const outcome = await args.run(currentUploadCredentials(args.session));
+    recordUploadBatchDuration(args.session, Date.now() - started);
+
+    const sentCountBeforeAttempt = sentPaths.size;
+    if ("sentPaths" in outcome) {
+      for (const path of outcome.sentPaths) sentPaths.add(path);
+      if (outcome.output !== "understood" || outcome.filesSent !== outcome.sentPaths.length) {
+        sentCountReliable = false;
+      }
+    }
+    // A newly reported transfer makes the next chunk retry less fruitless. This
+    // signal only bounds retries; the location log remains the durable authority.
+    const transferredNewPath = sentPaths.size > sentCountBeforeAttempt;
+
+    const explicitExpiry = expiredCredentialError(outcome);
+    // S3 HeadObject errors are generic, so git-annex cannot always name an expired
+    // token. If an errored check returns after its known lease expiration, refresh it.
+    const failedAfterLeaseExpiry = Boolean(
+      args.session.lease &&
+        args.session.lease.expiresAtMs <= Date.now() &&
+        (outcome.error !== undefined || ("absent" in outcome && outcome.absent.length > 0)),
+    );
+    const expired =
+      explicitExpiry ??
+      (failedAfterLeaseExpiry
+        ? "The credential lease expired while the recorded-file check was running"
+        : undefined);
+    if (!expired) {
+      if (!outcome.success) {
+        return {
+          success: false,
+          error: outcome.error ?? `Failed to run the recorded-file ${args.operation}`,
+        };
+      }
+      if ("sentPaths" in outcome) {
+        return {
+          success: true,
+          outcome: {
+            ...outcome,
+            filesSent: sentCountReliable ? sentPaths.size : outcome.filesSent,
+            sentPaths: [...sentPaths],
+            output: sentCountReliable
+              ? outcome.output
+              : worseOutputState(outcome.output, "unrecognized"),
+          } as T,
+        };
+      }
+      return { success: true, outcome };
+    }
+
+    if (!args.session.lease || !args.session.renewLease) {
+      return {
+        success: false,
+        error:
+          outcome.error ??
+          `Expired upload credentials interrupted the recorded-file ${args.operation}: ${expired}`,
+      };
+    }
+    if (transferredNewPath) {
+      fruitlessExpiredAttempts = 0;
+    } else {
+      fruitlessExpiredAttempts++;
+    }
+    if (fruitlessExpiredAttempts >= MAX_FRUITLESS_REFRESHES) {
+      return {
+        success: false,
+        error: `Recorded-file ${args.operation} keeps failing with expired credentials: ${expired}`,
+      };
+    }
+    const renewalError = await renewUploadCredentials(
+      args.session,
+      explicitExpiry
+        ? "expired during recorded-file verification"
+        : "lease expired during recorded-file verification",
+      "recorded-file verification",
+    );
+    if (renewalError) return { success: false, error: renewalError };
+    useJustRenewedLease = true;
+  }
+}
+
+function worseOutputState(a: OutputState, b: OutputState): OutputState {
+  return a === "unrecognized" || b === "unrecognized"
+    ? "unrecognized"
+    : a === "partial" || b === "partial"
+      ? "partial"
+      : "understood";
+}
+
+async function checkRecordedWithContent(args: {
+  absolutePath: string;
+  remote: string;
+  paths: string[];
+  sizes: Map<string, number>;
+  jobs: number;
+  batchMaxFiles?: number;
+  credentialSession: UploadCredentialSession;
+}): Promise<
+  { success: true; filesSent: number; output: OutputState } | { success: false; error: string }
+> {
+  let filesSent = 0;
+  let output: OutputState = "understood";
+  for (const batch of planRecordedCheckBatches(args.paths, args.sizes, args.batchMaxFiles)) {
+    for (const chunk of chunkAddTargets(batch)) {
+      const check = await runRecordedCheckChunk({
+        session: args.credentialSession,
+        operation: "copy check",
+        run: (credentials) =>
+          copyPathsToAnnexRemote(args.absolutePath, args.remote, chunk, args.jobs, credentials),
+      });
+      if (!check.success) return check;
+      filesSent += check.outcome.filesSent;
+      output = worseOutputState(output, check.outcome.output);
+    }
+  }
+  return { success: true, filesSent, output };
+}
+
+async function checkRecordedWithoutLocalContent(args: {
+  absolutePath: string;
+  remote: string;
+  paths: string[];
+  jobs: number;
+  credentialSession: UploadCredentialSession;
+}): Promise<RemoteHoldsOutcome> {
+  let present = 0;
+  let absent: RemoteHoldsOutcome["absent"] = [];
+  let unanswered: string[] = [];
+  let output: OutputState = "understood";
+  for (const chunk of chunkAddTargets(args.paths)) {
+    const check = await runRecordedCheckChunk({
+      session: args.credentialSession,
+      operation: "presence check",
+      run: (credentials) =>
+        checkRemoteHolds(args.absolutePath, args.remote, chunk, args.jobs, credentials),
+    });
+    if (!check.success) {
+      return { success: false, error: check.error, present, absent, unanswered, output };
+    }
+    present += check.outcome.present;
+    absent = absent.concat(check.outcome.absent);
+    unanswered = unanswered.concat(check.outcome.unanswered);
+    output = worseOutputState(output, check.outcome.output);
+  }
+  return { success: true, present, absent, unanswered, output };
 }
 
 /**
@@ -854,51 +1113,24 @@ async function copyPendingInBatches(args: {
   pending: string[];
   sizes: Map<string, number>;
   jobs: number;
-  credentials?: S3Credentials;
-  lease?: CredentialLease;
-  renewLease?: () => Promise<CredentialLease>;
+  credentialSession: UploadCredentialSession;
   batchMaxFiles?: number;
   batchMaxBytes?: number;
-  onCredentialsRenewed?: (count: number, reason: string) => void;
 }): Promise<PendingCopyOutcome> {
   const batches = planCopyBatches(args.pending, args.sizes, {
     maxFiles: args.batchMaxFiles,
     maxBytes: args.batchMaxBytes,
   });
-  let lease = args.lease;
-  let refreshes = 0;
-  let longestBatchMs = 0;
   let filesCopied = 0;
   let filesSent = 0;
   let output: OutputState = "understood";
-  const worse = (a: OutputState, b: OutputState): OutputState =>
-    a === "unrecognized" || b === "unrecognized"
-      ? "unrecognized"
-      : a === "partial" || b === "partial"
-        ? "partial"
-        : "understood";
   const fail = (error: string): PendingCopyOutcome => ({
     success: false,
     error,
     filesCopied,
     filesSent,
     output,
-    lease,
   });
-  const renew = async (reason: string): Promise<string | null> => {
-    if (!args.renewLease) return "Upload credentials cannot be renewed in this remote";
-    if (refreshes >= DEFAULT_MAX_REFRESHES) {
-      return `Upload credentials were renewed ${refreshes} times and the copy is still not done; re-run the command to continue`;
-    }
-    try {
-      lease = await args.renewLease();
-    } catch (error) {
-      return `Could not renew upload credentials (${reason}): ${errorDetail(error)}`;
-    }
-    refreshes++;
-    args.onCredentialsRenewed?.(refreshes, reason);
-    return null;
-  };
 
   for (const batch of batches) {
     let noProgressExpiredAttempts = 0;
@@ -918,12 +1150,12 @@ async function copyPendingInBatches(args: {
         // This also avoids burning another API lease when the issued duration is shorter
         // than the proactive refresh margin (as in the 15-minute integration case).
         useJustRenewedLease = false;
-      } else if (
-        lease &&
-        args.renewLease &&
-        lease.expiresAtMs - Date.now() < DEFAULT_REFRESH_MARGIN_MS + longestBatchMs
-      ) {
-        const renewalError = await renew("close to expiry");
+      } else if (uploadCredentialsNeedRefresh(args.credentialSession)) {
+        const renewalError = await renewUploadCredentials(
+          args.credentialSession,
+          "close to expiry",
+          "copy",
+        );
         if (renewalError) return fail(renewalError);
       }
 
@@ -933,9 +1165,9 @@ async function copyPendingInBatches(args: {
         args.remote,
         toCopy,
         args.jobs,
-        lease?.credentials ?? args.credentials,
+        currentUploadCredentials(args.credentialSession),
       );
-      longestBatchMs = Math.max(longestBatchMs, Date.now() - started);
+      recordUploadBatchDuration(args.credentialSession, Date.now() - started);
 
       let pendingAfter: Set<string>;
       try {
@@ -947,7 +1179,7 @@ async function copyPendingInBatches(args: {
       const delivered = toCopy.length - remaining.length;
       filesCopied += delivered;
       filesSent = Math.min(filesCopied, filesSent + copied.filesSent);
-      output = worse(output, copied.output);
+      output = worseOutputState(output, copied.output);
 
       // The location log wins over process status: git-annex can report an
       // expired sibling after other paths in the same batch were already sent.
@@ -961,7 +1193,7 @@ async function copyPendingInBatches(args: {
       if (!isExpiredCredentialError(copied.error)) {
         return fail(copied.error ?? "Failed to copy pending files to the remote");
       }
-      if (!lease || !args.renewLease) {
+      if (!args.credentialSession.lease || !args.credentialSession.renewLease) {
         return fail(copied.error ?? "Expired upload credentials cannot be renewed in this remote");
       }
 
@@ -971,13 +1203,17 @@ async function copyPendingInBatches(args: {
           `Copy keeps failing with expired credentials and the pending location-log set did not shrink: ${copied.error ?? "expired credentials"}`,
         );
       }
-      const renewalError = await renew("expired during copy");
+      const renewalError = await renewUploadCredentials(
+        args.credentialSession,
+        "expired during copy",
+        "copy",
+      );
       if (renewalError) return fail(renewalError);
       useJustRenewedLease = true;
     }
   }
 
-  return { success: true, filesCopied, filesSent, output, lease };
+  return { success: true, filesCopied, filesSent, output };
 }
 
 /**
@@ -1118,35 +1354,41 @@ export async function copyAnnexedToRemote(args: {
     smallNotAnnexed,
   });
 
+  const credentialSession: UploadCredentialSession = {
+    credentials: args.credentials,
+    lease: args.lease,
+    renewLease: args.renewLease,
+    refreshes: 0,
+    longestBatchMs: 0,
+    onCredentialsRenewed: args.onCredentialsRenewed,
+  };
   const copy = await copyPendingInBatches({
     absolutePath,
     remote,
     pending,
     sizes: new Map(args.addTargets.map((file) => [file.path, file.size])),
     jobs: args.jobs,
-    credentials: args.credentials,
-    lease: args.lease,
-    renewLease: args.renewLease,
+    credentialSession,
     batchMaxFiles: args.batchMaxFiles,
-    onCredentialsRenewed: args.onCredentialsRenewed,
   });
   if (!copy.success) {
     return { status: "copy_failed", error: copy.error ?? "Failed to copy to remote" };
   }
-  const copyCredentials = copy.lease?.credentials ?? args.credentials;
 
   let resent = 0;
   let recordedOutput: OutputState = "understood";
   let notConfirmed: Array<{ file: string; errors: string[] }> = [];
   let unanswered: string[] = [];
   if (!skipCheck) {
-    const check = await copyPathsToAnnexRemote(
+    const check = await checkRecordedWithContent({
       absolutePath,
       remote,
-      recordedWithContent,
-      args.jobs,
-      copyCredentials,
-    );
+      paths: recordedWithContent,
+      sizes: new Map(args.addTargets.map((file) => [file.path, file.size])),
+      jobs: args.jobs,
+      batchMaxFiles: args.batchMaxFiles,
+      credentialSession,
+    });
     if (!check.success) {
       return { status: "copy_failed", error: check.error ?? "Failed to check the remote" };
     }
@@ -1154,13 +1396,13 @@ export async function copyAnnexedToRemote(args: {
     recordedOutput = check.output;
 
     if (recordedNoLocal.length > 0) {
-      const holds = await checkRemoteHolds(
+      const holds = await checkRecordedWithoutLocalContent({
         absolutePath,
         remote,
-        recordedNoLocal,
-        args.jobs,
-        copyCredentials,
-      );
+        paths: recordedNoLocal,
+        jobs: args.jobs,
+        credentialSession,
+      });
       if (!holds.success) {
         return { status: "copy_failed", error: holds.error ?? "Failed to check the remote" };
       }
