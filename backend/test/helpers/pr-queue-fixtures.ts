@@ -189,6 +189,8 @@ export interface RowSeed {
   detail?: string | null;
   report?: unknown;
   createdAt?: string;
+  /** When the commit was last delivered; defaults to now. "Newest" means the last SEEN. */
+  seenAt?: string;
 }
 
 export function seedReview(db: Database, r: RowSeed) {
@@ -206,8 +208,8 @@ export function seedReview(db: Database, r: RowSeed) {
         : null;
   db.run(
     `INSERT INTO pr_reviews (dataset_id, pr_number, head_sha, author_id, author_login, state,
-                             verdict, detail, report, created_at, decided_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                             verdict, detail, report, created_at, decided_at, seen_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, strftime('%Y-%m-%d %H:%M:%f', 'now')))`,
     [
       r.ds,
       r.n,
@@ -220,6 +222,7 @@ export function seedReview(db: Database, r: RowSeed) {
       report === null ? null : typeof report === "string" ? report : JSON.stringify(report),
       r.createdAt ?? "2026-10-01 00:00:00",
       r.state === "dispatched" ? null : (r.createdAt ?? "2026-10-01 00:00:00"),
+      r.seenAt ?? null,
     ],
   );
 }

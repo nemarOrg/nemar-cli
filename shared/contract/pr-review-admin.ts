@@ -16,10 +16,15 @@
 import type {
   AuthorTally,
   DeclineReason,
+  OverrideMode,
   ReviewOutcome,
+  ReviewState,
   RunError,
   Standing,
 } from "../pr-review.js";
+
+// The review's own vocabulary (ADR 0092) is declared once, in `shared/pr-review.ts`.
+export type { OverrideMode, ReviewState };
 
 /**
  * What the queue shows for one pull request, in the words an administrator uses.
@@ -49,19 +54,6 @@ export type ReadVerdict = "pass" | "fail" | "uncertain";
 /** The state of one required check on the pull request's head commit. */
 export const CHECK_STATES = ["pass", "fail", "pending", "missing", "unknown"] as const;
 export type CheckState = (typeof CHECK_STATES)[number];
-
-/** The states a `pr_reviews` row can be in (the migration's CHECK constraint). */
-export const REVIEW_STATES = [
-  "dispatched",
-  "reported",
-  "declined",
-  "errored",
-  "unreported",
-] as const;
-export type ReviewState = (typeof REVIEW_STATES)[number];
-
-/** `allow` or `block`: a maintainer's standing decision about one contributor. */
-export type OverrideMode = "allow" | "block";
 
 export type QueueEnvironment = "production" | "non-production";
 

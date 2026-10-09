@@ -40,10 +40,11 @@ by the administrator, from their machine, with their own GitHub login.**
   complete is worse than none. A result that cannot be read as a pull request is counted and shown,
   not dropped.
 - **A verdict belongs to the commit it read, and the review used is that commit's.** `pr_reviews` has
-  one row per commit and a repeated commit adds none, so after a force-push back to a commit that was
-  already reviewed its review is not the newest row. The queue and the detail view therefore use the
-  review of the pull request's current head when one exists, and otherwise show the newest review as
-  `not_reviewed` with what it concluded as `stale_verdict`. When the current head cannot be
+  one row per commit, and a redelivery of a commit refreshes its `seen_at`: "latest" means the last
+  commit seen (ADR 0092), so a force-push back to a reviewed commit makes that commit's review the
+  newest. A delivery can still be missed, so the queue and the detail view use the review of the pull
+  request's current head whenever one exists, whatever its place in that order, and otherwise show
+  the most recently seen review as `not_reviewed` with what it concluded as `stale_verdict`. When the current head cannot be
   established no verdict is asserted at all. The detail view re-derives the verdict from the stored
   report and treats a report that no longer parses as `could_not_decide`, except that a stored `fail`
   stays a `fail`: an unreadable report must never make a rejection easier to approve. The list reads
@@ -126,8 +127,9 @@ by the administrator, from their machine, with their own GitHub login.**
   here should make a merge the side effect of a review.
 - **Show another commit's pass as a pass with a warning.** A pass about different code is the mistake
   this ADR exists to prevent. Rejected.
-- **Use the newest review row for every purpose.** Simpler, and wrong after a force-push back to a
-  reviewed commit: it downgrades a failure to a confirmation. Rejected.
+- **Use the newest review row for every purpose.** Simpler, and wrong whenever the delivery of a
+  force-push back to a reviewed commit was missed: it downgrades a failure to a confirmation.
+  Rejected.
 
 ## Receipts
 

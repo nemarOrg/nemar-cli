@@ -25,7 +25,7 @@ import {
   __resetRateLimitStateForTests,
   __seedRateLimitStateForTests,
 } from "../src/services/github/transport";
-import { decideReview } from "../src/services/pr-review";
+import { handlePullRequestEvent } from "../src/services/pr-review";
 import {
   __setGraphqlTimeoutForTests,
   checkStateOf,
@@ -112,6 +112,9 @@ beforeAll(() => {
             },
           },
         });
+      }
+      if (req.method === "POST" && url.pathname === "/repos/nemarDatasets/.github/dispatches") {
+        return new Response(null, { status: 204 });
       }
       const user = url.pathname.match(/^\/users\/([^/]+)$/);
       if (req.method === "GET" && user) {
@@ -215,6 +218,32 @@ const queue = async (qs = "") => {
   const r = await get(`/admin/pr-reviews${qs}`);
   return { status: r.status, body: r.body as unknown as QueueResponse };
 };
+
+/** What the webhook would hand the review for an opened pull request. */
+function openPullRequest(authorId: number, login: string, number: number, headSha: string) {
+  return handlePullRequestEvent(
+    { ...env(), PRESCREEN_CALLBACK_SECRET: "queue-test-callback-secret" } as Bindings,
+    {
+      action: "opened",
+      number,
+      repository: {
+        name: "nm000301",
+        full_name: "nemarDatasets/nm000301",
+        owner: { login: "nemarDatasets" },
+      },
+      pull_request: {
+        number,
+        state: "open",
+        draft: false,
+        merged: false,
+        author_association: "COLLABORATOR",
+        user: { id: authorId, login, type: "User" },
+        base: { ref: "main" },
+        head: { sha: headSha, repo: { full_name: "nemarDatasets/nm000301" } },
+      },
+    },
+  );
+}
 
 function seedDataset(id: string) {
   db.run(
@@ -977,17 +1006,15 @@ describe("PUT and DELETE /admin/pr-review-authors/:login", () => {
       set_by: adminId,
     });
 
-    // The decision is read by the same gate the webhook uses.
-    const decision = await decideReview(env().DB, {
-      datasetId: "nm000301",
-      prNumber: 1,
-      headSha: SHA_A,
-      authorId: 77,
-      authorLogin: "Alice",
-      authorAssociation: "COLLABORATOR",
-      fromFork: false,
+    // The decision is read by the gate the webhook uses: a pull request from this contributor is
+    // declined, and the row says why.
+    seedDataset("nm000301");
+    const gated = await openPullRequest(77, "Alice", 1, SHA_A);
+    expect(gated).toMatchObject({ dispatched: false, reason: "contributor_paused" });
+    expect(db.query("SELECT state, detail FROM pr_reviews WHERE pr_number = 1").get()).toEqual({
+      state: "declined",
+      detail: "contributor_paused",
     });
-    expect(decision).toEqual({ review: false, reason: "contributor_paused" });
 
     const audit = db
       .query("SELECT * FROM audit_log WHERE action = 'pr_review_override_set'")
@@ -1005,10 +1032,19 @@ describe("PUT and DELETE /admin/pr-review-authors/:login", () => {
     seedHistory(77, "alice", 6, 4);
     expect((await standing("alice")).body.standing.paused).toBe(true);
 
+    seedDataset("nm000301");
+    // Paused by the record alone: the gate declines a new pull request.
+    expect(await openPullRequest(77, "alice", 1, SHA_A)).toMatchObject({
+      dispatched: false,
+      reason: "contributor_paused",
+    });
+
     const allowed = await send("PUT", "/admin/pr-review-authors/alice", { mode: "allow" });
     expect((allowed.body as unknown as SetOverrideResponse).standing.standing).toEqual({
       paused: false,
     });
+    // Allowed: the same gate now lets the next one through to the reviewer.
+    expect(await openPullRequest(77, "alice", 2, SHA_B)).toMatchObject({ dispatched: true });
 
     const blocked = await send("PUT", "/admin/pr-review-authors/alice", { mode: "block" });
     expect((blocked.body as unknown as SetOverrideResponse).previous).toBe("allow");
@@ -1151,6 +1187,36 @@ describe("which review counts for a commit", () => {
       reviewed_sha: SHA_B,
       stale_verdict: "pass",
     });
+  });
+
+  test("'newest' means the last commit SEEN, as the review's own tally defines it, not the highest row id", async () => {
+    // A was delivered again after B (a force-push back), so A is the one most recently seen even
+    // though B has the higher row id.
+    seedReview({
+      ds: "nm000201",
+      n: 7,
+      sha: SHA_A,
+      state: "reported",
+      verdict: "fail",
+      seenAt: "2026-10-03 00:00:00.000",
+    });
+    seedReview({
+      ds: "nm000201",
+      n: 7,
+      sha: SHA_B,
+      state: "reported",
+      verdict: "pass",
+      seenAt: "2026-10-02 00:00:00.000",
+    });
+    nodes({ ds: "nm000201", n: 7, sha: SHA_C });
+    expect((await queue()).body.entries[0]).toMatchObject({
+      reviewed_sha: SHA_A,
+      stale_verdict: "fail",
+    });
+    pulls["nm000201#7"] = liveAt(SHA_C);
+    const { body } = await detail("nm000201", 7);
+    expect(body.history.map((h) => h.head_sha[0])).toEqual(["a", "b"]);
+    expect(body.review?.head_sha).toBe(SHA_A);
   });
 
   test("the detail view picks the same review, and `?head=` asks about the commit the caller holds", async () => {

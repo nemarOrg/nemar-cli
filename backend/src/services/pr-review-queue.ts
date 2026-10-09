@@ -6,8 +6,9 @@
  *
  * - **A verdict belongs to the commit it read.** The review ON RECORD for the pull request's current
  *   head is used when there is one; otherwise the newest review is shown as `not_reviewed` with what
- *   it concluded as `stale_verdict`. (`pr_reviews` has one row per commit and a repeated commit adds
- *   none, so after a force-push back to an earlier commit the newest row is NOT the current one.)
+ *   it concluded as `stale_verdict`. "Newest" is the last commit SEEN (`seen_at`), the review's own
+ *   definition, so a redelivered commit is the newest; the exact commit is still preferred because a
+ *   delivery can be missed, and the newest row would then be the wrong one.
  * - **One search, not one call per pull request.** The open pull requests, their head commits, forks,
  *   authors and required checks arrive in a paginated GraphQL search, so a queue of 60 costs two
  *   requests instead of a read and a check lookup for each. The token is shared with publishing and
@@ -33,25 +34,21 @@ import {
   type QueueResponse,
   type QueueSkipped,
   type QueueVerdict,
-  REVIEW_STATES,
   type ReadVerdict,
   type ReviewHistoryItem,
   type ReviewRecord,
-  type ReviewState,
   type SetOverrideResponse,
   type VerdictDetail,
 } from "../../../shared/contract/pr-review-admin.js";
 import {
   type AuthorOverride,
-  DECLINE_REASONS,
-  type DeclineReason,
-  PrReviewReportError,
   REJECTION_COUNT,
   REJECTION_PERCENT,
-  RUN_ERRORS,
+  REVIEW_STATES,
   type ReviewOutcome,
-  type RunError,
-  parsePrReviewReport,
+  type ReviewState,
+  isDeclineReason,
+  isRunError,
   sanitizeNote,
   standingOf,
   verdictOf,
@@ -64,7 +61,7 @@ import { getDatasetsTokenWithRefresher } from "./github-auth.js";
 import { deriveContexts } from "./github/branch-protection.js";
 import { GITHUB_API, ORG_NAME, ghHeaders } from "./github/shared.js";
 import { githubFetchWithRetry } from "./github/transport.js";
-import { readAuthorOverride, readAuthorTally } from "./pr-review.js";
+import { outcomeOfRow, readAuthorOverride, readAuthorTally } from "./pr-review.js";
 
 /** The GitHub search that defines the queue: open pull requests to `main` across the datasets org. */
 export const OPEN_PR_SEARCH = `org:${ORG_NAME} is:pr is:open base:main`;
@@ -524,8 +521,6 @@ export interface ReviewRow {
 const REVIEW_COLUMNS = `id, dataset_id, pr_number, head_sha, author_id, author_login, from_fork,
   state, verdict, detail, created_at, decided_at`;
 
-const DECLINES: ReadonlySet<string> = new Set(DECLINE_REASONS);
-const RUN_ERROR_SET: ReadonlySet<string> = new Set(RUN_ERRORS);
 const REVIEW_STATE_SET: ReadonlySet<string> = new Set(REVIEW_STATES);
 
 /** What a stored row means, in the queue's words, ignoring which commit it is about. */
@@ -544,12 +539,12 @@ export function meaningOf(row: Pick<ReviewRow, "state" | "verdict" | "detail">):
     case "declined":
       return {
         verdict: "not_reviewed",
-        detail: row.detail && DECLINES.has(row.detail) ? (row.detail as DeclineReason) : null,
+        detail: isDeclineReason(row.detail) ? row.detail : null,
       };
     case "errored":
       return {
         verdict: "could_not_decide",
-        detail: row.detail && RUN_ERROR_SET.has(row.detail) ? (row.detail as RunError) : null,
+        detail: isRunError(row.detail) ? row.detail : null,
       };
     case "unreported":
       return { verdict: "could_not_decide", detail: "unreported" };
@@ -624,13 +619,13 @@ async function loadReviews(db: D1Database, datasetIds: readonly string[]): Promi
     const { results } = await db
       .prepare(
         `SELECT ${REVIEW_COLUMNS} FROM pr_reviews
-          WHERE dataset_id IN (${chunk.map(() => "?").join(",")}) ORDER BY id`,
+          WHERE dataset_id IN (${chunk.map(() => "?").join(",")}) ORDER BY seen_at, id`,
       )
       .bind(...chunk)
       .all<ReviewRow>();
     for (const r of results) {
       byHead.set(headKey(r.dataset_id, r.pr_number, r.head_sha), r);
-      newest.set(`${r.dataset_id}#${r.pr_number}`, r); // ascending id, so the last write is the newest
+      newest.set(`${r.dataset_id}#${r.pr_number}`, r); // ascending seen_at, so the last write is the newest
     }
   }
   return { byHead, newest };
@@ -866,37 +861,22 @@ export async function fetchLivePullRequest(
   }
 }
 
-/** Re-validate a stored report on the way out; a row that no longer parses is not trusted. */
-export function outcomeOf(
-  row: Pick<ReviewRow, "state" | "detail"> & { report: string | null },
-): ReviewOutcome | null {
-  switch (row.state) {
-    case "dispatched":
-      return null;
-    case "unreported":
-      return { kind: "unreported" };
-    case "declined":
-      return row.detail && DECLINES.has(row.detail)
-        ? { kind: "declined", reason: row.detail as DeclineReason }
-        : { kind: "error", error: "report_invalid" };
-    case "errored":
-      return row.detail && RUN_ERROR_SET.has(row.detail)
-        ? { kind: "error", error: row.detail as RunError }
-        : { kind: "error", error: "report_invalid" };
-    case "reported":
-      try {
-        return { kind: "reported", report: parsePrReviewReport(JSON.parse(row.report ?? "null")) };
-      } catch (err) {
-        // Say why: a change to the model allowlist or the report version would otherwise turn every
-        // stored report into "invalid" with nothing to tell an operator where to look.
-        console.warn(
-          `[pr-queue] a stored report no longer parses (${err instanceof PrReviewReportError ? err.code : "not JSON"})`,
-        );
-        return { kind: "error", error: "report_invalid" };
-      }
-    default:
-      return { kind: "error", error: "report_invalid" };
-  }
+/**
+ * What a stored row stands for, by the review's own rules (`outcomeOfRow`, which also logs a report
+ * that no longer parses and says why). Null for a review still waiting for its report.
+ */
+function outcomeOf(row: ReviewRow & { report: string | null }): ReviewOutcome | null {
+  return outcomeOfRow({
+    id: row.id,
+    datasetId: row.dataset_id,
+    prNumber: row.pr_number,
+    headSha: row.head_sha,
+    state: (REVIEW_STATE_SET.has(row.state) ? row.state : "errored") as ReviewState,
+    detail: row.detail,
+    report: row.report,
+    checkRunId: null,
+    commentId: null,
+  });
 }
 
 type StoredReview = ReviewRow & { report: string | null };
@@ -921,7 +901,7 @@ export async function readPrReviewDetail(
   const { results } = await db
     .prepare(
       `SELECT ${REVIEW_COLUMNS}, report FROM pr_reviews
-        WHERE dataset_id = ? AND pr_number = ? ORDER BY id DESC LIMIT ?`,
+        WHERE dataset_id = ? AND pr_number = ? ORDER BY seen_at DESC, id DESC LIMIT ?`,
     )
     .bind(datasetId, prNumber, HISTORY_LIMIT + 1)
     .all<StoredReview>();
@@ -1037,13 +1017,13 @@ export async function readPrReviewDetail(
 
 const RECENT_SQL = `
   WITH latest AS (
-    SELECT dataset_id, pr_number, head_sha, verdict, decided_at, id,
-           ROW_NUMBER() OVER (PARTITION BY dataset_id, pr_number ORDER BY id DESC) AS rn
+    SELECT dataset_id, pr_number, head_sha, verdict, decided_at, seen_at, id,
+           ROW_NUMBER() OVER (PARTITION BY dataset_id, pr_number ORDER BY seen_at DESC, id DESC) AS rn
       FROM pr_reviews
      WHERE author_id = ? AND state = 'reported' AND verdict IN ('pass', 'fail')
   )
   SELECT dataset_id, pr_number, head_sha, verdict, decided_at
-    FROM latest WHERE rn = 1 ORDER BY id DESC LIMIT 10`;
+    FROM latest WHERE rn = 1 ORDER BY seen_at DESC, id DESC LIMIT 10`;
 
 /** The tally, override and standing of one contributor, as the review gate would see them now. */
 export async function standingFor(
@@ -1157,7 +1137,7 @@ async function resolveInReviews(db: D1Database, login: string): Promise<Resolved
   const row = await db
     .prepare(
       `SELECT author_id, author_login FROM pr_reviews
-        WHERE lower(author_login) = lower(?) ORDER BY id DESC LIMIT 1`,
+        WHERE lower(author_login) = lower(?) ORDER BY seen_at DESC, id DESC LIMIT 1`,
     )
     .bind(login)
     .first<{ author_id: number; author_login: string }>();
