@@ -1122,6 +1122,7 @@ async function copyPendingInBatches(args: {
 }): Promise<PendingCopyOutcome> {
   let filesCopied = 0;
   let filesSent = 0;
+  const sentPaths = new Set<string>();
   let output: OutputState = "understood";
   const fail = (error: string): PendingCopyOutcome => ({
     success: false,
@@ -1177,7 +1178,10 @@ async function copyPendingInBatches(args: {
       const remaining = toCopy.filter((path) => pendingAfter.has(path));
       const delivered = toCopy.length - remaining.length;
       filesCopied += delivered;
-      filesSent = Math.min(filesCopied, filesSent + copied.filesSent);
+      // Keep unique positive send records for reporting even if the location log
+      // has not caught up yet; only that log determines durable retry progress.
+      for (const path of copied.sentPaths) sentPaths.add(path);
+      filesSent = sentPaths.size;
       output = worseOutputState(output, copied.output);
 
       // The location log wins over process status: git-annex can report an
