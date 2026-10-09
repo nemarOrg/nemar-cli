@@ -755,6 +755,41 @@ function listChangedFiles(e: ReviewEvidence): string {
   return `<details><summary>Changed files (${e.listed.length} of ${e.files_changed})</summary>\n\n${rows.join("\n")}${more}\n\n</details>`;
 }
 
+/**
+ * What a reader should look at before approving: a steering attempt, each finding, the facts found
+ * from the files that no finding already states, and a warning when the reviewer did not see
+ * everything. Empty when there is nothing to say. One bullet per line, in markdown.
+ */
+export function findingLines(report: PrReviewReport): string[] {
+  // A code newer than this build (the CLI ships apart from the Worker) is named, not "undefined".
+  const labelOf = (code: FindingCode): string =>
+    (CODE_LABEL as Record<string, string | undefined>)[code] ?? `Unknown finding (${code})`;
+  const { notes } = factsOf(report);
+  const details: string[] = [];
+  if (report.steering) {
+    details.push(`- **${CODE_LABEL.steering_attempt}.** The review fails for that alone.`);
+  }
+  for (const f of report.findings) {
+    const where = f.path ? ` (\`${f.path}\`)` : "";
+    const note = f.note ? `: ${f.note}` : "";
+    details.push(`- **${labelOf(f.code)}**${where}, ${f.severity}${note}`);
+  }
+  // Facts found from the files, stated in their own right so a red or amber answer is never left
+  // without a reason. A model finding that already says the same thing is not repeated.
+  for (const n of notes) {
+    if (report.findings.some((f) => f.criterion === n.criterion && f.code === n.code)) continue;
+    details.push(
+      `- **${labelOf(n.code)}**, ${n.result === "fail" ? "blocker" : "concern"}: found from the files, not by the reviewer.`,
+    );
+  }
+  if (report.evidence.truncated) {
+    details.push(
+      "- Some changed files were not shown to the reviewer in full, so a clean result is not claimed.",
+    );
+  }
+  return details;
+}
+
 /** Render the check-run's title, summary and detail from an outcome. Pure; no input is quoted raw. */
 export function renderCheck(outcome: ReviewOutcome): RenderedCheck {
   if (outcome.kind === "declined") {
@@ -781,7 +816,7 @@ export function renderCheck(outcome: ReviewOutcome): RenderedCheck {
 
   const { report } = outcome;
   const verdict = verdictOf(report);
-  const { criteria, notes } = factsOf(report);
+  const { criteria } = factsOf(report);
   const title =
     verdict === "pass"
       ? "Passes: nothing lost, revision advances, materially better"
@@ -793,28 +828,7 @@ export function renderCheck(outcome: ReviewOutcome): RenderedCheck {
   lines.push(...describeChanges(report.evidence));
   lines.push("| Question | Answer |", "| --- | --- |");
   for (const c of CRITERIA) lines.push(`| ${CRITERION_LABEL[c]} | ${RESULT_WORD[criteria[c]]} |`);
-  const details: string[] = [];
-  if (report.steering) {
-    details.push(`- **${CODE_LABEL.steering_attempt}.** The review fails for that alone.`);
-  }
-  for (const f of report.findings) {
-    const where = f.path ? ` (\`${f.path}\`)` : "";
-    const note = f.note ? `: ${f.note}` : "";
-    details.push(`- **${CODE_LABEL[f.code]}**${where}, ${f.severity}${note}`);
-  }
-  // Facts found from the files, stated in their own right so a red or amber answer is never left
-  // without a reason. A model finding that already says the same thing is not repeated.
-  for (const n of notes) {
-    if (report.findings.some((f) => f.criterion === n.criterion && f.code === n.code)) continue;
-    details.push(
-      `- **${CODE_LABEL[n.code]}**, ${n.result === "fail" ? "blocker" : "concern"}: found from the files, not by the reviewer.`,
-    );
-  }
-  if (report.evidence.truncated) {
-    details.push(
-      "- Some changed files were not shown to the reviewer in full, so a clean result is not claimed.",
-    );
-  }
+  const details = findingLines(report);
   const text = [
     details.length ? `### Findings\n\n${details.join("\n")}` : "No findings.",
     listChangedFiles(report.evidence),

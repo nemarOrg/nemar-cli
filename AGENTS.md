@@ -164,7 +164,12 @@ cannot erase an already claimed run, each Actions run has a unique concurrency g
 Anthropic identity is minted only in `nemarDatasets/.github`; a contributor is paused after more
 than 5 rejected pull requests AND
 more than 10 percent of their decided ones).
-0093 (the upload save step skips re-reading annexed content only once recorded annexed bytes reach
+0093 (`nemar admin pr-reviews` lists the open dataset pull requests with the automated review: a verdict
+belongs to the commit it read, an approval is the administrator's OWN act from their machine with their
+own GitHub login and no Worker code path approves, a failing, running or unreadable review needs
+`--force`, nothing merges without `--merge` or a `y` in `nemar admin pr-reviews next`, and each
+Worker lists only the datasets it owns).
+0094 (the upload save step skips re-reading annexed content only once recorded annexed bytes reach
 1 GiB, only for files whose size and mtime still match the upload plan, and only while it can clear
 `assume-unchanged` safely; failures to verify or clear the state fail the save).
 

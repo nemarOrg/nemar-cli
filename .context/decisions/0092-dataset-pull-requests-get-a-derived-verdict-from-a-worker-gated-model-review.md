@@ -111,8 +111,8 @@ decide" cannot be expressed with either.
 - A model is now red or green on a pull request. That departs from ADR 0026, which keeps adequacy
   judgments advisory, and is acceptable only because the check is not required and a fact can lower
   the model's answer but the model can never raise a fact.
-- A contributor can be paused by the tally. The only way back today is a row in
-  `pr_review_overrides`, written with `wrangler d1 execute`; an admin command is a follow-up.
+- A contributor can be paused by the tally. The way back is a row in `pr_review_overrides`, which
+  `nemar admin pr-reviews allow|block|clear` writes (ADR 0093); it was a `wrangler d1 execute` until then.
 - The tally and the rate caps live in D1 on the production Worker. The dev Worker answers only for
   repositories it owns, and the watchdog is production-only.
 - A workflow that cannot reach the Worker at the claim, or is answered with an error, fails its
