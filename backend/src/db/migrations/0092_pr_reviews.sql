@@ -101,8 +101,7 @@ CREATE INDEX idx_pr_reviews_state ON pr_reviews (state, created_at);
 
 -- A maintainer's standing decision about one contributor. It wins over the tally in both
 -- directions: 'allow' keeps reviewing someone the tally would pause, 'block' pauses someone it
--- would not. Set by an administrator; there is no route for it yet, so today it is a row written
--- with `wrangler d1 execute` (ADR 0092).
+-- would not. Set by an administrator with `nemar admin pr-reviews allow|block|clear` (ADR 0093).
 CREATE TABLE pr_review_overrides (
   author_id INTEGER PRIMARY KEY,
   author_login TEXT NOT NULL,

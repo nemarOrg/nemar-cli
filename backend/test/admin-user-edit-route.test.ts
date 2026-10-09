@@ -1,5 +1,5 @@
 /**
- * PATCH /admin/users/by-id/:id (ADR 0093).
+ * PATCH /admin/users/by-id/:id (ADR 0094).
  *
  * Real engine: bun:sqlite behind realD1 with every migration applied, the real
  * admin router (authMiddleware + adminMiddleware, real hashed tokens). No mocks.

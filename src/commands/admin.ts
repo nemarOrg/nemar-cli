@@ -20,6 +20,7 @@
  * - nemar admin email-preferences show/update - Email notification opt-out
  * - nemar admin notice list/set/clear - System notice management
  * - nemar admin notify              - Send broadcast email to users
+ * - nemar admin pr-reviews          - Dataset pull requests awaiting approval, with the automated review
  */
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -235,6 +236,7 @@ import {
   resolveWithdrawTargets,
   stillWithdrawn,
 } from "../lib/withdrawn-datasets.js";
+import { prReviewsCommand } from "./admin-pr-reviews.js";
 
 /**
  * Hints keyed on a publication `block_reason`, which outrank the status-code
@@ -467,7 +469,7 @@ Examples:
 
     // An empty search is refused here and again by the backend, never treated
     // as "no search": someone looking up one person must not be handed the
-    // whole directory because a shell variable came out empty (ADR 0093).
+    // whole directory because a shell variable came out empty (ADR 0094).
     const search: string | undefined = options.search;
     if (search !== undefined && search.trim() === "") {
       console.error(chalk.red("--search needs at least one word to look for"));
@@ -559,7 +561,7 @@ Examples:
 
       // A search that names ONE account outright (its id, username, email,
       // GitHub handle or ORCID iD) goes straight to it, as a search box does
-      // with an exact hit, and lists whatever else matched beneath (ADR 0093).
+      // with an exact hit, and lists whatever else matched beneath (ADR 0094).
       // What counts as "outright" is the server's call (`match_kind`).
       if (search !== undefined) {
         const hit = exactHit(users);
@@ -679,7 +681,7 @@ Examples:
   });
 
 // ----------------------------------------------------------------------------
-// users show / users edit (ADR 0093)
+// users show / users edit (ADR 0094)
 // ----------------------------------------------------------------------------
 
 /**
@@ -10279,3 +10281,4 @@ neurobagelCommand
   );
 
 adminCommand.addCommand(neurobagelCommand);
+adminCommand.addCommand(prReviewsCommand);

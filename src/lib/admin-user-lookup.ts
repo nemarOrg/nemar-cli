@@ -1,6 +1,6 @@
 /**
  * `nemar admin users show` and `edit`: turning what an admin typed into one
- * account, and one account into text (ADR 0093).
+ * account, and one account into text (ADR 0094).
  *
  * Pure, so the rules are testable without a server. The commands in
  * commands/admin.ts own the I/O.

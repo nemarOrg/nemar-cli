@@ -1,5 +1,5 @@
 /**
- * Admin account lookup and edit: wire contract (ADR 0093).
+ * Admin account lookup and edit: wire contract (ADR 0094).
  *
  * Three surfaces share this file: `GET /admin/users?q=` (search, whose row shape
  * is `adminUserListItemSchema` in ./user.ts), `GET /admin/users/by-id/:id` (one

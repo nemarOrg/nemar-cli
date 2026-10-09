@@ -1,5 +1,5 @@
 /**
- * Admin account search and the columns an admin may read (ADR 0093).
+ * Admin account search and the columns an admin may read (ADR 0094).
  *
  * `GET /admin/users?q=` has to look at "all fields" of an account without
  * becoming an oracle for the fields that must never be read, and it has to stay

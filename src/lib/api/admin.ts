@@ -36,6 +36,13 @@ import type {
   NeurobagelStatus,
   NeurobagelVerifyResult,
 } from "../../../shared/contract/neurobagel-admin.js";
+import type {
+  ClearOverrideResponse,
+  ContributorStanding,
+  PrReviewDetail,
+  QueueResponse,
+  SetOverrideResponse,
+} from "../../../shared/contract/pr-review-admin.js";
 import type { BackfillNameOutcome } from "../../../shared/contract/publication.js";
 import type { NeurobagelWeekly } from "../../../shared/contract/weekly-attention.js";
 import { request } from "./client.js";
@@ -81,7 +88,7 @@ export async function listUsers(
   // What the account IS (epic #1272 phase 4, #1284; ADR 0048).
   kind?: AccountKind,
   extra: {
-    /** Words to find in ANY text field of an account (ADR 0093). Every word
+    /** Words to find in ANY text field of an account (ADR 0094). Every word
      *  must match somewhere. Each matching row then carries `matched_in`. */
     search?: string;
     /** Include tombstoned accounts, which the listing hides by default. */
@@ -104,7 +111,7 @@ export async function listUsers(
 export type { AdminUserFullDetail, AdminUserEditBody, AdminUserEditResponse };
 
 /**
- * One account's full non-secret details, by numeric id (ADR 0093). By id and
+ * One account's full non-secret details, by numeric id (ADR 0094). By id and
  * not username because a web/ORCID account has no username.
  */
 export async function getAdminUserById(
@@ -120,7 +127,7 @@ export async function getAdminUserById(
 }
 
 /**
- * Edit an account (ADR 0093). Descriptive fields: any admin. username, email
+ * Edit an account (ADR 0094). Descriptive fields: any admin. username, email
  * and github_username: owner only, and never one's own account.
  */
 export async function editAdminUser(
@@ -261,7 +268,7 @@ export async function setAccountKind(
 /** The fields `nemar admin doctor kinds` reads off `GET
  *  /admin/users/:username` (epic #1272 phase 4, #1284 review; ADR 0048).
  *  The route selects every NON-SECRET column (`ADMIN_USER_NON_SECRET_SELECT`;
- *  credentials are never returned, ADR 0093) plus two computed columns, so
+ *  credentials are never returned, ADR 0094) plus two computed columns, so
  *  this is deliberately narrow rather than a full mirror of the row --
  *  everything else is untyped here on purpose (`.passthrough()`-shaped).
  *  `getAdminUserById` is the validated, fully typed read of one account. */
@@ -2183,6 +2190,85 @@ export async function anonymitySweepReset(): Promise<{ reset: number }> {
   return request<{ reset: number }>(
     "/admin/datasets/anonymity-sweep?reset=1",
     { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
+// ============================================================================
+// Dataset pull-request review queue (ADR 0093, following ADR 0092)
+// ============================================================================
+
+export type {
+  ClearOverrideResponse,
+  ContributorStanding,
+  PrReviewDetail,
+  QueueEntry,
+  QueueResponse,
+  QueueVerdict,
+  SetOverrideResponse,
+} from "../../../shared/contract/pr-review-admin.js";
+
+/** Every open pull request to `main` in `nemarDatasets`, with the automated review of its current commit. */
+export async function listPrReviews(filters: {
+  verdicts?: string[];
+  dataset?: string;
+  author?: string;
+  needsMe?: boolean;
+}): Promise<QueueResponse> {
+  const params = new URLSearchParams();
+  if (filters.verdicts && filters.verdicts.length > 0) {
+    params.set("verdict", filters.verdicts.join(","));
+  }
+  if (filters.dataset) params.set("dataset", filters.dataset);
+  if (filters.author) params.set("author", filters.author);
+  if (filters.needsMe) params.set("needs_me", "1");
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return request<QueueResponse>(`/admin/pr-reviews${query}`, { method: "GET" }, true);
+}
+
+/**
+ * One pull request: its stored review and history, what GitHub says now, and its author's standing.
+ * Pass `head` (a full commit id) to ask what the review concluded about THAT commit, which is how
+ * `approve` avoids relying on a head the Worker read a moment earlier or later.
+ */
+export async function getPrReview(
+  datasetId: string,
+  prNumber: number,
+  head?: string,
+): Promise<PrReviewDetail> {
+  const query = head ? `?head=${encodeURIComponent(head)}` : "";
+  return request<PrReviewDetail>(
+    `/admin/pr-reviews/${encodeURIComponent(datasetId)}/${prNumber}${query}`,
+    { method: "GET" },
+    true,
+  );
+}
+
+export async function getPrReviewAuthor(login: string): Promise<ContributorStanding> {
+  return request<ContributorStanding>(
+    `/admin/pr-review-authors/${encodeURIComponent(login)}`,
+    { method: "GET" },
+    true,
+  );
+}
+
+/** Allow or block a contributor; the tally no longer decides the pause until it is cleared (rate limits still apply). */
+export async function setPrReviewAuthor(
+  login: string,
+  mode: "allow" | "block",
+  reason?: string,
+): Promise<SetOverrideResponse> {
+  return request<SetOverrideResponse>(
+    `/admin/pr-review-authors/${encodeURIComponent(login)}`,
+    { method: "PUT", body: JSON.stringify(reason ? { mode, reason } : { mode }) },
+    true,
+  );
+}
+
+export async function clearPrReviewAuthor(login: string): Promise<ClearOverrideResponse> {
+  return request<ClearOverrideResponse>(
+    `/admin/pr-review-authors/${encodeURIComponent(login)}`,
+    { method: "DELETE" },
     true,
   );
 }

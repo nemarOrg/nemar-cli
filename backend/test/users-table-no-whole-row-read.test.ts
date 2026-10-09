@@ -1,5 +1,5 @@
 /**
- * No code selects a whole row of `users` (ADR 0093).
+ * No code selects a whole row of `users` (ADR 0094).
  *
  * `users` carries credential columns (`password_hash`, `verification_token`, the
  * encrypted AWS pair). A query that selects the whole row hands every one of

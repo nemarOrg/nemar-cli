@@ -119,6 +119,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "changeUserRole",
     "changeVisibility",
     "clearIdentityConflict",
+    "clearPrReviewAuthor",
     "createConceptDoi",
     "createExemplar",
     "createKeyFor",
@@ -140,6 +141,8 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "getFleetDrift",
     "getImportStatus",
     "getNeurobagelStatus",
+    "getPrReview",
+    "getPrReviewAuthor",
     "getSummaryCoverage",
     "getUserDuplicates",
     "hedSweep",
@@ -149,6 +152,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "importIssueTriage",
     "importWeeklySummary",
     "listKeysFor",
+    "listPrReviews",
     "listUsers",
     "neurobagelRegenerate",
     "neurobagelVerify",
@@ -170,6 +174,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "rollbackImport",
     "sendBroadcast",
     "setAccountKind",
+    "setPrReviewAuthor",
     "signalDefaultsSweep",
     "signalDefaultsSweepReset",
     "syncCi",
@@ -219,8 +224,8 @@ const POST_SPLIT_ADDITIONS = [
   "importWeeklySummary", // #1312, epic #1306 phase 4: POST /admin/imports/weekly-summary
   "doctorFix", // #1130, CLI wrapper for POST /admin/doctor/fix
   "doctorScan", // #1130, CLI wrapper for POST /admin/doctor/scan
-  "editAdminUser", // ADR 0093: PATCH /admin/users/by-id/:id, `nemar admin users edit`
-  "getAdminUserById", // ADR 0093: GET /admin/users/by-id/:id, `nemar admin users show` and `edit`
+  "editAdminUser", // ADR 0094: PATCH /admin/users/by-id/:id, `nemar admin users edit`
+  "getAdminUserById", // ADR 0094: GET /admin/users/by-id/:id, `nemar admin users show` and `edit`
   "getAdminUserByUsername", // #1284 review, epic #1272 phase 4, ADR 0048: GET /admin/users/:username, read by `nemar admin doctor kinds`
   "getFacets", // #1149, epic #1144 phase 5b: GET /datasets/facets for shell completion
   "getUserDuplicates", // #1254, ADR 0043: GET /admin/users/duplicates
@@ -251,6 +256,11 @@ const POST_SPLIT_ADDITIONS = [
   "getNeurobagelStatus", // epic #1586 phase 4, ADR 0084: GET /admin/neurobagel/status
   "neurobagelRegenerate", // epic #1586 phase 4, ADR 0084: POST /admin/neurobagel/regenerate (dry run by default)
   "neurobagelVerify", // epic #1586 phase 6, ADR 0067 amendment: POST /admin/neurobagel/verify (reports only)
+  "listPrReviews", // ADR 0093: GET /admin/pr-reviews
+  "getPrReview", // ADR 0093: GET /admin/pr-reviews/:dataset/:pr
+  "getPrReviewAuthor", // ADR 0093: GET /admin/pr-review-authors/:login
+  "setPrReviewAuthor", // ADR 0093: PUT /admin/pr-review-authors/:login (allow or block)
+  "clearPrReviewAuthor", // ADR 0093: DELETE /admin/pr-review-authors/:login
 ];
 
 /** The api.ts monolith's runtime surface, captured at #908 commit 1. */

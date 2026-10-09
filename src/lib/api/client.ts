@@ -234,7 +234,7 @@ export async function request<T>(
     // `same_kind`, ...), not a sentence.
     const isAccountKindCode =
       typeof data.error === "string" && ACCOUNT_KIND_ERROR_CODES.includes(data.error);
-    // The admin account lookup and edit vocabulary (ADR 0093): `invalid_search`,
+    // The admin account lookup and edit vocabulary (ADR 0094): `invalid_search`,
     // `field_not_editable`, `owner_only_field`, ... Same shape again, same rule.
     // The uniqueness refusals the edit route also raises (`email_in_use`,
     // `username_taken`, ...) are already covered by the identity and profile

@@ -1,6 +1,6 @@
 /**
  * How an admin account search is ranked, which hit is "the" account, and what
- * to offer when nothing matches (ADR 0093).
+ * to offer when nothing matches (ADR 0094).
  *
  * Three behaviours of an ordinary search, in the order a person meets them:
  *

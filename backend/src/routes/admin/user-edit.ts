@@ -1,5 +1,5 @@
 /**
- * Admin routes: one account's details and an admin edit of it (ADR 0093).
+ * Admin routes: one account's details and an admin edit of it (ADR 0094).
  *
  *   GET   /admin/users/by-id/:id   details, every non-secret column
  *   PATCH /admin/users/by-id/:id   edit a closed set of fields

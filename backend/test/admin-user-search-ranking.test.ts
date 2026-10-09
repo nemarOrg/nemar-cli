@@ -1,6 +1,6 @@
 /**
  * Ranking, exact-hit detection and close matches for `GET /admin/users?q=`
- * (ADR 0093): what makes the search behave like an ordinary one.
+ * (ADR 0094): what makes the search behave like an ordinary one.
  *
  * Real engine: bun:sqlite behind realD1 with every migration applied, the real
  * admin router, real hashed tokens. No mocks.
