@@ -26,7 +26,7 @@ import {
   type QueueVerdict,
   type ReadVerdict,
 } from "../../shared/contract/pr-review-admin.js";
-import { type ReviewOutcome, renderCheck } from "../../shared/pr-review.js";
+import { type ReviewOutcome, factsOf, findingLines, renderCheck } from "../../shared/pr-review.js";
 import {
   clearPrReviewAuthor,
   getPrReview,
@@ -231,18 +231,36 @@ export function reportLines(outcome: ReviewOutcome): string[] {
   }
 }
 
+/** `Version:  1.0.0 to 1.1.0   revision advances: yes`, from the review's own evidence and answer. */
+function versionLine(report: Extract<ReviewOutcome, { kind: "reported" }>["report"]): string {
+  const { version_before: before, version_after: after } = report.evidence;
+  const advances = factsOf(report).criteria.advances_revision;
+  const word =
+    advances === "pass"
+      ? chalk.green("revision advances: yes")
+      : advances === "fail"
+        ? chalk.red("revision advances: NO")
+        : chalk.yellow("revision advances: unknown");
+  return `Version:  ${plain(before ?? "unknown")} to ${plain(after ?? "unknown")}   ${word}`;
+}
+
 /**
- * The stored report as the short read `next` shows: the headline and the summary, and the findings
- * only when there are some. Nothing for a review that is not of this commit (`null`): another
- * commit's report is not a statement about this one.
+ * The stored report as the short read `next` shows: the headline, the reviewer's sentence, whether
+ * the version went up, and the findings when there are any. The whole report is `d`. Nothing for a
+ * review that is not of this commit (`null`): another commit's report is not a statement about
+ * this one.
  */
-export function summaryLines(outcome: unknown): string[] {
+export function briefLines(outcome: unknown): string[] {
   if (outcome === null || outcome === undefined) return [];
   try {
     const o = outcome as ReviewOutcome;
     const r = renderCheck(o);
-    const lines = [chalk.bold(plain(r.title)), "", terminalize(r.summary)];
-    if (o.kind === "reported" && o.report.findings.length > 0) lines.push("", terminalize(r.text));
+    if (o.kind !== "reported") return [chalk.bold(plain(r.title)), plain(r.summary)];
+    const lines = [chalk.bold(plain(r.title))];
+    if (o.report.summary) lines.push(plain(o.report.summary));
+    lines.push(versionLine(o.report));
+    const findings = findingLines(o.report);
+    if (findings.length > 0) lines.push(chalk.bold("Findings:"), ...findings.map(terminalize));
     return lines;
   } catch (err) {
     dlog(`pr-reviews: the stored report could not be rendered (${errorDetail(err)})`);
@@ -1057,6 +1075,7 @@ required checks (BIDS and version) are green, then waits for one answer:
       required checks are green; a failing, running or unreadable review also needs --force.
   n   close it. You are asked for a comment, which is posted first so the author sees why.
   c   comment on it and leave it open. You are asked for the comment.
+  d   show the whole report, then ask again.
   s   leave it for now (it is not shown again in this run).   q   stop.
 
 An empty comment cancels the n or c and asks again. The squash merge is attempted once, only if
@@ -1085,7 +1104,7 @@ except what you answer, with your own token, and a write whose outcome is unknow
       const login = session.me.login;
       console.log(
         chalk.dim(
-          `Going through the queue as @${login}.  y approve + squash merge   n close with a comment   c comment   s skip   q quit`,
+          `Going through the queue as @${login}.  y approve + squash merge   n close with a comment   c comment   d details   s skip   q quit`,
         ),
       );
       if (session.match === "unlinked") {
@@ -1172,10 +1191,10 @@ except what you answer, with your own token, and a write whose outcome is unknow
         if (a.contributorNote) console.log(chalk.yellow(`  ${plain(a.contributorNote)}`));
         if (a.gate.kind === "confirm") console.log(chalk.yellow(`  ${a.gate.warning}`));
         // `a.outcome` is the report of THIS commit's review, or null (see reviewForApproval).
-        const summary = summaryLines(a.outcome);
-        if (summary.length > 0) {
+        const brief = briefLines(a.outcome);
+        if (brief.length > 0) {
           console.log();
-          for (const l of summary) console.log(l);
+          for (const l of brief) console.log(`  ${l}`);
         }
         if (!allowed.ok) {
           console.log();
@@ -1184,7 +1203,7 @@ except what you answer, with your own token, and a write whose outcome is unknow
 
         for (;;) {
           const raw = await reader.ask(
-            `\n${allowed.ok ? "y approve + squash merge, " : ""}n close, c comment, s skip, q quit > `,
+            `\n${allowed.ok ? "y approve + squash merge, " : ""}n close, c comment, d details, s skip, q quit > `,
           );
           if (raw === null) {
             console.log(chalk.dim("\nInput ended; stopping."));
@@ -1196,6 +1215,15 @@ except what you answer, with your own token, and a write whose outcome is unknow
             continue;
           }
           if (choice === "quit") break run;
+          if (choice === "details") {
+            console.log();
+            if (a.outcome === null || a.outcome === undefined) {
+              console.log(chalk.dim("  There is no report for this commit."));
+            } else {
+              for (const l of reportLines(a.outcome as ReviewOutcome)) console.log(l);
+            }
+            continue;
+          }
           if (choice === "skip") {
             tally.skipped++;
             break;

@@ -37,6 +37,7 @@ import {
   SHA_A,
   SHA_B,
   bidsOk,
+  goodReport,
   prNode,
   seedReview,
   versionOk,
@@ -1153,6 +1154,7 @@ describe("nemar admin pr-reviews next", () => {
     expect(r.stdout).toContain("version ok");
     expect(r.stdout).toContain("Passes: nothing lost, revision advances, materially better");
     expect(r.stdout).toContain("Adds two subjects and corrects the task description.");
+    expect(r.stdout).toContain("Version:  1.0.0 to 1.1.0   revision advances: yes");
     expect(r.stdout).toContain("Approved nm000201 #7 at aaaaaaa as @queueadmin-gh.");
     expect(r.stdout).toContain("Merged nm000201 #7 (squash).");
     expect(r.stdout).toContain("Nothing left that needs you.");
@@ -1168,6 +1170,58 @@ describe("nemar admin pr-reviews next", () => {
         (s) => s.token === WORKER_TOKEN && s.method !== "GET" && s.path !== "/graphql",
       ),
     ).toHaveLength(0);
+  });
+
+  test("the card is short: the reviewer's sentence and the version, not the whole report", async () => {
+    nodes(ready("nm000201", 7));
+    const r = await next("q\n");
+    expect(r.stdout).toContain("Version:  1.0.0 to 1.1.0   revision advances: yes");
+    expect(r.stdout).not.toContain("| Question | Answer |");
+    expect(r.stdout).not.toContain("Changed files");
+    expect(r.stdout).toContain("d details");
+  });
+
+  test("d shows the whole report and asks again, and sends nothing", async () => {
+    nodes(ready("nm000201", 7));
+    const r = await next("d\nq\n");
+    expect(r.stdout).toContain("| Question | Answer |");
+    expect(r.stdout).toContain("Changed files (1 of 3)");
+    expect(r.stdout.match(/ > /g)?.length).toBeGreaterThanOrEqual(2);
+    expect(writes()).toHaveLength(0);
+  });
+
+  test("d on a pull request with no report for this commit says so", async () => {
+    gh.pulls["nm000201#7"] = { sha: SHA_A, author: "alice" };
+    nodes({ ds: "nm000201", n: 7, author: "alice", authorId: 42 });
+    const r = await next("d\nq\n");
+    expect(r.stdout).toContain("There is no report for this commit.");
+  });
+
+  test("a version that did not go up is said so in red words, and the version check agrees or not", async () => {
+    gh.pulls["nm000201#7"] = { sha: SHA_A, author: "alice" };
+    const report = goodReport({ advances_revision: "fail" });
+    report.evidence.version_after = "1.0.0";
+    seed({
+      ds: "nm000201",
+      n: 7,
+      authorId: 42,
+      login: "alice",
+      state: "reported",
+      verdict: "fail",
+      report,
+    });
+    nodes({
+      ds: "nm000201",
+      n: 7,
+      author: "alice",
+      authorId: 42,
+      checks: [bidsOk("nm000201"), { ...versionOk, conclusion: "FAILURE" }],
+    });
+    const r = await next("q\n", ["--all"]);
+    expect(r.stdout).toContain("Version:  1.0.0 to 1.0.0   revision advances: NO");
+    expect(r.stdout).toContain("version FAIL");
+    expect(r.stdout).toContain("Findings:");
+    expect(r.stdout).toContain("blocker");
   });
 
   test("n asks for a comment, posts it, and only then closes the pull request", async () => {

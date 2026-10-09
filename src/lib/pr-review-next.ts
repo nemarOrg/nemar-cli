@@ -7,7 +7,7 @@
  *   y   approve as yourself, then squash-merge
  *   n   close it, with a comment you type
  *   c   comment on it and leave it open
- *   s   leave it for now      q   stop
+ *   d   show the whole report      s   leave it for now      q   stop
  *
  * What `y` may do is the same as for `approve`, plus one thing: it also merges, so it is only
  * offered when the two required checks are green. GitHub would refuse the merge otherwise, and an
@@ -16,7 +16,7 @@
 
 import type { ApprovalGate } from "./pr-review-approve.js";
 
-export type NextChoice = "approve" | "close" | "comment" | "skip" | "quit";
+export type NextChoice = "approve" | "close" | "comment" | "details" | "skip" | "quit";
 
 /** What was typed, as a choice; null for anything else, including an empty line. */
 export function parseChoice(raw: string): NextChoice | null {
@@ -30,6 +30,9 @@ export function parseChoice(raw: string): NextChoice | null {
     case "c":
     case "comment":
       return "comment";
+    case "d":
+    case "details":
+      return "details";
     case "s":
     case "skip":
       return "skip";

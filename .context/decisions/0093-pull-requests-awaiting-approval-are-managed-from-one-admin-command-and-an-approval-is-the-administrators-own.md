@@ -89,10 +89,12 @@ by the administrator, from their machine, with their own GitHub login.**
   `no_such_pull_request`, the last because the administrator's own token just read the pull
   request). The reason a pull request is not reviewed (a paused or rate-limited contributor) is
   shown beside the verdict.
-- **`next` walks the queue and asks one question per pull request.** It shows who opened it, the
-  review's summary (only the report of THIS commit's review) and whether the two required checks
-  are green, then waits for one answer: `y` approves as the administrator and squash-merges, `n`
-  closes with a comment, `c` comments and leaves it open, `s` leaves it, `q` stops. `y` is offered
+- **`next` walks the queue and asks one question per pull request.** It shows who opened it,
+  whether the two required checks (BIDS and the version check) are green, and a short read of the
+  review (only the report of THIS commit's review): its headline, the reviewer's sentence, whether
+  the version went up, and any findings. Then it waits for one answer: `y` approves as the
+  administrator and squash-merges, `n` closes with a comment, `c` comments and leaves it open, `d`
+  shows the whole report and asks again, `s` leaves it, `q` stops. `y` is offered
   only when both required checks are green, because the merge that follows would be refused
   otherwise, and a failing, running or unreadable review still needs `--force`, exactly as for
   `approve`. A comment is typed by the administrator and posted as typed, and for `n` it is posted

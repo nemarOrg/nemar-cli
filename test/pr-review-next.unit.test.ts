@@ -11,10 +11,11 @@ import { approveAllowed, parseChoice } from "../src/lib/pr-review-next";
 import { LineReader } from "../src/lib/prompt-lines";
 
 describe("what a typed answer means", () => {
-  test("y n c s q, in either case and with spaces, and the words they stand for", () => {
+  test("y n c d s q, in either case and with spaces, and the words they stand for", () => {
     expect(["y", "Y", " yes "].map(parseChoice)).toEqual(["approve", "approve", "approve"]);
     expect(["n", "N", "no"].map(parseChoice)).toEqual(["close", "close", "close"]);
     expect(["c", "comment"].map(parseChoice)).toEqual(["comment", "comment"]);
+    expect(["d", "Details"].map(parseChoice)).toEqual(["details", "details"]);
     expect(["s", "skip"].map(parseChoice)).toEqual(["skip", "skip"]);
     expect(["q", "Quit"].map(parseChoice)).toEqual(["quit", "quit"]);
   });
