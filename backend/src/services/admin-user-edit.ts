@@ -10,10 +10,9 @@
  * field rules instead of restating them. The name, affiliation, location,
  * username and GitHub handle go through `normalizeProfilePatch`, the function
  * `PATCH /auth/profile` validates with; the email goes through
- * `emailFieldSchema`, the one every auth route validates an address with. (CLI
- * signup has its own schema for the username, which `validateUsernameFormat`
- * mirrors.) An admin therefore cannot store a value the person could not have
- * typed themselves.
+ * `emailFieldSchema`, the one every auth route validates an address with. An
+ * admin therefore cannot store a value the person could not have typed
+ * themselves.
  *
  * Two things differ from self-service, on purpose. WHO may change a field is
  * declared in `shared/contract/admin-user.ts`. And there is NO username lock:

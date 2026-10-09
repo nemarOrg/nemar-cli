@@ -193,8 +193,8 @@ api.route("/neurobagel", neurobagelRoutes);
 // Mount route handlers
 api.route("/auth", authRoutes);
 // Web-dashboard auth (#569). Mounted at the same /auth prefix as the
-// CLI flow; no path overlap with authRoutes (existing /signup, /login,
-// /verify, etc. vs new /code/request, /code/verify, /logout, /me).
+// API-key routes; no path overlap with authRoutes (/login, /verify, etc.
+// vs new /code/request, /code/verify, /logout, /me).
 api.route("/auth", authWebRoutes);
 // ORCID SSO (#832). Same /auth prefix; new paths under /auth/orcid/*.
 api.route("/auth", authOrcidRoutes);
