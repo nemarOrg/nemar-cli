@@ -37,11 +37,12 @@ export interface UploadProgress {
   files: Record<string, FileProgress>;
   completed_steps: UploadStep[];
   /**
-   * When step 9 last had the remote itself confirm the annexed path/key set, its timestamp,
-   * count, and fingerprint. A resume within {@link RECORDED_CHECK_VALID_MS} skips the check
-   * only when the currently recorded path/key set matches that fingerprint. The count alone
-   * is not enough: a collaborator can replace one recorded key with another without changing
-   * the number of files. These persisted values are read only through
+   * When step 9 last had the remote itself confirm the annexed path/key set at its current
+   * target, its timestamp, count, and fingerprint. A resume within
+   * {@link RECORDED_CHECK_VALID_MS} skips the check only when the effective target and
+   * currently recorded path/key set match that fingerprint. The count alone is not enough:
+   * a collaborator can replace one recorded key with another without changing the number of
+   * files. These persisted values are read only through
    * {@link isRecordedCheckFresh}; anything damaged or mismatched means "check".
    */
   remote_checked_at?: unknown;
@@ -55,14 +56,18 @@ export const RECORDED_CHECK_VALID_MS = 6 * 60 * 60 * 1000;
 /** {@link RECORDED_CHECK_VALID_MS} as words for a message: "6 hours". */
 export const RECORDED_CHECK_VALID_TEXT = `${RECORDED_CHECK_VALID_MS / (60 * 60 * 1000)} hours`;
 
-/** Stable, compact identity for the annexed paths and keys whose remote state was checked. */
-export function fingerprintAnnexedFiles(entries: Iterable<readonly [string, string]>): string {
+/** Stable, compact identity for the target and annexed paths/keys whose remote state was checked. */
+export function fingerprintAnnexedFiles(
+  entries: Iterable<readonly [string, string]>,
+  remoteIdentity: string,
+): string {
   const sorted = [...entries].sort(([pathA, keyA], [pathB, keyB]) => {
     if (pathA !== pathB) return pathA < pathB ? -1 : 1;
     if (keyA === keyB) return 0;
     return keyA < keyB ? -1 : 1;
   });
   const hash = createHash("sha256");
+  hash.update(remoteIdentity).update("\0");
   for (const [path, key] of sorted) hash.update(path).update("\0").update(key).update("\0");
   return hash.digest("hex");
 }
@@ -88,7 +93,7 @@ export function isRecordedCheckFresh(
   return at <= now && now - at < RECORDED_CHECK_VALID_MS;
 }
 
-/** Record that the remote has just confirmed the annexed path/key set and its size. */
+/** Record that the current target has just confirmed the annexed path/key set and its size. */
 export function markRecordedChecked(
   progress: UploadProgress,
   recordedCount: number,

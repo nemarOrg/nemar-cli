@@ -43,6 +43,7 @@ import { ensureLocalMainBranch, getCurrentBranch } from "../git-annex/repo-state
 import { runCommand } from "../git-annex/run-command.js";
 import {
   type S3Credentials,
+  buildS3RemoteArgs,
   clearAnnexCredentials,
   configureS3Remote,
   toS3Credentials,
@@ -607,7 +608,7 @@ export function formatUploadSummary(
 
   if (attempted === 0 && resent === 0) {
     if (skipped) {
-      return `All ${total} data files are recorded at the S3 remote; not checked again, because the same files and annex keys passed a check within the last ${RECORDED_CHECK_VALID_TEXT}`;
+      return `All ${total} data files are recorded at the S3 remote; not checked again, because these files and their annex keys passed a check at this destination within the last ${RECORDED_CHECK_VALID_TEXT}`;
     }
     if (checkOutput !== "understood") {
       return `All ${total} data files are recorded at the S3 remote (${whyUnknown(checkOutput)}, so what its check found is unknown)`;
@@ -651,7 +652,7 @@ export function formatUploadSummary(
   if (recorded > 0) {
     if (skipped) {
       parts.push(
-        `${recorded} already recorded at the remote ${wasWere(recorded)} not checked again, because the same files and annex keys passed a check within the last ${RECORDED_CHECK_VALID_TEXT}`,
+        `${recorded} already recorded at the remote ${wasWere(recorded)} not checked again, because these files and their annex keys passed a check at this destination within the last ${RECORDED_CHECK_VALID_TEXT}`,
       );
     } else if (checkOutput !== "understood") {
       parts.push(
@@ -745,7 +746,7 @@ export type S3CopyOutcome =
        * for all of it was understood: the one state worth stamping as a passed check.
        */
       remoteConfirmed: boolean;
-      /** Fingerprint of the annexed path/key set this run checked, or null if it could not be read. */
+      /** Fingerprint of the target and annexed path/key set, or null if keys/identity are unavailable. */
       recordedCheckFingerprint: string | null;
       annexedPaths: Set<string>;
       smallNotAnnexed: SmallNotAnnexed;
@@ -806,9 +807,12 @@ export async function copyAnnexedToRemote(args: {
   addTargets: Array<{ path: string; size: number; type?: string }>;
   jobs: number;
   credentials?: S3Credentials;
+  /** Effective destination identity; absent for direct callers disables stamp reuse. */
+  remoteIdentity?: string;
   /**
-   * Whether a recent check covers this count and path/key fingerprint (see
-   * `isRecordedCheckFresh`), so the remote is not asked about them again.
+   * Whether a recent check covers this count and target/path/key fingerprint (see
+   * `isRecordedCheckFresh`), so the remote is not asked about them again. Without a target
+   * identity, the key walk and stamp reuse are both skipped.
    */
   skipRecordedCheck?: (recordedCount: number, fingerprint: string) => boolean;
   onPlan?: (plan: S3CopyPlan) => void | Promise<void>;
@@ -826,10 +830,10 @@ export async function copyAnnexedToRemote(args: {
 
   // The count alone cannot identify what the remote check covered: a collaborator can
   // replace one recorded key with another without changing the count. This local key walk
-  // gives the resume stamp a stable identity; if it cannot be read, the upload still
-  // performs the remote check but does not cache it.
+  // gives the resume stamp a stable identity; if it cannot be read, or there is no target
+  // identity to bind it to, the upload still performs the remote check but does not cache it.
   let annexedKeys: Map<string, string> | null = null;
-  if (annexedBefore.size > 0) {
+  if (annexedBefore.size > 0 && args.remoteIdentity) {
     try {
       annexedKeys = await listAnnexedKeys(absolutePath);
     } catch {
@@ -845,7 +849,8 @@ export async function copyAnnexedToRemote(args: {
       if (key === undefined) return null;
       entries.push([path, key]);
     }
-    return fingerprintAnnexedFiles(entries);
+    if (!args.remoteIdentity) return null;
+    return fingerprintAnnexedFiles(entries, args.remoteIdentity);
   };
   const checkedFingerprint = fingerprintPaths(annexedBefore);
 
@@ -1206,11 +1211,14 @@ export async function listPendingAtRemote(absolutePath: string, remote: string):
 
 /**
  * Makes the special remote ready to copy to and says which credentials to use (none
- * for a remote that needs none). The production version asks the backend for STS
- * credentials and configures the S3 remote with them; a test supplies one that
- * registers a `directory` remote, which is all that differs between the two.
+ * for a remote that needs none). `remoteIdentity` describes the effective target without
+ * credentials, so a resume can only reuse a stamp for the destination it checked. The
+ * production version asks the backend for STS credentials and configures the S3 remote;
+ * a test can register a `directory` remote and return its directory as the identity.
  */
-export type OpenRemote = () => Promise<Step<{ credentials?: S3Credentials }>>;
+export type OpenRemote = () => Promise<
+  Step<{ credentials?: S3Credentials; remoteIdentity?: string }>
+>;
 
 /** The production {@link OpenRemote}: STS credentials from the backend, then the S3 remote. */
 function openS3Remote(absolutePath: string, datasetInfo: DatasetInfo): OpenRemote {
@@ -1230,15 +1238,16 @@ function openS3Remote(absolutePath: string, datasetInfo: DatasetInfo): OpenRemot
 
     // Configure S3 special remote (idempotent: enables existing if already created)
     spinner = ora("Configuring S3 remote...").start();
+    const config = {
+      name: S3_REMOTE_NAME,
+      bucket: creds.s3.bucket,
+      prefix: `${datasetInfo.dataset_id}/objects`,
+      region: creds.s3.region,
+      publicUrl: datasetInfo.s3_config.public_url,
+    };
     const s3Result = await configureS3Remote(
       absolutePath,
-      {
-        name: S3_REMOTE_NAME,
-        bucket: creds.s3.bucket,
-        prefix: `${datasetInfo.dataset_id}/objects`,
-        region: creds.s3.region,
-        publicUrl: datasetInfo.s3_config.public_url,
-      },
+      config,
       toS3Credentials(creds.credentials),
     );
     if (!s3Result.success) {
@@ -1247,7 +1256,13 @@ function openS3Remote(absolutePath: string, datasetInfo: DatasetInfo): OpenRemot
       return FAIL;
     }
     spinner.succeed("S3 remote configured");
-    return ok({ credentials: toS3Credentials(creds.credentials) });
+    return ok({
+      credentials: toS3Credentials(creds.credentials),
+      // STS credentials authenticate the request but do not identify its destination.
+      // Include every effective annex S3 option so a resume against another environment,
+      // bucket, region, prefix, or public URL cannot reuse the previous target's stamp.
+      remoteIdentity: JSON.stringify([S3_REMOTE_NAME, buildS3RemoteArgs(config)]),
+    });
   };
 }
 
@@ -1285,7 +1300,7 @@ export function describeRecordedCheck(plan: S3CopyPlan, jobs: number): string[] 
   if (plan.recorded === 0) return lines;
   if (plan.recordedCheckSkipped) {
     lines.push(
-      `  These ${plan.recorded} recorded files and their annex keys passed a check within the last ${RECORDED_CHECK_VALID_TEXT}; the remote is not asked about them again.`,
+      `  These ${plan.recorded} recorded files and their annex keys passed a check at this destination within the last ${RECORDED_CHECK_VALID_TEXT}; the remote is not asked about them again.`,
     );
     return lines;
   }
@@ -1344,6 +1359,7 @@ export async function transferAnnexedData(args: {
     const copyArgs = {
       absolutePath,
       remote: S3_REMOTE_NAME,
+      remoteIdentity: opened.value.remoteIdentity,
       addTargets,
       jobs: args.jobs,
       credentials: opened.value.credentials,
@@ -1503,7 +1519,7 @@ export async function transferAnnexedData(args: {
   }
   // A run that had the remote answer for every file, and understood the answers, is what a
   // re-run may rely on for a while; a skipped or unreadable check must not refresh it. The
-  // count and path/key fingerprint keep later or replaced annex keys from riding on it.
+  // count and target/path/key fingerprint keep changed destinations or replaced annex keys from riding on it.
   if (outcome.remoteConfirmed && outcome.recordedCheckFingerprint !== null) {
     markRecordedChecked(progress, outcome.total, outcome.recordedCheckFingerprint);
   }
