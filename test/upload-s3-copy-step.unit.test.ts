@@ -491,6 +491,28 @@ describe("listPendingAtRemote", () => {
 });
 
 describe("listAnnexedPathsNotAt", () => {
+  test("a path-scoped location-log read is literal and does not walk unrelated annexed files", async () => {
+    const dir = await newDatasetRepo(scratch.root, "not-at-scoped");
+    const paths = ["sub-01/eeg/a*.edf", "sub-01/eeg/abc.edf"];
+    writeFile(
+      dir,
+      paths[0] as string,
+      readFileSync(join(import.meta.dir, "fixtures/identifier-scan/clean.edf")),
+    );
+    writeFile(
+      dir,
+      paths[1] as string,
+      readFileSync(join(import.meta.dir, "fixtures/identifier-scan/flagged.edf")),
+    );
+    expect((await gitAnnexAdd(dir, paths, {}, { forceLarge: true })).success).toBe(true);
+    await initDirectoryRemote(scratch.root, dir, REMOTE);
+
+    expect(await listAnnexedPathsNotAt(dir, REMOTE, [paths[0] as string])).toEqual(
+      new Set([paths[0]]),
+    );
+    expect(await listAnnexedPathsNotAt(dir, REMOTE, paths)).toEqual(new Set(paths));
+  });
+
   test("names annexed files the remote lacks, including ones whose content is not local, and never a git file", async () => {
     // The step relies on one `git annex find --not --in` walk both to plan and to
     // verify. It must not depend on the content being present here (a file dropped
