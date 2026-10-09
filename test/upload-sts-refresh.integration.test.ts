@@ -17,6 +17,7 @@ import {
   buildS3RemoteArgs,
   toS3Credentials,
 } from "../src/lib/git-annex/s3-remote";
+import { listAnnexedKeys } from "../src/lib/git-annex/transfer";
 import { initUploadProgress } from "../src/lib/upload-progress";
 import { listAnnexedPaths, transferAnnexedData } from "../src/lib/upload/transfer";
 import { ok } from "../src/lib/upload/types";
@@ -173,13 +174,32 @@ describe.skipIf(!canRun)("STS credential renewal through the real upload transfe
     expect(setupUsedInitialLease).toBe(true);
     expect(renewedCredentials).toHaveLength(3);
 
-    const copyRequests = standin.calls("PutObject");
+    const initializationWrites = standin
+      .calls("PutObject")
+      .filter((entry) => entry.key === `${DATASET_ID}/objects/annex-uuid`);
+    expect(initializationWrites).toHaveLength(1);
+    expect(initializationWrites[0]?.keyId).toBe(initialAccessKeyId);
+    expect(initializationWrites[0]?.sessionTokenFingerprint).toBe(initialTokenFingerprint);
+
+    const annexedKeys = await listAnnexedKeys(repo);
+    const expectedObjectKeys = new Set(
+      targets.map((target) => {
+        const key = annexedKeys.get(target.path);
+        expect(key).toBeDefined();
+        return `${DATASET_ID}/objects/${key}`;
+      }),
+    );
+    const copyRequests = standin
+      .calls("PutObject")
+      .filter((entry) => expectedObjectKeys.has(entry.key));
     const expiredKeyId = renewedCredentials[0]?.accessKeyId;
     const failedLeaseRequests = copyRequests.filter((entry) => entry.keyId === expiredKeyId);
     const successfulCopyRequests = copyRequests.filter((entry) => entry.status === 200);
     expect(failedLeaseRequests.length).toBeGreaterThan(0);
     expect(failedLeaseRequests.every((entry) => entry.status === 403)).toBe(true);
-    expect(successfulCopyRequests).toHaveLength(2);
+    expect([...new Set(successfulCopyRequests.map((entry) => entry.key))].sort()).toEqual(
+      [...expectedObjectKeys].sort(),
+    );
     expect(
       successfulCopyRequests.some((entry) => entry.keyId === renewedCredentials[1]?.accessKeyId),
     ).toBe(true);
