@@ -203,37 +203,8 @@ describe("POST /auth/login", () => {
   });
 });
 
-// The two routes that took a password are retired (ADR 0095). Dispatch is real,
-// so a 404 here means the route is not mounted, not that a handler declined.
-// The body is one the retired handlers accepted, so a 404 cannot be a 400 for
-// a missing field in disguise, and nothing is written for it.
-describe("the password routes are gone", () => {
-  test("POST /auth/retrieve-key is not mounted and mints no key", async () => {
-    const user = await seedUser("keygone", "verified", { withToken: false });
-    const res = await postJson("/auth/retrieve-key", {
-      email: user.email,
-      password: "correct horse battery staple",
-    });
-    expect(res.status).toBe(404);
-    expect(db.query("SELECT COUNT(*) AS n FROM tokens").get()).toEqual({ n: 0 });
-  });
-
-  test("POST /auth/signup is not mounted and creates no account", async () => {
-    const before = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM users").get();
-    const res = await postJson("/auth/signup", {
-      username: "signupgone",
-      email: "signupgone@example.org",
-      password: "correct horse battery staple",
-      github_username: "signupgone-gh",
-      description: "A request that used to be a registration",
-      orcid: "0000-0002-1825-0097",
-      city: "San Diego",
-      country: "USA",
-    });
-    expect(res.status).toBe(404);
-    expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM users").get()).toEqual(before);
-  });
-});
+// `POST /auth/retrieve-key` used to be tested here. It is retired (ADR 0095) and
+// is pinned through the production entry point in password-routes-retired.test.ts.
 
 describe("the sandbox routes", () => {
   test("a `verified` account can read its training status", async () => {

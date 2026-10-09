@@ -40,6 +40,27 @@ import type { Bindings, Variables } from "../types/bindings";
 export const authRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 /**
+ * The two routes that took a password, answered with a 410 that says where to go
+ * (ADR 0095).
+ *
+ * They are retired, not unrouted. An already-installed CLI still has the
+ * commands that call them, and an unrouted path answers 404 `Not Found`, which
+ * that CLI renders as "This NEMAR backend does not support this command yet":
+ * it blames the server and never names the command that works. The sentence is
+ * in `error` on purpose: the client prints `error` first for any code it does
+ * not know, and an older client knows none of this one.
+ *
+ * These handlers read nothing and write nothing: no body parse, no database,
+ * no password check. A request cannot create an account or a key here.
+ */
+export const PASSWORD_SIGN_IN_RETIRED_BODY = {
+  error: "Password sign-in was removed. Run `nemar auth login` to sign in with your browser.",
+  code: "password_sign_in_retired",
+} as const;
+authRoutes.post("/signup", (c) => c.json(PASSWORD_SIGN_IN_RETIRED_BODY, 410));
+authRoutes.post("/retrieve-key", (c) => c.json(PASSWORD_SIGN_IN_RETIRED_BODY, 410));
+
+/**
  * GET /auth/check-username - Check if username is available
  */
 authRoutes.get("/check-username", async (c) => {
@@ -126,17 +147,12 @@ authRoutes.get("/check-github", async (c) => {
 /**
  * GET /auth/orcid-name - Read the given/family name on a public ORCID record
  *
- * Pre-signup lookup, alongside check-username and check-github (#1255). ORCID
- * is required at signup and is the canonical source of the researcher name
- * that DOIs cite, but a record may hide its name. The CLI calls this right
- * after the ORCID prompt so it can ask for the name ONLY in that case,
- * instead of asking everyone for something we usually already know.
- *
- * A pre-flight GET rather than a flag on the signup response: signup is the
- * call that creates the account, so discovering "we need a name" from its
- * response would mean failing a submitted registration and re-driving the
- * prompts. This is idempotent, costs one public ORCID read, and mirrors the
- * two pre-signup checks that already exist.
+ * Written for the CLI's old signup form (#1255), alongside check-username and
+ * check-github: ORCID is the canonical source of the researcher name that DOIs
+ * cite, but a record may hide its name, so the form asked for one ONLY in that
+ * case. The form went with the password routes (ADR 0095) and nothing in this
+ * repository calls this route now; it stays because removing a public route is
+ * a separate decision. It is idempotent and costs one public ORCID read.
  *
  * The three outcomes are reported separately (`found` / `no_public_name` /
  * `lookup_failed`): the caller prompts for a name in the last two, but the
@@ -280,7 +296,7 @@ authRoutes.get("/verify", async (c) => {
     .run();
 
   // The account is now active (ADR 0040 phase 2), so this is the moment the
-  // API key becomes obtainable — and therefore the moment the mail that
+  // API key becomes obtainable, and therefore the moment the mail that
   // explains how to get it belongs. It used to be sent at approval,
   // which is no longer when the key becomes available. Best-effort: a mail
   // failure must not undo a verification that has already committed, and the
@@ -378,7 +394,7 @@ authRoutes.get("/verify", async (c) => {
     You can close this page. Your account is active${
       keyEmailSent
         ? "; we've emailed you the steps to get your API key."
-        : " — run <code>nemar auth login</code> to get your API key."
+        : "; run <code>nemar auth login</code> to get your API key."
     }
   </p>
 
@@ -741,7 +757,7 @@ authRoutes.get("/confirm-key-regeneration", async (c) => {
 
     <h2 style="color: #333; font-size: 18px; margin: 25px 0 15px 0;">Login with your new key</h2>
     <div style="background-color: #f4f4f5; padding: 12px; border-radius: 8px; font-family: monospace; font-size: 13px;">
-      nemar auth login
+      nemar auth login -k &lt;your-new-key&gt;
     </div>
   </div>
 

@@ -1468,6 +1468,29 @@ Examples:
 );
 
 // ============================================================================
+// Retired: retrieve-key (ADR 0095)
+// ============================================================================
+
+// A hidden stub rather than a deletion. The "your API key is ready" mail sent
+// when an account verified its email, and pages outside this repository, told
+// people to run it, so "unknown command" would leave them with no next step.
+// It takes no input, prompts for nothing and calls no endpoint.
+authCommand
+  .command("retrieve-key", { hidden: true })
+  .description("Removed: there is no password sign-in")
+  .allowUnknownOption()
+  .allowExcessArguments()
+  .action(() => {
+    console.error(
+      chalk.yellow("Password sign-in was removed, so 'nemar auth retrieve-key' no longer exists."),
+    );
+    console.error(
+      `  Run ${chalk.cyan("nemar auth login")} to sign in with your browser; it also creates your API key.`,
+    );
+    process.exitCode = 1;
+  });
+
+// ============================================================================
 // Regenerate Key
 // ============================================================================
 
@@ -1507,10 +1530,13 @@ const regenerateKeyCmd = authCommand
       console.log("Next steps:");
       console.log("  1. Check your email for a verification link");
       console.log("  2. Click the link to generate your new API key");
-      console.log("  3. Copy the new key and run 'nemar auth login'");
+      console.log("  3. Copy the new key and run 'nemar auth login -k <new-key>'");
       console.log();
       console.log(chalk.dim("The link expires in 1 hour"));
     } catch (error) {
+      // This is the only way to replace a lost key without an already signed-in
+      // machine, so a failure has to be visible to a script, not only a person.
+      process.exitCode = 1;
       if (error instanceof ApiError) {
         spinner.fail(error.message);
       } else {
@@ -1531,7 +1557,8 @@ Description:
   1. Revoke your current API key ON EVERY MACHINE, not just this one --
      use 'nemar auth keys revoke' instead to remove only one machine's key
   2. Generate a new API key (shown in the browser)
-  3. You will need to login again with the new key
+  3. Use the new key with 'nemar auth login -k <new-key>'; a plain
+     'nemar auth login' signs in with your browser and makes another key
 
 Examples:
   $ nemar auth regenerate-key`,
