@@ -169,17 +169,20 @@ async function sessionCookie(userId: number): Promise<string> {
 //
 // `POST /auth/signup` (the CLI's password registration) is gone (ADR 0095), and
 // with it the "CLI signup refuses a duplicate identity" and "normalises what it
-// stores" suites. The same rules are still pinned through the entry points that
-// remain: ORCID finalize, ORCID link, the profile and email-change routes, and
-// the schema (migration 0077).
+// stores" suites. What they pinned is covered as follows. Refusing a held iD,
+// address or handle: ORCID finalize, ORCID link and the profile and
+// email-change routes below, and the schema (migration 0077). The typed-input
+// rules (a lowercase check digit, an orcid.org URL, a garbage-prefixed paste, a
+// pasted @handle) and the live-only holder lookups: identity-normalizers.unit
+// .test.ts, which has no HTTP route to go through any more.
 // --------------------------------------------------------------------------
 
 describe("an address is found whatever case it was stored or typed in", () => {
   // The regression this pins: addresses came to be stored lowercase, while
   // `resend-verification` / `request-key-regeneration` still looked them up
   // exact-case. Someone who registered as `John.Smith@gmail.com` and typed it
-  // that way got nothing back -- a dead end with no way to tell it from a
-  // wrong address.
+  // that way got nothing back: a dead end with no way to tell it from a wrong
+  // address.
   const MIXED = "John.Smith@Example.ORG";
   const OTHER_CASE = "JOHN.smith@example.org";
 
@@ -322,11 +325,30 @@ describe("ORCID finalize refuses a duplicate identity", () => {
     expect(body.message).toContain("nemar.org/settings");
   });
 
+  test("a soft-deleted row holding the iD does not block a new account", async () => {
+    // The tombstone is not a holder: a person who deleted their account can
+    // come back. The live-only predicate is what allows it, and without this
+    // case nothing at the route level would notice it going.
+    seedUser("deleted+8@deleted.invalid", { orcid: HELD_ORCID, deleted: true });
+    const res = await finalize(HELD_ORCID);
+    expect(res.status).toBe(200);
+  });
+
+  test("a soft-deleted row holding the same address does not block it either", async () => {
+    // The legacy shape: a tombstone that kept the real address. The unique
+    // index is partial (live rows only), so the write is legal and the
+    // pre-check must agree with it.
+    seedUser("BrandNew@Example.ORG", { deleted: true });
+    const res = await finalize(X_ORCID, { email: "brandnew@example.org" });
+    expect(res.status).toBe(200);
+  });
+
   test("a clean signup lands, with the address trimmed and lowercased", async () => {
     // The iD is already canonical here and cannot be otherwise: `verifyPending`
     // rejects a token whose iD is not in canonical form, so finalize's own
     // `normalizeOrcid` is a belt-and-braces guarantee about what gets STORED,
-    // not a repair for user input. The typed-iD path is covered on signup.
+    // not a repair for user input. The typed-iD rules are pinned in
+    // identity-normalizers.unit.test.ts.
     //
     // The address is the interesting half: `"  Brand.New@Example.ORG "` used to
     // 400, because the schema ran `.email()` before its own trim.
