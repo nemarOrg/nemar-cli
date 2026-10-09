@@ -75,6 +75,24 @@ describe("when y may approve and merge", () => {
     }
   });
 
+  test("a pull request that cannot be merged as it is, is not offered y", () => {
+    for (const [mergeable, word] of [
+      ["dirty", "merge conflicts"],
+      ["behind", "behind main"],
+    ] as const) {
+      const r = approveAllowed({ gate: pass, force: true, ...green, mergeable });
+      expect(r.ok, mergeable).toBe(false);
+      if (!r.ok) expect(r.reason).toContain(word);
+    }
+    // Everything else GitHub says is left to the merge itself: blocked may be waiting on this approval.
+    for (const mergeable of ["clean", "unknown", "blocked", "unstable", "has_hooks", undefined]) {
+      expect(
+        approveAllowed({ gate: pass, force: false, ...green, mergeable }),
+        String(mergeable),
+      ).toEqual({ ok: true });
+    }
+  });
+
   test("both reasons are given when both apply", () => {
     const gate = approvalGate({ verdict: "fail", staleVerdict: null });
     const r = approveAllowed({ gate, force: false, bids: "fail", version: "pass" });
@@ -87,13 +105,66 @@ describe("when y may approve and merge", () => {
 });
 
 describe("the line reader", () => {
-  function reader() {
+  function reader(options?: ConstructorParameters<typeof LineReader>[2]) {
     const input = new PassThrough();
     const output = new PassThrough();
     const written: string[] = [];
     output.on("data", (b) => written.push(String(b)));
-    return { input, written, reader: new LineReader(input, output) };
+    return { input, written, reader: new LineReader(input, output, options) };
   }
+
+  test("on a terminal, what was typed before a card was shown is dropped, and counted", async () => {
+    const { input, reader: r } = reader({ typeAhead: "discard" });
+    input.write("y\ny\n"); // Enter pressed while the program was busy
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(await r.discardTyped()).toBe(2);
+    // The next question waits for a line typed after it was shown.
+    const pending = r.ask("? ");
+    input.write("q\n");
+    expect(await pending).toBe("q");
+    r.close();
+  });
+
+  test("a pasted comment: the lines that arrive with it are dropped once it settles", async () => {
+    const { input, reader: r } = reader({ typeAhead: "discard" });
+    const first = r.ask("comment> ");
+    input.write("Fix the README.\nAlso add a CHANGES entry.\ny\n");
+    expect(await first).toBe("Fix the README.");
+    expect(await r.discardTyped(30)).toBe(2);
+    r.close();
+  });
+
+  test("a pipe is a script: its lines are kept and discardTyped drops nothing", async () => {
+    const { input, reader: r } = reader(); // not a terminal
+    input.write("y\nn\n");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(await r.discardTyped(10)).toBe(0);
+    expect(await r.ask("? ")).toBe("y");
+    expect(await r.ask("? ")).toBe("n");
+    r.close();
+  });
+
+  test("Ctrl+C ends the input, says it was an interrupt, and what was typed before it is not an answer", async () => {
+    // A terminal as readline sees one: a stream that says it is a TTY and can go raw.
+    const input = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => input });
+    const output = new PassThrough();
+    const r = new LineReader(input, output, { typeAhead: "keep" });
+    input.write("y\r");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    input.write("\u0003");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(r.interrupted).toBe(true);
+    // "keep" would hand the queued "y" to the next question; an interrupt clears it either way.
+    expect(await r.ask("? ")).toBeNull();
+    r.close();
+  });
+
+  test("an input that ended is not an interrupt", async () => {
+    const { input, reader: r } = reader();
+    input.end();
+    expect(await r.ask("? ")).toBeNull();
+    expect(r.interrupted).toBe(false);
+  });
 
   test("lines typed ahead are kept for the questions that come later", async () => {
     const { input, reader: r } = reader();

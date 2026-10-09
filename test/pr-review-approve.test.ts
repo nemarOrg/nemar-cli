@@ -432,6 +432,10 @@ describe("approving", () => {
         sleep: async () => {},
       });
       expect(m).toMatchObject({ ok: false, status: 0, outcome: "not_sent" });
+      if (!m.ok) {
+        expect(m.reason).toStartWith("Not merged: ");
+        expect(m.reason).toContain("The approval stands.");
+      }
     } finally {
       dead.stop(true);
     }

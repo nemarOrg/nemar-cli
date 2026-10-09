@@ -1194,7 +1194,7 @@ describe("nemar admin pr-reviews next", () => {
     gh.pulls["nm000201#7"] = { sha: SHA_A, author: "alice" };
     nodes({ ds: "nm000201", n: 7, author: "alice", authorId: 42 });
     const r = await next("d\nq\n");
-    expect(r.stdout).toContain("There is no report for this commit.");
+    expect(r.stdout).toContain("This commit has not been reviewed.");
   });
 
   test("a version that did not go up is said so in red words, and the version check agrees or not", async () => {
@@ -1388,7 +1388,8 @@ describe("nemar admin pr-reviews next", () => {
     nodes(ready("nm000201", 7), ready("nm000202", 3));
     gh.reviewStatus = 422;
     const r = await next("y\ns\n");
-    expect(r.exitCode).toBe(0);
+    // A refusal is reported and the run goes on, but the run did not do what it was asked.
+    expect(r.exitCode).toBe(1);
     expect(r.stdout).toContain("Not approved: Can not approve your own pull request");
     expect(r.stdout).toContain("[2 of 2] nm000202 #3");
     expect(r.stdout).toContain("1 skipped, 1 failed");
@@ -1409,8 +1410,9 @@ describe("nemar admin pr-reviews next", () => {
     nodes(ready("nm000201", 7));
     gh.closeStatus = 403;
     const r = await next("n\nClosing, superseded.\n");
-    expect(r.stdout).toContain("The comment was posted, but the pull request is not closed.");
+    expect(r.stdout).toContain("The comment was posted.");
     expect(r.stdout).toContain("Not closed:");
+    expect(r.stdout).not.toContain("Outcome unknown");
     expect(gh.comments).toHaveLength(1);
     expect(r.stdout).toContain("1 failed");
   });
@@ -1427,6 +1429,144 @@ describe("nemar admin pr-reviews next", () => {
     expect(mergePuts()).toHaveLength(0);
   });
 
+  test("a merge whose outcome is unknown is counted as unknown, not as 'approved but not merged'", async () => {
+    nodes(ready("nm000201", 7));
+    gh.mergeStatus = 502;
+    const r = await next("y\n");
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("Outcome unknown: GitHub may have merged it");
+    expect(r.stdout).toContain("Done: 1 with an unknown outcome (check the pull request).");
+    expect(r.stdout).not.toContain("approved but not merged");
+  });
+
+  test("a close whose outcome is unknown says the comment was posted and that the close may have happened", async () => {
+    nodes(ready("nm000201", 7));
+    gh.closeStatus = 502;
+    const r = await next("n\nClosing, superseded.\n");
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("The comment was posted.");
+    expect(r.stdout).toContain("Outcome unknown: GitHub may have closed it");
+    expect(r.stdout).not.toContain("is not closed");
+    expect(r.stdout).toContain("1 with an unknown outcome");
+    expect(gh.comments).toHaveLength(1);
+  });
+
+  test("a comment whose answer cannot be read is unknown too, and stops the run", async () => {
+    nodes(ready("nm000201", 7), ready("nm000202", 3));
+    gh.unreadableAnswers = true;
+    const r = await next("c\nHello.\nq\n");
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("Outcome unknown: GitHub may have posted the comment");
+    expect(r.stdout).not.toContain("[2 of 2]");
+  });
+
+  test("'nothing left' is only said when it is known: skipped and failed pull requests still need you", async () => {
+    nodes(ready("nm000201", 7));
+    const skipped = await next("s\n");
+    expect(skipped.stdout).not.toContain("Nothing left that needs you.");
+    expect(skipped.stdout).toContain(
+      "No more pull requests to show, but 1 still needs you (skipped, failed, with an unknown outcome, or approved and not merged).",
+    );
+    const clean = await next("y\n");
+    expect(clean.stdout).toContain("Nothing left that needs you.");
+  });
+
+  test("'nothing left' is qualified when the list was incomplete, or part of it belongs to the other Worker", async () => {
+    gh.searchPages = [[prNode(ready("nm000201", 7)), prNode({ ds: "xx090001", n: 1 })]];
+    const r = await next("y\n");
+    expect(r.stdout).toContain("Merged nm000201 #7 (squash).");
+    expect(r.stdout).not.toContain("Nothing left that needs you.");
+    expect(r.stdout).toContain("belong to the other environment's Worker and are not shown");
+
+    const queue: QueueResponse = {
+      environment: "production",
+      review_enabled: true,
+      entries: [],
+      total_open: 0,
+      truncated: true,
+      skipped: { not_a_dataset: 0, not_owned_here: 0, unreadable: 0 },
+      filters: { verdicts: [], dataset: null, author: null, needs_me: true },
+    };
+    apiOverride = (req) =>
+      new URL(req.url).pathname === "/admin/pr-reviews" ? Response.json(queue) : null;
+    const truncated = await next("");
+    expect(truncated.stdout).not.toContain("Nothing left that needs you.");
+    expect(truncated.stdout).toContain("this list is incomplete");
+  });
+
+  test("a comment or a close is not written if the pull request changed while the card was open", async () => {
+    nodes(ready("nm000201", 7));
+    // The administrator's read finds SHA_A; every read after it finds a push.
+    gh.pulls["nm000201#7"].headAfterFirstRead = SHA_B;
+    const r = await next("n\nThis does not pass.\n");
+    expect(r.stdout).toContain("This pull request changed while it was open here");
+    expect(r.stdout).toContain("Nothing was sent.");
+    expect(gh.comments).toHaveLength(0);
+    expect(writes()).toHaveLength(0);
+    expect(r.stdout).toContain("1 skipped");
+  });
+
+  test("a pull request this token cannot see is skipped with a note, counted, and the run goes on", async () => {
+    nodes(ready("nm000201", 7), ready("nm000202", 3));
+    Reflect.deleteProperty(gh.pulls, "nm000201#7"); // GitHub answers 404
+    const r = await next("y\n");
+    expect(r.stdout).toContain("nm000201 #7: skipped,");
+    expect(r.stdout).toContain("Merged nm000202 #3 (squash).");
+    expect(r.stdout).toContain("1 merged, 1 failed");
+    expect(r.exitCode).toBe(1);
+  });
+
+  test("a pull request with merge conflicts is shown as such and y is not offered", async () => {
+    nodes(ready("nm000201", 7));
+    gh.pulls["nm000201#7"].mergeableState = "dirty";
+    const r = await next("y\nq\n");
+    expect(r.stdout).toContain("Merge:    it has merge conflicts");
+    expect(r.stdout).toContain("y is not available:");
+    expect(r.stdout).toContain("merge conflicts, so it cannot be merged as it is");
+    expect(writes()).toHaveLength(0);
+  });
+
+  test("--force says on the card that y will approve against the review", async () => {
+    nodes(ready("nm000201", 7, {}, "fail"));
+    const r = await next("q\n", ["--all", "--force"]);
+    expect(r.stdout).toContain(
+      "--force: y will approve although the review says it needs changes.",
+    );
+  });
+
+  test("the stored verdict and the report disagreeing is said on the card, with the stricter used", async () => {
+    gh.pulls["nm000201#7"] = { sha: SHA_A, author: "alice" };
+    seed({
+      ds: "nm000201",
+      n: 7,
+      authorId: 42,
+      login: "alice",
+      state: "reported",
+      verdict: "fail",
+      report: goodReport(), // the report alone would pass
+    });
+    nodes({ ds: "nm000201", n: 7, author: "alice", authorId: 42 });
+    const r = await next("q\n", ["--all"]);
+    expect(r.stdout).toContain("Review:   fail");
+    expect(r.stdout).toContain("The stored verdict is fail; the report below would now read pass.");
+    expect(r.stdout).toContain("y is not available:");
+  });
+
+  test("d says a report could not be read when it could not, and not that there is none", async () => {
+    nodes(ready("nm000201", 7));
+    apiOverride = (req) =>
+      new URL(req.url).pathname.startsWith("/admin/pr-reviews/")
+        ? Response.json(
+            { error: "nm000201 belongs to the dev Worker.", code: "not_owned_here" },
+            { status: 404 },
+          )
+        : null;
+    const r = await next("d\nq\n", ["--force"]);
+    expect(r.stdout).toContain("The report could not be read (");
+    expect(r.stdout).not.toContain("There is no report");
+    expect(r.stdout).not.toContain("has not been reviewed");
+  });
+
   test("input that ends stops the run without sending anything", async () => {
     nodes(ready("nm000201", 7));
     const none = await next("");
@@ -1441,7 +1581,7 @@ describe("nemar admin pr-reviews next", () => {
   test("an answer that is not one of the five is not guessed at", async () => {
     nodes(ready("nm000201", 7));
     const r = await next("approve it\nmaybe\nq\n");
-    expect(r.stdout.match(/Type y, n, c, s or q\./g)).toHaveLength(2);
+    expect(r.stdout.match(/Type y, n, c, d, s or q\./g)).toHaveLength(2);
     expect(writes()).toHaveLength(0);
   });
 

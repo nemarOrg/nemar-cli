@@ -760,6 +760,9 @@ function listChangedFiles(e: ReviewEvidence): string {
  * everything. Empty when there is nothing to say. One bullet per line, in markdown.
  */
 export function findingLines(report: PrReviewReport): string[] {
+  // A code newer than this build (the CLI ships apart from the Worker) is named, not "undefined".
+  const labelOf = (code: FindingCode): string =>
+    (CODE_LABEL as Record<string, string | undefined>)[code] ?? `Unknown finding (${code})`;
   const { notes } = factsOf(report);
   const details: string[] = [];
   if (report.steering) {
@@ -768,14 +771,14 @@ export function findingLines(report: PrReviewReport): string[] {
   for (const f of report.findings) {
     const where = f.path ? ` (\`${f.path}\`)` : "";
     const note = f.note ? `: ${f.note}` : "";
-    details.push(`- **${CODE_LABEL[f.code]}**${where}, ${f.severity}${note}`);
+    details.push(`- **${labelOf(f.code)}**${where}, ${f.severity}${note}`);
   }
   // Facts found from the files, stated in their own right so a red or amber answer is never left
   // without a reason. A model finding that already says the same thing is not repeated.
   for (const n of notes) {
     if (report.findings.some((f) => f.criterion === n.criterion && f.code === n.code)) continue;
     details.push(
-      `- **${CODE_LABEL[n.code]}**, ${n.result === "fail" ? "blocker" : "concern"}: found from the files, not by the reviewer.`,
+      `- **${labelOf(n.code)}**, ${n.result === "fail" ? "blocker" : "concern"}: found from the files, not by the reviewer.`,
     );
   }
   if (report.evidence.truncated) {

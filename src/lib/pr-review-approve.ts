@@ -661,7 +661,14 @@ export async function mergeWhenClean(
   let state = "unknown";
   for (let i = 0; i < tries; i++) {
     const pr = await fetchPullRequest(token, datasetId, prNumber, base);
-    if (!pr.ok) return { ok: false, outcome: "not_sent", status: pr.status, reason: pr.reason };
+    if (!pr.ok) {
+      return {
+        ok: false,
+        outcome: "not_sent",
+        status: pr.status,
+        reason: `Not merged: ${pr.reason} The approval stands.`,
+      };
+    }
     if (pr.value.headSha !== headSha) {
       return {
         ok: false,

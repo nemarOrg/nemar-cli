@@ -103,7 +103,13 @@ by the administrator, from their machine, with their own GitHub login.**
   the same identity checks as `approve`. A write whose outcome is unknown, or that recorded
   something other than what was asked, stops the run; a plain refusal is reported and the run
   goes on. Each run remembers the pull requests it has shown, because the search index trails a
-  merge or a close and would show them again.
+  merge or a close and would show them again. A comment or a close is not pinned to a commit by
+  GitHub, so the pull request is read again after the comment is typed and nothing is written if it
+  is no longer open at the commit shown. In a terminal, lines typed before a card was shown (Enter
+  pressed while the program was busy, or the rest of a pasted comment) are discarded, never
+  answered to the next card; piped answers are a script and are all kept. "Nothing left that needs
+  you" is said only when nothing was skipped, failed, left unknown or approved without a merge,
+  and the list was read whole.
 - **A merge is attempted only on request, and is a check, not an enforcement.** `--merge` (and `y`
   in `next`, which always squashes) is attempted once, only if GitHub reports the pull request `clean` (not `has_hooks`, which is a
   GitHub Enterprise Server value); it re-asks while GitHub is still

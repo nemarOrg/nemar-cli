@@ -51,19 +51,28 @@ export type ApproveVerdict = { ok: true } | { ok: false; reason: string };
  * Whether `y` may approve and merge this pull request now. The review's own verdict is judged as
  * for `approve` (`gate`): a failing or running review, or one that could not be read, needs
  * `--force`; the others only need the answer. The two required checks must both be green, whatever
- * `--force` says, because the merge that follows would be refused by GitHub.
+ * `--force` says, because the merge that follows would be refused by GitHub, and so must the pull
+ * request be mergeable as it is (no conflicts, not behind): an approval that cannot be followed by
+ * the merge `y` promises is better made on purpose with `approve`.
  */
 export function approveAllowed(input: {
   gate: ApprovalGate;
   force: boolean;
   bids: string;
   version: string;
+  /** GitHub's `mergeable_state` for the pull request now. Anything but `dirty` and `behind` passes. */
+  mergeable?: string;
 }): ApproveVerdict {
   const reasons: string[] = [];
   if (input.bids !== "pass" || input.version !== "pass") {
     reasons.push(
       `A required check is not green (BIDS ${checkWord(input.bids)}, version ${checkWord(input.version)}), so GitHub would not let it merge.`,
     );
+  }
+  if (input.mergeable === "dirty") {
+    reasons.push("GitHub reports merge conflicts, so it cannot be merged as it is.");
+  } else if (input.mergeable === "behind") {
+    reasons.push("GitHub reports the branch is behind main, so it cannot be merged as it is.");
   }
   if (input.gate.kind === "needs_force" && !input.force) {
     reasons.push(input.gate.reason);

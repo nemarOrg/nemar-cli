@@ -26,7 +26,13 @@ import {
   type QueueVerdict,
   type ReadVerdict,
 } from "../../shared/contract/pr-review-admin.js";
-import { type ReviewOutcome, factsOf, findingLines, renderCheck } from "../../shared/pr-review.js";
+import {
+  type ReviewOutcome,
+  factsOf,
+  findingLines,
+  renderCheck,
+  verdictOf,
+} from "../../shared/pr-review.js";
 import {
   clearPrReviewAuthor,
   getPrReview,
@@ -773,6 +779,8 @@ interface Assessment {
 type Stop =
   /** The pull request cannot be acted on (closed, merged, a draft, another branch). */
   | { kind: "refused"; message: string }
+  /** GitHub will not show this token the pull request (404, 403): not a reason to end a run. */
+  | { kind: "unreadable"; message: string }
   /** Something failed that the administrator should see; `error` runs through `failApi`. */
   | { kind: "failed"; message: string; error?: unknown };
 
@@ -790,7 +798,13 @@ async function assessPullRequest(
   base: string,
 ): Promise<Assessed> {
   const live = await fetchPullRequest(token, dataset, pr, base);
-  if (!live.ok) return { ok: false, stop: { kind: "failed", message: live.reason } };
+  if (!live.ok) {
+    const unreadable = live.status === 404 || live.status === 403;
+    return {
+      ok: false,
+      stop: { kind: unreadable ? "unreadable" : "failed", message: live.reason },
+    };
+  }
   const refusal = refusalFor(live.value);
   if (refusal) return { ok: false, stop: { kind: "refused", message: refusal } };
   const head = live.value.headSha;
@@ -1011,6 +1025,8 @@ interface NextTally {
   commented: number;
   skipped: number;
   failed: number;
+  /** Writes GitHub did not answer in a way that says what happened: they may have been applied. */
+  unknown: number;
 }
 
 function tallyLine(t: NextTally): string {
@@ -1021,38 +1037,69 @@ function tallyLine(t: NextTally): string {
     t.commented && `${t.commented} commented`,
     t.skipped && `${t.skipped} skipped`,
     t.failed && `${t.failed} failed`,
+    t.unknown && `${t.unknown} with an unknown outcome (check the pull request)`,
   ].filter(Boolean);
   return parts.length === 0 ? "Nothing was changed." : `Done: ${parts.join(", ")}.`;
 }
 
+/** Pull requests the run leaves for the administrator: skipped, failed, unknown, or approved only. */
+function outstanding(t: NextTally): number {
+  return t.skipped + t.failed + t.unknown + t.approved;
+}
+
 /**
- * Say what a failed write is. Returns true when the run must stop: a result that is not known
- * (GitHub may have applied it) or a record that is not what was asked for needs the administrator
- * to look at the pull request before anything else is done to it or to the next one.
+ * Say what a failed write is and count it. Returns true when the run must stop: a result that is
+ * not known (GitHub may have applied it) or a record that is not what was asked for needs the
+ * administrator to look at the pull request before anything else is done to it or to the next one.
+ * A refusal, or a merge that was never sent, is counted under `bucket` and the run goes on.
  */
 function reportFailedWrite(
   w: Extract<WriteResult, { ok: false }>,
-  didNot: string,
-  mayHave: string,
-  url: string,
+  spec: {
+    didNot: string;
+    mayHave: string;
+    url: string;
+    tally: NextTally;
+    bucket: "failed" | "approved";
+  },
 ): boolean {
   if (w.outcome === "unknown") {
     console.log(chalk.yellow(w.reason));
-    console.log(chalk.yellow(`Outcome unknown: GitHub may have ${mayHave}. Check ${url}.`));
+    console.log(
+      chalk.yellow(`Outcome unknown: GitHub may have ${spec.mayHave}. Check ${spec.url}.`),
+    );
+    spec.tally.unknown++;
     return true;
   }
   if (w.outcome === "different") {
     console.log(chalk.red(w.reason));
-    console.log(chalk.dim(`  Check ${url}.`));
+    console.log(chalk.dim(`  Check ${spec.url}.`));
+    spec.tally.unknown++;
     return true;
   }
+  spec.tally[spec.bucket]++;
   if (w.outcome === "not_sent") {
-    // Already a sentence of its own ("Not merged: GitHub says ..."), and nothing was sent.
+    // A sentence of its own ("Not merged: ... The approval stands."), and nothing was sent.
     console.log(chalk.yellow(w.reason));
     return false;
   }
-  console.log(chalk.red(`Not ${didNot}: ${w.reason}`));
+  console.log(chalk.red(`Not ${spec.didNot}: ${w.reason}`));
   return false;
+}
+
+/** Why `d` has no report to show, in words that do not call an unreadable report "none". */
+function noReportWhy(a: {
+  unread: string | undefined;
+  reviewCurrent: boolean | null;
+  verdict: QueueVerdict;
+}): string {
+  if (a.unread) return `The report could not be read (${plain(a.unread)}).`;
+  if (a.reviewCurrent === false) {
+    return "The review on record is of another commit, so its report is not shown.";
+  }
+  if (a.verdict === "in_progress") return "The review is still running.";
+  if (a.verdict === "not_reviewed") return "This commit has not been reviewed.";
+  return "A review of this commit is on record, but its report could not be read.";
 }
 
 prReviewsCommand
@@ -1068,19 +1115,23 @@ prReviewsCommand
   .addHelpText(
     "after",
     `
-For each pull request it shows who opened it, the automated review's summary and whether the two
-required checks (BIDS and version) are green, then waits for one answer:
+For each pull request it shows who opened it, the automated review's summary, whether the two
+required checks (BIDS and version) are green and whether the version went up, then waits for one
+answer:
 
   y   approve it as YOU (your own GitHub login), then squash-merge it. Only offered when both
-      required checks are green; a failing, running or unreadable review also needs --force.
+      required checks are green and GitHub says it can be merged as it is; a failing, running or
+      unreadable review also needs --force.
   n   close it. You are asked for a comment, which is posted first so the author sees why.
   c   comment on it and leave it open. You are asked for the comment.
   d   show the whole report, then ask again.
   s   leave it for now (it is not shown again in this run).   q   stop.
 
-An empty comment cancels the n or c and asks again. The squash merge is attempted once, only if
-GitHub reports the pull request clean, exactly as for 'approve --merge'. Nothing is sent to GitHub
-except what you answer, with your own token, and a write whose outcome is unknown stops the run.
+An empty comment cancels the n or c and asks again, and a comment is one line. The squash merge is
+attempted once, only if GitHub reports the pull request clean, exactly as for 'approve --merge'.
+Nothing is sent to GitHub except what you answer, with your own token, and a write whose outcome is
+unknown stops the run. In a terminal, anything you type before a card has been shown is ignored, so
+an impatient Enter cannot answer a pull request you have not seen; piped answers are all kept.
 `,
   )
   .action(
@@ -1124,16 +1175,25 @@ except what you answer, with your own token, and a write whose outcome is unknow
         commented: 0,
         skipped: 0,
         failed: 0,
+        unknown: 0,
       };
       let stopped = false;
       let first = true;
+      const endedWords = () =>
+        reader.interrupted ? "Interrupted; stopping." : "Input ended; stopping.";
+      /** Close the input and say what was done. Every way out of the run goes through here. */
+      const finish = () => {
+        reader.close();
+        console.log();
+        console.log(tallyLine(tally));
+      };
 
       run: for (;;) {
         let q: QueueResponse;
         try {
           q = await listPrReviews({ verdicts: [], dataset, author, needsMe: !options.all });
         } catch (err) {
-          reader.close();
+          finish();
           return failApi(err, null, "Could not read the pull-request queue");
         }
         if (first) {
@@ -1145,7 +1205,27 @@ except what you answer, with your own token, and a write whose outcome is unknow
         );
         const e = pending[0];
         if (!e) {
-          console.log(chalk.green("\nNothing left that needs you."));
+          // "Nothing left" is only said when it is known: nothing skipped, failed or half done, and
+          // a list that was read whole.
+          const notes = incompleteLines(q);
+          if (q.skipped.not_owned_here > 0) {
+            notes.push(
+              chalk.yellow(
+                `  ${q.skipped.not_owned_here} pull request(s) belong to the other environment's Worker and are not shown.`,
+              ),
+            );
+          }
+          const left = outstanding(tally);
+          if (left === 0 && notes.length === 0) {
+            console.log(chalk.green("\nNothing left that needs you."));
+          } else {
+            console.log(
+              chalk.yellow(
+                `\nNo more pull requests to show${left > 0 ? `, but ${left} still ${left === 1 ? "needs" : "need"} you (skipped, failed, with an unknown outcome, or approved and not merged)` : ""}.`,
+              ),
+            );
+            for (const l of notes) console.log(l);
+          }
           break;
         }
         handled.add(`${e.dataset_id}#${e.pr_number}`);
@@ -1154,13 +1234,14 @@ except what you answer, with your own token, and a write whose outcome is unknow
         // The pull request as it is now: the list can trail a merge or a push by a minute.
         const assessed = await assessPullRequest(session.token, e.dataset_id, e.pr_number, base);
         if (!assessed.ok) {
-          if (assessed.stop.kind === "refused") {
-            console.log(
-              chalk.dim(`\n${e.dataset_id} #${e.pr_number}: skipped, ${assessed.stop.message}`),
-            );
+          const { stop } = assessed;
+          if (stop.kind === "refused" || stop.kind === "unreadable") {
+            console.log(chalk.dim(`\n${e.dataset_id} #${e.pr_number}: skipped, ${stop.message}`));
+            // Closed, merged or drafted under us is resolved; one this token cannot read is not.
+            if (stop.kind === "unreadable") tally.failed++;
             continue;
           }
-          reader.close();
+          finish();
           return stopFor(assessed);
         }
         const a = assessed.value;
@@ -1173,7 +1254,11 @@ except what you answer, with your own token, and a write whose outcome is unknow
           force: options.force === true,
           bids,
           version,
+          mergeable: a.live.mergeableState,
         });
+        // The stored verdict and the report can disagree (ADR 0093: the stricter is used).
+        const shown = a.outcome as ReviewOutcome | null | undefined;
+        const rederived = shown?.kind === "reported" ? verdictOf(shown.report) : null;
 
         console.log();
         console.log(
@@ -1188,8 +1273,27 @@ except what you answer, with your own token, and a write whose outcome is unknow
         );
         console.log(`  Review:   ${reviewCell(a)}`);
         console.log(`  Checks:   BIDS ${checkCell(bids, 0)}   version ${checkCell(version, 0)}`);
+        if (a.live.mergeableState === "dirty") {
+          console.log(chalk.red("  Merge:    it has merge conflicts"));
+        } else if (a.live.mergeableState === "behind") {
+          console.log(chalk.yellow("  Merge:    the branch is behind main"));
+        }
         if (a.contributorNote) console.log(chalk.yellow(`  ${plain(a.contributorNote)}`));
         if (a.gate.kind === "confirm") console.log(chalk.yellow(`  ${a.gate.warning}`));
+        if (a.gate.kind === "needs_force" && options.force) {
+          console.log(
+            chalk.red(
+              `  --force: y will approve although the review ${a.unread ? "could not be read" : a.verdict === "in_progress" ? "is still running" : "says it needs changes"}.`,
+            ),
+          );
+        }
+        if (rederived !== null && !a.unread && a.verdict !== rederived) {
+          console.log(
+            chalk.yellow(
+              `  The stored verdict is ${verdictWord(a.verdict)}; the report below would now read ${verdictWord(rederived)}. The stricter is used.`,
+            ),
+          );
+        }
         // `a.outcome` is the report of THIS commit's review, or null (see reviewForApproval).
         const brief = briefLines(a.outcome);
         if (brief.length > 0) {
@@ -1201,24 +1305,30 @@ except what you answer, with your own token, and a write whose outcome is unknow
           console.log(chalk.yellow(`  y is not available: ${allowed.reason}`));
         }
 
+        // What was typed before this card existed was not an answer to it.
+        const dropped = await reader.discardTyped();
+        if (dropped > 0) {
+          console.log(chalk.dim(`  Ignored ${dropped} line(s) typed before this card was shown.`));
+        }
+
         for (;;) {
           const raw = await reader.ask(
             `\n${allowed.ok ? "y approve + squash merge, " : ""}n close, c comment, d details, s skip, q quit > `,
           );
           if (raw === null) {
-            console.log(chalk.dim("\nInput ended; stopping."));
+            console.log(chalk.dim(`\n${endedWords()}`));
             break run;
           }
           const choice = parseChoice(raw);
           if (choice === null) {
-            console.log(chalk.dim("  Type y, n, c, s or q."));
+            console.log(chalk.dim("  Type y, n, c, d, s or q."));
             continue;
           }
           if (choice === "quit") break run;
           if (choice === "details") {
             console.log();
             if (a.outcome === null || a.outcome === undefined) {
-              console.log(chalk.dim("  There is no report for this commit."));
+              console.log(chalk.dim(`  ${noReportWhy(a)}`));
             } else {
               for (const l of reportLines(a.outcome as ReviewOutcome)) console.log(l);
             }
@@ -1245,8 +1355,13 @@ except what you answer, with your own token, and a write whose outcome is unknow
               base,
             );
             if (!approved.ok) {
-              tally.failed++;
-              stopped = reportFailedWrite(approved, "approved", "recorded the approval", url);
+              stopped = reportFailedWrite(approved, {
+                didNot: "approved",
+                mayHave: "recorded the approval",
+                url,
+                tally,
+                bucket: "failed",
+              });
               if (stopped) break run;
               break;
             }
@@ -1267,8 +1382,13 @@ except what you answer, with your own token, and a write whose outcome is unknow
               console.log(chalk.green(`Merged ${e.dataset_id} #${e.pr_number} (squash).`));
               tally.merged++;
             } else {
-              tally.approved++;
-              stopped = reportFailedWrite(merged, "merged", "merged it", url);
+              stopped = reportFailedWrite(merged, {
+                didNot: "merged",
+                mayHave: "merged it",
+                url,
+                tally,
+                bucket: "approved",
+              });
               if (stopped) break run;
             }
             break;
@@ -1282,18 +1402,55 @@ except what you answer, with your own token, and a write whose outcome is unknow
               : "Comment (empty cancels): ",
           );
           if (typed === null) {
-            console.log(chalk.dim("\nInput ended; stopping."));
+            console.log(chalk.dim(`\n${endedWords()}`));
             break run;
+          }
+          // A pasted comment of several lines is one line plus lines that would answer the next
+          // cards. A terminal drops them and sends nothing; a pipe is a script and keeps its lines.
+          const extra = await reader.discardTyped(40);
+          if (extra > 0) {
+            console.log(
+              chalk.yellow(
+                `A comment is one line; ${extra} more line(s) arrived with it. Nothing was sent.`,
+              ),
+            );
+            continue;
           }
           const text = typed.trim();
           if (text === "") {
             console.log(chalk.dim("  Cancelled. Nothing was sent."));
             continue;
           }
+          // A comment and a close are not pinned to the commit the card showed, and typing takes a
+          // while: look again, and write nothing if the pull request is no longer the one shown.
+          const now = await fetchPullRequest(session.token, e.dataset_id, e.pr_number, base);
+          if (!now.ok) {
+            console.log(
+              chalk.yellow(
+                `Could not re-read the pull request, so nothing was sent: ${now.reason}`,
+              ),
+            );
+            tally.failed++;
+            break;
+          }
+          if (now.value.state !== "open" || now.value.headSha !== a.head) {
+            console.log(
+              chalk.yellow(
+                `This pull request changed while it was open here (now ${now.value.state}, at ${short(now.value.headSha)}). Nothing was sent.`,
+              ),
+            );
+            tally.skipped++;
+            break;
+          }
           const posted = await postComment(session.token, e.dataset_id, e.pr_number, text, base);
           if (!posted.ok) {
-            tally.failed++;
-            stopped = reportFailedWrite(posted, "commented", "posted the comment", url);
+            stopped = reportFailedWrite(posted, {
+              didNot: "commented",
+              mayHave: "posted the comment",
+              url,
+              tally,
+              bucket: "failed",
+            });
             if (stopped) break run;
             break;
           }
@@ -1302,13 +1459,16 @@ except what you answer, with your own token, and a write whose outcome is unknow
             tally.commented++;
             break;
           }
+          console.log(chalk.dim("  The comment was posted."));
           const closed = await closePullRequest(session.token, e.dataset_id, e.pr_number, base);
           if (!closed.ok) {
-            console.log(
-              chalk.yellow("The comment was posted, but the pull request is not closed."),
-            );
-            tally.failed++;
-            stopped = reportFailedWrite(closed, "closed", "closed it", url);
+            stopped = reportFailedWrite(closed, {
+              didNot: "closed",
+              mayHave: "closed it",
+              url,
+              tally,
+              bucket: "failed",
+            });
             if (stopped) break run;
             break;
           }
@@ -1319,10 +1479,9 @@ except what you answer, with your own token, and a write whose outcome is unknow
         if (options.once) break;
       }
 
-      reader.close();
-      console.log();
-      console.log(tallyLine(tally));
-      if (stopped) process.exit(1);
+      finish();
+      if (reader.interrupted) process.exit(130);
+      if (stopped || tally.failed > 0 || tally.unknown > 0) process.exit(1);
     },
   );
 
