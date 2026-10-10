@@ -2005,6 +2005,8 @@ describe("password sign-in is retired", () => {
     expect(result.out).not.toMatch(/unknown command/i);
     expect(result.out).not.toContain("Password:");
     expect(result.out).not.toContain("Email address:");
+    // A command that was retired on purpose is not a crash to report.
+    expect(result.out).not.toContain("--debug");
   }, 15000);
 
   test("retrieve-key ignores flags and arguments an old habit might add", async () => {

@@ -75,7 +75,7 @@ import {
   YES_OPTION,
   confirm,
 } from "../lib/confirm.js";
-import { markUsageExit, recordStep } from "../lib/debug-log.js";
+import { markReportedExit, markUsageExit, recordStep } from "../lib/debug-log.js";
 import {
   type DeviceLoginOutcome,
   describeDeviceOutcome,
@@ -1487,6 +1487,8 @@ authCommand
     console.error(
       `  Run ${chalk.cyan("nemar auth login")} to sign in with your browser; it also creates your API key.`,
     );
+    // A command retired on purpose is an answer, not a crash: no "attach a debug log" hint.
+    markReportedExit();
     process.exitCode = 1;
   });
 
@@ -1538,6 +1540,8 @@ const regenerateKeyCmd = authCommand
       // machine, so a failure has to be visible to a script, not only a person.
       process.exitCode = 1;
       if (error instanceof ApiError) {
+        // A refusal the server explained (unknown account, rate limit) is reported, not a bug.
+        if (error.statusCode >= 400 && error.statusCode < 500) markReportedExit();
         spinner.fail(error.message);
       } else {
         spinner.fail("Failed to send verification email");
