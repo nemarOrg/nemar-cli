@@ -53,6 +53,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "ADD_CHUNK_MAX_PATHS",
     "ANNEX_CLONE_DESCRIPTION",
     "ANNEX_DEPOSIT_DESCRIPTION",
+    "ANNEX_UPSTREAM_DESCRIPTION",
     "chunkAddTargets",
     "configureLargefiles",
     "ensureGitAnnexInitialized",
@@ -198,6 +199,7 @@ const INTERNAL_WIRING = [
   // Non-identifying annex repository descriptions (#1399).
   "ANNEX_CLONE_DESCRIPTION",
   "ANNEX_DEPOSIT_DESCRIPTION",
+  "ANNEX_UPSTREAM_DESCRIPTION",
   "isDefaultAnnexDescription",
   "replaceDefaultAnnexDescription",
   // Annex-only guarded push used after S3 copy has advanced git-annex.
