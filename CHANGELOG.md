@@ -98,6 +98,23 @@ the steps that turn it on are listed under Deploy coupling.
   (#1683).** `git annex init` is given a fixed description, and an upload replaces a default one
   left by an older CLI before anything is pushed. The old value stays in the history of an
   already-pushed `git-annex` branch (the back-catalogue is #1399).
+- **An imported dataset's first push no longer stops on the source's own repository names.** The
+  privacy gate added with #1683 refused any clone whose `uuid.log` held a `user@host:/path`
+  description, and OpenNeuro's own repositories carry them (13 of 20 sampled, for example
+  `root@93184394ac19:/datalad/ds000001`), so `nemar admin import prepare` stopped at the push. Before
+  anything of the `git-annex` branch is published, another repository's description is replaced with
+  `upstream` and the history is pruned again; this machine's own description is still refused, and the
+  message now names the way out.
+- **`--verbose` no longer prints a GitHub token.** The credential helper written for a push and the
+  token `gh` returns for `nemar admin pr-reviews` reached stderr, which people paste into issues.
+- **`nemar dataset download` reports a file the manifest lists and storage lacks as absent.** The data
+  plane answers 502 for it; the downloader retried three times and exited 1, where ADR 0005 treats a
+  file the archive does not have as a reportable gap. Any other 502 is still a transport fault.
+- **A retired command, or a refused `regenerate-key`, no longer asks for a bug report.**
+- **A blocked-publication sweep that throws is an error in the audit tally**, not a run with nothing to
+  do.
+- **`bun run migrations:d1-check`** reads wrangler's catalog around the warning banner it prints when a
+  proxy variable is set.
 
 ### Migrations
 
@@ -123,7 +140,12 @@ the steps that turn it on are listed under Deploy coupling.
   Worker owns (`nm099999`) to it, so the first live run can be made with the flag set on the dev
   Worker alone.
 - Pages on `docs.nemar.org` that name `nemar auth retrieve-key` need the same edit as the CLI
-  messages (ADR 0097); that repository is private.
+  messages (ADR 0097): `cli/getting-started/authentication`, `cli/getting-started/quickstart`,
+  `platform/api` and the help capture in `cli/commands/auth`. That repository is private.
+- The hourly D1 backup (ADR 0004) keeps the password hashes in its git history. Clearing them in
+  the database does not touch it; rewriting that history is a separate decision (ADR 0097).
+- Do not run `nemar admin fleet key-registration --apply` on a chunked dataset until `git annex get`
+  of a chunked key is shown to work (ADR 0064 and 0095).
 
 ### Known limitations
 
@@ -135,7 +157,18 @@ the steps that turn it on are listed under Deploy coupling.
 - Manually redelivering an older commit's event makes it the latest and the newer commit's
   claim is refused; both end as "push again" (ADR 0092, accepted risk).
 - Upload hardening epic #1671 leaves #1455 open: the worker-count default and the inactivity
-  diagnostic are not settled.
+  diagnostic are not settled. The S3 credential renewal and the multi-batch copy have no automated
+  test against a real bucket (the loopback test was removed); run one real upload to a dev dataset
+  before relying on them.
+- Chunked files are served by the Worker from a stream, and workerd may drop the hand-set
+  `Content-Length`; the chunk listing is bounded to 512 objects per backend and size. Read a chunked
+  sample from staging before announcing it (ADR 0095, known limits).
+- A recorded publication request whose latest BIDS run ends `cancelled`, `timed_out` or `skipped`
+  stays waiting until another run starts, while the CLI says it continues automatically (ADR 0086).
+- `nemar dataset update` does not clear stale assume-unchanged flags left by a save killed with
+  SIGKILL; `nemar dataset commit` does (ADR 0094).
+- Owner edits of an account's email and GitHub handle (ADR 0096, still proposed) do not end the old
+  holder's keys and sessions, and the handle is not checked against GitHub.
 
 ## 0.10.15 - 2026-10-07
 
