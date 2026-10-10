@@ -42,6 +42,16 @@ Deploy coupling.
   time. `standing` shows a contributor's record; `allow`, `block` and `clear` set or remove an
   override of the tally. It works with the review switched off: a pull request with no review is
   `not_reviewed`.
+- **`nemar admin pr-reviews start` reviews the pull requests that were already open (ADR 0092
+  amendment).** The Worker reviews on events, and a pull request that was open before the review
+  was switched on produced none. `start <dataset> <pr>` and `start --all` (with `--dry-run` and
+  `--yes`) ask for one: the Worker reads the pull request from GitHub itself and runs it through
+  the same gate, so the flag, the pause and the platform's daily pool still apply, while the
+  per-contributor allowances do not hold back a review an administrator asked for by name. It
+  also starts again a commit whose review was declined, ended in an error, never reported, or
+  was handed to GitHub and not heard from for 30 minutes. A restart that follows an attempt
+  which cost a model call counts as a second call against the pool. The redelivery of a failed
+  dispatch goes through the same gate.
 - **`nemar admin users` finds an account by any field and edits a closed set of fields (ADR 0096).**
   Search matches every word in any text field, ranks an exact hit first and offers close
   matches when nothing matches; `show` and `edit` work by account id, so web accounts without a
@@ -125,7 +135,10 @@ Deploy coupling.
 - `0092_pr_reviews.sql`: the review table, the contributor-override table and their CHECKs.
 - `0093_clear_password_hashes.sql`: sets every stored password hash to NULL. Not reversible.
 - `0094_guard_retired_password_signup.sql`: refuses the retired signup insert and clears any
-  hash written between the two migrations. `bun run migrations:d1-check` passes.
+  hash written between the two migrations.
+- `0095_pr_review_attempts.sql`: adds `pr_reviews.attempts` (1 for every existing row), so the
+  platform's daily pool counts model calls rather than rows. `bun run migrations:d1-check`
+  passes.
 
 ### Deploy coupling
 
@@ -145,9 +158,8 @@ Deploy coupling.
   the whole chain while production stays dark (`nm099998` is an anonymous deposit and `nm099999`
   is private and production's, so neither is ever reviewed). **Turning it on for real datasets**
   is adding the flag to the production block of `backend/wrangler-sccn.toml`, which ships in a
-  later release, after that trial has passed.
-  A pull request that is open at that moment produces no event and is not reviewed until its
-  author pushes again.
+  later release, after that trial has passed. A pull request that is open at that moment
+  produces no event; `nemar admin pr-reviews start --all` reviews those.
 - Pages on `docs.nemar.org` that name `nemar auth retrieve-key` need the same edit as the CLI
   messages (ADR 0097): `cli/getting-started/authentication`, `cli/getting-started/quickstart`,
   `platform/api` and the help capture in `cli/commands/auth`. That repository is private.

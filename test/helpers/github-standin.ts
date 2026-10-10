@@ -35,6 +35,10 @@ export interface PullState {
   base?: string;
   sha: string;
   author?: string;
+  /** GitHub's numeric id for the author; 501 unless a test says otherwise. */
+  authorId?: number;
+  /** `author_association` on the pull request ("COLLABORATOR" unless set). */
+  assoc?: string;
   mergeableState?: string;
   /** Served for the first N reads, then `mergeableState`. */
   unknownReads?: number;
@@ -51,6 +55,10 @@ export interface GitHubStandin {
   pulls: Record<string, PullState>;
   /** The GraphQL search pages. */
   searchPages: unknown[][];
+  /** The `issueCount` the search reports, when a test needs it to differ from the nodes returned. */
+  searchTotal: number | null;
+  /** What the repository dispatch that hands a review to the workflow answers (204 accepts it). */
+  dispatchStatus: number;
   users: Record<string, { id: number; login: string; type: string }>;
   /** When set, the review POST answers this status instead of recording an approval. */
   reviewStatus: number | null;
@@ -93,6 +101,8 @@ export function startGitHubStandin(): GitHubStandin {
     seen: [] as Seen[],
     pulls: {} as Record<string, PullState>,
     searchPages: [] as unknown[][],
+    searchTotal: null as number | null,
+    dispatchStatus: 204,
     users: {} as GitHubStandin["users"],
     reviewStatus: null as number | null,
     reviewState: null as string | null,
@@ -122,7 +132,7 @@ export function startGitHubStandin(): GitHubStandin {
         return Response.json({
           data: projectOnto(String((body as { query?: unknown } | null)?.query ?? ""), {
             search: {
-              issueCount: state.searchPages.flat().length,
+              issueCount: state.searchTotal ?? state.searchPages.flat().length,
               pageInfo: {
                 hasNextPage: index + 1 < state.searchPages.length,
                 endCursor: String(index + 1),
@@ -155,6 +165,23 @@ export function startGitHubStandin(): GitHubStandin {
         return hit ? Response.json(hit) : new Response("{}", { status: 404 });
       }
 
+      // What the Worker does when it starts a review: hand it to the central workflow and publish
+      // the check and the comment. Recorded in `seen` with the token each carried.
+      if (req.method === "POST" && url.pathname === "/repos/nemarDatasets/.github/dispatches") {
+        return new Response(state.dispatchStatus < 300 ? null : "{}", {
+          status: state.dispatchStatus,
+        });
+      }
+      if (/^\/repos\/nemarDatasets\/[^/]+\/check-runs(\/\d+)?$/.test(url.pathname)) {
+        return Response.json(
+          { id: 7000 + state.seen.length },
+          { status: req.method === "POST" ? 201 : 200 },
+        );
+      }
+      if (req.method === "PATCH" && /\/issues\/comments\/\d+$/.test(url.pathname)) {
+        return Response.json({ id: 1 });
+      }
+
       const comment = url.pathname.match(
         /^\/repos\/nemarDatasets\/([^/]+)\/issues\/(\d+)\/comments$/,
       );
@@ -183,8 +210,16 @@ export function startGitHubStandin(): GitHubStandin {
             draft: p.draft ?? false,
             mergeable_state: unknown ? "unknown" : (p.mergeableState ?? "clean"),
             title: "Add subjects",
-            user: { login: p.author ?? "contributor", id: 501, type: "User" },
-            base: { ref: p.base ?? "main" },
+            author_association: p.assoc ?? "COLLABORATOR",
+            user: { login: p.author ?? "contributor", id: p.authorId ?? 501, type: "User" },
+            base: {
+              ref: p.base ?? "main",
+              repo: {
+                name: pull[1],
+                full_name: `nemarDatasets/${pull[1]}`,
+                owner: { login: "nemarDatasets" },
+              },
+            },
             head: {
               sha: p.headAfterFirstRead && reads[key] > 1 ? p.headAfterFirstRead : p.sha,
               ref: "add-subjects",
@@ -251,6 +286,18 @@ export function startGitHubStandin(): GitHubStandin {
     set searchPages(v) {
       state.searchPages = v;
     },
+    get searchTotal() {
+      return state.searchTotal;
+    },
+    set searchTotal(v) {
+      state.searchTotal = v;
+    },
+    get dispatchStatus() {
+      return state.dispatchStatus;
+    },
+    set dispatchStatus(v) {
+      state.dispatchStatus = v;
+    },
     get users() {
       return state.users;
     },
@@ -314,6 +361,8 @@ export function startGitHubStandin(): GitHubStandin {
     reset() {
       state.seen.length = 0;
       state.searchPages = [];
+      state.searchTotal = null;
+      state.dispatchStatus = 204;
       state.reviewStatus = null;
       state.reviewState = null;
       state.reviewCommit = null;

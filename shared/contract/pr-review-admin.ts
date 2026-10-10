@@ -6,6 +6,7 @@
  *   GET    /admin/pr-review-authors/:login        a contributor's tally, override and standing
  *   PUT    /admin/pr-review-authors/:login        allow or block a contributor
  *   DELETE /admin/pr-review-authors/:login        remove that decision, so the tally decides again
+ *   POST   /admin/pr-reviews/:dataset/:pr/start   review a pull request that is already open
  *
  * Types, the closed vocabularies, and nothing else, so the Worker that answers and the CLI that
  * prints read ONE definition. Every string a pull request's author controls (title, branch) arrives
@@ -145,6 +146,23 @@ export interface QueueResponse {
   truncated: boolean;
   skipped: QueueSkipped;
   filters: QueueFilters;
+}
+
+/**
+ * What starting the review of one open pull request came to. `reason` is one of the review's own
+ * fixed words (ADR 0092): `dispatched`, `redispatched` (a commit started again) or `dispatch_claimed`
+ * (GitHub's answer was lost but the workflow had already claimed it) when it was handed to GitHub,
+ * otherwise why not (`duplicate`, `contributor_paused`, `daily_limit`, `draft`, `not_open`, `not_main`,
+ * `bot_author`, `dataset_not_reviewable`, `pr_review_disabled`, ...). `review_id` is null when no
+ * review row exists for it.
+ */
+export interface StartReviewResponse {
+  environment: QueueEnvironment;
+  dispatched: boolean;
+  reason: string;
+  review_id: number | null;
+  /** The pull request's author, when GitHub gave a login of the shape a login has; else null. */
+  author_login: string | null;
 }
 
 export interface ReviewHistoryItem {

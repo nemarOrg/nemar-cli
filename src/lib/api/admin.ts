@@ -42,6 +42,7 @@ import type {
   PrReviewDetail,
   QueueResponse,
   SetOverrideResponse,
+  StartReviewResponse,
 } from "../../../shared/contract/pr-review-admin.js";
 import type { BackfillNameOutcome } from "../../../shared/contract/publication.js";
 import type { NeurobagelWeekly } from "../../../shared/contract/weekly-attention.js";
@@ -2219,6 +2220,7 @@ export type {
   QueueResponse,
   QueueVerdict,
   SetOverrideResponse,
+  StartReviewResponse,
 } from "../../../shared/contract/pr-review-admin.js";
 
 /** Every open pull request to `main` in `nemarDatasets`, with the automated review of its current commit. */
@@ -2253,6 +2255,22 @@ export async function getPrReview(
   return request<PrReviewDetail>(
     `/admin/pr-reviews/${encodeURIComponent(datasetId)}/${prNumber}${query}`,
     { method: "GET" },
+    true,
+  );
+}
+
+/**
+ * Review a pull request that is already open, or start again a commit whose review ended without a
+ * verdict. The Worker reads the pull request from GitHub itself; only the dataset and the number are
+ * sent. The answer is the review gate's own fixed word (`dispatched`, `duplicate`, ...).
+ */
+export async function startPrReview(
+  datasetId: string,
+  prNumber: number,
+): Promise<StartReviewResponse> {
+  return request<StartReviewResponse>(
+    `/admin/pr-reviews/${encodeURIComponent(datasetId)}/${prNumber}/start`,
+    { method: "POST" },
     true,
   );
 }

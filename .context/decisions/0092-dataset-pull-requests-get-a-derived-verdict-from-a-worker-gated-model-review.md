@@ -156,7 +156,8 @@ decide" cannot be expressed with either.
     harmful change in a sidecar value is not one of them. This is why the check is not required.
 - A review that ended in an error for a setup reason (a missing organization variable, a federation
   rule that does not match) is not repeated for the same commit, because the row for that commit
-  exists. A new push re-runs it. A re-run command belongs with the admin follow-up.
+  exists. A new push re-runs it, and an administrator can start it again by name (the amendment of
+  2026-10-10 below).
 
 ## Alternatives considered
 
@@ -196,7 +197,8 @@ decide" cannot be expressed with either.
    and the check, and production stays dark. Read the Actions log of that run (`nemarDatasets/.github` is
    public) before turning anything on for real datasets.
 6. A pull request that is already open when the review is switched on produces no event, so the Worker
-   never sees it until its author pushes again. Starting those deliberately is a separate change.
+   never sees it until its author pushes again. `nemar admin pr-reviews start --all` starts those (and
+   `start <dataset> <pr>` one), see the amendment below. Run it once, after the trial has passed.
 
 ## Open items found in the release review (2026-10-10)
 
@@ -213,17 +215,48 @@ None blocks shipping the review switched off. Decide the first two before it is 
 - **`nemar dataset update --monitor` waits for every check**, this one included, and stops on a non-pass.
   That is the right signal for a contributor, but it means a pull request the review holds is not offered
   the merge. Installed older CLIs behave the same.
-- **A redelivery of a failed dispatch is not held to the pause or the allowances again.** `handleRepeat`
-  resets the row and starts the review without asking `standingOf` or `capDecision`, so the row is never
-  ranked or checked again; and because it keeps its old id, the cap queries (`id <= ?`) count it ahead of
-  every later row, so it can push a newer row over an allowance it was never held to. One model call can
-  follow a redelivery for a contributor who was blocked since, or after the day's pool was spent. It needs
-  an administrator to redeliver.
 - **Declines are check and comment writes on the datasets token without a cap of their own.** Past the
   allowances every pull request from a stranger gets a decline check, and a flood from many accounts is a
   proportional number of writes on the token that publication and enrichment also use.
 - **An administrator's own pull request cannot be approved from `next`.** GitHub refuses a self-approval
   with 422; `y` is offered, fails and is counted as failed.
+
+## Amendment 2026-10-10: a review can be started by name, and a restart is held to the gate
+
+The Worker reviews on events, and a pull request that was open before the review was switched on
+produced none. `POST /admin/pr-reviews/:dataset/:pr/start` (`nemar admin pr-reviews start`) asks for
+one. The Worker reads the pull request from GitHub with the datasets token, so nothing about it comes
+from the caller, shapes it as the `pull_request` delivery it would have been, and hands it to the one
+gate every delivery goes through: the flag, the "public, named, first-published" test, the per-commit
+dedupe, the contributor pause and the platform's daily pool all apply. Two things differ, both the
+administrator's choice made by name. The per-contributor hourly and daily allowances do not hold that
+review back (they exist to bound outsiders). And a commit whose review ended without a verdict
+(declined, errored, never reported, or handed to GitHub more than `PR_REVIEW_DEADLINE_MINUTES` ago and
+never answered) is started again; one that is running or has a result is not. A new delivery of the
+same commit still restarts nothing but a dispatch GitHub did not run.
+
+A restart is held to the gate like a new row. A contributor who is paused is declined, and the
+platform's pool is asked again with the row ranked as the newest: it keeps its old id, which the cap
+queries (`id <= ?`) would otherwise count ahead of every later row. The redelivery of a failed
+dispatch goes through the same restart, so it is held to the pause and the allowances too.
+
+The pool counts model calls, not rows. Migration 0095 adds `pr_reviews.attempts` (1 for every existing
+row), the pool sums it, and a restart of an attempt that had already spent a call adds one when the
+restart is handed to GitHub. A decline, a stale head and a dispatch GitHub never ran spent none. So a
+review restarted three times is three calls against the pool, not one.
+
+A start that is handed to GitHub writes an audit row (`pr_review_started`), best effort: a review that
+is already running is not reported as an error because its audit row could not be written. A start the
+gate declines changed nothing and writes none. The start cannot approve or merge: it makes the same
+dispatch, check and comment calls any review makes, and a test asserts that no other GitHub call is
+made.
+
+`start --all` lists the open pull requests with no review of their current commit (the queue's
+`not_reviewed` and `could_not_decide`), leaves drafts out, asks before spending (each is one model
+call), and starts them one at a time. A paused contributor's pull request is declined by the Worker
+like any other and said so in the output; `allow` lifts the pause and the same command then starts it.
+It stops when the daily pool is spent and exits 1, so a script knows some were not tried.
+Run it once, in the environment where the review is on, after the trial has passed.
 
 ## Receipts
 
