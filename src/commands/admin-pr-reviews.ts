@@ -5,6 +5,8 @@
  *   nemar admin pr-reviews [list]            open pull requests to main, with the automated review
  *   nemar admin pr-reviews next              go through them one at a time: y / n / c
  *   nemar admin pr-reviews show <ds> <pr>    the stored report, in the pull-request comment's words
+ *   nemar admin pr-reviews start <ds> <pr>   review a pull request that is already open
+ *   nemar admin pr-reviews start --all       every open pull request with no completed review
  *   nemar admin pr-reviews approve <ds> <pr> approve as YOU, with your own GitHub login
  *   nemar admin pr-reviews allow|block|clear <login>   who the automated review is spent on
  *   nemar admin pr-reviews standing <login>  a contributor's record and what it means
@@ -25,6 +27,7 @@ import {
   type QueueResponse,
   type QueueVerdict,
   type ReadVerdict,
+  type StartReviewResponse,
 } from "../../shared/contract/pr-review-admin.js";
 import {
   type ReviewOutcome,
@@ -39,6 +42,7 @@ import {
   getPrReviewAuthor,
   listPrReviews,
   setPrReviewAuthor,
+  startPrReview,
 } from "../lib/api/admin.js";
 import { getCurrentUser } from "../lib/api/auth.js";
 import { ApiError, errorDetail } from "../lib/api/errors.js";
@@ -883,6 +887,273 @@ function stopFor(assessed: { stop: Stop }): never {
     return failApi(stop.error, null, stop.message);
   }
   return die(stop.message);
+}
+
+// -- start --------------------------------------------------------------------------------------
+
+/** Why a start did not start one, in the words an administrator reads. Keys are the gate's fixed words. */
+const NOT_STARTED: Record<string, string> = {
+  duplicate: "this commit already has a review (running or finished)",
+  contributor_paused: "the contributor is paused",
+  daily_limit: "the platform's daily pool of reviews is spent",
+  rate_limited: "the contributor is over an allowance",
+  draft: "it is a draft",
+  not_open: "it is not open any more",
+  not_main: "it does not target main",
+  bot_author: "a bot opened it",
+  dataset_not_reviewable: "the dataset is not a public, named publication",
+  unknown_dataset: "NEMAR has no such dataset",
+  pr_review_disabled: "the automated review is off in this environment (PR_REVIEW_ENABLED)",
+  dispatch_failed: "GitHub did not accept the dispatch",
+  misconfigured: "the Worker is missing a secret the review needs",
+};
+
+/** A start that is a fault, not a decision: the exit code says so. */
+const START_FAULTS = new Set([
+  "pr_review_disabled",
+  "dispatch_failed",
+  "misconfigured",
+  "unknown_dataset",
+]);
+
+function startedWord(r: StartReviewResponse): string {
+  return r.reason === "redispatched" ? "started again" : "started";
+}
+
+function notStartedText(r: StartReviewResponse): string {
+  const why = NOT_STARTED[r.reason] ?? plain(r.reason).replaceAll("_", " ");
+  const hint =
+    r.reason === "contributor_paused" && r.author_login
+      ? ` (lift it with: nemar admin pr-reviews allow ${plain(r.author_login)})`
+      : "";
+  return `not started: ${why}${hint}`;
+}
+
+prReviewsCommand
+  .command("start [dataset] [pr]")
+  .description(
+    "Review a pull request that is already open, or start again one whose review ended without a verdict",
+  )
+  .option("--all", "Every open pull request whose current commit has no completed review")
+  .option("--dry-run", "With --all: list what would be started and start nothing")
+  .option("-y, --yes", "With --all: do not ask before starting")
+  .option("--json", "Output JSON instead of text")
+  .addHelpText(
+    "after",
+    `
+The automated review runs when GitHub tells the NEMAR API a pull request was opened or pushed to. A
+pull request that was already open when the review was switched on produced no such event, so it has
+no review until its author pushes again. This asks for one by name. The API reads the pull request
+from GitHub itself and runs it through the same gate as any other: the contributor pause and the
+platform's daily pool still apply. What a start lifts is the per-contributor hourly and daily
+allowance, because you chose this one. A commit whose review was declined, ended in an error or never
+reported is started again; one that is running or has a result is left alone.
+
+  nemar admin pr-reviews start nm000108 12
+  nemar admin pr-reviews start --all --dry-run
+  nemar admin pr-reviews start --all --yes
+
+Each review is one model call. A paused contributor's pull requests are listed, not started: lift
+the pause with 'allow' first.
+`,
+  )
+  .action(
+    async (
+      datasetArg: string | undefined,
+      prArg: string | undefined,
+      options: { all?: boolean; dryRun?: boolean; yes?: boolean; json?: boolean },
+    ) => {
+      if (!requireAuth(options.json)) process.exit(1);
+      const out = say(options.json);
+
+      if (options.all) {
+        if (datasetArg !== undefined || prArg !== undefined) {
+          die("Give either <dataset> <pr> or --all, not both.", undefined, options.json);
+        }
+        await startAll(options);
+        return;
+      }
+      if (datasetArg === undefined || prArg === undefined) {
+        die(
+          "Give a dataset and a pull request number, or --all.",
+          "nemar admin pr-reviews start nm000108 12",
+          options.json,
+        );
+      }
+      if (options.dryRun) die("--dry-run goes with --all.", undefined, options.json);
+      const dataset = checkDataset(datasetArg, options.json);
+      const pr = checkPr(prArg, options.json);
+
+      const spinner = options.json ? null : ora("Starting the review...").start();
+      let r: StartReviewResponse;
+      try {
+        r = await startPrReview(dataset, pr);
+        spinner?.stop();
+      } catch (err) {
+        if (err instanceof ApiError && errorWord(err) === "no_such_pull_request") {
+          spinner?.fail(`${dataset} #${pr} does not exist (GitHub has no such pull request).`);
+          if (!spinner) out(chalk.red("That pull request does not exist."));
+          process.exit(1);
+        }
+        failApi(err, spinner, "Could not start the review", options.json);
+      }
+      if (options.json) {
+        console.log(JSON.stringify(r, null, 2));
+        if (!r.dispatched && START_FAULTS.has(r.reason)) process.exit(1);
+        return;
+      }
+      if (r.dispatched) {
+        console.log(
+          `${chalk.bold(`${dataset} #${pr}`)}  ${chalk.green(startedWord(r))}. ${chalk.dim("The pull request's check shows the review as running.")}`,
+        );
+      } else {
+        const text = notStartedText(r);
+        const fault = START_FAULTS.has(r.reason);
+        console.log(
+          `${chalk.bold(`${dataset} #${pr}`)}  ${fault ? chalk.red(text) : chalk.yellow(text)}`,
+        );
+        if (fault) process.exit(1);
+      }
+      envNote(r.environment);
+    },
+  );
+
+/** The `--all` run: list, show, ask, then start one at a time. */
+async function startAll(options: {
+  dryRun?: boolean;
+  yes?: boolean;
+  json?: boolean;
+}): Promise<void> {
+  const spinner = options.json ? null : ora("Reading the open pull requests...").start();
+  let q: QueueResponse;
+  try {
+    q = await listPrReviews({ verdicts: ["not_reviewed", "could_not_decide"] });
+    spinner?.stop();
+  } catch (err) {
+    failApi(err, spinner, "Could not read the open pull requests", options.json);
+  }
+  if (!q.review_enabled) {
+    die(
+      "The automated review is off in this environment (PR_REVIEW_ENABLED), so nothing was started.",
+      "Turn it on in backend/wrangler-sccn.toml and deploy, then run this again.",
+      options.json,
+    );
+  }
+
+  const drafts = q.entries.filter((e) => e.draft);
+  const paused = q.entries.filter((e) => !e.draft && e.detail === "contributor_paused");
+  const todo = q.entries.filter((e) => !e.draft && e.detail !== "contributor_paused");
+
+  if (!options.json) {
+    console.log();
+    if (todo.length === 0) {
+      console.log("Nothing to start: every open pull request has a review of its current commit.");
+    } else {
+      console.log(
+        chalk.bold(
+          `${todo.length} pull request${todo.length === 1 ? "" : "s"} without a completed review`,
+        ),
+      );
+      for (const e of todo) {
+        console.log(
+          `  ${e.dataset_id} #${e.pr_number}  ${plain(e.author_login)}  ${chalk.dim(clip(e.title, 60))}`,
+        );
+      }
+    }
+    if (paused.length > 0) {
+      console.log();
+      console.log(chalk.yellow("Not started, the contributor is paused (lift it with 'allow'):"));
+      for (const e of paused) {
+        console.log(`  ${e.dataset_id} #${e.pr_number}  ${plain(e.author_login)}`);
+      }
+    }
+    if (drafts.length > 0) {
+      console.log(chalk.dim(`${drafts.length} draft${drafts.length === 1 ? "" : "s"} left out.`));
+    }
+    if (q.truncated) {
+      console.log(
+        chalk.yellow("GitHub's search returned fewer pull requests than exist; run this again."),
+      );
+    }
+  }
+  if (todo.length === 0) {
+    if (options.json)
+      console.log(JSON.stringify({ environment: q.environment, results: [], failed: 0 }, null, 2));
+    return;
+  }
+  if (options.dryRun) {
+    if (!options.json) console.log(chalk.dim("\nThis was a dry run: nothing was started."));
+    else
+      console.log(
+        JSON.stringify(
+          { environment: q.environment, results: [], failed: 0, dry_run: true },
+          null,
+          2,
+        ),
+      );
+    return;
+  }
+  if (!options.json) console.log();
+  const go = await confirm(
+    `Start the automated review of ${todo.length} pull request${todo.length === 1 ? "" : "s"}? Each is one model call.`,
+    { yes: options.yes },
+  );
+  if (go !== "confirmed") {
+    console.log("Cancelled.");
+    process.exit(1);
+  }
+
+  const results: Array<StartReviewResponse & { dataset_id: string; pr_number: number }> = [];
+  let failed = 0;
+  let stoppedAt: number | null = null;
+  for (let i = 0; i < todo.length; i++) {
+    const e = todo[i];
+    try {
+      const r = await startPrReview(e.dataset_id, e.pr_number);
+      results.push({ ...r, dataset_id: e.dataset_id, pr_number: e.pr_number });
+      if (!options.json) {
+        const label = `${e.dataset_id} #${e.pr_number}`;
+        console.log(
+          `  ${label}  ${r.dispatched ? chalk.green(startedWord(r)) : chalk.yellow(notStartedText(r))}`,
+        );
+      }
+      if (r.reason === "daily_limit") {
+        stoppedAt = i + 1;
+        break;
+      }
+    } catch (err) {
+      failed++;
+      if (!options.json) {
+        const gone = err instanceof ApiError && errorWord(err) === "no_such_pull_request";
+        console.log(
+          `  ${e.dataset_id} #${e.pr_number}  ${chalk.red(gone ? "failed: GitHub no longer has it" : `failed: ${err instanceof ApiError ? plain(err.message) : "could not be started"}`)}`,
+        );
+      }
+    }
+  }
+
+  if (options.json) {
+    console.log(JSON.stringify({ environment: q.environment, results, failed }, null, 2));
+  } else {
+    const started = results.filter((r) => r.dispatched).length;
+    const had = results.filter((r) => r.reason === "duplicate").length;
+    const other = results.length - started - had;
+    console.log();
+    console.log(
+      `${started} started, ${had} already had a review, ${other} not started, ${failed} failed`,
+    );
+    if (stoppedAt !== null && stoppedAt < todo.length) {
+      console.log(
+        chalk.yellow(
+          `Stopped: the platform's daily pool is spent, so ${todo.length - stoppedAt} were not tried. Run this again tomorrow.`,
+        ),
+      );
+    }
+    envNote(q.environment);
+  }
+  if (failed > 0 || results.some((r) => !r.dispatched && START_FAULTS.has(r.reason))) {
+    process.exit(1);
+  }
 }
 
 // -- approve ------------------------------------------------------------------------------------

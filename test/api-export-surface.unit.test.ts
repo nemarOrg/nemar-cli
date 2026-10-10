@@ -175,6 +175,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "setPrReviewAuthor",
     "signalDefaultsSweep",
     "signalDefaultsSweepReset",
+    "startPrReview",
     "syncCi",
     "updateDoi",
     "updateEmailPreferences",
@@ -259,6 +260,7 @@ const POST_SPLIT_ADDITIONS = [
   "getPrReviewAuthor", // ADR 0093: GET /admin/pr-review-authors/:login
   "setPrReviewAuthor", // ADR 0093: PUT /admin/pr-review-authors/:login (allow or block)
   "clearPrReviewAuthor", // ADR 0093: DELETE /admin/pr-review-authors/:login
+  "startPrReview", // ADR 0092: POST /admin/pr-reviews/:dataset/:pr/start (review an open pull request)
 ];
 
 /** The api.ts monolith's runtime surface, captured at #908 commit 1. */

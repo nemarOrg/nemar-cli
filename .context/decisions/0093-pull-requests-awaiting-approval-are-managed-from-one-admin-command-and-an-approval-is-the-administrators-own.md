@@ -189,3 +189,12 @@ by the administrator, from their machine, with their own GitHub login.**
 - Command: `src/commands/admin-pr-reviews.ts`, `src/lib/pr-review-approve.ts`. Tests:
   `test/admin-pr-reviews-cli.test.ts`, `test/pr-review-approve.test.ts`,
   `test/pr-reviews-render.unit.test.ts`.
+\n
+## Amendment 2026-10-10: `start`
+
+`nemar admin pr-reviews start <dataset> <pr>` and `start --all` ask the Worker to review a pull request
+that is already open, or to start again a commit whose review ended without a verdict. They are the one
+subcommand here that makes the Worker act on a pull request, and the Worker's part is the same dispatch,
+check and comment any review makes: it still does not approve or merge. The decision and its limits are
+in [ADR 0092](0092-dataset-pull-requests-get-a-derived-verdict-from-a-worker-gated-model-review.md),
+amendment of 2026-10-10.

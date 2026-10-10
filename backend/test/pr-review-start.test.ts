@@ -231,6 +231,7 @@ describe("starting a pull request that is already open", () => {
       environment: "production",
       dispatched: true,
       reason: "dispatched",
+      author_login: "ada",
     });
     expect(typeof body.review_id).toBe("number");
     expect(rows()).toHaveLength(1);

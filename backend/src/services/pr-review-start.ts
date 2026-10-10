@@ -24,6 +24,8 @@ import { githubFetchWithRetry } from "./github/transport.js";
 import { QueueError, environmentName, ownedHere } from "./pr-review-queue.js";
 import { handlePullRequestEvent } from "./pr-review.js";
 
+/** A GitHub login's shape; anything else is not echoed back. */
+const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const READ_TIMEOUT_MS = 10_000;
 const MAX_THROTTLE_MS = 15_000;
 
@@ -95,7 +97,13 @@ export async function startPullRequestReview(
     );
   }
   if (env.PR_REVIEW_ENABLED !== "1") {
-    return { environment, dispatched: false, reason: "pr_review_disabled", review_id: null };
+    return {
+      environment,
+      dispatched: false,
+      reason: "pr_review_disabled",
+      review_id: null,
+      author_login: null,
+    };
   }
 
   const pull = await readPullRequest(env, datasetId, prNumber);
@@ -108,11 +116,13 @@ export async function startPullRequestReview(
     { adminStart: true },
   );
 
+  const login = (pull.user as { login?: unknown } | null | undefined)?.login;
   const answer: StartReviewResponse = {
     environment,
     dispatched: result.dispatched,
     reason: result.reason,
     review_id: result.review_id ?? null,
+    author_login: typeof login === "string" && LOGIN.test(login) ? login : null,
   };
   const head = (pull.head as { sha?: unknown } | null | undefined)?.sha;
   await auditLogStatement(env.DB, {

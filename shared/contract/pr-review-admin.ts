@@ -160,6 +160,8 @@ export interface StartReviewResponse {
   dispatched: boolean;
   reason: string;
   review_id: number | null;
+  /** The pull request's author, when GitHub gave a login of the shape a login has; else null. */
+  author_login: string | null;
 }
 
 export interface ReviewHistoryItem {

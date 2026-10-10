@@ -196,7 +196,8 @@ decide" cannot be expressed with either.
    and the check, and production stays dark. Read the Actions log of that run (`nemarDatasets/.github` is
    public) before turning anything on for real datasets.
 6. A pull request that is already open when the review is switched on produces no event, so the Worker
-   never sees it until its author pushes again. Starting those deliberately is a separate change.
+   never sees it until its author pushes again. `nemar admin pr-reviews start --all` starts those (and
+   `start <dataset> <pr>` one), see the amendment below. Run it once, after the trial has passed.
 
 ## Open items found in the release review (2026-10-10)
 
@@ -213,17 +214,37 @@ None blocks shipping the review switched off. Decide the first two before it is 
 - **`nemar dataset update --monitor` waits for every check**, this one included, and stops on a non-pass.
   That is the right signal for a contributor, but it means a pull request the review holds is not offered
   the merge. Installed older CLIs behave the same.
-- **A redelivery of a failed dispatch is not held to the pause or the allowances again.** `handleRepeat`
-  resets the row and starts the review without asking `standingOf` or `capDecision`, so the row is never
-  ranked or checked again; and because it keeps its old id, the cap queries (`id <= ?`) count it ahead of
-  every later row, so it can push a newer row over an allowance it was never held to. One model call can
-  follow a redelivery for a contributor who was blocked since, or after the day's pool was spent. It needs
-  an administrator to redeliver.
 - **Declines are check and comment writes on the datasets token without a cap of their own.** Past the
   allowances every pull request from a stranger gets a decline check, and a flood from many accounts is a
   proportional number of writes on the token that publication and enrichment also use.
 - **An administrator's own pull request cannot be approved from `next`.** GitHub refuses a self-approval
   with 422; `y` is offered, fails and is counted as failed.
+
+## Amendment 2026-10-10: a review can be started by name, and a restart is held to the gate
+
+The Worker reviews on events, and a pull request that was open before the review was switched on
+produced none. `POST /admin/pr-reviews/:dataset/:pr/start` (`nemar admin pr-reviews start`) asks for
+one. The Worker reads the pull request from GitHub with the datasets token, so nothing about it comes
+from the caller, shapes it as the `pull_request` delivery it would have been, and hands it to the one
+gate every delivery goes through: the flag, the "public, named, first-published" test, the per-commit
+dedupe, the contributor pause and the platform's daily pool all apply. Two things differ, both the
+administrator's choice made by name. The per-contributor hourly and daily allowances do not hold that
+review back (they exist to bound outsiders). And a commit whose review ended without a verdict
+(declined, errored, never reported) is started again; one that is running or has a result is not, and a
+new delivery of the same commit still never restarts anything but a dispatch GitHub did not run.
+
+A restart is held to the gate like a new row. A contributor who is paused is declined, and the
+allowances are asked again with the row ranked as the newest: it keeps its old id, which the cap
+queries (`id <= ?`) would otherwise count ahead of every later row. This also closes the gap an
+earlier version of this ADR recorded for the redelivery of a failed dispatch, which used to skip the
+pause and the allowances. Each start writes an audit row (`pr_review_started`). The start cannot
+approve or merge: it makes the same dispatch, check and comment calls any review makes, and a test
+asserts that no other GitHub call is made.
+
+`start --all` lists the open pull requests with no review of their current commit (the queue's
+`not_reviewed` and `could_not_decide`), leaves drafts out, lists a paused contributor's apart instead of
+declining it a second time, asks before spending (each is one model call), and starts them one at a time,
+stopping when the daily pool is spent.
 
 ## Receipts
 

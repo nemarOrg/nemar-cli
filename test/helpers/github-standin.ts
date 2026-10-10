@@ -35,6 +35,10 @@ export interface PullState {
   base?: string;
   sha: string;
   author?: string;
+  /** GitHub's numeric id for the author; 501 unless a test says otherwise. */
+  authorId?: number;
+  /** `author_association` on the pull request ("COLLABORATOR" unless set). */
+  assoc?: string;
   mergeableState?: string;
   /** Served for the first N reads, then `mergeableState`. */
   unknownReads?: number;
@@ -155,6 +159,21 @@ export function startGitHubStandin(): GitHubStandin {
         return hit ? Response.json(hit) : new Response("{}", { status: 404 });
       }
 
+      // What the Worker does when it starts a review: hand it to the central workflow and publish
+      // the check and the comment. Recorded in `seen` with the token each carried.
+      if (req.method === "POST" && url.pathname === "/repos/nemarDatasets/.github/dispatches") {
+        return new Response(null, { status: 204 });
+      }
+      if (/^\/repos\/nemarDatasets\/[^/]+\/check-runs(\/\d+)?$/.test(url.pathname)) {
+        return Response.json(
+          { id: 7000 + state.seen.length },
+          { status: req.method === "POST" ? 201 : 200 },
+        );
+      }
+      if (req.method === "PATCH" && /\/issues\/comments\/\d+$/.test(url.pathname)) {
+        return Response.json({ id: 1 });
+      }
+
       const comment = url.pathname.match(
         /^\/repos\/nemarDatasets\/([^/]+)\/issues\/(\d+)\/comments$/,
       );
@@ -183,8 +202,16 @@ export function startGitHubStandin(): GitHubStandin {
             draft: p.draft ?? false,
             mergeable_state: unknown ? "unknown" : (p.mergeableState ?? "clean"),
             title: "Add subjects",
-            user: { login: p.author ?? "contributor", id: 501, type: "User" },
-            base: { ref: p.base ?? "main" },
+            author_association: p.assoc ?? "COLLABORATOR",
+            user: { login: p.author ?? "contributor", id: p.authorId ?? 501, type: "User" },
+            base: {
+              ref: p.base ?? "main",
+              repo: {
+                name: pull[1],
+                full_name: `nemarDatasets/${pull[1]}`,
+                owner: { login: "nemarDatasets" },
+              },
+            },
             head: {
               sha: p.headAfterFirstRead && reads[key] > 1 ? p.headAfterFirstRead : p.sha,
               ref: "add-subjects",
