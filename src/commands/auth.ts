@@ -1540,8 +1540,10 @@ const regenerateKeyCmd = authCommand
       // machine, so a failure has to be visible to a script, not only a person.
       process.exitCode = 1;
       if (error instanceof ApiError) {
-        // A refusal the server explained (unknown account, rate limit) is reported, not a bug.
-        if (error.statusCode >= 400 && error.statusCode < 500) markReportedExit();
+        // A refusal the server explained (not allowed, rate limit) is reported, not a bug. A
+        // 400, 404 or 405 is a client and server that disagree about the route, which is when the
+        // debug-log nudge is wanted.
+        if ([401, 403, 429].includes(error.statusCode)) markReportedExit();
         spinner.fail(error.message);
       } else {
         spinner.fail("Failed to send verification email");

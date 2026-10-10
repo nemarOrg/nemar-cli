@@ -1998,7 +1998,10 @@ describe("password sign-in is retired", () => {
   test("retrieve-key says it is gone and names the command to run, instead of 'unknown command'", async () => {
     // The mail sent when an account verified its email, and pages outside this
     // repository, told people to run it. It must prompt for nothing.
-    const result = await run(["auth", "retrieve-key"], "http://127.0.0.1:1");
+    // NEMAR_DEBUG turns the nudge into a log path, which would make the check below vacuous.
+    const result = await run(["auth", "retrieve-key"], "http://127.0.0.1:1", {
+      env: { NEMAR_DEBUG: undefined },
+    });
     expect(result.exitCode).toBe(1);
     expect(result.out).toContain("'nemar auth retrieve-key' no longer exists");
     expect(result.out).toContain("nemar auth login");
