@@ -98,6 +98,25 @@ const REVIEWABLE_DATASET_PREDICATE = `d.status = 'active' AND d.visibility = 'pu
 
 type Db = D1Database;
 
+/**
+ * Whether a dataset may be reviewed: it exists and is a live, named, first-published publication.
+ * Asked before anything about a pull request is read from GitHub when an administrator starts one.
+ */
+export async function reviewableDataset(
+  db: Db,
+  datasetId: string,
+): Promise<"reviewable" | "unknown" | "not_reviewable"> {
+  const dataset = await db
+    .prepare(
+      `SELECT CASE WHEN ${REVIEWABLE_DATASET_PREDICATE} THEN 1 ELSE 0 END AS reviewable
+         FROM datasets AS d WHERE d.dataset_id = ?`,
+    )
+    .bind(datasetId)
+    .first<{ reviewable: number }>();
+  if (!dataset) return "unknown";
+  return dataset.reviewable === 1 ? "reviewable" : "not_reviewable";
+}
+
 // ---------------------------------------------------------------------------------------------
 // Intake
 // ---------------------------------------------------------------------------------------------
@@ -250,7 +269,7 @@ const AUTHOR_HOURLY_RANK_SQL = `SELECT COUNT(*) AS n FROM pr_reviews
   WHERE author_id = ? AND ${COUNTS_TOWARD_CAPS} AND created_at >= datetime('now', '-1 hour') AND id <= ?`;
 const AUTHOR_DAILY_RANK_SQL = `SELECT COUNT(*) AS n FROM pr_reviews
   WHERE author_id = ? AND ${COUNTS_TOWARD_CAPS} AND created_at >= datetime('now', '-1 day') AND id <= ?`;
-const PLATFORM_DAILY_RANK_SQL = `SELECT COUNT(*) AS n FROM pr_reviews
+const PLATFORM_DAILY_RANK_SQL = `SELECT COALESCE(SUM(attempts), 0) AS n FROM pr_reviews
   WHERE ${COUNTS_TOWARD_CAPS} AND created_at >= datetime('now', '-1 day') AND id <= ?`;
 
 export async function readAuthorTally(db: Db, authorId: number): Promise<AuthorTally> {
@@ -275,6 +294,7 @@ async function capDecision(
   pr: PrIntake,
   rowId: number,
   skipAuthorCaps = false,
+  extraCalls = 0,
 ): Promise<Extract<DeclineReason, "rate_limited" | "daily_limit"> | null> {
   // An administrator who asks for a review by name is not an outsider spending the platform's
   // money, so the per-contributor allowances do not hold it back; the platform's pool still does.
@@ -291,7 +311,9 @@ async function capDecision(
     if ((daily?.n ?? 0) > dailyAuthorCapFor(pr.authorAssociation)) return "rate_limited";
   }
   const platform = await db.prepare(PLATFORM_DAILY_RANK_SQL).bind(rowId).first<{ n: number }>();
-  if ((platform?.n ?? 0) > DAILY_REVIEW_CAP) return "daily_limit";
+  // The pool counts model calls, not rows: a restart of an attempt that already spent one is a
+  // second call that no row yet shows, so it is added here and recorded once it is handed over.
+  if ((platform?.n ?? 0) + extraCalls > DAILY_REVIEW_CAP) return "daily_limit";
   return null;
 }
 
@@ -580,11 +602,6 @@ const no = (reason: string, reviewId?: number): PrReviewResponse => ({
   ...(reviewId === undefined ? {} : { review_id: reviewId }),
 });
 
-/**
- * Take up a `pull_request` delivery. The caller has already verified the delivery's signature and
- * applied the production/dev ownership fence; everything else is decided here. A database error
- * throws, and the route answers 500 (see the module comment).
- */
 export interface PrReviewOptions {
   /**
    * An administrator asked for this review by name (`startPullRequestReview`). The payload was built
@@ -594,6 +611,11 @@ export interface PrReviewOptions {
   adminStart?: boolean;
 }
 
+/**
+ * Take up a `pull_request` delivery. The caller has already verified the delivery's signature and
+ * applied the production/dev ownership fence; everything else is decided here. A database error
+ * throws, and the route answers 500 (see the module comment).
+ */
 export async function handlePullRequestEvent(
   env: Bindings,
   payload: unknown,
@@ -616,15 +638,9 @@ export async function handlePullRequestEvent(
   // Only review a live, named publication. An anonymous deposit is public in the catalog while
   // its GitHub repository remains private, and upload creates private unpublished rows; neither
   // may send pull-request text or metadata to the model.
-  const dataset = await db
-    .prepare(
-      `SELECT CASE WHEN ${REVIEWABLE_DATASET_PREDICATE} THEN 1 ELSE 0 END AS reviewable
-         FROM datasets AS d WHERE d.dataset_id = ?`,
-    )
-    .bind(pr.datasetId)
-    .first<{ reviewable: number }>();
-  if (!dataset) return no("unknown_dataset");
-  if (dataset.reviewable !== 1) return no("dataset_not_reviewable");
+  const reviewable = await reviewableDataset(db, pr.datasetId);
+  if (reviewable === "unknown") return no("unknown_dataset");
+  if (reviewable === "not_reviewable") return no("dataset_not_reviewable");
 
   const existing = await readRowByKey(db, pr.datasetId, pr.prNumber, pr.headSha);
   if (existing) return await handleRepeat(env, existing, secret, pr, options);
@@ -699,7 +715,7 @@ async function decideInserted(
   paused: boolean,
   nonce: string,
   secret: string,
-  options: PrReviewOptions & { restarted?: boolean } = {},
+  options: PrReviewOptions & { restarted?: boolean; extraCalls?: number } = {},
 ): Promise<PrReviewResponse> {
   const db = env.DB;
   const row = await readRow(db, reviewId);
@@ -717,6 +733,7 @@ async function decideInserted(
     pr,
     options.restarted ? Number.MAX_SAFE_INTEGER : reviewId,
     options.adminStart === true,
+    options.extraCalls ?? 0,
   );
   if (over) {
     await db
@@ -731,6 +748,13 @@ async function decideInserted(
     return no(over, reviewId);
   }
 
+  // The attempt is going ahead, so a call the row had already spent is now a second one.
+  if ((options.extraCalls ?? 0) > 0) {
+    await db
+      .prepare("UPDATE pr_reviews SET attempts = attempts + ? WHERE id = ?")
+      .bind(options.extraCalls, reviewId)
+      .run();
+  }
   return await startReview(env, row, nonce, secret);
 }
 
@@ -738,7 +762,8 @@ async function decideInserted(
  * The commit has been delivered before. It is marked seen again (so it is the pull request's
  * current commit, which is what force-pushing back to an earlier reviewed commit means), its
  * stored result is re-stated on the pull request, and a review whose dispatch failed is tried
- * again. Nothing else is reviewed twice.
+ * again. Nothing else is reviewed twice, except that an administrator's start also restarts a
+ * commit whose review ended without a verdict (see `isRestartable`).
  */
 async function handleRepeat(
   env: Bindings,
@@ -753,34 +778,60 @@ async function handleRepeat(
     .bind(existing.id)
     .run();
 
-  if (isRestartable(existing, options)) {
+  let current = existing;
+  if (await isRestartable(db, existing, options)) {
     const restarted = await restartReview(env, existing, pr, secret, options);
     if (restarted) return restarted;
+    // Another delivery moved the row first; what is re-stated below is what it is now, not what
+    // this call read before the other one ran.
+    current = (await readRow(db, existing.id)) ?? existing;
   }
 
-  const outcome = outcomeOfRow(existing);
-  if (outcome) await publishOutcome(env, existing, outcome, { commentOnly: true });
+  const outcome = outcomeOfRow(current);
+  if (outcome) await publishOutcome(env, current, outcome, { commentOnly: true });
   return no("duplicate", existing.id);
 }
 
 /**
- * A commit whose review can be tried again. GitHub never ran one whose dispatch failed, so a
- * redelivery restarts it. A commit that was declined, ended in an error or never reported is
- * restarted only when an administrator asks by name: a new delivery of the same commit must not
- * buy a second model call. One that is running, or has a result, is never restarted.
+ * A commit whose review can be tried again. A dispatch that failed was not run by GitHub (and a late
+ * claim of it is refused, its nonce having been cleared), so a redelivery restarts it. A commit that
+ * was declined, ended in an error or never reported is restarted only when an administrator asks by
+ * name: a new delivery of the same commit must not buy a second model call. So is one handed to
+ * GitHub that is past the watchdog's deadline: the production watchdog would have closed it as
+ * `unreported`, and the dev Worker never runs it. A review that is running, or has a result, is never
+ * restarted.
  */
-function isRestartable(row: ReviewRow, options: PrReviewOptions): boolean {
+async function isRestartable(db: Db, row: ReviewRow, options: PrReviewOptions): Promise<boolean> {
   if (row.state === "errored" && row.detail === "dispatch_failed") return true;
-  return (
-    options.adminStart === true &&
-    (row.state === "declined" || row.state === "errored" || row.state === "unreported")
+  if (options.adminStart !== true) return false;
+  if (row.state === "declined" || row.state === "errored" || row.state === "unreported") {
+    return true;
+  }
+  if (row.state !== "dispatched") return false;
+  const overdue = await db
+    .prepare(
+      `SELECT 1 AS overdue FROM pr_reviews
+        WHERE id = ? AND created_at < datetime('now', '-' || ? || ' minutes')`,
+    )
+    .bind(row.id, PR_REVIEW_DEADLINE_MINUTES)
+    .first<{ overdue: number }>();
+  return overdue !== null;
+}
+
+/** Whether a row's attempt may have cost a model call: the complement of a decline or an attempt GitHub never ran. */
+function spentACall(row: ReviewRow): boolean {
+  if (row.state === "declined") return false;
+  return !(
+    row.state === "errored" &&
+    (row.detail === "stale_head" || row.detail === "dispatch_failed")
   );
 }
 
 /**
  * Give a commit a fresh attempt, held to the same gate as a new one: a contributor who is paused is
- * declined, and the allowances are asked again (ranked as the newest row, see `decideInserted`).
- * Null when another delivery moved the row first.
+ * declined, and the allowances that apply to it are asked again (an administrator's start only the
+ * platform's pool), with the row ranked as the newest (see `decideInserted`). Null when another
+ * delivery moved the row first.
  */
 async function restartReview(
   env: Bindings,
@@ -818,6 +869,8 @@ async function restartReview(
     const res = await decideInserted(env, pr, existing.id, paused, nonce, secret, {
       ...options,
       restarted: true,
+      // The earlier attempt cost a model call unless it never got that far.
+      extraCalls: spentACall(existing) ? 1 : 0,
     });
     return res.dispatched && res.reason === "dispatched" ? { ...res, reason: "redispatched" } : res;
   } catch (err) {

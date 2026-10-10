@@ -6,7 +6,7 @@
  *   nemar admin pr-reviews next              go through them one at a time: y / n / c
  *   nemar admin pr-reviews show <ds> <pr>    the stored report, in the pull-request comment's words
  *   nemar admin pr-reviews start <ds> <pr>   review a pull request that is already open
- *   nemar admin pr-reviews start --all       every open pull request with no completed review
+ *   nemar admin pr-reviews start --all       every open pull request waiting for a review
  *   nemar admin pr-reviews approve <ds> <pr> approve as YOU, with your own GitHub login
  *   nemar admin pr-reviews allow|block|clear <login>   who the automated review is spent on
  *   nemar admin pr-reviews standing <login>  a contributor's record and what it means
@@ -49,7 +49,7 @@ import { ApiError, errorDetail } from "../lib/api/errors.js";
 import { openInBrowser } from "../lib/browser.js";
 import { isAuthenticated } from "../lib/config.js";
 import { confirm } from "../lib/confirm.js";
-import { dlog } from "../lib/debug-log.js";
+import { dlog, markReportedExit } from "../lib/debug-log.js";
 import {
   type ApprovalGate,
   MERGE_METHODS,
@@ -896,7 +896,6 @@ const NOT_STARTED: Record<string, string> = {
   duplicate: "this commit already has a review (running or finished)",
   contributor_paused: "the contributor is paused",
   daily_limit: "the platform's daily pool of reviews is spent",
-  rate_limited: "the contributor is over an allowance",
   draft: "it is a draft",
   not_open: "it is not open any more",
   not_main: "it does not target main",
@@ -906,6 +905,7 @@ const NOT_STARTED: Record<string, string> = {
   pr_review_disabled: "the automated review is off in this environment (PR_REVIEW_ENABLED)",
   dispatch_failed: "GitHub did not accept the dispatch",
   misconfigured: "the Worker is missing a secret the review needs",
+  malformed: "GitHub's record of the pull request could not be read",
 };
 
 /** A start that is a fault, not a decision: the exit code says so. */
@@ -914,6 +914,7 @@ const START_FAULTS = new Set([
   "dispatch_failed",
   "misconfigured",
   "unknown_dataset",
+  "malformed",
 ]);
 
 function startedWord(r: StartReviewResponse): string {
@@ -934,7 +935,10 @@ prReviewsCommand
   .description(
     "Review a pull request that is already open, or start again one whose review ended without a verdict",
   )
-  .option("--all", "Every open pull request whose current commit has no completed review")
+  .option(
+    "--all",
+    "Every open pull request whose current commit has no review, or one that was declined or ended without a verdict",
+  )
   .option("--dry-run", "With --all: list what would be started and start nothing")
   .option("-y, --yes", "With --all: do not ask before starting")
   .option("--json", "Output JSON instead of text")
@@ -947,14 +951,18 @@ no review until its author pushes again. This asks for one by name. The API read
 from GitHub itself and runs it through the same gate as any other: the contributor pause and the
 platform's daily pool still apply. What a start lifts is the per-contributor hourly and daily
 allowance, because you chose this one. A commit whose review was declined, ended in an error or never
-reported is started again; one that is running or has a result is left alone.
+reported is started again, and so is one handed to GitHub more than 30 minutes ago that never came
+back; one that is running or has a result is not started again. A start that restarts a review that
+already cost a model call costs a second one, and counts as one against the daily pool.
 
   nemar admin pr-reviews start nm000108 12
   nemar admin pr-reviews start --all --dry-run
   nemar admin pr-reviews start --all --yes
 
-Each review is one model call. A paused contributor's pull requests are listed, not started: lift
-the pause with 'allow' first.
+Each review is one model call. A paused contributor is asked about like any other and declined by the
+Worker, which says so; after 'allow', the same command starts it. --all leaves drafts out, asks
+before spending (--yes skips that), and stops when the daily pool is spent, exiting 1 so a script
+knows some were not tried.
 `,
   )
   .action(
@@ -991,8 +999,10 @@ the pause with 'allow' first.
         spinner?.stop();
       } catch (err) {
         if (err instanceof ApiError && errorWord(err) === "no_such_pull_request") {
-          spinner?.fail(`${dataset} #${pr} does not exist (GitHub has no such pull request).`);
-          if (!spinner) out(chalk.red("That pull request does not exist."));
+          spinner?.fail(`${dataset} #${pr}: GitHub has no such pull request.`);
+          if (!spinner) out(chalk.red("GitHub has no such pull request."));
+          // The answer to a question about a pull request, not a fault in the command.
+          markReportedExit();
           process.exit(1);
         }
         failApi(err, spinner, "Could not start the review", options.json);
@@ -1018,13 +1028,19 @@ the pause with 'allow' first.
     },
   );
 
+/** What one pull request of a `--all` run came to, in the JSON too. */
+type StartResult =
+  | (StartReviewResponse & { dataset_id: string; pr_number: number })
+  | { dataset_id: string; pr_number: number; error: string };
+
 /** The `--all` run: list, show, ask, then start one at a time. */
 async function startAll(options: {
   dryRun?: boolean;
   yes?: boolean;
   json?: boolean;
 }): Promise<void> {
-  const spinner = options.json ? null : ora("Reading the open pull requests...").start();
+  const json = options.json === true;
+  const spinner = json ? null : ora("Reading the open pull requests...").start();
   let q: QueueResponse;
   try {
     q = await listPrReviews({ verdicts: ["not_reviewed", "could_not_decide"] });
@@ -1035,23 +1051,28 @@ async function startAll(options: {
   if (!q.review_enabled) {
     die(
       "The automated review is off in this environment (PR_REVIEW_ENABLED), so nothing was started.",
-      "Turn it on in backend/wrangler-sccn.toml and deploy, then run this again.",
+      'Set PR_REVIEW_ENABLED = "1" in the Worker\'s [vars], deploy, then run this again.',
       options.json,
     );
   }
 
   const drafts = q.entries.filter((e) => e.draft);
-  const paused = q.entries.filter((e) => !e.draft && e.detail === "contributor_paused");
-  const todo = q.entries.filter((e) => !e.draft && e.detail !== "contributor_paused");
+  const todo = q.entries.filter((e) => !e.draft);
+  const incomplete = q.truncated || q.skipped.unreadable > 0;
+  const common = { environment: q.environment, drafts: drafts.length, truncated: incomplete };
 
-  if (!options.json) {
+  if (!json) {
     console.log();
     if (todo.length === 0) {
-      console.log("Nothing to start: every open pull request has a review of its current commit.");
+      console.log(
+        incomplete
+          ? "Nothing to start in what GitHub returned."
+          : "Nothing to start: no open pull request is waiting for a review.",
+      );
     } else {
       console.log(
         chalk.bold(
-          `${todo.length} pull request${todo.length === 1 ? "" : "s"} without a completed review`,
+          `${todo.length} pull request${todo.length === 1 ? "" : "s"} waiting for a review (none of the current commit, or one that was declined or ended without a verdict)`,
         ),
       );
       for (const e of todo) {
@@ -1060,100 +1081,103 @@ async function startAll(options: {
         );
       }
     }
-    if (paused.length > 0) {
-      console.log();
-      console.log(chalk.yellow("Not started, the contributor is paused (lift it with 'allow'):"));
-      for (const e of paused) {
-        console.log(`  ${e.dataset_id} #${e.pr_number}  ${plain(e.author_login)}`);
-      }
-    }
     if (drafts.length > 0) {
       console.log(chalk.dim(`${drafts.length} draft${drafts.length === 1 ? "" : "s"} left out.`));
     }
-    if (q.truncated) {
+    if (incomplete) {
       console.log(
-        chalk.yellow("GitHub's search returned fewer pull requests than exist; run this again."),
+        chalk.yellow(
+          "GitHub returned fewer pull requests than exist, or some could not be read, so this list is incomplete.",
+        ),
       );
     }
   }
   if (todo.length === 0) {
-    if (options.json)
-      console.log(JSON.stringify({ environment: q.environment, results: [], failed: 0 }, null, 2));
+    if (json)
+      console.log(JSON.stringify({ ...common, results: [], failed: 0, not_tried: 0 }, null, 2));
     return;
   }
   if (options.dryRun) {
-    if (!options.json) console.log(chalk.dim("\nThis was a dry run: nothing was started."));
-    else
-      console.log(
-        JSON.stringify(
-          { environment: q.environment, results: [], failed: 0, dry_run: true },
-          null,
-          2,
-        ),
-      );
+    if (json) {
+      const would = todo.map((e) => ({
+        dataset_id: e.dataset_id,
+        pr_number: e.pr_number,
+        author_login: e.author_login,
+      }));
+      console.log(JSON.stringify({ ...common, dry_run: true, would_start: would }, null, 2));
+    } else {
+      console.log(chalk.dim("\nThis was a dry run: nothing was started."));
+    }
     return;
   }
-  if (!options.json) console.log();
+  if (!json) console.log();
   const go = await confirm(
     `Start the automated review of ${todo.length} pull request${todo.length === 1 ? "" : "s"}? Each is one model call.`,
     { yes: options.yes },
   );
   if (go !== "confirmed") {
-    console.log("Cancelled.");
+    // Not on stdout under --json, which is read as one document.
+    (json ? console.error : console.log)("Cancelled.");
     process.exit(1);
   }
 
-  const results: Array<StartReviewResponse & { dataset_id: string; pr_number: number }> = [];
+  const results: StartResult[] = [];
   let failed = 0;
-  let stoppedAt: number | null = null;
+  let notTried = 0;
   for (let i = 0; i < todo.length; i++) {
     const e = todo[i];
+    const label = `${e.dataset_id} #${e.pr_number}`;
     try {
       const r = await startPrReview(e.dataset_id, e.pr_number);
       results.push({ ...r, dataset_id: e.dataset_id, pr_number: e.pr_number });
-      if (!options.json) {
-        const label = `${e.dataset_id} #${e.pr_number}`;
+      if (!json) {
         console.log(
           `  ${label}  ${r.dispatched ? chalk.green(startedWord(r)) : chalk.yellow(notStartedText(r))}`,
         );
       }
       if (r.reason === "daily_limit") {
-        stoppedAt = i + 1;
+        // The pool is the platform's, so the rest would be declined the same way.
+        notTried = todo.length - (i + 1);
         break;
       }
     } catch (err) {
       failed++;
-      if (!options.json) {
-        const gone = err instanceof ApiError && errorWord(err) === "no_such_pull_request";
+      const word =
+        err instanceof ApiError ? (errorWord(err) ?? `http_${err.statusCode}`) : "unknown";
+      results.push({ dataset_id: e.dataset_id, pr_number: e.pr_number, error: word });
+      if (!json) {
+        const gone = word === "no_such_pull_request";
         console.log(
-          `  ${e.dataset_id} #${e.pr_number}  ${chalk.red(gone ? "failed: GitHub no longer has it" : `failed: ${err instanceof ApiError ? plain(err.message) : "could not be started"}`)}`,
+          `  ${label}  ${chalk.red(gone ? "failed: GitHub has no such pull request" : `failed: ${err instanceof ApiError ? plain(err.message) : "could not be started"}`)}`,
         );
       }
     }
   }
 
-  if (options.json) {
-    console.log(JSON.stringify({ environment: q.environment, results, failed }, null, 2));
+  if (json) {
+    console.log(JSON.stringify({ ...common, results, failed, not_tried: notTried }, null, 2));
   } else {
-    const started = results.filter((r) => r.dispatched).length;
-    const had = results.filter((r) => r.reason === "duplicate").length;
-    const other = results.length - started - had;
+    const answered = results.filter(
+      (r): r is StartReviewResponse & { dataset_id: string; pr_number: number } => "reason" in r,
+    );
+    const started = answered.filter((r) => r.dispatched).length;
+    const had = answered.filter((r) => r.reason === "duplicate").length;
+    const other = answered.length - started - had;
     console.log();
     console.log(
       `${started} started, ${had} already had a review, ${other} not started, ${failed} failed`,
     );
-    if (stoppedAt !== null && stoppedAt < todo.length) {
+    if (notTried > 0) {
       console.log(
         chalk.yellow(
-          `Stopped: the platform's daily pool is spent, so ${todo.length - stoppedAt} were not tried. Run this again tomorrow.`,
+          `Stopped: the platform's daily pool is spent, so ${notTried} were not tried. It counts the last 24 hours; run this again once reviews from then have aged out.`,
         ),
       );
     }
     envNote(q.environment);
   }
-  if (failed > 0 || results.some((r) => !r.dispatched && START_FAULTS.has(r.reason))) {
-    process.exit(1);
-  }
+  const faulted = results.some((r) => "reason" in r && !r.dispatched && START_FAULTS.has(r.reason));
+  if (failed > 0 || faulted || notTried > 0) process.exit(1);
 }
 
 // -- approve ------------------------------------------------------------------------------------

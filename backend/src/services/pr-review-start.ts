@@ -16,18 +16,28 @@
  */
 
 import type { StartReviewResponse } from "../../../shared/contract/pr-review-admin.js";
+import { sanitizeNote } from "../../../shared/pr-review.js";
 import { auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { getDatasetsTokenWithRefresher } from "./github-auth.js";
 import { GITHUB_API, ORG_NAME, ghHeaders } from "./github/shared.js";
 import { githubFetchWithRetry } from "./github/transport.js";
 import { QueueError, environmentName, ownedHere } from "./pr-review-queue.js";
-import { handlePullRequestEvent } from "./pr-review.js";
+import { handlePullRequestEvent, reviewableDataset } from "./pr-review.js";
 
 /** A GitHub login's shape; anything else is not echoed back. */
 const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const READ_TIMEOUT_MS = 10_000;
 const MAX_THROTTLE_MS = 15_000;
+
+/** A fetch that ran out of time rather than failing. */
+function isTimeout(err: unknown): boolean {
+  return err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+}
+
+function said(err: unknown): string {
+  return sanitizeNote(err instanceof Error ? err.message : String(err), 160) || "no reason given";
+}
 
 /** GitHub's REST record of one pull request, or why there is none. */
 async function readPullRequest(
@@ -35,6 +45,7 @@ async function readPullRequest(
   datasetId: string,
   prNumber: number,
 ): Promise<Record<string, unknown>> {
+  const where = `${datasetId}#${prNumber}`;
   let res: Response;
   try {
     const { token, refresh } = await getDatasetsTokenWithRefresher(env);
@@ -49,9 +60,14 @@ async function readPullRequest(
       },
     );
   } catch (err) {
-    console.error(
-      `[pr-review-start] ${datasetId}#${prNumber}: GitHub read failed (${err instanceof Error ? err.name : "error"})`,
-    );
+    console.error(`[pr-review-start] ${where}: GitHub read failed (${said(err)})`);
+    if (isTimeout(err)) {
+      throw new QueueError(
+        502,
+        "github_timeout",
+        "GitHub took too long to answer, so nothing was started.",
+      );
+    }
     throw new QueueError(
       502,
       "github_unavailable",
@@ -59,21 +75,50 @@ async function readPullRequest(
     );
   }
   if (res.status === 404) {
-    throw new QueueError(404, "no_such_pull_request", "That pull request does not exist.");
+    // GitHub also answers 404 for a repository the token cannot see, so the sentence says both.
+    throw new QueueError(
+      404,
+      "no_such_pull_request",
+      "GitHub has no such pull request (or the Worker's token cannot see the repository).",
+    );
   }
   if (!res.ok) {
-    console.warn(`[pr-review-start] ${datasetId}#${prNumber}: GitHub answered HTTP ${res.status}`);
+    const body = sanitizeNote(await res.text().catch(() => ""), 160);
+    console.error(
+      `[pr-review-start] ${where}: GitHub answered HTTP ${res.status}: ${body || "no body"}`,
+    );
+    if (
+      res.status === 429 ||
+      (res.status === 403 &&
+        (/rate limit|abuse/i.test(body) || res.headers.get("x-ratelimit-remaining") === "0"))
+    ) {
+      throw new QueueError(
+        503,
+        "github_rate_limited",
+        "GitHub is rate limiting the Worker. Try again in a minute or two.",
+      );
+    }
+    if (res.status === 401 || res.status === 403) {
+      throw new QueueError(
+        502,
+        "github_refused",
+        `GitHub refused the read (HTTP ${res.status}), so nothing was started.`,
+      );
+    }
     throw new QueueError(
       502,
       "github_unavailable",
       "GitHub did not answer, so nothing was started.",
     );
   }
-  const body = (await res.json().catch(() => null)) as unknown;
-  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+  const parsed = (await res.json().catch((err) => {
+    console.error(`[pr-review-start] ${where}: GitHub's answer could not be read (${said(err)})`);
+    return null;
+  })) as unknown;
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new QueueError(502, "github_bad_response", "GitHub's answer could not be read.");
   }
-  return body as Record<string, unknown>;
+  return parsed as Record<string, unknown>;
 }
 
 /**
@@ -106,6 +151,19 @@ export async function startPullRequestReview(
     };
   }
 
+  // Before GitHub is asked anything, so a dataset that cannot be reviewed neither costs a read nor
+  // echoes the author of a pull request in it.
+  const reviewable = await reviewableDataset(env.DB, datasetId);
+  if (reviewable !== "reviewable") {
+    return {
+      environment,
+      dispatched: false,
+      reason: reviewable === "unknown" ? "unknown_dataset" : "dataset_not_reviewable",
+      review_id: null,
+      author_login: null,
+    };
+  }
+
   const pull = await readPullRequest(env, datasetId, prNumber);
   const base = pull.base as { repo?: unknown } | null | undefined;
   const result = await handlePullRequestEvent(
@@ -124,17 +182,28 @@ export async function startPullRequestReview(
     review_id: result.review_id ?? null,
     author_login: typeof login === "string" && LOGIN.test(login) ? login : null,
   };
-  const head = (pull.head as { sha?: unknown } | null | undefined)?.sha;
-  await auditLogStatement(env.DB, {
-    userId: adminUserId,
-    action: "pr_review_started",
-    resourceType: "pr_review",
-    resourceId: `${datasetId}#${prNumber}`,
-    details: JSON.stringify({
-      head_sha: typeof head === "string" ? head : null,
-      reason: answer.reason,
-      review_id: answer.review_id,
-    }),
-  }).run();
+  // Only a start is a fact worth an audit row; a decision not to start changed nothing an
+  // administrator did. And the row is best effort: a review that is already running must not be
+  // reported as an error because its audit row could not be written.
+  if (answer.dispatched) {
+    const head = (pull.head as { sha?: unknown } | null | undefined)?.sha;
+    try {
+      await auditLogStatement(env.DB, {
+        userId: adminUserId,
+        action: "pr_review_started",
+        resourceType: "pr_review",
+        resourceId: `${datasetId}#${prNumber}`,
+        details: JSON.stringify({
+          head_sha: typeof head === "string" ? head : null,
+          reason: answer.reason,
+          review_id: answer.review_id,
+        }),
+      }).run();
+    } catch (err) {
+      console.error(
+        `[pr-review-start] ${datasetId}#${prNumber}: review ${answer.review_id} started, audit row not written (${said(err)})`,
+      );
+    }
+  }
   return answer;
 }

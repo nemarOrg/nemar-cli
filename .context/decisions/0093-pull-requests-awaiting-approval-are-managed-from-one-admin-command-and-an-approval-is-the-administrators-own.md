@@ -159,8 +159,8 @@ by the administrator, from their machine, with their own GitHub login.**
   relying on the checks columns.
 - The dev Worker cannot show a production review. `approve` against it treats the verdict as unknown
   and needs `--force`.
-- A review that errored for a setup reason is still not re-run from here; a re-run command is not part
-  of this decision.
+- A review that errored for a setup reason is started again with `start` (amendment below), after the
+  setup is fixed; `approve` and `next` do not do it.
 
 ## Alternatives considered
 
@@ -189,7 +189,7 @@ by the administrator, from their machine, with their own GitHub login.**
 - Command: `src/commands/admin-pr-reviews.ts`, `src/lib/pr-review-approve.ts`. Tests:
   `test/admin-pr-reviews-cli.test.ts`, `test/pr-review-approve.test.ts`,
   `test/pr-reviews-render.unit.test.ts`.
-\n
+
 ## Amendment 2026-10-10: `start`
 
 `nemar admin pr-reviews start <dataset> <pr>` and `start --all` ask the Worker to review a pull request

@@ -226,7 +226,9 @@ describe("nemar admin pr-reviews start <dataset> <pr>", () => {
     const r = await cli([...START, "nm000201", "99"]);
 
     expect(r.exitCode).toBe(1);
-    expect(r.stdout + r.stderr).toContain("does not exist");
+    expect(r.stdout + r.stderr).toContain("GitHub has no such pull request");
+    // An answer about a pull request, not a fault in the command: no invitation to file a bug.
+    expect(r.stdout + r.stderr).not.toContain("--debug");
     expect(rows()).toHaveLength(0);
   });
 
@@ -263,34 +265,35 @@ describe("nemar admin pr-reviews start <dataset> <pr>", () => {
   });
 });
 
-describe("nemar admin pr-reviews start --all", () => {
-  function queue() {
-    openPr({ ds: "nm000201", n: 1, author: "alice", authorId: 42 });
-    openPr({ ds: "nm000202", n: 2, author: "bob", authorId: 43 });
-    // Already reviewed: left alone.
-    openPr({ ds: "nm000203", n: 3, author: "carol", authorId: 44 });
-    seedReview(db, {
-      ds: "nm000203",
-      n: 3,
-      sha: SHA_A,
-      authorId: 44,
-      state: "reported",
-      verdict: "pass",
-    });
-    // A review that ended in an error: started again.
-    openPr({ ds: "nm000204", n: 4, author: "dave", authorId: 45 });
-    seedReview(db, {
-      ds: "nm000204",
-      n: 4,
-      sha: SHA_A,
-      authorId: 45,
-      state: "errored",
-      detail: "workflow_failed",
-    });
-    // A draft: not reviewed.
-    openPr({ ds: "nm000205", n: 5, author: "erin", authorId: 46, draft: true });
-  }
+/** Four open pull requests to start (one with a stale error to restart), one reviewed, one draft. */
+function queue() {
+  openPr({ ds: "nm000201", n: 1, author: "alice", authorId: 42 });
+  openPr({ ds: "nm000202", n: 2, author: "bob", authorId: 43 });
+  // Already reviewed: left alone.
+  openPr({ ds: "nm000203", n: 3, author: "carol", authorId: 44 });
+  seedReview(db, {
+    ds: "nm000203",
+    n: 3,
+    sha: SHA_A,
+    authorId: 44,
+    state: "reported",
+    verdict: "pass",
+  });
+  // A review that ended in an error: started again.
+  openPr({ ds: "nm000204", n: 4, author: "dave", authorId: 45 });
+  seedReview(db, {
+    ds: "nm000204",
+    n: 4,
+    sha: SHA_A,
+    authorId: 45,
+    state: "errored",
+    detail: "workflow_failed",
+  });
+  // A draft: not reviewed.
+  openPr({ ds: "nm000205", n: 5, author: "erin", authorId: 46, draft: true });
+}
 
+describe("nemar admin pr-reviews start --all", () => {
   test("starts every open pull request without a completed review, and only those", async () => {
     queue();
 
@@ -338,11 +341,27 @@ describe("nemar admin pr-reviews start --all", () => {
     expect(dispatches()).toHaveLength(0);
   });
 
-  test("a contributor who is paused is listed apart, not started and not an error", async () => {
+  test("a paused contributor is asked about and declined by the Worker, with the way out", async () => {
     queue();
     db.run(
       "INSERT INTO pr_review_overrides (author_id, author_login, mode) VALUES (42, 'alice', 'block')",
     );
+
+    const r = await cli([...START, "--all", "--yes"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("nm000201 #1");
+    expect(r.stdout).toContain("not started: the contributor is paused");
+    expect(r.stdout).toContain("nemar admin pr-reviews allow alice");
+    expect(dispatches()).toHaveLength(2);
+    expect(rows().find((x) => x.pr_number === 1)).toMatchObject({
+      state: "declined",
+      detail: "contributor_paused",
+    });
+  });
+
+  test("after the pause is lifted, the stored decline is started by --all", async () => {
+    queue();
     seedReview(db, {
       ds: "nm000201",
       n: 1,
@@ -352,16 +371,16 @@ describe("nemar admin pr-reviews start --all", () => {
       state: "declined",
       detail: "contributor_paused",
     });
+    // `allow` changes the contributor's standing, not the rows already written.
+    db.run(
+      "INSERT INTO pr_review_overrides (author_id, author_login, mode) VALUES (42, 'alice', 'allow')",
+    );
 
     const r = await cli([...START, "--all", "--yes"]);
 
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).toContain("the contributor is paused (lift it with 'allow')");
-    expect(r.stdout).toContain("alice");
-    expect(dispatches()).toHaveLength(2);
-    // Listed apart: the Worker is not even asked about it, so nothing is declined a second time.
-    expect(gh.seen.some((x) => x.path.includes("/nm000201/pulls/"))).toBe(false);
-    expect(rows().filter((x) => x.pr_number === 1)).toHaveLength(1);
+    expect(dispatches()).toHaveLength(3);
+    expect(rows().find((x) => x.pr_number === 1)).toMatchObject({ state: "dispatched" });
   });
 
   test("a contributor held back by an allowance is started: the administrator chose it", async () => {
@@ -410,8 +429,10 @@ describe("nemar admin pr-reviews start --all", () => {
 
     const r = await cli([...START, "--all", "--yes"]);
 
-    expect(r.exitCode).toBe(0);
+    // Some were not reviewed, so the exit code says so (`next` does the same when it stops).
+    expect(r.exitCode).toBe(1);
     expect(r.stdout).toContain("daily");
+    expect(r.stdout).toMatch(/2 were not tried/);
     expect(dispatches()).toHaveLength(0);
     // The first decline says the pool is spent; the rest are not tried.
     expect(gh.seen.filter((s) => s.method === "GET" && s.path.includes("/pulls/"))).toHaveLength(1);
@@ -419,7 +440,8 @@ describe("nemar admin pr-reviews start --all", () => {
 
   test("a pull request that cannot be read is counted and the run goes on", async () => {
     queue();
-    Reflect.deleteProperty(gh.pulls, "nm000202#2");
+    // The first one listed, so a run that stopped at the first failure would start none.
+    Reflect.deleteProperty(gh.pulls, "nm000204#4");
 
     const r = await cli([...START, "--all", "--yes"]);
 
@@ -453,7 +475,27 @@ describe("nemar admin pr-reviews start --all", () => {
     const r = await cli([...START, "--all", "--yes"]);
 
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).toContain("Nothing to start");
+    expect(r.stdout).toContain("Nothing to start: no open pull request is waiting for a review");
+  });
+
+  test("a list GitHub cut short is not called complete", async () => {
+    openPr({ ds: "nm000203", n: 3, author: "carol", authorId: 44 });
+    seedReview(db, {
+      ds: "nm000203",
+      n: 3,
+      sha: SHA_A,
+      authorId: 44,
+      state: "reported",
+      verdict: "pass",
+    });
+    // GitHub's search says it has more than it returned.
+    gh.searchPages = [gh.searchPages[0] ?? [], []];
+    gh.searchTotal = 1500;
+
+    const r = await cli([...START, "--all", "--yes"]);
+
+    expect(r.stdout).not.toContain("Nothing to start: no open pull request is waiting");
+    expect(r.stdout).toContain("incomplete");
   });
 
   test("--json prints one result per pull request", async () => {
@@ -464,6 +506,7 @@ describe("nemar admin pr-reviews start --all", () => {
     expect(r.exitCode).toBe(0);
     const out = JSON.parse(r.stdout);
     expect(out.results).toHaveLength(3);
+    expect(out.not_tried).toBe(0);
     expect(out.results.every((x: { dispatched: boolean }) => x.dispatched)).toBe(true);
     expect(out.results.map((x: { reason: string }) => x.reason).sort()).toEqual([
       "dispatched",
@@ -471,5 +514,180 @@ describe("nemar admin pr-reviews start --all", () => {
       "redispatched",
     ]);
     expect(out.failed).toBe(0);
+  });
+});
+
+describe("nemar admin pr-reviews start --all --json", () => {
+  test("a dry run lists what it would start, in the JSON too", async () => {
+    openPr({ ds: "nm000201", n: 1, author: "alice", authorId: 42 });
+    openPr({ ds: "nm000205", n: 5, author: "erin", authorId: 46, draft: true });
+
+    const r = await cli([...START, "--all", "--dry-run", "--json"]);
+
+    expect(r.exitCode).toBe(0);
+    const out = JSON.parse(r.stdout);
+    expect(out.dry_run).toBe(true);
+    expect(out.would_start).toEqual([
+      expect.objectContaining({ dataset_id: "nm000201", pr_number: 1, author_login: "alice" }),
+    ]);
+    expect(out.drafts).toBe(1);
+    expect(dispatches()).toHaveLength(0);
+  });
+
+  test("a pull request that failed is in the results with its error, not only in a count", async () => {
+    openPr({ ds: "nm000201", n: 1, author: "alice", authorId: 42 });
+    openPr({ ds: "nm000202", n: 2, author: "bob", authorId: 43 });
+    Reflect.deleteProperty(gh.pulls, "nm000202#2");
+
+    const r = await cli([...START, "--all", "--yes", "--json"]);
+
+    expect(r.exitCode).toBe(1);
+    const out = JSON.parse(r.stdout);
+    expect(out.failed).toBe(1);
+    expect(out.results).toHaveLength(2);
+    expect(out.results.find((x: { pr_number: number }) => x.pr_number === 2)).toMatchObject({
+      dataset_id: "nm000202",
+      error: "no_such_pull_request",
+    });
+  });
+
+  test("declining the prompt prints no text on stdout", async () => {
+    openPr({ ds: "nm000201", n: 1, author: "alice", authorId: 42 });
+
+    const r = await cli([...START, "--all", "--json"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout.trim()).toBe("");
+    expect(dispatches()).toHaveLength(0);
+  });
+});
+
+describe("what must not start anything, and what a refused dispatch is", () => {
+  test("a single start refuses --dry-run, which would spend a model call", async () => {
+    openPr({ ds: "nm000201", n: 12 });
+
+    const r = await cli([...START, "nm000201", "12", "--dry-run"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout + r.stderr).toContain("--dry-run goes with --all");
+    expect(gh.seen).toHaveLength(0);
+    expect(rows()).toHaveLength(0);
+  });
+
+  test("--dry-run wins over --yes", async () => {
+    queue();
+
+    const r = await cli([...START, "--all", "--dry-run", "--yes"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(dispatches()).toHaveLength(0);
+    // Only the two rows the fixture seeded: nothing was recorded, nothing was restarted.
+    expect(rows().map((x) => [x.pr_number, x.state])).toEqual([
+      [3, "reported"],
+      [4, "errored"],
+    ]);
+  });
+
+  test("--all with a dataset given is refused", async () => {
+    queue();
+
+    const r = await cli([...START, "nm000201", "--all", "--yes"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(dispatches()).toHaveLength(0);
+  });
+
+  test("a dispatch GitHub refuses is a failure with a word, single", async () => {
+    gh.dispatchStatus = 500;
+    openPr({ ds: "nm000201", n: 12 });
+
+    const r = await cli([...START, "nm000201", "12"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("did not accept the dispatch");
+    expect(rows()[0]).toMatchObject({ state: "errored", detail: "dispatch_failed" });
+  });
+
+  test("a dispatch GitHub refuses is a failure in the JSON too", async () => {
+    gh.dispatchStatus = 500;
+    openPr({ ds: "nm000201", n: 12 });
+
+    const r = await cli([...START, "nm000201", "12", "--json"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(JSON.parse(r.stdout)).toMatchObject({ dispatched: false, reason: "dispatch_failed" });
+  });
+
+  test("--all exits 1 when GitHub refused a dispatch, and the next start tries again", async () => {
+    gh.dispatchStatus = 500;
+    openPr({ ds: "nm000201", n: 1, author: "alice", authorId: 42 });
+
+    const refused = await cli([...START, "--all", "--yes"]);
+
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stdout).toContain("did not accept the dispatch");
+
+    gh.dispatchStatus = 204;
+    const again = await cli([...START, "--all", "--yes"]);
+
+    expect(again.exitCode).toBe(0);
+    expect(again.stdout).toMatch(/1 started/);
+    expect(rows()[0]).toMatchObject({ state: "dispatched", detail: null });
+  });
+
+  test("a commit that was restarted reads as started again", async () => {
+    openPr({ ds: "nm000204", n: 4, author: "dave", authorId: 45 });
+    seedReview(db, {
+      ds: "nm000204",
+      n: 4,
+      sha: SHA_A,
+      authorId: 45,
+      state: "errored",
+      detail: "workflow_failed",
+    });
+
+    const r = await cli([...START, "nm000204", "4"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("started again");
+  });
+
+  test("a review that is running is not offered, and one handed over long ago is", async () => {
+    openPr({ ds: "nm000203", n: 3, author: "carol", authorId: 44 });
+    seedReview(db, { ds: "nm000203", n: 3, sha: SHA_A, authorId: 44, state: "dispatched" });
+
+    const running = await cli([...START, "--all", "--yes"]);
+
+    expect(running.stdout).toContain("Nothing to start");
+    expect(dispatches()).toHaveLength(0);
+
+    db.run("UPDATE pr_reviews SET created_at = '2026-10-01 00:00:00'");
+    const overdue = await cli([...START, "--all", "--yes"]);
+
+    // What the list offers is what the start takes: no "already has a review" for an offered row.
+    expect(overdue.exitCode).toBe(0);
+    expect(overdue.stdout).toMatch(/1 started/);
+    expect(overdue.stdout).not.toContain("already has a review");
+    expect(dispatches()).toHaveLength(1);
+  });
+
+  test("the daily stop says how many were not tried", async () => {
+    queue();
+    for (let i = 0; i < DAILY_REVIEW_CAP; i++) {
+      seedReview(db, {
+        ds: "nm000203",
+        n: 1000 + i,
+        sha: `${i}`.padStart(40, "b"),
+        authorId: 20_000 + i,
+        state: "reported",
+        verdict: "pass",
+        createdAt: new Date().toISOString().slice(0, 19).replace("T", " "),
+      });
+    }
+
+    const r = await cli([...START, "--all", "--yes"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toMatch(/Stopped: .*2 were not tried/);
   });
 });

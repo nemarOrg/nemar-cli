@@ -48,9 +48,10 @@ Deploy coupling.
   `--yes`) ask for one: the Worker reads the pull request from GitHub itself and runs it through
   the same gate, so the flag, the pause and the platform's daily pool still apply, while the
   per-contributor allowances do not hold back a review an administrator asked for by name. It
-  also starts again a commit whose review was declined, ended in an error or never reported.
-  The same gate now holds the redelivery of a failed dispatch, which used to skip the pause and
-  the allowances.
+  also starts again a commit whose review was declined, ended in an error, never reported, or
+  was handed to GitHub and not heard from for 30 minutes. A restart that follows an attempt
+  which cost a model call counts as a second call against the pool. The redelivery of a failed
+  dispatch goes through the same gate.
 - **`nemar admin users` finds an account by any field and edits a closed set of fields (ADR 0096).**
   Search matches every word in any text field, ranks an exact hit first and offers close
   matches when nothing matches; `show` and `edit` work by account id, so web accounts without a
@@ -134,7 +135,10 @@ Deploy coupling.
 - `0092_pr_reviews.sql`: the review table, the contributor-override table and their CHECKs.
 - `0093_clear_password_hashes.sql`: sets every stored password hash to NULL. Not reversible.
 - `0094_guard_retired_password_signup.sql`: refuses the retired signup insert and clears any
-  hash written between the two migrations. `bun run migrations:d1-check` passes.
+  hash written between the two migrations.
+- `0095_pr_review_attempts.sql`: adds `pr_reviews.attempts` (1 for every existing row), so the
+  platform's daily pool counts model calls rather than rows. `bun run migrations:d1-check`
+  passes.
 
 ### Deploy coupling
 

@@ -55,6 +55,10 @@ export interface GitHubStandin {
   pulls: Record<string, PullState>;
   /** The GraphQL search pages. */
   searchPages: unknown[][];
+  /** The `issueCount` the search reports, when a test needs it to differ from the nodes returned. */
+  searchTotal: number | null;
+  /** What the repository dispatch that hands a review to the workflow answers (204 accepts it). */
+  dispatchStatus: number;
   users: Record<string, { id: number; login: string; type: string }>;
   /** When set, the review POST answers this status instead of recording an approval. */
   reviewStatus: number | null;
@@ -97,6 +101,8 @@ export function startGitHubStandin(): GitHubStandin {
     seen: [] as Seen[],
     pulls: {} as Record<string, PullState>,
     searchPages: [] as unknown[][],
+    searchTotal: null as number | null,
+    dispatchStatus: 204,
     users: {} as GitHubStandin["users"],
     reviewStatus: null as number | null,
     reviewState: null as string | null,
@@ -126,7 +132,7 @@ export function startGitHubStandin(): GitHubStandin {
         return Response.json({
           data: projectOnto(String((body as { query?: unknown } | null)?.query ?? ""), {
             search: {
-              issueCount: state.searchPages.flat().length,
+              issueCount: state.searchTotal ?? state.searchPages.flat().length,
               pageInfo: {
                 hasNextPage: index + 1 < state.searchPages.length,
                 endCursor: String(index + 1),
@@ -162,7 +168,9 @@ export function startGitHubStandin(): GitHubStandin {
       // What the Worker does when it starts a review: hand it to the central workflow and publish
       // the check and the comment. Recorded in `seen` with the token each carried.
       if (req.method === "POST" && url.pathname === "/repos/nemarDatasets/.github/dispatches") {
-        return new Response(null, { status: 204 });
+        return new Response(state.dispatchStatus < 300 ? null : "{}", {
+          status: state.dispatchStatus,
+        });
       }
       if (/^\/repos\/nemarDatasets\/[^/]+\/check-runs(\/\d+)?$/.test(url.pathname)) {
         return Response.json(
@@ -278,6 +286,18 @@ export function startGitHubStandin(): GitHubStandin {
     set searchPages(v) {
       state.searchPages = v;
     },
+    get searchTotal() {
+      return state.searchTotal;
+    },
+    set searchTotal(v) {
+      state.searchTotal = v;
+    },
+    get dispatchStatus() {
+      return state.dispatchStatus;
+    },
+    set dispatchStatus(v) {
+      state.dispatchStatus = v;
+    },
     get users() {
       return state.users;
     },
@@ -341,6 +361,8 @@ export function startGitHubStandin(): GitHubStandin {
     reset() {
       state.seen.length = 0;
       state.searchPages = [];
+      state.searchTotal = null;
+      state.dispatchStatus = 204;
       state.reviewStatus = null;
       state.reviewState = null;
       state.reviewCommit = null;

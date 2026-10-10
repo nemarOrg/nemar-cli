@@ -5,7 +5,8 @@
  * produced none. An administrator asks for one by name: the Worker reads the pull request from
  * GitHub ITSELF (nothing about it comes from the caller), builds the same intake a delivery would
  * have, and runs it through the same gate. The same start also restarts a commit whose review
- * ended without a verdict (declined, errored, never reported), which a new delivery never does.
+ * ended without a verdict (declined, errored, never reported, or handed to GitHub and overdue),
+ * which a new delivery never does, and counts the restart against the platform's daily pool.
  *
  * Real engine only: bun:sqlite behind realD1 with every migration applied, the real admin router
  * with its real auth middleware and a real hashed token, and GitHub as a `Bun.serve()` stand-in
@@ -22,9 +23,10 @@ import { DAILY_REVIEW_CAP } from "../../shared/pr-review";
 import { adminRoutes } from "../src/routes/admin";
 import webhooks from "../src/routes/webhooks";
 import { __resetRateLimitStateForTests } from "../src/services/github/transport";
+import { handlePullRequestEvent } from "../src/services/pr-review";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
-import { freshDb, realD1 } from "./helpers/d1";
+import { freshDb, realD1, wrapD1 } from "./helpers/d1";
 import { SHA_A, SHA_B, seedReview } from "./helpers/pr-queue-fixtures";
 
 const ADMIN_KEY = "start-admin-key-0123456789abcdef0123456789abcdef";
@@ -332,14 +334,28 @@ describe("starting a pull request that is already open", () => {
     expect(dispatches()).toHaveLength(0);
   });
 
-  test("a dataset that is not a published, named publication is not started", async () => {
+  test("a dataset that is not a published, named publication is not started, and GitHub is not asked", async () => {
     seedDataset("nm000461", { visibility: "private" });
     pulls["nm000461#3"] = restPull({ ds: "nm000461", number: 3 });
 
     const r = await start("nm000461", 3);
 
-    expect(r.body).toMatchObject({ dispatched: false, reason: "dataset_not_reviewable" });
+    expect(r.body).toMatchObject({
+      dispatched: false,
+      reason: "dataset_not_reviewable",
+      author_login: null,
+    });
     expect(dispatches()).toHaveLength(0);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("a dataset NEMAR does not have is said so, and GitHub is not asked", async () => {
+    pulls["nm000999#3"] = restPull({ ds: "nm000999", number: 3 });
+
+    const r = await start("nm000999", 3);
+
+    expect(r.body).toMatchObject({ dispatched: false, reason: "unknown_dataset" });
+    expect(calls).toHaveLength(0);
   });
 
   test("a pull request GitHub does not have is a 404 with a word, not a guess", async () => {
@@ -497,6 +513,25 @@ describe("starting the same commit again", () => {
     expect(rows()[0].claimed_at).toBeNull();
   });
 
+  test("a review that was handed to GitHub and never came back is started again once it is overdue", async () => {
+    // The dev Worker never runs the watchdog, so an overdue row stays 'dispatched' there for good.
+    seedReview(db, {
+      ds: DATASET,
+      n: 7,
+      sha: SHA_A,
+      state: "dispatched",
+      createdAt: "2026-10-01 00:00:00",
+    });
+    pulls[`${DATASET}#7`] = restPull({});
+
+    const r = await start(DATASET, 7);
+
+    expect(r.body).toMatchObject({ dispatched: true, reason: "redispatched" });
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]).toMatchObject({ state: "dispatched", detail: null });
+    expect(rows()[0].nonce).not.toBeNull();
+  });
+
   test("a completed review is only re-stated, never run twice", async () => {
     seedReview(db, { ds: DATASET, n: 7, sha: SHA_A, state: "reported", verdict: "pass" });
     pulls[`${DATASET}#7`] = restPull({});
@@ -578,6 +613,91 @@ describe("what an administrator's start does not skip", () => {
       )
       .map((c) => `${c.method} ${c.path}`);
     expect(stray).toEqual([]);
+  });
+});
+
+describe("the platform's daily pool counts model calls, not rows", () => {
+  /** A full pool less one: a restart of a spent review is the 400th call, then the 401st. */
+  function seedPool(callsSpent: number) {
+    for (let i = 0; i < callsSpent; i++) {
+      seedReview(db, {
+        ds: DATASET,
+        n: 3000 + i,
+        sha: `${i}`.padStart(40, "d"),
+        authorId: 40_000 + i,
+        state: "reported",
+        verdict: "pass",
+        createdAt: now(),
+      });
+    }
+  }
+
+  test("restarting a review that already spent a call costs a second one", async () => {
+    // 399 calls spent elsewhere, and this commit's own failed run is the 400th: the pool is full.
+    seedPool(DAILY_REVIEW_CAP - 1);
+    seedReview(db, {
+      ds: DATASET,
+      n: 7,
+      sha: SHA_A,
+      state: "errored",
+      detail: "model_refused",
+      createdAt: now(),
+    });
+    pulls[`${DATASET}#7`] = restPull({});
+
+    const first = await start(DATASET, 7);
+
+    expect(first.body).toMatchObject({ dispatched: false, reason: "daily_limit" });
+    expect(dispatches()).toHaveLength(0);
+    // The attempt that never ran is not counted: the row is declined and still says one call.
+    expect(rows().find((x) => x.pr_number === 7)).toMatchObject({
+      state: "declined",
+      detail: "daily_limit",
+      attempts: 1,
+    });
+  });
+
+  test("a restart is counted once it is handed to GitHub, so repeating it is bounded", async () => {
+    seedPool(10);
+    seedReview(db, {
+      ds: DATASET,
+      n: 7,
+      sha: SHA_A,
+      state: "errored",
+      detail: "model_refused",
+      createdAt: now(),
+    });
+    pulls[`${DATASET}#7`] = restPull({});
+
+    expect((await start(DATASET, 7)).body).toMatchObject({ reason: "redispatched" });
+    expect(rows().find((x) => x.pr_number === 7)).toMatchObject({ attempts: 2 });
+
+    // The second run of it fails the same way and is started again: a third call.
+    db.run(
+      "UPDATE pr_reviews SET state = 'errored', detail = 'model_refused', nonce = NULL WHERE pr_number = 7",
+    );
+    expect((await start(DATASET, 7)).body).toMatchObject({ reason: "redispatched" });
+    expect(rows().find((x) => x.pr_number === 7)).toMatchObject({ attempts: 3 });
+    // 10 others + 3 calls of this one.
+    const pool = db
+      .query("SELECT SUM(attempts) AS n FROM pr_reviews WHERE state != 'declined'")
+      .get() as { n: number };
+    expect(pool.n).toBe(13);
+  });
+
+  test("a restart of something that never reached the model costs nothing extra", async () => {
+    seedReview(db, {
+      ds: DATASET,
+      n: 7,
+      sha: SHA_A,
+      state: "declined",
+      detail: "rate_limited",
+    });
+    pulls[`${DATASET}#7`] = restPull({});
+
+    await start(DATASET, 7);
+
+    expect(rows()[0]).toMatchObject({ state: "dispatched", attempts: 1 });
   });
 });
 
@@ -708,5 +828,243 @@ describe("a redelivery of a failed dispatch is held to the same gate", () => {
 
     expect(r).toMatchObject({ dispatched: false, reason: "duplicate" });
     expect(rows()[0]).toMatchObject({ state: "errored", detail: "workflow_failed" });
+  });
+
+  test("a redelivery restarts neither a decline nor an unreported review", async () => {
+    seedReview(db, {
+      ds: DATASET,
+      n: 7,
+      sha: SHA_A,
+      authorId: 501,
+      state: "declined",
+      detail: "rate_limited",
+    });
+    expect(await redeliver()).toMatchObject({ dispatched: false, reason: "duplicate" });
+    expect(rows()[0]).toMatchObject({ state: "declined", detail: "rate_limited" });
+
+    db.run("UPDATE pr_reviews SET state = 'unreported', detail = NULL");
+    expect(await redeliver()).toMatchObject({ dispatched: false, reason: "duplicate" });
+    expect(rows()[0]).toMatchObject({ state: "unreported" });
+    expect(dispatches()).toHaveLength(0);
+  });
+});
+
+describe("when the start itself goes wrong", () => {
+  test("a dispatch GitHub refuses is recorded, and a second start tries again", async () => {
+    pulls[`${DATASET}#7`] = restPull({});
+    dispatchStatus = 500;
+
+    const first = await start(DATASET, 7);
+
+    expect(first.body).toMatchObject({ dispatched: false, reason: "dispatch_failed" });
+    expect(rows()[0]).toMatchObject({ state: "errored", detail: "dispatch_failed", nonce: null });
+
+    dispatchStatus = 204;
+    const second = await start(DATASET, 7);
+
+    expect(second.body).toMatchObject({ dispatched: true, reason: "redispatched" });
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]).toMatchObject({ state: "dispatched" });
+  });
+
+  test("a database failure after the restart's reset leaves a dispatch that did not happen", async () => {
+    seedReview(db, { ds: DATASET, n: 7, sha: SHA_A, state: "errored", detail: "workflow_failed" });
+    pulls[`${DATASET}#7`] = restPull({});
+    const broken = wrapD1(realD1(db), (sql) => {
+      if (sql.includes("SUM(attempts)")) throw new Error("D1 is unavailable");
+    });
+    const quiet = console.error;
+    console.error = () => {};
+    let res: Response;
+    try {
+      res = await app.request(
+        `/admin/pr-reviews/${DATASET}/7/start`,
+        { method: "POST", headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+        { ...env(), DB: broken } as Bindings,
+      );
+    } finally {
+      console.error = quiet;
+    }
+
+    expect(res.status).toBe(500);
+    // Not left 'dispatched' with a live nonce, counting against the allowances and waiting to be
+    // called late: a start or a redelivery can run it.
+    expect(rows()[0]).toMatchObject({ state: "errored", detail: "dispatch_failed", nonce: null });
+    expect(dispatches()).toHaveLength(0);
+  });
+
+  test.each([
+    [401, "github_refused"],
+    [403, "github_refused"],
+    [429, "github_rate_limited"],
+    [500, "github_unavailable"],
+  ])(
+    "GitHub answering %i is reported as %s, not as a missing pull request",
+    async (status, code) => {
+      pulls[`${DATASET}#7`] = status;
+
+      const r = await start(DATASET, 7);
+
+      expect(r.status).toBeGreaterThanOrEqual(502);
+      expect(r.body).toMatchObject({ code });
+      expect(rows()).toHaveLength(0);
+    },
+  );
+
+  test("the audit row is written for a start and not for a decision not to start", async () => {
+    pulls[`${DATASET}#7`] = restPull({ draft: true });
+    await start(DATASET, 7);
+    expect(
+      db.query("SELECT 1 FROM audit_log WHERE action = 'pr_review_started'").all(),
+    ).toHaveLength(0);
+
+    pulls[`${DATASET}#8`] = restPull({ number: 8 });
+    await start(DATASET, 8);
+    expect(
+      db.query("SELECT 1 FROM audit_log WHERE action = 'pr_review_started'").all(),
+    ).toHaveLength(1);
+  });
+
+  test("an audit row that cannot be written does not turn a started review into an error", async () => {
+    pulls[`${DATASET}#7`] = restPull({});
+    const broken = wrapD1(realD1(db), (sql) => {
+      if (sql.includes("INSERT INTO audit_log")) throw new Error("D1 is unavailable");
+    });
+    const quiet = console.error;
+    console.error = () => {};
+    let res: Response;
+    try {
+      res = await app.request(
+        `/admin/pr-reviews/${DATASET}/7/start`,
+        { method: "POST", headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+        { ...env(), DB: broken } as Bindings,
+      );
+    } finally {
+      console.error = quiet;
+    }
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ dispatched: true });
+    expect(dispatches()).toHaveLength(1);
+  });
+});
+
+describe("the restart's bookkeeping and who can trigger it", () => {
+  test("a restart clears everything the old attempt recorded", async () => {
+    seedReview(db, { ds: DATASET, n: 7, sha: SHA_A, state: "errored", detail: "workflow_failed" });
+    // A review that failed after its workflow ran has been claimed and may have been published once.
+    db.run(
+      `UPDATE pr_reviews SET published_at = '2026-10-01 00:00:00', publish_attempts = 3,
+              claimed_at = '2026-10-01 00:00:00', decided_at = '2026-10-01 00:00:00'`,
+    );
+    pulls[`${DATASET}#7`] = restPull({});
+
+    await start(DATASET, 7);
+
+    // A stale `claimed_at` would refuse the new run's claim, and the review would never finish.
+    expect(rows()[0]).toMatchObject({
+      state: "dispatched",
+      detail: null,
+      claimed_at: null,
+      published_at: null,
+      publish_attempts: 0,
+      decided_at: null,
+    });
+  });
+
+  test("two starts at once of one commit hand it over once", async () => {
+    seedReview(db, { ds: DATASET, n: 7, sha: SHA_A, state: "errored", detail: "workflow_failed" });
+    const pull = restPull({});
+    const payload = {
+      action: "synchronize",
+      pull_request: pull,
+      repository: (pull.base as { repo: unknown }).repo,
+    };
+    const e = env();
+
+    const [a, b] = await Promise.all([
+      handlePullRequestEvent(e, payload, { adminStart: true }),
+      handlePullRequestEvent(e, payload, { adminStart: true }),
+    ]);
+
+    expect(dispatches()).toHaveLength(1);
+    expect([a.reason, b.reason].sort()).toEqual(["duplicate", "redispatched"]);
+  });
+
+  test("a contributor's per-day allowance is lifted for an administrator's start, as the hourly one is", async () => {
+    const threeHoursAgo = new Date(Date.now() - 3 * 3600_000)
+      .toISOString()
+      .slice(0, 19)
+      .replace("T", " ");
+    for (let i = 0; i < 6; i++) {
+      seedReview(db, {
+        ds: DATASET,
+        n: 100 + i,
+        sha: `${i}`.repeat(40),
+        authorId: 700,
+        login: "stranger",
+        state: "reported",
+        verdict: "pass",
+        createdAt: threeHoursAgo,
+      });
+    }
+    pulls[`${DATASET}#7`] = restPull({ userId: 700, login: "stranger", assoc: "NONE" });
+
+    const r = await start(DATASET, 7);
+
+    expect(r.body).toMatchObject({ dispatched: true, reason: "dispatched" });
+  });
+
+  test("a contributor paused by their record, not by a decision, is declined on a restart, and the decline is published", async () => {
+    for (let i = 0; i < 7; i++) {
+      seedReview(db, {
+        ds: DATASET,
+        n: 200 + i,
+        sha: `${i}`.repeat(40),
+        authorId: 900,
+        login: "n",
+        state: "reported",
+        verdict: "fail",
+      });
+    }
+    seedReview(db, {
+      ds: DATASET,
+      n: 7,
+      sha: SHA_A,
+      authorId: 900,
+      login: "n",
+      state: "declined",
+      detail: "rate_limited",
+    });
+    pulls[`${DATASET}#7`] = restPull({ userId: 900, login: "n" });
+
+    const r = await start(DATASET, 7);
+
+    expect(r.body).toMatchObject({ dispatched: false, reason: "contributor_paused" });
+    expect(dispatches()).toHaveLength(0);
+    // The pull request's author sees the new reason, not the old one.
+    expect(calls.filter((c) => c.method === "POST" && /\/check-runs$/.test(c.path))).toHaveLength(
+      1,
+    );
+  });
+
+  test("a pull request number that is not a positive whole number is a 400 and asks GitHub nothing", async () => {
+    for (const n of ["0", "-1", "1.5", "9007199254740993"]) {
+      const r = await app.request(
+        `/admin/pr-reviews/${DATASET}/${n}/start`,
+        { method: "POST", headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+        env(),
+      );
+      expect([n, r.status]).toEqual([n, 400]);
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  test("a bot's login is not echoed back", async () => {
+    pulls[`${DATASET}#7`] = restPull({ type: "Bot", login: "dependabot[bot]" });
+
+    const r = await start(DATASET, 7);
+
+    expect(r.body).toMatchObject({ dispatched: false, reason: "bot_author", author_login: null });
   });
 });

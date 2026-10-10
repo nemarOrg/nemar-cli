@@ -150,8 +150,9 @@ export interface QueueResponse {
 
 /**
  * What starting the review of one open pull request came to. `reason` is one of the review's own
- * fixed words (ADR 0092): `dispatched` or `redispatched` when it was handed to GitHub, otherwise why
- * not (`duplicate`, `contributor_paused`, `daily_limit`, `draft`, `not_open`, `not_main`,
+ * fixed words (ADR 0092): `dispatched`, `redispatched` (a commit started again) or `dispatch_claimed`
+ * (GitHub's answer was lost but the workflow had already claimed it) when it was handed to GitHub,
+ * otherwise why not (`duplicate`, `contributor_paused`, `daily_limit`, `draft`, `not_open`, `not_main`,
  * `bot_author`, `dataset_not_reviewable`, `pr_review_disabled`, ...). `review_id` is null when no
  * review row exists for it.
  */
