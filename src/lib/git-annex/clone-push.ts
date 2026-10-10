@@ -1302,7 +1302,7 @@ export async function cloneDataset(
     if (credentialHelper) {
       const { exitCode: cfgCode, stderr: cfgStderr } = await runCommand(
         ["git", "config", "credential.https://github.com.helper", credentialHelper],
-        { cwd: outputPath },
+        { cwd: outputPath, redact: [credentialHelper] },
       );
       if (cfgCode !== 0) {
         return {

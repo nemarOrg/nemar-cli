@@ -239,7 +239,9 @@ export async function createGitHubReader(
   const baseUrl = options.baseUrl ?? "https://api.github.com";
   let token = process.env.GH_TOKEN?.trim() || process.env.GITHUB_TOKEN?.trim() || "";
   if (!token) {
-    const { stdout, exitCode, stderr } = await runCommand(["gh", "auth", "token"]);
+    const { stdout, exitCode, stderr } = await runCommand(["gh", "auth", "token"], {
+      sensitiveOutput: true,
+    });
     if (exitCode !== 0 || !stdout.trim()) {
       throw new Error(
         `No GitHub token available: set GH_TOKEN, or run \`gh auth login\` (gh said: ${stderr.trim() || `exit ${exitCode}`}). A sweep of the fleet cannot run on the anonymous rate limit.`,

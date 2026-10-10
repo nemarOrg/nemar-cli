@@ -105,6 +105,13 @@ export async function runCommand(
     stdin?: string;
     /** Suppress both output streams from the verbose log when a command returns a secret. */
     sensitiveOutput?: boolean;
+    /**
+     * Secret values this command is GIVEN (in its arguments), to blank from the verbose log's
+     * echo of the command line and from what it prints. `sensitiveOutput` covers only what a
+     * command returns; a token handed to `git config ... password=<token>` would otherwise be
+     * logged with the line that ran it.
+     */
+    redact?: readonly string[];
     /** Called once for each quiet period with its measured duration; either stream resets it. */
     onInactivityWarning?: (idleMs: number) => void;
     /** Internal test threshold; production callers use the 120-second default. */
@@ -166,7 +173,7 @@ export async function runCommand(
   // What the log shows is credential-free: a failed S3 request makes git-annex print the
   // request it built, session token included, and a credential could as well be in an
   // argument.
-  const secrets = isVerbose() ? credentialValues(childEnv) : [];
+  const secrets = isVerbose() ? [...credentialValues(childEnv), ...(options.redact ?? [])] : [];
   if (isVerbose()) {
     const cwdHint = options.cwd ? ` (cwd=${options.cwd})` : "";
     vlog(chalk.dim(redactCredentials(`$ ${cmd.join(" ")}${cwdHint}`, secrets)));
