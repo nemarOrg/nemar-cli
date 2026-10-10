@@ -12,6 +12,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { PassThrough } from "node:stream";
 import {
   existsSync,
   mkdirSync,
@@ -23,7 +24,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { PassThrough } from "node:stream";
 import { clearStaleFlags, setAssumeUnchanged } from "../src/lib/git-annex/clone-push";
 import { annexRemoteExists, configureS3Remote } from "../src/lib/git-annex/s3-remote";
 import { collectFileManifest } from "../src/lib/git-annex/transfer";
