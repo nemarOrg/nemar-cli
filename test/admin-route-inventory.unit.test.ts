@@ -60,7 +60,7 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   // the first matching handler in registration order (pinned below).
   "GET /users/duplicates": 1,
   "POST /users/:id/clear-identity-conflict": 1,
-  // ADR 0094: one account's details and an admin edit of it, keyed by id because
+  // ADR 0096: one account's details and an admin edit of it, keyed by id because
   // a web/ORCID account has no username. The PATCH is a single handler on
   // purpose: owner-only applies to three of its eight fields, so the
   // permission check lives in parseAdminUserEdit and not in a middleware.

@@ -469,7 +469,7 @@ Examples:
 
     // An empty search is refused here and again by the backend, never treated
     // as "no search": someone looking up one person must not be handed the
-    // whole directory because a shell variable came out empty (ADR 0094).
+    // whole directory because a shell variable came out empty (ADR 0096).
     const search: string | undefined = options.search;
     if (search !== undefined && search.trim() === "") {
       console.error(chalk.red("--search needs at least one word to look for"));
@@ -561,7 +561,7 @@ Examples:
 
       // A search that names ONE account outright (its id, username, email,
       // GitHub handle or ORCID iD) goes straight to it, as a search box does
-      // with an exact hit, and lists whatever else matched beneath (ADR 0094).
+      // with an exact hit, and lists whatever else matched beneath (ADR 0096).
       // What counts as "outright" is the server's call (`match_kind`).
       if (search !== undefined) {
         const hit = exactHit(users);
@@ -681,7 +681,7 @@ Examples:
   });
 
 // ----------------------------------------------------------------------------
-// users show / users edit (ADR 0094)
+// users show / users edit (ADR 0096)
 // ----------------------------------------------------------------------------
 
 /**
@@ -7089,19 +7089,22 @@ adminCommand.addCommand(reindexCommand);
 
 const availabilityReportCommand = new Command("availability-report")
   .description(
-    "Report how much of a dataset's declared data is present in S3, and exactly which files are missing + why (#1000). Dry-run by default. --all backfills every managed dataset (#1001).",
+    "Report how much of a dataset's declared data is present in S3, and exactly which files are missing + why (#1000). Dry-run by default. --all backfills every non-sandbox dataset that has a version and no report yet (#1001).",
   )
   .argument("[dataset-id]", "Dataset ID (e.g., nm000103)")
   .option(
     "--write",
     "Commit the report to .nemar/availability-report.json on main (default: preview only)",
   )
-  .option("--all", "Backfill every managed dataset instead of a single one (#1001)")
+  .option(
+    "--all",
+    "Backfill every non-sandbox dataset that has a version and no report yet, instead of a single one (#1001)",
+  )
   .option(
     "--missing-only",
     "With --all, sweep only datasets already known incomplete (data_complete=0)",
   )
-  .option("--limit <n>", "With --all, datasets per batch (server clamps to [1,10])", "10")
+  .option("--limit <n>", "With --all, datasets per batch (server clamps to [1,30])", "10")
   .option("--reset", "With --all, clear every stamped sweep row so it re-sweeps from scratch")
   .option("--verbose", "With --all, print per-batch progress")
   .option("--json", "Output raw JSON")

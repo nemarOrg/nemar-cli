@@ -88,7 +88,7 @@ export async function listUsers(
   // What the account IS (epic #1272 phase 4, #1284; ADR 0048).
   kind?: AccountKind,
   extra: {
-    /** Words to find in ANY text field of an account (ADR 0094). Every word
+    /** Words to find in ANY text field of an account (ADR 0096). Every word
      *  must match somewhere. Each matching row then carries `matched_in`. */
     search?: string;
     /** Include tombstoned accounts, which the listing hides by default. */
@@ -111,7 +111,7 @@ export async function listUsers(
 export type { AdminUserFullDetail, AdminUserEditBody, AdminUserEditResponse };
 
 /**
- * One account's full non-secret details, by numeric id (ADR 0094). By id and
+ * One account's full non-secret details, by numeric id (ADR 0096). By id and
  * not username because a web/ORCID account has no username.
  */
 export async function getAdminUserById(
@@ -127,7 +127,7 @@ export async function getAdminUserById(
 }
 
 /**
- * Edit an account (ADR 0094). Descriptive fields: any admin. username, email
+ * Edit an account (ADR 0096). Descriptive fields: any admin. username, email
  * and github_username: owner only, and never one's own account.
  */
 export async function editAdminUser(
@@ -268,7 +268,7 @@ export async function setAccountKind(
 /** The fields `nemar admin doctor kinds` reads off `GET
  *  /admin/users/:username` (epic #1272 phase 4, #1284 review; ADR 0048).
  *  The route selects every NON-SECRET column (`ADMIN_USER_NON_SECRET_SELECT`;
- *  credentials are never returned, ADR 0094) plus two computed columns, so
+ *  credentials are never returned, ADR 0096) plus two computed columns, so
  *  this is deliberately narrow rather than a full mirror of the row --
  *  everything else is untyped here on purpose (`.passthrough()`-shaped).
  *  `getAdminUserById` is the validated, fully typed read of one account. */
@@ -1100,7 +1100,8 @@ export async function signalDefaultsSweepReset(): Promise<SignalDefaultsSweepRes
  *  `POST /admin/datasets/data-integrity-sweep`). */
 export interface DataIntegritySweepBatchResponse {
   processed: number;
-  /** Verified complete (every annex-keyed manifest entry present at declared size). */
+  /** Verified complete (every annex-keyed manifest entry present at declared size,
+   *  whole or as a complete chunk set). */
   complete: number;
   /** Verified incomplete this batch -- the #967 signature. */
   incomplete: number;
@@ -1216,9 +1217,21 @@ export interface AvailabilityReportSweepBatchResponse {
   processed: number;
   /** Successfully generated + committed this batch. */
   written: number;
-  errors: { dataset_id: string; error: string }[];
-  /** Datasets still unswept (no `$.availability_report_at` in sweep_stamps); 0 when done. */
+  errors: AvailabilityReportSweepError[];
+  /** Candidates still unstamped (no `$.availability_report_at` in sweep_stamps),
+   *  including rows this batch refused or failed; 0 means nothing is left to try. */
   remaining: number | null;
+}
+
+/** One candidate a batch could not complete. */
+export interface AvailabilityReportSweepError {
+  dataset_id: string;
+  error: string;
+  /** The status the single-dataset route answers for this failure: 409 = refused
+   *  because the repository has no `main`; 400/404 = the dataset's own
+   *  configuration; 500 = anything else (S3, GitHub or auth failure, a
+   *  repository not visible to NEMAR). */
+  status: number;
 }
 
 /** Response of `?reset=1`: count of stamped rows cleared back to unswept. */

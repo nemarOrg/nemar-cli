@@ -12,11 +12,12 @@
 # THE CLAIM COMES FIRST. The dispatch carries a one-shot token the Worker signed for this review.
 # Once the token is masked and the fields are checked, the first real step presents it to the
 # Worker, which accepts it once. A dispatch that cannot (it was forged by someone holding a dataset
-# repository's workflow credentials, it was already claimed, or its commit was superseded) stops
-# there, before anything is installed, minted or sent to a model. That is what makes the Worker's
-# spend caps binding. A claim that could not be decided (the Worker was unreachable or answered
-# with an error) fails the job loudly instead: it is neither forged nor stale, and nobody would
-# otherwise learn that the review never started.
+# repository's workflow credentials, it was already claimed, or a newer Worker-recorded delivery
+# exists) stops there, before anything is installed, minted or sent to a model. That is what makes
+# the Worker's spend caps binding. A claim that could not be decided (the Worker was unreachable or
+# answered with an error) fails the job loudly instead: it is neither forged nor known stale, and
+# nobody would otherwise learn that the review never started. The later review script checks the
+# fetched pull ref and current API head against the dispatched SHA before calling the model.
 #
 # WHAT EACH STEP CAN HOLD. The step that calls the model has the federated Anthropic identity and
 # the callback token in its environment, and no GitHub credential in it. The GitHub App's private
@@ -64,12 +65,12 @@ on:
 
 permissions: {}
 
-# One run per review. The group is the environment and the review id, so a forged dispatch cannot
-# cancel a real run by naming the same pull request (the earlier grouping by pull request let it),
-# and a dev review cannot collide with a production one that has the same small id. A superseded
-# commit is refused by the Worker at the claim instead of being cancelled here.
+# One group per workflow execution. GitHub keeps only one pending run per group, so grouping on
+# client payload would let an untrusted dispatch replace a legitimate pending run. The Worker
+# decides whether its latest recorded delivery may be claimed. Later, the review script checks the
+# fetched pull ref and current API head against the dispatched SHA before the model call.
 concurrency:
-  group: pr-review-${{ github.event.client_payload.environment }}-${{ github.event.client_payload.review_id }}
+  group: pr-review-${{ github.run_id }}-${{ github.run_attempt }}
   cancel-in-progress: false
 
 jobs:
@@ -140,9 +141,10 @@ jobs:
 
       # Present the token to the Worker before anything is installed, minted or sent anywhere. The
       # Worker accepts it once. A dispatch it refuses (HTTP 401: forged or replayed; 409: already
-      # claimed, or its commit was superseded) ends the job here, green, having spent nothing. Any
-      # other answer, or none, means the Worker could not decide: the job fails, because the review
-      # exists and is waiting, and a green run would hide that. A transient error is retried first.
+      # claimed, superseded, no longer reviewable, or unsettled) ends the job here, green, having
+      # spent nothing. Any other answer, or none, means the Worker could not decide: the job fails,
+      # because the review exists and is waiting, and a green run would hide that. A transient error
+      # is retried first.
       # (If the Worker claimed and the answer was lost, the retry is refused as already claimed and
       # the review is later reported as not finished; the watchdog says so.)
       - name: Claim the review

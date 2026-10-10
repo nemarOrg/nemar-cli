@@ -2,7 +2,7 @@
  * The identity normalisers and the live-only holder lookups (ADR 0043).
  *
  * These rules used to be exercised through `POST /auth/signup`, which is gone
- * (ADR 0095). Account creation now runs through ORCID finalize, which takes its
+ * (ADR 0097). Account creation now runs through ORCID finalize, which takes its
  * iD from a signed token, so the typed-input rules (a pasted `@handle`, an iD
  * with a lowercase check digit, an `orcid.org` URL, a garbage-prefixed paste)
  * have no HTTP route left to drive them. They still decide what admin search

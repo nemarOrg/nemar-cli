@@ -835,7 +835,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       return c.json({ error: `Invalid kind. Must be: ${ACCOUNT_KIND_VALUES.join(", ")}` }, 400);
     }
 
-    // Search every text field of an account (ADR 0094). Parsed before anything
+    // Search every text field of an account (ADR 0096). Parsed before anything
     // else so a bad query is refused rather than quietly listing everyone,
     // which is the opposite of what someone looking up one person wants.
     const rawQuery = c.req.query("q");
@@ -854,7 +854,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     // same filters and no search words) cannot share the first one's list.
     // Numbered placeholders (`?1`, `?2`, ...) throughout, because a search word
     // is referenced from the WHERE and from the "matched in" column and must be
-    // bound once (ADR 0094). Mixing bare `?` in would be a trap: a bare `?` takes
+    // bound once (ADR 0096). Mixing bare `?` in would be a trap: a bare `?` takes
     // the number after the highest so far and silently collides with a numbered
     // one reused later, so every parameter goes through `bind`.
     const filters = () => {
@@ -990,7 +990,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
    *
    * An explicit column list, never the whole row: this route used to select
    * every column and so returned `password_hash`, `verification_token` and the
-   * encrypted AWS key pair to any admin (ADR 0094). Which columns are secrets
+   * encrypted AWS key pair to any admin (ADR 0096). Which columns are secrets
    * is classified once, in `USER_COLUMN_ROLES`.
    */
   admin.get("/users/:username", async (c) => {

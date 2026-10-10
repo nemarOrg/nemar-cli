@@ -309,14 +309,14 @@ export const adminUserListItemSchema = z
      *  users --kind` and the `Kind:` row line both read this. */
     account_kind: accountKindSchema.optional(),
     /**
-     * Which fields the search words were found in (ADR 0094), present only on a
+     * Which fields the search words were found in (ADR 0096), present only on a
      * `?q=` listing. An unfiltered or tier-filtered listing omits it, so absent
      * means "this was not a search", never "matched nowhere". Column names, in
      * the order the backend checks them (`id` first when a word is a number).
      */
     matched_in: z.array(z.string()).optional(),
     /**
-     * How this row matched a `?q=` search, best first (ADR 0094): `exact` the
+     * How this row matched a `?q=` search, best first (ADR 0096): `exact` the
      * text IS the account's id, username, email, GitHub handle or ORCID iD;
      * `name` every word is a whole word of the name or username; `prefix` every
      * word begins a word of the name, username, email or GitHub handle;

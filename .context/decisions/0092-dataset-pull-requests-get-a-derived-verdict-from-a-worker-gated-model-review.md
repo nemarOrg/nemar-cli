@@ -28,8 +28,11 @@ decide" cannot be expressed with either.
 - **The trigger is the GitHub App's `pull_request` delivery to the Worker**, for pull requests
   against `main` (not drafts, not bots). No workflow in any dataset repository takes part, so there
   is nothing in a dataset repository to edit and nothing to roll out to ~785 repositories (ADR
-  0020). A fork is reviewed exactly like a branch: the job reads `refs/pull/N/head` from the BASE
-  repository and never fetches from the fork.
+  0020). Before storing or dispatching a review, the Worker requires the dataset row to be active,
+  public, named (`anonymous = 0`) and published (`first_published_at` is set). A private upload,
+  anonymous deposit, archived row or unpublished dataset cannot send pull-request text or metadata
+  to the model. A fork is reviewed exactly like a branch: the job reads `refs/pull/N/head` from the
+  BASE repository and never fetches from the fork.
 - **The Worker decides whether a review is dispatched, and the claim makes that binding.** It
   records one row per (dataset, pull request, head commit) in `pr_reviews`, so a repeated delivery
   is free. It pauses a contributor who has had more than 5 pull requests rejected AND more than 10
@@ -41,12 +44,22 @@ decide" cannot be expressed with either.
   slip under them.
 - **The workflow claims the review before it spends anything.** The dispatch carries a one-shot
   token the Worker signed for that review. The workflow's first real act is `POST
-  /webhooks/pr-review-claim`; the Worker accepts the token once and refuses a commit that is no
-  longer the pull request's latest (`superseded`). A dispatch that cannot claim (forged by someone
-  who holds a dataset repository's workflow credentials, replayed, or stale) stops before anything
-  is installed, minted or sent to a model, ends green and costs nothing. Without the claim the
-  caps would bind only reviews the Worker itself dispatched, and the dispatch is an API anyone with
-  those credentials can call.
+  /webhooks/pr-review-claim`; the Worker accepts the token once and checks that the review is still
+  its latest recorded delivery and that the dataset is still an active, named public publication in
+  the same conditional update that claims it. A superseded review or dataset that becomes
+  ineligible is recorded as `stale_head`. If the claim and refusal cannot settle across two
+  conditional attempts, the Worker closes the same unclaimed attempt as `stale_head`; it never
+  leaves that dispatch pending for the watchdog or allows it to spend without a claim.
+  The workflow later compares both the fetched pull ref and the current GitHub API head against the
+  dispatched SHA before it sends anything to the model. A dispatch that
+  cannot claim (forged by someone who holds a dataset repository's workflow credentials, replayed,
+  or superseded by a newer Worker-recorded delivery) stops before anything is installed, minted or
+  sent to a model, ends green and costs nothing. Without the claim the caps would bind only reviews
+  the Worker itself dispatched, and the dispatch is an API anyone with those credentials can call.
+- **A failed dispatch only fails its own unclaimed attempt.** The dispatch-failure update is fenced
+  by the row's nonce and `claimed_at IS NULL`. If GitHub accepted a dispatch before its response was
+  lost and the workflow claimed it, the Worker preserves that claim and accepts its callback rather
+  than turning a valid run into a retry.
 - **The reviewer is `run-pr-review.yml` in `nemarDatasets/.github`**, authored in this repository
   and deployed by whole-file copy like the onboarding workflow. The Anthropic identity is minted
   there and nowhere else, by workload identity federation (`claude-haiku-5-5`, effort `high`). Each
@@ -59,6 +72,10 @@ decide" cannot be expressed with either.
   credential that writes to GitHub or NEMAR beyond the one-shot callback token, which can post one
   report for one review. Nothing from the pull request is executed: the repository is fetched with
   `init` and `fetch`, never checked out.
+- **Every dispatch has a distinct Actions concurrency group.** The group is keyed by GitHub's
+  workflow run id and attempt, never by the untrusted event payload. GitHub retains one pending run
+  per group, so payload-derived groups could let a forged dispatch replace a legitimate pending
+  review.
 - **The callback token is masked before anything can print it.** `nemarDatasets/.github` is public
   and Actions prints a step's `env:` in its header, so a token in job-level env would sit in every
   public log. The first step registers it as a secret with no env of its own, and only the steps that
@@ -121,8 +138,9 @@ decide" cannot be expressed with either.
     request; commits a maintainer pushes to it count against that author.
   - **A redelivered older commit.** The latest commit is the last one SEEN. If the delivery for
     commit A fails and B is processed, a manual redelivery of A makes A the latest, B's claim is
-    refused as superseded and A's job finds the pull request at B. Both end as "push again". It fails
-    safe and wastes one review; ordering by the payload's `updated_at` would fix it and is not done.
+    refused as superseded and A's job finds the pull request at B. Neither reaches the model; a new
+    delivery for the current head may be needed. It fails safe and wastes one review; ordering by
+    the payload's `updated_at` would fix it and is not done.
   - **Reviews are not atomic with GitHub.** A retried check-run create can leave an orphan
     "in progress" check if the response was lost; a repeat decline for a new commit is suppressed
     without a check of its own; a claim whose answer was lost is refused on retry and the review is

@@ -17,7 +17,8 @@
 --   * `state`: dispatched (handed to GitHub, waiting for a report), reported (a verdict is
 --     stored), declined (not sent to the model: the contributor is paused, or a rate limit
 --     applied), errored (no verdict: the run reported that it could not decide, the dispatch
---     failed, the commit was superseded before it started, or the report it posted was refused),
+--     failed, the dataset was ineligible, a newer delivery superseded it, or the report it posted
+--     was refused),
 --     unreported (the watchdog gave up waiting). The same list as `REVIEW_STATES`; a test keeps
 --     them equal. A reader still must not trust the column.
 --   * `verdict`: pass, fail or uncertain, DERIVED by `verdictOf` from the report and the git facts

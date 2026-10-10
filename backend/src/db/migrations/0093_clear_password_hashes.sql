@@ -1,10 +1,10 @@
--- Clear every stored password hash (ADR 0095).
+-- Clear every stored password hash (ADR 0097).
 --
 -- NEMAR has no password sign-in any more: POST /auth/signup and POST
 -- /auth/retrieve-key were the only routes that wrote or read this column, and
 -- both are gone, with the bcrypt service behind them. A hash of a password
 -- nobody can use is credential material with no purpose, and it is the thing
--- ADR 0094 had to stop admins reading out of `users`; clearing it is the end of
+-- ADR 0096 had to stop admins reading out of `users`; clearing it is the end of
 -- that problem rather than a mitigation of it.
 --
 -- The column stays. Dropping it means rebuilding `users` and repointing every

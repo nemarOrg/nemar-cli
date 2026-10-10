@@ -78,7 +78,7 @@ beforeEach(async () => {
 describe("GET /admin/users/:username", () => {
   test("carries the request stamp and the why text", async () => {
     // The route selects an explicit list of every non-secret column
-    // (`ADMIN_USER_NON_SECRET_SELECT`, ADR 0094), and these two are on it. That
+    // (`ADMIN_USER_NON_SECRET_SELECT`, ADR 0096), and these two are on it. That
     // is exactly why this is worth an assertion: nemarOrg/website#306 builds the
     // admin review panel on them, and a column dropped from that list would lose
     // them silently.

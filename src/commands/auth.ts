@@ -1468,7 +1468,7 @@ Examples:
 );
 
 // ============================================================================
-// Retired: retrieve-key (ADR 0095)
+// Retired: retrieve-key (ADR 0097)
 // ============================================================================
 
 // A hidden stub rather than a deletion. The "your API key is ready" mail sent

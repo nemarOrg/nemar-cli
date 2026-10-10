@@ -1,5 +1,5 @@
 /**
- * Migration 0093_clear_password_hashes.sql (ADR 0095).
+ * Migration 0093_clear_password_hashes.sql (ADR 0097).
  *
  * Real engine, no mocks: bun:sqlite with every migration before 0093 applied,
  * `users` seeded at that schema, then 0093 applied and the table compared with
@@ -25,6 +25,7 @@ import { join } from "node:path";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../src/db/migrations");
 const TARGET = "0093_clear_password_hashes.sql";
+const GUARD = "0094_guard_retired_password_signup.sql";
 const HASH = "$2b$10$JmaHDE03Q2pjaBgWB4jeN.mgLCp9WdSWRpicN4J5gAiJ/YZBRPWIi";
 
 const STATUSES = ["pending", "verified", "approved", "revoked"] as const;
@@ -44,6 +45,17 @@ function dbBeforeTarget(): Database {
 
 function applyTarget(db: Database): void {
   db.exec(readFileSync(join(MIGRATIONS_DIR, TARGET), "utf-8"));
+}
+
+function applyGuard(db: Database): void {
+  db.exec(readFileSync(join(MIGRATIONS_DIR, GUARD), "utf-8"));
+}
+
+function applyGuardTriggerOnly(db: Database): void {
+  const migration = readFileSync(join(MIGRATIONS_DIR, GUARD), "utf-8");
+  const cleanup = migration.indexOf("UPDATE users SET password_hash");
+  if (cleanup < 0) throw new Error("0094 hash cleanup statement is missing");
+  db.exec(migration.slice(0, cleanup));
 }
 
 function seed(db: Database): void {
@@ -162,5 +174,45 @@ describe("0093_clear_password_hashes", () => {
       .find((c) => c.name === "password_hash");
     expect(col).toBeDefined();
     expect(col?.notnull).toBe(0);
+  });
+});
+
+describe("0094_guard_retired_password_signup", () => {
+  test("clears a hash written during migration-first rollout and blocks the old signup insert", () => {
+    const db = dbBeforeTarget();
+    seed(db);
+    applyTarget(db);
+
+    // The previous Worker remains live briefly after 0093 and its old signup route
+    // writes this pending, unverified CLI shape with a verification token.
+    db.run(
+      `INSERT INTO users (username, email, password_hash, verification_token)
+       VALUES ('late-signup', 'late-signup@example.org', ?, 'verification-token')`,
+      [HASH],
+    );
+    expect(hashedCount(db)).toBe(1);
+    const usersBeforeGuard = everythingButHash(db);
+    const tokensBeforeGuard = db.query("SELECT * FROM tokens ORDER BY id").all();
+
+    // D1 may leave the first statement applied if the later UPDATE fails. A
+    // replay must keep the guard and still finish clearing the late hash.
+    applyGuardTriggerOnly(db);
+    expect(hashedCount(db)).toBe(1);
+    applyGuard(db);
+
+    expect(hashedCount(db)).toBe(0);
+    expect(everythingButHash(db)).toEqual(usersBeforeGuard);
+    expect(db.query("SELECT * FROM tokens ORDER BY id").all()).toEqual(tokensBeforeGuard);
+    const afterGuard = db.query("SELECT * FROM users ORDER BY id").all();
+    applyGuard(db);
+    expect(db.query("SELECT * FROM users ORDER BY id").all()).toEqual(afterGuard);
+    expect(() =>
+      db.run(
+        `INSERT INTO users (username, email, password_hash, verification_token)
+         VALUES ('blocked-signup', 'blocked-signup@example.org', ?, 'verification-token')`,
+        [HASH],
+      ),
+    ).toThrow(/password sign-in has been retired/);
+    expect(hashedCount(db)).toBe(0);
   });
 });

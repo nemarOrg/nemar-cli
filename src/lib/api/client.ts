@@ -18,7 +18,10 @@ import {
   deviceGrantErrorSchema,
 } from "../../../shared/contract/device-auth.js";
 import { IDENTITY_CONFLICT_CODES } from "../../../shared/contract/identity.js";
-import { IDENTIFIER_SCREEN_ERROR_CODES } from "../../../shared/contract/publication.js";
+import {
+  IDENTIFIER_SCREEN_ERROR_CODES,
+  PUBLICATION_REFUSAL_ERROR_CODES,
+} from "../../../shared/contract/publication.js";
 import {
   ACCOUNT_KIND_ERROR_CODES,
   PROFILE_EDIT_ERROR_CODES,
@@ -234,7 +237,7 @@ export async function request<T>(
     // `same_kind`, ...), not a sentence.
     const isAccountKindCode =
       typeof data.error === "string" && ACCOUNT_KIND_ERROR_CODES.includes(data.error);
-    // The admin account lookup and edit vocabulary (ADR 0094): `invalid_search`,
+    // The admin account lookup and edit vocabulary (ADR 0096): `invalid_search`,
     // `field_not_editable`, `owner_only_field`, ... Same shape again, same rule.
     // The uniqueness refusals the edit route also raises (`email_in_use`,
     // `username_taken`, ...) are already covered by the identity and profile
@@ -245,8 +248,13 @@ export async function request<T>(
     // `error`, the reason and the next command in `message`.
     const isScreenCode =
       typeof data.error === "string" && IDENTIFIER_SCREEN_ERROR_CODES.includes(data.error);
+    // A publication request that could not check BIDS validation status at
+    // all (ci_check_unavailable): a code in `error`, the sentence in `message`.
+    const isPublicationRefusalCode =
+      typeof data.error === "string" && PUBLICATION_REFUSAL_ERROR_CODES.includes(data.error);
     const prefersMessage =
       hasBlockReason ||
+      isPublicationRefusalCode ||
       isProfileEditCode ||
       isDeviceCode ||
       isAccountKindCode ||

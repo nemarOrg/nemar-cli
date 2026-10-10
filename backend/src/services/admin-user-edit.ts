@@ -1,6 +1,6 @@
 /**
  * What an admin may change on someone else's account, and how a request to do
- * so is read (ADR 0094).
+ * so is read (ADR 0096).
  *
  * Pure functions, so the rules are testable without a Worker; the database
  * reads (does the target exist, does anyone already hold this address) live in

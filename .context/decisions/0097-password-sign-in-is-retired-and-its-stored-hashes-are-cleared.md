@@ -1,4 +1,4 @@
-# ADR 0095: Password sign-in is retired and its stored hashes are cleared
+# ADR 0097: Password sign-in is retired and its stored hashes are cleared
 
 **Status:** accepted
 **Date:** 2026-10-09
@@ -28,7 +28,7 @@ What was left, checked on 2026-10-09:
   the `bcryptjs` dependency in both packages, used by those two routes and by one
   script.
 - `users.password_hash`: written only by signup, read only by retrieve-key, and
-  the first column ADR 0094 had to stop admins reading out of `users`.
+  the first column ADR 0096 had to stop admins reading out of `users`.
 - Mail and pages that told a person to run `nemar auth retrieve-key`.
 
 `nemarOrg/website` and `nemarOrg/nemar-py` were searched for both routes and for
@@ -65,7 +65,7 @@ names `retrieve-key` is a follow-up (see Consequences).
 **Clear the stored hashes (migration 0093) and keep the column.** The migration
 sets every non-NULL `password_hash` to NULL. A hash of a password nobody can use
 is credential material with no purpose, and clearing it ends the live exposure
-that ADR 0094 only stopped admins reading. The migration is not reversible, and
+that ADR 0096 only stopped admins reading. The migration is not reversible, and
 that is the point, with one qualification: copies taken before it ran live on as
 D1 Time Travel history (up to 30 days, see migration 0089) and in any
 `wrangler d1 export` (migration 0031 describes the runbook), and keep the hashes
@@ -102,13 +102,12 @@ pair, the device flow, the passwordless web code flow, and the `check-username`,
 - Rolling this back does not restore the live data: the hashes are gone from the
   table. Restoring password sign-in would be a new decision with a new way to set
   a password.
-- Migration 0093 and the code deploy are not atomic. CI applies migrations before
-  it deploys the worker, so for a short time the old worker runs against a cleared
-  table. In that gap `retrieve-key` fails, because there is no hash to compare,
-  and `signup` could still write a new hash. Nothing calls `signup` (the CLI
-  stopped in phase 3 and neither the website nor `nemar-py` calls it), so none is
-  expected; if one were ever found, `UPDATE users SET password_hash = NULL WHERE
-  password_hash IS NOT NULL` is safe to run again.
+- Migrations run before the Worker deploy, so the previous Worker can briefly
+  serve the old CLI signup route after 0093 clears existing hashes. Migration
+  0094 clears any hash written in that interval, then installs a database trigger
+  matching the old route's pending, unverified CLI-signup shape so it cannot
+  write another hash before the new Worker returns 410. The trigger remains as a
+  guard against that retired path being reintroduced.
 - Follow-ups, not decided here. Pages on `docs.nemar.org` that name `retrieve-key`
   need the same edit (the repository is private; an admin can read it with
   `nemar admin docs`). The client functions `checkUsername`, `checkGitHubUsername`
@@ -134,6 +133,7 @@ pair, the device flow, the passwordless web code flow, and the `check-username`,
 ## Receipts
 
 - `backend/src/routes/auth.ts`, `backend/src/db/migrations/0093_clear_password_hashes.sql`,
+  `backend/src/db/migrations/0094_guard_retired_password_signup.sql`,
   `src/commands/auth.ts`, `src/lib/api/auth.ts`.
 - `backend/test/password-hashes-cleared-migration.test.ts` (every status and role
   carries a hash; keys and `updated_at` are untouched),
@@ -147,4 +147,4 @@ pair, the device flow, the passwordless web code flow, and the `check-username`,
   `identity-refusals-route.test.ts` (now driven through ORCID finalize).
 - ADR 0047 (amended in place). ADR 0040's phase 2 record still lists `POST
   /auth/retrieve-key` among the routes that accepted `verified`; that is history
-  and is left as written. ADR 0094.
+  and is left as written. ADR 0096.

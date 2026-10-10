@@ -6,7 +6,7 @@
  * it in the database; these tests drive the APPLICATION entry points that
  * have to refuse before the database has to, plus the unlink that stops an
  * account claiming an iD it can no longer prove. (There were four until
- * `POST /auth/signup` went with the password, ADR 0095.)
+ * `POST /auth/signup` went with the password, ADR 0097.)
  *
  * Real engine throughout: bun:sqlite behind realD1 with every migration
  * applied, real Hono dispatch via `app.request()`, real zod validation,
@@ -167,7 +167,7 @@ async function sessionCookie(userId: number): Promise<string> {
 // --------------------------------------------------------------------------
 // Legacy mixed-case rows
 //
-// `POST /auth/signup` (the CLI's password registration) is gone (ADR 0095), and
+// `POST /auth/signup` (the CLI's password registration) is gone (ADR 0097), and
 // with it the "CLI signup refuses a duplicate identity" and "normalises what it
 // stores" suites. What they pinned is covered as follows. Refusing a held iD,
 // address or handle: ORCID finalize, ORCID link and the profile and

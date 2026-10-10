@@ -263,8 +263,9 @@ function seedDataset(id: string) {
      VALUES (1, 'owner', 'owner@example.org', 'x', 'approved', 'member', 1)`,
   );
   db.run(
-    `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, is_sandbox, github_repo)
-     VALUES (?, ?, 1, 'active', 'public', 0, ?)`,
+    `INSERT INTO datasets
+       (dataset_id, name, owner_user_id, status, visibility, is_sandbox, github_repo, first_published_at)
+     VALUES (?, ?, 1, 'active', 'public', 0, ?, '2026-01-01 00:00:00')`,
     [id, `A sufficiently descriptive title for ${id}`, `nemarDatasets/${id}`],
   );
 }

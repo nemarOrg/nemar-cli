@@ -136,20 +136,21 @@ export function __resetCacheFaultLogForTests(): void {
 //
 // Public read data-plane bucket (`data.nemar.org/*`, which the host fork in
 // index.ts rewrites to `/data/*`; also reachable as `/nemar/data/*`). These
-// endpoints are read-only, anonymous and CDN-cacheable. Annexed bytes still
-// leave as a 302 to a presigned S3 URL, so the bulk egress is on S3 — but
-// since #1403 the Worker DOES carry git-tracked files itself rather than
-// redirecting them to raw.githubusercontent.com, because a private repo
-// cannot be read anonymously and a redirect can never be counted. Those are
-// kilobyte-scale metadata files, about 0.1 percent of a dataset's bytes, so
-// the cap below is still sized for request volume rather than egress. Note
+// endpoints are read-only and anonymous. Plain annexed objects keep their 302
+// to S3; chunk-only objects stream through the Worker with bounded discovery
+// and at most 512 sequential chunk GETs per request. Since #1403 the Worker
+// also carries git-tracked files itself rather than redirecting them to
+// raw.githubusercontent.com, because a private repo cannot be read anonymously
+// and a redirect can never be counted. The per-IP bucket limits repeated outer
+// requests; it does not measure bytes, while each chunk stream has its own
+// per-request subrequest bound. Note
 // what is NOT true: nothing here writes an edge copy (a Worker response on a
 // Custom Domain is not stored automatically — zarr-data.ts reaches
 // caches.default explicitly for that reason), so every one of those requests
 // still costs an upstream fetch. If that egress ever matters, this bucket
 // needs splitting rather than widening. A parallel client (e.g. `nemar-py
 // --jobs 16` on its HTTPS backend,
-// or `rclone`) legitimately bursts hundreds of per-file 302s for one dataset
+// or `rclone`) legitimately bursts hundreds of per-file requests for one dataset
 // and was tripping the 500/60s anonymous IP floor (#615 follow-up; Bruno's
 // `data.nemar.org` 429 reports). Give the data plane its own much larger
 // IP-keyed bucket so a real downloader runs unthrottled while a runaway loop
@@ -807,7 +808,8 @@ export type DataMissBudgetOutcome =
  * Count one cache miss against its IP's miss budget, and refuse it if the
  * budget is already spent. Call exactly once per miss, immediately before
  * going upstream -- never on a hit (the whole point), never on HEAD (HEAD
- * never reaches GitHub at all), never on an annexed file's 302, a directory
+ * never reaches GitHub at all), never on an annexed file response (302 or
+ * streamed chunks), a directory
  * listing, or the "not in the manifest at all" 404 (none of those go through
  * this path either).
  *

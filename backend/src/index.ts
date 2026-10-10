@@ -824,7 +824,15 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
   //    and rewrite their status. Narrowed rather than skipped: staging needs
   //    this sweep, since an exemplar published while BIDS validation is still
   //    running lands in 'blocked' and would otherwise stay stuck.
-  let blockedSweep = { scanned: 0, unblocked: 0, reblocked: 0, errors: 0 };
+  let blockedSweep = {
+    scanned: 0,
+    unblocked: 0,
+    reblocked: 0,
+    errors: 0,
+    deferred: 0,
+    skipped: 0,
+    gateReads: 0,
+  };
   try {
     blockedSweep = await sweepBlockedBidsValidationRequests(env);
   } catch (err) {
@@ -854,7 +862,7 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
     console.error("Scheduled cleanup: failed to write audit log:", err);
   }
   console.log(
-    `Scheduled cleanup: ${deleted} deleted, ${failed} failed; staleness warned=${staleness.warned} adminNotified=${staleness.adminNotified} reset=${staleness.reset}; importsSwept=${importsSwept}; blockedSweep unblocked=${blockedSweep.unblocked} reblocked=${blockedSweep.reblocked} errors=${blockedSweep.errors}`,
+    `Scheduled cleanup: ${deleted} deleted, ${failed} failed; staleness warned=${staleness.warned} adminNotified=${staleness.adminNotified} reset=${staleness.reset}; importsSwept=${importsSwept}; blockedSweep unblocked=${blockedSweep.unblocked} reblocked=${blockedSweep.reblocked} errors=${blockedSweep.errors} deferred=${blockedSweep.deferred} skipped=${blockedSweep.skipped}`,
   );
 }
 
@@ -1200,12 +1208,13 @@ export default {
       // runAvailabilityReportSweepCron instead. Kept inside this block too,
       // belt and braces, exactly like archiveRetrySweep's own internal guard.
       //
-      // Self-limiting rather than exhaustive: capped at 10 GitHub commits per
-      // run (AVAILABILITY_REPORT_SWEEP_MAX) because a burst of writes trips
-      // GitHub's secondary rate limit on the shared PAT. It drains ~10/day and
-      // stamps only on success, so failures are retried on the next pass. A
-      // large backlog is meant to be cleared with `nemar admin
-      // availability-report --all`, not by waiting on this.
+      // Self-limiting rather than exhaustive: capped at
+      // AVAILABILITY_REPORT_SWEEP_MAX (30) GitHub commits per run because a
+      // burst of writes trips GitHub's secondary rate limit on the shared PAT.
+      // It drains up to 30/day and stamps only on success, so failures are
+      // retried on the next pass (see AVAILABILITY_REPORT_SWEEP_BASE_WHERE for
+      // rows the write refuses). A large backlog is meant to be cleared with
+      // `nemar admin availability-report --all`, not by waiting on this.
       ctx.waitUntil(
         runAvailabilityReportSweepCron(env)
           .then((r) => {

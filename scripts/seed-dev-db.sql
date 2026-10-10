@@ -2,7 +2,7 @@
 -- Idempotent: safe to run multiple times (uses INSERT OR IGNORE)
 -- Run with: npx wrangler@latest d1 execute nemar-db-dev --remote --env dev -c backend/wrangler.toml --file scripts/seed-dev-db.sql
 
--- Test users. None has a password: NEMAR has no password sign-in (ADR 0095), so
+-- Test users. None has a password: NEMAR has no password sign-in (ADR 0097), so
 -- these rows carry none and sign in by API key or, on the web, by email code.
 --
 -- `service_access` is explicit on every 'approved' row and only on those, to

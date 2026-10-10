@@ -1,4 +1,4 @@
-# ADR 0094: Admins find an account by any field and edit a closed set of fields
+# ADR 0096: Admins find an account by any field and edit a closed set of fields
 
 **Status:** proposed
 **Date:** 2026-10-09

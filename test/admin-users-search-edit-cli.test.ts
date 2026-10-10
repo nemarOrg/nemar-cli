@@ -1,5 +1,5 @@
 /**
- * `nemar admin users --search`, `show` and `edit` (ADR 0094), driven through the
+ * `nemar admin users --search`, `show` and `edit` (ADR 0096), driven through the
  * real entry point (`bun run src/index.ts ...`).
  *
  * END TO END, NOT STUBBED. Unlike test/admin-kind-cli.test.ts, which answers

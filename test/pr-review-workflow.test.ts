@@ -88,14 +88,12 @@ describe("what triggers it", () => {
     expect(dispatch).toContain('event_type: "run-pr-review"');
   });
 
-  test("a run is keyed on its environment and review id and is never cancelled by another dispatch", () => {
-    // Keyed on the pull request, a forged dispatch naming the same pull request would cancel the
-    // real run. The Worker refuses a superseded commit at the claim instead. Both environments
-    // number reviews from 1, so the environment is part of the key.
-    expect(wf.concurrency.group).toContain("client_payload.review_id");
-    expect(wf.concurrency.group).toContain("client_payload.environment");
-    expect(wf.concurrency.group).not.toContain("pr_number");
-    expect(wf.concurrency.group).not.toContain("dataset_id");
+  test("each workflow execution has its own concurrency group", () => {
+    // GitHub replaces the pending run in a group. Never group on the untrusted repository_dispatch
+    // payload, or a forged event can replace a legitimate pending review.
+    expect(wf.concurrency.group).toContain("github.run_id");
+    expect(wf.concurrency.group).toContain("github.run_attempt");
+    expect(wf.concurrency.group).not.toContain("client_payload");
     expect(wf.concurrency["cancel-in-progress"]).toBe(false);
   });
 
@@ -185,9 +183,9 @@ describe("the claim comes first", () => {
     expect(run).toMatch(/\n\s*200\)[\s\S]*?claimed=true/);
     expect(run).toContain("claimed=true");
     expect(run).toContain("claimed=false");
-    // Only a refusal that proves the dispatch is not this review's to run (401 forged or
-    // replayed, 409 claimed or superseded) ends green. Anything else could not be decided, and a
-    // green run would hide a review that is waiting.
+    // A 401 (forged or replayed) and any 409 (already claimed, superseded, no longer reviewable,
+    // or unsettled) stop before the model. Anything else could not be decided, and a green run
+    // would hide a review that is waiting.
     expect(run).toMatch(/401\|409\)[\s\S]*claimed=false/);
     expect(run).toMatch(/\*\)[\s\S]*::error::[\s\S]*exit 1/);
     expect(run).toContain("for attempt in 1 2 3");

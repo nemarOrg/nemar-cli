@@ -1,7 +1,7 @@
 /**
  * Tell the PREVIOUS address that an account's sign-in email moved, for the one
  * route outside self-service that can move it (`PATCH /admin/users/by-id/:id`,
- * ADR 0094).
+ * ADR 0096).
  *
  * The same notice `PATCH`-ing your own email sends (#1054; ADR 0044), through the
  * same sender, for the same reason: NEMAR sign-in is passwordless, so whoever

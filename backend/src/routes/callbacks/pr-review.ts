@@ -3,8 +3,9 @@
  *
  *   POST /pr-review-claim    the workflow's first real step, before it mints an identity or reads
  *                            anything: take the review. A dispatch that cannot present the token
- *                            gets 401 and buys nothing; a commit that is no longer the pull
- *                            request's latest is refused with 409 `superseded`.
+ *                            gets 401 and buys nothing; a newer delivery, ineligible dataset, or
+ *                            unsettled claim is refused with 409 before the workflow reads
+ *                            anything or calls a model.
  *   POST /pr-review-result   the report (or the word for why there is none).
  *
  * Both are authed like the identifier-screen callback: a per-review HMAC token in X-Webhook-Token,
