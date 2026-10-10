@@ -107,8 +107,14 @@ function isRetryableStatus(status: number): boolean {
   return status === 408 || status === 425 || status === 429 || status >= 500;
 }
 
+/** The data plane's own answer is a few dozen bytes; anything larger is somebody else's page. */
+const MAX_MISSING_BODY_BYTES = 4096;
+
 /** True for the data plane's "published file is missing from storage" answer (a small JSON body). */
 async function namesAMissingPublishedFile(response: Response): Promise<boolean> {
+  if (!(response.headers.get("content-type") ?? "").includes("json")) return false;
+  const length = Number(response.headers.get("content-length") ?? 0);
+  if (length > MAX_MISSING_BODY_BYTES) return false;
   try {
     const body = (await response.json()) as { error?: unknown } | null;
     return body?.error === PUBLISHED_FILE_MISSING_ERROR;
@@ -189,8 +195,9 @@ async function fetchOne(
       infrastructure = isInfrastructureFailure(response.status);
       if (response.status === 502 && (await namesAMissingPublishedFile(response))) {
         // The manifest lists the file and storage does not have it (a partial dataset, ADR
-        // 0064). That is ADR 0005's "the archive does not have it": reportable, not retried,
-        // and not a failed run. Any other 502 stays a transport fault.
+        // 0064). ADR 0005 says missing content is reported and never blocks the delivery, so
+        // this is reportable, not retried, and not a failed run. Any other 502 stays a
+        // transport fault.
         message = `${file.path}: HTTP 502 (listed in the manifest, missing from storage)`;
         infrastructure = false;
         break;

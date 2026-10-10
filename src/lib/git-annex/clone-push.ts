@@ -39,6 +39,9 @@ function isNEMARImportRunnerDescription(description: string): boolean {
   return /^runner@[^:\s]+:\/tmp\/nemar-import-[^/\s]+(?:\/.*)?$/.test(description);
 }
 
+/** git-annex's repository ids: the 8-4-4-4-12 form, in either case. */
+const ANNEX_UUID = /^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/;
+
 function defaultDescriptionsForUuidHistory(diff: string): Set<string> {
   const descriptions = new Set<string>();
   for (const line of diff.split("\n")) {
@@ -173,9 +176,18 @@ async function scrubForeignDefaultDescriptions(
     .filter((uuid) => uuid !== localUuid);
   if (foreign.length === 0) return { success: true };
   const uuids = [...new Set(foreign)];
+  // `uuid.log` came from the clone's source, so its first token is untrusted text that goes into a
+  // command line. Only a uuid is taken, and `--` keeps it from being read as an option.
+  const odd = uuids.find((uuid) => !ANNEX_UUID.test(uuid));
+  if (odd !== undefined) {
+    return {
+      success: false,
+      error: "the git-annex history names a repository whose id is not a uuid",
+    };
+  }
   for (const uuid of uuids) {
     const describe = await runCommand(
-      ["git", "annex", "describe", uuid, ANNEX_UPSTREAM_DESCRIPTION],
+      ["git", "annex", "describe", "--", uuid, ANNEX_UPSTREAM_DESCRIPTION],
       {
         cwd: path,
       },

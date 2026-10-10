@@ -271,7 +271,7 @@ export async function cloneForFleetWork(
     await runCommand(["git", "config", "credential.helper", ""], { cwd: datasetPath });
     await runCommand(
       ["git", "config", "credential.https://github.com.helper", env.GIT_CONFIG_VALUE_1],
-      { cwd: datasetPath },
+      { cwd: datasetPath, redact: [env.GIT_CONFIG_VALUE_1] },
     );
   }
   // An identity per clone, BEFORE git-annex init, because that commits.

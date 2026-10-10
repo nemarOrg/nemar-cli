@@ -1098,6 +1098,50 @@ describe("first git-annex branch push prunes unpublished description history (#1
       ).not.toBe(0);
     });
 
+    test("a hostile first token in the source's uuid.log is never handed to git as an option", async () => {
+      // uuid.log comes from the clone's source. A line whose "uuid" is `-ccore.fsmonitor=./x`
+      // would be an option to `git annex describe`, which runs a program named by the config.
+      const { repo, bare } = await importedClone("openneuro-hostile");
+      const marker = join(repo, "marker");
+      await Bun.write(join(repo, "x"), `#!/bin/sh\ntouch "${marker}"\n`);
+      expect((await runCmd(["chmod", "+x", join(repo, "x")], repo)).exitCode).toBe(0);
+      const current = (await runCmd(["git", "show", "refs/heads/git-annex:uuid.log"], repo)).stdout;
+      const hostile = `${current}-ccore.fsmonitor=./x evil@host:/tmp/evil timestamp=1s\n`;
+      const blob = (
+        await runCmd(
+          ["sh", "-c", `printf '%s' "$1" | git hash-object -w --stdin`, "sh", hostile],
+          repo,
+        )
+      ).stdout.trim();
+      const index = join(repo, ".git", "hostile-index");
+      const withIndex = (args: string[]) =>
+        runCmd(["env", `GIT_INDEX_FILE=${index}`, "git", ...args], repo);
+      expect((await withIndex(["read-tree", "refs/heads/git-annex"])).exitCode).toBe(0);
+      expect(
+        (await withIndex(["update-index", "--add", "--cacheinfo", `100644,${blob},uuid.log`]))
+          .exitCode,
+      ).toBe(0);
+      const tree = (await withIndex(["write-tree"])).stdout.trim();
+      const commit = (
+        await runCmd(
+          ["git", "commit-tree", tree, "-p", "refs/heads/git-annex", "-m", "hostile"],
+          repo,
+        )
+      ).stdout.trim();
+      expect(
+        (await runCmd(["git", "update-ref", "refs/heads/git-annex", commit], repo)).exitCode,
+      ).toBe(0);
+
+      const result = await pushToGitHub(repo, "origin");
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("not a uuid");
+      expect(existsSync(marker)).toBe(false);
+      expect(
+        (await runCmd(["git", "--git-dir", bare, "rev-parse", "refs/heads/git-annex"])).exitCode,
+      ).not.toBe(0);
+    });
+
     test("still refuses when the depositor's own repository has a default description", async () => {
       const { repo, bare } = await importedClone("openneuro-own");
       expect(

@@ -307,7 +307,7 @@ describe("downloadEntries", () => {
     expect(result.hadInfrastructureFailure).toBe(false);
   });
 
-  test("a file the manifest lists and storage lacks is absence, not a failed run (ADR 0005)", async () => {
+  test("a file the manifest lists and storage lacks is reported, not a failed run (ADR 0005)", async () => {
     // The data plane answers 502 with a named error for a listed file whose object is gone (a
     // partial dataset served under ADR 0064). Retrying cannot help and exiting 1 would call a
     // reportable gap a transport fault.
@@ -358,6 +358,32 @@ describe("downloadEntries", () => {
       expect(result.hadInfrastructureFailure).toBe(true);
     } finally {
       other.stop(true);
+    }
+  });
+
+  test("the named error without a JSON content type is not trusted", async () => {
+    // An intermediary's page is not the data plane's answer, whatever words it contains.
+    let hits = 0;
+    const page = Bun.serve({
+      port: 0,
+      fetch: () => {
+        hits++;
+        return new Response(JSON.stringify({ error: PUBLISHED_FILE_MISSING_ERROR }), {
+          status: 502,
+          headers: { "Content-Type": "text/html" },
+        });
+      },
+    });
+    try {
+      const result = await downloadEntries(
+        [{ path: "f.bin", size: 10, bytes_url: `http://localhost:${page.port}/f` }],
+        join(workDir, "html-502"),
+        { attempts: 3 },
+      );
+      expect(hits).toBe(3);
+      expect(result.hadInfrastructureFailure).toBe(true);
+    } finally {
+      page.stop(true);
     }
   });
 
