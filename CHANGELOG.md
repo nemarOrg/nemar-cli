@@ -18,8 +18,9 @@ earlier releases are described only by their generated notes.
 Epic #1671 (upload and integrity fixes) reaches `main` together with the automated review of
 dataset pull requests and the admin command that works through it, publication requests that
 wait for the BIDS check, chunked annex objects that are counted and served, admin account
-search and edit, and the end of password sign-in. The automated review ships switched off;
-the steps that turn it on are listed under Deploy coupling.
+search and edit, and the end of password sign-in. The automated review ships dark in
+production and is on in the dev Worker for a trial; the steps that turn it on are listed under
+Deploy coupling.
 
 ### Added
 
@@ -32,8 +33,8 @@ the steps that turn it on are listed under Deploy coupling.
   and from git facts and never reads it from the model; anything that is not a clear pass is
   `action_required`, never green. A contributor with more than 5 rejected pull requests and more
   than 10 percent of their decided ones is paused. Only pull requests whose base is `main` are
-  reviewed, forks included, and nothing from a pull request is executed. **Off until
-  `PR_REVIEW_ENABLED` is exactly `1`.**
+  reviewed, forks included, and nothing from a pull request is executed. **Off in production
+  until its flag is exactly `1`; on in the dev Worker, which reviews only the datasets dev owns.**
 - **`nemar admin pr-reviews` lists, explains and approves dataset pull requests (ADR 0093).**
   `list` (the default) joins one GitHub search of open pull requests to the stored reviews,
   `show <dataset> <pr>` explains one, `approve` makes the approval with the administrator's own
@@ -100,8 +101,8 @@ the steps that turn it on are listed under Deploy coupling.
   already-pushed `git-annex` branch (the back-catalogue is #1399).
 - **An imported dataset's first push no longer stops on the source's own repository names.** The
   privacy gate added with #1683 refused any clone whose `uuid.log` held a `user@host:/path`
-  description, and OpenNeuro's own repositories carry them (13 of 20 sampled, for example
-  `root@93184394ac19:/datalad/ds000001`), so `nemar admin import prepare` stopped at the push. Before
+  description, and OpenNeuro's own repositories carry them (all of 20 older datasets checked, for
+  example `root@93184394ac19:/datalad/ds000001`), so `nemar admin import prepare` stopped at the push. Before
   anything of the `git-annex` branch is published, another repository's description is replaced with
   `upstream` and the history is pruned again; this machine's own description is still refused, and the
   message now names the way out.
@@ -131,14 +132,17 @@ the steps that turn it on are listed under Deploy coupling.
   `/admin/pr-reviews`), so the Worker must be live before the package is installed.
 - **Re-audit chunked datasets after the deploy:** `nemar admin data-integrity-sweep --reaudit`.
   A stored `data_complete = 0` stays 0 until something re-verifies the dataset (ADR 0064).
-- **Switching the automated review on** takes four steps, none of them in this release: subscribe
-  the NEMAR App to Pull request events (Pull requests: write); set the four `ANTHROPIC_*`
-  organization variables on `nemarDatasets`; deploy `run-pr-review.yml` to
+- **Trying the automated review** takes three steps outside this release: subscribe the NEMAR
+  App to Pull request events (Pull requests: write); have the four `ANTHROPIC_*` organization
+  variables on `nemarDatasets` (they are set); deploy `run-pr-review.yml` to
   `nemarDatasets/.github` (a change there reaches every dataset repository at once, ADR 0020)
-  and wire its parity test with `NEMAR_PR_REVIEW_WORKFLOW_LIVE`; then set `PR_REVIEW_ENABLED=1`
-  on the production Worker. The production Worker forwards events for the datasets the dev
-  Worker owns (`nm099999`) to it, so the first live run can be made with the flag set on the dev
-  Worker alone.
+  and wire its parity test with `NEMAR_PR_REVIEW_WORKFLOW_LIVE`. The flag is already on in the dev
+  Worker's config, and the production Worker forwards events for the datasets dev owns
+  (`nm099999`) to it, so a throwaway pull request there runs the whole chain while production
+  stays dark. **Turning it on for real datasets** is adding the flag to the production block of
+  `backend/wrangler-sccn.toml`, which ships in the next release, after that trial has passed.
+  A pull request that is open at that moment produces no event and is not reviewed until its
+  author pushes again.
 - Pages on `docs.nemar.org` that name `nemar auth retrieve-key` need the same edit as the CLI
   messages (ADR 0097): `cli/getting-started/authentication`, `cli/getting-started/quickstart`,
   `platform/api` and the help capture in `cli/commands/auth`. That repository is private.

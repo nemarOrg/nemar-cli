@@ -1020,7 +1020,8 @@ describe("first git-annex branch push prunes unpublished description history (#1
   // An OpenNeuro clone arrives with the source's git-annex branch merged in, and OpenNeuro names
   // its own repositories in git-annex's default `user@host:/path` form (ds000001's uuid.log has
   // `root@93184394ac19:/datalad/ds000001`). Those lines belong to the source, the importing
-  // runner cannot change them there, and 13 of 20 public OpenNeuro datasets sampled carry one.
+  // runner cannot change them there, and every one of 20 older OpenNeuro datasets checked
+  // (ds000001 to ds000248) carries one.
   describe("a default description inherited from the clone's source (OpenNeuro import)", () => {
     const sourceDescription = "root@93184394ac19:/datalad/ds000001";
 

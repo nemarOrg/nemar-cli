@@ -179,17 +179,21 @@ decide" cannot be expressed with either.
    rule accepts only `repo:nemarDatasets/.github:ref:refs/heads/main` for this workflow.
 3. Deploy `run-pr-review.yml`, then add it to the `unit-pure` sparse checkout with
    `NEMAR_PR_REVIEW_WORKFLOW_LIVE` so the parity test stops skipping.
-4. Release this change to production, then add `PR_REVIEW_ENABLED = "1"` to `[vars]` of
-   `backend/wrangler-sccn.toml` (the dev Worker's block is `[env.dev.vars]`). The variable lives in that
-   file and not in the dashboard, so a deploy never drops it and turning the review on is a reviewed
-   change. The flag stops new reviews only: the watchdog and the republish pass run regardless, so
-   switching it off never strands a check that is already in flight.
-5. The first live run can be made on the dev Worker alone. The production Worker forwards
-   `pull_request` events for the datasets dev owns (`nm099999`, `nm099998`, `xx09*`) to it before its own
-   handler runs (`DEV_WEBHOOK_MIRROR_URL`), so with the flag on in `[env.dev.vars]`, the workflow deployed
-   and the App subscribed, a throwaway pull request to `nm099999` exercises the claim, the federated
-   identity, the model call and the check, and production stays dark. Read the Actions log of that run
-   (the repository is public) before turning anything on for real datasets.
+4. Release this change to production. The flag is already on in `[env.dev.vars]` of
+   `backend/wrangler-sccn.toml` (the soak target) and absent from `[vars]`, so production is dark. Once
+   the soak below has passed, add `PR_REVIEW_ENABLED = "1"` to `[vars]`; that is a change to the file, so
+   it ships in the next release. The variable lives in that file and not in the dashboard, so a deploy
+   never drops it and turning the review on is a reviewed change. The flag stops new reviews only: the
+   watchdog and the republish pass run regardless, so switching it off never strands a check that is
+   already in flight.
+5. The first live run is made on the dev Worker alone. The production Worker forwards `pull_request`
+   events for the datasets dev owns (`nm099999`, `nm099998`, `xx09*`) to it before its own handler runs
+   (`DEV_WEBHOOK_MIRROR_URL`), so with the workflow deployed and the App subscribed, a throwaway pull
+   request to `nm099999` exercises the claim, the federated identity, the model call and the check, and
+   production stays dark. Read the Actions log of that run (the repository is public) before turning
+   anything on for real datasets.
+6. A pull request that is already open when the review is switched on produces no event, so the Worker
+   never sees it until its author pushes again. Starting those deliberately is a separate change.
 
 ## Open items found in the release review (2026-10-10)
 
