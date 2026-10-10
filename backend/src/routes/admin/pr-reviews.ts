@@ -7,6 +7,9 @@
  *   GET    /admin/pr-review-authors/:login        a contributor's tally, override and standing
  *   PUT    /admin/pr-review-authors/:login        allow or block a contributor (`{mode, reason?}`)
  *   DELETE /admin/pr-review-authors/:login        remove that decision; the tally decides again
+ *   POST   /admin/pr-reviews/:dataset/:pr/start   review a pull request that is already open (or
+ *                                                 start again a commit whose review ended without a
+ *                                                 verdict); the Worker reads it from GitHub itself
  *
  * Admin-only through the router's `authMiddleware` and `adminMiddleware`. The reads need no switch:
  * `PR_REVIEW_ENABLED` gates the REVIEW, not the view of it, so with the review off the queue lists
@@ -35,6 +38,7 @@ import {
   readPrReviewDetail,
   setOverride,
 } from "../../services/pr-review-queue";
+import { startPullRequestReview } from "../../services/pr-review-start";
 import type { AdminRouter } from "./shared";
 
 const overrideSchema = z
@@ -92,6 +96,22 @@ export function registerPrReviewRoutes(admin: AdminRouter): void {
       }
       const head = c.req.query("head") ?? null;
       return c.json(await readPrReviewDetail(c.env, dataset, pr, head));
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  admin.post("/pr-reviews/:dataset/:pr/start", async (c) => {
+    try {
+      const dataset = c.req.param("dataset");
+      const pr = Number(c.req.param("pr"));
+      if (!isValidDatasetId(dataset)) {
+        throw new QueueError(400, "bad_dataset", "That is not a dataset id.");
+      }
+      if (!Number.isSafeInteger(pr) || pr <= 0) {
+        throw new QueueError(400, "bad_pr", "A pull request number is a positive whole number.");
+      }
+      return c.json(await startPullRequestReview(c.env, c.get("user").id, dataset, pr));
     } catch (err) {
       return fail(c, err);
     }

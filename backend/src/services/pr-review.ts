@@ -274,17 +274,22 @@ async function capDecision(
   db: Db,
   pr: PrIntake,
   rowId: number,
+  skipAuthorCaps = false,
 ): Promise<Extract<DeclineReason, "rate_limited" | "daily_limit"> | null> {
-  const hourly = await db
-    .prepare(AUTHOR_HOURLY_RANK_SQL)
-    .bind(pr.authorId, rowId)
-    .first<{ n: number }>();
-  if ((hourly?.n ?? 0) > hourlyCapFor(pr.authorAssociation)) return "rate_limited";
-  const daily = await db
-    .prepare(AUTHOR_DAILY_RANK_SQL)
-    .bind(pr.authorId, rowId)
-    .first<{ n: number }>();
-  if ((daily?.n ?? 0) > dailyAuthorCapFor(pr.authorAssociation)) return "rate_limited";
+  // An administrator who asks for a review by name is not an outsider spending the platform's
+  // money, so the per-contributor allowances do not hold it back; the platform's pool still does.
+  if (!skipAuthorCaps) {
+    const hourly = await db
+      .prepare(AUTHOR_HOURLY_RANK_SQL)
+      .bind(pr.authorId, rowId)
+      .first<{ n: number }>();
+    if ((hourly?.n ?? 0) > hourlyCapFor(pr.authorAssociation)) return "rate_limited";
+    const daily = await db
+      .prepare(AUTHOR_DAILY_RANK_SQL)
+      .bind(pr.authorId, rowId)
+      .first<{ n: number }>();
+    if ((daily?.n ?? 0) > dailyAuthorCapFor(pr.authorAssociation)) return "rate_limited";
+  }
   const platform = await db.prepare(PLATFORM_DAILY_RANK_SQL).bind(rowId).first<{ n: number }>();
   if ((platform?.n ?? 0) > DAILY_REVIEW_CAP) return "daily_limit";
   return null;
@@ -580,9 +585,19 @@ const no = (reason: string, reviewId?: number): PrReviewResponse => ({
  * applied the production/dev ownership fence; everything else is decided here. A database error
  * throws, and the route answers 500 (see the module comment).
  */
+export interface PrReviewOptions {
+  /**
+   * An administrator asked for this review by name (`startPullRequestReview`). The payload was built
+   * from GitHub's own record of the pull request. It lifts the per-contributor allowances for this
+   * one review and lets a commit whose review ended without a verdict be started again.
+   */
+  adminStart?: boolean;
+}
+
 export async function handlePullRequestEvent(
   env: Bindings,
   payload: unknown,
+  options: PrReviewOptions = {},
 ): Promise<PrReviewResponse> {
   if (env.PR_REVIEW_ENABLED !== "1") return no("pr_review_disabled");
   const intake = readPullRequestEvent(payload);
@@ -612,7 +627,7 @@ export async function handlePullRequestEvent(
   if (dataset.reviewable !== 1) return no("dataset_not_reviewable");
 
   const existing = await readRowByKey(db, pr.datasetId, pr.prNumber, pr.headSha);
-  if (existing) return await handleRepeat(env, existing, secret);
+  if (existing) return await handleRepeat(env, existing, secret, pr, options);
 
   const standing = standingOf(
     await readAuthorTally(db, pr.authorId),
@@ -644,29 +659,35 @@ export async function handlePullRequestEvent(
   if ((inserted.meta.changes ?? 0) !== 1) {
     // Another delivery of the same commit won the insert between the read and the write.
     const raced = await readRowByKey(db, pr.datasetId, pr.prNumber, pr.headSha);
-    return raced ? await handleRepeat(env, raced, secret) : no("duplicate");
+    return raced ? await handleRepeat(env, raced, secret, pr, options) : no("duplicate");
   }
   const reviewId = Number(inserted.meta.last_row_id);
   try {
-    return await decideInserted(env, pr, reviewId, paused, nonce, secret);
+    return await decideInserted(env, pr, reviewId, paused, nonce, secret, options);
   } catch (err) {
-    // The row exists but nothing has run for it (a database error between the insert and the
-    // dispatch). Left as 'dispatched' it would count against the caps and wait for the watchdog
-    // to call it late, and a redelivery would find it and answer "duplicate". Mark it as a
-    // dispatch that did not happen, which a redelivery retries, and let the route answer 500.
-    try {
-      await db
-        .prepare(
-          `UPDATE pr_reviews SET state = 'errored', detail = 'dispatch_failed', nonce = NULL,
-                  decided_at = datetime('now')
-            WHERE id = ? AND state = 'dispatched' AND claimed_at IS NULL`,
-        )
-        .bind(reviewId)
-        .run();
-    } catch (inner) {
-      console.error(`[pr-review] review ${reviewId}: failure not recorded (${errName(inner)})`);
-    }
+    await markDispatchFailed(db, reviewId);
     throw err;
+  }
+}
+
+/**
+ * The row exists but nothing has run for it (a database error between the insert and the
+ * dispatch). Left as 'dispatched' it would count against the caps and wait for the watchdog to call
+ * it late, and a redelivery would find it and answer "duplicate". Mark it as a dispatch that did not
+ * happen, which a redelivery retries; the caller lets the route answer 500.
+ */
+async function markDispatchFailed(db: Db, reviewId: number): Promise<void> {
+  try {
+    await db
+      .prepare(
+        `UPDATE pr_reviews SET state = 'errored', detail = 'dispatch_failed', nonce = NULL,
+                decided_at = datetime('now')
+          WHERE id = ? AND state = 'dispatched' AND claimed_at IS NULL`,
+      )
+      .bind(reviewId)
+      .run();
+  } catch (inner) {
+    console.error(`[pr-review] review ${reviewId}: failure not recorded (${errName(inner)})`);
   }
 }
 
@@ -678,6 +699,7 @@ async function decideInserted(
   paused: boolean,
   nonce: string,
   secret: string,
+  options: PrReviewOptions & { restarted?: boolean } = {},
 ): Promise<PrReviewResponse> {
   const db = env.DB;
   const row = await readRow(db, reviewId);
@@ -688,7 +710,14 @@ async function decideInserted(
     return no("contributor_paused", reviewId);
   }
 
-  const over = await capDecision(db, pr, reviewId);
+  // A restarted row keeps its old id, which the allowance queries (`id <= ?`) would rank ahead of
+  // everything inserted since: it is ranked as the newest instead.
+  const over = await capDecision(
+    db,
+    pr,
+    options.restarted ? Number.MAX_SAFE_INTEGER : reviewId,
+    options.adminStart === true,
+  );
   if (over) {
     await db
       .prepare(
@@ -715,6 +744,8 @@ async function handleRepeat(
   env: Bindings,
   existing: ReviewRow,
   secret: string,
+  pr: PrIntake,
+  options: PrReviewOptions,
 ): Promise<PrReviewResponse> {
   const db = env.DB;
   await db
@@ -722,30 +753,77 @@ async function handleRepeat(
     .bind(existing.id)
     .run();
 
-  if (existing.state === "errored" && existing.detail === "dispatch_failed") {
-    const nonce = crypto.randomUUID();
-    const reset = await db
-      .prepare(
-        `UPDATE pr_reviews
-            SET state = 'dispatched', detail = NULL, nonce = ?, claimed_at = NULL,
-                published_at = NULL, publish_attempts = 0, decided_at = NULL,
-                created_at = datetime('now')
-          WHERE id = ? AND state = 'errored' AND detail = 'dispatch_failed'`,
-      )
-      .bind(nonce, existing.id)
-      .run();
-    if ((reset.meta.changes ?? 0) === 1) {
-      const row = await readRow(db, existing.id);
-      if (row) {
-        const res = await startReview(env, row, nonce, secret);
-        return res.dispatched ? { ...res, reason: "redispatched" } : res;
-      }
-    }
+  if (isRestartable(existing, options)) {
+    const restarted = await restartReview(env, existing, pr, secret, options);
+    if (restarted) return restarted;
   }
 
   const outcome = outcomeOfRow(existing);
   if (outcome) await publishOutcome(env, existing, outcome, { commentOnly: true });
   return no("duplicate", existing.id);
+}
+
+/**
+ * A commit whose review can be tried again. GitHub never ran one whose dispatch failed, so a
+ * redelivery restarts it. A commit that was declined, ended in an error or never reported is
+ * restarted only when an administrator asks by name: a new delivery of the same commit must not
+ * buy a second model call. One that is running, or has a result, is never restarted.
+ */
+function isRestartable(row: ReviewRow, options: PrReviewOptions): boolean {
+  if (row.state === "errored" && row.detail === "dispatch_failed") return true;
+  return (
+    options.adminStart === true &&
+    (row.state === "declined" || row.state === "errored" || row.state === "unreported")
+  );
+}
+
+/**
+ * Give a commit a fresh attempt, held to the same gate as a new one: a contributor who is paused is
+ * declined, and the allowances are asked again (ranked as the newest row, see `decideInserted`).
+ * Null when another delivery moved the row first.
+ */
+async function restartReview(
+  env: Bindings,
+  existing: ReviewRow,
+  pr: PrIntake,
+  secret: string,
+  options: PrReviewOptions,
+): Promise<PrReviewResponse | null> {
+  const db = env.DB;
+  const standing = standingOf(
+    await readAuthorTally(db, pr.authorId),
+    await readAuthorOverride(db, pr.authorId),
+  );
+  const paused = standing.paused;
+  const nonce = crypto.randomUUID();
+  const reset = await db
+    .prepare(
+      `UPDATE pr_reviews
+          SET state = ?, detail = ?, nonce = ?, claimed_at = NULL, published_at = NULL,
+              publish_attempts = 0, decided_at = ${paused ? "datetime('now')" : "NULL"},
+              created_at = datetime('now')
+        WHERE id = ? AND state = ? AND detail IS ?`,
+    )
+    .bind(
+      paused ? "declined" : "dispatched",
+      paused ? "contributor_paused" : null,
+      paused ? null : nonce,
+      existing.id,
+      existing.state,
+      existing.detail,
+    )
+    .run();
+  if ((reset.meta.changes ?? 0) !== 1) return null;
+  try {
+    const res = await decideInserted(env, pr, existing.id, paused, nonce, secret, {
+      ...options,
+      restarted: true,
+    });
+    return res.dispatched && res.reason === "dispatched" ? { ...res, reason: "redispatched" } : res;
+  } catch (err) {
+    await markDispatchFailed(db, existing.id);
+    throw err;
+  }
 }
 
 /** Show the review as running, hand it to GitHub, and record a failure to do so. */
