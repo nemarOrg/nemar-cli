@@ -9,7 +9,12 @@ import { statSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { displayName, displayNames, isPrintableInCommand } from "../display-name.js";
 import { getGitHubToken, resolveGitHubCloneAuth } from "./github.js";
-import { ANNEX_CLONE_DESCRIPTION, chunkAddTargets, isDefaultAnnexDescription } from "./init.js";
+import {
+  ANNEX_CLONE_DESCRIPTION,
+  ANNEX_UPSTREAM_DESCRIPTION,
+  chunkAddTargets,
+  isDefaultAnnexDescription,
+} from "./init.js";
 import { getCurrentBranch } from "./repo-state.js";
 import { runCommand } from "./run-command.js";
 
@@ -137,6 +142,47 @@ async function verifyAnnexPushTarget(
   return { success: true, url: pushTargets[0] };
 }
 
+/**
+ * Replace every default-form description that belongs to a repository other than this one
+ * with {@link ANNEX_UPSTREAM_DESCRIPTION}, then prune the history again so the replaced text is
+ * in no commit. Only for a branch nothing of which is published: the text of a description is a
+ * label, and the importing machine cannot change it at the source. This repository's own
+ * description is left for the caller's check to refuse.
+ */
+async function scrubForeignDefaultDescriptions(
+  path: string,
+): Promise<{ success: true } | { success: false; error: string }> {
+  const local = await runCommand(["git", "config", "--get", "annex.uuid"], { cwd: path });
+  const localUuid = local.exitCode === 0 ? local.stdout.trim() : "";
+  const current = await defaultDescriptionHistory(path, "refs/heads/git-annex");
+  if (!current.success) {
+    return { success: false, error: "the local git-annex description history could not be read" };
+  }
+  const foreign = [...current.descriptions]
+    .map((entry) => entry.split("\0")[0])
+    .filter((uuid) => uuid !== localUuid);
+  if (foreign.length === 0) return { success: true };
+  for (const uuid of new Set(foreign)) {
+    const describe = await runCommand(
+      ["git", "annex", "describe", uuid, ANNEX_UPSTREAM_DESCRIPTION],
+      {
+        cwd: path,
+      },
+    );
+    if (describe.exitCode !== 0) {
+      return {
+        success: false,
+        error: "a description in the git-annex history could not be replaced",
+      };
+    }
+  }
+  const forget = await runCommand(["git", "annex", "forget", "--force"], { cwd: path });
+  if (forget.exitCode !== 0) {
+    return { success: false, error: "the local git-annex history could not be pruned" };
+  }
+  return { success: true };
+}
+
 async function prepareAnnexBranchPush(
   path: string,
   remoteName: string,
@@ -160,6 +206,14 @@ async function prepareAnnexBranchPush(
     const forget = await runCommand(["git", "annex", "forget", "--force"], { cwd: path });
     if (forget.exitCode !== 0) {
       return { success: false, error: "the local git-annex history could not be pruned" };
+    }
+    // Nothing of this branch is published yet, so a default-form description of ANOTHER
+    // repository (the clone's source, or a collaborator's clone merged in) can still be
+    // replaced before it is. The pruned branch keeps the current `uuid.log`, so a source
+    // that names its repositories `user@host:/path` would otherwise stop every first push.
+    const scrubbed = await scrubForeignDefaultDescriptions(path);
+    if (!scrubbed.success) {
+      return { success: false, error: scrubbed.error };
     }
   } else {
     const remote = await fetchRemoteAnnexOid(path, target.url);
@@ -204,7 +258,9 @@ async function prepareAnnexBranchPush(
   } else if (localHistory.descriptions.size > 0) {
     return {
       success: false,
-      error: "first-push history still contains a machine-specific description after pruning",
+      error:
+        "first-push history still contains a machine-specific description after pruning " +
+        "(run `git annex describe here nemar-deposit`, then push again)",
     };
   }
 

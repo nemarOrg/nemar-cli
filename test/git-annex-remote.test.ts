@@ -1017,6 +1017,68 @@ describe("first git-annex branch push prunes unpublished description history (#1
     expect(await remoteHasDescription(bare, runnerDescription)).toBe(true);
   });
 
+  // An OpenNeuro clone arrives with the source's git-annex branch merged in, and OpenNeuro names
+  // its own repositories in git-annex's default `user@host:/path` form (ds000001's uuid.log has
+  // `root@93184394ac19:/datalad/ds000001`). Those lines belong to the source, the importing
+  // runner cannot change them there, and 13 of 20 public OpenNeuro datasets sampled carry one.
+  describe("a default description inherited from the clone's source (OpenNeuro import)", () => {
+    const sourceDescription = "root@93184394ac19:/datalad/ds000001";
+
+    async function importedClone(name: string): Promise<{ repo: string; bare: string }> {
+      const upstream = await newAnnexRepo(`${name}-upstream`);
+      expect(
+        (await runCmd(["git", "annex", "describe", "here", sourceDescription], upstream)).exitCode,
+      ).toBe(0);
+      await Bun.write(join(upstream, "README.md"), "source dataset\n");
+      expect((await runCmd(["git", "add", "README.md"], upstream)).exitCode).toBe(0);
+      expect((await runCmd(["git", "commit", "-qm", "source"], upstream)).exitCode).toBe(0);
+      const repo = await cloneAnnexRepo(upstream, `${name}-import`);
+      const bare = await bareOrigin(`${name}-origin`);
+      expect((await runCmd(["git", "remote", "set-url", "origin", bare], repo)).exitCode).toBe(0);
+      const merged = await runCmd(["git", "show", "refs/heads/git-annex:uuid.log"], repo);
+      expect(merged.stdout).toContain(sourceDescription);
+      return { repo, bare };
+    }
+
+    test("does not stop the first push, and is not published", async () => {
+      const { repo, bare } = await importedClone("openneuro-source");
+
+      const result = await pushToGitHub(repo, "origin");
+
+      expect(result.error).toBeUndefined();
+      expect(result.success).toBe(true);
+      expect(result.warning).toBeUndefined();
+      // The label is replaced before the push, and the replaced value is in no commit the remote
+      // received: the branch was pruned again after the rewrite.
+      expect(await remoteHasDescription(bare, sourceDescription)).toBe(false);
+      expect(await remoteHasDescription(bare, "upstream")).toBe(true);
+    });
+
+    test("still refuses when the depositor's own repository has a default description", async () => {
+      const { repo, bare } = await importedClone("openneuro-own");
+      expect(
+        (await runCmd(["git", "annex", "describe", "here", "me@laptop:/home/me/data"], repo))
+          .exitCode,
+      ).toBe(0);
+
+      const result = await pushToGitHub(repo, "origin");
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("machine-specific description");
+      expect(result.error).toContain("git annex describe here");
+
+      // The way out the message names works, and the refused text is never published.
+      expect(
+        (await runCmd(["git", "annex", "describe", "here", "nemar-deposit"], repo)).exitCode,
+      ).toBe(0);
+      const retry = await pushToGitHub(repo, "origin");
+      expect(retry.error).toBeUndefined();
+      expect(retry.success).toBe(true);
+      expect(await remoteHasDescription(bare, "me@laptop:/home/me/data")).toBe(false);
+      expect(await remoteHasDescription(bare, sourceDescription)).toBe(false);
+    });
+  });
+
   test("pushes only the checked annex snapshot if the local branch advances before push", async () => {
     const repo = await newAnnexRepo("annex-snapshot-race");
     const bare = await bareOrigin("annex-snapshot-race-origin");
