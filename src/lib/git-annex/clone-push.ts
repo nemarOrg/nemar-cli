@@ -8,8 +8,14 @@ import { randomUUID } from "node:crypto";
 import { statSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { displayName, displayNames, isPrintableInCommand } from "../display-name.js";
+import { vlog } from "../verbose.js";
 import { getGitHubToken, resolveGitHubCloneAuth } from "./github.js";
-import { ANNEX_CLONE_DESCRIPTION, chunkAddTargets, isDefaultAnnexDescription } from "./init.js";
+import {
+  ANNEX_CLONE_DESCRIPTION,
+  ANNEX_UPSTREAM_DESCRIPTION,
+  chunkAddTargets,
+  isDefaultAnnexDescription,
+} from "./init.js";
 import { getCurrentBranch } from "./repo-state.js";
 import { runCommand } from "./run-command.js";
 
@@ -32,6 +38,9 @@ const ASSUME_UNCHANGED_TAG = /^[a-z] /;
 function isNEMARImportRunnerDescription(description: string): boolean {
   return /^runner@[^:\s]+:\/tmp\/nemar-import-[^/\s]+(?:\/.*)?$/.test(description);
 }
+
+/** git-annex's repository ids: the 8-4-4-4-12 form, in either case. */
+const ANNEX_UUID = /^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/;
 
 function defaultDescriptionsForUuidHistory(diff: string): Set<string> {
   const descriptions = new Set<string>();
@@ -62,6 +71,10 @@ async function defaultDescriptionHistory(
       "--no-color",
       "--no-ext-diff",
       "--no-renames",
+      // A `-diff` attribute (the dataset's own .gitattributes is in the tree being pushed) or a
+      // NUL byte makes `git log -p` print "Binary files differ" and exit 0, which would read as
+      // a history with no description in it.
+      "--text",
       "-m",
       "-p",
       revision,
@@ -137,6 +150,67 @@ async function verifyAnnexPushTarget(
   return { success: true, url: pushTargets[0] };
 }
 
+/**
+ * Replace every default-form description that belongs to a repository other than this one
+ * with {@link ANNEX_UPSTREAM_DESCRIPTION}, then prune the history again so the replaced text is
+ * in no commit. Only for a branch nothing of which is published: the text of a description is a
+ * label, and the importing machine cannot change it at the source. This repository's own
+ * description is left for the caller's check to refuse.
+ */
+async function scrubForeignDefaultDescriptions(
+  path: string,
+): Promise<{ success: true } | { success: false; error: string }> {
+  const local = await runCommand(["git", "config", "--get", "annex.uuid"], { cwd: path });
+  const localUuid = local.exitCode === 0 ? local.stdout.trim() : "";
+  if (localUuid === "") {
+    // Without it every uuid would count as foreign, and this repository's own description would
+    // be relabelled instead of refused.
+    return { success: false, error: "this repository's git-annex uuid could not be read" };
+  }
+  const current = await defaultDescriptionHistory(path, "refs/heads/git-annex");
+  if (!current.success) {
+    return { success: false, error: "the local git-annex description history could not be read" };
+  }
+  const foreign = [...current.descriptions]
+    .map((entry) => entry.split("\0")[0])
+    .filter((uuid) => uuid !== localUuid);
+  if (foreign.length === 0) return { success: true };
+  const uuids = [...new Set(foreign)];
+  // `uuid.log` came from the clone's source, so its first token is untrusted text that goes into a
+  // command line. Only a uuid is taken, and `--` keeps it from being read as an option.
+  const odd = uuids.find((uuid) => !ANNEX_UUID.test(uuid));
+  if (odd !== undefined) {
+    return {
+      success: false,
+      error: "the git-annex history names a repository whose id is not a uuid",
+    };
+  }
+  for (const uuid of uuids) {
+    const describe = await runCommand(
+      ["git", "annex", "describe", "--", uuid, ANNEX_UPSTREAM_DESCRIPTION],
+      {
+        cwd: path,
+      },
+    );
+    if (describe.exitCode !== 0) {
+      // The uuid is a random identifier and the exit code a number; git-annex's own words are
+      // left out because they may repeat the description being replaced.
+      return {
+        success: false,
+        error: `the description of repository ${uuid} in the git-annex history could not be replaced (git-annex exit ${describe.exitCode})`,
+      };
+    }
+  }
+  vlog(
+    `Replaced the description of ${uuids.length} other repositor${uuids.length === 1 ? "y" : "ies"} with "${ANNEX_UPSTREAM_DESCRIPTION}" before the first push of the git-annex branch`,
+  );
+  const forget = await runCommand(["git", "annex", "forget", "--force"], { cwd: path });
+  if (forget.exitCode !== 0) {
+    return { success: false, error: "the local git-annex history could not be pruned" };
+  }
+  return { success: true };
+}
+
 async function prepareAnnexBranchPush(
   path: string,
   remoteName: string,
@@ -160,6 +234,14 @@ async function prepareAnnexBranchPush(
     const forget = await runCommand(["git", "annex", "forget", "--force"], { cwd: path });
     if (forget.exitCode !== 0) {
       return { success: false, error: "the local git-annex history could not be pruned" };
+    }
+    // Nothing of this branch is published yet, so a default-form description of ANOTHER
+    // repository (the clone's source, or a collaborator's clone merged in) can still be
+    // replaced before it is. The pruned branch keeps the current `uuid.log`, so a source
+    // that names its repositories `user@host:/path` would otherwise stop every first push.
+    const scrubbed = await scrubForeignDefaultDescriptions(path);
+    if (!scrubbed.success) {
+      return { success: false, error: scrubbed.error };
     }
   } else {
     const remote = await fetchRemoteAnnexOid(path, target.url);
@@ -204,7 +286,9 @@ async function prepareAnnexBranchPush(
   } else if (localHistory.descriptions.size > 0) {
     return {
       success: false,
-      error: "first-push history still contains a machine-specific description after pruning",
+      error:
+        "first-push history still contains a machine-specific description after pruning " +
+        "(run `git annex describe here nemar-deposit`, then push again)",
     };
   }
 
@@ -1246,7 +1330,7 @@ export async function cloneDataset(
     if (credentialHelper) {
       const { exitCode: cfgCode, stderr: cfgStderr } = await runCommand(
         ["git", "config", "credential.https://github.com.helper", credentialHelper],
-        { cwd: outputPath },
+        { cwd: outputPath, redact: [credentialHelper] },
       );
       if (cfgCode !== 0) {
         return {

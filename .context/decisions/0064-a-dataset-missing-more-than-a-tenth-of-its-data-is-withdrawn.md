@@ -237,6 +237,9 @@ The data plane and `manifest.json` still emit the plain-key URL (`<id>/objects/<
 For a reader that URL does not resolve (403 or 404): an anonymous GET of an absent key on `s3://nemar` answers 403, because anonymous ListBucket is denied.
 That half of #1565 is not fixed, and the issue stays open.
 
+**Update 2026-10-10.** The serving half landed afterwards (#1695, [ADR 0095](0095-manifest-urls-are-stable-data-plane-routes.md)): a `manifest.json` entry's `url` is now its stable `bytes_url`, and that route streams a complete chunk set, so a chunked file is servable from the data plane.
+Two things stay open. `git annex get` of a chunk-only key is still unverified, and the data plane has not served real chunk bytes yet (ADR 0095 leaves that acceptance open). The paragraphs above and below describe the state before that change, and where they say the data plane cannot serve a chunked key or that the issue stays open, ADR 0095 is the later word.
+
 **Consequence for the withdrawal rule.**
 A chunked key with a complete chunk set is available for this ADR's threshold, so the rule never fires on account of such a key, however many of them the data plane cannot yet serve.
 A chunked key with a missing, short or oversized chunk is still missing and still counts against the dataset.

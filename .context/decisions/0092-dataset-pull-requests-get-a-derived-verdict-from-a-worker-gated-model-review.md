@@ -179,9 +179,51 @@ decide" cannot be expressed with either.
    rule accepts only `repo:nemarDatasets/.github:ref:refs/heads/main` for this workflow.
 3. Deploy `run-pr-review.yml`, then add it to the `unit-pure` sparse checkout with
    `NEMAR_PR_REVIEW_WORKFLOW_LIVE` so the parity test stops skipping.
-4. Release this change to production, then set `PR_REVIEW_ENABLED=1` on the production Worker. The
-   flag stops new reviews only: the watchdog and the republish pass run regardless, so switching it
-   off never strands a check that is already in flight.
+4. Release this change to production. The flag is already on in `[env.dev.vars]` of
+   `backend/wrangler-sccn.toml` (the soak target) and absent from `[vars]`, so production is dark. Once
+   the soak below has passed, add `PR_REVIEW_ENABLED = "1"` to `[vars]`; that is a change to the file, so
+   it ships in the next release. The variable lives in that file and not in the dashboard, so a deploy
+   never drops it and turning the review on is a reviewed change. The flag stops new reviews only: the
+   watchdog and the republish pass run regardless, so switching it off never strands a check that is
+   already in flight.
+5. The first live run is made on the dev Worker alone. The production Worker forwards `pull_request`
+   events for the datasets dev owns (the `xx09*` datasets and the fixture `nm099998`) to it before its
+   own handler runs (`DEV_WEBHOOK_MIRROR_URL`). A dataset is reviewed only while it is public, named and
+   first-published, so the target is a published `xx0999NN` exemplar of the dev fleet (check that its
+   `first_published_at` is set); `nm099998` is an anonymous deposit and `nm099999` is private and
+   production's, so neither is ever reviewed. With the workflow deployed and the App subscribed, a
+   throwaway pull request to such an exemplar exercises the claim, the federated identity, the model call
+   and the check, and production stays dark. Read the Actions log of that run (`nemarDatasets/.github` is
+   public) before turning anything on for real datasets.
+6. A pull request that is already open when the review is switched on produces no event, so the Worker
+   never sees it until its author pushes again. Starting those deliberately is a separate change.
+
+## Open items found in the release review (2026-10-10)
+
+None blocks shipping the review switched off. Decide the first two before it is switched on.
+
+- **The administrator's merge refuses a pull request this check holds.** ADR 0093 attempts a merge only
+  when GitHub reports `clean`. The `NEMAR PR Review` check is not required, and a non-required check
+  that is not passing is expected to be reported as `unstable` (from GitHub's definition of the state;
+  not yet observed). So for an `uncertain`, `declined` or `errored` review, `approve --merge` and `y`
+  in `next` would record the approval and then print "Not merged: GitHub says it cannot be merged
+  cleanly (a check is failing). The approval stands." Either accept `unstable` when both required checks
+  pass (the merge call still enforces the ruleset, and no bypass is used) or say in ADR 0093 that these
+  are merged by hand.
+- **`nemar dataset update --monitor` waits for every check**, this one included, and stops on a non-pass.
+  That is the right signal for a contributor, but it means a pull request the review holds is not offered
+  the merge. Installed older CLIs behave the same.
+- **A redelivery of a failed dispatch is not held to the pause or the allowances again.** `handleRepeat`
+  resets the row and starts the review without asking `standingOf` or `capDecision`, so the row is never
+  ranked or checked again; and because it keeps its old id, the cap queries (`id <= ?`) count it ahead of
+  every later row, so it can push a newer row over an allowance it was never held to. One model call can
+  follow a redelivery for a contributor who was blocked since, or after the day's pool was spent. It needs
+  an administrator to redeliver.
+- **Declines are check and comment writes on the datasets token without a cap of their own.** Past the
+  allowances every pull request from a stranger gets a decline check, and a flood from many accounts is a
+  proportional number of writes on the token that publication and enrichment also use.
+- **An administrator's own pull request cannot be approved from `next`.** GitHub refuses a self-approval
+  with 422; `y` is offered, fails and is counted as failed.
 
 ## Receipts
 

@@ -198,3 +198,26 @@ If validation fails, the sweep relabels the request `bids_validation_failed` and
 The text says where to look.
 
 The pending state is `isCiPendingBlock` in `src/lib/publish-pending.ts`, guarded through the real CLI by `test/publish-pending-cli.test.ts` and `test/publish-status-pending-cli.test.ts`.
+
+## Known gaps at release (review of 2026-10-10)
+
+None blocks the release. Each is a place where the words promise a little more than the code does.
+
+- **The request route and the sweep classify the latest run differently.** The route blocks on no runs,
+  `failure` and an unfinished run, and lets every other conclusion through. The sweep releases only on
+  `success` and keeps a recorded request blocked on `cancelled`, `timed_out` and `skipped`, "a later run
+  decides" (its header says so). The shim run is about five seconds with a two-minute timeout, so the case
+  is rare, but a request recorded as waiting whose latest run ends that way stays waiting until a push to
+  the dataset starts another run, while the CLI says it continues automatically. A re-request passes.
+  One shared classifier is the fix; the sweep's tally has no figure for requests that stay blocked, so
+  these show as `errors=0`.
+- **The 503 `ci_check_unavailable` cure is not the sweep's.** When the cause is a workflow that was never
+  deployed, the sweep reads the run list, gets a 404 and counts an error each day; it does not deploy the
+  workflow. The depositor's `publish status` still says the request continues automatically.
+- **The notice promises mail that is sent once.** "You will be emailed if a check needs your attention"
+  holds for the identifier-screen block mail, whose send failure is logged and dropped without a lease or a
+  retry (the administrator mail has both).
+- **A request released and then lost before the screen starts** (the Worker is killed between the sweep's
+  release and `startScreenAndNotify`) is `requested` with no screen status, and no sweep looks for that.
+- **An older installed CLI prints the bare word `ci_check_unavailable`** for the 503, because only this
+  release's client leads with `message`.

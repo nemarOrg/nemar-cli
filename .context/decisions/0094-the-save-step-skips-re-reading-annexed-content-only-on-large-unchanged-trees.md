@@ -116,3 +116,12 @@ only a retry-progress signal; durable progress and final confirmation still come
 location log. Copy retry summaries count unique transferred paths across attempts only when
 git-annex output remains understood; uncertain output remains unrecognized. Neither a loopback
 S3 stand-in nor CI closes the owner-selected live-S3 and `sandboxCommand` acceptance gap.
+
+## Known gap at release (review of 2026-10-10)
+
+`nemar dataset update` runs its own `git status` and `git add -A` and never clears stale assume-unchanged
+flags, so it does not do what this ADR says every save does. The flags outlive a save that was killed
+with SIGKILL or lost power. A flag left that way, an edit to the same annexed file, and then `update`
+reads "No changes detected" or leaves the edit out of the pull request. Run `nemar dataset commit` (or the
+upload again) in that directory first; both clear stale flags. Routing `update` through the same clear is
+the fix.

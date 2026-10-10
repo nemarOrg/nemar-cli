@@ -1017,6 +1017,156 @@ describe("first git-annex branch push prunes unpublished description history (#1
     expect(await remoteHasDescription(bare, runnerDescription)).toBe(true);
   });
 
+  // An OpenNeuro clone arrives with the source's git-annex branch merged in, and OpenNeuro names
+  // its own repositories in git-annex's default `user@host:/path` form (ds000001's uuid.log has
+  // `root@93184394ac19:/datalad/ds000001`). Those lines belong to the source, the importing
+  // runner cannot change them there, and every one of 20 older OpenNeuro datasets checked
+  // (ds000001 to ds000248) carries one.
+  describe("a default description inherited from the clone's source (OpenNeuro import)", () => {
+    const sourceDescription = "root@93184394ac19:/datalad/ds000001";
+
+    async function importedClone(name: string): Promise<{ repo: string; bare: string }> {
+      const upstream = await newAnnexRepo(`${name}-upstream`);
+      expect(
+        (await runCmd(["git", "annex", "describe", "here", sourceDescription], upstream)).exitCode,
+      ).toBe(0);
+      await Bun.write(join(upstream, "README.md"), "source dataset\n");
+      expect((await runCmd(["git", "add", "README.md"], upstream)).exitCode).toBe(0);
+      expect((await runCmd(["git", "commit", "-qm", "source"], upstream)).exitCode).toBe(0);
+      const repo = await cloneAnnexRepo(upstream, `${name}-import`);
+      const bare = await bareOrigin(`${name}-origin`);
+      expect((await runCmd(["git", "remote", "set-url", "origin", bare], repo)).exitCode).toBe(0);
+      const merged = await runCmd(["git", "show", "refs/heads/git-annex:uuid.log"], repo);
+      expect(merged.stdout).toContain(sourceDescription);
+      return { repo, bare };
+    }
+
+    test("does not stop the first push, and is not published", async () => {
+      const { repo, bare } = await importedClone("openneuro-source");
+
+      const result = await pushToGitHub(repo, "origin");
+
+      expect(result.error).toBeUndefined();
+      expect(result.success).toBe(true);
+      expect(result.warning).toBeUndefined();
+      // The label is replaced before the push, and the replaced value is in no commit the remote
+      // received: the branch was pruned again after the rewrite.
+      expect(await remoteHasDescription(bare, sourceDescription)).toBe(false);
+      expect(await remoteHasDescription(bare, "upstream")).toBe(true);
+    });
+
+    test("replaces every other repository's description, not only the first", async () => {
+      const { repo, bare } = await importedClone("openneuro-two");
+      const second = await cloneAnnexRepo(repo, "second-collaborator");
+      expect(
+        (await runCmd(["git", "annex", "describe", "here", "other@node:/private/clone"], second))
+          .exitCode,
+      ).toBe(0);
+      expect((await runCmd(["git", "remote", "add", "second", second], repo)).exitCode).toBe(0);
+      expect((await runCmd(["git", "fetch", "second", "git-annex"], repo)).exitCode).toBe(0);
+      expect((await runCmd(["git", "annex", "merge"], repo)).exitCode).toBe(0);
+      const merged = (await runCmd(["git", "show", "refs/heads/git-annex:uuid.log"], repo)).stdout;
+      expect(merged).toContain(sourceDescription);
+      expect(merged).toContain("other@node:/private/clone");
+
+      const result = await pushToGitHub(repo, "origin");
+
+      expect(result.error).toBeUndefined();
+      expect(result.success).toBe(true);
+      expect(await remoteHasDescription(bare, sourceDescription)).toBe(false);
+      expect(await remoteHasDescription(bare, "other@node:/private/clone")).toBe(false);
+    });
+
+    test("a -diff attribute on uuid.log does not hide a description from the scan", async () => {
+      // `git log -p` prints "Binary files differ" and exits 0 for such a path, which would read
+      // as a history with nothing in it. The dataset's own .gitattributes is in the tree pushed.
+      const { repo, bare } = await importedClone("openneuro-binary");
+      await Bun.write(join(repo, ".gitattributes"), "*.log -diff\n");
+      expect((await runCmd(["git", "add", ".gitattributes"], repo)).exitCode).toBe(0);
+      expect((await runCmd(["git", "commit", "-qm", "attributes"], repo)).exitCode).toBe(0);
+      expect(
+        (await runCmd(["git", "annex", "describe", "here", "me@laptop:/home/me/data"], repo))
+          .exitCode,
+      ).toBe(0);
+
+      const result = await pushToGitHub(repo, "origin");
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("machine-specific description");
+      expect(
+        (await runCmd(["git", "--git-dir", bare, "rev-parse", "refs/heads/git-annex"])).exitCode,
+      ).not.toBe(0);
+    });
+
+    test("a hostile first token in the source's uuid.log is never handed to git as an option", async () => {
+      // uuid.log comes from the clone's source. A line whose "uuid" is `-ccore.fsmonitor=./x`
+      // would be an option to `git annex describe`, which runs a program named by the config.
+      const { repo, bare } = await importedClone("openneuro-hostile");
+      const marker = join(repo, "marker");
+      await Bun.write(join(repo, "x"), `#!/bin/sh\ntouch "${marker}"\n`);
+      expect((await runCmd(["chmod", "+x", join(repo, "x")], repo)).exitCode).toBe(0);
+      const current = (await runCmd(["git", "show", "refs/heads/git-annex:uuid.log"], repo)).stdout;
+      const hostile = `${current}-ccore.fsmonitor=./x evil@host:/tmp/evil timestamp=1s\n`;
+      const blob = (
+        await runCmd(
+          ["sh", "-c", `printf '%s' "$1" | git hash-object -w --stdin`, "sh", hostile],
+          repo,
+        )
+      ).stdout.trim();
+      const index = join(repo, ".git", "hostile-index");
+      const withIndex = (args: string[]) =>
+        runCmd(["env", `GIT_INDEX_FILE=${index}`, "git", ...args], repo);
+      expect((await withIndex(["read-tree", "refs/heads/git-annex"])).exitCode).toBe(0);
+      expect(
+        (await withIndex(["update-index", "--add", "--cacheinfo", `100644,${blob},uuid.log`]))
+          .exitCode,
+      ).toBe(0);
+      const tree = (await withIndex(["write-tree"])).stdout.trim();
+      const commit = (
+        await runCmd(
+          ["git", "commit-tree", tree, "-p", "refs/heads/git-annex", "-m", "hostile"],
+          repo,
+        )
+      ).stdout.trim();
+      expect(
+        (await runCmd(["git", "update-ref", "refs/heads/git-annex", commit], repo)).exitCode,
+      ).toBe(0);
+
+      const result = await pushToGitHub(repo, "origin");
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("not a uuid");
+      expect(existsSync(marker)).toBe(false);
+      expect(
+        (await runCmd(["git", "--git-dir", bare, "rev-parse", "refs/heads/git-annex"])).exitCode,
+      ).not.toBe(0);
+    });
+
+    test("still refuses when the depositor's own repository has a default description", async () => {
+      const { repo, bare } = await importedClone("openneuro-own");
+      expect(
+        (await runCmd(["git", "annex", "describe", "here", "me@laptop:/home/me/data"], repo))
+          .exitCode,
+      ).toBe(0);
+
+      const result = await pushToGitHub(repo, "origin");
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("machine-specific description");
+      expect(result.error).toContain("git annex describe here");
+
+      // The way out the message names works, and the refused text is never published.
+      expect(
+        (await runCmd(["git", "annex", "describe", "here", "nemar-deposit"], repo)).exitCode,
+      ).toBe(0);
+      const retry = await pushToGitHub(repo, "origin");
+      expect(retry.error).toBeUndefined();
+      expect(retry.success).toBe(true);
+      expect(await remoteHasDescription(bare, "me@laptop:/home/me/data")).toBe(false);
+      expect(await remoteHasDescription(bare, sourceDescription)).toBe(false);
+    });
+  });
+
   test("pushes only the checked annex snapshot if the local branch advances before push", async () => {
     const repo = await newAnnexRepo("annex-snapshot-race");
     const bare = await bareOrigin("annex-snapshot-race-origin");

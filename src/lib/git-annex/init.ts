@@ -261,6 +261,12 @@ export const ANNEX_DEPOSIT_DESCRIPTION = "nemar-deposit";
 export const ANNEX_CLONE_DESCRIPTION = "nemar-clone";
 
 /**
+ * The label that replaces a default-form description someone ELSE chose, before a first push
+ * (an OpenNeuro clone arrives with the source's own `user@host:/path` entries in `uuid.log`).
+ */
+export const ANNEX_UPSTREAM_DESCRIPTION = "upstream";
+
+/**
  * True for git-annex's default `user@host:/path` repository description (a
  * path under $HOME is written `user@host:~/path`).
  */

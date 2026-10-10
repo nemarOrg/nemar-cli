@@ -1978,6 +1978,49 @@ describe("the allowances at their exact edges", () => {
   });
 });
 
+describe("the Worker holds the datasets token and never approves or merges (ADR 0093)", () => {
+  test("every GitHub call across a pass, a fail, a decline and a failed run is a dispatch, a check or a comment", async () => {
+    const SHA_C = "c".repeat(40);
+    const passing = (await deliver(prEvent({ sha: SHA_A }))).body.review_id as number;
+    await callback(passing, { outcome: "reported", report: goodReport() });
+    await sleep(5);
+    const failing = (await deliver(prEvent({ action: "synchronize", sha: SHA_B }))).body
+      .review_id as number;
+    await callback(failing, { outcome: "reported", report: failingReport() });
+    await sleep(5);
+    const errored = (await deliver(prEvent({ action: "synchronize", sha: SHA_C }))).body
+      .review_id as number;
+    await callback(errored, { outcome: "error", error: "workflow_failed" });
+    // A decline: a stranger over the hourly allowance.
+    for (let i = 0; i < 4; i++) {
+      await deliver(
+        prEvent({ userId: 777, assoc: "NONE", number: 80 + i, sha: `${i + 1}`.repeat(40) }),
+      );
+    }
+    // A redelivery re-states the stored result.
+    await deliver(prEvent({ action: "synchronize", sha: SHA_B }));
+
+    const allowed = [
+      (c: { method: string; path: string }) =>
+        c.method === "POST" && c.path === "/repos/nemarDatasets/.github/dispatches",
+      (c: { method: string; path: string }) =>
+        /\/check-runs(\/\d+)?$/.test(c.path) && (c.method === "POST" || c.method === "PATCH"),
+      (c: { method: string; path: string }) =>
+        /\/issues\/(comments\/\d+|\d+\/comments)$/.test(c.path) &&
+        (c.method === "POST" || c.method === "PATCH"),
+    ];
+    const stray = calls
+      .filter((c) => !allowed.some((ok) => ok(c)))
+      .map((c) => `${c.method} ${c.path}`);
+    // No review submitted, no merge, no GraphQL, no read of anything but what is listed above.
+    expect(stray).toEqual([]);
+    // And the lifecycle really did reach each kind of call, so the list above is not vacuous.
+    expect(dispatchesMade().length).toBeGreaterThan(0);
+    expect(checks().length).toBeGreaterThan(0);
+    expect(posts("/comments").length).toBeGreaterThan(0);
+  });
+});
+
 describe("a callback token does not open another kind of callback either", () => {
   test("a pull-request review token verifies for neither the pre-screen nor the identifier screen", async () => {
     const payload = { datasetId: DATASET, requestId: 5, nonce: "n-1" };

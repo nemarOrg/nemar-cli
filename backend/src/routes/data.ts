@@ -12,6 +12,7 @@
  */
 
 import { type Context, Hono } from "hono";
+import { PUBLISHED_FILE_MISSING_ERROR } from "../../../shared/contract/data-plane";
 import { checkDataMissBudget } from "../middleware/rateLimit";
 import { recordAccess } from "../services/access-metrics";
 import { CONCEPT_DOI_SQL } from "../services/anonymity";
@@ -393,7 +394,7 @@ function notFound(message: string, payload?: FileNotFoundPayload, noStore = fals
 /** A manifest-named file is not absent when its backing object is missing. */
 function manifestObjectMissing(datasetId: string): Response {
   return new Response(
-    JSON.stringify({ error: "Published file is missing from storage", dataset_id: datasetId }),
+    JSON.stringify({ error: PUBLISHED_FILE_MISSING_ERROR, dataset_id: datasetId }),
     {
       status: 502,
       headers: { "Cache-Control": "no-store", "Content-Type": "application/json" },

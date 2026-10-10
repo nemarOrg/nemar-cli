@@ -93,7 +93,12 @@ export async function adminGitHubToken(
       // `gh` prefers these to the login it stores, which would answer with a token that is not
       // the account `gh auth status` shows. Ask for the stored one. The timeout is for a locked
       // keyring that waits for a prompt nobody can see.
-      { unsetEnv: ["GH_TOKEN", "GITHUB_TOKEN"], timeout: GH_TOKEN_TIMEOUT_MS },
+      {
+        unsetEnv: ["GH_TOKEN", "GITHUB_TOKEN"],
+        timeout: GH_TOKEN_TIMEOUT_MS,
+        // The answer IS the token; `--verbose` would otherwise print it.
+        sensitiveOutput: true,
+      },
     );
     if (timedOut) {
       return {
