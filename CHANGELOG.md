@@ -25,8 +25,8 @@ Deploy coupling.
 ### Added
 
 - **A pull request to a dataset is reviewed automatically, and the result is a green or red
-  check (#1682, ADR 0092).** The NEMAR GitHub App delivers `pull_request` events to the Worker,
-  which gates them (per-commit dedupe, the contributor tally, rate caps) and dispatches one
+  check (#1682, ADR 0092).** Once the NEMAR GitHub App is subscribed to Pull request events it
+  delivers them to the Worker, which gates them (per-commit dedupe, the contributor tally, rate caps) and dispatches one
   central workflow, `run-pr-review.yml` in `nemarDatasets/.github`. Claude Haiku 5.5 at high
   effort, with no tools, answers three questions: is anything lost, does the revision advance
   the dataset, is the dataset materially better. The Worker derives the verdict from the report
@@ -39,22 +39,23 @@ Deploy coupling.
   `list` (the default) joins one GitHub search of open pull requests to the stored reviews,
   `show <dataset> <pr>` explains one, `approve` makes the approval with the administrator's own
   GitHub login (no Worker code path approves), and `next` walks the queue one pull request at a
-  time. `allow`, `block` and `clear` manage a contributor the tally paused. It works with the
-  review switched off: a pull request with no review is `not_reviewed`.
+  time. `standing` shows a contributor's record; `allow`, `block` and `clear` set or remove an
+  override of the tally. It works with the review switched off: a pull request with no review is
+  `not_reviewed`.
 - **`nemar admin users` finds an account by any field and edits a closed set of fields (ADR 0096).**
   Search matches every word in any text field, ranks an exact hit first and offers close
   matches when nothing matches; `show` and `edit` work by account id, so web accounts without a
   username are reachable. Credentials are never searched or returned. Any administrator edits
   names, affiliation, city and country; changing who can act as the account is for owners only.
-- **A publication request made while BIDS validation is still running is recorded, not
-  refused (#1646, ADR 0086 amendment).** `nemar dataset publish request` reports it in the
-  info style and exits 0, `publish status` shows it the same way, and a daily sweep releases
+- **A publication request made while BIDS validation is still running is reported as waiting,
+  not as an error (#1646, ADR 0086 amendment).** The route still records the request as blocked;
+  `nemar dataset publish request` now shows it in the info style and exits 0, `publish status` shows it the same way, and a daily sweep releases
   the request when CI passes (or re-blocks it if a submission minimum fails). When the
   readiness check itself cannot run the route answers 503 `ci_check_unavailable`. The CLI says
   whether the requester is emailed, and `nemar dataset upload` names the CI and publish steps
   in its closing output.
 - **Chunked git-annex objects are counted as present and served (#1565, #1695, ADR 0064
-  amendment and ADR 0095).** A key stored as `-S<size>-C<n>` chunks counts toward
+  amendment and ADR 0095).** A key stored as `-S<chunksize>-C<n>` chunks counts toward
   `data_complete` once its chunk set is complete (`shared/annex-key.ts`, one definition for
   the Worker and the CLI). Every `manifest.json` entry now points at its stable data-plane
   route, which checks the published dataset and version before touching S3, redirects only
@@ -81,7 +82,8 @@ Deploy coupling.
   `POST /auth/retrieve-key` answer 410 `password_sign_in_retired` and say to run `nemar auth
   login`; `nemar auth retrieve-key` stays as a hidden stub that exits 1; `bcryptjs` and
   `services/password.ts` are deleted. Every stored `password_hash` is set to NULL (not
-  reversible; Time Travel and exports keep copies for up to 30 days) and a trigger refuses the
+  reversible; Time Travel keeps copies for up to 30 days, and exports and the hourly backup until
+  they are deleted) and a trigger refuses the
   retired route's insert shape. API keys, `POST /auth/login`, `regenerate-key`, the device flow
   and the web code flow are unchanged.
 - **`git init` falls back for a git older than 2.28.** `git init -b main` is tried first; on
@@ -106,8 +108,9 @@ Deploy coupling.
   anything of the `git-annex` branch is published, another repository's description is replaced with
   `upstream` and the history is pruned again; this machine's own description is still refused, and the
   message now names the way out.
-- **`--verbose` no longer prints a GitHub token.** The credential helper written for a push and the
-  token `gh` returns for `nemar admin pr-reviews` reached stderr, which people paste into issues.
+- **`--verbose` no longer prints a GitHub token.** The credential helper written for a push or a
+  fleet clone, and the token `gh` returns for `nemar admin pr-reviews` and the fleet annex policy, could
+  reach stderr, which people paste into issues. Only `nemar sandbox` turns that log on today.
 - **`nemar dataset download` reports a file the manifest lists and storage lacks as absent.** The data
   plane answers 502 for it; the downloader retried three times and exited 1, where ADR 0005 treats a
   file the archive does not have as a reportable gap. Any other 502 is still a transport fault.
@@ -134,13 +137,15 @@ Deploy coupling.
   A stored `data_complete = 0` stays 0 until something re-verifies the dataset (ADR 0064).
 - **Trying the automated review** takes three steps outside this release: subscribe the NEMAR
   App to Pull request events (Pull requests: write); have the four `ANTHROPIC_*` organization
-  variables on `nemarDatasets` (they are set); deploy `run-pr-review.yml` to
-  `nemarDatasets/.github` (a change there reaches every dataset repository at once, ADR 0020)
-  and wire its parity test with `NEMAR_PR_REVIEW_WORKFLOW_LIVE`. The flag is already on in the dev
-  Worker's config, and the production Worker forwards events for the datasets dev owns
-  (`nm099999`) to it, so a throwaway pull request there runs the whole chain while production
-  stays dark. **Turning it on for real datasets** is adding the flag to the production block of
-  `backend/wrangler-sccn.toml`, which ships in the next release, after that trial has passed.
+  variables on `nemarDatasets`; deploy `run-pr-review.yml` to `nemarDatasets/.github` (a change
+  there reaches every dataset repository at once, ADR 0020) and wire its parity test with
+  `NEMAR_PR_REVIEW_WORKFLOW_LIVE`. The flag is already on in the dev Worker's config, and the
+  production Worker forwards events for the datasets dev owns (the `xx09*` datasets and the
+  fixture `nm099998`) to it, so a throwaway pull request to a published `xx0999NN` exemplar runs
+  the whole chain while production stays dark (`nm099998` is an anonymous deposit and `nm099999`
+  is private and production's, so neither is ever reviewed). **Turning it on for real datasets**
+  is adding the flag to the production block of `backend/wrangler-sccn.toml`, which ships in a
+  later release, after that trial has passed.
   A pull request that is open at that moment produces no event and is not reviewed until its
   author pushes again.
 - Pages on `docs.nemar.org` that name `nemar auth retrieve-key` need the same edit as the CLI
@@ -160,8 +165,9 @@ Deploy coupling.
   the false-fail rate is known.
 - Manually redelivering an older commit's event makes it the latest and the newer commit's
   claim is refused; both end as "push again" (ADR 0092, accepted risk).
-- Upload hardening epic #1671 leaves #1455 open: the worker-count default and the inactivity
-  diagnostic are not settled. The S3 credential renewal and the multi-batch copy have no automated
+- Part of #1455 is addressed here and the issue stays open: acceptance against a real upload
+  (files over 1 GiB, authenticated S3, a final save on NFS) and the persistence of the idle
+  warnings are not settled. The S3 credential renewal and the multi-batch copy have no automated
   test against a real bucket (the loopback test was removed); run one real upload to a dev dataset
   before relying on them.
 - Chunked files are served by the Worker from a stream, and workerd may drop the hand-set

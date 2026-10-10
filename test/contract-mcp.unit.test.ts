@@ -274,7 +274,10 @@ describe("buildReadRecipe", () => {
     test("reads the environment that served it", () => {
       // A dev or staging server's recipe must not send a reader to production's index,
       // which is what read_index's default URL would do.
-      const staging = { ...on008083Index, contract_base: "https://zarr.staging.example/on008083/zarr/" };
+      const staging = {
+        ...on008083Index,
+        contract_base: "https://zarr.staging.example/on008083/zarr/",
+      };
       const text = buildReadRecipe({ index: staging, store, groupName: "eeg_250hz" }).how_to
         .python_browser;
       expect(text).toContain('index_url="https://zarr.staging.example/on008083/zarr/index.json"');
@@ -307,8 +310,12 @@ describe("buildReadRecipe", () => {
       // read_window reads level 0 only, so a recipe for a downsampled view must not
       // lead with it. No tool asks for a view level today (read_window's two call
       // sites pass level "0"); buildReadRecipe accepts one, so its text is pinned here.
-      const text = buildReadRecipe({ index: on008083Index, store, groupName: "eeg_250hz", level: 1 })
-        .how_to.python_browser;
+      const text = buildReadRecipe({
+        index: on008083Index,
+        store,
+        groupName: "eeg_250hz",
+        level: 1,
+      }).how_to.python_browser;
       expect(text).toContain("await eegprep_lean.open_array(");
       expect(text).not.toContain("read_window(");
       expect(text).not.toContain("read_index(");

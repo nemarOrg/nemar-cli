@@ -79,16 +79,18 @@ None of these blocks the release. Each is a fact a reader of the code would othe
   length, and completeness then rests on the stream ending cleanly. Serve a real chunked sample from
   staging and read the headers before announcing this.
 - **The chunk listing is bounded by prefix, not by file.** It lists `<backend>-s<size>-S`, which every
-  chunked file of the same size shares, over two pages of 256 objects. A dataset with more than 512 chunk
-  objects of one size answers 503 for those files while the integrity check, which lists without the
-  bound, says they are present. `nm000276` (40 recordings) is under the bound.
+  chunked file of the same size shares, over two pages of 256 objects. More than 512 chunk objects of one
+  file size (one file of more than 512 chunks, or many files of exactly that size) answer 503 for those
+  files while the integrity check, which lists without the bound, says they are present. The largest
+  recording's chunk count decides whether a dataset is under the bound.
 - **Chunk-only bytes pass through the Worker.** There is no single object to redirect to, so
   `.memory/never-proxy-bulk-bytes.md` cannot be followed here, and the delivery is not counted by
-  `recordAccess`. It applies only to files whose remote stores `chunk=`, which is one known dataset today.
+  `recordAccess`. It applies only to files whose remote stores `chunk=`.
 - **A listed file whose object is gone answers 502** with the error word
-  `PUBLISHED_FILE_MISSING_ERROR` (`shared/contract/data-plane.ts`). The CLI's download reads that word as
-  ADR 0005's "the archive does not have it" (reported, not retried, not a failed run) and any other 502 as
-  a transport fault. An installed CLI older than this release retries it and exits 1.
+  `PUBLISHED_FILE_MISSING_ERROR` (`shared/contract/data-plane.ts`); a git blob GitHub lacks answers the
+  same. The CLI's download reads that word by ADR 0005's rule that missing content is reported and never
+  blocks the delivery (not retried, not a failed run) and any other 502 as a transport fault. An installed
+  CLI older than this release retries it and exits 1.
 - **`nemar admin fleet key-registration --apply` uses the same presence test** and so records chunk-only
   keys as held by `nemar-s3`. Do not run it on a chunked dataset until `git annex get` of a chunked key
   is shown to work (ADR 0064 amendment).

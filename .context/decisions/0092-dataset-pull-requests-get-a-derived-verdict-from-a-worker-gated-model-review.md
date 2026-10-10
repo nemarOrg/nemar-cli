@@ -187,11 +187,14 @@ decide" cannot be expressed with either.
    watchdog and the republish pass run regardless, so switching it off never strands a check that is
    already in flight.
 5. The first live run is made on the dev Worker alone. The production Worker forwards `pull_request`
-   events for the datasets dev owns (`nm099999`, `nm099998`, `xx09*`) to it before its own handler runs
-   (`DEV_WEBHOOK_MIRROR_URL`), so with the workflow deployed and the App subscribed, a throwaway pull
-   request to `nm099999` exercises the claim, the federated identity, the model call and the check, and
-   production stays dark. Read the Actions log of that run (the repository is public) before turning
-   anything on for real datasets.
+   events for the datasets dev owns (the `xx09*` datasets and the fixture `nm099998`) to it before its
+   own handler runs (`DEV_WEBHOOK_MIRROR_URL`). A dataset is reviewed only while it is public, named and
+   first-published, so the target is a published `xx0999NN` exemplar of the dev fleet (check that its
+   `first_published_at` is set); `nm099998` is an anonymous deposit and `nm099999` is private and
+   production's, so neither is ever reviewed. With the workflow deployed and the App subscribed, a
+   throwaway pull request to such an exemplar exercises the claim, the federated identity, the model call
+   and the check, and production stays dark. Read the Actions log of that run (`nemarDatasets/.github` is
+   public) before turning anything on for real datasets.
 6. A pull request that is already open when the review is switched on produces no event, so the Worker
    never sees it until its author pushes again. Starting those deliberately is a separate change.
 
@@ -201,17 +204,21 @@ None blocks shipping the review switched off. Decide the first two before it is 
 
 - **The administrator's merge refuses a pull request this check holds.** ADR 0093 attempts a merge only
   when GitHub reports `clean`. The `NEMAR PR Review` check is not required, and a non-required check
-  that is not passing is reported as `unstable`. So for an `uncertain`, `declined` or `errored` review,
-  `approve --merge` and `y` in `next` record the approval and then print "Not merged: a check is
-  failing". Either accept `unstable` when both required checks pass (the merge call still enforces the
-  ruleset, and no bypass is used) or say in ADR 0093 that these are merged by hand.
+  that is not passing is expected to be reported as `unstable` (from GitHub's definition of the state;
+  not yet observed). So for an `uncertain`, `declined` or `errored` review, `approve --merge` and `y`
+  in `next` would record the approval and then print "Not merged: GitHub says it cannot be merged
+  cleanly (a check is failing). The approval stands." Either accept `unstable` when both required checks
+  pass (the merge call still enforces the ruleset, and no bypass is used) or say in ADR 0093 that these
+  are merged by hand.
 - **`nemar dataset update --monitor` waits for every check**, this one included, and stops on a non-pass.
   That is the right signal for a contributor, but it means a pull request the review holds is not offered
   the merge. Installed older CLIs behave the same.
-- **A redelivery of a failed dispatch skips the pause and the allowances.** `handleRepeat` resets the row
-  and starts the review without asking `standingOf` or `capDecision` again, and a reset row keeps its old
-  id, which ranks it ahead of everything inserted since. One model call can follow a redelivery for a
-  contributor who was blocked, or after the day's pool was spent. It needs an administrator to redeliver.
+- **A redelivery of a failed dispatch is not held to the pause or the allowances again.** `handleRepeat`
+  resets the row and starts the review without asking `standingOf` or `capDecision`, so the row is never
+  ranked or checked again; and because it keeps its old id, the cap queries (`id <= ?`) count it ahead of
+  every later row, so it can push a newer row over an allowance it was never held to. One model call can
+  follow a redelivery for a contributor who was blocked since, or after the day's pool was spent. It needs
+  an administrator to redeliver.
 - **Declines are check and comment writes on the datasets token without a cap of their own.** Past the
   allowances every pull request from a stranger gets a decline check, and a flood from many accounts is a
   proportional number of writes on the token that publication and enrichment also use.
