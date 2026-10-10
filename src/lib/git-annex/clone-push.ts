@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { statSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { displayName, displayNames, isPrintableInCommand } from "../display-name.js";
+import { vlog } from "../verbose.js";
 import { getGitHubToken, resolveGitHubCloneAuth } from "./github.js";
 import {
   ANNEX_CLONE_DESCRIPTION,
@@ -67,6 +68,10 @@ async function defaultDescriptionHistory(
       "--no-color",
       "--no-ext-diff",
       "--no-renames",
+      // A `-diff` attribute (the dataset's own .gitattributes is in the tree being pushed) or a
+      // NUL byte makes `git log -p` print "Binary files differ" and exit 0, which would read as
+      // a history with no description in it.
+      "--text",
       "-m",
       "-p",
       revision,
@@ -154,6 +159,11 @@ async function scrubForeignDefaultDescriptions(
 ): Promise<{ success: true } | { success: false; error: string }> {
   const local = await runCommand(["git", "config", "--get", "annex.uuid"], { cwd: path });
   const localUuid = local.exitCode === 0 ? local.stdout.trim() : "";
+  if (localUuid === "") {
+    // Without it every uuid would count as foreign, and this repository's own description would
+    // be relabelled instead of refused.
+    return { success: false, error: "this repository's git-annex uuid could not be read" };
+  }
   const current = await defaultDescriptionHistory(path, "refs/heads/git-annex");
   if (!current.success) {
     return { success: false, error: "the local git-annex description history could not be read" };
@@ -162,7 +172,8 @@ async function scrubForeignDefaultDescriptions(
     .map((entry) => entry.split("\0")[0])
     .filter((uuid) => uuid !== localUuid);
   if (foreign.length === 0) return { success: true };
-  for (const uuid of new Set(foreign)) {
+  const uuids = [...new Set(foreign)];
+  for (const uuid of uuids) {
     const describe = await runCommand(
       ["git", "annex", "describe", uuid, ANNEX_UPSTREAM_DESCRIPTION],
       {
@@ -170,12 +181,17 @@ async function scrubForeignDefaultDescriptions(
       },
     );
     if (describe.exitCode !== 0) {
+      // The uuid is a random identifier and the exit code a number; git-annex's own words are
+      // left out because they may repeat the description being replaced.
       return {
         success: false,
-        error: "a description in the git-annex history could not be replaced",
+        error: `the description of repository ${uuid} in the git-annex history could not be replaced (git-annex exit ${describe.exitCode})`,
       };
     }
   }
+  vlog(
+    `Replaced the description of ${uuids.length} other repositor${uuids.length === 1 ? "y" : "ies"} with "${ANNEX_UPSTREAM_DESCRIPTION}" before the first push of the git-annex branch`,
+  );
   const forget = await runCommand(["git", "annex", "forget", "--force"], { cwd: path });
   if (forget.exitCode !== 0) {
     return { success: false, error: "the local git-annex history could not be pruned" };

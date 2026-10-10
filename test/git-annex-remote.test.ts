@@ -1055,6 +1055,49 @@ describe("first git-annex branch push prunes unpublished description history (#1
       expect(await remoteHasDescription(bare, "upstream")).toBe(true);
     });
 
+    test("replaces every other repository's description, not only the first", async () => {
+      const { repo, bare } = await importedClone("openneuro-two");
+      const second = await cloneAnnexRepo(repo, "second-collaborator");
+      expect(
+        (await runCmd(["git", "annex", "describe", "here", "other@node:/private/clone"], second))
+          .exitCode,
+      ).toBe(0);
+      expect((await runCmd(["git", "remote", "add", "second", second], repo)).exitCode).toBe(0);
+      expect((await runCmd(["git", "fetch", "second", "git-annex"], repo)).exitCode).toBe(0);
+      expect((await runCmd(["git", "annex", "merge"], repo)).exitCode).toBe(0);
+      const merged = (await runCmd(["git", "show", "refs/heads/git-annex:uuid.log"], repo)).stdout;
+      expect(merged).toContain(sourceDescription);
+      expect(merged).toContain("other@node:/private/clone");
+
+      const result = await pushToGitHub(repo, "origin");
+
+      expect(result.error).toBeUndefined();
+      expect(result.success).toBe(true);
+      expect(await remoteHasDescription(bare, sourceDescription)).toBe(false);
+      expect(await remoteHasDescription(bare, "other@node:/private/clone")).toBe(false);
+    });
+
+    test("a -diff attribute on uuid.log does not hide a description from the scan", async () => {
+      // `git log -p` prints "Binary files differ" and exits 0 for such a path, which would read
+      // as a history with nothing in it. The dataset's own .gitattributes is in the tree pushed.
+      const { repo, bare } = await importedClone("openneuro-binary");
+      await Bun.write(join(repo, ".gitattributes"), "*.log -diff\n");
+      expect((await runCmd(["git", "add", ".gitattributes"], repo)).exitCode).toBe(0);
+      expect((await runCmd(["git", "commit", "-qm", "attributes"], repo)).exitCode).toBe(0);
+      expect(
+        (await runCmd(["git", "annex", "describe", "here", "me@laptop:/home/me/data"], repo))
+          .exitCode,
+      ).toBe(0);
+
+      const result = await pushToGitHub(repo, "origin");
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("machine-specific description");
+      expect(
+        (await runCmd(["git", "--git-dir", bare, "rev-parse", "refs/heads/git-annex"])).exitCode,
+      ).not.toBe(0);
+    });
+
     test("still refuses when the depositor's own repository has a default description", async () => {
       const { repo, bare } = await importedClone("openneuro-own");
       expect(
