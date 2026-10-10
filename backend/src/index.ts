@@ -837,6 +837,9 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
     blockedSweep = await sweepBlockedBidsValidationRequests(env);
   } catch (err) {
     console.error("Scheduled cleanup: blocked publication-request sweep failed:", err);
+    // The tally below is written to the audit log. Left at its zeros it would read as a sweep
+    // that ran and found nothing to do (ADR 0054), which is the opposite of what happened.
+    blockedSweep = { ...blockedSweep, errors: 1 };
   }
 
   // Log summary to audit_log. `deleted`/`failed` cover only sandbox (xx)
@@ -1024,8 +1027,9 @@ export default {
 
     // Safe outside prod: scheduledCleanup self-narrows to the dev sandbox band
     // and, outside production, runs ONLY its sandbox-delete, stuck-manifest
-    // logging and audit-log sections. Its staleness-email, import-recovery and
-    // blocked-publication-sweep sections are production-only (guards inside).
+    // logging and audit-log sections, plus the blocked-publication sweep narrowed to the dev
+    // range and the fixtures dev owns. Its staleness-email and import-recovery sections are
+    // production-only (guards inside).
     ctx.waitUntil(scheduledCleanup(env));
     // #646 Phase 4: drain stale vectors (embedding_dirty=1) — the backstop for
     // changes that don't go through the inline enrich/reindex re-embed.
