@@ -179,9 +179,40 @@ decide" cannot be expressed with either.
    rule accepts only `repo:nemarDatasets/.github:ref:refs/heads/main` for this workflow.
 3. Deploy `run-pr-review.yml`, then add it to the `unit-pure` sparse checkout with
    `NEMAR_PR_REVIEW_WORKFLOW_LIVE` so the parity test stops skipping.
-4. Release this change to production, then set `PR_REVIEW_ENABLED=1` on the production Worker. The
-   flag stops new reviews only: the watchdog and the republish pass run regardless, so switching it
-   off never strands a check that is already in flight.
+4. Release this change to production, then add `PR_REVIEW_ENABLED = "1"` to `[vars]` of
+   `backend/wrangler-sccn.toml` (the dev Worker's block is `[env.dev.vars]`). The variable lives in that
+   file and not in the dashboard, so a deploy never drops it and turning the review on is a reviewed
+   change. The flag stops new reviews only: the watchdog and the republish pass run regardless, so
+   switching it off never strands a check that is already in flight.
+5. The first live run can be made on the dev Worker alone. The production Worker forwards
+   `pull_request` events for the datasets dev owns (`nm099999`, `nm099998`, `xx09*`) to it before its own
+   handler runs (`DEV_WEBHOOK_MIRROR_URL`), so with the flag on in `[env.dev.vars]`, the workflow deployed
+   and the App subscribed, a throwaway pull request to `nm099999` exercises the claim, the federated
+   identity, the model call and the check, and production stays dark. Read the Actions log of that run
+   (the repository is public) before turning anything on for real datasets.
+
+## Open items found in the release review (2026-10-10)
+
+None blocks shipping the review switched off. Decide the first two before it is switched on.
+
+- **The administrator's merge refuses a pull request this check holds.** ADR 0093 attempts a merge only
+  when GitHub reports `clean`. The `NEMAR PR Review` check is not required, and a non-required check
+  that is not passing is reported as `unstable`. So for an `uncertain`, `declined` or `errored` review,
+  `approve --merge` and `y` in `next` record the approval and then print "Not merged: a check is
+  failing". Either accept `unstable` when both required checks pass (the merge call still enforces the
+  ruleset, and no bypass is used) or say in ADR 0093 that these are merged by hand.
+- **`nemar dataset update --monitor` waits for every check**, this one included, and stops on a non-pass.
+  That is the right signal for a contributor, but it means a pull request the review holds is not offered
+  the merge. Installed older CLIs behave the same.
+- **A redelivery of a failed dispatch skips the pause and the allowances.** `handleRepeat` resets the row
+  and starts the review without asking `standingOf` or `capDecision` again, and a reset row keeps its old
+  id, which ranks it ahead of everything inserted since. One model call can follow a redelivery for a
+  contributor who was blocked, or after the day's pool was spent. It needs an administrator to redeliver.
+- **Declines are check and comment writes on the datasets token without a cap of their own.** Past the
+  allowances every pull request from a stranger gets a decline check, and a flood from many accounts is a
+  proportional number of writes on the token that publication and enrichment also use.
+- **An administrator's own pull request cannot be approved from `next`.** GitHub refuses a self-approval
+  with 422; `y` is offered, fails and is counted as failed.
 
 ## Receipts
 

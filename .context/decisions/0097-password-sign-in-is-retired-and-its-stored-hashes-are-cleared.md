@@ -99,6 +99,12 @@ pair, the device flow, the passwordless web code flow, and the `check-username`,
   `nemar auth login` starts the browser flow and ignores a pasted key. The
   command also exits non-zero when the request fails.
 - The `key_retrieved` audit action is no longer written. Historical rows stay.
+- **The hourly backup keeps the hashes.** [ADR 0004](0004-d1-backup-to-a-private-repo-hourly.md) stores
+  plaintext dumps in the private `nemarOrg/nemar-db-backup` repository and uses its git history as the
+  recovery timeline, and those dumps contain the hashes. Every snapshot taken before migration 0093 keeps
+  them for as long as that history does, which is longer than Time Travel's 30 days. Restoring one would
+  put hashes back, and a restore that recreates `users` would also lose migration 0094's trigger.
+  Whether to rewrite that history is the maintainer's decision and is not made here.
 - Rolling this back does not restore the live data: the hashes are gone from the
   table. Restoring password sign-in would be a new decision with a new way to set
   a password.
