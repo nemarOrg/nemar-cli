@@ -109,7 +109,8 @@ export async function runCommand(
      * Secret values this command is GIVEN (in its arguments), to blank from the verbose log's
      * echo of the command line and from what it prints. `sensitiveOutput` covers only what a
      * command returns; a token handed to `git config ... password=<token>` would otherwise be
-     * logged with the line that ran it.
+     * logged with the line that ran it. A value shorter than 8 characters is not blanked (it
+     * would blank half of any message).
      */
     redact?: readonly string[];
     /** Called once for each quiet period with its measured duration; either stream resets it. */

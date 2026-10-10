@@ -337,6 +337,30 @@ describe("downloadEntries", () => {
     }
   });
 
+  test("a 502 with a different JSON error is still a transport fault", async () => {
+    // The data plane's other 502s are JSON too ("Upstream content host unavailable"); only the
+    // one named error means the archive does not have the file.
+    let hits = 0;
+    const other = Bun.serve({
+      port: 0,
+      fetch: () => {
+        hits++;
+        return Response.json({ error: "Upstream content host unavailable" }, { status: 502 });
+      },
+    });
+    try {
+      const result = await downloadEntries(
+        [{ path: "f.bin", size: 10, bytes_url: `http://localhost:${other.port}/f` }],
+        join(workDir, "json-502"),
+        { attempts: 3 },
+      );
+      expect(hits).toBe(3);
+      expect(result.hadInfrastructureFailure).toBe(true);
+    } finally {
+      other.stop(true);
+    }
+  });
+
   test("any other 502 is still a transport fault: retried, and a failed run", async () => {
     let hits = 0;
     const bad = Bun.serve({

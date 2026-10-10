@@ -170,6 +170,45 @@ describe("a secret handed to a command in its arguments", () => {
   });
 });
 
+describe("configureGitHubRemote with the token gh holds", () => {
+  test("the token read from gh is not written to the verbose log either", async () => {
+    const configDir = mkdtempSync(join(tmpdir(), "nemar-gh-remote-"));
+    writeFileSync(
+      join(configDir, "hosts.yml"),
+      `github.com:\n    user: tester\n    oauth_token: ${SECRET}\n    git_protocol: https\n`,
+    );
+    const dir = await scratchRepo();
+    const previous = {
+      GH_CONFIG_DIR: process.env.GH_CONFIG_DIR,
+      GH_TOKEN: process.env.GH_TOKEN,
+      GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+    };
+    process.env.GH_CONFIG_DIR = configDir;
+    Reflect.deleteProperty(process.env, "GH_TOKEN");
+    Reflect.deleteProperty(process.env, "GITHUB_TOKEN");
+    try {
+      const { value, log } = await verboseLog(() =>
+        configureGitHubRemote(dir, "git@github.com:nemarDatasets/nm099999.git"),
+      );
+
+      expect(value.success).toBe(true);
+      expect(log).not.toContain(SECRET);
+      const helper = await runCommand(
+        ["git", "config", "--get", "credential.https://github.com.helper"],
+        { cwd: dir, sensitiveOutput: true },
+      );
+      expect(helper.stdout).toContain(`password=${SECRET}`);
+    } finally {
+      for (const [key, v] of Object.entries(previous)) {
+        if (v === undefined) Reflect.deleteProperty(process.env, key);
+        else process.env[key] = v;
+      }
+      rmSync(configDir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("adminGitHubToken under --verbose", () => {
   test("the token gh holds is read and not written to the verbose log", async () => {
     // The stored login, as `gh` itself reads it: no environment token, a config directory
