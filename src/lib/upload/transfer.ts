@@ -1352,14 +1352,14 @@ export async function copyAnnexedToRemote(args: {
       return { status: "unreadable", error: errorDetail(listError) };
     }
   }
-  // Pending paths come from the annex location log, not just this run's add
-  // targets. Use the complete current inventory so resumed paths keep their
-  // real sizes and the byte bound still applies.
-  const pendingSizes = new Map(args.dataFiles.map((file) => [file.path, file.size]));
-  // Recorded-file checks deliberately retain the upload-plan boundary. Paths
-  // outside addTargets stay unknown and are checked one at a time (ADR 0094).
-  const recordedCheckSizes = new Map(args.addTargets.map((file) => [file.path, file.size]));
-  const copyBatches = planCopyBatches(pending, pendingSizes, {
+  // Pending and recorded paths come from the annex location log, not just this
+  // run's add targets. Use the complete current inventory so resumed paths keep
+  // their real sizes and the byte bound still applies. Only a path missing from
+  // the inventory has an unknown size and is checked alone (ADR 0094); sizing
+  // the recorded check from addTargets instead isolates every recorded file on
+  // a resume, which starts one git-annex process per file.
+  const inventorySizes = new Map(args.dataFiles.map((file) => [file.path, file.size]));
+  const copyBatches = planCopyBatches(pending, inventorySizes, {
     maxFiles: args.batchMaxFiles,
     maxBytes: args.batchMaxBytes,
   });
@@ -1401,7 +1401,7 @@ export async function copyAnnexedToRemote(args: {
       absolutePath,
       remote,
       paths: recordedWithContent,
-      sizes: recordedCheckSizes,
+      sizes: inventorySizes,
       jobs: args.jobs,
       batchMaxFiles: args.batchMaxFiles,
       credentialSession,

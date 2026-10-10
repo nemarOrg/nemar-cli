@@ -108,8 +108,9 @@ than the safety margin plus the longest observed batch, and retries only that ch
 identifiable expired-credential result or a failed check that returns after the known lease has
 expired. S3 `HeadObject` failures are generic, so no exact error code is available for an
 `fsck` check; the lease timestamp is the signal for that case. Recorded paths missing from the
-current upload plan have unknown sizes and are checked one at a time, never grouped as zero-byte
-files. A newly transferred path reported in a parsed git-annex JSON record resets the chunk's
+current data-file inventory have unknown sizes and are checked one at a time, never grouped as
+zero-byte files. A recorded path that is in the inventory is sized from it and batched like any
+other, so a resume that adds only a few files still checks the rest in bulk. A newly transferred path reported in a parsed git-annex JSON record resets the chunk's
 fruitless-expiry counter, while the upload's overall renewal limit still bounds retries. This is
 only a retry-progress signal; durable progress and final confirmation still come from the
 location log. Copy retry summaries count unique transferred paths across attempts only when
