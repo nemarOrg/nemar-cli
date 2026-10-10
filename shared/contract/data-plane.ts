@@ -20,6 +20,15 @@
 import { z } from "zod";
 
 /**
+ * The `error` of the 502 the data plane answers when a file the manifest names is not in
+ * storage (`manifestObjectMissing`, ADR 0095). It is a different answer from the 404 for a path
+ * the manifest never listed, so a gather can tell a missing optional table from lost content;
+ * a downloader reads it as ADR 0005's "the archive does not have it" (reportable, not a failed
+ * run), and reads any other 502 as a transport fault to retry.
+ */
+export const PUBLISHED_FILE_MISSING_ERROR = "Published file is missing from storage";
+
+/**
  * One file in a published version.
  *
  * `checksum_algorithm` is `"git"` for a file tracked in plain git and an annex
