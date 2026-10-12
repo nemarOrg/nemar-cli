@@ -399,6 +399,8 @@ describe("every workflow that calls gh gives it a repository", () => {
     action: string;
     /** The whole invocation, from `gh` to the end of its line or the next `gh`. */
     text: string;
+    /** What sits between the command position and `gh`: wrappers and `VAR=value` prefixes. */
+    prefix: string;
   }
 
   /** The groups that resolve `{owner}/{repo}` from the git remote when not told otherwise. */
@@ -475,13 +477,19 @@ describe("every workflow that calls gh gives it a repository", () => {
         const from = (m.index ?? 0) + m[1].length + m[2].length;
         const to = i + 1 < starts.length ? (starts[i + 1].index ?? line.length) : line.length;
         const text = line.slice(from, to);
-        calls.push({ group: m[3], action: text.split(/\s+/)[2] ?? "", text });
+        calls.push({ group: m[3], action: text.split(/\s+/)[2] ?? "", text, prefix: m[2] });
       });
     }
     return calls;
   }
 
   const hasRepoFlag = (call: GhCall) => /(?:^|\s)(?:--repo|-R)(?:\s|=)/.test(call.text);
+
+  /**
+   * `GH_REPO=o/n gh ...` and `env GH_REPO=o/n gh ...` name a repository for that one call.
+   * An empty value (`GH_REPO= gh`, `GH_REPO="" gh`) names nothing, as in the environment.
+   */
+  const hasInlineRepo = (call: GhCall) => /(?:^|\s)GH_REPO=(?!""|''|\s|$)\S/.test(call.prefix);
 
   /** `gh api repos/o/n/...` names its repository; `gh api repos/{owner}/{repo}/...` does not. */
   const needsRepository = (call: GhCall) =>
@@ -541,7 +549,7 @@ describe("every workflow that calls gh gives it a repository", () => {
         }
         for (const call of calls) {
           const shown = call.text.slice(0, 70);
-          if (needsRepository(call) && !covered && !hasRepoFlag(call)) {
+          if (needsRepository(call) && !covered && !hasRepoFlag(call) && !hasInlineRepo(call)) {
             defects.push(
               `${where}: \`${shown}\` has no repository (no checkout, GH_REPO or --repo)`,
             );
@@ -822,6 +830,36 @@ jobs:
       for (const line of ["gh pr list --reponame x", "gh pr list --state=-R"]) {
         expect(defectCount(withScript(line)), line).toBe(1);
       }
+    });
+
+    test("an inline GH_REPO names a repository for its own call, when it is not empty", () => {
+      const named = [
+        "GH_REPO=a/b gh pr list",
+        "env GH_REPO=a/b gh pr list",
+        "retry env GH_REPO=a/b gh pr list",
+        "X=1 GH_REPO=a/b gh pr list",
+        'GH_REPO="$R" gh pr list',
+        "GH_REPO=$R gh pr list",
+        "true && GH_REPO=a/b gh pr list",
+      ];
+      for (const line of named) expect(defectCount(withScript(line)), line).toBe(0);
+      const unnamed = [
+        "GH_REPO= gh pr list",
+        'GH_REPO="" gh pr list',
+        "GH_REPO='' gh pr list",
+        "env GH_REPO= gh pr list",
+        "GH_REPOS=a/b gh pr list",
+        "XGH_REPO=a/b gh pr list",
+        // An argument that mentions GH_REPO is not the environment variable.
+        "gh pr list --search GH_REPO=a/b",
+        "FOO=a/b gh pr list",
+        "env FOO=1 gh pr list",
+        // It names a repository for the command it prefixes, not for the ones around it.
+        "GH_REPO=a/b true && gh pr list",
+        "GH_REPO=a/b gh pr list && gh issue list",
+        "echo GH_REPO=a/b; gh pr list",
+      ];
+      for (const line of unnamed) expect(defectCount(withScript(line)), line).toBe(1);
     });
 
     test("every command group that reads the git remote is reported when bare", () => {
