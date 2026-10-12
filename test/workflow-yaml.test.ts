@@ -543,12 +543,18 @@ describe("every workflow that calls gh gives it a repository", () => {
   const ROOT = join(import.meta.dir, "..");
   const WORKFLOW_DIRS = [".github/workflows", ".github/dataset-workflows"];
 
+  /** GitHub runs a workflow from `.yml` and from `.yaml` alike, so the scan reads both. */
+  const workflowFilesIn = (dir: string): string[] =>
+    readdirSync(dir)
+      .filter((f) => /\.ya?ml$/.test(f))
+      .sort();
+
   function shippedWorkflows(): { label: string; text: string }[] {
     const files = WORKFLOW_DIRS.flatMap((dir) =>
-      readdirSync(join(ROOT, dir))
-        .filter((f) => f.endsWith(".yml"))
-        .sort()
-        .map((f) => ({ label: `${dir}/${f}`, text: readFileSync(join(ROOT, dir, f), "utf8") })),
+      workflowFilesIn(join(ROOT, dir)).map((f) => ({
+        label: `${dir}/${f}`,
+        text: readFileSync(join(ROOT, dir, f), "utf8"),
+      })),
     );
     // The per-dataset shims deploy into every dataset repository, where a `gh` with no
     // repository would fail the same way.
@@ -582,6 +588,24 @@ describe("every workflow that calls gh gives it a repository", () => {
     const groups = steps.flatMap((s) => (s.run ? ghCalls(s.run).map((c) => c.group) : []));
     expect(groups.filter((g) => g === "issue").length).toBeGreaterThanOrEqual(9);
     expect(groups.filter((g) => g === "label").length).toBeGreaterThanOrEqual(2);
+  });
+
+  test("workflow files are found by .yml and .yaml alike, and nothing else", () => {
+    const dir = mkdtempSync(join(tmpdir(), "workflow-files-"));
+    try {
+      for (const name of ["a.yaml", "b.yml", "c.txt", "d.yml.bak", "e.json"]) {
+        writeFileSync(join(dir, name), "name: x\n");
+      }
+      expect(workflowFilesIn(dir)).toEqual(["a.yaml", "b.yml"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the shipped set includes the per-dataset templates, not only the files", () => {
+    const labels = shippedWorkflows().map((w) => w.label);
+    expect(labels.filter((l) => l.startsWith("template ")).length).toBeGreaterThan(0);
+    expect(labels.filter((l) => l.startsWith(".github/")).length).toBeGreaterThan(0);
   });
 
   test("the drift workflow without its GH_REPO is caught, step by step", () => {
@@ -897,6 +921,10 @@ ${body}
         "env X=1 gh issue create --title t",
         "command gh issue create --title t",
         "sudo gh issue create --title t",
+        "exec gh issue create --title t",
+        "time gh issue create --title t",
+        "nohup gh issue create --title t",
+        "retry timeout 5 env X=1 gh issue create --title t",
       ]) {
         const yaml = workflow(`
     steps:
