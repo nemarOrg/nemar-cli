@@ -670,7 +670,7 @@ export function notCleanWhy(state: string): string {
 }
 
 /** What can be done about a merge that would not be attempted: see {@link MergeCheck}. */
-export type MergeAdvice = "without_merge" | "retry" | "none";
+export type MergeAdvice = "without_merge" | "retry" | "rerun" | "none";
 
 /**
  * What a merge may be told about GitHub's `mergeable_state`, as ONE value for every place that asks:
@@ -678,8 +678,9 @@ export type MergeAdvice = "without_merge" | "retry" | "none";
  * merge. `ok` only for `clean`. Otherwise `why` is the sentence (which state, why it blocks, that
  * no merge would be tried), `card` the short phrase for the `next` card, and `advice` what the
  * administrator can do: `without_merge` for a state that will not clear by itself, `retry` for one
- * that may (GitHub still working it out, a read that failed), `none` when the pull request is no
- * longer open.
+ * that may (GitHub still working it out, a read that failed), `rerun` when the head is another
+ * commit than the one shown (waiting does not help, a fresh run reads the new one), `none` when the
+ * pull request is no longer open.
  *
  * A state that is missing, empty or unrecognised is not `clean`: it is refused, and a missing one
  * reads as `unknown`.
@@ -781,9 +782,9 @@ function unreadMergeCheck(read: Extract<MergeStateRead, { ok: false }>): MergeRe
   if (read.kind === "moved") {
     return {
       ok: false,
-      why: "The pull request changed while it was being read.",
-      card: "the pull request changed while it was being read",
-      advice: "retry",
+      why: "The pull request changed since it was read.",
+      card: "the pull request changed since it was read",
+      advice: "rerun",
     };
   }
   if (read.kind === "closed") {

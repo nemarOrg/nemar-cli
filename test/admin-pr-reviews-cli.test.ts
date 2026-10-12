@@ -1214,9 +1214,15 @@ describe("nemar admin pr-reviews approve", () => {
     test("when asking again fails, or finds the branch moved, nothing is written and the reason is said", async () => {
       // The first read says unknown, so the state is asked about again; that second read is the
       // one that cannot be trusted to say clean.
-      for (const [later, said] of [
-        [{ status: 502 }, "Could not check whether it can be merged"],
-        [{ sha: SHA_B }, "The pull request changed while it was being read."],
+      for (const [later, said, advice] of [
+        // A failed read may clear: wait a moment and run it again.
+        [{ status: 502 }, "Could not check whether it can be merged", "again in a moment"],
+        // A moved head will not clear by waiting: a fresh run reads the new commit.
+        [
+          { sha: SHA_B },
+          "The pull request changed since it was read.",
+          "again to read it as it is now",
+        ],
       ] as const) {
         gh.reset();
         db.run("DELETE FROM pr_reviews");
@@ -1225,7 +1231,7 @@ describe("nemar admin pr-reviews approve", () => {
         const r = await approve(["--merge"]);
         expect(r.exitCode, said).toBe(1);
         expect(r.stdout, said).toContain(said);
-        expect(r.stdout, said).toContain("again in a moment");
+        expect(r.stdout, said).toContain(advice);
         expect(r.stdout, said).not.toContain("without --merge");
         expect(r.stdout, said).not.toContain("Approved nm000201");
         expect(adminWrites(), said).toHaveLength(0);
@@ -1285,7 +1291,7 @@ describe("nemar admin pr-reviews approve", () => {
     test("the late look refuses a read that fails, a branch that moved and a pull request that closed, too", async () => {
       for (const [later, said] of [
         [{ status: 502 }, "Could not check whether it can be merged"],
-        [{ sha: SHA_B }, "The pull request changed while it was being read."],
+        [{ sha: SHA_B }, "The pull request changed since it was read."],
         [{ state: "closed" }, "The pull request is no longer open (it was closed)."],
       ] as const) {
         gh.reset();
@@ -1852,17 +1858,23 @@ describe("nemar admin pr-reviews next", () => {
   test("the late look in next refuses a read that fails, a branch that moved and a pull request that closed, too", async () => {
     for (const [later, said] of [
       [{ status: 502 }, "Could not check whether it can be merged"],
-      [{ sha: SHA_B }, "The pull request changed while it was being read."],
+      [{ sha: SHA_B }, "The pull request changed since it was read."],
       [{ state: "closed" }, "The pull request is no longer open (it was closed)."],
     ] as const) {
       gh.reset();
       db.run("DELETE FROM pr_reviews");
       nodes(ready("nm000201", 7));
       gh.pulls["nm000201#7"].adminReadsAfterFirst = later;
-      const r = await next("y\nq\n");
+      const r = await next("y\ny\nq\n");
       expect(r.stdout, said).toContain(
         `Not approved: Checked again just before approving: ${said}`,
       );
+      // Typing y again takes the late look again against the head the card was shown for, so for a
+      // moved head it refuses every time: the advice is never "try y again".
+      expect(r.stdout, said).not.toContain("Try y again");
+      const again = "run 'nemar admin pr-reviews next' again to look again.";
+      if (said.includes("no longer open")) expect(r.stdout, said).not.toContain(again);
+      else expect(r.stdout, said).toContain(again);
       expect(writes(), said).toHaveLength(0);
     }
   });
@@ -1933,7 +1945,11 @@ describe("nemar admin pr-reviews next", () => {
     gh.pulls["nm000201#7"].unknownReads = 99;
     const r = await next("y\nq\n");
     expect(r.stdout).toContain("y is not available: GitHub reports this pull request as 'unknown'");
-    expect(r.stdout).toContain("Try y again in a moment");
+    // y is not offered, so typing it again does not look again: the advice is to run next again.
+    expect(r.stdout).toContain(
+      "s skips it; run 'nemar admin pr-reviews next' again to look again.",
+    );
+    expect(r.stdout).not.toContain("Try y again");
     expect(r.stdout).not.toContain(PROMPT_WITH_Y);
     expect(writes()).toHaveLength(0);
   });
@@ -1943,8 +1959,8 @@ describe("nemar admin pr-reviews next", () => {
       [{ status: 502 }, "could not be checked (", "Could not check whether it can be merged ("],
       [
         { sha: SHA_B },
-        "the pull request changed while it was being read",
-        "The pull request changed while it was being read.",
+        "the pull request changed since it was read",
+        "The pull request changed since it was read.",
       ],
     ] as const) {
       gh.reset();
@@ -1956,7 +1972,10 @@ describe("nemar admin pr-reviews next", () => {
       expect(r.stdout, said).toContain(`y is not available: ${said}`);
       // Not the sentence for a state GitHub did not give: nothing of the kind happened.
       expect(r.stdout, said).not.toContain("has not said whether it can be merged");
-      expect(r.stdout, said).toContain("Try y again in a moment");
+      expect(r.stdout, said).toContain(
+        "s skips it; run 'nemar admin pr-reviews next' again to look again.",
+      );
+      expect(r.stdout, said).not.toContain("Try y again");
       expect(r.stdout, said).not.toContain(PROMPT_WITH_Y);
       expect(writes(), said).toHaveLength(0);
     }

@@ -1198,10 +1198,15 @@ function mergeAdvice(
   at: { dataset: string; pr: number },
 ): string | null {
   if (advice === "none") return null;
-  if (advice === "retry") {
-    return how === "approve"
+  // In `next` a refused card is pinned to the head it was shown for, and when y is not offered
+  // typing it does not look again, so the only way to look again is a fresh run.
+  if (advice === "retry" || advice === "rerun") {
+    if (how === "next") {
+      return "s skips it; run 'nemar admin pr-reviews next' again to look again.";
+    }
+    return advice === "retry"
       ? "Run the same command again in a moment."
-      : "Try y again in a moment, or s to skip it.";
+      : "Run the same command again to read it as it is now.";
   }
   return how === "approve"
     ? "To approve without merging, run it again without --merge. The merge is then yours to make on GitHub."

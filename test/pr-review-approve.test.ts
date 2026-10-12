@@ -926,9 +926,10 @@ describe("the one check a merge is asked about, before the approval and again ri
     // Read, but the branch is another commit now.
     gh.pulls["nm000201#7"] = { sha: SHA_B, mergeableState: "clean" };
     const moved = await check(seen("unknown"));
-    expect(moved).toMatchObject({ ok: false, advice: "retry" });
+    // Waiting does not help a moved head: a fresh run reads the new commit.
+    expect(moved).toMatchObject({ ok: false, advice: "rerun" });
     if (!moved.ok) {
-      expect(moved.why).toContain("The pull request changed while it was being read.");
+      expect(moved.why).toContain("The pull request changed since it was read.");
       expect(moved.why).not.toContain("has not said");
     }
     // Read, and GitHub still says unknown after the reads allowed: that IS "has not said".
