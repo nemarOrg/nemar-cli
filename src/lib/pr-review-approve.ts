@@ -655,7 +655,7 @@ const NOT_CLEAN_WHY = new Map<string, string>([
   ["dirty", "it has merge conflicts"],
   [
     "unstable",
-    "a check that is not required is not passing, such as the automated review holding the pull request",
+    "a check or status that is not required is not passing or has not reported, for example the automated review holding the pull request",
   ],
   ["draft", "it is a draft"],
   ["unknown", "GitHub has not said whether it can be merged"],

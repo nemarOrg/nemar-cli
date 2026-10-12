@@ -83,10 +83,11 @@ describe("when y may approve and merge", () => {
 
   test("only a pull request GitHub reports as clean is offered y, whatever --force says", () => {
     // Every other state is refused BEFORE an approval is written, because the merge y promises
-    // would be refused after it (ADR 0093): unstable is a check that is not required and not
-    // passing, which is how a pull request the automated review holds is reported.
+    // would be refused after it (ADR 0093): unstable is a check or status that is not required and
+    // is not passing or has not reported, which a pull request the automated review holds is
+    // expected to be.
     for (const [mergeable, word] of [
-      ["unstable", "a check that is not required is not passing"],
+      ["unstable", "a check or status that is not required is not passing or has not reported"],
       ["blocked", "a required check or review is not satisfied"],
       ["dirty", "merge conflicts"],
       ["behind", "behind main"],

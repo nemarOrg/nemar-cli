@@ -1084,7 +1084,9 @@ describe("nemar admin pr-reviews approve", () => {
       const r = await approve(["--merge"]);
       expect(r.exitCode).toBe(1);
       expect(r.stdout).toContain("GitHub reports this pull request as 'unstable'");
-      expect(r.stdout).toContain("a check that is not required is not passing");
+      expect(r.stdout).toContain(
+        "a check or status that is not required is not passing or has not reported",
+      );
       expect(r.stdout).toContain("so a merge would not be attempted");
       expect(r.stdout).toContain("Nothing was approved or merged.");
       // The way to approve without merging is named.
@@ -1776,7 +1778,9 @@ describe("nemar admin pr-reviews next", () => {
     gh.pulls["nm000201#7"].mergeableState = "unstable";
     const r = await next("y\nq\n");
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).toContain("Merge:    a check that is not required is not passing");
+    expect(r.stdout).toContain(
+      "Merge:    a check or status that is not required is not passing or has not reported",
+    );
     expect(r.stdout).toContain("(GitHub: unstable)");
     expect(r.stdout).toContain(
       "y is not available: GitHub reports this pull request as 'unstable'",

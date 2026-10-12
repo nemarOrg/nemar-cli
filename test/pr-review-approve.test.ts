@@ -758,7 +758,7 @@ describe("what GitHub's mergeable state allows, asked before anything is written
   test("only clean allows a merge, and the sentence names the state and why it blocks", () => {
     expect(refusal("clean")).toBeNull();
     for (const [state, why] of [
-      ["unstable", "a check that is not required is not passing"],
+      ["unstable", "a check or status that is not required is not passing or has not reported"],
       ["blocked", "a required check or review is not satisfied"],
       ["behind", "the branch is behind main"],
       ["dirty", "it has merge conflicts"],

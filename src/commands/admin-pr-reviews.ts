@@ -456,10 +456,10 @@ the GitHub account linked to your NEMAR account (if one is linked), and approves
 you were shown. It asks before approving unless you add --yes. A failing review, a running one, or
 one that could not be read needs --force. Nothing merges unless you add --merge (or answer y in
 'next'), and then only if GitHub reports the pull request clean. That is checked BEFORE anything is
-approved: a pull request that is not clean (a pull request the automated review holds is reported
-'unstable') is neither approved nor merged by --merge or y, you are told which state GitHub gave and
-why, and 'approve' without --merge approves it. The merge is then attempted once, and it never
-tries a merge GitHub reports as blocked. If 'gh' holds no signed-in account, or the token is an app or workflow token,
+approved, and again just before the approval is written: a pull request that is not clean (one the
+automated review holds is expected to be reported 'unstable') is neither approved nor merged by
+--merge or y, you are told which state GitHub gave and why, and 'approve' without --merge approves
+it. The merge is then attempted once, and it never tries a merge GitHub reports as blocked. If 'gh' holds no signed-in account, or the token is an app or workflow token,
 'approve' prints the PR link and the equivalent 'gh pr review --approve' command (and, in a
 terminal, opens the link); a token GitHub rejects is reported without it.
 
@@ -1472,9 +1472,9 @@ answer:
 
   y   approve it as YOU (your own GitHub login), then squash-merge it. Only offered when both
       required checks are green and GitHub reports the pull request clean; a failing, running or
-      unreadable review also needs --force. A pull request the automated review holds is reported
-      'unstable', so y is not offered: nothing is approved from here. Approve it without merging
-      with 'nemar admin pr-reviews approve <dataset> <pr>', or leave it with s.
+      unreadable review also needs --force. A pull request the automated review holds is expected
+      to be reported 'unstable', so y is not offered: nothing is approved from here. Approve it
+      without merging with 'nemar admin pr-reviews approve <dataset> <pr>', or leave it with s.
   n   close it. You are asked for a comment, which is posted first so the author sees why.
   c   comment on it and leave it open. You are asked for the comment.
   d   show the whole report, then ask again.
