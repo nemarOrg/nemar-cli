@@ -307,11 +307,15 @@ describe("the repo's own test workflow routes changes to jobs", () => {
     for (const job of ["lint", "unit-pure"]) {
       expect(workflow.jobs[job]?.if ?? "", job).toContain("outputs.workflows == 'true'");
     }
-    const filters = (workflow.jobs.changes.steps as { with?: { filters?: string } }[]).find(
+    const filtersText = (workflow.jobs.changes.steps as { with?: { filters?: string } }[]).find(
       (s) => s.with?.filters,
     )?.with?.filters;
-    expect(filters).toContain("'.github/workflows/**'");
-    expect(filters).toContain("'.github/dataset-workflows/**'");
+    // Parsed, not searched: the globs must sit under the `workflows:` key, not merely appear
+    // somewhere in the block (under another filter, or in a comment).
+    const filters = parse(filtersText ?? "") as Record<string, string[]>;
+    expect(filters.workflows).toEqual(
+      expect.arrayContaining([".github/workflows/**", ".github/dataset-workflows/**"]),
+    );
   });
 
   test("the source trees the jobs build all have a filter", () => {
