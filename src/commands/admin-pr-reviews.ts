@@ -63,11 +63,15 @@ import {
   githubApiBase,
   identityMatches,
   manualApprovalCommand,
+  mergeRefusal,
   mergeWhenClean,
+  notCleanWhy,
   postComment,
   pullRequestUrl,
   refusalFor,
   reviewForApproval,
+  settleMergeState,
+  stateWord,
   submitApproval,
   whoAmI,
 } from "../lib/pr-review-approve.js";
@@ -1185,7 +1189,10 @@ async function startAll(options: {
 prReviewsCommand
   .command("approve <dataset> <pr>")
   .description("Approve a pull request as YOURSELF (your GitHub login); merges only with --merge")
-  .option("--merge", "After approving, merge it if GitHub reports it clean (attempted once)")
+  .option(
+    "--merge",
+    "Merge it after approving, once (refused before anything is approved unless GitHub reports it clean)",
+  )
   .option("--method <method>", `How to merge, with --merge: ${MERGE_METHODS.join(", ")}`, "merge")
   .option("--message <text>", "The text of your approval")
   .option("--force", "Approve although the review failed, is running, or could not be read")
@@ -1240,6 +1247,31 @@ prReviewsCommand
 
       if (gate.kind === "needs_force" && !options.force) die(gate.reason);
 
+      // A merge that was asked for is only worth an approval if it can be made, so GitHub's word on
+      // that comes BEFORE anything is written (ADR 0093). The look after the approval stays, for a
+      // state that changes in between, but it can only leave an approval standing.
+      if (options.merge) {
+        const settled = await settleMergeState(token, dataset, pr, head, {
+          base,
+          first: live.mergeableState,
+        });
+        if (!settled.ok) {
+          die(
+            settled.kind === "moved"
+              ? "The pull request changed while it was being read, so nothing was approved or merged."
+              : `Could not check whether it can be merged (${settled.reason}). Nothing was approved or merged.`,
+            "Run the command again.",
+          );
+        }
+        const refusal = mergeRefusal(settled.state);
+        if (refusal) {
+          die(
+            `${refusal} Nothing was approved or merged.`,
+            "To approve without merging, run it again without --merge. The merge is then yours to make on GitHub.",
+          );
+        }
+      }
+
       console.log();
       console.log(chalk.bold(`Approve ${dataset} #${pr}`));
       console.log(`  Author:   @${plain(live.authorLogin)}`);
@@ -1288,9 +1320,13 @@ prReviewsCommand
       console.log(chalk.green(`Approved ${dataset} #${pr} at ${short(head)} as @${me.login}.`));
 
       if (!options.merge) {
+        // What GitHub said when the pull request was read, so the advice is not one `--merge` would refuse.
+        const refusal = mergeRefusal(live.mergeableState);
         console.log(
           chalk.dim(
-            "  It is not merged. Run approve again with --merge (this records another approval), or merge it on GitHub.",
+            refusal && live.mergeableState !== "unknown"
+              ? `  It is not merged. GitHub reports it as '${stateWord(live.mergeableState)}' (${notCleanWhy(live.mergeableState)}), so --merge would not attempt it either; merge it on GitHub when you decide to.`
+              : "  It is not merged. Run approve again with --merge (this records another approval), or merge it on GitHub.",
           ),
         );
         return;

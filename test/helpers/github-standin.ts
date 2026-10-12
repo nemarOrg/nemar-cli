@@ -44,6 +44,11 @@ export interface PullState {
   unknownReads?: number;
   /** Set after the approval is recorded, to simulate a push landing in between. */
   movesToAfterReview?: string;
+  /**
+   * `mergeableState` once the approval is recorded: a check that turns pending, or a rule the
+   * approval itself changes, between the read before an approval and the read before its merge.
+   */
+  mergeableStateAfterReview?: string;
   /** The head every read AFTER THE FIRST sees: a push that lands between two readers' reads. */
   headAfterFirstRead?: string;
 }
@@ -246,6 +251,7 @@ export function startGitHubStandin(): GitHubStandin {
           const login = typeof who === "object" ? who.login : "unknown";
           const commit = (body as { commit_id?: string } | null)?.commit_id ?? p.sha;
           if (p.movesToAfterReview) p.sha = p.movesToAfterReview;
+          if (p.mergeableStateAfterReview) p.mergeableState = p.mergeableStateAfterReview;
           if (state.unreadableAnswers) return new Response("<html>proxy</html>", { status: 200 });
           return Response.json({
             id: 1,

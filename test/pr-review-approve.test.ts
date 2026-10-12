@@ -18,11 +18,14 @@ import {
   githubApiBase,
   identityMatches,
   manualApprovalCommand,
+  mergeRefusal,
   mergeWhenClean,
   postComment,
   pullRequestUrl,
   refusalFor,
   reviewForApproval,
+  settleMergeState,
+  stateWord,
   submitApproval,
   whoAmI,
 } from "../src/lib/pr-review-approve";
@@ -701,6 +704,103 @@ describe("merging", () => {
     });
     srv.stop(true);
     expect(r).toMatchObject({ ok: false, status: 0, outcome: "unknown" });
+  });
+});
+
+describe("what GitHub's mergeable state allows, asked before anything is written", () => {
+  const settle = (options: Parameters<typeof settleMergeState>[4] = {}) => {
+    const slept: number[] = [];
+    const run = settleMergeState(ADMIN_TOKEN, "nm000201", 7, SHA_A, {
+      base: base(),
+      sleep: async (ms) => {
+        slept.push(ms);
+      },
+      ...options,
+    });
+    return run.then((result) => ({ result, slept }));
+  };
+  const reads = () => gh.seen.filter((s) => s.method === "GET" && s.path.endsWith("/pulls/7"));
+
+  test("only clean allows a merge, and the sentence names the state and why it blocks", () => {
+    expect(mergeRefusal("clean")).toBeNull();
+    for (const [state, why] of [
+      ["unstable", "a check that is not required is not passing"],
+      ["blocked", "a required check or review is not satisfied"],
+      ["behind", "the branch is behind main"],
+      ["dirty", "it has merge conflicts"],
+      ["draft", "it is a draft"],
+      ["unknown", "GitHub has not said whether it can be merged"],
+      ["has_hooks", "this tool merges only a pull request GitHub reports as clean"],
+      ["brand_new_state", "this tool merges only a pull request GitHub reports as clean"],
+    ] as const) {
+      const said = mergeRefusal(state);
+      expect(said, state).toContain(`'${state}'`);
+      expect(said, state).toContain(why);
+      expect(said, state).toContain("so a merge would not be attempted");
+    }
+  });
+
+  test("a state that is missing or empty is not clean, it is unknown", () => {
+    for (const state of [undefined, null, ""]) {
+      expect(mergeRefusal(state), String(state)).toContain("'unknown'");
+    }
+  });
+
+  test("a state word that is not one of GitHub's is not shown as sent", () => {
+    expect(stateWord("has_hooks")).toBe("has_hooks");
+    for (const odd of [
+      "\u001b[31mred",
+      "UPPER",
+      "has hooks",
+      "x".repeat(40),
+      "[link](http://x.test)",
+    ]) {
+      expect(stateWord(odd), odd).toBe("unrecognised");
+      expect(mergeRefusal(odd), odd).toContain("'unrecognised'");
+    }
+  });
+
+  test("a state already read and settled is used as it is, with no further read", async () => {
+    const { result, slept } = await settle({ first: "unstable" });
+    expect(result).toEqual({ ok: true, state: "unstable" });
+    expect(reads()).toHaveLength(0);
+    expect(slept).toEqual([]);
+  });
+
+  test("an unknown already read is asked about again after a wait, and the new answer is used", async () => {
+    gh.pulls["nm000201#7"] = { sha: SHA_A, mergeableState: "unstable" };
+    const { result, slept } = await settle({ first: "unknown" });
+    expect(result).toEqual({ ok: true, state: "unstable" });
+    expect(reads()).toHaveLength(1);
+    expect(slept).toEqual([1000]);
+  });
+
+  test("with nothing read yet it reads, and asks again while GitHub says unknown", async () => {
+    gh.pulls["nm000201#7"] = { sha: SHA_A, mergeableState: "clean", unknownReads: 2 };
+    const { result, slept } = await settle();
+    expect(result).toEqual({ ok: true, state: "clean" });
+    expect(reads()).toHaveLength(3);
+    expect(slept).toEqual([1000, 1000]);
+  });
+
+  test("a state that never settles comes back as unknown after the reads allowed, with no wait after the last", async () => {
+    gh.pulls["nm000201#7"] = { sha: SHA_A, unknownReads: 99 };
+    const { result, slept } = await settle({ tries: 3 });
+    expect(result).toEqual({ ok: true, state: "unknown" });
+    expect(reads()).toHaveLength(3);
+    expect(slept).toHaveLength(2);
+    // ...and unknown is not clean.
+    expect(mergeRefusal("unknown")).not.toBeNull();
+  });
+
+  test("a head that is no longer the commit acted on is reported, not read as a state", async () => {
+    gh.pulls["nm000201#7"] = { sha: SHA_B, mergeableState: "clean" };
+    expect((await settle()).result).toEqual({ ok: false, kind: "moved" });
+  });
+
+  test("a pull request that cannot be read is reported with GitHub's status", async () => {
+    const { result } = await settle();
+    expect(result).toMatchObject({ ok: false, kind: "unreadable", status: 404 });
   });
 });
 
