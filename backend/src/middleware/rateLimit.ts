@@ -47,8 +47,8 @@
 import type { Context, Next } from "hono";
 import { isInternalRequest } from "../lib/internal-request";
 import { ACTIVE_ACCOUNT_STATUS_SQL_LIST } from "../services/account-tier";
+import { logPseudonym } from "../services/log-pseudonym";
 import { hashApiKey } from "../services/token";
-import { hashIp } from "../services/web-session";
 import type { Bindings, Variables } from "../types/bindings";
 
 // Rate limit configuration
@@ -1690,17 +1690,19 @@ export async function rateLimiter(
       // warn once if it crossed the trip point. `warned` rides in the same
       // cache record as `count` so it resets on the same window TTL.
       if (count >= maxRequests && !warned) {
-        // Hashed, not raw: this is a log line, not the enforcement key
-        // itself (which stays keyed on the raw IP, same as before) --
-        // avoids putting a raw client IP into structured logs.
-        // Same helper web-session.ts uses for privacy-preserving IP storage, so
-        // every IP hash in the codebase is produced by one named function.
-        const ipHash = await hashIp(rawKey);
+        // The caller's key (an address, or `site:<address>`), never in the clear:
+        // `ipHash` is a keyed pseudonym (`services/log-pseudonym.ts`, #1713), which
+        // tells one caller from another without letting a reader of the log
+        // recover the address. It used to be a plain SHA-256, which anyone can
+        // reverse for an IPv4 address by trying all 2^32. With no ENCRYPTION_KEY
+        // (a test, or a Worker never given one) the field is left out rather than
+        // unkeyed. The enforcement key itself stays the raw key, as before.
+        const ipHash = await logPseudonym(c.env.ENCRYPTION_KEY, rawKey);
         // Once per window per bucket kind (and again at the milestones) as well as
         // once per address: a flood from many addresses must not be a line each.
         logOncePerWindow(`observe:${keyKind}`, (suppressed, sinceMs) => {
           console.warn("[rate-limit] observe-only bucket would have tripped", {
-            ipHash,
+            ...(ipHash === null ? {} : { ipHash }),
             path,
             count: count + 1,
             suppressed,
