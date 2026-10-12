@@ -28,6 +28,7 @@ import type { SearchDatasetsInput } from "../../shared/contract/mcp";
 import { MAX_MODALITY_FILTER_TOKENS } from "../../shared/modality-filter";
 import { searchDatasetsTool } from "../src/mcp/tools/search-datasets";
 import { registerCatalogRoutes } from "../src/routes/datasets/catalog";
+import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 
@@ -319,6 +320,66 @@ describe("GET /datasets: modality is a whole-token match", () => {
     );
     expect(await listIds(app, db, "modality=eeg&has_hed=1")).toEqual(ids(ROWS.eegOnly));
     expect(await listIds(app, db, "modality=ieeg&has_hed=1")).toEqual(ids(ROWS.ieegOnly));
+  });
+});
+
+describe("GET /datasets?mine=true: modality is a whole-token match", () => {
+  // The signed-in branch builds its own query and calls the clause builder on
+  // its own; a regression there (dropping `filters`, or passing none) leaves
+  // every public-route test green, and `?mine` is the branch a depositor hits.
+  const API_KEY = "modality-mine-key-0123456789abcdef0123456789";
+  let db: Database;
+  let app: App;
+
+  beforeEach(async () => {
+    db = freshDb();
+    app = newApp();
+    seed(db);
+    db.run(
+      "INSERT INTO users (id, username, email, password_hash, status, role, email_verified) VALUES (9, 'mineuser', 'mine@example.org', 'x', 'approved', 'member', 1)",
+    );
+    db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (9, ?, ?)").run(
+      await hashApiKey(API_KEY),
+      API_KEY.slice(0, 8),
+    );
+    // The caller owns every fixture row except the iEEG-only one, which is
+    // someone else's: it must be absent for ownership, not for the filter.
+    db.query("UPDATE datasets SET owner_user_id = 9 WHERE dataset_id != ?").run(ROWS.ieegOnly.id);
+  });
+
+  async function mineIds(qs: string): Promise<string[]> {
+    const res = await app.request(
+      `/?mine=true&${qs}`,
+      { headers: { Authorization: `Bearer ${API_KEY}` } },
+      env(db),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { datasets: { dataset_id: string }[] };
+    return body.datasets.map((d) => d.dataset_id).sort();
+  }
+
+  test("control: the caller's own list is every row they own", async () => {
+    expect(await mineIds("")).toEqual(ALL_IDS.filter((id) => id !== ROWS.ieegOnly.id).sort());
+  });
+
+  test("modality=EEG returns the caller's rows holding an eeg token", async () => {
+    expect(await mineIds("modality=EEG")).toEqual(ids(...EEG_ROWS));
+  });
+
+  test("modality=iEEG returns the caller's ieeg rows and not another owner's", async () => {
+    expect(await mineIds("modality=iEEG")).toEqual(
+      ids(ROWS.eegAndIeeg, ROWS.upperIeeg, ROWS.middleIeeg),
+    );
+  });
+
+  test("a value over the token limit is a 400 here too", async () => {
+    const overLimit = distinctTokens(MAX_MODALITY_FILTER_TOKENS + 1).join(",");
+    const res = await app.request(
+      `/?mine=true&modality=${overLimit}`,
+      { headers: { Authorization: `Bearer ${API_KEY}` } },
+      env(db),
+    );
+    expect(res.status).toBe(400);
   });
 });
 
