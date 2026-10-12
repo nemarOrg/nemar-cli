@@ -201,9 +201,10 @@ export interface DatasetFilterOptions {
    * The declared facet vocabulary (epic #1144 phase 3, #1147) --
    * `shared/facets.ts` + `dataset-facets.ts`. Kept separate from the flat
    * legacy fields above rather than folded in: those nine fields have
-   * irregular, bespoke semantics (FTS routing, LIKE-joined comma lists) that
-   * don't fit a declared table, while every facet here shares one of five
-   * regular shapes. See ADR 0032.
+   * irregular, bespoke semantics (FTS routing, LIKE-joined `author` and
+   * `task` lists, a whole-token `modality` list) that don't fit a declared
+   * table, while every facet here shares one of five regular shapes. See
+   * ADR 0032.
    */
   facets?: FacetFilterValues;
   /** Widens every ACTIVE facet's predicate with its declared NULL test
