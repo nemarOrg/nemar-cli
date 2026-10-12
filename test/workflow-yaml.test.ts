@@ -607,11 +607,32 @@ describe("every workflow that calls gh gives it a repository", () => {
     ]) {
       expect(labels).toContain(expected);
     }
-    const issueCalls = parse(drift()) as Doc;
-    const steps = Object.values(issueCalls.jobs ?? {}).flatMap((j) => j.steps ?? []);
-    const groups = steps.flatMap((s) => (s.run ? ghCalls(s.run).map((c) => c.group) : []));
-    expect(groups.filter((g) => g === "issue").length).toBeGreaterThanOrEqual(9);
-    expect(groups.filter((g) => g === "label").length).toBeGreaterThanOrEqual(2);
+    const driftDoc = parse(drift()) as Doc;
+    const steps = Object.values(driftDoc.jobs ?? {}).flatMap((j) => j.steps ?? []);
+    const seen = new Map<string, number>();
+    for (const step of steps) {
+      for (const call of step.run ? ghCalls(step.run) : []) {
+        const pair = `${call.group} ${call.action}`;
+        seen.set(pair, (seen.get(pair) ?? 0) + 1);
+      }
+    }
+    // The least the drift workflow is known to do: each of its three issue steps lists, edits
+    // and creates an issue, and its label step lists and creates labels. Counted per command
+    // so a scanner that goes blind to ONE of them (say `elif gh label create`) fails here by
+    // name. If the workflow legitimately drops a call, lower its number; do not delete this.
+    const AT_LEAST: Record<string, number> = {
+      "issue list": 3,
+      "issue edit": 3,
+      "issue create": 3,
+      "label list": 1,
+      "label create": 1,
+    };
+    for (const [pair, least] of Object.entries(AT_LEAST)) {
+      expect(
+        seen.get(pair) ?? 0,
+        `gh ${pair} calls seen in the drift workflow`,
+      ).toBeGreaterThanOrEqual(least);
+    }
   });
 
   test("workflow files are found by .yml and .yaml alike, and nothing else", () => {
