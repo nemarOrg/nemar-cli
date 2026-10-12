@@ -13,12 +13,13 @@ import {
   adminGitHubToken,
   approvalGate,
   asVerdict,
+  checkMergeable,
   closePullRequest,
   fetchPullRequest,
   githubApiBase,
   identityMatches,
   manualApprovalCommand,
-  mergeRefusal,
+  mergeCheckOf,
   mergeWhenClean,
   notCleanWhy,
   postComment,
@@ -709,21 +710,35 @@ describe("merging", () => {
 });
 
 describe("what GitHub's mergeable state allows, asked before anything is written", () => {
-  const settle = (options: Parameters<typeof settleMergeState>[4] = {}) => {
+  /** The pull request as a caller has read it: a head, and the state read with it when it was read. */
+  const seen = (mergeableState?: string) => ({ headSha: SHA_A, mergeableState });
+  const options = (extra: Partial<Parameters<typeof settleMergeState>[4]> = {}) => {
     const slept: number[] = [];
-    const run = settleMergeState(ADMIN_TOKEN, "nm000201", 7, SHA_A, {
-      base: base(),
-      sleep: async (ms) => {
-        slept.push(ms);
-      },
-      ...options,
-    });
-    return run.then((result) => ({ result, slept }));
+    const sleep = async (ms: number) => {
+      slept.push(ms);
+    };
+    return { slept, opts: { base: base(), sleep, ...extra } };
+  };
+  const settle = async (
+    from: { headSha: string; mergeableState?: string } = seen(),
+    extra: Partial<Parameters<typeof settleMergeState>[4]> = {},
+  ) => {
+    const { slept, opts } = options(extra);
+    return { result: await settleMergeState(ADMIN_TOKEN, "nm000201", 7, from, opts), slept };
+  };
+  const check = async (
+    from: { headSha: string; mergeableState?: string } = seen(),
+    extra: Partial<Parameters<typeof settleMergeState>[4]> = {},
+  ) => checkMergeable(ADMIN_TOKEN, "nm000201", 7, from, options(extra).opts);
+  /** The sentence a merge that is not allowed is refused with, or null when it is. */
+  const refusal = (state: string | null | undefined) => {
+    const c = mergeCheckOf(state);
+    return c.ok ? null : c.why;
   };
   const reads = () => gh.seen.filter((s) => s.method === "GET" && s.path.endsWith("/pulls/7"));
 
   test("only clean allows a merge, and the sentence names the state and why it blocks", () => {
-    expect(mergeRefusal("clean")).toBeNull();
+    expect(refusal("clean")).toBeNull();
     for (const [state, why] of [
       ["unstable", "a check that is not required is not passing"],
       ["blocked", "a required check or review is not satisfied"],
@@ -734,7 +749,7 @@ describe("what GitHub's mergeable state allows, asked before anything is written
       ["has_hooks", "this tool merges only a pull request GitHub reports as clean"],
       ["brand_new_state", "this tool merges only a pull request GitHub reports as clean"],
     ] as const) {
-      const said = mergeRefusal(state);
+      const said = refusal(state);
       expect(said, state).toContain(`'${state}'`);
       expect(said, state).toContain(why);
       expect(said, state).toContain("so a merge would not be attempted");
@@ -743,7 +758,7 @@ describe("what GitHub's mergeable state allows, asked before anything is written
 
   test("a state that is the name of an object property is an unrecognised state, not that property", () => {
     for (const state of ["constructor", "toString", "hasOwnProperty", "__proto__", "valueOf"]) {
-      const said = mergeRefusal(state);
+      const said = refusal(state);
       expect(said, state).toContain("this tool merges only a pull request GitHub reports as clean");
       expect(said, state).not.toContain("function");
       expect(said, state).not.toContain("[object");
@@ -755,7 +770,7 @@ describe("what GitHub's mergeable state allows, asked before anything is written
 
   test("a state that is missing or empty is not clean, it is unknown", () => {
     for (const state of [undefined, null, ""]) {
-      expect(mergeRefusal(state), String(state)).toContain("'unknown'");
+      expect(refusal(state), String(state)).toContain("'unknown'");
     }
   });
 
@@ -769,7 +784,7 @@ describe("what GitHub's mergeable state allows, asked before anything is written
       "[link](http://x.test)",
     ]) {
       expect(stateWord(odd), odd).toBe("unrecognised");
-      expect(mergeRefusal(odd), odd).toContain("'unrecognised'");
+      expect(refusal(odd), odd).toContain("'unrecognised'");
     }
   });
 
@@ -778,14 +793,14 @@ describe("what GitHub's mergeable state allows, asked before anything is written
     const read = await fetchPullRequest(ADMIN_TOKEN, "nm000201", 7, base());
     expect(read).toMatchObject({ ok: true, value: { mergeableState: "unknown" } });
     // ...and asked about again, because unknown is what GitHub says while it works it out.
-    const { result, slept } = await settle({ tries: 2 });
+    const { result, slept } = await settle(seen(), { tries: 2 });
     expect(result).toEqual({ ok: true, state: "unknown" });
     expect(reads()).toHaveLength(3);
     expect(slept).toHaveLength(1);
   });
 
   test("a state already read and settled is used as it is, with no further read", async () => {
-    const { result, slept } = await settle({ first: "unstable" });
+    const { result, slept } = await settle(seen("unstable"));
     expect(result).toEqual({ ok: true, state: "unstable" });
     expect(reads()).toHaveLength(0);
     expect(slept).toEqual([]);
@@ -793,7 +808,7 @@ describe("what GitHub's mergeable state allows, asked before anything is written
 
   test("an unknown already read is asked about again after a wait, and the new answer is used", async () => {
     gh.pulls["nm000201#7"] = { sha: SHA_A, mergeableState: "unstable" };
-    const { result, slept } = await settle({ first: "unknown" });
+    const { result, slept } = await settle(seen("unknown"));
     expect(result).toEqual({ ok: true, state: "unstable" });
     expect(reads()).toHaveLength(1);
     expect(slept).toEqual([1000]);
@@ -809,12 +824,12 @@ describe("what GitHub's mergeable state allows, asked before anything is written
 
   test("a state that never settles comes back as unknown after the reads allowed, with no wait after the last", async () => {
     gh.pulls["nm000201#7"] = { sha: SHA_A, unknownReads: 99 };
-    const { result, slept } = await settle({ tries: 3 });
+    const { result, slept } = await settle(seen(), { tries: 3 });
     expect(result).toEqual({ ok: true, state: "unknown" });
     expect(reads()).toHaveLength(3);
     expect(slept).toHaveLength(2);
     // ...and unknown is not clean.
-    expect(mergeRefusal("unknown")).not.toBeNull();
+    expect(refusal("unknown")).not.toBeNull();
   });
 
   test("a head that is no longer the commit acted on is reported, not read as a state", async () => {
@@ -825,6 +840,83 @@ describe("what GitHub's mergeable state allows, asked before anything is written
   test("a pull request that cannot be read is reported with GitHub's status", async () => {
     const { result } = await settle();
     expect(result).toMatchObject({ ok: false, kind: "unreadable", status: 404 });
+  });
+
+  test("the state and the head it was read with travel together, so a state is never paired with another commit", async () => {
+    // The caller hands over the pull request it read, and the re-read is held to that one's head.
+    gh.pulls["nm000201#7"] = { sha: SHA_A, unknownReads: 1 };
+    const read = await fetchPullRequest(ADMIN_TOKEN, "nm000201", 7, base());
+    if (!read.ok) throw new Error("the stand-in answered no pull request");
+    expect(read.value).toMatchObject({ headSha: SHA_A, mergeableState: "unknown" });
+    gh.pulls["nm000201#7"].sha = SHA_B; // a push lands before the state is asked about again
+    expect((await settle(read.value)).result).toEqual({ ok: false, kind: "moved" });
+  });
+});
+
+describe("the one check a merge is asked about, before the approval and again right before it", () => {
+  const seen = (mergeableState?: string) => ({ headSha: SHA_A, mergeableState });
+  const opts = () => ({ base: base(), sleep: async () => {} });
+  const check = (from = seen(), extra = {}) =>
+    checkMergeable(ADMIN_TOKEN, "nm000201", 7, from, { ...opts(), ...extra });
+  const reads = () => gh.seen.filter((s) => s.method === "GET" && s.path.endsWith("/pulls/7"));
+
+  test("clean is the only state that allows it, and a clean one already read costs no read", async () => {
+    expect(mergeCheckOf("clean")).toEqual({ ok: true });
+    expect(await check(seen("clean"))).toEqual({ ok: true });
+    expect(reads()).toHaveLength(0);
+  });
+
+  test("a state that will not clear by itself advises approving without merging, one that may clear says to try again", () => {
+    for (const state of [
+      "unstable",
+      "blocked",
+      "behind",
+      "dirty",
+      "draft",
+      "has_hooks",
+      "odd_one",
+    ]) {
+      expect(mergeCheckOf(state), state).toMatchObject({ ok: false, advice: "without_merge" });
+    }
+    for (const state of ["unknown", "", undefined, null]) {
+      expect(mergeCheckOf(state), String(state)).toMatchObject({ ok: false, advice: "retry" });
+    }
+  });
+
+  test("each way of not getting a state says what actually happened, not that GitHub has not said", async () => {
+    // Cannot be read at all.
+    const unreadable = await check(seen("unknown"));
+    expect(unreadable).toMatchObject({ ok: false, advice: "retry" });
+    if (!unreadable.ok) {
+      expect(unreadable.why).toContain("Could not check whether it can be merged");
+      expect(unreadable.why).toContain("has no pull request #7");
+      expect(unreadable.why).not.toContain("has not said");
+      expect(unreadable.card).toContain("could not be checked");
+    }
+    // Read, but the branch is another commit now.
+    gh.pulls["nm000201#7"] = { sha: SHA_B, mergeableState: "clean" };
+    const moved = await check(seen("unknown"));
+    expect(moved).toMatchObject({ ok: false, advice: "retry" });
+    if (!moved.ok) {
+      expect(moved.why).toContain("The pull request changed while it was being read.");
+      expect(moved.why).not.toContain("has not said");
+    }
+    // Read, and GitHub still says unknown after the reads allowed: that IS "has not said".
+    gh.pulls["nm000201#7"] = { sha: SHA_A, unknownReads: 99 };
+    const unsettled = await check(seen("unknown"), { tries: 2 });
+    expect(unsettled).toMatchObject({ ok: false, advice: "retry" });
+    if (!unsettled.ok) expect(unsettled.why).toContain("'unknown' (GitHub has not said whether");
+  });
+
+  test("a failed read is never clean, even when the state it was asked about was", async () => {
+    // The caller's own state is "unknown", so the check reads again; the read fails.
+    gh.pulls["nm000201#7"] = {
+      sha: SHA_A,
+      mergeableState: "clean",
+      adminReadsAfterFirst: { status: 502 },
+    };
+    await fetchPullRequest(ADMIN_TOKEN, "nm000201", 7, base()); // the caller's first read
+    expect((await check(seen("unknown"))).ok).toBe(false);
   });
 });
 

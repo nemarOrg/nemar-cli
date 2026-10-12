@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { PassThrough } from "node:stream";
-import { approvalGate } from "../src/lib/pr-review-approve";
+import { type MergeCheck, approvalGate, mergeCheckOf } from "../src/lib/pr-review-approve";
 import { approveAllowed, parseChoice } from "../src/lib/pr-review-next";
 import { LineReader } from "../src/lib/prompt-lines";
 
@@ -29,7 +29,7 @@ describe("what a typed answer means", () => {
 
 describe("when y may approve and merge", () => {
   const pass = approvalGate({ verdict: "pass", staleVerdict: null });
-  const green = { bids: "pass", version: "pass", mergeable: "clean" };
+  const green = { bids: "pass", version: "pass", merge: mergeCheckOf("clean") };
 
   test("a pass with both required checks green", () => {
     expect(approveAllowed({ gate: pass, force: false, ...green })).toEqual({ ok: true });
@@ -52,7 +52,13 @@ describe("when y may approve and merge", () => {
       ["pass", "pending", "version pending"],
     ] as const) {
       for (const force of [false, true]) {
-        const r = approveAllowed({ gate: pass, force, bids, version, mergeable: "clean" });
+        const r = approveAllowed({
+          gate: pass,
+          force,
+          bids,
+          version,
+          merge: mergeCheckOf("clean"),
+        });
         expect(r.ok, `${bids}/${version}/${force}`).toBe(false);
         if (!r.ok) {
           expect(r.reason).toContain(word);
@@ -93,7 +99,7 @@ describe("when y may approve and merge", () => {
       ["", "has not said whether it can be merged"],
     ] as const) {
       for (const force of [false, true]) {
-        const r = approveAllowed({ gate: pass, force, ...green, mergeable });
+        const r = approveAllowed({ gate: pass, force, ...green, merge: mergeCheckOf(mergeable) });
         expect(r.ok, `${mergeable}/${force}`).toBe(false);
         if (!r.ok) {
           expect(r.reason).toContain(word);
@@ -101,9 +107,21 @@ describe("when y may approve and merge", () => {
         }
       }
     }
-    expect(approveAllowed({ gate: pass, force: false, ...green, mergeable: "clean" })).toEqual({
-      ok: true,
-    });
+    expect(approveAllowed({ gate: pass, force: false, ...green })).toEqual({ ok: true });
+  });
+
+  test("a merge check that could not be made says what happened, and --force does not reach it", () => {
+    const failed: MergeCheck = {
+      ok: false,
+      why: "Could not check whether it can be merged (Server Error (HTTP 502)).",
+      card: "could not be checked (Server Error (HTTP 502))",
+      advice: "retry",
+    };
+    for (const force of [false, true]) {
+      const r = approveAllowed({ gate: pass, force, ...green, merge: failed });
+      expect(r.ok, String(force)).toBe(false);
+      if (!r.ok) expect(r.reason).toContain("Could not check whether it can be merged");
+    }
   });
 
   test("both reasons are given when both apply", () => {
@@ -113,7 +131,7 @@ describe("when y may approve and merge", () => {
       force: false,
       bids: "fail",
       version: "pass",
-      mergeable: "clean",
+      merge: mergeCheckOf("clean"),
     });
     expect(r.ok).toBe(false);
     if (!r.ok) {
@@ -125,7 +143,7 @@ describe("when y may approve and merge", () => {
       force: false,
       bids: "fail",
       version: "pass",
-      mergeable: "unstable",
+      merge: mergeCheckOf("unstable"),
     });
     expect(all.ok).toBe(false);
     if (!all.ok) {

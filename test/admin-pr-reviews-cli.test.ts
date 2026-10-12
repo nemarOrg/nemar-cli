@@ -1122,10 +1122,22 @@ describe("nemar admin pr-reviews approve", () => {
       expect(r.exitCode).toBe(0);
       expect(r.stdout).toContain("Approved nm000201 #7");
       expect(r.stdout).toContain("It is not merged.");
-      expect(r.stdout).toContain("GitHub reports it as 'unstable'");
+      expect(r.stdout).toContain("GitHub reports this pull request as 'unstable'");
+      expect(r.stdout).toContain("so a merge would not be attempted");
+      expect(r.stdout).not.toContain("Run approve again with --merge");
       expect(reviewPosts()).toHaveLength(1);
       expect(reviewPosts()[0].token).toBe(ADMIN_TOKEN);
       expect(mergePuts()).toHaveLength(0);
+    });
+
+    test("approve alone while GitHub has not said still offers --merge again, because that state may clear", async () => {
+      reviewed("pass");
+      gh.pulls["nm000201#7"].unknownReads = 99;
+      const r = await approve();
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("Approved nm000201 #7");
+      expect(r.stdout).toContain("Run approve again with --merge");
+      expect(r.stdout).not.toContain("a merge would not be attempted");
     });
 
     test("approve alone on a held pull request whose review FAILED still needs --force, and with it approves", async () => {
@@ -1184,23 +1196,28 @@ describe("nemar admin pr-reviews approve", () => {
       expect(r.exitCode).toBe(1);
       expect(r.stdout).toContain("GitHub reports this pull request as 'unknown'");
       expect(r.stdout).toContain("Nothing was approved or merged.");
+      // A state that may clear by itself is not met with "approve without --merge".
+      expect(r.stdout).toContain("again in a moment");
+      expect(r.stdout).not.toContain("without --merge");
       expect(adminWrites()).toHaveLength(0);
     });
 
     test("when asking again fails, or finds the branch moved, nothing is written and the reason is said", async () => {
       // The first read says unknown, so the state is asked about again; that second read is the
       // one that cannot be trusted to say clean.
-      for (const [fields, said] of [
-        [{ adminReadStatusAfterFirst: 502 }, "Could not check whether it can be merged"],
-        [{ adminHeadAfterFirst: SHA_B }, "changed while it was being read"],
+      for (const [later, said] of [
+        [{ status: 502 }, "Could not check whether it can be merged"],
+        [{ sha: SHA_B }, "The pull request changed while it was being read."],
       ] as const) {
         gh.reset();
         db.run("DELETE FROM pr_reviews");
         reviewed("pass");
-        Object.assign(gh.pulls["nm000201#7"], { unknownReads: 1, ...fields });
+        Object.assign(gh.pulls["nm000201#7"], { unknownReads: 1, adminReadsAfterFirst: later });
         const r = await approve(["--merge"]);
         expect(r.exitCode, said).toBe(1);
         expect(r.stdout, said).toContain(said);
+        expect(r.stdout, said).toContain("again in a moment");
+        expect(r.stdout, said).not.toContain("without --merge");
         expect(r.stdout, said).not.toContain("Approved nm000201");
         expect(adminWrites(), said).toHaveLength(0);
       }
@@ -1767,26 +1784,32 @@ describe("nemar admin pr-reviews next", () => {
     gh.pulls["nm000201#7"].unknownReads = 99;
     const r = await next("y\nq\n");
     expect(r.stdout).toContain("y is not available: GitHub reports this pull request as 'unknown'");
+    expect(r.stdout).toContain("Try y again in a moment");
     expect(r.stdout).not.toContain(PROMPT_WITH_Y);
     expect(writes()).toHaveLength(0);
   });
 
-  test("when asking again fails, or finds the branch moved, the state is not clean and y is not offered", async () => {
-    for (const fields of [
-      { adminReadStatusAfterFirst: 502 },
-      { adminHeadAfterFirst: SHA_B },
+  test("when asking again fails or finds the branch moved, the card says which, and y is not offered", async () => {
+    for (const [later, card, said] of [
+      [{ status: 502 }, "could not be checked (", "Could not check whether it can be merged ("],
+      [
+        { sha: SHA_B },
+        "the pull request changed while it was being read",
+        "The pull request changed while it was being read.",
+      ],
     ] as const) {
       gh.reset();
       db.run("DELETE FROM pr_reviews");
       nodes(ready("nm000201", 7));
-      Object.assign(gh.pulls["nm000201#7"], { unknownReads: 1, ...fields });
+      Object.assign(gh.pulls["nm000201#7"], { unknownReads: 1, adminReadsAfterFirst: later });
       const r = await next("y\nq\n");
-      const why = JSON.stringify(fields);
-      expect(r.stdout, why).toContain(
-        "y is not available: GitHub reports this pull request as 'unknown'",
-      );
-      expect(r.stdout, why).not.toContain(PROMPT_WITH_Y);
-      expect(writes(), why).toHaveLength(0);
+      expect(r.stdout, said).toContain(`Merge:    ${card}`);
+      expect(r.stdout, said).toContain(`y is not available: ${said}`);
+      // Not the sentence for a state GitHub did not give: nothing of the kind happened.
+      expect(r.stdout, said).not.toContain("has not said whether it can be merged");
+      expect(r.stdout, said).toContain("Try y again in a moment");
+      expect(r.stdout, said).not.toContain(PROMPT_WITH_Y);
+      expect(writes(), said).toHaveLength(0);
     }
   });
 

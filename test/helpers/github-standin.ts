@@ -54,12 +54,18 @@ export interface PullState {
   /** The head every read AFTER THE FIRST sees: a push that lands between two readers' reads. */
   headAfterFirstRead?: string;
   /**
-   * Like the two above, but counted only over reads made with the administrator's own token, so a
-   * read the Worker makes in between does not use them up: the status those reads after the first
-   * answer (a GitHub that stops answering), and the head they see (a push).
+   * What every read made with the administrator's own token AFTER ITS FIRST answers instead: a
+   * status (a GitHub that stops answering), a head (a push), a mergeable state (a check that turns
+   * pending), or the pull request closed or merged. Counted over that token's reads only, so a read
+   * the Worker makes in between does not use it up.
    */
-  adminReadStatusAfterFirst?: number;
-  adminHeadAfterFirst?: string;
+  adminReadsAfterFirst?: {
+    status?: number;
+    sha?: string;
+    mergeableState?: string;
+    state?: "open" | "closed";
+    merged?: boolean;
+  };
 }
 
 export interface GitHubStandin {
@@ -219,23 +225,23 @@ export function startGitHubStandin(): GitHubStandin {
           reads[key] = (reads[key] ?? 0) + 1;
           if (token === ADMIN_TOKEN) adminReads[key] = (adminReads[key] ?? 0) + 1;
           const adminRead = token === ADMIN_TOKEN ? adminReads[key] : 0;
-          if (adminRead > 1 && p.adminReadStatusAfterFirst) {
-            return Response.json(
-              { message: "Server Error" },
-              { status: p.adminReadStatusAfterFirst },
-            );
+          const later = adminRead > 1 ? p.adminReadsAfterFirst : undefined;
+          if (later?.status) {
+            return Response.json({ message: "Server Error" }, { status: later.status });
           }
           const unknown = (p.unknownReads ?? 0) >= reads[key];
           return Response.json({
             number: Number(pull[2]),
-            state: p.state ?? "open",
-            merged: p.merged ?? false,
+            state: later?.state ?? p.state ?? "open",
+            merged: later?.merged ?? p.merged ?? false,
             draft: p.draft ?? false,
             mergeable_state: p.omitMergeableState
               ? undefined
-              : unknown
-                ? "unknown"
-                : (p.mergeableState ?? "clean"),
+              : later?.mergeableState
+                ? later.mergeableState
+                : unknown
+                  ? "unknown"
+                  : (p.mergeableState ?? "clean"),
             title: "Add subjects",
             author_association: p.assoc ?? "COLLABORATOR",
             user: { login: p.author ?? "contributor", id: p.authorId ?? 501, type: "User" },
@@ -249,11 +255,8 @@ export function startGitHubStandin(): GitHubStandin {
             },
             head: {
               sha:
-                p.adminHeadAfterFirst && adminRead > 1
-                  ? p.adminHeadAfterFirst
-                  : p.headAfterFirstRead && reads[key] > 1
-                    ? p.headAfterFirstRead
-                    : p.sha,
+                later?.sha ??
+                (p.headAfterFirstRead && reads[key] > 1 ? p.headAfterFirstRead : p.sha),
               ref: "add-subjects",
               repo: { full_name: `nemarDatasets/${pull[1]}`, owner: { login: "nemarDatasets" } },
             },

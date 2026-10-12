@@ -16,7 +16,7 @@
  * both (ADR 0093).
  */
 
-import { type ApprovalGate, mergeRefusal } from "./pr-review-approve.js";
+import type { ApprovalGate, MergeCheck } from "./pr-review-approve.js";
 
 export type NextChoice = "approve" | "close" | "comment" | "details" | "skip" | "quit";
 
@@ -66,11 +66,11 @@ export function approveAllowed(input: {
   bids: string;
   version: string;
   /**
-   * GitHub's `mergeable_state` for the pull request now, after `unknown` was asked about again.
-   * Required, so a caller cannot forget it; only `clean` passes, and one that was not read
-   * (undefined) is not clean.
+   * What GitHub's `mergeable_state` allows, as `checkMergeable` made it (asked again while it was
+   * `unknown`, and a read that failed or found another head is a refusal that says so). Required,
+   * so a caller cannot forget it; only `clean` passes.
    */
-  mergeable: string | undefined;
+  merge: MergeCheck;
 }): ApproveVerdict {
   const reasons: string[] = [];
   if (input.bids !== "pass" || input.version !== "pass") {
@@ -78,8 +78,7 @@ export function approveAllowed(input: {
       `A required check is not green (BIDS ${checkWord(input.bids)}, version ${checkWord(input.version)}), so GitHub would not let it merge.`,
     );
   }
-  const notClean = mergeRefusal(input.mergeable);
-  if (notClean) reasons.push(notClean);
+  if (!input.merge.ok) reasons.push(input.merge.why);
   if (input.gate.kind === "needs_force" && !input.force) {
     reasons.push(input.gate.reason);
   }

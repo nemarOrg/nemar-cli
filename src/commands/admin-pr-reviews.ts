@@ -53,25 +53,25 @@ import { dlog, markReportedExit } from "../lib/debug-log.js";
 import {
   type ApprovalGate,
   MERGE_METHODS,
+  type MergeAdvice,
+  type MergeCheck,
   type MergeMethod,
   type PullRequestFacts,
   type WriteResult,
   adminGitHubToken,
   approvalGate,
+  checkMergeable,
   closePullRequest,
   fetchPullRequest,
   githubApiBase,
   identityMatches,
   manualApprovalCommand,
-  mergeRefusal,
+  mergeCheckOf,
   mergeWhenClean,
-  notCleanWhy,
   postComment,
   pullRequestUrl,
   refusalFor,
   reviewForApproval,
-  settleMergeState,
-  stateWord,
   submitApproval,
   whoAmI,
 } from "../lib/pr-review-approve.js";
@@ -1189,6 +1189,32 @@ async function startAll(options: {
 
 // -- approve ------------------------------------------------------------------------------------
 
+type MergeRefused = Extract<MergeCheck, { ok: false }>;
+
+/** What the administrator can do about a merge that would not be attempted, in the words of the command that says it. */
+function mergeAdvice(
+  advice: MergeAdvice,
+  how: "approve" | "next",
+  at: { dataset: string; pr: number },
+): string {
+  if (advice === "retry") {
+    return how === "approve"
+      ? "Run the same command again in a moment."
+      : "Try y again in a moment, or s to skip it.";
+  }
+  return how === "approve"
+    ? "To approve without merging, run it again without --merge. The merge is then yours to make on GitHub."
+    : `To approve it without merging, run: nemar admin pr-reviews approve ${at.dataset} ${at.pr}   (without --merge). Here, s leaves it and c comments.`;
+}
+
+/** End `approve --merge` because a merge could not be asked for: nothing has been written. */
+function refuseMerge(merge: MergeRefused, at: { dataset: string; pr: number }): never {
+  return die(
+    `${merge.why} Nothing was approved or merged.`,
+    mergeAdvice(merge.advice, "approve", at),
+  );
+}
+
 prReviewsCommand
   .command("approve <dataset> <pr>")
   .description("Approve a pull request as YOURSELF (your GitHub login); merges only with --merge")
@@ -1254,25 +1280,8 @@ prReviewsCommand
       // that comes BEFORE anything is written (ADR 0093). The look after the approval stays, for a
       // state that changes in between, but it can only leave an approval standing.
       if (options.merge) {
-        const settled = await settleMergeState(token, dataset, pr, head, {
-          base,
-          first: live.mergeableState,
-        });
-        if (!settled.ok) {
-          die(
-            settled.kind === "moved"
-              ? "The pull request changed while it was being read, so nothing was approved or merged."
-              : `Could not check whether it can be merged (${settled.reason}). Nothing was approved or merged.`,
-            "Run the command again.",
-          );
-        }
-        const refusal = mergeRefusal(settled.state);
-        if (refusal) {
-          die(
-            `${refusal} Nothing was approved or merged.`,
-            "To approve without merging, run it again without --merge. The merge is then yours to make on GitHub.",
-          );
-        }
+        const merge = await checkMergeable(token, dataset, pr, live, { base });
+        if (!merge.ok) refuseMerge(merge, { dataset, pr });
       }
 
       console.log();
@@ -1323,12 +1332,13 @@ prReviewsCommand
       console.log(chalk.green(`Approved ${dataset} #${pr} at ${short(head)} as @${me.login}.`));
 
       if (!options.merge) {
-        // What GitHub said when the pull request was read, so the advice is not one `--merge` would refuse.
-        const refusal = mergeRefusal(live.mergeableState);
+        // What GitHub said when the pull request was read, so the advice is not one `--merge` would
+        // refuse. A state that may clear (unknown) still gets the usual advice.
+        const wouldMerge = mergeCheckOf(live.mergeableState);
         console.log(
           chalk.dim(
-            refusal && live.mergeableState !== "unknown"
-              ? `  It is not merged. GitHub reports it as '${stateWord(live.mergeableState)}' (${notCleanWhy(live.mergeableState)}), so --merge would not attempt it either; merge it on GitHub when you decide to.`
+            !wouldMerge.ok && wouldMerge.advice === "without_merge"
+              ? `  It is not merged. ${wouldMerge.why} Merge it on GitHub when you decide to.`
               : "  It is not merged. Run approve again with --merge (this records another approval), or merge it on GitHub.",
           ),
         );
@@ -1588,18 +1598,17 @@ an impatient Enter cannot answer a pull request you have not seen; piped answers
         const version = moved ? "unknown" : e.version;
         // `y` merges, so it is offered only when GitHub says the pull request is clean. GitHub works
         // that out lazily and the read above may have started it, so an `unknown` is asked about
-        // again; one that stays unknown (or cannot be read) is not clean.
-        const settled = await settleMergeState(session.token, e.dataset_id, e.pr_number, a.head, {
+        // again; one that stays unknown, cannot be read or finds another head is not clean, and the
+        // card says which.
+        const merge = await checkMergeable(session.token, e.dataset_id, e.pr_number, a.live, {
           base,
-          first: a.live.mergeableState,
         });
-        const mergeable = settled.ok ? settled.state : "unknown";
         const allowed = approveAllowed({
           gate: a.gate,
           force: options.force === true,
           bids,
           version,
-          mergeable,
+          merge,
         });
         // The stored verdict and the report can disagree (ADR 0093: the stricter is used).
         const shown = a.outcome as ReviewOutcome | null | undefined;
@@ -1618,10 +1627,7 @@ an impatient Enter cannot answer a pull request you have not seen; piped answers
         );
         console.log(`  Review:   ${reviewCell(a)}`);
         console.log(`  Checks:   BIDS ${checkCell(bids, 0)}   version ${checkCell(version, 0)}`);
-        if (mergeRefusal(mergeable)) {
-          const line = `  Merge:    ${notCleanWhy(mergeable)} (GitHub: ${stateWord(mergeable)})`;
-          console.log(mergeable === "dirty" ? chalk.red(line) : chalk.yellow(line));
-        }
+        if (!merge.ok) console.log(chalk.yellow(`  Merge:    ${merge.card}`));
         if (a.contributorNote) console.log(chalk.yellow(`  ${plain(a.contributorNote)}`));
         if (a.gate.kind === "confirm") console.log(chalk.yellow(`  ${a.gate.warning}`));
         if (a.gate.kind === "needs_force" && options.force) {
@@ -1647,13 +1653,10 @@ an impatient Enter cannot answer a pull request you have not seen; piped answers
         if (!allowed.ok) {
           console.log();
           console.log(chalk.yellow(`  y is not available: ${allowed.reason}`));
-          if (mergeRefusal(mergeable)) {
-            // Not a way to do it from here: `next` always merges when it approves.
-            console.log(
-              chalk.dim(
-                `  To approve it without merging, run: nemar admin pr-reviews approve ${e.dataset_id} ${e.pr_number}   (without --merge). Here, s leaves it and c comments.`,
-              ),
-            );
+          // `next` always merges when it approves, so approving without merging is `approve`.
+          if (!merge.ok) {
+            const at = { dataset: e.dataset_id, pr: e.pr_number };
+            console.log(chalk.dim(`  ${mergeAdvice(merge.advice, "next", at)}`));
           }
         }
 
