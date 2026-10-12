@@ -13,6 +13,24 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## Unreleased
+
+Pending release, currently `0.10.17-devN` on `dev`. Rename this heading to the version and
+date in the release pull request.
+
+### Fixed
+
+- **The `modality` filter matches a whole modality, not a substring (#1711, ADR 0032
+  amendment).** `GET /datasets`, `GET /datasets/search` and the MCP `search_datasets` tool
+  matched `LIKE '%eeg%'` over the comma-joined modality list, so `modality=EEG` also returned
+  datasets that were intracranial only (`ieeg`), and a `%` or `_` in the value matched every
+  row or any character. The filter now matches a whole token, ignoring case. A
+  comma-separated value matches a dataset holding any of its tokens (it used to match only a
+  list that held them adjacent and in stored order). A value that names no modality, such as
+  whitespace or a bare comma, matches nothing. Result counts for `modality=eeg` drop to the
+  datasets that hold an `eeg` token, which is the count `GET /datasets/facets` reports.
+  `task` and `author` are still substring filters. No migration and no deploy coupling.
+
 ## 0.10.16 - 2026-10-11
 
 Epic #1671 (upload and integrity fixes) reaches `main` together with the automated review of
