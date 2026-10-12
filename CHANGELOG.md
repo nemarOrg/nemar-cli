@@ -40,6 +40,17 @@ earlier releases are described only by their generated notes.
   or `.yaml`, and the per-dataset templates for a `gh` call with no checkout, `GH_REPO` or
   `--repo`, a swallowed issue lookup, a lookup in a step that does not stop on error, and a
   swallowed label create. A pull request that edited only a workflow used to run no job at all.
+- **A Cache API that keeps stalling no longer costs every API request half a second (#1715,
+  ADR 0098 amendment).** Every rate-limiter wait on the cache was bounded at 500 ms with no
+  memory, so while the cache stayed stalled each request paid the bound in each place it used
+  the cache, the website's server-side renders included. Each Worker isolate now keeps a small
+  breaker: three stalls within 60 seconds open it, an open breaker skips the cache at once for
+  10 seconds, and then one probe closes it when the cache answers. Fail-open is unchanged: a
+  skipped call is treated as a stalled one was, the request is served and not counted, and
+  nothing is ever refused because of it. Counting can stay off on an isolate for up to 10
+  seconds after the cache recovers. Skips are logged in the existing fault line as
+  `CacheSkippedError`, and opening and closing each have a rate-limited line. No migration and
+  no deploy coupling.
 
 ## 0.10.16 - 2026-10-11
 
