@@ -61,8 +61,8 @@ by the administrator, from their machine, with their own GitHub login.**
   protection applies: for a central-flow dataset only the check run posted by the NEMAR App counts,
   because anyone with push access can add a workflow job with the same name, and a commit status or
   another App's run does not; for the four legacy repositories (`nm000103`, `nm000105`, `nm000106`,
-  `nm000107`) the check is `bids-validation` from any source, as their ruleset has it; and
-  `version-check` is never pinned. A same-named run whose App could not be read is not counted but
+  `nm000107`) the check is `bids-validation` from any source, as their classic branch protection
+  (they have no ruleset) has it; and `version-check` is never pinned. A same-named run whose App could not be read is not counted but
   makes the state `unknown` if it is the newest. The checks read are the head commit's; if the
   connection returns another commit, or a check node could not be read, they are `unknown`.
 - **Approval is the administrator's act and does not pass through the Worker.** No Worker code path
