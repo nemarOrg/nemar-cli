@@ -28,6 +28,7 @@ import type { SearchDatasetsInput } from "../../shared/contract/mcp";
 import { MAX_MODALITY_FILTER_TOKENS } from "../../shared/modality-filter";
 import { searchDatasetsTool } from "../src/mcp/tools/search-datasets";
 import { registerCatalogRoutes } from "../src/routes/datasets/catalog";
+import { buildDatasetFilterClauses } from "../src/services/dataset-filters";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -505,6 +506,27 @@ describe("MCP search_datasets: modality is a whole-token match", () => {
     // Repeats are not distinct tokens.
     const repeats = Array.from({ length: 40 }, () => "EEG").join(",");
     expect(await call({ modality: repeats, limit: 100 })).toEqual(ids(...EEG_ROWS));
+  });
+});
+
+describe("an empty wanted token cannot match every row", () => {
+  // `parseTokenList` drops empty tokens, so no request reaches the clause with
+  // one. The clause must not DEPEND on that: its seed token is NULL, which
+  // equals nothing, so an empty wanted token matches only a row that holds an
+  // empty token. Injected through the bound parameter of the real clause, which
+  // is what a tokenizer that stopped dropping empties would bind.
+  test("[''] matches only the row that really holds an empty token", () => {
+    const db = freshDb();
+    seed(db);
+    const params: (string | number)[] = [];
+    const clauses = buildDatasetFilterClauses(params, { modality: "eeg" });
+    expect(params).toEqual(['["eeg"]']);
+    params[0] = JSON.stringify([""]);
+    const rows = db
+      .query(`SELECT d.dataset_id AS id FROM datasets d WHERE 1 = 1${clauses}`)
+      .all(...(params as never[])) as { id: string }[];
+    expect(rows.map((r) => r.id)).toEqual([ROWS.emptyModalities.id]);
+    db.close();
   });
 });
 

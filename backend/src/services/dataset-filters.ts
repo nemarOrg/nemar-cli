@@ -62,8 +62,10 @@ export function buildFtsMatch(query: string): string | null {
  * INSIDE a token (`e eg`) stays inside it. A NULL list yields no token at all:
  * `LOWER(NULL)` is NULL, so the seed row carries a NULL `rest`, the recursion's
  * condition is NULL and so not true, and no wanted token can equal the NULL
- * seed token. The first row is the empty seed token, which can never equal a
- * wanted one because {@link parseTokenList} drops empties.
+ * seed token. The first row is that NULL seed token, not an empty string, so it
+ * equals nothing: `NULL IN (...)` is never true, and even an empty wanted token
+ * (which {@link parseTokenList} drops, but which would otherwise match the seed
+ * of EVERY row) can only match a row that really holds an empty token.
  *
  * Splitting in SQL is what makes this the same tokenizing as
  * `parseTokenList` (split, trim, lower-case), and so as the facet vocabulary's
@@ -90,7 +92,7 @@ export function buildFtsMatch(query: string): string | null {
  * tok IN (SELECT value FROM json_each(?)))`, which references the outer `d`.
  */
 export const MODALITY_TOKENS_SQL = `WITH RECURSIVE modality_tokens(tok, rest) AS (
-    SELECT '', LOWER(d.modalities) || ','
+    SELECT NULL, LOWER(d.modalities) || ','
     UNION ALL
     SELECT TRIM(SUBSTR(rest, 1, INSTR(rest, ',') - 1), ' ' || CHAR(9) || CHAR(10) || CHAR(13)),
            SUBSTR(rest, INSTR(rest, ',') + 1)
