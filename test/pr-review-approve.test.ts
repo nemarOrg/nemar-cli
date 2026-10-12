@@ -596,7 +596,8 @@ describe("merging", () => {
       const r = await merge();
       expect(r.ok).toBe(false);
       if (!r.ok) {
-        expect(r.mergeableState).toBe(state);
+        // The refusal that is reported carries the state it was made for.
+        expect(r.merge?.why).toContain(`'${state}'`);
         expect(r.reason).toContain("The approval stands");
       }
       expect(puts()).toHaveLength(0);
@@ -729,7 +730,7 @@ describe("merging", () => {
 
 describe("what GitHub's mergeable state allows, asked before anything is written", () => {
   /** The pull request as a caller has read it: a head, and the state read with it when it was read. */
-  const seen = (mergeableState?: string) => ({ headSha: SHA_A, mergeableState });
+  const seen = (mergeableState: string | null = null) => ({ headSha: SHA_A, mergeableState });
   const options = (extra: Partial<Parameters<typeof settleMergeState>[4]> = {}) => {
     const slept: number[] = [];
     const sleep = async (ms: number) => {
@@ -738,14 +739,14 @@ describe("what GitHub's mergeable state allows, asked before anything is written
     return { slept, opts: { base: base(), sleep, ...extra } };
   };
   const settle = async (
-    from: { headSha: string; mergeableState?: string } = seen(),
+    from: { headSha: string; mergeableState: string | null } = seen(),
     extra: Partial<Parameters<typeof settleMergeState>[4]> = {},
   ) => {
     const { slept, opts } = options(extra);
     return { result: await settleMergeState(ADMIN_TOKEN, "nm000201", 7, from, opts), slept };
   };
   const check = async (
-    from: { headSha: string; mergeableState?: string } = seen(),
+    from: { headSha: string; mergeableState: string | null } = seen(),
     extra: Partial<Parameters<typeof settleMergeState>[4]> = {},
   ) => checkMergeable(ADMIN_TOKEN, "nm000201", 7, from, options(extra).opts);
   /** The sentence a merge that is not allowed is refused with, or null when it is. */
@@ -884,7 +885,7 @@ describe("what GitHub's mergeable state allows, asked before anything is written
 });
 
 describe("the one check a merge is asked about, before the approval and again right before it", () => {
-  const seen = (mergeableState?: string) => ({ headSha: SHA_A, mergeableState });
+  const seen = (mergeableState: string | null = null) => ({ headSha: SHA_A, mergeableState });
   const opts = () => ({ base: base(), sleep: async () => {} });
   const check = (from = seen(), extra = {}) =>
     checkMergeable(ADMIN_TOKEN, "nm000201", 7, from, { ...opts(), ...extra });

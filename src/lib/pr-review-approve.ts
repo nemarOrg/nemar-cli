@@ -730,8 +730,11 @@ export type MergeStateRead =
  */
 export interface MergeSeen {
   headSha: string;
-  /** When it is not `unknown` nothing more is read; when it is, GitHub is still working it out. */
-  mergeableState?: string;
+  /**
+   * The state read with that head, or null when none was read yet (it is then read). When it is not
+   * `unknown` nothing more is read; when it is, GitHub is still working it out.
+   */
+  mergeableState: string | null;
 }
 
 interface SettleOptions {
@@ -759,9 +762,9 @@ export async function settleMergeState(
   const tries = options.tries ?? 5;
 
   let state = seen.mergeableState;
-  let reads = state === undefined ? 0 : 1;
+  let reads = state === null ? 0 : 1;
   for (;;) {
-    if (state === undefined) {
+    if (state === null) {
       const pr = await fetchPullRequest(token, datasetId, prNumber, base);
       if (!pr.ok) return { ok: false, kind: "unreadable", status: pr.status, reason: pr.reason };
       if (pr.value.state !== "open") {
@@ -773,7 +776,7 @@ export async function settleMergeState(
     }
     if (state !== "unknown" || reads >= tries) return { ok: true, state };
     await sleep(1000);
-    state = undefined;
+    state = null;
   }
 }
 
@@ -809,7 +812,7 @@ function unreadMergeCheck(read: Extract<MergeStateRead, { ok: false }>): MergeRe
  * is `unknown`, as a {@link MergeCheck}. This is the ONE place that decides it, for the check made
  * before the approval is confirmed, the one made right before it is written, and the `next` card.
  * A pull request whose state was already read and is settled costs no request; one passed with only
- * its head ({ headSha }) is read.
+ * its head and no state (`mergeableState: null`) is read.
  */
 export async function checkMergeable(
   token: string,
@@ -836,7 +839,13 @@ export async function recheckBeforeApproval(
   headSha: string,
   options: SettleOptions = {},
 ): Promise<MergeCheck> {
-  const check = await checkMergeable(token, datasetId, prNumber, { headSha }, options);
+  const check = await checkMergeable(
+    token,
+    datasetId,
+    prNumber,
+    { headSha, mergeableState: null },
+    options,
+  );
   return check.ok ? check : { ...check, why: `Checked again just before approving: ${check.why}` };
 }
 
@@ -846,7 +855,7 @@ export async function recheckBeforeApproval(
  * that moved, a state that is not `clean`), so only `unknown` means "GitHub may have merged it".
  * `status` is GitHub's where it answered, 405 or 409 where this code decided, and 0 for no answer.
  */
-export type MergeResult = { ok: true } | (WriteFailure & { mergeableState?: string });
+export type MergeResult = { ok: true } | (WriteFailure & { merge?: MergeRefused });
 
 /**
  * Merge the pull request at `headSha`, only if GitHub says it is mergeable WITHOUT a bypass.
@@ -867,7 +876,13 @@ export async function mergeWhenClean(
 ): Promise<MergeResult> {
   const base = options.base ?? githubApiBase();
 
-  const read = await settleMergeState(token, datasetId, prNumber, { headSha }, options);
+  const read = await settleMergeState(
+    token,
+    datasetId,
+    prNumber,
+    { headSha, mergeableState: null },
+    options,
+  );
   if (!read.ok) {
     if (read.kind === "moved") {
       return {
@@ -898,7 +913,7 @@ export async function mergeWhenClean(
       ok: false,
       outcome: "not_sent",
       status: 405,
-      mergeableState: read.state,
+      merge: check,
       reason: `Not merged: ${check.why} The approval stands.`,
     };
   }
