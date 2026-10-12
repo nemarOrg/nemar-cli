@@ -89,14 +89,25 @@ const A = "sub-01/eeg/sub-01_task-rest_eeg.edf";
 const B = "sub-02/eeg/sub-02_task-rest_eeg.edf";
 const C = "sub-03/eeg/sub-03_task-rest_eeg.edf";
 
+/**
+ * Write a data file the way an upload finds one: written well before the run. A file
+ * modified in the same second git writes the index is "racily clean", and git sets its
+ * recorded size to zero so a later command reads it once more whatever its stat says.
+ * That is git protecting itself, not the read under test, and recordings on a real
+ * upload were written long before it.
+ */
+function writeDataFile(dir: string, path: string, size: number, fill: number): void {
+  writeFile(dir, path, Buffer.alloc(size, fill));
+  const written = Date.now() / 1000 - 60;
+  utimesSync(join(dir, path), written, written);
+}
+
 /** A dataset directory ready for an upload, with distinct content per file. */
 async function dataset(name: string, files: Record<string, number>): Promise<string> {
   const dir = await newDatasetRepo(scratch.root, name);
   ensureGitignoreHasNemar(dir);
   let fill = 1;
-  for (const [path, size] of Object.entries(files)) {
-    writeFile(dir, path, Buffer.alloc(size, fill++));
-  }
+  for (const [path, size] of Object.entries(files)) writeDataFile(dir, path, size, fill++);
   writeFile(dir, "dataset_description.json", '{"Name":"x","BIDSVersion":"1.9.0"}');
   return dir;
 }
@@ -209,7 +220,7 @@ describe("what the tracking step no longer reads", () => {
     expect(await statRecorded(dir, B)).toBe(false);
 
     clearUploadProgress(dir);
-    writeFile(dir, C, Buffer.alloc(2 * MIB, 9));
+    writeDataFile(dir, C, 2 * MIB, 9);
     const log = await meterFilterProcess(dir);
     const p = await plan(dir);
     // The premise: the files the first upload tracked are add targets again.
