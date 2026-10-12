@@ -249,3 +249,46 @@ projection).
   unlike the atomically-written pairs from migration 0070.
 - nm000111: confirmed live case where `n_channels` (19) disagrees with the
   true per-recording distribution (70/124 recordings actually at 20).
+
+## Amendment 2026-10-12 (#1711): `modality` is a whole-token match, and stays a bespoke filter
+
+The Decision keeps `modality` out of the facet table because its semantics are
+irregular, "LIKE-joined comma lists". For `modality` that irregularity was a defect:
+`datasets.modalities` is a comma-joined list (`eeg,ieeg,meg`) and the filter was
+`LOWER(modalities) LIKE '%<value>%'`, so `modality=EEG` also returned datasets whose
+modalities were only `ieeg`, `%` matched every row, and `_eg` matched `meg`. Production
+showed it: a search for `ieeg` with `modality=EEG` returned 97 of 100 rows with no `eeg`
+token.
+
+What is now decided:
+
+- **One definition, in `buildDatasetFilterClauses`.** `GET /datasets` (both branches),
+  every tier of `GET /datasets/search` and the MCP `search_datasets` tool all build their
+  filter through it, so the fix is one clause and no caller carries its own. The
+  vocabulary endpoint tallies the same column in JS; a route test holds the two to the
+  same counts, because either can be changed alone.
+- **Whole token, case-insensitive.** The stored list is lower-cased, spaces are removed
+  and a comma is fenced onto each end, so the first, middle and last token are found the
+  same way and `eeg` is not found inside `ieeg`. No modality token contains a space, so
+  removing every space equals trimming each token.
+- **A comma-separated value matches a dataset holding ANY of its tokens**, the same OR the
+  `license` filter and the enum facets use. Before, `eeg,meg` matched only a dataset whose
+  stored list happened to contain those two tokens adjacent and in that order.
+- **The wanted tokens are one `json_each` parameter**, not one placeholder per token and
+  not a LIKE pattern, so a long list costs one bound parameter (the D1 ceiling,
+  `MAX_BOUND_PARAMS`) and there is nothing to escape.
+- **A supplied value that names no token (whitespace, bare commas) matches nothing.** It
+  binds an empty list. It is not dropped, which would turn a filter the caller asked for
+  into the whole catalog, and it is not a 400: `modality` predates the table and keeps the
+  contract it shipped with, as `license` does. An EMPTY value is still no filter.
+
+Not decided here: `task` and `author` remain substring filters. Their documented contract
+is "substring match", and `task` has over a thousand distinct labels that people search by
+fragment; they are a separate decision if the same complaint is made of them. Moving
+`modality` into the facet table as a token-list kind remains possible, but it would change
+`FACETS.length`, the `search_datasets` filter cap that is sized from it, and the generated
+MCP and CLI flags, for no change in behavior. The admin sweep selectors that read
+`modalities LIKE '%eeg%'` are not this filter; their call sites say why a substring is
+right for them.
+
+Receipt: `backend/test/modality-exact-token.test.ts`.
