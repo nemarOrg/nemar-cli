@@ -361,6 +361,10 @@ describe("every workflow that calls gh gives it a repository", () => {
    * - MISSES a lookup whose failure is hidden some other way: `$(gh ... | head -1)` without
    *   `pipefail` (the pipeline's status is `head`'s), `|| exit 0`, `|| echo 0`, or any
    *   swallow not in the list the rule names.
+   * - MISSES a `gh` behind a wrapper it does not understand: one with options of its own
+   *   (`timeout -s KILL 30 gh`, `env -i X=1 gh`, `nice -n 5 gh`), `xargs gh`, or a quoted
+   *   script (`bash -c 'gh ...'`). It sees through only `retry`, `timeout N`, `env`, `command`,
+   *   `exec`, `time`, `nohup`, `sudo` and `VAR=value` prefixes.
    * - MISSES every later `gh` call in a script after a phantom heredoc: `$((1 << N))` or a
    *   string such as "<<EOF" looks like a heredoc start, and the rest of the script is
    *   skipped as its body.
