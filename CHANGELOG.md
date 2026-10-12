@@ -24,12 +24,16 @@ date in the release pull request.
   amendment).** `GET /datasets`, `GET /datasets/search` and the MCP `search_datasets` tool
   matched `LIKE '%eeg%'` over the comma-joined modality list, so `modality=EEG` also returned
   datasets that were intracranial only (`ieeg`), and a `%` or `_` in the value matched every
-  row or any character. The filter now matches a whole token, ignoring case. A
-  comma-separated value matches a dataset holding any of its tokens (it used to match only a
-  list that held them adjacent and in stored order). A value that names no modality, such as
-  whitespace or a bare comma, matches nothing. Result counts for `modality=eeg` drop to the
-  datasets that hold an `eeg` token, which is the count `GET /datasets/facets` reports.
-  `task` and `author` are still substring filters. No migration and no deploy coupling.
+  row or any character. The filter now matches a whole token, ignoring case, and a space
+  inside a token is part of it. **A partial name no longer matches:** `modality=ee` and
+  `modality=mot` used to return datasets and now return nothing; use the full name (`eeg`,
+  `motion`). A comma-separated value matches a dataset holding any of its tokens (it used to
+  match only a list that held them adjacent and in stored order). A value that names no
+  modality, such as whitespace or a bare comma, matches nothing. **At most 32 distinct
+  modalities may be named in one request**; more is a 400 (a refused tool call on MCP) rather
+  than a truncated list. Result counts for `modality=eeg` drop to the datasets that hold an
+  `eeg` token, which is the count `GET /datasets/facets` reports. `task` and `author` are
+  still substring filters. No migration and no deploy coupling.
 
 ## 0.10.16 - 2026-10-11
 
