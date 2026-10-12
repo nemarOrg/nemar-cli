@@ -17,19 +17,23 @@ earlier releases are described only by their generated notes.
 
 ### Fixed
 
-- **Tracking no longer leaves large data files for git to re-read through git-annex
-  filter-process (#1704, ADR 0100).** `git annex add` stages an unlocked file without stat
-  data, so the save, the first `git status` afterwards and the next upload's add each streamed
-  it through `git-annex filter-process` again, and the add's check of files already in the
-  index read each one twice. For data files of 1 GiB or more the tracking step now records the
-  stat data with `git add --refresh` through git-annex's per-file clean filter, which answers
-  from its inode cache without the file's content being sent. `filter.annex.process` is out of
-  the repository's configuration only for that refresh, under git-annex's own
-  `filter.annex.process-temp-disabled` marker, and is put back in a `finally`, on SIGINT,
-  SIGTERM and SIGHUP, and at the start of the next upload; a configuration that cannot be put
-  back fails the step. Smaller files are tracked as before. Measured locally, the bytes piped
-  into the filter fell from 2,517 MB to 1.1 MB on a second upload to a 1.26 GB dataset; not
-  measured on CephFS.
+- **Tracking no longer leaves data files of 1 GiB or more for git to re-read through
+  git-annex filter-process (#1704, ADR 0100).** `git annex add` stages an unlocked file without
+  stat data, so the save, the first `git status` afterwards and the next upload's add each
+  streamed it through `git-annex filter-process` again, and the add's check of files already in
+  the index read each one twice. For data files of 1 GiB or more the tracking step now records
+  the stat data with `git add --refresh` through git-annex's per-file clean filter, which
+  answers from its inode cache without the file's content being sent. `filter.annex.process` is
+  out of the repository's configuration only for one chunk of 100 paths at a time, under
+  git-annex's own `filter.annex.process-temp-disabled` marker, and only when no other filter
+  process (an empty one included) is set in any scope; it is put back after each chunk, on
+  SIGINT, SIGTERM and SIGHUP, and at the start of the next upload, and a configuration that
+  cannot be put back fails the step. Files under 1 GiB are tracked as before, so after a save
+  that took the 1 GiB skip, the next upload still reads each of them twice; trees of many
+  smaller files, the common EEG case, keep that cost. Measured locally with the threshold
+  lowered to 100 MB so that 200 MiB files were primed, the bytes piped into the filter on a
+  second upload to a 1.26 GB dataset fell from 2,517 MB to 1.1 MB; at the shipped threshold
+  those files are not primed. Not measured on CephFS.
 
 ## 0.10.16 - 2026-10-11
 
