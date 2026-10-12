@@ -456,8 +456,9 @@ the GitHub account linked to your NEMAR account (if one is linked), and approves
 you were shown. It asks before approving unless you add --yes. A failing review, a running one, or
 one that could not be read needs --force. Nothing merges unless you add --merge (or answer y in
 'next'), and then only if GitHub reports the pull request clean. That is checked BEFORE anything is
-approved, and again just before the approval is written: a pull request that is not clean (one the
-automated review holds is expected to be reported 'unstable') is neither approved nor merged by
+approved, and again just before the approval is written (GitHub has no approve-and-merge call, so
+that narrows the window to one request and cannot close it): a pull request that is not clean (one
+the automated review holds is expected to be reported 'unstable') is neither approved nor merged by
 --merge or y, you are told which state GitHub gave and why, and 'approve' without --merge approves
 it. The merge is then attempted once, and it never tries a merge GitHub reports as blocked.
 If 'gh' holds no signed-in account, or the token is an app or workflow token,

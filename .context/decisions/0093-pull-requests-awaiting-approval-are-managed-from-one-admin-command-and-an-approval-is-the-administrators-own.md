@@ -116,8 +116,10 @@ by the administrator, from their machine, with their own GitHub login.**
   GitHub Enterprise Server value). That is read BEFORE anything is written: a state that is not
   `clean` writes no approval and no merge (amendment of 2026-10-12). It re-asks while GitHub is still
   working the state out, does not wait for pending checks, sends the approved `sha` so GitHub refuses
-  a branch that moved, looks at the state once more after the approval in case it changed, and
-  otherwise stops with the approval standing. An administrator can be a
+  a branch that moved, reads the state again just before the approval is written (amendment of
+  2026-10-12) and once more after it in case it changed, and otherwise stops with the approval
+  standing. GitHub has no approve-and-merge call, so these looks narrow the window to one request and
+  do not close it. An administrator can be a
   bypass actor, so this does not attempt a merge GitHub reports as blocked; the ruleset enforces, and
   this code does not try to defeat it.
 - **An outcome that is unknown is said to be unknown.** A write that gets no answer from GitHub, one
@@ -220,8 +222,9 @@ before either is written, by one function (`checkMergeable`) for every place tha
   (GitHub works it out lazily), and writes nothing, no approval and no merge, unless it is `clean`.
   It says which state GitHub reported and why that blocks a merge, and then what to do. For a state
   that will not clear by itself that is to run `approve` without `--merge`, which approves without
-  merging; for `unknown`, or a read that failed or found the branch moved, it is to run the same
-  command again in a moment. `--dry-run --merge` gives the same answer, because it is what the real
+  merging; for `unknown` or a read that failed, it is to run the same command again in a moment; for
+  a head that is another commit than the one shown, to run it again to read the new one. `--dry-run
+  --merge` gives the same answer, because it is what the real
   run would do. A state that is still `unknown`, one that cannot be read, a re-read that finds
   another head, a pull request that is no longer open, and a state this code has never heard of are
   not `clean`.
@@ -229,12 +232,18 @@ before either is written, by one function (`checkMergeable`) for every place tha
   settled the same way before the card is shown. When it is not offered the card says which state, or
   which failed read, and why, and names `nemar admin pr-reviews approve <dataset> <pr>` (without
   `--merge`); `n`, `c`, `d`, `s` and `q` are the answers that remain. Typing `y` anyway is refused
-  with the reason and writes nothing. `--force` is about the review's verdict and does not reach this.
+  with the reason and writes nothing. For a state that may clear, or a head that changed, the
+  advice is that `s` skips the card and a fresh `next` run looks again, not that `y` can be tried
+  again: a card is pinned to the head it was shown for, and `y` when it is not offered does not look
+  again. `--force` is about the review's verdict and does not reach this.
 - **The state is read again right before the approval is written**, by one helper
   (`recheckBeforeApproval`) that both commands call. The early check can be as old as the
   confirmation prompt or the time a card was on screen, and an approval cannot be taken back, so the
   state is read fresh (one extra request when it is clean) and a refusal says it came from that second
   look. The early check stays so the administrator is not asked to confirm what cannot be done.
+  This narrows the window to one request and does not close it: GitHub has no approve-and-merge
+  call, so this is narrowed, not atomic, and the look after the approval is what catches a check that
+  starts or reports in the meantime.
 - **The look after the approval stays.** A check can turn pending and a push can land between the
   second read and the merge, so the state is read once more right before the merge is sent, and the
   approval stands if it is no longer `clean`. That is now the exception, not the way a held pull

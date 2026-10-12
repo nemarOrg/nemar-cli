@@ -26,8 +26,10 @@ earlier releases are described only by their generated notes.
   the approval is written: unless GitHub says `clean` (asked again while it says `unknown`; an
   unreadable or unrecognised state, a moved head and a pull request no longer open are not clean),
   nothing is approved or merged, the state or the failed read is named with why it blocks, and the
-  way forward is given (approve without `--merge` for a state that will not clear, try again in a
-  moment for one that may). `y` is not offered for such a pull request, `--force` does not reach it,
+  way forward is given (approve without `--merge` for a state that will not clear, run the command
+  again for one that may or whose head changed; in `next`, `s` skips it and a fresh run looks again).
+  The second look narrows the window to one request and does not close it: GitHub has no
+  approve-and-merge call. `y` is not offered for such a pull request, `--force` does not reach it,
   and `approve` without `--merge` is unchanged. The "clean only" rule itself is unchanged. A
   repository whose protection required an approving review would read `blocked` before the approval
   and is now refused; neither the ruleset applied to published datasets nor the classic protection on
