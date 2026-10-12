@@ -73,6 +73,19 @@ export function buildFtsMatch(query: string): string | null {
  * whitespace a stored list can carry; JS `trim` also covers exotic Unicode
  * spaces, which nothing writes here.
  *
+ * Termination: a step runs only while `rest` still contains a comma, and each
+ * step removes everything up to and including that comma, so `rest` strictly
+ * shortens and the recursion stops after one step per comma. It deliberately
+ * does NOT stop on `rest = ''`, which holds only if every step drains `rest`
+ * completely: SQLite's SUBSTR stops at an embedded NUL byte, so a stored value
+ * like `x,y,z<NUL>,eeg` can leave `rest` non-empty and comma-free, INSTR returns
+ * 0, SUBSTR(rest, 1) returns `rest` unchanged, and an `rest <> ''` condition
+ * repeats that row until the database's time limit (30 s on D1) ends the
+ * statement. No writer produces a NUL, but one such row would stall every
+ * modality-filtered request. `modality-tokenizer-termination.test.ts` runs it in
+ * a child process with a hard timeout, because a hung bun:sqlite call cannot be
+ * interrupted from inside the test.
+ *
  * Used as `EXISTS (${MODALITY_TOKENS_SQL} SELECT 1 FROM modality_tokens WHERE
  * tok IN (SELECT value FROM json_each(?)))`, which references the outer `d`.
  */
@@ -81,7 +94,7 @@ export const MODALITY_TOKENS_SQL = `WITH RECURSIVE modality_tokens(tok, rest) AS
     UNION ALL
     SELECT TRIM(SUBSTR(rest, 1, INSTR(rest, ',') - 1), ' ' || CHAR(9) || CHAR(10) || CHAR(13)),
            SUBSTR(rest, INSTR(rest, ',') + 1)
-    FROM modality_tokens WHERE rest <> ''
+    FROM modality_tokens WHERE INSTR(rest, ',') > 0
   )`;
 
 /**
