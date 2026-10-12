@@ -407,7 +407,7 @@ describe("every workflow that calls gh gives it a repository", () => {
    * the prefix, 2 the whitespace and wrappers, 3 the gh command group.
    */
   const GH_AT_COMMAND_POSITION = new RegExp(
-    String.raw`(^|[;&|(\`{!]|\b(?:then|do|else|elif|if|while|until)\s|=\S*\s)(\s*${WRAPPERS})gh\s+([a-z][a-z-]*)`,
+    String.raw`(^|[;&|(\`{!]|\b(?:then|do|else|elif|if|while|until)\s)(\s*${WRAPPERS})gh\s+([a-z][a-z-]*)`,
     "g",
   );
 
@@ -649,6 +649,248 @@ describe("every workflow that calls gh gives it a repository", () => {
     );
     expect(label, "the label mutation must apply").not.toBe(drift());
     expect(defectsOf("drift", label).some((d) => d.includes("failed label create"))).toBe(true);
+  });
+
+  describe("scanner controls, one table per way the analysis can be wrong", () => {
+    // Static text over parsed YAML is wrong at its edges in both directions. Each table names
+    // the cases one scanner line is responsible for, so changing that line fails a row.
+    const job = (body: string) => `
+name: Controls
+on: workflow_dispatch
+jobs:
+  j:
+    runs-on: ubuntu-latest
+${body}
+`;
+    /** A workflow whose only step runs `script`, optionally after a checkout of this repo. */
+    const withScript = (script: string, checkout = false) =>
+      job(`    steps:
+${checkout ? "      - uses: actions/checkout@v4\n" : ""}      - name: s
+        run: |
+${script
+  .split("\n")
+  .map((l) => `          ${l}`)
+  .join("\n")}
+`);
+    const defectCount = (yaml: string) => defectsOf("controls.yml", yaml).length;
+
+    test("GH_REPO counts only as a non-empty string, at any of the three levels", () => {
+      const levels: [string, (value: string) => string][] = [
+        [
+          "step",
+          (v) =>
+            job(
+              `    steps:\n      - name: s\n        env:\n          GH_REPO: ${v}\n        run: gh pr list`,
+            ),
+        ],
+        [
+          "job",
+          (v) =>
+            job(
+              `    env:\n      GH_REPO: ${v}\n    steps:\n      - name: s\n        run: gh pr list`,
+            ),
+        ],
+        [
+          "workflow",
+          (v) =>
+            `name: c\non: workflow_dispatch\nenv:\n  GH_REPO: ${v}\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - name: s\n        run: gh pr list\n`,
+        ],
+      ];
+      const values: [string, number][] = [
+        ['""', 1],
+        ['" "', 1],
+        ["", 1], // a bare key is null
+        ["5", 1], // defined, but not a repository
+        ["true", 1],
+        ["o/n", 0],
+        ["${{ github.repository }}", 0],
+      ];
+      for (const [level, build] of levels) {
+        for (const [value, expected] of values) {
+          expect(defectCount(build(value)), `${level}-level GH_REPO: ${value}`).toBe(expected);
+        }
+      }
+    });
+
+    test("GH_REPO does not leak from one step to another, or from one job to another", () => {
+      const acrossSteps = job(`    steps:
+      - name: names it
+        env:
+          GH_REPO: o/n
+        run: echo hello
+      - name: needs it
+        run: gh pr list`);
+      expect(defectCount(acrossSteps)).toBe(1);
+      const acrossJobs = `name: c
+on: workflow_dispatch
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    env:
+      GH_REPO: o/n
+    steps:
+      - name: names it
+        run: gh pr list
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - name: needs it
+        run: gh pr list
+`;
+      const defects = defectsOf("controls.yml", acrossJobs);
+      expect(defects.length).toBe(1);
+      expect(defects[0]).toContain('job "b"');
+    });
+
+    test("a checkout covers its own job only", () => {
+      const yaml = `name: c
+on: workflow_dispatch
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ok
+        run: gh pr list
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - name: not covered
+        run: gh pr list
+`;
+      const defects = defectsOf("controls.yml", yaml);
+      expect(defects.length).toBe(1);
+      expect(defects[0]).toContain('job "b"');
+    });
+
+    test("--repo and -R name a repository, in either spelling, for their own call only", () => {
+      const named = [
+        "gh pr list --repo o/n",
+        "gh pr list --repo=o/n",
+        "gh pr list -R o/n",
+        "gh pr list --state open --repo o/n --limit 5",
+      ];
+      for (const line of named) expect(defectCount(withScript(line)), line).toBe(0);
+      // A flag on the NEXT gh call on the line does not rescue the first.
+      expect(defectCount(withScript("gh pr list && gh issue list --repo o/n"))).toBe(1);
+      // A flag that only looks like one does not count.
+      for (const line of ["gh pr list --reponame x", "gh pr list --state=-R"]) {
+        expect(defectCount(withScript(line)), line).toBe(1);
+      }
+    });
+
+    test("every command group that reads the git remote is reported when bare", () => {
+      // A literal list, NOT the scanner's own set: iterating the set would let a group be
+      // dropped from it without any row noticing.
+      const scoped = [
+        "issue",
+        "pr",
+        "label",
+        "release",
+        "run",
+        "workflow",
+        "secret",
+        "variable",
+        "cache",
+        "ruleset",
+        "browse",
+      ];
+      for (const group of scoped) {
+        expect(defectCount(withScript(`gh ${group} list`)), `gh ${group}`).toBe(1);
+      }
+      // And the ones that name their own target, or none, stay clean.
+      const unscoped = [
+        "gh auth status",
+        "gh repo clone o/n",
+        'gh api "repos/o/n/issues"',
+        "gh api user",
+        "gh search issues x",
+        "gh extension list",
+        "gh --version",
+      ];
+      for (const line of unscoped) expect(defectCount(withScript(line)), line).toBe(0);
+    });
+
+    test("a lookup that decides whether an issue exists is reported when swallowed", () => {
+      const lookups = [
+        "gh issue list --state open",
+        "gh issue view 1 --json number",
+        "gh issue status",
+        "gh search issues drift",
+      ];
+      const swallows = [
+        '|| echo ""',
+        "|| echo ''",
+        "|| echo",
+        "|| true",
+        "|| :",
+        '|| printf ""',
+        "|| printf ''",
+        '|| EXISTING=""',
+        "|| EXISTING=''",
+        "|| EXISTING=",
+      ];
+      for (const lookup of lookups) {
+        for (const swallow of swallows) {
+          const line = `EXISTING=$(${lookup} ${swallow})`;
+          expect(defectCount(withScript(line, true)), line).toBe(1);
+        }
+        // The same lookup, left to fail the step, is clean.
+        expect(defectCount(withScript(`EXISTING=$(${lookup})`, true)), lookup).toBe(0);
+      }
+    });
+
+    test("a label create is reported when it discards stderr or its status, however spelled", () => {
+      const hidden = [
+        "gh label create x 2>/dev/null",
+        "gh label create x &>/dev/null",
+        "gh label create x >/dev/null 2>&1",
+        "gh label create x || true",
+        "gh label create x 2>/dev/null || true",
+        'gh label create x || echo ""',
+      ];
+      for (const line of hidden) expect(defectCount(withScript(line, true)), line).toBe(1);
+      for (const line of [
+        "gh label create x",
+        'gh label create x || echo "::warning::could not create x"',
+        "if gh label create x; then echo ok; fi",
+      ]) {
+        expect(defectCount(withScript(line, true)), line).toBe(0);
+      }
+    });
+
+    test("a gh call is found wherever a shell lets a command start", () => {
+      const positions = [
+        "gh issue create --title t",
+        "  gh issue create --title t",
+        "true && gh issue create --title t",
+        "false || gh issue create --title t",
+        "true; gh issue create --title t",
+        "echo x | gh issue create --title t",
+        "X=$(gh issue create --title t)",
+        "X=`gh issue create --title t`",
+        "{ gh issue create --title t; }",
+        "! gh issue create --title t",
+        "X=1 gh issue create --title t",
+        "if true; then gh issue create --title t; fi",
+        "for i in 1; do gh issue create --title t; done",
+        "if false; then :; else gh issue create --title t; fi",
+        "if false; then :; elif gh issue create --title t; then :; fi",
+        "while gh issue list; do :; done",
+        "until gh issue list; do :; done",
+        "if gh issue list; then :; fi",
+      ];
+      for (const line of positions) expect(defectCount(withScript(line)), line).toBe(1);
+      // Text that only mentions a command is not a command.
+      const mentions = [
+        'echo "run gh issue create by hand"',
+        "echo gh issue create",
+        "grep -q 'gh issue create' file",
+        "# then gh issue create",
+        "echo pigh issue create",
+      ];
+      for (const line of mentions) expect(defectCount(withScript(line)), line).toBe(0);
+    });
   });
 
   describe("the issue-filing steps of the drift and nightly workflows", () => {
