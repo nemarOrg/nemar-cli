@@ -95,9 +95,10 @@ by the administrator, from their machine, with their own GitHub login.**
   the version went up, and any findings. Then it waits for one answer: `y` approves as the
   administrator and squash-merges, `n` closes with a comment, `c` comments and leaves it open, `d`
   shows the whole report and asks again, `s` leaves it, `q` stops. `y` is offered
-  only when both required checks are green, because the merge that follows would be refused
-  otherwise, and a failing, running or unreadable review still needs `--force`, exactly as for
-  `approve`. A comment is typed by the administrator and posted as typed, and for `n` it is posted
+  only when both required checks are green and GitHub reports the pull request `clean` (settled as
+  for `approve --merge`, see the amendment of 2026-10-12), because the merge that follows would be
+  refused otherwise, and a failing, running or unreadable review still needs `--force`, exactly as for
+  `approve`; `--force` does not reach the mergeable state. A comment is typed by the administrator and posted as typed, and for `n` it is posted
   BEFORE the pull request is closed, so the author never meets a closed pull request with no
   reason; an empty comment cancels. Every write is made with the administrator's own token after
   the same identity checks as `approve`. A write whose outcome is unknown, or that recorded
@@ -112,9 +113,11 @@ by the administrator, from their machine, with their own GitHub login.**
   and the list was read whole.
 - **A merge is attempted only on request, and is a check, not an enforcement.** `--merge` (and `y`
   in `next`, which always squashes) is attempted once, only if GitHub reports the pull request `clean` (not `has_hooks`, which is a
-  GitHub Enterprise Server value); it re-asks while GitHub is still
+  GitHub Enterprise Server value). That is read BEFORE anything is written: a state that is not
+  `clean` writes no approval and no merge (amendment of 2026-10-12). It re-asks while GitHub is still
   working the state out, does not wait for pending checks, sends the approved `sha` so GitHub refuses
-  a branch that moved, and otherwise stops with the approval standing. An administrator can be a
+  a branch that moved, looks at the state once more after the approval in case it changed, and
+  otherwise stops with the approval standing. An administrator can be a
   bypass actor, so this does not attempt a merge GitHub reports as blocked; the ruleset enforces, and
   this code does not try to defeat it.
 - **An outcome that is unknown is said to be unknown.** A write that gets no answer from GitHub, one
@@ -198,3 +201,46 @@ subcommand here that makes the Worker act on a pull request, and the Worker's pa
 check and comment any review makes: it still does not approve or merge. The decision and its limits are
 in [ADR 0092](0092-dataset-pull-requests-get-a-derived-verdict-from-a-worker-gated-model-review.md),
 amendment of 2026-10-10.
+
+## Amendment 2026-10-12: a merge that was asked for is checked before anything is approved
+
+The release review of 0.10.16 found that `approve --merge`, and `y` in `next`, approved a pull request
+and only then read GitHub's state and declined to merge it. The state was read after the approval,
+and `y` was offered for every state but `dirty` and `behind`, so a pull request the automated
+review holds (its check is not required, and a non-required check that is not passing is expected
+to make GitHub report `unstable`; not yet observed on GitHub) was approved and then refused the
+merge. The administrator was left with an approval they asked for only as the first half of a pair.
+ADR 0092 recorded this as an open item.
+
+The rule above does not change: a merge is attempted only when GitHub reports `clean`. What moves
+is where it is checked. `--merge` and `y` ask for an approval AND a merge, so GitHub's state is read
+before either is written:
+
+- **`approve --merge`** reads the state first, asks again for a few seconds while it is `unknown`
+  (GitHub works it out lazily), and writes nothing, no approval and no merge, unless it is `clean`.
+  It says which state GitHub reported, why that blocks a merge, and that `approve` without `--merge`
+  approves without merging. `--dry-run --merge` gives the same answer, because it is what the real
+  run would do. A state that is still `unknown`, one that cannot be read, and one this code has never
+  heard of are not `clean`.
+- **`y` in `next`** is offered only when both required checks are green and GitHub reports `clean`,
+  settled the same way before the card is shown. When it is not offered the card says which state and
+  why, and names `nemar admin pr-reviews approve <dataset> <pr>` (without `--merge`); `s` and `c`
+  are the answers that remain. Typing `y` anyway is refused with the reason and writes nothing.
+  `--force` is about the review's verdict and does not reach this.
+- **The look after the approval stays.** A check can turn pending and a push can land between the
+  first read and the merge, so the state is read again right before the merge is sent, and the
+  approval stands if it is no longer `clean`. That is now the exception, not the way a held pull
+  request is handled.
+- **An approval alone is unchanged.** `approve` without `--merge` approves whatever the state is,
+  under the same verdict gate and `--force`, and when GitHub's state would have stopped `--merge` it
+  says so instead of suggesting `--merge`.
+
+A pull request the review holds is therefore approved with `approve` and merged on GitHub by the
+administrator, as ADR 0092's second option put it. The first option (accept `unstable` when both
+required checks pass) is not taken here: it changes the rule, and it is the maintainer's to decide.
+
+One consequence is worth knowing. A repository whose ruleset required an approving review would read
+`blocked` before the administrator's approval and `clean` after it, so `--merge` and `y` would now
+refuse it where they used to approve and merge. The ruleset applied to a published dataset requires
+none (`required_approving_review_count: 0`, ADR 0001), so nothing is refused today for this reason;
+the four legacy repositories' rulesets were not read for this change.

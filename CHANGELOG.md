@@ -13,6 +13,23 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## Unreleased
+
+### Fixed
+
+- **`nemar admin pr-reviews approve --merge` and `y` in `next` no longer approve a pull request
+  they then refuse to merge (ADR 0093 amendment).** Both approved first and read GitHub's
+  `mergeable_state` afterwards, and `y` was offered for every state but `dirty` and `behind`, so a
+  pull request the automated review holds (its check is not required and not passing, which GitHub is
+  expected to report as `unstable`) was approved and left unmerged. The state is now read before
+  anything is written: unless GitHub says `clean` (asked again while it says `unknown`; an
+  unreadable or unrecognised state is not clean), nothing is approved or merged, the state and why it
+  blocks are named, and the way to approve without merging is given. `y` is not offered for such a
+  pull request, `--force` does not reach it, and `approve` without `--merge` is unchanged. The
+  "clean only" rule itself is unchanged. A dataset whose ruleset required an approving review would
+  read `blocked` before the approval and is now refused; the ruleset applied to published datasets
+  requires none.
+
 ## 0.10.16 - 2026-10-11
 
 Epic #1671 (upload and integrity fixes) reaches `main` together with the automated review of
