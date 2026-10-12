@@ -51,6 +51,14 @@ earlier releases are described only by their generated notes.
   seconds after the cache recovers. Skips are logged in the existing fault line as
   `CacheSkippedError`, and opening and closing each have a rate-limited line. No migration and
   no deploy coupling.
+- **The rate limiter's observe-only warning no longer logs a reversible hash of the caller's
+  address (#1713, ADR 0098 amendment).** Its `ipHash` field was a plain SHA-256 of the address
+  (or of `site:<address>`), which anyone can reverse for an IPv4 address by trying every
+  address. It is now an HMAC-SHA-256 under a key derived from the existing `ENCRYPTION_KEY`
+  secret with HKDF, so it still tells one caller from another but a reader of the log cannot
+  recover the address. A Worker without `ENCRYPTION_KEY` leaves the field out. The field keeps
+  its name; its values change, so a pseudonym logged before this release does not match one
+  logged after. No new secret, no migration and no deploy coupling.
 
 ## 0.10.16 - 2026-10-11
 

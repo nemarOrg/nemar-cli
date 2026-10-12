@@ -241,3 +241,27 @@ A cool-down of 10 seconds rather than the rest of the window, so counting resume
 Receipts: `backend/test/rate-limit-cache-breaker.test.ts` drives the real limiter with the harness's cache made to stall.
 It fails when the breaker never opens, never closes, opens on one stall, keeps its state per caller key, keeps an unbounded list, lets a skipped call extend the cool-down, counts a fast failure as a stall, ignores the 60-second window, closes on a probe that stalls, lets more than one probe through, keeps the old stalls after recovering, guards the lookup but not the write, refuses instead of failing open, stops reporting a skipped call, or logs every opening.
 Nothing here was observed on the deployed Worker; no production stall has been recorded.
+
+## Amendment 2026-10-12 (#1713): the observe-only line names its caller by a keyed pseudonym
+
+The limiter's lines say a bucket's name and never an address (above).
+One line did carry one in effect: the observe-only warning, `[rate-limit] observe-only bucket would have tripped`, logged `ipHash` as a plain SHA-256 of the bucket key.
+An IPv4 address hashed that way is recovered by hashing all 2^32 of them, and a `site:<address>` key from decision 3 is no harder.
+
+1. **`ipHash` is now an HMAC-SHA-256 of the bucket key under a key derived for this purpose alone** (`backend/src/services/log-pseudonym.ts`).
+   The key is derived from `ENCRYPTION_KEY`, an existing Worker secret, with HKDF-SHA-256 (RFC 5869, empty salt, info `nemar/log-pseudonym/v1`).
+   No new secret is needed.
+   The derivation keeps this use apart from the secret's others (the sign-in code hashes, the ORCID state and pending-signup signatures, the stored-credential encryption):
+   nothing they compute is a pseudonym, and no pseudonym is anything they would accept.
+2. **The same caller gets the same pseudonym** for as long as the secret is unchanged, so lines about one caller can still be put together.
+   Someone holding the secret can still enumerate addresses; the secret is the boundary, as it is for the code hashes.
+3. **With no `ENCRYPTION_KEY` the field is left out.**
+   An unkeyed hash in its place would be the reversible value this removes, under a name that suggests otherwise.
+4. **The field keeps its name, `ipHash`,** although the value is a pseudonym and the key can be `site:<address>`, so a log query written for it still finds it.
+
+Not changed here, and a decision of its own: `hashIp` (`backend/src/services/web-session.ts`) is still a plain SHA-256,
+and its other callers store that value with web, docs and private-site sessions and in the device sign-in audit details.
+Nothing reads those columns back to compare them, so moving them to a keyed value would break no lookup, but it changes what stored rows mean and is outside the limiter.
+
+Receipts: `backend/test/rate-limit-log-pseudonym.test.ts` checks the logged value against values computed independently in Python's `hmac` and `hashlib`,
+and fails when the value is an unkeyed SHA-256, an HMAC under the bare secret, derived without the label, the raw key, present without a secret, or when a failed derivation is kept for the isolate's life.
