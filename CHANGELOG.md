@@ -13,6 +13,24 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## Unreleased
+
+### Fixed
+
+- **Tracking no longer leaves large data files for git to re-read through git-annex
+  filter-process (#1704, ADR 0098).** `git annex add` stages an unlocked file without stat
+  data, so the save, the first `git status` afterwards and the next upload's add each streamed
+  it through `git-annex filter-process` again, and the add's check of files already in the
+  index read each one twice. For data files of 1 GiB or more the tracking step now records the
+  stat data with `git add --refresh` through git-annex's per-file clean filter, which answers
+  from its inode cache without the file's content being sent. `filter.annex.process` is out of
+  the repository's configuration only for that refresh, under git-annex's own
+  `filter.annex.process-temp-disabled` marker, and is put back in a `finally`, on SIGINT,
+  SIGTERM and SIGHUP, and at the start of the next upload; a configuration that cannot be put
+  back fails the step. Smaller files are tracked as before. Measured locally, the bytes piped
+  into the filter fell from 2,517 MB to 1.1 MB on a second upload to a 1.26 GB dataset; not
+  measured on CephFS.
+
 ## 0.10.16 - 2026-10-11
 
 Epic #1671 (upload and integrity fixes) reaches `main` together with the automated review of

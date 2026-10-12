@@ -1,6 +1,6 @@
 /**
  * git-annex service: record index stat data for large annexed files without streaming
- * their content through `git-annex filter-process`. See ADR 0100 and
+ * their content through `git-annex filter-process`. See ADR 0098 and
  * {@link primeIndexStat}.
  */
 
@@ -32,7 +32,7 @@ export const FILTER_PROCESS_MARKER = "filter.annex.process-temp-disabled";
  * 25 GB file on CephFS. The read it replaces costs the file's size over filter-process
  * throughput: about 1.7 GB/s on local APFS, 75 to 95 MB/s a stream on that CephFS. A
  * 1 GiB file therefore takes about 0.6 s to re-read locally and 11 to 14 s on CephFS,
- * which leaves the per-file filter at least three times cheaper on both. Below a few
+ * which leaves the per-file filter at least twice as cheap on both. Below a few
  * hundred megabytes it is not: on CephFS a 256 MiB file re-reads in about 3 s. Re-measure
  * on the target host before moving it.
  */

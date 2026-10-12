@@ -40,7 +40,7 @@ export interface DataStepsArgs {
 export interface DataStepsDeps {
   openRemote?: OpenRemote;
   skipMinBytes?: number;
-  /** Lets a small file reach the tracking step's index priming (ADR 0100). */
+  /** Lets a small file reach the tracking step's index priming (ADR 0098). */
   primeMinBytes?: number;
   saveStep?: typeof saveDatasetStep;
   saveInactivityWarningAfterMs?: number;
@@ -71,7 +71,7 @@ export async function runDataSteps(
   }
 
   // The same for the filter process the tracking step takes out of the configuration
-  // while it records index stat data (ADR 0100): a run killed in that window leaves it
+  // while it records index stat data (ADR 0098): a run killed in that window leaves it
   // out, and every git command after it would start one git-annex process per file.
   const filter = await restoreSuspendedFilterProcess(args.absolutePath);
   if (filter.error) {
