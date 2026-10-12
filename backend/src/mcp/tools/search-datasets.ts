@@ -45,9 +45,11 @@ import { splitCsv } from "../../services/data-router.js";
 import { FacetEnumParseError, parseFacetFilters } from "../../services/dataset-facets.js";
 import {
   type DatasetFilterOptions,
+  ModalityTokenLimitError,
   PUBLISHED_AT_SQL,
   buildDatasetFilterClauses,
   buildPublicCatalogBase,
+  parseModalityFilter,
 } from "../../services/dataset-filters.js";
 import {
   DATASET_ID_IN_JSON_LIST,
@@ -315,6 +317,19 @@ export async function searchDatasetsTool(
     return badFilterOutcome(
       `That filter value was not accepted: ${detail}. Ranges take \`10..20\`, \`64..\`, or \`..128\`; enum and version facets take a declared token.`,
     );
+  }
+
+  // #1711: an over-long modality list is refused, never truncated, and
+  // reported by name like a malformed facet value (ADR 0051). Checked after
+  // the facet parse so the more specific complaint comes first; the clause
+  // builder enforces the same bound as a backstop.
+  if (args.modality) {
+    try {
+      parseModalityFilter(args.modality);
+    } catch (err) {
+      if (!(err instanceof ModalityTokenLimitError)) throw err;
+      return badFilterOutcome(`That filter value was not accepted. ${err.message}`);
+    }
   }
 
   const filters = buildFilterOptions(args, facets);

@@ -25,6 +25,7 @@ import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import type { SearchDatasetsInput } from "../../shared/contract/mcp";
+import { MAX_MODALITY_FILTER_TOKENS } from "../../shared/modality-filter";
 import { searchDatasetsTool } from "../src/mcp/tools/search-datasets";
 import { registerCatalogRoutes } from "../src/routes/datasets/catalog";
 import type { Bindings, Variables } from "../src/types/bindings";
@@ -132,6 +133,18 @@ async function searchIds(app: App, db: Database, qs: string): Promise<string[]> 
   expect(res.status).toBe(200);
   const body = (await res.json()) as { results: { id: string }[] };
   return body.results.map((r) => r.id).sort();
+}
+
+/**
+ * `count` DISTINCT modality tokens, the first being `eeg` so a request that is
+ * accepted still has rows to return. The rest are `m01`, `m02`, ... which no
+ * fixture row holds, so they widen the list without changing the answer.
+ */
+function distinctTokens(count: number): string[] {
+  return [
+    "eeg",
+    ...Array.from({ length: count - 1 }, (_, i) => `m${String(i + 1).padStart(2, "0")}`),
+  ];
 }
 
 describe("GET /datasets: modality is a whole-token match", () => {
@@ -268,6 +281,37 @@ describe("GET /datasets: modality is a whole-token match", () => {
     );
   });
 
+  test("a value naming more distinct modalities than the limit is refused, not truncated", async () => {
+    expect(MAX_MODALITY_FILTER_TOKENS).toBe(32); // the number the docs state
+    const atLimit = distinctTokens(MAX_MODALITY_FILTER_TOKENS).join(",");
+    expect(await listIds(app, db, `modality=${atLimit}`)).toEqual(ids(...EEG_ROWS));
+
+    const overLimit = distinctTokens(MAX_MODALITY_FILTER_TOKENS + 1).join(",");
+    const res = await app.request(`/?modality=${overLimit}`, {}, env(db));
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain(String(MAX_MODALITY_FILTER_TOKENS + 1));
+    expect(body.error).toContain(String(MAX_MODALITY_FILTER_TOKENS));
+    // A refusal names the count and the limit and does not echo the value.
+    expect(body.error).not.toContain("m01");
+  });
+
+  test("the limit counts DISTINCT tokens after normalising, so repeats are free", async () => {
+    // 40 copies of one token, in three spellings.
+    const repeats = Array.from({ length: 40 }, (_, i) => ["eeg", "EEG", " eeg "][i % 3]).join(",");
+    expect(await listIds(app, db, `modality=${repeats}`)).toEqual(ids(...EEG_ROWS));
+    // The limit's worth of distinct tokens PLUS case and padding variants of
+    // them: more than the limit by entry count, exactly the limit by distinct
+    // count.
+    const variants = [...distinctTokens(MAX_MODALITY_FILTER_TOKENS), "EEG", " M01 ", "m02"].join(
+      ",",
+    );
+    expect(await listIds(app, db, `modality=${variants}`)).toEqual(ids(...EEG_ROWS));
+    // Empty entries are not tokens either.
+    const gappy = `${distinctTokens(MAX_MODALITY_FILTER_TOKENS).join(",,")},,,`;
+    expect(await listIds(app, db, `modality=${gappy}`)).toEqual(ids(...EEG_ROWS));
+  });
+
   test("modality combines with another filter instead of replacing it", async () => {
     db.query("UPDATE datasets SET has_hed = 1 WHERE dataset_id IN (?, ?)").run(
       ROWS.eegOnly.id,
@@ -317,6 +361,19 @@ describe("GET /datasets/search: modality is a whole-token match", () => {
     expect(await searchIds(app, db, "q=ieeg&modality=eeg,meg")).toEqual(
       ids(ROWS.eegAndIeeg, ROWS.middleIeeg),
     );
+  });
+
+  test("the token limit applies here too: the limit is accepted, one more is a 400", async () => {
+    const atLimit = distinctTokens(MAX_MODALITY_FILTER_TOKENS).join(",");
+    expect(await searchIds(app, db, `q=eeg&modality=${atLimit}`)).toEqual(ids(...EEG_ROWS));
+    const overLimit = distinctTokens(MAX_MODALITY_FILTER_TOKENS + 1).join(",");
+    const res = await app.request(`/search?q=eeg&modality=${overLimit}`, {}, env(db));
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain(String(MAX_MODALITY_FILTER_TOKENS + 1));
+    // Repeats are not distinct tokens.
+    const repeats = Array.from({ length: 40 }, () => "eeg").join(",");
+    expect(await searchIds(app, db, `q=eeg&modality=${repeats}`)).toEqual(ids(...EEG_ROWS));
   });
 
   test("the reported count follows the filtered rows", async () => {
@@ -372,6 +429,21 @@ describe("MCP search_datasets: modality is a whole-token match", () => {
     expect(await call({ modality: "ieeg,meg", limit: 100 })).toEqual(
       ids(ROWS.ieegOnly, ROWS.eegAndIeeg, ROWS.upperIeeg, ROWS.middleIeeg, ROWS.megOnly),
     );
+  });
+
+  test("the token limit: the limit is accepted, one more is refused by name", async () => {
+    const atLimit = distinctTokens(MAX_MODALITY_FILTER_TOKENS).join(",");
+    expect(await call({ modality: atLimit, limit: 100 })).toEqual(ids(...EEG_ROWS));
+
+    const overLimit = distinctTokens(MAX_MODALITY_FILTER_TOKENS + 1).join(",");
+    const outcome = await searchDatasetsTool(toolEnv, { modality: overLimit, limit: 100 });
+    expect(outcome.result.isError).toBe(true);
+    const text = (outcome.result.content as { text: string }[])[0].text;
+    expect(text).toContain(String(MAX_MODALITY_FILTER_TOKENS + 1));
+    expect(text).toContain(String(MAX_MODALITY_FILTER_TOKENS));
+    // Repeats are not distinct tokens.
+    const repeats = Array.from({ length: 40 }, () => "EEG").join(",");
+    expect(await call({ modality: repeats, limit: 100 })).toEqual(ids(...EEG_ROWS));
   });
 });
 

@@ -20,6 +20,7 @@
  * lives here now instead). `dataset-search.ts` imports FROM this file only.
  */
 
+import { MAX_MODALITY_FILTER_TOKENS } from "../../../shared/modality-filter.js";
 import type { LicenseTier } from "../lib/license";
 import type { AuthUser } from "../types/bindings";
 import { hasRole } from "../types/bindings";
@@ -103,6 +104,48 @@ export function parseTokenList(raw: string): string[] {
   ];
 }
 
+/**
+ * Thrown when a `modality` filter names more than
+ * {@link MAX_MODALITY_FILTER_TOKENS} distinct tokens. A rejection the caller
+ * translates into a 400 (the HTTP routes) or a refused tool call (MCP), the
+ * way a malformed facet range is; truncating to the first 32 would answer a
+ * different question than the one asked. The message states the count and the
+ * limit and does not echo the value.
+ */
+export class ModalityTokenLimitError extends Error {
+  constructor(
+    readonly distinct: number,
+    readonly limit: number = MAX_MODALITY_FILTER_TOKENS,
+  ) {
+    super(
+      [
+        `The modality filter names ${distinct} distinct values and at most ${limit} are accepted.`,
+        "The catalog has about a dozen modalities, so pass fewer.",
+      ].join(" "),
+    );
+    this.name = "ModalityTokenLimitError";
+  }
+}
+
+/**
+ * {@link parseTokenList} for a `modality` filter value, refusing one that names
+ * more than {@link MAX_MODALITY_FILTER_TOKENS} DISTINCT tokens (counted after
+ * normalising, so `eeg,EEG, eeg` is one). The clause costs a little per wanted
+ * token for every row it tests and the value is caller-controlled, so the
+ * bound is checked once at the parse step of every entry point, and again in
+ * {@link buildDatasetFilterClauses} so a future caller that skips the parse
+ * cannot reach the clause with an unbounded list.
+ *
+ * @throws {ModalityTokenLimitError}
+ */
+export function parseModalityFilter(raw: string): string[] {
+  const tokens = parseTokenList(raw);
+  if (tokens.length > MAX_MODALITY_FILTER_TOKENS) {
+    throw new ModalityTokenLimitError(tokens.length);
+  }
+  return tokens;
+}
+
 // Escape SQLite LIKE wildcards in user input so a literal '%' or '_' in the
 // search term means itself rather than "match everything" / "match any
 // character". Paired with `ESCAPE '\\'` on every LIKE predicate that uses
@@ -121,9 +164,10 @@ export interface DatasetFilterOptions {
   /** Modality, matched as a WHOLE token of the dataset's comma-joined
    *  `modalities` list, case-insensitively (#1711): `eeg` matches `eeg` and
    *  `eeg,meg` but not `ieeg`. A comma-separated value matches a dataset
-   *  holding ANY of its tokens, the same OR the `license` filter uses. See
-   *  {@link MODALITY_TOKENS_SQL} and {@link parseTokenList}. A non-empty value
-   *  that names no token
+   *  holding ANY of its tokens, the same OR the `license` filter uses, and
+   *  names at most {@link MAX_MODALITY_FILTER_TOKENS} distinct tokens (more is
+   *  a {@link ModalityTokenLimitError}). See {@link MODALITY_TOKENS_SQL} and
+   *  {@link parseTokenList}. A non-empty value that names no token
    *  (whitespace, bare commas) is a filter that matches nothing, never an
    *  unfiltered list. */
   modality?: string;
@@ -231,9 +275,9 @@ export function buildDatasetFilterClauses(
     // single bound parameter as one value (D1's ceiling is MAX_BOUND_PARAMS)
     // and nothing here is a LIKE pattern to escape. An empty list binds `[]`
     // and matches nothing, which is what a filter that was asked for and names
-    // no modality should do.
+    // no modality should do. More than MAX_MODALITY_FILTER_TOKENS throws.
     clauses += ` AND EXISTS (${MODALITY_TOKENS_SQL} SELECT 1 FROM modality_tokens WHERE tok IN (SELECT value FROM json_each(?)))`;
-    params.push(JSON.stringify(parseTokenList(opts.modality)));
+    params.push(JSON.stringify(parseModalityFilter(opts.modality)));
   }
   if (opts.author) {
     clauses += " AND LOWER(COALESCE(d.authors, '')) LIKE ?";

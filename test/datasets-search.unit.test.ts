@@ -14,9 +14,12 @@ import {
 } from "../backend/src/routes/datasets/catalog";
 import {
   MODALITY_TOKENS_SQL,
+  ModalityTokenLimitError,
   PUBLISHED_AT_SQL,
+  parseModalityFilter,
   parseTokenList,
 } from "../backend/src/services/dataset-filters";
+import { MAX_MODALITY_FILTER_TOKENS } from "../shared/modality-filter";
 
 describe("buildDatasetFilterClauses search clause", () => {
   test("search includes dataset_id + source_id LIKE and routes free-text through FTS5", () => {
@@ -106,6 +109,40 @@ describe("parseTokenList (#1711)", () => {
     const clauses = buildDatasetFilterClauses(params, { modality: " , " });
     expect(clauses).toContain(MODALITY_TOKENS_SQL);
     expect(params).toEqual(["[]"]);
+  });
+});
+
+describe("parseModalityFilter and the clause builder's backstop (#1711)", () => {
+  const tokens = (n: number) => Array.from({ length: n }, (_, i) => `t${i}`).join(",");
+
+  test("the limit is accepted and the next distinct token is refused with both numbers", () => {
+    expect(parseModalityFilter(tokens(MAX_MODALITY_FILTER_TOKENS))).toHaveLength(
+      MAX_MODALITY_FILTER_TOKENS,
+    );
+    try {
+      parseModalityFilter(tokens(MAX_MODALITY_FILTER_TOKENS + 1));
+      throw new Error("expected a ModalityTokenLimitError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ModalityTokenLimitError);
+      const refusal = err as ModalityTokenLimitError;
+      expect(refusal.distinct).toBe(MAX_MODALITY_FILTER_TOKENS + 1);
+      expect(refusal.limit).toBe(MAX_MODALITY_FILTER_TOKENS);
+    }
+  });
+
+  test("repeats and empty entries are not counted", () => {
+    expect(parseModalityFilter("eeg,EEG, eeg ,,".repeat(20))).toEqual(["eeg"]);
+  });
+
+  test("a caller that skips the parse still cannot reach the clause with an over-long list", () => {
+    const params: (string | number)[] = [];
+    expect(() =>
+      buildDatasetFilterClauses(params, { modality: tokens(MAX_MODALITY_FILTER_TOKENS + 1) }),
+    ).toThrow(ModalityTokenLimitError);
+    expect(params).toEqual([]);
+    const ok: (string | number)[] = [];
+    buildDatasetFilterClauses(ok, { modality: tokens(MAX_MODALITY_FILTER_TOKENS) });
+    expect(ok).toHaveLength(1);
   });
 });
 
