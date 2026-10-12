@@ -33,7 +33,9 @@ date in the release pull request.
   modalities may be named in one request**; more is a 400 (a refused tool call on MCP) rather
   than a truncated list. Result counts for `modality=eeg` drop to the datasets that hold an
   `eeg` token, which is the count `GET /datasets/facets` reports. `task` and `author` are
-  still substring filters. No migration and no deploy coupling.
+  still substring filters. Adjacent fix: `GET /datasets/search` now sends `Cache-Control:
+  no-store` on every response; it sent no `Cache-Control` at all, including on its 400s, which
+  `GET /datasets` already sent as `no-store`. No migration and no deploy coupling.
 
 ## 0.10.16 - 2026-10-11
 
