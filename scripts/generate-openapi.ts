@@ -86,7 +86,10 @@ import {
 } from "../shared/contract/dataset.js";
 import { strictVersionTagSchema } from "../shared/contract/version.js";
 import { FACETS, type FacetDefinition, type FacetValueKind } from "../shared/facets.js";
-import { MODALITY_FILTER_DESCRIPTION } from "../shared/modality-filter.js";
+import {
+  MAX_MODALITY_FILTER_TOKENS,
+  MODALITY_FILTER_DESCRIPTION,
+} from "../shared/modality-filter.js";
 
 extendZodWithOpenApi(z);
 
@@ -339,7 +342,7 @@ export function buildOpenApiDocument(): OpenAPIObject {
         content: { "application/json": { schema: DatasetListEnvelope } },
       },
       400: {
-        description: "An invalid facet range, enum value, or filter token.",
+        description: `An invalid facet range, enum value, or filter token, or a \`modality\` list naming more than ${MAX_MODALITY_FILTER_TOKENS} distinct values.`,
         content: { "application/json": { schema: ErrorResponse } },
       },
       401: {
@@ -367,7 +370,7 @@ export function buildOpenApiDocument(): OpenAPIObject {
         content: { "application/json": { schema: DatasetSearchEnvelope } },
       },
       400: {
-        description: 'Missing the required "q" parameter, or an invalid facet/range/enum filter.',
+        description: `Missing the required "q" parameter, an invalid facet/range/enum filter, or a \`modality\` list naming more than ${MAX_MODALITY_FILTER_TOKENS} distinct values.`,
         content: { "application/json": { schema: ErrorResponse } },
       },
     },

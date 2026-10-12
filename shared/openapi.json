@@ -1854,7 +1854,7 @@
             }
           },
           "400": {
-            "description": "An invalid facet range, enum value, or filter token.",
+            "description": "An invalid facet range, enum value, or filter token, or a `modality` list naming more than 32 distinct values.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2298,7 +2298,7 @@
             }
           },
           "400": {
-            "description": "Missing the required \"q\" parameter, or an invalid facet/range/enum filter.",
+            "description": "Missing the required \"q\" parameter, an invalid facet/range/enum filter, or a `modality` list naming more than 32 distinct values.",
             "content": {
               "application/json": {
                 "schema": {
