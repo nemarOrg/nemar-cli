@@ -203,6 +203,12 @@ jobs:
 
       - name: Ensure issue labels exist
         if: fromJSON(steps.fetch.outputs.drift) != 0
+        # A failure here is loud (the step goes red and its stderr stays in the log) but does
+        # not stop the job. Failing the job instead trades a duplicate for a lost alarm: one
+        # label-API hiccup would mean no issue at all this week. Nothing is hidden by letting
+        # the job go on: if a label really is missing, `gh issue create --label` in the steps
+        # below fails and says so.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -211,30 +217,30 @@ jobs:
           # repo; P1 and P2 are the project's standard priority labels. Create
           # only the ones that are missing.
           #
-          # THIS STEP FAILS THE JOB when it cannot do that. It used to end each
-          # call in `>/dev/null 2>&1 || true`, which hid both the missing `drift`
-          # label and the repository error above for twenty weeks. Without the
-          # label the `gh issue create --label drift,...` below fails anyway
-          # ("could not add label"), and the weekly lookup finds an existing
-          # issue BY that label, so an issue filed without it would be filed
-          # again every Monday. Failing here names the real cause one step
-          # earlier instead.
+          # This used to end each call in `>/dev/null 2>&1 || true`, which hid both
+          # the missing `drift` label and the repository error above for twenty
+          # weeks. Every failure is now printed, and every label is attempted
+          # before the step reports failure.
           #
           # Not `gh label create --force`: with no --color it picks a RANDOM one,
           # so every run would recolor the existing P1 and P2 labels.
           LABELS=$(gh label list --limit 1000 --json name --jq '.[].name')
+          failed=0
           ensure_label() {
             local name="$1" color="$2" description="$3"
             if grep -qixF "$name" <<< "$LABELS"; then
               echo "Label '$name' exists."
-            else
-              gh label create "$name" --color "$color" --description "$description"
+            elif gh label create "$name" --color "$color" --description "$description"; then
               echo "Created label '$name'."
+            else
+              echo "::error::Could not create label '$name'."
+              failed=1
             fi
           }
           ensure_label drift FBCA04 "summary.json drift detected by the weekly cron"
           ensure_label P1 ff6347 "High priority - important features, significant bugs"
           ensure_label P2 ffa500 "Normal priority - standard features and improvements"
+          exit "$failed"
 
       - name: Open / update drift issue
         # Skip when majority_errored is true — that case opens its own P1

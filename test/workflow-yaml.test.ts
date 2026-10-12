@@ -399,7 +399,7 @@ describe("every workflow that calls gh gives it a repository", () => {
    * the prefix, 2 the whitespace and wrappers, 3 the gh command group.
    */
   const GH_AT_COMMAND_POSITION = new RegExp(
-    String.raw`(^|[;&|(\`{!]|\b(?:then|do|else|if|while|until)\s|=\S*\s)(\s*${WRAPPERS})gh\s+([a-z][a-z-]*)`,
+    String.raw`(^|[;&|(\`{!]|\b(?:then|do|else|elif|if|while|until)\s|=\S*\s)(\s*${WRAPPERS})gh\s+([a-z][a-z-]*)`,
     "g",
   );
 
