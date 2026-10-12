@@ -103,6 +103,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "verifyGitHubAuth",
   ],
   "clone-push": [
+    "INTERRUPT_SIGNALS",
     "clearStaleAssumeUnchanged",
     "clearStaleFlags",
     "cloneDataset",
@@ -117,6 +118,14 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "pushToGitHub",
     "saveDataset",
     "setAssumeUnchanged",
+    "writeStderrSync",
+  ],
+  "index-prime": [
+    "FILTER_PROCESS_KEY",
+    "FILTER_PROCESS_MARKER",
+    "PRIME_MIN_FILE_BYTES",
+    "primeIndexStat",
+    "restoreSuspendedFilterProcess",
   ],
   transfer: [
     "MAX_UNAVAILABLE_SAMPLE",
@@ -244,6 +253,18 @@ const INTERNAL_WIRING = [
   "compareRecordedStat",
   "describeChangedSinceTracked",
   "describeStaleFlagFailure",
+  // saveDataset's signal list and its signal-safe stderr writer, shared with
+  // index-prime.ts so both windows restore on the same signals (#1704).
+  "INTERRUPT_SIGNALS",
+  "writeStderrSync",
+  // index-prime.ts postdates the split (#1704, ADR 0098): the tracking step's index
+  // priming and the restore at the start of the upload steps, consumed by the upload
+  // modules and the tests, never by the CLI directly.
+  "FILTER_PROCESS_KEY",
+  "FILTER_PROCESS_MARKER",
+  "PRIME_MIN_FILE_BYTES",
+  "primeIndexStat",
+  "restoreSuspendedFilterProcess",
 ];
 
 /**
