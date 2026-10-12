@@ -575,7 +575,7 @@ describe("every workflow that calls gh gives it a repository", () => {
 
   test("the drift workflow's old lookup and label swallows are caught", () => {
     // Re-introduce each swallow the fix removed, one at a time, into the real file.
-    const lookup = drift().replace(/\.\[0\]\.number'\)/, `.[0].number' || echo "")`);
+    const lookup = drift().replace(/\.number \/\/ empty'\)/, `.number // empty' || echo "")`);
     expect(lookup, "the lookup mutation must apply").not.toBe(drift());
     expect(defectsOf("drift", lookup).some((d) => d.includes("failed lookup"))).toBe(true);
 
