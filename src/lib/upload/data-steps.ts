@@ -8,6 +8,7 @@
 import chalk from "chalk";
 import type { NemarMetadataPayload } from "../api/datasets.js";
 import { clearStaleFlags } from "../git-annex/clone-push.js";
+import { restoreSuspendedFilterProcess } from "../git-annex/index-prime.js";
 import type { UploadProgress } from "../upload-progress.js";
 import { saveDatasetStep, writeNemarMetadata } from "./finalize.js";
 import {
@@ -39,6 +40,8 @@ export interface DataStepsArgs {
 export interface DataStepsDeps {
   openRemote?: OpenRemote;
   skipMinBytes?: number;
+  /** Lets a small file reach the tracking step's index priming (ADR 0100). */
+  primeMinBytes?: number;
   saveStep?: typeof saveDatasetStep;
   saveInactivityWarningAfterMs?: number;
   saveSpinnerStream?: NodeJS.WritableStream;
@@ -67,6 +70,22 @@ export async function runDataSteps(
     );
   }
 
+  // The same for the filter process the tracking step takes out of the configuration
+  // while it records index stat data (ADR 0100): a run killed in that window leaves it
+  // out, and every git command after it would start one git-annex process per file.
+  const filter = await restoreSuspendedFilterProcess(args.absolutePath);
+  if (filter.error) {
+    console.log(chalk.red(filter.error));
+    return FAIL;
+  }
+  if (filter.restored) {
+    console.log(
+      chalk.yellow(
+        "  Put back git-annex's filter process, which an earlier, interrupted upload had left out of this repository's configuration",
+      ),
+    );
+  }
+
   // Step 9: Upload data files to S3 via the git-annex S3 special remote
   const uploaded = await uploadDataToS3(
     args.absolutePath,
@@ -75,7 +94,10 @@ export async function runDataSteps(
     args.filesToUpload,
     args.uploadProgress,
     args.datasetInfo,
-    { openRemote: deps.openRemote },
+    {
+      openRemote: deps.openRemote,
+      ...(deps.primeMinBytes === undefined ? {} : { primeMinBytes: deps.primeMinBytes }),
+    },
   );
   if (uploaded.status === "fail") return FAIL;
   const { progress, annexedPaths } = uploaded.value;

@@ -296,7 +296,7 @@ async function prepareAnnexBranchPush(
 }
 
 /** Signals on which an interrupted save still takes its assume-unchanged bits back. */
-const INTERRUPT_SIGNALS: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"];
+export const INTERRUPT_SIGNALS: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"];
 
 /**
  * Save all changes to the dataset
@@ -553,7 +553,7 @@ function describeStuckFlags(
  * write or answer EAGAIN, so this loops on the byte count for a short while; a stderr
  * that is closed (EPIPE) or stays unwritable ends it, and then the text is lost.
  */
-function writeStderrSync(text: string): void {
+export function writeStderrSync(text: string): void {
   const bytes = Buffer.from(text);
   const deadline = Date.now() + STDERR_WRITE_MS;
   let offset = 0;
