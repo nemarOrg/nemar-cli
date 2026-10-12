@@ -203,11 +203,12 @@ jobs:
 
       - name: Ensure issue labels exist
         if: fromJSON(steps.fetch.outputs.drift) != 0
-        # A failure here is loud (the step goes red and its stderr stays in the log) but does
-        # not stop the job. Failing the job instead trades a duplicate for a lost alarm: one
-        # label-API hiccup would mean no issue at all this week. Nothing is hidden by letting
-        # the job go on: if a label really is missing, `gh issue create --label` in the steps
-        # below fails and says so.
+        # A failure here stays in the log and in the run's annotations, but the step and the
+        # job stay green: with `continue-on-error` the runner reports the step as succeeded.
+        # Failing the job instead trades a duplicate for a lost alarm: one label-API hiccup
+        # would mean no issue at all this week. Nothing is hidden by letting the job go on:
+        # a label that is really missing still fails `gh issue create --label` in the steps
+        # below, and that failure is red.
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

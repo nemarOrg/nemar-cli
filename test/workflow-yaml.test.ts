@@ -1005,11 +1005,13 @@ jobs:
       }
     });
 
-    test("the label step may fail without stopping the job, and says so loudly", () => {
+    test("the label step may fail without stopping the job, and reports it in the log", () => {
       const step = stepNamed(driftSteps(), "Ensure issue labels exist");
       expect(step["continue-on-error"]).toBe(true);
       // Not silent: nothing in it discards stderr or the exit status (the scanner's label
-      // rule), and a failed create is reported and reflected in the step's own status.
+      // rule), and a failed create prints an error annotation and sets the step's exit status.
+      // The step and job stay green (continue-on-error), so the loud failure is the one in
+      // the later `gh issue create --label`, not this one.
       expect(step.run).toContain('echo "::error::Could not create label');
       expect(step.run).toContain('exit "$failed"');
     });
