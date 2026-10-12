@@ -99,10 +99,23 @@ const ROWS = {
   // Whitespace INSIDE a token is part of the token: this row holds the one
   // token `e eg`, which is not `eeg`. The vocabulary tallies it that way too.
   innerSpace: { id: "nm500014", modalities: "e eg" },
+  // Tab and CR+LF padding around a token, the other whitespace a pasted or
+  // hand-edited list carries. The clause trims them, and so does the
+  // vocabulary's JS `trim`, so both must agree on these too.
+  tabPadded: { id: "nm500015", modalities: "beh,\teeg\t" },
+  crlfPadded: { id: "nm500016", modalities: "beh,\r\neeg\r\n" },
 } as const;
 
 /** The rows that hold an `eeg` token, in any case or padding. */
-const EEG_ROWS = [ROWS.eegOnly, ROWS.eegAndIeeg, ROWS.upperEeg, ROWS.spacedList, ROWS.paddedEeg];
+const EEG_ROWS = [
+  ROWS.eegOnly,
+  ROWS.eegAndIeeg,
+  ROWS.upperEeg,
+  ROWS.spacedList,
+  ROWS.paddedEeg,
+  ROWS.tabPadded,
+  ROWS.crlfPadded,
+];
 
 const ALL_IDS = Object.values(ROWS).map((r) => r.id);
 
@@ -187,7 +200,9 @@ describe("GET /datasets: modality is a whole-token match", () => {
 
   test("a token in the middle of a list matches, and so does the last one", async () => {
     expect(await listIds(app, db, "modality=meg")).toEqual(ids(ROWS.megOnly, ROWS.middleIeeg));
-    expect(await listIds(app, db, "modality=beh")).toEqual(ids(ROWS.spacedList));
+    expect(await listIds(app, db, "modality=beh")).toEqual(
+      ids(ROWS.spacedList, ROWS.tabPadded, ROWS.crlfPadded),
+    );
   });
 
   test("a prefix or a suffix of a token is not that token", async () => {
@@ -265,6 +280,16 @@ describe("GET /datasets: modality is a whole-token match", () => {
     // ` eeg ` has no comma to anchor on, so only trimming each token finds it.
     expect(await listIds(app, db, "modality=eeg")).toContain(ROWS.paddedEeg.id);
     expect(await listIds(app, db, "modality=eeg")).toHaveLength(EEG_ROWS.length);
+  });
+
+  test("tab and CR+LF padding is trimmed like a space", async () => {
+    const listed = await listIds(app, db, "modality=eeg");
+    expect(listed).toContain(ROWS.tabPadded.id);
+    expect(listed).toContain(ROWS.crlfPadded.id);
+    // The padding is not left inside the token: `beh` is found in both too.
+    const beh = await listIds(app, db, "modality=beh");
+    expect(beh).toContain(ROWS.tabPadded.id);
+    expect(beh).toContain(ROWS.crlfPadded.id);
   });
 
   test("whitespace inside a token is part of it, never a separator", async () => {
