@@ -1488,10 +1488,10 @@
           {
             "schema": {
               "type": "string",
-              "description": "Filter by modality name (exact match)."
+              "description": "Filter by modality: a whole-token, case-insensitive match against the dataset's modality list, so `eeg` does not match `ieeg`. A comma-separated list matches a dataset holding any of its modalities."
             },
             "required": false,
-            "description": "Filter by modality name (exact match).",
+            "description": "Filter by modality: a whole-token, case-insensitive match against the dataset's modality list, so `eeg` does not match `ieeg`. A comma-separated list matches a dataset holding any of its modalities.",
             "name": "modality",
             "in": "query"
           },
@@ -1932,10 +1932,10 @@
           {
             "schema": {
               "type": "string",
-              "description": "Filter by modality name (exact match)."
+              "description": "Filter by modality: a whole-token, case-insensitive match against the dataset's modality list, so `eeg` does not match `ieeg`. A comma-separated list matches a dataset holding any of its modalities."
             },
             "required": false,
-            "description": "Filter by modality name (exact match).",
+            "description": "Filter by modality: a whole-token, case-insensitive match against the dataset's modality list, so `eeg` does not match `ieeg`. A comma-separated list matches a dataset holding any of its modalities.",
             "name": "modality",
             "in": "query"
           },

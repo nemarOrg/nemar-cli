@@ -218,8 +218,10 @@ const BESPOKE_OPTION_FIELD = {
  * is a non-empty string that `parseLicenseTierFilter` reduces to no tiers, a
  * version facet given `"v"` parses to an empty prefix, an enum facet given
  * `","` parses to no values, and `modality: "  "` is whitespace that the
- * builder's raw truthiness test accepts and binds as `%  %`. Every one of
- * those disagreements disappears once the question is asked after parsing.
+ * builder's raw truthiness test accepts (it still does: the clause binds an
+ * empty token list and matches nothing, since #1711, where it used to bind
+ * `%  %`). Every one of those disagreements disappears once the question is
+ * asked after parsing.
  *
  * The rules themselves are the builders': `buildDatasetFilterClauses` guards
  * each bespoke clause on bare truthiness (`if (opts.modality)`, `if

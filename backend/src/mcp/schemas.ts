@@ -92,7 +92,11 @@ export const searchDatasetsInputSchema4 = z4
     modality: z4
       .string()
       .optional()
-      .describe("Filter to datasets whose modalities include this substring (e.g. 'eeg', 'meg')."),
+      .describe(
+        "Filter to datasets recorded in this modality (e.g. 'eeg', 'meg'). A whole-token, " +
+          "case-insensitive match against the dataset's modality list: 'eeg' does not match " +
+          "'ieeg'. Comma-separated values match a dataset holding any of them.",
+      ),
     task: z4.string().optional().describe("Filter to datasets whose tasks include this substring."),
     has_hed: z4
       .boolean()

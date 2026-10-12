@@ -136,7 +136,12 @@ const FACET_QUERY_PARAMS: Record<string, z.ZodTypeAny> = Object.fromEntries(
  * `q` instead -- `parseFilterQuery`'s `includeSearch: false` on that route).
  */
 const LEGACY_FILTER_PARAMS = {
-  modality: z.string().optional().describe("Filter by modality name (exact match)."),
+  modality: z
+    .string()
+    .optional()
+    .describe(
+      "Filter by modality: a whole-token, case-insensitive match against the dataset's modality list, so `eeg` does not match `ieeg`. A comma-separated list matches a dataset holding any of its modalities.",
+    ),
   author: z.string().optional().describe("Filter by author name (substring match)."),
   task: z.string().optional().describe("Filter by BIDS task name (substring match)."),
   has_doi: z
