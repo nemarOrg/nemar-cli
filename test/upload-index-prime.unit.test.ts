@@ -15,8 +15,8 @@
 
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
-  chmodSync,
   closeSync,
+  existsSync,
   openSync,
   readFileSync,
   rmSync,
@@ -56,6 +56,7 @@ import {
   meterFilterProcess,
   newDatasetRepo,
   run,
+  tags,
   trackedRepo,
   writeFile,
 } from "./helpers/annex-repo";
@@ -204,6 +205,28 @@ describe("what the tracking step no longer reads", () => {
       const pointer = await run(["git", "cat-file", "-p", `HEAD:${path}`], dir);
       expect(pointer.stdout.trim()).toBe(`/annex/objects/${key}`);
     }
+  });
+
+  test("with the save's own skip on as well, nothing is read and nothing is left flagged", async () => {
+    // The production default for a large tree: ADR 0094's skip and the priming together.
+    // ADR 0098 says the skip costs a primed file nothing; this pins it.
+    const dir = await dataset("with-skip", { [A]: 2 * MIB, [B]: 2 * MIB });
+    const log = await meterFilterProcess(dir);
+
+    const result = await runSteps(dir, {
+      openRemote: directoryRemote(dir),
+      skipMinBytes: 1,
+      primeMinBytes: MIB,
+    });
+    expect(result.status).toBe("ok");
+    expect(bytesRead(log)).toBeLessThan(NOTHING_READ);
+    const status = await run(["git", "status", "--porcelain"], dir);
+
+    expect(status.exitCode).toBe(0);
+    expect(bytesRead(log)).toBeLessThan(NOTHING_READ);
+    expect(await statRecorded(dir, A)).toBe(true);
+    expect(await statRecorded(dir, B)).toBe(true);
+    expect(await tags(dir, A, B)).toEqual({ [A]: "H", [B]: "H" });
   });
 
   test("the next upload's add does not re-read the large files the last one tracked", async () => {
@@ -374,19 +397,48 @@ describe("the priming can neither hide nor stage an edit", () => {
 
 describe("the filter process never stays out of the configuration", () => {
   const runner = join(import.meta.dir, "helpers", "prime-runner.ts");
+  const spawnRunner = (dir: string, signal: string, delayMs: number, paths: string[]) =>
+    Bun.spawn(["bun", "run", runner, dir, signal, String(delayMs), ...paths], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+  /**
+   * A lock git takes for every config write. Creating it makes `git config` fail with
+   * "File exists" whoever runs the test (a read-only `.git` blocks nothing for root), and
+   * it blocks the configuration alone, so the refresh itself still runs.
+   */
+  const configLock = (dir: string) => join(dir, ".git", "config.lock");
 
   test("SIGTERM inside the window puts it back before the process dies", async () => {
     // Guards armRestoreOnInterrupt. Nothing but the handler can restore it here: the
     // process dies by the signal before the `finally` runs.
     const dir = await trackedRepo(scratch.root, "sigterm", { "a.edf": 300_000 });
     const configured = await filterConfig(dir);
-    const child = Bun.spawn(["bun", "run", runner, dir, "SIGTERM", "a.edf"], {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    const child = spawnRunner(dir, "SIGTERM", 0, ["a.edf"]);
     await child.exited;
 
     expect(child.signalCode).toBe("SIGTERM");
+    expect(await filterConfig(dir)).toEqual(configured);
+  });
+
+  test("SIGTERM during a refresh also stops the refresh, which lets go of index.lock", async () => {
+    // Guards stopChildren in the handler. A signal sent to the CLI alone does not reach
+    // the `git add --refresh` it started; left running, that refresh holds index.lock
+    // until it has been through every file (one git-annex process each), and a re-run's
+    // add or save fails on the lock. 100 files keep this refresh going for seconds.
+    const files = Object.fromEntries(
+      Array.from({ length: 100 }, (_, i) => [`sub-${i}/eeg/r.edf`, 120_000]),
+    );
+    const dir = await trackedRepo(scratch.root, "sigterm-refresh", files);
+    const configured = await filterConfig(dir);
+    const child = spawnRunner(dir, "SIGTERM", 500, Object.keys(files));
+    await child.exited;
+    expect(child.signalCode).toBe("SIGTERM");
+
+    const lock = join(dir, ".git", "index.lock");
+    for (let i = 0; i < 10 && existsSync(lock); i++) await Bun.sleep(50);
+    expect(existsSync(lock)).toBe(false);
     expect(await filterConfig(dir)).toEqual(configured);
   });
 
@@ -396,10 +448,7 @@ describe("the filter process never stays out of the configuration", () => {
     const dir = await dataset("sigkill", { [A]: 300_000 });
     const configured = await filterConfig(dir);
     expect((await gitAnnexAdd(dir, [A])).success).toBe(true);
-    const child = Bun.spawn(["bun", "run", runner, dir, "SIGKILL", A], {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    const child = spawnRunner(dir, "SIGKILL", 0, [A]);
     await child.exited;
     expect(child.signalCode).toBe("SIGKILL");
     expect(await filterConfig(dir)).toEqual({ process: [], marker: configured.process });
@@ -411,20 +460,19 @@ describe("the filter process never stays out of the configuration", () => {
   });
 
   test("a configuration that cannot be put back fails the step, and the re-run puts it back", async () => {
-    // Guards the `error` path: a read-only `.git` makes both the refresh and the restore
-    // fail inside the window. Tracking itself finished, so its stamp stands.
+    // Guards the `error` path. The lock appears inside the window, so the refresh runs
+    // and only the restore fails. Tracking itself finished, so its stamp stands.
     const dir = await dataset("unrestorable", { [A]: 2 * MIB });
     const configured = await filterConfig(dir);
-    const gitDir = join(dir, ".git");
     let result: Awaited<ReturnType<typeof trackAndCopy>>;
     try {
       result = await trackAndCopy(dir, {
         openRemote: directoryRemote(dir),
         primeMinBytes: MIB,
-        primeOnSuspended: () => chmodSync(gitDir, 0o555),
+        primeOnSuspended: () => writeFileSync(configLock(dir), ""),
       });
     } finally {
-      chmodSync(gitDir, 0o755);
+      rmSync(configLock(dir), { force: true });
     }
 
     expect(result.status).toBe("fail");
@@ -444,16 +492,63 @@ describe("the filter process never stays out of the configuration", () => {
     const configured = await filterConfig(dir);
     await run(["git", "config", "--local", FILTER_PROCESS_MARKER, configured.process[0]], dir);
     await run(["git", "config", "--local", "--unset-all", FILTER_PROCESS_KEY], dir);
-    const gitDir = join(dir, ".git");
-    chmodSync(gitDir, 0o555);
+    writeFileSync(configLock(dir), "");
     let result: Awaited<ReturnType<typeof runSteps>>;
     try {
       result = await runSteps(dir, { openRemote: directoryRemote(dir) });
     } finally {
-      chmodSync(gitDir, 0o755);
+      rmSync(configLock(dir), { force: true });
     }
     expect(result.status).toBe("fail");
     expect((await run(["git", "ls-files", A], dir)).stdout.trim()).toBe("");
+  });
+
+  test("a leftover marker next to a filter process that is set is only a warning when it cannot be removed", async () => {
+    // Nothing is out of the configuration in that state, so it must not stop an upload.
+    const dir = await trackedRepo(scratch.root, "stale-marker", { "a.edf": 300_000 });
+    const configured = await filterConfig(dir);
+    await run(["git", "config", "--local", FILTER_PROCESS_MARKER, "git-annex filter-process"], dir);
+    writeFileSync(configLock(dir), "");
+    let res: Awaited<ReturnType<typeof restoreSuspendedFilterProcess>>;
+    try {
+      res = await restoreSuspendedFilterProcess(dir);
+    } finally {
+      rmSync(configLock(dir), { force: true });
+    }
+    expect(res.error).toBeUndefined();
+    expect(res.restored).toBe(false);
+    expect(res.warning).toContain("filter process itself is set");
+    expect((await filterConfig(dir)).process).toEqual(configured.process);
+  });
+
+  test("the signal handler is disarmed however the call ends", async () => {
+    // Guards disarm() in the finally. A handler left armed would rewrite the configuration
+    // with a stale value on some later Ctrl-C, and pile up one listener per call.
+    const counts = () => ["SIGINT", "SIGTERM", "SIGHUP"].map((s) => process.listenerCount(s));
+    const before = counts();
+
+    const ok1 = await trackedRepo(scratch.root, "disarm-ok", { "a.edf": 300_000 });
+    expect(await primeIndexStat(ok1, ["a.edf"])).toEqual({ primed: 1 });
+    expect(counts()).toEqual(before);
+
+    // A refresh that fails (index.lock held) is `skipped`, after the handler was armed.
+    const skipped = await trackedRepo(scratch.root, "disarm-skipped", { "a.edf": 300_000 });
+    const indexLock = join(skipped, ".git", "index.lock");
+    let res = await primeIndexStat(skipped, ["a.edf"], {
+      onSuspended: () => writeFileSync(indexLock, ""),
+    });
+    rmSync(indexLock, { force: true });
+    expect(res.skipped).toContain("git add --refresh failed");
+    expect(counts()).toEqual(before);
+
+    // A restore that fails is an `error`, also after the handler was armed.
+    const failed = await trackedRepo(scratch.root, "disarm-error", { "a.edf": 300_000 });
+    res = await primeIndexStat(failed, ["a.edf"], {
+      onSuspended: () => writeFileSync(configLock(failed), ""),
+    });
+    rmSync(configLock(failed), { force: true });
+    expect(res.error).toContain("Could not put git-annex's filter process back");
+    expect(counts()).toEqual(before);
   });
 });
 

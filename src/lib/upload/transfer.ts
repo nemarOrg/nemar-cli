@@ -139,12 +139,6 @@ async function primeLargeDataFiles(
       spinner.text = `Recording index stat data for large data files (${done.toLocaleString("en-US")} of ${total.toLocaleString("en-US")})...`;
     },
   });
-  if (result.recovered) {
-    spinner.info(
-      "Put back git-annex's filter process, which an earlier, interrupted upload had left out of this repository's configuration",
-    );
-    spinner.start();
-  }
   if (result.error) {
     spinner.fail(result.error);
     return false;
@@ -159,8 +153,12 @@ async function primeLargeDataFiles(
     spinner.stop();
     return true;
   }
+  // `primed` counts the files handed to git; one that changed since it was tracked is
+  // checked but keeps zero stat data, so the line speaks of the unchanged ones.
   spinner.succeed(
-    `Index stat data recorded for ${countDataFiles(result.primed)} of ${describeBytes(minBytes)} or more, so git need not re-read them`,
+    when === "before"
+      ? `Checked ${countDataFiles(result.primed)} of ${describeBytes(minBytes)} or more that an earlier run left in the index; the add need not re-read the unchanged ones`
+      : `Checked ${countDataFiles(result.primed)} of ${describeBytes(minBytes)} or more against the index; git need not re-read the unchanged ones`,
   );
   return true;
 }

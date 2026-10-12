@@ -78,6 +78,7 @@ export async function runDataSteps(
     console.log(chalk.red(filter.error));
     return FAIL;
   }
+  if (filter.warning) console.log(chalk.yellow(`  ${filter.warning}`));
   if (filter.restored) {
     console.log(
       chalk.yellow(
