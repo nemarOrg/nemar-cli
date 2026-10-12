@@ -1089,6 +1089,9 @@ describe("nemar admin pr-reviews approve", () => {
       );
       expect(r.stdout).toContain("so a merge would not be attempted");
       expect(r.stdout).toContain("Nothing was approved or merged.");
+      // Refused by the early check, before the card is shown, not by the look right before the write.
+      expect(r.stdout).not.toContain("Checked again just before approving");
+      expect(r.stdout).not.toContain("Approve nm000201 #7");
       // The way to approve without merging is named.
       expect(r.stdout).toContain("without --merge");
       // The assertions that matter: no approval was recorded and no merge was asked for.
@@ -1162,6 +1165,10 @@ describe("nemar admin pr-reviews approve", () => {
       expect(r.exitCode).toBe(1);
       expect(r.stdout).toContain("GitHub reports this pull request as 'unstable'");
       expect(r.stdout).toContain("Nothing was approved or merged.");
+      // The EARLY check refused it, before the card was shown: not the late one, which would also
+      // have written nothing but only after "Approve nm000201 #7" and the confirmation.
+      expect(r.stdout).not.toContain("Checked again just before approving");
+      expect(r.stdout).not.toContain("Approve nm000201 #7");
       expect(adminWrites()).toHaveLength(0);
     });
 
