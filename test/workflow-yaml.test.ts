@@ -1044,11 +1044,17 @@ jobs:
         dir = mkdtempSync(join(tmpdir(), "retry-helper-"));
       });
       const helperStep = () => stepNamed(driftSteps(), "Define the retry helper").run ?? "";
-      const run = (script: string) => {
+      // `retryDelay` null leaves RETRY_DELAY unset, so the helper's own default applies.
+      const run = (script: string, retryDelay: string | null = "0") => {
         writeFileSync(join(dir, "write.sh"), helperStep());
+        const env: Record<string, string | undefined> = {
+          ...process.env,
+          RUNNER_TEMP: dir,
+          RETRY_DELAY: retryDelay ?? undefined,
+        };
         const r = Bun.spawnSync(
           ["bash", "-c", `set -euo pipefail\nbash "${dir}/write.sh"\n${script}`],
-          { env: { ...process.env, RUNNER_TEMP: dir, RETRY_DELAY: "0" } },
+          { env },
         );
         return {
           status: r.exitCode,
@@ -1086,6 +1092,30 @@ jobs:
         expect(r.out).not.toContain("reached");
         expect(r.calls).toBe(3);
         expect(r.err).toContain("Giving up after 3 attempts");
+      });
+
+      test("waits 5 seconds between attempts by default, and not after the last", () => {
+        // RETRY_DELAY unset, so this is the default that ships. `sleep` is replaced after the
+        // helper is sourced: nothing waits, and every request to wait is recorded.
+        const sleeper = `sleep() { echo "$1" >> "${dir}/slept"; }`;
+        const slept = () => {
+          try {
+            return readFileSync(join(dir, "slept"), "utf8");
+          } catch {
+            return "";
+          }
+        };
+        // Two failures, then success: two waits.
+        rmSync(join(dir, "slept"), { force: true });
+        const recovered = run(`${flaky(2)}\n${sleeper}\nX=$(retry flaky)\necho "got:$X"`, null);
+        expect(recovered.status).toBe(0);
+        expect(slept()).toBe("5\n5\n");
+        expect(recovered.err.match(/retrying in 5s/g)?.length).toBe(2);
+        // Three failures: still two waits, none after the last attempt.
+        rmSync(join(dir, "slept"), { force: true });
+        const exhausted = run(`${flaky(99)}\n${sleeper}\nX=$(retry flaky)\necho "reached"`, null);
+        expect(exhausted.status).not.toBe(0);
+        expect(slept()).toBe("5\n5\n");
       });
 
       test("an empty successful result is an empty result, not a failure", () => {
