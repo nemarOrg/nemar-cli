@@ -29,7 +29,7 @@ describe("what a typed answer means", () => {
 
 describe("when y may approve and merge", () => {
   const pass = approvalGate({ verdict: "pass", staleVerdict: null });
-  const green = { bids: "pass", version: "pass" };
+  const green = { bids: "pass", version: "pass", mergeable: "clean" };
 
   test("a pass with both required checks green", () => {
     expect(approveAllowed({ gate: pass, force: false, ...green })).toEqual({ ok: true });
@@ -52,7 +52,7 @@ describe("when y may approve and merge", () => {
       ["pass", "pending", "version pending"],
     ] as const) {
       for (const force of [false, true]) {
-        const r = approveAllowed({ gate: pass, force, bids, version });
+        const r = approveAllowed({ gate: pass, force, bids, version, mergeable: "clean" });
         expect(r.ok, `${bids}/${version}/${force}`).toBe(false);
         if (!r.ok) {
           expect(r.reason).toContain(word);
@@ -75,31 +75,63 @@ describe("when y may approve and merge", () => {
     }
   });
 
-  test("a pull request that cannot be merged as it is, is not offered y", () => {
+  test("only a pull request GitHub reports as clean is offered y, whatever --force says", () => {
+    // Every other state is refused BEFORE an approval is written, because the merge y promises
+    // would be refused after it (ADR 0093): unstable is a check that is not required and not
+    // passing, which is how a pull request the automated review holds is reported.
     for (const [mergeable, word] of [
+      ["unstable", "a check that is not required is not passing"],
+      ["blocked", "a required check or review is not satisfied"],
       ["dirty", "merge conflicts"],
       ["behind", "behind main"],
+      ["draft", "it is a draft"],
+      ["unknown", "has not said whether it can be merged"],
+      ["has_hooks", "merges only a pull request GitHub reports as clean"],
+      ["a state nobody has heard of", "merges only a pull request GitHub reports as clean"],
+      // A state that was not read is not a clean one.
+      [undefined, "has not said whether it can be merged"],
+      ["", "has not said whether it can be merged"],
     ] as const) {
-      const r = approveAllowed({ gate: pass, force: true, ...green, mergeable });
-      expect(r.ok, mergeable).toBe(false);
-      if (!r.ok) expect(r.reason).toContain(word);
+      for (const force of [false, true]) {
+        const r = approveAllowed({ gate: pass, force, ...green, mergeable });
+        expect(r.ok, `${mergeable}/${force}`).toBe(false);
+        if (!r.ok) {
+          expect(r.reason).toContain(word);
+          expect(r.reason).toContain("so a merge would not be attempted");
+        }
+      }
     }
-    // Everything else GitHub says is left to the merge itself: blocked may be waiting on this approval.
-    for (const mergeable of ["clean", "unknown", "blocked", "unstable", "has_hooks", undefined]) {
-      expect(
-        approveAllowed({ gate: pass, force: false, ...green, mergeable }),
-        String(mergeable),
-      ).toEqual({ ok: true });
-    }
+    expect(approveAllowed({ gate: pass, force: false, ...green, mergeable: "clean" })).toEqual({
+      ok: true,
+    });
   });
 
   test("both reasons are given when both apply", () => {
     const gate = approvalGate({ verdict: "fail", staleVerdict: null });
-    const r = approveAllowed({ gate, force: false, bids: "fail", version: "pass" });
+    const r = approveAllowed({
+      gate,
+      force: false,
+      bids: "fail",
+      version: "pass",
+      mergeable: "clean",
+    });
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.reason).toContain("BIDS failing");
       expect(r.reason).toContain("needs changes");
+    }
+    const all = approveAllowed({
+      gate,
+      force: false,
+      bids: "fail",
+      version: "pass",
+      mergeable: "unstable",
+    });
+    expect(all.ok).toBe(false);
+    if (!all.ok) {
+      expect(all.reason).toContain("BIDS failing");
+      expect(all.reason).toContain("'unstable'");
+      expect(all.reason).toContain("needs changes");
     }
   });
 });

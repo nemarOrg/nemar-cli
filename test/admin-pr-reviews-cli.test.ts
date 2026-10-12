@@ -1532,8 +1532,9 @@ describe("nemar admin pr-reviews next", () => {
   });
 
   test("a merge GitHub will not do leaves the approval standing and goes on", async () => {
+    // Clean when the card was shown (so y was offered), blocked by the time of the merge.
     nodes(ready("nm000201", 7), ready("nm000202", 3));
-    gh.pulls["nm000201#7"].mergeableState = "blocked";
+    gh.pulls["nm000201#7"].mergeableStateAfterReview = "blocked";
     const r = await next("y\ns\n");
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("Approved nm000201 #7");
@@ -1636,8 +1637,101 @@ describe("nemar admin pr-reviews next", () => {
     const r = await next("y\nq\n");
     expect(r.stdout).toContain("Merge:    it has merge conflicts");
     expect(r.stdout).toContain("y is not available:");
-    expect(r.stdout).toContain("merge conflicts, so it cannot be merged as it is");
+    expect(r.stdout).toContain("'dirty' (it has merge conflicts)");
     expect(writes()).toHaveLength(0);
+  });
+
+  /** The prompt line for a card: `y` is in it only when `y` will be accepted. */
+  const PROMPT_WITH_Y = "\ny approve + squash merge, n close, c comment";
+  const PROMPT_WITHOUT_Y = "\nn close, c comment, d details, s skip, q quit > ";
+
+  test("a pull request the review holds (unstable) is not offered y, and answering y writes nothing", async () => {
+    nodes(ready("nm000201", 7, {}, "uncertain"));
+    gh.pulls["nm000201#7"].mergeableState = "unstable";
+    const r = await next("y\nq\n");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("Merge:    a check that is not required is not passing");
+    expect(r.stdout).toContain("(GitHub: unstable)");
+    expect(r.stdout).toContain(
+      "y is not available: GitHub reports this pull request as 'unstable'",
+    );
+    expect(r.stdout).toContain("so a merge would not be attempted");
+    // The way to approve without merging, and what can be done here instead.
+    expect(r.stdout).toContain("nemar admin pr-reviews approve nm000201 7");
+    expect(r.stdout).toContain("without --merge");
+    // y is not on the prompt, and typing it anyway is refused with the reason, not obeyed.
+    expect(r.stdout).toContain(PROMPT_WITHOUT_Y);
+    expect(r.stdout).not.toContain(PROMPT_WITH_Y);
+    expect(r.stdout).toContain("Not approved: GitHub reports this pull request as 'unstable'");
+    // The assertions that matter: nothing was approved, nothing was merged, nothing was written.
+    expect(r.stdout).not.toContain("Approved nm000201");
+    expect(reviewPosts()).toHaveLength(0);
+    expect(mergePuts()).toHaveLength(0);
+    expect(writes()).toHaveLength(0);
+  });
+
+  test("a clean pull request is approved and merged, and the held one after it is refused y and can still be commented on", async () => {
+    // The queue lists a pass before a review that is not one, so the clean card comes first.
+    nodes(ready("nm000201", 7, {}, "uncertain"), ready("nm000202", 3));
+    gh.pulls["nm000201#7"].mergeableState = "unstable";
+    const r = await next("y\ny\nc\nWaiting for the review.\n");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("Not approved: GitHub reports this pull request as 'unstable'");
+    expect(r.stdout).toContain("Commented on nm000201 #7.");
+    expect(r.stdout).toContain("Merged nm000202 #3 (squash).");
+    expect(r.stdout).toContain("Done: 1 merged, 1 commented.");
+    // Only the clean one was approved and merged, by the administrator's token.
+    expect(reviewPosts().map((p) => p.path)).toEqual([
+      "/repos/nemarDatasets/nm000202/pulls/3/reviews",
+    ]);
+    expect(mergePuts().map((p) => p.path)).toEqual(["/repos/nemarDatasets/nm000202/pulls/3/merge"]);
+    expect(writes().every((w) => w.token === ADMIN_TOKEN)).toBe(true);
+  });
+
+  test("a clean pull request is still offered y, approved first and merged second", async () => {
+    // The other direction: the state check must not take y away from a pull request that can merge.
+    nodes(ready("nm000201", 7));
+    const r = await next("y\n");
+    expect(r.stdout).toContain(PROMPT_WITH_Y);
+    expect(r.stdout).not.toContain("y is not available");
+    expect(writes().map((w) => `${w.method} ${w.path.split("/").pop()}`)).toEqual([
+      "POST reviews",
+      "PUT merge",
+    ]);
+  });
+
+  test("every state but clean takes y away, whatever --force says", async () => {
+    for (const state of ["blocked", "behind", "dirty", "draft", "has_hooks", "brand_new_state"]) {
+      gh.reset();
+      db.run("DELETE FROM pr_reviews");
+      nodes(ready("nm000201", 7));
+      gh.pulls["nm000201#7"].mergeableState = state;
+      const r = await next("y\nq\n", ["--force"]);
+      expect(r.stdout, state).toContain(
+        `y is not available: GitHub reports this pull request as '${state}'`,
+      );
+      expect(r.stdout, state).not.toContain(PROMPT_WITH_Y);
+      expect(writes(), state).toHaveLength(0);
+    }
+  });
+
+  test("a state GitHub never settles is not clean: y is not offered and nothing is written", async () => {
+    nodes(ready("nm000201", 7));
+    gh.pulls["nm000201#7"].unknownReads = 99;
+    const r = await next("y\nq\n");
+    expect(r.stdout).toContain("y is not available: GitHub reports this pull request as 'unknown'");
+    expect(r.stdout).not.toContain(PROMPT_WITH_Y);
+    expect(writes()).toHaveLength(0);
+  });
+
+  test("a state GitHub is still working out is asked about again before the card is shown", async () => {
+    nodes(ready("nm000201", 7));
+    gh.pulls["nm000201#7"].unknownReads = 1;
+    const r = await next("y\n");
+    expect(r.stdout).toContain(PROMPT_WITH_Y);
+    expect(r.stdout).toContain("Merged nm000201 #7 (squash).");
+    expect(reviewPosts()).toHaveLength(1);
+    expect(mergePuts()).toHaveLength(1);
   });
 
   test("--force says on the card that y will approve against the review", async () => {

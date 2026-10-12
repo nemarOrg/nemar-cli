@@ -454,7 +454,10 @@ App. It uses GH_TOKEN if set, otherwise the token 'gh' holds, checks it belongs 
 the GitHub account linked to your NEMAR account (if one is linked), and approves the exact commit
 you were shown. It asks before approving unless you add --yes. A failing review, a running one, or
 one that could not be read needs --force. Nothing merges unless you add --merge (or answer y in
-'next'), and then it is attempted once, only if GitHub reports the pull request clean; it never
+'next'), and then only if GitHub reports the pull request clean. That is checked BEFORE anything is
+approved: a pull request that is not clean (a pull request the automated review holds is reported
+'unstable') is neither approved nor merged by --merge or y, you are told which state GitHub gave and
+why, and 'approve' without --merge approves it. The merge is then attempted once, and it never
 tries a merge GitHub reports as blocked. If 'gh' holds no signed-in account, or the token is an app or workflow token,
 'approve' prints the PR link and the equivalent 'gh pr review --approve' command (and, in a
 terminal, opens the link); a token GitHub rejects is reported without it.
@@ -1451,15 +1454,18 @@ required checks (BIDS and version) are green and whether the version went up, th
 answer:
 
   y   approve it as YOU (your own GitHub login), then squash-merge it. Only offered when both
-      required checks are green and GitHub says it can be merged as it is; a failing, running or
-      unreadable review also needs --force.
+      required checks are green and GitHub reports the pull request clean; a failing, running or
+      unreadable review also needs --force. A pull request the automated review holds is reported
+      'unstable', so y is not offered: nothing is approved from here. Approve it without merging
+      with 'nemar admin pr-reviews approve <dataset> <pr>', or leave it with s.
   n   close it. You are asked for a comment, which is posted first so the author sees why.
   c   comment on it and leave it open. You are asked for the comment.
   d   show the whole report, then ask again.
   s   leave it for now (it is not shown again in this run).   q   stop.
 
 An empty comment cancels the n or c and asks again, and a comment is one line. The squash merge is
-attempted once, only if GitHub reports the pull request clean, exactly as for 'approve --merge'.
+attempted once, after GitHub has reported the pull request clean (checked before the approval is
+written), exactly as for 'approve --merge'.
 Nothing is sent to GitHub except what you answer, with your own token, and a write whose outcome is
 unknown stops the run. In a terminal, anything you type before a card has been shown is ignored, so
 an impatient Enter cannot answer a pull request you have not seen; piped answers are all kept.
@@ -1580,12 +1586,20 @@ an impatient Enter cannot answer a pull request you have not seen; piped answers
         const moved = a.head !== e.head_sha;
         const bids = moved ? "unknown" : e.bids;
         const version = moved ? "unknown" : e.version;
+        // `y` merges, so it is offered only when GitHub says the pull request is clean. GitHub works
+        // that out lazily and the read above may have started it, so an `unknown` is asked about
+        // again; one that stays unknown (or cannot be read) is not clean.
+        const settled = await settleMergeState(session.token, e.dataset_id, e.pr_number, a.head, {
+          base,
+          first: a.live.mergeableState,
+        });
+        const mergeable = settled.ok ? settled.state : "unknown";
         const allowed = approveAllowed({
           gate: a.gate,
           force: options.force === true,
           bids,
           version,
-          mergeable: a.live.mergeableState,
+          mergeable,
         });
         // The stored verdict and the report can disagree (ADR 0093: the stricter is used).
         const shown = a.outcome as ReviewOutcome | null | undefined;
@@ -1604,10 +1618,9 @@ an impatient Enter cannot answer a pull request you have not seen; piped answers
         );
         console.log(`  Review:   ${reviewCell(a)}`);
         console.log(`  Checks:   BIDS ${checkCell(bids, 0)}   version ${checkCell(version, 0)}`);
-        if (a.live.mergeableState === "dirty") {
-          console.log(chalk.red("  Merge:    it has merge conflicts"));
-        } else if (a.live.mergeableState === "behind") {
-          console.log(chalk.yellow("  Merge:    the branch is behind main"));
+        if (mergeRefusal(mergeable)) {
+          const line = `  Merge:    ${notCleanWhy(mergeable)} (GitHub: ${stateWord(mergeable)})`;
+          console.log(mergeable === "dirty" ? chalk.red(line) : chalk.yellow(line));
         }
         if (a.contributorNote) console.log(chalk.yellow(`  ${plain(a.contributorNote)}`));
         if (a.gate.kind === "confirm") console.log(chalk.yellow(`  ${a.gate.warning}`));
@@ -1634,6 +1647,14 @@ an impatient Enter cannot answer a pull request you have not seen; piped answers
         if (!allowed.ok) {
           console.log();
           console.log(chalk.yellow(`  y is not available: ${allowed.reason}`));
+          if (mergeRefusal(mergeable)) {
+            // Not a way to do it from here: `next` always merges when it approves.
+            console.log(
+              chalk.dim(
+                `  To approve it without merging, run: nemar admin pr-reviews approve ${e.dataset_id} ${e.pr_number}   (without --merge). Here, s leaves it and c comments.`,
+              ),
+            );
+          }
         }
 
         // What was typed before this card existed was not an answer to it.
