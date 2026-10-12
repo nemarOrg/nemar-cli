@@ -354,6 +354,21 @@ describe("every workflow that calls gh gives it a repository", () => {
    * The analysis is static text over parsed YAML, so it can be wrong in both directions;
    * the controls below pin the cases it has to get right, and that it reports a defect at
    * all (a scanner that matches nothing passes everything).
+   *
+   * Known blind spots, each checked against the scanner on 2026-10-12. Do not read a clean
+   * result as proof of more than the rules above.
+   *
+   * - MISSES a lookup whose failure is hidden some other way: `$(gh ... | head -1)` without
+   *   `pipefail` (the pipeline's status is `head`'s), `|| exit 0`, `|| echo 0`, or any
+   *   swallow not in the list the rule names.
+   * - MISSES every later `gh` call in a script after a phantom heredoc: `$((1 << N))` or a
+   *   string such as "<<EOF" looks like a heredoc start, and the rest of the script is
+   *   skipped as its body.
+   * - FALSE POSITIVE on `echo "x; gh issue create"` (a `gh` after a `;` inside a string) and
+   *   on a script that sets `export GH_REPO=...` itself, which counts as no repository.
+   * - Does not follow composite actions or reusable workflows (`uses:` of a local action or
+   *   a `workflow_call`): a `gh` call inside one is checked only if its own file is scanned,
+   *   and the repository context of its caller is not carried over.
    */
   interface Step {
     name?: string;
