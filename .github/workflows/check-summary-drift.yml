@@ -177,13 +177,35 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # `drift` is a workflow-specific label that may not exist yet on a
-          # fresh repo; `P2` is the project's standard priority label. Create
-          # both idempotently so `gh issue create` below doesn't fail closed
-          # with "could not add label" on the first run.
-          gh label create drift --color FBCA04 --description "summary.json drift detected by the weekly cron" --force >/dev/null 2>&1 || true
-          gh label create P1 --force >/dev/null 2>&1 || true
-          gh label create P2 --force >/dev/null 2>&1 || true
+          set -euo pipefail
+          # `drift` is a workflow-specific label that does not exist on a fresh
+          # repo; P1 and P2 are the project's standard priority labels. Create
+          # only the ones that are missing.
+          #
+          # THIS STEP FAILS THE JOB when it cannot do that. It used to end each
+          # call in `>/dev/null 2>&1 || true`, which hid both the missing `drift`
+          # label and the repository error above for twenty weeks. Without the
+          # label the `gh issue create --label drift,...` below fails anyway
+          # ("could not add label"), and the weekly lookup finds an existing
+          # issue BY that label, so an issue filed without it would be filed
+          # again every Monday. Failing here names the real cause one step
+          # earlier instead.
+          #
+          # Not `gh label create --force`: with no --color it picks a RANDOM one,
+          # so every run would recolor the existing P1 and P2 labels.
+          LABELS=$(gh label list --limit 1000 --json name --jq '.[].name')
+          ensure_label() {
+            local name="$1" color="$2" description="$3"
+            if grep -qixF "$name" <<< "$LABELS"; then
+              echo "Label '$name' exists."
+            else
+              gh label create "$name" --color "$color" --description "$description"
+              echo "Created label '$name'."
+            fi
+          }
+          ensure_label drift FBCA04 "summary.json drift detected by the weekly cron"
+          ensure_label P1 ff6347 "High priority - important features, significant bugs"
+          ensure_label P2 ffa500 "Normal priority - standard features and improvements"
 
       - name: Open / update drift issue
         # Skip when majority_errored is true — that case opens its own P1
