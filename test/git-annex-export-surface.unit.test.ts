@@ -118,6 +118,8 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "pushToGitHub",
     "saveDataset",
     "setAssumeUnchanged",
+    "sleepSync",
+    "stopChildren",
     "writeStderrSync",
   ],
   "index-prime": [
@@ -253,9 +255,12 @@ const INTERNAL_WIRING = [
   "compareRecordedStat",
   "describeChangedSinceTracked",
   "describeStaleFlagFailure",
-  // saveDataset's signal list and its signal-safe stderr writer, shared with
-  // index-prime.ts so both windows restore on the same signals (#1704).
+  // saveDataset's signal list and signal-handler helpers (stderr writer, pause, stop the
+  // CLI's children), shared with index-prime.ts so both windows handle a signal the same
+  // way (#1704).
   "INTERRUPT_SIGNALS",
+  "sleepSync",
+  "stopChildren",
   "writeStderrSync",
   // index-prime.ts postdates the split (#1704, ADR 0098): the tracking step's index
   // priming and the restore at the start of the upload steps, consumed by the upload
