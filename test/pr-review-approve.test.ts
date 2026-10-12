@@ -24,6 +24,7 @@ import {
   notCleanWhy,
   postComment,
   pullRequestUrl,
+  recheckBeforeApproval,
   refusalFor,
   reviewForApproval,
   settleMergeState,
@@ -951,6 +952,27 @@ describe("the one check a merge is asked about, before the approval and again ri
         expect(closed.card, word).toContain("no longer open");
       }
     }
+  });
+
+  test("the check right before an approval reads again with only the head in hand, and says it is the second look", async () => {
+    const late = () => recheckBeforeApproval(ADMIN_TOKEN, "nm000201", 7, SHA_A, opts());
+    gh.pulls["nm000201#7"] = { sha: SHA_A, mergeableState: "clean" };
+    expect(await late()).toEqual({ ok: true });
+    expect(reads()).toHaveLength(1); // one request when it is clean
+
+    gh.reset();
+    gh.pulls["nm000201#7"] = { sha: SHA_A, mergeableState: "unstable" };
+    const held = await late();
+    expect(held).toMatchObject({ ok: false, advice: "without_merge" });
+    if (!held.ok) {
+      expect(held.why).toStartWith(
+        "Checked again just before approving: GitHub reports this pull request as 'unstable'",
+      );
+    }
+    // The same refusal, without the prefix, from the check made earlier.
+    const early = await check(seen("unstable"));
+    if (!early.ok && !held.ok)
+      expect(held.why).toBe(`Checked again just before approving: ${early.why}`);
   });
 
   test("a failed read is never clean, even when the state it was asked about was", async () => {

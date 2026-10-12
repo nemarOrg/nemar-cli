@@ -70,6 +70,7 @@ import {
   mergeWhenClean,
   postComment,
   pullRequestUrl,
+  recheckBeforeApproval,
   refusalFor,
   reviewForApproval,
   submitApproval,
@@ -1309,6 +1310,13 @@ prReviewsCommand
         process.exit(1);
       }
 
+      // The confirmation can take as long as the administrator takes, and an approval cannot be
+      // taken back: look at the state once more right before writing it.
+      if (options.merge) {
+        const late = await recheckBeforeApproval(token, dataset, pr, head, { base });
+        if (!late.ok) refuseMerge(late, { dataset, pr });
+      }
+
       const text =
         options.message?.slice(0, 2000) ||
         `Approved with nemar admin pr-reviews approve. Automated review of this commit: ${unread ? "unknown" : verdictWord(verdict)}.`;
@@ -1696,6 +1704,23 @@ an impatient Enter cannot answer a pull request you have not seen; piped answers
           if (choice === "approve") {
             if (!allowed.ok) {
               console.log(chalk.yellow(`  Not approved: ${allowed.reason}`));
+              continue;
+            }
+            // The card was built some time ago: look at the state once more right before the approval.
+            const late = await recheckBeforeApproval(
+              session.token,
+              e.dataset_id,
+              e.pr_number,
+              a.head,
+              { base },
+            );
+            if (!late.ok) {
+              console.log(chalk.yellow(`  Not approved: ${late.why}`));
+              const advice = mergeAdvice(late.advice, "next", {
+                dataset: e.dataset_id,
+                pr: e.pr_number,
+              });
+              if (advice) console.log(chalk.dim(`  ${advice}`));
               continue;
             }
             const text = `Approved with nemar admin pr-reviews next. Automated review of this commit: ${a.unread ? "unknown" : verdictWord(a.verdict)}.`;

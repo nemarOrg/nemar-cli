@@ -1253,6 +1253,58 @@ describe("nemar admin pr-reviews approve", () => {
       expect(mergePuts()).toHaveLength(1);
     });
 
+    /** The administrator's own reads of the pull request: the first is the card, the rest are looks at the state. */
+    const adminPullReads = () =>
+      gh.seen.filter(
+        (s) => s.method === "GET" && s.path.endsWith("/pulls/7") && s.token === ADMIN_TOKEN,
+      );
+
+    test("the state is read again right before the approval: one that stopped being clean after the first look writes nothing", async () => {
+      // Clean when the pull request was read and checked, unstable by the time the approval would
+      // be written (a check started, or the review reported). The early check alone would pass.
+      reviewed("pass");
+      gh.pulls["nm000201#7"].adminReadsAfterFirst = { mergeableState: "unstable" };
+      const r = await approve(["--merge"]);
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain("Checked again just before approving:");
+      expect(r.stdout).toContain("GitHub reports this pull request as 'unstable'");
+      expect(r.stdout).toContain("Nothing was approved or merged.");
+      expect(r.stdout).not.toContain("Approved nm000201");
+      expect(adminWrites()).toHaveLength(0);
+    });
+
+    test("the late look refuses a read that fails, a branch that moved and a pull request that closed, too", async () => {
+      for (const [later, said] of [
+        [{ status: 502 }, "Could not check whether it can be merged"],
+        [{ sha: SHA_B }, "The pull request changed while it was being read."],
+        [{ state: "closed" }, "The pull request is no longer open (it was closed)."],
+      ] as const) {
+        gh.reset();
+        db.run("DELETE FROM pr_reviews");
+        reviewed("pass");
+        gh.pulls["nm000201#7"].adminReadsAfterFirst = later;
+        const r = await approve(["--merge"]);
+        expect(r.exitCode, said).toBe(1);
+        expect(r.stdout, said).toContain(`Checked again just before approving: ${said}`);
+        expect(adminWrites(), said).toHaveLength(0);
+      }
+    });
+
+    test("the late look costs one more read when the state is clean, and nothing for an approval alone", async () => {
+      reviewed("pass");
+      const merged = await approve(["--merge"]);
+      expect(merged.exitCode).toBe(0);
+      // The first read, the look right before the approval, and the look right before the merge.
+      expect(adminPullReads()).toHaveLength(3);
+
+      gh.reset();
+      db.run("DELETE FROM pr_reviews");
+      reviewed("pass");
+      const alone = await approve();
+      expect(alone.exitCode).toBe(0);
+      expect(adminPullReads()).toHaveLength(1);
+    });
+
     test("a clean pull request is approved first and merged second, both with the administrator's token", async () => {
       // The other direction of the precheck: it must not refuse what it should let through.
       reviewed("pass");
@@ -1760,6 +1812,49 @@ describe("nemar admin pr-reviews next", () => {
     ]);
     expect(mergePuts().map((p) => p.path)).toEqual(["/repos/nemarDatasets/nm000202/pulls/3/merge"]);
     expect(writes().every((w) => w.token === ADMIN_TOKEN)).toBe(true);
+  });
+
+  test("y reads the state again right before approving: one that stopped being clean after the card was shown writes nothing", async () => {
+    nodes(ready("nm000201", 7));
+    // Clean when the card was built, so y is offered; unstable when y is answered.
+    gh.pulls["nm000201#7"].adminReadsAfterFirst = { mergeableState: "unstable" };
+    const r = await next("y\nq\n");
+    expect(r.stdout).toContain(PROMPT_WITH_Y);
+    expect(r.stdout).toContain(
+      "Not approved: Checked again just before approving: GitHub reports this pull request as 'unstable'",
+    );
+    expect(r.stdout).not.toContain("Approved nm000201");
+    expect(writes()).toHaveLength(0);
+  });
+
+  test("the late look in next refuses a read that fails, a branch that moved and a pull request that closed, too", async () => {
+    for (const [later, said] of [
+      [{ status: 502 }, "Could not check whether it can be merged"],
+      [{ sha: SHA_B }, "The pull request changed while it was being read."],
+      [{ state: "closed" }, "The pull request is no longer open (it was closed)."],
+    ] as const) {
+      gh.reset();
+      db.run("DELETE FROM pr_reviews");
+      nodes(ready("nm000201", 7));
+      gh.pulls["nm000201#7"].adminReadsAfterFirst = later;
+      const r = await next("y\nq\n");
+      expect(r.stdout, said).toContain(
+        `Not approved: Checked again just before approving: ${said}`,
+      );
+      expect(writes(), said).toHaveLength(0);
+    }
+  });
+
+  test("the late look in next costs one more read when the state is clean", async () => {
+    nodes(ready("nm000201", 7));
+    const r = await next("y\n");
+    expect(r.stdout).toContain("Merged nm000201 #7 (squash).");
+    // The card, the look right before the approval, and the look right before the merge.
+    expect(
+      gh.seen.filter(
+        (s) => s.method === "GET" && s.path.endsWith("/pulls/7") && s.token === ADMIN_TOKEN,
+      ),
+    ).toHaveLength(3);
   });
 
   test("a clean pull request is still offered y, approved first and merged second", async () => {

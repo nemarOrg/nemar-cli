@@ -822,6 +822,24 @@ export async function checkMergeable(
 }
 
 /**
+ * The check made immediately before an approval that asks for a merge is written, by both callers
+ * (`approve --merge` after its confirmation, `y` in `next` when it is answered), so they cannot
+ * disagree. The early check can be minutes old by then, a check can have started or reported, and an
+ * approval cannot be taken back: the state is READ again (one request when it is clean), with only the
+ * head in hand so no state is carried over, and a refusal says it came from this second look.
+ */
+export async function recheckBeforeApproval(
+  token: string,
+  datasetId: string,
+  prNumber: number,
+  headSha: string,
+  options: SettleOptions = {},
+): Promise<MergeCheck> {
+  const check = await checkMergeable(token, datasetId, prNumber, { headSha }, options);
+  return check.ok ? check : { ...check, why: `Checked again just before approving: ${check.why}` };
+}
+
+/**
  * A merge that did not happen, with what is known of it ({@link WriteOutcome}). `not_sent` covers
  * every case where this code decided not to ask (a failed read of the pull request first, a branch
  * that moved, a state that is not `clean`), so only `unknown` means "GitHub may have merged it".
