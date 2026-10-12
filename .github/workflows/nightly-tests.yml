@@ -109,10 +109,23 @@ jobs:
           TITLE="Nightly tests failing on dev"
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           TODAY="$(date -u +%F)"
-          # Best-effort label (don't fail the step if it already exists / can't be made).
-          gh label create ci-nightly --color B60205 --description "Nightly dev-suite failures" 2>/dev/null || true
+          # Best-effort label: if it cannot be made, the issue below is still filed, without
+          # it. Best-effort is not silent, though. This used to be `2>/dev/null || true`,
+          # which also hid a real failure (a revoked permission, an API outage) behind the
+          # harmless one (the label already exists). List first and create only a missing
+          # label, so a failure is a warning in the log and "already exists" is not an error.
+          if ! LABELS=$(gh label list --repo "${{ github.repository }}" --limit 1000 --json name --jq '.[].name'); then
+            echo "::warning::Could not list labels; the issue is filed without the ci-nightly label if it is missing."
+          elif ! grep -qixF "ci-nightly" <<< "$LABELS"; then
+            gh label create ci-nightly --repo "${{ github.repository }}" \
+              --color B60205 --description "Nightly dev-suite failures" \
+              || echo "::warning::Could not create the ci-nightly label; the issue is filed without it."
+          fi
+          # A FAILED lookup fails the step (set -e above); an empty result means no open issue.
+          # This used to end in `|| true`, which read a failed lookup as "none exists" and
+          # filed a second issue for a night that already had one.
           EXISTING=$(gh issue list --repo "${{ github.repository }}" --state open \
-            --search "$TITLE in:title" --json number --jq '.[0].number // empty' || true)
+            --search "$TITLE in:title" --json number --jq '.[0].number // empty')
           if [ -n "$EXISTING" ]; then
             {
               echo "Still failing on ${TODAY}."
