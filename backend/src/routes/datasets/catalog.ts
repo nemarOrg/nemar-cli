@@ -1273,6 +1273,13 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
    * too would AND the query against itself through a second matcher.
    */
   datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
+    // Safe Cache-Control default, set BEFORE any early return like every other
+    // handler in this file: the missing-`q` 400, a bad-filter 400 (an invalid
+    // range or enum, or a `modality` list over the token limit) and the 500
+    // all inherit no-store. This handler used to send no Cache-Control at all,
+    // so its 400s could be cached by a shared cache while the same 400s on
+    // GET /datasets were not.
+    c.header("Cache-Control", "no-store");
     const query = c.req.query("q");
     if (!query) {
       return c.json({ error: "Search query parameter 'q' is required" }, 400);

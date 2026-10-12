@@ -319,6 +319,7 @@ describe("GET /datasets: modality is a whole-token match", () => {
     const body = (await res.json()) as { error: string };
     expect(body.error).toContain(String(MAX_MODALITY_FILTER_TOKENS + 1));
     expect(body.error).toContain(String(MAX_MODALITY_FILTER_TOKENS));
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
     // A refusal names the count and the limit and does not echo the value.
     expect(body.error).not.toContain("m01");
   });
@@ -461,6 +462,29 @@ describe("GET /datasets/search: modality is a whole-token match", () => {
     // Repeats are not distinct tokens.
     const repeats = Array.from({ length: 40 }, () => "eeg").join(",");
     expect(await searchIds(app, db, `q=eeg&modality=${repeats}`)).toEqual(ids(...EEG_ROWS));
+  });
+
+  test("every 400 from /search is no-store, so a shared cache never keeps a refusal", async () => {
+    // The handler used to send no Cache-Control at all, while the same refusals
+    // on GET /datasets were no-store. Covers each early return: the new
+    // over-limit modality list, an existing bad-range filter, and a missing q.
+    const overLimit = distinctTokens(MAX_MODALITY_FILTER_TOKENS + 1).join(",");
+    for (const qs of [`q=eeg&modality=${overLimit}`, "q=eeg&subjects=not-a-range", ""]) {
+      const res = await app.request(`/search?${qs}`, {}, env(db));
+      expect({ qs: qs.slice(0, 40), status: res.status }).toEqual({
+        qs: qs.slice(0, 40),
+        status: 400,
+      });
+      expect({ qs: qs.slice(0, 40), cc: res.headers.get("Cache-Control") }).toEqual({
+        qs: qs.slice(0, 40),
+        cc: "no-store",
+      });
+    }
+    // The success response carries the same safe default; nothing on this
+    // handler is shareable.
+    const ok = await app.request("/search?q=eeg&modality=eeg", {}, env(db));
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("Cache-Control")).toBe("no-store");
   });
 
   test("the reported count follows the filtered rows", async () => {
