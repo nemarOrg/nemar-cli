@@ -10,7 +10,7 @@
  * describe block).
  */
 
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1035,10 +1035,17 @@ jobs:
       // The real helper, written by the real step into a temporary directory and run by real
       // bash against a command that really fails a set number of times. It must succeed once
       // the command does, and after the third failure it must FAIL the step that called it.
-      const dir = mkdtempSync(join(tmpdir(), "retry-helper-"));
-      const helperStep = stepNamed(driftSteps(), "Define the retry helper").run ?? "";
+      //
+      // Nothing here runs at collection time: the directory is made in beforeAll and the
+      // helper step is looked up when a test runs, so a filtered run (`-t`) leaks no temp
+      // directory and a renamed step fails its own tests instead of the whole file.
+      let dir = "";
+      beforeAll(() => {
+        dir = mkdtempSync(join(tmpdir(), "retry-helper-"));
+      });
+      const helperStep = () => stepNamed(driftSteps(), "Define the retry helper").run ?? "";
       const run = (script: string) => {
-        writeFileSync(join(dir, "write.sh"), helperStep);
+        writeFileSync(join(dir, "write.sh"), helperStep());
         const r = Bun.spawnSync(
           ["bash", "-c", `set -euo pipefail\nbash "${dir}/write.sh"\n${script}`],
           { env: { ...process.env, RUNNER_TEMP: dir, RETRY_DELAY: "0" } },
