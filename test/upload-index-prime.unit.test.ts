@@ -1,7 +1,7 @@
 /**
  * The tracking step records index stat data for large annexed files through git-annex's
  * per-file clean filter, with `filter.annex.process` out of the configuration for the
- * duration (ADR 0098, issue #1704).
+ * duration (ADR 0100, issue #1704).
  *
  * `git annex add` stages an unlocked file with zero stat data, so every later git command
  * that compares the tree with the index streams the file through filter-process to learn
@@ -209,7 +209,7 @@ describe("what the tracking step no longer reads", () => {
 
   test("with the save's own skip on as well, nothing is read and nothing is left flagged", async () => {
     // The production default for a large tree: ADR 0094's skip and the priming together.
-    // ADR 0098 says the skip costs a primed file nothing; this pins it.
+    // ADR 0100 says the skip costs a primed file nothing; this pins it.
     const dir = await dataset("with-skip", { [A]: 2 * MIB, [B]: 2 * MIB });
     const log = await meterFilterProcess(dir);
 
@@ -357,7 +357,7 @@ describe("the priming can neither hide nor stage an edit", () => {
   });
 
   test("an edit that puts size and mtime back is missed by filter-process too: the priming hides nothing it would show", async () => {
-    // A characterization, recorded because the claim in ADR 0098 rests on it. git-annex's
+    // A characterization, recorded because the claim in ADR 0100 rests on it. git-annex's
     // inode cache is inode, size and mtime, and both filter forms answer from it, so an
     // in-place edit that restores the mtime exactly is invisible to `git status` through
     // filter-process just as it is to the per-file filter. If git-annex ever starts hashing

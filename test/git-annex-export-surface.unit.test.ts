@@ -262,7 +262,7 @@ const INTERNAL_WIRING = [
   "sleepSync",
   "stopChildren",
   "writeStderrSync",
-  // index-prime.ts postdates the split (#1704, ADR 0098): the tracking step's index
+  // index-prime.ts postdates the split (#1704, ADR 0100): the tracking step's index
   // priming and the restore at the start of the upload steps, consumed by the upload
   // modules and the tests, never by the CLI directly.
   "FILTER_PROCESS_KEY",

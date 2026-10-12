@@ -113,7 +113,7 @@ function persistOptionalSpinnerWarning(spinner: Ora | null, warning: string): Or
 /**
  * Record index stat data for the data files in `targets` whose recorded size reaches
  * `minBytes`, so git can tell they are unchanged without streaming them through
- * `git-annex filter-process` (ADR 0098, {@link primeIndexStat}). `when` says which
+ * `git-annex filter-process` (ADR 0100, {@link primeIndexStat}). `when` says which
  * entries the call is for: the ones an earlier run left in the index, before the add
  * checks them, or the ones the add just staged. Returns false only when the repository's
  * configuration could not be checked or put back, which fails the step; anything else
@@ -2150,7 +2150,7 @@ export async function uploadDataToS3(
   datasetInfo: DatasetInfo,
   deps: {
     openRemote?: OpenRemote;
-    /** Test hook: lets a small file reach the index priming (ADR 0098). */
+    /** Test hook: lets a small file reach the index priming (ADR 0100). */
     primeMinBytes?: number;
     /** Test hook: runs while the filter process is out of the configuration. */
     primeOnSuspended?: () => void;

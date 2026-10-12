@@ -1,4 +1,4 @@
-# ADR 0098: Tracking records index stat data for large files through git-annex's per-file clean filter
+# ADR 0100: Tracking records index stat data for large files through git-annex's per-file clean filter
 
 **Status:** proposed
 **Date:** 2026-10-12

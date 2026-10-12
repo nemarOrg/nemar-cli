@@ -18,7 +18,7 @@ earlier releases are described only by their generated notes.
 ### Fixed
 
 - **Tracking no longer leaves large data files for git to re-read through git-annex
-  filter-process (#1704, ADR 0098).** `git annex add` stages an unlocked file without stat
+  filter-process (#1704, ADR 0100).** `git annex add` stages an unlocked file without stat
   data, so the save, the first `git status` afterwards and the next upload's add each streamed
   it through `git-annex filter-process` again, and the add's check of files already in the
   index read each one twice. For data files of 1 GiB or more the tracking step now records the

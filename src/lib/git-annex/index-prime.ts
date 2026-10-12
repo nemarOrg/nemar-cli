@@ -1,6 +1,6 @@
 /**
  * git-annex service: record index stat data for large annexed files without streaming
- * their content through `git-annex filter-process`. See ADR 0098 and
+ * their content through `git-annex filter-process`. See ADR 0100 and
  * {@link primeIndexStat}.
  */
 
