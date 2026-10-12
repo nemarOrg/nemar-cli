@@ -10,8 +10,9 @@
  * describe block).
  */
 
-import { describe, expect, test } from "bun:test";
-import { readFileSync, readdirSync } from "node:fs";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
 import { buildEnrichmentCommitPayload } from "../backend/src/services/enrich-dataset";
@@ -351,6 +352,8 @@ describe("every workflow that calls gh gives it a repository", () => {
     run?: string;
     env?: Record<string, unknown>;
     with?: Record<string, unknown>;
+    shell?: string;
+    "continue-on-error"?: boolean;
   }
   interface Job {
     env?: Record<string, unknown>;
@@ -596,6 +599,157 @@ describe("every workflow that calls gh gives it a repository", () => {
     );
     expect(label, "the label mutation must apply").not.toBe(drift());
     expect(defectsOf("drift", label).some((d) => d.includes("failed label create"))).toBe(true);
+  });
+
+  describe("the issue-filing steps of the drift and nightly workflows", () => {
+    // Structure the scanner cannot see: how a lookup is retried, which step may fail without
+    // stopping the job, and that a title and the lookup that finds it share one prefix.
+    // Each of these was a way to quietly lose the weekly alarm, or to file it twice.
+    const LOOKUP_STEPS = [
+      "Open / update drift issue",
+      "Open / update probe-broken issue",
+      "Open / update report-broken issue",
+    ];
+    const stepsOf = (text: string): Step[] =>
+      Object.values((parse(text) as Doc).jobs ?? {}).flatMap((j) => j.steps ?? []);
+    const stepNamed = (steps: Step[], name: string): Step => {
+      const found = steps.find((s) => s.name === name);
+      if (!found) throw new Error(`no step named "${name}"`);
+      return found;
+    };
+    const driftSteps = () => stepsOf(drift());
+    const prefixOf = (run: string) => run.match(/^\s*PREFIX="([^"]+)"$/m)?.[1];
+
+    test("each lookup declares its prefix once, builds the title from it and matches on it", () => {
+      for (const name of LOOKUP_STEPS) {
+        const run = stepNamed(driftSteps(), name).run ?? "";
+        const prefix = prefixOf(run);
+        expect(prefix, `${name}: PREFIX="..."`).toBeDefined();
+        expect(run.match(/^\s*PREFIX=/gm)?.length, `${name}: PREFIX declared once`).toBe(1);
+        // The title starts with the prefix, so the lookup finds the issue the step files.
+        const title = run.match(/^\s*TITLE="([^"]*)"$/m)?.[1] ?? "";
+        expect(title.startsWith("${PREFIX}"), `${name}: TITLE="${title}"`).toBe(true);
+        expect(title.replace("${PREFIX}", prefix ?? "").startsWith(prefix ?? "?")).toBe(true);
+        // The lookup keeps only a title with that prefix, and there is no second literal to
+        // fall out of step with it.
+        expect(run, name).toContain('startswith(\\"${PREFIX}\\")');
+        expect(run.match(/startswith\(/g)?.length, `${name}: one startswith`).toBe(1);
+      }
+    });
+
+    test("no issue prefix is a prefix of another, so one lookup cannot find another's issue", () => {
+      const prefixes = LOOKUP_STEPS.map((name) =>
+        prefixOf(stepNamed(driftSteps(), name).run ?? ""),
+      );
+      for (const a of prefixes) {
+        for (const b of prefixes) {
+          if (a === b) continue;
+          expect(b?.startsWith(a ?? "?"), `"${b}" starts with "${a}"`).toBe(false);
+        }
+      }
+      expect(new Set(prefixes).size).toBe(LOOKUP_STEPS.length);
+    });
+
+    test("every lookup goes through the retry helper, defined before it is used", () => {
+      const steps = driftSteps();
+      const helper = steps.findIndex((s) => s.name === "Define the retry helper");
+      expect(helper, "the helper step exists").toBeGreaterThanOrEqual(0);
+      for (const name of LOOKUP_STEPS) {
+        const run = stepNamed(steps, name).run ?? "";
+        expect(
+          steps.findIndex((s) => s.name === name),
+          name,
+        ).toBeGreaterThan(helper);
+        expect(run, name).toContain('source "$RUNNER_TEMP/retry.sh"');
+        expect(run, name).toMatch(/EXISTING=\$\(retry gh issue list /);
+        // Failing must stop the step: set -e, and no continue-on-error to soften it.
+        expect(run, name).toContain("set -euo pipefail");
+        expect(stepNamed(steps, name)["continue-on-error"], name).toBeUndefined();
+      }
+    });
+
+    test("the label step may fail without stopping the job, and says so loudly", () => {
+      const step = stepNamed(driftSteps(), "Ensure issue labels exist");
+      expect(step["continue-on-error"]).toBe(true);
+      // Not silent: nothing in it discards stderr or the exit status (the scanner's label
+      // rule), and a failed create is reported and reflected in the step's own status.
+      expect(step.run).toContain('echo "::error::Could not create label');
+      expect(step.run).toContain('exit "$failed"');
+    });
+
+    test("the nightly lookup uses the same bounded retry as the drift workflow", () => {
+      const fn = (run: string) =>
+        (run.match(/^\s*retry\(\) \{\n[\s\S]*?\n\s*\}$/m)?.[0] ?? "")
+          .split("\n")
+          .map((l) => l.trim());
+      const driftHelper = fn(stepNamed(driftSteps(), "Define the retry helper").run ?? "");
+      expect(driftHelper.length).toBeGreaterThan(5);
+      const nightly = stepsOf(
+        readFileSync(join(ROOT, ".github/workflows/nightly-tests.yml"), "utf8"),
+      ).find((s) => s.run?.includes("gh issue list"));
+      expect(nightly, "the nightly lookup step").toBeDefined();
+      expect(fn(nightly?.run ?? "")).toEqual(driftHelper);
+      expect(nightly?.run).toMatch(/EXISTING=\$\(retry gh issue list /);
+    });
+
+    describe("the retry helper itself, as the workflow writes it", () => {
+      // The real helper, written by the real step into a temporary directory and run by real
+      // bash against a command that really fails a set number of times. It must succeed once
+      // the command does, and after the third failure it must FAIL the step that called it.
+      const dir = mkdtempSync(join(tmpdir(), "retry-helper-"));
+      const helperStep = stepNamed(driftSteps(), "Define the retry helper").run ?? "";
+      const run = (script: string) => {
+        writeFileSync(join(dir, "write.sh"), helperStep);
+        const r = Bun.spawnSync(
+          ["bash", "-c", `set -euo pipefail\nbash "${dir}/write.sh"\n${script}`],
+          { env: { ...process.env, RUNNER_TEMP: dir, RETRY_DELAY: "0" } },
+        );
+        return {
+          status: r.exitCode,
+          out: r.stdout.toString(),
+          err: r.stderr.toString(),
+          calls: Number(readFileSync(join(dir, "calls"), "utf8").trim()),
+        };
+      };
+      // A command that fails its first $1 calls, then prints "found". Counts its calls.
+      const flaky = (failures: number) => `
+        echo 0 > "${dir}/calls"
+        flaky() { n=$(($(cat "${dir}/calls") + 1)); echo $n > "${dir}/calls"; [ $n -gt ${failures} ] && echo found; }
+        source "${dir}/retry.sh"
+        set -euo pipefail
+      `;
+
+      test("succeeds on the first try without retrying", () => {
+        const r = run(`${flaky(0)}\nX=$(retry flaky)\necho "got:$X"`);
+        expect(r.status).toBe(0);
+        expect(r.out.trim()).toBe("got:found");
+        expect(r.calls).toBe(1);
+      });
+
+      test("recovers from two failures and prints the result once", () => {
+        const r = run(`${flaky(2)}\nX=$(retry flaky)\necho "got:$X"`);
+        expect(r.status).toBe(0);
+        expect(r.out.trim()).toBe("got:found");
+        expect(r.calls).toBe(3);
+        expect(r.err).toContain("Attempt 1 of 3 failed");
+      });
+
+      test("after the third failure the calling step FAILS and never reads it as no issue", () => {
+        const r = run(`${flaky(99)}\nX=$(retry flaky)\necho "reached:$X"`);
+        expect(r.status).not.toBe(0);
+        expect(r.out).not.toContain("reached");
+        expect(r.calls).toBe(3);
+        expect(r.err).toContain("Giving up after 3 attempts");
+      });
+
+      test("an empty successful result is an empty result, not a failure", () => {
+        const r = run(`${flaky(0)}\nempty() { :; }\nX=$(retry empty)\necho "got:[$X]"`);
+        expect(r.status).toBe(0);
+        expect(r.out.trim()).toBe("got:[]");
+      });
+
+      afterAll(() => rmSync(dir, { recursive: true, force: true }));
+    });
   });
 
   describe("a new workflow with the same defect", () => {
