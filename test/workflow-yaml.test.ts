@@ -387,11 +387,21 @@ describe("every workflow that calls gh gives it a repository", () => {
   ]);
 
   /**
-   * Where a `gh` may start: the beginning of a line, after a separator or a subshell, after
-   * a shell keyword, or after a `VAR=value` prefix. Group 1 is the prefix, 2 the whitespace.
+   * Commands that run another command and pass its status on, so `retry gh issue list` and
+   * `timeout 30 gh issue create` are `gh` calls too. `retry` is the helper the issue-filing
+   * workflows define; the rest are the usual suspects.
    */
-  const GH_AT_COMMAND_POSITION =
-    /(^|[;&|(`{!]|\b(?:then|do|else|if|while|until)\s|=\S*\s)(\s*)gh\s+([a-z][a-z-]*)/g;
+  const WRAPPERS = String.raw`(?:(?:retry|command|exec|time|nohup|sudo|env|timeout\s+\S+|\w+=\S*)\s+)*`;
+
+  /**
+   * Where a `gh` may start: the beginning of a line, after a separator or a subshell, after
+   * a shell keyword, or after a `VAR=value` prefix, optionally behind a wrapper. Group 1 is
+   * the prefix, 2 the whitespace and wrappers, 3 the gh command group.
+   */
+  const GH_AT_COMMAND_POSITION = new RegExp(
+    String.raw`(^|[;&|(\`{!]|\b(?:then|do|else|if|while|until)\s|=\S*\s)(\s*${WRAPPERS})gh\s+([a-z][a-z-]*)`,
+    "g",
+  );
 
   /** A failure turned into success: `|| true`, `|| :`, `|| echo ""`, `|| VAR=""`. */
   const SWALLOWS_FAILURE =
@@ -621,6 +631,33 @@ ${stepExtra}
       - uses: actions/checkout@v4
 `);
       expect(defectsOf("new.yml", yaml).length).toBe(1);
+    });
+
+    test("is reported behind a wrapper command such as retry or timeout", () => {
+      // `retry gh issue create` is a gh call; a scanner that only saw `gh` at the start of a
+      // command would stop seeing every call the moment it was wrapped.
+      for (const wrapped of [
+        "retry gh issue create --title t",
+        "timeout 30 gh issue create --title t",
+        "env X=1 gh issue create --title t",
+        "command gh issue create --title t",
+        "sudo gh issue create --title t",
+      ]) {
+        const yaml = workflow(`
+    steps:
+      - name: file it
+        run: ${wrapped}
+`);
+        expect(defectsOf("new.yml", yaml).length, wrapped).toBe(1);
+      }
+      const swallowed = workflow(`
+    steps:
+      - uses: actions/checkout@v4
+      - name: look
+        run: |
+          EXISTING=$(retry gh issue list --state open --json number --jq '.[0].number' || echo "")
+`);
+      expect(defectsOf("new.yml", swallowed).length).toBe(1);
     });
 
     test("is reported after a here-string, which does not start a heredoc", () => {
