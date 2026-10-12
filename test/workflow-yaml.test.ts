@@ -4,10 +4,15 @@
  * Validates that all CI workflow templates in deployWorkflows() produce
  * syntactically valid YAML. This prevents regressions like #285 where
  * unescaped \n in JS template literals broke the deployed YAML.
+ *
+ * It also checks the repository's own workflows: how the test workflow routes changes
+ * to jobs, and that every workflow that calls `gh` gives it a repository (the last
+ * describe block).
  */
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { parse } from "yaml";
 import { buildEnrichmentCommitPayload } from "../backend/src/services/enrich-dataset";
 import { getWorkflowTemplates } from "../backend/src/services/github";
@@ -297,5 +302,405 @@ describe("the repo's own test workflow routes changes to jobs", () => {
     for (const name of ["cli", "backend", "tests", "shared", "zarr"]) {
       expect(filterNames()).toContain(name);
     }
+  });
+});
+
+describe("every workflow that calls gh gives it a repository", () => {
+  /**
+   * `gh` finds the repository it acts on by asking git for the remote. A job with no
+   * `actions/checkout` step has no git repository, so `gh issue list` dies with "failed to
+   * run git: fatal: not a git repository" unless the repository is named some other way.
+   * `check-summary-drift.yml` was exactly that job: it had no checkout, no `GH_REPO` and no
+   * `--repo`, so every scheduled run failed (20 of 20 on record, the first on 2026-06-01)
+   * and the issue the workflow exists to file was never opened. Nothing noticed, because a
+   * red scheduled run on a workflow nobody watches is silence (ADR 0053).
+   *
+   * Three rules, all enforced over every workflow the repository ships:
+   *
+   * 1. A `gh` call that needs a repository has one: an earlier checkout of this repository
+   *    in the job, `GH_REPO` in the workflow, job or step environment, or `--repo`.
+   * 2. A lookup that decides "does an issue exist" never turns its own failure into "no".
+   *    `EXISTING=$(gh issue list ... || echo "")` reads an API error as an empty result and
+   *    files a duplicate; an empty result is fine, an error must fail the step.
+   * 3. `gh label create` does not discard its stderr or its exit code. A label step that
+   *    ended in `>/dev/null 2>&1 || true` hid the missing `drift` label for twenty weeks.
+   *
+   * The analysis is static text over parsed YAML, so it can be wrong in both directions;
+   * the controls below pin the cases it has to get right, and that it reports a defect at
+   * all (a scanner that matches nothing passes everything).
+   */
+  interface Step {
+    name?: string;
+    uses?: string;
+    run?: string;
+    env?: Record<string, unknown>;
+    with?: Record<string, unknown>;
+  }
+  interface Job {
+    env?: Record<string, unknown>;
+    steps?: Step[];
+  }
+  interface Doc {
+    env?: Record<string, unknown>;
+    jobs?: Record<string, Job>;
+  }
+  interface GhCall {
+    /** The gh command group: `issue` in `gh issue list`. */
+    group: string;
+    /** The subcommand: `list` in `gh issue list`. */
+    action: string;
+    /** The whole invocation, from `gh` to the end of its line or the next `gh`. */
+    text: string;
+  }
+
+  /** The groups that resolve `{owner}/{repo}` from the git remote when not told otherwise. */
+  // `gh repo` is left out on purpose: it takes its repository positionally, so a bare
+  // `gh repo clone owner/name` needs no context and the two cannot be told apart by flags.
+  const REPO_SCOPED_GROUPS = new Set([
+    "issue",
+    "pr",
+    "label",
+    "release",
+    "run",
+    "workflow",
+    "secret",
+    "variable",
+    "cache",
+    "ruleset",
+    "browse",
+  ]);
+
+  /**
+   * Where a `gh` may start: the beginning of a line, after a separator or a subshell, after
+   * a shell keyword, or after a `VAR=value` prefix. Group 1 is the prefix, 2 the whitespace.
+   */
+  const GH_AT_COMMAND_POSITION =
+    /(^|[;&|(`{!]|\b(?:then|do|else|if|while|until)\s|=\S*\s)(\s*)gh\s+([a-z][a-z-]*)/g;
+
+  /** A failure turned into success: `|| true`, `|| :`, `|| echo ""`, `|| VAR=""`. */
+  const SWALLOWS_FAILURE =
+    /\|\|\s*(?:true|:|echo(?:\s+(?:""|''))?|printf\s+(?:""|'')|[A-Za-z_][A-Za-z0-9_]*=(?:""|'')?)\s*\)?\s*(?:;|$)/;
+
+  const DISCARDS_STDERR = /(?:2>\s*\/dev\/null|&>\s*\/dev\/null|>\s*\/dev\/null\s+2>&1)/;
+
+  /** A script as the shell sees it: continuations joined, comments and heredoc bodies gone. */
+  function logicalLines(script: string): string[] {
+    const out: string[] = [];
+    let heredocEnd: string | null = null;
+    let pending = "";
+    for (const raw of script.split("\n")) {
+      if (heredocEnd !== null) {
+        if (raw.trim() === heredocEnd) heredocEnd = null;
+        continue;
+      }
+      const line = pending + raw;
+      if (/\\\s*$/.test(line)) {
+        pending = line.replace(/\\\s*$/, " ");
+        continue;
+      }
+      pending = "";
+      if (line.trim().startsWith("#")) continue;
+      out.push(line);
+      // `<<<` is a here-string, not a heredoc: the lookarounds keep it out.
+      const heredoc = line.match(/(?<!<)<<(?!<)-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/);
+      if (heredoc) heredocEnd = heredoc[2];
+    }
+    if (pending) out.push(pending);
+    return out;
+  }
+
+  function ghCalls(script: string): GhCall[] {
+    const calls: GhCall[] = [];
+    for (const line of logicalLines(script)) {
+      const starts = [...line.matchAll(GH_AT_COMMAND_POSITION)];
+      starts.forEach((m, i) => {
+        const from = (m.index ?? 0) + m[1].length + m[2].length;
+        const to = i + 1 < starts.length ? (starts[i + 1].index ?? line.length) : line.length;
+        const text = line.slice(from, to);
+        calls.push({ group: m[3], action: text.split(/\s+/)[2] ?? "", text });
+      });
+    }
+    return calls;
+  }
+
+  const hasRepoFlag = (call: GhCall) => /(?:^|\s)(?:--repo|-R)(?:\s|=)/.test(call.text);
+
+  /** `gh api repos/o/n/...` names its repository; `gh api repos/{owner}/{repo}/...` does not. */
+  const needsRepository = (call: GhCall) =>
+    call.group === "api"
+      ? /\{(?:owner|repo|branch)\}/.test(call.text)
+      : REPO_SCOPED_GROUPS.has(call.group);
+
+  const namesRepo = (env: Record<string, unknown> | undefined) =>
+    typeof env?.GH_REPO === "string" && env.GH_REPO.trim() !== "";
+
+  /**
+   * A checkout of THIS repository at the workspace root. One with `repository:` or `path:`
+   * leaves the root without this repository's git metadata, so it does not count.
+   */
+  const checksOutThisRepo = (step: Step) =>
+    typeof step.uses === "string" &&
+    step.uses.startsWith("actions/checkout@") &&
+    !step.with?.repository &&
+    !step.with?.path;
+
+  const isIssueLookup = (call: GhCall) =>
+    (call.group === "issue" && ["list", "view", "status"].includes(call.action)) ||
+    (call.group === "search" && call.action === "issues");
+
+  function findDefects(label: string, doc: Doc): string[] {
+    const defects: string[] = [];
+    for (const [jobName, job] of Object.entries(doc.jobs ?? {})) {
+      const steps = job.steps ?? [];
+      steps.forEach((step, index) => {
+        if (typeof step.run !== "string") return;
+        const where = `${label}: job "${jobName}", step "${step.name ?? `#${index + 1}`}"`;
+        const covered =
+          namesRepo(doc.env) ||
+          namesRepo(job.env) ||
+          namesRepo(step.env) ||
+          steps.slice(0, index).some(checksOutThisRepo);
+        for (const call of ghCalls(step.run)) {
+          const shown = call.text.slice(0, 70);
+          if (needsRepository(call) && !covered && !hasRepoFlag(call)) {
+            defects.push(
+              `${where}: \`${shown}\` has no repository (no checkout, GH_REPO or --repo)`,
+            );
+          }
+          if (isIssueLookup(call) && SWALLOWS_FAILURE.test(call.text)) {
+            defects.push(`${where}: \`${shown}\` turns a failed lookup into "no issue"`);
+          }
+          if (
+            call.group === "label" &&
+            call.action === "create" &&
+            (DISCARDS_STDERR.test(call.text) || SWALLOWS_FAILURE.test(call.text))
+          ) {
+            defects.push(`${where}: \`${shown}\` hides a failed label create`);
+          }
+        }
+      });
+    }
+    return defects;
+  }
+
+  const defectsOf = (label: string, yaml: string) => findDefects(label, parse(yaml) as Doc);
+
+  const ROOT = join(import.meta.dir, "..");
+  const WORKFLOW_DIRS = [".github/workflows", ".github/dataset-workflows"];
+
+  function shippedWorkflows(): { label: string; text: string }[] {
+    const files = WORKFLOW_DIRS.flatMap((dir) =>
+      readdirSync(join(ROOT, dir))
+        .filter((f) => f.endsWith(".yml"))
+        .sort()
+        .map((f) => ({ label: `${dir}/${f}`, text: readFileSync(join(ROOT, dir, f), "utf8") })),
+    );
+    // The per-dataset shims deploy into every dataset repository, where a `gh` with no
+    // repository would fail the same way.
+    const templates = getWorkflowTemplates().map((t) => ({
+      label: `template ${t.path}`,
+      text: t.content,
+    }));
+    return [...files, ...templates];
+  }
+
+  const drift = () => readFileSync(join(ROOT, ".github/workflows/check-summary-drift.yml"), "utf8");
+
+  test("no workflow the repository ships has a defect", () => {
+    const defects = shippedWorkflows().flatMap(({ label, text }) => defectsOf(label, text));
+    expect(defects).toEqual([]);
+  });
+
+  test("the scan reaches the workflows that file issues", () => {
+    // A scanner that matched no `gh` call would pass the test above for any input.
+    const labels = shippedWorkflows().map((w) => w.label);
+    for (const expected of [
+      ".github/workflows/check-summary-drift.yml",
+      ".github/workflows/nightly-tests.yml",
+      ".github/workflows/npm-publish.yml",
+      ".github/dataset-workflows/run-pr-review.yml",
+    ]) {
+      expect(labels).toContain(expected);
+    }
+    const issueCalls = parse(drift()) as Doc;
+    const steps = Object.values(issueCalls.jobs ?? {}).flatMap((j) => j.steps ?? []);
+    const groups = steps.flatMap((s) => (s.run ? ghCalls(s.run).map((c) => c.group) : []));
+    expect(groups.filter((g) => g === "issue").length).toBeGreaterThanOrEqual(9);
+    expect(groups.filter((g) => g === "label").length).toBeGreaterThanOrEqual(2);
+  });
+
+  test("the drift workflow without its GH_REPO is caught, step by step", () => {
+    // The real file with the one line that fixed it removed: the defect as it shipped.
+    const broken = drift().replace(/^\s*GH_REPO:.*\n/gm, "");
+    expect(broken, "the mutation must apply").not.toBe(drift());
+    const defects = defectsOf("check-summary-drift.yml", broken);
+    for (const step of [
+      "Ensure issue labels exist",
+      "Open / update drift issue",
+      "Open / update probe-broken issue",
+      "Open / update report-broken issue",
+    ]) {
+      expect(
+        defects.some((d) => d.includes(`step "${step}"`) && d.includes("has no repository")),
+        `${step} should be reported`,
+      ).toBe(true);
+    }
+  });
+
+  test("the drift workflow's old lookup and label swallows are caught", () => {
+    // Re-introduce each swallow the fix removed, one at a time, into the real file.
+    const lookup = drift().replace(/\.\[0\]\.number'\)/, `.[0].number' || echo "")`);
+    expect(lookup, "the lookup mutation must apply").not.toBe(drift());
+    expect(defectsOf("drift", lookup).some((d) => d.includes("failed lookup"))).toBe(true);
+
+    const label = drift().replace(
+      /gh label create "\$name" --color "\$color" --description "\$description"/,
+      `gh label create "$name" --color "$color" --description "$description" >/dev/null 2>&1 || true`,
+    );
+    expect(label, "the label mutation must apply").not.toBe(drift());
+    expect(defectsOf("drift", label).some((d) => d.includes("failed label create"))).toBe(true);
+  });
+
+  describe("a new workflow with the same defect", () => {
+    const workflow = (jobBody: string, workflowEnv = "") => `
+name: New
+on: workflow_dispatch
+${workflowEnv}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+${jobBody}
+`;
+    const noCheckout = (stepExtra = "", jobExtra = "") =>
+      workflow(`${jobExtra}
+    steps:
+      - name: file it
+${stepExtra}
+        run: gh issue create --title t --body b
+`);
+
+    test("is reported when the job has no checkout, GH_REPO or --repo", () => {
+      expect(defectsOf("new.yml", noCheckout()).length).toBe(1);
+    });
+
+    test("is reported when the only checkout is of another repository or path", () => {
+      for (const withBlock of ["repository: other/repo", "path: sub"]) {
+        const yaml = workflow(`
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ${withBlock}
+      - name: file it
+        run: gh issue create --title t --body b
+`);
+        expect(defectsOf("new.yml", yaml).length, withBlock).toBe(1);
+      }
+    });
+
+    test("is reported when the checkout comes after the gh call", () => {
+      const yaml = workflow(`
+    steps:
+      - name: file it
+        run: gh issue create --title t --body b
+      - uses: actions/checkout@v4
+`);
+      expect(defectsOf("new.yml", yaml).length).toBe(1);
+    });
+
+    test("is reported after a here-string, which does not start a heredoc", () => {
+      // `<<< word` looks like `<< word` to a naive heredoc matcher, which would then skip
+      // the rest of the script and report nothing.
+      const yaml = workflow(`
+    steps:
+      - name: file it
+        run: |
+          grep -q x <<< word
+          gh issue create --title t --body b
+`);
+      expect(defectsOf("new.yml", yaml).length).toBe(1);
+    });
+
+    test("is reported for gh api with a {owner}/{repo} placeholder", () => {
+      const yaml = workflow(`
+    steps:
+      - name: call
+        run: gh api repos/{owner}/{repo}/issues
+`);
+      expect(defectsOf("new.yml", yaml).length).toBe(1);
+    });
+
+    test("is not reported when the repository is named, however it is named", () => {
+      const named: string[] = [
+        // A checkout of this repository, before the call.
+        workflow(`
+    steps:
+      - uses: actions/checkout@v4
+      - name: file it
+        run: gh issue create --title t --body b
+`),
+        // GH_REPO at each of the three levels.
+        noCheckout("        env:\n          GH_REPO: ${{ github.repository }}"),
+        noCheckout("", "    env:\n      GH_REPO: ${{ github.repository }}"),
+        workflow(
+          `
+    steps:
+      - name: file it
+        run: gh issue create --title t --body b
+`,
+          "env:\n  GH_REPO: ${{ github.repository }}",
+        ),
+        // --repo, including on a continuation line and after a pipe.
+        workflow(`
+    steps:
+      - name: file it
+        run: |
+          echo body | gh issue create --repo "$GITHUB_REPOSITORY" \\
+            --title t --body-file -
+          gh issue list -R "$GITHUB_REPOSITORY" --state open
+`),
+        // Calls that need no repository: an explicit API path, and text that only looks like
+        // a gh invocation (a comment, a heredoc body, a quoted mention).
+        workflow(`
+    steps:
+      - name: call
+        run: |
+          # then gh issue create is the thing this step does not do
+          gh api "repos/o/n/dispatches" -f event_type=x
+          python3 << 'EOF'
+          gh issue create --title in-a-heredoc
+          EOF
+          echo "then run gh issue create by hand"
+`),
+      ];
+      named.forEach((yaml, i) => {
+        expect(defectsOf("new.yml", yaml), `case ${i}`).toEqual([]);
+      });
+    });
+
+    test("is reported when a failed issue lookup is swallowed, in any spelling", () => {
+      for (const swallow of ['|| echo ""', "|| echo ''", "|| true", "|| :", '|| EXISTING=""']) {
+        const yaml = workflow(`
+    steps:
+      - uses: actions/checkout@v4
+      - name: look
+        run: |
+          EXISTING=$(gh issue list --state open --json number --jq '.[0].number' ${swallow})
+`);
+        expect(defectsOf("new.yml", yaml).length, swallow).toBe(1);
+      }
+    });
+
+    test("is not reported when a failed lookup is allowed to fail the step", () => {
+      const yaml = workflow(`
+    steps:
+      - uses: actions/checkout@v4
+      - name: look
+        run: |
+          set -euo pipefail
+          EXISTING=$(gh issue list --state open --json number --jq '.[0].number // empty')
+          gh label create x --color 000000 || echo "::warning::could not create x"
+`);
+      expect(defectsOf("new.yml", yaml)).toEqual([]);
+    });
   });
 });
