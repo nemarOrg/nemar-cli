@@ -296,6 +296,22 @@ describe("the repo's own test workflow routes changes to jobs", () => {
     }
   });
 
+  test("workflow files have a filter, and gate lint and unit-pure alike", () => {
+    // test/workflow-yaml.test.ts polices every workflow, but a pull request that edits
+    // only a workflow matches no other filter and would run neither job. Both jobs, not
+    // just the one that runs the test: they are required checks, and a required check
+    // that is skipped blocks the merge.
+    expect(filterNames()).toContain("workflows");
+    for (const job of ["lint", "unit-pure"]) {
+      expect(workflow.jobs[job]?.if ?? "", job).toContain("outputs.workflows == 'true'");
+    }
+    const filters = (workflow.jobs.changes.steps as { with?: { filters?: string } }[]).find(
+      (s) => s.with?.filters,
+    )?.with?.filters;
+    expect(filters).toContain("'.github/workflows/**'");
+    expect(filters).toContain("'.github/dataset-workflows/**'");
+  });
+
   test("the source trees the jobs build all have a filter", () => {
     // If a new top-level source directory appears without one, it is invisible
     // to CI. Keep this list in step with what the jobs actually compile.
