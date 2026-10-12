@@ -169,13 +169,46 @@ async function statRecorded(dir: string, path: string): Promise<boolean> {
   return mtime[1] !== "0" || mtime[2] !== "0";
 }
 
-/** The repository's own filter process values and git-annex's marker, as git reads them. */
+/**
+ * The repository's own filter process values and git-annex's marker, as git reads them.
+ * Empty values are kept: git reads an empty filter process as no filter at all, so an
+ * assertion that dropped them would call that state clean.
+ */
 async function filterConfig(dir: string): Promise<{ process: string[]; marker: string[] }> {
   const read = async (key: string) =>
     (await run(["git", "config", "--local", "--null", "--get-all", key], dir)).stdout
       .split("\0")
-      .filter(Boolean);
+      .slice(0, -1);
   return { process: await read(FILTER_PROCESS_KEY), marker: await read(FILTER_PROCESS_MARKER) };
+}
+
+/** A git config file, outside any repository, holding an empty filter process. */
+function emptyFilterProcessFile(name: string): string {
+  const file = join(scratch.root, `${name}-${Math.random().toString(36).slice(2)}.gitconfig`);
+  writeFileSync(file, '[filter "annex"]\n\tprocess =\n');
+  return file;
+}
+
+/** Run `fn` with one environment variable set, and put the variable back after. */
+async function withEnv<T>(name: string, value: string, fn: () => Promise<T>): Promise<T> {
+  const saved = process.env[name];
+  process.env[name] = value;
+  try {
+    return await fn();
+  } finally {
+    // Not `= undefined`, which would leave the string "undefined".
+    if (saved === undefined) delete process.env[name];
+    else process.env[name] = saved;
+  }
+}
+
+/** Stage a new 300 KB file and report the size of the blob git stored for it. */
+async function stagedBlobSize(dir: string, path: string): Promise<number> {
+  writeFile(dir, path, Buffer.alloc(300_000, 7));
+  const add = await run(["git", "add", "--", path], dir);
+  if (add.exitCode !== 0) throw new Error(`git add failed: ${add.stderr}`);
+  const size = await run(["git", "cat-file", "-s", `:${path}`], dir);
+  return Number(size.stdout.trim());
 }
 
 const bytesRead = (log: string): number => readFileSync(log).length;
@@ -347,7 +380,7 @@ describe("the priming can neither hide nor stage an edit", () => {
 
     const res = await primeIndexStat(dir, ["a.edf", "b.edf"]);
 
-    expect(res).toEqual({ primed: 2 });
+    expect(res).toEqual({ status: "primed", primed: 2 });
     expect((await run(["git", "ls-files", "-s"], dir)).stdout).toBe(staged);
     expect(await statRecorded(dir, "a.edf")).toBe(false);
     expect(await statRecorded(dir, "b.edf")).toBe(true);
@@ -368,7 +401,10 @@ describe("the priming can neither hide nor stage an edit", () => {
 
     const viaPrime = await editedAfterTracking("edit-kept-prime", true);
     const staged = (await run(["git", "ls-files", "-s"], viaPrime)).stdout;
-    expect(await primeIndexStat(viaPrime, ["a.edf", "b.edf"])).toEqual({ primed: 2 });
+    expect(await primeIndexStat(viaPrime, ["a.edf", "b.edf"])).toEqual({
+      status: "primed",
+      primed: 2,
+    });
     expect((await run(["git", "ls-files", "-s"], viaPrime)).stdout).toBe(staged);
     const statusViaPrime = await run(["git", "status", "--porcelain"], viaPrime);
     expect(statusViaPrime.stdout.split("\n")).toContain("A  a.edf");
@@ -387,7 +423,7 @@ describe("the priming can neither hide nor stage an edit", () => {
 
     const res = await primeIndexStat(dir, ["untracked.edf", "gone.edf", "star*.edf"]);
 
-    expect(res).toEqual({ primed: 2 });
+    expect(res).toEqual({ status: "primed", primed: 2 });
     expect(await statRecorded(dir, "star*.edf")).toBe(true);
     expect(await statRecorded(dir, "starX.edf")).toBe(false);
     const status = await run(["git", "status", "--porcelain"], dir);
@@ -515,10 +551,28 @@ describe("the filter process never stays out of the configuration", () => {
     } finally {
       rmSync(configLock(dir), { force: true });
     }
-    expect(res.error).toBeUndefined();
-    expect(res.restored).toBe(false);
-    expect(res.warning).toContain("filter process itself is set");
+    expect(res.status).toBe("warning");
+    expect(res.status === "warning" && res.warning).toContain("filter process itself is set");
     expect((await filterConfig(dir)).process).toEqual(configured.process);
+  });
+
+  test("a config.lock held when the marker is written skips the priming without failing the step", async () => {
+    // Nothing has been taken out at that point, so it is not a restore failure.
+    const dir = await trackedRepo(scratch.root, "marker-locked", { "a.edf": 300_000 });
+    const configured = await filterConfig(dir);
+    writeFileSync(configLock(dir), "");
+    let res: Awaited<ReturnType<typeof primeIndexStat>>;
+    try {
+      res = await primeIndexStat(dir, ["a.edf"]);
+    } finally {
+      rmSync(configLock(dir), { force: true });
+    }
+    expect(res.status).toBe("skipped");
+    expect(res.status === "skipped" && res.reason).toContain(
+      `could not record ${FILTER_PROCESS_MARKER}`,
+    );
+    expect(await filterConfig(dir)).toEqual(configured);
+    expect(await statRecorded(dir, "a.edf")).toBe(false);
   });
 
   test("the signal handler is disarmed however the call ends", async () => {
@@ -528,18 +582,22 @@ describe("the filter process never stays out of the configuration", () => {
     const before = counts();
 
     const ok1 = await trackedRepo(scratch.root, "disarm-ok", { "a.edf": 300_000 });
-    expect(await primeIndexStat(ok1, ["a.edf"])).toEqual({ primed: 1 });
+    expect(await primeIndexStat(ok1, ["a.edf"])).toEqual({ status: "primed", primed: 1 });
     expect(counts()).toEqual(before);
 
     // A refresh that fails (index.lock held) is `skipped`, after the handler was armed.
     const skipped = await trackedRepo(scratch.root, "disarm-skipped", { "a.edf": 300_000 });
+    const skippedConfig = await filterConfig(skipped);
     const indexLock = join(skipped, ".git", "index.lock");
     let res = await primeIndexStat(skipped, ["a.edf"], {
       onSuspended: () => writeFileSync(indexLock, ""),
     });
     rmSync(indexLock, { force: true });
-    expect(res.skipped).toContain("git add --refresh failed");
+    expect(res.status === "skipped" && res.reason).toContain("git add --refresh failed");
     expect(counts()).toEqual(before);
+    // And the value was put back although the refresh failed (an editor holding
+    // index.lock is enough), with no marker left.
+    expect(await filterConfig(skipped)).toEqual(skippedConfig);
 
     // A restore that fails is an `error`, also after the handler was armed.
     const failed = await trackedRepo(scratch.root, "disarm-error", { "a.edf": 300_000 });
@@ -547,8 +605,92 @@ describe("the filter process never stays out of the configuration", () => {
       onSuspended: () => writeFileSync(configLock(failed), ""),
     });
     rmSync(configLock(failed), { force: true });
-    expect(res.error).toContain("Could not put git-annex's filter process back");
+    expect(res.status === "error" && res.error).toContain(
+      "Could not put git-annex's filter process back",
+    );
     expect(counts()).toEqual(before);
+  });
+});
+
+describe("an empty filter process anywhere stops the priming before anything changes", () => {
+  // git reads an empty filter.annex.process as no filter at all, not as unset. With one in
+  // a scope below the repository's own, taking the repository's value out would leave the
+  // empty one in effect, and every `git add` in that window would store raw content in git.
+
+  for (const variable of ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"] as const) {
+    test(`an empty value in the file ${variable} names`, async () => {
+      // Guards the empty-value half of the scope check (readConfigValues keeps empties).
+      const dir = await trackedRepo(scratch.root, `empty-${variable}`, { "a.edf": 300_000 });
+      const configured = await filterConfig(dir);
+      const file = emptyFilterProcessFile(variable);
+      let rawBlobInWindow = -1;
+
+      const res = await withEnv(variable, file, () =>
+        primeIndexStat(dir, ["a.edf"], {
+          onSuspended: () => {
+            rawBlobInWindow = 0;
+          },
+        }),
+      );
+
+      expect(res.status).toBe("skipped");
+      expect(rawBlobInWindow).toBe(-1);
+      expect(await statRecorded(dir, "a.edf")).toBe(false);
+      expect(await filterConfig(dir)).toEqual(configured);
+      // And the repository still annexes: its own value outranks the empty one.
+      const size = await withEnv(variable, file, () => stagedBlobSize(dir, "new.edf"));
+      expect(size).toBeLessThan(1_000);
+    });
+  }
+
+  test("an empty value in the repository's own configuration", async () => {
+    // The annex filter is already off in such a repository; nothing is primed or changed.
+    const dir = await trackedRepo(scratch.root, "empty-local", { "a.edf": 300_000 });
+    await run(["git", "config", "--local", FILTER_PROCESS_KEY, ""], dir);
+    let suspended = false;
+
+    const res = await primeIndexStat(dir, ["a.edf"], {
+      onSuspended: () => {
+        suspended = true;
+      },
+    });
+
+    expect(res.status).toBe("skipped");
+    expect(suspended).toBe(false);
+    expect(await filterConfig(dir)).toEqual({ process: [""], marker: [] });
+  });
+
+  test("an empty value in a file the repository includes before its own entry", async () => {
+    const dir = await trackedRepo(scratch.root, "empty-include", { "a.edf": 300_000 });
+    const configured = await filterConfig(dir);
+    const file = emptyFilterProcessFile("include");
+    const configPath = join(dir, ".git", "config");
+    writeFileSync(configPath, `[include]\n\tpath = ${file}\n${readFileSync(configPath, "utf-8")}`);
+
+    const res = await primeIndexStat(dir, ["a.edf"]);
+
+    expect(res.status).toBe("skipped");
+    expect(await statRecorded(dir, "a.edf")).toBe(false);
+    expect(await filterConfig(dir)).toEqual(configured);
+    expect(await stagedBlobSize(dir, "new.edf")).toBeLessThan(1_000);
+  });
+
+  test("an empty value that appears after the scope check is caught before the refresh, and the value is put back", async () => {
+    // Guards the check after the unset: whatever the earlier check missed, nothing is
+    // refreshed unless no filter process is left in any scope.
+    const dir = await trackedRepo(scratch.root, "empty-late", { "a.edf": 300_000 });
+    const configured = await filterConfig(dir);
+    const file = join(scratch.root, `late-${Math.random().toString(36).slice(2)}.gitconfig`);
+    writeFileSync(file, "");
+    await run(["git", "config", "--local", "include.path", file], dir);
+
+    const res = await primeIndexStat(dir, ["a.edf"], {
+      onSuspended: () => writeFileSync(file, '[filter "annex"]\n\tprocess =\n'),
+    });
+
+    expect(res.status).toBe("skipped");
+    expect(await statRecorded(dir, "a.edf")).toBe(false);
+    expect(await filterConfig(dir)).toEqual(configured);
   });
 });
 
@@ -561,7 +703,7 @@ describe("configurations the priming leaves alone", () => {
 
     const res = await primeIndexStat(dir, ["a.edf"]);
 
-    expect(res).toEqual({ primed: 1 });
+    expect(res).toEqual({ status: "primed", primed: 1 });
     expect(await statRecorded(dir, "a.edf")).toBe(true);
     expect(await filterConfig(dir)).toEqual({ process: [], marker: [] });
   });
@@ -586,8 +728,7 @@ describe("configurations the priming leaves alone", () => {
 
     const res = await primeIndexStat(dir, ["a.edf"]);
 
-    expect(res.primed).toBe(0);
-    expect(res.skipped).toContain("outside this repository");
+    expect(res.status === "skipped" && res.reason).toContain("outside this repository");
     expect(await statRecorded(dir, "a.edf")).toBe(false);
     expect(await filterConfig(dir)).toEqual({ process: [], marker: [] });
     const effective = await run(["git", "config", "--get-all", FILTER_PROCESS_KEY], dir);
@@ -601,8 +742,7 @@ describe("configurations the priming leaves alone", () => {
 
     const res = await primeIndexStat(dir, ["a.edf"]);
 
-    expect(res.primed).toBe(0);
-    expect(res.skipped).toContain("filter.annex.clean");
+    expect(res.status === "skipped" && res.reason).toContain("filter.annex.clean");
     expect(await filterConfig(dir)).toEqual(configured);
   });
 
@@ -611,7 +751,7 @@ describe("configurations the priming leaves alone", () => {
     const configured = await filterConfig(dir);
     await run(["git", "config", "--local", FILTER_PROCESS_MARKER, "something else"], dir);
 
-    expect(await restoreSuspendedFilterProcess(dir)).toEqual({ restored: false });
+    expect(await restoreSuspendedFilterProcess(dir)).toEqual({ status: "unchanged" });
     expect(await filterConfig(dir)).toEqual(configured);
   });
 });

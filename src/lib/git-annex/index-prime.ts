@@ -33,8 +33,10 @@ export const FILTER_PROCESS_MARKER = "filter.annex.process-temp-disabled";
  * throughput: about 1.7 GB/s on local APFS, 75 to 95 MB/s a stream on that CephFS. A
  * 1 GiB file therefore takes about 0.6 s to re-read locally and 11 to 14 s on CephFS,
  * against which the per-file filter is about 2.4 times cheaper locally at worst (a thin
- * margin, but the read there is fast anyway) and 3 times on CephFS. Below a few hundred
- * megabytes it is not cheaper: on CephFS a 256 MiB file re-reads in about 3 s. Re-measure
+ * margin, but the read there is fast anyway) and 3 times on CephFS. The break-even is about
+ * 280 to 350 MB a file on the issue's figures for the call after the add (one read saved)
+ * and about half that for the call before it (two reads saved); ADR 0100 tabulates it.
+ * The value is a maintainer's decision on that data, not a measured crossover: re-measure
  * on the target host before moving it.
  */
 export const PRIME_MIN_FILE_BYTES = 1024 ** 3;
@@ -55,22 +57,42 @@ const REFRESH_CHUNK_PATHS = 100;
 const CONFIG_KEY_ABSENT = 5;
 
 /** What {@link primeIndexStat} did. */
-export interface PrimeResult {
-  /** Indexed paths handed to git's refresh. */
-  primed: number;
+export type PrimeResult =
+  /** `primed` indexed paths were handed to git's refresh (zero when none was in the index). */
+  | { status: "primed"; primed: number }
   /**
-   * Why nothing (or only part) was primed, when that was a choice or a degradation the
-   * caller should mention: git will read those files the old way. Never a failure.
+   * Nothing more was primed, by choice or because a step failed in a way that cannot have
+   * changed anything but stat data. The caller says so: git will read those files the old way.
    */
-  skipped?: string;
+  | { status: "skipped"; reason: string }
   /**
-   * The repository's configuration could not be checked or put back. The caller must
-   * fail its step: this says what is wrong and what to do.
+   * The repository's configuration could not be read or put back. The caller must fail its
+   * step: this says what is wrong and what to do.
    */
-  error?: string;
-}
+  | { status: "error"; error: string };
 
-/** Values of `key` in one scope (`--local`) or in every scope, NUL-separated so any value is safe. */
+/** What {@link restoreSuspendedFilterProcess} found and did. */
+export type RestoreResult =
+  /** No marker, or a marker next to a filter process that is set, now removed. */
+  | { status: "unchanged" }
+  /** The filter process was missing and has been put back from the marker. */
+  | { status: "restored" }
+  /** A marker next to a set filter process that could not be removed; harmless. */
+  | { status: "warning"; warning: string }
+  /** The configuration could not be read or put back; the caller fails its step. */
+  | { status: "error"; error: string };
+
+/**
+ * What git falls back to while the filter process is out of the configuration:
+ * `per-file` when no filter process was left in any scope (checked), `unchecked` otherwise.
+ */
+type Fallback = "per-file" | "unchecked";
+
+/**
+ * Values of `key` in one scope (`--local`) or in every scope, NUL-separated so any value
+ * is safe. Empty values are kept: git reads an empty filter process as no filter at all,
+ * which is the one value that must never be overlooked.
+ */
 async function readConfigValues(
   path: string,
   key: string,
@@ -87,7 +109,8 @@ async function readConfigValues(
     if (out.exitCode !== 0) {
       return { error: out.stderr.trim() || `git config exited ${out.exitCode}` };
     }
-    return { values: out.stdout.split("\0").filter((v) => v.length > 0) };
+    // Each value is followed by a NUL, so the last piece is always the empty remainder.
+    return { values: out.stdout.split("\0").slice(0, -1) };
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) };
   }
@@ -137,9 +160,28 @@ function manualRestore(path: string, value: string): string {
   return `Run the upload again, which puts it back first, or by hand: git -C ${shellQuote(path)} config ${FILTER_PROCESS_KEY} ${shellQuote(value)} && git -C ${shellQuote(path)} config --unset-all ${FILTER_PROCESS_MARKER}`;
 }
 
-/** The failure text for a filter process that could not be put back. */
-function describeRestoreFailure(path: string, value: string, error: string): string {
-  return `Could not put git-annex's filter process back into ${displayName(path)}'s configuration (${displayName(error)}). Files are still stored correctly without it, but git runs one git-annex process per file until it is back. ${manualRestore(path, value)}`;
+/**
+ * The failure text for a filter process that could not be put back. What git does
+ * meanwhile depends on what else is configured, so it is only called harmless when no
+ * filter process was left in any scope.
+ */
+function describeRestoreFailure(
+  path: string,
+  value: string,
+  error: string,
+  fallback: Fallback,
+): string {
+  const meanwhile =
+    fallback === "per-file"
+      ? "Until it is back, git uses git-annex's per-file filters (no other filter process was set when it was taken out), which store files the same way but start one git-annex process per file."
+      : "Until it is back, git may not run git-annex's filter at all, so do not run git add or git commit in this repository before it is restored.";
+  return `Could not put git-annex's filter process back into ${displayName(path)}'s configuration (${displayName(error)}). ${meanwhile} ${manualRestore(path, value)}`;
+}
+
+/** Whether git, with the repository's own value out, would fall back to the per-file filters. */
+async function fallbackNow(path: string): Promise<Fallback> {
+  const all = await readConfigValues(path, FILTER_PROCESS_KEY, "all");
+  return "values" in all && all.values.length === 0 ? "per-file" : "unchecked";
 }
 
 /**
@@ -149,41 +191,48 @@ function describeRestoreFailure(path: string, value: string, error: string): str
  * unsets {@link FILTER_PROCESS_KEY}, and so does git-annex's own restage. A SIGKILL or a
  * power loss in between leaves the marker set. When the key is then missing it is set
  * back from the marker; when the key is present (`git annex init` sets it again, for
- * one) it is left alone. The marker is removed either way.
+ * one) it is left alone. The marker is removed either way. Like git-annex's restage, this
+ * also puts back a filter process someone removed by hand after the marker was written.
  *
  * A repository without the marker costs one `git config` read. A failure to read or
- * restore is returned as `error`, and the caller fails its step: what was left behind is
- * not a correctness problem (git falls back to git-annex's per-file filters, which store
- * files the same way), but it is a change to the person's configuration that nothing
- * else would undo. A marker that cannot be removed next to a filter process that is set
- * is only a `warning`: nothing is out of the configuration, and git-annex's next restage
- * removes it too.
+ * restore fails the caller's step (`error`): the priming only takes the value out after
+ * checking that no filter process is left in any scope, so git meanwhile uses git-annex's
+ * per-file filters, but that is still a change to the person's configuration that nothing
+ * else would undo, and nothing guarantees the other scopes stayed empty. A marker that
+ * cannot be removed next to a filter process that is set is only a `warning`: nothing is
+ * out of the configuration, and git-annex's next restage removes it too.
  */
-export async function restoreSuspendedFilterProcess(
-  path: string,
-): Promise<{ restored: boolean; error?: string; warning?: string }> {
+export async function restoreSuspendedFilterProcess(path: string): Promise<RestoreResult> {
   const marker = await readConfigValues(path, FILTER_PROCESS_MARKER, "local");
   if ("error" in marker) {
     return {
-      restored: false,
+      status: "error",
       error: `Could not check whether an earlier upload left git-annex's filter process out of the configuration (${displayName(marker.error)}). Run the upload again; if git keeps failing, the repository needs attention.`,
     };
   }
-  if (marker.values.length === 0) return { restored: false };
+  if (marker.values.length === 0) return { status: "unchanged" };
   const saved = marker.values[marker.values.length - 1];
   const current = await readConfigValues(path, FILTER_PROCESS_KEY, "local");
   if ("error" in current) {
-    return { restored: false, error: describeRestoreFailure(path, saved, current.error) };
+    return {
+      status: "error",
+      error: describeRestoreFailure(path, saved, current.error, await fallbackNow(path)),
+    };
   }
   if (current.values.length > 0) {
     const unset = await gitConfig(path, ["--unset-all", FILTER_PROCESS_MARKER]);
-    if (unset) return { restored: false, warning: describeStaleMarker(path, unset) };
-    return { restored: false };
+    if (unset) return { status: "warning", warning: describeStaleMarker(path, unset) };
+    return { status: "unchanged" };
   }
   let failure = await restoreFilterProcess(path, saved);
   if (failure) failure = await restoreFilterProcess(path, saved);
-  if (failure) return { restored: false, error: describeRestoreFailure(path, saved, failure) };
-  return { restored: true };
+  if (failure) {
+    return {
+      status: "error",
+      error: describeRestoreFailure(path, saved, failure, await fallbackNow(path)),
+    };
+  }
+  return { status: "restored" };
 }
 
 /** The warning for a leftover marker that could not be removed while the filter process is set. */
@@ -214,9 +263,10 @@ function restoreSync(path: string, value: string): string | undefined {
 }
 
 /**
- * Put the filter process back if the process is interrupted while it is out of the
- * configuration, then stop the `git add --refresh` it started. `git config` takes
- * `.git/config.lock`, not the `index.lock` the refresh holds, so the restore does not
+ * Put the filter process back if the process is interrupted while the priming runs, then
+ * stop the `git add --refresh` it started. The handler is armed for the whole call; between
+ * chunks the value is already back, and setting it again changes nothing. `git config`
+ * takes `.git/config.lock`, not the `index.lock` the refresh holds, so the restore does not
  * wait on the refresh; it is retried for {@link SIGNAL_RESTORE_RETRY_MS} in case this
  * process's own `git config` holds `config.lock` at that moment. A signal sent to the CLI
  * alone, unlike a terminal's Ctrl-C, does not reach its children, and a refresh left
@@ -226,9 +276,9 @@ function restoreSync(path: string, value: string): string | undefined {
  * the process dies the way the signal says only when no other handler for it is
  * registered. SIGKILL cannot be caught: the marker it leaves is restored by the next
  * upload's {@link restoreSuspendedFilterProcess}, or by git-annex's next restage. Returns
- * the function that disarms it.
+ * the function that disarms it. `fallback` says what git does while the value is out.
  */
-function armRestoreOnInterrupt(path: string, value: string): () => void {
+function armRestoreOnInterrupt(path: string, value: string, fallback: () => Fallback): () => void {
   function disarm(): void {
     for (const signal of INTERRUPT_SIGNALS) process.removeListener(signal, onSignal);
   }
@@ -241,7 +291,7 @@ function armRestoreOnInterrupt(path: string, value: string): () => void {
     }
     stopChildren();
     if (failure) {
-      writeStderrSync(`\n${describeRestoreFailure(path, value, failure)}\n`);
+      writeStderrSync(`\n${describeRestoreFailure(path, value, failure, fallback())}\n`);
     }
     disarm();
     process.kill(process.pid, signal);
@@ -277,6 +327,33 @@ function isAnnexCleanFilter(value: string): boolean {
 }
 
 /**
+ * Take the repository's filter process out for one chunk: record it under the marker,
+ * unset it, and then require that no filter process is left in any scope. Returns the
+ * reason it could not, or nothing when git will use the per-file filter for this chunk.
+ * `onSuspended` runs between the unset and that check, so a test can act in the window.
+ */
+async function suspendForChunk(
+  path: string,
+  saved: string | undefined,
+  onSuspended: (() => void) | undefined,
+): Promise<string | undefined> {
+  if (saved !== undefined) {
+    const unset = await gitConfig(path, ["--unset-all", FILTER_PROCESS_KEY]);
+    if (unset) return `could not unset ${FILTER_PROCESS_KEY}: ${unset}`;
+  }
+  onSuspended?.();
+  // Whatever the check before missed (an empty value it could not see, a value added
+  // since), git must find no filter process at all before anything is refreshed: an
+  // empty one left in another scope means no filter, and the refresh would hash raw content.
+  const left = await readConfigValues(path, FILTER_PROCESS_KEY, "all");
+  if ("error" in left) return `could not check ${FILTER_PROCESS_KEY}: ${left.error}`;
+  if (left.values.length > 0) {
+    return `${FILTER_PROCESS_KEY} is still set in another scope once this repository's value is out`;
+  }
+  return undefined;
+}
+
+/**
  * Record index stat data for `paths` so git stops treating them as possibly modified,
  * without streaming their content through `git-annex filter-process`.
  *
@@ -289,36 +366,41 @@ function isAnnexCleanFilter(value: string): boolean {
  * inode cache that nothing changed: the tracking check reads a file twice, `git status`
  * once. git-annex's per-file clean filter (`filter.annex.clean`) is given the path and
  * answers from the same inode cache without reading the content; git consumes only a
- * pipe buffer's worth. git uses it only when no filter process is configured, so for the
- * duration of one `git add --refresh` the filter process is taken out of the
- * repository's configuration, exactly as git-annex's own restage does, under the same
- * marker key.
+ * pipe buffer's worth. git uses it only when no filter process is configured, so for
+ * each chunk of {@link REFRESH_CHUNK_PATHS} paths the filter process is taken out of the
+ * repository's configuration for one `git add --refresh`, exactly as git-annex's own
+ * restage does, under the same marker key, and put back before the next chunk.
  *
  * What this cannot do is change what is committed. `git add --refresh` only records
  * stat data for an entry whose content cleans to the blob already staged; it never
  * stages anything. A file that changed since it was tracked cleans to a different
- * pointer and keeps zero stat data, so git still reads it and still sees the change.
- * Both filter forms answer from the same inode cache (inode, size, mtime), so they agree
- * on which files are unchanged, including the one case the cache cannot see: an edit in
- * place that puts the size and the exact mtime back is missed by `git status` through
- * filter-process as well. The only difference is the bytes git sends first.
+ * pointer and keeps zero stat data, so git still reads it and still sees the change
+ * (git-annex stores the new content as an unreferenced object while it cleans, as it does
+ * for `git status`). Both filter forms answer from the same inode cache (inode, size,
+ * mtime), so they agree on which files are unchanged, including the one case the cache
+ * cannot see: an edit in place that puts the size and the exact mtime back is missed by
+ * `git status` through filter-process as well. The only difference is the bytes git
+ * sends first.
  *
  * Guards, each a way the configuration change could outlive the call or do harm:
- *  - A marker left by an interrupted run (this one's or git-annex's) is restored first.
- *  - Nothing is primed unless `filter.annex.clean` is git-annex's and the filter process,
- *    if any, is set once and only in the repository's own configuration. One set
- *    anywhere else cannot be taken out for one command, so those files are left to be
- *    read as before (`skipped`). With no filter process at all, git already uses the
- *    per-file filter and nothing is changed.
+ *  - Nothing is primed unless `filter.annex.clean` is git-annex's, and the filter process,
+ *    if any, is set once, only in the repository's own configuration, and not empty. One
+ *    set anywhere else (an empty one included, which git reads as no filter at all)
+ *    cannot be taken out for one command, so those files are left to be read as before
+ *    (`skipped`). With no filter process at all, git already uses the per-file filter and
+ *    nothing is changed.
  *  - The value is recorded under {@link FILTER_PROCESS_MARKER} before the key is unset,
- *    and restored in a `finally`, retried once and read back. On SIGINT, SIGTERM and
- *    SIGHUP it is restored before the process dies.
+ *    and after the unset no filter process may be left in any scope, or the chunk is not
+ *    refreshed. It is put back after each chunk, retried once and read back, and on
+ *    SIGINT, SIGTERM and SIGHUP before the process dies.
  *  - Only paths that are in the index are handed to git, literally.
- *  - A refresh that fails is a degradation (`skipped`): it can only have recorded stat
- *    data. A configuration that cannot be read or put back is an `error`.
+ *  - A refresh that fails, or a marker that cannot be written, is a degradation
+ *    (`skipped`): neither can have changed more than stat data. A configuration that
+ *    cannot be read or put back is an `error`.
  *
- * `onSuspended` runs while the filter process is out of the configuration; it exists so
- * a test can interrupt the process there. `onProgress` reports paths handed to git so far.
+ * `onSuspended` runs once, in the first chunk's window, after the unset and before the
+ * check of the other scopes; it exists so a test can act there. `onProgress` reports paths
+ * handed to git so far.
  */
 export async function primeIndexStat(
   path: string,
@@ -328,96 +410,102 @@ export async function primeIndexStat(
     onProgress?: (done: number, total: number) => void;
   } = {},
 ): Promise<PrimeResult> {
-  // The upload steps already did this at their start; here it covers any other caller.
-  // A marker it cannot remove next to a set filter process is rewritten and removed below.
-  const recovery = await restoreSuspendedFilterProcess(path);
-  if (recovery.error) return { primed: 0, error: recovery.error };
-  if (paths.length === 0) return { primed: 0 };
+  if (paths.length === 0) return { status: "primed", primed: 0 };
 
   const listed = await indexedPaths(path, paths);
   if ("error" in listed) {
-    return { primed: 0, skipped: `could not read the index: ${listed.error}` };
+    return { status: "skipped", reason: `could not read the index: ${listed.error}` };
   }
-  if (listed.paths.length === 0) return { primed: 0 };
+  if (listed.paths.length === 0) return { status: "primed", primed: 0 };
 
   const clean = await readConfigValues(path, "filter.annex.clean", "all");
-  if ("error" in clean) {
-    return { primed: 0, error: describeConfigReadFailure(clean.error) };
-  }
+  if ("error" in clean) return { status: "error", error: describeConfigReadFailure(clean.error) };
   const cleanValue = clean.values[clean.values.length - 1];
   if (cleanValue === undefined || !isAnnexCleanFilter(cleanValue)) {
-    return {
-      primed: 0,
-      skipped: "filter.annex.clean is not git-annex's clean filter",
-    };
+    return { status: "skipped", reason: "filter.annex.clean is not git-annex's clean filter" };
   }
   const local = await readConfigValues(path, FILTER_PROCESS_KEY, "local");
-  if ("error" in local) return { primed: 0, error: describeConfigReadFailure(local.error) };
+  if ("error" in local) return { status: "error", error: describeConfigReadFailure(local.error) };
   const all = await readConfigValues(path, FILTER_PROCESS_KEY, "all");
-  if ("error" in all) return { primed: 0, error: describeConfigReadFailure(all.error) };
-  if (local.values.length > 1 || all.values.length > local.values.length) {
+  if ("error" in all) return { status: "error", error: describeConfigReadFailure(all.error) };
+  if (
+    local.values.length > 1 ||
+    all.values.length > local.values.length ||
+    all.values.some((value) => value === "")
+  ) {
     return {
-      primed: 0,
-      skipped: `${FILTER_PROCESS_KEY} is set outside this repository's configuration, or more than once`,
+      status: "skipped",
+      reason: `${FILTER_PROCESS_KEY} is set outside this repository's configuration, more than once, or empty`,
     };
   }
   const saved = local.values[0];
 
-  let disarm = () => {};
-  if (saved !== undefined) {
-    const marked = await gitConfig(path, [FILTER_PROCESS_MARKER, saved]);
-    if (marked) {
-      // Nothing was unset; drop a marker git may have half-written.
-      const undo = await gitConfig(path, ["--unset-all", FILTER_PROCESS_MARKER]);
-      if (undo) return { primed: 0, error: describeRestoreFailure(path, saved, undo) };
-      return {
-        primed: 0,
-        skipped: `could not record ${FILTER_PROCESS_MARKER}: ${marked}`,
-      };
-    }
-    disarm = armRestoreOnInterrupt(path, saved);
-  }
-
+  let fallback: Fallback = "unchecked";
+  const disarm =
+    saved === undefined ? () => {} : armRestoreOnInterrupt(path, saved, () => fallback);
   let primed = 0;
-  let refreshFailure: string | undefined;
-  let restoreFailure: string | undefined;
   try {
-    if (saved !== undefined) {
-      const unset = await gitConfig(path, ["--unset-all", FILTER_PROCESS_KEY]);
-      if (unset) refreshFailure = `could not unset ${FILTER_PROCESS_KEY}: ${unset}`;
-    }
-    if (!refreshFailure) {
-      options.onSuspended?.();
-      for (const chunk of chunkAddTargets(listed.paths, REFRESH_CHUNK_PATHS)) {
-        const out = await runCommand(
-          ["git", "--literal-pathspecs", "add", "--refresh", "--", ...chunk],
-          { cwd: path },
-        );
-        if (out.exitCode !== 0) {
-          refreshFailure = out.stderr.trim() || `git add --refresh exited ${out.exitCode}`;
-          break;
+    let first = true;
+    for (const chunk of chunkAddTargets(listed.paths, REFRESH_CHUNK_PATHS)) {
+      if (saved !== undefined) {
+        const marked = await gitConfig(path, [FILTER_PROCESS_MARKER, saved]);
+        if (marked) {
+          // Nothing was unset, so nothing is out of the configuration; a marker git may
+          // have left beside the set value is harmless and git-annex removes it too.
+          const undo = await gitConfig(path, ["--unset-all", FILTER_PROCESS_MARKER]);
+          const stale = undo ? ` ${describeStaleMarker(path, undo)}` : "";
+          return {
+            status: "skipped",
+            reason: `could not record ${FILTER_PROCESS_MARKER}: ${marked}.${stale}`,
+          };
         }
-        primed += chunk.length;
-        options.onProgress?.(primed, listed.paths.length);
       }
+      fallback = "unchecked";
+      let suspendFailure: string | undefined;
+      let refreshFailure: string | undefined;
+      let restoreFailure: string | undefined;
+      try {
+        suspendFailure = await suspendForChunk(
+          path,
+          saved,
+          first ? options.onSuspended : undefined,
+        );
+        first = false;
+        if (!suspendFailure) {
+          fallback = "per-file";
+          const out = await runCommand(
+            ["git", "--literal-pathspecs", "add", "--refresh", "--", ...chunk],
+            { cwd: path },
+          );
+          if (out.exitCode !== 0) {
+            refreshFailure = out.stderr.trim() || `git add --refresh exited ${out.exitCode}`;
+          }
+        }
+      } finally {
+        if (saved !== undefined) {
+          restoreFailure = await restoreFilterProcess(path, saved);
+          if (restoreFailure) restoreFailure = await restoreFilterProcess(path, saved);
+        }
+      }
+      if (restoreFailure && saved !== undefined) {
+        return {
+          status: "error",
+          error: describeRestoreFailure(path, saved, restoreFailure, fallback),
+        };
+      }
+      if (suspendFailure) return { status: "skipped", reason: suspendFailure };
+      if (refreshFailure) {
+        return { status: "skipped", reason: `git add --refresh failed: ${refreshFailure}` };
+      }
+      primed += chunk.length;
+      options.onProgress?.(primed, listed.paths.length);
     }
   } finally {
-    // Disarmed only after the restore: a signal that lands while it runs must still find
-    // a handler, or the filter process stays out of the configuration.
-    if (saved !== undefined) {
-      restoreFailure = await restoreFilterProcess(path, saved);
-      if (restoreFailure) restoreFailure = await restoreFilterProcess(path, saved);
-    }
+    // Disarmed only after the last restore: a signal that lands while it runs must still
+    // find a handler, or the filter process stays out of the configuration.
     disarm();
   }
-
-  if (restoreFailure && saved !== undefined) {
-    return { primed, error: describeRestoreFailure(path, saved, restoreFailure) };
-  }
-  if (refreshFailure) {
-    return { primed, skipped: `git add --refresh failed: ${refreshFailure}` };
-  }
-  return { primed };
+  return { status: "primed", primed };
 }
 
 function describeConfigReadFailure(error: string): string {

@@ -139,13 +139,13 @@ async function primeLargeDataFiles(
       spinner.text = `Recording index stat data for large data files (${done.toLocaleString("en-US")} of ${total.toLocaleString("en-US")})...`;
     },
   });
-  if (result.error) {
+  if (result.status === "error") {
     spinner.fail(result.error);
     return false;
   }
-  if (result.skipped) {
+  if (result.status === "skipped") {
     spinner.warn(
-      `Large data files will be re-read by git through git-annex filter-process (${result.skipped})`,
+      `Large data files will be re-read by git through git-annex filter-process (${result.reason})`,
     );
     return true;
   }

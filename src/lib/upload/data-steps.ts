@@ -74,12 +74,12 @@ export async function runDataSteps(
   // while it records index stat data (ADR 0100): a run killed in that window leaves it
   // out, and every git command after it would start one git-annex process per file.
   const filter = await restoreSuspendedFilterProcess(args.absolutePath);
-  if (filter.error) {
+  if (filter.status === "error") {
     console.log(chalk.red(filter.error));
     return FAIL;
   }
-  if (filter.warning) console.log(chalk.yellow(`  ${filter.warning}`));
-  if (filter.restored) {
+  if (filter.status === "warning") console.log(chalk.yellow(`  ${filter.warning}`));
+  if (filter.status === "restored") {
     console.log(
       chalk.yellow(
         "  Put back git-annex's filter process, which an earlier, interrupted upload had left out of this repository's configuration",
