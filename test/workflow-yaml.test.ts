@@ -1236,6 +1236,28 @@ ${body}
         run: ${look}
 `);
       expect(defectsOf("new.yml", jobLevel).length).toBe(1);
+      // And once for the whole workflow, with the narrower setting winning when there is one.
+      const defaultsBlock = "defaults:\n  run:\n    shell: bash {0}";
+      const workflowLevel = (stepShell = "") =>
+        `name: New\non: workflow_dispatch\n${defaultsBlock}\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - name: look\n${stepShell}        run: ${look}\n`;
+      expect(defectsOf("new.yml", workflowLevel()).length, "workflow-level shell").toBe(1);
+      expect(
+        defectsOf("new.yml", workflowLevel("        shell: bash -e {0}\n")).length,
+        "a step's own -e shell overrides the workflow default",
+      ).toBe(0);
+      const jobOverrides = workflow(`
+    defaults:
+      run:
+        shell: bash -e {0}
+    steps:
+      - uses: actions/checkout@v4
+      - name: look
+        run: ${look}
+`);
+      expect(
+        defectsOf("new.yml", jobOverrides.replace("jobs:", `${defaultsBlock}\njobs:`)).length,
+        "a job's own -e shell overrides the workflow default",
+      ).toBe(0);
     });
 
     test("is reported behind a wrapper command such as retry or timeout", () => {
