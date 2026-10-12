@@ -574,10 +574,21 @@ describe("every workflow that calls gh gives it a repository", () => {
   });
 
   test("the drift workflow's old lookup and label swallows are caught", () => {
-    // Re-introduce each swallow the fix removed, one at a time, into the real file.
-    const lookup = drift().replace(/\.number \/\/ empty'\)/, `.number // empty' || echo "")`);
+    // Re-introduce each swallow the fix removed into the real file: the lookup in every step
+    // that has one, then the label create.
+    const lookup = drift().replaceAll(/\.number \/\/ empty"\)/g, `.number // empty" || echo "")`);
     expect(lookup, "the lookup mutation must apply").not.toBe(drift());
-    expect(defectsOf("drift", lookup).some((d) => d.includes("failed lookup"))).toBe(true);
+    const swallowed = defectsOf("drift", lookup).filter((d) => d.includes("failed lookup"));
+    for (const step of [
+      "Open / update drift issue",
+      "Open / update probe-broken issue",
+      "Open / update report-broken issue",
+    ]) {
+      expect(
+        swallowed.some((d) => d.includes(`step "${step}"`)),
+        `${step} should be reported`,
+      ).toBe(true);
+    }
 
     const label = drift().replace(
       /gh label create "\$name" --color "\$color" --description "\$description"/,

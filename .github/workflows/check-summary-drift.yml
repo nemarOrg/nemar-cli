@@ -258,7 +258,11 @@ jobs:
         run: |
           set -euo pipefail
           source "$RUNNER_TEMP/retry.sh"
-          TITLE="summary.json drift: ${DRIFT} version(s) need backfill"
+          # The title and the lookup that finds it again share this one prefix, so they
+          # cannot drift apart. It must not be a prefix of the probe-broken or report-broken
+          # prefixes below, nor they of it (test/workflow-yaml.test.ts checks).
+          PREFIX="summary.json drift:"
+          TITLE="${PREFIX} ${DRIFT} version(s) need backfill"
           # Reuse the most recent open drift issue if one exists; otherwise open a fresh one.
           # A FAILED lookup fails the step (set -e above), after three attempts. It used to end
           # in `|| echo ""`, which turned an error into "no issue exists" and would have opened
@@ -269,9 +273,10 @@ jobs:
           # and report-broken issues carry the `drift` label too, and "summary.json drift"
           # appears in the title of one and the body of the other, so a bare search would
           # find one of them and rewrite it into a drift report.
-          EXISTING=$(retry gh issue list --label "drift" --state open --search "summary.json drift" \
+          # The search text is the prefix without its colon, so it is not a third copy.
+          EXISTING=$(retry gh issue list --label "drift" --state open --search "${PREFIX%:}" \
             --json number,title \
-            --jq '[.[] | select(.title | startswith("summary.json drift:"))] | .[0].number // empty')
+            --jq "[.[] | select(.title | startswith(\"${PREFIX}\"))] | .[0].number // empty")
           if [ -n "$EXISTING" ]; then
             # Update both title and body so the count in the title doesn't
             # rot when subsequent runs change how many versions are drifted.
@@ -297,12 +302,13 @@ jobs:
         run: |
           set -euo pipefail
           source "$RUNNER_TEMP/retry.sh"
-          TITLE="summary.json probe failing for majority of versions (${ERROR_COUNT}/${VERSIONS})"
+          PREFIX="summary.json probe failing"
+          TITLE="${PREFIX} for majority of versions (${ERROR_COUNT}/${VERSIONS})"
           BODY=$'## Probe is failing for most versions\n\n'"$ISSUE_BODY"$'\n\n---\n\n**This is likely a `/<id>/<v>/summary.json` route or S3 IAM problem, NOT a backfill problem.** `nemar admin summary check --fix` will dispatch workflows that succeed at writing to S3 but the read path will keep returning error. Triage:\n\n1. Hit `https://data.nemar.org/<a-known-published-id>/v1.0.0/summary.json` directly. If it 5xx, that confirms route/IAM.\n2. Check the Worker error log for `[data] summary fetch failed`.\n3. Verify `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` Workers secrets are set + valid (`npx cfman wrangler --account sccn secret list -c backend/wrangler-sccn.toml`).\n\nTriggering workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           # A failed lookup fails the step rather than reading as "no issue" (see the drift step).
-          EXISTING=$(retry gh issue list --label "drift,P1" --state open --search "summary.json probe failing" \
+          EXISTING=$(retry gh issue list --label "drift,P1" --state open --search "${PREFIX%:}" \
             --json number,title \
-            --jq '[.[] | select(.title | startswith("summary.json probe failing"))] | .[0].number // empty')
+            --jq "[.[] | select(.title | startswith(\"${PREFIX}\"))] | .[0].number // empty")
           if [ -n "$EXISTING" ]; then
             gh issue edit "$EXISTING" --title "$TITLE" --body "$BODY"
           else
@@ -322,12 +328,13 @@ jobs:
         run: |
           set -euo pipefail
           source "$RUNNER_TEMP/retry.sh"
-          TITLE="summary.json drift cron broken"
+          PREFIX="summary.json drift cron broken"
+          TITLE="${PREFIX}"
           BODY=$'## Coverage endpoint or payload broken\n\n'"$FETCH_ERROR"$'\n\nThe weekly summary.json drift cron could not parse a coverage report. Run `nemar admin summary check --json` manually to triage. Triggering workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           # A failed lookup fails the step rather than reading as "no issue" (see the drift step).
-          EXISTING=$(retry gh issue list --label "drift,P1" --state open --search "summary.json drift cron broken" \
+          EXISTING=$(retry gh issue list --label "drift,P1" --state open --search "${PREFIX%:}" \
             --json number,title \
-            --jq '[.[] | select(.title | startswith("summary.json drift cron broken"))] | .[0].number // empty')
+            --jq "[.[] | select(.title | startswith(\"${PREFIX}\"))] | .[0].number // empty")
           if [ -n "$EXISTING" ]; then
             gh issue edit "$EXISTING" --title "$TITLE" --body "$BODY"
           else
