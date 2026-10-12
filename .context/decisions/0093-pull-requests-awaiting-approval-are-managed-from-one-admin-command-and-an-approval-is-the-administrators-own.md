@@ -207,40 +207,48 @@ amendment of 2026-10-10.
 The release review of 0.10.16 found that `approve --merge`, and `y` in `next`, approved a pull request
 and only then read GitHub's state and declined to merge it. The state was read after the approval,
 and `y` was offered for every state but `dirty` and `behind`, so a pull request the automated
-review holds (its check is not required, and a non-required check that is not passing is expected
-to make GitHub report `unstable`; not yet observed on GitHub) was approved and then refused the
-merge. The administrator was left with an approval they asked for only as the first half of a pair.
-ADR 0092 recorded this as an open item.
+review holds was approved and then refused the merge. GitHub's `unstable` is a check or status that
+is not required and is not passing or has not reported; the review's check is not required, so a held
+review is expected to produce it (not yet observed on GitHub). The administrator was left with an
+approval they asked for only as the first half of a pair. ADR 0092 recorded this as an open item.
 
 The rule above does not change: a merge is attempted only when GitHub reports `clean`. What moves
 is where it is checked. `--merge` and `y` ask for an approval AND a merge, so GitHub's state is read
-before either is written:
+before either is written, by one function (`checkMergeable`) for every place that asks:
 
 - **`approve --merge`** reads the state first, asks again for a few seconds while it is `unknown`
   (GitHub works it out lazily), and writes nothing, no approval and no merge, unless it is `clean`.
-  It says which state GitHub reported, why that blocks a merge, and that `approve` without `--merge`
-  approves without merging. `--dry-run --merge` gives the same answer, because it is what the real
-  run would do. A state that is still `unknown`, one that cannot be read, and one this code has never
-  heard of are not `clean`.
+  It says which state GitHub reported and why that blocks a merge, and then what to do. For a state
+  that will not clear by itself that is to run `approve` without `--merge`, which approves without
+  merging; for `unknown`, or a read that failed or found the branch moved, it is to run the same
+  command again in a moment. `--dry-run --merge` gives the same answer, because it is what the real
+  run would do. A state that is still `unknown`, one that cannot be read, a re-read that finds
+  another head, a pull request that is no longer open, and a state this code has never heard of are
+  not `clean`.
 - **`y` in `next`** is offered only when both required checks are green and GitHub reports `clean`,
-  settled the same way before the card is shown. When it is not offered the card says which state and
-  why, and names `nemar admin pr-reviews approve <dataset> <pr>` (without `--merge`); `s` and `c`
-  are the answers that remain. Typing `y` anyway is refused with the reason and writes nothing.
-  `--force` is about the review's verdict and does not reach this.
+  settled the same way before the card is shown. When it is not offered the card says which state, or
+  which failed read, and why, and names `nemar admin pr-reviews approve <dataset> <pr>` (without
+  `--merge`); `n`, `c`, `d`, `s` and `q` are the answers that remain. Typing `y` anyway is refused
+  with the reason and writes nothing. `--force` is about the review's verdict and does not reach this.
+- **The state is read again right before the approval is written**, by one helper
+  (`recheckBeforeApproval`) that both commands call. The early check can be as old as the
+  confirmation prompt or the time a card was on screen, and an approval cannot be taken back, so the
+  state is read fresh (one extra request when it is clean) and a refusal says it came from that second
+  look. The early check stays so the administrator is not asked to confirm what cannot be done.
 - **The look after the approval stays.** A check can turn pending and a push can land between the
-  first read and the merge, so the state is read again right before the merge is sent, and the
+  second read and the merge, so the state is read once more right before the merge is sent, and the
   approval stands if it is no longer `clean`. That is now the exception, not the way a held pull
   request is handled.
 - **An approval alone is unchanged.** `approve` without `--merge` approves whatever the state is,
-  under the same verdict gate and `--force`, and when GitHub's state would have stopped `--merge` it
-  says so instead of suggesting `--merge`.
+  under the same verdict gate and `--force`, and when GitHub's state is one that will not clear by
+  itself it says so instead of suggesting `--merge`.
 
 A pull request the review holds is therefore approved with `approve` and merged on GitHub by the
 administrator, as ADR 0092's second option put it. The first option (accept `unstable` when both
 required checks pass) is not taken here: it changes the rule, and it is the maintainer's to decide.
 
-One consequence is worth knowing. A repository whose ruleset required an approving review would read
-`blocked` before the administrator's approval and `clean` after it, so `--merge` and `y` would now
-refuse it where they used to approve and merge. The ruleset applied to a published dataset requires
-none (`required_approving_review_count: 0`, ADR 0001), so nothing is refused today for this reason;
-the four legacy repositories' rulesets were not read for this change.
+One consequence is worth knowing. A repository whose protection required an approving review would
+read `blocked` before the administrator's approval and `clean` after it, so `--merge` and `y` would
+now refuse it where they used to approve and merge. The ruleset applied to a published dataset
+requires none (`required_approving_review_count: 0`, ADR 0001), and the four legacy repositories use
+classic branch protection that requires none, so nothing is refused today for this reason.
