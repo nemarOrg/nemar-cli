@@ -1,6 +1,7 @@
 /**
- * The `modality` filter's contract in numbers (#1711), declared once so the
- * backend that enforces it and the surfaces that describe it cannot disagree.
+ * The `modality` filter's contract in words and in numbers (#1711), declared
+ * once so the backend that enforces it and the three places that describe it
+ * (the CLI help, the OpenAPI document, the MCP tool schema) cannot disagree.
  *
  * The matching itself is SQL and lives in
  * `backend/src/services/dataset-filters.ts`; ADR 0032 (amendment 2026-10-12)
@@ -14,9 +15,23 @@
  * is REFUSED, not truncated: a filter that quietly dropped its tail would
  * return a confident-looking list for a question nobody asked.
  *
- * Why a number at all: the value travels in a URL an anonymous caller controls,
- * and the match costs something per wanted token for every row it tests. BIDS
+ * Why a number at all: the match costs a little per wanted token for every row
+ * it tests, and the value travels in a URL an anonymous caller controls. BIDS
  * defines 14 datatypes and the production vocabulary holds 12, so 32 is wider
- * than any real request.
+ * than any real request and far below a cost that matters.
  */
 export const MAX_MODALITY_FILTER_TOKENS = 32;
+
+/** What the filter does, in one sentence, for the OpenAPI document and the MCP
+ *  tool schema. */
+export const MODALITY_FILTER_DESCRIPTION = [
+  "Filter by modality: a whole-token, case-insensitive match against the dataset's modality",
+  "list, so `eeg` does not match `ieeg`. A comma-separated list matches a dataset holding any",
+  `of its modalities, at most ${MAX_MODALITY_FILTER_TOKENS} distinct values; more is refused.`,
+].join(" ");
+
+/** The `--modality` option's help text on the CLI's `list` and `search`. */
+export const MODALITY_FILTER_CLI_HELP = [
+  "Filter by modality (eeg, emg, meg, etc.), matched as a whole token;",
+  `a comma list matches any of up to ${MAX_MODALITY_FILTER_TOKENS}`,
+].join(" ");

@@ -86,6 +86,7 @@ import {
 } from "../shared/contract/dataset.js";
 import { strictVersionTagSchema } from "../shared/contract/version.js";
 import { FACETS, type FacetDefinition, type FacetValueKind } from "../shared/facets.js";
+import { MODALITY_FILTER_DESCRIPTION } from "../shared/modality-filter.js";
 
 extendZodWithOpenApi(z);
 
@@ -136,12 +137,7 @@ const FACET_QUERY_PARAMS: Record<string, z.ZodTypeAny> = Object.fromEntries(
  * `q` instead -- `parseFilterQuery`'s `includeSearch: false` on that route).
  */
 const LEGACY_FILTER_PARAMS = {
-  modality: z
-    .string()
-    .optional()
-    .describe(
-      "Filter by modality: a whole-token, case-insensitive match against the dataset's modality list, so `eeg` does not match `ieeg`. A comma-separated list matches a dataset holding any of its modalities.",
-    ),
+  modality: z.string().optional().describe(MODALITY_FILTER_DESCRIPTION),
   author: z.string().optional().describe("Filter by author name (substring match)."),
   task: z.string().optional().describe("Filter by BIDS task name (substring match)."),
   has_doi: z
