@@ -333,18 +333,22 @@ describe("every workflow that calls gh gives it a repository", () => {
    * `actions/checkout` step has no git repository, so `gh issue list` dies with "failed to
    * run git: fatal: not a git repository" unless the repository is named some other way.
    * `check-summary-drift.yml` was exactly that job: it had no checkout, no `GH_REPO` and no
-   * `--repo`, so every scheduled run failed (20 of 20 on record, the first on 2026-06-01)
-   * and the issue the workflow exists to file was never opened. Nothing noticed, because a
-   * red scheduled run on a workflow nobody watches is silence (ADR 0053).
+   * `--repo`. Of its 20 scheduled runs on record (the first on 2026-06-01), 19 failed in the
+   * step that opens the issue and 1 in the step that reports a broken coverage endpoint, so
+   * the issue the workflow exists to file was never opened, and the one outage it should
+   * have reported went unreported too. Nothing noticed: a red scheduled run on a workflow
+   * nobody watches is silence.
    *
-   * Three rules, all enforced over every workflow the repository ships:
+   * Four rules, all enforced over every workflow the repository ships:
    *
    * 1. A `gh` call that needs a repository has one: an earlier checkout of this repository
    *    in the job, `GH_REPO` in the workflow, job or step environment, or `--repo`.
    * 2. A lookup that decides "does an issue exist" never turns its own failure into "no".
    *    `EXISTING=$(gh issue list ... || echo "")` reads an API error as an empty result and
    *    files a duplicate; an empty result is fine, an error must fail the step.
-   * 3. `gh label create` does not discard its stderr or its exit code. A label step that
+   * 3. The step holding such a lookup stops on error: no `set +e`, and no `shell:` template
+   *    such as `bash {0}` without `-e`. Same swallow, with no `||` to spot.
+   * 4. `gh label create` does not discard its stderr or its exit code. A label step that
    *    ended in `>/dev/null 2>&1 || true` hid the missing `drift` label for twenty weeks.
    *
    * The analysis is static text over parsed YAML, so it can be wrong in both directions;
