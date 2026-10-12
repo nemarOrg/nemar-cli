@@ -54,26 +54,43 @@ export function buildFtsMatch(query: string): string | null {
 }
 
 /**
- * `d.modalities` as a comma-delimited string a whole token can be searched in:
- * lower-cased, every space removed (an older writer, or a hand edit, left
- * `beh, eeg`), and fenced with a comma at each end so the FIRST and LAST token
- * are found the same way as a middle one -- `',eeg,meg,'` contains `',eeg,'`
- * and `',meg,'`, and `',ieeg,'` does not contain `',eeg,'`. NULL reads as
- * the empty string, which is `,,` and holds no token.
+ * The tokens of `d.modalities`, one row per token, as the head of a
+ * `WITH RECURSIVE` named `modality_tokens(tok, rest)`: the list is lower-cased,
+ * split on every comma, and each token trimmed of surrounding whitespace, so
+ * `beh , EEG` yields `beh` and `eeg`, `ieeg` never yields `eeg`, and a space
+ * INSIDE a token (`e eg`) stays inside it. NULL reads as the empty string and
+ * yields no token worth matching. The first row is the empty seed token, which
+ * can never equal a wanted one because {@link parseTokenList} drops empties.
  *
- * No modality token contains a space (they are BIDS datatype directory names),
- * so removing every space is the same as trimming each token, without a
- * per-token function SQLite does not have. `dataset-facet-vocabulary.ts`
- * tallies the same column in JS (split, trim, lower-case), and
- * `modality-exact-token.test.ts` holds the two to the same counts.
+ * Splitting in SQL is what makes this the same tokenizing as
+ * `parseTokenList` (split, trim, lower-case), and so as the facet vocabulary's
+ * tally (`dataset-facet-vocabulary.ts`): a value the vocabulary advertises
+ * always filters to its advertised count, including a stored `e eg` (one
+ * token, not `eeg`). The trim here covers space, tab, CR and LF, the
+ * whitespace a stored list can carry; JS `trim` also covers exotic Unicode
+ * spaces, which nothing writes here.
+ *
+ * `COALESCE` is not needed for correctness (a NULL propagates to a row that
+ * matches nothing) but it keeps the recursion's stop condition from resting on
+ * `NULL <> ''` being unknown, so it stays.
+ *
+ * Used as `EXISTS (${MODALITY_TOKENS_SQL} SELECT 1 FROM modality_tokens WHERE
+ * tok IN (SELECT value FROM json_each(?)))`, which references the outer `d`.
  */
-export const MODALITY_TOKENS_SQL =
-  "',' || REPLACE(LOWER(COALESCE(d.modalities, '')), ' ', '') || ','";
+export const MODALITY_TOKENS_SQL = `WITH RECURSIVE modality_tokens(tok, rest) AS (
+    SELECT '', LOWER(COALESCE(d.modalities, '')) || ','
+    UNION ALL
+    SELECT TRIM(SUBSTR(rest, 1, INSTR(rest, ',') - 1), ' ' || CHAR(9) || CHAR(10) || CHAR(13)),
+           SUBSTR(rest, INSTR(rest, ',') + 1)
+    FROM modality_tokens WHERE rest <> ''
+  )`;
 
 /**
- * The distinct, trimmed, lower-cased tokens of a comma-separated filter value;
- * empty tokens are dropped. `"EEG, meg,eeg"` is `["eeg", "meg"]`, and `" , "`
- * is `[]`. The wanted side of {@link MODALITY_TOKENS_SQL}'s comparison.
+ * The distinct, trimmed, lower-cased tokens of a comma-separated value; empty
+ * tokens are dropped. `"EEG, meg,eeg"` is `["eeg", "meg"]`, and `" , "` is
+ * `[]`. Whitespace INSIDE a token is kept, so `"eeg meg"` is one token and
+ * not a list. The wanted side of {@link MODALITY_TOKENS_SQL}'s comparison, and
+ * the tokenizer the facet vocabulary tallies stored lists with.
  */
 export function parseTokenList(raw: string): string[] {
   return [
@@ -106,8 +123,9 @@ export interface DatasetFilterOptions {
    *  `eeg,meg` but not `ieeg`. A comma-separated value matches a dataset
    *  holding ANY of its tokens, the same OR the `license` filter uses. See
    *  {@link MODALITY_TOKENS_SQL} and {@link parseTokenList}. A non-empty value
-   *  that names no token (whitespace, bare commas) is a filter that matches
-   *  nothing, never an unfiltered list. */
+   *  that names no token
+   *  (whitespace, bare commas) is a filter that matches nothing, never an
+   *  unfiltered list. */
   modality?: string;
   author?: string;
   task?: string;
@@ -209,12 +227,12 @@ export function buildDatasetFilterClauses(
   if (opts.modality) {
     // #1711: a whole-token match, not `LIKE '%eeg%'` (which also matched
     // `ieeg`, and treated a `%` or `_` in the value as a wildcard). The wanted
-    // tokens travel as ONE json_each parameter, so a long comma list costs the
-    // same single bound parameter as one value (D1's ceiling is
-    // MAX_BOUND_PARAMS) and nothing here is a LIKE pattern to escape. An empty
-    // list binds `[]` and matches nothing, which is what a filter that was
-    // asked for and names no modality should do.
-    clauses += ` AND EXISTS (SELECT 1 FROM json_each(?) AS wanted WHERE instr(${MODALITY_TOKENS_SQL}, ',' || wanted.value || ',') > 0)`;
+    // tokens travel as ONE json_each parameter, so a comma list costs the same
+    // single bound parameter as one value (D1's ceiling is MAX_BOUND_PARAMS)
+    // and nothing here is a LIKE pattern to escape. An empty list binds `[]`
+    // and matches nothing, which is what a filter that was asked for and names
+    // no modality should do.
+    clauses += ` AND EXISTS (${MODALITY_TOKENS_SQL} SELECT 1 FROM modality_tokens WHERE tok IN (SELECT value FROM json_each(?)))`;
     params.push(JSON.stringify(parseTokenList(opts.modality)));
   }
   if (opts.author) {

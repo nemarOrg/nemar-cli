@@ -90,7 +90,16 @@ const ROWS = {
   emgOnly: { id: "nm500010", modalities: "emg" },
   nullModalities: { id: "nm500011", modalities: null },
   emptyModalities: { id: "nm500012", modalities: "" },
+  // Padded storage: the whole value wrapped in spaces. Only a per-token trim
+  // finds `eeg` in it; replacing just ", " with "," does not.
+  paddedEeg: { id: "nm500013", modalities: " eeg " },
+  // Whitespace INSIDE a token is part of the token: this row holds the one
+  // token `e eg`, which is not `eeg`. The vocabulary tallies it that way too.
+  innerSpace: { id: "nm500014", modalities: "e eg" },
 } as const;
+
+/** The rows that hold an `eeg` token, in any case or padding. */
+const EEG_ROWS = [ROWS.eegOnly, ROWS.eegAndIeeg, ROWS.upperEeg, ROWS.spacedList, ROWS.paddedEeg];
 
 const ALL_IDS = Object.values(ROWS).map((r) => r.id);
 
@@ -142,13 +151,11 @@ describe("GET /datasets: modality is a whole-token match", () => {
   });
 
   test("modality=EEG returns datasets with an eeg token and not iEEG-only ones (#1711 browse)", async () => {
-    expect(await listIds(app, db, "modality=EEG")).toEqual(
-      ids(ROWS.eegOnly, ROWS.eegAndIeeg, ROWS.upperEeg, ROWS.spacedList),
-    );
+    expect(await listIds(app, db, "modality=EEG")).toEqual(ids(...EEG_ROWS));
   });
 
   test("the same answer in any case", async () => {
-    const expected = ids(ROWS.eegOnly, ROWS.eegAndIeeg, ROWS.upperEeg, ROWS.spacedList);
+    const expected = ids(...EEG_ROWS);
     for (const value of ["eeg", "EEG", "Eeg", "eEg"]) {
       expect({ value, ids: await listIds(app, db, `modality=${value}`) }).toEqual({
         value,
@@ -177,14 +184,7 @@ describe("GET /datasets: modality is a whole-token match", () => {
 
   test("a comma list matches a dataset holding ANY of its tokens", async () => {
     expect(await listIds(app, db, "modality=eeg,meg")).toEqual(
-      ids(
-        ROWS.eegOnly,
-        ROWS.eegAndIeeg,
-        ROWS.upperEeg,
-        ROWS.spacedList,
-        ROWS.megOnly,
-        ROWS.middleIeeg,
-      ),
+      ids(...EEG_ROWS, ROWS.megOnly, ROWS.middleIeeg),
     );
   });
 
@@ -234,9 +234,38 @@ describe("GET /datasets: modality is a whole-token match", () => {
     // The browse failure was visible in the first page of a paged list; the
     // count has to follow the rows rather than the old substring.
     const total = await listTotal(app, db, "modality=EEG&limit=1");
-    expect(total).toBe(4);
+    expect(total).toBe(EEG_ROWS.length);
     expect(await listTotal(app, db, "modality=iEEG&limit=1")).toBe(4);
-    expect(await listTotal(app, db, "modality=eeg,meg&limit=1")).toBe(6);
+    expect(await listTotal(app, db, "modality=eeg,meg&limit=1")).toBe(EEG_ROWS.length + 2);
+  });
+
+  test("a trailing or leading comma leaves the one token", async () => {
+    const expected = ids(...EEG_ROWS);
+    expect(await listIds(app, db, "modality=eeg,")).toEqual(expected);
+    expect(await listIds(app, db, "modality=,eeg")).toEqual(expected);
+    expect(await listIds(app, db, "modality=,,eeg,,")).toEqual(expected);
+  });
+
+  test("padded storage still holds the token", async () => {
+    // ` eeg ` has no comma to anchor on, so only trimming each token finds it.
+    expect(await listIds(app, db, "modality=eeg")).toContain(ROWS.paddedEeg.id);
+    expect(await listIds(app, db, "modality=eeg")).toHaveLength(EEG_ROWS.length);
+  });
+
+  test("whitespace inside a token is part of it, never a separator", async () => {
+    // Stored side: `e eg` is the one token `e eg`, not `eeg`.
+    expect(await listIds(app, db, "modality=eeg")).not.toContain(ROWS.innerSpace.id);
+    // Wanted side: a space is not a list separator, so `eeg meg` is a single
+    // token that no row holds, rather than the two tokens `eeg` and `meg`.
+    expect(await listIds(app, db, "modality=eeg%20meg")).toEqual([]);
+    expect(await listIds(app, db, "modality=eeg;meg")).toEqual([]);
+    // ... and inner whitespace is not stripped to make `e eg` into `eeg`. The
+    // token `e eg` exists, so it finds exactly the row that holds it.
+    expect(await listIds(app, db, "modality=e%20eg")).toEqual(ids(ROWS.innerSpace));
+    // Spaces AROUND a comma are padding, not part of either token.
+    expect(await listIds(app, db, "modality=eeg%20,%20meg")).toEqual(
+      await listIds(app, db, "modality=eeg,meg"),
+    );
   });
 
   test("modality combines with another filter instead of replacing it", async () => {
@@ -281,9 +310,7 @@ describe("GET /datasets/search: modality is a whole-token match", () => {
   test("q=eeg with modality=eeg does not let an eeg-prefixed token through", async () => {
     // `eeg*` is a prefix match in the FTS tier, so `eegx` is a text hit that only
     // the modality filter can remove.
-    expect(await searchIds(app, db, "q=eeg&modality=eeg")).toEqual(
-      ids(ROWS.eegOnly, ROWS.eegAndIeeg, ROWS.upperEeg, ROWS.spacedList),
-    );
+    expect(await searchIds(app, db, "q=eeg&modality=eeg")).toEqual(ids(...EEG_ROWS));
   });
 
   test("a comma list is OR here too", async () => {
@@ -332,9 +359,7 @@ describe("MCP search_datasets: modality is a whole-token match", () => {
   }
 
   test("browsing with modality eeg returns no iEEG-only dataset", async () => {
-    expect(await call({ modality: "EEG", limit: 100 })).toEqual(
-      ids(ROWS.eegOnly, ROWS.eegAndIeeg, ROWS.upperEeg, ROWS.spacedList),
-    );
+    expect(await call({ modality: "EEG", limit: 100 })).toEqual(ids(...EEG_ROWS));
   });
 
   test("a query narrowed by modality honours the same rule", async () => {
@@ -373,7 +398,7 @@ describe("the modality vocabulary and the modality filter agree", () => {
     const vocabulary = body.modality ?? [];
     // Not vacuous: the fixture has these distinct tokens.
     expect(vocabulary.map((e) => e.value).sort()).toEqual(
-      ["anat", "beh", "eeg", "eegx", "emg", "ieeg", "meg"].sort(),
+      ["anat", "beh", "e eg", "eeg", "eegx", "emg", "ieeg", "meg"].sort(),
     );
     for (const { value, count } of vocabulary) {
       expect({ value, total: await listTotal(app, db, `modality=${value}&limit=1`) }).toEqual({
