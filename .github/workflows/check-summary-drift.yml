@@ -30,10 +30,12 @@ jobs:
       # THIS JOB HAS NO CHECKOUT STEP, deliberately: it needs no source tree. But
       # `gh` finds its repository by asking git for the remote, and with no
       # checkout there is no git repository, so every `gh issue` and `gh label`
-      # call died with "failed to run git: fatal: not a git repository". Every
-      # scheduled run on record (20, the first on 2026-06-01) failed in
-      # "Open / update drift issue" for that reason, so the drift issue this
-      # workflow exists to file was never opened.
+      # call died with "failed to run git: fatal: not a git repository". Of the 20
+      # scheduled runs on record (the first on 2026-06-01), 19 failed that way in
+      # "Open / update drift issue", so the drift issue this workflow exists to
+      # file was never opened. The other one (2026-08-24) failed in "Open / update
+      # report-broken issue" for the same reason, while reporting that the
+      # coverage endpoint had answered HTTP 500, so that outage went unreported.
       #
       # Job-level so a step added later inherits it instead of repeating the bug.
       # test/workflow-yaml.test.ts fails on a `gh` call that has no checkout, no
