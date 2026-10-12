@@ -459,7 +459,8 @@ one that could not be read needs --force. Nothing merges unless you add --merge 
 approved, and again just before the approval is written: a pull request that is not clean (one the
 automated review holds is expected to be reported 'unstable') is neither approved nor merged by
 --merge or y, you are told which state GitHub gave and why, and 'approve' without --merge approves
-it. The merge is then attempted once, and it never tries a merge GitHub reports as blocked. If 'gh' holds no signed-in account, or the token is an app or workflow token,
+it. The merge is then attempted once, and it never tries a merge GitHub reports as blocked.
+If 'gh' holds no signed-in account, or the token is an app or workflow token,
 'approve' prints the PR link and the equivalent 'gh pr review --approve' command (and, in a
 terminal, opens the link); a token GitHub rejects is reported without it.
 
