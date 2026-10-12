@@ -15,10 +15,15 @@
  * is REFUSED, not truncated: a filter that quietly dropped its tail would
  * return a confident-looking list for a question nobody asked.
  *
- * Why a number at all: the match costs a little per wanted token for every row
- * it tests, and the value travels in a URL an anonymous caller controls. BIDS
- * defines 14 datatypes and the production vocabulary holds 12, so 32 is wider
- * than any real request and far below a cost that matters.
+ * Why a number at all: an input contract, NOT a cost guard. The clause's cost
+ * is flat in the number of wanted tokens (the wanted set is probed through an
+ * index; on bun:sqlite over 1,000 synthetic rows, about 1.3 ms for 1 to 100
+ * distinct tokens and 3.4 ms for 8,000, D1 not measured), so the limit does not
+ * protect the database. It keeps a request, which is an anonymous caller's URL,
+ * small and predictable, and gives clients one documented bound. BIDS defines 14
+ * datatypes and the production vocabulary holds 12, so 32 is wider than any real
+ * request. Raising it means changing this constant and regenerating
+ * `shared/openapi.json`.
  */
 export const MAX_MODALITY_FILTER_TOKENS = 32;
 

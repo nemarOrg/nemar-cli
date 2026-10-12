@@ -143,11 +143,12 @@ export class ModalityTokenLimitError extends Error {
 /**
  * {@link parseTokenList} for a `modality` filter value, refusing one that names
  * more than {@link MAX_MODALITY_FILTER_TOKENS} DISTINCT tokens (counted after
- * normalising, so `eeg,EEG, eeg` is one). The clause costs a little per wanted
- * token for every row it tests and the value is caller-controlled, so the
- * bound is checked once at the parse step of every entry point, and again in
- * {@link buildDatasetFilterClauses} so a future caller that skips the parse
- * cannot reach the clause with an unbounded list.
+ * normalising, so `eeg,EEG, eeg` is one). The limit is an input contract, not a
+ * cost guard (the clause's cost is flat in the number of wanted tokens; see
+ * `shared/modality-filter.ts`): it keeps a caller-controlled value small and
+ * predictable. It is checked once at the parse step of every entry point, and
+ * again in {@link buildDatasetFilterClauses} so a future caller that skips the
+ * parse cannot reach the clause with an unbounded list.
  *
  * @throws {ModalityTokenLimitError}
  */

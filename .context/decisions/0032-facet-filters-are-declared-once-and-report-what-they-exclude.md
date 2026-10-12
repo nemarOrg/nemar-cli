@@ -278,16 +278,18 @@ What is now decided:
 - **At most 32 distinct tokens per request, refused and not truncated.** A request over
   the limit is a 400 on both HTTP endpoints and a refused tool call on MCP, the way a
   malformed facet range is; truncating would answer a different question than the one
-  asked. Tokens are counted after normalising, so `eeg,EEG,eeg` is one. The value is
-  caller-controlled and the old `LIKE` had failed fast on an over-long pattern only by
-  accident, so the bound is declared (`MAX_MODALITY_FILTER_TOKENS`, `shared/`), checked at
-  the parse step of every entry point, and enforced again in the clause builder. 32 is
-  above BIDS's 14 datatypes and the 12 the production vocabulary holds. Measured on
-  bun:sqlite over 1,000 synthetic rows (D1 was not measured): an earlier `instr`-based form
-  of the clause cost 1.12 s for 8,000 distinct tokens, which is what made the bound
-  necessary; the tokenizer form that shipped probes the wanted set through an index and
-  took 3.6 ms for the same input. The bound stays, because it constrains input rather than
-  tuning one plan.
+  asked. Tokens are counted after normalising, so `eeg,EEG,eeg` is one. This is an input
+  contract, not a cost guard. The clause's cost is flat in the number of wanted tokens,
+  because the wanted set is probed through an index: on bun:sqlite over 1,000 synthetic
+  rows, one statement, about 1.3 ms for 1 to 100 distinct tokens and 3.4 ms for 8,000 (D1
+  was not measured). The limit keeps a request, which is an anonymous caller's URL, small
+  and predictable and gives clients one documented bound; BIDS defines 14 datatypes and
+  the production vocabulary holds 12, so 32 is wider than any real request. The old `LIKE`
+  was subject to the 50-byte pattern limit Cloudflare documents for D1, which bounded the
+  value as a side effect; the limit here replaces that bound by declaration. It is
+  declared once (`MAX_MODALITY_FILTER_TOKENS`, `shared/`), checked at the parse step of
+  every entry point, enforced again in the clause builder, and can be raised by changing
+  that constant.
 - **The wanted tokens are one `json_each` parameter**, not one placeholder per token and
   not a LIKE pattern, so a list costs one bound parameter (the D1 ceiling,
   `MAX_BOUND_PARAMS`) and there is nothing to escape.
