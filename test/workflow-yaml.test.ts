@@ -355,12 +355,17 @@ describe("every workflow that calls gh gives it a repository", () => {
     shell?: string;
     "continue-on-error"?: boolean;
   }
+  interface Defaults {
+    run?: { shell?: string };
+  }
   interface Job {
     env?: Record<string, unknown>;
+    defaults?: Defaults;
     steps?: Step[];
   }
   interface Doc {
     env?: Record<string, unknown>;
+    defaults?: Defaults;
     jobs?: Record<string, Job>;
   }
   interface GhCall {
@@ -473,6 +478,21 @@ describe("every workflow that calls gh gives it a repository", () => {
     !step.with?.repository &&
     !step.with?.path;
 
+  /**
+   * Whether a failed command stops the step. GitHub runs `bash` steps with `-e`, but a
+   * `shell:` TEMPLATE such as `bash {0}` does not, and a script can switch it off itself.
+   * Either turns `EXISTING=$(gh issue list ...)` failing into an empty variable, which is
+   * "no issue": the swallow again, with no `||` to spot.
+   */
+  function stopsOnError(step: Step, job: Job, doc: Doc): boolean {
+    const run = step.run ?? "";
+    if (/(?:^|[\n;&])\s*set\s+(?:\+[a-z]*e[a-z]*|\+o\s+errexit)\b/.test(run)) return false;
+    const shell = step.shell ?? job.defaults?.run?.shell ?? doc.defaults?.run?.shell;
+    if (typeof shell !== "string" || !shell.includes("{0}")) return true;
+    // A template: -e in it, or a `set -e` in the script, restores the behaviour.
+    return /\s-\w*e/.test(shell) || /(?:^|[\n;&])\s*set\s+-\w*e/.test(run);
+  }
+
   const isIssueLookup = (call: GhCall) =>
     (call.group === "issue" && ["list", "view", "status"].includes(call.action)) ||
     (call.group === "search" && call.action === "issues");
@@ -489,7 +509,13 @@ describe("every workflow that calls gh gives it a repository", () => {
           namesRepo(job.env) ||
           namesRepo(step.env) ||
           steps.slice(0, index).some(checksOutThisRepo);
-        for (const call of ghCalls(step.run)) {
+        const calls = ghCalls(step.run);
+        if (calls.some(isIssueLookup) && !stopsOnError(step, job, doc)) {
+          defects.push(
+            `${where}: looks up an issue in a step that does not stop on error (set +e or a shell template without -e)`,
+          );
+        }
+        for (const call of calls) {
           const shown = call.text.slice(0, 70);
           if (needsRepository(call) && !covered && !hasRepoFlag(call)) {
             defects.push(
@@ -796,6 +822,70 @@ ${stepExtra}
       - uses: actions/checkout@v4
 `);
       expect(defectsOf("new.yml", yaml).length).toBe(1);
+    });
+
+    test("is reported when the step that looks up an issue cannot fail", () => {
+      // `set +e` and a `shell:` template without -e both turn a failed lookup into an empty
+      // variable, so the step carries on as though no issue existed. No `||` to spot.
+      const look = "EXISTING=$(gh issue list --state open --json number --jq '.[0].number')";
+      const cases: { name: string; extra: string; script: string; reported: boolean }[] = [
+        { name: "set +e", extra: "", script: `set +e\n${look}`, reported: true },
+        { name: "set +eu", extra: "", script: `set +eu\n${look}`, reported: true },
+        { name: "set +o errexit", extra: "", script: `set +o errexit\n${look}`, reported: true },
+        { name: "bash {0}", extra: "shell: bash {0}", script: look, reported: true },
+        { name: "sh {0}", extra: "shell: sh {0}", script: look, reported: true },
+        {
+          name: "bash {0} with set -e in the script",
+          extra: "shell: bash {0}",
+          script: `set -euo pipefail\n${look}`,
+          reported: false,
+        },
+        { name: "bash -e {0}", extra: "shell: bash -e {0}", script: look, reported: false },
+        {
+          name: "bash -eo pipefail {0}",
+          extra: "shell: bash -eo pipefail {0}",
+          script: look,
+          reported: false,
+        },
+        { name: "the default shell", extra: "", script: look, reported: false },
+        { name: "shell: bash", extra: "shell: bash", script: look, reported: false },
+        // Only a lookup is at risk: a create that cannot fail the step is not this rule's.
+        {
+          name: "set +e around a create",
+          extra: "",
+          script: "set +e\ngh issue create --title t",
+          reported: false,
+        },
+      ];
+      for (const c of cases) {
+        const body = c.script
+          .split("\n")
+          .map((l) => `          ${l}`)
+          .join("\n");
+        const stepExtra = c.extra ? `        ${c.extra}\n` : "";
+        const yaml = workflow(`
+    steps:
+      - uses: actions/checkout@v4
+      - name: look
+${stepExtra}        run: |
+${body}
+`);
+        const defects = defectsOf("new.yml", yaml).filter((d) =>
+          d.includes("does not stop on error"),
+        );
+        expect(defects.length, c.name).toBe(c.reported ? 1 : 0);
+      }
+      // The same, set once for the whole job.
+      const jobLevel = workflow(`
+    defaults:
+      run:
+        shell: bash {0}
+    steps:
+      - uses: actions/checkout@v4
+      - name: look
+        run: ${look}
+`);
+      expect(defectsOf("new.yml", jobLevel).length).toBe(1);
     });
 
     test("is reported behind a wrapper command such as retry or timeout", () => {
