@@ -760,6 +760,17 @@ describe("what GitHub's mergeable state allows, asked before anything is written
     }
   });
 
+  test("an answer that carries no mergeable_state is read as unknown, never as clean", async () => {
+    gh.pulls["nm000201#7"] = { sha: SHA_A, omitMergeableState: true };
+    const read = await fetchPullRequest(ADMIN_TOKEN, "nm000201", 7, base());
+    expect(read).toMatchObject({ ok: true, value: { mergeableState: "unknown" } });
+    // ...and asked about again, because unknown is what GitHub says while it works it out.
+    const { result, slept } = await settle({ tries: 2 });
+    expect(result).toEqual({ ok: true, state: "unknown" });
+    expect(reads()).toHaveLength(3);
+    expect(slept).toHaveLength(1);
+  });
+
   test("a state already read and settled is used as it is, with no further read", async () => {
     const { result, slept } = await settle({ first: "unstable" });
     expect(result).toEqual({ ok: true, state: "unstable" });

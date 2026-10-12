@@ -40,6 +40,8 @@ export interface PullState {
   /** `author_association` on the pull request ("COLLABORATOR" unless set). */
   assoc?: string;
   mergeableState?: string;
+  /** Answer without a `mergeable_state` at all, as an answer that does not carry the field would. */
+  omitMergeableState?: boolean;
   /** Served for the first N reads, then `mergeableState`. */
   unknownReads?: number;
   /** Set after the approval is recorded, to simulate a push landing in between. */
@@ -229,7 +231,11 @@ export function startGitHubStandin(): GitHubStandin {
             state: p.state ?? "open",
             merged: p.merged ?? false,
             draft: p.draft ?? false,
-            mergeable_state: unknown ? "unknown" : (p.mergeableState ?? "clean"),
+            mergeable_state: p.omitMergeableState
+              ? undefined
+              : unknown
+                ? "unknown"
+                : (p.mergeableState ?? "clean"),
             title: "Add subjects",
             author_association: p.assoc ?? "COLLABORATOR",
             user: { login: p.author ?? "contributor", id: p.authorId ?? 501, type: "User" },

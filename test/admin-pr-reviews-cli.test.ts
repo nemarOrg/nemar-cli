@@ -1142,6 +1142,25 @@ describe("nemar admin pr-reviews approve", () => {
       expect(mergePuts()).toHaveLength(0);
     });
 
+    test("--merge --force on a held pull request whose review FAILED still refuses: --force is about the verdict, not the state", async () => {
+      held("fail");
+      const r = await approve(["--merge", "--force"]);
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain("GitHub reports this pull request as 'unstable'");
+      expect(r.stdout).toContain("Nothing was approved or merged.");
+      expect(adminWrites()).toHaveLength(0);
+    });
+
+    test("an answer that carries no mergeable_state is not clean: it reads as unknown, and nothing is written", async () => {
+      reviewed("pass");
+      gh.pulls["nm000201#7"].omitMergeableState = true;
+      const r = await approve(["--merge"]);
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain("GitHub reports this pull request as 'unknown'");
+      expect(r.stdout).toContain("Nothing was approved or merged.");
+      expect(adminWrites()).toHaveLength(0);
+    });
+
     test("every state but clean refuses --merge before anything is written, whatever the verdict", async () => {
       // `has_hooks` is a GitHub Enterprise Server value and the last is one nobody has heard of:
       // neither is clean. `draft` is GitHub's own word for a pull request still marked as one.
@@ -1732,6 +1751,15 @@ describe("nemar admin pr-reviews next", () => {
       expect(r.stdout, state).not.toContain(PROMPT_WITH_Y);
       expect(writes(), state).toHaveLength(0);
     }
+  });
+
+  test("an answer that carries no mergeable_state is not clean: y is not offered and nothing is written", async () => {
+    nodes(ready("nm000201", 7));
+    gh.pulls["nm000201#7"].omitMergeableState = true;
+    const r = await next("y\nq\n");
+    expect(r.stdout).toContain("y is not available: GitHub reports this pull request as 'unknown'");
+    expect(r.stdout).not.toContain(PROMPT_WITH_Y);
+    expect(writes()).toHaveLength(0);
   });
 
   test("a state GitHub never settles is not clean: y is not offered and nothing is written", async () => {
