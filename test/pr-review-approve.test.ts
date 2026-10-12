@@ -20,6 +20,7 @@ import {
   manualApprovalCommand,
   mergeRefusal,
   mergeWhenClean,
+  notCleanWhy,
   postComment,
   pullRequestUrl,
   refusalFor,
@@ -737,6 +738,18 @@ describe("what GitHub's mergeable state allows, asked before anything is written
       expect(said, state).toContain(`'${state}'`);
       expect(said, state).toContain(why);
       expect(said, state).toContain("so a merge would not be attempted");
+    }
+  });
+
+  test("a state that is the name of an object property is an unrecognised state, not that property", () => {
+    for (const state of ["constructor", "toString", "hasOwnProperty", "__proto__", "valueOf"]) {
+      const said = mergeRefusal(state);
+      expect(said, state).toContain("this tool merges only a pull request GitHub reports as clean");
+      expect(said, state).not.toContain("function");
+      expect(said, state).not.toContain("[object");
+      expect(notCleanWhy(state), state).toBe(
+        "this tool merges only a pull request GitHub reports as clean",
+      );
     }
   });
 

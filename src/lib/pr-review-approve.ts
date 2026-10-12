@@ -649,19 +649,24 @@ const MERGEABLE = "clean";
  * a state that is not listed (`has_hooks` is a GitHub Enterprise Server value, and GitHub can add
  * more) is still refused, with the last sentence.
  */
-const NOT_CLEAN_WHY: Record<string, string> = {
-  blocked: "a required check or review is not satisfied",
-  behind: "the branch is behind main",
-  dirty: "it has merge conflicts",
-  unstable:
+const NOT_CLEAN_WHY = new Map<string, string>([
+  ["blocked", "a required check or review is not satisfied"],
+  ["behind", "the branch is behind main"],
+  ["dirty", "it has merge conflicts"],
+  [
+    "unstable",
     "a check that is not required is not passing, such as the automated review holding the pull request",
-  draft: "it is a draft",
-  unknown: "GitHub has not said whether it can be merged",
-};
+  ],
+  ["draft", "it is a draft"],
+  ["unknown", "GitHub has not said whether it can be merged"],
+]);
 
-/** Why GitHub's `mergeable_state` is not one a merge is attempted on. Meaningful for any state but `clean`. */
+/**
+ * Why GitHub's `mergeable_state` is not one a merge is attempted on. Meaningful for any state but
+ * `clean`. A Map, so a state named like an object property (`constructor`) is not read as one.
+ */
 export function notCleanWhy(state: string): string {
-  return NOT_CLEAN_WHY[state] ?? "this tool merges only a pull request GitHub reports as clean";
+  return NOT_CLEAN_WHY.get(state) ?? "this tool merges only a pull request GitHub reports as clean";
 }
 
 /**
