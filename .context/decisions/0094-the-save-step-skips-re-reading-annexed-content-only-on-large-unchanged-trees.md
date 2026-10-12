@@ -60,7 +60,7 @@ Measured on local disk, that first `git status` took about 0.35 to 0.45 s agains
   The total work is unchanged: 9.4 s for the plain save against 5.3 s plus 4.3 s for the skip save and the first status, at 10,000 annexed files plus 5,000 JSON files (local disk).
 - The save fails on a changed file, on an annexed file that disappeared, and on a git that cannot report or clear its flags.
   Each message says what to do.
-- Index stat data is still not primed, so the cost above is paid on a later command rather than avoided.
+- Index stat data is still not primed, so the cost above is paid on a later command rather than avoided (amended below: ADR 0098 primes data files of 1 GiB or more).
 
 ## The check of recorded files that precedes the save
 

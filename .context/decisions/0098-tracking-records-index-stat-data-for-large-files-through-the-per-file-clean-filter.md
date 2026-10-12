@@ -27,7 +27,7 @@ The issue reports 75 to 95 MB/s a stream for this read on CephFS, over 80 minute
 With `filter.annex.process` absent, git uses git-annex's per-file clean filter, `git-annex smudge --clean -- %f`, which answers from the same inode cache from the path alone: the same refresh piped 0.8 MB (a pipe buffer per file) in 0.38 s, recorded the stat data, and the next `git status` read nothing.
 git-annex does exactly this for its own restage: it records the value under `filter.annex.process-temp-disabled`, unsets `filter.annex.process`, refreshes, sets it back and removes the record, and its next restage restores from a record a killed run left (traced with `GIT_TRACE`).
 
-The per-file filter is one git-annex process per file, and that cost does not depend on the file's size: 0.06 to 0.18 s a file on APFS with 6 to 6,000 annexed files in the index, and 500 files of 150 KB took 129.9 s against 0.75 s through filter-process.
+The per-file filter is one git-annex process per file, and that cost does not depend on the file's size: 0.06 to 0.26 s a file on APFS with 6 to 6,000 annexed files in the index, and 500 files of 150 KB took 129.9 s against 0.75 s through filter-process.
 The issue reports 3.7 s for a 25 GB file on CephFS.
 
 ## Decision
@@ -46,9 +46,11 @@ The issue reports 3.7 s for a 25 GB file on CephFS.
   One set anywhere else cannot be taken out for one command, and the files are left to be read as before, with a warning.
   With no filter process at all (the issue's own workaround), git already uses the per-file filter and nothing is changed.
 - The value is written to `filter.annex.process-temp-disabled` before `filter.annex.process` is unset, and put back in a `finally`, retried once and read back.
-  On SIGINT, SIGTERM and SIGHUP it is put back synchronously before the signal is re-raised; `git config` takes `.git/config.lock`, not the `index.lock` the refresh holds.
+  On SIGINT, SIGTERM and SIGHUP it is put back synchronously, retried for about 2.5 seconds in case this process's own `git config` holds `.git/config.lock` at that moment, and the CLI's child processes are then asked to stop before the signal is re-raised.
+  The restore does not wait on the refresh (`git config` takes `config.lock`, not the `index.lock` the refresh holds), but a refresh left running would hold `index.lock` until it had been through every file, and a signal sent to the CLI alone does not reach it.
   SIGKILL and a power loss leave the marker, which the start of the next upload's steps restores (and git-annex's next restage would).
-- A configuration that cannot be read, or put back, fails the step with the two commands that restore it.
+- A configuration that cannot be read fails the step; one that cannot be put back fails it with the two commands that restore it.
+  A leftover marker next to a filter process that is set is only removed, and only warned about when it cannot be: nothing is out of the configuration in that state.
   What is left behind is not a correctness problem (git falls back to git-annex's per-file filters, which store files the same way), but it is a change to the person's configuration that nothing else would undo, and it makes every git command start one git-annex process per file.
   A refresh that fails is only a warning: it can have recorded nothing but stat data.
 
@@ -58,7 +60,7 @@ The issue reports 3.7 s for a 25 GB file on CephFS.
   A large file is no longer read by the next upload's add, by the save (with or without ADR 0094's skip), or by the first command after the upload.
 - Each large file costs one git-annex process per run that finds its entry without stat data, and an `lstat` on runs that do not.
 - Files below 1 GiB keep the old behavior, including ADR 0094's deferred read, because for them the per-file process can cost more than the read it saves.
-  At 1 GiB the per-file process is at least twice as cheap as the read on both measured hosts (about 0.6 s to re-read on APFS against 0.06 to 0.26 s a file, 11 to 14 s on the issue's CephFS against 3.7 s); it is not a measured crossover on CephFS, where only the one per-file figure from the issue is known.
+  At 1 GiB the per-file process is cheaper than the read on both measured hosts: about 0.6 s to re-read on APFS against 0.06 to 0.26 s a file (a thin margin of 2.4 times at worst, where the read is fast anyway), and 11 to 14 s on the issue's CephFS against 3.7 s (3 times). It is not a measured crossover on CephFS, where only the one per-file figure from the issue is known.
 - Nothing here was run on CephFS, on a multi-terabyte tree, or against S3.
 
 ## Alternatives considered
