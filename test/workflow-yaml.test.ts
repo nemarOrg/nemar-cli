@@ -299,9 +299,10 @@ describe("the repo's own test workflow routes changes to jobs", () => {
 
   test("workflow files have a filter, and gate lint and unit-pure alike", () => {
     // test/workflow-yaml.test.ts polices every workflow, but a pull request that edits
-    // only a workflow matches no other filter and would run neither job. Both jobs, not
-    // just the one that runs the test: they are required checks, and a required check
-    // that is skipped blocks the merge.
+    // only a workflow matches no other filter and would run no job. `unit-pure` is the job
+    // that runs the test, so it must be wired. `lint` is wired too, but that is convention
+    // (the two `if:` conditions stay identical), not a requirement: a job skipped by its
+    // `if:` reports Success and does not block a required check.
     expect(filterNames()).toContain("workflows");
     for (const job of ["lint", "unit-pure"]) {
       expect(workflow.jobs[job]?.if ?? "", job).toContain("outputs.workflows == 'true'");

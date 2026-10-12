@@ -177,8 +177,10 @@ jobs:
             # introduce one. A pull request editing only a workflow matched no other
             # filter and ran no job, so the guard would have been skipped on the change it
             # polices. FOURTH TIME FOR THIS GAP, after `shared:`, `decisions:` and
-            # `agentdocs:` above. Wired into lint AND unit-pure, which must stay in step:
-            # both are required checks, and a skipped required check blocks the merge.
+            # `agentdocs:` above. It has to reach `unit-pure`, the job that runs the test.
+            # It is wired into `lint` as well, but only to keep the two `if:` conditions
+            # identical; that is convention, not a requirement: a job skipped by its
+            # `if:` reports Success and does not block a required check.
             workflows:
               - '.github/workflows/**'
               - '.github/dataset-workflows/**'
@@ -697,8 +699,10 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     needs: changes
-    # Matches unit-pure's trigger so that, as a required check, lint never
-    # "skips" on a backend-only PR (a skipped required check blocks merges).
+    # Kept identical to unit-pure's trigger so the two jobs run on the same changes.
+    # (A job skipped by its `if:` reports Success and does not block a required check.
+    # Only a skipped WORKFLOW leaves its checks pending, which is why `pull_request`
+    # above has no paths-ignore.)
     if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.zarr == 'true' || needs.changes.outputs.shared == 'true' || needs.changes.outputs.decisions == 'true' || needs.changes.outputs.agentdocs == 'true' || needs.changes.outputs.neurobagel_deploy == 'true' || needs.changes.outputs.workflows == 'true'
     steps:
       - name: Checkout code
