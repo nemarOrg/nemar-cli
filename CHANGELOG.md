@@ -13,6 +13,29 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## Unreleased
+
+### Fixed
+
+- **The weekly summary.json drift check can file its issue.** The job has no checkout, so `gh`
+  had no repository to act on and every scheduled run failed in the step that opens the issue
+  (20 of 20 on record, the first on 2026-06-01); no drift issue was ever filed. The job now names
+  its repository, the label step creates the `drift` label and fails the job when it cannot
+  instead of discarding the error, and each existing-issue lookup fails the step instead of
+  reading an error as "no issue", which would have filed a duplicate every Monday. A lookup also
+  keeps only an issue whose title starts with its own prefix, so the probe-broken and
+  report-broken issues are no longer taken for the drift issue. The first run after the fix files
+  the first drift issue; the report on 2026-10-12 listed 96 of 1303 versions with no
+  `summary.json`.
+- **The nightly dev-suite issue no longer files a duplicate when its lookup fails.** The same
+  `|| true` pattern read a failed lookup as "no open issue", and the label step hid a real
+  failure behind "already exists".
+- **A test fails on a workflow `gh` call that has no repository, and CI runs it on a workflow-only
+  pull request.** `test/workflow-yaml.test.ts` checks every workflow the repository ships and the
+  per-dataset templates for a `gh` call with no checkout, `GH_REPO` or `--repo`, a swallowed issue
+  lookup, and a swallowed label create. A pull request that edited only a workflow used to run no
+  job at all.
+
 ## 0.10.16 - 2026-10-11
 
 Epic #1671 (upload and integrity fixes) reaches `main` together with the automated review of
