@@ -59,9 +59,11 @@ export function buildFtsMatch(query: string): string | null {
  * `WITH RECURSIVE` named `modality_tokens(tok, rest)`: the list is lower-cased,
  * split on every comma, and each token trimmed of surrounding whitespace, so
  * `beh , EEG` yields `beh` and `eeg`, `ieeg` never yields `eeg`, and a space
- * INSIDE a token (`e eg`) stays inside it. NULL reads as the empty string and
- * yields no token worth matching. The first row is the empty seed token, which
- * can never equal a wanted one because {@link parseTokenList} drops empties.
+ * INSIDE a token (`e eg`) stays inside it. A NULL list yields no token at all:
+ * `LOWER(NULL)` is NULL, so the seed row carries a NULL `rest`, the recursion's
+ * condition is NULL and so not true, and no wanted token can equal the NULL
+ * seed token. The first row is the empty seed token, which can never equal a
+ * wanted one because {@link parseTokenList} drops empties.
  *
  * Splitting in SQL is what makes this the same tokenizing as
  * `parseTokenList` (split, trim, lower-case), and so as the facet vocabulary's
@@ -71,15 +73,11 @@ export function buildFtsMatch(query: string): string | null {
  * whitespace a stored list can carry; JS `trim` also covers exotic Unicode
  * spaces, which nothing writes here.
  *
- * `COALESCE` is not needed for correctness (a NULL propagates to a row that
- * matches nothing) but it keeps the recursion's stop condition from resting on
- * `NULL <> ''` being unknown, so it stays.
- *
  * Used as `EXISTS (${MODALITY_TOKENS_SQL} SELECT 1 FROM modality_tokens WHERE
  * tok IN (SELECT value FROM json_each(?)))`, which references the outer `d`.
  */
 export const MODALITY_TOKENS_SQL = `WITH RECURSIVE modality_tokens(tok, rest) AS (
-    SELECT '', LOWER(COALESCE(d.modalities, '')) || ','
+    SELECT '', LOWER(d.modalities) || ','
     UNION ALL
     SELECT TRIM(SUBSTR(rest, 1, INSTR(rest, ',') - 1), ' ' || CHAR(9) || CHAR(10) || CHAR(13)),
            SUBSTR(rest, INSTR(rest, ',') + 1)
