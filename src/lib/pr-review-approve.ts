@@ -670,7 +670,7 @@ export function notCleanWhy(state: string): string {
 }
 
 /** What can be done about a merge that would not be attempted: see {@link MergeCheck}. */
-export type MergeAdvice = "without_merge" | "retry";
+export type MergeAdvice = "without_merge" | "retry" | "none";
 
 /**
  * What a merge may be told about GitHub's `mergeable_state`, as ONE value for every place that asks:
@@ -678,7 +678,8 @@ export type MergeAdvice = "without_merge" | "retry";
  * merge. `ok` only for `clean`. Otherwise `why` is the sentence (which state, why it blocks, that
  * no merge would be tried), `card` the short phrase for the `next` card, and `advice` what the
  * administrator can do: `without_merge` for a state that will not clear by itself, `retry` for one
- * that may (GitHub still working it out, a read that failed).
+ * that may (GitHub still working it out, a read that failed), `none` when the pull request is no
+ * longer open.
  *
  * A state that is missing, empty or unrecognised is not `clean`: it is refused, and a missing one
  * reads as `unknown`.
@@ -686,6 +687,9 @@ export type MergeAdvice = "without_merge" | "retry";
 export type MergeCheck =
   | { ok: true }
   | { ok: false; why: string; card: string; advice: MergeAdvice };
+
+/** A {@link MergeCheck} that refuses. */
+export type MergeRefused = Extract<MergeCheck, { ok: false }>;
 
 export function mergeCheckOf(state: string | null | undefined): MergeCheck {
   const word = state && state.length > 0 ? state : "unknown";
@@ -710,12 +714,13 @@ export function stateWord(state: string): string {
 /**
  * What a read of GitHub's mergeability came to: the state, or why there is none. `unreadable` is a
  * failed read of the pull request (`status` is GitHub's, or 0 for no answer); `moved` is a head that
- * is no longer the commit being acted on.
+ * is no longer the commit being acted on; `closed` is a pull request that is no longer open.
  */
 export type MergeStateRead =
   | { ok: true; state: string }
   | { ok: false; kind: "unreadable"; status: number; reason: string }
-  | { ok: false; kind: "moved" };
+  | { ok: false; kind: "moved" }
+  | { ok: false; kind: "closed"; merged: boolean };
 
 /**
  * A pull request as a caller has read it: its head and, when one was read with it, the state. They
@@ -738,8 +743,8 @@ interface SettleOptions {
 /**
  * GitHub's `mergeable_state` for the head in `seen`. It is computed lazily, so an `unknown` is asked
  * about again a few times, a second apart; one that is still `unknown` after that is returned as
- * `unknown`, for the caller to treat as not clean. A re-read that finds another head is `moved`.
- * Never sleeps after the last read.
+ * `unknown`, for the caller to treat as not clean. A re-read that finds another head is `moved`, and
+ * one that finds the pull request closed or merged is `closed`. Never sleeps after the last read.
  */
 export async function settleMergeState(
   token: string,
@@ -758,6 +763,9 @@ export async function settleMergeState(
     if (state === undefined) {
       const pr = await fetchPullRequest(token, datasetId, prNumber, base);
       if (!pr.ok) return { ok: false, kind: "unreadable", status: pr.status, reason: pr.reason };
+      if (pr.value.state !== "open") {
+        return { ok: false, kind: "closed", merged: pr.value.state === "merged" };
+      }
       if (pr.value.headSha !== seen.headSha) return { ok: false, kind: "moved" };
       state = pr.value.mergeableState;
       reads++;
@@ -769,13 +777,21 @@ export async function settleMergeState(
 }
 
 /** A read that gave no state, as a refusal that says what happened and not "GitHub has not said". */
-function unreadMergeCheck(read: Extract<MergeStateRead, { ok: false }>): MergeCheck {
+function unreadMergeCheck(read: Extract<MergeStateRead, { ok: false }>): MergeRefused {
   if (read.kind === "moved") {
     return {
       ok: false,
       why: "The pull request changed while it was being read.",
       card: "the pull request changed while it was being read",
       advice: "retry",
+    };
+  }
+  if (read.kind === "closed") {
+    return {
+      ok: false,
+      why: `The pull request is no longer open (it was ${read.merged ? "merged" : "closed"}).`,
+      card: "the pull request is no longer open",
+      advice: "none",
     };
   }
   const reason = read.reason.replace(/\.$/, "");
@@ -834,19 +850,28 @@ export async function mergeWhenClean(
 
   const read = await settleMergeState(token, datasetId, prNumber, { headSha }, options);
   if (!read.ok) {
-    return read.kind === "moved"
-      ? {
-          ok: false,
-          outcome: "not_sent",
-          status: 409,
-          reason: "The pull request changed after it was approved, so it was not merged.",
-        }
-      : {
-          ok: false,
-          outcome: "not_sent",
-          status: read.status,
-          reason: `Not merged: ${read.reason} The approval stands.`,
-        };
+    if (read.kind === "moved") {
+      return {
+        ok: false,
+        outcome: "not_sent",
+        status: 409,
+        reason: "The pull request changed after it was approved, so it was not merged.",
+      };
+    }
+    if (read.kind === "closed") {
+      return {
+        ok: false,
+        outcome: "not_sent",
+        status: 409,
+        reason: `Not merged: ${unreadMergeCheck(read).why} The approval stands.`,
+      };
+    }
+    return {
+      ok: false,
+      outcome: "not_sent",
+      status: read.status,
+      reason: `Not merged: ${read.reason} The approval stands.`,
+    };
   }
   const check = mergeCheckOf(read.state);
   if (!check.ok) {

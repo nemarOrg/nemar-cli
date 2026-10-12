@@ -54,8 +54,8 @@ import {
   type ApprovalGate,
   MERGE_METHODS,
   type MergeAdvice,
-  type MergeCheck,
   type MergeMethod,
+  type MergeRefused,
   type PullRequestFacts,
   type WriteResult,
   adminGitHubToken,
@@ -1189,14 +1189,13 @@ async function startAll(options: {
 
 // -- approve ------------------------------------------------------------------------------------
 
-type MergeRefused = Extract<MergeCheck, { ok: false }>;
-
 /** What the administrator can do about a merge that would not be attempted, in the words of the command that says it. */
 function mergeAdvice(
   advice: MergeAdvice,
   how: "approve" | "next",
   at: { dataset: string; pr: number },
-): string {
+): string | null {
+  if (advice === "none") return null;
   if (advice === "retry") {
     return how === "approve"
       ? "Run the same command again in a moment."
@@ -1211,7 +1210,7 @@ function mergeAdvice(
 function refuseMerge(merge: MergeRefused, at: { dataset: string; pr: number }): never {
   return die(
     `${merge.why} Nothing was approved or merged.`,
-    mergeAdvice(merge.advice, "approve", at),
+    mergeAdvice(merge.advice, "approve", at) ?? undefined,
   );
 }
 
@@ -1654,10 +1653,10 @@ an impatient Enter cannot answer a pull request you have not seen; piped answers
           console.log();
           console.log(chalk.yellow(`  y is not available: ${allowed.reason}`));
           // `next` always merges when it approves, so approving without merging is `approve`.
-          if (!merge.ok) {
-            const at = { dataset: e.dataset_id, pr: e.pr_number };
-            console.log(chalk.dim(`  ${mergeAdvice(merge.advice, "next", at)}`));
-          }
+          const advice = merge.ok
+            ? null
+            : mergeAdvice(merge.advice, "next", { dataset: e.dataset_id, pr: e.pr_number });
+          if (advice) console.log(chalk.dim(`  ${advice}`));
         }
 
         // What was typed before this card existed was not an answer to it.

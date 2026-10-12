@@ -642,6 +642,23 @@ describe("merging", () => {
     expect(await merge("merge", SHA_A)).toMatchObject({ ok: false, outcome: "not_sent" });
   });
 
+  test("a pull request that was closed or merged after the approval is not merged, and the approval stands", async () => {
+    for (const fields of [
+      { state: "closed" as const },
+      { state: "closed" as const, merged: true },
+    ]) {
+      gh.reset();
+      gh.pulls["nm000201#7"] = { sha: SHA_A, mergeableState: "clean", ...fields };
+      const r = await merge();
+      expect(r, JSON.stringify(fields)).toMatchObject({ ok: false, outcome: "not_sent" });
+      if (!r.ok) {
+        expect(r.reason).toContain("no longer open");
+        expect(r.reason).toContain("The approval stands.");
+      }
+      expect(puts()).toHaveLength(0);
+    }
+  });
+
   test("a merge answered by a gateway error, or by a body that cannot be read, may have happened", async () => {
     gh.pulls["nm000201#7"] = { sha: SHA_A, mergeableState: "clean" };
     gh.mergeStatus = 502;
@@ -842,6 +859,18 @@ describe("what GitHub's mergeable state allows, asked before anything is written
     expect(result).toMatchObject({ ok: false, kind: "unreadable", status: 404 });
   });
 
+  test("a pull request that is no longer open when asked again is reported, merged or closed", async () => {
+    for (const [fields, merged] of [
+      [{ state: "closed" as const }, false],
+      [{ state: "closed" as const, merged: true }, true],
+    ] as const) {
+      gh.reset();
+      gh.pulls["nm000201#7"] = { sha: SHA_A, mergeableState: "clean", ...fields };
+      const { result } = await settle(seen("unknown"));
+      expect(result, JSON.stringify(fields)).toEqual({ ok: false, kind: "closed", merged });
+    }
+  });
+
   test("the state and the head it was read with travel together, so a state is never paired with another commit", async () => {
     // The caller hands over the pull request it read, and the re-read is held to that one's head.
     gh.pulls["nm000201#7"] = { sha: SHA_A, unknownReads: 1 };
@@ -906,6 +935,22 @@ describe("the one check a merge is asked about, before the approval and again ri
     const unsettled = await check(seen("unknown"), { tries: 2 });
     expect(unsettled).toMatchObject({ ok: false, advice: "retry" });
     if (!unsettled.ok) expect(unsettled.why).toContain("'unknown' (GitHub has not said whether");
+  });
+
+  test("a pull request that is no longer open says so, and there is nothing to retry or approve around", async () => {
+    for (const [fields, word] of [
+      [{ state: "closed" as const }, "closed"],
+      [{ state: "closed" as const, merged: true }, "merged"],
+    ] as const) {
+      gh.reset();
+      gh.pulls["nm000201#7"] = { sha: SHA_A, mergeableState: "clean", ...fields };
+      const closed = await check(seen("unknown"));
+      expect(closed, word).toMatchObject({ ok: false, advice: "none" });
+      if (!closed.ok) {
+        expect(closed.why, word).toBe(`The pull request is no longer open (it was ${word}).`);
+        expect(closed.card, word).toContain("no longer open");
+      }
+    }
   });
 
   test("a failed read is never clean, even when the state it was asked about was", async () => {

@@ -1223,6 +1223,25 @@ describe("nemar admin pr-reviews approve", () => {
       }
     });
 
+    test("a pull request closed or merged while it was being checked is refused, with nothing to retry", async () => {
+      for (const [later, word] of [
+        [{ state: "closed" }, "closed"],
+        [{ state: "closed", merged: true }, "merged"],
+      ] as const) {
+        gh.reset();
+        db.run("DELETE FROM pr_reviews");
+        reviewed("pass");
+        Object.assign(gh.pulls["nm000201#7"], { unknownReads: 1, adminReadsAfterFirst: later });
+        const r = await approve(["--merge"]);
+        expect(r.exitCode, word).toBe(1);
+        expect(r.stdout, word).toContain(`The pull request is no longer open (it was ${word}).`);
+        expect(r.stdout, word).toContain("Nothing was approved or merged.");
+        expect(r.stdout, word).not.toContain("in a moment");
+        expect(r.stdout, word).not.toContain("without --merge");
+        expect(adminWrites(), word).toHaveLength(0);
+      }
+    });
+
     test("a state GitHub is still working out is asked about again, and a clean answer then merges", async () => {
       reviewed("pass");
       gh.pulls["nm000201#7"].unknownReads = 2;
@@ -1810,6 +1829,26 @@ describe("nemar admin pr-reviews next", () => {
       expect(r.stdout, said).toContain("Try y again in a moment");
       expect(r.stdout, said).not.toContain(PROMPT_WITH_Y);
       expect(writes(), said).toHaveLength(0);
+    }
+  });
+
+  test("a pull request closed or merged while its card was being prepared is not offered y", async () => {
+    for (const [later, word] of [
+      [{ state: "closed" }, "closed"],
+      [{ state: "closed", merged: true }, "merged"],
+    ] as const) {
+      gh.reset();
+      db.run("DELETE FROM pr_reviews");
+      nodes(ready("nm000201", 7));
+      Object.assign(gh.pulls["nm000201#7"], { unknownReads: 1, adminReadsAfterFirst: later });
+      const r = await next("y\nq\n");
+      expect(r.stdout, word).toContain("Merge:    the pull request is no longer open");
+      expect(r.stdout, word).toContain(
+        `y is not available: The pull request is no longer open (it was ${word}).`,
+      );
+      expect(r.stdout, word).not.toContain("in a moment");
+      expect(r.stdout, word).not.toContain(PROMPT_WITH_Y);
+      expect(writes(), word).toHaveLength(0);
     }
   });
 
