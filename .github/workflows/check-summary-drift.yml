@@ -228,7 +228,14 @@ jobs:
           # which turned an error into "no issue exists" and would have opened a duplicate
           # every Monday once the repository error was fixed. An empty RESULT is fine and
           # means there is none; an error is not.
-          EXISTING=$(gh issue list --label "drift" --state open --search "summary.json drift" --json number --jq '.[0].number')
+          #
+          # The match is on the TITLE PREFIX, not on the search text alone: the probe-broken
+          # and report-broken issues carry the `drift` label too, and "summary.json drift"
+          # appears in the title of one and the body of the other, so a bare search would
+          # find one of them and rewrite it into a drift report.
+          EXISTING=$(gh issue list --label "drift" --state open --search "summary.json drift" \
+            --json number,title \
+            --jq '[.[] | select(.title | startswith("summary.json drift:"))] | .[0].number')
           if [ -n "$EXISTING" ]; then
             # Update both title and body so the count in the title doesn't
             # rot when subsequent runs change how many versions are drifted.
@@ -256,7 +263,9 @@ jobs:
           TITLE="summary.json probe failing for majority of versions (${ERROR_COUNT}/${VERSIONS})"
           BODY=$'## Probe is failing for most versions\n\n'"$ISSUE_BODY"$'\n\n---\n\n**This is likely a `/<id>/<v>/summary.json` route or S3 IAM problem, NOT a backfill problem.** `nemar admin summary check --fix` will dispatch workflows that succeed at writing to S3 but the read path will keep returning error. Triage:\n\n1. Hit `https://data.nemar.org/<a-known-published-id>/v1.0.0/summary.json` directly. If it 5xx, that confirms route/IAM.\n2. Check the Worker error log for `[data] summary fetch failed`.\n3. Verify `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` Workers secrets are set + valid (`npx cfman wrangler --account sccn secret list -c backend/wrangler-sccn.toml`).\n\nTriggering workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           # A failed lookup fails the step rather than reading as "no issue" (see the drift step).
-          EXISTING=$(gh issue list --label "drift,P1" --state open --search "summary.json probe failing" --json number --jq '.[0].number')
+          EXISTING=$(gh issue list --label "drift,P1" --state open --search "summary.json probe failing" \
+            --json number,title \
+            --jq '[.[] | select(.title | startswith("summary.json probe failing"))] | .[0].number')
           if [ -n "$EXISTING" ]; then
             gh issue edit "$EXISTING" --title "$TITLE" --body "$BODY"
           else
@@ -278,7 +287,9 @@ jobs:
           TITLE="summary.json drift cron broken"
           BODY=$'## Coverage endpoint or payload broken\n\n'"$FETCH_ERROR"$'\n\nThe weekly summary.json drift cron could not parse a coverage report. Run `nemar admin summary check --json` manually to triage. Triggering workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           # A failed lookup fails the step rather than reading as "no issue" (see the drift step).
-          EXISTING=$(gh issue list --label "drift,P1" --state open --search "summary.json drift cron broken" --json number --jq '.[0].number')
+          EXISTING=$(gh issue list --label "drift,P1" --state open --search "summary.json drift cron broken" \
+            --json number,title \
+            --jq '[.[] | select(.title | startswith("summary.json drift cron broken"))] | .[0].number')
           if [ -n "$EXISTING" ]; then
             gh issue edit "$EXISTING" --title "$TITLE" --body "$BODY"
           else
