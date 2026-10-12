@@ -51,6 +51,13 @@ export interface PullState {
   mergeableStateAfterReview?: string;
   /** The head every read AFTER THE FIRST sees: a push that lands between two readers' reads. */
   headAfterFirstRead?: string;
+  /**
+   * Like the two above, but counted only over reads made with the administrator's own token, so a
+   * read the Worker makes in between does not use them up: the status those reads after the first
+   * answer (a GitHub that stops answering), and the head they see (a push).
+   */
+  adminReadStatusAfterFirst?: number;
+  adminHeadAfterFirst?: string;
 }
 
 export interface GitHubStandin {
@@ -121,6 +128,7 @@ export function startGitHubStandin(): GitHubStandin {
     unreadableAnswers: false,
   };
   const reads: Record<string, number> = {};
+  const adminReads: Record<string, number> = {};
 
   const server: Server = Bun.serve({
     port: 0,
@@ -207,6 +215,14 @@ export function startGitHubStandin(): GitHubStandin {
         if (!p) return Response.json({ message: "Not Found" }, { status: 404 });
         if (req.method === "GET" && !pull[3]) {
           reads[key] = (reads[key] ?? 0) + 1;
+          if (token === ADMIN_TOKEN) adminReads[key] = (adminReads[key] ?? 0) + 1;
+          const adminRead = token === ADMIN_TOKEN ? adminReads[key] : 0;
+          if (adminRead > 1 && p.adminReadStatusAfterFirst) {
+            return Response.json(
+              { message: "Server Error" },
+              { status: p.adminReadStatusAfterFirst },
+            );
+          }
           const unknown = (p.unknownReads ?? 0) >= reads[key];
           return Response.json({
             number: Number(pull[2]),
@@ -226,7 +242,12 @@ export function startGitHubStandin(): GitHubStandin {
               },
             },
             head: {
-              sha: p.headAfterFirstRead && reads[key] > 1 ? p.headAfterFirstRead : p.sha,
+              sha:
+                p.adminHeadAfterFirst && adminRead > 1
+                  ? p.adminHeadAfterFirst
+                  : p.headAfterFirstRead && reads[key] > 1
+                    ? p.headAfterFirstRead
+                    : p.sha,
               ref: "add-subjects",
               repo: { full_name: `nemarDatasets/${pull[1]}`, owner: { login: "nemarDatasets" } },
             },
@@ -382,6 +403,7 @@ export function startGitHubStandin(): GitHubStandin {
       for (const k of Object.keys(state.pulls)) delete state.pulls[k];
       for (const k of Object.keys(state.users)) delete state.users[k];
       for (const k of Object.keys(reads)) delete reads[k];
+      for (const k of Object.keys(adminReads)) delete adminReads[k];
     },
     stop() {
       server.stop(true);

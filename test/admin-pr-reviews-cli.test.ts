@@ -1168,6 +1168,25 @@ describe("nemar admin pr-reviews approve", () => {
       expect(adminWrites()).toHaveLength(0);
     });
 
+    test("when asking again fails, or finds the branch moved, nothing is written and the reason is said", async () => {
+      // The first read says unknown, so the state is asked about again; that second read is the
+      // one that cannot be trusted to say clean.
+      for (const [fields, said] of [
+        [{ adminReadStatusAfterFirst: 502 }, "Could not check whether it can be merged"],
+        [{ adminHeadAfterFirst: SHA_B }, "changed while it was being read"],
+      ] as const) {
+        gh.reset();
+        db.run("DELETE FROM pr_reviews");
+        reviewed("pass");
+        Object.assign(gh.pulls["nm000201#7"], { unknownReads: 1, ...fields });
+        const r = await approve(["--merge"]);
+        expect(r.exitCode, said).toBe(1);
+        expect(r.stdout, said).toContain(said);
+        expect(r.stdout, said).not.toContain("Approved nm000201");
+        expect(adminWrites(), said).toHaveLength(0);
+      }
+    });
+
     test("a state GitHub is still working out is asked about again, and a clean answer then merges", async () => {
       reviewed("pass");
       gh.pulls["nm000201#7"].unknownReads = 2;
@@ -1722,6 +1741,25 @@ describe("nemar admin pr-reviews next", () => {
     expect(r.stdout).toContain("y is not available: GitHub reports this pull request as 'unknown'");
     expect(r.stdout).not.toContain(PROMPT_WITH_Y);
     expect(writes()).toHaveLength(0);
+  });
+
+  test("when asking again fails, or finds the branch moved, the state is not clean and y is not offered", async () => {
+    for (const fields of [
+      { adminReadStatusAfterFirst: 502 },
+      { adminHeadAfterFirst: SHA_B },
+    ] as const) {
+      gh.reset();
+      db.run("DELETE FROM pr_reviews");
+      nodes(ready("nm000201", 7));
+      Object.assign(gh.pulls["nm000201#7"], { unknownReads: 1, ...fields });
+      const r = await next("y\nq\n");
+      const why = JSON.stringify(fields);
+      expect(r.stdout, why).toContain(
+        "y is not available: GitHub reports this pull request as 'unknown'",
+      );
+      expect(r.stdout, why).not.toContain(PROMPT_WITH_Y);
+      expect(writes(), why).toHaveLength(0);
+    }
   });
 
   test("a state GitHub is still working out is asked about again before the card is shown", async () => {
