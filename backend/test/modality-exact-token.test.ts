@@ -1,0 +1,385 @@
+/**
+ * The `modality` filter matches a whole modality token, not a substring (#1711).
+ *
+ * `datasets.modalities` is a comma-joined list (`eeg,ieeg,meg`), and the filter
+ * used to be `LOWER(modalities) LIKE '%<value>%'`. `eeg` is a substring of
+ * `ieeg`, so `modality=EEG` returned intracranial-only datasets. Production
+ * showed it: a search for `ieeg` with `modality=EEG` returned 97 of 100 rows
+ * that held no `eeg` token at all.
+ *
+ * Every assertion goes through a real entry point -- the registered catalog
+ * routes (`GET /datasets`, `GET /datasets/search`), the MCP `search_datasets`
+ * tool, and `GET /datasets/facets` -- against a real bun:sqlite database with
+ * every migration applied. There is no hand-copied SQL: the one place that
+ * decides what a modality token is lives in `dataset-filters.ts`, and all three
+ * entry points reach it, so a test that drove only the clause builder could
+ * stay green while a caller stopped passing the filter in.
+ *
+ * The fixture is built so that substring and token matching DISAGREE on almost
+ * every row. A fixture of lowercase single-token rows cannot tell them apart:
+ * `eeg` and `ieeg` are the only collision in it, and a `meg` or `emg` query
+ * agrees under both.
+ */
+
+import type { Database } from "bun:sqlite";
+import { beforeEach, describe, expect, test } from "bun:test";
+import { Hono } from "hono";
+import type { SearchDatasetsInput } from "../../shared/contract/mcp";
+import { searchDatasetsTool } from "../src/mcp/tools/search-datasets";
+import { registerCatalogRoutes } from "../src/routes/datasets/catalog";
+import type { Bindings, Variables } from "../src/types/bindings";
+import { freshDb, realD1 } from "./helpers/d1";
+
+type App = Hono<{ Bindings: Bindings; Variables: Variables }>;
+
+function env(db: Database): Bindings {
+  // No AI/VECTORIZE bound: GET /datasets/search takes its text (FTS) tier, which
+  // is the tier that carries the filter clauses in the production failure.
+  return { DB: realD1(db), ENVIRONMENT: "development" } as Bindings;
+}
+
+function newApp(): App {
+  const app: App = new Hono();
+  registerCatalogRoutes(app);
+  return app;
+}
+
+function insertDataset(
+  db: Database,
+  datasetId: string,
+  cols: Record<string, string | number | null> = {},
+): void {
+  const merged: Record<string, string | number | null> = {
+    owner_user_id: -1,
+    name: `Fixture ${datasetId}`,
+    visibility: "public",
+    status: "active",
+    is_sandbox: 0,
+    ...cols,
+  };
+  const keys = Object.keys(merged);
+  db.query(
+    `INSERT INTO datasets (dataset_id, ${keys.join(", ")}) VALUES (?, ${keys
+      .map(() => "?")
+      .join(", ")})`,
+  ).run(datasetId, ...(keys.map((k) => merged[k]) as never[]));
+}
+
+/**
+ * One row per way a modality list can be written. The comment on each row says
+ * which token set it carries, because the expectations below are derived from
+ * that and nothing else.
+ */
+const ROWS = {
+  eegOnly: { id: "nm500001", modalities: "eeg" },
+  ieegOnly: { id: "nm500002", modalities: "ieeg" },
+  eegAndIeeg: { id: "nm500003", modalities: "eeg,ieeg" },
+  megOnly: { id: "nm500004", modalities: "meg" },
+  // Legacy capitalisation: the column is lowercase when written by the current
+  // code (BIDS datatype directory names), but the filter has always been
+  // case-insensitive and must stay so.
+  upperEeg: { id: "nm500005", modalities: "EEG" },
+  upperIeeg: { id: "nm500006", modalities: "iEEG" },
+  // A space after the comma, the shape an older writer or a hand edit leaves.
+  spacedList: { id: "nm500007", modalities: "beh, EEG" },
+  // `ieeg` in the MIDDLE of a list, and no `eeg` token at all.
+  middleIeeg: { id: "nm500008", modalities: "anat,ieeg,meg" },
+  // `eeg` as a PREFIX of a different token: the other direction a substring
+  // match leaks, which a suffix-only (`ieeg`) fixture never exercises.
+  eegPrefix: { id: "nm500009", modalities: "eegx" },
+  emgOnly: { id: "nm500010", modalities: "emg" },
+  nullModalities: { id: "nm500011", modalities: null },
+  emptyModalities: { id: "nm500012", modalities: "" },
+} as const;
+
+const ALL_IDS = Object.values(ROWS).map((r) => r.id);
+
+function ids(...rows: (typeof ROWS)[keyof typeof ROWS][]): string[] {
+  return rows.map((r) => r.id).sort();
+}
+
+function seed(db: Database): void {
+  for (const row of Object.values(ROWS)) {
+    insertDataset(db, row.id, { modalities: row.modalities });
+  }
+}
+
+async function listIds(app: App, db: Database, qs: string): Promise<string[]> {
+  const res = await app.request(`/?${qs}`, {}, env(db));
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as { datasets: { dataset_id: string }[] };
+  return body.datasets.map((d) => d.dataset_id).sort();
+}
+
+async function listTotal(app: App, db: Database, qs: string): Promise<number> {
+  const res = await app.request(`/?${qs}`, {}, env(db));
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as { total_count: number };
+  return body.total_count;
+}
+
+async function searchIds(app: App, db: Database, qs: string): Promise<string[]> {
+  const res = await app.request(`/search?${qs}`, {}, env(db));
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as { results: { id: string }[] };
+  return body.results.map((r) => r.id).sort();
+}
+
+describe("GET /datasets: modality is a whole-token match", () => {
+  let db: Database;
+  let app: App;
+
+  beforeEach(() => {
+    db = freshDb();
+    app = newApp();
+    seed(db);
+  });
+
+  test("control: no modality filter returns every row, so the fixture is all visible", async () => {
+    // Without this, an expectation below that a row is ABSENT could be satisfied
+    // by the row never being listable at all.
+    expect(await listIds(app, db, "")).toEqual([...ALL_IDS].sort());
+  });
+
+  test("modality=EEG returns datasets with an eeg token and not iEEG-only ones (#1711 browse)", async () => {
+    expect(await listIds(app, db, "modality=EEG")).toEqual(
+      ids(ROWS.eegOnly, ROWS.eegAndIeeg, ROWS.upperEeg, ROWS.spacedList),
+    );
+  });
+
+  test("the same answer in any case", async () => {
+    const expected = ids(ROWS.eegOnly, ROWS.eegAndIeeg, ROWS.upperEeg, ROWS.spacedList);
+    for (const value of ["eeg", "EEG", "Eeg", "eEg"]) {
+      expect({ value, ids: await listIds(app, db, `modality=${value}`) }).toEqual({
+        value,
+        ids: expected,
+      });
+    }
+  });
+
+  test("modality=iEEG returns the datasets that hold an ieeg token", async () => {
+    expect(await listIds(app, db, "modality=iEEG")).toEqual(
+      ids(ROWS.ieegOnly, ROWS.eegAndIeeg, ROWS.upperIeeg, ROWS.middleIeeg),
+    );
+  });
+
+  test("a token in the middle of a list matches, and so does the last one", async () => {
+    expect(await listIds(app, db, "modality=meg")).toEqual(ids(ROWS.megOnly, ROWS.middleIeeg));
+    expect(await listIds(app, db, "modality=beh")).toEqual(ids(ROWS.spacedList));
+  });
+
+  test("a prefix or a suffix of a token is not that token", async () => {
+    expect(await listIds(app, db, "modality=ee")).toEqual([]);
+    expect(await listIds(app, db, "modality=eegx")).toEqual(ids(ROWS.eegPrefix));
+    expect(await listIds(app, db, "modality=ieeg")).not.toContain(ROWS.eegOnly.id);
+    expect(await listIds(app, db, "modality=eeg")).not.toContain(ROWS.eegPrefix.id);
+  });
+
+  test("a comma list matches a dataset holding ANY of its tokens", async () => {
+    expect(await listIds(app, db, "modality=eeg,meg")).toEqual(
+      ids(
+        ROWS.eegOnly,
+        ROWS.eegAndIeeg,
+        ROWS.upperEeg,
+        ROWS.spacedList,
+        ROWS.megOnly,
+        ROWS.middleIeeg,
+      ),
+    );
+  });
+
+  test("a comma list tolerates spaces and repeats", async () => {
+    const plain = await listIds(app, db, "modality=eeg,meg");
+    expect(await listIds(app, db, "modality=%20eeg%20,%20MEG%20,eeg")).toEqual(plain);
+  });
+
+  test("rows with no modality at all match no modality filter", async () => {
+    for (const value of ["eeg", "ieeg", "meg", "emg", "beh", "eeg,meg"]) {
+      const listed = await listIds(app, db, `modality=${value}`);
+      expect({ value, null: listed.includes(ROWS.nullModalities.id) }).toEqual({
+        value,
+        null: false,
+      });
+      expect({ value, empty: listed.includes(ROWS.emptyModalities.id) }).toEqual({
+        value,
+        empty: false,
+      });
+    }
+  });
+
+  test("LIKE wildcards in the value are literal characters, not patterns", async () => {
+    // The old clause bound `%<value>%` unescaped, so `%` matched EVERY row (NULL
+    // and empty ones included, through the COALESCE) and `_eg` matched meg, eeg
+    // and emg. Both are the dangerous direction: they widen instead of narrow.
+    expect(await listIds(app, db, "modality=%25")).toEqual([]);
+    expect(await listIds(app, db, "modality=_eg")).toEqual([]);
+    expect(await listIds(app, db, "modality=e%25")).toEqual([]);
+    expect(await listIds(app, db, "modality=e_g")).toEqual([]);
+  });
+
+  test("a value that names no modality matches nothing; it does not fall back to everything", async () => {
+    // Whitespace and bare commas are supplied-but-inert. The filter was asked
+    // for, so the answer is the empty list, never the unfiltered catalog.
+    for (const value of ["%20", "%20%20", ",", "%20,%20", ",,"]) {
+      expect({ value, ids: await listIds(app, db, `modality=${value}`) }).toEqual({
+        value,
+        ids: [],
+      });
+    }
+    // An EMPTY value is not a supplied filter, and stays unfiltered.
+    expect(await listIds(app, db, "modality=")).toEqual([...ALL_IDS].sort());
+  });
+
+  test("total_count counts the same rows the page lists", async () => {
+    // The browse failure was visible in the first page of a paged list; the
+    // count has to follow the rows rather than the old substring.
+    const total = await listTotal(app, db, "modality=EEG&limit=1");
+    expect(total).toBe(4);
+    expect(await listTotal(app, db, "modality=iEEG&limit=1")).toBe(4);
+    expect(await listTotal(app, db, "modality=eeg,meg&limit=1")).toBe(6);
+  });
+
+  test("modality combines with another filter instead of replacing it", async () => {
+    db.query("UPDATE datasets SET has_hed = 1 WHERE dataset_id IN (?, ?)").run(
+      ROWS.eegOnly.id,
+      ROWS.ieegOnly.id,
+    );
+    expect(await listIds(app, db, "modality=eeg&has_hed=1")).toEqual(ids(ROWS.eegOnly));
+    expect(await listIds(app, db, "modality=ieeg&has_hed=1")).toEqual(ids(ROWS.ieegOnly));
+  });
+});
+
+describe("GET /datasets/search: modality is a whole-token match", () => {
+  let db: Database;
+  let app: App;
+
+  beforeEach(() => {
+    db = freshDb();
+    app = newApp();
+    seed(db);
+  });
+
+  test("control: the text tier finds every row that carries an ieeg token", async () => {
+    // The query is the one from the production report. Without this, the
+    // narrowing assertions below could pass because the search found nothing.
+    expect(await searchIds(app, db, "q=ieeg")).toEqual(
+      ids(ROWS.ieegOnly, ROWS.eegAndIeeg, ROWS.upperIeeg, ROWS.middleIeeg),
+    );
+  });
+
+  test("q=ieeg with modality=EEG returns only datasets that also hold an eeg token (#1711 search)", async () => {
+    // Production returned 97 of 100 rows with no exact EEG token for this call.
+    expect(await searchIds(app, db, "q=ieeg&modality=EEG")).toEqual(ids(ROWS.eegAndIeeg));
+  });
+
+  test("q=ieeg with modality=iEEG keeps every row the query found", async () => {
+    expect(await searchIds(app, db, "q=ieeg&modality=iEEG")).toEqual(
+      ids(ROWS.ieegOnly, ROWS.eegAndIeeg, ROWS.upperIeeg, ROWS.middleIeeg),
+    );
+  });
+
+  test("q=eeg with modality=eeg does not let an eeg-prefixed token through", async () => {
+    // `eeg*` is a prefix match in the FTS tier, so `eegx` is a text hit that only
+    // the modality filter can remove.
+    expect(await searchIds(app, db, "q=eeg&modality=eeg")).toEqual(
+      ids(ROWS.eegOnly, ROWS.eegAndIeeg, ROWS.upperEeg, ROWS.spacedList),
+    );
+  });
+
+  test("a comma list is OR here too", async () => {
+    expect(await searchIds(app, db, "q=ieeg&modality=eeg,meg")).toEqual(
+      ids(ROWS.eegAndIeeg, ROWS.middleIeeg),
+    );
+  });
+
+  test("the reported count follows the filtered rows", async () => {
+    const res = await app.request("/search?q=ieeg&modality=EEG", {}, env(db));
+    const body = (await res.json()) as { count: number; results: unknown[] };
+    expect(body.count).toBe(1);
+    expect(body.results).toHaveLength(1);
+  });
+
+  test("an exact-id hit is held to the same token rule", async () => {
+    // The exact-id tier short-circuits the text tier, so it is a second place a
+    // filter could be applied loosely. nm500002 is ieeg-only.
+    const res = await app.request(`/search?q=${ROWS.ieegOnly.id}&modality=EEG`, {}, env(db));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { method: string; results: { id: string }[] };
+    expect(body.results.map((r) => r.id)).not.toContain(ROWS.ieegOnly.id);
+    const kept = await app.request(`/search?q=${ROWS.ieegOnly.id}&modality=ieeg`, {}, env(db));
+    const keptBody = (await kept.json()) as { method: string; results: { id: string }[] };
+    expect(keptBody.method).toBe("exact_id");
+    expect(keptBody.results.map((r) => r.id)).toEqual([ROWS.ieegOnly.id]);
+  });
+});
+
+describe("MCP search_datasets: modality is a whole-token match", () => {
+  let db: Database;
+  let toolEnv: Pick<Bindings, "DB" | "AI" | "VECTORIZE">;
+
+  beforeEach(() => {
+    db = freshDb();
+    seed(db);
+    toolEnv = { DB: realD1(db), AI: {} as never, VECTORIZE: {} as never };
+  });
+
+  async function call(args: SearchDatasetsInput): Promise<string[]> {
+    const outcome = await searchDatasetsTool(toolEnv, args);
+    expect(outcome.result.isError).toBeUndefined();
+    const text = (outcome.result.content as { text: string }[])[0].text;
+    const parsed = JSON.parse(text) as { results: { dataset_id: string }[] };
+    return parsed.results.map((r) => r.dataset_id).sort();
+  }
+
+  test("browsing with modality eeg returns no iEEG-only dataset", async () => {
+    expect(await call({ modality: "EEG", limit: 100 })).toEqual(
+      ids(ROWS.eegOnly, ROWS.eegAndIeeg, ROWS.upperEeg, ROWS.spacedList),
+    );
+  });
+
+  test("a query narrowed by modality honours the same rule", async () => {
+    expect(await call({ query: "ieeg", modality: "EEG", limit: 100 })).toEqual(
+      ids(ROWS.eegAndIeeg),
+    );
+  });
+
+  test("a comma list is OR", async () => {
+    expect(await call({ modality: "ieeg,meg", limit: 100 })).toEqual(
+      ids(ROWS.ieegOnly, ROWS.eegAndIeeg, ROWS.upperIeeg, ROWS.middleIeeg, ROWS.megOnly),
+    );
+  });
+});
+
+describe("the modality vocabulary and the modality filter agree", () => {
+  // `GET /datasets/facets` tells a client which values exist and how many
+  // datasets carry each; the client then passes one back as `modality=`. The
+  // two were written separately (the vocabulary tallies tokens in JS, the filter
+  // used to be a substring in SQL) and disagreed for `eeg`: the vocabulary said
+  // 4, the filter returned 8. Each is tested against the other because either
+  // can be changed alone.
+  let db: Database;
+  let app: App;
+
+  beforeEach(() => {
+    db = freshDb();
+    app = newApp();
+    seed(db);
+  });
+
+  test("every advertised value filters to exactly its advertised count", async () => {
+    const res = await app.request("/facets", {}, env(db));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { modality?: { value: string; count: number }[] };
+    const vocabulary = body.modality ?? [];
+    // Not vacuous: the fixture has these distinct tokens.
+    expect(vocabulary.map((e) => e.value).sort()).toEqual(
+      ["anat", "beh", "eeg", "eegx", "emg", "ieeg", "meg"].sort(),
+    );
+    for (const { value, count } of vocabulary) {
+      expect({ value, total: await listTotal(app, db, `modality=${value}&limit=1`) }).toEqual({
+        value,
+        total: count,
+      });
+    }
+  });
+});

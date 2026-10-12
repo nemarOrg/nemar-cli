@@ -53,6 +53,39 @@ export function buildFtsMatch(query: string): string | null {
   return tokens.map((t) => `"${t}"*`).join(" OR ");
 }
 
+/**
+ * `d.modalities` as a comma-delimited string a whole token can be searched in:
+ * lower-cased, every space removed (an older writer, or a hand edit, left
+ * `beh, eeg`), and fenced with a comma at each end so the FIRST and LAST token
+ * are found the same way as a middle one -- `',eeg,meg,'` contains `',eeg,'`
+ * and `',meg,'`, and `',ieeg,'` does not contain `',eeg,'`. NULL reads as
+ * the empty string, which is `,,` and holds no token.
+ *
+ * No modality token contains a space (they are BIDS datatype directory names),
+ * so removing every space is the same as trimming each token, without a
+ * per-token function SQLite does not have. `dataset-facet-vocabulary.ts`
+ * tallies the same column in JS (split, trim, lower-case), and
+ * `modality-exact-token.test.ts` holds the two to the same counts.
+ */
+export const MODALITY_TOKENS_SQL =
+  "',' || REPLACE(LOWER(COALESCE(d.modalities, '')), ' ', '') || ','";
+
+/**
+ * The distinct, trimmed, lower-cased tokens of a comma-separated filter value;
+ * empty tokens are dropped. `"EEG, meg,eeg"` is `["eeg", "meg"]`, and `" , "`
+ * is `[]`. The wanted side of {@link MODALITY_TOKENS_SQL}'s comparison.
+ */
+export function parseTokenList(raw: string): string[] {
+  return [
+    ...new Set(
+      raw
+        .split(",")
+        .map((token) => token.trim().toLowerCase())
+        .filter((token) => token !== ""),
+    ),
+  ];
+}
+
 // Escape SQLite LIKE wildcards in user input so a literal '%' or '_' in the
 // search term means itself rather than "match everything" / "match any
 // character". Paired with `ESCAPE '\\'` on every LIKE predicate that uses
@@ -68,6 +101,13 @@ export function escapeLikePattern(raw: string): string {
  */
 export interface DatasetFilterOptions {
   search?: string;
+  /** Modality, matched as a WHOLE token of the dataset's comma-joined
+   *  `modalities` list, case-insensitively (#1711): `eeg` matches `eeg` and
+   *  `eeg,meg` but not `ieeg`. A comma-separated value matches a dataset
+   *  holding ANY of its tokens, the same OR the `license` filter uses. See
+   *  {@link MODALITY_TOKENS_SQL} and {@link parseTokenList}. A non-empty value
+   *  that names no token (whitespace, bare commas) is a filter that matches
+   *  nothing, never an unfiltered list. */
   modality?: string;
   author?: string;
   task?: string;
@@ -167,8 +207,15 @@ export function buildDatasetFilterClauses(
   }
 
   if (opts.modality) {
-    clauses += " AND LOWER(COALESCE(d.modalities, '')) LIKE ?";
-    params.push(`%${opts.modality.toLowerCase()}%`);
+    // #1711: a whole-token match, not `LIKE '%eeg%'` (which also matched
+    // `ieeg`, and treated a `%` or `_` in the value as a wildcard). The wanted
+    // tokens travel as ONE json_each parameter, so a long comma list costs the
+    // same single bound parameter as one value (D1's ceiling is
+    // MAX_BOUND_PARAMS) and nothing here is a LIKE pattern to escape. An empty
+    // list binds `[]` and matches nothing, which is what a filter that was
+    // asked for and names no modality should do.
+    clauses += ` AND EXISTS (SELECT 1 FROM json_each(?) AS wanted WHERE instr(${MODALITY_TOKENS_SQL}, ',' || wanted.value || ',') > 0)`;
+    params.push(JSON.stringify(parseTokenList(opts.modality)));
   }
   if (opts.author) {
     clauses += " AND LOWER(COALESCE(d.authors, '')) LIKE ?";
