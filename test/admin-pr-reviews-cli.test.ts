@@ -1314,6 +1314,17 @@ describe("nemar admin pr-reviews approve", () => {
       expect(adminPullReads()).toHaveLength(1);
     });
 
+    test("the late look comes after the confirmation: when it is not given there is no second read", async () => {
+      reviewed("pass");
+      // No --yes and no terminal, so the confirmation is not given. A look taken before it would
+      // reopen the whole interactive window the look exists to close.
+      const r = await cli([...PR, "approve", "nm000201", "7", "--merge"]);
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain("Not approved.");
+      expect(adminPullReads()).toHaveLength(1); // the first read only
+      expect(adminWrites()).toHaveLength(0);
+    });
+
     test("a clean pull request is approved first and merged second, both with the administrator's token", async () => {
       // The other direction of the precheck: it must not refuse what it should let through.
       reviewed("pass");
@@ -1854,6 +1865,19 @@ describe("nemar admin pr-reviews next", () => {
       );
       expect(writes(), said).toHaveLength(0);
     }
+  });
+
+  test("the late look in next is taken when y is answered, not when the card is shown", async () => {
+    nodes(ready("nm000201", 7));
+    const r = await next("q\n");
+    expect(r.stdout).toContain(PROMPT_WITH_Y);
+    // The card's own read only: nothing looked again before an answer was given.
+    expect(
+      gh.seen.filter(
+        (s) => s.method === "GET" && s.path.endsWith("/pulls/7") && s.token === ADMIN_TOKEN,
+      ),
+    ).toHaveLength(1);
+    expect(writes()).toHaveLength(0);
   });
 
   test("the late look in next costs one more read when the state is clean", async () => {
