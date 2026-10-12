@@ -38,7 +38,7 @@ jobs:
       # coverage endpoint had answered HTTP 500, so that outage went unreported.
       #
       # Job-level so a step added later inherits it instead of repeating the bug.
-      # test/workflow-yaml.test.ts fails on a `gh` call that has no checkout, no
+      # test/workflow-gh-calls.test.ts fails on a `gh` call that has no checkout, no
       # GH_REPO and no --repo.
       GH_REPO: ${{ github.repository }}
     steps:
@@ -261,7 +261,7 @@ jobs:
           source "$RUNNER_TEMP/retry.sh"
           # The title and the lookup that finds it again share this one prefix, so they
           # cannot drift apart. It must not be a prefix of the probe-broken or report-broken
-          # prefixes below, nor they of it (test/workflow-yaml.test.ts checks).
+          # prefixes below, nor they of it (test/workflow-gh-calls.test.ts checks).
           PREFIX="summary.json drift:"
           TITLE="${PREFIX} ${DRIFT} version(s) need backfill"
           # Reuse the most recent open drift issue if one exists; otherwise open a fresh one.

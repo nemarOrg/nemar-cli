@@ -295,7 +295,7 @@ describe("the repo's own test workflow routes changes to jobs", () => {
   });
 
   test("workflow files have a filter, and gate lint and unit-pure alike", () => {
-    // test/workflow-yaml.test.ts polices every workflow, but a pull request that edits
+    // test/workflow-gh-calls.test.ts polices every workflow, but a pull request that edits
     // only a workflow matches no other filter and would run no job. `unit-pure` is the job
     // that runs the test, so it must be wired. `lint` is wired too, but that is convention
     // (the two `if:` conditions stay identical), not a requirement: a job skipped by its

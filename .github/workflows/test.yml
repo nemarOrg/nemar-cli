@@ -172,7 +172,7 @@ jobs:
               - 'test/docs-links.unit.test.ts'
               - '.github/workflows/test.yml'
             # The repository's own workflows and the dataset-side workflows it deploys.
-            # `test/workflow-yaml.test.ts` parses every one of them and fails on a `gh`
+            # `test/workflow-gh-calls.test.ts` parses every one of them and fails on a `gh`
             # call that has no repository, so it must run on exactly the change that can
             # introduce one. A pull request editing only a workflow matched no other
             # filter and ran no job, so the guard would have been skipped on the change it

@@ -36,7 +36,7 @@ earlier releases are described only by their generated notes.
   failure behind "already exists". The lookup is now retried three times and fails the step if
   it still fails; the label step warns in the log instead of going silent.
 - **A test fails on a workflow `gh` call that has no repository, and CI runs it on a workflow-only
-  pull request.** `test/workflow-yaml.test.ts` checks every workflow the repository ships, `.yml`
+  pull request.** `test/workflow-gh-calls.test.ts` checks every workflow the repository ships, `.yml`
   or `.yaml`, and the per-dataset templates for a `gh` call with no checkout, `GH_REPO` or
   `--repo`, a swallowed issue lookup, a lookup in a step that does not stop on error, and a
   swallowed label create. A pull request that edited only a workflow used to run no job at all.
