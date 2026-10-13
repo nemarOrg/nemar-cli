@@ -25,6 +25,17 @@ severity of a defect is not proportional to the size of the diff that carries it
   `backend/src/`, `shared/`, `scripts/`, `test/` or `backend/test/` is a PR.
   Tests are included deliberately: a bad test does not break production, it
   removes the thing that would have caught the break.
+- **"A review pass" is the two-round cap in `.rules/code_review.md`.** One full
+  round and, only when it was substantial, one delta round on the fixes. Merge
+  once every accepted finding is fixed; a third round needs the owner.
+- **Review-fix commits belong to the PR they fix.** Push them to that PR's own
+  branch, once per round. They are covered by its review rounds and are not a
+  new change needing a PR of their own. A feature branch is not an integration
+  branch, so this does not breach the rule above.
+- **A separate fix PR is the exception:** a large fix (defined in
+  `.rules/code_review.md`), or a head branch that bars direct commits (`dev`
+  for a release PR, an epic branch for the final epic PR). Open ONE per round,
+  targeting the PR's head branch, and give it the delta review and nothing more.
 
 **Record the review where it survives.** Post the findings and their resolution
 as a comment on the PR. Agent-driven reviews leave `reviewCount: 0` on GitHub, so
