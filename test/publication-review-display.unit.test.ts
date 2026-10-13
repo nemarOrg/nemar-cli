@@ -9,6 +9,9 @@
  * The rendering functions are tested with hostile text fed straight in: the spawned-CLI suite goes
  * through the real Worker, which has already reduced the model's words to plain ones, so it would
  * pass with every `plain()` call of the CLI deleted.
+ *
+ * Mutation checks (each turns a named test red): drop the pending-screen wait of `needsAdministrator`;
+ * drop `plain()` from `screenViewLines`.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -33,6 +36,7 @@ import {
   historyLines,
   reviewDetailLines,
   reviewListLine,
+  screenViewLines,
   shownLine,
   startedSentence,
   withheldLine,
@@ -135,6 +139,70 @@ describe("needsAdministrator", () => {
         }),
       ),
     ).toBe(false);
+  });
+
+  // The review is off in production today: its summary has no reason at all, so the screen's own
+  // state is the only word that a request is still waiting for the platform.
+  const SCREEN_PENDING = {
+    state: "pending",
+    headline: "Identifier screen: RUNNING",
+    tone: "note" as const,
+    lines: [],
+  };
+  const OFF = () =>
+    summary({ kind: "off", enabled: false, outcome: null, reasons: [], gate: "off" });
+
+  test("a request whose identifier screen is still running is only waiting, whatever the review says", () => {
+    // The review is off (no reasons): the screen is the wait.
+    expect(
+      needsAdministrator(row({ identifier_screen: SCREEN_PENDING, publication_review: OFF() })),
+    ).toBe(false);
+    // No summary at all (an older backend) but a row that says its screen is running.
+    expect(
+      needsAdministrator(row({ identifier_screen: SCREEN_PENDING, publication_review: undefined })),
+    ).toBe(false);
+    // The review is on and says something else: the screen still has to report first.
+    expect(
+      needsAdministrator(
+        row({
+          identifier_screen: SCREEN_PENDING,
+          publication_review: summary({ reasons: ["question_failed"] }),
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  test("a screen that reported, did not run or is not on the row does not make a request wait", () => {
+    for (const state of [
+      "clean",
+      "dates-only",
+      "review",
+      "direct-identifiers",
+      "error",
+      "unreported",
+    ]) {
+      expect(
+        needsAdministrator(
+          row({ identifier_screen: { ...SCREEN_PENDING, state }, publication_review: OFF() }),
+        ),
+      ).toBe(true);
+    }
+    expect(
+      needsAdministrator(
+        row({ identifier_screen: { ...SCREEN_PENDING, state: null }, publication_review: OFF() }),
+      ),
+    ).toBe(true);
+    expect(
+      needsAdministrator(row({ identifier_screen: undefined, publication_review: OFF() })),
+    ).toBe(true);
+  });
+
+  test("a screen that is running does not hide an approval that stopped, and an approving request is never only waiting", () => {
+    expect(
+      needsAdministrator(
+        row({ status: "approving", identifier_screen: SCREEN_PENDING, publication_review: OFF() }),
+      ),
+    ).toBe(true);
   });
 
   test("a wait next to anything else is still the administrator's", () => {
@@ -455,6 +523,42 @@ describe("reviewListLine", () => {
       summary({ headline: `Publication review: ${HOSTILE}`, reasons: [HOSTILE as ReasonCode] }),
     );
     expect(plainText(line ?? "")).not.toMatch(DANGEROUS);
+  });
+});
+
+describe("screenViewLines", () => {
+  const view = (over: Record<string, unknown> = {}) => ({
+    state: "review",
+    headline: "Identifier screen: needs review",
+    tone: "warn" as const,
+    lines: ["3 files hold an identifier-like word."],
+    ...over,
+  });
+
+  test("is the headline and its lines, indented", () => {
+    const lines = screenViewLines(view(), 4).map(plainText);
+    expect(lines[0]).toBe("    Identifier screen: needs review");
+    expect(lines[1]).toBe("      3 files hold an identifier-like word.");
+  });
+
+  test("passes the headline and every line through plain()", () => {
+    const lines = screenViewLines(
+      view({ headline: HOSTILE, lines: [HOSTILE, `a ${HOSTILE} b`] }),
+      2,
+    );
+    expect(lines).toHaveLength(3);
+    for (const line of lines) expect(plainText(line)).not.toMatch(DANGEROUS);
+  });
+
+  test("is nothing for a view an older backend did not send or one with no headline", () => {
+    expect(screenViewLines(undefined, 4)).toEqual([]);
+    expect(screenViewLines(view({ headline: undefined }), 4)).toEqual([]);
+  });
+
+  test("a view whose lines are not a list prints its headline alone", () => {
+    expect(screenViewLines(view({ lines: "not a list" }), 0).map(plainText)).toEqual([
+      "Identifier screen: needs review",
+    ]);
   });
 });
 

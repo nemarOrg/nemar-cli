@@ -23,15 +23,13 @@
 import chalk from "chalk";
 import type { Command } from "commander";
 import { PUBLICATION_COMMENT_MAX_LENGTH } from "../../shared/contract/publication-review-admin.js";
-import { requireSignedIn } from "../lib/admin-command.js";
-import { failMessage } from "../lib/admin-output.js";
-import { ApiError, errorDetail } from "../lib/api/errors.js";
 import {
-  commentOnPublication,
-  denyPublication,
-  listPublishRequests,
-  reviewErrorCode,
-} from "../lib/api/publish.js";
+  ACKNOWLEDGMENT_MAX_LENGTH,
+  ACKNOWLEDGMENT_MIN_LENGTH,
+  DENIAL_REASON_MAX_LENGTH,
+} from "../../shared/publication-limits.js";
+import { checkedDatasetId, failWith, requireSignedIn } from "../lib/admin-command.js";
+import { commentOnPublication, denyPublication, listPublishRequests } from "../lib/api/publish.js";
 import { LineReader } from "../lib/prompt-lines.js";
 import { type ReviewRead, readReview, reasonViewLine } from "../lib/publication-review-approve.js";
 import { NON_PRODUCTION_NOTE, reviewDetailLines } from "../lib/publication-review-display.js";
@@ -51,14 +49,6 @@ import {
 } from "../lib/publication-review-next.js";
 import { plain } from "../lib/terminal-text.js";
 import { runApproval } from "./admin-publish-approve.js";
-
-const DATASET_ID_RE = /^(nm|on|xx)\d{6}$/;
-
-/** What the Worker accepts for a denial's reason (`denySchema` in the admin publish routes). */
-const DENIAL_REASON_MAX = 2000;
-/** What the Worker accepts for the screen's acknowledgment (the same bounds `approve` checks). */
-const ACKNOWLEDGMENT_MIN = 10;
-const ACKNOWLEDGMENT_MAX = 500;
 
 export function registerNextCommand(group: Command): void {
   group
@@ -118,12 +108,7 @@ Examples:
     )
     .action(async (options: { dataset?: string; force?: boolean; once?: boolean }) => {
       if (!requireSignedIn()) return;
-      if (options.dataset !== undefined && !DATASET_ID_RE.test(options.dataset)) {
-        failMessage(`"${plain(options.dataset)}" is not a dataset id (like nm000108).`, {
-          answered: true,
-        });
-        return;
-      }
+      if (options.dataset !== undefined && checkedDatasetId(options.dataset) === null) return;
       await walk({
         dataset: options.dataset,
         force: options.force === true,
@@ -192,121 +177,135 @@ async function walk(options: WalkOptions): Promise<void> {
   const endedWords = () =>
     reader.interrupted ? "Interrupted; stopping." : "Input ended; stopping.";
 
-  run: for (;;) {
-    let rows: PublishRow[];
-    try {
-      rows = await readQueue(dataset);
-    } catch (error) {
-      printFailure(error, "Could not read the publication requests");
-      tally.failed++;
-      break;
-    }
-    if (first) {
-      first = false;
-      if (rows.length > 0 && rows.every((r) => r.publication_review?.enabled === false)) {
-        console.log(
-          chalk.dim(
-            "  The automated review is off on this Worker, so no review gates an approval.",
-          ),
-        );
-      }
-    }
-    const pending = nextQueue(rows, handled);
-    const row = pending[0];
-    if (!row) {
-      const left = stillNeedYou(tally);
-      if (handled.size === 0 && dataset !== undefined) {
-        console.log(
-          chalk.dim(
-            `\n${dataset} is not waiting for you now: it has no open request, it is blocked, an approval is running, or it is only waiting for the screen or the review.`,
-          ),
-        );
-      } else if (left === 0) {
-        console.log(chalk.green("\nNothing left that needs you."));
-      } else {
-        console.log(
-          chalk.yellow(
-            `\nNo more requests to show, but ${left} still ${left === 1 ? "needs" : "need"} you (skipped or failed).`,
-          ),
-        );
-      }
-      break;
-    }
-    handled.add(row.dataset_id);
-
-    // The review as it is now, read once: the card, `d` and an override all come from this one.
-    const read = await readReview(row.dataset_id);
-    const answer = yAnswer(row.dataset_id, read, force, resumeOf(row));
-    const card: Card = { row, read, answer };
-    if (!noted && read.kind === "detail" && read.detail.environment !== "production") {
-      noted = true;
-      console.log(chalk.yellow(`\n  ${NON_PRODUCTION_NOTE}`));
-    }
-    console.log();
-    for (const line of cardLines({
-      position: handled.size,
-      total: handled.size - 1 + pending.length,
-      row,
-      read,
-      answer,
-      force,
-    })) {
-      console.log(line);
-    }
-
-    // What was typed before this card existed was not an answer to it.
-    const dropped = await reader.discardTyped();
-    if (dropped > 0) {
-      console.log(chalk.dim(`  Ignored ${dropped} line(s) typed before this card was shown.`));
-    }
-
-    for (;;) {
-      const raw = await reader.ask(
-        `\n${answer.offered ? "y approve, " : ""}n deny, c comment, d details, s skip, q quit > `,
-      );
-      if (raw === null) {
-        console.log(chalk.dim(`\n${endedWords()}`));
-        break run;
-      }
-      const choice = parseChoice(raw);
-      if (choice === null) {
-        console.log(chalk.dim("  Type y, n, c, d, s or q."));
-        continue;
-      }
-      if (choice === "quit") break run;
-      if (choice === "skip") {
-        tally.skipped++;
+  // Whatever the loop throws (a field this version of the CLI did not expect, from a Worker of
+  // another version), the reader is closed and the tally says what was done before it.
+  let completed = false;
+  try {
+    run: for (;;) {
+      let rows: PublishRow[];
+      try {
+        rows = await readQueue(dataset);
+      } catch (error) {
+        failWith(error, null, "Could not read the publication requests");
+        tally.failed++;
         break;
       }
-      let outcome: Outcome;
-      switch (choice) {
-        case "details":
-          showDetails(card);
-          outcome = "again";
-          break;
-        case "approve":
-          outcome = await approve(step, card);
-          break;
-        case "deny":
-          outcome = await deny(step, card);
-          break;
-        case "comment":
-          outcome = await comment(step, card);
-          break;
+      if (first) {
+        first = false;
+        if (rows.length > 0 && rows.every((r) => r.publication_review?.enabled === false)) {
+          console.log(
+            chalk.dim(
+              "  The automated review is off on this Worker, so no review gates an approval.",
+            ),
+          );
+        }
       }
-      if (outcome === "ended") {
+      const pending = nextQueue(rows, handled);
+      const row = pending[0];
+      if (!row) {
+        const left = stillNeedYou(tally);
+        if (handled.size === 0 && dataset !== undefined) {
+          console.log(
+            chalk.dim(
+              `\n${dataset} is not waiting for you now: it has no open request, it is blocked, an approval is running, or it is only waiting for the screen or the review.`,
+            ),
+          );
+        } else if (left === 0) {
+          console.log(chalk.green("\nNothing left that needs you."));
+        } else {
+          console.log(
+            chalk.yellow(
+              `\nNo more requests to show, but ${left} still ${left === 1 ? "needs" : "need"} you (skipped or failed).`,
+            ),
+          );
+        }
+        break;
+      }
+      // The input has ended (Ctrl+D, Ctrl+C or a closed pipe, usually while the last answer was an
+      // approval that took its time) and nothing is left to answer with: a card nobody can answer
+      // is not drawn, nor its review read.
+      if (!reader.canAnswer) {
         console.log(chalk.dim(`\n${endedWords()}`));
-        break run;
+        break;
       }
-      if (outcome === "done") break;
-    }
-    if (once) break;
-  }
+      handled.add(row.dataset_id);
 
-  reader.close();
-  console.log();
-  console.log(tallyLine(tally));
-  process.exitCode = exitCodeOf(tally, reader.interrupted);
+      // The review as it is now, read once: the card, `d` and an override all come from this one.
+      const read = await readReview(row.dataset_id);
+      const answer = yAnswer(row.dataset_id, read, force, resumeOf(row));
+      const card: Card = { row, read, answer };
+      if (!noted && read.kind === "detail" && read.detail.environment !== "production") {
+        noted = true;
+        console.log(chalk.yellow(`\n  ${NON_PRODUCTION_NOTE}`));
+      }
+      console.log();
+      for (const line of cardLines({
+        position: handled.size,
+        total: handled.size - 1 + pending.length,
+        row,
+        read,
+        answer,
+        force,
+      })) {
+        console.log(line);
+      }
+
+      // What was typed before this card existed was not an answer to it.
+      const dropped = await reader.discardTyped();
+      if (dropped > 0) {
+        console.log(chalk.dim(`  Ignored ${dropped} line(s) typed before this card was shown.`));
+      }
+
+      for (;;) {
+        const raw = await reader.ask(
+          `\n${answer.offered ? "y approve, " : ""}n deny, c comment, d details, s skip, q quit > `,
+        );
+        if (raw === null) {
+          console.log(chalk.dim(`\n${endedWords()}`));
+          break run;
+        }
+        const choice = parseChoice(raw);
+        if (choice === null) {
+          console.log(chalk.dim("  Type y, n, c, d, s or q."));
+          continue;
+        }
+        if (choice === "quit") break run;
+        if (choice === "skip") {
+          tally.skipped++;
+          break;
+        }
+        let outcome: Outcome;
+        switch (choice) {
+          case "details":
+            showDetails(card);
+            outcome = "again";
+            break;
+          case "approve":
+            outcome = await approve(step, card);
+            break;
+          case "deny":
+            outcome = await deny(step, card);
+            break;
+          case "comment":
+            outcome = await comment(step, card);
+            break;
+        }
+        if (outcome === "ended") {
+          console.log(chalk.dim(`\n${endedWords()}`));
+          break run;
+        }
+        if (outcome === "done") break;
+      }
+      if (once) break;
+    }
+
+    completed = true;
+  } finally {
+    reader.close();
+    console.log();
+    console.log(tallyLine(tally));
+    process.exitCode = completed ? exitCodeOf(tally, reader.interrupted) : 1;
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -317,7 +316,19 @@ async function walk(options: WalkOptions): Promise<void> {
 function showDetails(card: Card): void {
   console.log();
   if (card.read.kind === "detail") {
-    for (const line of reviewDetailLines(card.read.detail)) console.log(line);
+    let lines: string[];
+    try {
+      lines = reviewDetailLines(card.read.detail);
+    } catch {
+      // A detail that parsed but lacks what the rendering reads: a Worker of another version.
+      console.log(
+        chalk.dim(
+          "  The review cannot be shown by this version of the CLI (the NEMAR API sent a shape it does not know). Update the CLI to read it.",
+        ),
+      );
+      return;
+    }
+    for (const line of lines) console.log(line);
     return;
   }
   const why =
@@ -369,15 +380,18 @@ async function approve(step: Step, card: Card): Promise<Outcome> {
     for (;;) {
       const got = await askLine(
         step.reader,
-        `Reason for approving over the identifier screen (${ACKNOWLEDGMENT_MIN} to ${ACKNOWLEDGMENT_MAX} characters; empty cancels): `,
+        `Reason for approving over the identifier screen (${ACKNOWLEDGMENT_MIN_LENGTH} to ${ACKNOWLEDGMENT_MAX_LENGTH} characters; empty cancels): `,
         "reason",
       );
       if (got.kind === "ended") return "ended";
       if (got.kind === "cancelled") return "again";
-      if (got.text.length < ACKNOWLEDGMENT_MIN || got.text.length > ACKNOWLEDGMENT_MAX) {
+      if (
+        got.text.length < ACKNOWLEDGMENT_MIN_LENGTH ||
+        got.text.length > ACKNOWLEDGMENT_MAX_LENGTH
+      ) {
         console.log(
           chalk.yellow(
-            `A reason is ${ACKNOWLEDGMENT_MIN} to ${ACKNOWLEDGMENT_MAX} characters; this one is ${got.text.length}.`,
+            `A reason is ${ACKNOWLEDGMENT_MIN_LENGTH} to ${ACKNOWLEDGMENT_MAX_LENGTH} characters; this one is ${got.text.length}.`,
           ),
         );
         continue;
@@ -408,14 +422,20 @@ async function approve(step: Step, card: Card): Promise<Outcome> {
     }
   }
 
-  const run = await runApproval(row.dataset_id, {
-    resume: resumeOf(row),
-    sandbox: false,
-    skipCiCheck: false,
-    acknowledge,
-    // The review and the reasons the card showed: never a second read.
-    override: answer.override,
-  });
+  const stopListening = onInterrupt(step, row.dataset_id);
+  let run: Awaited<ReturnType<typeof runApproval>>;
+  try {
+    run = await runApproval(row.dataset_id, {
+      resume: resumeOf(row),
+      sandbox: false,
+      skipCiCheck: false,
+      acknowledge,
+      // The review and the reasons the card showed: never a second read.
+      override: answer.override,
+    });
+  } finally {
+    stopListening();
+  }
   keepListening(step.reader);
   if (run.ok) step.tally.approved++;
   else step.tally.failed++;
@@ -432,10 +452,10 @@ async function deny(step: Step, card: Card): Promise<Outcome> {
   );
   if (got.kind === "ended") return "ended";
   if (got.kind === "cancelled") return "again";
-  if (got.text.length > DENIAL_REASON_MAX) {
+  if (got.text.length > DENIAL_REASON_MAX_LENGTH) {
     console.log(
       chalk.yellow(
-        `A denial reason is at most ${DENIAL_REASON_MAX} characters; this one is ${got.text.length}. Nothing was sent.`,
+        `A denial reason is at most ${DENIAL_REASON_MAX_LENGTH} characters; this one is ${got.text.length}. Nothing was sent.`,
       ),
     );
     return "again";
@@ -443,7 +463,7 @@ async function deny(step: Step, card: Card): Promise<Outcome> {
   try {
     await denyPublication(id, got.text);
   } catch (error) {
-    printFailure(error, `Could not deny ${plain(id)}`);
+    failWith(error, null, `Could not deny ${plain(id)}`);
     step.tally.failed++;
     return "done";
   }
@@ -471,7 +491,7 @@ async function comment(step: Step, card: Card): Promise<Outcome> {
   } catch (error) {
     // The Worker's own sentence: a failed send may still have reached the depositor, and the
     // sentence says so. It is not rewritten into a claim that nothing was sent.
-    printFailure(error, `Could not send the message for ${plain(id)}`);
+    failWith(error, null, `Could not send the message for ${plain(id)}`);
     step.tally.failed++;
     return "done";
   }
@@ -487,22 +507,41 @@ async function comment(step: Step, card: Card): Promise<Outcome> {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Say why a write failed, in the Worker's words, and set the exit code. The Worker's refusal (a
- * 4xx, or an error that names its closed word) is the command's answer and not a crash, so it does
- * not invite a bug report; a network failure and a fault of the Worker's own may be one.
+ * Hear Ctrl+C while an approval runs, and return the function that stops listening.
+ *
+ * The approval's spinner takes over standard input and turns Ctrl+C into a SIGINT event for the
+ * whole process, so the walk's reader (which hears Ctrl+C only at a prompt) never sees it. With no
+ * listener of its own the CLI's exit hooks turn that event into a plain death: no word, no tally,
+ * and an approval that may well go on to publish. With this one registered, they leave it alone.
+ *
+ * What is said is what is known: the request was sent and nobody heard how it ended, so the run may
+ * still be going or may be finished on the server. The two commands that find out and go on are
+ * named, then the tally of the rest, and the walk exits 130 as it does for Ctrl+C at a prompt.
  */
-function printFailure(error: unknown, fallback: string): void {
-  if (error instanceof ApiError) {
-    const word = reviewErrorCode(error);
-    failMessage(plain(error.message), {
-      answered:
-        (error.statusCode >= 400 && error.statusCode < 500) ||
-        (word !== undefined && word !== "internal"),
-      hint: error.statusCode === 403 ? "This command requires admin privileges" : undefined,
-    });
-    return;
-  }
-  failMessage(fallback, { answered: false, hint: `Error details: ${plain(errorDetail(error))}` });
+function onInterrupt(step: Step, datasetId: string): () => void {
+  const handler = () => {
+    step.reader.interrupt();
+    if (process.stdin.isTTY) process.stdin.setRawMode(false);
+    const id = plain(datasetId);
+    console.log();
+    console.log(chalk.yellow(`Interrupted while approving ${id}.`));
+    console.log(
+      "  The approval may still be running, or may have finished on the server. It is not counted below.",
+    );
+    console.log(
+      chalk.dim(`  nemar admin publish show ${id}                find out where it stands`),
+    );
+    console.log(
+      chalk.dim(`  nemar admin publish approve ${id} --resume    continue it if it stopped`),
+    );
+    console.log();
+    console.log(tallyLine(step.tally));
+    process.exit(exitCodeOf(step.tally, true));
+  };
+  process.on("SIGINT", handler);
+  return () => {
+    process.off("SIGINT", handler);
+  };
 }
 
 /**

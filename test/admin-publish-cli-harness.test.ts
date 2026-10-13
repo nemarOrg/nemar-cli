@@ -7,7 +7,11 @@
  *   - the stand-ins record what the backend sent them, and answer what the test told them to;
  *   - nothing leaves the machine: a mail goes to the Resend stand-in, the command runs under its
  *     own configuration directory and the signed-in account is the one the test chose;
- *   - the hooks that let a test change the world between a command's read and its write work.
+ *   - the hooks that let a test change the world between a command's read and its write work, and
+ *     the ones that slow the GitHub stand-in, change an answer of the real route, or pipe a
+ *     terminal command's standard output;
+ *   - a command run on a terminal is read to its end: the transcript is taken only once the
+ *     terminal has delivered everything.
  *
  * CI TIER: integration, like the other CLI suites that start the binary against a local server.
  */
@@ -338,6 +342,28 @@ describe("what a test can change between a command's read and its write", () => 
     expect(r.stdout).not.toContain("Publication Requests");
   });
 
+  test("`rewrite` changes the JSON of the answers to a route, keeping the real route's status", async () => {
+    seedScreenedRequest(h.db, { datasetId: DATASET });
+    h.rewrite("GET /admin/publish/requests", (body) => {
+      for (const row of body.requests as Array<Record<string, unknown>>) {
+        row.requested_by_username = "renamed_by_the_test";
+      }
+    });
+
+    const rewritten = await h.cli(["admin", "publish", "list"]);
+    expect(rewritten.exitCode).toBe(0);
+    expect(rewritten.stdout).toContain("renamed_by_the_test");
+    expect(h.requests).toEqual([{ method: "GET", path: "/admin/publish/requests", status: 200 }]);
+
+    // A replacement is accepted too, and `reset()` clears the rewrite.
+    h.reset();
+    await h.admin("harnessadmin", ADMIN_KEY);
+    seedScreenedRequest(h.db, { datasetId: DATASET });
+    const plain = await h.cli(["admin", "publish", "list"]);
+    expect(plain.stdout).not.toContain("renamed_by_the_test");
+    expect(plain.stdout).toContain("depositor_nm000460");
+  });
+
   test("a screen the test marks clean again is the screen the gate reads", async () => {
     const requestId = seedGoldenRequest();
     markScreen(h.db, requestId, DATASET, { status: "review" });
@@ -408,5 +434,94 @@ describe("input and isolation", () => {
     });
     h.setEnv({ ENVIRONMENT: "test" });
     expect(h.env().ENVIRONMENT).toBe("test");
+  });
+});
+
+describe.skipIf(process.platform === "win32")("a command run on a terminal", () => {
+  /** A terminal gets the CLI's colours; the lines are asserted without them. */
+  const ESC = String.fromCharCode(27);
+  const withoutColour = (text: string) => text.replace(new RegExp(`${ESC}\\[[0-9;]*m`, "g"), "");
+
+  /** Enough requests that `list` writes tens of kilobytes, which is what a late chunk needs. */
+  function seedMany(n: number): void {
+    for (let i = 0; i < n; i++) {
+      seedScreenedRequest(h.db, { datasetId: `nm${String(1000 + i).padStart(6, "0")}` });
+    }
+  }
+
+  test("the transcript read after the exit still holds the last line of a long output", async () => {
+    seedMany(250);
+
+    // The driver does nothing: the command writes everything and exits before it is looked at.
+    const r = await h.cli(["admin", "publish", "list"], { terminal: async () => undefined });
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("nm001249");
+    expect(withoutColour(r.stdout).trimEnd().endsWith("so no review gates an approval.")).toBe(
+      true,
+    );
+  });
+
+  test("waitFor still finds the last line of a command that has already exited", async () => {
+    seedMany(250);
+
+    const r = await h.cli(["admin", "publish", "list"], {
+      terminal: async (t) => {
+        await Bun.sleep(1_500);
+        await t.waitFor("so no review gates an approval.");
+      },
+    });
+
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("waitFor says the command ended when the text never comes, and shows what it wrote", async () => {
+    seedScreenedRequest(h.db, { datasetId: DATASET });
+
+    const run = h.cli(["admin", "publish", "list"], {
+      terminal: async (t) => {
+        await t.waitFor("a line the command never writes");
+      },
+    });
+
+    await expect(run).rejects.toThrow(/the command ended no "a line the command never writes"/);
+  });
+
+  test("standard output can be a pipe while standard input and standard error stay the terminal", async () => {
+    seedScreenedRequest(h.db, { datasetId: DATASET });
+
+    const ok = await h.cli(["admin", "publish", "list"], {
+      terminal: async () => undefined,
+      pipeStdout: true,
+    });
+    expect(ok.exitCode).toBe(0);
+    expect(ok.stdout).toContain(DATASET);
+    expect(ok.stderr).not.toContain(DATASET);
+
+    // An error under --json is written to standard error, which is the terminal here.
+    const failed = await h.cli(["admin", "publish", "list", "--json"], {
+      terminal: async () => undefined,
+      pipeStdout: true,
+      signedOut: true,
+    });
+    expect(failed.exitCode).toBe(1);
+    expect(failed.stdout).toBe("");
+    expect(failed.stderr).toContain("Not authenticated");
+  });
+
+  test("the GitHub stand-in waits as long as the test says, until the next reset", async () => {
+    const url = (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL;
+    const timed = async () => {
+      const start = Date.now();
+      await fetch(`${url}/repos/nemarDatasets/${DATASET}/git/ref/heads/main`);
+      return Date.now() - start;
+    };
+
+    h.githubDelayMs.value = 400;
+    expect(await timed()).toBeGreaterThanOrEqual(380);
+
+    h.reset();
+    expect(h.githubDelayMs.value).toBe(0);
+    expect(await timed()).toBeLessThan(380);
   });
 });

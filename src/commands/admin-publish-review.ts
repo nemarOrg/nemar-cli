@@ -16,7 +16,13 @@ import chalk from "chalk";
 import type { Command } from "commander";
 import ora from "ora";
 import { PLATFORM_DAILY_CAP } from "../../shared/publication-review.js";
-import { failMessage, reportFailure, signedIn } from "../lib/admin-output.js";
+import {
+  checkedDatasetId,
+  failMessage,
+  failWith,
+  isAnswered,
+  requireSignedIn,
+} from "../lib/admin-command.js";
 import { ApiError } from "../lib/api/errors.js";
 import {
   type PublishRequestsResponse,
@@ -26,7 +32,7 @@ import {
   reviewErrorCode,
   startPublicationReview,
 } from "../lib/api/publish.js";
-import { YES_OPTION, confirm } from "../lib/confirm.js";
+import { type ConfirmResult, YES_OPTION, confirm } from "../lib/confirm.js";
 import { markReportedExit } from "../lib/debug-log.js";
 import {
   NON_PRODUCTION_NOTE,
@@ -35,15 +41,6 @@ import {
 } from "../lib/publication-review-display.js";
 import { startAllCandidates } from "../lib/publication-review-queue.js";
 import { plain } from "../lib/terminal-text.js";
-
-const DATASET_ID_RE = /^(nm|on|xx)\d{6}$/;
-
-/** A dataset id typed on the command line, checked before anything is sent; null when it is not one. */
-function checkedDataset(raw: string, json: boolean): string | null {
-  if (DATASET_ID_RE.test(raw)) return raw;
-  failMessage(`"${plain(raw)}" is not a dataset id (like nm000108).`, { json, answered: true });
-  return null;
-}
 
 type Row = PublishRequestsResponse["requests"][number];
 
@@ -73,8 +70,8 @@ Examples:
     )
     .action(async (datasetArg: string, options: { json?: boolean }) => {
       const json = options.json === true;
-      if (!signedIn(json)) return;
-      const datasetId = checkedDataset(datasetArg, json);
+      if (!requireSignedIn(json)) return;
+      const datasetId = checkedDatasetId(datasetArg, json);
       if (datasetId === null) return;
 
       const spinner = json ? null : ora("Reading the review...").start();
@@ -89,7 +86,7 @@ Examples:
         for (const line of reviewDetailLines(detail)) console.log(line);
         console.log();
       } catch (error) {
-        reportFailure(error, spinner, "Could not read the review", json);
+        failWith(error, spinner, "Could not read the review", undefined, { json });
       }
     });
 
@@ -119,7 +116,8 @@ Description:
   before spending (--yes skips that), and starts them one at a time. Each is one
   model call, and the platform allows ${PLATFORM_DAILY_CAP} in any 24 hours: when that is
   spent the run stops and says how many were not tried. A piped command with no
-  --yes is cancelled.
+  --yes is cancelled, and so is one with --json, which keeps standard output for
+  the one document.
 
 Exit status:
   0 when the review is going or already exists (a start, a review that is running
@@ -138,7 +136,7 @@ Examples:
         options: { all?: boolean; dryRun?: boolean; yes?: boolean; json?: boolean },
       ) => {
         const json = options.json === true;
-        if (!signedIn(json)) return;
+        if (!requireSignedIn(json)) return;
         if (options.all) {
           if (datasetArg !== undefined) {
             failMessage("Give either a dataset id or --all, not both.", { json, answered: true });
@@ -159,7 +157,7 @@ Examples:
           failMessage("--dry-run goes with --all.", { json, answered: true });
           return;
         }
-        const datasetId = checkedDataset(datasetArg, json);
+        const datasetId = checkedDatasetId(datasetArg, json);
         if (datasetId === null) return;
         await startOne(datasetId, json);
       },
@@ -197,7 +195,7 @@ function sentenceOf(error: unknown, fallback: string): string {
 /**
  * Ask the Worker to start the review of one dataset and sort what it said. The sort is the exit
  * code's: a review that is going or exists is an answer of success, every other word is a start
- * that did not happen (M13).
+ * that did not happen, and a script has to be able to tell.
  */
 async function attemptStart(datasetId: string): Promise<StartAnswer> {
   try {
@@ -218,16 +216,6 @@ async function attemptStart(datasetId: string): Promise<StartAnswer> {
 /** The sentence with the closed word behind it: `A review of this commit is running. (running)`. */
 const withWord = (sentence: string, word: string | undefined): string =>
   word === undefined ? sentence : `${sentence} (${plain(word)})`;
-
-/**
- * Whether a failure is the Worker's own answer (a 4xx, or a 5xx that names its closed word, such as
- * `dispatch_unconfigured`) and not a crash that may be a bug: `internal` is the Worker's fault.
- */
-function isAnswered(error: unknown, word: string | undefined): boolean {
-  if (!(error instanceof ApiError)) return false;
-  if (error.statusCode >= 400 && error.statusCode < 500) return true;
-  return word !== undefined && word !== "internal";
-}
 
 async function startOne(datasetId: string, json: boolean): Promise<void> {
   const spinner = json ? null : ora("Starting the review...").start();
@@ -261,14 +249,14 @@ async function startOne(datasetId: string, json: boolean): Promise<void> {
       if (answer.word !== undefined) {
         failMessage(withWord(`${datasetId}: ${answer.sentence}`, answer.word), {
           json,
-          answered: isAnswered(answer.error, answer.word),
+          answered: isAnswered(answer.error),
           hint:
             answer.error instanceof ApiError && answer.error.statusCode === 403
               ? "This command requires admin privileges"
               : undefined,
         });
       } else {
-        reportFailure(answer.error, null, "Could not start the review", json);
+        failWith(answer.error, null, "Could not start the review", undefined, { json });
       }
       return;
   }
@@ -302,7 +290,7 @@ async function startAll(options: {
     rows = (await listPublishRequests("requested")).requests;
     spinner?.stop();
   } catch (error) {
-    reportFailure(error, spinner, "Could not read the publication requests", json);
+    failWith(error, spinner, "Could not read the publication requests", undefined, { json });
     return;
   }
   // The review is off, or this Worker is older than the review: nothing to ask about, and saying
@@ -361,10 +349,21 @@ async function startAll(options: {
 
   if (!json) console.log();
   const n = candidates.length;
-  const go = await confirm(
-    `Start the automated review of ${n} request${n === 1 ? "" : "s"}? Each is one model call, and the platform allows ${PLATFORM_DAILY_CAP} in any 24 hours.`,
-    { yes: options.yes },
-  );
+  // `inquirer` writes its question to standard output, which `--json` keeps for the one document a
+  // pipe reads, so under `--json` the question is not asked, at a terminal or not: the same refusal
+  // as a command with no terminal to ask on.
+  let go: ConfirmResult;
+  if (json && !options.yes) {
+    console.error(
+      "--json cannot ask for a confirmation, which would be written to standard output; pass --yes, or --dry-run to see what would start.",
+    );
+    go = "cancelled";
+  } else {
+    go = await confirm(
+      `Start the automated review of ${n} request${n === 1 ? "" : "s"}? Each is one model call, and the platform allows ${PLATFORM_DAILY_CAP} in any 24 hours.`,
+      { yes: options.yes },
+    );
+  }
   if (go !== "confirmed") {
     // Nothing was started, and a script that asked for it has to be able to tell. Not on standard
     // output under --json, which is read as one document.
@@ -382,7 +381,7 @@ async function startAll(options: {
     const result = resultOf(id, answer);
     results.push(result);
     if (answer.kind === "started") environment = answer.body.environment;
-    if (answer.kind === "failed" && !isAnswered(answer.error, answer.word)) unexplained = true;
+    if (answer.kind === "failed" && !isAnswered(answer.error)) unexplained = true;
     if (!json) console.log(`  ${plain(id)}  ${resultText(answer)}`);
     if (answer.kind === "not_started" && answer.platformLimit) {
       // The allowance is the platform's, so every start after this one would be declined the same

@@ -2,23 +2,25 @@
  * `nemar admin publish`: the publication workflow, from the administrator's side.
  *
  *   nemar admin publish list [--status <s>]    the publication requests, with the identifier screen
+ *   nemar admin publish show <ds>              the automated review of one request (admin-publish-review.ts)
+ *   nemar admin publish start <ds> | --all     start the automated review (admin-publish-review.ts)
+ *   nemar admin publish next                   the requests that need you, one card each (admin-publish-next.ts)
+ *   nemar admin publish approve <ds>           approve and publish (admin-publish-approve.ts)
  *   nemar admin publish deny <ds> [-r <why>]   deny one, mailing the depositor the reason
  *   nemar admin publish screen <ds>            run the identifier screen of a request again
- *   nemar admin publish approve <ds>           approve and publish (admin-publish-approve.ts)
- *   nemar admin publish next                   the requests that need you, one card each (admin-publish-next.ts)
  *
  * Split out of `admin.ts` (epic #1726, phase 2) so the publication review's commands do not grow
  * a file of ten thousand lines. The group is registered on `adminCommand` at the position it
- * always had, so `nemar admin --help` is unchanged; `approve` has its own file and is registered
- * on this group at the end, so the subcommands keep their order.
+ * always had, so `nemar admin --help` is unchanged. `show` and `start` are registered from their own
+ * file right after `list`, and `approve` and `next` after `screen`; commander lists a group's
+ * subcommands alphabetically, so the order of registration does not show in `--help`.
  */
 
 import chalk from "chalk";
 import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
-import { failWith, requireSignedIn } from "../lib/admin-command.js";
-import { reportFailure, signedIn } from "../lib/admin-output.js";
+import { checkedDatasetId, failMessage, failWith, requireSignedIn } from "../lib/admin-command.js";
 import { denyPublication, listPublishRequests, rerunIdentifierScreen } from "../lib/api/publish.js";
 import {
   type ConfirmOptions,
@@ -29,8 +31,8 @@ import {
   confirm,
 } from "../lib/confirm.js";
 import { markReportedExit } from "../lib/debug-log.js";
-import { identifierScreenLines } from "../lib/identifier-screen-display.js";
-import { reviewListLine } from "../lib/publication-review-display.js";
+import { LineReader } from "../lib/prompt-lines.js";
+import { reviewListLine, screenViewLines } from "../lib/publication-review-display.js";
 import { needsAdministrator } from "../lib/publication-review-queue.js";
 import { plain } from "../lib/terminal-text.js";
 import { registerApproveCommand } from "./admin-publish-approve.js";
@@ -82,7 +84,7 @@ Examples:
   )
   .action(async (options: { status?: string; needsMe?: boolean; json?: boolean }) => {
     const json = options.json === true;
-    if (!signedIn(json)) return;
+    if (!requireSignedIn(json)) return;
 
     const spinner = json ? null : ora("Fetching publication requests...").start();
 
@@ -136,14 +138,14 @@ Examples:
           );
         }
         // Epic #1610 phase 4: the identifier screen, in the backend's words.
-        for (const line of identifierScreenLines(req.identifier_screen, 4)) console.log(line);
+        for (const line of screenViewLines(req.identifier_screen, 4)) console.log(line);
         // ADR 0102: the automated review, in the backend's words; nothing for a request it did
         // not assess.
         const review = reviewListLine(req.publication_review, 4);
         if (review !== null) console.log(review);
         if (req.current_step && req.status === "approving") {
           console.log(
-            `    ${chalk.yellow(">")} ${req.current_step.replace(/_/g, " ")}${req.last_error ? chalk.red(` (${req.last_error})`) : ""}`,
+            `    ${chalk.yellow(">")} ${plain(req.current_step).replace(/_/g, " ")}${req.last_error ? chalk.red(` (${plain(req.last_error)})`) : ""}`,
           );
         }
         // Non-blocking pre-screen advisory (#756): a concern for the admin to
@@ -152,7 +154,8 @@ Examples:
           let reasons: string[] = [];
           try {
             const parsed = JSON.parse(req.prescreen_reasons || "[]");
-            if (Array.isArray(parsed)) reasons = parsed.filter((x) => typeof x === "string");
+            if (Array.isArray(parsed))
+              reasons = parsed.filter((x) => typeof x === "string").map(plain);
           } catch {
             // malformed -> show the flag without inline reasons
           }
@@ -182,11 +185,33 @@ Examples:
       }
       console.log();
     } catch (error) {
-      reportFailure(error, spinner, "Failed to list publication requests", json);
+      failWith(error, spinner, "Failed to list publication requests", undefined, { json });
     }
   });
 
 registerReviewCommands(publishCommand);
+
+/**
+ * The reason for a denial when `--reason` was not given: asked for at a terminal, and read as the
+ * first line of standard input when that is a pipe (null when it holds none). Not asked through
+ * `inquirer` unless there is a terminal: on a stdin that has ended its prompt dies with an
+ * uncatchable ERR_USE_AFTER_CLOSE stack trace, which `confirm()` guards against in the same way.
+ */
+async function askReason(): Promise<string | null> {
+  if (process.stdin.isTTY) {
+    const { inputReason } = await inquirer.prompt([
+      { type: "input", name: "inputReason", message: "Reason for denial:" },
+    ]);
+    return typeof inputReason === "string" && inputReason.trim() !== "" ? inputReason : null;
+  }
+  const reader = new LineReader();
+  try {
+    const line = await reader.ask("");
+    return line !== null && line.trim() !== "" ? line.trim() : null;
+  } finally {
+    reader.close();
+  }
+}
 
 publishCommand
   .command("deny")
@@ -206,7 +231,8 @@ Description:
   before resubmitting their publication request.
 
 Requirements:
-  - Must provide a reason for denial
+  - Must provide a reason for denial: --reason, a prompt at a terminal, or one
+    line piped in (nothing is asked when there is neither)
   - Reason will be sent to the user via email
   - User can fix issues and submit a new request
 
@@ -215,22 +241,23 @@ Examples:
   $ nemar admin publish deny nm000104 -r "Dataset incomplete - missing subjects"
   $ nemar admin publish deny nm000104    # Prompts for reason interactively`,
   )
-  .action(async (datasetId, options: ConfirmOptions & { reason?: string }) => {
+  .action(async (datasetArg: string, options: ConfirmOptions & { reason?: string }) => {
     if (!requireSignedIn()) return;
+    const datasetId = checkedDatasetId(datasetArg);
+    if (datasetId === null) return;
 
     let reason = options.reason;
     if (!reason) {
-      const { inputReason } = await inquirer.prompt([
-        { type: "input", name: "inputReason", message: "Reason for denial:" },
-      ]);
-      reason = inputReason;
-    }
-
-    if (!reason) {
-      console.log(chalk.red("Reason is required"));
-      process.exitCode = 1;
-      markReportedExit();
-      return;
+      reason = (await askReason()) ?? undefined;
+      if (!reason) {
+        failMessage("Reason is required", {
+          answered: true,
+          hint: process.stdin.isTTY
+            ? undefined
+            : `Pass --reason "<why>"; there is no terminal to ask on and nothing was piped in.`,
+        });
+        return;
+      }
     }
 
     const confirmResult = await confirm(`Deny publication of ${datasetId}?`, options);
@@ -273,8 +300,10 @@ Description:
 Examples:
   $ nemar admin publish screen nm000104`,
   )
-  .action(async (datasetId: string) => {
+  .action(async (datasetArg: string) => {
     if (!requireSignedIn()) return;
+    const datasetId = checkedDatasetId(datasetArg);
+    if (datasetId === null) return;
     const spinner = ora(`Re-running the identifier screen for ${datasetId}...`).start();
     try {
       const result = await rerunIdentifierScreen(datasetId);
@@ -283,7 +312,7 @@ Examples:
         console.log(chalk.dim("  The admins are mailed when it reports."));
       } else {
         spinner.warn(`The identifier screen for ${datasetId} could not be started`);
-        for (const line of identifierScreenLines(result.identifier_screen)) console.log(line);
+        for (const line of screenViewLines(result.identifier_screen, 2)) console.log(line);
         console.log(chalk.dim("  The admins have been mailed this result."));
       }
     } catch (error) {

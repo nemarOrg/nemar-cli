@@ -160,7 +160,7 @@ export function nextQueue(rows: readonly PublishRow[], handled: ReadonlySet<stri
 }
 
 // ---------------------------------------------------------------------------------------------
-// The size line (ADR 0102, M12)
+// The size line
 // ---------------------------------------------------------------------------------------------
 
 /** A dataset this big gets a size line: locking its objects is a long run, and a person should know. */

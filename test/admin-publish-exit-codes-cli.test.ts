@@ -15,7 +15,10 @@
  * (the API-error, refusal and run-failure rows); from `requireSignedIn` (the signed-out rows); from
  * the declined branch of `deny` or `approve` (the declined rows). Each `markReportedExit` call
  * guards the rows that end in it, and widening the 4xx rule of `failWith` to 5xx turns the
- * backend-500 rows red.
+ * backend-500 rows red. Narrowing the answer rule (`isAnswered`) to 4xx turns the closed-word
+ * rows red; counting `internal` as a word turns the `internal` row red. Removing the terminal
+ * guard of `deny`'s reason prompt turns the no-terminal rows red, and dropping the dataset id check
+ * of `deny` or `screen` turns the mistyped-id rows red.
  *
  * CI TIER: integration, like the other CLI suites that start the binary against a local server.
  */
@@ -276,6 +279,175 @@ describe("a confirmation that is declined or cannot be asked", () => {
       expect(requestStatus(requestId)).toBe("requested");
     });
   }
+});
+
+describe("a mistyped dataset id is refused before any request is made", () => {
+  const MISTYPED: ReadonlyArray<{ name: string; args: string[] }> = [
+    { name: "deny", args: ["admin", "publish", "deny", "nm0004", ...WHY, "--yes"] },
+    { name: "screen", args: ["admin", "publish", "screen", "nm0004"] },
+  ];
+  for (const { name, args } of MISTYPED) {
+    test(`${name} nm0004 exits 1 and sends nothing`, async () => {
+      const requestId = seedGolden();
+      const r = await h.cli(args);
+      expect(r.exitCode).toBe(1);
+      expect(output(r)).toContain('"nm0004" is not a dataset id');
+      expect(output(r)).not.toContain(BUG_HINT);
+      expect(h.requests).toEqual([]);
+      expect(requestStatus(requestId)).toBe("requested");
+    });
+  }
+});
+
+describe("deny with no reason and nothing to ask on", () => {
+  // `inquirer` on a stdin that is not a terminal dies with an uncatchable ERR_USE_AFTER_CLOSE
+  // stack trace (the case `confirm()` already guards), so the reason prompt is guarded the same way.
+  test("a closed stdin exits 1 with a sentence, no stack trace and nothing posted", async () => {
+    const requestId = seedGolden();
+    const r = await h.cli(["admin", "publish", "deny", DATASET, "--yes"]);
+    expect(r.exitCode).toBe(1);
+    expect(output(r)).toContain("Reason is required");
+    expect(output(r)).toContain("--reason");
+    expect(output(r)).not.toContain("ERR_USE_AFTER_CLOSE");
+    expect(output(r)).not.toMatch(/\n\s+at /);
+    expect(output(r)).not.toContain(BUG_HINT);
+    expect(posts()).toEqual([]);
+    expect(requestStatus(requestId)).toBe("requested");
+  });
+
+  test("a reason piped in is read as the reason, and nothing is asked", async () => {
+    const requestId = seedGolden();
+    const r = await h.cli(["admin", "publish", "deny", DATASET, "--yes"], {
+      input: "Please add the participants file\n",
+    });
+    expect(r.exitCode).toBe(0);
+    expect(requestStatus(requestId)).toBe("denied");
+  });
+
+  describe.skipIf(process.platform === "win32")("on a terminal", () => {
+    test("the reason is asked for, and an empty one is refused", async () => {
+      const requestId = seedGolden();
+      const r = await h.cli(["admin", "publish", "deny", DATASET, "--yes"], {
+        terminal: async (t) => {
+          const asked = await t.waitFor("Reason for denial:");
+          t.type("\n");
+          await t.waitFor("Reason is required", { after: asked });
+        },
+      });
+      expect(r.exitCode).toBe(1);
+      expect(posts()).toEqual([]);
+      expect(requestStatus(requestId)).toBe("requested");
+    });
+
+    test("a typed reason is sent", async () => {
+      const requestId = seedGolden();
+      const r = await h.cli(["admin", "publish", "deny", DATASET, "--yes"], {
+        terminal: async (t) => {
+          const asked = await t.waitFor("Reason for denial:");
+          t.type("Please add the participants file\n");
+          await t.waitFor(`Publication denied for ${DATASET}`, { after: asked });
+        },
+      });
+      expect(r.exitCode).toBe(0);
+      expect(requestStatus(requestId)).toBe("denied");
+    });
+  });
+});
+
+describe("under --json a failure goes to standard error and standard output stays empty", () => {
+  const JSON_COMMANDS: ReadonlyArray<{ name: string; args: string[] }> = [
+    { name: "list", args: ["admin", "publish", "list", "--json"] },
+    { name: "show", args: ["admin", "publish", "show", DATASET, "--json"] },
+    { name: "start", args: ["admin", "publish", "start", DATASET, "--json"] },
+    { name: "start --all", args: ["admin", "publish", "start", "--all", "--json"] },
+  ];
+
+  for (const { name, args } of JSON_COMMANDS) {
+    test(`${name} signed out`, async () => {
+      seedGolden();
+      const r = await h.cli(args, { signedOut: true });
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toBe("");
+      expect(r.stderr).toContain("Error: Not authenticated");
+      expect(h.requests).toEqual([]);
+    });
+
+    test(`${name} with a member's key: the Worker's refusal and its hint`, async () => {
+      seedGolden();
+      await h.user("exitmember", "member", MEMBER_KEY);
+      const r = await h.cli(args);
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toBe("");
+      expect(r.stderr).toContain("This command requires admin privileges");
+      expect(posts().every((c) => c.status === 403)).toBe(true);
+    });
+  }
+
+  for (const { name, args } of JSON_COMMANDS.filter(
+    (c) => c.name !== "list" && c.name !== "start --all",
+  )) {
+    test(`${name} of a mistyped id`, async () => {
+      const r = await h.cli(args.map((a) => (a === DATASET ? "nm0004" : a)));
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toBe("");
+      expect(r.stderr).toContain('"nm0004" is not a dataset id');
+      expect(h.requests).toEqual([]);
+    });
+  }
+
+  test("a fault of the Worker is on standard error too", async () => {
+    seedGolden();
+    h.hookDb({
+      statement(sql) {
+        if (/FROM publication_requests/.test(sql)) throw new Error("simulated read failure");
+      },
+    });
+    const r = await h.cli(["admin", "publish", "list", "--json"]);
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).not.toBe("");
+    expect(h.requests.at(-1)?.status).toBe(500);
+  });
+});
+
+describe("whether a 5xx may be a bug: the Worker's closed word makes it an answer", () => {
+  test("start of a Worker with no way to dispatch (502, dispatch_unconfigured) exits 1, no bug-report hint", async () => {
+    h.setEnv({ PUBLICATION_REVIEW_ENABLED: "1", PRESCREEN_CALLBACK_SECRET: undefined });
+    seedScreenedRequest(h.db, { datasetId: DATASET });
+    const r = await h.cli(["admin", "publish", "start", DATASET]);
+    expect(r.exitCode).toBe(1);
+    expect(h.requests.at(-1)?.status).toBe(502);
+    expect(output(r)).toContain("(dispatch_unconfigured)");
+    expect(output(r)).not.toContain(BUG_HINT);
+  });
+
+  test("a comment the Worker could not mail (502, comment_not_sent) exits 1, no bug-report hint", async () => {
+    h.setEnv({ PUBLICATION_REVIEW_ENABLED: "1" });
+    seedGolden();
+    const r = await h.cli(["admin", "publish", "next"], {
+      input: "c\nCould you check the README?\n",
+      resend: { status: 422 },
+    });
+    expect(r.exitCode).toBe(1);
+    expect(h.requests.filter((c) => c.path.endsWith("/comment")).map((c) => c.status)).toEqual([
+      502,
+    ]);
+    expect(output(r)).not.toContain(BUG_HINT);
+  });
+
+  test("a 5xx that names the word internal may be a bug: show keeps the hint", async () => {
+    h.setEnv({ PUBLICATION_REVIEW_ENABLED: "1" });
+    seedGolden();
+    h.hookDb({
+      statement(sql) {
+        if (/FROM publication_reviews/.test(sql)) throw new Error("simulated read failure");
+      },
+    });
+    const r = await h.cli(["admin", "publish", "show", DATASET]);
+    expect(r.exitCode).toBe(1);
+    expect(h.requests.at(-1)?.status).toBe(500);
+    expect(output(r)).toContain(BUG_HINT);
+  });
 });
 
 describe("success still exits 0", () => {

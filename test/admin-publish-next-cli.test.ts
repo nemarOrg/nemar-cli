@@ -19,7 +19,10 @@
  * (a skipped card comes back); exit 0 after a failed approval; keep the type-ahead before a card or
  * before the extra question; skip the extra question; never ask for the screen's acknowledgment;
  * resume every request; leave the terminal paused after an approval's spinner, or wake it after
- * the input has ended.
+ * the input has ended; never clear the reported mark (a refusal, then a fault that may be a bug, exits
+ * with the hint suppressed); list a request whose identifier screen is still running with the review
+ * off; draw a card after the input has ended; let `d` throw on a detail it cannot render; skip the
+ * `finally` of the walk; drop the SIGINT listener of an approval (Ctrl+C then kills the walk silently).
  *
  * CI TIER: integration, like the other CLI suites that start the binary against a local server.
  */
@@ -145,6 +148,26 @@ describe("y approves from the terminal", () => {
     expect(r.stdout).toContain("Done: 1 approved.");
     // The first card offers y, the second (not a pass, no --force) does not.
     expect(count(r.stdout, "y approve, ")).toBe(1);
+  });
+
+  test("when the input ends during the approval, no second card is drawn and no review is read for it", async () => {
+    // `y` is the last line of the script: the pipe has ended by the time the approval returns, so a
+    // card for the next request could not be answered. It used to be drawn (and its review read)
+    // only for the walk to say that the input had ended.
+    seed(A);
+    seed(B);
+    requestedAt(A, "2026-10-10 09:00:00");
+    requestedAt(B, "2026-10-11 09:00:00");
+
+    const r = await next("y\n");
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(`[1 of 2] ${A}`);
+    expect(r.stdout).not.toContain(`[2 of 2] ${B}`);
+    expect(r.stdout).not.toContain(B);
+    expect(h.requests.filter((c) => c.path === `/admin/publish/${B}/review`)).toEqual([]);
+    expect(count(r.stdout, "Input ended; stopping.")).toBe(1);
+    expect(r.stdout).toContain("Done: 1 approved.");
   });
 
   test("the run ends with the tally when the last request is decided, and says nothing is left", async () => {
@@ -629,6 +652,20 @@ describe("which requests are shown, and in what order", () => {
     expect(r.stdout).toContain("Done: 3 skipped.");
   });
 
+  test("with the review off, a request whose identifier screen is still running is not shown either", async () => {
+    // Nothing reports a wait when the review is off (production today), so the screen's own state
+    // is the only word: a card for it would offer y, and y would fail on "Identifier screen: running".
+    h.setEnv({ PUBLICATION_REVIEW_ENABLED: "0" });
+    seed(A, null, { status: "pending" });
+    seed(B, null);
+
+    const r = await next("q\n");
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(`[1 of 1] ${B}`);
+    expect(r.stdout).not.toContain(A);
+  });
+
   test("a skipped request is not shown again in the same run, and the run says it still needs the administrator", async () => {
     seed(A);
 
@@ -810,6 +847,35 @@ describe("what fails exits 1, and the walk goes on", () => {
     expect(output(r)).not.toContain("attach the log to a new issue");
   });
 
+  test("a request the Worker refused, then one that failed for a reason that may be a bug: the bug-report hint follows the LAST failure", async () => {
+    // Card 1: the Worker's refusal (409), an answer, which marks the exit as reported. Card 2: a
+    // denial the Worker could not write (500 with no closed word), which may be a bug and must
+    // bring the hint back; a mark that nothing can clear would leave it suppressed.
+    seed(A, twoReasons());
+    seed(B);
+    requestedAt(A, "2026-10-10 09:00:00");
+    requestedAt(B, "2026-10-11 09:00:00");
+    h.after(`GET /admin/publish/${A}/review`, () => {
+      h.db.run("INSERT INTO dataset_versions (dataset_id, version, doi) VALUES (?, '1.0.0', ?)", [
+        A,
+        "10.5072/FK2.late",
+      ]);
+    });
+    h.hookDb({
+      statement(sql) {
+        if (/SET status = 'denied'/.test(sql)) throw new Error("simulated write failure");
+      },
+    });
+
+    const r = await next("y\ny\nn\nThe participants file is missing\n", ["--force"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(h.requests.filter((c) => c.path === approvePath(A)).map((c) => c.status)).toEqual([409]);
+    expect(h.requests.filter((c) => c.path.endsWith("/deny")).map((c) => c.status)).toEqual([500]);
+    expect(r.stdout).toContain("Done: 2 failed.");
+    expect(output(r)).toContain("attach the log to a new issue");
+  });
+
   test("a review that could not be read still gets a card; y is offered, the Worker refuses it, exit 1", async () => {
     const { requestId } = seed(A);
     h.hookDb({
@@ -846,6 +912,44 @@ describe("what fails exits 1, and the walk goes on", () => {
       "The review could not be read (HTTP 500), so there is nothing more to show.",
     );
     expect(promptsIn(r)).toBe(2);
+  });
+
+  test("a review this version of the CLI cannot show is said so on d, and the card asks again", async () => {
+    // A detail that parses (the id and the override are there) but lacks what the rendering reads: a
+    // Worker of another version. `d` used to throw out of the walk, with no tally and the reader open.
+    seed(A, failingReport());
+    h.rewrite(`GET /admin/publish/${A}/review`, (body) => {
+      Reflect.deleteProperty(body.review as Record<string, unknown>, "questions");
+    });
+
+    const r = await next("d\nq\n");
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("cannot be shown by this version of the CLI");
+    expect(promptsIn(r)).toBe(2);
+    expect(r.stdout).toContain("Nothing was changed.");
+    expect(r.stderr).not.toContain("TypeError");
+  });
+
+  test("a card that cannot be built still closes the reader and prints the tally before the error", async () => {
+    // The second row lacks a field the walk reads: nothing in the walk catches that, so the tally
+    // and the reader's close are the `finally`'s. The first card was skipped and is in the tally.
+    seed(A);
+    seed(B);
+    requestedAt(A, "2026-10-10 09:00:00");
+    requestedAt(B, "2026-10-11 09:00:00");
+    h.rewrite("GET /admin/publish/requests", (body) => {
+      for (const row of body.requests as Array<Record<string, unknown>>) {
+        if (row.dataset_id === B) Reflect.deleteProperty(row, "steps_completed");
+      }
+    });
+
+    const r = await next("s\ns\n");
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain(`[1 of 2] ${A}`);
+    expect(r.stdout).toContain("Done: 1 skipped.");
+    expect(r.stderr).toContain("steps_completed");
   });
 
   test("a failed read of the list is said, and the exit code is 1", async () => {
@@ -1031,6 +1135,51 @@ describe.skipIf(process.platform === "win32")("on a terminal", () => {
     expect(r.exitCode).toBe(0);
     expect(requestRow(a.requestId)?.status).toBe("published");
     expect(r.stdout).toContain("Done: 1 approved.");
+    // The input had ended, so the second request got no card.
+    expect(r.stdout).not.toContain("[2 of 2]");
+  });
+
+  test("Ctrl+C while an approval runs says which dataset was mid-approval, what to run, the tally, exits 130 and leaves the terminal as it found it", async () => {
+    // The spinner's own handling of standard input turns Ctrl+C into a SIGINT event for the whole
+    // process, which the CLI's exit hooks used to turn into a plain death: no word, no tally, and an
+    // approval that went on to publish. The GitHub stand-in is slow so the run is still going.
+    const a = seed(A);
+    h.githubDelayMs.value = 2_000;
+
+    const r = await h.cli(NEXT, {
+      terminal: async (t) => {
+        const first = await t.waitFor("y approve, ");
+        t.type("y\n");
+        const running = await t.waitFor("Running publication workflow", { after: first });
+        await Bun.sleep(600);
+        t.type("\u0003");
+        await t.waitFor(`nemar admin publish approve ${A} --resume`, { after: running });
+        await t.waitFor("Nothing was changed.", { after: running });
+      },
+    });
+
+    expect(r.exitCode).toBe(130);
+    expect(r.stdout).toContain(`Interrupted while approving ${A}.`);
+    expect(r.stdout).toContain("may still be running, or may have finished");
+    expect(r.stdout).toContain(`nemar admin publish show ${A}`);
+    expect(r.stdout).toContain(`nemar admin publish approve ${A} --resume`);
+    // The tally follows the pointer, and the interrupted approval is not in it.
+    expect(r.stdout.indexOf("Nothing was changed.")).toBeGreaterThan(
+      r.stdout.indexOf(`approve ${A} --resume`),
+    );
+    // No other message of a stopped walk: the interrupt is the one thing said.
+    expect(r.stdout).not.toContain("Input ended; stopping.");
+    // The spinner hid the cursor; the last word about it is that it is shown again.
+    const hidden = r.stdout.lastIndexOf("\u001b[?25l");
+    expect(hidden).toBeGreaterThan(-1);
+    expect(r.stdout.lastIndexOf("\u001b[?25h")).toBeGreaterThan(hidden);
+
+    // The Worker was already running it, and went on: that is why the message says "may".
+    const deadline = Date.now() + 20_000;
+    while (!h.requests.some((c) => c.path === approvePath(A)) && Date.now() < deadline) {
+      await Bun.sleep(100);
+    }
+    expect(requestRow(a.requestId)?.status).toBe("published");
   });
 
   test("Ctrl+C stops the walk with the shell's code for an interrupt, and says so", async () => {

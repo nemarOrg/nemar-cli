@@ -110,6 +110,15 @@ export function markReportedExit(): void {
   reportedExit = true;
 }
 
+/**
+ * Undoes {@link markReportedExit}, for a command that can fail more than once in one run. The mark
+ * is process-wide, so a walk that has one request refused (an answer) and a later one fail for a
+ * reason that may be a bug must let the LAST failure decide whether the exit hook invites a report.
+ */
+export function unmarkReportedExit(): void {
+  reportedExit = false;
+}
+
 export function wasReportedExit(): boolean {
   return reportedExit;
 }

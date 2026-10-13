@@ -18,7 +18,10 @@
  * model's summary without its label or a note without `plain()` (show); let `--json` print a line
  * besides the JSON; exit 0 for a refused start other than `running` and `has_result`; recompute
  * `start --all`'s candidates from reason codes; continue `start --all` after `platform_limit`;
- * start without a confirmation in a pipe.
+ * start without a confirmation in a pipe; ask the confirmation of `start --all --json` at a terminal
+ * (its question goes to standard output); print the step, the error or the pre-screen's reasons of
+ * `list` without `plain()`; count a request whose identifier screen is running as needing a person
+ * when the review is off.
  *
  * CI TIER: integration, like the other CLI suites that start the binary against a local server.
  */
@@ -258,6 +261,40 @@ describe("list with the review", () => {
   });
 });
 
+describe("list prints what came from the network as plain text", () => {
+  // The fields a request row holds raw: the step and error of a run, and the pre-screen's reasons,
+  // which the model writes from text the depositor wrote. None of them passes through the Worker's
+  // own words, so the CLI's `plain()` is the only thing between them and the terminal.
+  const ESC = String.fromCharCode(27);
+  const hostile = `${ESC}[2J${ESC}]0;title\u0007steered\u202ereversed\u200b\u2028end`;
+  const cleaned = "[2J]0;titlesteeredreversedend";
+
+  test("the step, the error and the pre-screen's reasons carry no terminal control", async () => {
+    const running = seedScreenedRequest(h.db, {
+      datasetId: "nm000480",
+      requestStatus: "approving",
+    });
+    h.db.run("UPDATE publication_requests SET current_step = ?, last_error = ? WHERE id = ?", [
+      `ci_check${hostile}`,
+      hostile,
+      running.requestId,
+    ]);
+    const concern = seedScreenedRequest(h.db, { datasetId: "nm000481" });
+    h.db.run(
+      "UPDATE publication_requests SET prescreen_status = 'concern', prescreen_reasons = ? WHERE id = ?",
+      [JSON.stringify([hostile, "a plain reason"]), concern.requestId],
+    );
+
+    const r = await h.cli(LIST);
+
+    expect(r.exitCode).toBe(0);
+    expect(blockOf(r.stdout, "nm000480").join("\n")).toContain(`ci check${cleaned}`);
+    expect(blockOf(r.stdout, "nm000480").join("\n")).toContain(`(${cleaned})`);
+    expect(blockOf(r.stdout, "nm000481").join("\n")).toContain(`${cleaned}; a plain reason`);
+    for (const line of r.stdout.split("\n")) expect(line).not.toMatch(DANGEROUS_IN_LINES);
+  });
+});
+
 describe("list with the review off", () => {
   beforeEach(() => {
     h.setEnv({ PUBLICATION_REVIEW_ENABLED: "0" });
@@ -280,6 +317,25 @@ describe("list with the review off", () => {
     expect(r.stdout).toContain(
       "The automated review is off on this Worker, so no review gates an approval.",
     );
+  });
+
+  test("a request whose identifier screen is still running is only waiting, with the review off too", async () => {
+    seedScreenedRequest(h.db, { datasetId: "nm000480", status: "pending" });
+    seedScreenedRequest(h.db, { datasetId: "nm000481" });
+
+    const r = await h.cli(LIST);
+
+    expect(r.exitCode).toBe(0);
+    // No review reports a wait here (the flag is off), so the screen's own state is the only word.
+    expect(blockOf(r.stdout, "nm000480")[0].trimEnd().endsWith("*")).toBe(false);
+    expect(blockOf(r.stdout, "nm000481")[0].trimEnd().endsWith("*")).toBe(true);
+    expect(r.stdout).toContain("2 requests, 1 you can act on.");
+
+    const mine = await h.cli([...LIST, "--needs-me"]);
+
+    expect(mine.stdout).toContain("Publication Requests (1)");
+    expect(mine.stdout).toContain("nm000481");
+    expect(mine.stdout).not.toContain("nm000480");
   });
 
   test("a stored review is printed as advice, and the footer still says the review is off", async () => {
@@ -550,7 +606,7 @@ describe("show", () => {
     // CLI's own `plain()` is held to the same by publication-review-display.unit.test.ts, which
     // feeds it hostile text the Worker would never send.
     const ESC = String.fromCharCode(27);
-    const hostile = `${ESC}[2J${ESC}]0;title\u0007steered‮reversed​ end`;
+    const hostile = `${ESC}[2J${ESC}]0;title\u0007steered\u202ereversed\u200b\u2028end`;
     const { requestId } = seedScreenedRequest(h.db, { datasetId: "nm000480" });
     const base = failingReport() as { findings: Array<{ note: string }>; summary: string };
     base.summary = hostile;
@@ -1116,6 +1172,50 @@ describe("start --all", () => {
     expect(r.stdout).toBe("");
     expect(r.stderr).toContain("Cancelled.");
   });
+
+  // `inquirer` writes its question to standard output, which `--json` keeps for the one document
+  // a pipe reads (`| jq`). So under --json the question is not asked at all, on a terminal too.
+  describe.skipIf(process.platform === "win32")(
+    "--json at a terminal, standard output piped",
+    () => {
+      test("without --yes it is refused: nothing is asked on standard output, nothing is started, exit 1", async () => {
+        seedFleet();
+
+        const r = await h.cli([...START, "--all", "--json"], {
+          terminal: async (t) => {
+            await t.waitFor("Cancelled.", { timeoutMs: 10_000 });
+          },
+          pipeStdout: true,
+        });
+
+        expect(r.exitCode).toBe(1);
+        // What a pipe reads: nothing, so no prompt text for `jq` to choke on.
+        expect(r.stdout).toBe("");
+        expect(r.stderr).toContain("--json cannot ask for a confirmation");
+        expect(r.stderr).toContain("--yes");
+        expect(r.stderr).toContain("Cancelled.");
+        expect(startPosts()).toEqual([]);
+        expect(dispatchedDatasets()).toEqual([]);
+      });
+
+      test("with --yes it runs and standard output is the one JSON document", async () => {
+        seedFleet();
+
+        const r = await h.cli([...START, "--all", "--yes", "--json"], {
+          terminal: async () => undefined,
+          pipeStdout: true,
+        });
+
+        expect(r.exitCode).toBe(0);
+        const done = JSON.parse(r.stdout) as {
+          started: number;
+          results: Array<{ outcome: string }>;
+        };
+        expect(done.started).toBe(4);
+        expect(dispatchedDatasets()).toEqual(CANDIDATES);
+      });
+    },
+  );
 
   test("--all with a dataset id is refused", async () => {
     const r = await h.cli([...START, "nm000480", "--all"]);
