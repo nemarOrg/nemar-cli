@@ -139,7 +139,7 @@ This rule is not negotiable, and nothing in this ADR or a later phase may weaken
 ### 3. What the model is shown
 
 - The root README, at most 24,000 characters, fenced; a longer file is cut and the cut is a fact.
-  The README is the first present of `README.md`, `README`, `README.rst` and `README.txt`, the four forms BIDS allows, in the order `submission-gate.ts` already uses;
+  The README is the first present of `README.md`, `README`, `README.rst` and `README.txt`, the four forms BIDS allows, in that order (one shared list, `shared/readme-candidates.ts`);
   the format makes no difference to the review, and a `.rst` or `.txt` README is read as text like the others.
 - The BIDS-defined top-level keys of `dataset_description.json`, re-serialized, at most 16,000 characters
   (these include `EthicsApprovals`, `License`, `Authors`, `Funding`, `ReferencesAndLinks` and `SourceDatasets`, the fields the questions below turn on);
@@ -147,10 +147,12 @@ This rule is not negotiable, and nothing in this ADR or a later phase may weaken
 - CHANGES, at most 8,000 characters, and the root LICENSE, at most 4,000, to compare with the `License` field.
 - `participants.json`, the column descriptions, at most 8,000 characters.
 - A structural summary the job computes from the tree, in counts and closed words only:
-  subjects, sessions and recordings counted, the datatypes, the file formats folded into the preflight's closed list
-  (`KNOWN_FORMATS`, the rest `.other`), and whether `derivatives/`, `sourcedata/` and `code/` exist.
+  subjects, sessions and recordings counted, the datatypes, the file formats folded into a closed list
+  (the preflight's `KNOWN_FORMATS` plus `.edf` and `.bdf`, which the preflight counts as screened and so leaves out of that list; the rest `.other`),
+  channel counts and sampling rates as deduplicated numbers read from a bounded sample of data sidecars,
+  and whether `derivatives/`, `sourcedata/` and `code/` exist.
   No path, file name, subject label or task label is sent, so no path text reaches the model and a path finding withholds nothing.
-- Never: any `.tsv` file, any sidecar value, recordings, the contents of `sourcedata/`, `derivatives/` or `code/`,
+- Never: any `.tsv` file, any raw sidecar value (a number derived from sidecars, as above, is a fact of the summary), recordings, the contents of `sourcedata/`, `derivatives/` or `code/`,
   any document file, the depositor's NEMAR account, and the screen's result.
 
 For an anonymous release (ADR 0065) the model is told the release is anonymous and that `Authors` is blinded by design;
