@@ -18,6 +18,7 @@ import {
   NEVER_REACHED_MODEL,
   PLATFORM_DAILY_CAP,
 } from "../../shared/publication-review";
+import { DEPOSITOR_RANK_SQL, startPublicationReview } from "../src/services/publication-review";
 import { interceptingD1, realD1, wrapD1, yieldingD1 } from "./helpers/d1";
 import { SCREENED_HEAD } from "./helpers/identifier-screen";
 import {
@@ -371,6 +372,7 @@ describe("the daily caps", () => {
         requestId: r.requestId,
         datasetId: dataset,
         state: "reported",
+        claimed: true,
         createdMinutesAgo: minutesAgo,
       });
     }
@@ -412,6 +414,7 @@ describe("the daily caps", () => {
         requestId: r.requestId,
         datasetId: dataset,
         state: "reported",
+        claimed: true,
       });
     }
     const last = pending(PROD_DATASET);
@@ -457,6 +460,93 @@ describe("the daily caps", () => {
     await h.screenResult(requestId, PROD_DATASET);
     expect(h.reviews().find((r) => r.request_id === requestId)).toMatchObject({
       state: "dispatched",
+    });
+  });
+
+  // What a row costs. The claim precedes any model spend, so a row nobody claimed spent nothing,
+  // and an `unreported` row nobody ever claimed (the workflow undeployed, Actions down) must not
+  // hold an allowance for a day. A row still `dispatched` may yet be claimed, so it counts.
+  const COSTS: [string, string | undefined, boolean, boolean][] = [
+    // state, detail, claimed, counts
+    ["unreported", undefined, false, false],
+    ["unreported", undefined, true, true],
+    ["errored", "model_unavailable", false, false],
+    ["errored", "workflow_failed", false, false],
+    ["errored", "model_unavailable", true, true],
+    ["errored", "workflow_failed", true, true],
+    ["errored", "stale_head", true, false],
+    ["errored", "dispatch_failed", false, false],
+    ["dispatched", undefined, false, true],
+    ["dispatched", undefined, true, true],
+    ["declined", "platform_limit", false, false],
+    ["reported", undefined, true, true],
+  ];
+  for (const [rowState, detail, claimed, counts] of COSTS) {
+    const label = `${rowState}${detail ? ` (${detail})` : ""}, ${claimed ? "claimed" : "never claimed"}`;
+    test(`a depositor's allowance: a ${label} row ${counts ? "counts" : "does not count"}`, async () => {
+      const who = depositor();
+      for (let i = 0; i < DEPOSITOR_DAILY_CAP; i++) {
+        const dataset = ds(1100 + i);
+        const r = seedScreenedRequest(h.db, { datasetId: dataset, requestedBy: who });
+        seedPublicationReview(h.db, {
+          requestId: r.requestId,
+          datasetId: dataset,
+          state: rowState as never,
+          detail,
+          claimed,
+        });
+      }
+      const next = pending(PROD_DATASET, { requestedBy: who });
+      await h.screenResult(next.requestId, PROD_DATASET);
+      expect(h.reviews().find((r) => r.request_id === next.requestId)).toMatchObject(
+        counts
+          ? { state: "declined", detail: "depositor_limit" }
+          : { state: "dispatched", detail: null },
+      );
+      expect(h.dispatches()).toHaveLength(counts ? 0 : 1);
+    });
+  }
+
+  test("the platform's allowance is not held by fifty reviews nobody ever claimed", async () => {
+    for (let i = 0; i < PLATFORM_DAILY_CAP; i++) {
+      const dataset = ds(1200 + i);
+      const r = seedScreenedRequest(h.db, { datasetId: dataset });
+      seedPublicationReview(h.db, {
+        requestId: r.requestId,
+        datasetId: dataset,
+        state: "unreported",
+        createdMinutesAgo: 90,
+      });
+    }
+    const next = pending(PROD_DATASET);
+    await h.screenResult(next.requestId, PROD_DATASET);
+    expect(h.reviews().find((r) => r.request_id === next.requestId)).toMatchObject({
+      state: "dispatched",
+    });
+  });
+
+  test("an administrator's call on a depositor's request still counts against the depositor", async () => {
+    // Intended, not an oversight: an administrator is not held by the depositor's allowance (the
+    // allowance exists to stop a depositor spending the platform's money, and an administrator is
+    // not one), but the call still costs the platform, so it is the depositor's tally that grows
+    // and the depositor's own next request that is held.
+    const who = depositor();
+    spend(DEPOSITOR_DAILY_CAP, who);
+    const first = seedScreenedRequest(h.db, { datasetId: ds(1300), requestedBy: who });
+    const second = pending(ds(1301), { requestedBy: who });
+    const out = await startPublicationReview(h.env(), {
+      requestId: first.requestId,
+      datasetId: ds(1300),
+      adminUserId: 1,
+    });
+    expect(out).toMatchObject({ started: true, reason: "dispatched" });
+    const tally = h.db.query(DEPOSITOR_RANK_SQL).get(who, Number.MAX_SAFE_INTEGER) as { n: number };
+    expect(tally.n).toBe(DEPOSITOR_DAILY_CAP + 1);
+
+    await h.screenResult(second.requestId, ds(1301));
+    expect(h.reviews().find((r) => r.request_id === second.requestId)).toMatchObject({
+      state: "declined",
+      detail: "depositor_limit",
     });
   });
 

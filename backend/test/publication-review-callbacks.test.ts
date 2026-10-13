@@ -32,7 +32,8 @@ import {
   signPublicationReviewCallbackToken,
 } from "../src/services/github/callback-tokens";
 import {
-  COUNTS_TOWARD_CAPS,
+  CAP_CALLS_SQL,
+  PLATFORM_RANK_SQL,
   startPublicationReview,
   storePublicationReviewResult,
   sweepPublicationReviews,
@@ -359,9 +360,7 @@ describe("the claim", () => {
       });
       // It never reached a model, so it is not counted against any cap.
       const counted = h.db
-        .query(
-          `SELECT COUNT(*) AS n FROM publication_reviews WHERE id = ? AND ${COUNTS_TOWARD_CAPS}`,
-        )
+        .query(`SELECT ${CAP_CALLS_SQL} AS n FROM publication_reviews WHERE id = ?`)
         .get(reviewId) as { n: number };
       expect(counted.n).toBe(0);
       // And the token is spent.
@@ -1237,6 +1236,7 @@ describe("an administrator's start", () => {
     detail?: string,
     minutesAgo = 0,
     dataset = PROD_DATASET,
+    claimed = false,
   ) {
     const { requestId } = seedScreenedRequest(h.db, { datasetId: dataset });
     const reviewId = seedPublicationReview(h.db, {
@@ -1245,6 +1245,7 @@ describe("an administrator's start", () => {
       state,
       detail,
       createdMinutesAgo: minutesAgo,
+      claimed,
     });
     return { requestId, reviewId, datasetId: dataset };
   }
@@ -1270,7 +1271,13 @@ describe("an administrator's start", () => {
   });
 
   test("restarts an errored row that reached a model: it costs a second call", async () => {
-    const { requestId, reviewId } = startable("errored", "model_unavailable");
+    const { requestId, reviewId } = startable(
+      "errored",
+      "model_unavailable",
+      0,
+      PROD_DATASET,
+      true,
+    );
     const out = await startPublicationReview(h.env(), {
       requestId,
       datasetId: PROD_DATASET,
@@ -1281,7 +1288,8 @@ describe("an administrator's start", () => {
   });
 
   test("restarts an unreported row, and the older run can no longer answer", async () => {
-    const { requestId, reviewId } = startable("unreported");
+    // The older run took its claim, so it may be mid-call: that call is spent and the restart is a second.
+    const { requestId, reviewId } = startable("unreported", undefined, 0, PROD_DATASET, true);
     const oldToken = await h.tokenFor(reviewId);
     const out = await startPublicationReview(h.env(), {
       requestId,
@@ -1308,7 +1316,7 @@ describe("an administrator's start", () => {
     expect(h.nonceOf(fresh.reviewId)).toBe(nonceBefore);
     expect(h.dispatches()).toHaveLength(0);
 
-    const overdue = startable("dispatched", undefined, 45, "nm000481");
+    const overdue = startable("dispatched", undefined, 45, "nm000481", true);
     const out = await startPublicationReview(h.env(), {
       requestId: overdue.requestId,
       datasetId: "nm000481",
@@ -1317,6 +1325,27 @@ describe("an administrator's start", () => {
     expect(out).toEqual({ started: true, reason: "redispatched", reviewId: overdue.reviewId });
     expect(state(overdue.reviewId)).toMatchObject({ state: "dispatched", attempts: 2 });
     expect(h.nonceOf(overdue.reviewId)).not.toBe(null);
+  });
+
+  test("a row nobody ever claimed is restarted for free: no model was reached", async () => {
+    // The workflow was undeployed, or Actions was down. Nothing was spent, so a restart costs the
+    // one call it will make and does not stack a second on an attempt that made none.
+    const dead = startable("unreported", undefined, 120);
+    const out = await startPublicationReview(h.env(), {
+      requestId: dead.requestId,
+      datasetId: PROD_DATASET,
+      ...admin,
+    });
+    expect(out.reason).toBe("redispatched");
+    expect(state(dead.reviewId)).toMatchObject({ state: "dispatched", attempts: 1 });
+
+    const silent = startable("dispatched", undefined, 45, "nm000481");
+    await startPublicationReview(h.env(), {
+      requestId: silent.requestId,
+      datasetId: "nm000481",
+      ...admin,
+    });
+    expect(state(silent.reviewId)).toMatchObject({ state: "dispatched", attempts: 1 });
   });
 
   test("never restarts a row that has a result", async () => {
@@ -1340,6 +1369,7 @@ describe("an administrator's start", () => {
         requestId: r.requestId,
         datasetId: dataset,
         state: "reported",
+        claimed: true,
       });
     }
     const target = seedPublicationReview(h.db, {
@@ -1347,6 +1377,7 @@ describe("an administrator's start", () => {
       datasetId: PROD_DATASET,
       state: "errored",
       detail: "model_unavailable",
+      claimed: true,
     });
     const out = await startPublicationReview(h.env(), {
       requestId,
@@ -1365,14 +1396,19 @@ describe("an administrator's start", () => {
         requestId: r.requestId,
         datasetId: dataset,
         state: "reported",
+        claimed: true,
       });
     }
   }
 
+  /** The model calls the platform's allowance counts now: what a new start would be ranked against. */
+  const counted = () =>
+    (h.db.query(PLATFORM_RANK_SQL).get(Number.MAX_SAFE_INTEGER) as { n: number }).n;
+
   test("a restart of an attempt that reached a model is a second call: it fits at fifty", async () => {
     // 48 other calls and this row's own earlier call are 49; the restart is the 50th.
     fillPlatform(48);
-    const target = startable("errored", "model_unavailable");
+    const target = startable("errored", "model_unavailable", 0, PROD_DATASET, true);
     const out = await startPublicationReview(h.env(), {
       requestId: target.requestId,
       datasetId: PROD_DATASET,
@@ -1386,7 +1422,8 @@ describe("an administrator's start", () => {
     // 49 other calls and this row's own earlier call are 50. Counted once the restart would
     // read 50 and pass; it is a second call, so it is the 51st, and the platform's cap holds.
     fillPlatform(49);
-    const target = startable("errored", "model_unavailable");
+    const target = startable("errored", "model_unavailable", 0, PROD_DATASET, true);
+    expect(counted()).toBe(50);
     const out = await startPublicationReview(h.env(), {
       requestId: target.requestId,
       datasetId: PROD_DATASET,
@@ -1397,10 +1434,92 @@ describe("an administrator's start", () => {
       state: "declined",
       detail: "platform_limit",
       nonce: null,
-      attempts: 1,
     });
     expect(h.dispatches()).toHaveLength(0);
   });
+
+  test("a restart the platform declines does not erase the call the row already spent", async () => {
+    // The row's earlier call was real. Declining the restart must leave it counted: written off,
+    // the tally dropped by one, the next start was admitted, and fifty-one calls were made in a day.
+    fillPlatform(49);
+    const target = startable("unreported", undefined, 120, PROD_DATASET, true);
+    expect(counted()).toBe(50);
+    const out = await startPublicationReview(h.env(), {
+      requestId: target.requestId,
+      datasetId: PROD_DATASET,
+      ...admin,
+    });
+    expect(out.reason).toBe("platform_limit");
+    expect(counted()).toBe(50);
+
+    // So the next start, of another request, is still the fifty-first and is declined.
+    const other = seedScreenedRequest(h.db, { datasetId: "nm000481" });
+    const next = await startPublicationReview(h.env(), {
+      requestId: other.requestId,
+      datasetId: "nm000481",
+    });
+    expect(next.reason).toBe("platform_limit");
+    expect(h.dispatches()).toHaveLength(0);
+  });
+
+  test("a restart whose dispatch fails does not erase the call the row already spent", async () => {
+    fillPlatform(48);
+    const target = startable("errored", "model_unavailable", 0, PROD_DATASET, true);
+    expect(counted()).toBe(49);
+    h.dispatchStatus = 500;
+    const out = await startPublicationReview(h.env(), {
+      requestId: target.requestId,
+      datasetId: PROD_DATASET,
+      ...admin,
+    });
+    expect(out.reason).toBe("dispatch_failed");
+    expect(state(target.reviewId)).toMatchObject({
+      state: "errored",
+      detail: "dispatch_failed",
+      nonce: null,
+    });
+    // The failed attempt is free, the call before it is not.
+    expect(counted()).toBe(49);
+
+    // One more start fits (the fiftieth); the one after it does not.
+    h.dispatchStatus = 204;
+    const a = seedScreenedRequest(h.db, { datasetId: "nm000481" });
+    const b = seedScreenedRequest(h.db, { datasetId: "nm000482" });
+    expect(
+      (await startPublicationReview(h.env(), { requestId: a.requestId, datasetId: "nm000481" }))
+        .reason,
+    ).toBe("dispatched");
+    expect(
+      (await startPublicationReview(h.env(), { requestId: b.requestId, datasetId: "nm000482" }))
+        .reason,
+    ).toBe("platform_limit");
+  });
+
+  // The invariant under the tests above: within a window a restart, a decline or a failed
+  // dispatch never lowers the calls counted. Checked for each way a spent row can be restarted.
+  const spentRows: [string, string | undefined][] = [
+    ["unreported", undefined],
+    ["errored", "model_unavailable"],
+    ["errored", "workflow_failed"],
+  ];
+  for (const [rowState, detail] of spentRows) {
+    for (const outcome of ["declined", "dispatch_failed", "started"] as const) {
+      test(`restarting a spent ${rowState}${detail ? ` (${detail})` : ""} row that ${outcome === "started" ? "goes ahead" : `ends ${outcome}`} never lowers what is counted`, async () => {
+        const target = startable(rowState as never, detail, 120, PROD_DATASET, true);
+        if (outcome === "declined") fillPlatform(49);
+        const before = counted();
+        h.dispatchStatus = outcome === "dispatch_failed" ? 500 : 204;
+        await startPublicationReview(h.env(), {
+          requestId: target.requestId,
+          datasetId: PROD_DATASET,
+          ...admin,
+        });
+        expect(counted()).toBeGreaterThanOrEqual(before);
+        // A restart that goes ahead is one call more, never fewer.
+        if (outcome === "started") expect(counted()).toBe(before + 1);
+      });
+    }
+  }
 
   test("a declined row costs one call, not two, when it is restarted", async () => {
     fillPlatform(49);
@@ -1413,6 +1532,20 @@ describe("an administrator's start", () => {
     expect(out.reason).toBe("redispatched");
     expect(state(target.reviewId).attempts).toBe(1);
     // One more other call and the same restart is the 51st.
+  });
+
+  test("a declined row, the one kind that never reached a model, is not counted when it is declined again", async () => {
+    // Fifty other calls: the platform is full, and the declined row holds nothing of it.
+    fillPlatform(50);
+    const target = startable("declined", "depositor_limit");
+    expect(counted()).toBe(50);
+    const out = await startPublicationReview(h.env(), {
+      requestId: target.requestId,
+      datasetId: PROD_DATASET,
+      ...admin,
+    });
+    expect(out.reason).toBe("platform_limit");
+    expect(counted()).toBe(50);
   });
 
   test("without the callback secret or a GitHub credential nothing is sent, and the row says why", async () => {
@@ -1572,10 +1705,50 @@ describe("no secret reaches the Worker's logs", () => {
 });
 
 describe("what the caps count", () => {
-  test("an attempt no model saw is not counted, whatever else is", () => {
-    // The widening direction matters: a word dropped from this list would make a free attempt
-    // cost a call, and a word added would let a costly one through for nothing.
-    for (const word of NEVER_REACHED_MODEL) expect(COUNTS_TOWARD_CAPS).toContain(`'${word}'`);
-    expect(COUNTS_TOWARD_CAPS).toContain("state <> 'declined'");
+  const costOf = (id: number) =>
+    (
+      h.db.query(`SELECT ${CAP_CALLS_SQL} AS n FROM publication_reviews WHERE id = ?`).get(id) as {
+        n: number;
+      }
+    ).n;
+
+  test("an attempt no model saw costs nothing, claimed or not; any other word costs a call only if claimed", () => {
+    // The widening direction matters: a word dropped from NEVER_REACHED_MODEL would make a free
+    // attempt cost a call, and a word added would let a costly one through for nothing.
+    for (const [i, word] of PUBLICATION_RUN_ERRORS.entries()) {
+      for (const claimed of [false, true]) {
+        const dataset = ds(2000 + i * 2 + (claimed ? 1 : 0));
+        const { requestId } = seedScreenedRequest(h.db, { datasetId: dataset });
+        const id = seedPublicationReview(h.db, {
+          requestId,
+          datasetId: dataset,
+          state: "errored",
+          detail: word,
+          claimed,
+        });
+        const never = (NEVER_REACHED_MODEL as readonly string[]).includes(word);
+        expect(costOf(id), `${word} claimed=${claimed}`).toBe(never || !claimed ? 0 : 1);
+      }
+    }
+  });
+
+  test("a restarted attempt that did not reach a model gives back only its own slot", () => {
+    // attempts 2: one call that was made, and the slot of the attempt that was not.
+    for (const [i, row] of [
+      { state: "declined", detail: "platform_limit" },
+      { state: "errored", detail: "dispatch_failed" },
+      { state: "unreported", detail: undefined },
+    ].entries()) {
+      const dataset = ds(2100 + i);
+      const { requestId } = seedScreenedRequest(h.db, { datasetId: dataset });
+      const id = seedPublicationReview(h.db, {
+        requestId,
+        datasetId: dataset,
+        state: row.state as never,
+        detail: row.detail,
+        attempts: 2,
+      });
+      expect(costOf(id), row.state).toBe(1);
+    }
   });
 });

@@ -23,6 +23,7 @@ import {
 } from "../../shared/publication-review";
 import { minimumFailureSentence } from "../../shared/submission-minimums";
 import {
+  PLATFORM_RANK_SQL,
   claimPublicationReview,
   startPublicationReview,
   storePublicationReviewResult,
@@ -110,14 +111,15 @@ async function nonceOf(d1: D1Database, id: number): Promise<string> {
   return row?.nonce as string;
 }
 
-/** A counted call by another depositor: an errored row that reached a model. */
+/** A counted call by another depositor: an errored row whose run claimed, so it reached a model. */
 async function spend(d1: D1Database, n: number, requestedBy: number, from = 1000) {
   for (let i = 0; i < n; i++) {
     await d1
       .prepare(
         `INSERT INTO publication_reviews (request_id, dataset_id, head_sha, anonymous, requested_by,
-                                          state, detail, decided_at)
-         VALUES (?, 'nm000491', ?, 0, ?, 'errored', 'model_unavailable', datetime('now'))`,
+                                          state, detail, claimed_at, decided_at)
+         VALUES (?, 'nm000491', ?, 0, ?, 'errored', 'model_unavailable', datetime('now'),
+                 datetime('now'))`,
       )
       .bind(from + i, SCREENED_HEAD, requestedBy)
       .run();
@@ -230,6 +232,39 @@ describe("the review's statements on D1", () => {
       attempts: 1,
     });
     expect(dispatches).toHaveLength(1);
+  });
+
+  test("a restart the platform declines leaves the call it already spent counted, on D1", async () => {
+    dispatches = [];
+    const d1 = await seededD1();
+    const started = await startPublicationReview(env(d1), { requestId: 1, datasetId: DATASET });
+    const id = started.reviewId as number;
+    const nonce = await nonceOf(d1, id);
+    expect(await claimPublicationReview(env(d1), id, DATASET, nonce)).toBe("claimed");
+    await storePublicationReviewResult(env(d1), id, DATASET, nonce, {
+      kind: "error",
+      error: "model_unavailable",
+    });
+    await spend(d1, PLATFORM_DAILY_CAP - 1, 2);
+    const counted = async () =>
+      (await d1.prepare(PLATFORM_RANK_SQL).bind(Number.MAX_SAFE_INTEGER).first<{ n: number }>())?.n;
+    expect(await counted()).toBe(PLATFORM_DAILY_CAP);
+
+    dispatches = [];
+    const out = await startPublicationReview(env(d1), {
+      requestId: 1,
+      datasetId: DATASET,
+      adminUserId: 2,
+    });
+    expect(out).toMatchObject({ started: false, reason: "platform_limit", reviewId: id });
+    expect((await reviews(d1)).find((r) => r.id === id)).toMatchObject({
+      state: "declined",
+      detail: "platform_limit",
+      attempts: 2,
+    });
+    expect(dispatches).toHaveLength(0);
+    // Its first call is still one of the day's fifty.
+    expect(await counted()).toBe(PLATFORM_DAILY_CAP);
   });
 
   test("the claim is one conditional write bound to the screened commit and the request", async () => {
@@ -396,6 +431,8 @@ describe("the review's statements on D1", () => {
     const id = started.reviewId as number;
     const first = await nonceOf(d1, id);
     const nonce = first;
+    // The run took its claim, so the error it reports came after a model was reached.
+    expect(await claimPublicationReview(env(d1), id, DATASET, nonce)).toBe("claimed");
     await storePublicationReviewResult(env(d1), id, DATASET, nonce, {
       kind: "error",
       error: "model_unavailable",
