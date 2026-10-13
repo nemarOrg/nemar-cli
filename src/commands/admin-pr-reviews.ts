@@ -36,6 +36,7 @@ import {
   renderCheck,
   verdictOf,
 } from "../../shared/pr-review.js";
+import { PUBLICATION_DATASET_ID_RE } from "../../shared/publication-limits.js";
 import { say } from "../lib/admin-command.js";
 import {
   clearPrReviewAuthor,
@@ -85,7 +86,6 @@ import { ageOf, clip, plain } from "../lib/terminal-text.js";
 // them from here.
 export { ageOf, plain };
 
-const DATASET_ID_RE = /^(nm|xx|on)\d{6}$/;
 /** The Worker keeps this much of a reason; a longer one is refused here rather than cut without a word. */
 const MAX_REASON = 200;
 const LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
@@ -368,7 +368,7 @@ function failApi(err: unknown, spinner: Ora | null, fallback: string, json?: boo
 }
 
 function checkDataset(id: string, json?: boolean): string {
-  if (!DATASET_ID_RE.test(id))
+  if (!PUBLICATION_DATASET_ID_RE.test(id))
     die(`"${plain(id)}" is not a dataset id (like nm000108).`, undefined, json);
   return id;
 }
