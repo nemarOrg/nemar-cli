@@ -550,7 +550,7 @@ describe("show", () => {
     // CLI's own `plain()` is held to the same by publication-review-display.unit.test.ts, which
     // feeds it hostile text the Worker would never send.
     const ESC = String.fromCharCode(27);
-    const hostile = `${ESC}[2J${ESC}]0;title\u0007steered‮reversed​ end`;
+    const hostile = `${ESC}[2J${ESC}]0;title\u0007steered\u202ereversed\u200b\u2028end`;
     const { requestId } = seedScreenedRequest(h.db, { datasetId: "nm000480" });
     const base = failingReport() as { findings: Array<{ note: string }>; summary: string };
     base.summary = hostile;
