@@ -377,9 +377,14 @@ function checkRemoteBase(base: string): string {
 
 /**
  * Clone each dataset (shallow, blob-less, anonymously), fetch the blobs the job's readers open in
- * one batch, read it through those readers, and store the root documents and the summary. A dataset that cannot be cloned, whose tree cannot be
- * read, or whose `dataset_description.json` is not readable is skipped with a closed word (the job
- * would stop at `description_unreadable` for it too); an entry already in the corpus is left alone.
+ * one batch, read it through those readers, and store the root documents and the summary. A dataset
+ * that cannot be cloned, whose tree cannot be read, or whose `dataset_description.json` is not
+ * there to be read is skipped with a closed word; an entry already in the corpus is left alone.
+ *
+ * The description is required here though the job asks less of it: the job reviews a dataset with
+ * no description (as a failed minimum) and only stops at one it could not read, but every dataset in
+ * a corpus of published ones has a readable description, and every defect is made by editing it.
+ * `description_unreadable` therefore covers an absent description as well as an unreadable one.
  */
 export async function buildCorpus(opts: BuildCorpusOptions): Promise<BuildCorpusResult> {
   const ids = [...new Set(opts.ids)];
@@ -426,7 +431,8 @@ export async function buildCorpus(opts: BuildCorpusOptions): Promise<BuildCorpus
         let summary: StructuralSummary;
         try {
           docs = readRootDocuments(clone, tree);
-          // The job stops here too: every fact below a description nobody could read is invented.
+          // Not an entry: a published dataset has a readable description, and the defects edit it
+          // (the job itself goes on past an absent one, and stops only at one it could not read).
           if (docs.dataset_description.state !== "present") {
             skips.push({ id, reason: "description_unreadable" });
             continue;
