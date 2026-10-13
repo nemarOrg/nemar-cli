@@ -336,6 +336,10 @@ describe("sizeLine", () => {
  * Run `body` with the process in time zone `zone` (Bun honours a change of `TZ` at run time), and
  * put the zone back afterwards. A test of a timestamp that carries no zone must not pass only
  * because the machine it runs on is in UTC, as a CI runner is.
+ *
+ * The zone is put back by assigning it, never by deleting `TZ`: Bun keeps the last zone it was
+ * given after the key is deleted, so a delete would leave every later file in this process in the
+ * zone of the call. `bun test` runs in UTC when `TZ` is unset, so UTC is what an unset one means.
  */
 function inZone(zone: string, body: () => void): void {
   const previous = process.env.TZ;
@@ -343,13 +347,35 @@ function inZone(zone: string, body: () => void): void {
   try {
     body();
   } finally {
-    if (previous === undefined) Reflect.deleteProperty(process.env, "TZ");
-    else process.env.TZ = previous;
+    process.env.TZ = previous ?? "UTC";
   }
 }
 
 /** Zones west and east of UTC: a timestamp read in either as local time is hours off. */
 const ZONES = ["America/Los_Angeles", "Pacific/Auckland"] as const;
+
+describe("inZone", () => {
+  // A date in October 2026: Los Angeles is on daylight time (UTC-7), Auckland too (UTC+13).
+  const offsetNow = () => new Date("2026-10-13 12:00:00").getTimezoneOffset();
+
+  // First of the file's uses of `inZone`: a restore that leaks would leave the next measurement
+  // of "before" in the zone it leaked, and the test could not see it.
+  test("puts the zone back, so no later test in the process is left in it", () => {
+    // Bun keeps the last zone it was given when `TZ` is deleted, so a restore that deletes the key
+    // leaves the process in the zone of the call: every later file would then read a timestamp
+    // with no zone (SQLite's UTC ones) as local time.
+    const before = offsetNow();
+    inZone("America/Los_Angeles", () => {});
+    expect(offsetNow()).toBe(before);
+    inZone("Pacific/Auckland", () => {});
+    expect(offsetNow()).toBe(before);
+  });
+
+  test("really changes the zone inside the call", () => {
+    inZone("America/Los_Angeles", () => expect(offsetNow()).toBe(420));
+    inZone("Pacific/Auckland", () => expect(offsetNow()).toBe(-780));
+  });
+});
 
 describe("requestedAge", () => {
   test("a timestamp the database wrote (UTC, no zone) is read as UTC, in any time zone", () => {
