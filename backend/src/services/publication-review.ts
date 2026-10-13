@@ -667,25 +667,25 @@ async function handOver(env: Bindings, h: HandOver): Promise<StartOutcome> {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * The nonce of a review still waiting for its report, and the state it waits in. Replays and
- * strangers find nothing: a stored result has no nonce, a declined or errored row has none, and
- * a re-start replaced it. The one place a nonce is read; every other read of a review selects
- * `ROW_COLUMNS`, which leaves it out.
+ * The nonce of a review still waiting for its report (`dispatched`, or `unreported` after the
+ * watchdog gave up). Replays and strangers find nothing: a stored result has no nonce, a declined
+ * or errored row has none, and a re-start replaced it. The one place a nonce is read; every other
+ * read of a review selects `ROW_COLUMNS`, which leaves it out.
  */
 export async function pendingPublicationReviewNonce(
   db: Db,
   reviewId: number,
   datasetId: string,
-): Promise<{ nonce: string; state: "dispatched" | "unreported" } | null> {
+): Promise<{ nonce: string } | null> {
   const row = await db
     .prepare(
-      `SELECT nonce, state FROM publication_reviews
+      `SELECT nonce FROM publication_reviews
         WHERE id = ? AND dataset_id = ? AND state IN ('dispatched', 'unreported')
           AND nonce IS NOT NULL LIMIT 1`,
     )
     .bind(reviewId, datasetId)
-    .first<{ nonce: string; state: "dispatched" | "unreported" }>();
-  return row ? { nonce: row.nonce, state: row.state } : null;
+    .first<{ nonce: string }>();
+  return row ? { nonce: row.nonce } : null;
 }
 
 export type PublicationClaimResult =
@@ -715,13 +715,13 @@ const REQUEST_IS_CURRENT = `(SELECT 1 FROM publication_requests AS pr
  * The claim: one conditional write, so a dispatch buys one model call. It takes the review only
  * while its nonce is the live one, it was never claimed, and the request still stands as above.
  */
-export const CLAIM_SQL = `UPDATE publication_reviews SET claimed_at = datetime('now')
+const CLAIM_SQL = `UPDATE publication_reviews SET claimed_at = datetime('now')
   WHERE id = ? AND dataset_id = ? AND nonce = ? AND claimed_at IS NULL
     AND state IN ('dispatched', 'unreported')
     AND EXISTS ${REQUEST_IS_CURRENT}`;
 
 /** The refusal of a claim: the same row predicate, with the request no longer current. */
-export const CLAIM_STALE_SQL = `UPDATE publication_reviews
+const CLAIM_STALE_SQL = `UPDATE publication_reviews
     SET state = 'errored', detail = 'stale_head', nonce = NULL, decided_at = datetime('now')
   WHERE id = ? AND dataset_id = ? AND nonce = ? AND claimed_at IS NULL
     AND state IN ('dispatched', 'unreported')
@@ -832,7 +832,7 @@ function whileWaiting(
  * Fires only while the claimed review it came from is still waiting under its nonce (the last
  * three binds), so a replay, a stranger's nonce or a report nobody claimed re-blocks nothing.
  */
-export const REBLOCK_SQL = `UPDATE publication_requests
+const REBLOCK_SQL = `UPDATE publication_requests
     SET status = 'blocked', block_reason = 'min_requirements_failed',
         min_requirements_reasons = ?, approval_requested_by = NULL, approval_dispatched_at = NULL,
         updated_at = datetime('now')
@@ -846,7 +846,7 @@ export const REBLOCK_SQL = `UPDATE publication_requests
  * `unreported` (the last three binds), so a replay does not re-arm a mail that was since sent.
  * `needsClaim` is whether the result being stored is a report, which needs a claim.
  */
-export function rearmMailSql(needsClaim: boolean): string {
+function rearmMailSql(needsClaim: boolean): string {
   return `UPDATE publication_requests
     SET identifier_screen_emailed_at = NULL, identifier_screen_mail_claimed_at = NULL
   WHERE id = ? AND status IN ('requested', 'blocked') AND anonymous = ?
@@ -863,7 +863,7 @@ export function rearmMailSql(needsClaim: boolean): string {
  * guarded like the others, so it fires only when the write of the result takes effect. The binds are
  * those of {@link rearmMailSql} followed by the review's id.
  */
-export function rearmOverdueMailSql(needsClaim: boolean): string {
+function rearmOverdueMailSql(needsClaim: boolean): string {
   return `UPDATE publication_requests
     SET identifier_screen_emailed_at = NULL, identifier_screen_mail_claimed_at = NULL
   WHERE id = ? AND status IN ('requested', 'blocked') AND anonymous = ?
