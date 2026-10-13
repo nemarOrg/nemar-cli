@@ -10,6 +10,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   DATASET_STATUSES,
   describeScreen,
@@ -32,6 +34,17 @@ describe("the re-exports are the same functions, not copies", () => {
   test("and the shared module's: whether an approval has started publishing, and the steps before it", () => {
     expect(screen.hasStartedPublishing).toBe(steps.hasStartedPublishing);
     expect(screen.PRE_PUBLICATION_STEPS).toBe(steps.PRE_PUBLICATION_STEPS);
+  });
+
+  test("the review's view imports the moved code from where it now lives, never from the screen", () => {
+    const view = readFileSync(
+      join(import.meta.dir, "../src/services/publication-review-view.ts"),
+      "utf8",
+    );
+    // `identifier-screen.ts` imports the view; an import back would be a cycle.
+    expect(view).not.toMatch(/from "\.\/identifier-screen(\.js)?"/);
+    expect(view).toContain('from "./identifier-screen-stored.js"');
+    expect(view).toContain('from "../../../shared/publication-steps.js"');
   });
 });
 

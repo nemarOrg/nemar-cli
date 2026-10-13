@@ -113,6 +113,14 @@ export interface PublicationReviewSummary {
   headline: string;
   tone: "ok" | "note" | "warn" | "stop";
   reasons: ReasonCode[];
+  /**
+   * An administrator's `start` is offered for this request: the one rule `describePublicationReview`
+   * uses for its next command (`startOffered`), and the route's own screen precondition. False
+   * unless the review is on and applies. A start the platform's allowance or the Worker's
+   * ownership refuses is still offered here, and answers 409; a client that starts many stops on
+   * `platform_limit`.
+   */
+  start_offered: boolean;
   /** The review in force, when there is one. */
   review_id: number | null;
   head_sha: string | null;
@@ -174,6 +182,18 @@ export interface PublicationReviewHistoryEntry {
   decided_at: string | null;
 }
 
+/**
+ * The request's identifier screen in `describeScreen`'s words: the same view the list row's
+ * `identifier_screen` carries, one function behind both. `state` is the stored state, `exempt` for
+ * a sandbox dataset, or null when no screen was started.
+ */
+export interface PublicationReviewScreenView {
+  state: string | null;
+  headline: string;
+  tone: "ok" | "note" | "warn" | "stop";
+  lines: string[];
+}
+
 /** `GET /admin/publish/:id/review`. */
 export interface PublicationReviewDetail {
   environment: PublicationReviewEnvironment;
@@ -182,6 +202,20 @@ export interface PublicationReviewDetail {
   request_id: number;
   request_status: string;
   anonymous: boolean;
+  /** The request's screen, so `approve` and `next` show it from the one read they make. */
+  identifier_screen: PublicationReviewScreenView;
+  /** The screen acknowledgment on record (who and when), or null. Its reason is not carried. */
+  screen_acknowledgment: { by: number; at: string } | null;
+  /** The request's block reason when it is blocked, as a plain word (`shownBlockReason`), else null. */
+  block_reason: string | null;
+  /**
+   * The request is `approving` and a step after the validation-only ones completed
+   * (`hasStartedPublishing`): a resume passes no gate, and `approve` without `--resume` would
+   * start the run over.
+   */
+  started_publishing: boolean;
+  /** `datasets.total_files` (the manifest-first count), or null when unknown. */
+  total_files: number | null;
   applies: boolean;
   gate: PublicationReviewGateState;
   /** Null when the request is not assessed; see {@link PublicationReviewSummary.outcome}. */

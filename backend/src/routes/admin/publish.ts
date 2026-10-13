@@ -124,6 +124,7 @@ export function registerPublishRoutes(admin: AdminRouter): void {
         identifier_screen_nonce?: string | null;
         identifier_screen_report?: string | null;
         identifier_screen_ack_by: number | null;
+        identifier_screen_ack_at: string | null;
         review_ds_id: string | null;
         review_ds_source: string | null;
         review_ds_is_exemplar: number | null;
@@ -148,6 +149,8 @@ export function registerPublishRoutes(admin: AdminRouter): void {
           identifier_screen_status: r.identifier_screen_status,
           identifier_screen_report: r.identifier_screen_report ?? null,
           identifier_screen_ack_by: r.identifier_screen_ack_by,
+          identifier_screen_ack_at: r.identifier_screen_ack_at,
+          steps_completed: r.steps_completed ?? null,
         },
         dataset:
           r.review_ds_id === null
@@ -158,6 +161,8 @@ export function registerPublishRoutes(admin: AdminRouter): void {
                 concept_doi: r.review_ds_concept_doi,
                 ezid_status: r.review_ds_ezid_status,
                 first_published_at: r.review_ds_first_published_at,
+                // The detail's field; the summary does not use it.
+                total_files: null,
               },
       })),
       nowMs,
