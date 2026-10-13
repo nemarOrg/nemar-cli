@@ -30,15 +30,20 @@ import {
 import type { PublicationReviewSummary, PublishRequestsResponse } from "../src/lib/api/publish";
 import type { ReviewRead } from "../src/lib/publication-review-approve";
 import {
+  type NextTally,
   OBJECTS_PER_LOCK_CALL,
   SIZE_LINE_THRESHOLD,
   type YAnswer,
   cardLines,
+  emptyTally,
+  exitCodeOf,
   nextQueue,
   parseChoice,
   requestedAge,
   resumeOf,
   sizeLine,
+  stillNeedYou,
+  tallyLine,
   yAnswer,
 } from "../src/lib/publication-review-next";
 
@@ -434,6 +439,13 @@ describe("sizeLine", () => {
     );
   });
 
+  test("a count that is not a number is not believed", () => {
+    // An older Worker sends no count; the type says number | null, the network says anything.
+    for (const odd of [undefined, "12400", Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(sizeLine(odd as unknown as number | null)).toBeNull();
+    }
+  });
+
   test("a part of a call is a call", () => {
     expect(sizeLine(12_401)).toBe(
       "about 12,401 files; locking them takes about 125 calls to the API",
@@ -605,5 +617,31 @@ describe("cardLines", () => {
     );
     expect(text).toContain("[2Jbob");
     for (const line of text.split("\n")) expect(line).not.toMatch(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u);
+  });
+});
+
+describe("the tally and the exit code", () => {
+  const tally = (over: Partial<NextTally> = {}): NextTally => ({ ...emptyTally(), ...over });
+
+  test("nothing done says so; what was done is counted in the order it was asked", () => {
+    expect(tallyLine(tally())).toBe("Nothing was changed.");
+    expect(tallyLine(tally({ approved: 2, denied: 1, commented: 3, skipped: 4, failed: 5 }))).toBe(
+      "Done: 2 approved, 1 denied, 3 commented, 4 skipped, 5 failed.",
+    );
+    expect(tallyLine(tally({ skipped: 1 }))).toBe("Done: 1 skipped.");
+  });
+
+  test("skipped and failed are what still needs the administrator; the rest is done", () => {
+    expect(stillNeedYou(tally({ approved: 3, denied: 2, commented: 1 }))).toBe(0);
+    expect(stillNeedYou(tally({ skipped: 2, failed: 1 }))).toBe(3);
+  });
+
+  test("0 when nothing failed, 1 when anything did, 130 when interrupted, whatever else", () => {
+    expect(exitCodeOf(tally(), false)).toBe(0);
+    expect(exitCodeOf(tally({ approved: 2, skipped: 1, commented: 1 }), false)).toBe(0);
+    expect(exitCodeOf(tally({ failed: 1 }), false)).toBe(1);
+    expect(exitCodeOf(tally({ approved: 5, failed: 1 }), false)).toBe(1);
+    expect(exitCodeOf(tally(), true)).toBe(130);
+    expect(exitCodeOf(tally({ failed: 2 }), true)).toBe(130);
   });
 });

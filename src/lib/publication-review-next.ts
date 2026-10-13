@@ -179,7 +179,9 @@ export const OBJECTS_PER_LOCK_CALL = 100;
  * is known only once the first lock call has listed them, so this says "about".
  */
 export function sizeLine(totalFiles: number | null): string | null {
-  if (totalFiles === null || totalFiles < SIZE_LINE_THRESHOLD) return null;
+  // The count crossed the network: an older Worker sends none, and a number is all that is believed.
+  if (typeof totalFiles !== "number" || !Number.isFinite(totalFiles)) return null;
+  if (totalFiles < SIZE_LINE_THRESHOLD) return null;
   const calls = Math.ceil(totalFiles / OBJECTS_PER_LOCK_CALL);
   return `about ${totalFiles.toLocaleString("en-US")} files; locking them takes about ${calls.toLocaleString("en-US")} calls to the API`;
 }
@@ -263,8 +265,9 @@ export function cardLines(input: CardInput): string[] {
     if (detail.reasons.length > CARD_REASONS) {
       out.push(`${indent}+${detail.reasons.length - CARD_REASONS} more (d shows them)`);
     }
-  } else if (row.publication_review !== undefined && row.publication_review.reasons.length > 0) {
-    out.push(`${indent}${chalk.dim(row.publication_review.reasons.map(plain).join(", "))}`);
+  } else if (Array.isArray(row.publication_review?.reasons)) {
+    const codes = row.publication_review.reasons.map(plain).join(", ");
+    if (codes !== "") out.push(`${indent}${chalk.dim(codes)}`);
   }
 
   const size = detail === null ? null : sizeLine(detail.total_files);
@@ -284,4 +287,53 @@ export function cardLines(input: CardInput): string[] {
     out.push(chalk.yellow(`  y is not offered: ${answer.why}`));
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The tally and the exit code
+// ---------------------------------------------------------------------------------------------
+
+/** What one walk did, request by request. */
+export interface NextTally {
+  approved: number;
+  denied: number;
+  commented: number;
+  skipped: number;
+  /** A write that was refused or could not be made: an approval, a denial or a comment. */
+  failed: number;
+}
+
+export const emptyTally = (): NextTally => ({
+  approved: 0,
+  denied: 0,
+  commented: 0,
+  skipped: 0,
+  failed: 0,
+});
+
+/** `Done: 1 approved, 1 skipped.`, or that nothing was changed. */
+export function tallyLine(t: NextTally): string {
+  const parts = [
+    t.approved && `${t.approved} approved`,
+    t.denied && `${t.denied} denied`,
+    t.commented && `${t.commented} commented`,
+    t.skipped && `${t.skipped} skipped`,
+    t.failed && `${t.failed} failed`,
+  ].filter(Boolean);
+  return parts.length === 0 ? "Nothing was changed." : `Done: ${parts.join(", ")}.`;
+}
+
+/** Requests the walk leaves for the administrator: the ones skipped and the ones that failed. */
+export function stillNeedYou(t: NextTally): number {
+  return t.skipped + t.failed;
+}
+
+/**
+ * The walk's exit code: 130 when it was interrupted (the shell's code for Ctrl+C), else 1 when
+ * anything failed, else 0. A request that was skipped or left open is not a failure; a script that
+ * asked for an approval and was refused has to be able to tell.
+ */
+export function exitCodeOf(t: NextTally, interrupted: boolean): 0 | 1 | 130 {
+  if (interrupted) return 130;
+  return t.failed > 0 ? 1 : 0;
 }
