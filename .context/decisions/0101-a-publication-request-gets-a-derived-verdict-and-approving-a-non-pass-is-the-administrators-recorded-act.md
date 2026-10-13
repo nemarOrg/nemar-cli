@@ -115,21 +115,37 @@ This rule is not negotiable, and nothing in this ADR or a later phase may weaken
 - **Every byte sent to the model is examined by the shared mechanical rules immediately before it is sent.**
   Because the screen does not read the files the model reads, screen-first is the ORDERING rule,
   and a pre-send check is the CONTENT rule.
-  The review job applies `scanTextForLocalPaths` to each text file and `scanJsonKeys` to each JSON document,
-  over exactly the bytes it is about to send.
-  A file with any finding, a file it cannot read in full, a file that is not valid UTF-8,
+  The scanned string is the sent string.
+  The job normalizes each document first: default-ignorable and invisible code points (variation selectors, Hangul fillers and the like) and lone surrogates are removed,
+  the text is put into Unicode form NFKC (so a fullwidth slash or letter is seen as the person and the model read it),
+  and the shared `tidy` cleans the rest.
+  The input of that step is bounded, and a document with a run of more than 64 combining marks is withheld,
+  because NFKC is quadratic on such a run and real text never has one.
+  The job then applies `scanTextForLocalPaths` to each text file and `scanJsonKeys` to each JSON document,
+  and for a JSON document to every key and every string one by one, with local rules for a `file:` URL, a drive path and a UNC path,
+  over exactly the normalized bytes it is about to send.
+  A file with any finding, a file it cannot read in full, a file that is not valid UTF-8 (a NUL byte is not text),
+  a JSON document nested deeper than 32 levels,
   and a root document that is an annexed link or pointer rather than text in git
   are withheld from the model whole.
+  A `dataset_description.json` with a NUL byte is the one exception to the NUL rule: it stays present, fails the ADR 0026 minimums as JSON that does not parse,
+  and is not sent, so a depositor still hits the hard refusal and not an overridable one.
   The evidence says which file classes were withheld, and the counts by finding kind in the screen's own vocabulary;
   a question that needs a withheld file cannot be better than unknown.
   Only the pre-send function can produce the input type the prompt builder accepts
-  (a branded `ClearedText`, as ADR 0092 brands a parsed report), and a test keeps casts to it out of every other file.
+  (a branded `ClearedText`, as ADR 0092 brands a parsed report), a test keeps casts to it out of every other file,
+  and the prompt builder also checks at run time that pre-send cleared each document string it is given
+  (pre-send keeps a digest of each string it clears, never the text), because a lexical test cannot see a cast through a type predicate, a generic or `JSON.parse`.
 - **What the pre-send check is, stated without overstatement.**
   The pre-send check applies the shared rules to the bytes sent.
-  For README, CHANGES and LICENSE the only rule today is a local-user-path pattern that examines the first match only (#1737).
+  For README, CHANGES and LICENSE the only rule today is a local-user-path pattern that examines every match (#1737);
+  the `file:`, drive and UNC forms are checked in JSON strings and keys only, so `C:/Users/x` in a README passes.
+  Lookalikes that NFKC does not fold to ASCII (a division slash, a Cyrillic letter) are not seen in any document.
   It is a consistency control, not a privacy control.
   No rule recognizes a name, email address or date in prose.
-  Fixing #1737 is a prerequisite of Phase 1; extending the screen to the root documents is #1736.
+  Extending the screen to the root documents is #1736.
+  The input limit and the cost bound assume about four characters to a token; adversarial text can cost more,
+  the API's refusal of an oversize call is `model_invalid`, and the daily caps bound the cost either way.
 - **Why prose is sent at all.**
   Enrichment and the pre-screen already send this prose to a model in production,
   the depositor has asked for exactly this content to be made public,
@@ -145,7 +161,11 @@ This rule is not negotiable, and nothing in this ADR or a later phase may weaken
   (these include `EthicsApprovals`, `License`, `Authors`, `Funding`, `ReferencesAndLinks` and `SourceDatasets`, the fields the questions below turn on);
   any other key is counted and not shown.
 - CHANGES, at most 8,000 characters, and the root LICENSE, at most 4,000, to compare with the `License` field.
-- `participants.json`, the column descriptions, at most 8,000 characters.
+- `participants.json`, the column descriptions only, at most 8,000 characters:
+  a count of columns and, for each column in the file's order, the string fields `LongName`, `Description` and `Units`, each capped,
+  and never a column's name, a `Levels` value or any per-participant value.
+  The whole file is withheld when a column name is a study code (`sub01`, `S01`, `P001`, `participant_01`, a pure number), is longer than 64 characters or names an identifier,
+  and as unreadable when it holds more than 200 columns or is not an object of objects (a subject-keyed file).
 - A structural summary the job computes from the tree, in counts and closed words only:
   subjects, sessions and recordings counted, the datatypes, the file formats folded into a closed list
   (the preflight's `KNOWN_FORMATS` plus `.edf` and `.bdf`, which the preflight counts as screened and so leaves out of that list; the rest `.other`),
@@ -162,10 +182,13 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
 
 - **No tools, one call, a schema-constrained answer**, exactly as in ADR 0092.
   Dataset text is untrusted: it sits in blocks fenced by a per-run random nonce,
-  the platform's facts sit outside any fence, and an instruction found in the text sets `steering`.
+  the platform's facts sit outside any fence in a block tagged with the same nonce, and only that exact tag is trusted,
+  so a facts-like block inside a document is text; an instruction found in the text sets `steering`.
   The model writes only a result per question, findings from a closed list, a short summary and the steering flag;
   it cannot write the evidence, the version, the model name, a reason or the verdict.
   Free text is reduced by `sanitizeNote`, and only its start is kept.
+  Every finding the model returns is validated, and the steering and blocker rules apply to all of them before the list is cut to eight,
+  with those findings kept first, so a steering attempt or a blocker buried past the cap still counts, and an invalid finding past the cap still refuses the output.
 - **Four questions, each answered `pass`, `fail` or `unknown`:**
   - `complete_and_honest`: the README says what the data is, how it was collected and how to use it,
     and what it claims agrees with the structural summary;
@@ -284,16 +307,27 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
 - **The reviewer.** `run-publication-review.yml` in `nemarDatasets/.github`,
   authored in this repository and deployed by whole-file copy,
   holds the only federated Anthropic identity for this review.
-  It follows `run-pr-review.yml` step for step:
+  It follows `run-pr-review.yml` with one deliberate reordering:
   mask the callback token first; validate every payload field; claim before anything is installed, minted or read;
-  check out `nemarOrg/nemar-cli` at `main` for the script;
   mint a read-only token (contents and actions: read) for ONE dataset repository;
-  fetch `main` as git data, shallow and blob-less, with `init` and `fetch` and never a checkout;
+  fetch `main` as git data, shallow and blob-less, with `init` and `fetch` and never a checkout,
+  handing the token to each git command for that command alone and never writing it into the clone,
+  and prefetch in one batch exactly the blobs the script reads (the root documents and the sampled sidecars),
+  because the model step holds no credential and cannot read lazily;
   refuse as `stale_head` when the fetched `main` is not the dispatched head;
+  only THEN check out `nemarOrg/nemar-cli` at `main` for the script, set up the runtime, and install its dependencies
+  with `--frozen-lockfile --ignore-scripts`;
   mint the OpenID Connect token last;
   give the model step the federated identity and the callback token, and no GitHub credential;
   report a failure after the claim through a dependency-free `curl` step;
+  pin every third-party action to a full commit SHA;
   use one concurrency group per run; and print ids and fixed words only, because the log is public.
+  What the order closes: code planted before the mint, install-time scripts, and the dataset token sitting in a configuration file.
+  What it does not close: the pinned actions' own code; the callback token, which the dispatch payload carries in the event file that every step can read
+  (the model step needs it to post, as in the pull-request review); and the mint action's post step, which the dependency tree's runtime code in the model step could reach.
+  A two-job split that hands the clone over as an artifact was rejected, because the central repository's logs and artifacts are public and the clone is private dataset text.
+  The head is checked when the clone is fetched, a little before the model call, so a push to `main` in that gap still costs one model call;
+  the approval's own head check (ADR 0086) still refuses a stale approval.
 - **Where it departs from the pull-request review.**
   There is no GitHub event: the Worker starts the review from the screen result, so the App needs no new subscription.
   There is no pull-request text and no fork: the job reads `main` at the screened commit.
