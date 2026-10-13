@@ -520,17 +520,26 @@ async function recordUnconfigured(
       .run();
     if ((inserted.meta.changes ?? 0) === 1) reviewId = Number(inserted.meta.last_row_id);
   } else if (plan.kind === "restart") {
+    // The same rule as the restart that does hand over (`restartGuard`): a `dispatched` row is
+    // closed only once it is overdue. A review that is running is not made unanswerable because
+    // the Worker could not have started another.
+    const guard = restartGuard(plan.row);
     const closed = await db
       .prepare(
         `UPDATE publication_reviews
             SET state = 'errored', detail = 'dispatch_unconfigured', nonce = NULL,
                 claimed_at = NULL, decided_at = datetime('now'),
                 attempts = attempts + ?, started_by = COALESCE(?, started_by)
-          WHERE id = ? AND state = ? AND detail IS ?`,
+          WHERE ${guard.sql}`,
       )
-      .bind(plan.extraCalls, adminUserId ?? null, plan.row.id, plan.row.state, plan.row.detail)
+      .bind(plan.extraCalls, adminUserId ?? null, ...guard.binds)
       .run();
-    if ((closed.meta.changes ?? 0) === 1) reviewId = plan.row.id;
+    if ((closed.meta.changes ?? 0) === 1) {
+      reviewId = plan.row.id;
+    } else if (plan.row.state === "dispatched") {
+      const now = await readReview(db, plan.row.id);
+      if (now?.state === "dispatched") return answer("running", now.id);
+    }
   }
   console.warn(
     `[publication-review] ${request.dataset_id} request ${request.id}: dispatch_unconfigured`,

@@ -1586,6 +1586,70 @@ describe("an administrator's start", () => {
     expect(h.dispatches()).toHaveLength(1);
   });
 
+  const unconfigured: [string, Partial<Bindings>][] = [
+    ["the callback secret", { PRESCREEN_CALLBACK_SECRET: undefined }],
+    ["the GitHub credential", { GITHUB_ADMIN_PAT: undefined }],
+  ];
+
+  for (const [what, missing] of unconfigured) {
+    for (const claimed of [false, true]) {
+      test(`without ${what}, a start does not close a ${claimed ? "claimed" : "fresh"} review that is running`, async () => {
+        // The restart rule is one rule: a `dispatched` row is restarted once it is past its
+        // deadline, whether or not the review can be handed over. Closed early, the running job's
+        // result got 401 and, `dispatch_unconfigured` being free, a later screen result started
+        // a second review while the first was still mid-call.
+        const target = startable("dispatched", undefined, 1, PROD_DATASET, claimed);
+        const before = JSON.stringify(state(target.reviewId));
+        const nonce = h.nonceOf(target.reviewId);
+        const out = await startPublicationReview(h.env(missing), {
+          requestId: target.requestId,
+          datasetId: PROD_DATASET,
+          ...admin,
+        });
+        expect(out).toEqual({ started: false, reason: "running", reviewId: target.reviewId });
+        expect(JSON.stringify(state(target.reviewId))).toBe(before);
+        expect(h.nonceOf(target.reviewId)).toBe(nonce);
+        if (claimed) {
+          const stored = await h.result(target.reviewId, {
+            outcome: "reported",
+            report: reportFor(SCREENED_HEAD, false),
+          });
+          expect(stored.status).toBe(200);
+          expect(state(target.reviewId)).toMatchObject({ state: "reported" });
+        }
+      });
+    }
+  }
+
+  test("without the callback secret, an overdue review is closed, and its call stays counted", async () => {
+    // Overdue and claimed: a job may have made its call before it went quiet.
+    const spent = startable("dispatched", undefined, 45, PROD_DATASET, true);
+    const gone = startable("dispatched", undefined, 45, "nm000481", false);
+    const before = counted();
+    expect(before).toBe(2);
+    for (const target of [spent, gone]) {
+      const out = await startPublicationReview(h.env({ PRESCREEN_CALLBACK_SECRET: undefined }), {
+        requestId: target.requestId,
+        datasetId: target.datasetId,
+        ...admin,
+      });
+      expect(out).toEqual({
+        started: false,
+        reason: "dispatch_unconfigured",
+        reviewId: target.reviewId,
+      });
+      expect(state(target.reviewId)).toMatchObject({
+        state: "errored",
+        detail: "dispatch_unconfigured",
+        nonce: null,
+      });
+    }
+    // The claimed one spent a call and the other, which nobody ever claimed, did not.
+    expect(state(spent.reviewId).attempts).toBe(2);
+    expect(state(gone.reviewId).attempts).toBe(1);
+    expect(counted()).toBe(1);
+  });
+
   test("a GitHub failure is dispatch_failed, and a start can try again", async () => {
     const { requestId } = seedScreenedRequest(h.db, { datasetId: PROD_DATASET });
     h.dispatchStatus = 500;
