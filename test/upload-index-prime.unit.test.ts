@@ -26,6 +26,7 @@ import {
   writeSync,
 } from "node:fs";
 import { join } from "node:path";
+import { Writable } from "node:stream";
 import {
   FILTER_PROCESS_KEY,
   FILTER_PROCESS_MARKER,
@@ -442,6 +443,7 @@ describe("the filter process never stays out of the configuration", () => {
     paths: string[],
     chunk = 0,
     chunkPaths = 100,
+    emptyFirst = false,
   ) =>
     Bun.spawn(
       [
@@ -453,6 +455,7 @@ describe("the filter process never stays out of the configuration", () => {
         String(delayMs),
         String(chunk),
         String(chunkPaths),
+        emptyFirst ? "1" : "0",
         ...paths,
       ],
       { stdout: "pipe", stderr: "pipe" },
@@ -788,6 +791,80 @@ describe("the filter process never stays out of the configuration", () => {
     );
     expect(describePrimeSkip("why")).toBe(
       "Large data files will be re-read by git through git-annex filter-process (why)",
+    );
+  });
+
+  test("an empty value written into the repository while it is out fails the step and commits nothing", async () => {
+    // Guards the empty-value refusal in restoreFilterProcess and in the recovery. A value
+    // someone sets meanwhile is theirs, except an empty one: git reads it as no filter at
+    // all, and an upload that went on would commit the file's raw content to git.
+    const dir = await dataset("empty-in-window", { [A]: 2 * MIB });
+    const configured = await filterConfig(dir);
+
+    const result = await runSteps(dir, {
+      openRemote: directoryRemote(dir),
+      primeMinBytes: MIB,
+      primeOnSuspended: () => {
+        spawnSync("git", ["config", "--local", FILTER_PROCESS_KEY, ""], { cwd: dir });
+      },
+    });
+
+    expect(result.status).toBe("fail");
+    const tree = await run(["git", "ls-tree", "-r", "--name-only", "HEAD"], dir);
+    expect(tree.stdout.split("\n")).not.toContain(A);
+    // The empty value is the person's to fix; the marker keeps the value to restore.
+    expect(await filterConfig(dir)).toEqual({ process: [""], marker: configured.process });
+
+    // And the next upload refuses at its start rather than calling that state clean.
+    const rerun = await runSteps(dir, { openRemote: directoryRemote(dir) });
+    expect(rerun.status).toBe("fail");
+    const after = await run(["git", "ls-tree", "-r", "--name-only", "HEAD"], dir);
+    expect(after.stdout.split("\n")).not.toContain(A);
+    const recovery = await restoreSuspendedFilterProcess(dir);
+    expect(recovery.status === "error" && recovery.error).toContain("do not run git add");
+  });
+
+  test("SIGTERM after an empty value was written into the repository puts the real value back", async () => {
+    // Guards the signal handler's restore: `git config --get-all` succeeds for an empty
+    // value, and a handler that took that as "someone's value" would leave no filter.
+    const dir = await trackedRepo(scratch.root, "empty-sigterm", { "a.edf": 300_000 });
+    const configured = await filterConfig(dir);
+    const child = spawnRunner(dir, "SIGTERM", 0, ["a.edf"], 0, 100, true);
+    await child.exited;
+
+    expect(child.signalCode).toBe("SIGTERM");
+    expect(await filterConfig(dir)).toEqual(configured);
+    expect(await stagedBlobSize(dir, "new.edf")).toBeLessThan(1_000);
+  });
+
+  test("the tracking step's warning counts what a priming that stopped in its second chunk did record", async () => {
+    // Guards passing `primed` from the result into the warning. The second chunk's refresh
+    // fails on an index.lock held in its window; the stream lets go of the lock as soon as
+    // the warning is written, so the rest of the step runs normally.
+    const dir = await dataset("partial-warning", { [A]: 2 * MIB, [B]: 2 * MIB });
+    const lock = join(dir, ".git", "index.lock");
+    let lines = "";
+    const stream = new Writable({
+      write(chunk, _encoding, done) {
+        lines += chunk.toString();
+        if (lines.includes("will be re-read")) rmSync(lock, { force: true });
+        done();
+      },
+    });
+
+    const result = await trackAndCopy(dir, {
+      openRemote: directoryRemote(dir),
+      primeMinBytes: MIB,
+      primeChunkPaths: 1,
+      primeSpinnerStream: stream,
+      primeOnSuspended: (chunk) => {
+        if (chunk === 1) writeFileSync(lock, "");
+      },
+    });
+
+    expect(result.status).toBe("ok");
+    expect(lines).toContain(
+      "Index stat data was recorded for 1 data file before it stopped; the other large data files will be re-read",
     );
   });
 

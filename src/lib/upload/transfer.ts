@@ -124,17 +124,24 @@ async function primeLargeDataFiles(
   targets: ReadonlyArray<{ path: string; size: number }>,
   minBytes: number,
   when: "before" | "after",
-  onSuspended?: () => void,
+  hooks: {
+    onSuspended?: (chunk: number) => void;
+    chunkPaths?: number;
+    stream?: NodeJS.WritableStream;
+  } = {},
 ): Promise<boolean> {
   const large = targets.filter((f) => f.size >= minBytes).map((f) => f.path);
   if (large.length === 0) return true;
-  const spinner = ora(
-    when === "before"
-      ? "Checking large data files an earlier run left in the index..."
-      : `Recording index stat data for ${countDataFiles(large.length)} of ${describeBytes(minBytes)} or more...`,
-  ).start();
+  const spinner = ora({
+    text:
+      when === "before"
+        ? "Checking large data files an earlier run left in the index..."
+        : `Recording index stat data for ${countDataFiles(large.length)} of ${describeBytes(minBytes)} or more...`,
+    ...(hooks.stream ? { stream: hooks.stream } : {}),
+  }).start();
   const result = await primeIndexStat(absolutePath, large, {
-    ...(onSuspended ? { onSuspended } : {}),
+    ...(hooks.onSuspended ? { onSuspended: hooks.onSuspended } : {}),
+    ...(hooks.chunkPaths === undefined ? {} : { chunkPaths: hooks.chunkPaths }),
     onProgress: (done, total) => {
       spinner.text = `Recording index stat data for large data files (${done.toLocaleString("en-US")} of ${total.toLocaleString("en-US")})...`;
     },
@@ -2162,8 +2169,12 @@ export async function uploadDataToS3(
     openRemote?: OpenRemote;
     /** Test hook: lets a small file reach the index priming (ADR 0100). */
     primeMinBytes?: number;
-    /** Test hook: runs while the filter process is out of the configuration. */
-    primeOnSuspended?: () => void;
+    /** Test hook: runs in each chunk's window while the filter process is out (after the add). */
+    primeOnSuspended?: (chunk: number) => void;
+    /** Test hook: the priming's chunk size, so a test can reach a second chunk. */
+    primeChunkPaths?: number;
+    /** Test hook: where the priming's spinner writes, so a test can read its lines. */
+    primeSpinnerStream?: NodeJS.WritableStream;
   } = {},
 ): Promise<Step<S3StepState>> {
   let progress = uploadProgress;
@@ -2293,7 +2304,19 @@ export async function uploadDataToS3(
         // upload, whose save leaves entries without stat data) is in the index with zero
         // stat data, and the add's check of already-indexed paths would stream it through
         // filter-process twice to learn it is unchanged.
-        if (!(await primeLargeDataFiles(absolutePath, addTargets, primeMinBytes, "before"))) {
+        const primeHooks = {
+          ...(deps.primeChunkPaths === undefined ? {} : { chunkPaths: deps.primeChunkPaths }),
+          ...(deps.primeSpinnerStream ? { stream: deps.primeSpinnerStream } : {}),
+        };
+        if (
+          !(await primeLargeDataFiles(
+            absolutePath,
+            addTargets,
+            primeMinBytes,
+            "before",
+            primeHooks,
+          ))
+        ) {
           return FAIL;
         }
         spinner = ora(`Tracking ${addTargets.length} data files with git-annex...`).start();
@@ -2320,13 +2343,10 @@ export async function uploadDataToS3(
         // again. Stamped first: the files are tracked whatever this finds, and a re-run that
         // has to put the configuration back does it at the start of the upload steps.
         if (
-          !(await primeLargeDataFiles(
-            absolutePath,
-            addTargets,
-            primeMinBytes,
-            "after",
-            deps.primeOnSuspended,
-          ))
+          !(await primeLargeDataFiles(absolutePath, addTargets, primeMinBytes, "after", {
+            ...primeHooks,
+            ...(deps.primeOnSuspended ? { onSuspended: deps.primeOnSuspended } : {}),
+          }))
         ) {
           return FAIL;
         }

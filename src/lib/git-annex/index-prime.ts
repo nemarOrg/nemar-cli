@@ -128,30 +128,49 @@ async function gitConfig(path: string, args: string[]): Promise<string | undefin
   }
 }
 
+/** Why a restore did not leave a filter process and no marker. */
+interface RestoreFailure {
+  error: string;
+  /** An empty filter process is in this repository's configuration: no filter at all. */
+  filterOff: boolean;
+}
+
+/** The failure text when the repository's own configuration holds an empty filter process. */
+const EMPTY_LOCAL_FILTER = `${FILTER_PROCESS_KEY} is empty in this repository's configuration, which turns git-annex's filter off`;
+
 /**
  * Put `value` back as the repository's filter process and drop the marker, then read
- * both back. A value someone set in the repository while it was out is theirs and is left
- * as it is; only the marker is removed. Returns git's complaint, or nothing when the
- * configuration holds a filter process again and no marker.
+ * both back. A non-empty value someone set in the repository while it was out is theirs
+ * and is left as it is; only the marker is removed. An empty value is never theirs to
+ * keep: git reads it as no filter at all, so the restore refuses, keeps the marker, and the
+ * caller fails its step. Returns why it did not succeed, or nothing when the configuration
+ * holds a filter process again and no marker.
  */
-async function restoreFilterProcess(path: string, value: string): Promise<string | undefined> {
+async function restoreFilterProcess(
+  path: string,
+  value: string,
+): Promise<RestoreFailure | undefined> {
+  const fail = (error: string, filterOff = false): RestoreFailure => ({ error, filterOff });
   const before = await readConfigValues(path, FILTER_PROCESS_KEY, "local");
-  if ("error" in before) return before.error;
+  if ("error" in before) return fail(before.error);
+  if (before.values.includes("")) return fail(EMPTY_LOCAL_FILTER, true);
   if (before.values.length === 0) {
     const set = await gitConfig(path, [FILTER_PROCESS_KEY, value]);
-    if (set) return set;
+    if (set) return fail(set);
   }
   const unset = await gitConfig(path, ["--unset-all", FILTER_PROCESS_MARKER]);
-  if (unset) return unset;
+  if (unset) return fail(unset);
   const now = await readConfigValues(path, FILTER_PROCESS_KEY, "local");
-  if ("error" in now) return now.error;
+  if ("error" in now) return fail(now.error);
   const expected = before.values.length === 0 ? [value] : before.values;
   if (JSON.stringify(now.values) !== JSON.stringify(expected)) {
-    return `${FILTER_PROCESS_KEY} reads back as ${JSON.stringify(now.values)}, not ${JSON.stringify(expected)}`;
+    return fail(
+      `${FILTER_PROCESS_KEY} reads back as ${JSON.stringify(now.values)}, not ${JSON.stringify(expected)}`,
+    );
   }
   const marker = await readConfigValues(path, FILTER_PROCESS_MARKER, "local");
-  if ("error" in marker) return marker.error;
-  if (marker.values.length > 0) return `${FILTER_PROCESS_MARKER} is still set`;
+  if ("error" in marker) return fail(marker.error);
+  if (marker.values.length > 0) return fail(`${FILTER_PROCESS_MARKER} is still set`);
   return undefined;
 }
 
@@ -234,6 +253,13 @@ export async function restoreSuspendedFilterProcess(path: string): Promise<Resto
       error: describeRestoreFailure(path, saved, current.error, await fallbackNow(path)),
     };
   }
+  if (current.values.includes("")) {
+    // Not the person's value to keep: git reads it as no filter at all. The marker stays.
+    return {
+      status: "error",
+      error: describeRestoreFailure(path, saved, EMPTY_LOCAL_FILTER, "unchecked"),
+    };
+  }
   if (current.values.length > 0) {
     const unset = await gitConfig(path, ["--unset-all", FILTER_PROCESS_MARKER]);
     if (unset) return { status: "warning", warning: describeStaleMarker(path, unset) };
@@ -242,10 +268,8 @@ export async function restoreSuspendedFilterProcess(path: string): Promise<Resto
   let failure = await restoreFilterProcess(path, saved);
   if (failure) failure = await restoreFilterProcess(path, saved);
   if (failure) {
-    return {
-      status: "error",
-      error: describeRestoreFailure(path, saved, failure, await fallbackNow(path)),
-    };
+    const fallback = failure.filterOff ? "unchecked" : await fallbackNow(path);
+    return { status: "error", error: describeRestoreFailure(path, saved, failure.error, fallback) };
   }
   return { status: "restored" };
 }
@@ -263,14 +287,17 @@ function restoreSync(path: string, value: string): string | undefined {
   const run = (args: string[]) =>
     spawnSync("git", ["config", "--local", ...args], {
       cwd: path,
-      stdio: ["ignore", "ignore", "pipe"],
+      stdio: ["ignore", "pipe", "pipe"],
       timeout: SIGNAL_RESTORE_TIMEOUT_MS,
     });
-  // A value someone set while it was out is theirs (exit 0 means one is there).
-  const present = run(["--get-all", FILTER_PROCESS_KEY]);
+  // A non-empty value someone set while it was out is theirs. An empty one is not: git
+  // reads it as no filter at all, so it is replaced like a missing one.
+  const present = run(["--null", "--get-all", FILTER_PROCESS_KEY]);
   if (present.error) return present.error.message;
-  if (present.status !== 0) {
-    const set = run([FILTER_PROCESS_KEY, value]);
+  const values =
+    present.status === 0 ? (present.stdout?.toString() ?? "").split("\0").slice(0, -1) : [];
+  if (!values.some((v) => v !== "")) {
+    const set = run(["--replace-all", FILTER_PROCESS_KEY, value]);
     if (set.error) return set.error.message;
     if (set.status !== 0) return set.stderr?.toString().trim() || `git config exited ${set.status}`;
   }
@@ -366,11 +393,11 @@ async function suspendForChunk(
   onSuspended?.(chunk);
   // Whatever the check before missed (an empty value it could not see, a value added
   // since), git must find no filter process at all before anything is refreshed: an
-  // empty one left in another scope means no filter, and the refresh would hash raw content.
+  // empty one left anywhere means no filter, and the refresh would hash raw content.
   const left = await readConfigValues(path, FILTER_PROCESS_KEY, "all");
   if ("error" in left) return `could not check ${FILTER_PROCESS_KEY}: ${left.error}`;
   if (left.values.length > 0) {
-    return `${FILTER_PROCESS_KEY} is still set in another scope once this repository's value is out`;
+    return `a filter process is set once this repository's value is out (${FILTER_PROCESS_KEY} came back, or is set in another scope)`;
   }
   const clean = await readConfigValues(path, "filter.annex.clean", "all");
   if ("error" in clean) return `could not check filter.annex.clean: ${clean.error}`;
@@ -514,7 +541,7 @@ export async function primeIndexStat(
       fallback = "unchecked";
       let suspendFailure: string | undefined;
       let refreshFailure: string | undefined;
-      let restoreFailure: string | undefined;
+      let restoreFailure: RestoreFailure | undefined;
       try {
         suspendFailure = await suspendForChunk(path, saved, index, options.onSuspended);
         if (!suspendFailure) {
@@ -536,7 +563,12 @@ export async function primeIndexStat(
       if (restoreFailure && saved !== undefined) {
         return {
           status: "error",
-          error: describeRestoreFailure(path, saved, restoreFailure, fallback),
+          error: describeRestoreFailure(
+            path,
+            saved,
+            restoreFailure.error,
+            restoreFailure.filterOff ? "unchecked" : fallback,
+          ),
         };
       }
       if (suspendFailure) return { status: "skipped", reason: suspendFailure, ...partial() };

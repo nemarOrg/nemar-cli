@@ -42,6 +42,8 @@ export interface DataStepsDeps {
   skipMinBytes?: number;
   /** Lets a small file reach the tracking step's index priming (ADR 0100). */
   primeMinBytes?: number;
+  /** Runs in each priming chunk's window while the filter process is out (ADR 0100). */
+  primeOnSuspended?: (chunk: number) => void;
   saveStep?: typeof saveDatasetStep;
   saveInactivityWarningAfterMs?: number;
   saveSpinnerStream?: NodeJS.WritableStream;
@@ -98,6 +100,7 @@ export async function runDataSteps(
     {
       openRemote: deps.openRemote,
       ...(deps.primeMinBytes === undefined ? {} : { primeMinBytes: deps.primeMinBytes }),
+      ...(deps.primeOnSuspended ? { primeOnSuspended: deps.primeOnSuspended } : {}),
     },
   );
   if (uploaded.status === "fail") return FAIL;
