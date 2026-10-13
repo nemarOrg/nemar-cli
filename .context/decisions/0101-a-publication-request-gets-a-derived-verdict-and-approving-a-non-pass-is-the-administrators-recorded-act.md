@@ -248,7 +248,17 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   Storing a review result tries the mail.
   A review that never reports is marked `unreported` by the watchdog, which mails it as such,
   and a late report re-arms the mail, as a late screen report does in `storeScreenResult`.
+  The mail reads the review at the deadline, which the other surfaces do not (section 7):
+  the lease frees a request's mail 30 minutes after the dispatch, and the mail it then sends says the review did not report,
+  whether or not the watchdog has marked the row, so a mail never says `running` about a review that is past its deadline
+  and is not mailed again;
+  a report that lands afterwards, on a row still `dispatched` or one the watchdog marked `unreported`, re-arms the mail.
+  An administrator's `start` after a mail has gone sends no second mail:
+  the administrator who started the review reads its result with `show`.
+  The depositor's resend of the reminder carries the same section, and while the mail is held for a review in flight
+  the resend does not mark the mail as sent, so the review's own mail still goes.
   The email gains one section, the review's headline and reasons in the shared words, with the next command.
+  It carries no model-written text: not the summary and not a finding's note, which only the detail view shows.
   The worst case is the screen's 50 minutes, plus the review's 30, plus one 30-minute tick; the expected case is minutes.
 - **A review starts again only from a new screen result, or by an administrator's `start`.**
   `start` restarts a row that was declined, errored, never reported, or is past its deadline,
@@ -299,11 +309,19 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   and its request's mail is tried.
   It runs whatever the flag says.
   The dev Worker never ages a row, so every surface reads a row dispatched longer ago than the deadline plus one tick
-  as `review_did_not_report`, as ADR 0093 does.
+  as `review_did_not_report`, as ADR 0093 does; the admin mail is the one exception and reads the deadline itself (section 6).
+  A result that arrives as the watchdog fires is never dropped:
+  the store, the re-block of a failed minimum and the mail re-arm are one atomic batch, and the two states a result may land on,
+  `dispatched` and `unreported`, are tried in that order (a row only moves from the first to the second).
 - **Caps.** A depositor's requests may cost 5 model calls in any 24 hours and the platform 50,
   counted from `attempts` after the insert so that concurrent starts cannot all slip under (ADR 0092's ranking).
+  `attempts` is one slot per attempt, and a restart of an attempt that reached a model adds one,
+  so nothing that happens to an attempt (a decline, a failed dispatch, the watchdog giving up) lowers what the calls before it cost.
+  An attempt counts when it is still `dispatched`, has reported, or took its claim and did not end in a word that says no model was reached;
+  one nobody claimed (the workflow undeployed, Actions down) held no model, because the claim precedes any model spend, and does not count.
   Over a cap the row is `declined` (`review_limit_reached`).
-  An administrator's `start` is held by the platform's cap only.
+  An administrator's `start` is held by the platform's cap only; the call still counts toward the depositor's tally,
+  because it costs the platform and bounds the depositor's own next request.
   There is no contributor tally and no override table:
   depositors are approved accounts (ADR 0040), publication requests are rare, and the cap is enough.
 - **The flag, and what it does not switch** (call 11, amended).
@@ -313,9 +331,22 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   The mechanical refusals ship unconditionally in Phase 2:
   a `blocked` request cannot be approved, and the ADR 0026 minimums refuse wherever they are evaluated, whatever the flag says.
   With the flag off, no review is started, the claim route refuses a new claim so that no model call is spent,
-  the result route still stores a result whose run was already claimed (the call was spent, and the record stays honest),
+  the result route still stores the result of a run that took its claim (the call was spent, and the record stays honest),
   the watchdog still closes rows, the mail does not wait for a review,
   and a stored review is shown as advice and gates nothing.
+  A report is stored only for a run that took its claim, whatever the flag says, because a report implies a model call
+  and the claim precedes any spend; an error word is recorded whether or not a claim was taken,
+  so that a failure before the claim (a payload the job could not validate, a fetch that failed) can be diagnosed.
+  A request that is not assessed (the review is off and no row exists, the request is over and has no row, a mirror or an exemplar)
+  has no outcome and no reasons on any surface, and is never shown as a pass or as action required.
+- **The administrator's start.** `POST /admin/publish/:id/review/start` is a thin adapter over the one start path a screen result also takes.
+  It accepts a bearer key, or a session cookie only from a NEMAR origin (the rule of `approve-dispatch`, because the call spends the platform's money).
+  It answers 202 when a review was handed over (`dispatched`, `redispatched`) or its run stands (`dispatch_claimed`),
+  409 with a closed code for a request that cannot be started as it stands (`review_disabled`, `not_applicable`, `not_owned_here`,
+  `request_not_requested`, `screen_not_ready`, `running`, `has_result`, `platform_limit`),
+  502 when the hand-over failed (`dispatch_failed`, `dispatch_unconfigured`), and 500 for a database fault.
+  It writes the audit row `publication_review_started` for a start that is going; a failed audit write is logged and never fails the start.
+  There is no route for `start --all`: that is a loop in the command-line interface (Phase 2).
 - **Environment fences.** The dev Worker starts reviews only for the datasets it owns (`isDevOwnedDatasetId`),
   and production never for those; each Worker answers only from its own D1.
   The review mails administrators only, under the production-only fence of `getAdminEmailsForCategory`,
