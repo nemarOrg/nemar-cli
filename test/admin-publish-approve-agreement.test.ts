@@ -272,6 +272,42 @@ const SCENARIOS: Scenario[] = [
     workerRefusal: "needs_override",
   },
 
+  {
+    name: "an acknowledgment this administrator recorded earlier is enough",
+    seed: (w) => {
+      const requestId = golden(w, { status: "unchecked" });
+      seedReport(w.db, requestId);
+      w.db.run(
+        `UPDATE publication_requests
+            SET identifier_screen_ack_by = ?, identifier_screen_ack_reason = ?,
+                identifier_screen_ack_at = datetime('now')
+          WHERE id = ?`,
+        [w.adminId, WHY, requestId],
+      );
+    },
+    decision: "proceed",
+    override: "none",
+  },
+  {
+    name: "an acknowledgment another administrator recorded: the command goes on, the Worker decides",
+    seed: (w) => {
+      const requestId = golden(w, { status: "unchecked" });
+      seedReport(w.db, requestId);
+      w.db.run(
+        `UPDATE publication_requests
+            SET identifier_screen_ack_by = ?, identifier_screen_ack_reason = ?,
+                identifier_screen_ack_at = datetime('now')
+          WHERE id = ?`,
+        [w.otherId, WHY, requestId],
+      );
+    },
+    decision: "proceed",
+    override: "none",
+    // An acknowledgment counts only for the administrator who gave it, and the command cannot
+    // know whose key is whose.
+    workerRefuses: "identifier_screen_not_clear",
+  },
+
   // ---- a run that has started publishing, and the gate that is off ------------------------------
   {
     name: "a run that has started publishing, resumed, over a failing review",
@@ -365,6 +401,10 @@ const SCENARIOS: Scenario[] = [
         state: "dispatched",
         createdMinutesAgo: 10,
       });
+    },
+    // Cured with --force the gate lets the run through, and the failing BIDS run stops it.
+    setup: () => {
+      h.bidsConclusion.value = "failure";
     },
     decision: "needs_force",
     workerRefusal: "needs_override",
