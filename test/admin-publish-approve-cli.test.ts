@@ -35,7 +35,12 @@ import {
   seedScreenedRequest,
 } from "../backend/test/helpers/publication-review";
 import { makePublicationReviewApp } from "../backend/test/helpers/publication-review-app";
-import { NOT_ASSESSED_LINE, REASONS, REVIEW_GATE_REFUSAL_TEXT } from "../shared/publication-review";
+import {
+  NOT_ASSESSED_LINE,
+  REASONS,
+  REVIEW_GATE_REFUSAL_TEXT,
+  reviewGateRefusalText,
+} from "../shared/publication-review";
 import { type CliResult, startPublishCli } from "./helpers/admin-publish-cli";
 import {
   DATASET,
@@ -152,6 +157,8 @@ describe("the command decides: a review that is not a pass", () => {
     expect(r.stdout).toContain(REASONS.question_failed.sentence.replace(/\.$/, ""));
     expect(r.stdout).toContain(REASONS.version_missing.sentence);
     expect(r.stdout).toContain("Not approved:");
+    // The refusal says it in the gate's own words, then names the exact command.
+    expect(r.stdout).toContain(reviewGateRefusalText("needs_override", DATASET));
     expect(r.stdout).toContain(`nemar admin publish approve ${DATASET} --resume --force`);
     // The model's own words never reach the approval screen.
     expect(output(r)).not.toContain(SUMMARY_SENTINEL);
@@ -197,6 +204,7 @@ describe("the command decides: a review that is not a pass", () => {
 
     expect(r.exitCode).toBe(1);
     expect(r.stdout).toContain("Not approved:");
+    expect(r.stdout).toContain(reviewGateRefusalText("hard_reason", DATASET));
     expect(r.stdout).toContain(REASONS.submission_minimum_failed.cure);
     expect(h.posted).toEqual([]);
     expect(requestRow(requestId)?.status).toBe("requested");
@@ -843,6 +851,40 @@ describe("with the Worker's gate: what the Worker refuses is printed, and exits 
     expect(output(r)).toContain("The request is blocked");
     expect(h.requests.filter((c) => c.path === APPROVE_PATH).map((c) => c.status)).toEqual([409]);
     expect(requestRow(requestId)?.status).toBe("blocked");
+  });
+
+  test("a refusal prints each reason as the review above it worded it, not as the closed words", async () => {
+    const requestId = seedGolden();
+    const reviewId = seedReport(requestId, withheldReport());
+    // Another administrator's record names every reason, so this run goes to the Worker with no
+    // override and the Worker refuses with all three reasons in its body.
+    const otherId = await h.admin("otheradmin", OTHER_ADMIN_KEY);
+    seedOverride(h.db, reviewId, otherId, ["question_failed", "text_withheld", "question_unknown"]);
+    const shown = JSON.parse((await h.cli(["admin", "publish", "show", DATASET, "--json"])).stdout);
+
+    const r = await approve(["--resume", "--yes"], { as: "approveradmin" });
+
+    expect(r.exitCode).toBe(1);
+    expect(h.requests.filter((c) => c.path === APPROVE_PATH).map((c) => c.status)).toEqual([409]);
+    for (const reason of shown.reasons as Array<{
+      code: keyof typeof REASONS;
+      sentence: string;
+      cure: string;
+      line?: string;
+    }>) {
+      // What the CLI prints is the whole line the Worker sent; a Worker that sends none gets the
+      // sentence and the cure, never the closed words.
+      expect(output(r), reason.code).toContain(reason.line ?? `${reason.sentence} ${reason.cure}`);
+      if (reason.line !== undefined) {
+        // ... and that line is the one the review above the question printed.
+        const sentence = REASONS[reason.code].sentence.replace(/\.$/, "");
+        const described = (shown.description.lines as string[]).find((l) => l.startsWith(sentence));
+        expect(reason.line, reason.code).toBe(described);
+      }
+    }
+    // The words for a person, not the closed ones behind them.
+    expect(output(r)).toContain("(README, participants.json)");
+    expect(output(r)).not.toContain("(readme, participants_json)");
   });
 
   test("--force records the override on the review it was shown, for the reasons shown", async () => {

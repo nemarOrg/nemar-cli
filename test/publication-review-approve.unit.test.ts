@@ -28,6 +28,8 @@ import {
   REASONS,
   REASON_CODES,
   type ReasonCode,
+  reasonLine,
+  reviewGateRefusalText,
 } from "../shared/publication-review";
 import {
   type ApproveDecision,
@@ -35,6 +37,7 @@ import {
   type ReviewRead,
   decideApproval,
   parseReviewDetail,
+  reasonViewLine,
 } from "../src/lib/publication-review-approve";
 
 const ID = "nm000460";
@@ -119,6 +122,17 @@ function detailOf(spec: Spec = {}): PublicationReviewDetail {
 }
 
 const read = (spec?: Spec): ReviewRead => ({ kind: "detail", detail: detailOf(spec) });
+
+/** The reasons of `detail` as a Worker that sends `line` sends them: the whole reason in the shared words. */
+function withLines(detail: PublicationReviewDetail): PublicationReviewDetail {
+  return {
+    ...detail,
+    reasons: detail.reasons.map((r) => ({
+      ...r,
+      line: reasonLine({ code: r.code, detail: r.detail }, ID, null, false),
+    })),
+  };
+}
 
 const NO_FLAGS: ApproveOptions = { force: false, acknowledge: undefined, resume: false };
 const FORCE: ApproveOptions = { ...NO_FLAGS, force: true };
@@ -315,25 +329,42 @@ describe("4. a gate that is off or does not apply is not enforced", () => {
 });
 
 describe("5. a hard reason is refused, with the cure, even with --force", () => {
-  test("one line per hard reason, from the Worker's own words", () => {
+  test("the refusal's own sentence is the gate's, then one line per hard reason, from the Worker's own words", () => {
     const spec = {
       reasons: ["request_blocked", "submission_minimum_failed", "question_failed"] as ReasonCode[],
     };
     for (const options of [NO_FLAGS, FORCE]) {
       const d = refusal(decide(spec, options));
       expect(d.why).toBe("hard");
-      expect(d.lines).toHaveLength(2);
-      expect(d.lines[0]).toContain(REASONS.request_blocked.sentence.replace(/\.$/, ""));
-      expect(d.lines[0]).toContain(REASONS.request_blocked.cure);
-      expect(d.lines[1]).toContain(REASONS.submission_minimum_failed.cure);
+      expect(d.lines).toHaveLength(3);
+      expect(d.lines[0]).toBe(reviewGateRefusalText("hard_reason", ID));
+      expect(d.lines[1]).toContain(REASONS.request_blocked.sentence.replace(/\.$/, ""));
+      expect(d.lines[1]).toContain(REASONS.request_blocked.cure);
+      expect(d.lines[2]).toContain(REASONS.submission_minimum_failed.cure);
     }
   });
 
-  test("the closed detail word is shown with the sentence", () => {
-    const d = refusal(
-      decide({ reasons: [["submission_minimum_failed", "name_too_short,no_authors"]] }, FORCE),
+  test("a reason prints as the line the Worker sent, and as sentence and cure when it sent none", () => {
+    const shown: Spec = { reasons: [["submission_minimum_failed", "name_too_short,no_authors"]] };
+    // A Worker that sends `line`: the whole reason, as its description words it.
+    const withLine = decideApproval(
+      ID,
+      { kind: "detail", detail: withLines(detailOf(shown)) },
+      FORCE,
     );
-    expect(d.lines[0]).toContain("(name_too_short, no_authors)");
+    const line = reasonLine(
+      { code: "submission_minimum_failed", detail: "name_too_short,no_authors" },
+      ID,
+      null,
+      false,
+    );
+    expect(refusal(withLine).lines[1]).toBe(line);
+    // An older Worker sends none: sentence and cure, and not the closed words behind the reason.
+    const without = refusal(decide(shown, FORCE));
+    expect(without.lines[1]).toBe(
+      `${REASONS.submission_minimum_failed.sentence} ${REASONS.submission_minimum_failed.cure}`,
+    );
+    expect(without.lines[1]).not.toContain("name_too_short");
   });
 
   test("every hard reason refuses, alone", () => {
@@ -515,7 +546,8 @@ describe("10. otherwise the CLI asks for --force", () => {
     const d = refusal(decide(spec));
     expect(d.why).toBe("needs_force");
     const text = d.lines.join("\n");
-    expect(text).toContain("This review is not a pass.");
+    // The gate's own sentence for this refusal, then the exact command.
+    expect(d.lines[0]).toBe(reviewGateRefusalText("needs_override", ID));
     expect(text).toContain(`nemar admin publish approve ${ID} --force`);
   });
 
@@ -579,6 +611,36 @@ describe("the whole table: every reason lands in exactly one branch", () => {
         expect(proceeds(forced).override?.reasons, code).toEqual([code]);
       }
     }
+  });
+});
+
+describe("reasonViewLine: the words of one reason", () => {
+  const view = (over: Partial<Parameters<typeof reasonViewLine>[0]> = {}) => ({
+    sentence: "A sentence.",
+    cure: "A cure.",
+    ...over,
+  });
+
+  test("the whole line the Worker sent, when it sent one", () => {
+    expect(reasonViewLine(view({ line: "The whole reason (in words). A cure." }))).toBe(
+      "The whole reason (in words). A cure.",
+    );
+  });
+
+  test("the sentence and the cure when it sent none, or an empty one", () => {
+    expect(reasonViewLine(view())).toBe("A sentence. A cure.");
+    expect(reasonViewLine(view({ line: "" }))).toBe("A sentence. A cure.");
+  });
+
+  test("a detailed reason reads as the shared words, not as the closed words", () => {
+    // `text_withheld` carries closed words (readme, participants_json); the words for a person are
+    // what the review above the question printed, and the refusal below it must say the same.
+    const reason = { code: "text_withheld" as const, detail: "readme,participants_json" };
+    const line = reasonLine(reason, ID, null, false);
+    expect(line).toContain("(README, participants.json)");
+    const [shown] = withLines(detailOf({ reasons: [["text_withheld", reason.detail]] })).reasons;
+    expect(reasonViewLine(shown)).toBe(line);
+    expect(reasonViewLine(shown)).not.toContain("participants_json");
   });
 });
 

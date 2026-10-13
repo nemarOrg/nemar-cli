@@ -379,7 +379,7 @@ function refusalReasons(error: unknown): string[] {
   if (!Array.isArray(reasons)) return [];
   return reasons
     .filter(
-      (r): r is { sentence: string; cure: string; detail: string | null } =>
+      (r): r is { sentence: string; cure: string; line?: unknown } =>
         typeof r === "object" &&
         r !== null &&
         typeof (r as { sentence?: unknown }).sentence === "string" &&
@@ -389,7 +389,7 @@ function refusalReasons(error: unknown): string[] {
       reasonViewLine({
         sentence: r.sentence,
         cure: r.cure,
-        detail: typeof r.detail === "string" ? r.detail : null,
+        line: typeof r.line === "string" ? r.line : undefined,
       }),
     );
 }

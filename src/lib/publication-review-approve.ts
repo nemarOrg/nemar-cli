@@ -37,6 +37,7 @@ import {
   type ReasonCode,
   hardReasonsOf,
   reasonLine,
+  reviewGateRefusalText,
   uncoveredByOverride,
 } from "../../shared/publication-review.js";
 import { BLOCK_REASON_HINTS } from "./admin-command.js";
@@ -92,6 +93,7 @@ function isReasonView(x: unknown): boolean {
     typeof x.sentence === "string" &&
     typeof x.cure === "string" &&
     (x.detail === null || typeof x.detail === "string") &&
+    (x.line === undefined || typeof x.line === "string") &&
     x.cleared_by === REASONS[x.code as ReasonCode].clearedBy
   );
 }
@@ -185,13 +187,16 @@ export async function readReview(datasetId: string): Promise<ReviewRead> {
 // Words
 // ---------------------------------------------------------------------------------------------
 
-/** One reason as one line: what is wrong, the closed word behind it, and what clears it. */
-export function reasonViewLine(view: Pick<ReasonView, "sentence" | "cure" | "detail">): string {
-  const sentence =
-    view.detail === null
-      ? view.sentence
-      : `${view.sentence.replace(/\.$/, "")} (${view.detail.replaceAll(",", ", ")}).`;
-  return `${sentence} ${view.cure}`;
+/**
+ * One reason as one line, in the words the Worker's own description uses (`line`: the sentence, the
+ * detail as words for a person and the cure), so a reason reads the same in the review above the
+ * question and in the refusal below it. A Worker that predates `line` sends none; the line is then
+ * the sentence and the cure, without the closed word behind it, which is not a word for a person.
+ */
+export function reasonViewLine(view: Pick<ReasonView, "sentence" | "cure" | "line">): string {
+  return typeof view.line === "string" && view.line !== ""
+    ? view.line
+    : `${view.sentence} ${view.cure}`;
 }
 
 /** The approve command for this dataset, with the flags the administrator needs next. */
@@ -285,7 +290,11 @@ export function decideApproval(
   // 5. A hard reason is refused whatever the flags say, with its cure.
   const hard = hardReasonsOf(detail.reasons);
   if (hard.length > 0) {
-    return { kind: "refuse", why: "hard", lines: hard.map(reasonViewLine) };
+    return {
+      kind: "refuse",
+      why: "hard",
+      lines: [reviewGateRefusalText("hard_reason", id), ...hard.map(reasonViewLine)],
+    };
   }
 
   // What an override would have to cover, and whether one already does (step 9).
@@ -344,7 +353,7 @@ export function decideApproval(
     kind: "refuse",
     why: "needs_force",
     lines: [
-      "This review is not a pass. Read the reasons above.",
+      reviewGateRefusalText("needs_override", id),
       `To approve over them, run: ${approveCommand(id, {
         resume: resumeFlag,
         acknowledge: ackGiven,
