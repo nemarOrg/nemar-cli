@@ -23,8 +23,10 @@ import {
   seedPublicationReview,
   seedScreenedRequest,
   seedUser,
+  textOf,
 } from "../backend/test/helpers/publication-review";
 import { PROD_DATASET, createHarness } from "../backend/test/helpers/publication-review-harness";
+import { asSend, withFakeResend } from "../backend/test/helpers/resend";
 import {
   APPROVAL_REFUSAL_ERROR_CODES,
   IDENTIFIER_SCREEN_ERROR_CODES,
@@ -299,11 +301,12 @@ describe("reviewErrorCode", () => {
 
 describe("commentOnPublication, against the real router", () => {
   test("posts the administrator's words as JSON to the comment route, and nothing else", async () => {
-    // The route is the comment package's; what is pinned here is what the client sends, which the
-    // real router receives whether or not it knows the route yet.
+    // No request is open, so the route refuses; what is pinned here is what the client sent and
+    // what it makes of the refusal, both read at the real router.
     const err = await thrown(() => commentOnPublication(PROD_DATASET, "Please add a license."));
     expect(err).toBeInstanceOf(ApiError);
     expect(err.statusCode).toBe(404);
+    expect(reviewErrorCode(err)).toBe("not_found");
     expect(seen).toHaveLength(1);
     expect(seen[0]).toEqual({
       method: "POST",
@@ -311,6 +314,39 @@ describe("commentOnPublication, against the real router", () => {
       contentType: "application/json",
       body: JSON.stringify({ message: "Please add a license." }),
     });
+  });
+
+  test("resolves the route's 200 once the depositor was mailed the words, and the request stays open", async () => {
+    const { requestId } = seedScreenedRequest(h.db, { datasetId: PROD_DATASET });
+    const { answer, calls } = await withFakeResend(async (sent) => ({
+      answer: await commentOnPublication(PROD_DATASET, "Please add a license."),
+      calls: sent,
+    }));
+    expect(answer).toEqual({ dataset_id: PROD_DATASET, request_id: requestId, mailed: true });
+    expect(calls).toHaveLength(1);
+    expect(asSend(calls[0]).to).toEqual([`depositor_${PROD_DATASET}@example.org`]);
+    expect(textOf(asSend(calls[0]).html)).toContain("Please add a license.");
+    expect(h.requestRow(requestId).status).toBe("requested");
+  });
+
+  test("a message that could not be mailed throws the route's 502 with its closed word", async () => {
+    seedScreenedRequest(h.db, { datasetId: PROD_DATASET });
+    const err = await withFakeResend(
+      () => thrown(() => commentOnPublication(PROD_DATASET, "Please add a license.")),
+      { status: 422 },
+    );
+    expect(err.statusCode).toBe(502);
+    expect(reviewErrorCode(err)).toBe("comment_not_sent");
+    expect(err.message).toBe(
+      "The message could not be mailed, so nothing was sent to the depositor.",
+    );
+  });
+
+  test("a message the route refuses (blank) throws its 400 with its closed word", async () => {
+    seedScreenedRequest(h.db, { datasetId: PROD_DATASET });
+    const err = await withFakeResend(() => thrown(() => commentOnPublication(PROD_DATASET, "   ")));
+    expect(err.statusCode).toBe(400);
+    expect(reviewErrorCode(err)).toBe("invalid_body");
   });
 });
 
