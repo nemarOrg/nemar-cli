@@ -17,6 +17,7 @@ import {
 } from "../../../shared/publication-steps.js";
 
 import { datasetLandingUrl } from "../../../shared/datacite-constants.js";
+import { REASON_CODES } from "../../../shared/publication-review.js";
 import { auditLogStatement } from "../db/audit-log";
 import { getS3Config } from "../routes/admin/shared";
 import type { AuthUser, Bindings } from "../types/bindings";
@@ -71,6 +72,12 @@ import { getDatasetsToken } from "./github-auth";
 import { checkApprovalScreenGate, hasStartedPublishing } from "./identifier-screen";
 import { generateManifest } from "./manifest";
 import { scheduleNeurobagelSync } from "./neurobagel-hooks.js";
+import {
+  evaluateApprovalReviewGate,
+  recordApprovalOverride,
+  requestBlockedRefusal,
+  reviewGateStateOf,
+} from "./publication-review-gate.js";
 import { BIDS_METADATA_UNAVAILABLE, errorMessage, readRepoMetadata } from "./repo-metadata";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "./repo-spec";
 import { withRetry } from "./retry";
@@ -224,6 +231,17 @@ export const acknowledgeIdentifierScreenSchema = z
   .max(500, "The acknowledgment is limited to 500 characters");
 
 /**
+ * The override of the publication review as the approval routes accept it. Shared by `/approve` and
+ * `approve-dispatch` so the two read one shape; its type is `PublicationReviewOverride`.
+ */
+export const publicationReviewOverrideSchema = z
+  .object({
+    review_id: z.number().int().positive().nullable(),
+    reasons: z.array(z.enum(REASON_CODES)).max(REASON_CODES.length),
+  })
+  .strict();
+
+/**
  * POST /admin/publish/:id/approve - Approve and run publication orchestrator
  *
  * The step inventory and execution order live in PUBLICATION_STEPS
@@ -263,6 +281,11 @@ export const approveSchema = z.object({
   // Recorded on the request with the admin and audited; ignored for any other
   // screen state, and never enough for direct identifiers.
   acknowledge_identifier_screen: acknowledgeIdentifierScreenSchema.optional(),
+  // ADR 0102: an administrator's override of a publication review that is not a pass, given for
+  // the review shown (`review_id`, null when there was none) and the reasons shown. Strict, so a
+  // field the gate does not know cannot ride along, and it means nothing unless the review gate
+  // is on and a reason stands that an override clears. `/approve` takes it from a bearer key only.
+  override_publication_review: publicationReviewOverrideSchema.optional(),
 });
 
 export type ApproveBody = z.infer<typeof approveSchema>;
@@ -458,6 +481,25 @@ async function stepCiCheck(c: ApproveStepContext): Promise<RespondOutcome | unde
   if (stepsToRun.includes("ci_check")) {
     if (body.skip_ci_check) {
       console.warn(`[publish] CI check skipped by admin ${adminUser.username} for ${datasetId}`);
+      // The skip is on the record when it happens: the approval's own row says only what the call
+      // that FINISHED the run asked for, and a run resumed with another flag would lose it.
+      // Best effort, like the approval's row: a missing row never changes the run.
+      try {
+        await auditLogStatement(c.db, {
+          userId: c.approver.id,
+          action: "publication_ci_check_skipped",
+          resourceType: "dataset",
+          resourceId: datasetId,
+          details: JSON.stringify({
+            request_id: c.requestId,
+            ...(c.approver.id !== adminUser.id ? { executed_by: adminUser.id } : {}),
+          }),
+        }).run();
+      } catch (auditError) {
+        console.error(
+          `[publish] audit write for the skipped CI check on ${datasetId} failed: ${errorMessage(auditError)}`,
+        );
+      }
       await updateProgress("ci_check");
     } else {
       try {
@@ -2412,13 +2454,14 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // fresh heartbeat and a stale click would always look live.
   const request = await db
     .prepare(
-      `SELECT id, status, steps_completed, anonymous, approval_requested_by,
+      `SELECT id, status, block_reason, steps_completed, anonymous, approval_requested_by,
               ${approvalLeaseLiveSql()} AS approval_lease_live ${ACTIVE_REQUEST_TAIL_SQL}`,
     )
     .bind(datasetId)
     .first<{
       id: number;
       status: string;
+      block_reason: string | null;
       steps_completed: string;
       anonymous: number | null;
       approval_requested_by: number | null;
@@ -2427,6 +2470,15 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
 
   if (!request) {
     return c.json({ error: "No active publication request found" }, 404);
+  }
+
+  // A blocked request is refused by the mechanical rules (ADR 0102): whatever the flag says, and
+  // for every dataset, before anything else decides anything, as `approve-dispatch` refuses it
+  // before its screen gate. A blocked request has never started a step (the one walk back to
+  // `blocked`, the owner-name check below, comes before the first), so this strands no run, and
+  // it holds for a resume too. The depositor fixes what blocked it and requests again.
+  if (request.status === "blocked") {
+    return c.json(requestBlockedRefusal(datasetId, request.block_reason), 409);
   }
 
   // Attribution forks (ADR 0080): a web click records the admin who clicked,
@@ -2506,6 +2558,41 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
         `[publish] ${datasetId}: approval refused by the identifier screen (${gate.refusal.gate})`,
       );
       return c.json(gate.refusal, 409);
+    }
+
+    // The publication review's gate (ADR 0102), after the screen's and before anything is
+    // marked: a review that is not a pass needs the approver's recorded override, and a hard
+    // reason is refused whatever the body says. Skipped (with the screen's) only for a run that has
+    // started publishing. Off and not-applicable datasets pass without a read of the review.
+    const review = await evaluateApprovalReviewGate(env, {
+      requestId: request.id,
+      datasetId,
+      approverId: c.approver.id,
+      override: body.override_publication_review,
+    });
+    if (!review.ok) {
+      console.warn(
+        `[publish] ${datasetId}: approval refused by the publication review (${review.body.refusal})`,
+      );
+      return c.json(review.body, 409);
+    }
+    if (review.state === "enforced" && review.record !== null) {
+      const recorded = await recordApprovalOverride(env, {
+        requestId: request.id,
+        datasetId,
+        approverId: c.approver.id,
+        executedBy: c.approver.id !== adminUser.id ? adminUser.id : null,
+        via: "approve",
+        outcome: review.outcome,
+        headSha: review.headSha,
+        record: review.record,
+      });
+      if (!recorded.ok) {
+        console.warn(
+          `[publish] ${datasetId}: approval refused by the publication review (${recorded.body.refusal})`,
+        );
+        return c.json(recorded.body, 409);
+      }
     }
   }
 
@@ -2733,6 +2820,11 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
           ? { executed_by: adminUser.username || String(adminUser.id) }
           : {}),
         steps: allSteps,
+        // The review gate's state for this environment and dataset when the row is written, and
+        // the flag of the call that finished the run. A skip is also its own row when it happens
+        // (`publication_ci_check_skipped`), which survives a resume with another flag.
+        review_gate: reviewGateStateOf(env, dataset),
+        skip_ci_check: body.skip_ci_check,
       }),
     }).run();
   } catch (auditError) {
