@@ -865,7 +865,7 @@ describe("the parser refuses what the job must never send", () => {
 
 describe("free text is reduced to plain words, never refused for its content", () => {
   const hostile =
-    "@admins see [this](https://evil.example/x) <img src=x onerror=1> #12 GH-7 **bold** ‮evil `code` ![i](data:x) www.evil.example";
+    "@admins see [this](https://evil.example/x) <img src=x onerror=1> #12 GH-7 **bold** \u202eevil `code` ![i](data:x) www.evil.example";
 
   test("a hostile note and summary reach the parsed report as plain words", () => {
     const parsed = parsePublicationReviewReport(
@@ -876,7 +876,7 @@ describe("free text is reduced to plain words, never refused for its content", (
       }),
     );
     for (const text of [parsed.findings[0].note, parsed.summary]) {
-      expect(text).not.toMatch(/[@#<>`*‮[\]]/);
+      expect(text).not.toMatch(/[@#<>`*\u202e[\]]/);
       expect(text).not.toContain("evil.example");
       expect(text).not.toMatch(/https?:/);
       expect(text).toContain("(link removed)");
@@ -1810,7 +1810,7 @@ describe("reportReasons, over every report dimension", () => {
 
 describe("describePublicationReview", () => {
   const hostile =
-    "@admins [click](https://evil.example) <script>x</script> #1 GH-2 `code` ‮ www.evil.example";
+    "@admins [click](https://evil.example) <script>x</script> #1 GH-2 `code` \u202e www.evil.example";
   const hostileReport = parsePublicationReviewReport(
     reportBody({
       summary: hostile,
@@ -1960,11 +1960,11 @@ describe("describePublicationReview", () => {
     });
     // The model's summary is a field of its own, in plain words; it is never one of the lines.
     expect(d.summary).not.toBeNull();
-    expect(d.summary).not.toMatch(/[@#<>`‮]/);
+    expect(d.summary).not.toMatch(/[@#<>`\u202e]/);
     expect(d.summary).not.toContain("evil.example");
     const text = d.lines.join("\n");
     expect(text).not.toContain("summary");
-    expect(text).not.toMatch(/[@#<>`‮]/);
+    expect(text).not.toMatch(/[@#<>`\u202e]/);
     expect(text).not.toContain("evil.example");
     expect(text).not.toContain("script");
     // The question's line names its finding by its closed label, not by the model's note.

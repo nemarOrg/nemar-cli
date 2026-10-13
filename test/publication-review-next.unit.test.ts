@@ -358,7 +358,12 @@ describe("yAnswer: a review that could not be read is the Worker's to judge", ()
       expect(a.override).toBeNull();
       expect(a.overrideReasons).toEqual([]);
       expect(a.askAcknowledgment).toBe(false);
-      expect(a.notes.length).toBe(1);
+      // The note that says why nothing was read, and the one that says `--force` was not sent
+      // because there was no review to approve over.
+      expect(a.notes.length).toBe(2);
+      expect(a.notes[1]).toContain("--force was not sent");
+      // Without `--force` there is nothing to say about it.
+      expect(offered(yAnswer(ID, r, false, false)).notes.length).toBe(1);
     }
   });
 });

@@ -28,6 +28,7 @@
  */
 
 import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { PUBLICATION_COMMENT_SENTENCES } from "../backend/src/routes/admin/publish-comment";
 import {
   NOTE_SENTINEL,
   SUMMARY_SENTINEL,
@@ -557,21 +558,33 @@ describe("c mails the depositor a message and leaves the request open", () => {
     expect(h.posted).toEqual([]);
   });
 
-  test("a message the Worker could not mail is a failure: the Worker's own sentence, no claim that nothing was sent, exit 1", async () => {
+  test("a message the provider answered with a server error is a failure: the Worker's own sentence, no claim that nothing was sent, exit 1", async () => {
     const { requestId } = seed(A);
 
-    const r = await next("c\nCould you check the README?\n", [], { resend: { status: 422 } });
+    // A 5xx can leave the mail accepted, so the Worker says it may or may not have gone.
+    const r = await next("c\nCould you check the README?\n", [], { resend: { status: 503 } });
 
     expect(r.exitCode).toBe(1);
-    expect(output(r)).toContain(
-      "The mail may not have been sent, and it may also have arrived. Check with the depositor before sending it again.",
-    );
+    expect(output(r)).toContain(PUBLICATION_COMMENT_SENTENCES.comment_not_confirmed);
     expect(output(r)).not.toMatch(/nothing was sent/i);
     expect(r.stdout).toContain("Done: 1 failed.");
     // The Worker did try, and the request is as it was.
     expect(h.mail.filter((m) => m.path === "/emails")).toHaveLength(1);
     expect(requestRow(requestId)?.status).toBe("requested");
     // A refusal the Worker made is the command's answer, not a crash to report.
+    expect(output(r)).not.toContain("attach the log to a new issue");
+  });
+
+  test("a message the provider refused is a failure that says nothing was sent, exit 1", async () => {
+    const { requestId } = seed(A);
+
+    // A 4xx is a refusal before any delivery, so the Worker can say so.
+    const r = await next("c\nCould you check the README?\n", [], { resend: { status: 422 } });
+
+    expect(r.exitCode).toBe(1);
+    expect(output(r)).toContain(PUBLICATION_COMMENT_SENTENCES.comment_not_sent);
+    expect(r.stdout).toContain("Done: 1 failed.");
+    expect(requestRow(requestId)?.status).toBe("requested");
     expect(output(r)).not.toContain("attach the log to a new issue");
   });
 
