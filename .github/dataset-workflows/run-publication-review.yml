@@ -39,6 +39,23 @@
 # GitHub or to NEMAR. `id-token: write` puts the OIDC request variables in every step's
 # environment, which the federation rule's conditions (this repository, this workflow, main) bound.
 #
+# THE ORDER KEEPS THE APP'S PRIVATE KEY AWAY FROM INSTALLED CODE. The mint step is given the GitHub
+# App's private key, so nothing the dependency tree or a setup action brought may have run on the
+# runner before it: code that ran earlier could leave a hook in the environment (a variable, a path
+# entry) for the minting action to load. The claim, the mint and the dataset fetch therefore come
+# first, and the checkout of the review script, the setup of Bun and `bun install` come after them;
+# the first step that runs anything of the repository's is the install. What could not move: the
+# masking step must be first (and is GitHub's own action, with no env and no secret); the mint
+# action itself runs with the key; and the OIDC token is still requested by an action in the job
+# that installs the tree, because the model step needs that identity and runs the same tree, so
+# `id-token: write` stays job-wide and a step that runs installed code could request a token too;
+# the federation rule's conditions (this repository, this workflow, main) bound what one can do.
+# One cost of the order, accepted: the read-only dataset token is in the clone's git config before
+# the install, so the setup action and the install can read it, as the model step already can.
+# It reads one repository for an hour at most, and the private key that mints it is out of reach.
+# Every action is pinned to a full commit, with the version it was resolved from in a trailing
+# comment; moving a pin is a reviewed change to this file.
+#
 # THE CALLBACK TOKEN IS MASKED BEFORE ANYTHING CAN PRINT IT. This repository's logs are public and
 # Actions prints a step's `env:` in its header, so the token is never in job-level env, the first
 # step registers it as a secret, and only the steps that use it carry it (each header then shows
@@ -103,7 +120,7 @@ jobs:
       # First, with no env at all: after this step the token is a registered secret, and every later
       # step's log (its header included) shows it as ***.
       - name: Mask the callback token
-        uses: actions/github-script@v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
         with:
           script: |
             const token = context.payload.client_payload && context.payload.client_payload.callback_token;
@@ -194,26 +211,6 @@ jobs:
               ;;
           esac
 
-      - name: Check out the review script
-        if: steps.claim.outputs.claimed == 'true'
-        uses: actions/checkout@v4
-        with:
-          repository: nemarOrg/nemar-cli
-          ref: main
-          path: tool
-          persist-credentials: false
-
-      - name: Set up Bun
-        if: steps.claim.outputs.claimed == 'true'
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.3
-
-      - name: Install the review script's dependencies
-        if: steps.claim.outputs.claimed == 'true'
-        working-directory: tool
-        run: bun install --frozen-lockfile
-
       # Fail early and say why, rather than let the SDK fail to find a credential. The Worker turns
       # this into a review that says the service could not sign in.
       - name: Check the federation configuration
@@ -236,7 +233,7 @@ jobs:
       - name: Mint a read-only token for the dataset repository
         if: steps.claim.outputs.claimed == 'true'
         id: app-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1.12.0
         with:
           app-id: ${{ secrets.NEMAR_APP_ID }}
           private-key: ${{ secrets.NEMAR_APP_PRIVATE_KEY }}
@@ -283,11 +280,34 @@ jobs:
           gh api "repos/nemarDatasets/${DATASET_ID}/actions/workflows/bids-validation.yml/runs?head_sha=${HEAD_SHA}&per_page=10" \
             > "$RUNNER_TEMP/bids-runs.json" || echo '{"unavailable":true}' > "$RUNNER_TEMP/bids-runs.json"
 
+      # From here on, code that was not written for this job runs on the runner: a setup action and
+      # the review script's whole dependency tree. The App's private key was used by the mint step
+      # above and is out of reach of everything below (see the header).
+      - name: Check out the review script
+        if: steps.claim.outputs.claimed == 'true'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: nemarOrg/nemar-cli
+          ref: main
+          path: tool
+          persist-credentials: false
+
+      - name: Set up Bun
+        if: steps.claim.outputs.claimed == 'true'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.3
+
+      - name: Install the review script's dependencies
+        if: steps.claim.outputs.claimed == 'true'
+        working-directory: tool
+        run: bun install --frozen-lockfile
+
       # Minted last, so it has not aged when the script exchanges it. The audience is the one the
       # federation rule expects.
       - name: Fetch the GitHub OIDC token for Anthropic
         if: steps.claim.outputs.claimed == 'true'
-        uses: actions/github-script@v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
         with:
           script: |
             const fs = require('fs');

@@ -212,6 +212,104 @@ describe("the claim comes first", () => {
   });
 });
 
+describe("nothing third-party runs where the App's private key can be reached (#1728)", () => {
+  // `create-github-app-token` is the one step given the GitHub App's private key. Anything that ran
+  // earlier on the same runner (a setup action, the whole `bun install` dependency tree) could have
+  // left a hook in the environment for it. So the claim, the mint and the dataset fetch come first,
+  // and what installs or runs repository code comes after.
+  const names = job.steps.map((s) => s.name);
+  const at = (n: string) => names.indexOf(n);
+  const INSTALL = "Install the review script's dependencies";
+
+  test("the steps are in the order that keeps the key away from installed code", () => {
+    expect(names).toEqual([
+      "Mask the callback token",
+      "Validate the dispatch",
+      "Claim the review",
+      "Check the federation configuration",
+      MINT,
+      FETCH,
+      BIDS,
+      "Check out the review script",
+      "Set up Bun",
+      INSTALL,
+      OIDC,
+      "Review",
+      "Report that the job failed",
+    ]);
+  });
+
+  test("before the mint, only the masking action and plain shell run, and nothing from the tool checkout", () => {
+    for (const s of job.steps.slice(0, at(MINT))) {
+      if (s.name === "Mask the callback token") {
+        expect(s.uses, s.name).toMatch(/^actions\/github-script@/);
+        continue;
+      }
+      expect(s.uses, s.name).toBeUndefined();
+      expect(s.run ?? "", s.name).not.toMatch(/\b(bun|node|npm|npx|yarn|pnpm)\b/);
+      expect(s["working-directory"], s.name).toBeUndefined();
+    }
+  });
+
+  test("the mint and the fetch come before the checkout, Bun, the install and any `bun run`", () => {
+    for (const later of ["Check out the review script", "Set up Bun", INSTALL, OIDC, "Review"]) {
+      expect(at(later), later).toBeGreaterThan(at(FETCH));
+      expect(at(later), later).toBeGreaterThan(at(BIDS));
+      expect(at(later), later).toBeGreaterThan(at(MINT));
+    }
+    // And no step before the mint holds anything of the repository's: no tool directory, no Bun.
+    const before = JSON.stringify(job.steps.slice(0, at(MINT)));
+    expect(before).not.toMatch(/oven-sh|setup-bun|working-directory|\btool\b|bun (install|run)/);
+  });
+
+  test("the install runs after the setup that provides Bun, and the script runs after the install", () => {
+    expect(at("Set up Bun")).toBeLessThan(at(INSTALL));
+    expect(at(INSTALL)).toBeLessThan(at("Review"));
+    expect(at("Check out the review script")).toBeLessThan(at(INSTALL));
+  });
+});
+
+describe("every action is pinned to a full commit, with its version in a comment (#1728)", () => {
+  const USES = [...SRC.matchAll(/^\s*(?:-\s+)?uses:\s*(\S+)(?:[ \t]+#[ \t]*(\S+))?[ \t]*$/gm)].map(
+    (m) => ({ ref: m[1] as string, comment: m[2] }),
+  );
+
+  test("there are uses lines to check, and they are the workflow's steps' own", () => {
+    expect(USES).toHaveLength(job.steps.filter((s) => s.uses !== undefined).length);
+    expect(USES.length).toBeGreaterThanOrEqual(5);
+  });
+
+  test("each is owner/name@<40 hex characters>, never a tag or a branch", () => {
+    for (const { ref } of USES)
+      expect(ref, ref).toMatch(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@[0-9a-f]{40}$/);
+  });
+
+  test("each carries the tag it was resolved from, as a trailing comment", () => {
+    for (const { ref, comment } of USES) expect(comment, ref).toMatch(/^v\d+(\.\d+){0,2}$/);
+  });
+
+  test("the actions are exactly the four this job has reviewed", () => {
+    expect(
+      USES.map((u) => u.ref.split("@")[0])
+        .sort()
+        .filter((n, i, all) => all.indexOf(n) === i),
+    ).toEqual(
+      [
+        "actions/checkout",
+        "actions/create-github-app-token",
+        "actions/github-script",
+        "oven-sh/setup-bun",
+      ].sort(),
+    );
+  });
+
+  test("the parsed workflow agrees with the raw lines", () => {
+    expect(job.steps.flatMap((s) => (s.uses === undefined ? [] : [s.uses]))).toEqual(
+      USES.map((u) => u.ref),
+    );
+  });
+});
+
 describe("what it is allowed to hold", () => {
   test("no permissions by default; the job has contents read and the OIDC token, and nothing that writes", () => {
     expect(wf.permissions).toEqual({});
@@ -396,7 +494,7 @@ describe("nothing from the dataset runs", () => {
     expect(fetch).toContain("core.hooksPath /dev/null");
     expect(fetch).not.toMatch(/git (checkout|clone|worktree|reset|merge|pull|switch)\b/);
     expect(SRC).not.toMatch(
-      /uses: actions\/checkout@v\d+\s*\n\s*with:\s*\n\s*repository: nemarDatasets/,
+      /uses: actions\/checkout@\S+(?: +#[^\n]*)?\s*\n\s*with:\s*\n\s*repository: nemarDatasets/,
     );
   });
 
