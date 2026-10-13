@@ -7,8 +7,9 @@
  * rebuilds the reasons from the stored report ({@link rowViewOf} re-parses it every time) and
  * from facts read now ({@link LiveFacts}), and shows the STRICTER of the stored verdict and the
  * re-derived outcome. Either can lower an outcome and neither can raise it. A fact that cannot be
- * read is never guessed: the read throws, and the caller says so (the mail names it, the routes
- * answer 500), because an outcome built on a guess could be a pass.
+ * read is never guessed: the read throws, and the caller says so (the mail names it, the detail
+ * route answers 500, and the list shows that one row as unreadable and still answers), because an
+ * outcome built on a guess could be a pass.
  *
  * **The review in force is the row of the screened head and the request's flag.** The head comes
  * from `readStoredReport(...)?.head`, the gate's own reader. A row of another head or flag is
@@ -27,6 +28,10 @@
  * nowhere else: the list carries the headline and the reason codes, and the email carries the
  * headline, the reasons, the next command and no model-written text at all. No nonce is read:
  * every statement here selects named columns, and `publication-review-rows.ts` never selects it.
+ *
+ * **Not assessed is not "action required".** A request with no review on record and no gate on it
+ * (the review is off, or the request is over) has no outcome and no reasons, like a mirror, so the
+ * outcome never contradicts a headline that says "not reviewed".
  *
  * The module imports the row readers and the stored-screen readers, and nothing of the screen's
  * mail or the review's write path, so `identifier-screen.ts` can import it without a cycle.
@@ -297,12 +302,20 @@ export async function derivePublicationReview(
     }
   }
 
+  // Not assessed: no review is on record AND nothing of the review gates this request (the review
+  // is off, or the request is over). Such a request has no outcome and no reason, as a mirror has
+  // none, so a client that renders `outcome` cannot contradict the headline ("not reviewed"), and
+  // no live fact is read for it. An open request with the review on and no row IS assessed: the
+  // missing review is its reason.
+  const closed = !ACTIVE_STATUSES.has(request.status);
+  const assessed = !(row === null && (!enabled || closed));
+
   const report = reportOf(rowView);
   const version = report?.evidence.version ?? null;
   // What an approval would publish: a dataset with no Version is published as 1.0.0, so that is
   // the version whose release the live checks must look for (a malformed one has none).
   const publishedVersion = report === null ? null : effectiveVersionOf(report.evidence);
-  const readFacts = applies && LIVE_FACT_STATUSES.has(request.status);
+  const readFacts = applies && assessed && LIVE_FACT_STATUSES.has(request.status);
   const versionRowExists =
     readFacts && publishedVersion !== null
       ? await exists(db, VERSION_ROW_SQL, request.dataset_id, publishedVersion)
@@ -358,12 +371,7 @@ export async function derivePublicationReview(
     };
   }
 
-  // Not assessed: no review is on record AND nothing of the review gates this request (the review
-  // is off, or the request is over). Such a request has no outcome and no reason, as a mirror has
-  // none, so a client that renders `outcome` cannot contradict the headline ("not reviewed"). An
-  // open request with the review on and no row IS assessed: the missing review is its reason.
-  const closed = !ACTIVE_STATUSES.has(request.status);
-  if (row === null && (!enabled || closed)) {
+  if (!assessed) {
     return {
       applies,
       enabled,
@@ -433,6 +441,10 @@ function viewKindOf(d: DerivedPublicationReview): PublicationReviewViewKind {
 /** What every surface says when it could not read the review: a fixed sentence, never a pass. */
 const UNREADABLE_HEADLINE = "Publication review: could not be read";
 
+/**
+ * One row of `GET /admin/publish/requests`: the outcome, the headline and the reason codes. No
+ * sentence of the model's, and no sentence a client could not take from the shared words.
+ */
 function summaryOf(d: DerivedPublicationReview): PublicationReviewSummary {
   return {
     kind: viewKindOf(d),
@@ -464,20 +476,6 @@ function unreadableSummary(enabled: boolean): PublicationReviewSummary {
     review_id: null,
     head_sha: null,
   };
-}
-
-/**
- * The review of one row of `GET /admin/publish/requests`: the outcome, the headline and the
- * reason codes. No sentence of the model's, and no sentence a client could not take from the
- * shared words. Throws when a read fails; a list uses {@link publicationReviewSummaries}.
- */
-export async function publicationReviewSummary(
-  env: Bindings,
-  request: ReviewRequestFields,
-  dataset: ReviewDatasetFields | null,
-  nowMs: number = Date.now(),
-): Promise<PublicationReviewSummary> {
-  return summaryOf(await derivePublicationReview({ env, nowMs, request, dataset }));
 }
 
 /** One request of a list, with the dataset columns the derivation reads. */
@@ -800,7 +798,9 @@ function unreadableSection(datasetId: string): PublicationReviewSection {
  * deadline is therefore read here as one that did not report, whether or not a watchdog has marked
  * it yet, ran, or reached it among the rows it takes in a tick. The lists and the detail have no
  * lease to explain and keep the longer window (ADR 0101, section 7: the deadline plus one tick),
- * so they do not say "did not report" about a review the watchdog is about to close.
+ * so they do not say "did not report" about a review the watchdog is about to close. (The lease
+ * reads SQLite's clock and this the Worker's, so a row within their skew of the deadline can be
+ * read either way: a matter of milliseconds.)
  *
  * Never throws: a read that fails is logged (ids and fixed words only) and, while the review is
  * on, the mail says the review could not be read, so an administrator is never told less than the
