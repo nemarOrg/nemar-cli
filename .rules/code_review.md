@@ -27,9 +27,10 @@ The full procedure is
 3. **Fixes ride on the PR.**
    Review-fix commits go on the PR's own branch, pushed once per round; they are part of that PR and are not a new change that needs its own PR.
    A separate fix PR exists only for a large fix (over 150 non-test, non-doc lines, a public contract change, or a replaced approach) or when the PR's head branch bars direct commits (`dev` for a release PR, an epic branch for the final epic PR).
-   Then open ONE per round, targeting the PR's head branch, and give it the round 2 delta review and nothing more.
-   A release PR gets one integration-scoped reviewer (see `.memory/release-pr-needs-own-review.md`).
-4. **Merge gate:** the round 1 report is in, every finding has an outcome, and CI is green.
+   Then open ONE per round, targeting the PR's head branch.
+   It gets the round 2 delta review only if round 1 was substantial (a large fix always is); otherwise the driver checks each finding is resolved.
+   A release PR or the final epic PR gets one integration-scoped reviewer (see `.memory/release-pr-needs-own-review.md`).
+4. **Merge gate:** the round 1 report (and the round 2 report, if round 2 runs) is in, every finding has an outcome, no accepted Critical is open, and CI is green on the final head.
    Never merge while a review is still running.
 
 ## Manual Code Review Checklist
