@@ -10,8 +10,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import {
   DATASET_STATUSES,
   describeScreen,
@@ -22,29 +22,75 @@ import * as screen from "../src/services/identifier-screen";
 import * as stored from "../src/services/identifier-screen-stored";
 import { screenReportBodyFor } from "./helpers/publication-review";
 
+const SERVICES = join(import.meta.dir, "../src/services");
+
+/** The relative modules a file loads at run time: not `import type`, not an all-`type` clause. */
+function runtimeImports(file: string): string[] {
+  const clauses = /^(?:import|export)\s+(type\s+)?([^;]*?)\s*from\s*["'](\.[^"']*)["']/gm;
+  const found: string[] = [];
+  for (const [, typeOnly, clause, spec] of readFileSync(file, "utf8").matchAll(clauses)) {
+    if (typeOnly) continue;
+    const named = /^\{([\s\S]*)\}$/.exec(clause.trim());
+    if (named?.[1]?.split(",").every((x) => x.trim() === "" || x.trim().startsWith("type "))) {
+      continue;
+    }
+    const base = resolve(dirname(file), spec.replace(/\.js$/, ""));
+    const target = [`${base}.ts`, join(base, "index.ts")].find((c) => existsSync(c));
+    if (target) found.push(target);
+  }
+  return found;
+}
+
+/** Every module a file reaches through runtime imports, itself included. */
+function runtimeClosure(entry: string): string[] {
+  const seen = new Set<string>([entry]);
+  const queue = [entry];
+  for (let file = queue.pop(); file !== undefined; file = queue.pop()) {
+    for (const next of runtimeImports(file)) {
+      if (!seen.has(next)) {
+        seen.add(next);
+        queue.push(next);
+      }
+    }
+  }
+  return [...seen];
+}
+
 describe("the re-exports are the same functions, not copies", () => {
   test("identifier-screen.ts hands every importer the stored module's functions", () => {
     expect(screen.screenView).toBe(stored.screenView);
-    expect(screen.EXEMPT_SCREEN_DESCRIPTION).toBe(stored.EXEMPT_SCREEN_DESCRIPTION);
     expect(screen.isScreenExempt).toBe(stored.isScreenExempt);
     expect(screen.readStoredReport).toBe(stored.readStoredReport);
     expect(screen.readStoredState).toBe(stored.readStoredState);
   });
 
-  test("and the shared module's: whether an approval has started publishing, and the steps before it", () => {
+  test("and the shared module's: whether an approval has started publishing", () => {
+    // `PRE_PUBLICATION_STEPS` and `EXEMPT_SCREEN_DESCRIPTION` are read from their own modules
+    // (pinned below); nothing imports them through the screen, so it no longer re-exports them.
     expect(screen.hasStartedPublishing).toBe(steps.hasStartedPublishing);
-    expect(screen.PRE_PUBLICATION_STEPS).toBe(steps.PRE_PUBLICATION_STEPS);
   });
 
-  test("the review's view imports the moved code from where it now lives, never from the screen", () => {
-    const view = readFileSync(
-      join(import.meta.dir, "../src/services/publication-review-view.ts"),
-      "utf8",
-    );
-    // `identifier-screen.ts` imports the view; an import back would be a cycle.
-    expect(view).not.toMatch(/from "\.\/identifier-screen(\.js)?"/);
-    expect(view).toContain('from "./identifier-screen-stored.js"');
-    expect(view).toContain('from "../../../shared/publication-steps.js"');
+  test("the review's view reaches the moved code from where it now lives, and nothing that imports it back", () => {
+    // `identifier-screen.ts` imports the view, so any path from the view back to the screen, or to
+    // the review's write path or the mail, is a cycle. Walked through every runtime import, not
+    // just the view's own lines, so a cycle that comes back through another module is noticed.
+    const view = join(SERVICES, "publication-review-view.ts");
+    const reached = runtimeClosure(view);
+    expect(reached).toContain(join(SERVICES, "identifier-screen-stored.ts"));
+    expect(reached).toContain(join(import.meta.dir, "../../shared/publication-steps.ts"));
+    for (const forbidden of [
+      "identifier-screen.ts",
+      "publication-review.ts",
+      "publication-review-gate.ts",
+      "email.ts",
+    ]) {
+      expect({ forbidden, reachable: reached.includes(join(SERVICES, forbidden)) }).toEqual({
+        forbidden,
+        reachable: false,
+      });
+    }
+    // The walk is not vacuous: from the screen the view IS reachable, which is the one-way import.
+    expect(runtimeClosure(join(SERVICES, "identifier-screen.ts"))).toContain(view);
   });
 });
 
@@ -84,6 +130,63 @@ describe("hasStartedPublishing", () => {
     // A number among the names is not a name.
     expect(steps.hasStartedPublishing('[1, "ci_check"]')).toBe(false);
     expect(steps.hasStartedPublishing('[1, "s3_lock"]')).toBe(true);
+  });
+});
+
+describe("publishingStanding", () => {
+  const QUIET = '["ci_check","enrichment_check"]';
+  const STARTED = '["ci_check","enrichment_check","s3_public_read"]';
+  const STANDING = steps.publishingStanding;
+
+  test("an approving request stands by its steps: started is publishing, anything else stopped", () => {
+    expect(STANDING({ status: "approving", steps_completed: STARTED, block_reason: null })).toBe(
+      "publishing",
+    );
+    for (const raw of [QUIET, "[]", null, "", "not json", "{}"]) {
+      expect({
+        raw,
+        standing: STANDING({ status: "approving", steps_completed: raw, block_reason: null }),
+      }).toEqual({
+        raw,
+        standing: "stopped",
+      });
+    }
+    // A reason on an approving row is not read: only a blocked row's reason decides anything.
+    expect(
+      STANDING({ status: "approving", steps_completed: STARTED, block_reason: "anything" }),
+    ).toBe("publishing");
+  });
+
+  test("a blocked request is publishing only for the owner-name walk-back, and only once it started", () => {
+    const blocked = (steps_completed: string | null, block_reason: string | null) =>
+      STANDING({ status: "blocked", steps_completed, block_reason });
+    expect(blocked(STARTED, steps.OWNER_NAME_MISSING_REASON)).toBe("publishing");
+    expect(steps.OWNER_NAME_MISSING_REASON).toBe("owner_name_missing");
+    // The walk-back before a step changed anything is not a run that started.
+    expect(blocked(QUIET, steps.OWNER_NAME_MISSING_REASON)).toBe("none");
+    expect(blocked(null, steps.OWNER_NAME_MISSING_REASON)).toBe("none");
+    // Any other reason, however stale its steps, is a blocked request and no run: the gates apply.
+    for (const reason of [
+      "identifier_screen_blocks",
+      "min_requirements_failed",
+      "OWNER_NAME_MISSING",
+      "",
+      null,
+    ]) {
+      expect({ reason, standing: blocked(STARTED, reason) }).toEqual({ reason, standing: "none" });
+    }
+  });
+
+  test("every other status is none, whatever its steps and reason say", () => {
+    for (const status of ["requested", "published", "denied", "cancelled", "", "approved"]) {
+      for (const reason of [null, steps.OWNER_NAME_MISSING_REASON]) {
+        expect({
+          status,
+          reason,
+          standing: STANDING({ status, steps_completed: STARTED, block_reason: reason }),
+        }).toEqual({ status, reason, standing: "none" });
+      }
+    }
   });
 });
 

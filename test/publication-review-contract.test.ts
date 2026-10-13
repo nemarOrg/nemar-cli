@@ -13,7 +13,9 @@ import * as prompt from "../scripts/ci/pr-review-prompt";
 import {
   APPROVAL_REFUSAL_ERROR_CODES,
   IDENTIFIER_SCREEN_ERROR_CODES,
+  OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE,
   PUBLICATION_REFUSAL_ERROR_CODES,
+  REQUEST_CHANGED_MESSAGE,
 } from "../shared/contract/publication";
 import {
   OVERRIDE_FIELD,
@@ -3154,5 +3156,29 @@ describe("the gate refusal body is a union keyed on `refusal`", () => {
       { ...screen, state: "whatever" },
     ];
     expect(wrong).toHaveLength(1);
+  });
+});
+
+describe("the sentences the Worker's tests import are pinned here, once", () => {
+  // The other suites import these constants and never copy them, so an edit to a sentence cannot
+  // pass them by also editing a hand-copied literal. These literals are the one oracle.
+  test("the two approval refusals the orchestrator words itself", () => {
+    expect(REQUEST_CHANGED_MESSAGE).toBe(
+      "The request changed while the approval was being checked (it was denied or blocked). Read it again before approving.",
+    );
+    expect(OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE).toBe(
+      "A web approval of this request is in progress, so an override sent now would be recorded under the administrator who clicked. Wait for it to finish or stop, then approve again with --force.",
+    );
+  });
+
+  test("the refusal for a review the gate could not check covers a failed read and a failed record alike", () => {
+    // `unverified` is also what a failed write of the override, or of its audit row, answers, so
+    // it must not claim the review "could not be read".
+    expect(REVIEW_GATE_REFUSAL_TEXT.unverified).toBe(
+      "The publication review could not be checked just now, so the approval is refused. Try again.",
+    );
+    expect(reviewGateRefusalText("unverified", "nm000123")).toBe(
+      REVIEW_GATE_REFUSAL_TEXT.unverified,
+    );
   });
 });

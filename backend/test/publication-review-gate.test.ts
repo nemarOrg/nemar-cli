@@ -21,7 +21,11 @@ import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Server } from "bun";
 import { Hono } from "hono";
-import { APPROVAL_REFUSAL_ERROR_CODES } from "../../shared/contract/publication";
+import {
+  APPROVAL_REFUSAL_ERROR_CODES,
+  OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE,
+  REQUEST_CHANGED_MESSAGE,
+} from "../../shared/contract/publication";
 import {
   OVERRIDE_FIELD,
   type PublicationReviewDetail,
@@ -364,6 +368,53 @@ describe("a blocked request that HAS started publishing is not refused: the owne
   });
 });
 
+describe("a blocked request is a run that started only when the owner-name walk-back blocked it", () => {
+  // The exemption above is for ONE way of being blocked half way. A request that was blocked
+  // for any other reason is blocked, however stale its step list: nothing clears `steps_completed`
+  // when the depositor requests again, so a run walked back for the owner's name and then blocked
+  // again by the screen or by a failed minimum still carries the steps of its first life. Trusting
+  // them let a resume skip every gate and publish over the content that blocked it.
+  for (const [reason, screen] of [
+    ["identifier_screen_findings", "direct-identifiers"],
+    ["min_requirements_failed", "clean"],
+  ] as const) {
+    for (const lit of [true, false] as const) {
+      test(`2. blocked for ${reason}, every step done, flag ${lit ? "on" : "off"}: a resume is 409 request_blocked, nothing runs`, async () => {
+        const { requestId } = seedFailing({
+          requestStatus: "blocked",
+          blockReason: reason,
+          status: screen,
+          steps: DONE,
+        });
+        const res = await approve({ resume: true }, { bindings: env({}, lit) });
+        expect(res.status).toBe(409);
+        const out = (await res.json()) as Record<string, unknown>;
+        expect(out).toMatchObject({ error: "request_blocked", block_reason: reason });
+        const row = requestRow(requestId);
+        expect(row.status).toBe("blocked");
+        expect(row.block_reason).toBe(reason);
+        expect(row.approved_by).toBeNull();
+        expect(JSON.parse(String(row.steps_completed))).toEqual([...DONE]);
+        expect(auditRows("dataset_published")).toHaveLength(0);
+        expect(overrideRows()).toHaveLength(0);
+      });
+    }
+  }
+
+  test("2. the control: the owner-name walk-back with the same steps resumes, and the other reasons did not", async () => {
+    const { requestId } = seedFailing({
+      requestStatus: "blocked",
+      blockReason: "owner_name_missing",
+      status: "direct-identifiers",
+      steps: DONE,
+    });
+    const res = await approve({ resume: true });
+    expect(res.status).toBe(200);
+    expect(requestRow(requestId).status).toBe("published");
+    expect(overrideRows()).toHaveLength(0);
+  });
+});
+
 describe("a dataset the review does not apply to, and one it passes", () => {
   test("3. a mirror and an exemplar publish with no override, and the gate says n/a", async () => {
     const mirror = seed({ source: "openneuro", datasetId: MIRROR });
@@ -426,6 +477,33 @@ describe("--skip-ci-check is recorded", () => {
     expect(skipped[0].details).toEqual({ request_id: requestId });
     // The BIDS conclusion was never asked for.
     expect(calls.filter((c) => /bids-validation/.test(c.path))).toHaveLength(0);
+  });
+});
+
+describe("the audit trail names the executor one way", () => {
+  test("19. a skip inside a web approval records executed_by as the same username the approval row does", async () => {
+    // The executor's service account (B) runs the clicker's (A's) approval. Both rows name B as
+    // the executor, and both as the username: one type for the field across the whole trail.
+    const { requestId } = seed({
+      requestStatus: "approving",
+      steps: DONE.filter((s) => s !== "ci_check"),
+    });
+    seedPublicationReview(db, { requestId, datasetId: DATASET, state: "reported" });
+    db.run(
+      `UPDATE publication_requests
+          SET approval_requested_by = ?, approval_dispatched_at = datetime('now', '-1 minutes')
+        WHERE id = ?`,
+      [adminA, requestId],
+    );
+    const res = await approve({ resume: true, skip_ci_check: true }, { key: ADMIN_B_KEY });
+    expect(res.status).toBe(200);
+    const skipped = auditRows("publication_ci_check_skipped");
+    expect(skipped).toHaveLength(1);
+    // Attributed to the clicker, executed by the service account.
+    expect(skipped[0].user_id).toBe(adminA);
+    expect(skipped[0].details).toEqual({ request_id: requestId, executed_by: "gateadminb" });
+    expect(skipped[0].details.executed_by).toBe(published().details.executed_by as string);
+    expect(typeof skipped[0].details.executed_by).toBe("string");
   });
 });
 
@@ -496,6 +574,11 @@ describe("a review that is not a pass needs the administrator's override", () =>
     const detail = await detailOf();
     expect(body.reasons).toEqual(detail.reasons);
     expect(body.headline).toBe(detail.description.headline);
+    // Each reason carries the humanized line the detail prints for it.
+    expect(body.reasons.map((r) => r.line)).toEqual(
+      detail.description.lines.slice(0, body.reasons.length),
+    );
+    expect(body.reasons.every((r) => typeof r.line === "string" && r.line !== "")).toBe(true);
     // Nothing started, nothing recorded.
     expect(requestRow(requestId).status).toBe("requested");
     expect(requestRow(requestId).approved_by).toBeNull();
@@ -729,6 +812,11 @@ describe("a review that is not a pass needs the administrator's override", () =>
       reasons: ["review_not_started"],
       via: "approve",
     });
+    // The audit row is the only record of this override, so the outcome it holds is the one the
+    // administrator was shown: the refusal's, which is the derived outcome of the review.
+    expect(refusal.outcome).toBe("action_required");
+    expect(audit[0].details.outcome).toBe(refusal.outcome);
+    expect(audit[0].details).not.toHaveProperty("executed_by");
   });
 
   test("15. an approving request whose screen was re-run to a new head has no review to attach to: same rule", async () => {
@@ -809,6 +897,90 @@ describe("an override is its approver's, and it is recorded once", () => {
     expect(requestRow(requestId).status).toBe("approving");
   });
 
+  test("an override that now names more than the one on record is recorded again, by the same administrator", async () => {
+    // The record is skipped only when it says exactly what stands: a reason that came up since
+    // the first override is one the administrator confirms again, and the new set replaces the old.
+    bidsConclusion = "failure";
+    const { requestId, reviewId } = seedFailing({ requestStatus: "approving", steps: [] });
+    const first = await approve({
+      resume: true,
+      override_publication_review: { review_id: reviewId, reasons: ["question_failed"] },
+    });
+    expect(first.status).toBe(422);
+    expect(reviewRow(reviewId).override_reasons).toBe(JSON.stringify(["question_failed"]));
+    expect(overrideRows()).toHaveLength(1);
+
+    db.run("INSERT INTO dataset_versions (dataset_id, version, doi) VALUES (?, '1.0.0', ?)", [
+      DATASET,
+      "10.82901/nm.test",
+    ]);
+    const second = await approve({
+      resume: true,
+      override_publication_review: {
+        review_id: reviewId,
+        reasons: ["question_failed", "version_already_released"],
+      },
+    });
+    expect(second.status).toBe(422);
+    expect(reviewRow(reviewId).override_by).toBe(adminA);
+    expect(reviewRow(reviewId).override_reasons).toBe(
+      JSON.stringify(["question_failed", "version_already_released"]),
+    );
+    const audit = overrideRows();
+    expect(audit).toHaveLength(2);
+    expect(audit[1].details).toMatchObject({
+      review_id: reviewId,
+      reasons: ["question_failed", "version_already_released"],
+    });
+    expect(requestRow(requestId).status).toBe("approving");
+  });
+
+  test("an override records the codes that stand, not every override-class code the body lists, so a later reason is not pre-covered", async () => {
+    // A client other than the CLI may list a code that does not stand. Only the codes that stand
+    // are recorded, so the record cannot cover a reason that comes up afterwards.
+    bidsConclusion = "failure";
+    const { requestId, reviewId } = seedFailing({ requestStatus: "approving", steps: [] });
+    const body = {
+      resume: true,
+      override_publication_review: {
+        review_id: reviewId,
+        reasons: ["question_failed", "version_already_released"],
+      },
+    };
+    const first = await approve(body);
+    // Past the gate, stopped by the BIDS check.
+    expect(first.status).toBe(422);
+    expect(reviewRow(reviewId).override_reasons).toBe(JSON.stringify(["question_failed"]));
+    expect(overrideRows()).toHaveLength(1);
+    expect(overrideRows()[0].details).toMatchObject({ reasons: ["question_failed"] });
+
+    // Sent again as it was, the set that stands is the set on record: not recorded again.
+    const again = await approve(body);
+    expect(again.status).toBe(422);
+    expect(overrideRows()).toHaveLength(1);
+
+    // The release of this very version lands afterwards. The record does not cover it.
+    db.run("INSERT INTO dataset_versions (dataset_id, version, doi) VALUES (?, '1.0.0', ?)", [
+      DATASET,
+      "10.82901/nm.test",
+    ]);
+    // Seeded after the fact, so the run is gated again: it has not started publishing.
+    const bare = await refusalOf(await approve({ resume: true }));
+    expect(bare.refusal).toBe("needs_override");
+    // A bare approval names everything an override would have to cover.
+    expect(bare.uncovered).toEqual(["question_failed", "version_already_released"]);
+    const named = await refusalOf(
+      await approve({
+        resume: true,
+        override_publication_review: { review_id: reviewId, reasons: ["question_failed"] },
+      }),
+    );
+    expect(named.refusal).toBe("override_not_covering");
+    expect(named.uncovered).toEqual(["version_already_released"]);
+    expect(reviewRow(reviewId).override_reasons).toBe(JSON.stringify(["question_failed"]));
+    expect(requestRow(requestId).status).toBe("approving");
+  });
+
   test("an override from another administrator for the same review replaces the recorded one", async () => {
     const { reviewId } = seedFailing();
     db.run(
@@ -871,8 +1043,6 @@ describe("#1604 as it stands: an override is never recorded under another admini
         WHERE id = ?`,
       [adminA, requestId],
     );
-  const INSIDE_MESSAGE =
-    "A web approval of this request is in progress, so an override sent now would be recorded under the administrator who clicked. Wait for it to finish or stop, then approve again with --force.";
 
   test("23. an override sent by B inside A's live lease is refused, and recorded under nobody", async () => {
     const { requestId, reviewId } = seedFailing();
@@ -886,7 +1056,10 @@ describe("#1604 as it stands: an override is never recorded under another admini
     );
     expect(res.status).toBe(409);
     const body = (await res.json()) as { error: string; message: string };
-    expect(body).toEqual({ error: "override_inside_web_approval", message: INSIDE_MESSAGE });
+    expect(body).toEqual({
+      error: "override_inside_web_approval",
+      message: OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE,
+    });
     expect(APPROVAL_REFUSAL_ERROR_CODES).toContain(body.error);
     // Nothing ran and nothing was recorded, under A or under B.
     expect(reviewRow(reviewId).override_by).toBeNull();
@@ -1189,8 +1362,6 @@ describe("a run that stopped before it published is gated on the version and DOI
 describe("the mark that starts an approval does not overwrite a change made while it was checked", () => {
   /** The statement that marks the request `approving`: the first write of a run past the gates. */
   const isMark = (sql: string) => /UPDATE publication_requests SET status = 'approving'/.test(sql);
-  const REQUEST_CHANGED_MESSAGE =
-    "The request changed while the approval was being checked (it was denied or blocked). Read it again before approving.";
 
   test("21. a failed-minimum report that re-blocks the request between the gate and the mark is not undone by the approval", async () => {
     // The administrator forces over a review that is still running; the override commits on the
@@ -1855,6 +2026,56 @@ describe("approve-dispatch runs the gate before it claims, and records after the
     expect(dispatchesSent()).toBe(0);
   });
 
+  /** An `approving` row whose last heartbeat is old: no run is live, so a dispatch may claim it. */
+  const idle = (requestId: number) =>
+    db.run(
+      "UPDATE publication_requests SET updated_at = datetime('now', '-20 minutes') WHERE id = ?",
+      [requestId],
+    );
+
+  test("16. an approving run that has started publishing is dispatched with no gate: no review refusal, nothing recorded", async () => {
+    // The route accepts `requested` and `approving` requests (a `blocked` one is 409), and a
+    // resume of a run that has started publishing is continued without a gate, as `/approve` does.
+    const { requestId, reviewId } = seedFailing({ requestStatus: "approving", steps: DONE });
+    idle(requestId);
+    // The screened commit is no longer `main`, as it is once the run's own steps committed.
+    mainHead = OTHER_HEAD;
+    for (const body of [
+      undefined,
+      { override_publication_review: { review_id: reviewId, reasons: ["question_failed"] } },
+    ]) {
+      const res = await dispatchApproval(body);
+      expect(res.status).toBe(202);
+      // The claim is released again between the two, as a finished dispatch's lease would lapse.
+      db.run(
+        "UPDATE publication_requests SET approval_requested_by = NULL, approval_dispatched_at = NULL WHERE id = ?",
+        [requestId],
+      );
+    }
+    expect(dispatchesSent()).toBe(2);
+    // Neither the review's gate nor the screen's head check ran, so nothing was recorded.
+    expect(overrideRows()).toHaveLength(0);
+    expect(reviewRow(reviewId).override_by).toBeNull();
+    expect(calls.filter((c) => /\/git\/ref\//.test(c.path))).toHaveLength(0);
+  });
+
+  test("16. an approving run that stopped before it published is gated like a fresh one", async () => {
+    const { requestId, reviewId } = seedFailing({ requestStatus: "approving", steps: [] });
+    idle(requestId);
+    const refused = await refusalOf(await dispatchApproval());
+    expect(refused.refusal).toBe("needs_override");
+    expect(refused.uncovered).toEqual(["question_failed"]);
+    expect(requestRow(requestId).approval_requested_by).toBeNull();
+    expect(dispatchesSent()).toBe(0);
+    // With the override it goes on, after the head check, and the override is recorded.
+    const res = await dispatchApproval({
+      override_publication_review: { review_id: reviewId, reasons: ["question_failed"] },
+    });
+    expect(res.status).toBe(202);
+    expect(reviewRow(reviewId).override_by).toBe(adminA);
+    expect(dispatchesSent()).toBe(1);
+  });
+
   test("a review that passes dispatches with nothing recorded, the flag off too", async () => {
     const { requestId } = seed();
     seedPublicationReview(db, { requestId, datasetId: DATASET, state: "reported" });
@@ -1863,7 +2084,7 @@ describe("approve-dispatch runs the gate before it claims, and records after the
     expect(overrideRows()).toHaveLength(0);
 
     // With the flag off the gate reads nothing and an override means nothing.
-    const other = seed({ datasetId: MIRROR, source: "openneuro" });
+    seed({ datasetId: MIRROR, source: "openneuro" });
     expect((await dispatchApproval({}, { dataset: MIRROR })).status).toBe(202);
     const failing = seedFailing({ datasetId: "nm000483" });
     const off = await dispatchApproval(
@@ -1874,7 +2095,9 @@ describe("approve-dispatch runs the gate before it claims, and records after the
     );
     expect(off.status).toBe(202);
     expect(reviewRow(failing.reviewId).override_by).toBeNull();
-    expect(other.requestId).not.toBe(requestId);
+    // All three were handed to the executor, and no override was recorded for any of them.
+    expect(dispatchesSent()).toBe(3);
+    expect(overrideRows()).toHaveLength(0);
   });
 
   test("the website's cookie request from a NEMAR page records an override", async () => {

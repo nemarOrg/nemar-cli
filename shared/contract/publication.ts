@@ -129,6 +129,21 @@ export const APPROVAL_REFUSAL_ERROR_CODES: readonly string[] = [
 ];
 
 /**
+ * The sentence of the 409 `request_changed`: the request moved (a denial, a re-block) between the
+ * gates' read of it and the write that marks it `approving`. Declared here so the Worker, the
+ * clients and the tests say the one sentence.
+ */
+export const REQUEST_CHANGED_MESSAGE =
+  "The request changed while the approval was being checked (it was denied or blocked). Read it again before approving.";
+
+/**
+ * The sentence of the 409 `override_inside_web_approval`: an override sent while a web approval of
+ * the request is in progress would be recorded under the administrator who clicked.
+ */
+export const OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE =
+  "A web approval of this request is in progress, so an override sent now would be recorded under the administrator who clicked. Wait for it to finish or stop, then approve again with --force.";
+
+/**
  * Per-user outcome of `POST /admin/users/backfill-names` (#1255).
  *
  * `no_public_name` and `lookup_failed` are deliberately distinct: the first is

@@ -15,15 +15,19 @@
  * from `readStoredReport(...)?.head`, the gate's own reader. A row of another head or flag is
  * history in the detail view and never the outcome here.
  *
- * **Only a request in `requested` is reviewed** (ADR 0102, section 7: the claim requires it). A
- * request in any other state shows its stored review as history and never as a wait: a dispatched
- * row of such a request reads as one that did not report, so no surface says "running" about a
- * review whose result can no longer settle anything. Its live facts are not read either, with one
- * exception, `blocked` ({@link LIVE_FACT_STATUSES}): a blocked request that never started
- * publishing has written nothing of an approval, so a version row or a concept DOI can only belong
- * to an EARLIER release, and is shown beside the hard `request_blocked`. A request that is over
- * (`published`, `denied`) would read as one whose own release "was already released", and an
- * `approving` or `blocked` request that has started publishing has written those facts itself, so
+ * **A dispatched review is waited for in two statuses, `requested` and `approving`.** Only a request
+ * in `requested` is claimed for a review (ADR 0102, section 7: the claim requires it), but an
+ * approval that has not started publishing is gated again when it resumes, so a review claimed
+ * before the approval began can still report and settle that gate; none starts once the request is
+ * `approving`. A request in any other state shows its stored review as history and never as a wait:
+ * a dispatched row of such a request reads as one that did not report, so no surface says
+ * "running" about a review whose result can no longer settle anything. Its live facts are not read
+ * either, with one exception, `blocked` ({@link LIVE_FACT_STATUSES}): a blocked request that is not
+ * a run that started publishing has written nothing of an approval, so a version row or a concept
+ * DOI can only belong to an EARLIER release, and is shown beside the hard `request_blocked`. A
+ * request that is over (`published`, `denied`) would read as one whose own release "was already
+ * released", and an `approving` request that has started publishing, or a `blocked` one the
+ * owner-name walk-back stopped half way (`publishingStanding`), has written those facts itself, so
  * they show their stored review only. An `approving` request that stopped before it published has
  * written neither, is gated again when it resumes, and reads them like a `requested` one.
  *
@@ -45,7 +49,8 @@
  * The module imports the row readers, the stored-screen readers and the screen's status view, and
  * nothing of the screen's mail or the review's write path, so `identifier-screen.ts` can import it
  * without a cycle. That is why `screenView` lives beside those readers, and `hasStartedPublishing`
- * in `shared/publication-steps.ts`: both moved out of `identifier-screen.ts` for it.
+ * in `shared/publication-steps.ts` (with `publishingStanding`, the rule over it): both moved out of
+ * `identifier-screen.ts` for it.
  */
 
 import type {
@@ -85,13 +90,14 @@ import {
   isPublicationOutcome,
   isPublicationReviewState,
   isPublicationRunError,
+  reasonLine,
   reasonsOf,
   shownBlockReason,
   startOffered,
   stricterOf,
   verdictOf,
 } from "../../../shared/publication-review.js";
-import { hasStartedPublishing } from "../../../shared/publication-steps.js";
+import { publishingStanding } from "../../../shared/publication-steps.js";
 import type { Bindings } from "../types/bindings.js";
 import { ACTIVE_REQUEST_TAIL_SQL } from "./approval-dispatch.js";
 import type { PublicationReviewSection } from "./email.js";
@@ -143,17 +149,18 @@ export function publicationReviewApplies(dataset: {
  * an EARLIER release, which is what the checks look for.
  *
  *  - `requested`: waiting for its decision.
- *  - `blocked`: a request that never started publishing has written nothing either. Its facts
- *    are informative, and the hard `request_blocked` stands beside them. One that HAS started
+ *  - `blocked`: a request that is not a run that started publishing has written nothing either. Its
+ *    facts are informative, and the hard `request_blocked` stands beside them. One that HAS started
  *    publishing is a run the owner-name walk-back blocked half way (the check runs on every call
- *    of a run), so it wrote its own version row and DOI and reads none, like `approving`.
+ *    of a run; `publishingStanding` reads the reason too), so it wrote its own version row and DOI
+ *    and reads none, like `approving`.
  *
  * Not `approving` as such: a run that HAS started publishing has by then written its own
  * `dataset_versions` row and concept DOI, and read as live facts they would say "already released"
  * and "unexpected DOI" about a run that should be RESUMED, with `approve --force` as its next
  * command. It, like every request that is over (`published`, `denied`), shows its stored review and
  * the stored verdict only; the approval gate skips such a run for the same reason
- * (`hasStartedPublishing`). An `approving` run that STOPPED before it published (`approval ===
+ * (`publishingStanding`). An `approving` run that STOPPED before it published (`approval ===
  * "stopped"`: only the validation-only steps, `ci_check` and `enrichment_check`, completed) is
  * gated again when it resumes and has written neither a version row nor a DOI, so its facts are
  * about an earlier release and are read, whatever its status says.
@@ -239,7 +246,7 @@ export interface DerivedPublicationReview {
 }
 
 /** The report of the review in force, when it reported and still parses. */
-function reportOf(view: ReviewRowView): PublicationReviewReport | null {
+export function reportOf(view: ReviewRowView): PublicationReviewReport | null {
   return view.kind === "reported" ? view.report : null;
 }
 
@@ -315,12 +322,10 @@ export async function derivePublicationReview(
   const startable = request.status === "requested";
   // Where an approval stands: a run that has started publishing is continued without a gate, one
   // that stopped before it did is gated like a fresh run (`describePublicationReview`'s `approval`).
-  const approval: ApprovalStanding =
-    request.status !== "approving"
-      ? "none"
-      : hasStartedPublishing(request.steps_completed)
-        ? "publishing"
-        : "stopped";
+  // The one rule the approval itself asks (`publishingStanding`), so the words, the next command
+  // and `started_publishing` agree with what the Worker does: a run the owner-name walk-back
+  // blocked half way is `publishing` too, and any other blocked request is `none`.
+  const approval: ApprovalStanding = publishingStanding(request);
 
   const { head, gate } = screenOf(request);
 
@@ -335,9 +340,10 @@ export async function derivePublicationReview(
       rowView = rowViewOf(row, ctx.nowMs, ctx.overdueMinutes);
       // A review is waited for only while it can still settle something: for a request that is
       // `requested`, and for one that is `approving`, because an approval that has not started
-      // publishing is gated again when it resumes, so its review can still report before then. The
-      // gate, the detail, the list and the mail therefore read a dispatched row one way, by time
-      // alone. A run that HAS started publishing is never gated again, so its reasons do not
+      // publishing is gated again when it resumes, and a review claimed before the approval began
+      // can still report before then (the claim requires `requested`, so none starts once the
+      // request is approving). The gate, the detail, the list and the mail therefore read a
+      // dispatched row one way, by time alone. A run that HAS started publishing is never gated again, so its reasons do not
       // matter to the gate, and reading its row as running is harmless. For any other status a
       // dispatched row is not waited for.
       if (
@@ -365,7 +371,7 @@ export async function derivePublicationReview(
   const publishedVersion = report === null ? null : effectiveVersionOf(report.evidence);
   // A blocked request whose run had started publishing (the owner-name walk-back, which runs on
   // every call of a run) wrote its own version row and DOI, so it reads no live fact either.
-  const ownRun = request.status === "blocked" && hasStartedPublishing(request.steps_completed);
+  const ownRun = request.status === "blocked" && approval === "publishing";
   const readFacts =
     applies &&
     assessed &&
@@ -604,8 +610,10 @@ export const LIST_CONCURRENCY = 8;
  * The summaries of a whole list, in order, at a cost that does not grow with what each row needs.
  *
  *  - The review in force of every row is read in batches of {@link MAX_KEYS_PER_READ} requests (one
- *    statement each), never once per row. A request that is over, or being approved, then needs no
- *    other statement: its live facts are not read ({@link LIVE_FACT_STATUSES}).
+ *    statement each), never once per row. A request that is over, or that has started
+ *    publishing, then needs no other statement: its live facts are not read
+ *    ({@link LIVE_FACT_STATUSES}). A stopped `approving` run reads up to three live-fact
+ *    statements, like a `requested` one.
  *  - The rest of a row's derivation (a version row, an earlier anonymous request) runs
  *    {@link LIST_CONCURRENCY} rows at a time, so a long list does not put a request for every row
  *    in flight at once.
@@ -703,13 +711,17 @@ export function overrideReasonsOf(raw: string | null): ReasonCode[] {
 }
 
 /**
- * The reasons in the shared words, each with its cure for this dataset: the detail's `reasons`, and
- * what the approval gate's refusal carries, so the two say the same thing.
+ * The reasons in the shared words, each with its cure for this dataset and the whole reason as the
+ * one line `description.lines` prints for it (`reasonLine`, which needs the report of the review in
+ * force for a failed question's findings): the detail's `reasons`, and what the approval gate's
+ * refusal carries, so the two say the same thing. A caller that has no report passes none, and the
+ * line then lacks only what the report adds.
  */
 export function reasonViewsOf(
   reasons: readonly Reason[],
   datasetId: string,
   startable: boolean,
+  report: PublicationReviewReport | null = null,
 ): ReasonView[] {
   return reasons.map((r) => {
     const rule = REASONS[r.code];
@@ -720,6 +732,7 @@ export function reasonViewsOf(
       detail: r.detail,
       sentence: rule.sentence,
       cure: cureOf(r.code, datasetId, startable),
+      line: reasonLine(r, datasetId, report, startable),
     };
   });
 }
@@ -871,14 +884,12 @@ export async function publicationReviewDetail(
     // Not read from the reasons: with the review off they are empty, and a blocked request must
     // still be told apart.
     block_reason: shownBlockReason(ctx.request),
-    started_publishing:
-      (ctx.request.status === "approving" || ctx.request.status === "blocked") &&
-      hasStartedPublishing(ctx.request.steps_completed),
+    started_publishing: publishingStanding(ctx.request) === "publishing",
     total_files: ctx.dataset?.total_files ?? null,
     applies: d.applies,
     gate: d.gate,
     outcome: d.outcome,
-    reasons: reasonViewsOf(d.reasons, ctx.request.dataset_id, d.startable),
+    reasons: reasonViewsOf(d.reasons, ctx.request.dataset_id, d.startable, reportOf(d.rowView)),
     description: d.description,
     review: d.row === null ? null : recordOf(d.row, d.rowView),
     history: past.slice(0, HISTORY_LIMIT).map(historyEntryOf),

@@ -6,19 +6,22 @@
  * through. It never approves or denies anything: it answers yes, or a refusal in the shared words
  * (`reviewGateRefusalText`), and it records the administrator's override when one was needed.
  *
- * Only the OVERRIDE is recorded last, and only for an approval that goes on: the routes call
- * {@link recordApprovalOverride} once every other gate has passed. The screen's acknowledgment is
- * not part of that: it is the screen gate's own, recorded when that gate passes, and it stands on
- * its own (it is about the screen, and a later run by the same administrator uses it). An approval
- * this module refuses can therefore leave the acknowledgment on the record, and that is intended.
+ * Only the OVERRIDE is recorded last, and only after every gate has passed: the routes call
+ * {@link recordApprovalOverride} then. It can remain on its row, bound to that review, those
+ * reasons and its approver, when a later check or the dispatch then fails. The screen's
+ * acknowledgment is not part of that: it is the screen gate's own, recorded when that gate passes,
+ * and it stands on its own (it is about the screen, and a later run by the same administrator uses
+ * it). An approval this module refuses can therefore leave the acknowledgment on the record, and
+ * that is intended.
  *
  * What it pins, and why each line is here:
  *
  *  - **With the flag off it reads nothing.** Production is dark until the review is switched on, so
  *    a fault of the review table must not stop an approval there. The mechanical rules that hold
  *    with the flag off live outside this module (the blocked refusal, the store's re-block).
- *  - **It fails closed.** A read that fails, or anything that throws after the request was read,
- *    is a refusal (`unverified`), never a pass and never a 500 (ADR 0053, ADR 0054).
+ *  - **It fails closed.** A read that fails, a record of the override that cannot be written, or
+ *    anything that throws after the request was read, is a refusal (`unverified`), never a pass
+ *    and never a 500 (ADR 0053, ADR 0054).
  *  - **Hard reasons are checked before the override.** Nothing clears them, so an override in the
  *    body changes nothing for a request that has one.
  *  - **An override attaches to what was shown, or to nothing.** It names the review it was given
@@ -46,6 +49,7 @@ import {
   type ReviewGateRefusal,
   cureOf,
   hardReasonsOf,
+  overrideClassReasonsOf,
   reviewGateRefusalText,
   shownBlockReason,
   uncoveredByOverride,
@@ -62,6 +66,7 @@ import {
   publicationReviewApplies,
   readReviewContext,
   reasonViewsOf,
+  reportOf,
   reviewEnabled,
 } from "./publication-review-view.js";
 
@@ -112,7 +117,7 @@ export interface ReviewGateArgs {
 export interface OverrideToRecord {
   /** The review in force as it was read, or null when there is none (terminal only). */
   row: PublicationReviewRow | null;
-  /** The override-class codes of the caller's override, unique, in `REASON_CODES` order. */
+  /** The override-class codes that stand and the override covers, unique, in `REASON_CODES` order. */
   reasons: ReasonCode[];
 }
 
@@ -122,7 +127,6 @@ export type ReviewGateResult =
       ok: true;
       state: "enforced";
       outcome: PublicationOutcome;
-      reviewId: number | null;
       headSha: string | null;
       /** Set when the caller's override was needed and is not already on the row as given. */
       record: OverrideToRecord | null;
@@ -131,7 +135,10 @@ export type ReviewGateResult =
 
 type Refused = { ok: false; body: PublicationReviewGateRefusalBody };
 
-/** A refusal for a review that could not be read: no reasons, no outcome, and which read failed. */
+/**
+ * A refusal for a request or a review the gate could not check: a read that failed, or a write of
+ * the override that did. No reasons, no outcome, and which fact it was.
+ */
 function unverified(datasetId: string, fact: "request" | "review"): Refused {
   return {
     ok: false,
@@ -150,15 +157,15 @@ function unverified(datasetId: string, fact: "request" | "review"): Refused {
 }
 
 function bareRefusal(
-  refusal: Exclude<ReviewGateRefusal, "unverified">,
+  kind: Exclude<ReviewGateRefusal, "unverified">,
   datasetId: string,
   headline: string,
 ): PublicationReviewReasonedRefusalBody {
   return {
     error: PUBLICATION_REVIEW_NOT_CLEAR_CODE,
-    refusal,
+    refusal: kind,
     headline,
-    message: reviewGateRefusalText(refusal, datasetId),
+    message: reviewGateRefusalText(kind, datasetId),
     outcome: null,
     reasons: [],
     uncovered: [],
@@ -177,7 +184,7 @@ function refusal(
   d: DerivedPublicationReview,
   uncovered: ReasonCode[] = [],
 ): Refused {
-  const reasons = reasonViewsOf(d.reasons, datasetId, d.startable);
+  const reasons = reasonViewsOf(d.reasons, datasetId, d.startable, reportOf(d.rowView));
   let message = reviewGateRefusalText(kind, datasetId);
   if (kind === "hard_reason") {
     const first = hardReasonsOf(reasons)[0];
@@ -216,7 +223,8 @@ function sameCodes(a: readonly string[], b: readonly string[]): boolean {
  *     reason, which the screen gate enforced). An override in the body is ignored.
  *  7. With an override in the body: it must name the review in force (`review_changed`) and every
  *     override-class reason that stands (`override_not_covering`). It passes with the override to
- *     record, unless this administrator's own record on the row already says the same.
+ *     record, which holds exactly the reasons that stand, unless this administrator's own record on
+ *     the row already says the same.
  *  8. Without one, the override recorded on the review in force counts only when it is this
  *     approver's and covers every reason that stands; otherwise `needs_override`.
  *
@@ -259,13 +267,12 @@ function decide(args: ReviewGateArgs, d: DerivedPublicationReview): ReviewGateRe
   const { datasetId, approverId, override } = args;
   if (hardReasonsOf(d.reasons).length > 0) return refusal("hard_reason", datasetId, d);
 
-  const need = d.reasons.filter((r) => REASONS[r.code].clearedBy === "override");
+  const need = overrideClassReasonsOf(d.reasons);
   const row = d.row;
   const enforced = (record: OverrideToRecord | null): ReviewGateResult => ({
     ok: true,
     state: "enforced",
     outcome: d.outcome ?? verdictOf(d.reasons),
-    reviewId: row?.id ?? null,
     headSha: row?.headSha ?? d.live.screen.head,
     record,
   });
@@ -275,7 +282,10 @@ function decide(args: ReviewGateArgs, d: DerivedPublicationReview): ReviewGateRe
     if (override.review_id !== (row?.id ?? null)) return refusal("review_changed", datasetId, d);
     const uncovered = uncoveredByOverride(need, override.reasons);
     if (uncovered.length > 0) return refusal("override_not_covering", datasetId, d, uncovered);
-    const reasons = OVERRIDE_REASONS.filter((code) => override.reasons.includes(code));
+    // Recorded: the override-class codes that STAND, in the table's order (`uncoveredByOverride`
+    // just guaranteed the body names every one), never the others the body lists. A record that
+    // held a code that does not stand would pre-cover a reason that comes up on this row later.
+    const reasons = OVERRIDE_REASONS.filter((code) => need.some((r) => r.code === code));
     if (row === null && args.requireRow === true) return refusal("no_review_row", datasetId, d);
     if (
       row !== null &&
@@ -300,9 +310,10 @@ function decide(args: ReviewGateArgs, d: DerivedPublicationReview): ReviewGateRe
 /**
  * Record the override the gate said to record: on the review row as it was read (one conditional
  * statement, {@link RECORD_OVERRIDE_SQL}), then the audit row. Called by the route after every
- * other gate has passed, so an override is recorded only for an approval that goes on (the
- * orchestrator's own conditional mark can still refuse `request_changed` after it; the override
- * then stays on its row, bound to that review, those reasons and its approver). Zero
+ * other gate has passed, and only then. A later check can still refuse (the orchestrator's own
+ * conditional mark can refuse `request_changed`, and approve-dispatch's dispatch can fail or go
+ * unconfirmed); the override then stays on its row, bound to that review, those reasons and its
+ * approver. Zero
  * changes means the row moved between the read and now, and the override is refused as
  * `review_changed`, read again so the refusal carries what is true now. A write that fails refuses
  * `unverified`: an override that could not be recorded approves nothing.
@@ -314,6 +325,11 @@ function decide(args: ReviewGateArgs, d: DerivedPublicationReview): ReviewGateRe
  *
  * With a review row the audit row is best effort, as the screen acknowledgment's is: the override
  * is on the row, and losing the second record must not refuse an approval already decided.
+ *
+ * The audit row names no executor. An override is its sender's act and is recorded under the
+ * approver of record, and the approval route refuses an override from anyone but the approver
+ * (`override_inside_web_approval`) before the gate runs, so the sender and the approver are the
+ * same administrator whenever one is recorded.
  */
 export async function recordApprovalOverride(
   env: Bindings,
@@ -321,8 +337,6 @@ export async function recordApprovalOverride(
     requestId: number;
     datasetId: string;
     approverId: number;
-    /** The caller when it is not the approver (the executor's account), for the audit row. */
-    executedBy: number | null;
     via: "approve" | "approve-dispatch";
     outcome: PublicationOutcome;
     headSha: string | null;
@@ -370,7 +384,6 @@ export async function recordApprovalOverride(
         outcome: args.outcome,
         reasons: record.reasons,
         via: args.via,
-        ...(args.executedBy !== null ? { executed_by: args.executedBy } : {}),
       }),
     }).run();
   } catch (err) {

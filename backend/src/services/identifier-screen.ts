@@ -64,7 +64,6 @@ import {
   triggerIdentifierScreenRun,
 } from "./github.js";
 import {
-  EXEMPT_SCREEN_DESCRIPTION,
   type ScreenView,
   isScreenExempt,
   readStoredReport,
@@ -76,17 +75,10 @@ import { publicationReviewEmailSection, reviewEnabled } from "./publication-revi
 
 // The two readers of a stored screen, the sandbox exemption and the screen's status view live in
 // their own module so the publication review (ADR 0102) can use them without importing this one;
-// re-exported for every existing importer. The same goes for the two functions that say whether an
+// re-exported for every existing importer. The same goes for the function that says whether an
 // approval has started publishing, which moved to `shared/publication-steps.ts`.
-export {
-  EXEMPT_SCREEN_DESCRIPTION,
-  type ScreenView,
-  isScreenExempt,
-  readStoredReport,
-  readStoredState,
-  screenView,
-};
-export { PRE_PUBLICATION_STEPS, hasStartedPublishing } from "../../../shared/publication-steps.js";
+export { type ScreenView, isScreenExempt, readStoredReport, readStoredState, screenView };
+export { hasStartedPublishing } from "../../../shared/publication-steps.js";
 
 /**
  * A screen still pending this long after its dispatch has not reported, and is

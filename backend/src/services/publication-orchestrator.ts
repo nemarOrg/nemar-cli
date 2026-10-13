@@ -12,11 +12,21 @@
 import { z } from "zod";
 import {
   ANONYMOUS_RELEASE_STEPS,
+  OWNER_NAME_MISSING_REASON,
   PUBLICATION_STEPS,
   type PublicationStep,
+  publishingStanding,
 } from "../../../shared/publication-steps.js";
 
+import {
+  OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE,
+  REQUEST_CHANGED_MESSAGE,
+} from "../../../shared/contract/publication.js";
 import { datasetLandingUrl } from "../../../shared/datacite-constants.js";
+import {
+  ACKNOWLEDGMENT_MAX_LENGTH,
+  ACKNOWLEDGMENT_MIN_LENGTH,
+} from "../../../shared/publication-limits.js";
 import { REASON_CODES } from "../../../shared/publication-review.js";
 import { auditLogStatement } from "../db/audit-log";
 import { getS3Config } from "../routes/admin/shared";
@@ -69,7 +79,7 @@ import {
   setRepoVisibility,
 } from "./github";
 import { getDatasetsToken } from "./github-auth";
-import { checkApprovalScreenGate, hasStartedPublishing } from "./identifier-screen";
+import { checkApprovalScreenGate } from "./identifier-screen";
 import { generateManifest } from "./manifest";
 import { scheduleNeurobagelSync } from "./neurobagel-hooks.js";
 import {
@@ -91,7 +101,6 @@ import {
 import { ZARR_REQUEUE_AT_PATH } from "./sweep-stamps";
 import {
   OWNER_NAME_MISSING_MESSAGE,
-  OWNER_NAME_MISSING_REASON,
   requiresUploaderName,
   resolveOwnerIdentity,
 } from "./uploader-identity";
@@ -223,12 +232,27 @@ export function isRespond(v: unknown): v is RespondOutcome {
   return typeof v === "object" && v !== null && RESPOND in v;
 }
 
+/**
+ * How the audit trail names the administrator whose key executed a run attributed to another (a
+ * web approval, ADR 0080): the username, or the id as text when there is none. One form for every
+ * row that carries `executed_by`, so the field has one type across the trail.
+ */
+function executorName(adminUser: Pick<AuthUser, "id" | "username">): string {
+  return adminUser.username || String(adminUser.id);
+}
+
 /** An acknowledgment of the identifier screen: a stated reason, 10 to 500 characters once trimmed. */
 export const acknowledgeIdentifierScreenSchema = z
   .string()
   .trim()
-  .min(10, "The acknowledgment needs a reason of at least 10 characters")
-  .max(500, "The acknowledgment is limited to 500 characters");
+  .min(
+    ACKNOWLEDGMENT_MIN_LENGTH,
+    `The acknowledgment needs a reason of at least ${ACKNOWLEDGMENT_MIN_LENGTH} characters`,
+  )
+  .max(
+    ACKNOWLEDGMENT_MAX_LENGTH,
+    `The acknowledgment is limited to ${ACKNOWLEDGMENT_MAX_LENGTH} characters`,
+  );
 
 /**
  * The override of the publication review as the approval routes accept it. Shared by `/approve` and
@@ -492,7 +516,7 @@ async function stepCiCheck(c: ApproveStepContext): Promise<RespondOutcome | unde
           resourceId: datasetId,
           details: JSON.stringify({
             request_id: c.requestId,
-            ...(c.approver.id !== adminUser.id ? { executed_by: adminUser.id } : {}),
+            ...(c.approver.id !== adminUser.id ? { executed_by: executorName(adminUser) } : {}),
           }),
         }).run();
       } catch (auditError) {
@@ -2472,18 +2496,21 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     return c.json({ error: "No active publication request found" }, 404);
   }
 
-  // A blocked request that has not started publishing is refused by the mechanical rules (ADR
-  // 0102): whatever the flag says, and for every dataset, before anything else decides anything,
-  // as `approve-dispatch` refuses it before its screen gate. It holds for a resume too, and the
-  // depositor fixes what blocked it and requests again.
+  // A blocked request is refused by the mechanical rules (ADR 0102): whatever the flag says, and
+  // for every dataset, before anything else decides anything, as `approve-dispatch` refuses it
+  // before its screen gate. It holds for a resume too, and the depositor fixes what blocked it
+  // and requests again.
   //
-  // One that HAS started publishing is not refused here. The owner-name check below walks the
-  // request back to `blocked` on every call of a run, a resume and the batches of `s3_lock`
-  // included, so a depositor who clears their name mid-run blocks a run that is half published.
-  // The owner fixes the name and the run is resumed, as it was before the review existed;
-  // refusing it for good would strand a half-published dataset until a re-request.
-  const startedSteps = hasStartedPublishing(request.steps_completed);
-  if (request.status === "blocked" && !startedSteps) {
+  // One exception: a run that HAS started publishing and was walked back to `blocked` for the
+  // owner's name (`publishingStanding`: that reason, and a step done outside the validation-only
+  // ones). The owner-name check below walks the request back on every call of a run, a resume and
+  // the batches of `s3_lock` included, so a depositor who clears their name mid-run blocks a run
+  // that is half published. The owner fixes the name and the run is resumed, as it was before the
+  // review existed; refusing it for good would strand a half-published dataset until a
+  // re-request. A request blocked for any other reason is refused however stale its steps: the
+  // standing reads the reason, so the steps of an earlier life cannot skip the gates.
+  const standing = publishingStanding(request);
+  if (request.status === "blocked" && standing !== "publishing") {
     return c.json(requestBlockedRefusal(datasetId, request.block_reason), 409);
   }
 
@@ -2509,8 +2536,7 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     return c.json(
       {
         error: "override_inside_web_approval",
-        message:
-          "A web approval of this request is in progress, so an override sent now would be recorded under the administrator who clicked. Wait for it to finish or stop, then approve again with --force.",
+        message: OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE,
       },
       409,
     );
@@ -2562,7 +2588,7 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // The identifier screen gate (epic #1610 phase 4, ADR 0086), before anything
   // is marked: a request whose screen is not clear for its CURRENT content
   // never starts approving. It is skipped only for a resume of a run that has
-  // already started publishing (`hasStartedPublishing`: a step after the
+  // already started publishing (`publishingStanding`: a step after the
   // validation-only ones completed). From then on the run must be able to
   // finish, and its own steps commit to main, so a head check would strand it
   // halfway. Before that point nothing is public, and the depositor may have
@@ -2571,8 +2597,7 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // a request that never started, is gated like a fresh run. Sandbox (`xx`)
   // datasets are exempt inside the check. A run the owner-name walk-back blocked
   // half way is a run that started: it is continued, not gated.
-  const startedPublishing =
-    resume && (request.status === "approving" || request.status === "blocked") && startedSteps;
+  const startedPublishing = resume && standing === "publishing";
   if (!startedPublishing) {
     const gate = await checkApprovalScreenGate(env, {
       requestId: request.id,
@@ -2610,7 +2635,6 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
         requestId: request.id,
         datasetId,
         approverId: c.approver.id,
-        executedBy: c.approver.id !== adminUser.id ? adminUser.id : null,
         via: "approve",
         outcome: review.outcome,
         headSha: review.headSha,
@@ -2630,15 +2654,18 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // it since (a failed submission minimum, ADR 0102) or a denial would be overwritten by an
   // unconditional write, and the run would publish over it. Nothing has run yet, so a request
   // that changed is refused and read again. A request that was `blocked` when it was read got
-  // here only because it has started publishing (above), and is marked `approving` again.
+  // here only because it has started publishing (above), and is marked `approving` again: the
+  // last bound value (1 only for such a request) is what lets a `blocked` row through, so a
+  // request that was not blocked when it was read cannot be marked once it has become one.
+  const readAsBlocked = request.status === "blocked" ? 1 : 0;
   const marked = await db
     .prepare(
       // `last_error = NULL`: a new attempt begins, so the previous attempt's
       // error is history (the caller's own output has it), and the row reads as
       // running, not failed, from this moment (services/approval-dispatch.ts).
-      "UPDATE publication_requests SET status = 'approving', approved_by = ?, last_error = NULL, updated_at = datetime('now') WHERE id = ? AND status IN ('requested', 'approving', ?)",
+      "UPDATE publication_requests SET status = 'approving', approved_by = ?, last_error = NULL, updated_at = datetime('now') WHERE id = ? AND (status IN ('requested', 'approving') OR (status = 'blocked' AND ? = 1))",
     )
-    .bind(c.approver.id, request.id, request.status === "blocked" ? "blocked" : "approving")
+    .bind(c.approver.id, request.id, readAsBlocked)
     .run();
   if ((marked.meta.changes ?? 0) !== 1) {
     console.warn(
@@ -2647,8 +2674,7 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     return c.json(
       {
         error: "request_changed",
-        message:
-          "The request changed while the approval was being checked (it was denied or blocked). Read it again before approving.",
+        message: REQUEST_CHANGED_MESSAGE,
       },
       409,
     );
@@ -2863,9 +2889,7 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
         approved_by: c.approver.username,
         // Only when the executor is not the approver, so a terminal approval's
         // row is byte-identical to what it always was.
-        ...(c.approver.id !== adminUser.id
-          ? { executed_by: adminUser.username || String(adminUser.id) }
-          : {}),
+        ...(c.approver.id !== adminUser.id ? { executed_by: executorName(adminUser) } : {}),
         steps: allSteps,
         // The review gate's state for this environment and dataset when the row is written, and
         // the flag of the call that finished the run. A skip is also its own row when it happens

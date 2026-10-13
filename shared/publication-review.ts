@@ -36,6 +36,7 @@
 import type { FindingKind } from "./identifier-scan.js";
 import { FINDING_KINDS, KNOWN_FORMATS, type ScreenGate } from "./identifier-screen-report.js";
 import { SEMVER, isOneOf } from "./pr-review.js";
+import { PUBLICATION_DATASET_ID_RE } from "./publication-limits.js";
 import { MINIMUM_FAILURES, MIN_NAME_LENGTH, type MinimumFailure } from "./submission-minimums.js";
 import { sanitizeNote } from "./untrusted-text.js";
 
@@ -466,7 +467,7 @@ export class PublicationReviewReportError extends Error {
 
 export const HEAD = /^[0-9a-f]{40}$/;
 /** A dataset id as the platform mints them: the only text a command is built from. */
-const DATASET_ID = /^(nm|on|xx)\d{6}$/;
+const DATASET_ID = PUBLICATION_DATASET_ID_RE;
 /** A count: a non-negative safe integer no larger than this. */
 export const MAX_COUNT = 10_000_000;
 /** A sampling rate is a positive number below this, in hertz. */
@@ -1691,7 +1692,7 @@ export function startOffered(input: {
 export type ApprovalStanding = "none" | "stopped" | "publishing";
 
 /** What the description says about a run that has started publishing: why no gate applies to it. */
-const APPROVAL_PUBLISHING_LINE =
+export const APPROVAL_PUBLISHING_LINE =
   "This approval has started publishing; it passed the gates when it started and is continued without them.";
 
 /**
@@ -1700,7 +1701,7 @@ const APPROVAL_PUBLISHING_LINE =
  * cure for a failed minimum names takes only a request still waiting for its decision, so this one
  * stays `approving`. The way out is a denial. `<dataset>` is filled like a cure's.
  */
-const APPROVAL_STOPPED_HARD_LINE =
+export const APPROVAL_STOPPED_HARD_LINE =
   "This approval stopped before it started publishing, and a reason that nothing clears now stands, so it cannot be resumed. Deny it with a reason (nemar admin publish deny <dataset>); the depositor can request again.";
 
 /**
@@ -1915,8 +1916,9 @@ export function describeUnreadableReview(datasetId: string): PublicationReviewDe
  *    between the read and the write that records the override.
  *  - `no_review_row`: the web executor's dispatch needs an override and there is no review row to
  *    record it on.
- *  - `unverified`: the gate could not read the request or the review, so it refuses rather than
- *    guess (ADR 0053, ADR 0054).
+ *  - `unverified`: the gate could not check the request or the review, so it refuses rather than
+ *    guess (ADR 0053, ADR 0054). A read that failed, or a record of the override that could not be
+ *    written: an override that is recorded nowhere approves nothing.
  */
 export const REVIEW_GATE_REFUSALS = [
   "hard_reason",
@@ -1941,7 +1943,7 @@ export const REVIEW_GATE_REFUSAL_TEXT: Record<ReviewGateRefusal, string> = {
   no_review_row:
     "No review of this commit is on record to attach the override to. Start it (nemar admin publish start <dataset>), or approve from a terminal with --force.",
   unverified:
-    "The publication review could not be read just now, so the approval is refused. Try again.",
+    "The publication review could not be checked just now, so the approval is refused. Try again.",
 };
 
 /**

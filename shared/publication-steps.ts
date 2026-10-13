@@ -68,6 +68,49 @@ export function hasStartedPublishing(stepsCompletedJson: string | null | undefin
 }
 
 /**
+ * `publication_requests.block_reason` of a request whose owner has no real name. The one reason
+ * that walks a run that started publishing back to `blocked` (the check runs on every call of a
+ * run), so it is the one blocked request that is still a run ({@link publishingStanding}). The
+ * column is free text and a new reason needs no migration; this word is read by the Worker's
+ * routes and by the approval, so it is declared here beside the rule that depends on it.
+ */
+export const OWNER_NAME_MISSING_REASON = "owner_name_missing";
+
+/** Where a request stands as a run (see {@link publishingStanding}). */
+export type PublishingStanding = "none" | "stopped" | "publishing";
+
+/**
+ * Where a request stands as a publication run, the ONE rule behind the approval's exemption from
+ * the gates and everything that says so (the detail's `approval`, `started_publishing` and next
+ * command):
+ *
+ *  - `publishing`: a run that has started publishing, so a resume is continued without a gate.
+ *    That is an `approving` request with a step done outside {@link PRE_PUBLICATION_STEPS}, and a
+ *    `blocked` one only when the owner-name walk-back blocked it ({@link OWNER_NAME_MISSING_REASON})
+ *    with such a step done: the walk-back runs on every call of a run, so it strands a run that is
+ *    half published, and the owner fixes the name and the run is resumed.
+ *  - `stopped`: `approving`, with nothing done yet that changed anything. A resume is gated like a
+ *    fresh run, because the depositor may have pushed since.
+ *  - `none`: every other request. A `blocked` request with any other reason is blocked however
+ *    stale its step list: nothing clears `steps_completed` when the depositor requests again, so a
+ *    run walked back for the name and then blocked again by the screen or a failed minimum still
+ *    carries the steps of its first life, and trusting them would skip the gates for content that
+ *    never passed them.
+ */
+export function publishingStanding(input: {
+  status: string;
+  steps_completed: string | null;
+  block_reason: string | null;
+}): PublishingStanding {
+  const started = hasStartedPublishing(input.steps_completed);
+  if (input.status === "approving") return started ? "publishing" : "stopped";
+  if (input.status === "blocked" && input.block_reason === OWNER_NAME_MISSING_REASON && started) {
+    return "publishing";
+  }
+  return "none";
+}
+
+/**
  * Steps an ANONYMOUS release does not run (#1408, epic #1406).
  *
  * An anonymous release makes the DATA public while the depositor stays

@@ -23,6 +23,8 @@ import type {
   PublicationReviewSummary,
 } from "../../shared/contract/publication-review-admin";
 import {
+  APPROVAL_PUBLISHING_LINE,
+  APPROVAL_STOPPED_HARD_LINE,
   NOT_ASSESSED_LINE,
   REASONS,
   REASON_CODES,
@@ -42,6 +44,7 @@ import {
   overrideReasonsOf,
   readReviewContext,
   reasonViewsOf,
+  reportOf,
 } from "../src/services/publication-review-view";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, interceptingD1, realD1 } from "./helpers/d1";
@@ -1162,7 +1165,7 @@ describe("GET /admin/publish/:id/review", () => {
       ["id", "head_sha", "anonymous", "state", "stored_verdict", "created_at", "decided_at"].sort(),
     );
     expect(Object.keys(d.reasons[0]).sort()).toEqual(
-      ["code", "class", "cleared_by", "detail", "sentence", "cure"].sort(),
+      ["code", "class", "cleared_by", "detail", "sentence", "cure", "line"].sort(),
     );
     expect(d.reasons).toEqual([
       {
@@ -1172,8 +1175,12 @@ describe("GET /admin/publish/:id/review", () => {
         detail: "complete_and_honest",
         sentence: REASONS.question_failed.sentence,
         cure: REASONS.question_failed.cure,
+        // The line the description prints for the reason, which the detail repeats so a client
+        // prints it and composes nothing from `detail`.
+        line: d.description.lines[0],
       },
     ]);
+    expect(d.reasons[0].line).toContain(REASONS.question_failed.cure);
     expect(d.description.headline).toBe("Publication review: FAIL");
     expect(d.description.tone).toBe("stop");
     expect(d.description.lines.at(-1)).toBe(NOT_ASSESSED_LINE);
@@ -1720,7 +1727,7 @@ describe("the detail carries what approve and next show from one read", () => {
     expect((await detail(bare.datasetId)).block_reason).toBeNull();
   });
 
-  test("started_publishing is true only for an approving or blocked request with a step outside the validation-only ones", async () => {
+  test("started_publishing is true only for an approving request, or one the owner-name walk-back blocked, with a step outside the validation-only ones", async () => {
     const stepsOf = (requestId: number, steps: unknown) =>
       db.run("UPDATE publication_requests SET steps_completed = ? WHERE id = ?", [
         typeof steps === "string" ? steps : JSON.stringify(steps),
@@ -1754,9 +1761,10 @@ describe("the detail carries what approve and next show from one read", () => {
     const waiting = request({ requestStatus: "requested" });
     stepsOf(waiting.requestId, ["ci_check", "s3_public_read", "publish_doi"]);
     expect((await detail(waiting.datasetId)).started_publishing).toBe(false);
-    // A blocked request is one only by the owner-name walk-back that runs on every approval call,
-    // so one with a step done is a run that stopped half published, and is told apart from one
-    // that never started (which the Worker refuses outright).
+    // A request blocked by the owner-name walk-back, which runs on every approval call, with a
+    // step done is a run that stopped half published, and is told apart from one that never
+    // started (which the Worker refuses outright). A blocked request with any other reason is no
+    // run, whatever its steps (pinned in its own test below).
     const blocked = request({ requestStatus: "blocked", blockReason: "owner_name_missing" });
     expect((await detail(blocked.datasetId)).started_publishing).toBe(false);
     stepsOf(blocked.requestId, QUIET);
@@ -1782,6 +1790,57 @@ describe("the detail carries what approve and next show from one read", () => {
     expect(d.reasons.map((r) => r.code)).toEqual(["request_blocked"]);
   });
 
+  test("a run the owner-name walk-back blocked half way is told it started publishing, and its next command is the resume", async () => {
+    // The Worker resumes such a run with no gate, so the words say what it does: not "blocked,
+    // requests again", and a command that is the resume.
+    const { requestId, datasetId } = request({
+      requestStatus: "blocked",
+      blockReason: "owner_name_missing",
+    });
+    seedPublicationReview(db, { requestId, datasetId, state: "reported", report: failingReport() });
+    startPublishing(requestId);
+    const d = await detail(datasetId);
+    expect(d.request_status).toBe("blocked");
+    expect(d.started_publishing).toBe(true);
+    expect(d.description.next).toBe(`nemar admin publish approve ${datasetId} --resume`);
+    expect(d.description.lines).toContain(APPROVAL_PUBLISHING_LINE);
+    expect(d.description.lines.at(-1)).toBe(NOT_ASSESSED_LINE);
+    // Before any step changed anything it is a blocked request that never started: no run, no
+    // command, the depositor's cure.
+    db.run("UPDATE publication_requests SET steps_completed = ? WHERE id = ?", [
+      JSON.stringify(["ci_check", "enrichment_check"]),
+      requestId,
+    ]);
+    const quiet = await detail(datasetId);
+    expect(quiet.started_publishing).toBe(false);
+    expect(quiet.description.next).toBeNull();
+    expect(quiet.description.lines).not.toContain(APPROVAL_PUBLISHING_LINE);
+  });
+
+  test("a blocked request with any other reason is not a run, whatever steps an earlier life left on it", async () => {
+    // Nothing clears `steps_completed` when the depositor requests again, so these are the steps of
+    // a run that was walked back for the owner's name and then blocked again for something else.
+    for (const blockReason of ["identifier_screen_findings", "min_requirements_failed", null]) {
+      const { requestId, datasetId } = request({ requestStatus: "blocked", blockReason });
+      seedPublicationReview(db, {
+        requestId,
+        datasetId,
+        state: "reported",
+        report: failingReport(),
+      });
+      startPublishing(requestId);
+      const d = await detail(datasetId);
+      expect({ blockReason, started: d.started_publishing }).toEqual({
+        blockReason,
+        started: false,
+      });
+      expect(d.description.next).toBeNull();
+      expect(d.description.lines).not.toContain(APPROVAL_PUBLISHING_LINE);
+      // The blocked cure, which the stale steps must not replace.
+      expect(d.description.lines.join("\n")).toContain(REASONS.request_blocked.cure);
+    }
+  });
+
   test("an approving request's next command follows where its approval stands: resumed gated, or resumed with no gate", async () => {
     const { requestId, datasetId } = request({ requestStatus: "approving" });
     seedPublicationReview(db, { requestId, datasetId, state: "reported", report: failingReport() });
@@ -1800,9 +1859,7 @@ describe("the detail carries what approve and next show from one read", () => {
     expect(publishing.started_publishing).toBe(true);
     // No gate applies to a run that has started publishing: no --force, and the line says why.
     expect(publishing.description.next).toBe(`nemar admin publish approve ${datasetId} --resume`);
-    expect(publishing.description.lines).toContain(
-      "This approval has started publishing; it passed the gates when it started and is continued without them.",
-    );
+    expect(publishing.description.lines).toContain(APPROVAL_PUBLISHING_LINE);
     expect(publishing.description.lines.at(-1)).toBe(NOT_ASSESSED_LINE);
     // A request waiting for its decision is unchanged.
     const open = request();
@@ -1821,8 +1878,7 @@ describe("the detail carries what approve and next show from one read", () => {
     // A failed-minimum report that lands on an `approving` request leaves it approving (the store's
     // move to blocked takes only a `requested` one), so no move to blocked happens to it, as the
     // table's cure allows for; the way out is a denial, and the detail says so.
-    const STOPPED =
-      "This approval stopped before it started publishing, and a reason that nothing clears now stands, so it cannot be resumed.";
+    const stoppedLine = (id: string) => APPROVAL_STOPPED_HARD_LINE.replaceAll("<dataset>", id);
     const { requestId, datasetId } = request({ requestStatus: "approving" });
     seedPublicationReview(db, {
       requestId,
@@ -1841,12 +1897,10 @@ describe("the detail carries what approve and next show from one read", () => {
     expect(stopped.started_publishing).toBe(false);
     expect(stopped.reasons.map((r) => r.code)).toContain("submission_minimum_failed");
     const lines = stopped.description.lines;
-    const at = lines.findIndex((l) => l.startsWith(STOPPED));
+    const at = lines.indexOf(stoppedLine(datasetId));
     expect(at).toBeGreaterThanOrEqual(0);
-    expect(lines[at]).toBe(
-      `${STOPPED} Deny it with a reason (nemar admin publish deny ${datasetId}); the depositor can request again.`,
-    );
-    expect(lines.filter((l) => l.startsWith(STOPPED))).toHaveLength(1);
+    expect(lines[at]).toContain(`(nemar admin publish deny ${datasetId})`);
+    expect(lines.filter((l) => l === stoppedLine(datasetId))).toHaveLength(1);
     expect(lines.at(-1)).toBe(NOT_ASSESSED_LINE);
     expect(at).toBe(lines.length - 2);
 
@@ -1865,7 +1919,7 @@ describe("the detail carries what approve and next show from one read", () => {
       }),
     });
     const waiting = await detail(open.datasetId);
-    expect(waiting.description.lines.some((l) => l.startsWith(STOPPED))).toBe(false);
+    expect(waiting.description.lines).not.toContain(stoppedLine(open.datasetId));
 
     // Once it has started publishing, no gate applies and the line is the other one.
     db.run("UPDATE publication_requests SET steps_completed = ? WHERE id = ?", [
@@ -1873,10 +1927,8 @@ describe("the detail carries what approve and next show from one read", () => {
       requestId,
     ]);
     const publishing = await detail(datasetId);
-    expect(publishing.description.lines.some((l) => l.startsWith(STOPPED))).toBe(false);
-    expect(publishing.description.lines).toContain(
-      "This approval has started publishing; it passed the gates when it started and is continued without them.",
-    );
+    expect(publishing.description.lines).not.toContain(stoppedLine(datasetId));
+    expect(publishing.description.lines).toContain(APPROVAL_PUBLISHING_LINE);
   });
 
   test("total_files is the dataset's count, or null when it is not known", async () => {
@@ -2235,13 +2287,66 @@ describe("the exports the approval gate reads through", () => {
     await expect(readReviewContext(failing, requestId)).rejects.toThrow("simulated");
   });
 
+  test("each reason carries the line the description prints for it, with the detail in words", async () => {
+    // A client prints `line` and composes nothing from `detail`, whose closed words (a document
+    // key, a run error) are not words for a person.
+    const withheld = request();
+    seedPublicationReview(db, {
+      requestId: withheld.requestId,
+      datasetId: withheld.datasetId,
+      state: "reported",
+      report: {
+        ...failingReport(),
+        evidence: evidenceFor(SCREENED_HEAD, false, {
+          documents: {
+            readme: "withheld_unreadable",
+            dataset_description: "sent",
+            changes: "sent",
+            license: "sent",
+            participants_json: "withheld_not_json",
+          },
+        }),
+      },
+    });
+    const a = await detail(withheld.datasetId);
+    expect(a.reasons.map((r) => r.code)).toEqual([
+      "question_failed",
+      "text_withheld",
+      "question_unknown",
+    ]);
+    for (const [i, r] of a.reasons.entries()) {
+      expect({ code: r.code, line: r.line }).toEqual({
+        code: r.code,
+        line: a.description.lines[i],
+      });
+    }
+    const withheldLine = a.reasons[1].line as string;
+    expect(withheldLine).toContain("README");
+    expect(withheldLine).not.toContain("participants_json");
+    // The model's findings against a failed question are in the line the description prints.
+    expect(a.reasons[0].line).toContain("findings:");
+
+    const errored = request();
+    seedPublicationReview(db, {
+      requestId: errored.requestId,
+      datasetId: errored.datasetId,
+      state: "errored",
+      detail: "model_unavailable",
+    });
+    const b = await detail(errored.datasetId);
+    expect(b.reasons.map((r) => r.code)).toEqual(["review_could_not_run"]);
+    expect(b.reasons[0].line).toBe(b.description.lines[0]);
+    expect(b.reasons[0].line).toContain("the reviewing model was unavailable");
+    expect(b.reasons[0].line).not.toContain("model_unavailable");
+  });
+
   test("reasonViewsOf is the detail's reasons: the shared words, with the cure for this dataset and request", async () => {
     const { requestId, datasetId } = request();
     seedPublicationReview(db, { requestId, datasetId, state: "errored", detail: "model_refused" });
     const ctx = await readReviewContext(env(), requestId);
     if (ctx === null) throw new Error("no such request");
     const d = await derivePublicationReview({ env: env(), nowMs: Date.now(), ...ctx });
-    const views = reasonViewsOf(d.reasons, datasetId, d.startable);
+    const views = reasonViewsOf(d.reasons, datasetId, d.startable, reportOf(d.rowView));
     expect(views).toEqual((await detail(datasetId)).reasons);
     expect(views.map((v) => v.code)).toEqual(["review_could_not_run"]);
     expect(views[0].cure).toContain(`nemar admin publish start ${datasetId}`);
