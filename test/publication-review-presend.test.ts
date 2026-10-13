@@ -15,6 +15,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   PARTICIPANT_FIELD_CAPS,
+  normalizeText,
   presend,
   scanLocalPathForms,
 } from "../scripts/ci/publication-review-presend";
@@ -298,14 +299,15 @@ describe("variation selectors are removed before the rules look (#1728)", () => 
     },
   );
 
-  test("the characters next to the ranges are text, not selectors", () => {
-    // U+FE10 is a presentation form, U+1810 a Mongolian digit, U+E00FF and U+E01F0 are unassigned.
-    const text = "a\uFE10b\u1810c\u{E00FF}d\u{E01F0}e";
-    const r = presend(docs({ readme: present(text) }));
-    expect(r.cleared.readme as string).toBe(text);
+  test("the characters next to the ranges are not selectors", () => {
+    // U+FE10 is a presentation form of a comma, which compatibility normalization makes a comma;
+    // U+1810 is a Mongolian digit, which stays. (U+E00FF and U+E01F0, unassigned and default
+    // ignorable, are removed with the rest of that kind: see the default-ignorable tests below.)
+    const r = presend(docs({ readme: present("a\uFE10b\u1810c") }));
+    expect(r.cleared.readme as string).toBe("a,b\u1810c");
   });
 
-  test("exactly the four ranges are removed: every code point around them is checked", () => {
+  test("every variation selector is removed: the four ranges, in full", () => {
     const isSelector = (cp: number) =>
       (cp >= 0x180b && cp <= 0x180d) ||
       cp === 0x180f ||
@@ -313,20 +315,19 @@ describe("variation selectors are removed before the rules look (#1728)", () => 
       (cp >= 0xe0100 && cp <= 0xe01ef);
     let removed = 0;
     for (const [from, to] of [
-      [0x1800, 0x1820],
-      [0xfdf0, 0xfe20],
-      [0xe00f0, 0xe0200],
+      [0x180b, 0x180d],
+      [0x180f, 0x180f],
+      [0xfe00, 0xfe0f],
+      [0xe0100, 0xe01ef],
     ] as const) {
       for (let cp = from; cp <= to; cp++) {
-        const ch = String.fromCodePoint(cp);
-        const r = presend(docs({ readme: present(`a${ch}b`) }));
-        // A selector goes; a control or format character becomes a space; anything else stays.
-        const expected = isSelector(cp) ? "ab" : /[\p{Cc}\p{Cf}]/u.test(ch) ? "a b" : `a${ch}b`;
-        expect(r.cleared.readme as string, cp.toString(16)).toBe(expected);
-        if (isSelector(cp)) removed++;
+        expect(isSelector(cp)).toBe(true);
+        const r = presend(docs({ readme: present(`a${String.fromCodePoint(cp)}b`) }));
+        expect(r.cleared.readme as string, cp.toString(16)).toBe("ab");
+        removed++;
       }
     }
-    expect(removed).toBe(4 + 16 + 240);
+    expect(removed).toBe(3 + 1 + 16 + 240);
   });
 
   test("a hidden message is gone from every JSON string and key, too", () => {
@@ -349,6 +350,307 @@ describe("variation selectors are removed before the rules look (#1728)", () => 
         2,
       ),
     );
+  });
+});
+
+/** ASCII text in its fullwidth forms (the code points U+FF01 to U+FF5E), a space as U+3000. */
+const fullwidth = (text: string) =>
+  [...text]
+    .map((c) =>
+      c === " "
+        ? "\u3000"
+        : c >= "!" && c <= "~"
+          ? String.fromCodePoint((c.codePointAt(0) as number) + 0xfee0)
+          : c,
+    )
+    .join("");
+
+describe("compatibility forms are normalized (NFKC) before any rule looks (#1728)", () => {
+  // A fullwidth solidus is a slash to a reader and to the model, and nothing to a rule that matches
+  // the ASCII one. The text is normalized first, the rules run on the result, and the result is sent.
+  test("the helper writes what it says", () => {
+    expect(fullwidth("/home a")).toBe("\uFF0F\uFF48\uFF4F\uFF4D\uFF45\u3000\uFF41");
+    expect(fullwidth("\\")).toBe("\uFF3C");
+    expect(fullwidth("\u00e9")).toBe("\u00e9");
+  });
+
+  test.each([
+    ["a POSIX home path", fullwidth("Scripts in /home/jsmith/projects")],
+    ["a macOS path", fullwidth("see /Users/jsmith/data and more")],
+    ["a Windows path", fullwidth("C:\\Users\\jsmith\\Desktop")],
+    ["a path with only the slashes fullwidth", "in \uFF0Fhome\uFF0Fjsmith\uFF0Fx"],
+    ["a path with only the name fullwidth", "in /home/\uFF4A\uFF53\uFF4D\uFF49\uFF54\uFF48"],
+  ])("a fullwidth path is a path: %s", (_what, text) => {
+    for (const [document, name] of [
+      ["readme", "README.md"],
+      ["changes", "CHANGES"],
+      ["license", "LICENSE"],
+    ] as const) {
+      const r = presend(docs({ [document]: present(text, name) }));
+      expect(r.states[document], document).toBe("withheld_finding");
+      expect(r.cleared[document]).toBeUndefined();
+      expect(r.withheld_findings, document).toEqual({ "local-user-path": 1 });
+    }
+  });
+
+  test("a fullwidth path inside a JSON string, or as a JSON key, is a path", () => {
+    const d = presend(
+      docs({
+        dataset_description: present(
+          JSON.stringify({ Funding: [fullwidth("/Users/jsmith/grant.pdf")] }),
+          "dataset_description.json",
+        ),
+      }),
+    );
+    expect(d.states.dataset_description).toBe("withheld_finding");
+    expect(d.withheld_findings).toEqual({ "local-user-path": 1 });
+    const p = presend(
+      docs({
+        participants_json: present(
+          JSON.stringify({ age: { Description: fullwidth("Collected by /home/jsmith/forms") } }),
+          "participants.json",
+        ),
+      }),
+    );
+    expect(p.states.participants_json).toBe("withheld_finding");
+    const k = presend(
+      docs({
+        dataset_description: present(
+          JSON.stringify({ GeneratedBy: [{ Name: "x", [fullwidth("/home/jsmith/x")]: "v" }] }),
+          "dataset_description.json",
+        ),
+      }),
+    );
+    expect(k.states.dataset_description).toBe("withheld_finding");
+  });
+
+  test.each([
+    ["patient name", "patient name"],
+    ["birthdate", "birthdate"],
+    ["email", "email"],
+  ])("a fullwidth identifier key is an identifier key: %s", (_what, key) => {
+    const r = presend(
+      docs({
+        dataset_description: present(
+          JSON.stringify({
+            Name: "A descriptive dataset name that is long enough",
+            GeneratedBy: [{ Name: "pipeline", [fullwidth(key)]: "Jane Q Doe" }],
+          }),
+          "dataset_description.json",
+        ),
+      }),
+    );
+    expect(r.states.dataset_description).toBe("withheld_finding");
+    expect(r.withheld_findings).toEqual({ "json-identifier-key": 1 });
+    expect(JSON.stringify(r)).not.toContain("Jane");
+  });
+
+  test("a fullwidth column of participants.json is read as what it says", () => {
+    const named = presend(
+      docs({
+        participants_json: present(
+          JSON.stringify({
+            participant_id: { Description: "label" },
+            [fullwidth("birthdate")]: { Units: "x" },
+          }),
+          "participants.json",
+        ),
+      }),
+    );
+    expect(named.states.participants_json).toBe("withheld_finding");
+    expect(named.withheld_findings).toEqual({ "json-identifier-key": 1 });
+    const keyed = presend(
+      docs({
+        participants_json: present(
+          JSON.stringify({ [fullwidth("sub-01")]: { Description: "x" } }),
+          "participants.json",
+        ),
+      }),
+    );
+    expect(keyed.states.participants_json).toBe("withheld_finding");
+    expect(keyed.withheld_findings).toEqual({ "path-subject-label": 1 });
+  });
+
+  test("what is sent is the normalized text, in prose and in JSON keys and values", () => {
+    const text =
+      "\uFB01le \u2460 \u00B2 \u2122 \u338F \uFF21\uFF22\uFF23 e\u0301 \u00A0| \u212B \u2026";
+    const expected = "file 1 2 TM kg ABC \u00E9  | \u00C5 ...";
+    const r = presend(docs({ readme: present(text), changes: present(text, "CHANGES") }));
+    expect(r.cleared.readme as string).toBe(expected);
+    expect(r.cleared.changes as string).toBe(expected);
+    const json = presend(
+      docs({
+        dataset_description: present(
+          JSON.stringify({
+            Name: text,
+            GeneratedBy: [{ [`${fullwidth("Name")}\u2460`]: text }],
+          }),
+          "dataset_description.json",
+        ),
+      }),
+    );
+    expect(JSON.parse(json.cleared.dataset_description as string)).toEqual({
+      Name: expected,
+      GeneratedBy: [{ Name1: expected }],
+    });
+  });
+
+  test("normalizing what was sent changes nothing, even where removing a mark composes its neighbours", () => {
+    // The combining-grapheme joiner between "a" and an acute accent is removed, and the two then
+    // compose: the result must already be what a second look would make of it.
+    const first = presend(
+      docs({ readme: present("a\u034F\u0301 \uFFA0\u0301 e\u034F\u0323\u0301") }),
+    );
+    const sent = first.cleared.readme as string;
+    expect(sent).toBe("\u00E1 \u0301 \u1EB9\u0301");
+    const second = presend(docs({ readme: present(sent) }));
+    expect(second.cleared.readme as string).toBe(sent);
+  });
+
+  test("the normalization is a fixed point: every code point, alone and between marks, settles in one pass", () => {
+    // What the rules scanned is what is sent, and the sent JSON is normalized once more as text, so
+    // a second pass must change nothing. Removing a mark can bring its neighbours together to
+    // compose, and two code points normalize into the removed set; the order of the steps handles both.
+    const contexts = [
+      (c: string) => c,
+      (c: string) => `a${c}`,
+      (c: string) => `a${c}\u0301`,
+      (c: string) => `e\u034F${c}\u0323\u0301`,
+      (c: string) => `${c}\u0301${c}`,
+      (c: string) => `\u1100${c}\u1161`,
+    ];
+    let checked = 0;
+    for (let cp = 0; cp <= 0x10ffff; cp += cp < 0x3200 || (cp >= 0xf900 && cp < 0x10000) ? 1 : 5) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      const ch = String.fromCodePoint(cp);
+      for (const context of contexts) {
+        const once = normalizeText(context(ch));
+        if (normalizeText(once) !== once) {
+          throw new Error(`not a fixed point at U+${cp.toString(16)}`);
+        }
+        checked++;
+      }
+    }
+    expect(checked).toBeGreaterThan(100_000);
+    // And the cases the order exists for.
+    expect(normalizeText("a\u034F\u0301")).toBe("\u00E1");
+    expect(normalizeText("\uFFA0")).toBe("");
+    expect(normalizeText("\u3164\uFF21")).toBe("A");
+  });
+
+  test("a form that expands is cut after it expands, so the cap is of what is sent", () => {
+    const cap = DOCUMENT_CHAR_CAPS.readme;
+    // U+FDFA is one character that becomes eighteen.
+    const r = presend(docs({ readme: present("\uFDFA".repeat(cap / 10)) }));
+    expect(r.states.readme).toBe("sent_cut");
+    expect((r.cleared.readme as string).length).toBe(cap + "\n[cut]".length);
+  });
+});
+
+describe("default-ignorable characters are removed, so a path split by one is a path (#1728)", () => {
+  // Characters that render as nothing, or as a blank letter, and that the control-character cleaning
+  // does not touch (it turns the format characters into spaces; these are not format characters).
+  const STRIPPED: [number, number][] = [
+    [0x034f, 0x034f], // combining grapheme joiner
+    [0x115f, 0x1160], // Hangul choseong and jungseong fillers
+    [0x17b4, 0x17b5], // Khmer inherent vowels
+    [0x180b, 0x180d], // Mongolian free variation selectors
+    [0x180f, 0x180f],
+    [0x2065, 0x2065], // unassigned, default ignorable
+    [0x3164, 0x3164], // Hangul filler
+    [0xfe00, 0xfe0f], // variation selectors
+    [0xffa0, 0xffa0], // halfwidth Hangul filler
+    [0xfff0, 0xfff8], // unassigned, default ignorable
+    [0xe0000, 0xe0000],
+    [0xe0002, 0xe001f],
+    [0xe0080, 0xe0fff], // the rest of the tag block and the variation selector supplement
+  ];
+  const isStripped = (cp: number) => STRIPPED.some(([a, b]) => cp >= a && cp <= b);
+  const SAMPLES = [
+    0x034f, 0x115f, 0x1160, 0x17b4, 0x17b5, 0x3164, 0xffa0, 0x2065, 0xfff0, 0xfff8, 0xe0000,
+    0xe0002, 0xe001f, 0xe0080, 0xe00ff, 0xe01f0, 0xe0fff, 0xfe0f,
+  ];
+
+  test("every code point of the set is removed, and the ones beside it are not", () => {
+    let removed = 0;
+    const windows: [number, number][] = [
+      [0x0340, 0x0355],
+      [0x1158, 0x1163],
+      [0x17b0, 0x17b8],
+      [0x2060, 0x206a],
+      [0x3160, 0x3168],
+      [0xffa0 - 3, 0xffa0 + 3],
+      [0xffe0, 0xfffd],
+      [0xe0000, 0xe0004],
+      [0xe001c, 0xe0022],
+      [0xe007c, 0xe0084],
+      [0xe0ffa, 0xe1004],
+    ];
+    for (const [from, to] of windows) {
+      for (let cp = from; cp <= to; cp++) {
+        const ch = String.fromCodePoint(cp);
+        const sent = presend(docs({ readme: present(`a${ch}b`) })).cleared.readme as string;
+        if (isStripped(cp)) {
+          expect(sent, cp.toString(16)).toBe("ab");
+          removed++;
+        } else {
+          expect(sent, cp.toString(16)).not.toBe("ab");
+        }
+      }
+    }
+    // 1 + 2 + 2 + 1 + 1 + 1 + 9 + 4 + 4 + 5 + 6, counted by hand from the windows above.
+    expect(removed).toBe(36);
+  });
+
+  test.each(SAMPLES.map((cp) => [`U+${cp.toString(16).toUpperCase()}`, String.fromCodePoint(cp)]))(
+    "a path split by %s is found",
+    (_name, mark) => {
+      for (const text of [
+        `/Us${mark}ers/jsmith/x`,
+        `/${mark}Users/jsmith/x`,
+        `/Users/${mark}jsmith`,
+      ]) {
+        const r = presend(docs({ readme: present(`see ${text} and more`) }));
+        expect(r.states.readme, text).toBe("withheld_finding");
+        expect(r.withheld_findings).toEqual({ "local-user-path": 1 });
+      }
+      const json = presend(
+        docs({
+          dataset_description: present(
+            JSON.stringify({ Acknowledgements: `Data at ${mark}/home/js${mark}mith/x` }),
+            "dataset_description.json",
+          ),
+        }),
+      );
+      expect(json.states.dataset_description).toBe("withheld_finding");
+    },
+  );
+
+  test("an identifier key split by one is an identifier key", () => {
+    for (const mark of ["\u3164", "\u034F", "\u115F", "\uFFA0"]) {
+      const r = presend(
+        docs({
+          dataset_description: present(
+            JSON.stringify({ GeneratedBy: [{ Name: "x", [`patient${mark}name`]: "Jane" }] }),
+            "dataset_description.json",
+          ),
+        }),
+      );
+      expect(r.states.dataset_description, mark).toBe("withheld_finding");
+    }
+  });
+
+  test("the zero-width joiner and non-joiner are format characters: they become spaces, as before", () => {
+    // Removing them would join what the writer separated in the scripts where they matter, and the
+    // cleaning already replaces them with a space; nothing here changes that.
+    const r = presend(docs({ readme: present("a\u200Db\u200Cc\u200Bd") }));
+    expect(r.cleared.readme as string).toBe("a b c d");
+  });
+
+  test("the braille blank is a blank cell: it becomes a space, and no other braille cell changes", () => {
+    // It has width, a reader sees a gap, and in braille it is the word space; so it is a space.
+    const r = presend(docs({ readme: present("a\u2800b \u2801\u2802") }));
+    expect(r.cleared.readme as string).toBe("a b \u2801\u2802");
   });
 });
 
