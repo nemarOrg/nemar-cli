@@ -59,6 +59,7 @@ import { approvalDispatchEnvironment, triggerPublicationReviewRun } from "./gith
 import { readStoredReport, readStoredState } from "./identifier-screen-stored.js";
 import { notifyAdminsOfScreen } from "./identifier-screen.js";
 import { ownedHere } from "./pr-review-queue.js";
+import { SHA40, errorWords } from "./publication-review-log.js";
 import {
   type PublicationReviewRow,
   REVIEWABLE_SCREEN_STATES_SQL,
@@ -82,8 +83,6 @@ const SWEEP_LIMIT = 20;
 /** How long the dispatch may wait for GitHub before the start answers. */
 const DISPATCH_TIMEOUT_MS = 10_000;
 
-const SHA40 = /^[0-9a-f]{40}$/;
-
 // ---------------------------------------------------------------------------------------------
 // The flag, applicability, words
 // ---------------------------------------------------------------------------------------------
@@ -100,24 +99,12 @@ function sqlWord(w: string): string {
   return `'${w}'`;
 }
 
-/**
- * What an error is called in a log line: a class or a status, never its message, which may carry
- * text from a service that echoed something it was sent.
- */
-export function errClass(err: unknown): string {
-  if (!(err instanceof Error)) return "unknown";
-  if (err.name === "TimeoutError" || err.name === "AbortError") return "timeout";
-  const status = /^Publication review dispatch rejected: HTTP (\d{3})$/.exec(err.message);
-  if (status) return `http_${status[1]}`;
-  return /^[A-Za-z]{1,40}$/.test(err.name) ? err.name : "error";
-}
-
 /** Try the request's admin mail. It never throws, and a failure here must not fail a store. */
 async function tryMail(env: Bindings, requestId: number): Promise<"sent" | "other"> {
   try {
     return (await notifyAdminsOfScreen(env, requestId)) === "sent" ? "sent" : "other";
   } catch (err) {
-    console.error(`[publication-review] request ${requestId}: mail failed (${errClass(err)})`);
+    console.error(`[publication-review] request ${requestId}: mail failed (${errorWords(err)})`);
     return "other";
   }
 }
@@ -344,7 +331,7 @@ export async function startPublicationReviewForScreen(
     return out;
   } catch (err) {
     console.error(
-      `[publication-review] request ${args.requestId} (${args.datasetId}): start failed (${errClass(err)})`,
+      `[publication-review] request ${args.requestId} (${args.datasetId}): start failed (${errorWords(err)})`,
     );
     return answer("dispatch_failed");
   }
@@ -586,7 +573,7 @@ async function markDispatchFailed(db: Db, reviewId: number, nonce: string): Prom
       .run();
   } catch (inner) {
     console.error(
-      `[publication-review] review ${reviewId}: failure not recorded (${errClass(inner)})`,
+      `[publication-review] review ${reviewId}: failure not recorded (${errorWords(inner)})`,
     );
   }
 }
@@ -641,7 +628,7 @@ async function handOver(env: Bindings, h: HandOver): Promise<StartOutcome> {
     );
   } catch (err) {
     console.error(
-      `[publication-review] review ${h.reviewId} (${h.request.dataset_id}): dispatch failed (${errClass(err)})`,
+      `[publication-review] review ${h.reviewId} (${h.request.dataset_id}): dispatch failed (${errorWords(err)})`,
     );
     try {
       // Fenced by the nonce and by `claimed_at IS NULL`: GitHub may have accepted the dispatch
@@ -667,7 +654,7 @@ async function handOver(env: Bindings, h: HandOver): Promise<StartOutcome> {
       }
     } catch (inner) {
       console.error(
-        `[publication-review] review ${h.reviewId}: failure not recorded (${errClass(inner)})`,
+        `[publication-review] review ${h.reviewId}: failure not recorded (${errorWords(inner)})`,
       );
     }
     return answer("dispatch_failed", h.reviewId);
@@ -1076,7 +1063,7 @@ export async function sweepPublicationReviews(
     ).results;
   } catch (err) {
     result.errors++;
-    console.error(`[publication-review-sweep] overdue query failed (${errClass(err)})`);
+    console.error(`[publication-review-sweep] overdue query failed (${errorWords(err)})`);
     return result;
   }
   for (const { id, request_id } of rows) {
@@ -1094,7 +1081,7 @@ export async function sweepPublicationReviews(
       if ((await tryMail(env, request_id)) === "sent") result.mailed++;
     } catch (err) {
       result.errors++;
-      console.error(`[publication-review-sweep] review ${id} failed (${errClass(err)})`);
+      console.error(`[publication-review-sweep] review ${id} failed (${errorWords(err)})`);
     }
   }
   return result;

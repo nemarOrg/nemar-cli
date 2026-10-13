@@ -32,9 +32,9 @@
 import { parsePublicationCallbackOutcome } from "../../../../shared/publication-review.js";
 import { isValidDatasetId } from "../../services/datasetId.js";
 import { verifyPublicationReviewCallbackToken } from "../../services/github/callback-tokens.js";
+import { errorWords } from "../../services/publication-review-log.js";
 import {
   claimPublicationReview,
-  errClass,
   pendingPublicationReviewNonce,
   storePublicationReviewResult,
 } from "../../services/publication-review.js";
@@ -136,7 +136,7 @@ export function registerPublicationReviewRoutes(webhooks: WebhookRouter): void {
       // Nothing was stored and the token is not spent (the store is one transaction), so the job
       // may try again. The class of the error is logged, never its message.
       console.error(
-        `[publication-review-result] review ${v.reviewId} (${v.datasetId}): store failed (${errClass(err)})`,
+        `[publication-review-result] review ${v.reviewId} (${v.datasetId}): store failed (${errorWords(err)})`,
       );
       return c.json({ error: "The result could not be stored; try again" }, 500);
     }

@@ -757,7 +757,8 @@ describe("when the review cannot be handed over", () => {
       Object.assign(console, originals);
     }
     const out = lines.join("\n");
-    expect(out).toContain("dispatch failed");
+    // The error's name and a closed word for what it was (here GitHub's refusal, by status).
+    expect(out).toContain("dispatch failed (Error, http_500)");
     const sent = JSON.stringify(h.calls);
     const token = (h.dispatches()[0].client_payload.callback_token as string) ?? "";
     for (const secret of [token, GITHUB_PAT, CALLBACK_SECRET]) {

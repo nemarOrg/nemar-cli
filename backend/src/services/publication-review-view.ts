@@ -80,6 +80,7 @@ import { isSandboxDatasetId, isValidDatasetId } from "./datasetId.js";
 import type { PublicationReviewSection } from "./email.js";
 import { isNonProductionEnv } from "./environment.js";
 import { readStoredReport, readStoredState } from "./identifier-screen-stored.js";
+import { SHA40, errorWords } from "./publication-review-log.js";
 import {
   MAX_KEYS_PER_READ,
   type PublicationReviewRow,
@@ -147,8 +148,6 @@ const ACTIVE_STATUSES: ReadonlySet<string> = new Set(["requested", "approving", 
 export function screenExempt(datasetId: string): boolean {
   return /^xx\d{6}$/.test(datasetId) && isSandboxDatasetId(datasetId);
 }
-
-const HEAD = /^[0-9a-f]{40}$/;
 
 // ---------------------------------------------------------------------------------------------
 // The derivation
@@ -262,7 +261,7 @@ function reviewKeyOf(
   dataset: ReviewDatasetFields | null,
 ): ReviewKey | null {
   const { head } = screenOf(request);
-  if (!publicationReviewApplies(dataset ?? {}) || head === null || !HEAD.test(head)) return null;
+  if (!publicationReviewApplies(dataset ?? {}) || head === null || !SHA40.test(head)) return null;
   return { requestId: request.id, headSha: head, anonymous: request.anonymous === 1 };
 }
 
@@ -288,7 +287,7 @@ export async function derivePublicationReview(
 
   let row: PublicationReviewRow | null = null;
   let rowView: ReviewRowView = { kind: "none" };
-  if (applies && head !== null && HEAD.test(head)) {
+  if (applies && head !== null && SHA40.test(head)) {
     row =
       ctx.reviewRow !== undefined
         ? ctx.reviewRow
@@ -522,7 +521,7 @@ export async function publicationReviewSummaries(
       for (const [text, row] of got) rows.set(text, row);
     } catch (err) {
       console.error(
-        `[publication-review] could not read the reviews of ${chunk.length} requests for the list (${readFailureWords(err)})`,
+        `[publication-review] could not read the reviews of ${chunk.length} requests for the list (${errorWords(err)})`,
       );
       for (const w of chunk) unreadable.add(w.index);
     }
@@ -549,7 +548,7 @@ export async function publicationReviewSummaries(
             );
           } catch (err) {
             console.error(
-              `[publication-review] could not read the review of request ${item.request.id} for the list (${readFailureWords(err)})`,
+              `[publication-review] could not read the review of request ${item.request.id} for the list (${errorWords(err)})`,
             );
             return unreadableSummary(enabled);
           }
@@ -749,24 +748,6 @@ export async function publicationReviewDetail(
  */
 export const SUMMARY_LINE_PREFIX = "Reviewer's summary: ";
 
-/**
- * What a failed read is called in a log line: the error's name and one word of a closed list, and
- * never its message, which can carry SQL or text a service echoed. `no_such_table` is the one a
- * deploy before the review's migration is applied produces; `timeout` is a read that did not
- * answer; anything else is `other`. The name is shown only when it is a plain identifier.
- */
-export function readFailureWords(err: unknown): string {
-  const name =
-    err instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,39}$/.test(err.name) ? err.name : "unknown";
-  const message = err instanceof Error ? err.message : "";
-  const kind = /no such table/i.test(message)
-    ? "no_such_table"
-    : name === "TimeoutError" || name === "AbortError" || /time(d)? ?out/i.test(message)
-      ? "timeout"
-      : "other";
-  return `${name}, ${kind}`;
-}
-
 /** What the mail says when the review could not be read: a fixed sentence, never a pass. */
 function unreadableSection(datasetId: string): PublicationReviewSection {
   return {
@@ -831,7 +812,7 @@ export async function publicationReviewEmailSection(
     };
   } catch (err) {
     console.error(
-      `[publication-review] could not read the review of request ${requestId} for the admin email (${readFailureWords(err)})`,
+      `[publication-review] could not read the review of request ${requestId} for the admin email (${errorWords(err)})`,
     );
     // With the review off there is nothing to add to the mail unless a stored review shows as
     // advice, and the mail must then be exactly what it was before the review existed: a deploy
