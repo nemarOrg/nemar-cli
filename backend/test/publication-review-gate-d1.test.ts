@@ -45,6 +45,8 @@ const OTHER_ADMIN = 3;
 let mf: Miniflare;
 let server: Server;
 let counter = 0;
+/** How many databases the tests below need: one each, counted as they are declared. */
+let databasesNeeded = 0;
 
 async function seededD1(): Promise<D1Database> {
   counter += 1;
@@ -77,6 +79,15 @@ async function seededD1(): Promise<D1Database> {
     .bind(DATASET, DEPOSITOR, JSON.stringify(report))
     .run();
   return d1;
+}
+
+/**
+ * A test on a database of its own. Every test is declared before `beforeAll` provisions Miniflare,
+ * so the number of databases is the number of these declarations, not a count kept by hand.
+ */
+function d1Test(name: string, run: (d1: D1Database) => Promise<void>): void {
+  databasesNeeded += 1;
+  test(name, async () => run(await seededD1()));
 }
 
 function env(d1: D1Database): Bindings {
@@ -139,7 +150,7 @@ beforeAll(() => {
     script: "export default { fetch() { return new Response(null, { status: 204 }); } };",
     compatibilityDate: "2024-12-01",
     d1Databases: Object.fromEntries(
-      Array.from({ length: 8 }, (_, i) => [`DB${i + 1}`, `DB${i + 1}`]),
+      Array.from({ length: databasesNeeded }, (_, i) => [`DB${i + 1}`, `DB${i + 1}`]),
     ),
   });
 });
@@ -151,142 +162,149 @@ afterAll(async () => {
 });
 
 describe("the override's statement on D1", () => {
-  test("22. it matches a review that is still running (NULL decided_at through IS ?) and records once", async () => {
-    const d1 = await seededD1();
-    const started = await startPublicationReview(env(d1), { requestId: 1, datasetId: DATASET });
-    const id = started.reviewId as number;
-    const before = await review(d1, id);
-    expect(before).toMatchObject({ state: "dispatched", decided_at: null, override_by: null });
+  d1Test(
+    "22. it matches a review that is still running (NULL decided_at through IS ?) and records once",
+    async (d1) => {
+      const started = await startPublicationReview(env(d1), { requestId: 1, datasetId: DATASET });
+      const id = started.reviewId as number;
+      const before = await review(d1, id);
+      expect(before).toMatchObject({ state: "dispatched", decided_at: null, override_by: null });
 
-    const gate = await evaluate(d1, ADMIN, { id, reasons: ["review_running"] });
-    if (!gate.ok || gate.state !== "enforced") throw new Error("the gate refused");
-    expect(gate.record?.row?.decidedAt).toBeNull();
-    expect(gate.record?.reasons).toEqual(["review_running"]);
+      const gate = await evaluate(d1, ADMIN, { id, reasons: ["review_running"] });
+      if (!gate.ok || gate.state !== "enforced") throw new Error("the gate refused");
+      expect(gate.record?.row?.decidedAt).toBeNull();
+      expect(gate.record?.reasons).toEqual(["review_running"]);
 
-    const recorded = await recordApprovalOverride(env(d1), {
-      requestId: 1,
-      datasetId: DATASET,
-      approverId: ADMIN,
-      via: "approve",
-      outcome: gate.outcome,
-      headSha: gate.headSha,
-      record: gate.record as NonNullable<typeof gate.record>,
-    });
-    expect(recorded).toEqual({ ok: true });
-    expect(await review(d1, id)).toMatchObject({
-      override_by: ADMIN,
-      override_reasons: JSON.stringify(["review_running"]),
-    });
-    const audit = await d1
-      .prepare(
-        "SELECT user_id, details FROM audit_log WHERE action = 'publication_review_overridden'",
-      )
-      .all<{ user_id: number; details: string }>();
-    expect(audit.results).toHaveLength(1);
-    expect(JSON.parse(audit.results[0].details)).toMatchObject({
-      request_id: 1,
-      review_id: id,
-      reasons: ["review_running"],
-      via: "approve",
-    });
+      const recorded = await recordApprovalOverride(env(d1), {
+        requestId: 1,
+        datasetId: DATASET,
+        approverId: ADMIN,
+        via: "approve",
+        outcome: gate.outcome,
+        headSha: gate.headSha,
+        record: gate.record as NonNullable<typeof gate.record>,
+      });
+      expect(recorded).toEqual({ ok: true });
+      expect(await review(d1, id)).toMatchObject({
+        override_by: ADMIN,
+        override_reasons: JSON.stringify(["review_running"]),
+      });
+      const audit = await d1
+        .prepare(
+          "SELECT user_id, details FROM audit_log WHERE action = 'publication_review_overridden'",
+        )
+        .all<{ user_id: number; details: string }>();
+      expect(audit.results).toHaveLength(1);
+      expect(JSON.parse(audit.results[0].details)).toMatchObject({
+        request_id: 1,
+        review_id: id,
+        reasons: ["review_running"],
+        via: "approve",
+      });
 
-    // The recorded override is its approver's, read back through the same read.
-    const again = await evaluate(d1, ADMIN);
-    expect(again).toMatchObject({ ok: true, state: "enforced", record: null });
-    const other = await evaluate(d1, OTHER_ADMIN);
-    expect(other.ok).toBe(false);
-    if (!other.ok) expect(other.body.refusal).toBe("needs_override");
-  });
+      // The recorded override is its approver's, read back through the same read.
+      const again = await evaluate(d1, ADMIN);
+      expect(again).toMatchObject({ ok: true, state: "enforced", record: null });
+      const other = await evaluate(d1, OTHER_ADMIN);
+      expect(other.ok).toBe(false);
+      if (!other.ok) expect(other.body.refusal).toBe("needs_override");
+    },
+  );
 
-  test("22. it does not match once the state moves: the override is refused and nothing is recorded", async () => {
-    const d1 = await seededD1();
-    const started = await startPublicationReview(env(d1), { requestId: 1, datasetId: DATASET });
-    const id = started.reviewId as number;
-    const nonce = await nonceOf(d1, id);
-    expect(await claimPublicationReview(env(d1), id, DATASET, nonce)).toBe("claimed");
+  d1Test(
+    "22. it does not match once the state moves: the override is refused and nothing is recorded",
+    async (d1) => {
+      const started = await startPublicationReview(env(d1), { requestId: 1, datasetId: DATASET });
+      const id = started.reviewId as number;
+      const nonce = await nonceOf(d1, id);
+      expect(await claimPublicationReview(env(d1), id, DATASET, nonce)).toBe("claimed");
 
-    const gate = await evaluate(d1, ADMIN, { id, reasons: ["review_running"] });
-    if (!gate.ok || gate.state !== "enforced") throw new Error("the gate refused");
+      const gate = await evaluate(d1, ADMIN, { id, reasons: ["review_running"] });
+      if (!gate.ok || gate.state !== "enforced") throw new Error("the gate refused");
 
-    // The job's report lands between the gate's read and the record.
-    const stored = await storePublicationReviewResult(env(d1), id, DATASET, nonce, {
-      kind: "reported",
-      report: parsePublicationReviewReport(failingReport()),
-    });
-    expect(stored).toEqual({ stored: true, state: "reported" });
+      // The job's report lands between the gate's read and the record.
+      const stored = await storePublicationReviewResult(env(d1), id, DATASET, nonce, {
+        kind: "reported",
+        report: parsePublicationReviewReport(failingReport()),
+      });
+      expect(stored).toEqual({ stored: true, state: "reported" });
 
-    const recorded = await recordApprovalOverride(env(d1), {
-      requestId: 1,
-      datasetId: DATASET,
-      approverId: ADMIN,
-      via: "approve",
-      outcome: gate.outcome,
-      headSha: gate.headSha,
-      record: gate.record as NonNullable<typeof gate.record>,
-    });
-    expect(recorded.ok).toBe(false);
-    if (!recorded.ok) {
-      expect(recorded.body.refusal).toBe("review_changed");
-      expect(recorded.body.message).toBe(reviewGateRefusalText("review_changed", DATASET));
-      // Read again: what stands now is the failing report, which the override never saw.
-      expect(recorded.body.reasons.map((r) => r.code)).toEqual(["question_failed"]);
-    }
-    expect(await review(d1, id)).toMatchObject({
-      state: "reported",
-      override_by: null,
-      override_reasons: null,
-    });
-    const audit = await d1
-      .prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'publication_review_overridden'")
-      .first<{ n: number }>();
-    expect(audit?.n).toBe(0);
-  });
+      const recorded = await recordApprovalOverride(env(d1), {
+        requestId: 1,
+        datasetId: DATASET,
+        approverId: ADMIN,
+        via: "approve",
+        outcome: gate.outcome,
+        headSha: gate.headSha,
+        record: gate.record as NonNullable<typeof gate.record>,
+      });
+      expect(recorded.ok).toBe(false);
+      if (!recorded.ok) {
+        expect(recorded.body.refusal).toBe("review_changed");
+        expect(recorded.body.message).toBe(reviewGateRefusalText("review_changed", DATASET));
+        // Read again: what stands now is the failing report, which the override never saw.
+        expect(recorded.body.reasons.map((r) => r.code)).toEqual(["question_failed"]);
+      }
+      expect(await review(d1, id)).toMatchObject({
+        state: "reported",
+        override_by: null,
+        override_reasons: null,
+      });
+      const audit = await d1
+        .prepare(
+          "SELECT COUNT(*) AS n FROM audit_log WHERE action = 'publication_review_overridden'",
+        )
+        .first<{ n: number }>();
+      expect(audit?.n).toBe(0);
+    },
+  );
 
-  test("22. it matches a decided review through its timestamps, and a restart takes it back", async () => {
-    const d1 = await seededD1();
-    const started = await startPublicationReview(env(d1), { requestId: 1, datasetId: DATASET });
-    const id = started.reviewId as number;
-    const nonce = await nonceOf(d1, id);
-    expect(await claimPublicationReview(env(d1), id, DATASET, nonce)).toBe("claimed");
-    await storePublicationReviewResult(env(d1), id, DATASET, nonce, {
-      kind: "error",
-      error: "model_unavailable",
-    });
-    const decided = await review(d1, id);
-    expect(decided).toMatchObject({ state: "errored", detail: "model_unavailable" });
-    expect(decided.decided_at).not.toBeNull();
+  d1Test(
+    "22. it matches a decided review through its timestamps, and a restart takes it back",
+    async (d1) => {
+      const started = await startPublicationReview(env(d1), { requestId: 1, datasetId: DATASET });
+      const id = started.reviewId as number;
+      const nonce = await nonceOf(d1, id);
+      expect(await claimPublicationReview(env(d1), id, DATASET, nonce)).toBe("claimed");
+      await storePublicationReviewResult(env(d1), id, DATASET, nonce, {
+        kind: "error",
+        error: "model_unavailable",
+      });
+      const decided = await review(d1, id);
+      expect(decided).toMatchObject({ state: "errored", detail: "model_unavailable" });
+      expect(decided.decided_at).not.toBeNull();
 
-    const gate = await evaluate(d1, ADMIN, { id, reasons: ["review_could_not_run"] });
-    if (!gate.ok || gate.state !== "enforced") throw new Error("the gate refused");
-    const recorded = await recordApprovalOverride(env(d1), {
-      requestId: 1,
-      datasetId: DATASET,
-      approverId: ADMIN,
-      via: "approve",
-      outcome: gate.outcome,
-      headSha: gate.headSha,
-      record: gate.record as NonNullable<typeof gate.record>,
-    });
-    expect(recorded).toEqual({ ok: true });
-    expect(await review(d1, id)).toMatchObject({ override_by: ADMIN });
+      const gate = await evaluate(d1, ADMIN, { id, reasons: ["review_could_not_run"] });
+      if (!gate.ok || gate.state !== "enforced") throw new Error("the gate refused");
+      const recorded = await recordApprovalOverride(env(d1), {
+        requestId: 1,
+        datasetId: DATASET,
+        approverId: ADMIN,
+        via: "approve",
+        outcome: gate.outcome,
+        headSha: gate.headSha,
+        record: gate.record as NonNullable<typeof gate.record>,
+      });
+      expect(recorded).toEqual({ ok: true });
+      expect(await review(d1, id)).toMatchObject({ override_by: ADMIN });
 
-    // A new attempt is not the one the override was given for.
-    const restarted = await startPublicationReview(env(d1), {
-      requestId: 1,
-      datasetId: DATASET,
-      adminUserId: ADMIN,
-    });
-    expect(restarted).toMatchObject({ started: true, reason: "redispatched", reviewId: id });
-    expect(await review(d1, id)).toMatchObject({
-      state: "dispatched",
-      override_by: null,
-      override_at: null,
-      override_reasons: null,
-    });
-  });
+      // A new attempt is not the one the override was given for.
+      const restarted = await startPublicationReview(env(d1), {
+        requestId: 1,
+        datasetId: DATASET,
+        adminUserId: ADMIN,
+      });
+      expect(restarted).toMatchObject({ started: true, reason: "redispatched", reviewId: id });
+      expect(await review(d1, id)).toMatchObject({
+        state: "dispatched",
+        override_by: null,
+        override_at: null,
+        override_reasons: null,
+      });
+    },
+  );
 
-  test("22. each pin of the statement refuses on its own, on D1", async () => {
-    const d1 = await seededD1();
+  d1Test("22. each pin of the statement refuses on its own, on D1", async (d1) => {
     const started = await startPublicationReview(env(d1), { requestId: 1, datasetId: DATASET });
     const id = started.reviewId as number;
     const row = await review(d1, id);

@@ -10,8 +10,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import {
   DATASET_STATUSES,
   describeScreen,
@@ -21,6 +21,40 @@ import * as steps from "../../shared/publication-steps";
 import * as screen from "../src/services/identifier-screen";
 import * as stored from "../src/services/identifier-screen-stored";
 import { screenReportBodyFor } from "./helpers/publication-review";
+
+const SERVICES = join(import.meta.dir, "../src/services");
+
+/** The relative modules a file loads at run time: not `import type`, not an all-`type` clause. */
+function runtimeImports(file: string): string[] {
+  const clauses = /^(?:import|export)\s+(type\s+)?([^;]*?)\s*from\s*["'](\.[^"']*)["']/gm;
+  const found: string[] = [];
+  for (const [, typeOnly, clause, spec] of readFileSync(file, "utf8").matchAll(clauses)) {
+    if (typeOnly) continue;
+    const named = /^\{([\s\S]*)\}$/.exec(clause.trim());
+    if (named?.[1]?.split(",").every((x) => x.trim() === "" || x.trim().startsWith("type "))) {
+      continue;
+    }
+    const base = resolve(dirname(file), spec.replace(/\.js$/, ""));
+    const target = [`${base}.ts`, join(base, "index.ts")].find((c) => existsSync(c));
+    if (target) found.push(target);
+  }
+  return found;
+}
+
+/** Every module a file reaches through runtime imports, itself included. */
+function runtimeClosure(entry: string): string[] {
+  const seen = new Set<string>([entry]);
+  const queue = [entry];
+  for (let file = queue.pop(); file !== undefined; file = queue.pop()) {
+    for (const next of runtimeImports(file)) {
+      if (!seen.has(next)) {
+        seen.add(next);
+        queue.push(next);
+      }
+    }
+  }
+  return [...seen];
+}
 
 describe("the re-exports are the same functions, not copies", () => {
   test("identifier-screen.ts hands every importer the stored module's functions", () => {
@@ -36,15 +70,27 @@ describe("the re-exports are the same functions, not copies", () => {
     expect(screen.hasStartedPublishing).toBe(steps.hasStartedPublishing);
   });
 
-  test("the review's view imports the moved code from where it now lives, never from the screen", () => {
-    const view = readFileSync(
-      join(import.meta.dir, "../src/services/publication-review-view.ts"),
-      "utf8",
-    );
-    // `identifier-screen.ts` imports the view; an import back would be a cycle.
-    expect(view).not.toMatch(/from "\.\/identifier-screen(\.js)?"/);
-    expect(view).toContain('from "./identifier-screen-stored.js"');
-    expect(view).toContain('from "../../../shared/publication-steps.js"');
+  test("the review's view reaches the moved code from where it now lives, and nothing that imports it back", () => {
+    // `identifier-screen.ts` imports the view, so any path from the view back to the screen, or to
+    // the review's write path or the mail, is a cycle. Walked through every runtime import, not
+    // just the view's own lines, so a cycle that comes back through another module is noticed.
+    const view = join(SERVICES, "publication-review-view.ts");
+    const reached = runtimeClosure(view);
+    expect(reached).toContain(join(SERVICES, "identifier-screen-stored.ts"));
+    expect(reached).toContain(join(import.meta.dir, "../../shared/publication-steps.ts"));
+    for (const forbidden of [
+      "identifier-screen.ts",
+      "publication-review.ts",
+      "publication-review-gate.ts",
+      "email.ts",
+    ]) {
+      expect({ forbidden, reachable: reached.includes(join(SERVICES, forbidden)) }).toEqual({
+        forbidden,
+        reachable: false,
+      });
+    }
+    // The walk is not vacuous: from the screen the view IS reachable, which is the one-way import.
+    expect(runtimeClosure(join(SERVICES, "identifier-screen.ts"))).toContain(view);
   });
 });
 

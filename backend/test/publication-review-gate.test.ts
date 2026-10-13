@@ -2084,7 +2084,7 @@ describe("approve-dispatch runs the gate before it claims, and records after the
     expect(overrideRows()).toHaveLength(0);
 
     // With the flag off the gate reads nothing and an override means nothing.
-    const other = seed({ datasetId: MIRROR, source: "openneuro" });
+    seed({ datasetId: MIRROR, source: "openneuro" });
     expect((await dispatchApproval({}, { dataset: MIRROR })).status).toBe(202);
     const failing = seedFailing({ datasetId: "nm000483" });
     const off = await dispatchApproval(
@@ -2095,7 +2095,9 @@ describe("approve-dispatch runs the gate before it claims, and records after the
     );
     expect(off.status).toBe(202);
     expect(reviewRow(failing.reviewId).override_by).toBeNull();
-    expect(other.requestId).not.toBe(requestId);
+    // All three were handed to the executor, and no override was recorded for any of them.
+    expect(dispatchesSent()).toBe(3);
+    expect(overrideRows()).toHaveLength(0);
   });
 
   test("the website's cookie request from a NEMAR page records an override", async () => {
