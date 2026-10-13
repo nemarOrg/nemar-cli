@@ -16,12 +16,14 @@
  * history in the detail view and never the outcome here.
  *
  * **Only a request in `requested` is reviewed** (ADR 0102, section 7: the claim requires it). A
- * request in another state shows its stored review as history and never as a wait: a dispatched
+ * request in any other state shows its stored review as history and never as a wait: a dispatched
  * row of such a request reads as one that did not report, so no surface says "running" about a
- * review whose result can no longer settle anything. Its live facts are not read either, apart from
- * the two statuses {@link LIVE_FACT_STATUSES} names: they describe an approval that is not going to
- * happen (a published request would otherwise read as one whose version "was already released"),
- * or one that is under way and has written them itself (an `approving` request).
+ * review whose result can no longer settle anything. Its live facts are not read either, with one
+ * exception, `blocked` ({@link LIVE_FACT_STATUSES}): a blocked request has written nothing of an
+ * approval, so a version row or a concept DOI can only belong to an EARLIER release, and is shown
+ * beside the hard `request_blocked`. A request that is over (`published`, `denied`) would read as
+ * one whose own release "was already released", and an `approving` request has written those facts
+ * itself, so both show their stored review only.
  *
  * **What a viewer may read** is counts, closed words and the shared sentences. The model's summary
  * and the notes of its findings, both sanitized by the parser, appear in the detail view and
@@ -531,7 +533,7 @@ export const LIST_CONCURRENCY = 8;
  *    in flight at once.
  *  - Each row stands alone. A read that fails costs the rows it was for, and nothing else: they
  *    read as {@link unreadableSummary} (never a pass), only ids and a closed class are logged, and
- *    the list still answers. One bad row used to fail the queue for every administrator.
+ *    the list still answers.
  */
 export async function publicationReviewSummaries(
   env: Bindings,
