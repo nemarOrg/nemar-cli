@@ -37,6 +37,7 @@ import {
 import {
   PUBLICATION_EVIDENCE_ERRORS,
   PublicationEvidenceError,
+  SIDECAR_BYTE_CEILING,
   SIDECAR_SAMPLE,
   bidsState,
   blobsToRead,
@@ -862,6 +863,21 @@ describe("the structural summary is counts and closed words", () => {
     expect(report.evidence.summary.sampling_rates_hz).toEqual([justUnder]);
     expect(report.evidence.summary.channel_counts).toEqual([MAX_COUNT]);
   });
+
+  test("a sidecar over the byte ceiling is counted and not read, and one at the ceiling is", async () => {
+    // Valid JSON padded with spaces to an exact size: the only difference between the two is size.
+    const padded = (rate: number, bytes: number) => {
+      const body = JSON.stringify({ SamplingFrequency: rate, EEGChannelCount: 8 });
+      return `${body}${" ".repeat(bytes - body.length)}`;
+    };
+    const ds = newDataset("summary-sidecar-ceiling", {
+      [`${EEG}.json`]: null,
+      "sub-A/eeg/sub-A_task-r_eeg.json": padded(250, SIDECAR_BYTE_CEILING),
+      "sub-B/eeg/sub-B_task-r_eeg.json": padded(500, SIDECAR_BYTE_CEILING + 1),
+    });
+    const s = structuralSummary(ds.dir, await readTree(ds.dir, ds.head));
+    expect(s).toMatchObject({ sidecars_total: 2, sidecars_read: 1, sampling_rates_hz: [250] });
+  }, 20_000);
 
   test("a sidecar value that is not a usable number contributes nothing", async () => {
     const ds = newDataset("summary-sidecar-junk", {
