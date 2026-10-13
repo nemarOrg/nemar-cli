@@ -42,6 +42,7 @@ import {
   screenView,
   startScreenAndNotify,
 } from "../../services/identifier-screen";
+import { reviewEnabled } from "../../services/publication-review";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../services/repo-spec";
 import { markDatasetPrivate, markDatasetPublic } from "../../services/s3";
 import { checkSubmissionGate } from "../../services/submission-gate";
@@ -546,11 +547,19 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     // the request is already 'requested', so a dispatch failure must not 500
     // the call -- we log it and leave the row as a normal pending request.
     // The verdict arrives later at /webhooks/prescreen-result.
+    //
+    // ADR 0101 retires this advisory check in favour of the publication review, and the two
+    // must not both read the README: with the review on (exactly the word `1`) the pre-screen
+    // is not dispatched, so the deploy that turns the review on is the one that stops it,
+    // with no gap and no overlap. Only the dispatch is conditioned. The pre-screen's callback
+    // route, its columns and PRESCREEN_CALLBACK_SECRET (which also signs the identifier
+    // screen's, the sweep's and the pull-request review's tokens) all stay.
     if (
       prId !== null &&
       repoName &&
       pat &&
       c.env.PRESCREEN_ENABLED === "true" &&
+      !reviewEnabled(c.env) &&
       c.env.PRESCREEN_CALLBACK_SECRET
     ) {
       try {
