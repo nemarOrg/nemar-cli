@@ -195,7 +195,7 @@ function sentenceOf(error: unknown, fallback: string): string {
 /**
  * Ask the Worker to start the review of one dataset and sort what it said. The sort is the exit
  * code's: a review that is going or exists is an answer of success, every other word is a start
- * that did not happen (M13).
+ * that did not happen, and a script has to be able to tell.
  */
 async function attemptStart(datasetId: string): Promise<StartAnswer> {
   try {

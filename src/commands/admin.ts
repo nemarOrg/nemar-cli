@@ -13,7 +13,7 @@
  * - nemar admin repo public/private - Change repository visibility
  * - nemar admin ci check/add       - Manage CI workflows
  * - nemar admin doi create/info/update/enrich - DOI management
- * - nemar admin publish list/deny/approve - Publication workflow
+ * - nemar admin publish list/show/start/next/approve/deny/screen - Publication workflow and its automated review
  * - nemar admin revert             - Revert dataset to a previous version
  * - nemar admin withdraw/restore   - Withdraw/restore a published dataset (visibility + EZID DOIs)
  * - nemar admin recover [status]   - Re-copy epic #967 imports whose upstream is accessible
