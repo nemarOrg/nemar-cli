@@ -30,7 +30,7 @@
 import { sanitizeNote } from "./untrusted-text.js";
 
 // The sanitizer lives in `shared/untrusted-text.ts`, shared with the publication review
-// (ADR 0101); it is re-exported so every importer of this module keeps working.
+// (ADR 0102); it is re-exported so every importer of this module keeps working.
 export { sanitizeNote };
 
 export const REPORT_VERSION = 1;

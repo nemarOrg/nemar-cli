@@ -69,7 +69,7 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    * lease. The new columns `approval_requested_by` and `approval_dispatched_at`
    * ride along in `pr.*`.
    *
-   * `publication_review` (ADR 0101) is the review of each request, re-derived now from its stored
+   * `publication_review` (ADR 0102) is the review of each request, re-derived now from its stored
    * report and the live facts: the outcome, the headline and the reason codes in the shared
    * words, and no sentence the model wrote. The dataset's columns it needs are joined in under
    * names of their own and withheld from the response below, so the wire gains one key.
@@ -135,7 +135,7 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     // One clock for the whole list, so two rows are aged by the same instant.
     const nowMs = Date.now();
     // The review of every row, read in a few statements and derived a few rows at a time; a row
-    // whose review cannot be read says so for itself and never fails the list (ADR 0101).
+    // whose review cannot be read says so for itself and never fails the list (ADR 0102).
     const reviews = await publicationReviewSummaries(
       c.env,
       requests.results.map((r) => ({

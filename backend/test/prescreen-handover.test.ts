@@ -1,5 +1,5 @@
 /**
- * The pre-screen of ADR 0014 hands over to the publication review (ADR 0101, section 10).
+ * The pre-screen of ADR 0014 hands over to the publication review (ADR 0102, section 10).
  *
  * With `PUBLICATION_REVIEW_ENABLED` exactly `1`, a publication request does not dispatch the
  * advisory pre-screen: the review replaces it, so the deploy that turns the review on is the one

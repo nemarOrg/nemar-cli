@@ -7,7 +7,7 @@
  * headers, identifying sidecar columns and keys, identifying file names) and
  * posts a report to `/webhooks/identifier-screen-result`. The admin's
  * publication-request email WAITS for that report and states it. While the
- * publication review is on (ADR 0101) it also waits for a review of the screened
+ * publication review is on (ADR 0102) it also waits for a review of the screened
  * commit that is in flight, and adds the review's section.
  *
  * Every way of not getting a report still reaches the admin, and says so:
@@ -71,7 +71,7 @@ import { reviewInFlightSql } from "./publication-review-rows.js";
 import { publicationReviewEmailSection, reviewEnabled } from "./publication-review-view.js";
 
 // The two readers of a stored screen live in their own module so the publication review
-// (ADR 0101) can use them without importing this one; re-exported for every existing importer.
+// (ADR 0102) can use them without importing this one; re-exported for every existing importer.
 export { readStoredReport, readStoredState };
 
 /**
@@ -279,7 +279,7 @@ const LEASE_EXPIRED_SQL = `strftime('%Y-%m-%d %H:%M:%f', 'now', '-${SCREEN_EMAIL
 
 /**
  * What the mail lease and the watchdog's unmailed query add while the publication review is on
- * (ADR 0101, section 6): the mail WAITS while a review of the screened commit is dispatched and
+ * (ADR 0102, section 6): the mail WAITS while a review of the screened commit is dispatched and
  * younger than the review deadline, so the one mail an administrator gets carries the review.
  * Only a request in `requested` waits, because only such a request is reviewed; a request in
  * any other status is mailed as before. Two things end the wait, so it can never hold a mail for

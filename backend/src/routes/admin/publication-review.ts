@@ -1,5 +1,5 @@
 /**
- * Admin routes for the publication review (ADR 0101, section 8):
+ * Admin routes for the publication review (ADR 0102, section 8):
  *
  *   GET  /admin/publish/:id/review         the review of the dataset's active request: the outcome
  *                                          and its reasons in the shared words, the review in

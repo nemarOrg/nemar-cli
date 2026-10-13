@@ -1,5 +1,5 @@
 /**
- * Publication-review callbacks, called by the `run-publication-review` workflow (ADR 0101).
+ * Publication-review callbacks, called by the `run-publication-review` workflow (ADR 0102).
  *
  *   POST /publication-review-claim    the workflow's first real step, before it mints an identity or
  *                                     reads anything: take the review. A dispatch that cannot

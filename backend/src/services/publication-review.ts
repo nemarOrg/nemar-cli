@@ -1,5 +1,5 @@
 /**
- * The publication review, Worker side: the write path (ADR 0101).
+ * The publication review, Worker side: the write path (ADR 0102).
  *
  * When the identifier screen of a publication request reports for a commit and its gate is clear
  * or needs an acknowledgment, the Worker starts a review of that commit: it records the attempt in
@@ -387,7 +387,7 @@ export async function startPublicationReview(
   if (!request) return answer("request_not_requested");
   if (!publicationReviewApplies(request)) return answer("not_applicable");
   // Only a request waiting for its decision is reviewed. One that is blocked, being approved,
-  // denied or published has nothing a review could change (ADR 0101, section 7).
+  // denied or published has nothing a review could change (ADR 0102, section 7).
   if (request.status !== "requested") return answer("request_not_requested");
 
   // The screen is read the gate's way: its state and its commit through the two readers, never a

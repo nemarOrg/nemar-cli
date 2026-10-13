@@ -1,5 +1,5 @@
 /**
- * The publication review's contract (ADR 0101): the report a review run posts, the evidence it
+ * The publication review's contract (ADR 0102): the report a review run posts, the evidence it
  * carries, the reasons a request is not a pass, the verdict derived from them, and the words every
  * surface shows.
  *
@@ -50,7 +50,7 @@ export const PUBLICATION_REVIEW_MODELS = ["claude-haiku-5-5"] as const;
 export type PublicationReviewModel = (typeof PUBLICATION_REVIEW_MODELS)[number];
 
 /**
- * The models the offline calibration may compare (ADR 0101's call 6). Only the calibration passes
+ * The models the offline calibration may compare (ADR 0102's call 6). Only the calibration passes
  * this list to {@link parsePublicationReviewReport}; the Worker's parser accepts the production
  * list alone. Verify the second id against the live model list when the calibration runs.
  */
@@ -85,7 +85,7 @@ export const NOT_ASSESSED_LINE = "Not assessed: whether the text names the depos
 // Questions, answers and findings
 // ---------------------------------------------------------------------------------------------
 
-/** The four questions of the review (ADR 0101, section 4). */
+/** The four questions of the review (ADR 0102, section 4). */
 export const QUESTIONS = [
   "complete_and_honest",
   "meets_standards",
@@ -304,7 +304,7 @@ export interface StructuralSummary {
   /**
    * Distinct sampling rates read from a sample of data sidecars, ascending, at most
    * {@link MAX_SUMMARY_VALUES}, each positive, below 1,000,000 and rounded to 0.01. A number
-   * derived from sidecars is a fact; a raw sidecar value never is (ADR 0101, section 3).
+   * derived from sidecars is a fact; a raw sidecar value never is (ADR 0102, section 3).
    */
   sampling_rates_hz: number[];
   /** Distinct channel counts from the same sample, ascending, at most {@link MAX_SUMMARY_VALUES}, each positive. */
@@ -957,7 +957,7 @@ export interface ReasonRule {
 const OVERRIDE =
   "An administrator may approve over it; the approval records the override (--force).";
 
-/** The reasons table (ADR 0101, section 5). A `Record`, so a code without a rule fails the build. */
+/** The reasons table (ADR 0102, section 5). A `Record`, so a code without a rule fails the build. */
 export const REASONS: Record<ReasonCode, ReasonRule> = {
   request_blocked: {
     class: "fail",

@@ -1,5 +1,5 @@
 /**
- * The publication review's contract (ADR 0101), and the shared pieces it stands on.
+ * The publication review's contract (ADR 0102), and the shared pieces it stands on.
  *
  * Pure: no database and no network. Real parser, real reasons table, real renderer, driven with
  * the inputs a hostile job, a hostile depositor or a hostile model controls.
@@ -316,7 +316,7 @@ const withEvidence = (over: Record<string, unknown>) =>
   reportBody({ evidence: evidenceBody(over) });
 const withSummary = (over: Record<string, unknown>) => withEvidence({ summary: summaryBody(over) });
 
-/** The fail-class reasons, written out from ADR 0101's table rather than read from the module. */
+/** The fail-class reasons, written out from ADR 0102's table rather than read from the module. */
 const FAIL_CLASS: ReadonlySet<ReasonCode> = new Set<ReasonCode>([
   "request_blocked",
   "submission_minimum_failed",
@@ -336,7 +336,7 @@ function oracleVerdict(reasons: readonly Reason[]): PublicationOutcome {
   return reasons.some((r) => FAIL_CLASS.has(r.code)) ? "fail" : "action_required";
 }
 
-describe("the closed lists are the ones ADR 0101 and the design note name", () => {
+describe("the closed lists are the ones ADR 0102 and the design note name", () => {
   test("questions, answers, severities, findings", () => {
     expect([...QUESTIONS]).toEqual([
       "complete_and_honest",
@@ -996,7 +996,7 @@ describe("the reasons table", () => {
     expect(new Set(REASON_CODES.map((c) => REASONS[c].sentence)).size).toBe(REASON_CODES.length);
   });
 
-  test("the class of each reason is ADR 0101's", () => {
+  test("the class of each reason is ADR 0102's", () => {
     for (const code of REASON_CODES) {
       expect(`${code}:${REASONS[code].class}`).toBe(
         `${code}:${FAIL_CLASS.has(code) ? "fail" : "unknown"}`,
@@ -1071,7 +1071,7 @@ describe("verdictOf and stricterOf", () => {
 // ---------------------------------------------------------------------------------------------
 // reasonsOf, over every combination. The one thing most likely to go wrong in this contract is a
 // non-reported row, or a screen or request fact, that yields no reason and so reads as a pass.
-// The expectations are written from ADR 0101's table, in this file, not read from the module.
+// The expectations are written from ADR 0102's table, in this file, not read from the module.
 // ---------------------------------------------------------------------------------------------
 
 const R = (code: ReasonCode, detail: string | null = null): Reason => ({ code, detail });
@@ -1190,7 +1190,7 @@ function* liveFacts(): Generator<LiveFacts> {
                     }
 }
 
-/** The reasons ADR 0101's table calls for, in the table's order. */
+/** The reasons ADR 0102's table calls for, in the table's order. */
 function expectedReasons(live: LiveFacts, row: ReviewRowView, own: Reason[] | null): Reason[] {
   const out: Reason[] = [];
   const add = (code: ReasonCode, detail: string | null = null) => out.push({ code, detail });

@@ -3,7 +3,7 @@
  * and the report column, neither trusted.
  *
  * These two functions are the only way any decision reads the screen's state or its screened
- * commit; the approval gate, the status views and the publication review (ADR 0101) all go
+ * commit; the approval gate, the status views and the publication review (ADR 0102) all go
  * through them and `screenGate`. They live in their own module, with nothing else, so the review
  * can import them without importing `identifier-screen.ts`, which in turn waits for the review
  * before it mails. `identifier-screen.ts` re-exports both, so its importers are unchanged.

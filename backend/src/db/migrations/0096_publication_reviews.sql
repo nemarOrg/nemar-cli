@@ -1,4 +1,4 @@
--- The publication review (ADR 0101).
+-- The publication review (ADR 0102).
 --
 -- When the identifier screen of a publication request reports for a commit and its gate is clear
 -- or needs an acknowledgment, the Worker starts a review of that commit: it records the attempt

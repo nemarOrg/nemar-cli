@@ -1,5 +1,5 @@
 /**
- * The pre-send boundary of the publication review (ADR 0101, section 2), exercised with the REAL
+ * The pre-send boundary of the publication review (ADR 0102, section 2), exercised with the REAL
  * shared rules (`scanTextForLocalPaths`, `scanJsonKeys`) over documents shaped the way git hands
  * them over.
  *
@@ -1229,7 +1229,7 @@ describe("a path in a JSON string is found as the person who reads the string wo
 });
 
 describe("participants.json: the column descriptions only, and never a column's name (#1728)", () => {
-  // ADR 0101, section 3: "participants.json, the column descriptions". A column description is
+  // ADR 0102, section 3: "participants.json, the column descriptions". A column description is
   // LongName, Description and Units. Everything else a participants.json can hold (the levels of a
   // categorical column, links, per-participant values someone typed in) is not sent, and neither is
   // the key of a column: a file keyed by participant (`sub01`, `S01`, `Jane Doe`) would send every

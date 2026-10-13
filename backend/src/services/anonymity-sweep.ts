@@ -431,7 +431,7 @@ const MIN_OWNER_TOKEN_LENGTH = 4;
  * root-level `.json`/`.tsv`. Sub-directory sidecars are not scanned: they hold
  * acquisition parameters rather than prose, there are thousands of them, and
  * the budget is better spent on the files a person actually wrote. The README
- * forms come from the one shared list (ADR 0101); all four are read, so only
+ * forms come from the one shared list (ADR 0102); all four are read, so only
  * their order inside the budget follows it.
  */
 const PRIORITY_DEPOSIT_FILES: readonly string[] = [

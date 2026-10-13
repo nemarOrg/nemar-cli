@@ -1,5 +1,5 @@
 /**
- * The publication review's SQL on Miniflare D1, the implementation `wrangler --local` runs (ADR 0101).
+ * The publication review's SQL on Miniflare D1, the implementation `wrangler --local` runs (ADR 0102).
  *
  * Every other review test runs on bun:sqlite, which is more lenient than D1. The statements that
  * carry the feature's guarantees are the ones run here, through the real service functions with

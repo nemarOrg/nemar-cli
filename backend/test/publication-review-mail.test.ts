@@ -1,5 +1,5 @@
 /**
- * The admin mail and the publication review (ADR 0101, section 6), end to end through the real
+ * The admin mail and the publication review (ADR 0102, section 6), end to end through the real
  * mail lease, the real watchdog and the real screen callback route.
  *
  * The mail of a publication request WAITS for the identifier screen's verdict (ADR 0086), and

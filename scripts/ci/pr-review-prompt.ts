@@ -27,7 +27,7 @@ import { fence, tidy, tidyPath } from "../../shared/untrusted-text";
 import { type GitFacts, MAX_MODEL_FILES, classifyPath } from "./pr-review-evidence";
 
 // The prompt's text tools live in `shared/untrusted-text.ts`, shared with the publication review
-// (ADR 0101); they are re-exported so every importer of this module keeps working.
+// (ADR 0102); they are re-exported so every importer of this module keeps working.
 export { fence, tidy, tidyPath };
 
 /** The model that reviews. One place, one reviewed change to move it. */

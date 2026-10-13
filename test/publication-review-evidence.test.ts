@@ -1,5 +1,5 @@
 /**
- * The publication review job's evidence, pre-send path and model call (ADR 0101), against REAL git
+ * The publication review job's evidence, pre-send path and model call (ADR 0102), against REAL git
  * repositories.
  *
  * Each test builds a dataset repository in a temp directory with the real `git`, and runs the real
@@ -11,7 +11,7 @@
  * identity provider; and the lazy blob fetch over https, which needs GitHub (a file:// remote stands
  * in for it, through the same git calls).
  *
- * The property the report depends on is the hard constraint of ADR 0101, section 2: the model
+ * The property the report depends on is the hard constraint of ADR 0102, section 2: the model
  * receives cleared prose from the closed document list and numbers and words from the evidence, and
  * NEVER a table byte, a header value, a path, a file name, a subject or task label, a raw sidecar
  * value or a finding. Every test that sends something to the stand-in model searches the whole

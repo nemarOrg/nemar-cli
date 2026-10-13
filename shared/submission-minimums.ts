@@ -13,7 +13,7 @@
  * imports and exemplars are exempted by the caller, not here.
  *
  * Shared, not backend-only: the Worker's request gate and the publication
- * review job (ADR 0101), which evaluates the same minimums at the reviewed
+ * review job (ADR 0102), which evaluates the same minimums at the reviewed
  * commit, must not be able to disagree about them.
  * `backend/src/services/submission-minimums.ts` re-exports this module.
  */
@@ -125,7 +125,7 @@ export function describesEthicsApproval(descriptionJson: string | null): boolean
  * applies to a publication only, and `authors_empty_for_anonymous` and
  * `authors_not_blinded` to an anonymous release only.
  *
- * A word, not a sentence, because the publication review (ADR 0101) carries
+ * A word, not a sentence, because the publication review (ADR 0102) carries
  * its evidence in closed words only: the sentence for an anonymous release
  * quotes the names it found, and a report, a log line or a stored row must not.
  */

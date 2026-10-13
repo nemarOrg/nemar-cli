@@ -89,9 +89,9 @@ const EXPECTED_ENTRIES: Record<string, number> = {
 
   // Publication workflow
   "GET /publish/requests": 1,
-  // ADR 0101: the review of the active request, with its history.
+  // ADR 0102: the review of the active request, with its history.
   "GET /publish/:id/review": 1,
-  // ADR 0101: start (or start again) the review of the screened commit; one route, no `--all`.
+  // ADR 0102: start (or start again) the review of the screened commit; one route, no `--all`.
   "POST /publish/:id/review/start": 1,
   "POST /publish/:id/deny": 2,
   "POST /publish/:id/approve": 2,

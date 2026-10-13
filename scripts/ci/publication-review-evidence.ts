@@ -1,6 +1,6 @@
 /**
  * What a publication request's dataset looks like at the reviewed commit, read as git data
- * (ADR 0101).
+ * (ADR 0102).
  *
  * Runs inside the central review workflow against a repository made with `git init` and
  * `git fetch --depth=1 --filter=blob:none`, which has no working tree. **Nothing is checked out and

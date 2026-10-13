@@ -271,7 +271,7 @@ describe("explicitDatasetIdGate (ADR 0068, #1432)", () => {
     // has no row for, the dev worker refusing its own dataset, and
     // delete-dataset refused on the only worker that could rebuild it.
     expect(explicitDatasetIdGate({ ...ok, datasetId: "nm099998" })).toBeNull();
-    // nm099997 is the soak fixture of ADR 0101, declared before it exists.
+    // nm099997 is the soak fixture of ADR 0102, declared before it exists.
     expect(explicitDatasetIdGate({ ...ok, datasetId: "nm099997" })).toBeNull();
 
     // Reserved `xx` ids are dev-range, so they are dev-owned without being

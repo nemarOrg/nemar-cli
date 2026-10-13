@@ -1,5 +1,5 @@
 /**
- * The publication review, end to end (ADR 0101): from a screen result to the administrator's mail,
+ * The publication review, end to end (ADR 0102): from a screen result to the administrator's mail,
  * through every piece the phase built, each one the real thing.
  *
  *   the identifier screen's callback  ->  the Worker starts a review and dispatches it

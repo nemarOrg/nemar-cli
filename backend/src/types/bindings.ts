@@ -244,7 +244,7 @@ export interface Bindings {
   // Worker answers only for repositories it owns (see the ownership fence in the webhook).
   PR_REVIEW_ENABLED?: string; // "1" enables the review
 
-  // Publication review (ADR 0101). When PUBLICATION_REVIEW_ENABLED is exactly "1", a stored
+  // Publication review (ADR 0102). When PUBLICATION_REVIEW_ENABLED is exactly "1", a stored
   // identifier-screen result whose gate is clear or acknowledge starts a model review of the
   // screened commit, the claim route accepts new claims, and the request's admin mail waits for
   // the review. Any other value (unset included) starts nothing and refuses new claims; a result

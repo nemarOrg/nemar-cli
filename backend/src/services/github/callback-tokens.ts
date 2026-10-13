@@ -345,7 +345,7 @@ export async function verifyPrReviewCallbackToken(
 }
 
 // ============================================================================
-// Publication-review callback HMAC tokens (ADR 0101)
+// Publication-review callback HMAC tokens (ADR 0102)
 // ============================================================================
 //
 // The publication review workflow claims its review at /webhooks/publication-review-claim and

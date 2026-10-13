@@ -5,7 +5,7 @@ The tooling is built and tested against a model stand-in.
 Nothing below has been measured; every results table is empty on purpose.
 Fill the tables with counts only, never with a dataset's text or the model's words.
 
-Question: is Haiku 5.5 at high effort good enough to be the publication review's model (ADR 0101, call 6)?
+Question: is Haiku 5.5 at high effort good enough to be the publication review's model (ADR 0102, call 6)?
 The decision rule is the ADR's: if more than one in five non-pass outcomes is judged wrong by the maintainer, the same set is run again on Sonnet 5.5.
 The run belongs before the soak (Phase 5) and does not gate the Phase 1 merge.
 

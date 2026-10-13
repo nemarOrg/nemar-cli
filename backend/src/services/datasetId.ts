@@ -131,7 +131,7 @@ export const DEV_EPHEMERAL_BAND_END = formatDatasetId("xx", RESERVED_FIXTURE_FLO
 // reserved band by owner: nm099999 and nm099998 are adjacent and differ.
 //
 // **nm099997 is declared before it exists.** It is the standing fixture the publication
-// review (ADR 0101) is exercised against on the dev worker: a native, named, private deposit.
+// review (ADR 0102) is exercised against on the dev worker: a native, named, private deposit.
 // An undeclared fixture is invisible to the dev worker and claimed by the production one, so the
 // release that ships the review must already carry this line, or production would dispatch
 // enrichment for a repository it has no row for from the day the fixture is created.

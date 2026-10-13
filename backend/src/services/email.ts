@@ -1226,7 +1226,7 @@ export interface PublicationScreenSection {
 }
 
 /**
- * The publication review's part of the same email (ADR 0101). Built ONLY from
+ * The publication review's part of the same email (ADR 0102). Built ONLY from
  * `describePublicationReview` (shared/publication-review.ts): the headline, each reason in the
  * shared words, the next command and the standing line. It never carries the model's summary or
  * any other text the model wrote; the one place a sentence a depositor could influence would

@@ -1,5 +1,5 @@
 /**
- * The calibration corpus of the publication review (ADR 0101, call 6; design note, section 7).
+ * The calibration corpus of the publication review (ADR 0102, call 6; design note, section 7).
  *
  * The calibration needs documents the model has not been tuned on, and a way to know the right
  * answer for some of them. This module makes both. {@link buildCorpus} reads published, public

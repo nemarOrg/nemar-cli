@@ -662,7 +662,7 @@ export async function triggerPrReviewRun(
 }
 
 /**
- * The fields the central publication review workflow needs (ADR 0101), and nothing it could use to
+ * The fields the central publication review workflow needs (ADR 0102), and nothing it could use to
  * choose a target. The workflow reads the dataset's root documents from GitHub itself, at the
  * commit named here: it is given the review's coordinates, never the dataset's text, and it maps
  * `environment` to an API origin from a fixed table of its own, so a payload can never steer the
@@ -681,7 +681,7 @@ export interface PublicationReviewDispatch {
 
 /**
  * Trigger the publication review via `repository_dispatch[run-publication-review]` on
- * `nemarDatasets/.github` (ADR 0101). Throws with the status only: GitHub's body is not ours to
+ * `nemarDatasets/.github` (ADR 0102). Throws with the status only: GitHub's body is not ours to
  * forward, and the caller logs this message. This is the only call the Worker makes to GitHub for
  * a review; nothing is written to a dataset repository.
  */

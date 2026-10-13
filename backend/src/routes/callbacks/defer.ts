@@ -1,5 +1,5 @@
 /**
- * Work that follows a callback's answer (ADR 0101): the admin mail, and the review's start.
+ * Work that follows a callback's answer (ADR 0102): the admin mail, and the review's start.
  *
  * A callback's caller is a workflow with a POST timeout whose retry finds the one-shot token spent,
  * so nothing slow (a Resend send, a GitHub App token and a dispatch of up to ten seconds) sits

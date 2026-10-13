@@ -1,5 +1,5 @@
 /**
- * The mail lease that waits for a publication review, on Miniflare D1 (ADR 0101, section 6).
+ * The mail lease that waits for a publication review, on Miniflare D1 (ADR 0102, section 6).
  *
  * Every other review test runs on bun:sqlite, which is more lenient than D1. The statements that
  * carry the lease's guarantee are the ones run here, through the real service functions with only

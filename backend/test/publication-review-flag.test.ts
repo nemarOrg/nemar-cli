@@ -1,5 +1,5 @@
 /**
- * Where the publication review's flag is set, and where it is not (ADR 0101).
+ * Where the publication review's flag is set, and where it is not (ADR 0102).
  *
  * `PUBLICATION_REVIEW_ENABLED` is `1` in `[env.dev.vars]` and absent from `[vars]`, so production is
  * dark and turning it on is a reviewed change to the configuration file. It is never a Worker

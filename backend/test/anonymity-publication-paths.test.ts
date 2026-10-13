@@ -313,7 +313,7 @@ describe("the repository does not follow the catalog row", () => {
 
 describe("anonymity is requested at publication, not refused there", () => {
   const PUBLICATION = readFileSync(join(SRC, "routes", "datasets", "publication.ts"), "utf8");
-  // The minimums moved to `shared/` (ADR 0101) so the review job evaluates the
+  // The minimums moved to `shared/` (ADR 0102) so the review job evaluates the
   // same rules; the backend module only re-exports them, so the pin follows.
   const MINIMUMS = readFileSync(join(SRC, "..", "..", "shared", "submission-minimums.ts"), "utf8");
   // The gate moved out of the route into one function the request route and

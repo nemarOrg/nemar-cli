@@ -1,4 +1,4 @@
-// Publication-review fixtures for backend tests (ADR 0101).
+// Publication-review fixtures for backend tests (ADR 0102).
 //
 // Every review test needs a native request whose identifier screen reported a commit, and review
 // rows in each state with reports a job could really have posted. These helpers write REAL rows:

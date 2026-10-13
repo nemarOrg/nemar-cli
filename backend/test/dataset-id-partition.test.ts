@@ -406,7 +406,7 @@ describe("the declared ownership set cannot drift (#1440)", () => {
   });
 });
 
-describe("the soak fixture is declared before it exists (ADR 0101)", () => {
+describe("the soak fixture is declared before it exists (ADR 0102)", () => {
   // nm099997 is where the publication review is exercised on the dev worker. It is declared
   // BEFORE the fixture is created, in the release that ships the review, because an undeclared
   // fixture is invisible to the dev worker and claimed by the production one.

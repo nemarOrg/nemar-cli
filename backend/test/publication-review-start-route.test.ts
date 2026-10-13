@@ -1,5 +1,5 @@
 /**
- * POST /admin/publish/:id/review/start (ADR 0101, section 8).
+ * POST /admin/publish/:id/review/start (ADR 0102, section 8).
  *
  * An administrator starts the review of a request's current screened commit, or starts again one
  * that was declined, errored, never reported or is past its deadline. What is pinned here is the

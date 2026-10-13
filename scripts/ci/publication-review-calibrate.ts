@@ -1,5 +1,5 @@
 /**
- * The publication review's offline calibration (ADR 0101, call 6; design note, section 7).
+ * The publication review's offline calibration (ADR 0102, call 6; design note, section 7).
  *
  * Before the review is turned on, someone should know how often its model is wrong on published
  * datasets and how many seeded defects it catches. This module runs the review job's own path over

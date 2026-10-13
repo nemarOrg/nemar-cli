@@ -1,5 +1,5 @@
 /**
- * The publication review's prompt, output schema and report assembly (ADR 0101).
+ * The publication review's prompt, output schema and report assembly (ADR 0102).
  *
  * The depositor wrote every document the model reads, so the prompt is built around one rule, the
  * pull-request review's (ADR 0092): **the model is told what it may trust and what it may not, and

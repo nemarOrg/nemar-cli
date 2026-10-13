@@ -1,5 +1,5 @@
 /**
- * What an administrator reads about a publication review (ADR 0101, section 8), through the real
+ * What an administrator reads about a publication review (ADR 0102, section 8), through the real
  * `/admin` router: `GET /admin/publish/requests` (each row gains `publication_review`) and
  * `GET /admin/publish/:id/review` (the detail, with history).
  *

@@ -947,7 +947,7 @@ export default {
               ),
             ),
         );
-        // ADR 0101: the publication-review watchdog. A review handed to GitHub that never
+        // ADR 0102: the publication-review watchdog. A review handed to GitHub that never
         // reports is marked unreported, its nonce kept so a late report still lands, and the
         // request's admin mail (which waits for the review) is tried, because a dispatch is
         // answered 204 whether or not a workflow listens. Its deadline is 30 minutes, so it

@@ -1,6 +1,6 @@
 /**
  * The README of a dataset, as BIDS allows it to be named: one list, for every place that has to
- * pick which file is the README (ADR 0101, section 3).
+ * pick which file is the README (ADR 0102, section 3).
  *
  * The submission gate reads the first present one for its ethics rule, the anonymity sweep puts
  * all four among the files it reads first, and the publication review shows the first present

@@ -1,5 +1,5 @@
 /**
- * The publication review's callbacks and watchdog, through the real routes (ADR 0101).
+ * The publication review's callbacks and watchdog, through the real routes (ADR 0102).
  *
  * The job claims a review (one shot, before it spends anything), and posts its report. The Worker
  * parses the report at the door, derives the verdict, moves a request whose minimum failed back to
@@ -1059,7 +1059,7 @@ describe("a failed submission minimum re-blocks the request", () => {
   });
 
   test("the depositor is not mailed about it", async () => {
-    // Administrators only (ADR 0101, section 6); the depositor reads the block on the status view.
+    // Administrators only (ADR 0102, section 6); the depositor reads the block on the status view.
     seedAdmin();
     const { reviewId, requestId } = dispatched({ claimed: true, mailed: false });
     const depositor = h.db

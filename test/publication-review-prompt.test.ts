@@ -1,5 +1,5 @@
 /**
- * The publication review's prompt, output schema and report assembly (ADR 0101).
+ * The publication review's prompt, output schema and report assembly (ADR 0102).
  *
  * The brand guard is a COMPILE-TIME property and this file holds its negative half: the
  * `@ts-expect-error` lines below are checked by `bun run typecheck` (the root tsconfig includes this

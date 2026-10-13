@@ -1,5 +1,5 @@
 /**
- * Starting a publication review from a stored screen result, through the real routes (ADR 0101).
+ * Starting a publication review from a stored screen result, through the real routes (ADR 0102).
  *
  * A screen result reaches POST /webhooks/identifier-screen-result; when its gate is clear or needs
  * an acknowledgment, the Worker records a review of THAT commit and dispatches it, subject to the
@@ -40,7 +40,7 @@ import { withFakeResend } from "./helpers/resend";
 const h = createHarness();
 
 const OTHER_HEAD = "e".repeat(40);
-/** The soak fixture of ADR 0101: a reserved id the dev Worker owns. */
+/** The soak fixture of ADR 0102: a reserved id the dev Worker owns. */
 const SOAK_FIXTURE = "nm099997";
 
 /** The n-th extra production-owned dataset id (never a live one, never a reserved fixture). */
@@ -251,7 +251,7 @@ describe("a screen result starts one review of its commit", () => {
   });
 
   test("the review's row exists before the admin mail is tried", async () => {
-    // ADR 0101, section 6: the mail waits for the review, and the lease can only see a row that
+    // ADR 0102, section 6: the mail waits for the review, and the lease can only see a row that
     // has been written. The mail lease is the first statement the callback runs after the start.
     const { requestId } = pending();
     let seenWhenMailTried: number | null = null;
@@ -787,7 +787,7 @@ describe("each Worker reviews only the datasets it owns", () => {
   });
 
   test("the soak fixture nm099997 is the dev Worker's, and production never starts a review for it", async () => {
-    // Declared in DEV_OWNED_FIXTURE_IDS before it exists (ADR 0101), so the release that ships the
+    // Declared in DEV_OWNED_FIXTURE_IDS before it exists (ADR 0102), so the release that ships the
     // review already stops production claiming it.
     const dev = h.env({ ENVIRONMENT: "development" });
     const mine = pending(SOAK_FIXTURE);

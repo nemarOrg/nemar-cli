@@ -1,5 +1,5 @@
 /**
- * The publication review's callback token and dispatch (ADR 0101).
+ * The publication review's callback token and dispatch (ADR 0102).
  *
  * The token shares its key with every other callback token (PRESCREEN_CALLBACK_SECRET) and is
  * signed over the same three fields as the pull-request review's, so the one property that keeps

@@ -1,5 +1,5 @@
 /**
- * The publication review's calibration tooling (ADR 0101, call 6), against REAL git repositories.
+ * The publication review's calibration tooling (ADR 0102, call 6), against REAL git repositories.
  *
  * The corpus builder clones local repositories made with the real `git` (a `file://` remote with
  * the filter capability stands in for the public hosting service, through the same git calls), and

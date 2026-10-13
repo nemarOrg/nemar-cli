@@ -1,5 +1,5 @@
 /**
- * The pre-send boundary of the publication review (ADR 0101, section 2).
+ * The pre-send boundary of the publication review (ADR 0102, section 2).
  *
  * **This is the only file that mints `ClearedText`.** The prompt builder accepts nothing else, and
  * `test/publication-review-contract.test.ts` fails if any other source file casts to the type. So
@@ -43,7 +43,7 @@
  *     lookbehind then skips a path that, as the parsed string, starts a line.
  *  4. Anything the rules cannot clear, or that throws, is withheld, never sent.
  *
- * What the rules can and cannot see is stated in ADR 0101: for prose the only rule is a local
+ * What the rules can and cannot see is stated in ADR 0102: for prose the only rule is a local
  * user path, so this is a consistency control, not a privacy control. It never decides anything
  * about names, email addresses or dates in prose.
  *
@@ -152,7 +152,7 @@ function isPlainObject(x: unknown): x is Record<string, unknown> {
  *
  * A form counts where it starts a string or follows anything but a letter or digit, so `profile:`
  * and `https://` are not drive paths or file URLs. These rules run over the JSON strings and keys
- * only; prose keeps the shared rule alone, which ADR 0101 describes as a consistency control.
+ * only; prose keeps the shared rule alone, which ADR 0102 describes as a consistency control.
  */
 const LOCAL_PATH_FORMS: readonly RegExp[] = [
   /(?<![A-Za-z0-9+.-])file:(?:[\\/]|[A-Za-z]:)/i,
@@ -409,7 +409,7 @@ function prepare(document: ReviewDocument, raw: RawDocument): Prepared {
 const SUBJECT_LABEL_KEY = /^\s*sub-/i;
 
 /**
- * participants.json, reduced to what ADR 0101 says the model is shown: the column descriptions, and
+ * participants.json, reduced to what ADR 0102 says the model is shown: the column descriptions, and
  * not the columns' names. What is sent is `{ column_count, columns }`: for each top-level column, in
  * file order and with no key, its `LongName`, `Description` and `Units` where they are strings, each
  * cut to {@link PARTICIPANT_FIELD_CAPS}, and nothing else (no levels, links, other keys or values of

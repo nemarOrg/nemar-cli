@@ -1,5 +1,5 @@
 /**
- * Migration 0096 (`publication_reviews`) and the row module that reads it (ADR 0101).
+ * Migration 0096 (`publication_reviews`) and the row module that reads it (ADR 0102).
  *
  * Real engines only: every migration applied in order to bun:sqlite (`freshDb`), and the SQL
  * fragments the claim and the mail lease will share run again on Miniflare's D1, the

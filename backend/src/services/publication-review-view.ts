@@ -1,5 +1,5 @@
 /**
- * What every surface shows about a publication request's review (ADR 0101, section 5): the
+ * What every surface shows about a publication request's review (ADR 0102, section 5): the
  * admin list, the detail view and the admin email all read it from here, so none of them can
  * disagree about an outcome, a reason or a sentence.
  *
@@ -15,7 +15,7 @@
  * from `readStoredReport(...)?.head`, the gate's own reader. A row of another head or flag is
  * history in the detail view and never the outcome here.
  *
- * **Only a request in `requested` is reviewed** (ADR 0101, section 7: the claim requires it). A
+ * **Only a request in `requested` is reviewed** (ADR 0102, section 7: the claim requires it). A
  * request in another state shows its stored review as history and never as a wait: a dispatched
  * row of such a request reads as one that did not report, so no surface says "running" about a
  * review whose result can no longer settle anything. Its live facts are not read either, apart from
@@ -105,7 +105,7 @@ export function reviewEnabled(env: Pick<Bindings, "PUBLICATION_REVIEW_ENABLED">)
  * Does the review apply to this dataset at all? OpenNeuro mirrors and exemplars passed an
  * upstream review (ADR 0014, ADR 0026), so the review is "not applicable" for them. A named
  * wrapper over `requiresUploaderName`, so that a change to the name rule cannot silently change
- * the review's scope (ADR 0101, section 5).
+ * the review's scope (ADR 0102, section 5).
  */
 export function publicationReviewApplies(dataset: {
   source?: string | null;
@@ -797,7 +797,7 @@ function unreadableSection(datasetId: string): PublicationReviewSection {
  * corrected later by the watchdog, whose own mail would find nothing left to send. A row past the
  * deadline is therefore read here as one that did not report, whether or not a watchdog has marked
  * it yet, ran, or reached it among the rows it takes in a tick. The lists and the detail have no
- * lease to explain and keep the longer window (ADR 0101, section 7: the deadline plus one tick),
+ * lease to explain and keep the longer window (ADR 0102, section 7: the deadline plus one tick),
  * so they do not say "did not report" about a review the watchdog is about to close. (The lease
  * reads SQLite's clock and this the Worker's, so a row within their skew of the deadline can be
  * read either way: a matter of milliseconds.)

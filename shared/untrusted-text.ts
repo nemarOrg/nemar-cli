@@ -2,7 +2,7 @@
  * Text that someone outside the platform wrote, made safe for the two places it goes.
  *
  * Two reviews read depositor or contributor text with a model and show what comes back to people:
- * the dataset pull-request review (ADR 0092) and the publication review (ADR 0101). Both need the
+ * the dataset pull-request review (ADR 0092) and the publication review (ADR 0102). Both need the
  * same four tools, so they live here once and neither review owns them:
  *
  *  - {@link sanitizeNote}: a model's or an author's words on their way to a person (a check-run, a

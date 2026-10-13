@@ -1,12 +1,12 @@
 /**
- * The central publication-review workflow (ADR 0101): the properties its security rests on, pinned
+ * The central publication-review workflow (ADR 0102): the properties its security rests on, pinned
  * so a later "simplification" cannot remove one without a test saying which.
  *
  * The workflow is authored in this repository and deployed by copying it whole into
  * `nemarDatasets/.github` (the same arrangement and the same drift risk as the pull-request review
  * workflow, see `test/pr-review-workflow.test.ts`). The check at the bottom compares the two byte
  * for byte, and SKIPS VISIBLY when there is no deployed copy: the deployed copy does not exist until
- * the release that ships the script has happened (ADR 0101, "Before it is switched on"), so unlike
+ * the release that ships the script has happened (ADR 0102, "Before it is switched on"), so unlike
  * the pull-request review's, this check is not wired into CI's required job yet.
  *
  * Two checks read the Worker's own files: the event type it dispatches and the callback routes it

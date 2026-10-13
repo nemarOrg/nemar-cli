@@ -1,5 +1,5 @@
 /**
- * The wire shapes of the publication review's admin surfaces (ADR 0101, section 8):
+ * The wire shapes of the publication review's admin surfaces (ADR 0102, section 8):
  *
  *   GET  /admin/publish/requests              each row gains `publication_review`
  *   GET  /admin/publish/:id/review            the review of the active request, with its history

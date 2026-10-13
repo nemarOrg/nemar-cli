@@ -1,4 +1,4 @@
-// The publication review's write path, driven through the real routes (ADR 0101).
+// The publication review's write path, driven through the real routes (ADR 0102).
 //
 // What a review test needs and none of it replaces a rule: a real bun:sqlite database with every
 // migration (`freshDb`, behind `realD1`), the real Hono `/webhooks` router, real WebCrypto tokens,

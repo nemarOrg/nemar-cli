@@ -41,7 +41,7 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /pr-review-claim": 1,
   "POST /pr-review-result": 1,
 
-  // Publication review callbacks (domain-tagged token, same secret; ADR 0101)
+  // Publication review callbacks (domain-tagged token, same secret; ADR 0102)
   "POST /publication-review-claim": 1,
   "POST /publication-review-result": 1,
 

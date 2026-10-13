@@ -550,7 +550,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     // the call -- we log it and leave the row as a normal pending request.
     // The verdict arrives later at /webhooks/prescreen-result.
     //
-    // ADR 0101 retires this advisory check in favour of the publication review, and the two
+    // ADR 0102 retires this advisory check in favour of the publication review, and the two
     // must not both read the README: with the review on (exactly the word `1`) the pre-screen
     // is not dispatched, so the deploy that turns the review on is the one that stops it,
     // with no gap and no overlap. Only the dispatch is conditioned. The pre-screen's callback
@@ -896,7 +896,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     // Resend notification to admins who have publication_request notifications
     // enabled, with the screen section as stored: a request that predates the
     // screen says "NOT RUN for this request", never nothing. The review's section
-    // is the one the screen callback and the watchdog build (ADR 0101), so the
+    // is the one the screen callback and the watchdog build (ADR 0102), so the
     // reminder never says less about the review than the mail it reminds of.
     try {
       const outcome = await mailPublicationRequest(c.env, {
