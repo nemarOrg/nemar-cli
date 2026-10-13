@@ -396,14 +396,20 @@ async function approve(step: Step, card: Card): Promise<Outcome> {
     }
   }
 
-  const run = await runApproval(row.dataset_id, {
-    resume: resumeOf(row),
-    sandbox: false,
-    skipCiCheck: false,
-    acknowledge,
-    // The review and the reasons the card showed: never a second read.
-    override: answer.override,
-  });
+  const stopListening = onInterrupt(step, row.dataset_id);
+  let run: Awaited<ReturnType<typeof runApproval>>;
+  try {
+    run = await runApproval(row.dataset_id, {
+      resume: resumeOf(row),
+      sandbox: false,
+      skipCiCheck: false,
+      acknowledge,
+      // The review and the reasons the card showed: never a second read.
+      override: answer.override,
+    });
+  } finally {
+    stopListening();
+  }
   keepListening(step.reader);
   if (run.ok) step.tally.approved++;
   else step.tally.failed++;
@@ -473,6 +479,44 @@ async function comment(step: Step, card: Card): Promise<Outcome> {
 // ---------------------------------------------------------------------------------------------
 // The terminal
 // ---------------------------------------------------------------------------------------------
+
+/**
+ * Hear Ctrl+C while an approval runs, and return the function that stops listening.
+ *
+ * The approval's spinner takes over standard input and turns Ctrl+C into a SIGINT event for the
+ * whole process, so the walk's reader (which hears Ctrl+C only at a prompt) never sees it. With no
+ * listener of its own the CLI's exit hooks turn that event into a plain death: no word, no tally,
+ * and an approval that may well go on to publish. With this one registered, they leave it alone.
+ *
+ * What is said is what is known: the request was sent and nobody heard how it ended, so the run may
+ * still be going or may be finished on the server. The two commands that find out and go on are
+ * named, then the tally of the rest, and the walk exits 130 as it does for Ctrl+C at a prompt.
+ */
+function onInterrupt(step: Step, datasetId: string): () => void {
+  const handler = () => {
+    step.reader.interrupt();
+    if (process.stdin.isTTY) process.stdin.setRawMode(false);
+    const id = plain(datasetId);
+    console.log();
+    console.log(chalk.yellow(`Interrupted while approving ${id}.`));
+    console.log(
+      "  The approval may still be running, or may have finished on the server. It is not counted below.",
+    );
+    console.log(
+      chalk.dim(`  nemar admin publish show ${id}                find out where it stands`),
+    );
+    console.log(
+      chalk.dim(`  nemar admin publish approve ${id} --resume    continue it if it stopped`),
+    );
+    console.log();
+    console.log(tallyLine(step.tally));
+    process.exit(exitCodeOf(step.tally, true));
+  };
+  process.on("SIGINT", handler);
+  return () => {
+    process.off("SIGINT", handler);
+  };
+}
 
 /**
  * Put a terminal's input back the way the walk's reader needs it. The approval's spinner takes

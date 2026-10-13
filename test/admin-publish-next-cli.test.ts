@@ -1076,6 +1076,49 @@ describe.skipIf(process.platform === "win32")("on a terminal", () => {
     expect(r.stdout).toContain("Done: 1 approved.");
   });
 
+  test("Ctrl+C while an approval runs says which dataset was mid-approval, what to run, the tally, exits 130 and leaves the terminal as it found it", async () => {
+    // The spinner's own handling of standard input turns Ctrl+C into a SIGINT event for the whole
+    // process, which the CLI's exit hooks used to turn into a plain death: no word, no tally, and an
+    // approval that went on to publish. The GitHub stand-in is slow so the run is still going.
+    const a = seed(A);
+    h.githubDelayMs.value = 2_000;
+
+    const r = await h.cli(NEXT, {
+      terminal: async (t) => {
+        const first = await t.waitFor("y approve, ");
+        t.type("y\n");
+        const running = await t.waitFor("Running publication workflow", { after: first });
+        await Bun.sleep(600);
+        t.type("\u0003");
+        await t.waitFor(`nemar admin publish approve ${A} --resume`, { after: running });
+        await t.waitFor("Nothing was changed.", { after: running });
+      },
+    });
+
+    expect(r.exitCode).toBe(130);
+    expect(r.stdout).toContain(`Interrupted while approving ${A}.`);
+    expect(r.stdout).toContain("may still be running, or may have finished");
+    expect(r.stdout).toContain(`nemar admin publish show ${A}`);
+    expect(r.stdout).toContain(`nemar admin publish approve ${A} --resume`);
+    // The tally follows the pointer, and the interrupted approval is not in it.
+    expect(r.stdout.indexOf("Nothing was changed.")).toBeGreaterThan(
+      r.stdout.indexOf(`approve ${A} --resume`),
+    );
+    // No other message of a stopped walk: the interrupt is the one thing said.
+    expect(r.stdout).not.toContain("Input ended; stopping.");
+    // The spinner hid the cursor; the last word about it is that it is shown again.
+    const hidden = r.stdout.lastIndexOf("\u001b[?25l");
+    expect(hidden).toBeGreaterThan(-1);
+    expect(r.stdout.lastIndexOf("\u001b[?25h")).toBeGreaterThan(hidden);
+
+    // The Worker was already running it, and went on: that is why the message says "may".
+    const deadline = Date.now() + 20_000;
+    while (!h.requests.some((c) => c.path === approvePath(A)) && Date.now() < deadline) {
+      await Bun.sleep(100);
+    }
+    expect(requestRow(a.requestId)?.status).toBe("published");
+  });
+
   test("Ctrl+C stops the walk with the shell's code for an interrupt, and says so", async () => {
     seed(A);
 

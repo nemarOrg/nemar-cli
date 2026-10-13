@@ -45,11 +45,7 @@ export class LineReader {
       else this.lines.push(line);
     });
     // Ctrl+C ends the input like Ctrl+D does, and anything typed before it is not an answer.
-    this.rl.on("SIGINT", () => {
-      this.wasInterrupted = true;
-      this.lines.length = 0;
-      this.rl.close();
-    });
+    this.rl.on("SIGINT", () => this.interrupt());
     this.rl.on("close", () => {
       this.ended = true;
       for (const next of this.waiting.splice(0)) next(null);
@@ -64,6 +60,16 @@ export class LineReader {
   /** True once Ctrl+C ended the input, so the caller can say "interrupted" and not "input ended". */
   get interrupted(): boolean {
     return this.wasInterrupted;
+  }
+
+  /**
+   * End the input as Ctrl+C does: interrupted, nothing queued is an answer, and the reader closes.
+   * For a caller that heard the interrupt somewhere else (a SIGINT event while it was busy).
+   */
+  interrupt(): void {
+    this.wasInterrupted = true;
+    this.lines.length = 0;
+    this.rl.close();
   }
 
   /** Print `prompt` and return the next line typed, or null once the input has ended. */
