@@ -79,15 +79,48 @@ function isPlainObject(x: unknown): x is Record<string, unknown> {
 }
 
 /**
- * The string a document is sent as: control characters replaced, then cut to `cap` characters with
- * a visible mark. Whether it was cut is judged on the cleaned text, because a control character
- * outside the Basic Multilingual Plane is replaced by one space and so shortens the text.
+ * Marks that render as nothing and survive the control-character cleaning: the variation selectors
+ * (U+FE00 to U+FE0F, U+E0100 to U+E01EF) and the Mongolian free variation selectors (U+180B to
+ * U+180D, U+180F), which together are the Unicode property `Variation_Selector`. Text spelled in
+ * them is invisible to a person reading the file and still in the prompt, and one inside a path
+ * hides it from the rule.
+ */
+const INVISIBLE_SELECTORS = /\p{Variation_Selector}/gu;
+/** In unicode mode this matches only a surrogate that is not half of a pair. */
+const LONE_SURROGATE = /\p{Cs}/gu;
+
+/**
+ * The one normalization every string goes through before any rule looks at it: the invisible
+ * selectors and any half of a surrogate pair removed, then control characters replaced (`tidy`).
+ * The rules run over the result and the result is what is sent, so nothing the model can read is
+ * something the rules could not.
+ */
+function normalizeText(text: string): string {
+  return tidy(
+    text.replace(INVISIBLE_SELECTORS, "").replace(LONE_SURROGATE, ""),
+    Number.MAX_SAFE_INTEGER,
+  );
+}
+
+/**
+ * `text` cut to `cap` characters with a visible mark, never in the middle of a character: a cut
+ * that would leave the first half of a surrogate pair at the end stops one unit sooner.
+ */
+function cutTo(text: string, cap: number): { text: string; cut: boolean } {
+  if (text.length <= cap) return { text, cut: false };
+  const last = text.charCodeAt(cap - 1);
+  const end = last >= 0xd800 && last <= 0xdbff ? cap - 1 : cap;
+  return { text: `${text.slice(0, end)}\n[cut]`, cut: true };
+}
+
+/**
+ * The string a document is sent as: normalized, then cut to `cap` characters. Whether it was cut is
+ * judged on the normalized text, because a control character outside the Basic Multilingual Plane
+ * is replaced by one space and so shortens the text.
  */
 function toSent(text: string, cap: number): { sent: string; cut: boolean } {
-  const cleaned = tidy(text, Number.MAX_SAFE_INTEGER);
-  return cleaned.length > cap
-    ? { sent: tidy(cleaned, cap), cut: true }
-    : { sent: cleaned, cut: false };
+  const { text: sent, cut } = cutTo(normalizeText(text), cap);
+  return { sent, cut };
 }
 
 /** Build the string a document would be sent as, or say why there is none. */

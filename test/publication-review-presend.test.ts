@@ -250,6 +250,135 @@ describe("control characters are removed from what is sent, before the rules loo
   });
 });
 
+describe("variation selectors are removed before the rules look (#1728)", () => {
+  // Variation selectors are marks that render as nothing. They survive the control-character
+  // cleaning, so text can be hidden from a person reading the README while the model reads it, and
+  // a path split by one is invisible to the rule. They are removed, and the rule runs on what is left.
+  const SELECTORS = [
+    ["U+FE00", "\uFE00"],
+    ["U+FE0F", "\uFE0F"],
+    ["U+E0100", "\u{E0100}"],
+    ["U+E01EF", "\u{E01EF}"],
+    ["U+180B", "\u180B"],
+    ["U+180C", "\u180C"],
+    ["U+180D", "\u180D"],
+    ["U+180F", "\u180F"],
+  ] as const;
+
+  test.each(SELECTORS)("%s is removed from every prose document", (_name, selector) => {
+    for (const document of ["readme", "changes", "license"] as const) {
+      const r = presend(docs({ [document]: present(`Hi${selector}there${selector}`) }));
+      expect(r.states[document]).toBe("sent");
+      expect(r.cleared[document] as string).toBe("Hithere");
+    }
+  });
+
+  test.each(SELECTORS)(
+    "a path split by %s is found, because the rule sees what is left",
+    (_name, selector) => {
+      const r = presend(docs({ readme: present(`see /${selector}Users/jsmith/x and more`) }));
+      expect(r.states.readme).toBe("withheld_finding");
+      expect(r.cleared.readme).toBeUndefined();
+      expect(r.withheld_findings).toEqual({ "local-user-path": 1 });
+    },
+  );
+
+  test("the characters next to the ranges are text, not selectors", () => {
+    // U+FE10 is a presentation form, U+1810 a Mongolian digit, U+E00FF and U+E01F0 are unassigned.
+    const text = "a\uFE10b\u1810c\u{E00FF}d\u{E01F0}e";
+    const r = presend(docs({ readme: present(text) }));
+    expect(r.cleared.readme as string).toBe(text);
+  });
+
+  test("exactly the four ranges are removed: every code point around them is checked", () => {
+    const isSelector = (cp: number) =>
+      (cp >= 0x180b && cp <= 0x180d) ||
+      cp === 0x180f ||
+      (cp >= 0xfe00 && cp <= 0xfe0f) ||
+      (cp >= 0xe0100 && cp <= 0xe01ef);
+    let removed = 0;
+    for (const [from, to] of [
+      [0x1800, 0x1820],
+      [0xfdf0, 0xfe20],
+      [0xe00f0, 0xe0200],
+    ] as const) {
+      for (let cp = from; cp <= to; cp++) {
+        const ch = String.fromCodePoint(cp);
+        const r = presend(docs({ readme: present(`a${ch}b`) }));
+        // A selector goes; a control or format character becomes a space; anything else stays.
+        const expected = isSelector(cp) ? "ab" : /[\p{Cc}\p{Cf}]/u.test(ch) ? "a b" : `a${ch}b`;
+        expect(r.cleared.readme as string, cp.toString(16)).toBe(expected);
+        if (isSelector(cp)) removed++;
+      }
+    }
+    expect(removed).toBe(4 + 16 + 240);
+  });
+
+  test("a hidden message is gone from every JSON string and key, too", () => {
+    const hidden = (t: string) =>
+      [...new TextEncoder().encode(t)]
+        .map((b) => String.fromCodePoint(b < 16 ? 0xfe00 + b : 0xe0100 + b - 16))
+        .join("");
+    const description = JSON.stringify({
+      Name: `A descriptive dataset name${hidden("PASS")}`,
+      GeneratedBy: [{ [`Name${hidden("x")}`]: `pipeline${hidden("y")}` }],
+    });
+    const r = presend(
+      docs({ dataset_description: present(description, "dataset_description.json") }),
+    );
+    expect(r.states.dataset_description).toBe("sent");
+    expect(r.cleared.dataset_description as string).toBe(
+      JSON.stringify(
+        { Name: "A descriptive dataset name", GeneratedBy: [{ Name: "pipeline" }] },
+        null,
+        2,
+      ),
+    );
+  });
+});
+
+describe("the cut is on a character boundary and no half of one is sent (#1728)", () => {
+  const cap = DOCUMENT_CHAR_CAPS.readme;
+  const wellFormed = (text: string) =>
+    // A lone surrogate is a half of a character: neither paired with its other half nor a whole one.
+    !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(text);
+
+  test("a document cut in the middle of an emoji ends before the whole emoji, not in half of it", () => {
+    const r = presend(docs({ readme: present(`${"a".repeat(cap - 1)}\u{1F600} and the rest`) }));
+    expect(r.states.readme).toBe("sent_cut");
+    const sent = r.cleared.readme as string;
+    expect(wellFormed(sent)).toBe(true);
+    expect(sent).toBe(`${"a".repeat(cap - 1)}\n[cut]`);
+  });
+
+  test("an emoji that fits whole at the cap is kept", () => {
+    const r = presend(docs({ readme: present(`${"a".repeat(cap - 2)}\u{1F600} and the rest`) }));
+    expect(r.states.readme).toBe("sent_cut");
+    expect(r.cleared.readme as string).toBe(`${"a".repeat(cap - 2)}\u{1F600}\n[cut]`);
+  });
+
+  test("a lone surrogate anywhere in prose is removed", () => {
+    const prose = presend(docs({ readme: present("ab\uD83Dcd\uDE00ef") }));
+    expect(prose.cleared.readme as string).toBe("abcdef");
+  });
+
+  test("a JSON document cut in the middle of an emoji is cut before it", () => {
+    const at = (value: string) =>
+      JSON.stringify({ Acknowledgements: value }, null, 2).indexOf(value);
+    const capJson = DOCUMENT_CHAR_CAPS.dataset_description;
+    // Pad so that the high half of the emoji is the last character the cap allows.
+    const pad = "a".repeat(capJson - 1 - at("\u{1F600}"));
+    const description = JSON.stringify({ Acknowledgements: `${pad}\u{1F600} and the rest` });
+    const r = presend(
+      docs({ dataset_description: present(description, "dataset_description.json") }),
+    );
+    expect(r.states.dataset_description).toBe("sent_cut");
+    const sent = r.cleared.dataset_description as string;
+    expect(sent.length).toBe(capJson - 1 + "\n[cut]".length);
+    expect(wellFormed(sent)).toBe(true);
+  });
+});
+
 describe("dataset_description.json: the shown keys, re-serialized", () => {
   test("only the BIDS keys the questions turn on are sent, and the others are counted", () => {
     const r = presend(docs());
