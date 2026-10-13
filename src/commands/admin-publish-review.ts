@@ -97,7 +97,7 @@ Examples:
     .command("start")
     .description("Start the automated review of a publication request, or of every one waiting")
     .argument("[dataset-id]", "Dataset ID")
-    .option("--all", "Every request a start is offered for (see list), oldest first")
+    .option("--all", "Every request whose review can be started, oldest first")
     .option("--dry-run", "With --all: list what would be started and start nothing")
     .option(YES_OPTION, "With --all: do not ask before starting")
     .option("--json", "Output JSON instead of text")

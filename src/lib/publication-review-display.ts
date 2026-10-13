@@ -237,7 +237,7 @@ export function historyLines(
   for (const h of d.history as PublicationReviewHistoryEntry[]) {
     const stored = h.stored_verdict === null ? "-" : plain(h.stored_verdict);
     out.push(
-      `  #${String(h.id).padEnd(5)} ${plain(h.head_sha).slice(0, 12)}  ${plain(h.state).padEnd(10)}  ${stored.padEnd(15)}  ${chalk.dim(plain(h.created_at))}${
+      `  #${plain(String(h.id)).padEnd(5)} ${plain(h.head_sha).slice(0, 12)}  ${plain(h.state).padEnd(10)}  ${stored.padEnd(15)}  ${chalk.dim(plain(h.created_at))}${
         h.id === inForce ? chalk.dim("  in force") : ""
       }`,
     );
@@ -270,7 +270,9 @@ export function reviewDetailLines(d: PublicationReviewDetail): string[] {
     d.block_reason === null || d.block_reason === undefined
       ? plain(d.request_status)
       : `${plain(d.request_status)} (${plain(d.block_reason)})`;
-  out.push(`${chalk.bold(plain(d.dataset_id))}  request ${d.request_id}, ${status}, ${kind}`);
+  out.push(
+    `${chalk.bold(plain(d.dataset_id))}  request ${plain(String(d.request_id))}, ${status}, ${kind}`,
+  );
   if (d.environment !== "production") out.push(`  ${chalk.yellow(NON_PRODUCTION_NOTE)}`);
 
   out.push("");
@@ -287,7 +289,7 @@ export function reviewDetailLines(d: PublicationReviewDetail): string[] {
   );
   if (d.screen_acknowledgment) {
     out.push(
-      `  Acknowledged by administrator ${d.screen_acknowledgment.by} at ${plain(d.screen_acknowledgment.at)}.`,
+      `  Acknowledged by administrator ${plain(String(d.screen_acknowledgment.by))} at ${plain(d.screen_acknowledgment.at)}.`,
     );
   }
 
@@ -322,7 +324,7 @@ export function reviewDetailLines(d: PublicationReviewDetail): string[] {
     }
     if (review.override !== null) {
       out.push(
-        `  Override: by administrator ${review.override.by} at ${plain(review.override.at)} for ${review.override.reasons.map(plain).join(", ")}`,
+        `  Override: by administrator ${plain(String(review.override.by))} at ${plain(review.override.at)} for ${review.override.reasons.map(plain).join(", ")}`,
       );
     }
   }
