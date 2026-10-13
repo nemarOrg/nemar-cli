@@ -21,9 +21,19 @@ import {
   __stallLimits,
   checkDataMissBudget,
 } from "../src/middleware/rateLimit";
+import { hashApiKey } from "../src/services/token";
 import type { Bindings } from "../src/types/bindings";
 import { InMemoryCache } from "./helpers/cache";
-import { buildApp, edge, hit, useRateLimitHarness, viaBinding } from "./helpers/rate-limit-harness";
+import { freshDb, realD1 } from "./helpers/d1";
+import {
+  PROD_ENV,
+  T0,
+  buildApp,
+  edge,
+  hit,
+  useRateLimitHarness,
+  viaBinding,
+} from "./helpers/rate-limit-harness";
 
 const h = useRateLimitHarness();
 
@@ -77,12 +87,41 @@ async function openByStalls(): Promise<void> {
 }
 
 const env = { ENVIRONMENT: "production" } as Pick<Bindings, "ENVIRONMENT" | "TEST_BYPASS_TOKEN">;
-const missBudget = (address: string) =>
+const missBudget = (
+  address: string,
+  waitUntil: ((work: Promise<unknown>) => void) | undefined = undefined,
+) =>
   checkDataMissBudget(
     env,
     new Request("http://localhost/data/x", { headers: edge(address) }),
-    undefined,
+    waitUntil,
   );
+
+/** A `waitUntil` that keeps what it is handed, the way the runtime does until it settles. */
+function collector() {
+  const work: Promise<unknown>[] = [];
+  const waitUntil = (p: Promise<unknown>) => {
+    work.push(p);
+  };
+  return {
+    waitUntil,
+    executionCtx: { waitUntil, passThroughOnException: () => {} } as unknown as ExecutionContext,
+    settled: () => Promise.all(work),
+  };
+}
+
+/** A cached record whose body never finishes, for the requests whose key matches `which`. */
+class HangingBody extends InMemoryCache {
+  constructor(private readonly which: (url: string) => boolean = () => true) {
+    super();
+  }
+  async match(request: RequestInfo | URL): Promise<Response | undefined> {
+    if (!this.which((request as Request).url)) return super.match(request);
+    return new Response(new ReadableStream<Uint8Array>({ start() {} }));
+  }
+}
+
+const bearer = (key: string) => ({ Authorization: `Bearer ${key}` });
 
 describe("the numbers", () => {
   test("three stalls within one window open it, for ten seconds", () => {
@@ -206,7 +245,7 @@ describe("stalls open it", () => {
     await stallAtOnce(40, "198.18.0");
     expect(isOpen()).toBe(true);
     expect(__cacheBreakerForTests().stallsRemembered).toBe(STALLS_TO_OPEN);
-    // Late stalls from calls made before it opened do not keep it open longer.
+    // And a probe that is answered still closes it.
     h.cache.stalled = false;
     h.clock += COOL_DOWN_MS;
     await hit(buildApp(), edge("198.18.0.1"));
@@ -301,7 +340,205 @@ describe("an open breaker", () => {
   });
 });
 
+describe("every place the limiter calls the cache is behind the breaker", () => {
+  // One test per call site: three stalls there, and nowhere else, open the breaker.
+  // The lookups of the counter, the admin flag and the miss budget, and the counter's
+  // write on a strict bucket, are covered above.
+
+  test(
+    "the data plane's counter write handed to waitUntil",
+    async () => {
+      h.cache.putsStall = true;
+      const app = buildApp();
+      const ctxs = Array.from({ length: STALLS_TO_OPEN }, () => collector());
+      const answers = await Promise.all(
+        ctxs.map((ctx, i) =>
+          app.fetch(
+            new Request("http://localhost/data/nm000108/v1.0.0/x", {
+              headers: edge(`198.51.100.${i + 1}`),
+            }),
+            PROD_ENV,
+            ctx.executionCtx,
+          ),
+        ),
+      );
+      // Answered at once: nothing waited on the write, so nothing has stalled yet.
+      expect(answers.map((r) => r.status)).toEqual([200, 200, 200]);
+      expect(isOpen()).toBe(false);
+      await Promise.all(ctxs.map((ctx) => ctx.settled()));
+      expect(isOpen()).toBe(true);
+    },
+    SLOW_TEST_MS,
+  );
+
+  test(
+    "the miss budget's write handed to waitUntil",
+    async () => {
+      h.cache.putsStall = true;
+      const ctxs = Array.from({ length: STALLS_TO_OPEN }, () => collector());
+      await Promise.all(ctxs.map((ctx, i) => missBudget(`198.51.100.${10 + i}`, ctx.waitUntil)));
+      await Promise.all(ctxs.map((ctx) => ctx.settled()));
+      expect(isOpen()).toBe(true);
+    },
+    SLOW_TEST_MS,
+  );
+
+  test(
+    "the data plane's counter write with no execution context",
+    async () => {
+      h.cache.putsStall = true;
+      const app = buildApp();
+      await Promise.all(
+        Array.from({ length: STALLS_TO_OPEN }, (_, i) =>
+          hit(app, edge(`198.51.100.${20 + i}`), "/data/nm000108/v1.0.0/x"),
+        ),
+      );
+      expect(isOpen()).toBe(true);
+    },
+    SLOW_TEST_MS,
+  );
+
+  test(
+    "the miss budget's write with no execution context",
+    async () => {
+      h.cache.putsStall = true;
+      await Promise.all(
+        Array.from({ length: STALLS_TO_OPEN }, (_, i) => missBudget(`198.51.100.${60 + i}`)),
+      );
+      expect(isOpen()).toBe(true);
+    },
+    SLOW_TEST_MS,
+  );
+
+  test(
+    "the read of a counter record's body",
+    async () => {
+      (globalThis as { caches?: unknown }).caches = { default: new HangingBody() };
+      const app = buildApp();
+      await Promise.all(
+        Array.from({ length: STALLS_TO_OPEN }, (_, i) => hit(app, edge(`198.51.100.${30 + i}`))),
+      );
+      expect(isOpen()).toBe(true);
+    },
+    SLOW_TEST_MS,
+  );
+
+  test(
+    "the read of an admin-flag record's body",
+    async () => {
+      const flagsOnly = new HangingBody((url) => url.includes("admin-flag"));
+      (globalThis as { caches?: unknown }).caches = { default: flagsOnly };
+      const app = buildApp();
+      await Promise.all(
+        Array.from({ length: STALLS_TO_OPEN }, (_, i) =>
+          hit(
+            app,
+            { ...edge(`198.51.100.${40 + i}`), ...bearer(`flag-${i}-${"k".repeat(40)}`) },
+            "/admin/users",
+          ),
+        ),
+      );
+      expect(isOpen()).toBe(true);
+    },
+    SLOW_TEST_MS,
+  );
+
+  test(
+    "the write of an admin flag the database answered",
+    async () => {
+      const db = freshDb();
+      db.run(
+        `INSERT INTO users (username, email, password_hash, status, role, email_verified, service_access, sandbox_completed)
+         VALUES ('breaker-admin', 'breaker-admin@example.org', 'x', 'approved', 'admin', 1, 1, 1)`,
+      );
+      const user = db
+        .query<{ id: number }, []>("SELECT id FROM users WHERE username='breaker-admin'")
+        .get();
+      if (!user) throw new Error("seed failed");
+      const adminKey = `breaker-admin-${"k".repeat(36)}`;
+      db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)").run(
+        user.id,
+        await hashApiKey(adminKey),
+        adminKey.slice(0, 8),
+      );
+      const withDb = { ...PROD_ENV, DB: realD1(db) } as Bindings;
+      h.cache.putsStall = true;
+      const app = buildApp();
+      await Promise.all(
+        Array.from({ length: STALLS_TO_OPEN }, (_, i) =>
+          hit(
+            app,
+            { ...edge(`198.51.100.${50 + i}`), ...bearer(adminKey) },
+            "/admin/users",
+            withDb,
+          ),
+        ),
+      );
+      expect(isOpen()).toBe(true);
+    },
+    SLOW_TEST_MS,
+  );
+});
+
+describe("the end of the cool-down", () => {
+  test(
+    "is not pushed away by a stall that settles after the breaker opened",
+    async () => {
+      h.cache.stalled = true;
+      const app = buildApp();
+      // Three calls open it at T0.
+      const first = Array.from({ length: STALLS_TO_OPEN }, (_, i) =>
+        hit(app, edge(`198.51.100.${70 + i}`)),
+      );
+      // A fourth is let through 300 ms in, while it is still closed, and so settles
+      // 300 ms after it opened.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const late = hit(app, edge("198.51.100.79"));
+      await Promise.all(first);
+      expect(isOpen()).toBe(true);
+      // Six seconds pass on the limiter's clock before the late stall settles.
+      h.clock += 6_000;
+      await late;
+      // The cool-down still ends ten seconds after it opened, not after the late stall.
+      h.cache.stalled = false;
+      h.clock = T0 + COOL_DOWN_MS;
+      const probe = await hit(app, edge("198.51.100.80"));
+      expect(probe.headers.get("X-RateLimit-Remaining")).not.toBeNull();
+      expect(isOpen()).toBe(false);
+    },
+    SLOW_TEST_MS,
+  );
+
+  test("is never further away than one cool-down, even when the clock goes backwards", async () => {
+    await openByStalls();
+    h.cache.stalled = false;
+    // An hour back: the stored end of the cool-down is now an hour and ten seconds away.
+    h.clock = T0 - 3_600_000;
+    const res = await hit(buildApp(), edge("198.51.100.90"));
+    expect(res.headers.get("X-RateLimit-Remaining")).not.toBeNull();
+    expect(isOpen()).toBe(false);
+  });
+});
+
 describe("the probe", () => {
+  test(
+    "that stalls reopens it and says so, as a probe, once the log line's window has turned",
+    async () => {
+      await openByStalls();
+      // Past the cool-down, and past the window of the line that reported the opening,
+      // so the next opening speaks instead of being counted as swallowed.
+      h.clock = T0 + __limits.WINDOW_SIZE * 1000;
+      const { ms } = await timed(hit(buildApp(), edge("203.0.113.130")));
+      expect(ms).toBeGreaterThanOrEqual(WAITED_MS);
+      expect(isOpen()).toBe(true);
+      expect(opened().map((c) => (c[1] as { trigger: string }).trigger)).toEqual([
+        "stalls",
+        "probe",
+      ]);
+    },
+    SLOW_TEST_MS,
+  );
+
   test("after the cool-down one call is let through, and an answer closes the breaker", async () => {
     await openByStalls();
     const openedAt = h.clock;
