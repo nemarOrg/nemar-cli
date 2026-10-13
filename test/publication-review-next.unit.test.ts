@@ -459,12 +459,35 @@ describe("sizeLine", () => {
   });
 });
 
+/**
+ * Run `body` with the process in time zone `zone` (Bun honours a change of `TZ` at run time), and
+ * put the zone back afterwards. A test of a timestamp that carries no zone must not pass only
+ * because the machine it runs on is in UTC, as a CI runner is.
+ */
+function inZone(zone: string, body: () => void): void {
+  const previous = process.env.TZ;
+  process.env.TZ = zone;
+  try {
+    body();
+  } finally {
+    if (previous === undefined) Reflect.deleteProperty(process.env, "TZ");
+    else process.env.TZ = previous;
+  }
+}
+
+/** Zones west and east of UTC: a timestamp read in either as local time is hours off. */
+const ZONES = ["America/Los_Angeles", "Pacific/Auckland"] as const;
+
 describe("requestedAge", () => {
   test("a timestamp the database wrote (UTC, no zone) is read as UTC, in any time zone", () => {
     const now = Date.parse("2026-10-14T09:14:03Z");
-    expect(requestedAge("2026-10-12 09:14:03", now)).toBe("2d");
-    expect(requestedAge("2026-10-14 08:14:03", now)).toBe("1h");
-    expect(requestedAge("2026-10-14T09:04:03Z", now)).toBe("10m");
+    for (const zone of ["UTC", ...ZONES]) {
+      inZone(zone, () => {
+        expect(requestedAge("2026-10-12 09:14:03", now)).toBe("2d");
+        expect(requestedAge("2026-10-14 08:14:03", now)).toBe("1h");
+        expect(requestedAge("2026-10-14T09:04:03Z", now)).toBe("10m");
+      });
+    }
   });
 
   test("a timestamp that is not one says so", () => {
@@ -497,6 +520,16 @@ describe("cardLines", () => {
   test("the first line says where it is, who asked, what kind and how long ago", () => {
     const text = card({});
     expect(text.split("\n")[0]).toBe(`[1 of 3] ${ID}  alice  named publication  requested 2d ago`);
+  });
+
+  test("how long ago does not depend on the zone the machine is in", () => {
+    for (const zone of ZONES) {
+      inZone(zone, () => {
+        expect(card({}).split("\n")[0]).toBe(
+          `[1 of 3] ${ID}  alice  named publication  requested 2d ago`,
+        );
+      });
+    }
   });
 
   test("an anonymous release is said as one", () => {
