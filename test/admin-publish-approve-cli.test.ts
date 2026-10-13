@@ -380,6 +380,34 @@ describe("the command decides: the screen's acknowledgment is its own flag", () 
     expect(requestRow(requestId)?.status).toBe("published");
   });
 
+  test("the reason is 10 to 500 characters once trimmed: 9 and 501 are refused before anything is posted, 10 and 500 are sent", async () => {
+    const requestId = seedGolden({ status: "unchecked" });
+    seedReport(requestId);
+
+    for (const reason of ["a".repeat(9), "a".repeat(501)]) {
+      const r = await approve(["--resume", "--yes", "--acknowledge-identifier-screen", reason]);
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain("--acknowledge-identifier-screen needs a reason of 10 to 500");
+    }
+    expect(h.posted).toEqual([]);
+
+    const ten = "b".repeat(10);
+    expect(
+      (await approve(["--resume", "--yes", "--acknowledge-identifier-screen", ten])).exitCode,
+    ).toBe(0);
+    expect(approveBodies()[0]?.acknowledge_identifier_screen).toBe(ten);
+
+    h.reset();
+    adminId = await h.admin("approveradmin", ADMIN_KEY);
+    h.setEnv({ PUBLICATION_REVIEW_ENABLED: "1" });
+    seedReport(seedGolden({ status: "unchecked" }));
+    const long = "c".repeat(500);
+    expect(
+      (await approve(["--resume", "--yes", "--acknowledge-identifier-screen", long])).exitCode,
+    ).toBe(0);
+    expect(approveBodies()[0]?.acknowledge_identifier_screen).toBe(long);
+  });
+
   test("when the review is not a pass either, the refusal says --force is needed as well", async () => {
     const requestId = seedGolden({ status: "unchecked" });
     seedReport(requestId, twoReasons());

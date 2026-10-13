@@ -19,6 +19,10 @@ import {
   type PublicationReviewOverride,
 } from "../../shared/contract/publication-review-admin.js";
 import {
+  ACKNOWLEDGMENT_MAX_LENGTH,
+  ACKNOWLEDGMENT_MIN_LENGTH,
+} from "../../shared/publication-limits.js";
+import {
   PUBLICATION_STEPS,
   PUBLICATION_STEP_LABELS,
   stepsForRelease,
@@ -62,7 +66,7 @@ export function registerApproveCommand(group: Command): void {
     )
     .option(
       "--acknowledge-identifier-screen <reason>",
-      "Approve over an identifier screen that needs review, recording why (10 to 500 characters)",
+      `Approve over an identifier screen that needs review, recording why (${ACKNOWLEDGMENT_MIN_LENGTH} to ${ACKNOWLEDGMENT_MAX_LENGTH} characters)`,
     )
     .option(
       "--force",
@@ -174,9 +178,14 @@ After Approval:
         if (!requireSignedIn()) return;
 
         const ack = options.acknowledgeIdentifierScreen?.trim();
-        if (ack !== undefined && (ack.length < 10 || ack.length > 500)) {
+        if (
+          ack !== undefined &&
+          (ack.length < ACKNOWLEDGMENT_MIN_LENGTH || ack.length > ACKNOWLEDGMENT_MAX_LENGTH)
+        ) {
           console.log(
-            chalk.red("--acknowledge-identifier-screen needs a reason of 10 to 500 characters."),
+            chalk.red(
+              `--acknowledge-identifier-screen needs a reason of ${ACKNOWLEDGMENT_MIN_LENGTH} to ${ACKNOWLEDGMENT_MAX_LENGTH} characters.`,
+            ),
           );
           process.exitCode = 1;
           markReportedExit();
