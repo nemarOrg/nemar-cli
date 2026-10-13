@@ -232,12 +232,29 @@ The bound remembered nothing, so while the cache stayed stalled every request pa
    The calls behind it keep skipping until it reports, so a recovering cache is not met by a crowd of waits.
    A probe that answers, with a value or with a fast error, closes the breaker and forgets the stalls; one that stalls opens it for another 10 seconds.
    A probe that never reports is replaced after one cool-down.
-5. **Fail-open is unchanged.**
+5. **Fail-open is unchanged for a fault and is new for a stall.**
+   A call that throws failed open before this release: the request was served and not counted.
+   A call that never answered did not: the counter's lookup was awaited without a bound, so the request waited on the stall.
+   Now every call is bounded at 500 ms and then fails open, and an open breaker skips the cache at once.
+   So while a stall lasts every bucket fails open, and counting is off on the isolate for 10 seconds at a time.
    A skipped call is treated exactly as a stalled call was, without the wait:
    the request is served and not counted, with the headers a stalled call would have left it (see "What an absent header means" above),
    the admin-flag lookup answers "not an admin", and the miss and private-grant budgets allow.
    The breaker never refuses a request and never counts one.
    The price is that counting stays off on an isolate for up to 10 seconds after the cache recovers.
+   **That includes the strict `auth-ip` bucket,** ten a window per address on the `AUTH_PATHS` family, whose purpose is to bound email and GitHub spend.
+   A caller can see it happen, because the responses lack the `X-RateLimit-*` headers while it lasts.
+   What bounds that spend meanwhile is what each handler enforces, and not every strict path has a bound:
+   - The emailed-code requests count `auth_codes` rows per email (`PER_MINUTE_LIMIT` of 1 and `PER_HOUR_LIMIT` of 5 in `services/auth-code.ts`), with a per-account count on the two session-bound ones (the header of `routes/auth-web.ts`).
+   - A wrong code is counted per code: the fifth wrong guess consumes it (`MAX_CODE_ATTEMPTS`, `recordFailedAttempt` in `routes/auth-web.ts`).
+   - `POST /auth/request-key-regeneration` has no limit of its own: each call mails the address and replaces the stored token.
+   - `POST /users/me/upload-access/request` has none this amendment could verify.
+     An attempt that is refused after the GitHub lookup writes nothing, so it is replayable, which is why `AUTH_PATHS` lists it.
+     Once a request is stored and the admins have been told, a repeat is answered without mailing or looking anything up.
+
+   Whether the strict buckets should fail closed during a stall instead was considered and is not decided here.
+   The options (keep failing open and record the compensating limits, fail the strict buckets closed while the breaker is open, or fail closed only on the routes that spend money or send email) are tracked in #1745.
+   No production stall has been recorded, so the risk is unmeasured.
 6. **The state is one record per isolate:** at most three timestamps and an end time, never per caller or per bucket, because a stall is a property of the platform.
    Isolates and data centers do not share it, as they do not share the counters.
    An evicted isolate's replacement starts closed and pays its own stalls before it opens,
