@@ -461,6 +461,8 @@ export class PublicationReviewReportError extends Error {
 // ---------------------------------------------------------------------------------------------
 
 const HEAD = /^[0-9a-f]{40}$/;
+/** A dataset id as the platform mints them: the only text a command is built from. */
+const DATASET_ID = /^(nm|on|xx)\d{6}$/;
 /** A count: a non-negative safe integer no larger than this. */
 const MAX_COUNT = 10_000_000;
 /** A sampling rate is a positive number below this, in hertz. */
@@ -1042,10 +1044,20 @@ export interface ReasonRule {
   sentence: string;
   /** What clears it. May contain `<dataset>`, which {@link describePublicationReview} fills. */
   cure: string;
+  /**
+   * What is true instead of `cure` when an administrator's `start` would be refused, because the
+   * request is not waiting for its decision (`POST .../review/start` answers 409
+   * `request_not_requested`). Present exactly on the reasons whose cure is "start it", so a
+   * request that is being approved or is blocked is never sent to a command that cannot work.
+   */
+  cureNotStartable?: string;
 }
 
 const OVERRIDE =
   "An administrator may approve over it; the approval records the override (--force).";
+
+/** What a start cure says for a request no start can reach (see {@link ReasonRule.cureNotStartable}). */
+const NOT_STARTABLE = `A review starts only for a request that is waiting for its decision. ${OVERRIDE}`;
 
 /** The reasons table (ADR 0102, section 5). A `Record`, so a code without a rule fails the build. */
 export const REASONS: Record<ReasonCode, ReasonRule> = {
@@ -1143,6 +1155,7 @@ export const REASONS: Record<ReasonCode, ReasonRule> = {
     clearedBy: "override",
     sentence: "No review of the screened commit has started.",
     cure: `Start it: nemar admin publish start <dataset>. ${OVERRIDE}`,
+    cureNotStartable: NOT_STARTABLE,
   },
   review_running: {
     class: "unknown",
@@ -1155,18 +1168,21 @@ export const REASONS: Record<ReasonCode, ReasonRule> = {
     clearedBy: "override",
     sentence: "The review did not report in time.",
     cure: `Start it again: nemar admin publish start <dataset>. ${OVERRIDE}`,
+    cureNotStartable: NOT_STARTABLE,
   },
   review_limit_reached: {
     class: "unknown",
     clearedBy: "override",
     sentence: "The daily limit of automated reviews was reached.",
     cure: `Start it later: nemar admin publish start <dataset>; an administrator's start is held by the platform's limit only. ${OVERRIDE}`,
+    cureNotStartable: NOT_STARTABLE,
   },
   review_could_not_run: {
     class: "unknown",
     clearedBy: "override",
     sentence: "The review could not run.",
     cure: `Once the cause is fixed, start it again: nemar admin publish start <dataset>. ${OVERRIDE}`,
+    cureNotStartable: NOT_STARTABLE,
   },
   text_withheld: {
     class: "unknown",
@@ -1204,6 +1220,24 @@ export const REASONS: Record<ReasonCode, ReasonRule> = {
 export const HARD_REASONS: readonly ReasonCode[] = REASON_CODES.filter(
   (c) => REASONS[c].clearedBy === "nothing",
 );
+
+/** The reasons whose cure is an administrator's `start`: the ones with a {@link ReasonRule.cureNotStartable}. */
+export const START_CURE_REASONS: readonly ReasonCode[] = REASON_CODES.filter(
+  (c) => REASONS[c].cureNotStartable !== undefined,
+);
+
+/**
+ * The cure of a reason for this dataset: `<dataset>` filled (a malformed id is never quoted), and,
+ * when `startable` is false, what is true for a request no `start` can reach. One function for the
+ * detail's `cure` field and the lines every surface prints, so they cannot differ.
+ */
+export function cureOf(code: ReasonCode, datasetId: string, startable: boolean): string {
+  const rule = REASONS[code];
+  const id = DATASET_ID.test(datasetId) ? datasetId : "<dataset>";
+  const text =
+    !startable && rule.cureNotStartable !== undefined ? rule.cureNotStartable : rule.cure;
+  return text.replaceAll("<dataset>", id);
+}
 
 export interface Reason {
   code: ReasonCode;
@@ -1481,8 +1515,6 @@ const OUTCOME_TONE: Record<PublicationOutcome, "ok" | "warn" | "stop"> = {
   fail: "stop",
 };
 
-const DATASET_ID = /^(nm|on|xx)\d{6}$/;
-
 /**
  * A detail word as a person reads it; anything unexpected is shown as the closed word it is. A
  * failed or unknown question names the question, then the fact that lowered the answer when a fact
@@ -1527,14 +1559,14 @@ function detailText(reason: Reason, report: PublicationReviewReport | null): str
 export function reasonLine(
   reason: Reason,
   datasetId: string,
-  report: PublicationReviewReport | null = null,
+  report: PublicationReviewReport | null,
+  startable: boolean,
 ): string {
   const rule = REASONS[reason.code];
-  const id = DATASET_ID.test(datasetId) ? datasetId : "<dataset>";
   const detail = detailText(reason, report);
   const sentence =
     detail === null ? rule.sentence : `${rule.sentence.replace(/\.$/, "")} (${detail}).`;
-  return `${sentence} ${rule.cure.replaceAll("<dataset>", id)}`;
+  return `${sentence} ${cureOf(reason.code, datasetId, startable)}`;
 }
 
 export interface PublicationReviewDescription {
@@ -1558,7 +1590,7 @@ export interface PublicationReviewDescription {
 }
 
 /** Can an administrator's `start` create or restart this row? Never a running or reported one. */
-function startable(row: ReviewRowView): boolean {
+function rowRestartable(row: ReviewRowView): boolean {
   return (
     row.kind === "none" ||
     row.kind === "declined" ||
@@ -1568,7 +1600,12 @@ function startable(row: ReviewRowView): boolean {
   );
 }
 
-function nextCommand(id: string, reasons: readonly Reason[], row: ReviewRowView): string | null {
+function nextCommand(
+  id: string,
+  reasons: readonly Reason[],
+  row: ReviewRowView,
+  startable: boolean,
+): string | null {
   const codes = new Set(reasons.map((r) => r.code));
   if (reasons.length === 0) return `nemar admin publish approve ${id}`;
   if (reasons.some((r) => REASONS[r.code].clearedBy === "nothing")) {
@@ -1577,13 +1614,9 @@ function nextCommand(id: string, reasons: readonly Reason[], row: ReviewRowView)
       ? `nemar admin publish screen ${id}`
       : null;
   }
-  const startCures: readonly ReasonCode[] = [
-    "review_not_started",
-    "review_did_not_report",
-    "review_limit_reached",
-    "review_could_not_run",
-  ];
-  if (startable(row) && startCures.some((c) => codes.has(c))) {
+  // A start is offered only where the route would take it: the request is waiting for its
+  // decision, and the row is one a start can create or restart.
+  if (startable && rowRestartable(row) && START_CURE_REASONS.some((c) => codes.has(c))) {
     return `nemar admin publish start ${id}`;
   }
   if (codes.has("review_running")) return `nemar admin publish show ${id}`;
@@ -1616,12 +1649,19 @@ export function describePublicationReview(input: {
   head: string | null;
   version: string | null;
   /**
+   * An administrator's `start` can reach this request: it is waiting for its decision
+   * (`requested`). The route refuses any other status, so a request that is blocked or being
+   * approved is never told to start a review, in a cure or in `next`. Required, so that a caller
+   * cannot forget it and offer a command that cannot work.
+   */
+  startable: boolean;
+  /**
    * The request is over (published or denied), so no review is waiting for or gating it. With no
    * review on record it reads as not reviewed, never as "action required". Default false.
    */
   closed?: boolean;
 }): PublicationReviewDescription {
-  const { applies, enabled, reasons, row } = input;
+  const { applies, enabled, reasons, row, startable } = input;
   const id = DATASET_ID.test(input.datasetId) ? input.datasetId : "<dataset>";
   if (!applies) {
     return {
@@ -1663,7 +1703,7 @@ export function describePublicationReview(input: {
 
   const outcome = stricterOf(input.outcome ?? "action_required", verdictOf(reasons));
   const report = row.kind === "reported" ? row.report : null;
-  const lines = reasons.map((r) => reasonLine(r, id, report));
+  const lines = reasons.map((r) => reasonLine(r, id, report, startable));
   const summary = report !== null && report.summary !== "" ? report.summary : null;
   if (row.kind === "reported") {
     const parts: string[] = [];
@@ -1693,7 +1733,7 @@ export function describePublicationReview(input: {
     tone: OUTCOME_TONE[outcome],
     lines,
     summary,
-    next: nextCommand(id, reasons, row),
+    next: nextCommand(id, reasons, row, startable),
   };
 }
 

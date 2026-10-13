@@ -1309,6 +1309,63 @@ describe("GET /admin/publish/:id/review", () => {
     );
   });
 
+  describe("a request an administrator cannot start a review for is not told to start one", () => {
+    // `POST /admin/publish/:id/review/start` refuses any request that is not `requested`
+    // (409 request_not_requested), so the reasons whose cure is "start it" must not send an
+    // administrator there for a request that is being approved or is blocked.
+    const START = "nemar admin publish start";
+    const NOT_STARTABLE = "A review starts only for a request that is waiting for its decision.";
+    const startCures: Array<[ReasonCode, Omit<SeedReview, "requestId" | "datasetId"> | null]> = [
+      ["review_not_started", null],
+      ["review_did_not_report", { state: "unreported" }],
+      ["review_limit_reached", { state: "declined", detail: "platform_limit" }],
+      ["review_could_not_run", { state: "errored", detail: "model_refused" }],
+    ];
+
+    for (const status of ["approving", "blocked"] as const) {
+      for (const [code, seed] of startCures) {
+        test(`${status}: ${code} says what is true, and no start command is offered`, async () => {
+          const { requestId, datasetId } = request({
+            requestStatus: status,
+            blockReason: status === "blocked" ? "min_requirements_failed" : null,
+          });
+          if (seed !== null) seedPublicationReview(db, { ...seed, requestId, datasetId });
+          const d = await detail(datasetId);
+          const reason = d.reasons.find((r) => r.code === code);
+          expect(reason).toBeDefined();
+          expect(reason?.cure).not.toContain(START);
+          expect(reason?.cure).toContain(NOT_STARTABLE);
+          expect(d.description.lines.join("\n")).not.toContain(START);
+          expect(d.description.lines.join("\n")).toContain(NOT_STARTABLE);
+          expect(d.description.next ?? "").not.toContain(START);
+        });
+      }
+    }
+
+    test("an approving request's next command is the approval, not a start the route refuses", async () => {
+      const { requestId, datasetId } = request({ requestStatus: "approving" });
+      seedPublicationReview(db, {
+        requestId,
+        datasetId,
+        state: "errored",
+        detail: "model_refused",
+      });
+      const d = await detail(datasetId);
+      expect(d.description.next).toBe(`nemar admin publish approve ${datasetId} --force`);
+      // A request waiting for its decision is still told to start it.
+      const open = request();
+      seedPublicationReview(db, {
+        requestId: open.requestId,
+        datasetId: open.datasetId,
+        state: "errored",
+        detail: "model_refused",
+      });
+      const dOpen = await detail(open.datasetId);
+      expect(dOpen.description.next).toBe(`nemar admin publish start ${open.datasetId}`);
+      expect(dOpen.reasons[0].cure).toContain(`${START} ${open.datasetId}`);
+    });
+  });
+
   test("a hard reason is cleared by nothing, and the screen's by its acknowledgment", async () => {
     const blocked = request({ requestStatus: "blocked", blockReason: "min_requirements_failed" });
     const hard = (await detail(blocked.datasetId)).reasons.find(

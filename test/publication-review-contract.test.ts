@@ -61,10 +61,12 @@ import {
   type Reason,
   type ReasonCode,
   type ReviewRowView,
+  START_CURE_REASONS,
   TAG_STATES,
   VERSION_SHAPES,
   WORKER_ONLY_RUN_ERRORS,
   answersOf,
+  cureOf,
   describePublicationReview,
   describeUnreadableReview,
   effectiveVersionOf,
@@ -1166,6 +1168,7 @@ describe("facts only lower an answer (answersOf)", () => {
       model: report.model,
       head: HEAD,
       version: "1.2.0",
+      startable: true,
     }).lines;
     expect(lines[0]).toStartWith(
       "A question of the review failed (the authors and the license are real and consistent; dataset_description.json sets no License).",
@@ -1181,7 +1184,7 @@ describe("facts only lower an answer (answersOf)", () => {
         findings: [finding("name_adequate", "blocker", "name_not_descriptive")],
       }),
     );
-    expect(reasonLine(reportReasons(own)[0], "nm000123", own)).toStartWith(
+    expect(reasonLine(reportReasons(own)[0], "nm000123", own, true)).toStartWith(
       "A question of the review failed (the name describes the dataset; findings: Name not descriptive).",
     );
   });
@@ -1763,42 +1766,58 @@ describe("describePublicationReview", () => {
     [R("identifier_screen_needs_acknowledgment"), R("text_withheld", "readme,license")],
     [R("request_blocked", "min_requirements_failed")],
     [R("identifier_screen_stale"), R("review_not_started")],
+    // Every cure that says "start it", without a hard reason ahead of it.
+    [R("review_not_started"), R("review_did_not_report")],
+    [R("review_limit_reached", "platform_limit"), R("review_could_not_run", "model_refused")],
   ];
-  const base = { datasetId: "nm000123", model: "claude-haiku-5-5", head: HEAD, version: "1.2.0" };
+  const base = {
+    datasetId: "nm000123",
+    model: "claude-haiku-5-5",
+    head: HEAD,
+    version: "1.2.0",
+    startable: true,
+  };
 
   test("every rendering ends with the standing line, and none is milder than its reasons", () => {
     let renderings = 0;
     for (const applies of [true, false])
       for (const enabled of [true, false])
-        for (const row of rows)
-          for (const reasons of reasonSets)
-            for (const outcome of [...PUBLICATION_OUTCOMES, null]) {
-              renderings++;
-              const d = describePublicationReview({
-                ...base,
-                applies,
-                enabled,
-                outcome,
-                reasons,
-                row,
-              });
-              expect(d.lines[d.lines.length - 1]).toBe(NOT_ASSESSED_LINE);
-              expect(d.lines.filter((l) => l === NOT_ASSESSED_LINE)).toHaveLength(1);
-              if (!applies) {
-                expect(d.headline).toBe("Publication review: not applicable");
-                expect(d.tone).toBe("note");
-              } else if (!enabled) {
-                expect(d.tone).toBe("note");
-                expect(d.headline).toContain("the automated review is off");
-                expect(d.next).toBeNull();
-              } else {
-                const shown = stricterOf(outcome ?? "action_required", oracleVerdict(reasons));
-                expect(d.tone).toBe(
-                  ({ pass: "ok", action_required: "warn", fail: "stop" } as const)[shown],
-                );
-                if (reasons.length > 0) expect(d.headline).not.toBe("Publication review: pass");
+        for (const startable of [true, false])
+          for (const row of rows)
+            for (const reasons of reasonSets)
+              for (const outcome of [...PUBLICATION_OUTCOMES, null]) {
+                renderings++;
+                const d = describePublicationReview({
+                  ...base,
+                  startable,
+                  applies,
+                  enabled,
+                  outcome,
+                  reasons,
+                  row,
+                });
+                expect(d.lines[d.lines.length - 1]).toBe(NOT_ASSESSED_LINE);
+                expect(d.lines.filter((l) => l === NOT_ASSESSED_LINE)).toHaveLength(1);
+                // A request no start can reach is never sent to one, in a line or in `next`.
+                if (!startable) {
+                  expect(d.lines.join("\n")).not.toContain("publish start");
+                  expect(d.next ?? "").not.toContain("publish start");
+                }
+                if (!applies) {
+                  expect(d.headline).toBe("Publication review: not applicable");
+                  expect(d.tone).toBe("note");
+                } else if (!enabled) {
+                  expect(d.tone).toBe("note");
+                  expect(d.headline).toContain("the automated review is off");
+                  expect(d.next).toBeNull();
+                } else {
+                  const shown = stricterOf(outcome ?? "action_required", oracleVerdict(reasons));
+                  expect(d.tone).toBe(
+                    ({ pass: "ok", action_required: "warn", fail: "stop" } as const)[shown],
+                  );
+                  if (reasons.length > 0) expect(d.headline).not.toBe("Publication review: pass");
+                }
               }
-            }
     expect(renderings).toBeGreaterThan(1000);
   });
 
@@ -1906,6 +1925,57 @@ describe("describePublicationReview", () => {
       expect(d.next).toBeNull();
       expect(JSON.stringify(d)).not.toContain("Zqxjvw");
     }
+  });
+
+  test("the cures that say 'start it' are exactly four, and each has what is true for a request no start reaches", () => {
+    expect([...START_CURE_REASONS]).toEqual([
+      "review_not_started",
+      "review_did_not_report",
+      "review_limit_reached",
+      "review_could_not_run",
+    ]);
+    for (const code of REASON_CODES) {
+      const startCure = START_CURE_REASONS.includes(code);
+      expect(REASONS[code].cure.includes("publish start")).toBe(startCure);
+      expect(REASONS[code].cureNotStartable !== undefined).toBe(startCure);
+      // The cure of a reason that is not a start cure is the same either way.
+      if (!startCure) expect(cureOf(code, "nm000123", false)).toBe(cureOf(code, "nm000123", true));
+    }
+    for (const code of START_CURE_REASONS) {
+      expect(cureOf(code, "nm000123", true)).toContain("nemar admin publish start nm000123");
+      const plain = cureOf(code, "nm000123", false);
+      expect(plain).toBe(
+        "A review starts only for a request that is waiting for its decision. An administrator may approve over it; the approval records the override (--force).",
+      );
+      expect(plain).not.toContain("publish start");
+    }
+    // A malformed id is never quoted, in either form.
+    expect(cureOf("review_not_started", `x ${SENTINEL}`, true)).toContain(
+      "publish start <dataset>",
+    );
+  });
+
+  test("a request no start reaches is never told to start: not in a line, and not as the next command", () => {
+    const next = (reasons: Reason[], row: ReviewRowView, startable: boolean) =>
+      describePublicationReview({
+        ...base,
+        applies: true,
+        enabled: true,
+        outcome: null,
+        reasons,
+        row,
+        startable,
+      }).next;
+    const errored: ReviewRowView = { kind: "errored", detail: "model_refused" };
+    const reasons = [R("review_could_not_run", "model_refused")];
+    expect(next(reasons, errored, true)).toBe("nemar admin publish start nm000123");
+    // Being approved: the approval is the next thing, with the override its reason needs.
+    expect(next(reasons, errored, false)).toBe("nemar admin publish approve nm000123 --force");
+    expect(next([R("review_not_started")], { kind: "none" }, false)).toBe(
+      "nemar admin publish approve nm000123 --force",
+    );
+    // Blocked: a hard reason, so there is no command at all, startable or not.
+    expect(next([R("request_blocked"), ...reasons], errored, false)).toBeNull();
   });
 
   test("the next command follows from the reasons, and a malformed dataset id is never quoted", () => {

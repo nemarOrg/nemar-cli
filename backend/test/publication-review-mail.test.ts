@@ -917,6 +917,7 @@ describe("what the mail may carry", () => {
       model: report.model,
       head: SCREENED_HEAD,
       version: "1.0.0",
+      startable: true,
     });
     expect(described.summary).toBe(SUMMARY_SENTINEL);
     expect(described.lines.join("\n")).not.toContain(SUMMARY_SENTINEL);

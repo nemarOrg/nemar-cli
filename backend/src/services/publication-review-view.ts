@@ -64,6 +64,7 @@ import {
   type ReasonCode,
   type ReviewRowView,
   answersOf,
+  cureOf,
   describePublicationReview,
   describeUnreadableReview,
   effectiveVersionOf,
@@ -78,7 +79,6 @@ import {
 } from "../../../shared/publication-review.js";
 import type { Bindings } from "../types/bindings.js";
 import { ACTIVE_REQUEST_TAIL_SQL } from "./approval-dispatch.js";
-import { isValidDatasetId } from "./datasetId.js";
 import type { PublicationReviewSection } from "./email.js";
 import { isNonProductionEnv } from "./environment.js";
 import { isScreenExempt, readStoredReport, readStoredState } from "./identifier-screen-stored.js";
@@ -204,6 +204,8 @@ export interface DerivedPublicationReview {
    * review is off, or the request is over).
    */
   outcome: PublicationOutcome | null;
+  /** An administrator's start can reach this request (it is `requested`); the cures and `next` say so. */
+  startable: boolean;
   description: PublicationReviewDescription;
 }
 
@@ -277,6 +279,9 @@ export async function derivePublicationReview(
   const enabled = reviewEnabled(env);
   const applies = publicationReviewApplies(dataset ?? {});
   const anonymous = request.anonymous === 1;
+  // An administrator's start is refused for any request that is not waiting for its decision, so
+  // only such a request is ever told to start a review.
+  const startable = request.status === "requested";
 
   const { head, gate } = screenOf(request);
 
@@ -351,6 +356,7 @@ export async function derivePublicationReview(
       live,
       reasons: [],
       outcome: null,
+      startable,
       description: describePublicationReview({
         datasetId: request.dataset_id,
         applies,
@@ -361,6 +367,7 @@ export async function derivePublicationReview(
         model: null,
         head: null,
         version: null,
+        startable,
       }),
     };
   }
@@ -375,6 +382,7 @@ export async function derivePublicationReview(
       live,
       reasons: [],
       outcome: null,
+      startable,
       description: describePublicationReview({
         datasetId: request.dataset_id,
         applies,
@@ -385,6 +393,7 @@ export async function derivePublicationReview(
         model: null,
         head: null,
         version: null,
+        startable,
         closed,
       }),
     };
@@ -405,6 +414,7 @@ export async function derivePublicationReview(
     live,
     reasons,
     outcome,
+    startable,
     description: describePublicationReview({
       datasetId: request.dataset_id,
       applies,
@@ -415,6 +425,7 @@ export async function derivePublicationReview(
       model: report?.model ?? null,
       head: row?.headSha ?? head,
       version,
+      startable,
       closed,
     }),
   };
@@ -472,6 +483,8 @@ function unreadableSummary(enabled: boolean, datasetId: string): PublicationRevi
       model: null,
       head: null,
       version: null,
+      // Not an offer of anything: the review is off, so no command is built.
+      startable: false,
     });
     return {
       kind: "off",
@@ -609,8 +622,11 @@ export function overrideReasonsOf(raw: string | null): ReasonCode[] {
   return [...new Set(known)];
 }
 
-function reasonViewsOf(reasons: readonly Reason[], datasetId: string): ReasonView[] {
-  const id = isValidDatasetId(datasetId) ? datasetId : "<dataset>";
+function reasonViewsOf(
+  reasons: readonly Reason[],
+  datasetId: string,
+  startable: boolean,
+): ReasonView[] {
   return reasons.map((r) => {
     const rule = REASONS[r.code];
     return {
@@ -619,7 +635,7 @@ function reasonViewsOf(reasons: readonly Reason[], datasetId: string): ReasonVie
       cleared_by: rule.clearedBy,
       detail: r.detail,
       sentence: rule.sentence,
-      cure: rule.cure.replaceAll("<dataset>", id),
+      cure: cureOf(r.code, datasetId, startable),
     };
   });
 }
@@ -751,7 +767,7 @@ export async function publicationReviewDetail(
     applies: d.applies,
     gate: d.gate,
     outcome: d.outcome,
-    reasons: reasonViewsOf(d.reasons, ctx.request.dataset_id),
+    reasons: reasonViewsOf(d.reasons, ctx.request.dataset_id, d.startable),
     description: d.description,
     review: d.row === null ? null : recordOf(d.row, d.rowView),
     history: past.slice(0, HISTORY_LIMIT).map(historyEntryOf),
