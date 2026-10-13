@@ -16,7 +16,10 @@
  * `--force` for a review that is not a pass; make the extra question default to yes; build the
  * override from a second read; list a blocked, an in-flight or a running-only request, or ignore
  * oldest first; deny with an empty reason; let `c` change the request; forget what was handled
- * (a skipped card comes back); exit 0 after a failed approval; keep the type-ahead before a card.
+ * (a skipped card comes back); exit 0 after a failed approval; keep the type-ahead before a card or
+ * before the extra question; skip the extra question; never ask for the screen's acknowledgment;
+ * resume every request; leave the terminal paused after an approval's spinner, or wake it after
+ * the input has ended.
  *
  * CI TIER: integration, like the other CLI suites that start the binary against a local server.
  */
@@ -89,7 +92,7 @@ const requestRow = (id: number) =>
 /**
  * A request waiting for its decision with every step but the two no-ops done (a run the gates let
  * through reaches `published`), and its review: reported with `report`, or none at all when `null`.
- * `seedApprovals`'s helpers fix one dataset id; a walk needs several.
+ * The seeds in `helpers/approve-seeds.ts` fix one dataset id; a walk needs several.
  */
 function seed(
   datasetId: string,
