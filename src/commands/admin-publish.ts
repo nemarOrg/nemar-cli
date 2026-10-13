@@ -16,7 +16,7 @@ import chalk from "chalk";
 import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
-import { handleCommandError, requireAuth } from "../lib/admin-command.js";
+import { failWith, requireSignedIn } from "../lib/admin-command.js";
 import { denyPublication, listPublishRequests, rerunIdentifierScreen } from "../lib/api/publish.js";
 import {
   type ConfirmOptions,
@@ -55,7 +55,7 @@ Examples:
   $ nemar admin publish list --status denied      # View denied`,
   )
   .action(async (options: { status?: string }) => {
-    if (!requireAuth()) return;
+    if (!requireSignedIn()) return;
 
     const spinner = ora("Fetching publication requests...").start();
 
@@ -117,7 +117,7 @@ Examples:
       }
       console.log();
     } catch (error) {
-      handleCommandError(error, spinner, "Failed to list publication requests");
+      failWith(error, spinner, "Failed to list publication requests");
     }
   });
 
@@ -149,7 +149,7 @@ Examples:
   $ nemar admin publish deny nm000104    # Prompts for reason interactively`,
   )
   .action(async (datasetId, options: ConfirmOptions & { reason?: string }) => {
-    if (!requireAuth()) return;
+    if (!requireSignedIn()) return;
 
     let reason = options.reason;
     if (!reason) {
@@ -161,12 +161,15 @@ Examples:
 
     if (!reason) {
       console.log(chalk.red("Reason is required"));
+      process.exitCode = 1;
       return;
     }
 
     const confirmResult = await confirm(`Deny publication of ${datasetId}?`, options);
     if (confirmResult !== "confirmed") {
       console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+      // Nothing was denied, and a script that asked for a denial has to be able to tell.
+      process.exitCode = 1;
       return;
     }
 
@@ -177,7 +180,7 @@ Examples:
       spinner.succeed(`Publication denied for ${datasetId}`);
       console.log(chalk.dim("  User has been notified."));
     } catch (error) {
-      handleCommandError(error, spinner, "Failed to deny publication");
+      failWith(error, spinner, "Failed to deny publication");
     }
   });
 
@@ -201,7 +204,7 @@ Examples:
   $ nemar admin publish screen nm000104`,
   )
   .action(async (datasetId: string) => {
-    if (!requireAuth()) return;
+    if (!requireSignedIn()) return;
     const spinner = ora(`Re-running the identifier screen for ${datasetId}...`).start();
     try {
       const result = await rerunIdentifierScreen(datasetId);
@@ -214,8 +217,7 @@ Examples:
         console.log(chalk.dim("  The admins have been mailed this result."));
       }
     } catch (error) {
-      handleCommandError(error, spinner, "Failed to re-run the identifier screen");
-      process.exitCode = 1;
+      failWith(error, spinner, "Failed to re-run the identifier screen");
     }
   });
 

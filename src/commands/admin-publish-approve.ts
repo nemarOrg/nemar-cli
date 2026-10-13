@@ -13,7 +13,7 @@ import {
   PUBLICATION_STEP_LABELS,
   stepsForRelease,
 } from "../../shared/publication-steps.js";
-import { handleCommandError, requireAuth } from "../lib/admin-command.js";
+import { failWith, requireSignedIn } from "../lib/admin-command.js";
 import {
   type PublishProgressInfo,
   type StepResult,
@@ -125,7 +125,7 @@ After Approval:
           acknowledgeIdentifierScreen?: string;
         },
       ) => {
-        if (!requireAuth()) return;
+        if (!requireSignedIn()) return;
 
         const ack = options.acknowledgeIdentifierScreen?.trim();
         if (ack !== undefined && (ack.length < 10 || ack.length > 500)) {
@@ -220,6 +220,8 @@ After Approval:
         const confirmResult = await confirm(`${action}?`, options);
         if (confirmResult !== "confirmed") {
           console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+          // Nothing was approved, and a script that asked for an approval has to be able to tell.
+          process.exitCode = 1;
           return;
         }
 
@@ -327,7 +329,7 @@ After Approval:
             console.log(chalk.yellow(`  Warning: ${result.warning}`));
           }
         } catch (error) {
-          handleCommandError(error, spinner, "Failed to approve publication", {
+          failWith(error, spinner, "Failed to approve publication", {
             422: "Fix the CI issues and retry with --resume",
           });
 

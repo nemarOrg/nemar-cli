@@ -1,10 +1,11 @@
 /**
  * Plumbing shared by the admin command groups that live in their own files (`commands/admin-*.ts`).
  *
- * `commands/admin.ts` keeps its own copies of these for the commands that are still in it. A group
- * split out of that file imports them from here instead, because a command file may not import
- * `admin.ts` (it imports the command files, and the cycle would run `adminCommand.addCommand`
- * before the group existed).
+ * A command file may not import `admin.ts`: it imports the command files, and the cycle would run
+ * `adminCommand.addCommand` before the group existed. So what a group needs from it lives here.
+ * `handleCommandError` is `admin.ts`'s own, moved, and `admin.ts` imports it back. `failWith` and
+ * `requireSignedIn` are for a group that exits non-zero on every failure (#1581); the commands that
+ * are still in `admin.ts` print and exit 0 for the same failures, which is left to a follow-up.
  */
 
 import chalk from "chalk";
@@ -46,12 +47,29 @@ export function handleCommandError(
 }
 
 /**
- * Check authentication and show error if not authenticated
+ * `handleCommandError`, then the exit code of a failure. The one way a command of a group that
+ * exits non-zero reports an error, so no failure path can print without failing (#1581).
  */
-export function requireAuth(): boolean {
+export function failWith(
+  error: unknown,
+  spinner: Ora,
+  defaultMsg: string,
+  hints?: Record<number, string>,
+): void {
+  handleCommandError(error, spinner, defaultMsg, hints);
+  process.exitCode = 1;
+}
+
+/**
+ * Check authentication: when nobody is signed in, say so, set the exit code to 1 and return false
+ * so the caller can `return`. A command that is not signed in has done nothing, and a script has to
+ * be able to tell.
+ */
+export function requireSignedIn(): boolean {
   if (!isAuthenticated()) {
     console.log(chalk.red("Error: Not authenticated"));
     console.log(chalk.dim("  Run 'nemar auth login' first"));
+    process.exitCode = 1;
     return false;
   }
   return true;
