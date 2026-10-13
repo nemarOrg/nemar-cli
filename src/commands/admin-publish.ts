@@ -231,8 +231,8 @@ Description:
   before resubmitting their publication request.
 
 Requirements:
-  - Must provide a reason for denial: --reason, a prompt at a terminal, or one
-    line piped in (nothing is asked when there is neither)
+  - Must provide a reason for denial: --reason or, with no --reason, one typed
+    at a terminal or the first line of piped input (in a script, pass --reason)
   - Reason will be sent to the user via email
   - User can fix issues and submit a new request
 
