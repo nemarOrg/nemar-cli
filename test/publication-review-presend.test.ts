@@ -14,8 +14,10 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  MAX_COMBINING_RUN,
   MAX_JSON_DEPTH,
   PARTICIPANT_FIELD_CAPS,
+  normalizeBounded,
   normalizeText,
   presend,
   scanLocalPathForms,
@@ -652,6 +654,221 @@ describe("default-ignorable characters are removed, so a path split by one is a 
     // It has width, a reader sees a gap, and in braille it is the word space; so it is a space.
     const r = presend(docs({ readme: present("a\u2800b \u2801\u2802") }));
     expect(r.cleared.readme as string).toBe("a b \u2801\u2802");
+  });
+});
+
+describe("normalization is bounded: no input makes it quadratic (#1728)", () => {
+  // NFKC reorders combining marks, which is quadratic in the length of a run of marks of mixed
+  // classes: 32,000 marks took a second, 256 KB of them eighteen, and it ran on the whole raw
+  // document before any cut. The input of the compatibility step is bounded, and a run of marks no
+  // text has is refused.
+  const marks = (n: number) => "\u0316\u0301".repeat(n / 2).padEnd(n, "\u0316");
+  const run = (n: number) => `a${marks(n)}b`;
+  const cap = DOCUMENT_CHAR_CAPS.readme;
+
+  test("the limit is 64 marks in a row, counted after the invisible characters are removed", () => {
+    expect(MAX_COMBINING_RUN).toBe(64);
+    // A run of exactly 64 is text (it only has to be canonically ordered), one more is not.
+    expect(presend(docs({ readme: present(run(64)) })).states.readme).toBe("sent");
+    for (const document of ["readme", "changes", "license"] as const) {
+      const r = presend(docs({ [document]: present(run(65)) }));
+      expect(r.states[document], document).toBe("withheld_unreadable");
+      expect(r.cleared[document]).toBeUndefined();
+      expect(r.withheld_findings).toEqual({});
+    }
+    // Invisible characters between the marks do not break the run: they are removed first.
+    const hidden = `a${marks(40)}\u3164${marks(40)}b`;
+    expect(presend(docs({ readme: present(hidden) })).states.readme).toBe("withheld_unreadable");
+    // A visible separator does.
+    const apart = `a${marks(40)} ${marks(40)}b`;
+    expect(presend(docs({ readme: present(apart) })).states.readme).toBe("sent");
+  });
+
+  test("the same limit holds for every string and key of a JSON document", () => {
+    const base = { Name: "A descriptive dataset name that is long enough" };
+    for (const object of [
+      { ...base, Acknowledgements: run(65) },
+      { ...base, GeneratedBy: [{ Name: "x", [`k${marks(65)}`]: "v" }] },
+    ]) {
+      const r = presend(
+        docs({
+          dataset_description: present(JSON.stringify(object), "dataset_description.json"),
+        }),
+      );
+      expect(r.states.dataset_description).toBe("withheld_unreadable");
+    }
+    const column = presend(
+      docs({
+        participants_json: present(
+          JSON.stringify({ age: { Description: run(65) } }),
+          "participants.json",
+        ),
+      }),
+    );
+    expect(column.states.participants_json).toBe("withheld_unreadable");
+    const ok = presend(
+      docs({
+        dataset_description: present(
+          JSON.stringify({ ...base, Acknowledgements: run(64) }),
+          "dataset_description.json",
+        ),
+      }),
+    );
+    expect(ok.states.dataset_description).toBe("sent");
+  });
+
+  test("a hostile README of two million marks is refused in well under two seconds", () => {
+    const started = performance.now();
+    const r = presend(docs({ readme: present(`a${"\u0316\u0301".repeat(1_000_000)}`) }));
+    expect(performance.now() - started).toBeLessThan(2000);
+    expect(r.states.readme).toBe("withheld_unreadable");
+  });
+
+  test("two megabytes of the longest legal runs are cut before normalization, and are fast", () => {
+    const text = `a${marks(64)}`.repeat(30_000);
+    expect(text.length).toBeGreaterThan(1_900_000);
+    const started = performance.now();
+    const r = presend(docs({ readme: present(text) }));
+    expect(performance.now() - started).toBeLessThan(2000);
+    expect(r.states.readme).toBe("sent_cut");
+    expect((r.cleared.readme as string).length).toBe(cap + "\n[cut]".length);
+  });
+
+  test("a hostile JSON string is bounded the same way, and a long one is cut and says so", () => {
+    const base = { Name: "A descriptive dataset name that is long enough" };
+    const started = performance.now();
+    const hostile = presend(
+      docs({
+        dataset_description: present(
+          JSON.stringify({ ...base, Acknowledgements: `a${"\u0316\u0301".repeat(1_000_000)}` }),
+          "dataset_description.json",
+        ),
+      }),
+    );
+    const longLegal = presend(
+      docs({
+        dataset_description: present(
+          JSON.stringify({ ...base, Acknowledgements: `a${marks(64)}`.repeat(30_000) }),
+          "dataset_description.json",
+        ),
+      }),
+    );
+    expect(performance.now() - started).toBeLessThan(2000);
+    expect(hostile.states.dataset_description).toBe("withheld_unreadable");
+    expect(longLegal.states.dataset_description).toBe("sent_cut");
+    const capJson = DOCUMENT_CHAR_CAPS.dataset_description;
+    expect((longLegal.cleared.dataset_description as string).length).toBe(
+      capJson + "\n[cut]".length,
+    );
+  });
+
+  test("a JSON string longer than the document's cap is cut with the mark, and the state says so", () => {
+    const capJson = DOCUMENT_CHAR_CAPS.dataset_description;
+    // Two shown strings, each longer than the cap: each is cut where it stands, and the document
+    // says it was cut even though its serialization would otherwise be short enough.
+    const r = presend(
+      docs({
+        dataset_description: present(
+          JSON.stringify({
+            Name: "A descriptive dataset name that is long enough",
+            Acknowledgements: "x".repeat(capJson * 5),
+          }),
+          "dataset_description.json",
+        ),
+      }),
+    );
+    expect(r.states.dataset_description).toBe("sent_cut");
+    const sent = r.cleared.dataset_description as string;
+    expect(
+      sent.startsWith('{\n  "Name": "A descriptive dataset name that is long enough",\n'),
+    ).toBe(true);
+    expect(sent.endsWith("\n[cut]")).toBe(true);
+    // The string was cut where it stood (to the cap), not read whole: 5 caps of text never got here.
+    expect(sent.length).toBe(capJson + "\n[cut]".length);
+  });
+
+  test("a long string that is not sent does not make participants.json look cut", () => {
+    const r = presend(
+      docs({
+        participants_json: present(
+          JSON.stringify({
+            age: {
+              Description: "Age at recording",
+              Levels: { a: "y".repeat(DOCUMENT_CHAR_CAPS.participants_json * 6) },
+            },
+          }),
+          "participants.json",
+        ),
+      }),
+    );
+    expect(r.states.participants_json).toBe("sent");
+  });
+
+  test("normalizeBounded: the compatibility step sees at most four caps, and a drop is a cut", () => {
+    expect(normalizeBounded("x".repeat(100), 30)).toEqual({
+      text: `${"x".repeat(30)}\n[cut]`,
+      cut: true,
+    });
+    expect(normalizeBounded("x".repeat(30), 30)).toEqual({ text: "x".repeat(30), cut: false });
+    // The mark run is checked on the WHOLE input, even the part the bound would drop.
+    expect(() => normalizeBounded(`${"x".repeat(1000)}a${marks(65)}`, 30)).toThrow();
+    // The bound: only the first four caps reach the compatibility step. Text past them cannot
+    // change the result, so a fullwidth letter there is never normalized (it is never sent).
+    const past = normalizeBounded(`${"x".repeat(120)}\uFF21`, 30);
+    expect(past).toEqual({ text: `${"x".repeat(30)}\n[cut]`, cut: true });
+  });
+
+  test("normalizeBounded: text the bound drops is a cut even when what is left is shorter than the cap", () => {
+    // Composition shrinks text, so a prefix bounded at one cap can normalize to less than the cap.
+    // With the real factor of four that cannot happen; the factor is a parameter so it is tested.
+    const dropped = normalizeBounded("e\u0301".repeat(40), 30, 1);
+    expect(dropped.cut).toBe(true);
+    expect(dropped.text).toBe(`${"\u00E9".repeat(15)}\n[cut]`);
+    // And the bound never ends in half of a surrogate pair.
+    const pair = normalizeBounded(`${"x".repeat(9)}\u{1F600}${"y".repeat(5)}`, 10, 1);
+    expect(pair).toEqual({ text: `${"x".repeat(9)}\n[cut]`, cut: true });
+  });
+
+  test.each([
+    [
+      "Vietnamese, precomposed and with several marks",
+      "Vi\u1EC7t Nam, \u1EA1\u0309 \u1EA5 \u1EAD \u1EB1 \u1EF3 \u1EF9",
+    ],
+    [
+      "Arabic with harakat and shadda",
+      "\u0627\u0644\u0633\u064E\u0651\u0644\u064E\u0627\u0645\u064F \u0639\u064E\u0644\u064E\u064A\u0652\u0643\u064F\u0645\u0652",
+    ],
+    ["Tibetan stacks", "\u0F66\u0FA1\u0FB2\u0F74\u0F42 \u0F45\u0FB1\u0F72\u0F7C"],
+    [
+      "Hebrew with points and cantillation",
+      "\u05D1\u05B0\u05BC\u05E8\u05B5\u05D0\u05E9\u05B4\u05C1\u05D9\u05EA \u05D1\u05B8\u05BC\u05E8\u05B8\u05D0",
+    ],
+    [
+      "Devanagari with signs",
+      "\u0915\u094D\u0937\u093F \u0928\u093F\u0903 \u0938\u0902\u0938\u094D\u0915\u0943\u0924\u092E\u094D",
+    ],
+    ["Thai with tone marks", "\u0E19\u0E49\u0E32 \u0E01\u0E34\u0E19 \u0E0A\u0E48\u0E27\u0E22"],
+  ])(
+    "legitimate text with several combining marks per letter is not touched: %s",
+    (_what, text) => {
+      // Already in the form normalization leaves it, so the sent text is the text.
+      expect(text.normalize("NFKC")).toBe(text);
+      const r = presend(docs({ readme: present(text) }));
+      expect(r.states.readme).toBe("sent");
+      expect(r.cleared.readme as string).toBe(text);
+      const json = presend(
+        docs({
+          dataset_description: present(JSON.stringify({ Name: text }), "dataset_description.json"),
+        }),
+      );
+      expect(JSON.parse(json.cleared.dataset_description as string).Name).toBe(text);
+    },
+  );
+
+  test("text that is not yet in canonical order is reordered, as before, and is still fast", () => {
+    const r = presend(docs({ readme: present("a\u0301\u0316 a\u0316\u0301") }));
+    // Reordered (the lower class first), after which the accent composes with its base.
+    expect(r.cleared.readme as string).toBe("\u00E1\u0316 \u00E1\u0316");
   });
 });
 

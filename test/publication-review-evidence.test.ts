@@ -2250,3 +2250,20 @@ describe("compatibility forms and invisible letters cannot hide a path or a key 
     expect(user).not.toContain("</untrusted-0>");
   });
 });
+
+describe("a hostile run of combining marks costs the job nothing", () => {
+  test("a README of two million marks is withheld as unreadable, and the review is quick", async () => {
+    // 4 MB of UTF-8, under the byte ceiling, so the reader hands it over; normalizing it whole took
+    // minutes, and the job has twenty.
+    const ds = newDataset("mark-run", {
+      "README.md": `# Study\na${"\u0316\u0301".repeat(1_000_000)}\n`,
+    });
+    const started = performance.now();
+    const report = await reviewOf(ds);
+    expect(performance.now() - started).toBeLessThan(10_000);
+    expect(report.evidence.documents.readme).toBe("withheld_unreadable");
+    const { user } = theRequest();
+    expect(user).not.toContain('kind="readme"');
+    expect(user.length).toBeLessThan(100_000);
+  });
+});

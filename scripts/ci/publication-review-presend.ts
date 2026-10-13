@@ -24,6 +24,9 @@
  *     a NUL byte is not text and is withheld as not UTF-8. For a JSON document the same
  *     normalization is applied to every key and every string value of the parsed structure, so the
  *     rules see the key the model will read (`patient<zero-width space>name` is `patient name` to it).
+ *     The work is bounded: a run of more than 64 combining marks (which no text has, and which
+ *     makes compatibility normalization quadratic) withholds the document as unreadable, the
+ *     compatibility step sees at most four caps of text, and JSON nesting past 32 levels is refused.
  *  2. The string is then built in full and cut: the prose text, or the serialized normalized
  *     structure (the shown keys of `dataset_description.json`; the column descriptions of
  *     `participants.json`, which are only `LongName`, `Description` and `Units`, each cut short),
@@ -174,21 +177,26 @@ function scanStructureForPaths(value: unknown): Finding[] {
 }
 
 /**
- * A parsed JSON value with {@link normalizeText} applied to every string AND every key, to any
+ * A parsed JSON value with {@link normalizeBounded} applied to every string AND every key, to any
  * depth. The model is sent the cleaned text, so the rules must look at the cleaned structure: a key
  * `patient<zero-width space>name` is the key `patient name` to the model, and `scanJsonKeys` would
- * not have matched the first. Built with `Object.fromEntries`, which defines each key as data, so a
- * key named `__proto__` is kept and examined instead of becoming a prototype.
+ * not have matched the first. Each string is cut to the document's cap with the cut mark (a string
+ * longer than the cap makes the serialization longer than it, so the document is `sent_cut` by the
+ * ordinary cut and no flag is needed). Built with `Object.fromEntries`, which defines each key as
+ * data, so a key named `__proto__` is kept and examined instead of becoming a prototype.
  */
-function normalizeStructure(value: unknown): unknown {
-  if (typeof value === "string") return normalizeText(value);
-  if (Array.isArray(value)) return value.map(normalizeStructure);
-  if (isPlainObject(value)) {
-    return Object.fromEntries(
-      Object.entries(value).map(([k, v]) => [normalizeText(k), normalizeStructure(v)]),
-    );
-  }
-  return value;
+function normalizeStructure(value: unknown, cap: number): unknown {
+  const walk = (v: unknown): unknown => {
+    if (typeof v === "string") return normalizeBounded(v, cap).text;
+    if (Array.isArray(v)) return v.map(walk);
+    if (isPlainObject(v)) {
+      return Object.fromEntries(
+        Object.entries(v).map(([k, child]) => [normalizeBounded(k, cap).text, walk(child)]),
+      );
+    }
+    return v;
+  };
+  return walk(value);
 }
 
 /**
@@ -215,6 +223,43 @@ const BRAILLE_BLANK = /\u2800/g;
 /** In unicode mode this matches only a surrogate that is not half of a pair. */
 const LONE_SURROGATE = /\p{Cs}/gu;
 
+/** The longest run of combining marks real text has; a longer one is refused. */
+export const MAX_COMBINING_RUN = 64;
+/**
+ * The compatibility step sees at most this many caps of text. NFKC reorders combining marks, which
+ * is quadratic in the length of a run of marks of mixed classes, and it used to run on the whole
+ * raw document before any cut.
+ */
+const COMPATIBILITY_INPUT_CAPS = 4;
+const MARK_RUN = /\p{M}+/gu;
+
+/** Whether `run` is more than `limit` code points, without spreading a long one. */
+function longerThan(run: string, limit: number): boolean {
+  if (run.length <= limit) return false;
+  if (run.length > 2 * limit) return true;
+  let n = 0;
+  for (const _ of run) n++;
+  return n > limit;
+}
+
+/** The linear part of the normalization: everything that removes or replaces, and no NFKC. */
+function strip(text: string): string {
+  return text.replace(INVISIBLE, "").replace(LONE_SURROGATE, "").replace(BRAILLE_BLANK, " ");
+}
+
+/** Throws on a run of more than {@link MAX_COMBINING_RUN} combining marks, which no text has. */
+function refuseLongMarkRuns(text: string): void {
+  for (const m of text.matchAll(MARK_RUN)) {
+    if (longerThan(m[0], MAX_COMBINING_RUN))
+      throw new Error("a run of combining marks no text has");
+  }
+}
+
+/** The part of the normalization that needs a bounded input: compatibility form, then `tidy`. */
+function settle(text: string): string {
+  return tidy(text.normalize("NFKC"), Number.MAX_SAFE_INTEGER);
+}
+
 /**
  * The one normalization every string goes through before any rule looks at it, and the string the
  * model is sent: invisible code points and any half of a surrogate pair removed, the braille blank
@@ -226,17 +271,41 @@ const LONE_SURROGATE = /\p{Cs}/gu;
  * test sweeps): the removals come BEFORE the compatibility normalization, so characters that were
  * only apart because a mark stood between them compose, and the two code points that normalize INTO
  * the removed set (U+3164 and U+FFA0, both to U+1160) are removed before they can. Exported so that
- * test can reach it; nothing else imports it.
+ * test can reach it; nothing else imports it. It is NOT bounded: see {@link normalizeBounded}.
  */
 export function normalizeText(text: string): string {
-  return tidy(
-    text
-      .replace(INVISIBLE, "")
-      .replace(LONE_SURROGATE, "")
-      .replace(BRAILLE_BLANK, " ")
-      .normalize("NFKC"),
-    Number.MAX_SAFE_INTEGER,
-  );
+  return settle(strip(text));
+}
+
+/**
+ * {@link normalizeText} with its cost bounded, and the text cut to `cap` characters with the mark.
+ * The removals run first (they are linear), then a run of more than {@link MAX_COMBINING_RUN}
+ * combining marks anywhere in the text throws (the caller withholds the document as unreadable),
+ * then the text is cut to a bounded prefix on a character boundary before the compatibility step
+ * sees it, and then to the cap. A cut at either step is a cut: `cut` says so, and the mark is there
+ * even when the normalized prefix happens to be shorter than the cap. `inputCaps` is a parameter
+ * only so a test can make that last case reachable: composition shrinks text by at most about three
+ * to one, so with the real factor of four a bounded prefix always normalizes to more than the cap.
+ */
+export function normalizeBounded(
+  text: string,
+  cap: number,
+  inputCaps: number = COMPATIBILITY_INPUT_CAPS,
+): { text: string; cut: boolean } {
+  const stripped = strip(text);
+  refuseLongMarkRuns(stripped);
+  const bound = inputCaps * cap;
+  const bounded = stripped.length > bound;
+  const normalized = settle(bounded ? cutAtBoundary(stripped, bound) : stripped);
+  const result = cutTo(normalized, cap);
+  if (bounded && !result.cut) return { text: `${normalized}\n[cut]`, cut: true };
+  return result;
+}
+
+/** The first `n` characters of `text`, never ending in the first half of a surrogate pair. */
+function cutAtBoundary(text: string, n: number): string {
+  const last = text.charCodeAt(n - 1);
+  return text.slice(0, last >= 0xd800 && last <= 0xdbff ? n - 1 : n);
 }
 
 /**
@@ -251,12 +320,12 @@ function cutTo(text: string, cap: number): { text: string; cut: boolean } {
 }
 
 /**
- * The string a document is sent as: normalized, then cut to `cap` characters. Whether it was cut is
- * judged on the normalized text, because a control character outside the Basic Multilingual Plane
- * is replaced by one space and so shortens the text.
+ * The string a document is sent as: normalized (bounded), then cut to `cap` characters. Whether it
+ * was cut is judged on the normalized text, because a control character outside the Basic
+ * Multilingual Plane is replaced by one space and so shortens the text.
  */
 function toSent(text: string, cap: number): { sent: string; cut: boolean } {
-  const { text: sent, cut } = cutTo(normalizeText(text), cap);
+  const { text: sent, cut } = normalizeBounded(text, cap);
   return { sent, cut };
 }
 
@@ -307,7 +376,7 @@ function prepare(document: ReviewDocument, raw: RawDocument): Prepared {
   if (nestedDeeperThan(kept, MAX_JSON_DEPTH))
     return { kind: "no-text", state: "withheld_unreadable" };
   // Normalize first, then examine the normalized structure, then send that same structure.
-  const object = normalizeStructure(kept);
+  const object = normalizeStructure(kept, cap);
   return {
     kind: "text",
     ...toSent(JSON.stringify(object, null, 2), cap),
@@ -335,7 +404,7 @@ function prepareParticipants(parsed: Record<string, unknown>, cap: number): Prep
   if (!Object.values(parsed).every(isPlainObject) || nestedDeeperThan(parsed, MAX_JSON_DEPTH)) {
     return { kind: "no-text", state: "withheld_unreadable" };
   }
-  const whole = normalizeStructure(parsed) as Record<string, Record<string, unknown>>;
+  const whole = normalizeStructure(parsed, cap) as Record<string, Record<string, unknown>>;
   let fieldCut = false;
   const reduced = Object.fromEntries(
     Object.entries(whole).map(([column, description]) => {
