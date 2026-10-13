@@ -76,9 +76,13 @@ import type { PublicationReviewSection } from "./email.js";
 import { isNonProductionEnv } from "./environment.js";
 import { readStoredReport, readStoredState } from "./identifier-screen-stored.js";
 import {
+  MAX_KEYS_PER_READ,
   type PublicationReviewRow,
+  type ReviewKey,
   listReviewsOfRequest,
   readReviewByKey,
+  readReviewsByKeys,
+  reviewKeyText,
   rowViewOf,
 } from "./publication-review-rows.js";
 import { requiresUploaderName } from "./uploader-identity.js";
@@ -178,6 +182,12 @@ export interface ReviewContext {
    * {@link PUBLICATION_REVIEW_DEADLINE_MINUTES}: see {@link publicationReviewEmailSection}.
    */
   overdueMinutes?: number;
+  /**
+   * The review in force, when the caller has already read it (the list reads every row's in one
+   * statement, {@link readReviewsByKeys}): the row, or null for "none on record". Left out, the
+   * derivation reads it itself.
+   */
+  reviewRow?: PublicationReviewRow | null;
 }
 
 export interface DerivedPublicationReview {
@@ -224,6 +234,33 @@ const VERSION_ROW_SQL =
 const EARLIER_ANONYMOUS_REQUEST_SQL =
   "SELECT 1 AS found FROM publication_requests WHERE dataset_id = ? AND anonymous = 1 AND id < ? LIMIT 1";
 
+/** The screen's side of a request: the commit it read and the gate its state gives. */
+function screenOf(request: ReviewRequestFields): {
+  head: string | null;
+  gate: ScreenGate | "exempt";
+} {
+  const state = readStoredState(request.identifier_screen_status);
+  const screenReport = state === null ? null : readStoredReport(request.identifier_screen_report);
+  return {
+    head: screenReport?.head ?? null,
+    gate: screenExempt(request.dataset_id) ? "exempt" : screenGate(state),
+  };
+}
+
+/**
+ * The coordinates of the review in force: the request, the commit its screen read and its release
+ * kind. Null when the review does not apply to the dataset, or the screen read no commit, so there
+ * is no row to look for.
+ */
+function reviewKeyOf(
+  request: ReviewRequestFields,
+  dataset: ReviewDatasetFields | null,
+): ReviewKey | null {
+  const { head } = screenOf(request);
+  if (!publicationReviewApplies(dataset ?? {}) || head === null || !HEAD.test(head)) return null;
+  return { requestId: request.id, headSha: head, anonymous: request.anonymous === 1 };
+}
+
 /**
  * Everything a surface shows, re-derived now. Reads the review in force and, for a request whose
  * approval has written nothing yet ({@link LIVE_FACT_STATUSES}), three facts: a version row for
@@ -242,17 +279,15 @@ export async function derivePublicationReview(
   const applies = publicationReviewApplies(dataset ?? {});
   const anonymous = request.anonymous === 1;
 
-  const state = readStoredState(request.identifier_screen_status);
-  const screenReport = state === null ? null : readStoredReport(request.identifier_screen_report);
-  const head = screenReport?.head ?? null;
-  const gate: ScreenGate | "exempt" = screenExempt(request.dataset_id)
-    ? "exempt"
-    : screenGate(state);
+  const { head, gate } = screenOf(request);
 
   let row: PublicationReviewRow | null = null;
   let rowView: ReviewRowView = { kind: "none" };
   if (applies && head !== null && HEAD.test(head)) {
-    row = await readReviewByKey(db, request.id, head, anonymous);
+    row =
+      ctx.reviewRow !== undefined
+        ? ctx.reviewRow
+        : await readReviewByKey(db, request.id, head, anonymous);
     if (row !== null) {
       rowView = rowViewOf(row, ctx.nowMs, ctx.overdueMinutes);
       // Only `requested` is reviewed: a dispatched row of any other request is not waited for.
@@ -395,18 +430,10 @@ function viewKindOf(d: DerivedPublicationReview): PublicationReviewViewKind {
   return "decided";
 }
 
-/**
- * The review of one row of `GET /admin/publish/requests`: the outcome, the headline and the
- * reason codes. No sentence of the model's, and no sentence a client could not take from the
- * shared words.
- */
-export async function publicationReviewSummary(
-  env: Bindings,
-  request: ReviewRequestFields,
-  dataset: ReviewDatasetFields | null,
-  nowMs: number = Date.now(),
-): Promise<PublicationReviewSummary> {
-  const d = await derivePublicationReview({ env, nowMs, request, dataset });
+/** What every surface says when it could not read the review: a fixed sentence, never a pass. */
+const UNREADABLE_HEADLINE = "Publication review: could not be read";
+
+function summaryOf(d: DerivedPublicationReview): PublicationReviewSummary {
   return {
     kind: viewKindOf(d),
     enabled: d.enabled,
@@ -418,6 +445,121 @@ export async function publicationReviewSummary(
     review_id: d.row?.id ?? null,
     head_sha: d.row?.headSha ?? null,
   };
+}
+
+/**
+ * The summary of a request whose review could not be read: not a pass, and not a reason to fail
+ * the rest of a list. The fixed headline of the mail's unreadable section and the reason
+ * `review_could_not_run`, so a client that renders the server's words says the same everywhere.
+ */
+function unreadableSummary(enabled: boolean): PublicationReviewSummary {
+  return {
+    kind: enabled ? "decided" : "off",
+    enabled,
+    gate: enabled ? "enforced" : "off",
+    outcome: "action_required",
+    headline: UNREADABLE_HEADLINE,
+    tone: "warn",
+    reasons: ["review_could_not_run"],
+    review_id: null,
+    head_sha: null,
+  };
+}
+
+/**
+ * The review of one row of `GET /admin/publish/requests`: the outcome, the headline and the
+ * reason codes. No sentence of the model's, and no sentence a client could not take from the
+ * shared words. Throws when a read fails; a list uses {@link publicationReviewSummaries}.
+ */
+export async function publicationReviewSummary(
+  env: Bindings,
+  request: ReviewRequestFields,
+  dataset: ReviewDatasetFields | null,
+  nowMs: number = Date.now(),
+): Promise<PublicationReviewSummary> {
+  return summaryOf(await derivePublicationReview({ env, nowMs, request, dataset }));
+}
+
+/** One request of a list, with the dataset columns the derivation reads. */
+export interface ReviewListItem {
+  request: ReviewRequestFields;
+  dataset: ReviewDatasetFields | null;
+}
+
+/** How many requests of a list derive at once: each can ask D1 for up to two live facts. */
+export const LIST_CONCURRENCY = 8;
+
+/**
+ * The summaries of a whole list, in order, at a cost that does not grow with what each row needs.
+ *
+ *  - The review in force of every row is read in batches of {@link MAX_KEYS_PER_READ} requests (one
+ *    statement each), never once per row. A request that is over, or being approved, then needs no
+ *    other statement: its live facts are not read ({@link LIVE_FACT_STATUSES}).
+ *  - The rest of a row's derivation (a version row, an earlier anonymous request) runs
+ *    {@link LIST_CONCURRENCY} rows at a time, so a long list does not put a request for every row
+ *    in flight at once.
+ *  - Each row stands alone. A read that fails costs the rows it was for, and nothing else: they
+ *    read as {@link unreadableSummary} (never a pass), only ids and a closed class are logged, and
+ *    the list still answers. One bad row used to fail the queue for every administrator.
+ */
+export async function publicationReviewSummaries(
+  env: Bindings,
+  items: readonly ReviewListItem[],
+  nowMs: number = Date.now(),
+): Promise<PublicationReviewSummary[]> {
+  const enabled = reviewEnabled(env);
+  const keys = items.map((i) => reviewKeyOf(i.request, i.dataset));
+
+  // The review rows, one statement per chunk. A chunk that cannot be read marks its rows.
+  const rows = new Map<string, PublicationReviewRow>();
+  const unreadable = new Set<number>();
+  const wanted = keys.flatMap((key, index) => (key === null ? [] : [{ key, index }]));
+  for (let i = 0; i < wanted.length; i += MAX_KEYS_PER_READ) {
+    const chunk = wanted.slice(i, i + MAX_KEYS_PER_READ);
+    try {
+      const got = await readReviewsByKeys(
+        env.DB,
+        chunk.map((w) => w.key),
+      );
+      for (const [text, row] of got) rows.set(text, row);
+    } catch (err) {
+      console.error(
+        `[publication-review] could not read the reviews of ${chunk.length} requests for the list (${readFailureWords(err)})`,
+      );
+      for (const w of chunk) unreadable.add(w.index);
+    }
+  }
+
+  const summaries: PublicationReviewSummary[] = [];
+  for (let start = 0; start < items.length; start += LIST_CONCURRENCY) {
+    const batch = items.slice(start, start + LIST_CONCURRENCY);
+    summaries.push(
+      ...(await Promise.all(
+        batch.map(async (item, offset) => {
+          const index = start + offset;
+          if (unreadable.has(index)) return unreadableSummary(enabled);
+          try {
+            const key = keys[index];
+            return summaryOf(
+              await derivePublicationReview({
+                env,
+                nowMs,
+                request: item.request,
+                dataset: item.dataset,
+                reviewRow: key === null ? undefined : (rows.get(reviewKeyText(key)) ?? null),
+              }),
+            );
+          } catch (err) {
+            console.error(
+              `[publication-review] could not read the review of request ${item.request.id} for the list (${readFailureWords(err)})`,
+            );
+            return unreadableSummary(enabled);
+          }
+        }),
+      )),
+    );
+  }
+  return summaries;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -630,7 +772,7 @@ export function readFailureWords(err: unknown): string {
 /** What the mail says when the review could not be read: a fixed sentence, never a pass. */
 function unreadableSection(datasetId: string): PublicationReviewSection {
   return {
-    headline: "Publication review: could not be read",
+    headline: UNREADABLE_HEADLINE,
     tone: "warn",
     lines: [
       "The review's state could not be read just now, so it is not known. This is not a pass.",

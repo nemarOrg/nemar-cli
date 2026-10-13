@@ -43,6 +43,7 @@ import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, interceptingD1, realD1, yieldingD1 } from "./helpers/d1";
 import { SCREENED_HEAD, cleanScreenReportBody } from "./helpers/identifier-screen";
+import { logged } from "./helpers/logs";
 import {
   type SeedReview,
   type SeedScreenedRequest,
@@ -125,22 +126,6 @@ function mailState(requestId: number) {
          FROM publication_requests WHERE id = ?`,
     )
     .get(requestId) as { emailed: string | null; claimed: string | null };
-}
-
-/** Run `fn` and return what it logged through console.warn and console.error, restoring both. */
-async function logged(fn: () => Promise<void>): Promise<string[]> {
-  const lines: string[] = [];
-  const { warn, error } = console;
-  const take = (...args: unknown[]) => void lines.push(args.map(String).join(" "));
-  console.warn = take;
-  console.error = take;
-  try {
-    await fn();
-  } finally {
-    console.warn = warn;
-    console.error = error;
-  }
-  return lines;
 }
 
 /** A D1 whose read of the review rows fails with `error`, and nothing else does. */

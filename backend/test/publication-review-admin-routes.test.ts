@@ -38,6 +38,7 @@ import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, interceptingD1, realD1 } from "./helpers/d1";
 import { SCREENED_HEAD } from "./helpers/identifier-screen";
+import { logged } from "./helpers/logs";
 import {
   type SeedReview,
   type SeedScreenedRequest,
@@ -858,19 +859,158 @@ describe("what the list carries", () => {
     db.run("DELETE FROM datasets WHERE dataset_id = ?", [datasetId]);
     expect((await review(datasetId)).outcome).toBe("pass");
   });
+});
 
-  test("a list that cannot read a fact fails loudly, with no SQL in the answer", async () => {
-    const { requestId, datasetId } = request();
+// ============================================================================
+
+describe("the list's cost and isolation", () => {
+  /** The statements one list request issues, with the values each was bound with. */
+  async function listStatements(rows: number, bindings: Partial<Bindings> = {}) {
+    const seen: Array<{ sql: string; binds: readonly unknown[] }> = [];
+    const counting = interceptingD1(realD1(db), (sql, binds) => {
+      seen.push({ sql: sql.replace(/\s+/g, " ").trim(), binds });
+    });
+    const { rows: listed } = await listBody(env({ DB: counting, ...bindings }));
+    expect(listed).toHaveLength(rows);
+    const count = (re: RegExp) => seen.filter((x) => re.test(x.sql)).length;
+    return {
+      total: seen.length,
+      reviewReads: count(/^SELECT .* FROM publication_reviews/),
+      versionLookups: count(/FROM dataset_versions/),
+      earlierAnonymous: count(/FROM publication_requests WHERE dataset_id = \? AND anonymous = 1/),
+      mostBinds: Math.max(0, ...seen.map((x) => x.binds.length)),
+    };
+  }
+
+  let n = 0;
+  /** A request with a stored review, in `status`, with `versioned` meaning a version row exists. */
+  function listed(status: SeedScreenedRequest["requestStatus"], versioned = false) {
+    n += 1;
+    const datasetId = `nm${String(9000 + n).padStart(6, "0")}`;
+    const { requestId } = request({ datasetId, requestStatus: status });
     seedPublicationReview(db, { requestId, datasetId, state: "reported" });
+    if (versioned) addVersionRow(datasetId);
+    return datasetId;
+  }
+
+  test("reads every review row in one query, and a version fact only for a request that could still be approved", async () => {
+    // 20 rows: 8 over, 3 being approved, 6 waiting, 3 waiting whose version has a release.
+    for (let i = 0; i < 8; i++) listed("published");
+    for (let i = 0; i < 3; i++) listed("approving");
+    for (let i = 0; i < 6; i++) listed("requested");
+    for (let i = 0; i < 3; i++) listed("requested", true);
+    const cost = await listStatements(20);
+    // The cost is the 3 statements of the request itself (the key's lookup and its stamp, and
+    // the list), ONE read of all 20 review rows, a version lookup for each of the 9 requests that
+    // could still be approved, and the earlier-anonymous lookup for the 3 with a release.
+    // Requests that are over or being approved read nothing beyond the one batch.
+    expect(cost.reviewReads).toBe(1);
+    expect(cost.versionLookups).toBe(9);
+    expect(cost.earlierAnonymous).toBe(3);
+    expect(cost.total).toBe(3 + 1 + 9 + 3);
+  });
+
+  test("a list of requests that are over costs one read however long it is, and stays inside D1's bound limit", async () => {
+    for (let i = 0; i < 100; i++) listed("published");
+    const cost = await listStatements(100);
+    expect(cost.versionLookups).toBe(0);
+    expect(cost.earlierAnonymous).toBe(0);
+    // 45 requests a read (two values each), so three reads for 100 rows, none past D1's 100 binds.
+    expect(cost.reviewReads).toBe(3);
+    expect(cost.mostBinds).toBeLessThanOrEqual(100);
+  });
+
+  test("each row is read on its own: one that cannot be read does not hide the others", async () => {
+    const ids = [listed("requested"), listed("requested"), listed("requested")];
+    const poisoned = ids[1];
     const failing = env({
-      DB: interceptingD1(realD1(db), (sql) => {
-        if (/^\s*SELECT .*FROM publication_reviews/s.test(sql))
+      DB: interceptingD1(realD1(db), (sql, binds) => {
+        if (/FROM dataset_versions/.test(sql) && binds.includes(poisoned)) {
           throw new Error("D1_ERROR: simulated SQL text");
+        }
       }),
     });
-    const res = await get("/admin/publish/requests", ADMIN_KEY, failing);
-    expect(res.status).toBe(500);
-    expect(await res.text()).not.toContain("simulated");
+    let text = "";
+    let rows: ListRow[] = [];
+    const lines = await logged(async () => {
+      ({ text, rows } = await listBody(failing));
+    });
+    expect(rows).toHaveLength(3);
+    for (const id of [ids[0], ids[2]]) {
+      expect(rows.find((r) => r.dataset_id === id)?.publication_review).toMatchObject({
+        outcome: "pass",
+        reasons: [],
+      });
+    }
+    // The poisoned row is not a pass, and says so in the fixed words.
+    expect(rows.find((r) => r.dataset_id === poisoned)?.publication_review).toEqual({
+      kind: "decided",
+      enabled: true,
+      gate: "enforced",
+      outcome: "action_required",
+      headline: "Publication review: could not be read",
+      tone: "warn",
+      reasons: ["review_could_not_run"],
+      review_id: null,
+      head_sha: null,
+    });
+    // No SQL, no message, in the answer or the log: the request's id and a closed class.
+    expect(text).not.toContain("simulated");
+    const log = lines.join("\n");
+    const poisonedRequest = rows.find((r) => r.dataset_id === poisoned)?.id;
+    expect(log).toContain(`request ${poisonedRequest}`);
+    expect(log).toContain("(Error, other)");
+    expect(log).not.toContain("simulated");
+    expect(log).not.toContain(poisoned);
+  });
+
+  test("a list whose review rows cannot be read still answers, and none of its rows is a pass", async () => {
+    const waiting = listed("requested");
+    const over = listed("published");
+    const mirror = request({ source: "openneuro" }).datasetId;
+    const failing = env({
+      DB: interceptingD1(realD1(db), (sql) => {
+        if (/^\s*SELECT .*FROM publication_reviews/s.test(sql)) {
+          throw new Error("D1_ERROR: simulated SQL text");
+        }
+      }),
+    });
+    let text = "";
+    let rows: ListRow[] = [];
+    await logged(async () => {
+      ({ text, rows } = await listBody(failing));
+    });
+    for (const id of [waiting, over]) {
+      expect(rows.find((r) => r.dataset_id === id)?.publication_review).toMatchObject({
+        outcome: "action_required",
+        headline: "Publication review: could not be read",
+        reasons: ["review_could_not_run"],
+      });
+    }
+    // A mirror needs no review row, so there was nothing to fail to read.
+    expect(rows.find((r) => r.dataset_id === mirror)?.publication_review.kind).toBe(
+      "not_applicable",
+    );
+    expect(text).not.toContain("simulated");
+  });
+
+  test("the rows that could still be approved are read a few at a time, never all at once", async () => {
+    for (let i = 0; i < 20; i++) listed("requested");
+    let inFlight = 0;
+    let most = 0;
+    const slow = env({
+      DB: interceptingD1(realD1(db), async (sql) => {
+        if (!/FROM dataset_versions/.test(sql)) return;
+        inFlight++;
+        most = Math.max(most, inFlight);
+        // Hold the slot across a macrotask, as a network round trip would.
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        inFlight--;
+      }),
+    });
+    const { rows } = await listBody(slow);
+    expect(rows).toHaveLength(20);
+    expect(most).toBe(8);
   });
 });
 

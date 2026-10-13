@@ -124,6 +124,56 @@ export async function readReviewByKey(
   return r ? toRow(r) : null;
 }
 
+/** The coordinates of the review in force: a request, the commit its screen read and its release kind. */
+export interface ReviewKey {
+  requestId: number;
+  headSha: string;
+  anonymous: boolean;
+}
+
+/** The text a key is looked up by in the map {@link readReviewsByKeys} returns. */
+export function reviewKeyText(key: ReviewKey): string {
+  return `${key.requestId}:${key.headSha}:${key.anonymous ? 1 : 0}`;
+}
+
+/**
+ * The most reviews one batched read takes. A read binds two values for each (the request and its
+ * commit), and D1 allows 100 bound values in a statement, so 45 keeps it inside the limit.
+ */
+export const MAX_KEYS_PER_READ = 45;
+
+/**
+ * The review in force of several requests in ONE statement, for a list that would otherwise ask
+ * once per row. Returns the rows of those requests at those commits, keyed by
+ * {@link reviewKeyText}; a key with no row is simply absent, and a caller looks each up by its
+ * exact key (the statement matches the request and the commit sets independently, so it may also
+ * return a row of another pairing, which no lookup asks for). At most {@link MAX_KEYS_PER_READ}
+ * keys: the caller chunks, so that a failed read costs one chunk and not the list.
+ */
+export async function readReviewsByKeys(
+  db: D1Database,
+  keys: readonly ReviewKey[],
+): Promise<Map<string, PublicationReviewRow>> {
+  const found = new Map<string, PublicationReviewRow>();
+  if (keys.length === 0) return found;
+  if (keys.length > MAX_KEYS_PER_READ) throw new RangeError("too many review keys in one read");
+  const ids = [...new Set(keys.map((k) => k.requestId))];
+  const heads = [...new Set(keys.map((k) => k.headSha))];
+  const marks = (n: number) => Array.from({ length: n }, () => "?").join(", ");
+  const { results } = await db
+    .prepare(
+      `SELECT ${ROW_COLUMNS} FROM publication_reviews
+        WHERE request_id IN (${marks(ids.length)}) AND head_sha IN (${marks(heads.length)})`,
+    )
+    .bind(...ids, ...heads)
+    .all<Record<string, unknown>>();
+  for (const raw of results ?? []) {
+    const row = toRow(raw);
+    found.set(reviewKeyText(row), row);
+  }
+  return found;
+}
+
 /** The most rows one history read returns. */
 export const MAX_HISTORY_ROWS = 200;
 
