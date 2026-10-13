@@ -382,6 +382,11 @@ function seedFailing(
   return { requestId, datasetId, reviewId };
 }
 
+/** The failing report with some of its fields replaced (its question still fails). */
+function failingReportWith(over: Record<string, unknown>): Record<string, unknown> {
+  return { ...failingReport(), ...over };
+}
+
 /** What the administrator is shown: the detail view of the dataset's active request. */
 async function detailOf(datasetId = DATASET, key = ADMIN_A_KEY): Promise<PublicationReviewDetail> {
   const res = await app.request(
@@ -421,6 +426,28 @@ describe("a review that is not a pass needs the administrator's override", () =>
     expect(reviewRow(reviewId).override_by).toBeNull();
     expect(overrideRows()).toHaveLength(0);
     expect(auditRows("dataset_published")).toHaveLength(0);
+  });
+
+  test("6. a refusal lists every override-class code that stands, and a partial override is refused for the rest", async () => {
+    // Two reasons an override clears: a failed question, and a BIDS validation that failed at the
+    // reviewed commit. The list is every code, in the table's order, whatever order they came in.
+    const { reviewId } = seedFailing(
+      {},
+      failingReportWith({ evidence: evidenceFor(SCREENED_HEAD, false, { bids: "fail" }) }),
+    );
+    const refused = await refusalOf(await approve());
+    expect(refused.refusal).toBe("needs_override");
+    expect(refused.uncovered).toEqual(["question_failed", "bids_failed_at_review"]);
+
+    const partial = await refusalOf(
+      await approve({
+        resume: true,
+        override_publication_review: { review_id: reviewId, reasons: ["bids_failed_at_review"] },
+      }),
+    );
+    expect(partial.refusal).toBe("override_not_covering");
+    expect(partial.uncovered).toEqual(["question_failed"]);
+    expect(overrideRows()).toHaveLength(0);
   });
 
   test("7. an override that covers publishes and is recorded on the row, by code, with its audit row", async () => {
