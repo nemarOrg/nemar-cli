@@ -603,6 +603,66 @@ describe("GET /admin/publish/requests: the review of each request", () => {
     }
   });
 
+  test("an approving request is read from its stored review only: what its own run wrote is not held against it", async () => {
+    // The approval has already written the version row and the concept DOI of THIS release. Read
+    // as live facts they would say "already released" and "unexpected DOI" about a run that is to
+    // be resumed, and point at `approve --force` for it.
+    const { requestId, datasetId } = request({ requestStatus: "approving" });
+    seedPublicationReview(db, { requestId, datasetId, state: "reported" });
+    addVersionRow(datasetId);
+    db.run(
+      "UPDATE datasets SET concept_doi = '10.82901/nm.own-run', ezid_status = 'draft' WHERE dataset_id = ?",
+      [datasetId],
+    );
+    expect(await review(datasetId)).toMatchObject({ outcome: "pass", reasons: [] });
+    const d = await detail(datasetId);
+    expect(d.request_status).toBe("approving");
+    expect(d.outcome).toBe("pass");
+    expect(d.reasons).toEqual([]);
+    expect(d.description.next).not.toContain("--force");
+  });
+
+  test("an approving request still shows its stored review: a failed question and a stored fail stand", async () => {
+    const failed = request({ requestStatus: "approving" });
+    seedPublicationReview(db, {
+      requestId: failed.requestId,
+      datasetId: failed.datasetId,
+      state: "reported",
+      report: failingReport(),
+    });
+    addVersionRow(failed.datasetId);
+    expect(await review(failed.datasetId)).toMatchObject({
+      outcome: "fail",
+      reasons: ["question_failed"],
+    });
+    const storedFail = request({ requestStatus: "approving" });
+    seedPublicationReview(db, {
+      requestId: storedFail.requestId,
+      datasetId: storedFail.datasetId,
+      state: "reported",
+      verdict: "fail",
+    });
+    expect(await review(storedFail.datasetId)).toMatchObject({
+      outcome: "fail",
+      reasons: ["stored_verdict_fail"],
+    });
+  });
+
+  test("a blocked request has written nothing of an approval, so its live facts are still read", async () => {
+    // A request is blocked before any approval step runs (the only walk back from approving is
+    // the owner-name check, ahead of the first step), so a version row or a concept DOI on its
+    // dataset belongs to an earlier release, which is what the checks look for.
+    const { requestId, datasetId } = request({
+      requestStatus: "blocked",
+      blockReason: "min_requirements_failed",
+    });
+    seedPublicationReview(db, { requestId, datasetId, state: "reported" });
+    addVersionRow(datasetId);
+    const r = await review(datasetId);
+    expect(r.outcome).toBe("fail");
+    expect(r.reasons).toEqual(["request_blocked", "version_already_released"]);
+  });
+
   test("every row's reasons are codes of the closed vocabulary, and a non-pass always has one", async () => {
     // A broad sweep of seeded states: no row may be an outcome without a reason.
     const seeds: Array<Partial<SeedScreenedRequest>> = [

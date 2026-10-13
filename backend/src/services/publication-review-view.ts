@@ -17,9 +17,10 @@
  * **Only a request in `requested` is reviewed** (ADR 0101, section 7: the claim requires it). A
  * request in another state shows its stored review as history and never as a wait: a dispatched
  * row of such a request reads as one that did not report, so no surface says "running" about a
- * review whose result can no longer settle anything. Its live facts are not read either: they
- * describe an approval that is not going to happen, and a published request would otherwise read
- * as one whose version "was already released".
+ * review whose result can no longer settle anything. Its live facts are not read either, apart from
+ * the two statuses {@link LIVE_FACT_STATUSES} names: they describe an approval that is not going to
+ * happen (a published request would otherwise read as one whose version "was already released"),
+ * or one that is under way and has written them itself (an `approving` request).
  *
  * **What a viewer may read** is counts, closed words and the shared sentences. The model's summary
  * and the notes of its findings, both sanitized by the parser, appear in the detail view and
@@ -105,10 +106,23 @@ export function publicationReviewApplies(dataset: {
 }
 
 /**
- * The statuses whose live facts are read: the requests an approval could still act on, the same
- * set as `ACTIVE_REQUEST_TAIL_SQL`. A request in any other status shows its stored review only.
+ * The statuses whose live version and DOI facts are read: those where nothing of an approval has
+ * been written yet, so a `dataset_versions` row or a concept DOI on the dataset can only belong to
+ * an EARLIER release, which is what the checks look for.
+ *
+ *  - `requested`: waiting for its decision.
+ *  - `blocked`: a request is blocked before an approval step runs (the one walk back from
+ *    `approving`, the owner-name check, is ahead of the first step), so it has written nothing
+ *    either. Its facts are informative, and the hard `request_blocked` stands beside them.
+ *
+ * Not `approving`: the approval run has by then written its own `dataset_versions` row and concept
+ * DOI, and read as live facts they would say "already released" and "unexpected DOI" about a run
+ * that should be RESUMED, with `approve --force` as its next command. An `approving` request, like
+ * every request that is over (`published`, `denied`), shows its stored review and the stored
+ * verdict only; the approval gate (Phase 2) skips a resumed run that has started publishing for the
+ * same reason (`hasStartedPublishing`).
  */
-const LIVE_FACT_STATUSES: ReadonlySet<string> = new Set(["requested", "approving", "blocked"]);
+const LIVE_FACT_STATUSES: ReadonlySet<string> = new Set(["requested", "blocked"]);
 
 /**
  * `isScreenExempt` of `identifier-screen.ts`, stated again because that module imports this one.
@@ -200,10 +214,11 @@ const EARLIER_ANONYMOUS_REQUEST_SQL =
   "SELECT 1 AS found FROM publication_requests WHERE dataset_id = ? AND anonymous = 1 AND id < ? LIMIT 1";
 
 /**
- * Everything a surface shows, re-derived now. Reads the review in force and, for a request an
- * approval could still act on, three facts: a version row, an earlier anonymous request and the
- * concept DOI. No GitHub call is made anywhere in this module: `head_current` stays null, and only
- * the approval gate (Phase 2) asks GitHub whether the screened commit is still `main`.
+ * Everything a surface shows, re-derived now. Reads the review in force and, for a request whose
+ * approval has written nothing yet ({@link LIVE_FACT_STATUSES}), three facts: a version row for
+ * the version an approval would publish, an earlier anonymous request and the concept DOI. No
+ * GitHub call is made anywhere in this module: `head_current` stays null, and only the approval
+ * gate (Phase 2) asks GitHub whether the screened commit is still `main`.
  *
  * Throws when a read fails. It never answers from a fact it could not read.
  */
