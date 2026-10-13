@@ -567,6 +567,24 @@ export async function publicationReviewDetail(
  */
 export const SUMMARY_LINE_PREFIX = "Reviewer's summary: ";
 
+/**
+ * What a failed read is called in a log line: the error's name and one word of a closed list, and
+ * never its message, which can carry SQL or text a service echoed. `no_such_table` is the one a
+ * deploy before the review's migration is applied produces; `timeout` is a read that did not
+ * answer; anything else is `other`. The name is shown only when it is a plain identifier.
+ */
+export function readFailureWords(err: unknown): string {
+  const name =
+    err instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,39}$/.test(err.name) ? err.name : "unknown";
+  const message = err instanceof Error ? err.message : "";
+  const kind = /no such table/i.test(message)
+    ? "no_such_table"
+    : name === "TimeoutError" || name === "AbortError" || /time(d)? ?out/i.test(message)
+      ? "timeout"
+      : "other";
+  return `${name}, ${kind}`;
+}
+
 /** What the mail says when the review could not be read: a fixed sentence, never a pass. */
 function unreadableSection(datasetId: string): PublicationReviewSection {
   return {
@@ -585,9 +603,10 @@ function unreadableSection(datasetId: string): PublicationReviewSection {
  * words, the next command and the standing line. Never the model's summary, and never any text
  * the model wrote.
  *
- * Null when there is nothing to add: the request is gone, or the review is off and has no row,
- * which leaves the mail exactly as it was before the review existed. A request the review does
- * not apply to says so while the review is on, as the screen's section does for a sandbox.
+ * Null when there is nothing to add: the request is gone, or the review is off and has no row
+ * (or its rows cannot be read), which leaves the mail exactly as it was before the review
+ * existed. A request the review does not apply to says so while the review is on, as the screen's
+ * section does for a sandbox.
  *
  * **The mail ages a dispatched row by the deadline, the lists by the deadline plus a tick.** The
  * mail lease frees a held request when its review is older than
@@ -599,8 +618,9 @@ function unreadableSection(datasetId: string): PublicationReviewSection {
  * lease to explain and keep the longer window (ADR 0101, section 7: the deadline plus one tick),
  * so they do not say "did not report" about a review the watchdog is about to close.
  *
- * Never throws: a read that fails is logged (ids and fixed words only) and the mail says the
- * review could not be read, so an administrator is never told less than the truth.
+ * Never throws: a read that fails is logged (ids and fixed words only) and, while the review is
+ * on, the mail says the review could not be read, so an administrator is never told less than the
+ * truth.
  */
 export async function publicationReviewEmailSection(
   env: Bindings,
@@ -627,10 +647,14 @@ export async function publicationReviewEmailSection(
     };
   } catch (err) {
     console.error(
-      `[publication-review] could not read the review of request ${requestId} for the admin email (${
-        err instanceof Error ? err.name : "unknown"
-      })`,
+      `[publication-review] could not read the review of request ${requestId} for the admin email (${readFailureWords(err)})`,
     );
+    // With the review off there is nothing to add to the mail unless a stored review shows as
+    // advice, and the mail must then be exactly what it was before the review existed: a deploy
+    // before the review's migration is applied has no table to read, and no administrator should
+    // be told a review "could not be read" that nothing was ever going to start. With it on, the
+    // review is a gate, and not knowing its state is said so.
+    if (!reviewEnabled(env)) return null;
     return unreadableSection(datasetId);
   }
 }

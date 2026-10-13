@@ -122,6 +122,30 @@ function mailState(requestId: number) {
     .get(requestId) as { emailed: string | null; claimed: string | null };
 }
 
+/** Run `fn` and return what it logged through console.warn and console.error, restoring both. */
+async function logged(fn: () => Promise<void>): Promise<string[]> {
+  const lines: string[] = [];
+  const { warn, error } = console;
+  const take = (...args: unknown[]) => void lines.push(args.map(String).join(" "));
+  console.warn = take;
+  console.error = take;
+  try {
+    await fn();
+  } finally {
+    console.warn = warn;
+    console.error = error;
+  }
+  return lines;
+}
+
+/** A D1 whose read of the review rows fails with `error`, and nothing else does. */
+function failingReviewReads(error: Error): D1Database {
+  return interceptingD1(realD1(db), (sql) => {
+    // The review row's read, not the lease (which only checks that one exists).
+    if (/^\s*SELECT .*FROM publication_reviews/s.test(sql)) throw error;
+  });
+}
+
 /** A report whose first question failed with a finding, and whose model wrote the two sentinels. */
 function failingReport(head = SCREENED_HEAD) {
   return goodPublicationReport({
@@ -463,6 +487,45 @@ describe("with the review off, the mail is what it was before the review existed
     });
   });
 
+  test("with the review off and no review row, a failed read of the review rows leaves the mail exactly as it was", async () => {
+    // A deploy before migration 0096 is applied: the table is not there, and the review is off, so
+    // the mail has nothing to say about it. It must not gain a "could not be read" section.
+    const { requestId, datasetId } = unmailed();
+    const row = db
+      .query<{ s: string; r: string }, [number]>(
+        "SELECT identifier_screen_status AS s, identifier_screen_report AS r FROM publication_requests WHERE id = ?",
+      )
+      .get(requestId) as { s: string; r: string };
+    const failing = failingReviewReads(new Error("no such table: publication_reviews"));
+    await withFakeResend(async (calls) => {
+      await sendPublicationRequestEmail(
+        [ADMIN_EMAIL],
+        datasetId,
+        `depositor_${datasetId}`,
+        "re_test",
+        "NEMAR <noreply@nemar.org>",
+        undefined,
+        false,
+        { ENVIRONMENT: "production" },
+        { anonymous: false, screen: screenEmailSection(datasetId, row.s, row.r) },
+      );
+      let outcome: string | undefined;
+      const lines = await logged(async () => {
+        outcome = await notifyAdminsOfScreen(
+          env({ PUBLICATION_REVIEW_ENABLED: undefined, DB: failing }),
+          requestId,
+        );
+      });
+      expect(outcome).toBe("sent");
+      const [direct, viaRoute] = sends(calls);
+      expect(viaRoute.html).toBe(direct.html);
+      expect(viaRoute.subject).toBe(direct.subject);
+      expect(viaRoute.html).not.toContain("Publication review");
+      // The failure is still logged, with its class and never its message.
+      expect(lines.join("\n")).toContain("no_such_table");
+    });
+  });
+
   test("a request the review does not apply to says so only while the review is on", async () => {
     const exempt: Array<Partial<SeedScreenedRequest>> = [
       { source: "openneuro" },
@@ -744,6 +807,32 @@ describe("what the mail may carry", () => {
       );
       expect(text).toContain("Publication review: pass");
     });
+  });
+
+  test("a failed read is logged by the error's name and a closed class, never by its message", async () => {
+    const message = "D1_ERROR: SECRET-SQL-SENTINEL near publication_reviews";
+    const timeout = Object.assign(new Error(message), { name: "TimeoutError" });
+    const cases: Array<[Error, string]> = [
+      [new Error(`${message}: no such table: publication_reviews`), "Error, no_such_table"],
+      [timeout, "TimeoutError, timeout"],
+      [new Error(message), "Error, other"],
+    ];
+    for (const [error, words] of cases) {
+      const { requestId } = unmailed();
+      const failing = env({ DB: failingReviewReads(error) });
+      await withFakeResend(async (calls) => {
+        const lines = await logged(async () => {
+          expect(await notifyAdminsOfScreen(failing, requestId)).toBe("sent");
+        });
+        // Still the fixed sentence for the administrator: the flag is on.
+        expect(textOf(sends(calls).at(-1)?.html ?? "")).toContain(
+          "Publication review: could not be read",
+        );
+        const log = lines.join("\n");
+        expect(log).toContain(`(${words})`);
+        expect(log).not.toContain("SECRET-SQL-SENTINEL");
+      });
+    }
   });
 
   test("a review that cannot be read is said so, never passed over and never a pass", async () => {
