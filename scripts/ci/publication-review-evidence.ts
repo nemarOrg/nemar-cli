@@ -139,8 +139,10 @@ type BlobRead = { ok: true; bytes: Buffer } | { ok: false; reason: "missing" | "
 
 /**
  * One blob's bytes, never more than `ceiling` of them. The size is asked first, so a blob that is
- * too large is never held in memory. In the job's blob-less clone both calls fetch the blob lazily
- * through the repository's own read-only credential, which this module never reads.
+ * too large is never held in memory. The job's clone is blob-less, but the workflow's fetch step
+ * already fetched every blob this module reads (the root documents and the sampled sidecars), and
+ * the clone holds no credential: a blob that was not fetched would be requested from the remote
+ * without one, which fails, and is `missing` here.
  */
 function readBlob(dir: string, oid: string, ceiling: number): BlobRead {
   if (!/^[0-9a-f]{40,64}$/.test(oid)) return { ok: false, reason: "missing" };
