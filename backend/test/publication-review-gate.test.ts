@@ -368,6 +368,53 @@ describe("a blocked request that HAS started publishing is not refused: the owne
   });
 });
 
+describe("a blocked request is a run that started only when the owner-name walk-back blocked it", () => {
+  // The exemption above is for ONE way of being blocked half way. A request that was blocked
+  // for any other reason is blocked, however stale its step list: nothing clears `steps_completed`
+  // when the depositor requests again, so a run walked back for the owner's name and then blocked
+  // again by the screen or by a failed minimum still carries the steps of its first life. Trusting
+  // them let a resume skip every gate and publish over the content that blocked it.
+  for (const [reason, screen] of [
+    ["identifier_screen_findings", "direct-identifiers"],
+    ["min_requirements_failed", "clean"],
+  ] as const) {
+    for (const lit of [true, false] as const) {
+      test(`2. blocked for ${reason}, every step done, flag ${lit ? "on" : "off"}: a resume is 409 request_blocked, nothing runs`, async () => {
+        const { requestId } = seedFailing({
+          requestStatus: "blocked",
+          blockReason: reason,
+          status: screen,
+          steps: DONE,
+        });
+        const res = await approve({ resume: true }, { bindings: env({}, lit) });
+        expect(res.status).toBe(409);
+        const out = (await res.json()) as Record<string, unknown>;
+        expect(out).toMatchObject({ error: "request_blocked", block_reason: reason });
+        const row = requestRow(requestId);
+        expect(row.status).toBe("blocked");
+        expect(row.block_reason).toBe(reason);
+        expect(row.approved_by).toBeNull();
+        expect(JSON.parse(String(row.steps_completed))).toEqual([...DONE]);
+        expect(auditRows("dataset_published")).toHaveLength(0);
+        expect(overrideRows()).toHaveLength(0);
+      });
+    }
+  }
+
+  test("2. the control: the owner-name walk-back with the same steps resumes, and the other reasons did not", async () => {
+    const { requestId } = seedFailing({
+      requestStatus: "blocked",
+      blockReason: "owner_name_missing",
+      status: "direct-identifiers",
+      steps: DONE,
+    });
+    const res = await approve({ resume: true });
+    expect(res.status).toBe(200);
+    expect(requestRow(requestId).status).toBe("published");
+    expect(overrideRows()).toHaveLength(0);
+  });
+});
+
 describe("a dataset the review does not apply to, and one it passes", () => {
   test("3. a mirror and an exemplar publish with no override, and the gate says n/a", async () => {
     const mirror = seed({ source: "openneuro", datasetId: MIRROR });

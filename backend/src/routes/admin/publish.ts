@@ -9,6 +9,7 @@ import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 
 import { screenGate } from "../../../../shared/identifier-screen-report.js";
+import { publishingStanding } from "../../../../shared/publication-steps.js";
 import { auditLogStatement } from "../../db/audit-log";
 import { ACTIVE_REQUEST_TAIL_SQL, approvalInFlightSql } from "../../services/approval-dispatch";
 import { resolveEmailConfig, sendPublicationDeniedEmail } from "../../services/email";
@@ -441,7 +442,8 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     // is skipped only for a run that has already started publishing. A run that
     // stopped before that (a failed ci_check leaves the row `approving`) is
     // gated like a fresh one, because the depositor may have pushed since.
-    const gated = !(resume && hasStartedPublishing(request.steps_completed));
+    // A blocked request never gets here (refused above), so the reason is not asked.
+    const gated = publishingStanding({ ...request, block_reason: null }) !== "publishing";
 
     // The state half: no network and no claim, so a refused click changes
     // nothing. The head half needs a GitHub token and runs once one is in hand,

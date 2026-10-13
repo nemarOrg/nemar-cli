@@ -87,6 +87,63 @@ describe("hasStartedPublishing", () => {
   });
 });
 
+describe("publishingStanding", () => {
+  const QUIET = '["ci_check","enrichment_check"]';
+  const STARTED = '["ci_check","enrichment_check","s3_public_read"]';
+  const STANDING = steps.publishingStanding;
+
+  test("an approving request stands by its steps: started is publishing, anything else stopped", () => {
+    expect(STANDING({ status: "approving", steps_completed: STARTED, block_reason: null })).toBe(
+      "publishing",
+    );
+    for (const raw of [QUIET, "[]", null, "", "not json", "{}"]) {
+      expect({
+        raw,
+        standing: STANDING({ status: "approving", steps_completed: raw, block_reason: null }),
+      }).toEqual({
+        raw,
+        standing: "stopped",
+      });
+    }
+    // A reason on an approving row is not read: only a blocked row's reason decides anything.
+    expect(
+      STANDING({ status: "approving", steps_completed: STARTED, block_reason: "anything" }),
+    ).toBe("publishing");
+  });
+
+  test("a blocked request is publishing only for the owner-name walk-back, and only once it started", () => {
+    const blocked = (steps_completed: string | null, block_reason: string | null) =>
+      STANDING({ status: "blocked", steps_completed, block_reason });
+    expect(blocked(STARTED, steps.OWNER_NAME_MISSING_REASON)).toBe("publishing");
+    expect(steps.OWNER_NAME_MISSING_REASON).toBe("owner_name_missing");
+    // The walk-back before a step changed anything is not a run that started.
+    expect(blocked(QUIET, steps.OWNER_NAME_MISSING_REASON)).toBe("none");
+    expect(blocked(null, steps.OWNER_NAME_MISSING_REASON)).toBe("none");
+    // Any other reason, however stale its steps, is a blocked request and no run: the gates apply.
+    for (const reason of [
+      "identifier_screen_blocks",
+      "min_requirements_failed",
+      "OWNER_NAME_MISSING",
+      "",
+      null,
+    ]) {
+      expect({ reason, standing: blocked(STARTED, reason) }).toEqual({ reason, standing: "none" });
+    }
+  });
+
+  test("every other status is none, whatever its steps and reason say", () => {
+    for (const status of ["requested", "published", "denied", "cancelled", "", "approved"]) {
+      for (const reason of [null, steps.OWNER_NAME_MISSING_REASON]) {
+        expect({
+          status,
+          reason,
+          standing: STANDING({ status, steps_completed: STARTED, block_reason: reason }),
+        }).toEqual({ status, reason, standing: "none" });
+      }
+    }
+  });
+});
+
 describe("screenView", () => {
   const report = (status: string) =>
     JSON.stringify(parseScreenReport(screenReportBodyFor("nm000123", status)));

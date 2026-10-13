@@ -12,8 +12,10 @@
 import { z } from "zod";
 import {
   ANONYMOUS_RELEASE_STEPS,
+  OWNER_NAME_MISSING_REASON,
   PUBLICATION_STEPS,
   type PublicationStep,
+  publishingStanding,
 } from "../../../shared/publication-steps.js";
 
 import {
@@ -73,7 +75,7 @@ import {
   setRepoVisibility,
 } from "./github";
 import { getDatasetsToken } from "./github-auth";
-import { checkApprovalScreenGate, hasStartedPublishing } from "./identifier-screen";
+import { checkApprovalScreenGate } from "./identifier-screen";
 import { generateManifest } from "./manifest";
 import { scheduleNeurobagelSync } from "./neurobagel-hooks.js";
 import {
@@ -95,7 +97,6 @@ import {
 import { ZARR_REQUEUE_AT_PATH } from "./sweep-stamps";
 import {
   OWNER_NAME_MISSING_MESSAGE,
-  OWNER_NAME_MISSING_REASON,
   requiresUploaderName,
   resolveOwnerIdentity,
 } from "./uploader-identity";
@@ -2476,18 +2477,21 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     return c.json({ error: "No active publication request found" }, 404);
   }
 
-  // A blocked request that has not started publishing is refused by the mechanical rules (ADR
-  // 0102): whatever the flag says, and for every dataset, before anything else decides anything,
-  // as `approve-dispatch` refuses it before its screen gate. It holds for a resume too, and the
-  // depositor fixes what blocked it and requests again.
+  // A blocked request is refused by the mechanical rules (ADR 0102): whatever the flag says, and
+  // for every dataset, before anything else decides anything, as `approve-dispatch` refuses it
+  // before its screen gate. It holds for a resume too, and the depositor fixes what blocked it
+  // and requests again.
   //
-  // One that HAS started publishing is not refused here. The owner-name check below walks the
-  // request back to `blocked` on every call of a run, a resume and the batches of `s3_lock`
-  // included, so a depositor who clears their name mid-run blocks a run that is half published.
-  // The owner fixes the name and the run is resumed, as it was before the review existed;
-  // refusing it for good would strand a half-published dataset until a re-request.
-  const startedSteps = hasStartedPublishing(request.steps_completed);
-  if (request.status === "blocked" && !startedSteps) {
+  // One exception: a run that HAS started publishing and was walked back to `blocked` for the
+  // owner's name (`publishingStanding`: that reason, and a step done outside the validation-only
+  // ones). The owner-name check below walks the request back on every call of a run, a resume and
+  // the batches of `s3_lock` included, so a depositor who clears their name mid-run blocks a run
+  // that is half published. The owner fixes the name and the run is resumed, as it was before the
+  // review existed; refusing it for good would strand a half-published dataset until a
+  // re-request. A request blocked for any other reason is refused however stale its steps: the
+  // standing reads the reason, so the steps of an earlier life cannot skip the gates.
+  const standing = publishingStanding(request);
+  if (request.status === "blocked" && standing !== "publishing") {
     return c.json(requestBlockedRefusal(datasetId, request.block_reason), 409);
   }
 
@@ -2565,7 +2569,7 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // The identifier screen gate (epic #1610 phase 4, ADR 0086), before anything
   // is marked: a request whose screen is not clear for its CURRENT content
   // never starts approving. It is skipped only for a resume of a run that has
-  // already started publishing (`hasStartedPublishing`: a step after the
+  // already started publishing (`publishingStanding`: a step after the
   // validation-only ones completed). From then on the run must be able to
   // finish, and its own steps commit to main, so a head check would strand it
   // halfway. Before that point nothing is public, and the depositor may have
@@ -2574,8 +2578,7 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // a request that never started, is gated like a fresh run. Sandbox (`xx`)
   // datasets are exempt inside the check. A run the owner-name walk-back blocked
   // half way is a run that started: it is continued, not gated.
-  const startedPublishing =
-    resume && (request.status === "approving" || request.status === "blocked") && startedSteps;
+  const startedPublishing = resume && standing === "publishing";
   if (!startedPublishing) {
     const gate = await checkApprovalScreenGate(env, {
       requestId: request.id,

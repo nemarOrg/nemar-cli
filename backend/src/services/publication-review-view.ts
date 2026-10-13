@@ -45,7 +45,8 @@
  * The module imports the row readers, the stored-screen readers and the screen's status view, and
  * nothing of the screen's mail or the review's write path, so `identifier-screen.ts` can import it
  * without a cycle. That is why `screenView` lives beside those readers, and `hasStartedPublishing`
- * in `shared/publication-steps.ts`: both moved out of `identifier-screen.ts` for it.
+ * in `shared/publication-steps.ts` (with `publishingStanding`, the rule over it): both moved out of
+ * `identifier-screen.ts` for it.
  */
 
 import type {
@@ -91,7 +92,7 @@ import {
   stricterOf,
   verdictOf,
 } from "../../../shared/publication-review.js";
-import { hasStartedPublishing } from "../../../shared/publication-steps.js";
+import { publishingStanding } from "../../../shared/publication-steps.js";
 import type { Bindings } from "../types/bindings.js";
 import { ACTIVE_REQUEST_TAIL_SQL } from "./approval-dispatch.js";
 import type { PublicationReviewSection } from "./email.js";
@@ -153,7 +154,7 @@ export function publicationReviewApplies(dataset: {
  * and "unexpected DOI" about a run that should be RESUMED, with `approve --force` as its next
  * command. It, like every request that is over (`published`, `denied`), shows its stored review and
  * the stored verdict only; the approval gate skips such a run for the same reason
- * (`hasStartedPublishing`). An `approving` run that STOPPED before it published (`approval ===
+ * (`publishingStanding`). An `approving` run that STOPPED before it published (`approval ===
  * "stopped"`: only the validation-only steps, `ci_check` and `enrichment_check`, completed) is
  * gated again when it resumes and has written neither a version row nor a DOI, so its facts are
  * about an earlier release and are read, whatever its status says.
@@ -315,12 +316,10 @@ export async function derivePublicationReview(
   const startable = request.status === "requested";
   // Where an approval stands: a run that has started publishing is continued without a gate, one
   // that stopped before it did is gated like a fresh run (`describePublicationReview`'s `approval`).
-  const approval: ApprovalStanding =
-    request.status !== "approving"
-      ? "none"
-      : hasStartedPublishing(request.steps_completed)
-        ? "publishing"
-        : "stopped";
+  // The one rule the approval itself asks (`publishingStanding`), so the words, the next command
+  // and `started_publishing` agree with what the Worker does: a run the owner-name walk-back
+  // blocked half way is `publishing` too, and any other blocked request is `none`.
+  const approval: ApprovalStanding = publishingStanding(request);
 
   const { head, gate } = screenOf(request);
 
@@ -365,7 +364,7 @@ export async function derivePublicationReview(
   const publishedVersion = report === null ? null : effectiveVersionOf(report.evidence);
   // A blocked request whose run had started publishing (the owner-name walk-back, which runs on
   // every call of a run) wrote its own version row and DOI, so it reads no live fact either.
-  const ownRun = request.status === "blocked" && hasStartedPublishing(request.steps_completed);
+  const ownRun = request.status === "blocked" && approval === "publishing";
   const readFacts =
     applies &&
     assessed &&
@@ -871,9 +870,7 @@ export async function publicationReviewDetail(
     // Not read from the reasons: with the review off they are empty, and a blocked request must
     // still be told apart.
     block_reason: shownBlockReason(ctx.request),
-    started_publishing:
-      (ctx.request.status === "approving" || ctx.request.status === "blocked") &&
-      hasStartedPublishing(ctx.request.steps_completed),
+    started_publishing: publishingStanding(ctx.request) === "publishing",
     total_files: ctx.dataset?.total_files ?? null,
     applies: d.applies,
     gate: d.gate,
