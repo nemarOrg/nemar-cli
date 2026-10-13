@@ -14,10 +14,12 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import type { Server } from "bun";
 import { Hono } from "hono";
 import type {
   PublicationReviewDetail,
+  PublicationReviewGateRefusalBody,
   PublicationReviewSummary,
 } from "../../shared/contract/publication-review-admin";
 import {
@@ -628,23 +630,21 @@ describe("GET /admin/publish/requests: the review of each request", () => {
     expect(r.reasons).toContain("submission_minimum_failed");
   });
 
-  test("only a request in requested is reviewed: a dispatched row of any other request is not a wait", async () => {
-    for (const requestStatus of ["blocked", "approving"] as const) {
-      const { requestId, datasetId } = request({
-        requestStatus,
-        blockReason: requestStatus === "blocked" ? "min_requirements_failed" : null,
-      });
-      seedPublicationReview(db, {
-        requestId,
-        datasetId,
-        state: "dispatched",
-        createdMinutesAgo: 2,
-      });
-      const r = await review(datasetId);
-      expect(r.reasons).toContain("review_did_not_report");
-      expect(r.reasons).not.toContain("review_running");
-      expect(r.kind).toBe("decided");
-    }
+  test("a request that is blocked does not wait for a review: a dispatched row of it is one that did not report", async () => {
+    const { requestId, datasetId } = request({
+      requestStatus: "blocked",
+      blockReason: "min_requirements_failed",
+    });
+    seedPublicationReview(db, {
+      requestId,
+      datasetId,
+      state: "dispatched",
+      createdMinutesAgo: 2,
+    });
+    const r = await review(datasetId);
+    expect(r.reasons).toContain("review_did_not_report");
+    expect(r.reasons).not.toContain("review_running");
+    expect(r.kind).toBe("decided");
   });
 
   test("a request that is over reads its stored review only: no live fact is held against it", async () => {
@@ -1886,30 +1886,32 @@ describe("the list's start_offered", () => {
 
 // ============================================================================
 
-describe("dispatchedAgesByTime: the approval gate's reading of a review that is running", () => {
-  async function derive(requestId: number, over: { dispatchedAgesByTime?: boolean } = {}) {
+describe("a dispatched review is read by time alone while the request can still be gated, on every surface", () => {
+  async function derive(requestId: number) {
     const ctx = await readReviewContext(env(), requestId);
     if (ctx === null) throw new Error("no such request");
-    return derivePublicationReview({ env: env(), nowMs: Date.now(), ...ctx, ...over });
+    return derivePublicationReview({ env: env(), nowMs: Date.now(), ...ctx });
   }
 
-  test("an approving request's dispatched row reads as running by time only when the gate asks", async () => {
+  const codes = (d: { reasons: { code: string }[] }) => d.reasons.map((r) => r.code);
+
+  function ageReview(minutes: number) {
+    db.run("UPDATE publication_reviews SET created_at = datetime('now', ?)", [
+      `-${minutes} minutes`,
+    ]);
+  }
+
+  test("an approving request that has not started publishing waits for a review dispatched under the bound", async () => {
     const { requestId, datasetId } = request({ requestStatus: "approving" });
     seedPublicationReview(db, { requestId, datasetId, state: "dispatched", createdMinutesAgo: 10 });
-    // The surfaces' reading: a review of a request that is not `requested` cannot settle anything.
-    for (const over of [{}, { dispatchedAgesByTime: false }]) {
-      const d = await derive(requestId, over);
-      expect(d.reasons.map((r) => r.code)).toEqual(["review_did_not_report"]);
-      expect(d.rowView).toEqual({ kind: "dispatched", overdue: true });
-    }
-    // The gate's reading: the review can still report before the resume is gated again.
-    const gate = await derive(requestId, { dispatchedAgesByTime: true });
-    expect(gate.reasons.map((r) => r.code)).toEqual(["review_running"]);
-    expect(gate.rowView).toEqual({ kind: "dispatched", overdue: false });
-    expect(gate.startable).toBe(false);
+    const d = await derive(requestId);
+    expect(codes(d)).toEqual(["review_running"]);
+    expect(d.rowView).toEqual({ kind: "dispatched", overdue: false });
+    // Only a request waiting for its decision is offered a start.
+    expect(d.startable).toBe(false);
   });
 
-  test("time still ages it: past the view's bound it did not report, with the option on", async () => {
+  test("time still ages it: past the view's bound it did not report", async () => {
     const { requestId, datasetId } = request({ requestStatus: "approving" });
     seedPublicationReview(db, {
       requestId,
@@ -1917,12 +1919,12 @@ describe("dispatchedAgesByTime: the approval gate's reading of a review that is 
       state: "dispatched",
       createdMinutesAgo: REVIEW_OVERDUE_VIEW_MINUTES + 1,
     });
-    const d = await derive(requestId, { dispatchedAgesByTime: true });
-    expect(d.reasons.map((r) => r.code)).toEqual(["review_did_not_report"]);
+    const d = await derive(requestId);
+    expect(codes(d)).toEqual(["review_did_not_report"]);
     expect(d.rowView).toEqual({ kind: "dispatched", overdue: true });
   });
 
-  test("a request waiting for its decision reads the same either way, and so does every other row", async () => {
+  test("a request waiting for its decision reads the same, and so does a reported row", async () => {
     const waiting = request();
     seedPublicationReview(db, {
       requestId: waiting.requestId,
@@ -1930,27 +1932,141 @@ describe("dispatchedAgesByTime: the approval gate's reading of a review that is 
       state: "dispatched",
       createdMinutesAgo: 10,
     });
-    for (const over of [{}, { dispatchedAgesByTime: false }, { dispatchedAgesByTime: true }]) {
-      expect((await derive(waiting.requestId, over)).reasons.map((r) => r.code)).toEqual([
-        "review_running",
-      ]);
-    }
+    expect(codes(await derive(waiting.requestId))).toEqual(["review_running"]);
     const reported = request({ requestStatus: "approving" });
     seedPublicationReview(db, {
       requestId: reported.requestId,
       datasetId: reported.datasetId,
       state: "reported",
     });
-    for (const over of [{}, { dispatchedAgesByTime: true }]) {
-      expect((await derive(reported.requestId, over)).reasons).toEqual([]);
-    }
+    expect((await derive(reported.requestId)).reasons).toEqual([]);
   });
 
-  test("the surfaces never pass it: the detail and the list read the same row as one that did not report", async () => {
+  test("any other request does not wait: a dispatched row reads as one that did not report", async () => {
+    const { requestId, datasetId } = request({
+      requestStatus: "blocked",
+      blockReason: "min_requirements_failed",
+    });
+    seedPublicationReview(db, { requestId, datasetId, state: "dispatched", createdMinutesAgo: 10 });
+    const d = await derive(requestId);
+    expect(d.rowView).toEqual({ kind: "dispatched", overdue: true });
+    expect(codes(d)).toContain("review_did_not_report");
+    expect(codes(d)).not.toContain("review_running");
+  });
+
+  test("the detail of an approving request reads a dispatched review by time, and offers no start", async () => {
     const { requestId, datasetId } = request({ requestStatus: "approving" });
     seedPublicationReview(db, { requestId, datasetId, state: "dispatched", createdMinutesAgo: 10 });
-    expect((await detail(datasetId)).reasons.map((r) => r.code)).toEqual(["review_did_not_report"]);
-    expect((await review(datasetId)).reasons).toEqual(["review_did_not_report"]);
+    const young = await detail(datasetId);
+    expect(codes(young)).toEqual(["review_running"]);
+    expect(young.description.next).toBe(`nemar admin publish show ${datasetId}`);
+
+    ageReview(90);
+    const old = await detail(datasetId);
+    expect(codes(old)).toEqual(["review_did_not_report"]);
+    expect(old.description.next).not.toBe(`nemar admin publish start ${datasetId}`);
+  });
+
+  test("the list summary of an approving request reads the same row the same way", async () => {
+    const { requestId, datasetId } = request({ requestStatus: "approving" });
+    seedPublicationReview(db, { requestId, datasetId, state: "dispatched", createdMinutesAgo: 10 });
+    expect(await review(datasetId)).toMatchObject({
+      kind: "running",
+      reasons: ["review_running"],
+      start_offered: false,
+    });
+
+    ageReview(90);
+    expect(await review(datasetId)).toMatchObject({
+      kind: "decided",
+      reasons: ["review_did_not_report"],
+      start_offered: false,
+    });
+  });
+
+  test("a blocked request's dispatched row still reads as one that did not report, in the detail and the list", async () => {
+    const { requestId, datasetId } = request({
+      requestStatus: "blocked",
+      blockReason: "min_requirements_failed",
+    });
+    seedPublicationReview(db, { requestId, datasetId, state: "dispatched", createdMinutesAgo: 10 });
+    const d = await detail(datasetId);
+    expect(codes(d)).toContain("review_did_not_report");
+    expect(codes(d)).not.toContain("review_running");
+    const summary = await review(datasetId);
+    expect(summary.reasons).toContain("review_did_not_report");
+    expect(summary.reasons).not.toContain("review_running");
+  });
+});
+
+// ============================================================================
+
+describe("the detail and the approval gate read one review as one", () => {
+  let server: Server;
+
+  beforeAll(() => {
+    // A stand-in for api.github.com: the screen gate's read of `main`, which is the screened head.
+    server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const path = new URL(req.url).pathname;
+        if (req.method === "GET" && /\/git\/ref\/heads\/main$/.test(path)) {
+          return Response.json({ object: { sha: SCREENED_HEAD } });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL =
+      `http://127.0.0.1:${server.port}`;
+  });
+
+  afterAll(() => {
+    (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = undefined;
+    server.stop(true);
+  });
+
+  function gateEnv(): Bindings {
+    return env({
+      GITHUB_ADMIN_PAT: "ghp_review_view_test",
+      PRESCREEN_CALLBACK_SECRET: "review-view-secret",
+      API_BASE_URL: "https://api.test.nemar.org",
+    });
+  }
+
+  /** The reason codes the approval gate refuses an approval with, no override sent. */
+  async function refusedWith(datasetId: string): Promise<string[]> {
+    const res = await app.request(
+      `/admin/publish/${datasetId}/approve`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${ADMIN_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ resume: true }),
+      },
+      gateEnv(),
+    );
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as PublicationReviewGateRefusalBody;
+    expect(body.error).toBe("publication_review_not_clear");
+    return body.reasons.map((r) => r.code);
+  }
+
+  test("for one approving request the detail's reasons are the gate's refusal, young row or old", async () => {
+    const { requestId, datasetId } = request({ requestStatus: "approving" });
+    seedPublicationReview(db, {
+      requestId,
+      datasetId,
+      state: "dispatched",
+      createdMinutesAgo: 10,
+      claimed: true,
+    });
+    const young = (await detail(datasetId, gateEnv())).reasons.map((r) => r.code);
+    expect(young).toEqual(["review_running"]);
+    expect(await refusedWith(datasetId)).toEqual(young);
+
+    db.run("UPDATE publication_reviews SET created_at = datetime('now', '-90 minutes')");
+    const old = (await detail(datasetId, gateEnv())).reasons.map((r) => r.code);
+    expect(old).toEqual(["review_did_not_report"]);
+    expect(await refusedWith(datasetId)).toEqual(old);
   });
 });
 

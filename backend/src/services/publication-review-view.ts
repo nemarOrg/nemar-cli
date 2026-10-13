@@ -210,15 +210,6 @@ export interface ReviewContext {
    * derivation reads it itself.
    */
   reviewRow?: PublicationReviewRow | null;
-  /**
-   * Age a dispatched row by time alone, whatever the request's status. The surfaces read a
-   * dispatched row of a request that is not `requested` as one that did not report, because its
-   * result can no longer settle anything there. The approval gate is the exception: an `approving`
-   * request that has not started publishing is gated again when it resumes, and its review can
-   * still report before then, so a review that is running reads as running for as long as the
-   * time rule says. Only the gate passes true.
-   */
-  dispatchedAgesByTime?: boolean;
 }
 
 export interface DerivedPublicationReview {
@@ -334,11 +325,16 @@ export async function derivePublicationReview(
         : await readReviewByKey(db, request.id, head, anonymous);
     if (row !== null) {
       rowView = rowViewOf(row, ctx.nowMs, ctx.overdueMinutes);
-      // Only `requested` is reviewed: a dispatched row of any other request is not waited for,
-      // unless the caller (the approval gate) asks for the row to age by time alone.
+      // A review is waited for only while it can still settle something: for a request that is
+      // `requested`, and for one that is `approving`, because an approval that has not started
+      // publishing is gated again when it resumes, so its review can still report before then. The
+      // gate, the detail, the list and the mail therefore read a dispatched row one way, by time
+      // alone. A run that HAS started publishing is never gated again, so its reasons do not
+      // matter to the gate, and reading its row as running is harmless. For any other status a
+      // dispatched row is not waited for.
       if (
-        ctx.dispatchedAgesByTime !== true &&
         request.status !== "requested" &&
+        request.status !== "approving" &&
         rowView.kind === "dispatched"
       ) {
         rowView = { kind: "dispatched", overdue: true };
