@@ -22,9 +22,9 @@ administrator approves a pull request, a weekly drift check that can finally fil
 issue, and an upload step that no longer re-reads tracked files of 1 GiB or more through
 git-annex's filter process. The automated review of dataset pull requests stays off in
 production, as in 0.10.16; its first live run passed on dev on 2026-10-12, with a throwaway
-pull request to an exemplar dataset. There is no migration and no new secret. Counting per visitor needs a second deploy: the
-website must be promoted to production after this release (see Deploy coupling), while the
-fixed windows and the higher cap help the shared pool at once.
+pull request to an exemplar dataset. There is no migration and no new secret. Counting per
+visitor needs a second deploy: the website must be promoted to production after this release
+(see Deploy coupling), while the fixed windows and the higher cap help the shared pool at once.
 
 ### Changed
 
