@@ -1341,7 +1341,11 @@ export interface LiveFacts {
     /** The screened commit (`readStoredReport(...)?.head`), or null when there is none. */
     head: string | null;
     acknowledged_by: number | null;
-    /** Whether the screened commit is still `main`. Null except at the approval gate, which asks GitHub. */
+    /**
+     * Whether the screened commit is still `main`. Null for every caller of the derivation (the
+     * detail, the list, the mail and the review's gate read no GitHub), so `identifier_screen_stale`
+     * is not derived there; the stale refusal comes from the identifier screen's own gate.
+     */
     head_current: boolean | null;
   };
   versions: {
