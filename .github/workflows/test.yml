@@ -31,10 +31,18 @@ permissions:
   contents: read
   pull-requests: read
 
-# Cancel in-progress runs on new push
+# A pull request keeps only its newest run: a push to the branch cancels the run
+# it supersedes, which is what keeps a release pull request (dev -> main) from
+# stacking a full suite per merge into dev. Grouped by pull request number.
+#
+# A push run is never cancelled. Its group is its own commit, so it neither
+# cancels nor waits for another. The old per-branch group cancelled the run of
+# every merge into dev 14 s later, when auto-bump-dev.yml pushed its version
+# commit (109 of 109 merges, 2026-09-15 to 2026-10-13), so the commit carrying the
+# code never finished a run and the version commit re-ran the suite instead.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('{0}-{1}', github.ref, github.sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Check what files changed to determine which tests to run
