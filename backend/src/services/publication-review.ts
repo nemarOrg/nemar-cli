@@ -771,6 +771,19 @@ export const REARM_MAIL_SQL = `UPDATE publication_requests
   WHERE id = ? AND status IN ('requested', 'blocked') AND anonymous = ?
     AND ${screenedHeadSql("publication_requests")} = ?`;
 
+/**
+ * {@link REARM_MAIL_SQL} for a result that landed on a row still `dispatched`, which is late all the
+ * same once the row is past the deadline: the request's mail is released at the deadline and says
+ * the review did not report, whether or not the watchdog has marked the row (it may not have run,
+ * errored, or not reached this row among the {@link SWEEP_LIMIT} it takes in a tick). Read from the
+ * row's own age, which a result never changes, so a report inside the deadline re-arms nothing. The
+ * review's id is the last bind.
+ */
+export const REARM_OVERDUE_MAIL_SQL = `${REARM_MAIL_SQL}
+    AND EXISTS (SELECT 1 FROM publication_reviews AS r
+                 WHERE r.id = ?
+                   AND r.created_at < datetime('now', '-${PUBLICATION_REVIEW_DEADLINE_MINUTES} minutes'))`;
+
 /** The write of a result, keyed on the nonce and on the state the row waits in. */
 function storeSql(from: "unreported" | "dispatched"): string {
   return `UPDATE publication_reviews
@@ -792,8 +805,10 @@ function storeSql(from: "unreported" | "dispatched"): string {
  *
  * Two conditional writes, so a watchdog that flips the row between the read and the write cannot
  * hide the late path: `unreported` first (a late report, which re-arms the mail), then
- * `dispatched`. The flag is not consulted: a result whose run was already claimed is stored
- * whatever the flag says, because the call was spent and the record stays honest.
+ * `dispatched`, which re-arms it only when the row is past the deadline (the mail has gone and said
+ * the review did not report; see {@link REARM_OVERDUE_MAIL_SQL}). The flag is not consulted: a
+ * result whose run was already claimed is stored whatever the flag says, because the call was
+ * spent and the record stays honest.
  */
 export async function storePublicationReviewResult(
   env: Bindings,
@@ -858,6 +873,12 @@ export async function storePublicationReviewResult(
     await db
       .prepare(REARM_MAIL_SQL)
       .bind(row.requestId, row.anonymous ? 1 : 0, row.headSha)
+      .run();
+  } else {
+    // Still `dispatched` when the result landed: late only if it is past the deadline.
+    await db
+      .prepare(REARM_OVERDUE_MAIL_SQL)
+      .bind(row.requestId, row.anonymous ? 1 : 0, row.headSha, reviewId)
       .run();
   }
   await tryMail(env, row.requestId);

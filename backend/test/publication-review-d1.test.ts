@@ -340,6 +340,55 @@ describe("the review's statements on D1", () => {
     expect((await reviews(d1))[0]).toMatchObject({ state: "reported", verdict: "pass" });
   });
 
+  test("a report past the deadline re-arms the mail on a row no watchdog has marked, and one inside it does not", async () => {
+    const d1 = await seededD1();
+    const started = await startPublicationReview(env(d1), { requestId: 1, datasetId: DATASET });
+    const id = started.reviewId as number;
+    const nonce = await nonceOf(d1, id);
+    const stamp = (await request(d1)).identifier_screen_emailed_at;
+    expect(stamp).not.toBeNull();
+
+    // Inside the deadline: nothing is re-armed and the sent mail stands.
+    await withFakeResend(async (calls) => {
+      const spare = await seededD1();
+      const spareStart = await startPublicationReview(env(spare), {
+        requestId: 1,
+        datasetId: DATASET,
+      });
+      const spareId = spareStart.reviewId as number;
+      await storePublicationReviewResult(
+        env(spare),
+        spareId,
+        DATASET,
+        await nonceOf(spare, spareId),
+        {
+          kind: "reported",
+          report: parsePublicationReviewReport(goodPublicationReport()),
+        },
+      );
+      expect(sendsTo(calls, "d1admin@example.org")).toHaveLength(0);
+      expect((await request(spare)).identifier_screen_emailed_at).not.toBeNull();
+    });
+
+    // Past the deadline and still `dispatched`: the mail went at the deadline and said the review
+    // did not report, so the report re-arms it.
+    await d1
+      .prepare(
+        "UPDATE publication_reviews SET created_at = datetime('now', '-45 minutes') WHERE id = ?",
+      )
+      .bind(id)
+      .run();
+    expect((await reviews(d1))[0]).toMatchObject({ state: "dispatched" });
+    await withFakeResend(async (calls) => {
+      const late = await storePublicationReviewResult(env(d1), id, DATASET, nonce, {
+        kind: "reported",
+        report: parsePublicationReviewReport(goodPublicationReport()),
+      });
+      expect(late).toEqual({ stored: true, state: "reported" });
+      expect(sendsTo(calls, "d1admin@example.org")).toHaveLength(1);
+    });
+  });
+
   test("a restart of an errored row takes a new nonce and a second call on D1", async () => {
     dispatches = [];
     const d1 = await seededD1();
