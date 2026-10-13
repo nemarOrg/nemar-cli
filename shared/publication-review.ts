@@ -1227,6 +1227,40 @@ export const HARD_REASONS: readonly ReasonCode[] = REASON_CODES.filter(
   (c) => REASONS[c].clearedBy === "nothing",
 );
 
+/**
+ * The reasons an administrator's override clears (`clearedBy: "override"`), in {@link REASON_CODES}
+ * order. Every reason is exactly one of three: hard (nothing clears it), the screen's own
+ * acknowledgment reason (the screen's recorded acknowledgment clears it, and the screen gate, not
+ * the override, enforces that), or one of these.
+ */
+export const OVERRIDE_REASONS: readonly ReasonCode[] = REASON_CODES.filter(
+  (c) => REASONS[c].clearedBy === "override",
+);
+
+/** The hard reasons among `reasons` (`clearedBy: "nothing"`), as given and in their order. */
+export function hardReasonsOf<T extends { code: ReasonCode }>(reasons: readonly T[]): T[] {
+  return reasons.filter((r) => REASONS[r.code].clearedBy === "nothing");
+}
+
+/**
+ * The override-class codes among `reasons` that `given` does not name, each once, in
+ * {@link REASON_CODES} order whatever the order of either argument. Hard and acknowledgment
+ * reasons are never in the result: an override cannot clear them, so they are not its to cover
+ * (whether one stands is {@link hardReasonsOf}'s question, and the screen gate's). Words in `given`
+ * that are not reason codes are ignored. One function for the Worker's gate and the command-line
+ * interface's early refusal, so the two cannot disagree about what an override covers.
+ */
+export function uncoveredByOverride(
+  reasons: readonly { code: ReasonCode }[],
+  given: readonly string[],
+): ReasonCode[] {
+  const named = new Set<string>(given);
+  const needed = new Set<ReasonCode>(
+    reasons.filter((r) => REASONS[r.code].clearedBy === "override").map((r) => r.code),
+  );
+  return REASON_CODES.filter((c) => needed.has(c) && !named.has(c));
+}
+
 /** The reasons whose cure is an administrator's `start`: the ones with a {@link ReasonRule.cureNotStartable}. */
 export const START_CURE_REASONS: readonly ReasonCode[] = REASON_CODES.filter(
   (c) => REASONS[c].cureNotStartable !== undefined,
@@ -1348,6 +1382,21 @@ export type ReviewRowView =
 const BLOCK_REASON_WORD = /^[a-z][a-z_]{0,63}$/;
 
 /**
+ * The block reason a surface may show: a blocked request's, and only when it is a plain lowercase
+ * word, so a column a person edited by hand is never printed. Null for a request that is not
+ * blocked, whatever its column holds. One rule for {@link reasonsOf}'s detail and for the detail
+ * view's `block_reason`, so the two cannot show different words.
+ */
+export function shownBlockReason(request: {
+  status: string;
+  block_reason: string | null;
+}): string | null {
+  if (request.status !== "blocked") return null;
+  const why = request.block_reason;
+  return why !== null && BLOCK_REASON_WORD.test(why) ? why : null;
+}
+
+/**
  * Every reason the request is not a pass, re-derived from the live facts and the review in force:
  * de-duplicated, and ordered as {@link REASON_CODES}. It lists everything, and decides nothing about
  * what is cleared: whether a recorded acknowledgment or override satisfies an approval is the gate's.
@@ -1363,10 +1412,7 @@ export function reasonsOf(input: { live: LiveFacts; row: ReviewRowView }): Reaso
   const out: Reason[] = [];
   const add = (code: ReasonCode, detail: string | null = null) => out.push({ code, detail });
 
-  if (live.request.status === "blocked") {
-    const why = live.request.block_reason;
-    add("request_blocked", why !== null && BLOCK_REASON_WORD.test(why) ? why : null);
-  }
+  if (live.request.status === "blocked") add("request_blocked", shownBlockReason(live.request));
 
   const gate = live.screen.gate;
   if (gate === "blocks") add("identifier_screen_blocks");
@@ -1606,31 +1652,63 @@ function rowRestartable(row: ReviewRowView): boolean {
   );
 }
 
+/**
+ * Whether an administrator's `start` is offered for this review: the request is waiting for its
+ * decision (`startable`), the row is one a start can create or restart, a reason's cure is "start
+ * it", and no hard reason stands (with one standing the approval is refused whatever a review says,
+ * so the only command left is the screen's own cure, or none).
+ *
+ * The one rule behind `next` ({@link describePublicationReview}) and the list's `start_offered`, so
+ * a client that decides from the list (`start --all`) cannot offer what the detail would not. It
+ * knows only what these inputs say: a request whose screen has no clear result, one this Worker
+ * does not own and the platform's allowance are the route's to refuse (HTTP 409), and the view that
+ * carries this to the list adds the screen's part.
+ */
+export function startOffered(input: {
+  reasons: readonly Reason[];
+  row: ReviewRowView;
+  startable: boolean;
+}): boolean {
+  const { reasons, row, startable } = input;
+  if (!startable || !rowRestartable(row)) return false;
+  if (hardReasonsOf(reasons).length > 0) return false;
+  const codes = new Set(reasons.map((r) => r.code));
+  return START_CURE_REASONS.some((c) => codes.has(c));
+}
+
+/** Where an approval of the request stands (see {@link describePublicationReview}). */
+export type ApprovalStanding = "none" | "stopped" | "publishing";
+
+/** What the description says about a run that has started publishing: why no gate applies to it. */
+const APPROVAL_PUBLISHING_LINE =
+  "This approval has started publishing; it passed the gates when it started and is continued without them.";
+
 function nextCommand(
   id: string,
   reasons: readonly Reason[],
   row: ReviewRowView,
   startable: boolean,
+  approval: ApprovalStanding,
 ): string | null {
   const codes = new Set(reasons.map((r) => r.code));
-  if (reasons.length === 0) return `nemar admin publish approve ${id}`;
-  if (reasons.some((r) => REASONS[r.code].clearedBy === "nothing")) {
+  // A run that has started publishing is continued, not gated again, whatever the reasons say.
+  if (approval === "publishing") return `nemar admin publish approve ${id} --resume`;
+  // A stopped run that has not started publishing is gated like a fresh one when it resumes.
+  const resume = approval === "stopped" ? " --resume" : "";
+  if (reasons.length === 0) return `nemar admin publish approve ${id}${resume}`;
+  if (hardReasonsOf(reasons).length > 0) {
     // Only the screen's own hard reasons are an administrator's to act on.
     return codes.has("identifier_screen_not_run") || codes.has("identifier_screen_stale")
       ? `nemar admin publish screen ${id}`
       : null;
   }
-  // A start is offered only where the route would take it: the request is waiting for its
-  // decision, and the row is one a start can create or restart.
-  if (startable && rowRestartable(row) && START_CURE_REASONS.some((c) => codes.has(c))) {
-    return `nemar admin publish start ${id}`;
-  }
+  if (startOffered({ reasons, row, startable })) return `nemar admin publish start ${id}`;
   if (codes.has("review_running")) return `nemar admin publish show ${id}`;
   const ack = codes.has("identifier_screen_needs_acknowledgment")
     ? ' --acknowledge-identifier-screen "<reason>"'
     : "";
   const force = reasons.some((r) => REASONS[r.code].clearedBy === "override") ? " --force" : "";
-  return `nemar admin publish approve ${id}${ack}${force}`;
+  return `nemar admin publish approve ${id}${resume}${ack}${force}`;
 }
 
 /**
@@ -1666,8 +1744,16 @@ export function describePublicationReview(input: {
    * review on record it reads as not reviewed, never as "action required". Default false.
    */
   closed?: boolean;
+  /**
+   * Where an approval of this request stands. `stopped`: the request is `approving` and has not
+   * started publishing, so a resume is gated like a fresh run and its command carries `--resume`.
+   * `publishing`: it has started publishing, so a resume passes no gate: its command is the resume
+   * whatever the reasons say, and a line says why. Default `none`.
+   */
+  approval?: ApprovalStanding;
 }): PublicationReviewDescription {
   const { applies, enabled, reasons, row, startable } = input;
+  const approval = input.approval ?? "none";
   const id = DATASET_ID.test(input.datasetId) ? input.datasetId : "<dataset>";
   if (!applies) {
     return {
@@ -1733,13 +1819,14 @@ export function describePublicationReview(input: {
       next: null,
     };
   }
+  if (approval === "publishing") lines.push(APPROVAL_PUBLISHING_LINE);
   lines.push(NOT_ASSESSED_LINE);
   return {
     headline: `Publication review: ${OUTCOME_WORD[outcome]}`,
     tone: OUTCOME_TONE[outcome],
     lines,
     summary,
-    next: nextCommand(id, reasons, row, startable),
+    next: nextCommand(id, reasons, row, startable, approval),
   };
 }
 
@@ -1765,6 +1852,61 @@ export function describeUnreadableReview(datasetId: string): PublicationReviewDe
     summary: null,
     next: DATASET_ID.test(datasetId) ? `nemar admin publish show ${datasetId}` : null,
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// The approval gate's words
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Why the approval gate refused (ADR 0102, section 8), in a closed word: the `refusal` of the 409
+ * `publication_review_not_clear` the approval routes answer with. In the order the gate tries them.
+ *
+ *  - `hard_reason`: a reason nothing clears stands, so no override changes the answer.
+ *  - `needs_override`: an override-class reason stands and the approver gave none (and has none on
+ *    record for the review in force).
+ *  - `override_not_covering`: the override does not name every live override-class reason, for
+ *    instance one that came up after the administrator read the review.
+ *  - `review_changed`: the override names another review than the one in force, or the row moved
+ *    between the read and the write that records the override.
+ *  - `no_review_row`: the web executor's dispatch needs an override and there is no review row to
+ *    record it on.
+ *  - `unverified`: the gate could not read the request or the review, so it refuses rather than
+ *    guess (ADR 0053, ADR 0054).
+ */
+export const REVIEW_GATE_REFUSALS = [
+  "hard_reason",
+  "needs_override",
+  "override_not_covering",
+  "review_changed",
+  "no_review_row",
+  "unverified",
+] as const;
+export type ReviewGateRefusal = (typeof REVIEW_GATE_REFUSALS)[number];
+
+/** The sentence of each refusal. `<dataset>` is filled by {@link reviewGateRefusalText}. */
+export const REVIEW_GATE_REFUSAL_TEXT: Record<ReviewGateRefusal, string> = {
+  hard_reason:
+    "The publication review gives a reason that no override clears, so the approval is refused.",
+  needs_override:
+    "The publication review is not a pass. Read it (nemar admin publish show <dataset>), then approve over it with --force, which records the override with your account.",
+  override_not_covering:
+    "The review now gives a reason the override was not given for. Read it again (nemar admin publish show <dataset>) before approving.",
+  review_changed:
+    "The review the override was given for is no longer the review of this request, or it changed while the approval was being checked. Read it again (nemar admin publish show <dataset>) before approving.",
+  no_review_row:
+    "No review of this commit is on record to attach the override to. Start it (nemar admin publish start <dataset>), or approve from a terminal with --force.",
+  unverified:
+    "The publication review could not be read just now, so the approval is refused. Try again.",
+};
+
+/**
+ * The sentence of a refusal for this dataset: `<dataset>` filled, and a malformed id never quoted
+ * (as {@link cureOf} does), so the one place the gate speaks cannot echo what a caller sent.
+ */
+export function reviewGateRefusalText(refusal: ReviewGateRefusal, datasetId: string): string {
+  const id = DATASET_ID.test(datasetId) ? datasetId : "<dataset>";
+  return REVIEW_GATE_REFUSAL_TEXT[refusal].replaceAll("<dataset>", id);
 }
 
 // ---------------------------------------------------------------------------------------------

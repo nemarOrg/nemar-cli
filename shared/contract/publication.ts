@@ -113,6 +113,19 @@ export const IDENTIFIER_SCREEN_ERROR_CODES: readonly string[] = [
 ];
 
 /**
+ * The codes an approval refusal carries in `error` with the human sentence in `message` (ADR
+ * 0102): the review gate's 409 and the blocked request's. Declared here, beside the screen's, so
+ * the CLI's client leads with the sentence and not the bare token. The same two words are the
+ * `error` of the bodies in `publication-review-admin.ts`
+ * (`PUBLICATION_REVIEW_NOT_CLEAR_CODE`, `REQUEST_BLOCKED_CODE`); this file stays free of every
+ * dependency but zod, and a test holds the two spellings together.
+ */
+export const APPROVAL_REFUSAL_ERROR_CODES: readonly string[] = [
+  "publication_review_not_clear",
+  "request_blocked",
+];
+
+/**
  * Per-user outcome of `POST /admin/users/backfill-names` (#1255).
  *
  * `no_public_name` and `lookup_failed` are deliberately distinct: the first is
