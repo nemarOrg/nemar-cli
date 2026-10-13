@@ -710,7 +710,8 @@ const REPORT_KEYS = ["v", "model", "questions", "findings", "summary", "steering
  * The report must agree with itself, in the safe direction only (as ADR 0092's report does): a
  * finding coded `steering_attempt` sets `steering`; a question passed with a blocker against it
  * becomes `unknown`; a failed question with no finding gets one `other` finding, made room for by
- * dropping the model's LAST findings, so a fail always has something for a person to read.
+ * dropping the model's LAST findings (never the first finding of another failed question), so a
+ * fail always has something for a person to read, and parsing a parsed report changes nothing.
  *
  * `options.models` is for the offline calibration only, and is still limited to
  * {@link CALIBRATION_MODELS}; the Worker passes nothing.
@@ -754,7 +755,23 @@ export function parsePublicationReviewReport(
   const unexplained = QUESTIONS.filter(
     (q) => questions[q] === "fail" && !findings.some((f) => f.question === q),
   );
-  findings.splice(MAX_PUBLICATION_FINDINGS - unexplained.length);
+  // Make room for one filler per unexplained question by dropping the model's LAST findings, but
+  // never the one finding that explains another failed question: the first of each stays. Cutting
+  // blindly from the end could take it, leaving that question failed with nothing to read, and
+  // then a re-parse (every read of a stored report) would move the same hole to another question.
+  // At most four questions fail and the list holds eight, so there is always room.
+  const explains = new Set<PublicationFinding>();
+  for (const q of QUESTIONS) {
+    const first = findings.find((f) => f.question === q);
+    if (questions[q] === "fail" && first !== undefined) explains.add(first);
+  }
+  for (
+    let i = findings.length - 1;
+    i >= 0 && findings.length + unexplained.length > MAX_PUBLICATION_FINDINGS;
+    i--
+  ) {
+    if (!explains.has(findings[i])) findings.splice(i, 1);
+  }
   for (const q of unexplained) {
     findings.push({
       question: q,

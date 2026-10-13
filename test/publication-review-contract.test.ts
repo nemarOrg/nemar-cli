@@ -849,6 +849,82 @@ describe("the report agrees with itself, in the safe direction only", () => {
       },
     ]);
   });
+
+  /** Parse, serialize as the store does, and parse again: what a read of a stored report does. */
+  const reparsed = (report: PublicationReviewReport) =>
+    parsePublicationReviewReport(JSON.parse(JSON.stringify(report)));
+
+  test("room is never made by dropping the only finding of another failed question", () => {
+    // Seven notes for one question, and the one blocker of a second failed question last: the
+    // cut that makes room for the third question's `other` finding used to take the blocker, so
+    // the second question read as failed with nothing to read, and a re-parse (every read of a
+    // stored report) moved the same hole to the third.
+    const notes = Array.from({ length: 7 }, (_, i) =>
+      finding("complete_and_honest", "note", "other", null, `note ${i}`),
+    );
+    const parsed = parsePublicationReviewReport(
+      reportBody({
+        questions: { ...ALL_PASS, meets_standards: "fail", name_adequate: "fail" },
+        findings: [...notes, finding("meets_standards", "blocker", "ethics_statement_missing")],
+      }),
+    );
+    expect(parsed.findings).toHaveLength(8);
+    for (const q of QUESTIONS) {
+      if (parsed.questions[q] === "fail") {
+        expect(parsed.findings.some((f) => f.question === q)).toBe(true);
+      }
+    }
+    // The model's own finding for the second question stands; the third gets the filler; the
+    // model's last NOTE made the room.
+    expect(parsed.findings.filter((f) => f.question === "meets_standards")).toEqual([
+      expect.objectContaining({ code: "ethics_statement_missing" }),
+    ]);
+    expect(parsed.findings.filter((f) => f.question === "name_adequate")).toEqual([
+      expect.objectContaining({ code: "other", note: "No detail given." }),
+    ]);
+    expect(parsed.findings.filter((f) => f.question === "complete_and_honest")).toHaveLength(6);
+    expect(reparsed(parsed)).toEqual(parsed);
+  });
+
+  test("parsing is idempotent over random reports, and a failed question always has a finding", () => {
+    // mulberry32: a small seeded generator, so a failure is reproducible from the seed alone.
+    let state = 0x1ea5e5;
+    const next = () => {
+      state = (state + 0x6d2b79f5) | 0;
+      let t = Math.imul(state ^ (state >>> 15), 1 | state);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const pick = <T>(all: readonly T[]): T => all[Math.floor(next() * all.length)];
+    for (let i = 0; i < 4000; i++) {
+      const questions = Object.fromEntries(QUESTIONS.map((q) => [q, pick(ANSWERS)])) as Record<
+        Question,
+        Answer
+      >;
+      const findings = Array.from(
+        { length: Math.floor(next() * (MAX_PUBLICATION_FINDINGS + 1)) },
+        () =>
+          finding(
+            pick(QUESTIONS),
+            pick(PUBLICATION_SEVERITIES),
+            // Most findings are plain; some steer.
+            next() < 0.1 ? "steering_attempt" : "other",
+          ),
+      );
+      const parsed = parsePublicationReviewReport(
+        reportBody({ questions, findings, steering: next() < 0.1 }),
+      );
+      expect(reparsed(parsed)).toEqual(parsed);
+      expect(parsed.findings.length).toBeLessThanOrEqual(MAX_PUBLICATION_FINDINGS);
+      for (const q of QUESTIONS) {
+        if (parsed.questions[q] === "fail") {
+          expect(parsed.findings.some((f) => f.question === q)).toBe(true);
+        }
+      }
+      // The cut never lowers what the report says: a steering finding that made room still steers.
+      if (findings.some((f) => f.code === "steering_attempt")) expect(parsed.steering).toBe(true);
+    }
+  });
 });
 
 describe("facts only lower an answer (answersOf)", () => {
