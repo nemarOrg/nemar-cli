@@ -173,43 +173,7 @@ describe("1. a review that could not be read is the Worker's to judge", () => {
   });
 });
 
-describe("2. a blocked request is refused whatever the gate says", () => {
-  test("with the gate off, where the reasons are empty, the status is what says so", () => {
-    const d = refusal(
-      decide({ status: "blocked", gate: "off", blockReason: "min_requirements_failed" }),
-    );
-    expect(d.why).toBe("blocked");
-    expect(d.lines.join("\n")).toContain("The request is blocked (min_requirements_failed).");
-    expect(d.lines.join("\n")).toContain(REASONS.request_blocked.cure);
-  });
-
-  test("with the gate enforced, and with --force", () => {
-    for (const gate of ["enforced", "n/a"] as const) {
-      const spec = {
-        status: "blocked",
-        gate,
-        reasons: ["request_blocked" as const],
-        blockReason: "ci_failed",
-      };
-      expect(refusal(decide(spec)).why).toBe("blocked");
-      expect(refusal(decide(spec, FORCE)).why).toBe("blocked");
-    }
-  });
-
-  test("a block reason that has a hint carries it, as the Worker's refusal does", () => {
-    const d = refusal(
-      decide({ status: "blocked", gate: "off", blockReason: "owner_name_missing" }),
-    );
-    expect(d.lines.join("\n")).toContain("nemar admin backfill-names");
-  });
-
-  test("a blocked request with no block reason still says it is blocked", () => {
-    const d = refusal(decide({ status: "blocked", gate: "off", blockReason: null }));
-    expect(d.lines[0]).toContain("The request is blocked.");
-  });
-});
-
-describe("3. a run that has started publishing is continued, not gated", () => {
+describe("2. a run that has started publishing is continued, not gated", () => {
   const spec = {
     status: "approving",
     startedPublishing: true,
@@ -242,6 +206,32 @@ describe("3. a run that has started publishing is continued, not gated", () => {
     expect(proceeds(decide(ack, { ...NO_FLAGS, resume: true })).override).toBeNull();
   });
 
+  test("a blocked run that has started publishing (the owner-name walk-back) is continued the same way, not refused as blocked", () => {
+    // The Worker refuses a blocked request only when it never started a step; the detail says
+    // `started_publishing` for this one whatever the status string, so the CLI does not refuse
+    // what the Worker would pass.
+    const blockedMidRun = {
+      status: "blocked",
+      startedPublishing: true,
+      blockReason: "owner_name_missing",
+      reasons: ["request_blocked" as const],
+    };
+    const needs = refusal(decide(blockedMidRun));
+    expect(needs.why).toBe("needs_resume");
+    expect(needs.lines.join(" ")).toContain(`nemar admin publish approve ${ID} --resume`);
+    expect(refusal(decide(blockedMidRun, FORCE)).why).toBe("needs_resume");
+    for (const gate of ["enforced", "off", "n/a"] as const) {
+      const d = proceeds(decide({ ...blockedMidRun, gate }, { ...NO_FLAGS, resume: true }));
+      expect(d.gate).toBe(gate);
+      expect(d.override).toBeNull();
+    }
+  });
+
+  test("a blocked request that never started publishing is still refused as blocked", () => {
+    const never = { status: "blocked", startedPublishing: false, blockReason: "ci_failed" };
+    expect(refusal(decide(never, { ...NO_FLAGS, resume: true })).why).toBe("blocked");
+  });
+
   test("an approving run that has NOT started publishing is gated like a fresh one", () => {
     const stopped = {
       status: "approving",
@@ -249,6 +239,42 @@ describe("3. a run that has started publishing is continued, not gated", () => {
       reasons: ["review_running" as const],
     };
     expect(refusal(decide(stopped, { ...NO_FLAGS, resume: true })).why).toBe("needs_force");
+  });
+});
+
+describe("3. a blocked request that has not started publishing is refused whatever the gate says", () => {
+  test("with the gate off, where the reasons are empty, the status is what says so", () => {
+    const d = refusal(
+      decide({ status: "blocked", gate: "off", blockReason: "min_requirements_failed" }),
+    );
+    expect(d.why).toBe("blocked");
+    expect(d.lines.join("\n")).toContain("The request is blocked (min_requirements_failed).");
+    expect(d.lines.join("\n")).toContain(REASONS.request_blocked.cure);
+  });
+
+  test("with the gate enforced, and with --force", () => {
+    for (const gate of ["enforced", "n/a"] as const) {
+      const spec = {
+        status: "blocked",
+        gate,
+        reasons: ["request_blocked" as const],
+        blockReason: "ci_failed",
+      };
+      expect(refusal(decide(spec)).why).toBe("blocked");
+      expect(refusal(decide(spec, FORCE)).why).toBe("blocked");
+    }
+  });
+
+  test("a block reason that has a hint carries it, as the Worker's refusal does", () => {
+    const d = refusal(
+      decide({ status: "blocked", gate: "off", blockReason: "owner_name_missing" }),
+    );
+    expect(d.lines.join("\n")).toContain("nemar admin backfill-names");
+  });
+
+  test("a blocked request with no block reason still says it is blocked", () => {
+    const d = refusal(decide({ status: "blocked", gate: "off", blockReason: null }));
+    expect(d.lines[0]).toContain("The request is blocked.");
   });
 });
 

@@ -2472,12 +2472,18 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     return c.json({ error: "No active publication request found" }, 404);
   }
 
-  // A blocked request is refused by the mechanical rules (ADR 0102): whatever the flag says, and
-  // for every dataset, before anything else decides anything, as `approve-dispatch` refuses it
-  // before its screen gate. A blocked request has never started a step (the one walk back to
-  // `blocked`, the owner-name check below, comes before the first), so this strands no run, and
-  // it holds for a resume too. The depositor fixes what blocked it and requests again.
-  if (request.status === "blocked") {
+  // A blocked request that has not started publishing is refused by the mechanical rules (ADR
+  // 0102): whatever the flag says, and for every dataset, before anything else decides anything,
+  // as `approve-dispatch` refuses it before its screen gate. It holds for a resume too, and the
+  // depositor fixes what blocked it and requests again.
+  //
+  // One that HAS started publishing is not refused here. The owner-name check below walks the
+  // request back to `blocked` on every call of a run, a resume and the batches of `s3_lock`
+  // included, so a depositor who clears their name mid-run blocks a run that is half published.
+  // The owner fixes the name and the run is resumed, as it was before the review existed;
+  // refusing it for good would strand a half-published dataset until a re-request.
+  const startedSteps = hasStartedPublishing(request.steps_completed);
+  if (request.status === "blocked" && !startedSteps) {
     return c.json(requestBlockedRefusal(datasetId, request.block_reason), 409);
   }
 
@@ -2489,6 +2495,26 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     request.approval_lease_live === 1,
     { id: adminUser.id, username: adminUser.username },
   );
+
+  // An override is the act of the administrator who sends it, and is recorded under the approver
+  // of record (ADR 0102, section 9). Inside a live web lease the approver is the administrator who
+  // clicked (ADR 0080), so another administrator's override would be recorded under the clicker's
+  // name, with the sender only as the executor. Refused until a dispatch token makes the
+  // attribution exact (#1604, Phase 3); this also means the executor's service account never
+  // records one (it sends none, and its run rides on the clicker's recorded override).
+  if (body.override_publication_review !== undefined && c.approver.id !== adminUser.id) {
+    console.warn(
+      `[publish] ${datasetId}: override refused, a web approval of request ${request.id} is in progress`,
+    );
+    return c.json(
+      {
+        error: "override_inside_web_approval",
+        message:
+          "A web approval of this request is in progress, so an override sent now would be recorded under the administrator who clicked. Wait for it to finish or stop, then approve again with --force.",
+      },
+      409,
+    );
+  }
 
   const stepsCompleted: PublicationStep[] = resume
     ? JSON.parse(request.steps_completed || "[]")
@@ -2543,9 +2569,10 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // pushed since the earlier attempt stopped (a failed ci_check leaves the row
   // `approving`), so a resume, or the import pipeline's resume-flagged retry of
   // a request that never started, is gated like a fresh run. Sandbox (`xx`)
-  // datasets are exempt inside the check.
+  // datasets are exempt inside the check. A run the owner-name walk-back blocked
+  // half way is a run that started: it is continued, not gated.
   const startedPublishing =
-    resume && request.status === "approving" && hasStartedPublishing(request.steps_completed);
+    resume && (request.status === "approving" || request.status === "blocked") && startedSteps;
   if (!startedPublishing) {
     const gate = await checkApprovalScreenGate(env, {
       requestId: request.id,
@@ -2563,7 +2590,9 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     // The publication review's gate (ADR 0102), after the screen's and before anything is
     // marked: a review that is not a pass needs the approver's recorded override, and a hard
     // reason is refused whatever the body says. Skipped (with the screen's) only for a run that has
-    // started publishing. Off and not-applicable datasets pass without a read of the review.
+    // started publishing. Off and not-applicable datasets pass without a read of the review. The
+    // screen's acknowledgment was recorded when the screen gate passed, on its own; only the
+    // override below is recorded last, once both gates have passed.
     const review = await evaluateApprovalReviewGate(env, {
       requestId: request.id,
       datasetId,
@@ -2596,16 +2625,34 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     }
   }
 
-  // Mark as approving
-  await db
+  // Mark as approving. Only a request that is still one an approval can act on (`requested`, or
+  // `approving` for a resume): the gates above read it a moment ago, and a result that re-blocked
+  // it since (a failed submission minimum, ADR 0102) or a denial would be overwritten by an
+  // unconditional write, and the run would publish over it. Nothing has run yet, so a request
+  // that changed is refused and read again. A request that was `blocked` when it was read got
+  // here only because it has started publishing (above), and is marked `approving` again.
+  const marked = await db
     .prepare(
       // `last_error = NULL`: a new attempt begins, so the previous attempt's
       // error is history (the caller's own output has it), and the row reads as
       // running, not failed, from this moment (services/approval-dispatch.ts).
-      "UPDATE publication_requests SET status = 'approving', approved_by = ?, last_error = NULL, updated_at = datetime('now') WHERE id = ?",
+      "UPDATE publication_requests SET status = 'approving', approved_by = ?, last_error = NULL, updated_at = datetime('now') WHERE id = ? AND status IN ('requested', 'approving', ?)",
     )
-    .bind(c.approver.id, request.id)
+    .bind(c.approver.id, request.id, request.status === "blocked" ? "blocked" : "approving")
     .run();
+  if ((marked.meta.changes ?? 0) !== 1) {
+    console.warn(
+      `[publish] ${datasetId}: approval refused, request ${request.id} changed while it was being checked`,
+    );
+    return c.json(
+      {
+        error: "request_changed",
+        message:
+          "The request changed while the approval was being checked (it was denied or blocked). Read it again before approving.",
+      },
+      409,
+    );
+  }
 
   // Get dataset info
   const dataset = await db

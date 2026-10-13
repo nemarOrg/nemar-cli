@@ -262,8 +262,9 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   and use the STRICTER of the two, so either can lower a verdict and neither can raise it (ADR 0093's rule).
   A stored report that no longer parses, or whose echoed commit or release kind differs from its row's,
   reads as `review_could_not_run` (`report_invalid`), and as `stored_verdict_fail` as well when the column says `fail`.
-  Live facts (a release row, a tag, the concept DOI, an earlier anonymous release) are read only for a request that is `requested` or `blocked`:
-  a request that is `approving` has written its own version row and DOI, and a request that is over shows its stored review only.
+  Live facts (a release row, a tag, the concept DOI, an earlier anonymous release) are read only for a request that is `requested` or `blocked`,
+  and for an `approving` run that stopped before it published (only the validation-only steps completed), which the gate checks again when it resumes and which has written neither a version row nor a DOI:
+  a run that has started publishing has written its own version row and DOI, and a request that is over shows its stored review only.
   A request that is not assessed (the review is off and no row exists, the request is over and has no row, a mirror or an exemplar)
   has no outcome and no reasons on any surface.
   A review that cannot be read says so and is never a pass: with the review on, a list row reads `unreadable` (action required, no reasons, one fixed headline)
@@ -394,7 +395,7 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   and the hand-over from the advisory pre-screen (with the flag on, the pre-screen of ADR 0014 is not dispatched for a dataset the review applies to,
   so the deploy that turns the review on is the one that stops it); it switches nothing else.
   The mechanical refusals ship unconditionally in Phase 2:
-  a `blocked` request cannot be approved, and the ADR 0026 minimums refuse wherever they are evaluated, whatever the flag says.
+  a `blocked` request that has not started publishing cannot be approved, and the ADR 0026 minimums refuse wherever they are evaluated, whatever the flag says.
   With the flag off, no review is started, the claim route refuses a new claim so that no model call is spent,
   the result route still stores the result of a run that took its claim (the call was spent, and the record stays honest),
   the watchdog still closes rows, the mail does not wait for a review,
@@ -423,7 +424,7 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   the model sees at most the caps of section 3 after normalization, a `participants.json` column's fields are cut at 100, 500 and 50 characters,
   the job samples at most 64 data sidecars and reduces them to at most 8 distinct sampling rates and 8 distinct channel counts,
   the watchdog takes at most 20 rows a tick, the job times out at 20 minutes, and the deadline for a report is 30.
-  A request's live facts are read only while it is `requested` or `blocked` (section 5).
+  A request's live facts are read only while it is `requested` or `blocked`, or `approving` and stopped before it published, and never for a run that has started publishing (section 5).
 
 ### 8. What the administrator sees and may do
 
@@ -486,6 +487,8 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
 - **Records.**
   An override writes an audit row, `publication_review_overridden`, with the request, the review, the outcome and the reasons,
   as the screen acknowledgment does; `start` writes `publication_review_started`, as `pr_review_started` does.
+  The audit row is best effort when the review row holds the override, and the only record when there is no row to hold it (a terminal's override of `review_not_started`),
+  so there a failed audit write refuses the approval as `unverified`.
   The approval's audit row records `review_gate` (`enforced`, `off` or `n/a`) and whether `--skip-ci-check` was used.
 
 ### 9. Who approves
@@ -495,6 +498,8 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   An override and a screen acknowledgment are recorded with that administrator's id and what they were shown,
   and satisfy a later run only when that run is attributed to the same administrator;
   a run attributed to anyone else passes the gate on its own or not at all.
+  Only the override is recorded last, for an approval that goes on;
+  the screen's acknowledgment is recorded when the screen gate passes and stands on its own, so an approval the review then refuses leaves it on the record, as intended.
 - **No Worker code path decides an approval or a denial.**
   The review never calls `/approve` or `/deny`, and nothing is denied automatically.
   The only status a review changes is the mechanical `requested` to `blocked` of section 5, which ADR 0026 already makes.
@@ -502,6 +507,8 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
 - **Making "attributed to" exact is Phase 3's, and its shape is set here.**
   Until then ADR 0080's lease-based attribution stands, with the gap #1604 describes:
   a terminal approval inside a live web lease is recorded as the clicker's, and could ride on the clicker's recorded override.
+  Until then an override sent inside a live web lease by anyone but the clicker is refused (`override_inside_web_approval`),
+  so none is ever recorded under another administrator's name; the ride on the clicker's own recorded override stays as it is.
   The proposed fix is a dispatch token minted per claim and valid only while that claim's lease is live.
   The executor presents it on every `/approve` call of that run, one per batch and retry, so it cannot be single-use,
   and `approve-publication.yml` masks it as its first step, as `run-pr-review.yml` masks its token.
@@ -630,7 +637,9 @@ The maintainer decided all twelve on 2026-10-12, as recommended, and amended cal
 4. (Amended.) The version facts need `--force`,
    except that a named publication after an anonymous release that keeps its version is hard;
    `version_already_released` fires only for a version row, or for a tag that names another commit than the reviewed head.
-5. A `blocked` request cannot be approved from a terminal, unconditionally.
+5. (Amended.) A `blocked` request cannot be approved from a terminal, unconditionally, unless it has started publishing:
+   the owner-name check walks a request back to `blocked` on every call of a run, so a depositor who clears their name mid-run blocks a half-published run,
+   and that run is resumed once the name is back, with no gate asked, as an `approving` one is (the detail's `started_publishing` is true for it).
 6. Haiku 5.5 at `high`, checked by an offline calibration before the soak (design note),
    and re-run on Sonnet 5.5 if more than one in five non-pass outcomes is judged wrong.
 7. The mail waits for the review.
@@ -658,7 +667,9 @@ The maintainer decided all twelve on 2026-10-12, as recommended, and amended cal
    (ADR 0068 names `nm099997` as the next one; created only after step 3, and never approved under a name).
    A fix to the script found by the soak reaches the soak only through another production release.
 6. Add the review's statement to the policy pages, after the separate docs change that corrects them for current practice.
-7. Ship Phases 3 and 4, then add `PUBLICATION_REVIEW_ENABLED = "1"` to `[vars]`,
+7. Fix #1604 (a terminal approval inside a live web lease is attributed to the administrator who clicked; Phase 3 attributes it to its own caller),
+   which production must not be lit without; until then the Worker refuses an override sent inside a web approval (`override_inside_web_approval`).
+8. Ship Phases 3 and 4, then add `PUBLICATION_REVIEW_ENABLED = "1"` to `[vars]`,
    delete the `PRESCREEN_ENABLED` secret and disable `run-prescreen.yml` (section 10),
    and run `nemar admin publish start --all` once for the requests already open.
 

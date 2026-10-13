@@ -21,6 +21,7 @@ import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Server } from "bun";
 import { Hono } from "hono";
+import { APPROVAL_REFUSAL_ERROR_CODES } from "../../shared/contract/publication";
 import {
   OVERRIDE_FIELD,
   type PublicationReviewDetail,
@@ -251,7 +252,7 @@ describe("with the review off the gate reads nothing", () => {
   });
 });
 
-describe("a blocked request is refused by the mechanical rules, whatever the flag says", () => {
+describe("a blocked request that has not started publishing is refused by the mechanical rules, whatever the flag says", () => {
   for (const lit of [true, false] as const) {
     for (const [what, over] of [
       ["a native dataset", {}],
@@ -259,9 +260,10 @@ describe("a blocked request is refused by the mechanical rules, whatever the fla
     ] as const) {
       for (const [steps, body] of [
         [[], { resume: false }],
-        [PUBLICATION_STEPS, { resume: true }],
+        // Only the validation-only steps: nothing has changed yet, so this is not a run that started.
+        [["ci_check", "enrichment_check"], { resume: true }],
       ] as const) {
-        test(`2. ${what}, flag ${lit ? "on" : "off"}, ${steps.length === 0 ? "a fresh run" : "every step done"}: 409 request_blocked, nothing started`, async () => {
+        test(`2. ${what}, flag ${lit ? "on" : "off"}, ${steps.length === 0 ? "a fresh run" : "only the validation steps done, resumed"}: 409 request_blocked, nothing started`, async () => {
           const { requestId, datasetId } = seed({
             ...over,
             requestStatus: "blocked",
@@ -288,6 +290,78 @@ describe("a blocked request is refused by the mechanical rules, whatever the fla
       }
     }
   }
+});
+
+describe("a blocked request that HAS started publishing is not refused: the owner-name walk-back strands no run", () => {
+  // The walk-back to `blocked` (the owner's name is missing) runs on every `/approve` call, the
+  // batches of `s3_lock` included, so a depositor who clears their name mid-lock blocks a run that
+  // is half published. The owner fixes the name and the run is resumed; a refusal that no re-run
+  // could cure would leave the dataset half published until a re-request.
+  for (const lit of [true, false] as const) {
+    for (const [what, over] of [
+      ["a native dataset", {}],
+      ["a mirror", { source: "openneuro", datasetId: MIRROR }],
+    ] as const) {
+      test(`2. ${what}, flag ${lit ? "on" : "off"}: a resume carries on past the blocked status, and no gate is asked`, async () => {
+        const { requestId, datasetId } = seedFailing({
+          ...over,
+          requestStatus: "blocked",
+          blockReason: "owner_name_missing",
+          steps: DONE,
+        });
+        // The screened commit is no longer `main`, as it is once the run's own steps committed.
+        mainHead = OTHER_HEAD;
+        const res = await approve({ resume: true }, { dataset: datasetId, bindings: env({}, lit) });
+        expect(res.status).toBe(200);
+        expect(requestRow(requestId).status).toBe("published");
+        expect(requestRow(requestId).approved_by).toBe(adminA);
+        expect(calls.filter((c) => /\/git\/ref\//.test(c.path))).toHaveLength(0);
+        expect(overrideRows()).toHaveLength(0);
+      });
+    }
+  }
+
+  test("2. the walk-back as it happens: blocked again while the name is missing, resumed once it is back", async () => {
+    const { requestId } = seed({ requestStatus: "approving", steps: DONE });
+    const clearName = (given: string | null) =>
+      db.run("UPDATE users SET given_name = ? WHERE username = ?", [given, `depositor_${DATASET}`]);
+    clearName(null);
+    // The call that finds the name gone walks the request back to blocked.
+    const first = await approve({ resume: true });
+    expect(first.status).toBe(422);
+    expect(requestRow(requestId).status).toBe("blocked");
+    expect(requestRow(requestId).block_reason).toBe("owner_name_missing");
+    // Calling again is the same answer, not a 409 that no resume could cure.
+    const second = await approve({ resume: true });
+    expect(second.status).toBe(422);
+    expect(((await second.json()) as { block_reason?: string }).block_reason).toBe(
+      "owner_name_missing",
+    );
+    expect(requestRow(requestId).status).toBe("blocked");
+    expect(JSON.parse(String(requestRow(requestId).steps_completed))).toEqual([...DONE]);
+    // The name is back: the same resume finishes the run.
+    clearName("Ada");
+    const third = await approve({ resume: true });
+    expect(third.status).toBe(200);
+    expect(requestRow(requestId).status).toBe("published");
+  });
+
+  test("2. without --resume the run would start over, so the refusal stands for it", async () => {
+    // `resume: false` discards the step list, which for a run that started is not a continuation.
+    // It reaches the gates like a fresh run, and the blocked request is refused there.
+    const { requestId } = seed({
+      requestStatus: "blocked",
+      blockReason: "owner_name_missing",
+      steps: DONE,
+    });
+    const res = await approve({ resume: false });
+    const body = await refusalOf(res);
+    expect(body.refusal).toBe("hard_reason");
+    expect(body.reasons.map((r) => r.code)).toContain("request_blocked");
+    expect(requestRow(requestId).status).toBe("blocked");
+    expect(JSON.parse(String(requestRow(requestId).steps_completed))).toEqual([...DONE]);
+    expect(auditRows("dataset_published")).toHaveLength(0);
+  });
 });
 
 describe("a dataset the review does not apply to, and one it passes", () => {
@@ -759,8 +833,8 @@ describe("an override is its approver's, and it is recorded once", () => {
   test("23. #1604 as it stands: a terminal approval by B inside A's live web lease is A's, and rides on A's override", async () => {
     // Pinned so Phase 3 flips it on purpose: until a dispatch token makes attribution exact
     // (ADR 0102 section 9, #1604), a run inside a live lease is attributed to the clicker, and so
-    // satisfies the gate on the clicker's recorded override and records new ones under the
-    // clicker's id.
+    // satisfies the gate on the clicker's recorded override. (A NEW override sent from a terminal
+    // inside the lease is refused, below, so none is recorded under the clicker's id.)
     const { requestId, reviewId } = seedFailing();
     db.run(
       `UPDATE publication_reviews
@@ -785,16 +859,66 @@ describe("an override is its approver's, and it is recorded once", () => {
   });
 });
 
-describe("#1604 as it stands: a terminal approval inside a live web lease is the clicker's", () => {
-  test("23. an override given by B inside A's live lease is recorded under A, with B as the executor", async () => {
-    // Pinned with the test above so Phase 3 flips both on purpose.
-    const { requestId, reviewId } = seedFailing();
+describe("#1604 as it stands: an override is never recorded under another administrator's name", () => {
+  // Until a dispatch token makes attribution exact (ADR 0102 section 9, #1604, Phase 3), a terminal
+  // approval inside a live web lease is attributed to the clicker. The ride on the clicker's own
+  // recorded override (test 23, above) stays as it is; a NEW override sent from a terminal inside
+  // a lease would be recorded as the clicker's, with the sender as the executor, so it is refused.
+  const lease = (requestId: number) =>
     db.run(
       `UPDATE publication_requests
           SET approval_requested_by = ?, approval_dispatched_at = datetime('now', '-1 minutes')
         WHERE id = ?`,
       [adminA, requestId],
     );
+  const INSIDE_MESSAGE =
+    "A web approval of this request is in progress, so an override sent now would be recorded under the administrator who clicked. Wait for it to finish or stop, then approve again with --force.";
+
+  test("23. an override sent by B inside A's live lease is refused, and recorded under nobody", async () => {
+    const { requestId, reviewId } = seedFailing();
+    lease(requestId);
+    const res = await approve(
+      {
+        resume: true,
+        override_publication_review: { review_id: reviewId, reasons: ["question_failed"] },
+      },
+      { key: ADMIN_B_KEY },
+    );
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body).toEqual({ error: "override_inside_web_approval", message: INSIDE_MESSAGE });
+    expect(APPROVAL_REFUSAL_ERROR_CODES).toContain(body.error);
+    // Nothing ran and nothing was recorded, under A or under B.
+    expect(reviewRow(reviewId).override_by).toBeNull();
+    expect(reviewRow(reviewId).override_reasons).toBeNull();
+    expect(overrideRows()).toHaveLength(0);
+    const row = requestRow(requestId);
+    expect(row.status).toBe("requested");
+    expect(row.approved_by).toBeNull();
+    expect(auditRows("dataset_published")).toHaveLength(0);
+    // The lease is the clicker's still: refusing the override did not touch it.
+    expect(row.approval_requested_by).toBe(adminA);
+  });
+
+  test("23. the refusal is for the override and nothing else: B's bodies without one, and A's own, pass as before", async () => {
+    const { requestId, reviewId } = seedFailing();
+    lease(requestId);
+    // No override from B: the gate answers as it does (A recorded none, so one is needed).
+    const bare = await approve({ resume: true }, { key: ADMIN_B_KEY });
+    expect((await refusalOf(bare)).refusal).toBe("needs_override");
+    // A's own override inside A's own lease is A's act, recorded under A.
+    const own = await approve({
+      resume: true,
+      override_publication_review: { review_id: reviewId, reasons: ["question_failed"] },
+    });
+    expect(own.status).toBe(200);
+    expect(reviewRow(reviewId).override_by).toBe(adminA);
+    expect(overrideRows()).toHaveLength(1);
+    expect(requestRow(requestId).status).toBe("published");
+  });
+
+  test("23. outside any lease a terminal's override is its own, B's included", async () => {
+    const { reviewId } = seedFailing();
     const res = await approve(
       {
         resume: true,
@@ -803,11 +927,22 @@ describe("#1604 as it stands: a terminal approval inside a live web lease is the
       { key: ADMIN_B_KEY },
     );
     expect(res.status).toBe(200);
-    expect(reviewRow(reviewId).override_by).toBe(adminA);
-    const audit = overrideRows();
-    expect(audit).toHaveLength(1);
-    expect(audit[0].user_id).toBe(adminA);
-    expect(audit[0].details).toMatchObject({ via: "approve", executed_by: adminB });
+    expect(reviewRow(reviewId).override_by).toBe(adminB);
+    expect(overrideRows()[0].details).not.toHaveProperty("executed_by");
+  });
+
+  test("23. the executor sends no override, so the run rides on the clicker's recorded one: unchanged, #1604 is Phase 3's", async () => {
+    // The shape of `approve-dispatch` followed by the executor's run (test 12, above), with the
+    // refusal in place: nothing the executor needs is an override.
+    const { requestId, reviewId } = seedFailing();
+    const dispatched = await dispatchApproval({
+      override_publication_review: { review_id: reviewId, reasons: ["question_failed"] },
+    });
+    expect(dispatched.status).toBe(202);
+    const run = await approve({ resume: true }, { key: ADMIN_B_KEY });
+    expect(run.status).toBe(200);
+    expect(requestRow(requestId).approved_by).toBe(adminA);
+    expect(overrideRows()).toHaveLength(1);
   });
 });
 
@@ -876,6 +1011,283 @@ describe("the gate runs on a resume that has not started publishing, and only on
     expect(body.refusal).toBe("override_not_covering");
     expect(body.uncovered).toEqual(["review_did_not_report"]);
     expect(requestRow(requestId).approved_by).toBeNull();
+  });
+});
+
+describe("a run that stopped before it published is gated on the version and DOI facts too", () => {
+  // `approving` with no step after the validation-only ones done: the run is gated again when it
+  // resumes (test 16's counterpart), and nothing it ran so far wrote a `dataset_versions` row or a
+  // concept DOI, so those facts are about an EARLIER release exactly as they are for `requested`.
+  const STOPPED = { requestStatus: "approving", steps: [] } as const;
+  const VERSION_DOI = "10.82901/nm.test";
+
+  /** An anonymous release of 1.0.0 that left its version row, before this request. */
+  function anonymousReleaseOfOneZero(): void {
+    seed({ anonymous: true, requestStatus: "published" });
+    db.run("INSERT INTO dataset_versions (dataset_id, version, doi) VALUES (?, '1.0.0', ?)", [
+      DATASET,
+      VERSION_DOI,
+    ]);
+  }
+
+  test("5. the probe: forced over a running review, stopped at the CI check, resumed with the report a pass: refused, and the detail says why", async () => {
+    // The review had not reported when the administrator forced past it, so no version was known
+    // and the gate had nothing to refuse. The report lands as a pass, naming 1.0.0, which an
+    // anonymous release already used; the resume is gated again and must see it.
+    bidsConclusion = "failure";
+    anonymousReleaseOfOneZero();
+    const { requestId } = seed({ steps: [] });
+    const reviewId = seedPublicationReview(db, {
+      requestId,
+      datasetId: DATASET,
+      state: "dispatched",
+      createdMinutesAgo: 5,
+      claimed: true,
+    });
+    const forced = await approve({
+      resume: true,
+      override_publication_review: { review_id: reviewId, reasons: ["review_running"] },
+    });
+    expect(forced.status).toBe(422);
+    expect(((await forced.json()) as { step?: string }).step).toBe("ci_check");
+    expect(requestRow(requestId).status).toBe("approving");
+    expect(JSON.parse(String(requestRow(requestId).steps_completed))).toEqual([]);
+
+    const nonce = (
+      db.query("SELECT nonce FROM publication_reviews WHERE id = ?").get(reviewId) as {
+        nonce: string;
+      }
+    ).nonce;
+    const stored = await storePublicationReviewResult(env(), reviewId, DATASET, nonce, {
+      kind: "reported",
+      report: parsePublicationReviewReport(goodPublicationReport()),
+    });
+    expect(stored.stored).toBe(true);
+
+    // What the administrator is shown now, and what the gate says to a resume with no flag.
+    const detail = await detailOf();
+    expect(detail.request_status).toBe("approving");
+    expect(detail.started_publishing).toBe(false);
+    expect(detail.reasons.map((r) => r.code)).toEqual(["version_kept_after_anonymous_release"]);
+    const resumed = await approve({ resume: true });
+    const body = await refusalOf(resumed);
+    expect(body.refusal).toBe("hard_reason");
+    expect(body.message).toContain(REASONS.version_kept_after_anonymous_release.sentence);
+    expect(body.reasons).toEqual(detail.reasons);
+    // The earlier forced run's step list is untouched: nothing ran for the refused resume.
+    expect(JSON.parse(String(requestRow(requestId).steps_completed))).toEqual([]);
+    expect(requestRow(requestId).approved_by).toBe(adminA);
+    expect(auditRows("dataset_published")).toHaveLength(0);
+  });
+
+  test("5. a named run that keeps the version an anonymous release used is refused the same way when it stopped before publishing", async () => {
+    anonymousReleaseOfOneZero();
+    const { requestId, reviewId } = seedFailing(STOPPED, goodPublicationReport());
+    const res = await approve({
+      resume: true,
+      override_publication_review: {
+        review_id: reviewId,
+        reasons: ["version_kept_after_anonymous_release", "version_already_released"],
+      },
+    });
+    const body = await refusalOf(res);
+    expect(body.refusal).toBe("hard_reason");
+    expect(body.message).toContain(REASONS.version_kept_after_anonymous_release.sentence);
+    expect(body.reasons.map((r) => r.code)).toEqual(["version_kept_after_anonymous_release"]);
+    expect((await detailOf()).reasons).toEqual(body.reasons);
+    expect(requestRow(requestId).approved_by).toBeNull();
+    expect(overrideRows()).toHaveLength(0);
+  });
+
+  test("5. a failed submission minimum is refused whatever the override says when the run stopped before publishing", async () => {
+    const { requestId, reviewId } = seedFailing(
+      STOPPED,
+      goodPublicationReport({
+        evidence: evidenceFor(SCREENED_HEAD, false, {
+          minimums: "failed",
+          minimum_failures: ["name_too_short"],
+          name_length: 5,
+        }),
+      }),
+    );
+    const res = await approve({
+      resume: true,
+      override_publication_review: {
+        review_id: reviewId,
+        reasons: ["submission_minimum_failed", "question_failed"],
+      },
+    });
+    const body = await refusalOf(res);
+    expect(body.refusal).toBe("hard_reason");
+    expect(body.reasons.map((r) => r.code)).toContain("submission_minimum_failed");
+    expect((await detailOf()).reasons).toEqual(body.reasons);
+    expect(requestRow(requestId).approved_by).toBeNull();
+    expect(overrideRows()).toHaveLength(0);
+  });
+
+  test("9. a version the dataset already released needs the override from a run that stopped before publishing, and the override then passes", async () => {
+    bidsConclusion = "failure";
+    // A named request for a version an earlier NAMED release already published: not the anonymous
+    // case, so `version_already_released`, which an override clears.
+    seed({ requestStatus: "published" });
+    db.run("INSERT INTO dataset_versions (dataset_id, version, doi) VALUES (?, '1.0.0', ?)", [
+      DATASET,
+      VERSION_DOI,
+    ]);
+    const { requestId, reviewId } = seedFailing(STOPPED, goodPublicationReport());
+    const detail = await detailOf();
+    expect(detail.reasons.map((r) => r.code)).toEqual(["version_already_released"]);
+
+    const refused = await refusalOf(await approve({ resume: true }));
+    expect(refused.refusal).toBe("needs_override");
+    expect(refused.uncovered).toEqual(["version_already_released"]);
+    expect(requestRow(requestId).approved_by).toBeNull();
+
+    const res = await approve({
+      resume: true,
+      override_publication_review: { review_id: reviewId, reasons: ["version_already_released"] },
+    });
+    // Past the gate, stopped by the BIDS check: the override named what stood.
+    expect(res.status).toBe(422);
+    expect(((await res.json()) as { step?: string }).step).toBe("ci_check");
+    expect(reviewRow(reviewId).override_reasons).toBe(JSON.stringify(["version_already_released"]));
+  });
+
+  test("9. a concept DOI the dataset already carries is a reason for a run that stopped before publishing", async () => {
+    seedFailing(STOPPED, goodPublicationReport());
+    db.run("UPDATE datasets SET concept_doi = '10.82901/nm.concept' WHERE dataset_id = ?", [
+      DATASET,
+    ]);
+    const refused = await refusalOf(await approve({ resume: true }));
+    expect(refused.refusal).toBe("needs_override");
+    expect(refused.uncovered).toEqual(["doi_state_unexpected"]);
+  });
+
+  test("16. a run that HAS started publishing reads none of them: its own version row and DOI are not an earlier release", async () => {
+    // The run wrote these itself (`doi_create`, `create_tag`), so reading them as live facts would
+    // say "already released" about a run that has to be resumed, with `approve --force` as the way.
+    const { requestId } = seedFailing({ requestStatus: "approving", steps: DONE });
+    db.run("INSERT INTO dataset_versions (dataset_id, version, doi) VALUES (?, '1.0.0', ?)", [
+      DATASET,
+      VERSION_DOI,
+    ]);
+    db.run("UPDATE datasets SET concept_doi = '10.82901/nm.concept' WHERE dataset_id = ?", [
+      DATASET,
+    ]);
+    const detail = await detailOf();
+    expect(detail.started_publishing).toBe(true);
+    expect(detail.reasons.map((r) => r.code)).not.toContain("version_already_released");
+    expect(detail.reasons.map((r) => r.code)).not.toContain("doi_state_unexpected");
+    expect(detail.reasons.map((r) => r.code)).not.toContain("version_kept_after_anonymous_release");
+    const res = await approve({ resume: true });
+    expect(res.status).toBe(200);
+    expect(requestRow(requestId).status).toBe("published");
+    expect(overrideRows()).toHaveLength(0);
+  });
+});
+
+describe("the mark that starts an approval does not overwrite a change made while it was checked", () => {
+  /** The statement that marks the request `approving`: the first write of a run past the gates. */
+  const isMark = (sql: string) => /UPDATE publication_requests SET status = 'approving'/.test(sql);
+  const REQUEST_CHANGED_MESSAGE =
+    "The request changed while the approval was being checked (it was denied or blocked). Read it again before approving.";
+
+  test("21. a failed-minimum report that re-blocks the request between the gate and the mark is not undone by the approval", async () => {
+    // The administrator forces over a review that is still running; the override commits on the
+    // review row. Then the job's report lands with a failed submission minimum, and its batch moves
+    // the request to `blocked` (REBLOCK_SQL). The mark must not flip it back to `approving`.
+    const { requestId } = seed();
+    const reviewId = seedPublicationReview(db, {
+      requestId,
+      datasetId: DATASET,
+      state: "dispatched",
+      createdMinutesAgo: 5,
+      claimed: true,
+    });
+    const nonce = (
+      db.query("SELECT nonce FROM publication_reviews WHERE id = ?").get(reviewId) as {
+        nonce: string;
+      }
+    ).nonce;
+    const real = realD1(db);
+    const racing = interceptingD1(real, async (sql) => {
+      if (!isMark(sql)) return;
+      const stored = await storePublicationReviewResult(
+        env({ DB: real }),
+        reviewId,
+        DATASET,
+        nonce,
+        {
+          kind: "reported",
+          report: parsePublicationReviewReport(
+            goodPublicationReport({
+              evidence: evidenceFor(SCREENED_HEAD, false, {
+                minimums: "failed",
+                minimum_failures: ["name_too_short"],
+                name_length: 5,
+              }),
+            }),
+          ),
+        },
+      );
+      expect(stored.stored).toBe(true);
+    });
+    const res = await approve(
+      {
+        resume: true,
+        override_publication_review: { review_id: reviewId, reasons: ["review_running"] },
+      },
+      { bindings: env({ DB: racing }) },
+    );
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body).toEqual({ error: "request_changed", message: REQUEST_CHANGED_MESSAGE });
+    expect(APPROVAL_REFUSAL_ERROR_CODES).toContain(body.error);
+    const row = requestRow(requestId);
+    // As the report's batch left it: blocked, with its reason, and nothing of an approval on it.
+    expect(row.status).toBe("blocked");
+    expect(row.block_reason).toBe("min_requirements_failed");
+    expect(row.approved_by).toBeNull();
+    expect(JSON.parse(String(row.steps_completed))).toEqual([...DONE]);
+    expect(auditRows("dataset_published")).toHaveLength(0);
+    // The screen gate's read of `main` is the only call: no step ran.
+    expect(calls.filter((c) => !/\/git\/ref\//.test(c.path))).toEqual([]);
+  });
+
+  test("21. a denial that lands between the gate and the mark is not undone either", async () => {
+    const { requestId } = seed();
+    seedPublicationReview(db, { requestId, datasetId: DATASET, state: "reported" });
+    const real = realD1(db);
+    const racing = interceptingD1(real, (sql) => {
+      if (isMark(sql)) {
+        db.run("UPDATE publication_requests SET status = 'denied' WHERE id = ?", [requestId]);
+      }
+    });
+    const res = await approve({ resume: true }, { bindings: env({ DB: racing }) });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: "request_changed",
+      message: REQUEST_CHANGED_MESSAGE,
+    });
+    expect(requestRow(requestId).status).toBe("denied");
+    expect(requestRow(requestId).approved_by).toBeNull();
+    expect(auditRows("dataset_published")).toHaveLength(0);
+  });
+
+  test("21. a request that is still waiting, or already approving, is marked as before", async () => {
+    const waiting = seed();
+    seedPublicationReview(db, {
+      requestId: waiting.requestId,
+      datasetId: DATASET,
+      state: "reported",
+    });
+    expect((await approve()).status).toBe(200);
+    expect(requestRow(waiting.requestId).status).toBe("published");
+    expect(requestRow(waiting.requestId).approved_by).toBe(adminA);
+
+    const resumed = seed({ datasetId: "nm000484", requestStatus: "approving", steps: DONE });
+    expect((await approve({ resume: true }, { dataset: "nm000484" })).status).toBe(200);
+    expect(requestRow(resumed.requestId).status).toBe("published");
   });
 });
 
@@ -954,6 +1366,64 @@ describe("what the gate cannot decide it refuses", () => {
     expect(body.refusal).toBe("unverified");
     expect(requestRow(requestId).status).toBe("requested");
     expect(reviewRow(reviewId).override_by).toBeNull();
+    expect(overrideRows()).toHaveLength(0);
+  });
+
+  test("18. an override with no review row is recorded nowhere but the audit row, so a failed audit write approves nothing", async () => {
+    // A terminal's `--force` over `review_not_started`: there is no row to hold the override, so
+    // the audit row is the ONLY record of it. Best effort here would approve over a non-pass with
+    // the override recorded nowhere, so a write that fails refuses, as a failed write to the row does.
+    const { requestId } = seed();
+    const noAudit = hookedD1(realD1(db), {
+      statement: (sql) => {
+        if (/INSERT INTO audit_log/.test(sql)) throw new Error("the audit write failed");
+      },
+    });
+    const res = await approve(
+      {
+        resume: true,
+        override_publication_review: { review_id: null, reasons: ["review_not_started"] },
+      },
+      { bindings: env({ DB: noAudit }) },
+    );
+    const body = await refusalOf(res);
+    expect(body.refusal).toBe("unverified");
+    expect(body.fact).toBe("review");
+    expect(body.message).toBe(reviewGateRefusalText("unverified", DATASET));
+    expect(requestRow(requestId).status).toBe("requested");
+    expect(requestRow(requestId).approved_by).toBeNull();
+    expect(reviewRows()).toHaveLength(0);
+    expect(overrideRows()).toHaveLength(0);
+    expect(auditRows("dataset_published")).toHaveLength(0);
+
+    // With the audit table writable again the same request goes through, so the refusal was the
+    // missing record and nothing else.
+    const again = await approve({
+      resume: true,
+      override_publication_review: { review_id: null, reasons: ["review_not_started"] },
+    });
+    expect(again.status).toBe(200);
+    expect(overrideRows()).toHaveLength(1);
+  });
+
+  test("18. with a review row the audit row stays best effort: the override is on the row, and a lost audit write refuses nothing", async () => {
+    const { requestId, reviewId } = seedFailing();
+    const noAudit = hookedD1(realD1(db), {
+      statement: (sql) => {
+        if (/INSERT INTO audit_log/.test(sql)) throw new Error("the audit write failed");
+      },
+    });
+    const res = await approve(
+      {
+        resume: true,
+        override_publication_review: { review_id: reviewId, reasons: ["question_failed"] },
+      },
+      { bindings: env({ DB: noAudit }) },
+    );
+    expect(res.status).toBe(200);
+    expect(requestRow(requestId).status).toBe("published");
+    expect(reviewRow(reviewId).override_by).toBe(adminA);
+    expect(reviewRow(reviewId).override_reasons).toBe(JSON.stringify(["question_failed"]));
     expect(overrideRows()).toHaveLength(0);
   });
 
