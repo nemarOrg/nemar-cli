@@ -28,8 +28,9 @@
  *     makes compatibility normalization quadratic) withholds the document as unreadable, the
  *     compatibility step sees at most four caps of text, and JSON nesting past 32 levels is refused.
  *  2. The string is then built in full and cut: the prose text, or the serialized normalized
- *     structure (the shown keys of `dataset_description.json`; the column descriptions of
- *     `participants.json`, which are only `LongName`, `Description` and `Units`, each cut short),
+ *     structure (the shown keys of `dataset_description.json`; for `participants.json` a count and
+ *     the column descriptions, which are only `LongName`, `Description` and `Units`, each cut
+ *     short, and never a column's name),
  *     cut to its cap on a character boundary. The text rule runs over THAT string, so a finding in
  *     the part a cut removes does not withhold prose whose sent bytes are clean, and no byte the
  *     rules did not see is ever sent.
@@ -56,6 +57,7 @@ import {
   type FindingKind,
   countByKind,
   scanJsonKeys,
+  scanTableColumns,
   scanTextForLocalPaths,
   shapeOf,
 } from "../../shared/identifier-scan";
@@ -97,6 +99,20 @@ type Prepared =
  * (a column description is a short name, a sentence or two, and a unit).
  */
 export const PARTICIPANT_FIELD_CAPS = { LongName: 100, Description: 500, Units: 50 } as const;
+/**
+ * A participants.json of more columns than this is keyed by participant, not by variable: it is
+ * withheld as unreadable. Real files have a few dozen columns.
+ */
+export const PARTICIPANT_MAX_COLUMNS = 200;
+/** A column name longer than this is not a variable name (it is a phrase, or a person). */
+export const PARTICIPANT_KEY_MAX = 64;
+/**
+ * What a study code looks like (`sub01`, `S01`, `P001`, `participant_01`, `subject-01`): the shared
+ * rule's own pattern, `SUBJECT_LABEL` in `shared/identifier-scan.ts`, which does not export it. A
+ * test reads that file and fails if the two differ, so the copy cannot drift.
+ */
+export const PARTICIPANT_LABEL = /^(sub|subj|subject|s|p|pt|participant)[-_ ]?\d+$/i;
+const PARTICIPANT_NUMBER = /^[+-]?\d+(?:[.,]\d+)?$/;
 
 /**
  * The deepest nesting a JSON document may have, counting the object at its root as level 1. Real
@@ -390,39 +406,46 @@ function prepare(document: ReviewDocument, raw: RawDocument): Prepared {
 const SUBJECT_LABEL_KEY = /^\s*sub-/i;
 
 /**
- * participants.json, reduced to what ADR 0101 says the model is shown: the column descriptions.
- * For each top-level column that is its `LongName`, `Description` and `Units` where they are
- * strings, each cut to {@link PARTICIPANT_FIELD_CAPS}, and nothing else: no levels, links, other
- * keys or values of any participant. The file must be an object of objects (a column is an object);
- * anything else is unreadable. A column named like a subject label means the file is keyed by
- * participant, and it is withheld whole.
+ * participants.json, reduced to what ADR 0101 says the model is shown: the column descriptions, and
+ * not the columns' names. What is sent is `{ column_count, columns }`: for each top-level column, in
+ * file order and with no key, its `LongName`, `Description` and `Units` where they are strings, each
+ * cut to {@link PARTICIPANT_FIELD_CAPS}, and nothing else (no levels, links, other keys or values of
+ * any participant). The key of a column is never sent: a file keyed by participant (`sub01`, `S01`,
+ * `Jane Doe`) would send every label.
  *
- * The key rule reads the whole normalized file, not only what is kept, so a column named for an
- * identifier is a finding whatever it holds. The path rules read what is sent.
+ * Withheld as unreadable: not an object of objects, more than {@link PARTICIPANT_MAX_COLUMNS}
+ * columns, nested too deep. Withheld with a finding: a key that is a study code (the shared
+ * `SUBJECT_LABEL` pattern, or `sub-` followed by anything), a number, longer than
+ * {@link PARTICIPANT_KEY_MAX}, or named for an identifier (read by the JSON key rule and the
+ * participants table's column rule whatever the column holds, because a column called `name` or
+ * `email` is the finding even when it is empty). Every key
+ * of the file is read as it would be normalized. The key rule also reads the keys inside each
+ * column, and the path rules read what is sent.
  */
 function prepareParticipants(parsed: Record<string, unknown>, cap: number): Prepared {
-  if (!Object.values(parsed).every(isPlainObject) || nestedDeeperThan(parsed, MAX_JSON_DEPTH)) {
+  const entries = Object.entries(parsed);
+  if (
+    entries.length > PARTICIPANT_MAX_COLUMNS ||
+    !entries.every(([, column]) => isPlainObject(column)) ||
+    nestedDeeperThan(parsed, MAX_JSON_DEPTH)
+  ) {
     return { kind: "no-text", state: "withheld_unreadable" };
   }
-  const whole = normalizeStructure(parsed, cap) as Record<string, Record<string, unknown>>;
-  let fieldCut = false;
-  const reduced = Object.fromEntries(
-    Object.entries(whole).map(([column, description]) => {
-      const fields: Record<string, string> = {};
-      for (const field of Object.keys(
-        PARTICIPANT_FIELD_CAPS,
-      ) as (keyof typeof PARTICIPANT_FIELD_CAPS)[]) {
-        const value = Object.hasOwn(description, field) ? description[field] : undefined;
-        if (typeof value !== "string") continue;
-        const { text, cut } = cutTo(value, PARTICIPANT_FIELD_CAPS[field]);
-        fields[field] = text;
-        fieldCut ||= cut;
-      }
-      return [column, fields];
-    }),
-  );
-  const findings: Finding[] = [...scanJsonKeys(whole), ...scanStructureForPaths(reduced)];
-  if (Object.keys(whole).some((column) => SUBJECT_LABEL_KEY.test(column))) {
+  // Every column kept, in order: an object keyed by the normalized names would lose one of two
+  // names that normalize alike, and the count would be wrong.
+  const columns = entries.map(([key, column]) => ({
+    key: normalizeBounded(key, cap).text,
+    value: normalizeStructure(column, cap) as Record<string, unknown>,
+  }));
+
+  const findings: Finding[] = [];
+  const labelled = columns.some(({ key }) => {
+    const bare = key.trim();
+    return (
+      SUBJECT_LABEL_KEY.test(key) || PARTICIPANT_LABEL.test(bare) || PARTICIPANT_NUMBER.test(bare)
+    );
+  });
+  if (labelled) {
     findings.push({
       kind: "path-subject-label",
       severity: "review",
@@ -430,7 +453,43 @@ function prepareParticipants(parsed: Record<string, unknown>, cap: number): Prep
       shape: shapeOf("sub-"),
     });
   }
-  const sent = toSent(JSON.stringify(reduced, null, 2), cap);
+  if (columns.some(({ key }) => key.length > PARTICIPANT_KEY_MAX)) {
+    findings.push({
+      kind: "participants-identifier-column",
+      severity: "review",
+      field: "participants-key",
+      shape: shapeOf("long"),
+    });
+  }
+  for (const { key, value } of columns) {
+    // The name of the column, by the two shared rules that know names: the JSON key rule (given a
+    // value, because it looks for content, so that it reads the name only) and the participants
+    // table's column rule (`name`, `email`, `dob`, ...). One finding per column at most. Then the
+    // keys inside the column.
+    const named = scanJsonKeys({ [key]: "x" });
+    findings.push(...(named.length > 0 ? named : scanTableColumns(key)), ...scanJsonKeys(value));
+  }
+
+  let fieldCut = false;
+  const descriptions = columns.map(({ value }) => {
+    const fields: Record<string, string> = {};
+    for (const field of Object.keys(
+      PARTICIPANT_FIELD_CAPS,
+    ) as (keyof typeof PARTICIPANT_FIELD_CAPS)[]) {
+      const text = Object.hasOwn(value, field) ? value[field] : undefined;
+      if (typeof text !== "string") continue;
+      const { text: kept, cut } = cutTo(text, PARTICIPANT_FIELD_CAPS[field]);
+      fields[field] = kept;
+      fieldCut ||= cut;
+    }
+    return fields;
+  });
+  findings.push(...scanStructureForPaths(descriptions));
+
+  const sent = toSent(
+    JSON.stringify({ column_count: descriptions.length, columns: descriptions }, null, 2),
+    cap,
+  );
   return {
     kind: "text",
     sent: sent.sent,

@@ -2010,38 +2010,88 @@ describe("a local path inside a JSON string never reaches the model, however it 
 });
 
 describe("participants.json: the model is shown the column descriptions and nothing else", () => {
-  test("levels, links, other keys and per-participant values are not in the request", async () => {
+  test("levels, links, other keys, per-participant values and the column names are not in the request", async () => {
     const ds = newDataset("participants-reduced", {
       "participants.json": JSON.stringify({
-        participant_id: {
+        SENTINEL_COLUMN_ONE: {
           LongName: "Participant label",
           Description: "Unique label of the participant",
           Levels: { "sub-SENTINELSUBJ": "SENTINEL_LEVEL" },
           TermURL: "https://example.org/SENTINEL_TERM",
         },
-        age: { Description: "Age at recording", Units: "years", Minimum: 18, SENTINEL_KEY: 1 },
-        group: { Levels: { patient: "SENTINEL_GROUP_LEVEL", control: "x" } },
+        SENTINEL_COLUMN_TWO: {
+          Description: "Age at recording",
+          Units: "years",
+          Minimum: 18,
+          SENTINEL_KEY: 1,
+        },
+        SENTINEL_COLUMN_THREE: { Levels: { patient: "SENTINEL_GROUP_LEVEL", control: "x" } },
       }),
     });
     const report = await reviewOf(ds);
     expect(report.evidence.documents.participants_json).toBe("sent");
     const { raw, user } = theRequest();
     expect(raw).not.toMatch(
-      /SENTINEL_(LEVEL|TERM|KEY|GROUP_LEVEL)|SENTINELSUBJ|Minimum|TermURL|Levels/,
+      /SENTINEL_(LEVEL|TERM|KEY|GROUP_LEVEL|COLUMN)|SENTINELSUBJ|Minimum|TermURL|Levels/,
     );
-    // What is sent: the descriptions, in the fenced block, in a fixed order.
+    // What is sent: a count and the descriptions in file order, in the fenced block, with no key.
     const block = user.slice(
       user.indexOf('kind="participants_json">'),
       user.indexOf("</untrusted-", user.indexOf('kind="participants_json">')),
     );
     expect(JSON.parse(block.slice(block.indexOf("{"), block.lastIndexOf("}") + 1))).toEqual({
-      participant_id: {
-        LongName: "Participant label",
-        Description: "Unique label of the participant",
-      },
-      age: { Description: "Age at recording", Units: "years" },
-      group: {},
+      column_count: 3,
+      columns: [
+        { LongName: "Participant label", Description: "Unique label of the participant" },
+        { Description: "Age at recording", Units: "years" },
+        {},
+      ],
     });
+  });
+
+  test.each(["sub01", "S01", "P001", "participant_01", "subject-01", "01"])(
+    "a file keyed by %s is withheld whole, and none of its keys or values is sent",
+    async (key) => {
+      const ds = newDataset(`participants-label-${key}`, {
+        "participants.json": JSON.stringify({
+          [key]: { Description: "SENTINEL_VALUE" },
+          other: { Description: "SENTINEL_OTHER" },
+        }),
+      });
+      const report = await reviewOf(ds);
+      expect(report.evidence.documents.participants_json).toBe("withheld_finding");
+      expect(report.evidence.withheld_findings).toEqual({ "path-subject-label": 1 });
+      expect(theRequest().raw).not.toMatch(/SENTINEL/);
+    },
+  );
+
+  test("a column named for a person is sent as its description alone, and the name is not in the request", async () => {
+    const ds = newDataset("participants-person-name", {
+      "participants.json": JSON.stringify({
+        "SENTINEL Jane Doe": { Description: "age 34, right-handed" },
+      }),
+    });
+    const report = await reviewOf(ds);
+    expect(report.evidence.documents.participants_json).toBe("sent");
+    const { raw, user } = theRequest();
+    expect(raw).not.toMatch(/SENTINEL|Jane Doe/);
+    expect(user).toContain('"column_count": 1');
+    expect(user).toContain('"Description": "age 34, right-handed"');
+  });
+
+  test("an identifier column with nothing in it is withheld, and a file of 201 columns is unreadable", async () => {
+    const ds = newDataset("participants-empty-name", {
+      "participants.json": JSON.stringify({ participant_id: { Description: "label" }, email: {} }),
+    });
+    expect((await reviewOf(ds)).evidence.documents.participants_json).toBe("withheld_finding");
+    modelRequests.length = 0;
+    const many = Object.fromEntries(
+      Array.from({ length: 201 }, (_, i) => [`column_${i}_x`, { Description: "x" }]),
+    );
+    const big = newDataset("participants-201", { "participants.json": JSON.stringify(many) });
+    const report = await reviewOf(big);
+    expect(report.evidence.documents.participants_json).toBe("withheld_unreadable");
+    expect(theRequest().raw).not.toMatch(/column_\d+_x/);
   });
 
   test("a file keyed by subject is withheld whole, and no label or value of it is sent", async () => {

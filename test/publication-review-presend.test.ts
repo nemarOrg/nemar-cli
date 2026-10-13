@@ -17,6 +17,9 @@ import {
   MAX_COMBINING_RUN,
   MAX_JSON_DEPTH,
   PARTICIPANT_FIELD_CAPS,
+  PARTICIPANT_KEY_MAX,
+  PARTICIPANT_LABEL,
+  PARTICIPANT_MAX_COLUMNS,
   normalizeBounded,
   normalizeText,
   presend,
@@ -75,8 +78,13 @@ describe("a clean set of documents is sent, exactly as it will be fenced", () =>
     expect(r.cleared.readme as string).toBe(input.readme.text as string);
     expect(r.cleared.changes as string).toBe(input.changes.text as string);
     expect(r.cleared.license as string).toBe(input.license.text as string);
+    // participants.json is sent as a count and its column descriptions, without the column names.
     expect(r.cleared.participants_json as string).toBe(
-      JSON.stringify(JSON.parse(input.participants_json.text as string), null, 2),
+      JSON.stringify(
+        { column_count: 2, columns: [{ Description: "Unique label" }, { Units: "years" }] },
+        null,
+        2,
+      ),
     );
     expect(r.cleared.dataset_description as string).toBe(
       JSON.stringify(
@@ -1220,12 +1228,16 @@ describe("a path in a JSON string is found as the person who reads the string wo
   });
 });
 
-describe("participants.json: the column descriptions only, under the same rules (#1728)", () => {
+describe("participants.json: the column descriptions only, and never a column's name (#1728)", () => {
   // ADR 0101, section 3: "participants.json, the column descriptions". A column description is
   // LongName, Description and Units. Everything else a participants.json can hold (the levels of a
-  // categorical column, links, per-participant values someone typed in) is not sent.
+  // categorical column, links, per-participant values someone typed in) is not sent, and neither is
+  // the key of a column: a file keyed by participant (`sub01`, `S01`, `Jane Doe`) would send every
+  // label. What is sent is a count and the descriptions in file order, with no key.
   const sendParticipants = (object: unknown) =>
     presend(docs({ participants_json: present(JSON.stringify(object), "participants.json") }));
+  const sentOf = (object: unknown) =>
+    JSON.parse(sendParticipants(object).cleared.participants_json as string);
 
   test("an identifier-named column key with content withholds it", () => {
     const text = JSON.stringify({
@@ -1238,12 +1250,26 @@ describe("participants.json: the column descriptions only, under the same rules 
     expect(r.withheld_findings).toEqual({ "json-identifier-key": 1 });
   });
 
-  test("the key rule reads the whole file, so an identifier column that is not sent still withholds it", () => {
-    // A column named for an identifier is a finding wherever its content sits: the rule is stricter
-    // than what is sent, never weaker.
+  test.each([
+    ["an empty object", {}],
+    ["an empty description", { Description: "" }],
+    ["levels only", { Levels: { a: "b" } }],
+    ["a description", { Description: "Full name of the participant" }],
+  ])("an identifier-named column is withheld whatever it holds: %s", (_what, value) => {
+    for (const key of ["name", "email", "birthdate", "patientname", "Phone"]) {
+      const r = sendParticipants({ participant_id: { Description: "label" }, [key]: value });
+      expect(r.states.participants_json, key).toBe("withheld_finding");
+      // One finding for the one column, of the JSON key kind or the table-column kind.
+      expect(
+        Object.values(r.withheld_findings).reduce((a, b) => a + (b ?? 0), 0),
+        key,
+      ).toBe(1);
+    }
+  });
+
+  test("a key inside a column is still read by the key rule", () => {
     const r = sendParticipants({
-      participant_id: { Description: "label" },
-      email: { Levels: { a: "b" } },
+      participant_id: { Description: "label", Levels: { email: "a@example.org" } },
     });
     expect(r.states.participants_json).toBe("withheld_finding");
     expect(r.withheld_findings).toEqual({ "json-identifier-key": 1 });
@@ -1254,7 +1280,7 @@ describe("participants.json: the column descriptions only, under the same rules 
     expect(cut.states.participants_json).toBe("withheld_finding");
   });
 
-  test("only LongName, Description and Units of each column are sent, in that order", () => {
+  test("a count and the descriptions in file order are sent: LongName, Description, Units, no key", () => {
     const r = sendParticipants({
       participant_id: {
         Units: "n/a",
@@ -1272,28 +1298,59 @@ describe("participants.json: the column descriptions only, under the same rules 
     expect(sent).toBe(
       JSON.stringify(
         {
-          participant_id: { LongName: "Participant", Description: "Unique label", Units: "n/a" },
-          sex: {},
-          age: { Description: "Age at recording", Units: "years" },
+          column_count: 3,
+          columns: [
+            { LongName: "Participant", Description: "Unique label", Units: "n/a" },
+            {},
+            { Description: "Age at recording", Units: "years" },
+          ],
         },
         null,
         2,
       ),
     );
-    for (const leak of ["SENTINEL", "sub-01", "male", "Minimum", "TermURL", "Levels"]) {
+    // No column key, and nothing else of the file.
+    for (const leak of [
+      "participant_id",
+      '"sex"',
+      '"age"',
+      "SENTINEL",
+      "sub-01",
+      "male",
+      "TermURL",
+    ]) {
       expect(sent).not.toContain(leak);
     }
   });
 
+  test("the keys are never sent, whatever they look like", () => {
+    const keys = [
+      "Jane Doe",
+      "visual_acuity",
+      "handedness",
+      "x".repeat(60),
+      "p300_amplitude",
+      "colonne é",
+    ];
+    const sent = sendParticipants(
+      Object.fromEntries(keys.map((k, i) => [k, { Description: `column ${i}` }])),
+    ).cleared.participants_json as string;
+    for (const key of keys) expect(sent).not.toContain(key);
+    expect(JSON.parse(sent).columns).toHaveLength(keys.length);
+  });
+
+  test("a column named for a person is not a name in the sent text, only its description is", () => {
+    const sent = sentOf({ "Jane Doe": { Description: "age 34, right-handed" } });
+    expect(sent).toEqual({ column_count: 1, columns: [{ Description: "age 34, right-handed" }] });
+  });
+
   test("a field that is not a string is not sent", () => {
-    const r = sendParticipants({
-      a: { LongName: 5, Description: ["x", "y"], Units: { u: "years" } },
-      b: { LongName: null, Description: true, Units: "years" },
-    });
-    expect(JSON.parse(r.cleared.participants_json as string)).toEqual({
-      a: {},
-      b: { Units: "years" },
-    });
+    expect(
+      sentOf({
+        a: { LongName: 5, Description: ["x", "y"], Units: { u: "years" } },
+        b: { LongName: null, Description: true, Units: "years" },
+      }),
+    ).toEqual({ column_count: 2, columns: [{}, { Units: "years" }] });
   });
 
   test("each field is cut to its own short cap, and a cut is a fact", () => {
@@ -1313,8 +1370,8 @@ describe("participants.json: the column descriptions only, under the same rules 
     const sent = JSON.parse(r.cleared.participants_json as string);
     for (const field of ["LongName", "Description", "Units"] as const) {
       const cap = PARTICIPANT_FIELD_CAPS[field];
-      expect(sent.col[field]).toBe(`${field[0]?.repeat(cap)}\n[cut]`);
-      expect(sent.whole[field]).toBe(field[0]?.repeat(cap));
+      expect(sent.columns[0][field]).toBe(`${field[0]?.repeat(cap)}\n[cut]`);
+      expect(sent.columns[1][field]).toBe(field[0]?.repeat(cap));
     }
     // And a column nothing was cut from says nothing of the kind.
     const clean = sendParticipants({ col: { Units: "years" } });
@@ -1323,20 +1380,28 @@ describe("participants.json: the column descriptions only, under the same rules 
 
   test("a cut between the halves of an emoji ends before it", () => {
     const cap = PARTICIPANT_FIELD_CAPS.Description;
-    const r = sendParticipants({ col: { Description: `${"a".repeat(cap - 1)}\u{1F600}b` } });
-    expect(JSON.parse(r.cleared.participants_json as string).col.Description).toBe(
-      `${"a".repeat(cap - 1)}\n[cut]`,
-    );
+    expect(
+      sentOf({ col: { Description: `${"a".repeat(cap - 1)}\u{1F600}b` } }).columns[0].Description,
+    ).toBe(`${"a".repeat(cap - 1)}\n[cut]`);
   });
 
   test.each([
     ["sub-01", "sub-01"],
+    ["sub01", "sub01"],
+    ["sub_01", "sub_01"],
+    ["S01", "S01"],
+    ["P001", "P001"],
+    ["pt7", "pt7"],
+    ["participant_01", "participant_01"],
+    ["subject-01", "subject-01"],
+    ["subj 12", "subj 12"],
     ["in capitals", "SUB-02"],
     ["mixed case", "Sub-jsmith"],
     ["after a space", " sub-03"],
     ["after an invisible character", "\u200bsub-04"],
     ["after a variation selector", "\uFE0Fsub-05"],
-  ])("a column named like a subject label withholds the whole file: %s", (_what, key) => {
+    ["fullwidth", fullwidth("sub01")],
+  ])("a column named like a participant label withholds the whole file: %s", (_what, key) => {
     const r = sendParticipants({
       participant_id: { Description: "label" },
       [key]: { Description: "x", Units: "y" },
@@ -1344,24 +1409,93 @@ describe("participants.json: the column descriptions only, under the same rules 
     expect(r.states.participants_json).toBe("withheld_finding");
     expect(r.cleared.participants_json).toBeUndefined();
     expect(r.withheld_findings).toEqual({ "path-subject-label": 1 });
-    expect(JSON.stringify(r)).not.toMatch(/jsmith|sub-0/i);
+    expect(JSON.stringify(r)).not.toMatch(/jsmith|sub-0|S01|P001/i);
+  });
+
+  test.each(["01", "1", "123", "-4", "12.5", "007"])(
+    "a column that is a number is a label: %s",
+    (key) => {
+      const r = sendParticipants({ [key]: { Description: "x" } });
+      expect(r.states.participants_json).toBe("withheld_finding");
+      expect(r.withheld_findings).toEqual({ "path-subject-label": 1 });
+    },
+  );
+
+  test("a key longer than 64 characters is not a column name, and withholds the file", () => {
+    const ok = sendParticipants({ [`${"c".repeat(PARTICIPANT_KEY_MAX)}`]: { Description: "x" } });
+    expect(ok.states.participants_json).toBe("sent");
+    const long = sendParticipants({
+      [`${"c".repeat(PARTICIPANT_KEY_MAX + 1)}`]: { Description: "x" },
+    });
+    expect(long.states.participants_json).toBe("withheld_finding");
+    expect(long.withheld_findings).toEqual({ "participants-identifier-column": 1 });
   });
 
   test("a file keyed by subject is one finding, however many subjects", () => {
     const keyed = Object.fromEntries(
       Array.from({ length: 50 }, (_, i) => [`sub-${i}`, { age: 30 }]),
     );
-    const r = sendParticipants(keyed);
-    expect(r.withheld_findings).toEqual({ "path-subject-label": 1 });
+    expect(sendParticipants(keyed).withheld_findings).toEqual({ "path-subject-label": 1 });
+    const numbers = Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`${i}`, { age: 30 }]));
+    expect(sendParticipants(numbers).withheld_findings).toEqual({ "path-subject-label": 1 });
   });
 
-  test("only a prefix is a subject label: sub inside a name, or without the hyphen, is a column", () => {
+  test("two columns whose names normalize alike are two columns, and are counted as two", () => {
+    // As keys of one object they would be one; the count and the list follow the file.
+    const text =
+      '{"a\\u200b":{"Description":"first"},"a ":{"Description":"second"},"b":{"Units":"u"}}';
+    const r = presend(docs({ participants_json: present(text, "participants.json") }));
+    expect(JSON.parse(r.cleared.participants_json as string)).toEqual({
+      column_count: 3,
+      columns: [{ Description: "first" }, { Description: "second" }, { Units: "u" }],
+    });
+  });
+
+  test("a word that begins like a label is a column: subject_group, subtype, a hyphenated sub", () => {
     const r = sendParticipants({
       subject_group: { Description: "g" },
       subtype: { Description: "t" },
       "pre-sub-": { Description: "x" },
+      participant_id: { Description: "label" },
+      age: { Units: "years" },
     });
     expect(r.states.participants_json).toBe("sent");
+  });
+
+  test("the shared rule's own pattern is the one used here (the shared constant is not exported)", () => {
+    const shared = readFileSync(
+      join(import.meta.dir, "..", "shared", "identifier-scan.ts"),
+      "utf8",
+    );
+    expect(shared).toContain(`const SUBJECT_LABEL = ${PARTICIPANT_LABEL.toString()};`);
+  });
+
+  test("more than 200 columns is a file keyed by participant: unreadable, not sent", () => {
+    const columns = (n: number) =>
+      Object.fromEntries(Array.from({ length: n }, (_, i) => [`col${i}x`, { Description: "x" }]));
+    expect(PARTICIPANT_MAX_COLUMNS).toBe(200);
+    // 200 is the limit and is read: its column_count is 200 whether or not the text is cut.
+    expect(sentOf(columns(200)).column_count).toBe(200);
+    expect(sentOf(columns(100)).column_count).toBe(100);
+    const r = sendParticipants(columns(201));
+    expect(r.states.participants_json).toBe("withheld_unreadable");
+    expect(r.cleared.participants_json).toBeUndefined();
+    expect(r.withheld_findings).toEqual({});
+  });
+
+  test("a __proto__ column is a column, and its description is read", () => {
+    const text = '{"__proto__":{"Description":"/Users/jsmith/x"}}';
+    const r = presend(docs({ participants_json: present(text, "participants.json") }));
+    expect(r.states.participants_json).toBe("withheld_finding");
+    expect(r.withheld_findings).toEqual({ "local-user-path": 1 });
+  });
+
+  test("a path in a description is still a path, whatever the column is called", () => {
+    for (const key of ["age", "Jane Doe", "visual_acuity"]) {
+      const r = sendParticipants({ [key]: { Description: "Collected by /home/jsmith/forms" } });
+      expect(r.states.participants_json, key).toBe("withheld_finding");
+      expect(r.withheld_findings).toEqual({ "local-user-path": 1 });
+    }
   });
 
   test.each([
@@ -1377,10 +1511,13 @@ describe("participants.json: the column descriptions only, under the same rules 
     expect(r.withheld_findings).toEqual({});
   });
 
-  test("an empty object is a file with no columns, and is sent as one", () => {
+  test("an empty object is a file with no columns, and is sent as a count of none", () => {
     const r = sendParticipants({});
     expect(r.states.participants_json).toBe("sent");
-    expect(r.cleared.participants_json as string).toBe("{}");
+    expect(JSON.parse(r.cleared.participants_json as string)).toEqual({
+      column_count: 0,
+      columns: [],
+    });
   });
 
   test("an array, or text that is not JSON, is withheld as not JSON", () => {
