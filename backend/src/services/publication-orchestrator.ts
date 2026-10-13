@@ -71,7 +71,7 @@ import { getDatasetsToken } from "./github-auth";
 import { checkApprovalScreenGate, hasStartedPublishing } from "./identifier-screen";
 import { generateManifest } from "./manifest";
 import { scheduleNeurobagelSync } from "./neurobagel-hooks.js";
-import { requestBlockedRefusal } from "./publication-review-gate.js";
+import { requestBlockedRefusal, reviewGateStateOf } from "./publication-review-gate.js";
 import { BIDS_METADATA_UNAVAILABLE, errorMessage, readRepoMetadata } from "./repo-metadata";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "./repo-spec";
 import { withRetry } from "./retry";
@@ -459,6 +459,25 @@ async function stepCiCheck(c: ApproveStepContext): Promise<RespondOutcome | unde
   if (stepsToRun.includes("ci_check")) {
     if (body.skip_ci_check) {
       console.warn(`[publish] CI check skipped by admin ${adminUser.username} for ${datasetId}`);
+      // The skip is on the record when it happens: the approval's own row says only what the call
+      // that FINISHED the run asked for, and a run resumed with another flag would lose it.
+      // Best effort, like the approval's row: a missing row never changes the run.
+      try {
+        await auditLogStatement(c.db, {
+          userId: c.approver.id,
+          action: "publication_ci_check_skipped",
+          resourceType: "dataset",
+          resourceId: datasetId,
+          details: JSON.stringify({
+            request_id: c.requestId,
+            ...(c.approver.id !== adminUser.id ? { executed_by: adminUser.id } : {}),
+          }),
+        }).run();
+      } catch (auditError) {
+        console.error(
+          `[publish] audit write for the skipped CI check on ${datasetId} failed: ${errorMessage(auditError)}`,
+        );
+      }
       await updateProgress("ci_check");
     } else {
       try {
@@ -2744,6 +2763,11 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
           ? { executed_by: adminUser.username || String(adminUser.id) }
           : {}),
         steps: allSteps,
+        // The review gate's state for this environment and dataset when the row is written, and
+        // the flag of the call that finished the run. A skip is also its own row when it happens
+        // (`publication_ci_check_skipped`), which survives a resume with another flag.
+        review_gate: reviewGateStateOf(env, dataset),
+        skip_ci_check: body.skip_ci_check,
       }),
     }).run();
   } catch (auditError) {

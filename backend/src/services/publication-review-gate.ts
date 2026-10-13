@@ -28,6 +28,17 @@ import {
   type RequestBlockedRefusalBody,
 } from "../../../shared/contract/publication-review-admin.js";
 import { REASONS, cureOf, shownBlockReason } from "../../../shared/publication-review.js";
+import type { Bindings } from "../types/bindings";
+import { publicationReviewApplies, reviewEnabled } from "./publication-review-view.js";
+
+/** The gate's state for this environment and dataset: what the approval's audit row records. */
+export function reviewGateStateOf(
+  env: Bindings,
+  dataset: { source?: string | null; is_exemplar?: number | null },
+): "enforced" | "off" | "n/a" {
+  if (!reviewEnabled(env)) return "off";
+  return publicationReviewApplies(dataset) ? "enforced" : "n/a";
+}
 
 /**
  * The 409 body for a blocked request. It holds whatever the flag says and for every dataset, since

@@ -28,9 +28,12 @@ import { freshDb, realD1 } from "./helpers/d1";
 import { SCREENED_HEAD } from "./helpers/identifier-screen";
 import {
   type SeedScreenedRequest,
+  failingReport,
+  seedPublicationReview,
   seedScreenedRequest,
   seedUser,
 } from "./helpers/publication-review";
+import { hookedD1 } from "./helpers/publication-review-harness";
 
 const ADMIN_A_KEY = "review-gate-admin-a-0123456789abcdef0123456789abcdef";
 const ADMIN_B_KEY = "review-gate-admin-b-0123456789abcdef0123456789abcdef";
@@ -170,6 +173,49 @@ function published(): { user_id: number; details: Record<string, unknown> } {
 
 // ============================================================================
 
+describe("with the review off the gate reads nothing", () => {
+  test("1. a failing review does not gate; the run publishes and records that the gate was off", async () => {
+    const { requestId } = seed();
+    seedPublicationReview(db, {
+      requestId,
+      datasetId: DATASET,
+      state: "reported",
+      report: failingReport(),
+    });
+    const res = await approve({ resume: true }, { bindings: env({}, false) });
+    expect(res.status).toBe(200);
+    expect(requestRow(requestId).status).toBe("published");
+    expect(published().details).toMatchObject({ review_gate: "off", skip_ci_check: false });
+    expect(auditRows("publication_review_overridden")).toHaveLength(0);
+  });
+
+  test("1. with every read of the review table failing the run still publishes: the gate read nothing", async () => {
+    const { requestId } = seed();
+    seedPublicationReview(db, {
+      requestId,
+      datasetId: DATASET,
+      state: "reported",
+      report: failingReport(),
+    });
+    const reads: string[] = [];
+    const broken = hookedD1(realD1(db), {
+      statement: (sql) => {
+        // The gate's two reads: the request with its dataset (the detail's shape, which carries
+        // the dataset's size), and the review's own table.
+        if (/ds_total_files/.test(sql)) reads.push("request");
+        if (/publication_reviews/.test(sql)) {
+          reads.push("review");
+          throw new Error("the review table is unreadable");
+        }
+      },
+    });
+    const res = await approve({ resume: true }, { bindings: env({ DB: broken }, false) });
+    expect(res.status).toBe(200);
+    expect(requestRow(requestId).status).toBe("published");
+    expect(reads).toEqual([]);
+  });
+});
+
 describe("a blocked request is refused by the mechanical rules, whatever the flag says", () => {
   for (const lit of [true, false] as const) {
     for (const [what, over] of [
@@ -207,4 +253,68 @@ describe("a blocked request is refused by the mechanical rules, whatever the fla
       }
     }
   }
+});
+
+describe("a dataset the review does not apply to, and one it passes", () => {
+  test("3. a mirror and an exemplar publish with no override, and the gate says n/a", async () => {
+    const mirror = seed({ source: "openneuro", datasetId: MIRROR });
+    const res = await approve({ resume: true }, { dataset: MIRROR });
+    expect(res.status).toBe(200);
+    expect(requestRow(mirror.requestId).status).toBe("published");
+    expect(published().details).toMatchObject({ review_gate: "n/a" });
+
+    const exemplar = seed({ isExemplar: 1, datasetId: EXEMPLAR });
+    const second = await approve(
+      { resume: true, sandbox: true },
+      { dataset: EXEMPLAR, bindings: env({ ENVIRONMENT: "staging" }) },
+    );
+    expect(second.status).toBe(200);
+    expect(requestRow(exemplar.requestId).status).toBe("published");
+    const rows = auditRows("dataset_published");
+    expect(rows).toHaveLength(2);
+    expect(rows[1].details).toMatchObject({ review_gate: "n/a" });
+    // No review was read or written for either.
+    expect(reviewRows()).toHaveLength(0);
+    expect(auditRows("publication_review_overridden")).toHaveLength(0);
+  });
+
+  test("4. a reported pass publishes with nothing recorded, and the gate says enforced", async () => {
+    const { requestId } = seed();
+    const reviewId = seedPublicationReview(db, {
+      requestId,
+      datasetId: DATASET,
+      state: "reported",
+    });
+    const res = await approve();
+    expect(res.status).toBe(200);
+    expect(requestRow(requestId).status).toBe("published");
+    expect(published().details).toMatchObject({ review_gate: "enforced", skip_ci_check: false });
+    expect(reviewRows()).toHaveLength(1);
+    expect(reviewRows()[0]).toMatchObject({
+      id: reviewId,
+      override_by: null,
+      override_at: null,
+      override_reasons: null,
+    });
+    expect(auditRows("publication_review_overridden")).toHaveLength(0);
+  });
+});
+
+describe("--skip-ci-check is recorded", () => {
+  test("19. a run that skips the CI check says so in the approval's row and in a row of its own", async () => {
+    // Only the CI check and the enrichment check left, so the run reaches the skip with no network.
+    const { requestId } = seed({
+      steps: DONE.filter((s) => s !== "ci_check"),
+    });
+    const res = await approve({ resume: true, skip_ci_check: true });
+    expect(res.status).toBe(200);
+    expect(requestRow(requestId).status).toBe("published");
+    expect(published().details).toMatchObject({ skip_ci_check: true });
+    const skipped = auditRows("publication_ci_check_skipped");
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0].user_id).toBe(adminA);
+    expect(skipped[0].details).toEqual({ request_id: requestId });
+    // The BIDS conclusion was never asked for.
+    expect(calls.filter((c) => /bids-validation/.test(c.path))).toHaveLength(0);
+  });
 });
