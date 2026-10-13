@@ -1244,6 +1244,13 @@ describe("an administrator's start", () => {
       [requestId],
     );
     expect((await go()).reason).toBe("screen_not_ready");
+    // A screen whose gate blocks is not reviewable even when it names a commit: the gate decides,
+    // not the presence of a head.
+    h.db.run(
+      "UPDATE publication_requests SET identifier_screen_status = 'direct-identifiers' WHERE id = ?",
+      [requestId],
+    );
+    expect((await go()).reason).toBe("screen_not_ready");
     const mirror = seedScreenedRequest(h.db, { datasetId: "nm000483", source: "openneuro" });
     expect((await go(h.env(), mirror.requestId, "nm000483")).reason).toBe("not_applicable");
     expect(h.reviews()).toHaveLength(0);

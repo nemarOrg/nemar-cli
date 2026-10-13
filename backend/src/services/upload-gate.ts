@@ -160,9 +160,9 @@ export const EXPLICIT_ID_NOT_RESERVED_ERROR = {
   error: "explicit_id_not_reserved",
   message:
     // I-12: names the SECOND requirement too. The earlier message advertised
-    // the whole reserved band, so an operator picked nm099997 -- then the next
+    // the whole reserved band, so an operator picked nm099997 (then the next
     // standing fixture ADR 0068 designated, since declared for ADR 0101's
-    // review -- and hit a refusal this sentence had not predicted. The next
+    // review) and hit a refusal this sentence had not predicted. The next
     // undeclared one is nm099996.
     "Only ids the allocator can never mint may be named: nm099900-nm099999 and xx099900-xx099999 (ADR 0068). A reserved nm id must also be declared in DEV_OWNED_FIXTURE_IDS before it can be created.",
 } as const;
