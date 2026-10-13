@@ -11,7 +11,7 @@
  * only from what was shown. The ten steps run in a fixed order, so most cases here are the same
  * review under two different flags. The reasons are made by the Worker's own `reasonViewsOf`, so a
  * sentence, a cure or a class the table changes changes here too, and the agreement with the real
- * gate is tested end to end in `admin-publish-approve-cli.test.ts`.
+ * gate is tested end to end in `admin-publish-approve-agreement.test.ts`.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -28,13 +28,17 @@ import {
   REASONS,
   REASON_CODES,
   type ReasonCode,
+  reasonLine,
+  reviewGateRefusalText,
 } from "../shared/publication-review";
+import { ApiError } from "../src/lib/api/errors";
 import {
   type ApproveDecision,
   type ApproveOptions,
   type ReviewRead,
   decideApproval,
   parseReviewDetail,
+  reasonViewLine,
 } from "../src/lib/publication-review-approve";
 
 const ID = "nm000460";
@@ -120,6 +124,17 @@ function detailOf(spec: Spec = {}): PublicationReviewDetail {
 
 const read = (spec?: Spec): ReviewRead => ({ kind: "detail", detail: detailOf(spec) });
 
+/** The reasons of `detail` as a Worker that sends `line` sends them: the whole reason in the shared words. */
+function withLines(detail: PublicationReviewDetail): PublicationReviewDetail {
+  return {
+    ...detail,
+    reasons: detail.reasons.map((r) => ({
+      ...r,
+      line: reasonLine({ code: r.code, detail: r.detail }, ID, null, false),
+    })),
+  };
+}
+
 const NO_FLAGS: ApproveOptions = { force: false, acknowledge: undefined, resume: false };
 const FORCE: ApproveOptions = { ...NO_FLAGS, force: true };
 
@@ -139,9 +154,8 @@ function proceeds(d: ApproveDecision) {
 }
 
 describe("1. a review that could not be read is the Worker's to judge", () => {
-  test("unreadable: proceed with no override, the gate unknown, and say why", () => {
-    const d = proceeds(decideApproval(ID, { kind: "unreadable", why: "HTTP 500" }, FORCE));
-    expect(d.gate).toBe("unknown");
+  test("unreadable: proceed with no override, and say why", () => {
+    const d = proceeds(decideApproval(ID, { kind: "unreadable", why: "HTTP 500" }, NO_FLAGS));
     expect(d.override).toBeNull();
     expect(d.notes).toEqual([
       "The publication review could not be read (HTTP 500); the API still checks it.",
@@ -150,14 +164,12 @@ describe("1. a review that could not be read is the Worker's to judge", () => {
 
   test("a backend with no review route", () => {
     const d = proceeds(decideApproval(ID, { kind: "absent", why: "no_route" }, NO_FLAGS));
-    expect(d.gate).toBe("unknown");
     expect(d.override).toBeNull();
     expect(d.notes).toEqual(["This API has no publication review."]);
   });
 
   test("no active request: the Worker answers 404, the CLI does not decide for it", () => {
     const d = proceeds(decideApproval(ID, { kind: "absent", why: "no_request" }, NO_FLAGS));
-    expect(d.gate).toBe("unknown");
     expect(d.override).toBeNull();
     expect(d.notes.join(" ")).toContain("No active publication request");
   });
@@ -169,6 +181,34 @@ describe("1. a review that could not be read is the Worker's to judge", () => {
       { kind: "absent", why: "no_request" },
     ] as const) {
       expect(proceeds(decideApproval(ID, r, FORCE)).override).toBeNull();
+    }
+  });
+
+  test("the Worker's own refusal of the read (a bad id, no key, not an administrator) changes nothing for a caller that does not stop on it", () => {
+    // `approve` stops on `refused`; `next` does not read it, and decides as it did.
+    const refused = new ApiError(403, "Admin access required");
+    const d = proceeds(
+      decideApproval(ID, { kind: "unreadable", why: "HTTP 403", refused }, NO_FLAGS),
+    );
+    expect(d.notes).toEqual([
+      "The publication review could not be read (HTTP 403); the API still checks it.",
+    ]);
+  });
+
+  test("--force says it was not sent, for every read that gave nothing to override", () => {
+    // Otherwise the API's "approve over it with --force" reaches someone who just passed it.
+    const NOT_SENT = "--force was not sent: no review could be read to approve over.";
+    const reads = [
+      { kind: "unreadable", why: "HTTP 500" },
+      { kind: "absent", why: "no_route" },
+      { kind: "absent", why: "no_request" },
+    ] as const;
+    for (const r of reads) {
+      const withForce = proceeds(decideApproval(ID, r, FORCE));
+      expect(withForce.notes, r.kind + r.why).toHaveLength(2);
+      expect(withForce.notes[1]).toBe(NOT_SENT);
+      // ... and says nothing about it when it was not given.
+      expect(proceeds(decideApproval(ID, r, NO_FLAGS)).notes.join(" ")).not.toContain("--force");
     }
   });
 });
@@ -187,10 +227,9 @@ describe("2. a run that has started publishing is continued, not gated", () => {
     expect(refusal(decide(spec, FORCE)).why).toBe("needs_resume");
   });
 
-  test("with --resume it proceeds with no override, the gate as the Worker reported it", () => {
+  test("with --resume it proceeds with no override, whatever the gate", () => {
     for (const gate of ["enforced", "off", "n/a"] as const) {
       const d = proceeds(decide({ ...spec, gate }, { ...NO_FLAGS, resume: true }));
-      expect(d.gate).toBe(gate);
       expect(d.override).toBeNull();
       expect(d.notes.join(" ")).toContain(
         "a resume that has started publishing is not gated again",
@@ -222,7 +261,6 @@ describe("2. a run that has started publishing is continued, not gated", () => {
     expect(refusal(decide(blockedMidRun, FORCE)).why).toBe("needs_resume");
     for (const gate of ["enforced", "off", "n/a"] as const) {
       const d = proceeds(decide({ ...blockedMidRun, gate }, { ...NO_FLAGS, resume: true }));
-      expect(d.gate).toBe(gate);
       expect(d.override).toBeNull();
     }
   });
@@ -279,9 +317,8 @@ describe("3. a blocked request that has not started publishing is refused whatev
 });
 
 describe("4. a gate that is off or does not apply is not enforced", () => {
-  test("off: proceed with no override, and say what the gate is", () => {
+  test("off: proceed with no override and no note", () => {
     const d = proceeds(decide({ gate: "off" }));
-    expect(d.gate).toBe("off");
     expect(d.override).toBeNull();
     expect(d.notes).toEqual([]);
   });
@@ -290,7 +327,6 @@ describe("4. a gate that is off or does not apply is not enforced", () => {
     for (const gate of ["off", "n/a"] as const) {
       const spec = { gate, reasons: ["question_failed" as const, "review_running" as const] };
       const d = proceeds(decide(spec));
-      expect(d.gate).toBe(gate);
       expect(d.override).toBeNull();
     }
   });
@@ -305,25 +341,42 @@ describe("4. a gate that is off or does not apply is not enforced", () => {
 });
 
 describe("5. a hard reason is refused, with the cure, even with --force", () => {
-  test("one line per hard reason, from the Worker's own words", () => {
+  test("the refusal's own sentence is the gate's, then one line per hard reason, from the Worker's own words", () => {
     const spec = {
       reasons: ["request_blocked", "submission_minimum_failed", "question_failed"] as ReasonCode[],
     };
     for (const options of [NO_FLAGS, FORCE]) {
       const d = refusal(decide(spec, options));
       expect(d.why).toBe("hard");
-      expect(d.lines).toHaveLength(2);
-      expect(d.lines[0]).toContain(REASONS.request_blocked.sentence.replace(/\.$/, ""));
-      expect(d.lines[0]).toContain(REASONS.request_blocked.cure);
-      expect(d.lines[1]).toContain(REASONS.submission_minimum_failed.cure);
+      expect(d.lines).toHaveLength(3);
+      expect(d.lines[0]).toBe(reviewGateRefusalText("hard_reason", ID));
+      expect(d.lines[1]).toContain(REASONS.request_blocked.sentence.replace(/\.$/, ""));
+      expect(d.lines[1]).toContain(REASONS.request_blocked.cure);
+      expect(d.lines[2]).toContain(REASONS.submission_minimum_failed.cure);
     }
   });
 
-  test("the closed detail word is shown with the sentence", () => {
-    const d = refusal(
-      decide({ reasons: [["submission_minimum_failed", "name_too_short,no_authors"]] }, FORCE),
+  test("a reason prints as the line the Worker sent, and as sentence and cure when it sent none", () => {
+    const shown: Spec = { reasons: [["submission_minimum_failed", "name_too_short,no_authors"]] };
+    // A Worker that sends `line`: the whole reason, as its description words it.
+    const withLine = decideApproval(
+      ID,
+      { kind: "detail", detail: withLines(detailOf(shown)) },
+      FORCE,
     );
-    expect(d.lines[0]).toContain("(name_too_short, no_authors)");
+    const line = reasonLine(
+      { code: "submission_minimum_failed", detail: "name_too_short,no_authors" },
+      ID,
+      null,
+      false,
+    );
+    expect(refusal(withLine).lines[1]).toBe(line);
+    // An older Worker sends none: sentence and cure, and not the closed words behind the reason.
+    const without = refusal(decide(shown, FORCE));
+    expect(without.lines[1]).toBe(
+      `${REASONS.submission_minimum_failed.sentence} ${REASONS.submission_minimum_failed.cure}`,
+    );
+    expect(without.lines[1]).not.toContain("name_too_short");
   });
 
   test("every hard reason refuses, alone", () => {
@@ -363,7 +416,6 @@ describe("6. the screen's acknowledgment is its own reason, cleared by its own f
   test("given this run: it is not the CLI's to refuse, and nothing is overridden by it", () => {
     const d = proceeds(decide(spec, { ...NO_FLAGS, acknowledge: "a reason long enough" }));
     expect(d.override).toBeNull();
-    expect(d.gate).toBe("enforced");
   });
 
   test("recorded earlier (by anyone: the Worker decides whose it must be)", () => {
@@ -398,7 +450,6 @@ describe("7. nothing for an override to clear", () => {
   test("a pass proceeds with no override, with and without --force", () => {
     for (const options of [NO_FLAGS, FORCE]) {
       const d = proceeds(decide({ reasons: [] }, options));
-      expect(d.gate).toBe("enforced");
       expect(d.override).toBeNull();
       expect(d.notes).toEqual([]);
     }
@@ -507,7 +558,8 @@ describe("10. otherwise the CLI asks for --force", () => {
     const d = refusal(decide(spec));
     expect(d.why).toBe("needs_force");
     const text = d.lines.join("\n");
-    expect(text).toContain("This review is not a pass.");
+    // The gate's own sentence for this refusal, then the exact command.
+    expect(d.lines[0]).toBe(reviewGateRefusalText("needs_override", ID));
     expect(text).toContain(`nemar admin publish approve ${ID} --force`);
   });
 
@@ -574,6 +626,36 @@ describe("the whole table: every reason lands in exactly one branch", () => {
   });
 });
 
+describe("reasonViewLine: the words of one reason", () => {
+  const view = (over: Partial<Parameters<typeof reasonViewLine>[0]> = {}) => ({
+    sentence: "A sentence.",
+    cure: "A cure.",
+    ...over,
+  });
+
+  test("the whole line the Worker sent, when it sent one", () => {
+    expect(reasonViewLine(view({ line: "The whole reason (in words). A cure." }))).toBe(
+      "The whole reason (in words). A cure.",
+    );
+  });
+
+  test("the sentence and the cure when it sent none, or an empty one", () => {
+    expect(reasonViewLine(view())).toBe("A sentence. A cure.");
+    expect(reasonViewLine(view({ line: "" }))).toBe("A sentence. A cure.");
+  });
+
+  test("a detailed reason reads as the shared words, not as the closed words", () => {
+    // `text_withheld` carries closed words (readme, participants_json); the words for a person are
+    // what the review above the question printed, and the refusal below it must say the same.
+    const reason = { code: "text_withheld" as const, detail: "readme,participants_json" };
+    const line = reasonLine(reason, ID, null, false);
+    expect(line).toContain("(README, participants.json)");
+    const [shown] = withLines(detailOf({ reasons: [["text_withheld", reason.detail]] })).reasons;
+    expect(reasonViewLine(shown)).toBe(line);
+    expect(reasonViewLine(shown)).not.toContain("participants_json");
+  });
+});
+
 describe("parseReviewDetail: a review this CLI cannot read is not guessed at", () => {
   const good = () => JSON.parse(JSON.stringify(detailOf({ reasons: ["review_running"] })));
 
@@ -585,6 +667,25 @@ describe("parseReviewDetail: a review this CLI cannot read is not guessed at", (
   test("a reason code this CLI does not know (a newer server) is unreadable, not a crash", () => {
     const raw = good();
     raw.reasons[0].code = "a_reason_from_the_future";
+    expect(parseReviewDetail(raw)).toBeNull();
+  });
+
+  test("a reason the API classifies differently from this CLI's table is unreadable, so the API decides", () => {
+    // A newer API that moved a reason from "override" to "nothing" (or back) would otherwise leave
+    // this CLI refusing as hard what the API accepts, or sending an override for what it refuses.
+    for (const code of REASON_CODES) {
+      for (const other of ["nothing", "screen_acknowledgment", "override"] as const) {
+        const raw = JSON.parse(JSON.stringify(detailOf({ reasons: [code] })));
+        raw.reasons[0].cleared_by = other;
+        if (other === REASONS[code].clearedBy) {
+          expect(parseReviewDetail(raw), `${code} as ${other}`).not.toBeNull();
+        } else {
+          expect(parseReviewDetail(raw), `${code} as ${other}`).toBeNull();
+        }
+      }
+    }
+    const raw = good();
+    raw.reasons[0].cleared_by = "something_new";
     expect(parseReviewDetail(raw)).toBeNull();
   });
 

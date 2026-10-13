@@ -6,9 +6,9 @@
  * The NEMAR API is the REAL admin router over bun:sqlite with every migration applied (the
  * review's own harness), served on a local port and reached through the client's URL override.
  * GitHub is the harness's `Bun.serve()` stand-in. The wrapper in front of the router only records
- * what the client sent; it answers nothing itself, except in the one place a test needs the
- * transport to fail (the vocabulary tests at the end, which feed the client bodies of the shape
- * the approval gate will answer with, because the gate is not built yet).
+ * what the client sent; it answers nothing itself, except where a test needs the transport to fail
+ * or to answer with a shape the router would not make (the approval gate's refusal bodies, a
+ * review the CLI cannot classify, a 404 with no review word): those tests script the answer.
  *
  * CI TIER: integration, like the other suites that point the client at a local server.
  */
@@ -39,6 +39,7 @@ import {
   REQUEST_BLOCKED_CODE,
   type RequestBlockedRefusalBody,
 } from "../shared/contract/publication-review-admin";
+import { APPROVE_RETRY_DELAY_MS } from "../shared/publication-retry";
 import {
   REASONS,
   REVIEW_GATE_REFUSALS,
@@ -54,6 +55,7 @@ import {
   reviewErrorCode,
   startPublicationReview,
 } from "../src/lib/api/publish";
+import { decideApproval, readReview } from "../src/lib/publication-review-approve";
 
 const ADMIN_KEY = "client-admin-key-0123456789abcdef0123456789abcdef";
 const MEMBER_KEY = "client-member-key-0123456789abcdef0123456789abcd";
@@ -416,7 +418,7 @@ describe("approvePublication carries the override beside the acknowledgment", ()
   });
 });
 
-describe("how the client reads an approval refusal (the gate's bodies, which the Worker will answer with)", () => {
+describe("how the client reads an approval refusal (the gate's bodies, scripted)", () => {
   function gateBody(over: Partial<PublicationReviewGateRefusalBody> = {}) {
     const refusal = over.refusal ?? "needs_override";
     const body: PublicationReviewGateRefusalBody = {
@@ -528,5 +530,154 @@ describe("how the client reads an approval refusal (the gate's bodies, which the
       request("/admin/publish/nm000480/approve", { method: "POST" }, true),
     );
     expect(err.message).toBe("Some other refusal");
+  });
+});
+
+describe("the wait between approval attempts", () => {
+  /** The wait `approvePublication` announces before its first retry; the run is ended there, so no test sleeps. */
+  async function announcedDelay(): Promise<number> {
+    scripted = [{ status: 500, body: { error: "boom" } }];
+    const stop = new Error("stop after the notice");
+    let delay = -1;
+    await approvePublication(PROD_DATASET, true, false, false, (info) => {
+      delay = info.delayMs;
+      throw stop;
+    }).catch((err: unknown) => {
+      if (err !== stop) throw err;
+    });
+    return delay;
+  }
+
+  async function withKnob(value: string | undefined): Promise<number> {
+    const previous = process.env.NEMAR_APPROVE_RETRY_DELAY_MS;
+    if (value === undefined) Reflect.deleteProperty(process.env, "NEMAR_APPROVE_RETRY_DELAY_MS");
+    else process.env.NEMAR_APPROVE_RETRY_DELAY_MS = value;
+    try {
+      return await announcedDelay();
+    } finally {
+      if (previous === undefined) {
+        Reflect.deleteProperty(process.env, "NEMAR_APPROVE_RETRY_DELAY_MS");
+      } else process.env.NEMAR_APPROVE_RETRY_DELAY_MS = previous;
+    }
+  }
+
+  test("is the shared default unless the knob names a whole number of milliseconds up to it", async () => {
+    expect(await withKnob(undefined)).toBe(APPROVE_RETRY_DELAY_MS);
+    expect(await withKnob("0")).toBe(0);
+    expect(await withKnob("250")).toBe(250);
+    expect(await withKnob(String(APPROVE_RETRY_DELAY_MS))).toBe(APPROVE_RETRY_DELAY_MS);
+  });
+
+  test("the knob can only shorten it: a longer wait, a negative one and anything else leave the default", async () => {
+    for (const value of [
+      String(APPROVE_RETRY_DELAY_MS + 1),
+      "99999999",
+      "-5",
+      "1.5",
+      "1e3",
+      "",
+      " 5",
+      "ten",
+    ]) {
+      expect(await withKnob(value), JSON.stringify(value)).toBe(APPROVE_RETRY_DELAY_MS);
+    }
+  });
+});
+
+describe("readReview and a review the CLI cannot classify as the API does", () => {
+  test("a reason with another cleared_by than this CLI's table is unreadable, and --force says it was not sent", async () => {
+    const { requestId } = seedScreenedRequest(h.db, { datasetId: PROD_DATASET });
+    seedPublicationReview(h.db, {
+      requestId,
+      datasetId: PROD_DATASET,
+      state: "reported",
+      report: failingReport(),
+    });
+    // The Worker's own detail, as a newer Worker that moved `question_failed` out of the override
+    // class would send it: the one word of the reason that decides what the CLI may do.
+    const live = await getPublicationReview(PROD_DATASET);
+    const skewed = JSON.parse(JSON.stringify(live));
+    expect(skewed.reasons[0].code).toBe("question_failed");
+    skewed.reasons[0].cleared_by = "nothing";
+    scripted = [{ status: 200, body: skewed }];
+
+    const read = await readReview(PROD_DATASET);
+
+    expect(read).toEqual({
+      kind: "unreadable",
+      why: "this version of the CLI classifies a reason differently from the API",
+    });
+    const decision = decideApproval(PROD_DATASET, read, {
+      force: true,
+      acknowledge: undefined,
+      resume: false,
+    });
+    expect(decision.kind).toBe("proceed");
+    if (decision.kind === "proceed") {
+      expect(decision.override).toBeNull();
+      expect(decision.notes).toEqual([
+        "The publication review could not be read (this version of the CLI classifies a reason differently from the API); the API still checks it.",
+        "--force was not sent: no review could be read to approve over.",
+      ]);
+    }
+    // The detail the Worker really sent is read as it always was.
+    scripted = [{ status: 200, body: live }];
+    expect((await readReview(PROD_DATASET)).kind).toBe("detail");
+  });
+});
+
+describe("readReview carries the Worker's definitive refusal of the read", () => {
+  test("a 400, 401 or 403 is the Worker's final word on the read; no other status is", async () => {
+    for (const status of [400, 401, 403]) {
+      scripted = [{ status, body: { error: "Refused", code: "refused" } }];
+      const read = await readReview(PROD_DATASET);
+      expect(read.kind, String(status)).toBe("unreadable");
+      if (read.kind === "unreadable") {
+        expect(read.refused?.statusCode, String(status)).toBe(status);
+        expect(read.refused?.message).toBe("Refused");
+        expect(read.why).toBe(`HTTP ${status}`);
+      }
+    }
+    for (const status of [409, 429, 500, 502, 503]) {
+      scripted = [{ status, body: { error: "Not final" } }];
+      const read = await readReview(PROD_DATASET);
+      expect(read.kind, String(status)).toBe("unreadable");
+      if (read.kind === "unreadable") expect(read.refused, String(status)).toBeUndefined();
+    }
+    // A request with no active request is not one: the Worker decides what the approval says.
+    scripted = [{ status: 404, body: { error: "None", code: "not_found" } }];
+    expect(await readReview(PROD_DATASET)).toEqual({ kind: "absent", why: "no_request" });
+  });
+
+  test("a member's key, against the real router, is a refusal", async () => {
+    useKey(MEMBER_KEY);
+    seedScreenedRequest(h.db, { datasetId: PROD_DATASET });
+    const read = await readReview(PROD_DATASET);
+    expect(read.kind).toBe("unreadable");
+    if (read.kind === "unreadable") expect(read.refused?.statusCode).toBe(403);
+  });
+});
+
+describe("readReview tells a backend with no review route from a request with no review", () => {
+  test("a 404 without the review's word is no_route, and the approval goes on with its own sentence", async () => {
+    // An older backend has no `/review` route: its 404 is a bare `{ error }` with no `code`.
+    scripted = [{ status: 404, body: { error: "Not found" } }];
+    const read = await readReview(PROD_DATASET);
+    expect(read).toEqual({ kind: "absent", why: "no_route" });
+    const decision = decideApproval(PROD_DATASET, read, {
+      force: false,
+      acknowledge: undefined,
+      resume: false,
+    });
+    expect(decision.kind).toBe("proceed");
+    if (decision.kind === "proceed") {
+      expect(decision.notes).toEqual(["This API has no publication review."]);
+      expect(decision.override).toBeNull();
+    }
+  });
+
+  test("a 404 with the review's not_found word is no_request: the Worker, not the CLI, answers for the request", async () => {
+    const read = await readReview(PROD_DATASET);
+    expect(read).toEqual({ kind: "absent", why: "no_request" });
   });
 });

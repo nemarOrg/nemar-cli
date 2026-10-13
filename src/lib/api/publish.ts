@@ -429,6 +429,20 @@ export function isRetryablePublishError(err: unknown): boolean {
 }
 
 /**
+ * The wait between attempts: `APPROVE_RETRY_DELAY_MS`, or less when `NEMAR_APPROVE_RETRY_DELAY_MS`
+ * names a whole number of milliseconds from 0 up to it. It exists so a test of the retry does not
+ * sleep ten seconds per attempt. It can only SHORTEN the wait, because the backend's lease holds
+ * a failed run for longer than the default (`shared/publication-retry.ts`); anything else, a
+ * longer wait included, leaves the default.
+ */
+function retryDelayMs(): number {
+  const raw = process.env.NEMAR_APPROVE_RETRY_DELAY_MS;
+  if (raw === undefined || !/^\d+$/.test(raw)) return APPROVE_RETRY_DELAY_MS;
+  const ms = Number(raw);
+  return Number.isSafeInteger(ms) && ms <= APPROVE_RETRY_DELAY_MS ? ms : APPROVE_RETRY_DELAY_MS;
+}
+
+/**
  * Approve publication request (admin) - runs orchestrator with
  * retry-with-delay across Worker invocations.
  *
@@ -456,7 +470,7 @@ export async function approvePublication(
   overridePublicationReview?: PublicationReviewOverride,
 ): Promise<PublishApproveResponse> {
   const MAX_ATTEMPTS = 5;
-  const RETRY_DELAY_MS = APPROVE_RETRY_DELAY_MS;
+  const RETRY_DELAY_MS = retryDelayMs();
 
   let s3_lock_continuation_token: string | undefined;
   // Total object count for s3_lock — computed by the server on the first

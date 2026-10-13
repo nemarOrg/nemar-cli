@@ -15,13 +15,15 @@
  *    prints, the override on the row, the web executor's run). These need the gate
  *    (`backend/src/services/publication-review-gate.ts`) and say so in their name.
  *
- * Mutation checks (each turns a named test red; the diff is shown in the work package's report):
- * treat `--yes` as `--force` (the `--yes without --force` rows); build the override from a second
- * read (the in-between row); refuse when a recorded override covers (the executor row); let a hard
- * reason through with `--force` (the hard rows); let `--skip-ci-check` stand for `--force` (the
- * skip row); skip the acknowledgment step (the acknowledgment rows); proceed for a blocked request
- * when the flag is off (the blocked rows); refuse a started-publishing run that has `--resume`
- * (the resume rows); drop the override from a retry call (the retry row, in `publish-progress`).
+ * Mutation checks (each turns a named test red): treat `--yes` as `--force` (the `--yes without
+ * --force` rows); build the override from a second read (the in-between row); refuse when a
+ * recorded override covers (the executor row); let a hard reason through with `--force` (the hard
+ * rows); let `--skip-ci-check` stand for `--force` (the skip row); skip the acknowledgment step
+ * (the acknowledgment rows); proceed for a blocked request when the flag is off (the blocked
+ * rows); refuse a started-publishing run that has `--resume` (the resume rows); drop the override
+ * from a retry call (the retry row, "a retry after a 5xx"); exit 0 when the run gives up (the
+ * "keeps failing" row); ask the question after a refused read (the "definitive answer" rows);
+ * read the banner's release kind from the status again (the "banner names the kind" rows).
  *
  * CI TIER: integration, like the other CLI suites that start the binary against a local server.
  */
@@ -31,10 +33,17 @@ import {
   NOTE_SENTINEL,
   SUMMARY_SENTINEL,
   failingReport,
+  seedPublicationReview,
   seedScreenedRequest,
 } from "../backend/test/helpers/publication-review";
 import { makePublicationReviewApp } from "../backend/test/helpers/publication-review-app";
-import { NOT_ASSESSED_LINE, REASONS, REVIEW_GATE_REFUSAL_TEXT } from "../shared/publication-review";
+import {
+  HARD_REASONS,
+  NOT_ASSESSED_LINE,
+  REASONS,
+  REVIEW_GATE_REFUSAL_TEXT,
+  reviewGateRefusalText,
+} from "../shared/publication-review";
 import { type CliResult, startPublishCli } from "./helpers/admin-publish-cli";
 import {
   DATASET,
@@ -51,6 +60,7 @@ setDefaultTimeout(60_000);
 
 const ADMIN_KEY = "approve-admin-key-0123456789abcdef0123456789abcdef";
 const OTHER_ADMIN_KEY = "approve-other-key-0123456789abcdef0123456789abcdef";
+const MEMBER_KEY = "approve-member-key-0123456789abcdef0123456789abcdef";
 const EXECUTOR_KEY = "approve-executor-key-0123456789abcdef0123456789abcdef";
 const APPROVE_PATH = `/admin/publish/${DATASET}/approve`;
 
@@ -102,6 +112,9 @@ const seedBlockedUnstarted = (blockReason: string) => {
 
 const WHY_ACK = "Read the recording formats by hand, nothing to remove";
 
+/** The command's retry wait, shortened to nothing so a test of the retry does not sleep ten seconds. */
+const SHORT_RETRY = { NEMAR_APPROVE_RETRY_DELAY_MS: "0" };
+
 const approve = (flags: string[], opts: Parameters<typeof h.cli>[1] = {}) =>
   h.cli(["admin", "publish", "approve", DATASET, ...flags], opts);
 
@@ -148,6 +161,8 @@ describe("the command decides: a review that is not a pass", () => {
     expect(r.stdout).toContain(REASONS.question_failed.sentence.replace(/\.$/, ""));
     expect(r.stdout).toContain(REASONS.version_missing.sentence);
     expect(r.stdout).toContain("Not approved:");
+    // The refusal says it in the gate's own words, then names the exact command.
+    expect(r.stdout).toContain(reviewGateRefusalText("needs_override", DATASET));
     expect(r.stdout).toContain(`nemar admin publish approve ${DATASET} --resume --force`);
     // The model's own words never reach the approval screen.
     expect(output(r)).not.toContain(SUMMARY_SENTINEL);
@@ -193,6 +208,7 @@ describe("the command decides: a review that is not a pass", () => {
 
     expect(r.exitCode).toBe(1);
     expect(r.stdout).toContain("Not approved:");
+    expect(r.stdout).toContain(reviewGateRefusalText("hard_reason", DATASET));
     expect(r.stdout).toContain(REASONS.submission_minimum_failed.cure);
     expect(h.posted).toEqual([]);
     expect(requestRow(requestId)?.status).toBe("requested");
@@ -235,8 +251,8 @@ describe("the command decides: what is sent is what was shown", () => {
     const reviewId = seedReport(requestId, twoReasons());
     // Between the command's read of the review and its post, a release of the version appears.
     // The override names the review and the reasons that were SHOWN; the Worker, which is the gate,
-    // is the one that sees the new reason (refused in "with the Worker's gate" below). Its answer
-    // is not asserted here: with no gate the run goes through, with one it is refused.
+    // is the one that sees the new reason (and refuses it: see "with the Worker's gate" below). What
+    // this test holds is what the command posted, not the Worker's answer to it.
     h.after(`GET /admin/publish/${DATASET}/review`, () => {
       h.db.run("INSERT INTO dataset_versions (dataset_id, version, doi) VALUES (?, '1.0.0', ?)", [
         DATASET,
@@ -289,16 +305,13 @@ describe("the command decides: what is sent is what was shown", () => {
       },
     });
 
-    const r = await approve([
-      "--resume",
-      "--yes",
-      "--force",
-      "--acknowledge-identifier-screen",
-      WHY_ACK,
-    ]);
+    const r = await approve(
+      ["--resume", "--yes", "--force", "--acknowledge-identifier-screen", WHY_ACK],
+      { env: SHORT_RETRY },
+    );
 
     expect(failed).toBe(true);
-    expect(output(r)).toContain("Retrying in 10s");
+    expect(output(r)).toContain("Retrying in 0s");
     expect(approveBodies()).toHaveLength(2);
     for (const body of approveBodies()) {
       expect(body?.override_publication_review).toEqual({
@@ -309,6 +322,41 @@ describe("the command decides: what is sent is what was shown", () => {
     }
     expect(r.exitCode).toBe(0);
     expect(requestRow(requestId)?.status).toBe("published");
+  });
+});
+
+describe("a Worker that keeps failing (#1581)", () => {
+  test("the command retries, gives up, exits 1, prints the failure and keeps the bug-report hint", async () => {
+    const requestId = seedGolden({ status: "unchecked" });
+    seedReport(requestId);
+    // Every attempt dies on the write that marks the request approving: a 5xx the command may
+    // retry, and one that may be a bug, so (unlike a refusal) the hint to report it stays.
+    let attempts = 0;
+    h.hookDb({
+      statement(sql) {
+        if (/SET status = 'approving'/.test(sql)) {
+          attempts++;
+          throw new Error("simulated write failure");
+        }
+      },
+    });
+
+    const r = await approve(["--resume", "--yes", "--acknowledge-identifier-screen", WHY_ACK], {
+      env: SHORT_RETRY,
+    });
+
+    expect(r.exitCode).toBe(1);
+    // Five attempts reached the Worker (the command's whole budget) and all five were a 500.
+    expect(attempts).toBe(5);
+    expect(approveBodies()).toHaveLength(5);
+    expect(h.requests.filter((c) => c.path === APPROVE_PATH).map((c) => c.status)).toEqual([
+      500, 500, 500, 500, 500,
+    ]);
+    expect(output(r).match(/Retrying in 0s/g)).toHaveLength(4);
+    expect(output(r)).toContain("attempt 5/5");
+    expect(output(r)).toContain("Invalid response from server (status 500)");
+    expect(output(r)).toContain("attach the log to a new issue");
+    expect(requestRow(requestId)?.status).toBe("requested");
   });
 });
 
@@ -343,6 +391,34 @@ describe("the command decides: the screen's acknowledgment is its own flag", () 
     expect(approveBodies()[0]?.acknowledge_identifier_screen).toBe(WHY);
     expect(approveBodies()[0]).not.toHaveProperty("override_publication_review");
     expect(requestRow(requestId)?.status).toBe("published");
+  });
+
+  test("the reason is 10 to 500 characters once trimmed: 9 and 501 are refused before anything is posted, 10 and 500 are sent", async () => {
+    const requestId = seedGolden({ status: "unchecked" });
+    seedReport(requestId);
+
+    for (const reason of ["a".repeat(9), "a".repeat(501)]) {
+      const r = await approve(["--resume", "--yes", "--acknowledge-identifier-screen", reason]);
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain("--acknowledge-identifier-screen needs a reason of 10 to 500");
+    }
+    expect(h.posted).toEqual([]);
+
+    const ten = "b".repeat(10);
+    expect(
+      (await approve(["--resume", "--yes", "--acknowledge-identifier-screen", ten])).exitCode,
+    ).toBe(0);
+    expect(approveBodies()[0]?.acknowledge_identifier_screen).toBe(ten);
+
+    h.reset();
+    adminId = await h.admin("approveradmin", ADMIN_KEY);
+    h.setEnv({ PUBLICATION_REVIEW_ENABLED: "1" });
+    seedReport(seedGolden({ status: "unchecked" }));
+    const long = "c".repeat(500);
+    expect(
+      (await approve(["--resume", "--yes", "--acknowledge-identifier-screen", long])).exitCode,
+    ).toBe(0);
+    expect(approveBodies()[0]?.acknowledge_identifier_screen).toBe(long);
   });
 
   test("when the review is not a pass either, the refusal says --force is needed as well", async () => {
@@ -596,6 +672,151 @@ describe("the command decides: the evidence behind a reason is read before the q
   });
 });
 
+describe("the command decides: the banner names the kind of request from the review it read", () => {
+  const STATUS_PATH = `/datasets/${DATASET}/publish/status`;
+  const ANONYMOUS_BANNER = "This is an ANONYMOUS RELEASE and will run";
+  const UNKNOWN_BANNER = "Could not read the request's state";
+  /** Fails the request-status route's own read and nothing else. */
+  const failStatusReads = () => {
+    h.hookDb({
+      statement(sql) {
+        if (/requested_by_username/.test(sql)) throw new Error("simulated status failure");
+      },
+    });
+  };
+
+  test("an anonymous release is named from the detail, whatever the status read would say", async () => {
+    const requestId = seedGolden({ anonymous: true });
+    seedPublicationReview(h.db, {
+      requestId,
+      datasetId: DATASET,
+      state: "reported",
+      anonymous: true,
+    });
+    failStatusReads();
+
+    const r = await approve(["--resume"]);
+
+    expect(r.stdout).toContain(ANONYMOUS_BANNER);
+    expect(r.stdout).not.toContain(UNKNOWN_BANNER);
+    // The detail carries `anonymous`, so the command did not ask a second source.
+    expect(h.requests.some((c) => c.path === STATUS_PATH)).toBe(false);
+  });
+
+  test("a named publication is named from the detail too, with no status read", async () => {
+    const requestId = seedGolden();
+    seedReport(requestId);
+
+    const r = await approve(["--resume"]);
+
+    expect(r.stdout).toContain("This will run the following 16-step orchestrator:");
+    expect(h.requests.some((c) => c.path === STATUS_PATH)).toBe(false);
+  });
+
+  test("with no detail to read, the status read decides, and a failing one says it could not", async () => {
+    const requestId = seedGolden({ anonymous: true });
+    seedPublicationReview(h.db, {
+      requestId,
+      datasetId: DATASET,
+      state: "reported",
+      anonymous: true,
+    });
+    // The review cannot be read at all: the status read is the only source left.
+    h.hookDb({
+      statement(sql) {
+        if (/FROM publication_reviews/.test(sql)) throw new Error("simulated read failure");
+      },
+    });
+    const fallback = await approve(["--resume"]);
+    expect(fallback.stdout).toContain(ANONYMOUS_BANNER);
+    expect(h.requests.some((c) => c.path === STATUS_PATH && c.status === 200)).toBe(true);
+
+    h.hookDb({
+      statement(sql) {
+        if (/FROM publication_reviews/.test(sql) || /requested_by_username/.test(sql)) {
+          throw new Error("simulated read failure");
+        }
+      },
+    });
+    const neither = await approve(["--resume"]);
+    expect(neither.stdout).toContain(UNKNOWN_BANNER);
+    expect(neither.stdout).toContain("lists all 16 steps; an anonymous release runs fewer");
+  });
+});
+
+describe("the command decides: nothing from the review reaches the terminal as an instruction", () => {
+  const ESC = String.fromCharCode(27);
+  const HOSTILE = `${ESC}[2J${ESC}]0;title\u0007x\u202ey\u200bz`;
+  /** Anything a terminal could act on, in a line of output (a line end is the run's own). */
+  const DANGEROUS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+  const expectClean = (text: string) => {
+    for (const line of text.split("\n")) expect(line).not.toMatch(DANGEROUS);
+  };
+
+  // The Worker reduces what it stores, so this is the Worker and the command together; the
+  // command's own `plain()` calls are held by `admin-publish-approve-print.test.ts`, which feeds
+  // them text the Worker would never send.
+  test("hostile text in the stored report, the request and the screen's report is cleaned or left out, with the question and without", async () => {
+    const requestId = seedGolden();
+    seedReport(requestId, {
+      ...failingReport(),
+      summary: `Summary ${HOSTILE}`,
+      findings: [
+        {
+          question: "complete_and_honest",
+          severity: "blocker",
+          code: "readme_mismatch",
+          document: "readme",
+          note: `Note ${HOSTILE}`,
+        },
+      ],
+    });
+    h.db.run("UPDATE publication_requests SET block_reason = ? WHERE id = ?", [HOSTILE, requestId]);
+
+    for (const flags of [["--resume"], ["--resume", "--yes", "--force"]]) {
+      const r = await approve(flags);
+      expectClean(output(r));
+      expect(output(r)).not.toContain("Summary x");
+      expect(output(r)).not.toContain("Note x");
+    }
+  });
+
+  test("a blocked request with a hostile block reason is refused in clean words", async () => {
+    seedBlockedUnstarted(HOSTILE);
+
+    const r = await approve(["--resume", "--yes", "--force"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("Not approved:");
+    expectClean(output(r));
+    expect(h.posted).toEqual([]);
+  });
+});
+
+describe("approve --help-all names every reason nothing clears", () => {
+  // The words the help uses for each hard reason. A hard reason the table gains has to be added
+  // here, and so to the help: `--force` does not clear it, and the help is where that is said.
+  const WORDS: Record<string, string> = {
+    request_blocked: "a blocked request",
+    submission_minimum_failed: "a failed submission minimum",
+    identifier_screen_blocks: "direct identifiers",
+    identifier_screen_not_run: "a screen that did not run",
+    identifier_screen_pending: "is still running",
+    identifier_screen_stale: "is stale",
+    version_kept_after_anonymous_release: "a version kept after an anonymous release",
+  };
+
+  test("the table of words is the table of hard reasons, and the help says each", async () => {
+    expect(Object.keys(WORDS).sort()).toEqual([...HARD_REASONS].sort());
+
+    const r = await h.cli(["admin", "publish", "approve", "--help-all"]);
+
+    expect(r.exitCode).toBe(0);
+    const help = r.stdout.replace(/\s+/g, " ");
+    for (const [code, words] of Object.entries(WORDS)) expect(help, code).toContain(words);
+  });
+});
+
 describe("the command decides: a gate that is off or does not apply", () => {
   test("the review off: a stored failing review is advice, --force changes nothing and says so", async () => {
     h.setEnv({ PUBLICATION_REVIEW_ENABLED: "0" });
@@ -624,6 +845,61 @@ describe("the command decides: a gate that is off or does not apply", () => {
   });
 });
 
+describe("the command decides: a definitive answer to the read ends it before the question", () => {
+  const BUG_HINT = "attach the log to a new issue";
+
+  test("a malformed dataset id is refused before anything is sent", async () => {
+    seedReport(seedGolden());
+
+    for (const flags of [["--yes"], ["--yes", "--force"], []]) {
+      const r = await h.cli(["admin", "publish", "approve", "nm0004", ...flags]);
+
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain('"nm0004" is not a dataset id (like nm000108).');
+      expect(output(r)).not.toContain("could not be read");
+      expect(output(r)).not.toContain(BUG_HINT);
+    }
+    expect(h.requests).toEqual([]);
+    expect(h.posted).toEqual([]);
+  });
+
+  test("a key that is not an administrator's gets the Worker's refusal and exit 1, with and without --yes, and nothing is posted", async () => {
+    const requestId = seedGolden();
+    seedReport(requestId);
+    await h.user("plainmember", "member", MEMBER_KEY);
+
+    for (const flags of [["--resume", "--yes"], ["--resume", "--yes", "--force"], ["--resume"]]) {
+      const r = await approve(flags, { as: "plainmember" });
+
+      expect(r.exitCode, flags.join(" ")).toBe(1);
+      expect(r.stdout).not.toContain("could not be read");
+      expect(r.stdout).not.toContain("This will run the following");
+      expect(r.stdout).not.toContain("Cancelled");
+      expect(output(r)).toContain("This command requires admin privileges");
+      // A refusal is the Worker's answer, not a crash: no invitation to report a bug.
+      expect(output(r)).not.toContain(BUG_HINT);
+    }
+    expect(h.posted).toEqual([]);
+    expect(h.requests.map((c) => `${c.method} ${c.path} ${c.status}`)).toEqual([
+      `GET /admin/publish/${DATASET}/review 403`,
+      `GET /admin/publish/${DATASET}/review 403`,
+      `GET /admin/publish/${DATASET}/review 403`,
+    ]);
+    expect(requestRow(requestId)?.status).toBe("requested");
+  });
+
+  test("a 404 for a dataset with no active request is not definitive: the Worker still decides", async () => {
+    // The documented choice (`readReview`): `no_request` goes on, so the Worker's own answer ends it.
+    seedScreenedRequest(h.db, { datasetId: DATASET });
+    h.db.run("DELETE FROM publication_requests");
+
+    const r = await approve(["--resume", "--yes"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(h.posted.filter((p) => p.path === APPROVE_PATH)).toHaveLength(1);
+  });
+});
+
 describe("the command decides: a review that cannot be read is the Worker's to judge", () => {
   const failReads = () =>
     h.hookDb({
@@ -642,6 +918,9 @@ describe("the command decides: a review that cannot be read is the Worker's to j
     expect(r.stdout).toContain(
       "The publication review could not be read (HTTP 500); the API still checks it.",
     );
+    // It says the flag was not sent, so the Worker's "approve over it with --force" is not a
+    // contradiction of what the administrator typed.
+    expect(r.stdout).toContain("--force was not sent: no review could be read to approve over.");
     // It went on to the Worker, which is the gate, and sent no override of its own making.
     expect(approveBodies().length).toBeGreaterThan(0);
     for (const body of approveBodies()) {
@@ -662,6 +941,13 @@ describe("the command decides: a review that cannot be read is the Worker's to j
     );
     expect(output(r)).toContain("No active publication request found");
     expect(h.requests.at(-1)?.status).toBe(404);
+    expect(r.stdout).not.toContain("--force was not sent");
+
+    const forced = await approve(["--resume", "--yes", "--force"]);
+    expect(forced.exitCode).toBe(1);
+    expect(forced.stdout).toContain(
+      "--force was not sent: no review could be read to approve over.",
+    );
   });
 });
 
@@ -697,6 +983,40 @@ describe("with the Worker's gate: what the Worker refuses is printed, and exits 
     expect(output(r)).toContain("The request is blocked");
     expect(h.requests.filter((c) => c.path === APPROVE_PATH).map((c) => c.status)).toEqual([409]);
     expect(requestRow(requestId)?.status).toBe("blocked");
+  });
+
+  test("a refusal prints each reason as the review above it worded it, not as the closed words", async () => {
+    const requestId = seedGolden();
+    const reviewId = seedReport(requestId, withheldReport());
+    // Another administrator's record names every reason, so this run goes to the Worker with no
+    // override and the Worker refuses with all three reasons in its body.
+    const otherId = await h.admin("otheradmin", OTHER_ADMIN_KEY);
+    seedOverride(h.db, reviewId, otherId, ["question_failed", "text_withheld", "question_unknown"]);
+    const shown = JSON.parse((await h.cli(["admin", "publish", "show", DATASET, "--json"])).stdout);
+
+    const r = await approve(["--resume", "--yes"], { as: "approveradmin" });
+
+    expect(r.exitCode).toBe(1);
+    expect(h.requests.filter((c) => c.path === APPROVE_PATH).map((c) => c.status)).toEqual([409]);
+    for (const reason of shown.reasons as Array<{
+      code: keyof typeof REASONS;
+      sentence: string;
+      cure: string;
+      line?: string;
+    }>) {
+      // What the CLI prints is the whole line the Worker sent; a Worker that sends none gets the
+      // sentence and the cure, never the closed words.
+      expect(output(r), reason.code).toContain(reason.line ?? `${reason.sentence} ${reason.cure}`);
+      if (reason.line !== undefined) {
+        // ... and that line is the one the review above the question printed.
+        const sentence = REASONS[reason.code].sentence.replace(/\.$/, "");
+        const described = (shown.description.lines as string[]).find((l) => l.startsWith(sentence));
+        expect(reason.line, reason.code).toBe(described);
+      }
+    }
+    // The words for a person, not the closed ones behind them.
+    expect(output(r)).toContain("(README, participants.json)");
+    expect(output(r)).not.toContain("(readme, participants_json)");
   });
 
   test("--force records the override on the review it was shown, for the reasons shown", async () => {

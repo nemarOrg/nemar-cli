@@ -28,14 +28,16 @@
 
 import type {
   PublicationReviewDetail,
-  PublicationReviewGateState,
   PublicationReviewOverride,
   ReasonView,
 } from "../../shared/contract/publication-review-admin.js";
 import {
+  REASONS,
   REASON_CODES,
+  type ReasonCode,
   hardReasonsOf,
   reasonLine,
+  reviewGateRefusalText,
   uncoveredByOverride,
 } from "../../shared/publication-review.js";
 import { BLOCK_REASON_HINTS } from "./admin-command.js";
@@ -47,7 +49,13 @@ export type ReviewRead =
   | { kind: "detail"; detail: PublicationReviewDetail }
   /** The backend has no review route (a 404 without a review code), or no active request (`not_found`). */
   | { kind: "absent"; why: "no_route" | "no_request" }
-  | { kind: "unreadable"; why: string };
+  /**
+   * `refused` is the Worker's own definitive answer to the read (HTTP 400, 401 or 403: a bad id, no
+   * key, a key that is not an administrator's). Nothing the command could ask next would change
+   * it, so `approve` stops there; a caller that does not read it treats it like any other read that
+   * failed.
+   */
+  | { kind: "unreadable"; why: string; refused?: ApiError };
 
 /** The flags that are the administrator's own act. There is no `yes` here, on purpose. */
 export interface ApproveOptions {
@@ -61,8 +69,6 @@ export type ApproveRefusal = "blocked" | "needs_resume" | "hard" | "needs_ack" |
 export type ApproveDecision =
   | {
       kind: "proceed";
-      /** What the review gate is for this request, as the Worker reported it; `unknown` when nothing was read. */
-      gate: PublicationReviewGateState | "unknown";
       /** What to send: the review shown and the reasons shown; null when nothing is overridden here. */
       override: PublicationReviewOverride | null;
       notes: string[];
@@ -79,6 +85,12 @@ const CODES: readonly string[] = REASON_CODES;
 const isObject = (x: unknown): x is Record<string, unknown> =>
   typeof x === "object" && x !== null && !Array.isArray(x);
 
+/**
+ * One reason this CLI can read and classify as the API does. `cleared_by` is what the API says
+ * clears it; the CLI decides from its own table (`REASONS`), so a reason the API classifies
+ * differently (a newer API that moved it) is unreadable here and the API decides, rather than this
+ * CLI refusing as hard what the API would accept, or sending an override for what it would refuse.
+ */
 function isReasonView(x: unknown): boolean {
   return (
     isObject(x) &&
@@ -87,7 +99,24 @@ function isReasonView(x: unknown): boolean {
     typeof x.sentence === "string" &&
     typeof x.cure === "string" &&
     (x.detail === null || typeof x.detail === "string") &&
-    typeof x.cleared_by === "string"
+    (x.line === undefined || typeof x.line === "string") &&
+    x.cleared_by === REASONS[x.code as ReasonCode].clearedBy
+  );
+}
+
+/** Whether `raw` carries a reason this CLI knows that the API classifies differently ({@link isReasonView}). */
+function classifiesDifferently(raw: unknown): boolean {
+  return (
+    isObject(raw) &&
+    Array.isArray(raw.reasons) &&
+    raw.reasons.some(
+      (r) =>
+        isObject(r) &&
+        typeof r.code === "string" &&
+        CODES.includes(r.code) &&
+        typeof r.cleared_by === "string" &&
+        r.cleared_by !== REASONS[r.code as ReasonCode].clearedBy,
+    )
   );
 }
 
@@ -129,16 +158,21 @@ export function parseReviewDetail(raw: unknown): PublicationReviewDetail | null 
   return ok ? (raw as unknown as PublicationReviewDetail) : null;
 }
 
+/** The statuses of the review read that are the Worker's final word: a bad id, no key, not an administrator. */
+const REFUSING_STATUSES: readonly number[] = [400, 401, 403];
+
 /** `GET /admin/publish/:id/review`, as a {@link ReviewRead}: never throws. */
 export async function readReview(datasetId: string): Promise<ReviewRead> {
   try {
-    const detail = parseReviewDetail(await getPublicationReview(datasetId));
-    return detail === null
-      ? {
-          kind: "unreadable",
-          why: "the NEMAR API sent a review this version of the CLI cannot read",
-        }
-      : { kind: "detail", detail };
+    const raw = await getPublicationReview(datasetId);
+    const detail = parseReviewDetail(raw);
+    if (detail !== null) return { kind: "detail", detail };
+    return {
+      kind: "unreadable",
+      why: classifiesDifferently(raw)
+        ? "this version of the CLI classifies a reason differently from the API"
+        : "the NEMAR API sent a review this version of the CLI cannot read",
+    };
   } catch (err) {
     if (err instanceof ApiError && err.statusCode === 404) {
       // The review route answers `not_found` for a dataset with no active request; a 404 without
@@ -148,13 +182,11 @@ export async function readReview(datasetId: string): Promise<ReviewRead> {
         why: reviewErrorCode(err) === "not_found" ? "no_request" : "no_route",
       };
     }
-    return {
-      kind: "unreadable",
-      why:
-        err instanceof ApiError && err.statusCode !== 0
-          ? `HTTP ${err.statusCode}`
-          : errorDetail(err),
-    };
+    const why =
+      err instanceof ApiError && err.statusCode !== 0 ? `HTTP ${err.statusCode}` : errorDetail(err);
+    return err instanceof ApiError && REFUSING_STATUSES.includes(err.statusCode)
+      ? { kind: "unreadable", why, refused: err }
+      : { kind: "unreadable", why };
   }
 }
 
@@ -162,13 +194,16 @@ export async function readReview(datasetId: string): Promise<ReviewRead> {
 // Words
 // ---------------------------------------------------------------------------------------------
 
-/** One reason as one line: what is wrong, the closed word behind it, and what clears it. */
-export function reasonViewLine(view: Pick<ReasonView, "sentence" | "cure" | "detail">): string {
-  const sentence =
-    view.detail === null
-      ? view.sentence
-      : `${view.sentence.replace(/\.$/, "")} (${view.detail.replaceAll(",", ", ")}).`;
-  return `${sentence} ${view.cure}`;
+/**
+ * One reason as one line, in the words the Worker's own description uses (`line`: the sentence, the
+ * detail as words for a person and the cure), so a reason reads the same in the review above the
+ * question and in the refusal below it. A Worker that predates `line` sends none; the line is then
+ * the sentence and the cure, without the closed word behind it, which is not a word for a person.
+ */
+export function reasonViewLine(view: Pick<ReasonView, "sentence" | "cure" | "line">): string {
+  return typeof view.line === "string" && view.line !== ""
+    ? view.line
+    : `${view.sentence} ${view.cure}`;
 }
 
 /** The approve command for this dataset, with the flags the administrator needs next. */
@@ -196,6 +231,8 @@ export function decideApproval(
 ): ApproveDecision {
   // 1. Nothing was read: the Worker is the gate, and a client that cannot read cannot clear
   // anything, so nothing is overridden and the Worker's own refusal is what the administrator sees.
+  // A --force that was given says it was not sent, or the Worker's "approve over it with --force"
+  // would reach someone who just passed it.
   if (read.kind !== "detail") {
     const note =
       read.kind === "unreadable"
@@ -203,7 +240,10 @@ export function decideApproval(
         : read.why === "no_route"
           ? "This API has no publication review."
           : `No active publication request was found for ${datasetId}; the API decides.`;
-    return { kind: "proceed", gate: "unknown", override: null, notes: [note] };
+    const notes = options.force
+      ? [note, "--force was not sent: no review could be read to approve over."]
+      : [note];
+    return { kind: "proceed", override: null, notes };
   }
   const { detail } = read;
   const id = datasetId;
@@ -224,7 +264,6 @@ export function decideApproval(
     }
     return {
       kind: "proceed",
-      gate: detail.gate,
       override: null,
       notes: [
         "It passed the gates when it started; a resume that has started publishing is not gated again.",
@@ -247,7 +286,6 @@ export function decideApproval(
   if (detail.gate !== "enforced") {
     return {
       kind: "proceed",
-      gate: detail.gate,
       override: null,
       notes: options.force ? [`--force changes nothing: the review gate is ${detail.gate}.`] : [],
     };
@@ -259,7 +297,11 @@ export function decideApproval(
   // 5. A hard reason is refused whatever the flags say, with its cure.
   const hard = hardReasonsOf(detail.reasons);
   if (hard.length > 0) {
-    return { kind: "refuse", why: "hard", lines: hard.map(reasonViewLine) };
+    return {
+      kind: "refuse",
+      why: "hard",
+      lines: [reviewGateRefusalText("hard_reason", id), ...hard.map(reasonViewLine)],
+    };
   }
 
   // What an override would have to cover, and whether one already does (step 9).
@@ -287,7 +329,7 @@ export function decideApproval(
   // 7. Nothing an override clears: a pass, or only the acknowledgment reason, which the screen
   // gate decides.
   if (need.length === 0) {
-    return { kind: "proceed", gate: "enforced", override: null, notes: [] };
+    return { kind: "proceed", override: null, notes: [] };
   }
 
   // 8. --force: the administrator's own act. The override names the review shown and the
@@ -295,7 +337,6 @@ export function decideApproval(
   if (options.force) {
     return {
       kind: "proceed",
-      gate: "enforced",
       override: { review_id: detail.review?.id ?? null, reasons: need },
       notes: [`Approving over: ${need.join(", ")} (--force; recorded with your account).`],
     };
@@ -307,7 +348,6 @@ export function decideApproval(
   if (recorded !== null && recordedCovers) {
     return {
       kind: "proceed",
-      gate: "enforced",
       override: null,
       notes: [
         `An override by administrator #${recorded.by} at ${recorded.at} covers these reasons. The API accepts it only for a run recorded as theirs.`,
@@ -320,7 +360,7 @@ export function decideApproval(
     kind: "refuse",
     why: "needs_force",
     lines: [
-      "This review is not a pass. Read the reasons above.",
+      reviewGateRefusalText("needs_override", id),
       `To approve over them, run: ${approveCommand(id, {
         resume: resumeFlag,
         acknowledge: ackGiven,
