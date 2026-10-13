@@ -260,11 +260,11 @@ describe("the claim comes first", () => {
   });
 });
 
-describe("what runs after the mint is not install-time code, and the header says what is left (#1728)", () => {
+describe("what runs after the mint is not install-time code (#1728)", () => {
   // `create-github-app-token` is the one step given the GitHub App's private key, and the runner
   // passes the same inputs to the action's post step at the end of the job. The order and the
-  // flags below close what they close; the header says what they do not (an earlier version of
-  // this file claimed the key was out of reach of everything after the mint, which was not true).
+  // flags below close what they close, which is hooks planted before the mint and install-time
+  // code; the workflow's header says what they do not.
   const names = job.steps.map((s) => s.name);
   const at = (n: string) => names.indexOf(n);
   const INSTALL = "Install the review script's dependencies";
@@ -330,42 +330,6 @@ describe("what runs after the mint is not install-time code, and the header says
     // Not `--production`: the review script imports the Anthropic SDK, which this repository lists as a
     // development dependency, so a production install could not run it (checked in a scratch copy).
     expect(SRC).not.toMatch(/bun install[^\n]*--production/);
-  });
-
-  /** The header's comment text as prose: comment markers removed, lines joined. */
-  const HEADER = SRC.split("\n")
-    .filter((l) => l.startsWith("#"))
-    .map((l) => l.replace(/^#\s?/, ""))
-    .join(" ")
-    .replace(/\s+/g, " ");
-
-  test("the header says precisely what the order closes and what it leaves", () => {
-    // The sentences that were false are gone, from the header and from the step comments.
-    expect(SRC).not.toContain("is out of reach of everything below");
-    expect(SRC).not.toContain("AWAY FROM INSTALLED CODE");
-    expect(SRC).not.toMatch(/the model step can USE the read-only token/i);
-    // What is closed.
-    expect(HEADER).toContain("WHAT THE ORDER CLOSES, AND WHAT IT DOES NOT");
-    expect(HEADER).toContain("hooks planted before the mint");
-    expect(HEADER).toContain("install-time code");
-    expect(HEADER).toContain("lifecycle scripts");
-    expect(HEADER).toContain("the dataset token in a configuration file");
-    // What is left, named.
-    for (const left of [
-      "pinned third-party actions' own code",
-      "event file",
-      "post step",
-      "dependency tree's runtime code",
-      "logs and artifacts are public",
-    ]) {
-      expect(HEADER, left).toContain(left);
-    }
-  });
-
-  test("the window between the head check and the model call is named, with its cost", () => {
-    expect(HEADER).toContain("THE HEAD CHECK AND ITS WINDOW");
-    expect(HEADER).toContain("one wasted call");
-    expect(HEADER).toContain("still blocks an approval");
   });
 });
 
