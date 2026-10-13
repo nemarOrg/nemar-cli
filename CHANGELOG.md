@@ -173,11 +173,14 @@ coupling).
 - **Release the Worker first, then promote the website.** Until the website calls through the
   service binding with `X-Forwarded-For` (nemarOrg/website, merged to `staging`), its
   visitors keep arriving from shared addresses and the `/discover` errors continue to depend on
-  the 1000 cap and the fixed windows alone. Releasing the website first would send binding calls
-  to a Worker that would count them as unattributed.
-- After the website is in production: two calls for one visitor should read
-  `X-RateLimit-Bucket: site-ip` with `X-RateLimit-Remaining` at 1999 then 1998 and a second
-  visitor should start at 1999. The `[rate-limit] counting a request without CF-Connecting-IP by
+  the 1000 cap and the fixed windows alone. Releasing the website first would count its calls per
+  visitor in the old 500-per-window `ip` bucket, with none of the new headers, and the website's
+  own first-call check would warn.
+- After the website is in production: calls for one visitor should read
+  `X-RateLimit-Bucket: site-ip`, with the first `X-RateLimit-Remaining` at 1999 and, across six
+  or more calls a second or two apart, a reading that falls overall (the count is kept per data
+  center, so an occasional repeat or small rise is normal), and a second visitor should start
+  at 1999. The `[rate-limit] counting a request without CF-Connecting-IP by
   its forwarded visitor` line should appear and no "request with neither" warning. #1712 (demote
   that line) stays open until this has been observed.
 - The weekly summary.json drift check runs from `main`, so its first corrected run is the Monday
