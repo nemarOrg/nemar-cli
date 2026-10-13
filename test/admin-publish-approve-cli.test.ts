@@ -102,6 +102,9 @@ const seedBlockedUnstarted = (blockReason: string) => {
 
 const WHY_ACK = "Read the recording formats by hand, nothing to remove";
 
+/** The command's retry wait, shortened to nothing so a test of the retry does not sleep ten seconds. */
+const SHORT_RETRY = { NEMAR_APPROVE_RETRY_DELAY_MS: "0" };
+
 const approve = (flags: string[], opts: Parameters<typeof h.cli>[1] = {}) =>
   h.cli(["admin", "publish", "approve", DATASET, ...flags], opts);
 
@@ -289,16 +292,13 @@ describe("the command decides: what is sent is what was shown", () => {
       },
     });
 
-    const r = await approve([
-      "--resume",
-      "--yes",
-      "--force",
-      "--acknowledge-identifier-screen",
-      WHY_ACK,
-    ]);
+    const r = await approve(
+      ["--resume", "--yes", "--force", "--acknowledge-identifier-screen", WHY_ACK],
+      { env: SHORT_RETRY },
+    );
 
     expect(failed).toBe(true);
-    expect(output(r)).toContain("Retrying in 10s");
+    expect(output(r)).toContain("Retrying in 0s");
     expect(approveBodies()).toHaveLength(2);
     for (const body of approveBodies()) {
       expect(body?.override_publication_review).toEqual({
@@ -309,6 +309,41 @@ describe("the command decides: what is sent is what was shown", () => {
     }
     expect(r.exitCode).toBe(0);
     expect(requestRow(requestId)?.status).toBe("published");
+  });
+});
+
+describe("a Worker that keeps failing (#1581)", () => {
+  test("the command retries, gives up, exits 1, prints the failure and keeps the bug-report hint", async () => {
+    const requestId = seedGolden({ status: "unchecked" });
+    seedReport(requestId);
+    // Every attempt dies on the write that marks the request approving: a 5xx the command may
+    // retry, and one that may be a bug, so (unlike a refusal) the hint to report it stays.
+    let attempts = 0;
+    h.hookDb({
+      statement(sql) {
+        if (/SET status = 'approving'/.test(sql)) {
+          attempts++;
+          throw new Error("simulated write failure");
+        }
+      },
+    });
+
+    const r = await approve(["--resume", "--yes", "--acknowledge-identifier-screen", WHY_ACK], {
+      env: SHORT_RETRY,
+    });
+
+    expect(r.exitCode).toBe(1);
+    // Five attempts reached the Worker (the command's whole budget) and all five were a 500.
+    expect(attempts).toBe(5);
+    expect(approveBodies()).toHaveLength(5);
+    expect(h.requests.filter((c) => c.path === APPROVE_PATH).map((c) => c.status)).toEqual([
+      500, 500, 500, 500, 500,
+    ]);
+    expect(output(r).match(/Retrying in 0s/g)).toHaveLength(4);
+    expect(output(r)).toContain("attempt 5/5");
+    expect(output(r)).toContain("Invalid response from server (status 500)");
+    expect(output(r)).toContain("attach the log to a new issue");
+    expect(requestRow(requestId)?.status).toBe("requested");
   });
 });
 

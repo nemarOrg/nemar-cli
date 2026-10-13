@@ -39,6 +39,7 @@ import {
   REQUEST_BLOCKED_CODE,
   type RequestBlockedRefusalBody,
 } from "../shared/contract/publication-review-admin";
+import { APPROVE_RETRY_DELAY_MS } from "../shared/publication-retry";
 import {
   REASONS,
   REVIEW_GATE_REFUSALS,
@@ -515,5 +516,56 @@ describe("how the client reads an approval refusal (the gate's bodies, which the
       request("/admin/publish/nm000480/approve", { method: "POST" }, true),
     );
     expect(err.message).toBe("Some other refusal");
+  });
+});
+
+describe("the wait between approval attempts", () => {
+  /** The wait `approvePublication` announces before its first retry; the run is ended there, so no test sleeps. */
+  async function announcedDelay(): Promise<number> {
+    scripted = [{ status: 500, body: { error: "boom" } }];
+    const stop = new Error("stop after the notice");
+    let delay = -1;
+    await approvePublication(PROD_DATASET, true, false, false, (info) => {
+      delay = info.delayMs;
+      throw stop;
+    }).catch((err: unknown) => {
+      if (err !== stop) throw err;
+    });
+    return delay;
+  }
+
+  async function withKnob(value: string | undefined): Promise<number> {
+    const previous = process.env.NEMAR_APPROVE_RETRY_DELAY_MS;
+    if (value === undefined) Reflect.deleteProperty(process.env, "NEMAR_APPROVE_RETRY_DELAY_MS");
+    else process.env.NEMAR_APPROVE_RETRY_DELAY_MS = value;
+    try {
+      return await announcedDelay();
+    } finally {
+      if (previous === undefined) {
+        Reflect.deleteProperty(process.env, "NEMAR_APPROVE_RETRY_DELAY_MS");
+      } else process.env.NEMAR_APPROVE_RETRY_DELAY_MS = previous;
+    }
+  }
+
+  test("is the shared default unless the knob names a whole number of milliseconds up to it", async () => {
+    expect(await withKnob(undefined)).toBe(APPROVE_RETRY_DELAY_MS);
+    expect(await withKnob("0")).toBe(0);
+    expect(await withKnob("250")).toBe(250);
+    expect(await withKnob(String(APPROVE_RETRY_DELAY_MS))).toBe(APPROVE_RETRY_DELAY_MS);
+  });
+
+  test("the knob can only shorten it: a longer wait, a negative one and anything else leave the default", async () => {
+    for (const value of [
+      String(APPROVE_RETRY_DELAY_MS + 1),
+      "99999999",
+      "-5",
+      "1.5",
+      "1e3",
+      "",
+      " 5",
+      "ten",
+    ]) {
+      expect(await withKnob(value), JSON.stringify(value)).toBe(APPROVE_RETRY_DELAY_MS);
+    }
   });
 });

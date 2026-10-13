@@ -119,6 +119,12 @@ export interface CliOptions {
   signedOut?: boolean;
   /** How the Resend stand-in answers for this run (a refusal, a lost answer). */
   resend?: FakeResendOptions;
+  /**
+   * Extra environment variables for the command, e.g. `NEMAR_APPROVE_RETRY_DELAY_MS` so a test of
+   * the retry does not sleep. The harness's own variables (the configuration directory, the API and
+   * GitHub addresses, the colour switches) always win over these.
+   */
+  env?: Record<string, string>;
 }
 
 export interface PublishCli {
@@ -378,6 +384,7 @@ export function startPublishCli(): PublishCli {
   async function run(args: string[], opts: CliOptions): Promise<CliResult> {
     const childEnv: Record<string, string | undefined> = {
       ...process.env,
+      ...opts.env,
       NEMAR_CONFIG_DIR: configDir,
       TEST_API_URL: `http://127.0.0.1:${apiServer.port}`,
       NEMAR_GITHUB_API_URL: `http://127.0.0.1:${githubServer.port}`,
