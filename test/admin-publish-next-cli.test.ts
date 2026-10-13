@@ -541,7 +541,7 @@ describe("c mails the depositor a message and leaves the request open", () => {
 
     expect(r.exitCode).toBe(1);
     expect(output(r)).toContain(
-      "The message could not be mailed, and it may not have reached the depositor. Check with them before sending it again.",
+      "The mail may not have been sent, and it may also have arrived. Check with the depositor before sending it again.",
     );
     expect(output(r)).not.toMatch(/nothing was sent/i);
     expect(r.stdout).toContain("Done: 1 failed.");
