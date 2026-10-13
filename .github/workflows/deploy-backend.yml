@@ -1,16 +1,34 @@
 name: Deploy Backend
 
 on:
+  # Production: every push to main that touches the backend.
   push:
     branches:
-      - dev
       - main
     paths:
       - 'backend/**'
       - 'shared/**'
       - '.github/workflows/deploy-backend.yml'
+  # The dev worker: dispatched by auto-bump-dev.yml, ONCE per push to dev, after it
+  # has pushed the version bump, with the commit to deploy (the bump). Until
+  # 2026-10, a push to dev deployed itself here, so a merge touching backend/ or
+  # shared/ deployed twice: the merge commit at -devN, then 14 s later the bump at
+  # -devN+1, each behind its own 18-minute test-gate (152 of 235 deploy runs were
+  # bump commits, 2026-09-15 to 2026-10-13). The dev worker now ends at the same
+  # bumped version from one deploy. auto-bump-dev.yml still dispatches a deploy for
+  # a push it does not bump, when that push touched the paths above.
+  #
+  # A dispatch from any other ref deploys nothing (see detect-environment), so this
+  # adds no way to reach production. By hand, to redeploy dev:
+  #   gh workflow run deploy-backend.yml --ref dev [-f sha=<commit on dev>]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit on dev to deploy (default: the head of dev)"
+        required: false
+        default: ""
 
-# Serialize deploys per ref (#897). The release pipeline pushes TWO commits to
+# Serialize deploys per ref (#897); a dispatched dev deploy's ref is dev. The release pipeline pushes TWO commits to
 # main that both match backend/** (the dev->main merge commit writes
 # backend/package.json's version, and auto-tag.yml's strip commit rewrites it
 # again seconds later). Without this group both fired `wrangler d1 migrations
@@ -30,14 +48,38 @@ jobs:
     timeout-minutes: 10
     outputs:
       environment: ${{ steps.detect.outputs.environment }}
+      # The commit every job below checks out: the pushed commit on main, the
+      # dispatched `sha` (or the head of dev) for the dev worker.
+      sha: ${{ steps.detect.outputs.sha }}
     steps:
       - name: Detect environment
         id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          INPUT_SHA: ${{ inputs.sha }}
         run: |
-          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-            echo "environment=production" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.ref }}" == "refs/heads/dev" ]]; then
-            echo "environment=dev" >> $GITHUB_OUTPUT
+          if [[ "$EVENT" == "push" && "$REF" == "refs/heads/main" ]]; then
+            echo "environment=production" >> "$GITHUB_OUTPUT"
+            echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          elif [[ "$EVENT" == "workflow_dispatch" && "$REF" == "refs/heads/dev" ]]; then
+            SHA="${INPUT_SHA:-$GITHUB_SHA}"
+            if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::sha '$SHA' is not a full commit id"
+              exit 1
+            fi
+            # Only a commit dev already holds: the dev worker deploys only from dev.
+            STATUS=$(gh api "repos/$GH_REPO/compare/$SHA...dev" --jq .status)
+            if [[ "$STATUS" != "ahead" && "$STATUS" != "identical" ]]; then
+              echo "::error::$SHA is not on dev (compare status '$STATUS'); refusing to deploy it"
+              exit 1
+            fi
+            echo "environment=dev" >> "$GITHUB_OUTPUT"
+            echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::$EVENT on $REF deploys nothing: production deploys on a push to main, dev on a dispatch from dev"
           fi
 
   # Gate (#897): the exact commit being deployed must pass the same required
@@ -55,6 +97,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.detect-environment.outputs.sha }}
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -123,6 +167,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.detect-environment.outputs.sha }}
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -256,6 +302,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
+          ref: ${{ needs.detect-environment.outputs.sha }}
           # Full history + tags so the drift check below can resolve whether the
           # deployed commit is a tagged release.
           fetch-depth: 0
