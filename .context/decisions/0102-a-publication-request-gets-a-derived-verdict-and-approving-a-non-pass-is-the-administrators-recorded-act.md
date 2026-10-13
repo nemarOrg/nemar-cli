@@ -493,6 +493,8 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   An override and a screen acknowledgment are recorded with that administrator's id and what they were shown,
   and satisfy a later run only when that run is attributed to the same administrator;
   a run attributed to anyone else passes the gate on its own or not at all.
+  Only the override is recorded last, for an approval that goes on;
+  the screen's acknowledgment is recorded when the screen gate passes and stands on its own, so an approval the review then refuses leaves it on the record, as intended.
 - **No Worker code path decides an approval or a denial.**
   The review never calls `/approve` or `/deny`, and nothing is denied automatically.
   The only status a review changes is the mechanical `requested` to `blocked` of section 5, which ADR 0026 already makes.

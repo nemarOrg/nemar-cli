@@ -2590,7 +2590,9 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     // The publication review's gate (ADR 0102), after the screen's and before anything is
     // marked: a review that is not a pass needs the approver's recorded override, and a hard
     // reason is refused whatever the body says. Skipped (with the screen's) only for a run that has
-    // started publishing. Off and not-applicable datasets pass without a read of the review.
+    // started publishing. Off and not-applicable datasets pass without a read of the review. The
+    // screen's acknowledgment was recorded when the screen gate passed, on its own; only the
+    // override below is recorded last, once both gates have passed.
     const review = await evaluateApprovalReviewGate(env, {
       requestId: request.id,
       datasetId,

@@ -457,10 +457,12 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       if (!stateGate.ok) return c.json(stateGate.refusal, 409);
       // The publication review's gate (ADR 0102) is asked next, still before the
       // claim, so a refusal claims nothing and changes nothing. It reads no GitHub
-      // and writes nothing: an override it says to record waits for the head check
-      // below, as the screen's acknowledgment does. `requireRow`: the executor that
-      // follows reads the clicker's override off the review row, so an override
-      // with no row to hold it cannot be carried.
+      // and writes nothing: only the OVERRIDE it says to record waits, until the head
+      // check below has passed, so it is recorded last and only for an approval that
+      // goes on. (The screen's acknowledgment is recorded when the screen gate passes,
+      // on its own, and stands whether or not the review then refuses.)
+      // `requireRow`: the executor that follows reads the clicker's override off the
+      // review row, so an override with no row to hold it cannot be carried.
       review = await evaluateApprovalReviewGate(c.env, {
         requestId: request.id,
         datasetId,
@@ -631,8 +633,10 @@ export function registerPublishRoutes(admin: AdminRouter): void {
           );
         }
       }
-      // The override the review gate asked to record, now that the screened commit is
-      // still `main`: it attaches to content that is still the content being published.
+      // The override the review gate asked to record, last, now that the screened commit
+      // is still `main`: it attaches to content that is still the content being published,
+      // and is recorded only for an approval that goes on. The screen's acknowledgment
+      // above was recorded when its own check passed and does not depend on this one.
       // Still before the dispatch, so the executor's run finds it on the row. A row
       // that moved since the gate read it refuses, and nothing has been sent.
       if (review.ok && review.state === "enforced" && review.record !== null) {

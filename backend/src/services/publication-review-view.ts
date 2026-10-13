@@ -295,9 +295,10 @@ function reviewKeyOf(
  * Everything a surface shows, re-derived now. Reads the review in force and, for a request whose
  * approval has written nothing yet ({@link LIVE_FACT_STATUSES}, or a run that stopped before it
  * published), three facts: a version row for the version an approval would publish, an earlier
- * anonymous request and the concept DOI. No GitHub call is made anywhere in this module:
- * `head_current` stays null, and only the approval gate (Phase 2) asks GitHub whether the screened
- * commit is still `main`.
+ * anonymous request and the concept DOI. No GitHub call is made anywhere in this module, and the
+ * review's approval gate makes none either: `head_current` stays null for every caller, so
+ * `identifier_screen_stale` is never derived here. Whether the screened commit is still `main` is
+ * asked by the identifier screen's own gate (`verifyScreenHead`), and the stale refusal is its.
  *
  * Throws when a read fails. It never answers from a fact it could not read.
  */

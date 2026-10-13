@@ -6,6 +6,12 @@
  * through. It never approves or denies anything: it answers yes, or a refusal in the shared words
  * (`reviewGateRefusalText`), and it records the administrator's override when one was needed.
  *
+ * Only the OVERRIDE is recorded last, and only for an approval that goes on: the routes call
+ * {@link recordApprovalOverride} once every other gate has passed. The screen's acknowledgment is
+ * not part of that: it is the screen gate's own, recorded when that gate passes, and it stands on
+ * its own (it is about the screen, and a later run by the same administrator uses it). An approval
+ * this module refuses can therefore leave the acknowledgment on the record, and that is intended.
+ *
  * What it pins, and why each line is here:
  *
  *  - **With the flag off it reads nothing.** Production is dark until the review is switched on, so
@@ -285,7 +291,9 @@ function decide(args: ReviewGateArgs, d: DerivedPublicationReview): ReviewGateRe
 /**
  * Record the override the gate said to record: on the review row as it was read (one conditional
  * statement, {@link RECORD_OVERRIDE_SQL}), then the audit row. Called by the route after every
- * other gate has passed, so an override is recorded only for an approval that goes on. Zero
+ * other gate has passed, so an override is recorded only for an approval that goes on (the
+ * orchestrator's own conditional mark can still refuse `request_changed` after it; the override
+ * then stays on its row, bound to that review, those reasons and its approver). Zero
  * changes means the row moved between the read and now, and the override is refused as
  * `review_changed`, read again so the refusal carries what is true now. A write that fails refuses
  * `unverified`: an override that could not be recorded approves nothing.
