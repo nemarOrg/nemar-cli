@@ -34,6 +34,40 @@ export const PUBLICATION_STEPS = [
 export type PublicationStep = (typeof PUBLICATION_STEPS)[number];
 
 /**
+ * The steps an approval runs BEFORE it changes anything: validation only. The
+ * first step after them, `s3_public_read`, is the first mutation (it makes the
+ * data publicly readable; the list above says so where it orders it). A resumed
+ * approval skips the identifier screen gate, and the publication review's gate,
+ * only once a step outside this list has completed: from then on the
+ * publication is underway and its own later steps commit to `main`, so a head
+ * check would refuse it halfway, stranding a half-published dataset. Before
+ * then nothing is public, and a resume, or a re-dispatch, is gated exactly like
+ * a fresh run, because the depositor may have pushed new content after the
+ * earlier attempt stopped.
+ *
+ * Moved verbatim from the backend's identifier screen, so the review's view and
+ * the screen's gate read one definition without importing each other.
+ */
+export const PRE_PUBLICATION_STEPS: readonly string[] = PUBLICATION_STEPS.slice(
+  0,
+  PUBLICATION_STEPS.indexOf("s3_public_read"),
+);
+
+/** True once an approval has completed a step that changed something (see {@link PRE_PUBLICATION_STEPS}). */
+export function hasStartedPublishing(stepsCompletedJson: string | null | undefined): boolean {
+  let steps: unknown;
+  try {
+    steps = JSON.parse(stepsCompletedJson || "[]");
+  } catch {
+    return false;
+  }
+  return (
+    Array.isArray(steps) &&
+    steps.some((s) => typeof s === "string" && !PRE_PUBLICATION_STEPS.includes(s))
+  );
+}
+
+/**
  * Steps an ANONYMOUS release does not run (#1408, epic #1406).
  *
  * An anonymous release makes the DATA public while the depositor stays
