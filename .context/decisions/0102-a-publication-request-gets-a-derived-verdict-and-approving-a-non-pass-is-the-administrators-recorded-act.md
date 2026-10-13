@@ -1,11 +1,11 @@
-# Architecture Decision Record (ADR) 0102: A publication request gets a derived verdict, and approving over a non-pass is the administrator's recorded act
+# ADR 0102: A publication request gets a derived verdict, and approving over a non-pass is the administrator's recorded act
 
 **Status:** proposed
 **Date:** 2026-10-12
 **Owner:** Seyed Yahya Shirazi
 
 Epic #1726, Phase 0 (#1727).
-Takes the shape of ADR 0092 (a derived verdict from a Worker-gated model review)
+Takes the shape of Architecture Decision Record (ADR) 0092 (a derived verdict from a Worker-gated model review)
 and of ADR 0093 (an administrator queue, and an approval that is the administrator's own).
 Builds on ADR 0086 (the identifier screen, its gate, its mail and its binding to a commit),
 ADR 0026 (mechanical submission minimums), ADR 0080 (the web approval executor),
