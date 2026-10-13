@@ -238,7 +238,9 @@ export function screenedHeadSql(name: string): string {
  * True when a review of the request's screened head and flag is dispatched and younger than the
  * deadline: the one condition under which the request's admin mail waits for the review. A row
  * older than the deadline no longer holds the mail, so a review that never reports cannot keep it
- * for good, whether or not a watchdog runs.
+ * for good, whether or not a watchdog runs. The mail's own review section reads a dispatched row
+ * past this same deadline as one that did not report (`publicationReviewEmailSection`), so what
+ * the mail says is true at the moment the lease lets it go.
  */
 export function reviewInFlightSql(name: string): string {
   const a = alias(name);

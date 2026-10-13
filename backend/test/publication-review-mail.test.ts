@@ -705,6 +705,30 @@ describe("a review that never reports is mailed once, and the mail says so", () 
     });
   });
 
+  test("the review sweep failing outright changes nothing: the identifier sweep mails it, as did not report", async () => {
+    const { requestId, datasetId } = neverReporting();
+    const broken = env({
+      DB: interceptingD1(realD1(db), (sql) => {
+        // The review watchdog's own query, and nothing else.
+        if (/^\s*SELECT id, request_id FROM publication_reviews/.test(sql)) {
+          throw new Error("D1_ERROR: simulated");
+        }
+      }),
+    });
+    await withFakeResend(async (calls) => {
+      let swept: Awaited<ReturnType<typeof sweepPublicationReviews>> | undefined;
+      await logged(async () => {
+        swept = await sweepPublicationReviews(broken);
+      });
+      expect(swept).toMatchObject({ timedOut: 0, errors: 1 });
+      expect((await sweepIdentifierScreens(env())).emailed).toBe(1);
+      const mails = mailsOf(calls, datasetId);
+      expect(mails).toHaveLength(1);
+      expect(textOf(mails[0].html)).toContain(DID_NOT_REPORT);
+    });
+    expect(mailState(requestId).emailed).not.toBeNull();
+  });
+
   test("both sweeps at once, over more requests than the review sweep takes in a tick: each is mailed once and none is told the review is running", async () => {
     // 25 never-reporting reviews: the review sweep takes 20 a tick and the identifier sweep 10,
     // each in the same order, so both reach the same requests at the same time, and a few
