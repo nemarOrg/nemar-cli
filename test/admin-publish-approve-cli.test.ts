@@ -405,7 +405,7 @@ describe("the command decides: an approval that stopped behind a reason nothing 
 
   test("the review says to deny it, under the review and before the refusal, and the hard reason refuses", async () => {
     // A failed-minimum report can land on an `approving` request that has not started publishing,
-    // and the request stays `approving`: the table's "moved to blocked" is not what happens to it.
+    // and the request stays `approving`: the move to blocked takes only a request that is waiting.
     const requestId = seedGolden({ requestStatus: "approving" });
     h.db.run("UPDATE publication_requests SET steps_completed = '[]' WHERE id = ?", [requestId]);
     seedReport(requestId, hardReport());

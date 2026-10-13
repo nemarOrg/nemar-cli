@@ -1756,8 +1756,8 @@ describe("the detail carries what approve and next show from one read", () => {
 
   test("a stopped approval behind a failed minimum is told it cannot be resumed and is to be denied, until it starts publishing", async () => {
     // A failed-minimum report that lands on an `approving` request leaves it approving (the store's
-    // move to blocked takes only a `requested` one), so the reasons table's "moved to blocked" is
-    // not what happens to it; the way out is a denial, and the detail says so.
+    // move to blocked takes only a `requested` one), so no move to blocked happens to it, as the
+    // table's cure allows for; the way out is a denial, and the detail says so.
     const STOPPED =
       "This approval stopped before it started publishing, and a reason that nothing clears now stands, so it cannot be resumed.";
     const { requestId, datasetId } = request({ requestStatus: "approving" });

@@ -1077,7 +1077,7 @@ export const REASONS: Record<ReasonCode, ReasonRule> = {
     class: "fail",
     clearedBy: "nothing",
     sentence: "A submission minimum failed at the reviewed commit.",
-    cure: "The request is moved to blocked; the depositor fixes the dataset and requests publication again.",
+    cure: "The depositor fixes the dataset and requests publication again; a request still waiting for its decision is moved to blocked.",
   },
   identifier_screen_blocks: {
     class: "fail",
@@ -1685,10 +1685,9 @@ const APPROVAL_PUBLISHING_LINE =
 
 /**
  * What the description says about an approval that stopped before it started publishing while a
- * reason nothing clears stands: a resume would be refused, and the reasons table's cure for such a
- * reason ("the request is moved to blocked") is true only of a request still waiting for its
- * decision, since the store's move takes only that one. The way out is a denial. `<dataset>` is
- * filled like a cure's.
+ * reason nothing clears stands: a resume would be refused, and the move to blocked that the table's
+ * cure for a failed minimum names takes only a request still waiting for its decision, so this one
+ * stays `approving`. The way out is a denial. `<dataset>` is filled like a cure's.
  */
 const APPROVAL_STOPPED_HARD_LINE =
   "This approval stopped before it started publishing, and a reason that nothing clears now stands, so it cannot be resumed. Deny it with a reason (nemar admin publish deny <dataset>); the depositor can request again.";

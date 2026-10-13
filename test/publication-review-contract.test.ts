@@ -1309,6 +1309,15 @@ describe("the reasons table", () => {
     }
   });
 
+  test("a failed minimum's cure is true of a request in any status: the depositor fixes it, and only a waiting request is moved to blocked", () => {
+    // The store moves only a `requested` request to blocked, so a cure that promised the move
+    // would be false for an approval that stopped behind the same reason (it is denied instead).
+    expect(REASONS.submission_minimum_failed.cure).toBe(
+      "The depositor fixes the dataset and requests publication again; a request still waiting for its decision is moved to blocked.",
+    );
+    expect(REASONS.submission_minimum_failed.cure).not.toContain("The request is moved to blocked");
+  });
+
   test("the order is exactly ADR 0102's: the hard reasons, the screen's acknowledgment, then the overrides", () => {
     expect([...REASON_CODES]).toEqual([
       // Hard: the request, the minimums and the screen's finding (fail), the screen's gaps
