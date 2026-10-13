@@ -253,10 +253,10 @@ export async function request<T>(
     // all (ci_check_unavailable): a code in `error`, the sentence in `message`.
     const isPublicationRefusalCode =
       typeof data.error === "string" && PUBLICATION_REFUSAL_ERROR_CODES.includes(data.error);
-    // The approval's refusals (ADR 0102): `publication_review_not_clear` and `request_blocked`
-    // carry a code in `error` and the sentence in `message`, the convention of the publish routes.
-    // The review routes use the other one (`{ error: sentence, code: word }`), which needs no
-    // rule here: `error` already leads, and the word is in `rawBody.code` (`reviewErrorCode`).
+    // The approval's refusals (ADR 0102), the words of `APPROVAL_REFUSAL_ERROR_CODES`: each
+    // carries a code in `error` and the sentence in `message`, the convention of the publish
+    // routes. The review routes use the other one (`{ error: sentence, code: word }`), which needs
+    // no rule here: `error` already leads, and the word is in `rawBody.code` (`reviewErrorCode`).
     const isApprovalRefusalCode =
       typeof data.error === "string" && APPROVAL_REFUSAL_ERROR_CODES.includes(data.error);
     const prefersMessage =
