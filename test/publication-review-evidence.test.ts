@@ -1792,13 +1792,34 @@ describe("a document with a NUL byte is withheld as not UTF-8, whatever decoder 
     expect(theRequest().raw).not.toMatch(/jsmith|j s m i t h/);
   });
 
-  test("a description with a NUL is unreadable, so there is no review to run", async () => {
+  test("a description with a NUL stays present for the evaluator: it is not JSON, a hard minimum, as before", async () => {
+    // UTF-16LE with no byte-order mark. Read as UTF-8 it has a NUL between every letter, so it does
+    // not parse: the evaluator's answer is `description_not_json`, which re-blocks the request. An
+    // unreadable description would instead end the run as `evidence_unavailable`, an overridable
+    // review that could not run, repeated on every restart.
     const ds = newDataset("nul-desc", {
       "dataset_description.json": UTF16(JSON.stringify(DESCRIPTION)),
     });
-    const res = await runPublicationReview(args(ds));
-    expect(res).toMatchObject({ outcome: "error", error: "evidence_unavailable" });
-    expect(modelRequests).toHaveLength(0);
+    const docs = readRootDocuments(ds.dir, await readTree(ds.dir, ds.head));
+    expect(docs.dataset_description.state).toBe("present");
+    expect(docs.dataset_description.text).toContain("\u0000");
+    const report = await reviewOf(ds);
+    expect(report.evidence.minimums).toBe("failed");
+    expect(report.evidence.minimum_failures).toEqual(["description_not_json"]);
+    // The model is still told nothing of it: the description is withheld, whole.
+    expect(report.evidence.documents.dataset_description).toBe("withheld_not_utf8");
+    const { raw, user } = theRequest();
+    expect(user).not.toContain('kind="dataset_description"');
+    expect(raw).not.toMatch(/healthy volunteers|Lovelace|IRB 2024|h e a l t h y/);
+  });
+
+  test("a README with a NUL is still not UTF-8, and the review still says text was withheld", async () => {
+    const ds = newDataset("nul-readme-reasons", {
+      "README.md": UTF16("# Study\nEthics: IRB 12\n"),
+    });
+    const report = await reviewOf(ds);
+    expect(report.evidence.documents.readme).toBe("withheld_not_utf8");
+    expect(reportReasons(report).map((r) => r.code)).toContain("text_withheld");
   });
 });
 
