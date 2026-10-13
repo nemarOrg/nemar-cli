@@ -11,7 +11,7 @@
  * only from what was shown. The ten steps run in a fixed order, so most cases here are the same
  * review under two different flags. The reasons are made by the Worker's own `reasonViewsOf`, so a
  * sentence, a cure or a class the table changes changes here too, and the agreement with the real
- * gate is tested end to end in `admin-publish-approve-cli.test.ts`.
+ * gate is tested end to end in `admin-publish-approve-agreement.test.ts`.
  */
 
 import { describe, expect, test } from "bun:test";

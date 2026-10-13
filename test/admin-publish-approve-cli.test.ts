@@ -15,13 +15,15 @@
  *    prints, the override on the row, the web executor's run). These need the gate
  *    (`backend/src/services/publication-review-gate.ts`) and say so in their name.
  *
- * Mutation checks (each turns a named test red; the diff is shown in the work package's report):
- * treat `--yes` as `--force` (the `--yes without --force` rows); build the override from a second
- * read (the in-between row); refuse when a recorded override covers (the executor row); let a hard
- * reason through with `--force` (the hard rows); let `--skip-ci-check` stand for `--force` (the
- * skip row); skip the acknowledgment step (the acknowledgment rows); proceed for a blocked request
- * when the flag is off (the blocked rows); refuse a started-publishing run that has `--resume`
- * (the resume rows); drop the override from a retry call (the retry row, in `publish-progress`).
+ * Mutation checks (each turns a named test red): treat `--yes` as `--force` (the `--yes without
+ * --force` rows); build the override from a second read (the in-between row); refuse when a
+ * recorded override covers (the executor row); let a hard reason through with `--force` (the hard
+ * rows); let `--skip-ci-check` stand for `--force` (the skip row); skip the acknowledgment step
+ * (the acknowledgment rows); proceed for a blocked request when the flag is off (the blocked
+ * rows); refuse a started-publishing run that has `--resume` (the resume rows); drop the override
+ * from a retry call (the retry row, "a retry after a 5xx"); exit 0 when the run gives up (the
+ * "keeps failing" row); ask the question after a refused read (the "definitive answer" rows);
+ * read the banner's release kind from the status again (the "banner names the kind" rows).
  *
  * CI TIER: integration, like the other CLI suites that start the binary against a local server.
  */
@@ -36,6 +38,7 @@ import {
 } from "../backend/test/helpers/publication-review";
 import { makePublicationReviewApp } from "../backend/test/helpers/publication-review-app";
 import {
+  HARD_REASONS,
   NOT_ASSESSED_LINE,
   REASONS,
   REVIEW_GATE_REFUSAL_TEXT,
@@ -248,8 +251,8 @@ describe("the command decides: what is sent is what was shown", () => {
     const reviewId = seedReport(requestId, twoReasons());
     // Between the command's read of the review and its post, a release of the version appears.
     // The override names the review and the reasons that were SHOWN; the Worker, which is the gate,
-    // is the one that sees the new reason (refused in "with the Worker's gate" below). Its answer
-    // is not asserted here: with no gate the run goes through, with one it is refused.
+    // is the one that sees the new reason (and refuses it: see "with the Worker's gate" below). What
+    // this test holds is what the command posted, not the Worker's answer to it.
     h.after(`GET /admin/publish/${DATASET}/review`, () => {
       h.db.run("INSERT INTO dataset_versions (dataset_id, version, doi) VALUES (?, '1.0.0', ?)", [
         DATASET,
@@ -787,6 +790,30 @@ describe("the command decides: nothing from the review reaches the terminal as a
     expect(r.stdout).toContain("Not approved:");
     expectClean(output(r));
     expect(h.posted).toEqual([]);
+  });
+});
+
+describe("approve --help-all names every reason nothing clears", () => {
+  // The words the help uses for each hard reason. A hard reason the table gains has to be added
+  // here, and so to the help: `--force` does not clear it, and the help is where that is said.
+  const WORDS: Record<string, string> = {
+    request_blocked: "a blocked request",
+    submission_minimum_failed: "a failed submission minimum",
+    identifier_screen_blocks: "direct identifiers",
+    identifier_screen_not_run: "a screen that did not run",
+    identifier_screen_pending: "is still running",
+    identifier_screen_stale: "is stale",
+    version_kept_after_anonymous_release: "a version kept after an anonymous release",
+  };
+
+  test("the table of words is the table of hard reasons, and the help says each", async () => {
+    expect(Object.keys(WORDS).sort()).toEqual([...HARD_REASONS].sort());
+
+    const r = await h.cli(["admin", "publish", "approve", "--help-all"]);
+
+    expect(r.exitCode).toBe(0);
+    const help = r.stdout.replace(/\s+/g, " ");
+    for (const [code, words] of Object.entries(WORDS)) expect(help, code).toContain(words);
   });
 });
 

@@ -4,10 +4,12 @@
  * Its own file, registered on the `publish` group at the end of `admin-publish.ts`, so the work
  * that follows (the review, the override, `next`) edits this command without editing the group.
  *
- * The order is: read the request and its review, show them, decide (`decideApproval`), and only
- * then ask. A refusal never asks and never posts. The Worker is the gate (ADR 0102); this
- * explains, with the same words, and sends the override the Worker needs. `runApproval` is the
- * loop that follows the question, exported because `next` runs it too.
+ * The order is: check the id, read the request and its review (the Worker's final word on the
+ * read, a refusal of the key or the id, ends the command there), show them, decide
+ * (`decideApproval`), and only then ask. A refusal never asks and never posts. The Worker is the
+ * gate (ADR 0102); this explains, with the same words, and sends the override the Worker needs.
+ * `runApproval` is the loop that follows the question, exported because `next` runs it too. What
+ * the command prints from the network passes `plain()` where it is printed.
  */
 
 import chalk from "chalk";
@@ -94,9 +96,9 @@ Description:
 
   The PUBLICATION REVIEW (ADR 0102) is read next and shown with the screen. A pass
   approves. A reason nothing clears (a blocked request, a failed submission
-  minimum, direct identifiers, a screen that did not run or is stale, a version
-  kept after an anonymous release) refuses the approval and names who acts;
-  --force does not change that. Any other reason (a failed or unanswered
+  minimum, direct identifiers, a screen that did not run, is still running or is
+  stale, a version kept after an anonymous release) refuses the approval and
+  names who acts; --force does not change that. Any other reason (a failed or unanswered
   question, BIDS validation, the version, a review that did not run) needs
   --force, which records an override with your account for the review and the
   reasons shown. A run that has started publishing is continued with --resume

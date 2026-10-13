@@ -24,7 +24,8 @@
  * either the command would refuse what the Worker passes, or it would send what the Worker
  * rejects.
  *
- * CI TIER: integration. Needs the Worker's review gate (WP2), which refuses with the shared words.
+ * CI TIER: integration. Needs the Worker's review gate
+ * (`backend/src/services/publication-review-gate.ts`), which refuses with the shared words.
  */
 
 import type { Database } from "bun:sqlite";

@@ -6,9 +6,9 @@
  * The NEMAR API is the REAL admin router over bun:sqlite with every migration applied (the
  * review's own harness), served on a local port and reached through the client's URL override.
  * GitHub is the harness's `Bun.serve()` stand-in. The wrapper in front of the router only records
- * what the client sent; it answers nothing itself, except in the one place a test needs the
- * transport to fail (the vocabulary tests at the end, which feed the client bodies of the shape
- * the approval gate will answer with, because the gate is not built yet).
+ * what the client sent; it answers nothing itself, except where a test needs the transport to fail
+ * or to answer with a shape the router would not make (the approval gate's refusal bodies, a
+ * review the CLI cannot classify, a 404 with no review word): those tests script the answer.
  *
  * CI TIER: integration, like the other suites that point the client at a local server.
  */
@@ -405,7 +405,7 @@ describe("approvePublication carries the override beside the acknowledgment", ()
   });
 });
 
-describe("how the client reads an approval refusal (the gate's bodies, which the Worker will answer with)", () => {
+describe("how the client reads an approval refusal (the gate's bodies, scripted)", () => {
   function gateBody(over: Partial<PublicationReviewGateRefusalBody> = {}) {
     const refusal = over.refusal ?? "needs_override";
     const body: PublicationReviewGateRefusalBody = {
