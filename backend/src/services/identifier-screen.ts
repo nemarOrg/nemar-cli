@@ -41,7 +41,6 @@ import {
   type ScreenReport,
   type ScreenState,
   describeScreen,
-  isScreenState,
   parseScreenReport,
   screenGate,
   stateOf,
@@ -64,6 +63,11 @@ import {
   signIdentifierScreenCallbackToken,
   triggerIdentifierScreenRun,
 } from "./github.js";
+import { readStoredReport, readStoredState } from "./identifier-screen-stored.js";
+
+// The two readers of a stored screen live in their own module so the publication review
+// (ADR 0101) can use them without importing this one; re-exported for every existing importer.
+export { readStoredReport, readStoredState };
 
 /**
  * A screen still pending this long after its dispatch has not reported, and is
@@ -175,28 +179,6 @@ export const RERUN_GUARD_SQL = `AND status IN ('requested', 'blocked', 'approvin
 /** A report the Worker writes itself, for a screen that produced none. */
 export function workerErrorReport(error: ScreenError): ScreenReport {
   return parseScreenReport({ version: REPORT_VERSION, scanner: null, head: null, error });
-}
-
-/** The stored status column, read without trusting it: anything that is not a state is null. */
-export function readStoredState(raw: unknown): ScreenState | null {
-  return isScreenState(raw) ? raw : null;
-}
-
-/**
- * The stored report column, re-validated on the way out. The Worker only ever
- * writes a parsed report, so a failure here means the row was edited by hand;
- * it reads as "no report", which every reader treats as not clear.
- */
-export function readStoredReport(raw: unknown): ScreenReport | null {
-  if (typeof raw !== "string") return null;
-  try {
-    return parseScreenReport(JSON.parse(raw));
-  } catch (err) {
-    // The parser's own fixed word, never its input, so a hand-edited row is not silent.
-    const code = err instanceof Error && err.name === "ReportError" ? err.message : "unparseable";
-    console.warn(`[identifier-screen] a stored report does not read back (${code})`);
-    return null;
-  }
 }
 
 /** The screen as a status view shows it. */
