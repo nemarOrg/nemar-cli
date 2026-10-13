@@ -16,7 +16,13 @@ import chalk from "chalk";
 import type { Command } from "commander";
 import ora from "ora";
 import { PLATFORM_DAILY_CAP } from "../../shared/publication-review.js";
-import { failMessage, reportFailure, signedIn } from "../lib/admin-output.js";
+import {
+  checkedDatasetId,
+  failMessage,
+  failWith,
+  isAnswered,
+  requireSignedIn,
+} from "../lib/admin-command.js";
 import { ApiError } from "../lib/api/errors.js";
 import {
   type PublishRequestsResponse,
@@ -35,15 +41,6 @@ import {
 } from "../lib/publication-review-display.js";
 import { startAllCandidates } from "../lib/publication-review-queue.js";
 import { plain } from "../lib/terminal-text.js";
-
-const DATASET_ID_RE = /^(nm|on|xx)\d{6}$/;
-
-/** A dataset id typed on the command line, checked before anything is sent; null when it is not one. */
-function checkedDataset(raw: string, json: boolean): string | null {
-  if (DATASET_ID_RE.test(raw)) return raw;
-  failMessage(`"${plain(raw)}" is not a dataset id (like nm000108).`, { json, answered: true });
-  return null;
-}
 
 type Row = PublishRequestsResponse["requests"][number];
 
@@ -73,8 +70,8 @@ Examples:
     )
     .action(async (datasetArg: string, options: { json?: boolean }) => {
       const json = options.json === true;
-      if (!signedIn(json)) return;
-      const datasetId = checkedDataset(datasetArg, json);
+      if (!requireSignedIn(json)) return;
+      const datasetId = checkedDatasetId(datasetArg, json);
       if (datasetId === null) return;
 
       const spinner = json ? null : ora("Reading the review...").start();
@@ -89,7 +86,7 @@ Examples:
         for (const line of reviewDetailLines(detail)) console.log(line);
         console.log();
       } catch (error) {
-        reportFailure(error, spinner, "Could not read the review", json);
+        failWith(error, spinner, "Could not read the review", undefined, { json });
       }
     });
 
@@ -138,7 +135,7 @@ Examples:
         options: { all?: boolean; dryRun?: boolean; yes?: boolean; json?: boolean },
       ) => {
         const json = options.json === true;
-        if (!signedIn(json)) return;
+        if (!requireSignedIn(json)) return;
         if (options.all) {
           if (datasetArg !== undefined) {
             failMessage("Give either a dataset id or --all, not both.", { json, answered: true });
@@ -159,7 +156,7 @@ Examples:
           failMessage("--dry-run goes with --all.", { json, answered: true });
           return;
         }
-        const datasetId = checkedDataset(datasetArg, json);
+        const datasetId = checkedDatasetId(datasetArg, json);
         if (datasetId === null) return;
         await startOne(datasetId, json);
       },
@@ -219,16 +216,6 @@ async function attemptStart(datasetId: string): Promise<StartAnswer> {
 const withWord = (sentence: string, word: string | undefined): string =>
   word === undefined ? sentence : `${sentence} (${plain(word)})`;
 
-/**
- * Whether a failure is the Worker's own answer (a 4xx, or a 5xx that names its closed word, such as
- * `dispatch_unconfigured`) and not a crash that may be a bug: `internal` is the Worker's fault.
- */
-function isAnswered(error: unknown, word: string | undefined): boolean {
-  if (!(error instanceof ApiError)) return false;
-  if (error.statusCode >= 400 && error.statusCode < 500) return true;
-  return word !== undefined && word !== "internal";
-}
-
 async function startOne(datasetId: string, json: boolean): Promise<void> {
   const spinner = json ? null : ora("Starting the review...").start();
   const answer = await attemptStart(datasetId);
@@ -261,14 +248,14 @@ async function startOne(datasetId: string, json: boolean): Promise<void> {
       if (answer.word !== undefined) {
         failMessage(withWord(`${datasetId}: ${answer.sentence}`, answer.word), {
           json,
-          answered: isAnswered(answer.error, answer.word),
+          answered: isAnswered(answer.error),
           hint:
             answer.error instanceof ApiError && answer.error.statusCode === 403
               ? "This command requires admin privileges"
               : undefined,
         });
       } else {
-        reportFailure(answer.error, null, "Could not start the review", json);
+        failWith(answer.error, null, "Could not start the review", undefined, { json });
       }
       return;
   }
@@ -302,7 +289,7 @@ async function startAll(options: {
     rows = (await listPublishRequests("requested")).requests;
     spinner?.stop();
   } catch (error) {
-    reportFailure(error, spinner, "Could not read the publication requests", json);
+    failWith(error, spinner, "Could not read the publication requests", undefined, { json });
     return;
   }
   // The review is off, or this Worker is older than the review: nothing to ask about, and saying
@@ -382,7 +369,7 @@ async function startAll(options: {
     const result = resultOf(id, answer);
     results.push(result);
     if (answer.kind === "started") environment = answer.body.environment;
-    if (answer.kind === "failed" && !isAnswered(answer.error, answer.word)) unexplained = true;
+    if (answer.kind === "failed" && !isAnswered(answer.error)) unexplained = true;
     if (!json) console.log(`  ${plain(id)}  ${resultText(answer)}`);
     if (answer.kind === "not_started" && answer.platformLimit) {
       // The allowance is the platform's, so every start after this one would be declined the same

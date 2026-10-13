@@ -2,15 +2,18 @@
  * `nemar admin publish`: the publication workflow, from the administrator's side.
  *
  *   nemar admin publish list [--status <s>]    the publication requests, with the identifier screen
+ *   nemar admin publish show <ds>              the automated review of one request (admin-publish-review.ts)
+ *   nemar admin publish start <ds> | --all     start the automated review (admin-publish-review.ts)
+ *   nemar admin publish next                   the requests that need you, one card each (admin-publish-next.ts)
+ *   nemar admin publish approve <ds>           approve and publish (admin-publish-approve.ts)
  *   nemar admin publish deny <ds> [-r <why>]   deny one, mailing the depositor the reason
  *   nemar admin publish screen <ds>            run the identifier screen of a request again
- *   nemar admin publish approve <ds>           approve and publish (admin-publish-approve.ts)
- *   nemar admin publish next                   the requests that need you, one card each (admin-publish-next.ts)
  *
  * Split out of `admin.ts` (epic #1726, phase 2) so the publication review's commands do not grow
  * a file of ten thousand lines. The group is registered on `adminCommand` at the position it
- * always had, so `nemar admin --help` is unchanged; `approve` has its own file and is registered
- * on this group at the end, so the subcommands keep their order.
+ * always had, so `nemar admin --help` is unchanged. `show` and `start` are registered from their own
+ * file right after `list`, and `approve` and `next` after `screen`; commander lists a group's
+ * subcommands alphabetically, so the order of registration does not show in `--help`.
  */
 
 import chalk from "chalk";
@@ -18,7 +21,6 @@ import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
 import { failWith, requireSignedIn } from "../lib/admin-command.js";
-import { reportFailure, signedIn } from "../lib/admin-output.js";
 import { denyPublication, listPublishRequests, rerunIdentifierScreen } from "../lib/api/publish.js";
 import {
   type ConfirmOptions,
@@ -82,7 +84,7 @@ Examples:
   )
   .action(async (options: { status?: string; needsMe?: boolean; json?: boolean }) => {
     const json = options.json === true;
-    if (!signedIn(json)) return;
+    if (!requireSignedIn(json)) return;
 
     const spinner = json ? null : ora("Fetching publication requests...").start();
 
@@ -182,7 +184,7 @@ Examples:
       }
       console.log();
     } catch (error) {
-      reportFailure(error, spinner, "Failed to list publication requests", json);
+      failWith(error, spinner, "Failed to list publication requests", undefined, { json });
     }
   });
 

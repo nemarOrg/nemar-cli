@@ -23,15 +23,13 @@
 import chalk from "chalk";
 import type { Command } from "commander";
 import { PUBLICATION_COMMENT_MAX_LENGTH } from "../../shared/contract/publication-review-admin.js";
-import { requireSignedIn } from "../lib/admin-command.js";
-import { failMessage } from "../lib/admin-output.js";
-import { ApiError, errorDetail } from "../lib/api/errors.js";
 import {
-  commentOnPublication,
-  denyPublication,
-  listPublishRequests,
-  reviewErrorCode,
-} from "../lib/api/publish.js";
+  ACKNOWLEDGMENT_MAX_LENGTH,
+  ACKNOWLEDGMENT_MIN_LENGTH,
+  DENIAL_REASON_MAX_LENGTH,
+} from "../../shared/publication-limits.js";
+import { checkedDatasetId, failWith, requireSignedIn } from "../lib/admin-command.js";
+import { commentOnPublication, denyPublication, listPublishRequests } from "../lib/api/publish.js";
 import { LineReader } from "../lib/prompt-lines.js";
 import { type ReviewRead, readReview, reasonViewLine } from "../lib/publication-review-approve.js";
 import { NON_PRODUCTION_NOTE, reviewDetailLines } from "../lib/publication-review-display.js";
@@ -51,14 +49,6 @@ import {
 } from "../lib/publication-review-next.js";
 import { plain } from "../lib/terminal-text.js";
 import { runApproval } from "./admin-publish-approve.js";
-
-const DATASET_ID_RE = /^(nm|on|xx)\d{6}$/;
-
-/** What the Worker accepts for a denial's reason (`denySchema` in the admin publish routes). */
-const DENIAL_REASON_MAX = 2000;
-/** What the Worker accepts for the screen's acknowledgment (the same bounds `approve` checks). */
-const ACKNOWLEDGMENT_MIN = 10;
-const ACKNOWLEDGMENT_MAX = 500;
 
 export function registerNextCommand(group: Command): void {
   group
@@ -118,12 +108,7 @@ Examples:
     )
     .action(async (options: { dataset?: string; force?: boolean; once?: boolean }) => {
       if (!requireSignedIn()) return;
-      if (options.dataset !== undefined && !DATASET_ID_RE.test(options.dataset)) {
-        failMessage(`"${plain(options.dataset)}" is not a dataset id (like nm000108).`, {
-          answered: true,
-        });
-        return;
-      }
+      if (options.dataset !== undefined && checkedDatasetId(options.dataset) === null) return;
       await walk({
         dataset: options.dataset,
         force: options.force === true,
@@ -197,7 +182,7 @@ async function walk(options: WalkOptions): Promise<void> {
     try {
       rows = await readQueue(dataset);
     } catch (error) {
-      printFailure(error, "Could not read the publication requests");
+      failWith(error, null, "Could not read the publication requests");
       tally.failed++;
       break;
     }
@@ -369,15 +354,18 @@ async function approve(step: Step, card: Card): Promise<Outcome> {
     for (;;) {
       const got = await askLine(
         step.reader,
-        `Reason for approving over the identifier screen (${ACKNOWLEDGMENT_MIN} to ${ACKNOWLEDGMENT_MAX} characters; empty cancels): `,
+        `Reason for approving over the identifier screen (${ACKNOWLEDGMENT_MIN_LENGTH} to ${ACKNOWLEDGMENT_MAX_LENGTH} characters; empty cancels): `,
         "reason",
       );
       if (got.kind === "ended") return "ended";
       if (got.kind === "cancelled") return "again";
-      if (got.text.length < ACKNOWLEDGMENT_MIN || got.text.length > ACKNOWLEDGMENT_MAX) {
+      if (
+        got.text.length < ACKNOWLEDGMENT_MIN_LENGTH ||
+        got.text.length > ACKNOWLEDGMENT_MAX_LENGTH
+      ) {
         console.log(
           chalk.yellow(
-            `A reason is ${ACKNOWLEDGMENT_MIN} to ${ACKNOWLEDGMENT_MAX} characters; this one is ${got.text.length}.`,
+            `A reason is ${ACKNOWLEDGMENT_MIN_LENGTH} to ${ACKNOWLEDGMENT_MAX_LENGTH} characters; this one is ${got.text.length}.`,
           ),
         );
         continue;
@@ -432,10 +420,10 @@ async function deny(step: Step, card: Card): Promise<Outcome> {
   );
   if (got.kind === "ended") return "ended";
   if (got.kind === "cancelled") return "again";
-  if (got.text.length > DENIAL_REASON_MAX) {
+  if (got.text.length > DENIAL_REASON_MAX_LENGTH) {
     console.log(
       chalk.yellow(
-        `A denial reason is at most ${DENIAL_REASON_MAX} characters; this one is ${got.text.length}. Nothing was sent.`,
+        `A denial reason is at most ${DENIAL_REASON_MAX_LENGTH} characters; this one is ${got.text.length}. Nothing was sent.`,
       ),
     );
     return "again";
@@ -443,7 +431,7 @@ async function deny(step: Step, card: Card): Promise<Outcome> {
   try {
     await denyPublication(id, got.text);
   } catch (error) {
-    printFailure(error, `Could not deny ${plain(id)}`);
+    failWith(error, null, `Could not deny ${plain(id)}`);
     step.tally.failed++;
     return "done";
   }
@@ -471,7 +459,7 @@ async function comment(step: Step, card: Card): Promise<Outcome> {
   } catch (error) {
     // The Worker's own sentence: a failed send may still have reached the depositor, and the
     // sentence says so. It is not rewritten into a claim that nothing was sent.
-    printFailure(error, `Could not send the message for ${plain(id)}`);
+    failWith(error, null, `Could not send the message for ${plain(id)}`);
     step.tally.failed++;
     return "done";
   }
@@ -485,25 +473,6 @@ async function comment(step: Step, card: Card): Promise<Outcome> {
 // ---------------------------------------------------------------------------------------------
 // The terminal
 // ---------------------------------------------------------------------------------------------
-
-/**
- * Say why a write failed, in the Worker's words, and set the exit code. The Worker's refusal (a
- * 4xx, or an error that names its closed word) is the command's answer and not a crash, so it does
- * not invite a bug report; a network failure and a fault of the Worker's own may be one.
- */
-function printFailure(error: unknown, fallback: string): void {
-  if (error instanceof ApiError) {
-    const word = reviewErrorCode(error);
-    failMessage(plain(error.message), {
-      answered:
-        (error.statusCode >= 400 && error.statusCode < 500) ||
-        (word !== undefined && word !== "internal"),
-      hint: error.statusCode === 403 ? "This command requires admin privileges" : undefined,
-    });
-    return;
-  }
-  failMessage(fallback, { answered: false, hint: `Error details: ${plain(errorDetail(error))}` });
-}
 
 /**
  * Put a terminal's input back the way the walk's reader needs it. The approval's spinner takes

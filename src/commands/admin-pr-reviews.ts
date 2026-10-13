@@ -36,6 +36,7 @@ import {
   renderCheck,
   verdictOf,
 } from "../../shared/pr-review.js";
+import { say } from "../lib/admin-command.js";
 import {
   clearPrReviewAuthor,
   getPrReview,
@@ -80,7 +81,8 @@ import { approveAllowed, parseChoice } from "../lib/pr-review-next.js";
 import { LineReader } from "../lib/prompt-lines.js";
 import { ageOf, clip, plain } from "../lib/terminal-text.js";
 
-// Moved to `lib/terminal-text.ts`; the render tests and the other commands import them from here.
+// Moved to `lib/terminal-text.ts`; re-exported because `test/pr-reviews-render.unit.test.ts` imports
+// them from here.
 export { ageOf, plain };
 
 const DATASET_ID_RE = /^(nm|xx|on)\d{6}$/;
@@ -336,11 +338,6 @@ function requireAuth(json?: boolean): boolean {
     return false;
   }
   return true;
-}
-
-/** Where an error goes: stderr when the caller asked for JSON, so stdout stays machine-readable. */
-function say(json: boolean | undefined): (line: string) => void {
-  return json ? (line) => console.error(line) : (line) => console.log(line);
 }
 
 function die(message: string, hint?: string, json?: boolean): never {

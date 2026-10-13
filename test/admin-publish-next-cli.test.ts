@@ -810,6 +810,35 @@ describe("what fails exits 1, and the walk goes on", () => {
     expect(output(r)).not.toContain("attach the log to a new issue");
   });
 
+  test("a request the Worker refused, then one that failed for a reason that may be a bug: the bug-report hint follows the LAST failure", async () => {
+    // Card 1: the Worker's refusal (409), an answer, which marks the exit as reported. Card 2: a
+    // denial the Worker could not write (500 with no closed word), which may be a bug and must
+    // bring the hint back; a mark that nothing can clear would leave it suppressed.
+    seed(A, twoReasons());
+    seed(B);
+    requestedAt(A, "2026-10-10 09:00:00");
+    requestedAt(B, "2026-10-11 09:00:00");
+    h.after(`GET /admin/publish/${A}/review`, () => {
+      h.db.run("INSERT INTO dataset_versions (dataset_id, version, doi) VALUES (?, '1.0.0', ?)", [
+        A,
+        "10.5072/FK2.late",
+      ]);
+    });
+    h.hookDb({
+      statement(sql) {
+        if (/SET status = 'denied'/.test(sql)) throw new Error("simulated write failure");
+      },
+    });
+
+    const r = await next("y\ny\nn\nThe participants file is missing\n", ["--force"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(h.requests.filter((c) => c.path === approvePath(A)).map((c) => c.status)).toEqual([409]);
+    expect(h.requests.filter((c) => c.path.endsWith("/deny")).map((c) => c.status)).toEqual([500]);
+    expect(r.stdout).toContain("Done: 2 failed.");
+    expect(output(r)).toContain("attach the log to a new issue");
+  });
+
   test("a review that could not be read still gets a card; y is offered, the Worker refuses it, exit 1", async () => {
     const { requestId } = seed(A);
     h.hookDb({
