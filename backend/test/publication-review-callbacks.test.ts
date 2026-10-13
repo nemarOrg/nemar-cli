@@ -2163,6 +2163,80 @@ describe("no secret reaches the Worker's logs", () => {
     }
   });
 
+  describe("a database fault in the door", () => {
+    // The route answers a fixed sentence and logs the error's words, never the error: left
+    // alone, the global handler prints the whole error object, whose text can carry SQL.
+    const FAULT = "D1_ERROR: SECRET-DRIVER-MESSAGE near publication_reviews";
+    const touchesReviews = (sql: string) => /publication_reviews/.test(sql);
+
+    test("the nonce read: a fixed 500 on the claim and on the result, and nothing printed but words", async () => {
+      const { reviewId } = dispatched({ claimed: false });
+      const token = await h.tokenFor(reviewId);
+      const nonce = h.nonceOf(reviewId) as string;
+      const faulty = h.env({
+        DB: hookedD1(realD1(h.db), {
+          statement: (sql) => {
+            if (touchesReviews(sql)) throw new Error(FAULT);
+          },
+        }),
+      });
+      const seen: Array<{ status: number; body: Record<string, unknown> }> = [];
+      const out = await captured(async () => {
+        seen.push(await h.claim(reviewId, token, faulty));
+        seen.push(
+          await h.result(
+            reviewId,
+            { outcome: "reported", report: reportFor(SCREENED_HEAD, false) },
+            token,
+            faulty,
+          ),
+        );
+      });
+      for (const res of seen) {
+        expect(res.status).toBe(500);
+        expect(JSON.stringify(res.body)).not.toContain("SECRET");
+      }
+      expect(seen[0].body).toEqual({ error: "The callback could not be checked; try again" });
+      expect(seen[1].body).toEqual(seen[0].body);
+      expect(out).toContain(`review ${reviewId} (${PROD_DATASET})`);
+      expect(out).toContain("Error, other");
+      for (const secret of [FAULT, "SECRET-DRIVER-MESSAGE", token, nonce, CALLBACK_SECRET]) {
+        expect(out).not.toContain(secret);
+      }
+      // Nothing was written, and the token is still good once the database is.
+      expect(state(reviewId)).toMatchObject({ state: "dispatched", claimed_at: null });
+      expect((await h.claim(reviewId, token)).status).toBe(200);
+    });
+
+    test("the claim: a fixed 500 and a log of words, and the job's retry still takes it", async () => {
+      const { reviewId } = dispatched({ claimed: false });
+      const token = await h.tokenFor(reviewId);
+      const nonce = h.nonceOf(reviewId) as string;
+      // The first statement on the table is the door's nonce read; the claim's own come after.
+      let reads = 0;
+      const faulty = h.env({
+        DB: hookedD1(realD1(h.db), {
+          statement: (sql) => {
+            if (touchesReviews(sql) && ++reads > 1) throw new Error(FAULT);
+          },
+        }),
+      });
+      let res: { status: number; body: Record<string, unknown> } | undefined;
+      const out = await captured(async () => {
+        res = await h.claim(reviewId, token, faulty);
+      });
+      expect(reads).toBeGreaterThan(1);
+      expect(res?.status).toBe(500);
+      expect(res?.body).toEqual({ error: "The claim could not be taken; try again" });
+      expect(out).toContain(`review ${reviewId} (${PROD_DATASET}): claim failed (Error, other)`);
+      for (const secret of [FAULT, "SECRET-DRIVER-MESSAGE", token, nonce, CALLBACK_SECRET]) {
+        expect(out).not.toContain(secret);
+      }
+      expect(state(reviewId).claimed_at).toBeNull();
+      expect((await h.claim(reviewId, token)).status).toBe(200);
+    });
+  });
+
   test("a hostile report's text is not logged when it is stored either", async () => {
     const { reviewId } = dispatched({ claimed: true });
     const out = await captured(async () => {

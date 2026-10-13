@@ -26,7 +26,9 @@
  * shown as text and never as markup, a link or a mention.
  *
  * Every log line is ids and fixed words: the route never prints a token, a nonce, a secret or a
- * byte of the body.
+ * byte of the body. A database fault is no exception: the nonce read, the claim and the store each
+ * catch it, answer a fixed 500 the job may retry, and log the error's words (`errorWords`), because
+ * the global handler would print the whole error, whose text can carry SQL.
  */
 
 import { parsePublicationCallbackOutcome } from "../../../../shared/publication-review.js";
@@ -75,7 +77,17 @@ async function verify(c: WebhookContext, route: string): Promise<Verified | Resp
     return c.json({ error: "Server misconfigured: callback secret unset" }, 500);
   }
 
-  const pending = await pendingPublicationReviewNonce(c.env.DB, reviewId, datasetId);
+  let pending: Awaited<ReturnType<typeof pendingPublicationReviewNonce>>;
+  try {
+    pending = await pendingPublicationReviewNonce(c.env.DB, reviewId, datasetId);
+  } catch (err) {
+    // Nothing was read or written, so the job may try again. The words of the error are logged,
+    // never the error: left to the global handler, its text (which can carry SQL) is printed.
+    console.error(
+      `[${route}] review ${reviewId} (${datasetId}): nonce read failed (${errorWords(err)})`,
+    );
+    return c.json({ error: "The callback could not be checked; try again" }, 500);
+  }
   if (!pending) {
     console.warn(`[${route}] no waiting review ${reviewId} (${datasetId})`);
     return c.json(UNAUTHORIZED, 401);
@@ -96,13 +108,24 @@ export function registerPublicationReviewRoutes(webhooks: WebhookRouter): void {
   webhooks.post("/publication-review-claim", async (c) => {
     const v = await verify(c, "publication-review-claim");
     if (v instanceof Response) return v;
-    const claim = await claimPublicationReview(
-      c.env,
-      v.reviewId,
-      v.datasetId,
-      v.nonce,
-      deferAfterAnswer(c),
-    );
+    let claim: Awaited<ReturnType<typeof claimPublicationReview>>;
+    try {
+      claim = await claimPublicationReview(
+        c.env,
+        v.reviewId,
+        v.datasetId,
+        v.nonce,
+        deferAfterAnswer(c),
+      );
+    } catch (err) {
+      // Every write on the claim's path is one conditional statement, so the job may try again
+      // (a claim that did land answers `already_claimed`, which never buys a second model call).
+      // The words of the error are logged, never the error (see `verify`).
+      console.error(
+        `[publication-review-claim] review ${v.reviewId} (${v.datasetId}): claim failed (${errorWords(err)})`,
+      );
+      return c.json({ error: "The claim could not be taken; try again" }, 500);
+    }
     console.log(`[publication-review-claim] review ${v.reviewId} (${v.datasetId}): ${claim}`);
     if (claim === "claimed") return c.json({ ok: true, claimed: true });
     return c.json({ ok: false, claimed: false, reason: claim }, 409);
