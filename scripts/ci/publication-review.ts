@@ -6,7 +6,8 @@
  * token, and no GitHub credential, and neither does the clone: an earlier step fetched the
  * repository, and with it the blobs this script reads, giving its read-only token to each git
  * command through that command's own environment and writing it nowhere. This script's git calls
- * need nothing from the network, and no git child process inherits any token.
+ * need nothing from the network and, with lazy fetching off, cannot ask for it, and no git child
+ * process inherits any token.
  *
  *   bun run scripts/ci/publication-review.ts review \
  *     --repo-dir DIR --head SHA --fetched-head SHA --tags-file FILE --bids-runs-file FILE \
@@ -53,22 +54,21 @@ import {
 import {
   PublicationEvidenceError,
   SHA40,
-  bidsState,
-  buildPublicationEvidence,
-  descriptionFacts,
+  evidenceFromDocuments,
   readRootDocuments,
   readTree,
   structuralSummary,
-  tagState,
-  versionFacts,
 } from "./publication-review-evidence";
-import { presend } from "./publication-review-presend";
 import {
   PUBLICATION_OUTPUT_SCHEMA,
   PUBLICATION_REVIEW_MODEL,
   assemblePublicationReport,
   buildPublicationReviewMessages,
 } from "./publication-review-prompt";
+
+// RunFailure, mapError, describeError, the callback poster, flag and need, and CALLBACK_ORIGINS
+// below are copies of the ones in pr-review.ts, on purpose: the live pull-request review stays
+// untouched.
 
 /** The API origin for each environment NAME. A payload never supplies a URL. */
 export const CALLBACK_ORIGINS = {
@@ -232,37 +232,16 @@ export async function runPublicationReview(args: ReviewArgs): Promise<Publicatio
 
     const tree = await readTree(args.repoDir, args.head);
     const docs = readRootDocuments(args.repoDir, tree);
-
-    // A description nobody could read leaves every fact below it invented, so it is not a fact.
-    const descriptionState = docs.dataset_description.state;
-    if (descriptionState !== "present" && descriptionState !== "absent") {
-      throw new PublicationEvidenceError("description_unreadable");
-    }
-    const description = descriptionFacts(
-      docs.dataset_description.text,
-      docs.readme.text,
-      args.anonymous,
-      { readmeUnread: ["annexed", "unreadable", "not_utf8"].includes(docs.readme.state) },
-    );
-    const version = versionFacts(docs.dataset_description.text);
-    const tagsText = readText(args.tagsFile);
-    if (tagsText === null) throw new PublicationEvidenceError("tags_unreadable");
-    const bidsRuns = readText(args.bidsRunsFile);
-
-    const checked = presend(docs);
-    const facts = buildPublicationEvidence({
+    const { facts, cleared } = evidenceFromDocuments(docs, {
       head: args.head,
       anonymous: args.anonymous,
-      description,
-      version,
-      tag: tagState(tagsText, version.version, args.head),
-      bids: bidsRuns === null ? "unknown" : bidsState(bidsRuns, args.head),
-      presend: checked,
+      tagsText: readText(args.tagsFile),
+      bidsRuns: readText(args.bidsRunsFile),
       summary: structuralSummary(args.repoDir, tree),
     });
     const { system, user } = buildPublicationReviewMessages({
       facts,
-      cleared: checked.cleared,
+      cleared,
       nonce: randomUUID().replaceAll("-", ""),
     });
     const modelOutput = await callPublicationReviewModel(system, user);
@@ -304,9 +283,12 @@ function flag(argv: string[], name: string): string | undefined {
   return i >= 0 ? argv[i + 1] : undefined;
 }
 
+/** A flag that is not there: exit 2, and the message is the flag's own name, never a value. */
+class UsageError extends Error {}
+
 function need(argv: string[], name: string): string {
   const v = flag(argv, name);
-  if (!v) throw new Error(`missing --${name}`);
+  if (!v) throw new UsageError(`missing --${name}`);
   return v;
 }
 
@@ -336,11 +318,40 @@ export async function main(
     console.error("usage: publication-review.ts review|calibrate ...");
     return 2;
   }
-  const dataset = need(rest, "dataset");
-  const reviewId = positive(need(rest, "review-id"));
-  const requestId = positive(need(rest, "request-id"));
-  const environment = need(rest, "environment");
-  const anonymous = need(rest, "anonymous");
+  let flags: Record<
+    | "dataset"
+    | "review-id"
+    | "request-id"
+    | "environment"
+    | "anonymous"
+    | "repo-dir"
+    | "head"
+    | "fetched-head"
+    | "tags-file"
+    | "bids-runs-file",
+    string
+  >;
+  try {
+    flags = {
+      dataset: need(rest, "dataset"),
+      "review-id": need(rest, "review-id"),
+      "request-id": need(rest, "request-id"),
+      environment: need(rest, "environment"),
+      anonymous: need(rest, "anonymous"),
+      "repo-dir": need(rest, "repo-dir"),
+      head: need(rest, "head"),
+      "fetched-head": need(rest, "fetched-head"),
+      "tags-file": need(rest, "tags-file"),
+      "bids-runs-file": need(rest, "bids-runs-file"),
+    };
+  } catch (e) {
+    if (!(e instanceof UsageError)) throw e;
+    console.error(e.message);
+    return 2;
+  }
+  const { dataset, environment, anonymous } = flags;
+  const reviewId = positive(flags["review-id"]);
+  const requestId = positive(flags["request-id"]);
   const token = process.env.PUBLICATION_REVIEW_CALLBACK_TOKEN;
   if (!DATASET_ID.test(dataset) || reviewId === null || requestId === null) {
     console.error("bad --dataset, --review-id or --request-id");
@@ -360,11 +371,11 @@ export async function main(
   }
 
   const result: PublicationReviewResult = await runPublicationReview({
-    repoDir: need(rest, "repo-dir"),
-    head: need(rest, "head"),
-    fetchedHead: need(rest, "fetched-head"),
-    tagsFile: need(rest, "tags-file"),
-    bidsRunsFile: need(rest, "bids-runs-file"),
+    repoDir: flags["repo-dir"],
+    head: flags.head,
+    fetchedHead: flags["fetched-head"],
+    tagsFile: flags["tags-file"],
+    bidsRunsFile: flags["bids-runs-file"],
     anonymous: anonymous === "true",
   });
 

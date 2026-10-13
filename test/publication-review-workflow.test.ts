@@ -28,12 +28,15 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { parse } from "yaml";
 import { CALLBACK_ORIGINS, main } from "../scripts/ci/publication-review";
 import {
+  DATA_SIDECAR,
+  NOT_RAW,
   SIDECAR_SAMPLE,
   bidsState,
+  blobsToRead,
   readRootDocuments,
   readTree,
   structuralSummary,
@@ -257,11 +260,11 @@ describe("the claim comes first", () => {
   });
 });
 
-describe("what runs after the mint is not install-time code, and the header says what is left (#1728)", () => {
+describe("what runs after the mint is not install-time code (#1728)", () => {
   // `create-github-app-token` is the one step given the GitHub App's private key, and the runner
   // passes the same inputs to the action's post step at the end of the job. The order and the
-  // flags below close what they close; the header says what they do not (an earlier version of
-  // this file claimed the key was out of reach of everything after the mint, which was not true).
+  // flags below close what they close, which is hooks planted before the mint and install-time
+  // code; the workflow's header says what they do not.
   const names = job.steps.map((s) => s.name);
   const at = (n: string) => names.indexOf(n);
   const INSTALL = "Install the review script's dependencies";
@@ -327,42 +330,6 @@ describe("what runs after the mint is not install-time code, and the header says
     // Not `--production`: the review script imports the Anthropic SDK, which this repository lists as a
     // development dependency, so a production install could not run it (checked in a scratch copy).
     expect(SRC).not.toMatch(/bun install[^\n]*--production/);
-  });
-
-  /** The header's comment text as prose: comment markers removed, lines joined. */
-  const HEADER = SRC.split("\n")
-    .filter((l) => l.startsWith("#"))
-    .map((l) => l.replace(/^#\s?/, ""))
-    .join(" ")
-    .replace(/\s+/g, " ");
-
-  test("the header says precisely what the order closes and what it leaves", () => {
-    // The sentences that were false are gone, from the header and from the step comments.
-    expect(SRC).not.toContain("is out of reach of everything below");
-    expect(SRC).not.toContain("AWAY FROM INSTALLED CODE");
-    expect(SRC).not.toMatch(/the model step can USE the read-only token/i);
-    // What is closed.
-    expect(HEADER).toContain("WHAT THE ORDER CLOSES, AND WHAT IT DOES NOT");
-    expect(HEADER).toContain("hooks planted before the mint");
-    expect(HEADER).toContain("install-time code");
-    expect(HEADER).toContain("lifecycle scripts");
-    expect(HEADER).toContain("the dataset token in a configuration file");
-    // What is left, named.
-    for (const left of [
-      "pinned third-party actions' own code",
-      "event file",
-      "post step",
-      "dependency tree's runtime code",
-      "logs and artifacts are public",
-    ]) {
-      expect(HEADER, left).toContain(left);
-    }
-  });
-
-  test("the window between the head check and the model call is named, with its cost", () => {
-    expect(HEADER).toContain("THE HEAD CHECK AND ITS WINDOW");
-    expect(HEADER).toContain("one wasted call");
-    expect(HEADER).toContain("still blocks an approval");
   });
 });
 
@@ -599,6 +566,21 @@ describe("nothing from the dataset runs", () => {
     const fetch = step(FETCH).run ?? "";
     expect(fetch).toContain('gitauth ls-remote --tags origin > "$RUNNER_TEMP/tags.txt"');
     expect(fetch).toContain('echo "fetched=$(git rev-parse refs/remotes/origin/main)"');
+  });
+
+  test("the fetch step reads GH_TOKEN once, into the header, and unsets it before any other command", () => {
+    const fetch = step(FETCH).run ?? "";
+    const header = fetch.indexOf("auth=");
+    const unset = fetch.indexOf("unset GH_TOKEN");
+    expect(header).toBeGreaterThan(-1);
+    expect(unset).toBeGreaterThan(header);
+    // The header is encoded without the token in the encoder's environment, and every command that
+    // follows (git init, config, remote, ls-tree, perl) comes after the unset.
+    expect(fetch.slice(header, unset)).toContain("env -u GH_TOKEN base64");
+    expect(fetch.indexOf("git init")).toBeGreaterThan(unset);
+    expect(fetch.indexOf("perl ")).toBeGreaterThan(unset);
+    // Nothing in the step puts it back.
+    expect(fetch.indexOf("GH_TOKEN", unset + "unset GH_TOKEN".length)).toBe(-1);
   });
 
   test("the fetch credential is masked before it is written anywhere", () => {
@@ -955,9 +937,12 @@ describe("the shell steps, run for real", () => {
   // The fetch, the validation runs, and the script's arguments: the chain the job really runs
   // -------------------------------------------------------------------------------------------
 
-  /** A dataset repository as GitHub would serve it: `main`, with an annotated tag and a later commit. */
-  function servedDataset() {
-    const dir = mkdtempSync(join(tmpdir(), "publication-review-remote-"));
+  /**
+   * An empty repository standing in for a dataset's remote: `main`, with the filter capability the
+   * hosting service has. `put` writes a file (creating its directories), `run` is the real git.
+   */
+  function servedRepo(prefix: string) {
+    const dir = mkdtempSync(join(tmpdir(), prefix));
     const env = {
       PATH: process.env.PATH ?? "",
       HOME: dir,
@@ -971,8 +956,12 @@ describe("the shell steps, run for real", () => {
     run("init", "-q", "-b", "main");
     run("config", "uploadpack.allowFilter", "true");
     run("config", "uploadpack.allowAnySHA1InWant", "true");
-    writeFileSync(
-      join(dir, "dataset_description.json"),
+    const put = (rel: string, text: string) => {
+      mkdirSync(dirname(join(dir, rel)), { recursive: true });
+      writeFileSync(join(dir, rel), text);
+    };
+    put(
+      "dataset_description.json",
       JSON.stringify({
         Name: "Resting EEG of healthy volunteers, eyes open and closed",
         BIDSVersion: "1.9.0",
@@ -982,18 +971,23 @@ describe("the shell steps, run for real", () => {
         EthicsApprovals: ["IRB 2024-0001, University X"],
       }),
     );
-    writeFileSync(join(dir, "README.md"), "# Resting EEG\nTwelve volunteers at rest.\n");
-    mkdirSync(join(dir, "sub-01", "eeg"), { recursive: true });
-    writeFileSync(join(dir, "sub-01", "eeg", "sub-01_task-rest_eeg.edf"), "recording");
-    writeFileSync(
-      join(dir, "sub-01", "eeg", "sub-01_task-rest_eeg.json"),
+    return { dir, run, put };
+  }
+
+  /** A dataset repository as GitHub would serve it: `main`, with an annotated tag and a later commit. */
+  function servedDataset() {
+    const { dir, run, put } = servedRepo("publication-review-remote-");
+    put("README.md", "# Resting EEG\nTwelve volunteers at rest.\n");
+    put("sub-01/eeg/sub-01_task-rest_eeg.edf", "recording");
+    put(
+      "sub-01/eeg/sub-01_task-rest_eeg.json",
       JSON.stringify({ SamplingFrequency: 250, EEGChannelCount: 8 }),
     );
     run("add", ".");
     run("commit", "-q", "-m", "first");
     const first = run("rev-parse", "HEAD");
     run("tag", "-a", "v1.0.0", "-m", "release one");
-    writeFileSync(join(dir, "CHANGES"), "1.0.1 later\n");
+    put("CHANGES", "1.0.1 later\n");
     run("add", ".");
     run("commit", "-q", "-m", "main moved on");
     return { dir, first, mainTip: run("rev-parse", "HEAD") };
@@ -1059,26 +1053,43 @@ describe("the shell steps, run for real", () => {
   });
 
   /**
-   * A `git` on the PATH that records, for each call, its arguments and the `GIT_CONFIG_*`
-   * environment it was started with, and then runs the real git. The credential travels as
-   * `GIT_CONFIG_*` variables of one command, so this is what shows which commands were given it.
+   * `git`, `perl`, `sort` and `base64` on the PATH that record, for each call, the command, whether
+   * `GH_TOKEN` was in its environment, and (for git, whose arguments are one line) its arguments and
+   * the `GIT_CONFIG_*` environment it was started with; each then runs the real command. The
+   * credential travels as `GIT_CONFIG_*` variables of one git command, so this is what shows which
+   * commands were given it and which of the step's commands could have read the environment variable.
    */
-  function gitSpy() {
-    const dir = mkdtempSync(join(tmpdir(), "publication-review-gitspy-"));
-    const real = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+  function commandSpy() {
+    const dir = mkdtempSync(join(tmpdir(), "publication-review-spy-"));
     const log = join(dir, "calls.txt");
-    writeFileSync(
-      join(dir, "git"),
-      `#!/usr/bin/env bash\n{ printf '%s\\t' "$*"; env | grep '^GIT_CONFIG_' | sort | tr '\\n' ' '; printf '\\n'; } >> "${log}"\nexec "${real}" "$@"\n`,
-    );
-    chmodSync(join(dir, "git"), 0o755);
+    const where = (name: string) =>
+      execFileSync("sh", ["-c", `command -v ${name}`], { encoding: "utf8" }).trim();
+    // The recorder sorts too, and must not call its own spy.
+    const realSort = where("sort");
+    for (const name of ["git", "perl", "sort", "base64"]) {
+      const real = where(name);
+      const args = name === "git" ? '"$*"' : '""';
+      writeFileSync(
+        join(dir, name),
+        [
+          "#!/usr/bin/env bash",
+          // One write of one line: the commands of a pipeline start together, and a record built
+          // by several writes would be torn by its neighbour's.
+          `line="$({ printf '%s\\t%s\\t' "${name}" ${args}; env | grep '^GIT_CONFIG_' | ${realSort} | tr '\\n' ' '; printf '\\t'; if [ -n "\${GH_TOKEN+x}" ]; then printf 'GH_TOKEN'; fi; })"`,
+          `printf '%s\\n' "$line" >> "${log}"`,
+          `exec "${real}" "$@"`,
+          "",
+        ].join("\n"),
+      );
+      chmodSync(join(dir, name), 0o755);
+    }
     const calls = () =>
       readFileSync(log, "utf8")
         .trim()
         .split("\n")
         .map((l) => {
-          const [args, env] = l.split("\t") as [string, string];
-          return { args, env };
+          const [tool, args, env, token] = l.split("\t") as [string, string, string, string];
+          return { tool, args, env, hasToken: token === "GH_TOKEN" };
         });
     return { dir, calls };
   }
@@ -1087,14 +1098,15 @@ describe("the shell steps, run for real", () => {
 
   test("fetch: the credential is given to the three git commands that need it, through their own environment, and to no other", async () => {
     const remote = servedDataset();
-    const spy = gitSpy();
+    const spy = commandSpy();
     const r = await runStepScript(
       FETCH,
       fetchEnv(remote, { PATH: `${spy.dir}:${process.env.PATH ?? ""}` }),
     );
     expect(r.status, r.stderr).toBe(0);
     const calls = spy.calls();
-    const withCredential = calls.filter((c) => c.env.includes(`AUTHORIZATION: basic ${AUTH}`));
+    const gitCalls = calls.filter((c) => c.tool === "git");
+    const withCredential = gitCalls.filter((c) => c.env.includes(`AUTHORIZATION: basic ${AUTH}`));
     // The tree fetch, the tag listing and the one fetch of the blobs the review reads.
     expect(
       withCredential.map((c) => c.args.split(" ").find((a) => ["fetch", "ls-remote"].includes(a))),
@@ -1106,12 +1118,18 @@ describe("the shell steps, run for real", () => {
       expect(c.env).toContain("GIT_CONFIG_KEY_0=url.file://");
     }
     // Every other call (init, config, remote, rev-parse, ls-tree) had none of it.
-    for (const c of calls.filter((x) => !withCredential.includes(x))) {
+    for (const c of gitCalls.filter((x) => !withCredential.includes(x))) {
       expect(c.env, c.args).not.toMatch(/extraheader|AUTHORIZATION/);
       expect(c.args, c.args).not.toMatch(/extraheader|AUTHORIZATION|ghs_/);
     }
     // And never on a command line, where any process can read it.
     for (const c of calls) expect(c.args).not.toMatch(/AUTHORIZATION|ghs_|x-access-token/);
+
+    // `GH_TOKEN` is the step's own input, read once to make the header: after that no command the
+    // step starts has it in its environment, the credentialed git commands included (they get the
+    // header, not the token), and neither do the commands that select the blobs or encode the header.
+    expect(new Set(calls.map((c) => c.tool))).toEqual(new Set(["git", "perl", "sort", "base64"]));
+    expect(calls.filter((c) => c.hasToken)).toEqual([]);
   });
 
   test("fetch: nothing of the credential is written anywhere in the repository, or left in what the step wrote", async () => {
@@ -1144,62 +1162,37 @@ describe("the shell steps, run for real", () => {
   });
 
   test("fetch: the names, patterns and sample size it selects by are the review script's own", () => {
+    // The behavior is held by the tests that run the step over a repository and compare what it
+    // fetched with `blobsToRead`; these pin the words and numbers the shell spells for itself.
     const run = step(FETCH).run ?? "";
-    // The root documents: exactly the names the reader looks for, and no others.
-    const names = [
-      ...README_CANDIDATES,
-      ...CHANGES_CANDIDATES,
-      ...LICENSE_CANDIDATES,
-      "dataset_description.json",
-      PARTICIPANTS_JSON,
-    ];
-    const listed = [...run.matchAll(/\$2 == "([^"]+)"/g)].map((m) => m[1]);
-    expect(listed.sort()).toEqual([...names].sort());
-    // The raw-tree and sidecar patterns, and the sample size, as the script spells them.
-    const source = readFileSync(
-      join(REPO_ROOT, "scripts", "ci", "publication-review-evidence.ts"),
-      "utf8",
+    expect(run).toContain("git ls-tree -r -z --full-tree");
+    const perl = run.slice(run.indexOf("perl -0ne"));
+    const lists = [...perl.matchAll(/qw\(([^)]*)\)/g)].map((m) =>
+      (m[1] as string).trim().split(/\s+/),
     );
-    expect(source).toContain("const NOT_RAW = /^(?:derivatives|sourcedata|code)\\//;");
-    expect(source).toContain("const DATA_SIDECAR = /_(?:eeg|ieeg|meg|emg|nirs)\\.json$/;");
-    expect(run).toContain("/^(derivatives|sourcedata|code)\\//");
-    expect(run).toContain("/_(eeg|ieeg|meg|emg|nirs)\\.json$/");
-    expect(run).toContain(`n <= ${SIDECAR_SAMPLE}`);
-    expect(run).toContain(`i < ${SIDECAR_SAMPLE}`);
-    expect(run).toContain(`i * n / ${SIDECAR_SAMPLE}`);
+    // The README forms in the order the reader chooses the first present, then the other documents.
+    expect(lists).toHaveLength(2);
+    expect(lists[0]).toEqual([...README_CANDIDATES]);
+    expect([...(lists[1] ?? [])].sort()).toEqual(
+      [
+        ...CHANGES_CANDIDATES,
+        ...LICENSE_CANDIDATES,
+        "dataset_description.json",
+        PARTICIPANTS_JSON,
+      ].sort(),
+    );
+    // The raw-tree and sidecar patterns, as the reader spells them (`$` is `\z` in perl, which does
+    // not stop before a final newline as `$` does), and the sample size.
+    expect(perl).toContain(`m{${NOT_RAW.source.replaceAll("\\/", "/")}}`);
+    expect(perl).toContain(`m{${DATA_SIDECAR.source.replace(/\$$/, "\\z")}}`);
+    expect(perl).toContain(`$n <= ${SIDECAR_SAMPLE}`);
+    expect(perl).toContain(`$_ * $n / ${SIDECAR_SAMPLE}`);
+    expect(perl).toContain(`0 .. ${SIDECAR_SAMPLE - 1}`);
   });
 
   /** A dataset with many data sidecars, some in places the review never reads. */
   function servedBigDataset(count: number) {
-    const dir = mkdtempSync(join(tmpdir(), "publication-review-big-remote-"));
-    const env = {
-      PATH: process.env.PATH ?? "",
-      HOME: dir,
-      GIT_AUTHOR_NAME: "t",
-      GIT_AUTHOR_EMAIL: "t@example.com",
-      GIT_COMMITTER_NAME: "t",
-      GIT_COMMITTER_EMAIL: "t@example.com",
-    };
-    const run = (...args: string[]) =>
-      execFileSync("git", args, { cwd: dir, encoding: "utf8", env }).trim();
-    run("init", "-q", "-b", "main");
-    run("config", "uploadpack.allowFilter", "true");
-    run("config", "uploadpack.allowAnySHA1InWant", "true");
-    const put = (rel: string, text: string) => {
-      mkdirSync(join(dir, rel, ".."), { recursive: true });
-      writeFileSync(join(dir, rel), text);
-    };
-    put(
-      "dataset_description.json",
-      JSON.stringify({
-        Name: "Resting EEG of healthy volunteers, eyes open and closed",
-        BIDSVersion: "1.9.0",
-        Version: "1.0.0",
-        License: "CC0",
-        Authors: ["Ada Lovelace"],
-        EthicsApprovals: ["IRB 2024-0001, University X"],
-      }),
-    );
+    const { dir, run, put } = servedRepo("publication-review-big-remote-");
     put("README.md", "# Resting EEG\nVolunteers at rest.\n");
     put("CHANGES", "1.0.0 first\n");
     put("LICENSE", "CC0\n");
@@ -1229,27 +1222,36 @@ describe("the shell steps, run for real", () => {
     return { dir, head: run("rev-parse", "HEAD") };
   }
 
+  /** Every blob the clone holds, by object id, asked without any lazy fetch. */
+  function localBlobs(repo: string): string[] {
+    return execFileSync(
+      "git",
+      ["-C", repo, "cat-file", "--batch-all-objects", "--batch-check=%(objecttype) %(objectname)"],
+      { encoding: "utf8", env: { PATH: process.env.PATH ?? "", GIT_NO_LAZY_FETCH: "1" } },
+    )
+      .split("\n")
+      .filter((l) => l.startsWith("blob "))
+      .map((l) => l.slice("blob ".length))
+      .sort();
+  }
+
   test("fetch: the blobs the review reads are fetched, exactly those, so that nothing later needs the credential", async () => {
     const count = 150;
     const remote = servedBigDataset(count);
     const r = await runStepScript(FETCH, fetchEnv(remote));
     expect(r.status, r.stderr).toBe(0);
     const repo = join(r.dir, "repo");
-    const localBlobs = execFileSync(
-      "git",
-      ["-C", repo, "cat-file", "--batch-all-objects", "--batch-check=%(objecttype)"],
-      { encoding: "utf8", env: { PATH: process.env.PATH ?? "", GIT_NO_LAZY_FETCH: "1" } },
-    )
-      .split("\n")
-      .filter((l) => l === "blob").length;
+    const tree = await readTree(repo, remote.head);
+    // The reader's own selection, which the readers below then find already in the clone.
+    const wanted = blobsToRead(tree);
     // Five root documents (README.md, dataset_description.json, CHANGES, LICENSE, participants.json)
     // and the 64 sidecars the review samples: not the 150, and none of the other sidecars or files.
-    expect(localBlobs).toBe(5 + 64);
+    expect(wanted).toHaveLength(5 + 64);
+    expect(localBlobs(repo)).toEqual(wanted);
 
     // Now cut the clone off from every remote and run the review's own readers over it: whatever
     // they ask for must already be there.
     execFileSync("git", ["-C", repo, "config", "remote.origin.url", "file:///nonexistent/remote"]);
-    const tree = await readTree(repo, remote.head);
     const docs = readRootDocuments(repo, tree);
     for (const name of [
       "readme",
@@ -1264,7 +1266,83 @@ describe("the shell steps, run for real", () => {
     // The top-level inherited sidecar matches the review's pattern too, so there is one more.
     expect(summary.sidecars_total).toBe(count + 1);
     expect(summary.sidecars_read).toBe(64);
-  });
+  }, 20_000);
+
+  /**
+   * File names git would print quoted and escaped without `-z`: a non-ASCII letter, a double
+   * quote, a tab, a backslash and a newline. Each is a data sidecar of the raw tree, with content of
+   * its own (identical content would be one blob, and the comparison below would prove nothing).
+   */
+  const AWKWARD_SIDECARS = [
+    "sub-01/eeg/sub-01_task-caf\u00e9_eeg.json",
+    'sub-02/eeg/sub-02_task-"q"_eeg.json',
+    "sub-03/eeg/sub-03_task-a\tb_eeg.json",
+    "sub-04/eeg/sub-04_task-a\\b_eeg.json",
+    "sub-05/eeg/sub-05_task-a\nb_eeg.json",
+  ];
+
+  function servedAwkwardDataset(ordinary: number) {
+    const { dir, run, put } = servedRepo("publication-review-awkward-remote-");
+    put("README.md", "# Resting EEG\nVolunteers at rest.\n");
+    for (const rel of AWKWARD_SIDECARS)
+      put(rel, JSON.stringify({ Which: rel, SamplingFrequency: 250 }));
+    // Not a sidecar: the name ends in a newline after `.json`. `$` in a perl pattern would match
+    // before it, and the reader's pattern does not, which is why the step ends the pattern with `\z`.
+    put("sub-06/eeg/sub-06_task-x_eeg.json\n", JSON.stringify({ Which: "trailing newline" }));
+    for (let i = 0; i < ordinary; i++) {
+      const sub = `sub-9${String(i).padStart(3, "0")}`;
+      put(`${sub}/eeg/${sub}_task-rest_eeg.json`, JSON.stringify({ Index: i }));
+    }
+    run("add", ".");
+    run("commit", "-q", "-m", "first");
+    return { dir, head: run("rev-parse", "HEAD") };
+  }
+
+  test("fetch: a path git would quote is selected as the reader selects it, whole and in the same place of the sample", async () => {
+    // 70 ordinary sidecars and the five awkward ones: more than the sample takes, so a sidecar the
+    // step does not see also moves every position after it.
+    for (const ordinary of [70, 0]) {
+      const remote = servedAwkwardDataset(ordinary);
+      const r = await runStepScript(FETCH, fetchEnv(remote));
+      expect(r.status, r.stderr).toBe(0);
+      const repo = join(r.dir, "repo");
+      const tree = await readTree(repo, remote.head);
+      expect(tree.entries.map((e) => e.path)).toEqual(expect.arrayContaining(AWKWARD_SIDECARS));
+      expect(structuralSummary(repo, tree).sidecars_total).toBe(ordinary + AWKWARD_SIDECARS.length);
+      expect(localBlobs(repo), `${ordinary} ordinary sidecars`).toEqual(blobsToRead(tree));
+      // The description, the README and every sidecar: all of them, when there are fewer than 64.
+      if (ordinary === 0) expect(localBlobs(repo)).toHaveLength(2 + AWKWARD_SIDECARS.length);
+    }
+  }, 20_000);
+
+  test("fetch: of several README forms only the one the reader opens is fetched, and a symlinked one is never opened", async () => {
+    const both = servedRepo("publication-review-readmes-remote-");
+    both.put("README.md", "# the one the reader opens\n");
+    both.put("README.txt", "# a second form, never opened\n");
+    both.run("add", ".");
+    both.run("commit", "-q", "-m", "first");
+    const linked = servedRepo("publication-review-readmes-linked-remote-");
+    symlinkSync(
+      "../.git/annex/objects/Xz/pQ/SHA256E-s9--0123456789abcdef.md/SHA256E-s9--0123456789abcdef.md",
+      join(linked.dir, "README.md"),
+    );
+    linked.put("README.txt", "# the reader opens README.md first, finds it annexed, and stops\n");
+    linked.run("add", ".");
+    linked.run("commit", "-q", "-m", "first");
+    // The description and the one README the reader opens; then the description alone, because the
+    // reader finds README.md annexed and never looks at README.txt.
+    for (const [remote, expected] of [
+      [both, 2],
+      [linked, 1],
+    ] as const) {
+      const r = await runStepScript(FETCH, fetchEnv(remote));
+      expect(r.status, r.stderr).toBe(0);
+      const repo = join(r.dir, "repo");
+      const tree = await readTree(repo, remote.run("rev-parse", "HEAD"));
+      expect(blobsToRead(tree)).toHaveLength(expected);
+      expect(localBlobs(repo)).toEqual(blobsToRead(tree));
+    }
+  }, 20_000);
 
   test("fetch: a dataset with fewer than 64 sidecars has every one of them, and one with few still fetches its documents", async () => {
     const small = servedBigDataset(7);

@@ -23,6 +23,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -74,6 +75,7 @@ import {
   readEntry,
 } from "../scripts/ci/publication-review-corpus";
 import {
+  blobsToRead,
   readRootDocuments,
   readTree,
   structuralSummary,
@@ -198,13 +200,13 @@ interface Origin {
 }
 
 /** A dataset repository at `<origins>/<id>.git` with `files` laid over the defaults. */
-function newOrigin(id: string, files: Record<string, string | null> = {}): Origin {
+function newOrigin(id: string, files: Record<string, string | Buffer | null> = {}): Origin {
   const dir = join(originsDir, `${id}.git`);
   mkdirSync(dir, { recursive: true });
   git(dir, "init", "-q", "-b", "main");
   git(dir, "config", "uploadpack.allowFilter", "true");
   git(dir, "config", "uploadpack.allowAnySHA1InWant", "true");
-  const all: Record<string, string | null> = { ...BASE_FILES, ...files };
+  const all: Record<string, string | Buffer | null> = { ...BASE_FILES, ...files };
   for (const [rel, content] of Object.entries(all)) {
     if (content !== null) write(dir, rel, content);
   }
@@ -244,7 +246,70 @@ beforeAll(() => {
   origins.nm000005.head = git(origins.nm000005.dir, "rev-parse", "HEAD");
   // No README at all.
   origins.nm000006 = newOrigin("nm000006", { "README.md": null });
+  // A README nobody can read (not UTF-8) and no ethics statement in the description: the minimum that
+  // may rest on the README is left out, not failed. Kept out of the corpora the other tests count.
+  origins.nm000007 = newOrigin("nm000007", {
+    "README.md": Buffer.from([0xff, 0xfe, 0x41, 0x80]),
+    "dataset_description.json": JSON.stringify({
+      Name: `Resting EEG with a README nobody can read ${NAME_SENTINEL}`,
+      BIDSVersion: "1.9.0",
+      Version: "1.0.0",
+      License: "CC0",
+      Authors: ["Ada Lovelace"],
+    }),
+  });
 });
+
+/**
+ * A `git` on the PATH that records, for each call, its subcommand, its `HOME` and whether lazy
+ * fetching was left on, and then runs the real git (stdin of a fetch is kept, so the objects it
+ * asked for can be read back). With `failFetch` it stands in for a network that goes away: a fetch
+ * exits 1 and nothing else changes.
+ */
+function gitSpy(options: { failFetch?: boolean } = {}) {
+  const dir = mkdtempSync(join(root, "gitspy-"));
+  const real = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+  const log = join(dir, "calls.txt");
+  const stdin = join(dir, "fetch-stdin.txt");
+  const script = [
+    "#!/usr/bin/env bash",
+    "sub=",
+    'for a in "$@"; do case "$a" in clone|fetch|cat-file|ls-tree|rev-parse) sub="$a"; break ;; esac; done',
+    `printf '%s\\t%s\\t%s\\n' "$sub" "$HOME" "\${GIT_NO_LAZY_FETCH:-lazy}" >> "${log}"`,
+    options.failFetch ? 'if [ "$sub" = fetch ]; then exit 1; fi' : "",
+    `if [ "$sub" = fetch ]; then cat > "${stdin}"; exec "${real}" "$@" < "${stdin}"; fi`,
+    `exec "${real}" "$@"`,
+    "",
+  ].join("\n");
+  writeFileSync(join(dir, "git"), script);
+  chmodSync(join(dir, "git"), 0o755);
+  return {
+    dir,
+    calls: () =>
+      existsSync(log)
+        ? readFileSync(log, "utf8")
+            .trim()
+            .split("\n")
+            .map((l) => {
+              const [sub, home, lazy] = l.split("\t") as [string, string, string];
+              return { sub, home, lazy };
+            })
+        : [],
+    fetched: () => (existsSync(stdin) ? readFileSync(stdin, "utf8").trim().split("\n").sort() : []),
+  };
+}
+
+/** Run `body` with the spy first on the PATH, which every git child process of this file inherits. */
+async function withSpy<T>(spy: { dir: string }, body: () => Promise<T>): Promise<T> {
+  const saved = process.env.PATH;
+  process.env.PATH = `${spy.dir}:${saved ?? ""}`;
+  try {
+    return await body();
+  } finally {
+    if (saved === undefined) Reflect.deleteProperty(process.env, "PATH");
+    else process.env.PATH = saved;
+  }
+}
 
 // ---------------------------------------------------------------------------------------------
 // The corpus builder
@@ -358,6 +423,55 @@ describe("the corpus builder reads public repositories through the job's own rea
     ).toThrow();
     // Nothing was checked out either.
     expect(readdirSync(dest)).toEqual([".git"]);
+  });
+
+  test("the blobs the readers open are fetched in ONE anonymous fetch, exactly those and no others", async () => {
+    const origin = origins.nm000001 as Origin;
+    const spy = gitSpy();
+    const out = join(root, "corpus-prefetch");
+    const result = await withSpy(spy, () =>
+      buildCorpus({ ids: ["nm000001"], outDir: out, remoteBase: REMOTE_BASE }),
+    );
+    expect(result).toMatchObject({ built: 1, skipped: 0 });
+
+    // The readers' own selection: the five root documents and the one sidecar, not the participants
+    // table, not the recording and not the code, which the origin holds too.
+    const wanted = blobsToRead(await readTree(origin.dir, origin.head));
+    expect(wanted).toHaveLength(6);
+    const every = git(origin.dir, "ls-tree", "-r", "HEAD").split("\n").length;
+    expect(every).toBeGreaterThan(wanted.length);
+    expect(spy.fetched()).toEqual(wanted);
+
+    // One fetch for the clone's blobs, and it runs in the clone's own empty home, as the clone does.
+    const calls = spy.calls();
+    expect(calls.filter((c) => c.sub === "fetch")).toHaveLength(1);
+    const homes = new Set(
+      calls.filter((c) => ["clone", "fetch"].includes(c.sub)).map((c) => c.home),
+    );
+    expect(homes.size).toBe(1);
+    const [home] = [...homes] as [string];
+    expect(home).not.toBe(process.env.HOME);
+    expect(home).toMatch(/publication-review-corpus-[^/]+\/home$/);
+
+    // And the readers fetch nothing of their own: every read of the tree and of a blob ran with lazy
+    // fetching off, so a gap in the batch would have been a missing blob and not a hidden request.
+    const reads = calls.filter((c) => c.sub === "cat-file" || c.sub === "ls-tree");
+    expect(reads.some((c) => c.sub === "cat-file")).toBe(true);
+    expect(reads.some((c) => c.sub === "ls-tree")).toBe(true);
+    expect(reads.filter((c) => c.lazy !== "1")).toEqual([]);
+  });
+
+  test("a fetch that fails is a clone that failed, never a README read as unreadable", async () => {
+    const spy = gitSpy({ failFetch: true });
+    const out = join(root, "corpus-prefetch-fails");
+    const result = await withSpy(spy, () =>
+      buildCorpus({ ids: ["nm000001"], outDir: out, remoteBase: REMOTE_BASE }),
+    );
+    // The clone itself succeeded (only a `fetch` is cut off), so what is skipped is the dataset
+    // whose blobs could not be brought in, and nothing half-read is stored.
+    expect(result.built).toBe(0);
+    expect(result.skips).toEqual([{ id: "nm000001", reason: "clone_failed" }]);
+    expect(existsSync(join(out, "nm000001"))).toBe(false);
   });
 
   test("the clone carries no credential of the operator's: an empty home and nothing inherited", () => {
@@ -745,6 +859,23 @@ describe("each defect is applied once, to a copy, and is visible in the mutated 
     expect(existsSync(second)).toBe(false);
   });
 
+  // A directory made with no permission to create a file in it: the umask is the real filesystem's
+  // way to make the write fail after the directory exists. Not meaningful for root, which ignores it.
+  test.skipIf(process.getuid?.() === 0)(
+    "a write that fails after the directory was made leaves no half-written entry behind",
+    () => {
+      const out = join(root, "mutant-write-fails");
+      const saved = process.umask(0o377);
+      try {
+        expect(() => mutate(join(goodCorpus, "nm000001"), "stub_readme", out)).toThrow();
+      } finally {
+        process.umask(saved);
+      }
+      // A directory without entry.json is not an entry, and listEntries would refuse the corpus.
+      expect(existsSync(out)).toBe(false);
+    },
+  );
+
   test("an existing directory is never overwritten", () => {
     const out = join(root, "mutant-exists");
     mkdirSync(out);
@@ -1029,6 +1160,38 @@ describe("calibrate runs the production review over every entry and records one 
     }
   });
 
+  test("calibration and production derive the same evidence for the same dataset, a README nobody could read included", async () => {
+    // The request drift test above compares what the model is sent; this compares the facts the
+    // report carries (the minimums, the version, the tag, the BIDS result, the documents' states),
+    // which the verdict is derived from. Each side orchestrates the same function over its own input.
+    const unread = join(root, "corpus-unread-readme");
+    const built = await buildCorpus({ ids: ["nm000007"], outDir: unread, remoteBase: REMOTE_BASE });
+    expect(built.built).toBe(1);
+    const dirs: Record<string, string> = { nm000007: join(unread, "nm000007") };
+    for (const id of ["nm000001", "nm000002", "nm000003", "nm000006"]) {
+      dirs[id] = join(goodCorpus, id);
+    }
+    for (const [id, dir] of Object.entries(dirs)) {
+      const origin = origins[id] as Origin;
+      const production = await runPublicationReview({
+        repoDir: origin.dir,
+        head: origin.head,
+        fetchedHead: origin.head,
+        tagsFile: sideFile(""),
+        bidsRunsFile: sideFile(null),
+        anonymous: false,
+      });
+      if (production.outcome !== "reported") throw new Error(`${id}: ${production.error}`);
+      expect(evidenceOf(readEntry(dir)).facts, id).toEqual(production.report.evidence);
+    }
+    // The case the two sides used to copy separately: the README exists and could not be read, so the
+    // ethics minimum that may rest on it is not recorded as failed, and the review says the text was
+    // withheld instead.
+    const { facts } = evidenceOf(readEntry(join(unread, "nm000007")));
+    expect(facts.documents.readme).toBe("withheld_not_utf8");
+    expect(facts).toMatchObject({ minimums: "met", minimum_failures: [] });
+  });
+
   test("a README with a path on somebody's machine is withheld, exactly as in production", async () => {
     const { records } = await run(oneEntryCorpus("nm000002"));
     const [record] = records as [CalibrationRecord];
@@ -1179,7 +1342,7 @@ describe("the outcome is derived, never reported, and facts the calibration cann
     expect(record.model_answers).toEqual(record.answers);
   });
 
-  test("the evidence is that of an unreleased named dataset: no tag unless there is a version, BIDS unknown", () => {
+  test("the evidence is that of an unreleased named dataset: the tag absent (a malformed Version has none to look up), BIDS unknown", () => {
     const withVersion = evidenceOf(readEntry(join(mutatedCorpus, "nm000001"))).facts;
     expect(withVersion).toMatchObject({
       anonymous: false,
@@ -1189,13 +1352,31 @@ describe("the outcome is derived, never reported, and facts the calibration cann
       bids: "unknown",
     });
     expect(withVersion.head).toBe((origins.nm000001 as Origin).head);
+    // No Version: published as 1.0.0, so there is a tag to look up, and it does not exist yet.
     const without = evidenceOf(readEntry(join(mutatedCorpus, "nm000003"))).facts;
     expect(without).toMatchObject({
       version: null,
       version_shape: "missing",
-      tag: "not_applicable",
+      tag: "absent",
     });
     expect(without.bids).toBe("unknown");
+    // A Version that is not X.Y.Z has nothing to look up.
+    const entry = readEntry(join(mutatedCorpus, "nm000001"));
+    const malformed = evidenceOf({
+      ...entry,
+      docs: {
+        ...entry.docs,
+        dataset_description: {
+          ...entry.docs.dataset_description,
+          text: JSON.stringify({ ...DESCRIPTION, Version: "one.two" }),
+        },
+      },
+    }).facts;
+    expect(malformed).toMatchObject({
+      version: null,
+      version_shape: "malformed",
+      tag: "not_applicable",
+    });
   });
 
   test("an unknown BIDS result would make every dataset a non-pass, so that one reason is not counted", () => {

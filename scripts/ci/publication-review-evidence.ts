@@ -8,7 +8,10 @@
  * driver or script in the dataset can run. Every git call passes its arguments as an array (no
  * shell), after the commit id has been checked against a 40-hex shape, with `--literal-pathspecs`
  * and with the environment reduced to what git needs, so a path is only ever data and no token the
- * job holds reaches a child process.
+ * job holds reaches a child process. **Nothing here touches the network**: lazy fetching is off, so
+ * the blobs this module opens are exactly the ones the workflow's fetch step brought in
+ * ({@link blobsToRead}), and a blob that is not in the clone reads as unreadable instead of being
+ * requested.
  *
  * The output has two halves with different trust, as in the pull-request review:
  *
@@ -40,8 +43,12 @@ import { SEMVER } from "../../shared/pr-review";
 import {
   type BidsState,
   CHANGES_CANDIDATES,
+  type ClearedDocuments,
   DOCUMENT_BYTE_CEILING,
   LICENSE_CANDIDATES,
+  MAX_COUNT,
+  MAX_SAMPLING_RATE_HZ,
+  MAX_SUMMARY_VALUES,
   PARTICIPANTS_JSON,
   type PreSendResult,
   type PublicationReviewEvidence,
@@ -55,6 +62,7 @@ import {
   type StructuralSummary,
   type TagState,
   type VersionShape,
+  effectiveVersionOf,
   parsePublicationReviewEvidence,
 } from "../../shared/publication-review";
 import { firstReadme } from "../../shared/readme-candidates";
@@ -65,6 +73,7 @@ import {
   listTree,
   parseAnnexPointer,
 } from "../identifier-screen-ci-lib";
+import { presend } from "./publication-review-presend";
 
 /** A full commit id. Every revision this module hands to git has this shape. */
 export const SHA40 = /^[0-9a-f]{40}$/;
@@ -75,9 +84,6 @@ export const SIDECAR_SAMPLE = 64;
 export const SIDECAR_BYTE_CEILING = 1024 * 1024;
 /** A file this small can be an unlocked git-annex pointer, which is one short line. */
 const POINTER_MAX_BYTES = 1024;
-/** The bounds the Worker's evidence parser puts on a rate (hertz) and on a count. */
-const MAX_SAMPLING_RATE_HZ = 1_000_000;
-const MAX_COUNT = 10_000_000;
 
 /**
  * Why the evidence could not be read. A closed list, because the word is printed in a public log:
@@ -104,7 +110,11 @@ export class PublicationEvidenceError extends Error {
 // Reading git
 // ---------------------------------------------------------------------------------------------
 
-/** What a git child process gets: no token, no user or system config, no prompt. */
+/**
+ * What a git child process gets: no token, no user or system config, no prompt, and no lazy fetch.
+ * A blob the clone does not hold is reported missing and is never requested from the remote, so
+ * nothing this module reads can reach the network, with or without a credential.
+ */
 function gitEnv(): Record<string, string> {
   return {
     PATH: process.env.PATH ?? "/usr/bin:/bin",
@@ -113,6 +123,7 @@ function gitEnv(): Record<string, string> {
     GIT_TERMINAL_PROMPT: "0",
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_NO_LAZY_FETCH: "1",
   };
 }
 
@@ -140,9 +151,9 @@ type BlobRead = { ok: true; bytes: Buffer } | { ok: false; reason: "missing" | "
 /**
  * One blob's bytes, never more than `ceiling` of them. The size is asked first, so a blob that is
  * too large is never held in memory. The job's clone is blob-less, but the workflow's fetch step
- * already fetched every blob this module reads (the root documents and the sampled sidecars), and
- * the clone holds no credential: a blob that was not fetched would be requested from the remote
- * without one, which fails, and is `missing` here.
+ * already fetched every blob this module reads (the root documents and the sampled sidecars). Lazy
+ * fetching is off (see {@link gitEnv}), so a blob that was not fetched is not requested from the
+ * remote, with or without a credential: it is `missing` here, and the document reads as unreadable.
  */
 function readBlob(dir: string, oid: string, ceiling: number): BlobRead {
   if (!/^[0-9a-f]{40,64}$/.test(oid)) return { ok: false, reason: "missing" };
@@ -231,6 +242,22 @@ function readDocument(dir: string, name: string, entry: TreeEntry): RawDocument 
   return { name, state: "present", text };
 }
 
+/** The root file each review document is read from, by the rule {@link readRootDocuments} reads by. */
+function rootDocumentFiles(
+  tree: Tree,
+): Record<ReviewDocument, { name: string; entry: TreeEntry } | null> {
+  const root = new Map<string, TreeEntry>();
+  for (const entry of tree.entries) if (!entry.path.includes("/")) root.set(entry.path, entry);
+  const rootNames = [...root.keys()];
+  const out = {} as Record<ReviewDocument, { name: string; entry: TreeEntry } | null>;
+  for (const document of REVIEW_DOCUMENTS) {
+    const name = candidatesOf(document, rootNames).find((n) => root.has(n));
+    const entry = name === undefined ? undefined : root.get(name);
+    out[document] = name === undefined || entry === undefined ? null : { name, entry };
+  }
+  return out;
+}
+
 /**
  * The five root documents, each `absent` or as the depositor wrote it. The README is the first
  * present of the four BIDS forms (`shared/readme-candidates.ts`, the order the submission gate
@@ -238,17 +265,14 @@ function readDocument(dir: string, name: string, entry: TreeEntry): RawDocument 
  * pre-send module's job, over the string it is about to send.
  */
 export function readRootDocuments(dir: string, tree: Tree): Record<ReviewDocument, RawDocument> {
-  const root = new Map<string, TreeEntry>();
-  for (const entry of tree.entries) if (!entry.path.includes("/")) root.set(entry.path, entry);
-  const rootNames = [...root.keys()];
+  const files = rootDocumentFiles(tree);
   const out = {} as Record<ReviewDocument, RawDocument>;
   for (const document of REVIEW_DOCUMENTS) {
-    const name = candidatesOf(document, rootNames).find((n) => root.has(n));
-    const entry = name === undefined ? undefined : root.get(name);
+    const found = files[document];
     out[document] =
-      name === undefined || entry === undefined
+      found === null
         ? { name: "", state: "absent", text: null }
-        : readDocument(dir, name, entry);
+        : readDocument(dir, found.name, found.entry);
   }
   return out;
 }
@@ -339,9 +363,11 @@ export function versionFacts(descriptionText: string | null): {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Where the tag `v<version>` points, from `git ls-remote --tags` output. Tags are annotated, so the
- * line that names the commit is the peeled `refs/tags/v<version>^{}` one, and it wins over the tag
- * object's own line; a lightweight tag has only the plain line, which is the commit.
+ * Where the tag `v<version>` points, from `git ls-remote --tags` output. `version` is the one to
+ * look up ({@link effectiveVersionOf}); null is a Version with nothing to look up, and is
+ * `not_applicable`. Tags are annotated, so the line that names the commit is the peeled
+ * `refs/tags/v<version>^{}` one, and it wins over the tag object's own line; a lightweight tag has
+ * only the plain line, which is the commit.
  */
 export function tagState(tagsText: string, version: string | null, head: string): TagState {
   if (version === null) return "not_applicable";
@@ -394,9 +420,9 @@ export function bidsState(runsJson: string, head: string): BidsState {
 // ---------------------------------------------------------------------------------------------
 
 /** What is not the dataset's own raw data: never counted as recordings, never sampled. */
-const NOT_RAW = /^(?:derivatives|sourcedata|code)\//;
+export const NOT_RAW = /^(?:derivatives|sourcedata|code)\//;
 /** A BIDS data sidecar: `..._<suffix>.json` for a signal modality. */
-const DATA_SIDECAR = /_(?:eeg|ieeg|meg|emg|nirs)\.json$/;
+export const DATA_SIDECAR = /_(?:eeg|ieeg|meg|emg|nirs)\.json$/;
 
 function datatypeOf(directory: string): ReviewDatatype {
   return (REVIEW_DATATYPES as readonly string[]).includes(directory)
@@ -417,6 +443,29 @@ function topValues(counts: Map<number, number>, n: number): number[] {
     .slice(0, n)
     .map(([value]) => value)
     .sort((a, b) => a - b);
+}
+
+/** The raw tree's data sidecars (no symlink: an annexed sidecar is never opened), in path order. */
+function dataSidecars(entries: readonly TreeEntry[]): TreeEntry[] {
+  return entries
+    .filter((e) => !NOT_RAW.test(e.path) && DATA_SIDECAR.test(e.path) && e.mode !== "120000")
+    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+}
+
+/**
+ * Every blob this module opens for a tree, by object id: the root documents it reads (never a
+ * symlink, which is never opened) and the bounded sample of data sidecars {@link structuralSummary}
+ * opens. The one place that says which blobs a review needs, for a caller that has to bring them
+ * into a blob-less clone before the readers run. The workflow's fetch step is a shell
+ * transcription of this selection, and a test holds the two equal.
+ */
+export function blobsToRead(tree: Tree): string[] {
+  const oids = new Set<string>();
+  for (const found of Object.values(rootDocumentFiles(tree))) {
+    if (found !== null && found.entry.mode !== "120000") oids.add(found.entry.oid);
+  }
+  for (const entry of evenly(dataSidecars(tree.entries), SIDECAR_SAMPLE)) oids.add(entry.oid);
+  return [...oids].sort();
 }
 
 /**
@@ -483,9 +532,7 @@ export function structuralSummary(dir: string, tree: Tree): StructuralSummary {
   }
   const recordings = Object.values(formats).reduce((a, b) => a + b, 0);
 
-  const sidecars = raw
-    .filter((e) => DATA_SIDECAR.test(e.path) && e.mode !== "120000")
-    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const sidecars = dataSidecars(entries);
   const rates = new Map<number, number>();
   const channels = new Map<number, number>();
   let sidecarsRead = 0;
@@ -516,8 +563,8 @@ export function structuralSummary(dir: string, tree: Tree): StructuralSummary {
     has_derivatives: entries.some((e) => e.path.startsWith("derivatives/")),
     has_sourcedata: entries.some((e) => e.path.startsWith("sourcedata/")),
     has_code: entries.some((e) => e.path.startsWith("code/")),
-    sampling_rates_hz: topValues(rates, 8),
-    channel_counts: topValues(channels, 8),
+    sampling_rates_hz: topValues(rates, MAX_SUMMARY_VALUES),
+    channel_counts: topValues(channels, MAX_SUMMARY_VALUES),
     sidecars_read: sidecarsRead,
     sidecars_total: sidecars.length,
   };
@@ -558,4 +605,69 @@ export function buildPublicationEvidence(parts: EvidenceParts): ReviewFacts {
     description_keys_not_shown: parts.presend.description_keys_not_shown,
     summary: parts.summary,
   });
+}
+
+/** The states of a README that exists and could not be read as text. */
+const UNREAD_STATES: readonly RawDocument["state"][] = ["annexed", "unreadable", "not_utf8"];
+
+export interface DocumentEvidenceInputs {
+  /** The commit the documents were read at: 40 hex. */
+  head: string;
+  /** The release kind: inverts the Authors rule, exactly as the request gate does. */
+  anonymous: boolean;
+  /**
+   * `git ls-remote --tags` output; the empty string is a repository with no tag. `null` is a file
+   * that could not be read, which is an evidence error: no tag state is invented for it.
+   */
+  tagsText: string | null;
+  /** The BIDS validation workflow's runs at `head`, or `null` when they could not be read (`unknown`). */
+  bidsRuns: string | null;
+  summary: StructuralSummary;
+}
+
+/**
+ * The evidence and the cleared documents for the root documents of one commit: the single place the
+ * review's facts are put together, run by the review job over what it read from git and by the
+ * calibration over what it read from a corpus. The minimums and the version come from the whole raw
+ * files, the pre-send check examines each document, and the Worker's parser validates the block.
+ *
+ * Throws {@link PublicationEvidenceError}: `description_unreadable` when the description exists and
+ * could not be read (every fact below it would be invented), and `tags_unreadable` for a tags file
+ * that could not be read.
+ */
+export function evidenceFromDocuments(
+  docs: Record<ReviewDocument, RawDocument>,
+  inputs: DocumentEvidenceInputs,
+): { facts: ReviewFacts; cleared: ClearedDocuments } {
+  const descriptionState = docs.dataset_description.state;
+  if (descriptionState !== "present" && descriptionState !== "absent") {
+    throw new PublicationEvidenceError("description_unreadable");
+  }
+  const description = descriptionFacts(
+    docs.dataset_description.text,
+    docs.readme.text,
+    inputs.anonymous,
+    { readmeUnread: UNREAD_STATES.includes(docs.readme.state) },
+  );
+  const version = versionFacts(docs.dataset_description.text);
+  if (inputs.tagsText === null) throw new PublicationEvidenceError("tags_unreadable");
+  const checked = presend(docs);
+  const facts = buildPublicationEvidence({
+    head: inputs.head,
+    anonymous: inputs.anonymous,
+    description,
+    version,
+    // The tag of the version an approval would publish: the described one, or 1.0.0 when the
+    // description sets none, so a release of 1.0.0 at another commit is found for a dataset with no
+    // Version too. A malformed Version has nothing to look up.
+    tag: tagState(
+      inputs.tagsText,
+      effectiveVersionOf({ version: version.version, version_shape: version.shape }),
+      inputs.head,
+    ),
+    bids: inputs.bidsRuns === null ? "unknown" : bidsState(inputs.bidsRuns, inputs.head),
+    presend: checked,
+    summary: inputs.summary,
+  });
+  return { facts, cleared: checked.cleared };
 }

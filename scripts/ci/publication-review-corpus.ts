@@ -16,11 +16,14 @@
  * mutator imports the production `presend` only to prove a defect is visible; it never builds a
  * prompt and never mints `ClearedText` (only the pre-send module may).
  *
- * **Public repositories only, and no credential.** The clone runs with an empty home directory, no
- * user or system git configuration, no terminal prompt and only the `https` and `file` transports,
- * so it carries no credential of the operator's and a private repository cannot be cloned.
+ * **Public repositories only, and no credential.** The clone and the one fetch of blobs that follows
+ * it run with an empty home directory, no user or system git configuration, no terminal prompt and
+ * only the `https` and `file` transports, so they carry no credential of the operator's and a
+ * private repository cannot be cloned. The readers themselves fetch nothing: the blobs they open
+ * are brought in first, by that one fetch, as the review workflow does.
  *
- * **Nothing here posts anything.** This module has no network code of its own beyond that one clone.
+ * **Nothing here posts anything.** This module has no network code of its own beyond that one clone
+ * and the one fetch of blobs that follows it.
  *
  * On disk an entry is a directory named for its id: each present document under its own BIDS file
  * name, `summary.json`, and `entry.json` (written last, so a directory without it is not an entry).
@@ -54,9 +57,10 @@ import {
   isPlaceholderAuthor,
   submissionMinimumFailures,
 } from "../../shared/submission-minimums";
-import { GITHUB_DATASETS } from "../identifier-screen-ci-lib";
+import { GITHUB_DATASETS, type Tree } from "../identifier-screen-ci-lib";
 import {
   SHA40,
+  blobsToRead,
   readRootDocuments,
   readTree,
   structuralSummary,
@@ -275,7 +279,7 @@ const CLONE_TIMEOUT_MS = 10 * 60_000;
 /**
  * A shallow, blob-less clone with nothing checked out: the commits' trees and nothing else, so no
  * recording data is fetched. The blobs the job reads (the root documents and a bounded sample of
- * sidecars) are fetched lazily, one at a time, by the readers themselves.
+ * sidecars) are fetched afterwards, in one batch, by {@link fetchReadBlobs}.
  */
 export function cloneBlobless(url: string, dest: string, home: string): void {
   execFileSync(
@@ -296,6 +300,44 @@ export function cloneBlobless(url: string, dest: string, home: string): void {
       dest,
     ],
     { env: cloneEnv(home), stdio: "ignore", timeout: CLONE_TIMEOUT_MS },
+  );
+}
+
+/**
+ * Fetch, in one batch and under the clone's own environment, exactly the blobs the review's readers
+ * open for this tree (`blobsToRead`, the same selection the workflow's fetch step transcribes). The
+ * readers fetch nothing themselves, so a blob that is not here reads as unreadable: a failed fetch
+ * must not become a README that looks unreadable, and it throws instead.
+ */
+export function fetchReadBlobs(dir: string, tree: Tree, home: string): void {
+  const oids = blobsToRead(tree);
+  if (oids.length === 0) return;
+  execFileSync(
+    "git",
+    [
+      "-C",
+      dir,
+      "-c",
+      "core.hooksPath=/dev/null",
+      "-c",
+      "protocol.ext.allow=never",
+      "-c",
+      "fetch.negotiationAlgorithm=noop",
+      "fetch",
+      "--quiet",
+      "--no-tags",
+      "--no-write-fetch-head",
+      "--recurse-submodules=no",
+      "--filter=blob:none",
+      "--stdin",
+      "origin",
+    ],
+    {
+      env: cloneEnv(home),
+      input: `${oids.join("\n")}\n`,
+      stdio: ["pipe", "ignore", "ignore"],
+      timeout: CLONE_TIMEOUT_MS,
+    },
   );
 }
 
@@ -335,10 +377,15 @@ function checkRemoteBase(base: string): string {
 }
 
 /**
- * Clone each dataset (shallow, blob-less, anonymously), read it through the job's own readers, and
- * store the root documents and the summary. A dataset that cannot be cloned, whose tree cannot be
- * read, or whose `dataset_description.json` is not readable is skipped with a closed word (the job
- * would stop at `description_unreadable` for it too); an entry already in the corpus is left alone.
+ * Clone each dataset (shallow, blob-less, anonymously), fetch the blobs the job's readers open in
+ * one batch, read it through those readers, and store the root documents and the summary. A dataset
+ * that cannot be cloned, whose tree cannot be read, or whose `dataset_description.json` is not
+ * there to be read is skipped with a closed word; an entry already in the corpus is left alone.
+ *
+ * The description is required here though the job asks less of it: the job reviews a dataset with
+ * no description (as a failed minimum) and only stops at one it could not read, but every dataset in
+ * a corpus of published ones has a readable description, and every defect is made by editing it.
+ * `description_unreadable` therefore covers an absent description as well as an unreadable one.
  */
 export async function buildCorpus(opts: BuildCorpusOptions): Promise<BuildCorpusResult> {
   const ids = [...new Set(opts.ids)];
@@ -367,13 +414,26 @@ export async function buildCorpus(opts: BuildCorpusOptions): Promise<BuildCorpus
           continue;
         }
         let head: string;
+        let tree: Tree;
+        try {
+          head = headOf(clone, home);
+          tree = await readTree(clone, head);
+        } catch {
+          skips.push({ id, reason: "tree_unreadable" });
+          continue;
+        }
+        try {
+          fetchReadBlobs(clone, tree, home);
+        } catch {
+          skips.push({ id, reason: "clone_failed" });
+          continue;
+        }
         let docs: Record<ReviewDocument, RawDocument>;
         let summary: StructuralSummary;
         try {
-          head = headOf(clone, home);
-          const tree = await readTree(clone, head);
           docs = readRootDocuments(clone, tree);
-          // The job stops here too: every fact below a description nobody could read is invented.
+          // Not an entry: a published dataset has a readable description, and the defects edit it
+          // (the job itself goes on past an absent one, and stops only at one it could not read).
           if (docs.dataset_description.state !== "present") {
             skips.push({ id, reason: "description_unreadable" });
             continue;
@@ -660,7 +720,8 @@ export function verifyDefect(defect: Defect, before: CorpusEntry, after: CorpusE
 /**
  * Apply `defect` once to a copy of the entry in `entryDir`, written to `outDir`, which must not
  * exist. The copy is read back and checked ({@link verifyDefect}); one that does not show its
- * defect is removed and refused, so a defect is never silently a no-op.
+ * defect is removed and refused, so a defect is never silently a no-op, and so is one whose write
+ * failed, so no half-written entry is left behind.
  */
 export function mutate(entryDir: string, defect: Defect, outDir: string): void {
   const before = readEntry(entryDir);
@@ -671,11 +732,12 @@ export function mutate(entryDir: string, defect: Defect, outDir: string): void {
     id: `${before.base}.${defect}`,
     label: defect,
   };
-  writeEntry(outDir, after);
   try {
+    writeEntry(outDir, after);
     verifyDefect(defect, before, readEntry(outDir));
   } catch (e) {
-    // This call made the directory a moment ago.
+    // This call made the directory a moment ago, and a directory without `entry.json` (a write that
+    // failed halfway) would make `listEntries` refuse the whole corpus.
     rmSync(outDir, { recursive: true, force: true });
     throw e;
   }

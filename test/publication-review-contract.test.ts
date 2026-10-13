@@ -18,7 +18,7 @@ import {
   START_REFUSED_REASONS,
   START_STARTED_REASONS,
 } from "../shared/contract/publication-review-admin";
-import { FINDING_KINDS, KNOWN_FORMATS, type ScreenGate } from "../shared/identifier-screen-report";
+import { KNOWN_FORMATS, type ScreenGate } from "../shared/identifier-screen-report";
 import * as prReview from "../shared/pr-review";
 import {
   ANSWERS,
@@ -502,7 +502,13 @@ describe("the closed lists are the ones ADR 0102 and the design note name", () =
     });
     // Version is the platform's fact, never the model's to read.
     expect(DESCRIPTION_KEYS_SHOWN).not.toContain("Version");
-    for (const key of ["EthicsApprovals", "License", "Authors", "Funding", "SourceDatasets"]) {
+    for (const key of [
+      "EthicsApprovals",
+      "License",
+      "Authors",
+      "Funding",
+      "SourceDatasets",
+    ] as const) {
       expect(DESCRIPTION_KEYS_SHOWN).toContain(key);
     }
   });
@@ -570,7 +576,8 @@ describe("the closed lists are the ones ADR 0102 and the design note name", () =
   });
 
   test("the datatypes are the Worker's BIDS datatypes plus other", () => {
-    expect([...REVIEW_DATATYPES]).toEqual([...BIDS_DATATYPES, "other"]);
+    // The Worker's list is a Set of plain strings, so the comparison is between lists of strings.
+    expect<string[]>([...REVIEW_DATATYPES]).toEqual([...BIDS_DATATYPES, "other"]);
   });
 
   test("the formats are the preflight's closed list plus EDF and BDF, and nothing else", () => {
@@ -735,8 +742,12 @@ describe("the parser refuses what the job must never send", () => {
       { version: "v1.2.0", version_shape: "ok" },
       { version: "1.2", version_shape: "ok" },
       { version: "1.2.0", version_shape: "ok", tag: "not_applicable" },
-      { version: null, version_shape: "missing", tag: "absent" },
+      // No Version is published as 1.0.0, so there is a tag to look up, and a state for it is required.
+      { version: null, version_shape: "missing", tag: "not_applicable" },
+      // A malformed Version has no version to look up: any tag state would be invented.
+      { version: null, version_shape: "malformed", tag: "absent" },
       { version: null, version_shape: "malformed", tag: "at_head" },
+      { version: null, version_shape: "malformed", tag: "elsewhere" },
       { minimums: "failed", minimum_failures: [] },
       { minimums: "met", minimum_failures: ["ethics_statement_missing"] },
       {
@@ -765,7 +776,9 @@ describe("the parser refuses what the job must never send", () => {
     ];
     for (const over of refused) expect(refusal(withEvidence(over))).toBe("bad_evidence");
     const accepted = [
-      { version: null, version_shape: "missing", tag: "not_applicable" },
+      { version: null, version_shape: "missing", tag: "absent" },
+      { version: null, version_shape: "missing", tag: "at_head" },
+      { version: null, version_shape: "missing", tag: "elsewhere" },
       { version: null, version_shape: "malformed", tag: "not_applicable" },
       { version: "1.2.0", version_shape: "ok", tag: "elsewhere" },
       {
@@ -889,7 +902,7 @@ describe("the report agrees with itself, in the safe direction only", () => {
     );
     expect(parsed.findings).toHaveLength(8);
     expect(parsed.findings.slice(0, 6).map((f) => f.note)).toEqual(
-      eight.slice(0, 6).map((f) => f.note),
+      eight.slice(0, 6).map((f) => String(f.note)),
     );
     expect(parsed.findings.slice(6)).toEqual([
       {
@@ -1398,7 +1411,7 @@ const REPORTS: Array<{ name: string; body: Record<string, unknown>; own: Reason[
       bids: "unconcluded",
       version: null,
       version_shape: "missing",
-      tag: "not_applicable",
+      tag: "absent",
     }),
     own: [
       R("text_withheld", "readme"),
@@ -1635,7 +1648,9 @@ describe("reportReasons, over every report dimension", () => {
     { version: "1.2.0", version_shape: "ok", tag: "absent" },
     { version: "1.2.0", version_shape: "ok", tag: "at_head" },
     { version: "1.2.0", version_shape: "ok", tag: "elsewhere" },
-    { version: null, version_shape: "missing", tag: "not_applicable" },
+    { version: null, version_shape: "missing", tag: "absent" },
+    { version: null, version_shape: "missing", tag: "at_head" },
+    { version: null, version_shape: "missing", tag: "elsewhere" },
     { version: null, version_shape: "malformed", tag: "not_applicable" },
   ];
   const DOCS: Array<Record<string, unknown>> = [
@@ -1752,7 +1767,7 @@ describe("reportReasons, over every report dimension", () => {
                     }
                   }
     expect(mismatches).toEqual([]);
-    expect(reports).toBe(3 * 2 * 4 * 2 * 5 * 5 * 5 * 2);
+    expect(reports).toBe(3 * 2 * 4 * 2 * 7 * 5 * 5 * 2);
   }, 120_000);
 });
 
@@ -2099,7 +2114,7 @@ describe("parsePublicationCallbackOutcome", () => {
   });
 
   test("a claimed pass, a worker-only word, an unknown word or a missing outcome is workflow_failed", () => {
-    const failed = { kind: "error", error: "workflow_failed" };
+    const failed = { kind: "error", error: "workflow_failed" } as const;
     expect(
       parsePublicationCallbackOutcome({ outcome: "pass", report: reportBody(), error: undefined }),
     ).toEqual(failed);
@@ -2253,9 +2268,7 @@ describe("the version an approval would publish", () => {
   test("the described X.Y.Z, or the orchestrator's default when none is set, and nothing for a malformed one", () => {
     expect(effectiveVersionOf(evidenceOf({}))).toBe("1.2.0");
     expect(
-      effectiveVersionOf(
-        evidenceOf({ version: null, version_shape: "missing", tag: "not_applicable" }),
-      ),
+      effectiveVersionOf(evidenceOf({ version: null, version_shape: "missing", tag: "absent" })),
     ).toBe(DEFAULT_PUBLICATION_VERSION);
     expect(
       effectiveVersionOf(
@@ -2264,6 +2277,39 @@ describe("the version an approval would publish", () => {
     ).toBeNull();
     // Every shape is answered, so a new one cannot slip through unlooked-up.
     expect(VERSION_SHAPES.length).toBe(3);
+  });
+
+  test("a tag of the version an approval would publish is reported for a dataset with no Version too", () => {
+    const reasonCodes = (over: Record<string, unknown>) =>
+      reportReasons(
+        parsePublicationReviewReport(
+          reportBody({
+            evidence: evidenceBody({ version: null, version_shape: "missing", ...over }),
+          }),
+        ),
+      ).map((r) => r.code);
+    // 1.0.0 is released at another commit: the same fact, and the same reason, as an explicit
+    // Version in that position; the overridable word for the missing Version rides beside it.
+    expect(reasonCodes({ tag: "elsewhere" })).toEqual([
+      "version_already_released",
+      "version_missing",
+    ]);
+    expect(reasonCodes({ tag: "at_head" })).toEqual(["version_missing"]);
+    expect(reasonCodes({ tag: "absent" })).toEqual(["version_missing"]);
+    // A malformed Version has nothing to look up and says so with its own word.
+    expect(
+      reportReasons(
+        parsePublicationReviewReport(
+          reportBody({
+            evidence: evidenceBody({
+              version: null,
+              version_shape: "malformed",
+              tag: "not_applicable",
+            }),
+          }),
+        ),
+      ).map((r) => r.code),
+    ).toContain("version_malformed");
   });
 
   test('the default is the one the orchestrator\'s `Version || "1.0.0"` publishes', () => {

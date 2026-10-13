@@ -258,7 +258,11 @@ export const MAX_SUMMARY_VALUES = 8;
 export const BIDS_STATES = ["pass", "fail", "unconcluded", "unknown"] as const;
 export type BidsState = (typeof BIDS_STATES)[number];
 
-/** The tag `v<version>`: absent, at the reviewed commit, at another commit, or no version to tag. */
+/**
+ * The tag of the version an approval would publish ({@link effectiveVersionOf}): absent, at the
+ * reviewed commit, or at another commit; `not_applicable` only for a malformed Version, which has
+ * no version to look up.
+ */
 export const TAG_STATES = ["absent", "at_head", "elsewhere", "not_applicable"] as const;
 export type TagState = (typeof TAG_STATES)[number];
 
@@ -326,7 +330,7 @@ export interface PublicationReviewEvidence {
   /** `X.Y.Z`, or null when `version_shape` is not `ok`. */
   version: string | null;
   version_shape: VersionShape;
-  /** `not_applicable` exactly when there is no version to tag. */
+  /** `not_applicable` exactly when the Version is malformed; a missing one is looked up as 1.0.0. */
   tag: TagState;
   bids: BidsState;
   /** ADR 0026's minimums at the reviewed commit, with the inverted Authors rule for an anonymous release. */
@@ -464,9 +468,9 @@ export const HEAD = /^[0-9a-f]{40}$/;
 /** A dataset id as the platform mints them: the only text a command is built from. */
 const DATASET_ID = /^(nm|on|xx)\d{6}$/;
 /** A count: a non-negative safe integer no larger than this. */
-const MAX_COUNT = 10_000_000;
+export const MAX_COUNT = 10_000_000;
 /** A sampling rate is a positive number below this, in hertz. */
-const MAX_SAMPLING_RATE_HZ = 1_000_000;
+export const MAX_SAMPLING_RATE_HZ = 1_000_000;
 const FINDING_KIND_SET: ReadonlySet<string> = new Set(FINDING_KINDS);
 
 function isRecord(x: unknown): x is Record<string, unknown> {
@@ -616,9 +620,9 @@ function parseMinimumFailures(raw: unknown, anonymous: boolean): MinimumFailure[
 /**
  * Validate an evidence block. Accepts only the keys declared above, only members of the closed
  * sets, only counts that are non-negative integers, and only blocks that agree with themselves:
- * a version exactly when its shape is `ok`, a tag state exactly when there is a version, failures
- * exactly when the minimums failed, finding counts exactly when a document was withheld for one,
- * and formats that add up to the recordings. Throws `bad_evidence`, never the input.
+ * a version exactly when its shape is `ok`, a tag state exactly when the Version is not malformed,
+ * failures exactly when the minimums failed, finding counts exactly when a document was withheld
+ * for one, and formats that add up to the recordings. Throws `bad_evidence`, never the input.
  */
 export function parsePublicationReviewEvidence(raw: unknown): ReviewFacts {
   if (!isRecord(raw) || !hasExactKeys(raw, EVIDENCE_KEYS)) badEvidence();
@@ -634,7 +638,9 @@ export function parsePublicationReviewEvidence(raw: unknown): ReviewFacts {
     badEvidence();
   }
   const tag = word(TAG_STATES, r.tag);
-  if ((tag === "not_applicable") !== (version_shape !== "ok")) badEvidence();
+  // The tag is the one of the version an approval would publish: a missing Version is published as
+  // the default, so it has a tag state like any other; only a malformed one has nothing to look up.
+  if ((tag === "not_applicable") !== (version_shape === "malformed")) badEvidence();
   const bids = word(BIDS_STATES, r.bids);
   const minimums = word(["met", "failed"] as const, r.minimums);
   const minimum_failures = parseMinimumFailures(r.minimum_failures, anonymous);

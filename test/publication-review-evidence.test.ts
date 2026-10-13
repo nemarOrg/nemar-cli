@@ -8,8 +8,9 @@
  * the way the Messages API does. That exercises the request the job really sends (the model, the
  * effort, the schema, no tools, and exactly the text a model would read) and the way each kind of
  * answer is read. The one thing not exercised is the live federated sign-in, which needs the real
- * identity provider; and the lazy blob fetch over https, which needs GitHub (a file:// remote stands
- * in for it, through the same git calls).
+ * identity provider; and the workflow's fetch over https, which needs GitHub (a file:// remote
+ * stands in for it, through the same git calls, where a test needs a blob-less clone). The job itself
+ * fetches nothing.
  *
  * The property the report depends on is the hard constraint of ADR 0102, section 2: the model
  * receives cleared prose from the closed document list and numbers and words from the evidence, and
@@ -37,8 +38,10 @@ import {
 import {
   PUBLICATION_EVIDENCE_ERRORS,
   PublicationEvidenceError,
+  SIDECAR_BYTE_CEILING,
   SIDECAR_SAMPLE,
   bidsState,
+  blobsToRead,
   buildPublicationEvidence,
   descriptionFacts,
   readRootDocuments,
@@ -52,9 +55,13 @@ import {
   PUBLICATION_OUTPUT_SCHEMA,
   PUBLICATION_REVIEW_MODEL,
 } from "../scripts/ci/publication-review-prompt";
+import type { Tree } from "../scripts/identifier-screen-ci-lib";
 import {
   DOCUMENT_BYTE_CEILING,
   DOCUMENT_CHAR_CAPS,
+  MAX_COUNT,
+  MAX_SAMPLING_RATE_HZ,
+  MAX_SUMMARY_VALUES,
   type PublicationReviewReport,
   PublicationReviewReportError,
   REVIEW_FORMATS,
@@ -809,7 +816,7 @@ describe("the structural summary is counts and closed words", () => {
     const total = SIDECAR_SAMPLE + 36;
     for (let i = 0; i < total; i++) {
       const s = `sub-${String(i).padStart(3, "0")}`;
-      // Ten distinct rates and channel counts, so the eight-value bound must bite.
+      // Ten distinct rates and channel counts, so the bound on how many are carried must bite.
       entries[`${s}/eeg/${s}_task-r_eeg.json`] = JSON.stringify({
         SamplingFrequency: 100 + (i % 10) + 0.123,
         EEGChannelCount: 16 + (i % 10),
@@ -821,8 +828,8 @@ describe("the structural summary is counts and closed words", () => {
     const s = structuralSummary(ds.dir, await readTree(ds.dir, ds.head));
     expect(s.sidecars_total).toBe(total);
     expect(s.sidecars_read).toBe(SIDECAR_SAMPLE);
-    expect(s.sampling_rates_hz).toHaveLength(8);
-    expect(s.channel_counts).toHaveLength(8);
+    expect(s.sampling_rates_hz).toHaveLength(MAX_SUMMARY_VALUES);
+    expect(s.channel_counts).toHaveLength(MAX_SUMMARY_VALUES);
     for (const list of [s.sampling_rates_hz, s.channel_counts]) {
       expect([...list].sort((a, b) => a - b)).toEqual(list);
     }
@@ -830,7 +837,48 @@ describe("the structural summary is counts and closed words", () => {
     expect(JSON.stringify(s)).not.toContain("SENTINEL");
     // The whole evidence block the Worker will parse accepts what the sample produced.
     expect((await reviewOf(ds)).evidence.summary.sidecars_read).toBe(SIDECAR_SAMPLE);
+  }, 20_000);
+
+  test("a sidecar at the Worker's own bounds is carried, and one past them is not: the job follows the parser", async () => {
+    // The largest rate and count the parser accepts, and the first ones it refuses. The job imports
+    // these bounds from the parser, so narrowing one cannot leave a dataset whose summary the Worker
+    // refuses on every restart.
+    const justUnder = Math.round((MAX_SAMPLING_RATE_HZ - 0.01) * 100) / 100;
+    const ds = newDataset("summary-bounds", {
+      [`${EEG}.json`]: null,
+      "sub-A/eeg/sub-A_task-r_eeg.json": JSON.stringify({
+        SamplingFrequency: justUnder,
+        EEGChannelCount: MAX_COUNT,
+      }),
+      "sub-B/eeg/sub-B_task-r_eeg.json": JSON.stringify({
+        SamplingFrequency: MAX_SAMPLING_RATE_HZ,
+        EEGChannelCount: MAX_COUNT + 1,
+      }),
+    });
+    const s = structuralSummary(ds.dir, await readTree(ds.dir, ds.head));
+    expect(s.sidecars_read).toBe(2);
+    expect(s.sampling_rates_hz).toEqual([justUnder]);
+    expect(s.channel_counts).toEqual([MAX_COUNT]);
+    // And the Worker's parser accepts the block the review builds from it.
+    const report = await reviewOf(ds);
+    expect(report.evidence.summary.sampling_rates_hz).toEqual([justUnder]);
+    expect(report.evidence.summary.channel_counts).toEqual([MAX_COUNT]);
   });
+
+  test("a sidecar over the byte ceiling is counted and not read, and one at the ceiling is", async () => {
+    // Valid JSON padded with spaces to an exact size: the only difference between the two is size.
+    const padded = (rate: number, bytes: number) => {
+      const body = JSON.stringify({ SamplingFrequency: rate, EEGChannelCount: 8 });
+      return `${body}${" ".repeat(bytes - body.length)}`;
+    };
+    const ds = newDataset("summary-sidecar-ceiling", {
+      [`${EEG}.json`]: null,
+      "sub-A/eeg/sub-A_task-r_eeg.json": padded(250, SIDECAR_BYTE_CEILING),
+      "sub-B/eeg/sub-B_task-r_eeg.json": padded(500, SIDECAR_BYTE_CEILING + 1),
+    });
+    const s = structuralSummary(ds.dir, await readTree(ds.dir, ds.head));
+    expect(s).toMatchObject({ sidecars_total: 2, sidecars_read: 1, sampling_rates_hz: [250] });
+  }, 20_000);
 
   test("a sidecar value that is not a usable number contributes nothing", async () => {
     const ds = newDataset("summary-sidecar-junk", {
@@ -918,6 +966,65 @@ describe("the tag lookup reads git ls-remote output, annotated tags included", (
     const report = await reviewOf({ dir: ds.dir, head }, { tags: ls });
     expect(report.evidence.tag).toBe("elsewhere");
     expect(reportReasons(report).map((r) => r.code)).toContain("version_already_released");
+  });
+});
+
+describe("a dataset with no Version is looked up as the version an approval would publish", () => {
+  const withVersion = (version: unknown) => JSON.stringify({ ...DESCRIPTION, Version: version });
+
+  /** A real repository at 1.0.0 (tagged), then a later commit on `main`, and its real tag listing. */
+  function released(name: string, version: unknown) {
+    const ds = newDataset(name, { "dataset_description.json": withVersion(version) });
+    const first = ds.head;
+    git(ds.dir, "tag", "-a", "v1.0.0", "-m", "release one");
+    write(ds.dir, "CHANGES", "later\n");
+    git(ds.dir, "add", "-A");
+    git(ds.dir, "commit", "-q", "-m", "later");
+    return {
+      dir: ds.dir,
+      first,
+      later: git(ds.dir, "rev-parse", "HEAD"),
+      ls: git(ds.dir, "ls-remote", "--tags", ds.dir),
+    };
+  }
+
+  test("a v1.0.0 tag at another commit is a version already released, as it is for an explicit Version", async () => {
+    for (const version of [undefined, "", null, 0]) {
+      const r = released(`tag-missing-${String(version)}`, version);
+      const report = await reviewOf({ dir: r.dir, head: r.later }, { tags: r.ls });
+      expect(report.evidence).toMatchObject({
+        version: null,
+        version_shape: "missing",
+        tag: "elsewhere",
+      });
+      expect(reportReasons(report).map((x) => x.code)).toEqual([
+        "version_already_released",
+        "version_missing",
+      ]);
+    }
+    // The same repository with the version written down gives the same reason.
+    const explicit = released("tag-explicit", "1.0.0");
+    const same = await reviewOf({ dir: explicit.dir, head: explicit.later }, { tags: explicit.ls });
+    expect(same.evidence.tag).toBe("elsewhere");
+    expect(reportReasons(same).map((x) => x.code)).toContain("version_already_released");
+  }, 20_000);
+
+  test("a v1.0.0 tag at the reviewed commit, and no tag at all, are their own states", async () => {
+    const r = released("tag-missing-states", undefined);
+    const atHead = await reviewOf({ dir: r.dir, head: r.first }, { tags: r.ls });
+    expect(atHead.evidence).toMatchObject({ version_shape: "missing", tag: "at_head" });
+    expect(reportReasons(atHead).map((x) => x.code)).toEqual(["version_missing"]);
+    const none = await reviewOf({ dir: r.dir, head: r.later }, { tags: "" });
+    expect(none.evidence).toMatchObject({ version_shape: "missing", tag: "absent" });
+  });
+
+  test("a malformed Version has no tag to look up, whatever tags exist", async () => {
+    const r = released("tag-malformed", "one.two");
+    const report = await reviewOf({ dir: r.dir, head: r.later }, { tags: r.ls });
+    expect(report.evidence).toMatchObject({ version: null, version_shape: "malformed" });
+    expect(report.evidence.tag).toBe("not_applicable");
+    expect(reportReasons(report).map((x) => x.code)).toContain("version_malformed");
+    expect(reportReasons(report).map((x) => x.code)).not.toContain("version_already_released");
   });
 });
 
@@ -1288,16 +1395,17 @@ describe("runPublicationReview: the job around the model call", () => {
 });
 
 // ---------------------------------------------------------------------------------------------
-// Reading from the job's real clone: shallow, blob-less, blobs fetched when needed
+// Reading from the job's real clone: shallow, blob-less, and read with no network at all
 // ---------------------------------------------------------------------------------------------
 
-describe("the job's clone: shallow and blob-less, read through lazy fetches", () => {
-  test("the review reads its documents and sidecars from a clone that holds no blobs", async () => {
-    const origin = newDataset("lazy-origin");
-    git(origin.dir, "config", "uploadpack.allowFilter", "true");
-    git(origin.dir, "config", "uploadpack.allowAnySHA1InWant", "true");
-    // A commit before the head, so a depth-one fetch really is shallow.
-    const clone = join(root, "lazy-clone");
+describe("the job's clone: shallow and blob-less, read with no network", () => {
+  /**
+   * A clone made the way the workflow's fetch step makes one (init, a partial-clone remote, one
+   * shallow blob-less fetch of `main`), then given `blobs` in one batch, as that step fetches the
+   * blobs the review reads. The origin is a `file://` remote that stays reachable unless a test cuts it.
+   */
+  async function jobClone(name: string, origin: Dataset, blobs: (tree: Tree) => string[]) {
+    const clone = join(root, name);
     mkdirSync(clone, { recursive: true });
     git(clone, "init", "-q", "-b", "main");
     git(clone, "config", "core.hooksPath", "/dev/null");
@@ -1314,19 +1422,85 @@ describe("the job's clone: shallow and blob-less, read through lazy fetches", ()
       "+refs/heads/main:refs/remotes/origin/main",
     );
     expect(git(clone, "rev-parse", "refs/remotes/origin/main")).toBe(origin.head);
-    // Nothing was checked out, and the README blob is not here: it has to be fetched when read.
-    const readmeBlob = git(origin.dir, "rev-parse", "HEAD:README.md");
-    expect(() =>
-      execFileSync("git", ["-C", clone, "cat-file", "-e", readmeBlob], {
+    const wanted = blobs(await readTree(clone, origin.head));
+    if (wanted.length > 0) {
+      execFileSync(
+        "git",
+        [
+          "-C",
+          clone,
+          "-c",
+          "fetch.negotiationAlgorithm=noop",
+          "fetch",
+          "-q",
+          "--no-tags",
+          "--no-write-fetch-head",
+          "--filter=blob:none",
+          "--stdin",
+          "origin",
+        ],
+        { env: GIT_ENV, input: `${wanted.join("\n")}\n` },
+      );
+    }
+    return clone;
+  }
+
+  /** Whether the clone holds the blob, asked without any lazy fetch, so asking cannot fill the gap. */
+  function holds(clone: string, oid: string): boolean {
+    try {
+      execFileSync("git", ["-C", clone, "cat-file", "-e", oid], {
         env: { ...GIT_ENV, GIT_NO_LAZY_FETCH: "1" },
         stdio: "ignore",
-      }),
-    ).toThrow();
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  test("the blobs the fetch step brought in are read from a clone cut off from every remote", async () => {
+    const origin = newDataset("lazy-origin");
+    git(origin.dir, "config", "uploadpack.allowFilter", "true");
+    git(origin.dir, "config", "uploadpack.allowAnySHA1InWant", "true");
+    const clone = await jobClone("lazy-clone", origin, blobsToRead);
+    // Nothing was checked out, and the participants table, which no reader opens, is not here.
+    const table = git(origin.dir, "rev-parse", "HEAD:participants.tsv");
+    expect(holds(clone, table)).toBe(false);
+    git(clone, "config", "remote.origin.url", "file:///nonexistent/remote");
 
     const report = await reviewOf({ dir: clone, head: origin.head });
     expect(report.evidence.documents.readme).toBe("sent");
     expect(report.evidence.summary.sampling_rates_hz).toEqual([256]);
+    expect(report.evidence.summary.sidecars_read).toBe(1);
     expect(theRequest().user).toContain("Two volunteers recorded at rest");
+  });
+
+  test("a blob the fetch step did not bring in reads as unreadable, and reading it fetches nothing, though the remote is reachable", async () => {
+    const origin = newDataset("gap-origin");
+    git(origin.dir, "config", "uploadpack.allowFilter", "true");
+    git(origin.dir, "config", "uploadpack.allowAnySHA1InWant", "true");
+    const readme = git(origin.dir, "rev-parse", "HEAD:README.md");
+    const sidecar = git(origin.dir, "rev-parse", `HEAD:${EEG}.json`);
+    // Everything the review reads but the README and the sidecar: a gap in the batch.
+    const clone = await jobClone("gap-clone", origin, (tree) =>
+      blobsToRead(tree).filter((oid) => oid !== readme && oid !== sidecar),
+    );
+    expect(holds(clone, readme)).toBe(false);
+    expect(holds(clone, sidecar)).toBe(false);
+
+    const tree = await readTree(clone, origin.head);
+    expect(readRootDocuments(clone, tree).readme.state).toBe("unreadable");
+    expect(readRootDocuments(clone, tree).dataset_description.state).toBe("present");
+    const summary = structuralSummary(clone, tree);
+    expect(summary).toMatchObject({ sidecars_total: 1, sidecars_read: 0 });
+    // The remote could have answered. It was not asked: the gap is still a gap.
+    expect(holds(clone, readme)).toBe(false);
+    expect(holds(clone, sidecar)).toBe(false);
+
+    const report = await reviewOf({ dir: clone, head: origin.head });
+    expect(report.evidence.documents.readme).toBe("withheld_unreadable");
+    expect(holds(clone, readme)).toBe(false);
+    expect(theRequest().user).not.toContain("Two volunteers recorded at rest");
   });
 });
 
@@ -1486,7 +1660,7 @@ describe("main: the whole script, from git to the callback", () => {
       expect(parsed).toEqual({ kind: "error", error: word as never });
       expect((WORKER_ONLY_RUN_ERRORS as readonly string[]).includes(word)).toBe(false);
     }
-  });
+  }, 20_000);
 
   test("a report the Worker's own parser would refuse is never posted as a report", async () => {
     const ds = newDataset("main-invalid");
@@ -1548,6 +1722,36 @@ describe("main: the whole script, from git to the callback", () => {
     expect(received).toHaveLength(0);
     expect(modelRequests).toHaveLength(0);
   });
+
+  test.each([
+    "repo-dir",
+    "head",
+    "fetched-head",
+    "tags-file",
+    "bids-runs-file",
+    "review-id",
+    "request-id",
+    "dataset",
+    "anonymous",
+    "environment",
+  ])(
+    "a missing --%s exits 2, says the flag's name and nothing else, and contacts nobody",
+    async (flag) => {
+      const ds = newDataset(`main-missing-${flag}`);
+      const full = argvFor(ds);
+      const at = full.indexOf(`--${flag}`);
+      expect(at).toBeGreaterThan(0);
+      // Both the flag and its value are absent; or the flag is the last word, with no value.
+      const without = [...full.slice(0, at), ...full.slice(at + 2)];
+      for (const argv of [without, [...without, `--${flag}`]]) {
+        const { code, log } = await runMain(argv);
+        expect(code).toBe(2);
+        expect(log).toBe(`missing --${flag}`);
+        expect(received).toHaveLength(0);
+        expect(modelRequests).toHaveLength(0);
+      }
+    },
+  );
 
   test("any command but review is refused", async () => {
     const { code } = await runMain(["calibrate", "--out", "x"]);
@@ -1721,9 +1925,20 @@ describe("the evidence block is the Worker's, built and parsed", () => {
     expect(() => buildPublicationEvidence({ ...base, head: "not-a-sha" })).toThrow(
       PublicationReviewReportError,
     );
-    // A tag state for a dataset that has no version contradicts itself.
+    // A tag state for a Version that is malformed has nothing to look up and contradicts itself;
+    // a missing Version is published as 1.0.0, so it has a tag state like any other.
+    expect(() =>
+      buildPublicationEvidence({ ...base, version: { version: null, shape: "malformed" } }),
+    ).toThrow(PublicationReviewReportError);
     expect(() =>
       buildPublicationEvidence({ ...base, version: { version: null, shape: "missing" } }),
+    ).not.toThrow();
+    expect(() =>
+      buildPublicationEvidence({
+        ...base,
+        version: { version: null, shape: "missing" },
+        tag: "not_applicable",
+      }),
     ).toThrow(PublicationReviewReportError);
   });
 

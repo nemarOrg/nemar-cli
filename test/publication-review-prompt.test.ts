@@ -437,6 +437,52 @@ describe("what the model is shown", () => {
     expect(p).not.toMatch(/identifier screen|screen report|\.tsv|header/i);
   });
 
+  test("the system prompt names the participants_json block and says it holds column descriptions only", () => {
+    const p = PUBLICATION_SYSTEM_PROMPT;
+    expect(p).toContain("The participants_json block");
+    expect(p).toContain("only descriptions of the participants table's columns");
+    expect(p).toContain("never any participant's data");
+    // What it says the block holds is what the block holds: a count, and a long name, a description
+    // and units per column (the fields pre-send keeps), and nothing else.
+    const { user } = buildPublicationReviewMessages({
+      facts: facts(),
+      cleared: presend({
+        ...DOCS,
+        participants_json: present(
+          JSON.stringify({
+            age: {
+              LongName: "Age at recording",
+              Description: "Age in years",
+              Units: "years",
+              Levels: { x: "y" },
+              TermURL: "https://example.org/age",
+            },
+            group: { Description: "Study group" },
+          }),
+          "participants.json",
+        ),
+      }).cleared,
+      nonce: NONCE,
+    });
+    const block = new RegExp(
+      `<untrusted-${NONCE} kind="participants_json">\\n([\\s\\S]*?)\\n</untrusted-${NONCE}>`,
+    ).exec(user);
+    expect(block).not.toBeNull();
+    const shown = JSON.parse((block as RegExpExecArray)[1] as string) as {
+      column_count: number;
+      columns: Record<string, string>[];
+    };
+    expect(Object.keys(shown)).toEqual(["column_count", "columns"]);
+    expect(shown.column_count).toBe(2);
+    expect(shown.columns).toEqual([
+      { LongName: "Age at recording", Description: "Age in years", Units: "years" },
+      { Description: "Study group" },
+    ]);
+    for (const word of ["long name", "description", "units", "column count"]) {
+      expect(PUBLICATION_SYSTEM_PROMPT, word).toContain(word);
+    }
+  });
+
   test("the system prompt is static: nothing about a dataset can be in it", () => {
     const a = buildPublicationReviewMessages({ facts: facts(), cleared: cleared(), nonce: NONCE });
     const b = buildPublicationReviewMessages({
