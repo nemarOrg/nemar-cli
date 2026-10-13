@@ -67,8 +67,11 @@ type Prepared =
       sent: string;
       /** The document was longer than its cap and `sent` is its start. */
       cut: boolean;
-      /** The parsed object `sent` was made from, for the two JSON documents; null for prose. */
-      object: unknown;
+      /**
+       * What the rules that run on the normalized structure of a JSON document found in it (its
+       * keys and every string in it); none for prose, which has no structure.
+       */
+      findings: Finding[];
       /** Shown and not-shown top-level keys; both 0 for anything but the description. */
       keysShown: number;
       keysNotShown: number;
@@ -76,6 +79,24 @@ type Prepared =
 
 function isPlainObject(x: unknown): x is Record<string, unknown> {
   return typeof x === "object" && x !== null && !Array.isArray(x);
+}
+
+/**
+ * A parsed JSON value with {@link normalizeText} applied to every string AND every key, to any
+ * depth. The model is sent the cleaned text, so the rules must look at the cleaned structure: a key
+ * `patient<zero-width space>name` is the key `patient name` to the model, and `scanJsonKeys` would
+ * not have matched the first. Built with `Object.fromEntries`, which defines each key as data, so a
+ * key named `__proto__` is kept and examined instead of becoming a prototype.
+ */
+function normalizeStructure(value: unknown): unknown {
+  if (typeof value === "string") return normalizeText(value);
+  if (Array.isArray(value)) return value.map(normalizeStructure);
+  if (isPlainObject(value)) {
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [normalizeText(k), normalizeStructure(v)]),
+    );
+  }
+  return value;
 }
 
 /**
@@ -146,7 +167,7 @@ function prepare(document: ReviewDocument, raw: RawDocument): Prepared {
   const cap = DOCUMENT_CHAR_CAPS[document];
 
   if (document !== "dataset_description" && document !== "participants_json") {
-    return { kind: "text", ...toSent(raw.text, cap), object: null, keysShown: 0, keysNotShown: 0 };
+    return { kind: "text", ...toSent(raw.text, cap), findings: [], keysShown: 0, keysNotShown: 0 };
   }
 
   let parsed: unknown;
@@ -157,7 +178,7 @@ function prepare(document: ReviewDocument, raw: RawDocument): Prepared {
   }
   if (!isPlainObject(parsed)) return { kind: "no-text", state: "withheld_not_json" };
 
-  let object: Record<string, unknown> = parsed;
+  let shown: Record<string, unknown> = parsed;
   let keysShown = 0;
   let keysNotShown = 0;
   if (document === "dataset_description") {
@@ -168,13 +189,15 @@ function prepare(document: ReviewDocument, raw: RawDocument): Prepared {
         keysShown++;
       }
     }
-    object = kept;
+    shown = kept;
     keysNotShown = Object.keys(parsed).length - keysShown;
   }
+  // Normalize first, then examine the normalized structure, then send that same structure.
+  const object = normalizeStructure(shown);
   return {
     kind: "text",
     ...toSent(JSON.stringify(object, null, 2), cap),
-    object,
+    findings: scanJsonKeys(object),
     keysShown,
     keysNotShown,
   };
@@ -199,10 +222,7 @@ export const presend: PreSend = (docs): PreSendResult => {
         states[document] = prepared.state;
         continue;
       }
-      const findings: Finding[] = [
-        ...scanTextForLocalPaths(prepared.sent),
-        ...(prepared.object === null ? [] : scanJsonKeys(prepared.object)),
-      ];
+      const findings: Finding[] = [...scanTextForLocalPaths(prepared.sent), ...prepared.findings];
       if (findings.length > 0) {
         states[document] = "withheld_finding";
         for (const [kind, n] of Object.entries(countByKind(findings))) {

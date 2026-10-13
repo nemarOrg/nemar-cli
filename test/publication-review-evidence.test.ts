@@ -1852,3 +1852,53 @@ describe("invisible marks and half characters never reach the model", () => {
     expect(user).toContain(`${"a".repeat(cap - 1)}\n[cut]\n</untrusted-`);
   });
 });
+
+describe("a JSON document is cleaned before the rules look, so a key cannot be disguised", () => {
+  const SECRET = "SENTINEL_DISGUISED_VALUE";
+
+  test.each([
+    ["a zero-width space", "patient​name"],
+    ["a soft hyphen", "patient­name"],
+  ])(
+    "an identifier key spelled with %s withholds the description and is never sent",
+    async (_what, key) => {
+      const ds = newDataset(`disguised-key-${key.length}`, {
+        "dataset_description.json": JSON.stringify({
+          ...DESCRIPTION,
+          GeneratedBy: [{ Name: "pipeline", [key]: SECRET }],
+        }),
+      });
+      const report = await reviewOf(ds);
+      expect(report.evidence.documents.dataset_description).toBe("withheld_finding");
+      expect(report.evidence.withheld_findings).toEqual({ "json-identifier-key": 1 });
+      const { raw } = theRequest();
+      expect(raw).not.toContain(SECRET);
+      expect(raw).not.toMatch(/patient/i);
+    },
+  );
+
+  test("participants.json with a disguised identifier column is withheld the same way", async () => {
+    const ds = newDataset("disguised-column", {
+      "participants.json": JSON.stringify({
+        participant_id: { Description: "label" },
+        "birth​date": { Description: SECRET },
+      }),
+    });
+    const report = await reviewOf(ds);
+    expect(report.evidence.documents.participants_json).toBe("withheld_finding");
+    expect(theRequest().raw).not.toContain(SECRET);
+  });
+
+  test("what is sent is the cleaned structure: no control character, escaped or raw, survives in a value", async () => {
+    const ds = newDataset("cleaned-values", {
+      "dataset_description.json": JSON.stringify({
+        ...DESCRIPTION,
+        Acknowledgements: "Thanks to\u0007 the\u001b[31m volunteers​",
+      }),
+    });
+    await reviewOf(ds);
+    const { user } = theRequest();
+    expect(user).toContain('"Acknowledgements": "Thanks to  the [31m volunteers "');
+    expect(user).not.toMatch(/\\u00(07|1b)/i);
+  });
+});

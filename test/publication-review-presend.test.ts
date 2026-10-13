@@ -482,6 +482,83 @@ describe("dataset_description.json: the shown keys, re-serialized", () => {
   });
 });
 
+describe("a JSON document is normalized first; every rule runs on what is sent (#1728)", () => {
+  // The model receives the cleaned text. A key the key rule saw as "patient\u200bname" is read by the
+  // model as "patient name", so the rules must look at the cleaned key, not the one that was parsed.
+  const withKey = (key: string) =>
+    JSON.stringify({
+      Name: "A descriptive dataset name that is long enough",
+      GeneratedBy: [{ Name: "pipeline", [key]: "Jane Q Doe" }],
+    });
+  const sendDescription = (text: string) =>
+    presend(docs({ dataset_description: present(text, "dataset_description.json") }));
+
+  test("the plain identifier key is withheld (the control)", () => {
+    const r = sendDescription(withKey("patientname"));
+    expect(r.states.dataset_description).toBe("withheld_finding");
+    expect(r.withheld_findings).toEqual({ "json-identifier-key": 1 });
+  });
+
+  test.each([
+    ["a zero-width space", "patient\u200bname"],
+    ["a soft hyphen", "patient\u00adname"],
+    ["a bidirectional override", "patient\u202ename"],
+    ["a bell", "patient\u0007name"],
+    ["a word joiner", "pa\u2060tient\u2060name"],
+    ["a variation selector", "patient\uFE0Fname"],
+    ["a tag character", "patient\u{E0001}name"],
+  ])("an identifier key spelled with %s is still an identifier key", (_what, key) => {
+    const r = sendDescription(withKey(key));
+    expect(r.states.dataset_description).toBe("withheld_finding");
+    expect(r.cleared.dataset_description).toBeUndefined();
+    expect(r.withheld_findings).toEqual({ "json-identifier-key": 1 });
+    expect(JSON.stringify(r)).not.toContain("Jane");
+  });
+
+  test("the keys and values that are sent are the cleaned ones", () => {
+    const description = JSON.stringify({
+      Name: "A descriptive\u200b dataset\u0007 name",
+      GeneratedBy: [{ "Name\u200b": "pipe\u00adline", Version: "1\u200b.0" }],
+    });
+    const r = sendDescription(description);
+    expect(r.states.dataset_description).toBe("sent");
+    expect(JSON.parse(r.cleared.dataset_description as string)).toEqual({
+      Name: "A descriptive  dataset  name",
+      GeneratedBy: [{ "Name ": "pipe line", Version: "1 .0" }],
+    });
+  });
+
+  test("a lone surrogate written as a JSON escape is removed from keys and values", () => {
+    const text =
+      '{"Name":"A descriptive dataset name \\ud83d here","GeneratedBy":[{"a\\ude00b":"c"}]}';
+    const r = sendDescription(text);
+    expect(r.states.dataset_description).toBe("sent");
+    expect(JSON.parse(r.cleared.dataset_description as string)).toEqual({
+      Name: "A descriptive dataset name  here",
+      GeneratedBy: [{ ab: "c" }],
+    });
+    expect(r.cleared.dataset_description as string).not.toMatch(/\\ud[89a-f]/i);
+  });
+
+  test("a key named __proto__ is data, not a prototype, and survives to be examined", () => {
+    const text =
+      '{"Name":"A descriptive dataset name that is long enough","GeneratedBy":[{"__proto__":{"email":"a@example.org"}}]}';
+    const r = sendDescription(text);
+    expect(r.states.dataset_description).toBe("withheld_finding");
+    expect(r.withheld_findings).toEqual({ "json-identifier-key": 1 });
+  });
+
+  test("participants.json is normalized the same way", () => {
+    const text = JSON.stringify({
+      participant_id: { Description: "label" },
+      "patient\u200bname": { Description: "x" },
+    });
+    const r = presend(docs({ participants_json: present(text, "participants.json") }));
+    expect(r.states.participants_json).toBe("withheld_finding");
+    expect(r.withheld_findings).toEqual({ "json-identifier-key": 1 });
+  });
+});
+
 describe("participants.json: the whole object, under the same two rules", () => {
   test("an identifier-named column key with content withholds it", () => {
     const text = JSON.stringify({
