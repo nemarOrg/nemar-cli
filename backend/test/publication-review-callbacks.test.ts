@@ -50,6 +50,7 @@ import {
   CALLBACK_SECRET,
   DEV_DATASET,
   PROD_DATASET,
+  answersWithin,
   createHarness,
   hookedD1,
   reportFor,
@@ -1228,6 +1229,107 @@ describe("a result that arrives as the watchdog fires", () => {
   });
 });
 
+describe("the callbacks answer before the mail", () => {
+  /** A D1 whose mail lease waits on `gate`, so the mail cannot finish until the test says so. */
+  function gatedMail(gate: Promise<void>) {
+    return interceptingD1(realD1(h.db), async (sql) => {
+      if (sql.includes("SET identifier_screen_mail_claimed_at")) await gate;
+    });
+  }
+  const gateOf = () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { gate, release };
+  };
+
+  test("a stored result answers while the mail is still being sent, and the mail follows", async () => {
+    // The job's POST has a timeout and its retry finds the token spent, so a slow Resend must not
+    // sit inside it. The result is stored before the answer; the mail finishes after it.
+    seedAdmin();
+    const { reviewId } = dispatched({ claimed: true, mailed: false });
+    const { gate, release } = gateOf();
+    h.deferred = [];
+    await withFakeResend(async (calls) => {
+      const res = await answersWithin(
+        h.result(
+          reviewId,
+          { outcome: "reported", report: reportFor(SCREENED_HEAD, false) },
+          undefined,
+          h.env({ DB: gatedMail(gate) }),
+        ),
+      );
+      expect(res).toEqual({ status: 200, body: { ok: true, dataset_id: PROD_DATASET } });
+      expect(state(reviewId)).toMatchObject({ state: "reported", verdict: "pass", nonce: null });
+      expect(h.deferred).toHaveLength(1);
+      expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(0);
+
+      release();
+      await Promise.allSettled(h.deferred ?? []);
+      expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(1);
+    });
+  });
+
+  test("a refused claim answers while the mail is still being sent, and the mail follows", async () => {
+    seedAdmin();
+    const { requestId, reviewId } = dispatched({ mailed: false });
+    h.db.run(
+      "UPDATE publication_requests SET identifier_screen_report = json_set(identifier_screen_report, '$.head', ?) WHERE id = ?",
+      [OTHER_HEAD, requestId],
+    );
+    const { gate, release } = gateOf();
+    h.deferred = [];
+    await withFakeResend(async (calls) => {
+      const res = await answersWithin(h.claim(reviewId, undefined, h.env({ DB: gatedMail(gate) })));
+      expect(res).toEqual({
+        status: 409,
+        body: { ok: false, claimed: false, reason: "stale_head" },
+      });
+      expect(state(reviewId)).toMatchObject({ state: "errored", detail: "stale_head" });
+      expect(h.deferred).toHaveLength(1);
+      expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(0);
+
+      release();
+      await Promise.allSettled(h.deferred ?? []);
+      expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(1);
+    });
+  });
+
+  test("without an execution context the mail is awaited, so a harness sees it done", async () => {
+    seedAdmin();
+    const { reviewId } = dispatched({ claimed: true, mailed: false });
+    await withFakeResend(async (calls) => {
+      await h.result(reviewId, { outcome: "reported", report: reportFor(SCREENED_HEAD, false) });
+      expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(1);
+    });
+  });
+
+  test("a mail that fails does not fail a stored result, deferred or not", async () => {
+    seedAdmin();
+    for (const [i, deferred] of [true, false].entries()) {
+      const dataset = ds(3000 + i);
+      const { reviewId } = dispatched({ dataset, claimed: true, mailed: false });
+      h.deferred = deferred ? [] : null;
+      await withFakeResend(
+        async () => {
+          const res = await h.result(
+            reviewId,
+            { outcome: "reported", report: reportFor(SCREENED_HEAD, false) },
+            undefined,
+            undefined,
+            dataset,
+          );
+          await Promise.allSettled(h.deferred ?? []);
+          expect(res.status).toBe(200);
+          expect(state(reviewId)).toMatchObject({ state: "reported" });
+        },
+        { status: 500 },
+      );
+    }
+  });
+});
+
 describe("an administrator's start", () => {
   const admin = { adminUserId: 1 };
 
@@ -1753,6 +1855,51 @@ describe("no secret reaches the Worker's logs", () => {
       "SMITH-SECRET",
     ]) {
       expect(out).not.toContain(secret);
+    }
+  });
+
+  test("a failed store and a report nobody claimed print ids and fixed words, nothing else", async () => {
+    const claimed = dispatched({ claimed: true });
+    const unclaimed = dispatched({ dataset: "nm000481", claimed: false });
+    const tokenA = await h.tokenFor(claimed.reviewId);
+    const tokenB = await h.tokenFor(unclaimed.reviewId, "nm000481");
+    const nonces = [h.nonceOf(claimed.reviewId), h.nonceOf(unclaimed.reviewId)];
+    const faulty = hookedD1(realD1(h.db), {
+      statement: (sql) => {
+        if (sql.includes("SET state = ?, verdict = ?")) {
+          throw new Error("D1_ERROR: SECRET-DRIVER-MESSAGE with HOSTILE-SUMMARY-TEXT");
+        }
+      },
+    });
+    const out = await captured(async () => {
+      await h.result(
+        claimed.reviewId,
+        {
+          outcome: "reported",
+          report: reportFor(SCREENED_HEAD, false, { summary: "HOSTILE-SUMMARY-TEXT" }),
+        },
+        tokenA,
+        h.env({ DB: faulty }),
+      );
+      await h.result(
+        unclaimed.reviewId,
+        { outcome: "reported", report: reportFor(SCREENED_HEAD, false) },
+        tokenB,
+        undefined,
+        "nm000481",
+      );
+    });
+    expect(out).toContain("store failed");
+    expect(out).toContain("not_claimed");
+    for (const secret of [
+      tokenA,
+      tokenB,
+      ...nonces,
+      "SECRET-DRIVER-MESSAGE",
+      "HOSTILE-SUMMARY-TEXT",
+      CALLBACK_SECRET,
+    ]) {
+      expect(out).not.toContain(secret as string);
     }
   });
 

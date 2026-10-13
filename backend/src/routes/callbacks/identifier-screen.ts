@@ -24,6 +24,7 @@ import { notifyAdminsOfScreen, storeScreenResult } from "../../services/identifi
 import { startPublicationReviewForScreen } from "../../services/publication-review.js";
 import type { WebhookRouter } from "../webhooks/shared.js";
 import { readBoundedJsonObject } from "./bounded-json.js";
+import { deferAfterAnswer } from "./defer.js";
 
 /**
  * The largest body this route reads (shared with the sweep's callback in
@@ -134,22 +135,18 @@ export function registerIdentifierScreenRoutes(webhooks: WebhookRouter): void {
     // here and not in `storeScreenResult`, whose outcome is pinned and which must not depend on
     // the review; it goes BEFORE the mail, so the review's row exists when the mail is tried, and
     // it never throws, so a fault in the review cannot fail the callback that stores the screen.
-    await startPublicationReviewForScreen(c.env, { requestId, datasetId });
-
-    // The mail goes after the answer: the result is stored, and the mail lease
-    // makes the send safe to finish in the background (a send that dies is
-    // retried by the watchdog once the lease expires). The workflow's callback
-    // does not wait on Resend. A test harness has no execution context, so the
-    // send is awaited there instead.
-    const mail = notifyAdminsOfScreen(c.env, requestId);
-    let deferred = false;
-    try {
-      c.executionCtx.waitUntil(mail);
-      deferred = true;
-    } catch {
-      // No ExecutionContext (in-process tests).
-    }
-    if (!deferred) await mail;
+    //
+    // Both go after the answer: the result is stored, and the review's start (a GitHub App token
+    // and a dispatch of up to ten seconds) and the mail (the lease makes the send safe to finish
+    // in the background: a send that dies is retried by the watchdog once the lease expires) must
+    // not run past the workflow's POST timeout, whose retry would find the token spent. They stay
+    // in one task, in that order. A test harness has no execution context, so the task is awaited
+    // there instead.
+    const afterAnswer = (async () => {
+      await startPublicationReviewForScreen(c.env, { requestId, datasetId });
+      await notifyAdminsOfScreen(c.env, requestId);
+    })();
+    if (!deferAfterAnswer(c)(afterAnswer)) await afterAnswer;
     return c.json({
       ok: true,
       dataset_id: datasetId,

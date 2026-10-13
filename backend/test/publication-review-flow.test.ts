@@ -31,6 +31,7 @@ import {
   DEV_DATASET,
   GITHUB_PAT,
   PROD_DATASET,
+  answersWithin,
   createHarness,
   reportFor,
 } from "./helpers/publication-review-harness";
@@ -263,6 +264,70 @@ describe("a screen result starts one review of its commit", () => {
     });
     await h.screenResult(requestId, PROD_DATASET, { bindings: h.env({ DB: watching }) });
     expect(seenWhenMailTried).toBe(1);
+  });
+});
+
+describe("the screen's answer does not wait for the review or the mail", () => {
+  test("it answers while GitHub is still taking the dispatch; the review follows, then the mail", async () => {
+    // The dispatch may take ten seconds to fail. The screen job's POST must not wait for it, and
+    // the review row must still exist before the mail is tried, so the two stay in one task, in
+    // that order.
+    const { requestId } = pending();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    h.dispatchStatus = 500;
+    h.duringDispatch = () => gate;
+    let seenWhenMailTried: number | null = null;
+    const watching = interceptingD1(realD1(h.db), (sql) => {
+      if (seenWhenMailTried === null && sql.includes("SET identifier_screen_mail_claimed_at")) {
+        seenWhenMailTried = (
+          h.db.query("SELECT COUNT(*) AS n FROM publication_reviews").get() as { n: number }
+        ).n;
+      }
+    });
+    h.deferred = [];
+    const res = await answersWithin(
+      h.screenResult(requestId, PROD_DATASET, { bindings: h.env({ DB: watching }) }),
+    );
+    expect(res).toEqual({
+      status: 200,
+      body: { ok: true, dataset_id: PROD_DATASET, state: "clean", blocked: false },
+    });
+    // The screen is stored. The review's start is a task of its own, handed to the runtime.
+    expect(h.requestRow(requestId).identifier_screen_status).toBe("clean");
+    expect(h.deferred).toHaveLength(1);
+    // Wait for the dispatch to reach GitHub: the review is written and is out, and no mail yet.
+    for (let i = 0; i < 200 && h.dispatches().length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(h.dispatches()).toHaveLength(1);
+    expect(h.reviews()[0]).toMatchObject({ state: "dispatched", claimed_at: null });
+    expect(seenWhenMailTried).toBeNull();
+
+    release();
+    await Promise.allSettled(h.deferred);
+    expect(h.reviews()[0]).toMatchObject({ state: "errored", detail: "dispatch_failed" });
+    // The mail was tried only now, with the review row written.
+    expect(seenWhenMailTried).toBe(1);
+  });
+
+  test("a fault in the review cannot fail the answer or keep the mail from being tried", async () => {
+    const { requestId } = pending();
+    let mailTried = false;
+    const faulty = wrapD1(realD1(h.db), (sql) => {
+      if (sql.includes("FROM publication_requests pr JOIN datasets d")) {
+        throw new Error("D1_ERROR: simulated fault");
+      }
+      if (sql.includes("SET identifier_screen_mail_claimed_at")) mailTried = true;
+    });
+    h.deferred = [];
+    const res = await h.screenResult(requestId, PROD_DATASET, { bindings: h.env({ DB: faulty }) });
+    expect(res.status).toBe(200);
+    await Promise.allSettled(h.deferred);
+    expect(h.reviews()).toHaveLength(0);
+    expect(mailTried).toBe(true);
   });
 });
 

@@ -70,6 +70,12 @@ import { publicationReviewApplies, reviewEnabled } from "./publication-review-vi
 
 type Db = D1Database;
 
+/**
+ * Hand work to the runtime so the caller's answer need not wait for it: true when it took the
+ * task, false when it cannot (a test harness has no execution context), and the caller awaits it.
+ */
+export type Defer = (task: Promise<unknown>) => boolean;
+
 /** Rows the watchdog handles per tick. */
 const SWEEP_LIMIT = 20;
 
@@ -114,6 +120,19 @@ async function tryMail(env: Bindings, requestId: number): Promise<"sent" | "othe
     console.error(`[publication-review] request ${requestId}: mail failed (${errClass(err)})`);
     return "other";
   }
+}
+
+/**
+ * Try the mail after the caller's answer when it can be deferred (the job's POST must not wait on
+ * Resend), and now when it cannot.
+ */
+async function tryMailAfterAnswer(
+  env: Bindings,
+  requestId: number,
+  defer: Defer | undefined,
+): Promise<void> {
+  const mail = tryMail(env, requestId);
+  if (!defer?.(mail)) await mail;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -746,6 +765,7 @@ export async function claimPublicationReview(
   reviewId: number,
   datasetId: string,
   nonce: string,
+  defer?: Defer,
 ): Promise<PublicationClaimResult> {
   const db = env.DB;
   const row = await readReview(db, reviewId);
@@ -753,7 +773,7 @@ export async function claimPublicationReview(
 
   if (!reviewEnabled(env)) {
     const closed = await db.prepare(CLAIM_DISABLED_SQL).bind(reviewId, datasetId, nonce).run();
-    if ((closed.meta.changes ?? 0) === 1) await tryMail(env, row.requestId);
+    if ((closed.meta.changes ?? 0) === 1) await tryMailAfterAnswer(env, row.requestId, defer);
     return "review_disabled";
   }
   if (!ownedHere(env, datasetId)) return "not_owned_here";
@@ -766,7 +786,7 @@ export async function claimPublicationReview(
 
     const stale = await db.prepare(CLAIM_STALE_SQL).bind(reviewId, datasetId, nonce).run();
     if ((stale.meta.changes ?? 0) === 1) {
-      await tryMail(env, row.requestId);
+      await tryMailAfterAnswer(env, row.requestId, defer);
       return "stale_head";
     }
   }
@@ -775,7 +795,7 @@ export async function claimPublicationReview(
   // so it neither waits for the watchdog nor reaches a model without a settled claim.
   const unsettled = await db.prepare(CLAIM_UNSETTLED_SQL).bind(reviewId, datasetId, nonce).run();
   if ((unsettled.meta.changes ?? 0) === 1) {
-    await tryMail(env, row.requestId);
+    await tryMailAfterAnswer(env, row.requestId, defer);
     return "claim_unsettled";
   }
   return "already_claimed";
@@ -790,9 +810,9 @@ export async function claimPublicationReview(
  * report, claimed. One predicate, spliced into the write of the result and into the guard of every
  * statement that must fire only if that write will take effect.
  */
-function waitingRow(states: readonly ("dispatched" | "unreported")[], claimed: boolean): string {
+function waitingRow(states: readonly ("dispatched" | "unreported")[], needsClaim: boolean): string {
   return `id = ? AND dataset_id = ? AND nonce = ? AND state IN (${states.map(sqlWord).join(", ")})${
-    claimed ? " AND claimed_at IS NOT NULL" : ""
+    needsClaim ? " AND claimed_at IS NOT NULL" : ""
   }`;
 }
 
@@ -801,8 +821,11 @@ function waitingRow(states: readonly ("dispatched" | "unreported")[], claimed: b
  * says. Evaluated BEFORE the write of the result in the same batch, so it is true exactly when
  * that write will match: a batch is one transaction, and nothing can move the row between them.
  */
-function whileWaiting(states: readonly ("dispatched" | "unreported")[], claimed: boolean): string {
-  return `EXISTS (SELECT 1 FROM publication_reviews WHERE ${waitingRow(states, claimed)})`;
+function whileWaiting(
+  states: readonly ("dispatched" | "unreported")[],
+  needsClaim: boolean,
+): string {
+  return `EXISTS (SELECT 1 FROM publication_reviews WHERE ${waitingRow(states, needsClaim)})`;
 }
 
 /**
@@ -826,22 +849,22 @@ export const REBLOCK_SQL = `UPDATE publication_requests
  * A late report re-arms the request's mail: the mail already sent said the review did not report.
  * Only for the request whose review this is, as above, and only while the review waits as
  * `unreported` (the last three binds), so a replay does not re-arm a mail that was since sent.
- * `claimed` is whether the result being stored is a report, which needs a claim.
+ * `needsClaim` is whether the result being stored is a report, which needs a claim.
  */
-export function rearmMailSql(claimed: boolean): string {
+export function rearmMailSql(needsClaim: boolean): string {
   return `UPDATE publication_requests
     SET identifier_screen_emailed_at = NULL, identifier_screen_mail_claimed_at = NULL
   WHERE id = ? AND status IN ('requested', 'blocked') AND anonymous = ?
     AND ${screenedHeadSql("publication_requests")} = ?
-    AND ${whileWaiting(["unreported"], claimed)}`;
+    AND ${whileWaiting(["unreported"], needsClaim)}`;
 }
 
 /** The write of a result, keyed on the nonce and on the state the row waits in. */
-function storeSql(from: "unreported" | "dispatched", claimed: boolean): string {
+function storeSql(from: "unreported" | "dispatched", needsClaim: boolean): string {
   return `UPDATE publication_reviews
       SET state = ?, verdict = ?, detail = ?, report = ?, nonce = NULL,
           decided_at = datetime('now')
-    WHERE ${waitingRow([from], claimed)}`;
+    WHERE ${waitingRow([from], needsClaim)}`;
 }
 
 /**
@@ -867,6 +890,9 @@ function storeSql(from: "unreported" | "dispatched", claimed: boolean): string {
  * A report (which implies a model call) needs a claim; an error word does not, so a failure before
  * the claim (a payload the job could not validate, a fetch that failed) is still recorded.
  * `refusal` says why nothing was stored when that is the reason.
+ *
+ * The mail follows the store, handed to `defer` when the caller can finish it after its answer
+ * (the job's POST has a timeout, and its retry finds the token spent); without one it is awaited.
  */
 export async function storePublicationReviewResult(
   env: Bindings,
@@ -874,6 +900,7 @@ export async function storePublicationReviewResult(
   datasetId: string,
   nonce: string,
   result: PublicationCallbackOutcome,
+  defer?: Defer,
 ): Promise<{
   stored: boolean;
   state: PublicationReviewState | null;
@@ -905,7 +932,8 @@ export async function storePublicationReviewResult(
     nonce,
   ];
   const guard = [reviewId, datasetId, nonce];
-  const claimed = reported !== null;
+  // A report implies a model call, and a call is made only by a run that took its claim.
+  const needsClaim = reported !== null;
   const kind = row.anonymous ? 1 : 0;
 
   const statements: D1PreparedStatement[] = [];
@@ -918,10 +946,10 @@ export async function storePublicationReviewResult(
     );
   }
   statements.push(
-    db.prepare(rearmMailSql(claimed)).bind(row.requestId, kind, row.headSha, ...guard),
+    db.prepare(rearmMailSql(needsClaim)).bind(row.requestId, kind, row.headSha, ...guard),
   );
-  statements.push(db.prepare(storeSql("dispatched", claimed)).bind(...binds));
-  statements.push(db.prepare(storeSql("unreported", claimed)).bind(...binds));
+  statements.push(db.prepare(storeSql("dispatched", needsClaim)).bind(...binds));
+  statements.push(db.prepare(storeSql("unreported", needsClaim)).bind(...binds));
 
   const results = await db.batch(statements);
   const fromDispatched = (results[statements.length - 2]?.meta?.changes ?? 0) === 1;
@@ -931,7 +959,7 @@ export async function storePublicationReviewResult(
     // nobody claimed (which the claim, and not this route, must precede).
     const now = await readReview(db, reviewId);
     const unclaimed =
-      claimed &&
+      needsClaim &&
       now !== null &&
       now.claimedAt === null &&
       (now.state === "dispatched" || now.state === "unreported");
@@ -948,7 +976,7 @@ export async function storePublicationReviewResult(
       `[publication-review] review ${reviewId} (${datasetId}): request ${row.requestId} blocked (min_requirements_failed)`,
     );
   }
-  await tryMail(env, row.requestId);
+  await tryMailAfterAnswer(env, row.requestId, defer);
   return { stored: true, state: reported ? "reported" : "errored" };
 }
 

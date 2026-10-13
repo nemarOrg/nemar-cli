@@ -40,6 +40,7 @@ import {
 } from "../../services/publication-review.js";
 import type { WebhookContext, WebhookRouter } from "../webhooks/shared.js";
 import { readBoundedJsonObject } from "./bounded-json.js";
+import { deferAfterAnswer } from "./defer.js";
 
 /** Every refusal says the same bytes, so the answer does not tell a caller which reviews are running. */
 const UNAUTHORIZED = { error: "Invalid or expired callback token" } as const;
@@ -95,7 +96,13 @@ export function registerPublicationReviewRoutes(webhooks: WebhookRouter): void {
   webhooks.post("/publication-review-claim", async (c) => {
     const v = await verify(c, "publication-review-claim");
     if (v instanceof Response) return v;
-    const claim = await claimPublicationReview(c.env, v.reviewId, v.datasetId, v.nonce);
+    const claim = await claimPublicationReview(
+      c.env,
+      v.reviewId,
+      v.datasetId,
+      v.nonce,
+      deferAfterAnswer(c),
+    );
     console.log(`[publication-review-claim] review ${v.reviewId} (${v.datasetId}): ${claim}`);
     if (claim === "claimed") return c.json({ ok: true, claimed: true });
     return c.json({ ok: false, claimed: false, reason: claim }, 409);
@@ -117,7 +124,14 @@ export function registerPublicationReviewRoutes(webhooks: WebhookRouter): void {
     );
     let stored: Awaited<ReturnType<typeof storePublicationReviewResult>>;
     try {
-      stored = await storePublicationReviewResult(c.env, v.reviewId, v.datasetId, v.nonce, outcome);
+      stored = await storePublicationReviewResult(
+        c.env,
+        v.reviewId,
+        v.datasetId,
+        v.nonce,
+        outcome,
+        deferAfterAnswer(c),
+      );
     } catch (err) {
       // Nothing was stored and the token is not spent (the store is one transaction), so the job
       // may try again. The class of the error is logged, never its message.
