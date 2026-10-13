@@ -209,9 +209,9 @@ export interface PublicationReviewDetail {
   /** The request's block reason when it is blocked, as a plain word (`shownBlockReason`), else null. */
   block_reason: string | null;
   /**
-   * The request is `approving` and a step after the validation-only ones completed
-   * (`hasStartedPublishing`): a resume passes no gate, and `approve` without `--resume` would
-   * start the run over.
+   * The request is `approving`, or `blocked` by the owner-name walk-back, and a step after the
+   * validation-only ones completed (`hasStartedPublishing`): a resume passes no gate, and
+   * `approve` without `--resume` would start the run over.
    */
   started_publishing: boolean;
   /** `datasets.total_files` (the manifest-first count), or null when unknown. */

@@ -92,6 +92,13 @@ const seedGolden = (over?: Parameters<typeof seedGoldenIn>[1]) => seedGoldenIn(h
 const seedReport = (requestId: number, report?: Record<string, unknown>) =>
   seedReportIn(h.db, requestId, report);
 
+/** A blocked request that never started a step, which the Worker refuses outright. */
+const seedBlockedUnstarted = (blockReason: string) => {
+  const requestId = seedGolden({ requestStatus: "blocked", blockReason });
+  h.db.run("UPDATE publication_requests SET steps_completed = '[]' WHERE id = ?", [requestId]);
+  return requestId;
+};
+
 const WHY_ACK = "Read the recording formats by hand, nothing to remove";
 
 const approve = (flags: string[], opts: Parameters<typeof h.cli>[1] = {}) =>
@@ -355,10 +362,7 @@ describe("the command decides: a blocked request is refused with the flag off an
   for (const flag of ["on", "off"] as const) {
     test(`with the review ${flag}: exits 1 before posting, with the block reason`, async () => {
       if (flag === "off") h.setEnv({ PUBLICATION_REVIEW_ENABLED: "0" });
-      const requestId = seedGolden({
-        requestStatus: "blocked",
-        blockReason: "min_requirements_failed",
-      });
+      const requestId = seedBlockedUnstarted("min_requirements_failed");
 
       const r = await approve(["--resume", "--yes", "--force"]);
 
@@ -368,6 +372,28 @@ describe("the command decides: a blocked request is refused with the flag off an
       expect(r.stdout).toContain(REASONS.request_blocked.cure);
       expect(h.posted).toEqual([]);
       expect(requestRow(requestId)?.status).toBe("blocked");
+    });
+  }
+});
+
+describe("the command decides: a blocked run that has started publishing is resumed, not refused", () => {
+  // The owner-name walk-back blocks a run half way; the owner fixes the name and the run goes on.
+  for (const flag of ["on", "off"] as const) {
+    test(`with the review ${flag}: --resume publishes with no override, and without it the cure is --resume`, async () => {
+      if (flag === "off") h.setEnv({ PUBLICATION_REVIEW_ENABLED: "0" });
+      const requestId = seedGolden({ requestStatus: "blocked", blockReason: "owner_name_missing" });
+      seedReport(requestId, failingReport());
+
+      const without = await approve(["--yes"]);
+      expect(without.exitCode).toBe(1);
+      expect(without.stdout).toContain("This approval has already started publishing.");
+      expect(h.posted).toEqual([]);
+
+      const r = await approve(["--resume", "--yes"]);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("a resume that has started publishing is not gated again");
+      expect(approveBodies()[0]).not.toHaveProperty("override_publication_review");
+      expect(requestRow(requestId)?.status).toBe("published");
     });
   }
 });
@@ -486,10 +512,7 @@ describe("with the Worker's gate: what the Worker refuses is printed, and exits 
   });
 
   test("a blocked request the command could not see is refused by the Worker with the block reason", async () => {
-    const requestId = seedGolden({
-      requestStatus: "blocked",
-      blockReason: "min_requirements_failed",
-    });
+    const requestId = seedBlockedUnstarted("min_requirements_failed");
     h.hookDb({
       statement(sql) {
         if (/FROM publication_reviews/.test(sql)) throw new Error("simulated read failure");

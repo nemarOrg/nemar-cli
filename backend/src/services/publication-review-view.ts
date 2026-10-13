@@ -19,13 +19,13 @@
  * request in any other state shows its stored review as history and never as a wait: a dispatched
  * row of such a request reads as one that did not report, so no surface says "running" about a
  * review whose result can no longer settle anything. Its live facts are not read either, with one
- * exception, `blocked` ({@link LIVE_FACT_STATUSES}): a blocked request has written nothing of an
- * approval, so a version row or a concept DOI can only belong to an EARLIER release, and is shown
- * beside the hard `request_blocked`. A request that is over (`published`, `denied`) would read as
- * one whose own release "was already released", and an `approving` request that has started
- * publishing has written those facts itself, so both show their stored review only. An `approving`
- * request that stopped before it published has written neither, is gated again when it resumes,
- * and reads them like a `requested` one.
+ * exception, `blocked` ({@link LIVE_FACT_STATUSES}): a blocked request that never started
+ * publishing has written nothing of an approval, so a version row or a concept DOI can only belong
+ * to an EARLIER release, and is shown beside the hard `request_blocked`. A request that is over
+ * (`published`, `denied`) would read as one whose own release "was already released", and an
+ * `approving` or `blocked` request that has started publishing has written those facts itself, so
+ * they show their stored review only. An `approving` request that stopped before it published has
+ * written neither, is gated again when it resumes, and reads them like a `requested` one.
  *
  * **What a viewer may read** is counts, closed words and the shared sentences. The model's summary
  * and the notes of its findings, both sanitized by the parser, appear in the detail view and
@@ -143,9 +143,10 @@ export function publicationReviewApplies(dataset: {
  * an EARLIER release, which is what the checks look for.
  *
  *  - `requested`: waiting for its decision.
- *  - `blocked`: a request is blocked before an approval step runs (the one walk back from
- *    `approving`, the owner-name check, is ahead of the first step), so it has written nothing
- *    either. Its facts are informative, and the hard `request_blocked` stands beside them.
+ *  - `blocked`: a request that never started publishing has written nothing either. Its facts
+ *    are informative, and the hard `request_blocked` stands beside them. One that HAS started
+ *    publishing is a run the owner-name walk-back blocked half way (the check runs on every call
+ *    of a run), so it wrote its own version row and DOI and reads none, like `approving`.
  *
  * Not `approving` as such: a run that HAS started publishing has by then written its own
  * `dataset_versions` row and concept DOI, and read as live facts they would say "already released"
@@ -361,8 +362,14 @@ export async function derivePublicationReview(
   // What an approval would publish: a dataset with no Version is published as 1.0.0, so that is
   // the version whose release the live checks must look for (a malformed one has none).
   const publishedVersion = report === null ? null : effectiveVersionOf(report.evidence);
+  // A blocked request whose run had started publishing (the owner-name walk-back, which runs on
+  // every call of a run) wrote its own version row and DOI, so it reads no live fact either.
+  const ownRun = request.status === "blocked" && hasStartedPublishing(request.steps_completed);
   const readFacts =
-    applies && assessed && (LIVE_FACT_STATUSES.has(request.status) || approval === "stopped");
+    applies &&
+    assessed &&
+    !ownRun &&
+    (LIVE_FACT_STATUSES.has(request.status) || approval === "stopped");
   const versionRowExists =
     readFacts && publishedVersion !== null
       ? await exists(db, VERSION_ROW_SQL, request.dataset_id, publishedVersion)
@@ -864,7 +871,8 @@ export async function publicationReviewDetail(
     // still be told apart.
     block_reason: shownBlockReason(ctx.request),
     started_publishing:
-      ctx.request.status === "approving" && hasStartedPublishing(ctx.request.steps_completed),
+      (ctx.request.status === "approving" || ctx.request.status === "blocked") &&
+      hasStartedPublishing(ctx.request.steps_completed),
     total_files: ctx.dataset?.total_files ?? null,
     applies: d.applies,
     gate: d.gate,

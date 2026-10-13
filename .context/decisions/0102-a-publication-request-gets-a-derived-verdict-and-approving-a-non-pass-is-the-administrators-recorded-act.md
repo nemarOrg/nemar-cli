@@ -395,7 +395,7 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   and the hand-over from the advisory pre-screen (with the flag on, the pre-screen of ADR 0014 is not dispatched for a dataset the review applies to,
   so the deploy that turns the review on is the one that stops it); it switches nothing else.
   The mechanical refusals ship unconditionally in Phase 2:
-  a `blocked` request cannot be approved, and the ADR 0026 minimums refuse wherever they are evaluated, whatever the flag says.
+  a `blocked` request that has not started publishing cannot be approved, and the ADR 0026 minimums refuse wherever they are evaluated, whatever the flag says.
   With the flag off, no review is started, the claim route refuses a new claim so that no model call is spent,
   the result route still stores the result of a run that took its claim (the call was spent, and the record stays honest),
   the watchdog still closes rows, the mail does not wait for a review,
@@ -424,7 +424,7 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   the model sees at most the caps of section 3 after normalization, a `participants.json` column's fields are cut at 100, 500 and 50 characters,
   the job samples at most 64 data sidecars and reduces them to at most 8 distinct sampling rates and 8 distinct channel counts,
   the watchdog takes at most 20 rows a tick, the job times out at 20 minutes, and the deadline for a report is 30.
-  A request's live facts are read only while it is `requested` or `blocked` (section 5).
+  A request's live facts are read only while it is `requested` or `blocked`, or `approving` and stopped before it published, and never for a run that has started publishing (section 5).
 
 ### 8. What the administrator sees and may do
 
@@ -628,7 +628,9 @@ The maintainer decided all twelve on 2026-10-12, as recommended, and amended cal
 4. (Amended.) The version facts need `--force`,
    except that a named publication after an anonymous release that keeps its version is hard;
    `version_already_released` fires only for a version row, or for a tag that names another commit than the reviewed head.
-5. A `blocked` request cannot be approved from a terminal, unconditionally.
+5. (Amended.) A `blocked` request cannot be approved from a terminal, unconditionally, unless it has started publishing:
+   the owner-name check walks a request back to `blocked` on every call of a run, so a depositor who clears their name mid-run blocks a half-published run,
+   and that run is resumed once the name is back, with no gate asked, as an `approving` one is (the detail's `started_publishing` is true for it).
 6. Haiku 5.5 at `high`, checked by an offline calibration before the soak (design note),
    and re-run on Sonnet 5.5 if more than one in five non-pass outcomes is judged wrong.
 7. The mail waits for the review.

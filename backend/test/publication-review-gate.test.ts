@@ -252,7 +252,7 @@ describe("with the review off the gate reads nothing", () => {
   });
 });
 
-describe("a blocked request is refused by the mechanical rules, whatever the flag says", () => {
+describe("a blocked request that has not started publishing is refused by the mechanical rules, whatever the flag says", () => {
   for (const lit of [true, false] as const) {
     for (const [what, over] of [
       ["a native dataset", {}],
@@ -260,9 +260,10 @@ describe("a blocked request is refused by the mechanical rules, whatever the fla
     ] as const) {
       for (const [steps, body] of [
         [[], { resume: false }],
-        [PUBLICATION_STEPS, { resume: true }],
+        // Only the validation-only steps: nothing has changed yet, so this is not a run that started.
+        [["ci_check", "enrichment_check"], { resume: true }],
       ] as const) {
-        test(`2. ${what}, flag ${lit ? "on" : "off"}, ${steps.length === 0 ? "a fresh run" : "every step done"}: 409 request_blocked, nothing started`, async () => {
+        test(`2. ${what}, flag ${lit ? "on" : "off"}, ${steps.length === 0 ? "a fresh run" : "only the validation steps done, resumed"}: 409 request_blocked, nothing started`, async () => {
           const { requestId, datasetId } = seed({
             ...over,
             requestStatus: "blocked",
@@ -289,6 +290,78 @@ describe("a blocked request is refused by the mechanical rules, whatever the fla
       }
     }
   }
+});
+
+describe("a blocked request that HAS started publishing is not refused: the owner-name walk-back strands no run", () => {
+  // The walk-back to `blocked` (the owner's name is missing) runs on every `/approve` call, the
+  // batches of `s3_lock` included, so a depositor who clears their name mid-lock blocks a run that
+  // is half published. The owner fixes the name and the run is resumed; a refusal that no re-run
+  // could cure would leave the dataset half published until a re-request.
+  for (const lit of [true, false] as const) {
+    for (const [what, over] of [
+      ["a native dataset", {}],
+      ["a mirror", { source: "openneuro", datasetId: MIRROR }],
+    ] as const) {
+      test(`2. ${what}, flag ${lit ? "on" : "off"}: a resume carries on past the blocked status, and no gate is asked`, async () => {
+        const { requestId, datasetId } = seedFailing({
+          ...over,
+          requestStatus: "blocked",
+          blockReason: "owner_name_missing",
+          steps: DONE,
+        });
+        // The screened commit is no longer `main`, as it is once the run's own steps committed.
+        mainHead = OTHER_HEAD;
+        const res = await approve({ resume: true }, { dataset: datasetId, bindings: env({}, lit) });
+        expect(res.status).toBe(200);
+        expect(requestRow(requestId).status).toBe("published");
+        expect(requestRow(requestId).approved_by).toBe(adminA);
+        expect(calls.filter((c) => /\/git\/ref\//.test(c.path))).toHaveLength(0);
+        expect(overrideRows()).toHaveLength(0);
+      });
+    }
+  }
+
+  test("2. the walk-back as it happens: blocked again while the name is missing, resumed once it is back", async () => {
+    const { requestId } = seed({ requestStatus: "approving", steps: DONE });
+    const clearName = (given: string | null) =>
+      db.run("UPDATE users SET given_name = ? WHERE username = ?", [given, `depositor_${DATASET}`]);
+    clearName(null);
+    // The call that finds the name gone walks the request back to blocked.
+    const first = await approve({ resume: true });
+    expect(first.status).toBe(422);
+    expect(requestRow(requestId).status).toBe("blocked");
+    expect(requestRow(requestId).block_reason).toBe("owner_name_missing");
+    // Calling again is the same answer, not a 409 that no resume could cure.
+    const second = await approve({ resume: true });
+    expect(second.status).toBe(422);
+    expect(((await second.json()) as { block_reason?: string }).block_reason).toBe(
+      "owner_name_missing",
+    );
+    expect(requestRow(requestId).status).toBe("blocked");
+    expect(JSON.parse(String(requestRow(requestId).steps_completed))).toEqual([...DONE]);
+    // The name is back: the same resume finishes the run.
+    clearName("Ada");
+    const third = await approve({ resume: true });
+    expect(third.status).toBe(200);
+    expect(requestRow(requestId).status).toBe("published");
+  });
+
+  test("2. without --resume the run would start over, so the refusal stands for it", async () => {
+    // `resume: false` discards the step list, which for a run that started is not a continuation.
+    // It reaches the gates like a fresh run, and the blocked request is refused there.
+    const { requestId } = seed({
+      requestStatus: "blocked",
+      blockReason: "owner_name_missing",
+      steps: DONE,
+    });
+    const res = await approve({ resume: false });
+    const body = await refusalOf(res);
+    expect(body.refusal).toBe("hard_reason");
+    expect(body.reasons.map((r) => r.code)).toContain("request_blocked");
+    expect(requestRow(requestId).status).toBe("blocked");
+    expect(JSON.parse(String(requestRow(requestId).steps_completed))).toEqual([...DONE]);
+    expect(auditRows("dataset_published")).toHaveLength(0);
+  });
 });
 
 describe("a dataset the review does not apply to, and one it passes", () => {

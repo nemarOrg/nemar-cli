@@ -1720,7 +1720,7 @@ describe("the detail carries what approve and next show from one read", () => {
     expect((await detail(bare.datasetId)).block_reason).toBeNull();
   });
 
-  test("started_publishing is true only for an approving request with a step outside the validation-only ones", async () => {
+  test("started_publishing is true only for an approving or blocked request with a step outside the validation-only ones", async () => {
     const stepsOf = (requestId: number, steps: unknown) =>
       db.run("UPDATE publication_requests SET steps_completed = ? WHERE id = ?", [
         typeof steps === "string" ? steps : JSON.stringify(steps),
@@ -1749,19 +1749,37 @@ describe("the detail carries what approve and next show from one read", () => {
         started: false,
       });
     }
-    // The status decides first: no other request is "publishing", whatever its steps say. (A
-    // request that is over has no detail to read.)
-    for (const requestStatus of ["requested", "blocked"] as const) {
-      const other = request({ requestStatus });
-      stepsOf(other.requestId, ["ci_check", "s3_public_read", "publish_doi"]);
-      expect({
-        requestStatus,
-        started: (await detail(other.datasetId)).started_publishing,
-      }).toEqual({
-        requestStatus,
-        started: false,
-      });
-    }
+    // The status decides first: a request that is waiting is not "publishing", whatever its steps
+    // say. (A request that is over has no detail to read.)
+    const waiting = request({ requestStatus: "requested" });
+    stepsOf(waiting.requestId, ["ci_check", "s3_public_read", "publish_doi"]);
+    expect((await detail(waiting.datasetId)).started_publishing).toBe(false);
+    // A blocked request is one only by the owner-name walk-back that runs on every approval call,
+    // so one with a step done is a run that stopped half published, and is told apart from one
+    // that never started (which the Worker refuses outright).
+    const blocked = request({ requestStatus: "blocked", blockReason: "owner_name_missing" });
+    expect((await detail(blocked.datasetId)).started_publishing).toBe(false);
+    stepsOf(blocked.requestId, QUIET);
+    expect((await detail(blocked.datasetId)).started_publishing).toBe(false);
+    stepsOf(blocked.requestId, ["ci_check", "s3_public_read", "publish_doi"]);
+    expect((await detail(blocked.datasetId)).started_publishing).toBe(true);
+  });
+
+  test("a blocked request that has started publishing reads no live fact: its own version row and DOI are not an earlier release", async () => {
+    const { requestId, datasetId } = request({
+      requestStatus: "blocked",
+      blockReason: "owner_name_missing",
+    });
+    startPublishing(requestId);
+    seedPublicationReview(db, { requestId, datasetId, state: "reported" });
+    addVersionRow(datasetId);
+    db.run(
+      "UPDATE datasets SET concept_doi = '10.82901/nm.own-run', ezid_status = 'draft' WHERE dataset_id = ?",
+      [datasetId],
+    );
+    const d = await detail(datasetId);
+    expect(d.started_publishing).toBe(true);
+    expect(d.reasons.map((r) => r.code)).toEqual(["request_blocked"]);
   });
 
   test("an approving request's next command follows where its approval stands: resumed gated, or resumed with no gate", async () => {

@@ -208,20 +208,11 @@ export function decideApproval(
   const { detail } = read;
   const id = datasetId;
 
-  // 2. A blocked request is refused by the mechanical rules, whatever the gate says: with the flag
-  // off the reasons are empty, so this reads the status.
-  if (detail.request_status === "blocked") {
-    const hint = detail.block_reason === null ? undefined : BLOCK_REASON_HINTS[detail.block_reason];
-    const lines = [
-      reasonLine({ code: "request_blocked", detail: detail.block_reason }, id, null, false),
-    ];
-    if (hint) lines.push(hint);
-    return { kind: "refuse", why: "blocked", lines };
-  }
-
-  // 3. A run that has started publishing is continued, not gated (the Worker skips every gate for
-  // it). Without --resume the Worker would start it over, so that is the cure.
-  if (detail.request_status === "approving" && detail.started_publishing) {
+  // 2. A run that has started publishing is continued, not gated (the Worker skips every gate for
+  // it). Without --resume the Worker would start it over, so that is the cure. This comes before
+  // the blocked check because the owner-name walk-back can block a run half way: the detail says
+  // `started_publishing` for it whatever the status, and the Worker passes it.
+  if (detail.started_publishing) {
     if (!options.resume) {
       return {
         kind: "refuse",
@@ -239,6 +230,17 @@ export function decideApproval(
         "It passed the gates when it started; a resume that has started publishing is not gated again.",
       ],
     };
+  }
+
+  // 3. A blocked request that has not started publishing is refused by the mechanical rules,
+  // whatever the gate says: with the flag off the reasons are empty, so this reads the status.
+  if (detail.request_status === "blocked") {
+    const hint = detail.block_reason === null ? undefined : BLOCK_REASON_HINTS[detail.block_reason];
+    const lines = [
+      reasonLine({ code: "request_blocked", detail: detail.block_reason }, id, null, false),
+    ];
+    if (hint) lines.push(hint);
+    return { kind: "refuse", why: "blocked", lines };
   }
 
   // 4. A gate that is off, or does not apply, gates nothing, and --force changes nothing there.

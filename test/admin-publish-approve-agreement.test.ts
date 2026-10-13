@@ -96,6 +96,13 @@ interface Scenario {
 /** A request on the golden path: every step but the two no-ops done. */
 const golden = (w: World, over?: Parameters<typeof seedGolden>[1]) => seedGolden(w.db, over);
 
+/** A blocked request that never started a step: the Worker refuses it outright. */
+const blockedUnstarted = (w: World, blockReason: string) => {
+  const requestId = golden(w, { requestStatus: "blocked", blockReason });
+  w.db.run("UPDATE publication_requests SET steps_completed = '[]' WHERE id = ?", [requestId]);
+  return requestId;
+};
+
 const SCENARIOS: Scenario[] = [
   // ---- a pass, and what needs no override ------------------------------------------------------
   {
@@ -249,18 +256,45 @@ const SCENARIOS: Scenario[] = [
     workerRefusal: "identifier_screen_not_clear",
   },
   {
-    name: "a blocked request, with the review on",
-    seed: (w) =>
-      seedReport(w.db, golden(w, { requestStatus: "blocked", blockReason: "ci_failed" })),
+    name: "a blocked request that never started, with the review on",
+    seed: (w) => seedReport(w.db, blockedUnstarted(w, "ci_failed")),
     options: { force: true },
     decision: "blocked",
     workerRefusal: "request_blocked",
   },
   {
-    name: "a blocked request, with the review off",
-    flag: "off",
+    name: "a blocked request that has started publishing (the owner-name walk-back), resumed",
     seed: (w) =>
-      void golden(w, { requestStatus: "blocked", blockReason: "min_requirements_failed" }),
+      seedReport(w.db, golden(w, { requestStatus: "blocked", blockReason: "owner_name_missing" })),
+    // The Worker refuses a blocked request only when no step beyond the validation ones ran, and
+    // skips every gate for one that did, as it does for an `approving` run.
+    decision: "proceed",
+    override: "none",
+  },
+  {
+    name: "a blocked request that has started publishing, without --resume",
+    seed: (w) =>
+      seedReport(w.db, golden(w, { requestStatus: "blocked", blockReason: "owner_name_missing" })),
+    options: { resume: false },
+    decision: "needs_resume",
+  },
+  {
+    name: "a blocked request with only the validation steps done, resumed",
+    seed: (w) => {
+      const requestId = blockedUnstarted(w, "ci_failed");
+      w.db.run("UPDATE publication_requests SET steps_completed = ? WHERE id = ?", [
+        JSON.stringify(["ci_check", "enrichment_check"]),
+        requestId,
+      ]);
+    },
+    options: { force: true },
+    decision: "blocked",
+    workerRefusal: "request_blocked",
+  },
+  {
+    name: "a blocked request that never started, with the review off",
+    flag: "off",
+    seed: (w) => void blockedUnstarted(w, "min_requirements_failed"),
     decision: "blocked",
     workerRefusal: "request_blocked",
   },

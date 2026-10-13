@@ -2472,12 +2472,18 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     return c.json({ error: "No active publication request found" }, 404);
   }
 
-  // A blocked request is refused by the mechanical rules (ADR 0102): whatever the flag says, and
-  // for every dataset, before anything else decides anything, as `approve-dispatch` refuses it
-  // before its screen gate. A blocked request has never started a step (the one walk back to
-  // `blocked`, the owner-name check below, comes before the first), so this strands no run, and
-  // it holds for a resume too. The depositor fixes what blocked it and requests again.
-  if (request.status === "blocked") {
+  // A blocked request that has not started publishing is refused by the mechanical rules (ADR
+  // 0102): whatever the flag says, and for every dataset, before anything else decides anything,
+  // as `approve-dispatch` refuses it before its screen gate. It holds for a resume too, and the
+  // depositor fixes what blocked it and requests again.
+  //
+  // One that HAS started publishing is not refused here. The owner-name check below walks the
+  // request back to `blocked` on every call of a run, a resume and the batches of `s3_lock`
+  // included, so a depositor who clears their name mid-run blocks a run that is half published.
+  // The owner fixes the name and the run is resumed, as it was before the review existed;
+  // refusing it for good would strand a half-published dataset until a re-request.
+  const startedSteps = hasStartedPublishing(request.steps_completed);
+  if (request.status === "blocked" && !startedSteps) {
     return c.json(requestBlockedRefusal(datasetId, request.block_reason), 409);
   }
 
@@ -2543,9 +2549,10 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // pushed since the earlier attempt stopped (a failed ci_check leaves the row
   // `approving`), so a resume, or the import pipeline's resume-flagged retry of
   // a request that never started, is gated like a fresh run. Sandbox (`xx`)
-  // datasets are exempt inside the check.
+  // datasets are exempt inside the check. A run the owner-name walk-back blocked
+  // half way is a run that started: it is continued, not gated.
   const startedPublishing =
-    resume && request.status === "approving" && hasStartedPublishing(request.steps_completed);
+    resume && (request.status === "approving" || request.status === "blocked") && startedSteps;
   if (!startedPublishing) {
     const gate = await checkApprovalScreenGate(env, {
       requestId: request.id,
@@ -2600,15 +2607,16 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // `approving` for a resume): the gates above read it a moment ago, and a result that re-blocked
   // it since (a failed submission minimum, ADR 0102) or a denial would be overwritten by an
   // unconditional write, and the run would publish over it. Nothing has run yet, so a request
-  // that changed is refused and read again.
+  // that changed is refused and read again. A request that was `blocked` when it was read got
+  // here only because it has started publishing (above), and is marked `approving` again.
   const marked = await db
     .prepare(
       // `last_error = NULL`: a new attempt begins, so the previous attempt's
       // error is history (the caller's own output has it), and the row reads as
       // running, not failed, from this moment (services/approval-dispatch.ts).
-      "UPDATE publication_requests SET status = 'approving', approved_by = ?, last_error = NULL, updated_at = datetime('now') WHERE id = ? AND status IN ('requested', 'approving')",
+      "UPDATE publication_requests SET status = 'approving', approved_by = ?, last_error = NULL, updated_at = datetime('now') WHERE id = ? AND status IN ('requested', 'approving', ?)",
     )
-    .bind(c.approver.id, request.id)
+    .bind(c.approver.id, request.id, request.status === "blocked" ? "blocked" : "approving")
     .run();
   if ((marked.meta.changes ?? 0) !== 1) {
     console.warn(
