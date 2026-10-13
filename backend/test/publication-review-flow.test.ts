@@ -38,6 +38,8 @@ import { withFakeResend } from "./helpers/resend";
 const h = createHarness();
 
 const OTHER_HEAD = "e".repeat(40);
+/** The soak fixture of ADR 0101: a reserved id the dev Worker owns. */
+const SOAK_FIXTURE = "nm099997";
 
 /** The n-th extra production-owned dataset id (never a live one, never a reserved fixture). */
 const ds = (n: number) => `nm${String(1000 + n).padStart(6, "0")}`;
@@ -627,6 +629,26 @@ describe("each Worker reviews only the datasets it owns", () => {
       dataset_id: DEV_DATASET,
       environment: "dev",
     });
+  });
+
+  test("the soak fixture nm099997 is the dev Worker's, and production never starts a review for it", async () => {
+    // Declared in DEV_OWNED_FIXTURE_IDS before it exists (ADR 0101), so the release that ships the
+    // review already stops production claiming it.
+    const dev = h.env({ ENVIRONMENT: "development" });
+    const mine = pending(SOAK_FIXTURE);
+    await h.screenResult(mine.requestId, SOAK_FIXTURE, { bindings: dev });
+    expect(h.dispatches().map((d) => d.client_payload)).toEqual([
+      expect.objectContaining({ dataset_id: SOAK_FIXTURE, environment: "dev" }),
+    ]);
+
+    const other = h.env();
+    const theirs = pending(ds(3));
+    await h.screenResult(theirs.requestId, ds(3), { bindings: other });
+    h.rearmScreen(mine.requestId);
+    await h.screenResult(mine.requestId, SOAK_FIXTURE, { bindings: other });
+    // Production started one for its own dataset, and none for the fixture.
+    expect(h.reviews().filter((r) => r.dataset_id === SOAK_FIXTURE)).toHaveLength(1);
+    expect(h.reviews().filter((r) => r.dataset_id === ds(3))).toHaveLength(1);
   });
 
   test("the dev Worker does not start for a dataset production owns", async () => {
