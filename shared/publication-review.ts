@@ -1889,7 +1889,10 @@ export function describeUnreadableReview(datasetId: string): PublicationReviewDe
 
 /**
  * Why the approval gate refused (ADR 0102, section 8), in a closed word: the `refusal` of the 409
- * `publication_review_not_clear` the approval routes answer with. In the order the gate tries them.
+ * `publication_review_not_clear` the approval routes answer with. Listed in declaration order, which
+ * is not the order the gate tries them: it tries `unverified` first (at its read of the request),
+ * then `hard_reason`, `review_changed`, `override_not_covering` and `no_review_row`, and arrives at
+ * `needs_override` only when the approver sent no override.
  *
  *  - `hard_reason`: a reason nothing clears stands, so no override changes the answer.
  *  - `needs_override`: an override-class reason stands and the approver gave none (and has none on

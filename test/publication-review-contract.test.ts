@@ -2881,7 +2881,7 @@ describe("where an approval stands (describePublicationReview's approval input)"
 });
 
 describe("the approval gate's words", () => {
-  test("the refusals, in the order the gate tries them", () => {
+  test("the refusals, in declaration order (not the order the gate tries them)", () => {
     expect([...REVIEW_GATE_REFUSALS]).toEqual([
       "hard_reason",
       "needs_override",
