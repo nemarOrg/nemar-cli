@@ -21,10 +21,10 @@
  * itself is a fixture row, not a call of the depositor's request route (which reads the repository
  * through GitHub); every later step is reached through its own route.
  *
- * The property the plan names as most likely to go wrong is a chain that passes without exercising
- * the chain: the mail asserted before the review reports, or the job's post never reaching the real
- * route. So the mail count is read at EVERY step, after the work the request deferred has finished,
- * and the chain's last assertions are made on state only the real routes could have written.
+ * The property most likely to go wrong is a chain that passes without exercising the chain: the
+ * mail asserted before the review reports, or the job's post never reaching the real route. So the
+ * mail count is read at EVERY step, after the work the request deferred has finished, and the
+ * chain's last assertions are made on state only the real routes could have written.
  */
 
 import type { Database } from "bun:sqlite";

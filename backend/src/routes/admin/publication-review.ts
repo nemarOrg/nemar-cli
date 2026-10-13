@@ -30,13 +30,10 @@ import { auditLogStatement } from "../../db/audit-log";
 import { ACTIVE_REQUEST_TAIL_SQL } from "../../services/approval-dispatch";
 import { isValidDatasetId } from "../../services/datasetId";
 import { isNonProductionEnv } from "../../services/environment";
-import {
-  type StartOutcome,
-  errClass,
-  startPublicationReview,
-} from "../../services/publication-review";
+import { type StartOutcome, startPublicationReview } from "../../services/publication-review";
+import { errorWords } from "../../services/publication-review-log";
 import { readReview } from "../../services/publication-review-rows";
-import { publicationReviewDetail, readFailureWords } from "../../services/publication-review-view";
+import { publicationReviewDetail } from "../../services/publication-review-view";
 import { isAllowedOrigin } from "../../services/web-session";
 import type { AdminRouter } from "./shared";
 
@@ -108,7 +105,7 @@ export function registerPublicationReviewRoutes(admin: AdminRouter): void {
     } catch (err) {
       // Ids and fixed words only: the error text can carry SQL.
       console.error(
-        `[admin/publication-review] could not read the review of ${datasetId} (${readFailureWords(err)})`,
+        `[admin/publication-review] could not read the review of ${datasetId} (${errorWords(err)})`,
       );
       return refuse(c, 500, "internal", "The publication review could not be read. Try again.");
     }
@@ -153,7 +150,7 @@ export function registerPublicationReviewRoutes(admin: AdminRouter): void {
       // Ids and fixed words only: the error text can carry SQL. `startPublicationReview` throws
       // only after a database fault, and has marked a row it wrote as `dispatch_failed` first.
       console.error(
-        `[admin/publication-review] could not start the review of ${datasetId} (${readFailureWords(err)})`,
+        `[admin/publication-review] could not start the review of ${datasetId} (${errorWords(err)})`,
       );
       return refuse(c, 500, "internal", "The publication review could not be started. Try again.");
     }
@@ -223,7 +220,7 @@ async function recordStart(
     }).run();
   } catch (err) {
     console.error(
-      `[admin/publication-review] ${datasetId}: review ${reviewId} started, audit row not written (${errClass(err)})`,
+      `[admin/publication-review] ${datasetId}: review ${reviewId} started, audit row not written (${errorWords(err)})`,
     );
   }
 }

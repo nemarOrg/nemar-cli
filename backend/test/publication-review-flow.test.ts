@@ -667,6 +667,22 @@ describe("when the review cannot be handed over", () => {
     expect(h.requestRow(requestId).identifier_screen_status).toBe("clean");
   });
 
+  test("the stand-in's hook runs while GitHub accepts a dispatch too, with the row already written", async () => {
+    // `duringDispatch` is documented as running while the stand-in answers a dispatch, and it
+    // used to run only for a refusal. The row is written before anything is sent, so the hook sees
+    // a `dispatched` row whatever the answer is.
+    let seen: unknown = null;
+    h.duringDispatch = async () => {
+      seen = h.reviews()[0]?.state ?? null;
+    };
+    const { requestId } = pending();
+    await h.screenResult(requestId, PROD_DATASET);
+    expect(h.dispatchStatus).toBe(204);
+    expect(seen).toBe("dispatched");
+    expect(h.dispatches()).toHaveLength(1);
+    expect(h.reviews()[0]).toMatchObject({ state: "dispatched", claimed_at: null });
+  });
+
   test("a dispatch that fails after the job already claimed it is kept, not failed", async () => {
     // GitHub may have accepted the dispatch and lost only the answer: the job can already be
     // running. Clearing its nonce would make its valid report fail, and a retry could buy a
@@ -757,7 +773,8 @@ describe("when the review cannot be handed over", () => {
       Object.assign(console, originals);
     }
     const out = lines.join("\n");
-    expect(out).toContain("dispatch failed");
+    // The error's name and a closed word for what it was (here GitHub's refusal, by status).
+    expect(out).toContain("dispatch failed (Error, http_500)");
     const sent = JSON.stringify(h.calls);
     const token = (h.dispatches()[0].client_payload.callback_token as string) ?? "";
     for (const secret of [token, GITHUB_PAT, CALLBACK_SECRET]) {

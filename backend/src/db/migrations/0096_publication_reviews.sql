@@ -45,8 +45,11 @@
 --     when a result is stored or the row is declined or errored.
 --   * `claimed_at`: when the workflow claimed the review, before it spent anything on the model.
 --     A dispatch nobody can claim (it carries no valid token) buys nothing.
---   * `attempts`: how many model calls the row has cost. A restart of an attempt that reached the
---     model adds one, so the platform's cap counts calls rather than rows (as migration 0095 does).
+--   * `attempts`: one slot per attempt, the number of model calls the row may have cost. An insert
+--     starts with one (the call it is about to make) and a restart of an attempt that reached a
+--     model adds one, so the caps count calls rather than rows (as migration 0095 does). An
+--     attempt that never reached a model gives its slot back when the caps are counted, not in the
+--     column: a declined row has attempts = 1 and costs nothing.
 --   * `override_by` / `override_at` / `override_reasons`: the administrator's recorded override
 --     and the closed reason codes it was given for (written by the approval gate of a later
 --     phase). Recorded whole or not at all, on the row it was given for, so it cannot reach
@@ -109,5 +112,6 @@ CREATE TABLE publication_reviews (
 -- The depositor's daily cap. Every lookup by request uses the UNIQUE key's own index, whose first
 -- column is `request_id`.
 CREATE INDEX idx_publication_reviews_depositor ON publication_reviews (requested_by, created_at);
--- The watchdog and the platform's daily cap.
+-- The watchdog's scan for dispatched rows past their deadline. The platform's daily cap does not
+-- use it: that count ranks a row by `id <= ?` and reads the INTEGER PRIMARY KEY.
 CREATE INDEX idx_publication_reviews_state ON publication_reviews (state, created_at);

@@ -35,13 +35,16 @@ import { notifyAdminsOfScreen } from "../src/services/identifier-screen";
 import {
   CAP_CALLS_SQL,
   PLATFORM_RANK_SQL,
+  STORE_RESULT_SQL_MARKER,
   startPublicationReview,
   storePublicationReviewResult,
   sweepPublicationReviews,
 } from "../src/services/publication-review";
+import { hashApiKey } from "../src/services/token";
 import type { Bindings } from "../src/types/bindings";
 import { interceptingD1, realD1 } from "./helpers/d1";
 import { SCREENED_HEAD } from "./helpers/identifier-screen";
+import { logged } from "./helpers/logs";
 import {
   evidenceFor,
   seedPublicationReview,
@@ -50,6 +53,7 @@ import {
 import {
   CALLBACK_SECRET,
   DEV_DATASET,
+  GITHUB_PAT,
   PROD_DATASET,
   answersWithin,
   createHarness,
@@ -72,6 +76,30 @@ function seedAdmin() {
      VALUES ('rev_admin', ?, 'x', 'approved', 'admin', 1, 1)`,
     [ADMIN_EMAIL],
   );
+}
+
+/** A bearer key for an existing account, which is how a terminal (and these tests) reach a route. */
+async function keyFor(userId: number, label: string): Promise<string> {
+  const key = `${label}-key-0123456789abcdef0123456789abcdef`;
+  h.db
+    .query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)")
+    .run(userId, await hashApiKey(key), key.slice(0, 8));
+  return key;
+}
+
+/** A new account that can use the API, with its bearer key. */
+async function keyedUser(
+  username: string,
+  role: "admin" | "member",
+): Promise<{ id: number; key: string }> {
+  h.db.run(
+    `INSERT INTO users (username, email, password_hash, status, role, email_verified,
+                        service_access, sandbox_completed)
+     VALUES (?, ?, 'x', 'approved', ?, 1, 1, 1)`,
+    [username, `${username}@example.org`, role],
+  );
+  const row = h.db.query("SELECT id FROM users WHERE username = ?").get(username) as { id: number };
+  return { id: row.id, key: await keyFor(row.id, username) };
 }
 
 /** A native request with a clear screen at SCREENED_HEAD and one review of it, dispatched. */
@@ -960,7 +988,7 @@ describe("a failed submission minimum re-blocks the request", () => {
     let writes = 0;
     const faulty = hookedD1(realD1(h.db), {
       statement: (sql) => {
-        if (sql.includes("SET state = ?, verdict = ?") && ++writes === 2) {
+        if (sql.includes(STORE_RESULT_SQL_MARKER) && ++writes === 2) {
           throw new Error("D1_ERROR: transient");
         }
       },
@@ -971,6 +999,8 @@ describe("a failed submission minimum re-blocks the request", () => {
       token,
       h.env({ DB: faulty }),
     );
+    // The fault was the second write of the result: a hook that never fired would also leave a 200.
+    expect(writes).toBe(2);
     expect(res.status).toBe(500);
     expect(state(reviewId)).toMatchObject({ state: "dispatched", report: null });
     expect(h.nonceOf(reviewId)).toBe(nonce);
@@ -1001,7 +1031,7 @@ describe("a failed submission minimum re-blocks the request", () => {
     expect(batches[0].some((q) => q.includes("SET identifier_screen_emailed_at = NULL"))).toBe(
       true,
     );
-    expect(batches[0].filter((q) => q.includes("SET state = ?, verdict = ?"))).toHaveLength(2);
+    expect(batches[0].filter((q) => q.includes(STORE_RESULT_SQL_MARKER))).toHaveLength(2);
     // Nothing that changes a review or a request ran outside it (the mail lease is the mail's own).
     expect(alone.filter((q) => !q.includes("identifier_screen_mail_claimed_at"))).toEqual([]);
   });
@@ -1071,6 +1101,116 @@ describe("a failed submission minimum re-blocks the request", () => {
       await h.result(reviewId, { outcome: "reported", report: failing() });
       expect(sendsTo(calls, depositor.email)).toHaveLength(0);
     });
+  });
+});
+
+describe("a web approval's claim does not outlive the block it meets", () => {
+  /** The website's Approve click, as the route sees it. */
+  const click = (key: string, datasetId = PROD_DATASET) =>
+    h.app.request(
+      `/admin/publish/${datasetId}/approve-dispatch`,
+      { method: "POST", headers: { Authorization: `Bearer ${key}`, "X-CLI-Version": "99.0.0" } },
+      h.env(),
+    );
+
+  const claimOf = (requestId: number) => {
+    const { approval_requested_by, approval_dispatched_at } = h.requestRow(requestId);
+    return { approval_requested_by, approval_dispatched_at };
+  };
+
+  // Storing a result tries the administrators' mail: the capture keeps it off the network.
+
+  test("an administrator's click, then a failed minimum: the request is blocked and holds no claim", async () => {
+    // The click claims `approval_requested_by` and `approval_dispatched_at` while the request is
+    // still `requested`, and the report that arrives afterwards moves it to `blocked`. The
+    // orchestrator's own walk-back to `blocked` clears both, for the reason given there.
+    const admin = await keyedUser("rev_clicker", "admin");
+    const { requestId, reviewId } = dispatched();
+    expect((await click(admin.key)).status).toBe(202);
+    expect(claimOf(requestId)).toEqual({
+      approval_requested_by: admin.id,
+      approval_dispatched_at: expect.any(String),
+    });
+
+    const token = await h.tokenFor(reviewId);
+    await withFakeResend(async () => {
+      expect((await h.claim(reviewId, token)).status).toBe(200);
+      await h.result(reviewId, { outcome: "reported", report: failing() }, token);
+    });
+
+    expect(h.requestRow(requestId)).toMatchObject({
+      status: "blocked",
+      block_reason: "min_requirements_failed",
+    });
+    expect(claimOf(requestId)).toEqual({
+      approval_requested_by: null,
+      approval_dispatched_at: null,
+    });
+  });
+
+  test("a depositor who fixes it and asks again inside the lease can be approved at once", async () => {
+    // With the claim left on the blocked row, the re-request made it `requested` again with a
+    // live lease: the next click was refused as "already running" and a terminal approval was
+    // attributed to the administrator who had clicked before the block.
+    const clicker = await keyedUser("rev_clicker", "admin");
+    const next = await keyedUser("rev_next_admin", "admin");
+    const { requestId, reviewId, datasetId } = dispatched();
+    const depositorId = h.requestRow(requestId).requested_by as number;
+    h.db.run("UPDATE users SET sandbox_completed = 1 WHERE id = ?", [depositorId]);
+    const depositorKey = await keyFor(depositorId, "rev_depositor");
+
+    await withFakeResend(async () => {
+      expect((await click(clicker.key)).status).toBe(202);
+      const token = await h.tokenFor(reviewId);
+      await h.claim(reviewId, token);
+      await h.result(reviewId, { outcome: "reported", report: failing() }, token);
+      expect(h.requestRow(requestId).status).toBe("blocked");
+
+      // The depositor asks again, through the real route.
+      const again = await h.app.request(
+        `/datasets/${datasetId}/publish/request`,
+        { method: "POST", headers: { Authorization: `Bearer ${depositorKey}` } },
+        h.env(),
+      );
+      expect(again.status).toBe(200);
+      expect(h.requestRow(requestId)).toMatchObject({ status: "requested", block_reason: null });
+      expect(claimOf(requestId)).toEqual({
+        approval_requested_by: null,
+        approval_dispatched_at: null,
+      });
+
+      // The re-request reset the screen, as it does; once the screen has read the commit again,
+      // nothing is in flight and the next administrator's click is the run, in their name.
+      h.rearmScreen(requestId);
+      expect((await h.screenResult(requestId, datasetId)).status).toBe(200);
+    });
+    const list = await h.app.request(
+      "/admin/publish/requests?status=requested",
+      { headers: { Authorization: `Bearer ${next.key}`, "X-CLI-Version": "99.0.0" } },
+      h.env(),
+    );
+    const rows = ((await list.json()) as { requests: Record<string, unknown>[] }).requests;
+    expect(rows.find((r) => r.dataset_id === datasetId)?.approval_in_flight).toBe(false);
+    expect((await click(next.key)).status).toBe(202);
+    expect(claimOf(requestId).approval_requested_by).toBe(next.id);
+  });
+
+  test("a request the report does not block keeps the claim of a run that is going", async () => {
+    // Only the re-block releases it: a met minimum leaves the request, and the run, alone.
+    const admin = await keyedUser("rev_clicker", "admin");
+    const { requestId, reviewId } = dispatched();
+    expect((await click(admin.key)).status).toBe(202);
+    const token = await h.tokenFor(reviewId);
+    await withFakeResend(async () => {
+      await h.claim(reviewId, token);
+      await h.result(
+        reviewId,
+        { outcome: "reported", report: reportFor(SCREENED_HEAD, false) },
+        token,
+      );
+    });
+    expect(h.requestRow(requestId).status).toBe("requested");
+    expect(claimOf(requestId).approval_requested_by).toBe(admin.id);
   });
 });
 
@@ -1320,12 +1460,17 @@ describe("a result that arrives as the watchdog fires", () => {
     // `unreported`, so the write for `dispatched` must come first: written the other way round, a
     // flip between the two leaves BOTH matching nothing, the route says "duplicate", the job does
     // not retry a 200, and the spent model call is lost.
+    //
+    // The two writes are one batch, which D1 runs as a transaction, so no writer can land between
+    // them there: this pins an ordering that matters only if the batch is ever undone. The race
+    // has to happen for the pin to mean anything, which is what the two assertions on `writes`
+    // and on the stored row below insist on.
     const { reviewId } = dispatched({ minutesAgo: 45, claimed: true });
     const token = await h.tokenFor(reviewId);
     let writes = 0;
     const racing = hookedD1(realD1(h.db), {
       statement: (sql) => {
-        if (sql.includes("SET state = ?, verdict = ?")) {
+        if (sql.includes(STORE_RESULT_SQL_MARKER)) {
           writes++;
           if (writes === 2) h.db.run(FLIP, [reviewId]);
         }
@@ -1337,6 +1482,8 @@ describe("a result that arrives as the watchdog fires", () => {
       token,
       h.env({ DB: racing }),
     );
+    // Both writes were attempted, and the flip landed between them.
+    expect(writes).toBe(2);
     // Stored, and answered as stored: not the harmless "duplicate" of a lost race.
     expect(res).toEqual({ status: 200, body: { ok: true, dataset_id: PROD_DATASET } });
     expect(state(reviewId)).toMatchObject({ state: "reported", verdict: "pass", nonce: null });
@@ -1803,6 +1950,46 @@ describe("an administrator's start", () => {
     expect(h.dispatches()).toHaveLength(1);
   });
 
+  test("the log says which of the two is missing, and the credential's error by its words", async () => {
+    // One word for the row (`dispatch_unconfigured`) is not enough for the person who has to fix
+    // the Worker: the secret and the credential are set in different places.
+    const cases: Array<[Partial<Bindings>, string[], string[]]> = [
+      [
+        { PRESCREEN_CALLBACK_SECRET: undefined },
+        ["dispatch_unconfigured (callback_secret unset)"],
+        ["github_credential"],
+      ],
+      [
+        { GITHUB_ADMIN_PAT: undefined },
+        ["dispatch_unconfigured (github_credential unusable: Error, other)"],
+        ["callback_secret", "No GitHub auth configured"],
+      ],
+      [
+        { PRESCREEN_CALLBACK_SECRET: undefined, GITHUB_ADMIN_PAT: undefined },
+        ["dispatch_unconfigured (callback_secret unset, github_credential unusable: Error, other)"],
+        ["No GitHub auth configured"],
+      ],
+    ];
+    for (const [i, [missing, expected, absent]] of cases.entries()) {
+      const dataset = ds(3000 + i);
+      const { requestId } = seedScreenedRequest(h.db, { datasetId: dataset });
+      const lines = await logged(async () => {
+        const out = await startPublicationReview(h.env(missing), {
+          requestId,
+          datasetId: dataset,
+          ...admin,
+        });
+        expect(out).toMatchObject({ started: false, reason: "dispatch_unconfigured" });
+      });
+      const log = lines.join("\n");
+      for (const words of expected) expect(log, words).toContain(words);
+      for (const words of absent) expect(log, words).not.toContain(words);
+      expect(log).toContain(`${dataset} request ${requestId}`);
+      expect(log).not.toContain(CALLBACK_SECRET);
+      expect(log).not.toContain(GITHUB_PAT);
+    }
+  });
+
   const unconfigured: [string, Partial<Bindings>][] = [
     ["the callback secret", { PRESCREEN_CALLBACK_SECRET: undefined }],
     ["the GitHub credential", { GITHUB_ADMIN_PAT: undefined }],
@@ -1981,7 +2168,7 @@ describe("no secret reaches the Worker's logs", () => {
     const nonces = [h.nonceOf(claimed.reviewId), h.nonceOf(unclaimed.reviewId)];
     const faulty = hookedD1(realD1(h.db), {
       statement: (sql) => {
-        if (sql.includes("SET state = ?, verdict = ?")) {
+        if (sql.includes(STORE_RESULT_SQL_MARKER)) {
           throw new Error("D1_ERROR: SECRET-DRIVER-MESSAGE with HOSTILE-SUMMARY-TEXT");
         }
       },
@@ -2016,6 +2203,80 @@ describe("no secret reaches the Worker's logs", () => {
     ]) {
       expect(out).not.toContain(secret as string);
     }
+  });
+
+  describe("a database fault in the door", () => {
+    // The route answers a fixed sentence and logs the error's words, never the error: left
+    // alone, the global handler prints the whole error object, whose text can carry SQL.
+    const FAULT = "D1_ERROR: SECRET-DRIVER-MESSAGE near publication_reviews";
+    const touchesReviews = (sql: string) => /publication_reviews/.test(sql);
+
+    test("the nonce read: a fixed 500 on the claim and on the result, and nothing printed but words", async () => {
+      const { reviewId } = dispatched({ claimed: false });
+      const token = await h.tokenFor(reviewId);
+      const nonce = h.nonceOf(reviewId) as string;
+      const faulty = h.env({
+        DB: hookedD1(realD1(h.db), {
+          statement: (sql) => {
+            if (touchesReviews(sql)) throw new Error(FAULT);
+          },
+        }),
+      });
+      const seen: Array<{ status: number; body: Record<string, unknown> }> = [];
+      const out = await captured(async () => {
+        seen.push(await h.claim(reviewId, token, faulty));
+        seen.push(
+          await h.result(
+            reviewId,
+            { outcome: "reported", report: reportFor(SCREENED_HEAD, false) },
+            token,
+            faulty,
+          ),
+        );
+      });
+      for (const res of seen) {
+        expect(res.status).toBe(500);
+        expect(JSON.stringify(res.body)).not.toContain("SECRET");
+      }
+      expect(seen[0].body).toEqual({ error: "The callback could not be checked; try again" });
+      expect(seen[1].body).toEqual(seen[0].body);
+      expect(out).toContain(`review ${reviewId} (${PROD_DATASET})`);
+      expect(out).toContain("Error, other");
+      for (const secret of [FAULT, "SECRET-DRIVER-MESSAGE", token, nonce, CALLBACK_SECRET]) {
+        expect(out).not.toContain(secret);
+      }
+      // Nothing was written, and the token is still good once the database is.
+      expect(state(reviewId)).toMatchObject({ state: "dispatched", claimed_at: null });
+      expect((await h.claim(reviewId, token)).status).toBe(200);
+    });
+
+    test("the claim: a fixed 500 and a log of words, and the job's retry still takes it", async () => {
+      const { reviewId } = dispatched({ claimed: false });
+      const token = await h.tokenFor(reviewId);
+      const nonce = h.nonceOf(reviewId) as string;
+      // The first statement on the table is the door's nonce read; the claim's own come after.
+      let reads = 0;
+      const faulty = h.env({
+        DB: hookedD1(realD1(h.db), {
+          statement: (sql) => {
+            if (touchesReviews(sql) && ++reads > 1) throw new Error(FAULT);
+          },
+        }),
+      });
+      let res: { status: number; body: Record<string, unknown> } | undefined;
+      const out = await captured(async () => {
+        res = await h.claim(reviewId, token, faulty);
+      });
+      expect(reads).toBeGreaterThan(1);
+      expect(res?.status).toBe(500);
+      expect(res?.body).toEqual({ error: "The claim could not be taken; try again" });
+      expect(out).toContain(`review ${reviewId} (${PROD_DATASET}): claim failed (Error, other)`);
+      for (const secret of [FAULT, "SECRET-DRIVER-MESSAGE", token, nonce, CALLBACK_SECRET]) {
+        expect(out).not.toContain(secret);
+      }
+      expect(state(reviewId).claimed_at).toBeNull();
+      expect((await h.claim(reviewId, token)).status).toBe(200);
+    });
   });
 
   test("a hostile report's text is not logged when it is stored either", async () => {

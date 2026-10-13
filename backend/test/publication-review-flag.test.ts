@@ -13,7 +13,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { reviewEnabled } from "../src/services/publication-review";
+import { reviewEnabled } from "../src/services/publication-review-view";
 
 type VarsBlock = Record<string, unknown>;
 

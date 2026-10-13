@@ -1,10 +1,12 @@
 // The publication review's write path, driven through the real routes (ADR 0102).
 //
 // What a review test needs and none of it replaces a rule: a real bun:sqlite database with every
-// migration (`freshDb`, behind `realD1`), the real Hono `/webhooks` router, real WebCrypto tokens,
-// and a `Bun.serve()` stand-in for api.github.com (`NEMAR_GITHUB_API_URL`) that records each
-// dispatch. The stand-in is the only fake, and it sits at the GitHub boundary. Resend is the shared
-// real-boundary capture (`helpers/resend.ts`) in the tests that read mail.
+// migration (`freshDb`, behind `realD1`), the real Hono `/webhooks`, `/admin` and `/datasets`
+// routers behind their real auth middleware, real WebCrypto tokens, and a `Bun.serve()` stand-in
+// for api.github.com (`NEMAR_GITHUB_API_URL`) that records each call and answers the few reads the
+// admin approval and the publication request make. The stand-in is the only fake, and it sits at
+// the GitHub boundary. Resend is the shared real-boundary capture (`helpers/resend.ts`) in the
+// tests that read mail.
 //
 // `createHarness()` registers its hooks where it is called, so call it once at the top of a test
 // file. The database and the app are rebuilt before every test.
@@ -13,12 +15,14 @@ import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach } from "bun:test";
 import type { Server } from "bun";
 import { Hono } from "hono";
+import { adminRoutes } from "../../src/routes/admin";
+import { datasetRoutes } from "../../src/routes/datasets";
 import webhooks from "../../src/routes/webhooks";
 import { signIdentifierScreenCallbackToken } from "../../src/services/github";
 import { signPublicationReviewCallbackToken } from "../../src/services/github/callback-tokens";
 import type { Bindings, Variables } from "../../src/types/bindings";
 import { freshDb, realD1 } from "./d1";
-import { SCREENED_HEAD } from "./identifier-screen";
+import { SCREENED_HEAD, mainRefAnswer } from "./identifier-screen";
 import { evidenceFor, goodPublicationReport, screenReportBodyFor } from "./publication-review";
 
 export const CALLBACK_SECRET = "publication-review-callback-secret";
@@ -47,7 +51,10 @@ export interface Harness {
   calls: Recorded[];
   /** What the stand-in answers a dispatch with. Reset to 204 after every test. */
   dispatchStatus: number;
-  /** Runs inside the stand-in while it answers a dispatch, before it answers. */
+  /**
+   * Runs inside the stand-in while it answers a dispatch (whatever it answers it with), before it
+   * answers.
+   */
   duringDispatch: (() => Promise<void>) | null;
   /** Merged over the default bindings; reset after every test. */
   envOverrides: Partial<Bindings>;
@@ -87,6 +94,44 @@ export interface Harness {
     bindings?: Bindings,
     datasetId?: string,
   ): Promise<{ status: number; body: Record<string, unknown> }>;
+}
+
+const b64 = (text: string) => btoa(text);
+
+/**
+ * The reads the stand-in answers: the screened commit as the repository's `main` (the approval's
+ * head check), and a repository that is ready to be requested (its validation workflow present and
+ * passing, a dataset description and a README that meet the submission minimums). Anything else
+ * is not found, so a route that reads more than these says so.
+ */
+function readsAnswer(req: Request, path: string): Response | null {
+  const ref = mainRefAnswer(req);
+  if (ref) return ref;
+  if (req.method !== "GET") return null;
+  if (/\/contents\/\.github\/workflows\/bids-validation\.yml$/.test(path)) {
+    return Response.json({ name: "bids-validation.yml" });
+  }
+  if (/\/actions\/workflows\/bids-validation\.yml\/runs$/.test(path)) {
+    return Response.json({
+      workflow_runs: [{ status: "completed", conclusion: "success", html_url: "x" }],
+    });
+  }
+  if (/\/contents\/dataset_description\.json$/.test(path)) {
+    return Response.json({
+      encoding: "base64",
+      content: b64(
+        JSON.stringify({
+          Name: "A sufficiently descriptive dataset title",
+          Authors: ["Ada Lovelace"],
+          EthicsApprovals: ["Approved by an institutional review board"],
+        }),
+      ),
+    });
+  }
+  if (/\/contents\/README\.md$/.test(path)) {
+    return Response.json({ encoding: "base64", content: b64("# README") });
+  }
+  return null;
 }
 
 /** A route's answer as an object: its JSON, or `{ raw }` for a body that is not JSON (a bare 500). */
@@ -245,10 +290,10 @@ export function createHarness(): Harness {
         const body = req.method === "GET" ? null : ((await req.json().catch(() => null)) as never);
         h.calls.push({ method: req.method, path: url.pathname, body });
         if (req.method === "POST" && url.pathname === "/repos/nemarDatasets/.github/dispatches") {
-          if (h.dispatchStatus >= 300 && h.duringDispatch) await h.duringDispatch();
+          if (h.duringDispatch) await h.duringDispatch();
           return new Response(h.dispatchStatus < 300 ? null : "{}", { status: h.dispatchStatus });
         }
-        return new Response("not found", { status: 404 });
+        return readsAnswer(req, url.pathname) ?? new Response("not found", { status: 404 });
       },
     });
     (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL =
@@ -271,6 +316,8 @@ export function createHarness(): Harness {
   beforeEach(() => {
     db = freshDb();
     app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+    app.route("/admin", adminRoutes);
+    app.route("/datasets", datasetRoutes);
     app.route("/webhooks", webhooks);
   });
 

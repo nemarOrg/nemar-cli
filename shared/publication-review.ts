@@ -460,7 +460,7 @@ export class PublicationReviewReportError extends Error {
 // Parsing: a closed vocabulary, enforced at the door
 // ---------------------------------------------------------------------------------------------
 
-const HEAD = /^[0-9a-f]{40}$/;
+export const HEAD = /^[0-9a-f]{40}$/;
 /** A count: a non-negative safe integer no larger than this. */
 const MAX_COUNT = 10_000_000;
 /** A sampling rate is a positive number below this, in hertz. */

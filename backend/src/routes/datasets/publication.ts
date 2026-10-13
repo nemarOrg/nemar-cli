@@ -43,8 +43,12 @@ import {
   screenView,
   startScreenAndNotify,
 } from "../../services/identifier-screen";
-import { reviewEnabled } from "../../services/publication-review";
-import { publicationReviewEmailSection } from "../../services/publication-review-view";
+import { ownedHere } from "../../services/pr-review-queue";
+import {
+  publicationReviewApplies,
+  publicationReviewEmailSection,
+  reviewEnabled,
+} from "../../services/publication-review-view";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../services/repo-spec";
 import { markDatasetPrivate, markDatasetPublic } from "../../services/s3";
 import { checkSubmissionGate } from "../../services/submission-gate";
@@ -552,16 +556,22 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     //
     // ADR 0102 retires this advisory check in favour of the publication review, and the two
     // must not both read the README: with the review on (exactly the word `1`) the pre-screen
-    // is not dispatched, so the deploy that turns the review on is the one that stops it,
-    // with no gap and no overlap. Only the dispatch is conditioned. The pre-screen's callback
-    // route, its columns and PRESCREEN_CALLBACK_SECRET (which also signs the identifier
-    // screen's, the sweep's and the pull-request review's tokens) all stay.
+    // is not dispatched for a request the review will run for, so the deploy that turns the
+    // review on is the one that stops it, with no gap and no overlap. "Will run for" is what
+    // the start of a review asks (`startPublicationReview`): the flag, a dataset the review
+    // applies to (not an OpenNeuro mirror or an exemplar) and one this Worker owns. A request
+    // outside that gets no review, so it keeps the pre-screen exactly as before. Only the
+    // dispatch is conditioned. The pre-screen's callback route, its columns and
+    // PRESCREEN_CALLBACK_SECRET (which also signs the identifier screen's, the sweep's and the
+    // pull-request review's tokens) all stay.
+    const reviewWillRun =
+      reviewEnabled(c.env) && publicationReviewApplies(dataset) && ownedHere(c.env, datasetId);
     if (
       prId !== null &&
       repoName &&
       pat &&
       c.env.PRESCREEN_ENABLED === "true" &&
-      !reviewEnabled(c.env) &&
+      !reviewWillRun &&
       c.env.PRESCREEN_CALLBACK_SECRET
     ) {
       try {

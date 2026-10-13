@@ -59,6 +59,7 @@ import { approvalDispatchEnvironment, triggerPublicationReviewRun } from "./gith
 import { readStoredReport, readStoredState } from "./identifier-screen-stored.js";
 import { notifyAdminsOfScreen } from "./identifier-screen.js";
 import { ownedHere } from "./pr-review-queue.js";
+import { SHA40, errorWords } from "./publication-review-log.js";
 import {
   type PublicationReviewRow,
   REVIEWABLE_SCREEN_STATES_SQL,
@@ -82,8 +83,6 @@ const SWEEP_LIMIT = 20;
 /** How long the dispatch may wait for GitHub before the start answers. */
 const DISPATCH_TIMEOUT_MS = 10_000;
 
-const SHA40 = /^[0-9a-f]{40}$/;
-
 // ---------------------------------------------------------------------------------------------
 // The flag, applicability, words
 // ---------------------------------------------------------------------------------------------
@@ -91,8 +90,8 @@ const SHA40 = /^[0-9a-f]{40}$/;
 // The flag (exactly the word `1`, so the kill switch is one reviewed character) and the scope
 // (OpenNeuro mirrors and exemplars passed an upstream review, so there is no row, no gate and no
 // change to ADR 0089's importer) are declared once, in the view module: the admin mail imports
-// that module, and this one imports the mail, so a declaration here would be a cycle.
-export { publicationReviewApplies, reviewEnabled };
+// that module, and this one imports the mail, so a declaration here would be a cycle. Every
+// caller imports them from there.
 
 /** A closed word of lowercase letters and underscores, safe to splice into SQL. */
 function sqlWord(w: string): string {
@@ -100,24 +99,12 @@ function sqlWord(w: string): string {
   return `'${w}'`;
 }
 
-/**
- * What an error is called in a log line: a class or a status, never its message, which may carry
- * text from a service that echoed something it was sent.
- */
-export function errClass(err: unknown): string {
-  if (!(err instanceof Error)) return "unknown";
-  if (err.name === "TimeoutError" || err.name === "AbortError") return "timeout";
-  const status = /^Publication review dispatch rejected: HTTP (\d{3})$/.exec(err.message);
-  if (status) return `http_${status[1]}`;
-  return /^[A-Za-z]{1,40}$/.test(err.name) ? err.name : "error";
-}
-
 /** Try the request's admin mail. It never throws, and a failure here must not fail a store. */
 async function tryMail(env: Bindings, requestId: number): Promise<"sent" | "other"> {
   try {
     return (await notifyAdminsOfScreen(env, requestId)) === "sent" ? "sent" : "other";
   } catch (err) {
-    console.error(`[publication-review] request ${requestId}: mail failed (${errClass(err)})`);
+    console.error(`[publication-review] request ${requestId}: mail failed (${errorWords(err)})`);
     return "other";
   }
 }
@@ -344,7 +331,7 @@ export async function startPublicationReviewForScreen(
     return out;
   } catch (err) {
     console.error(
-      `[publication-review] request ${args.requestId} (${args.datasetId}): start failed (${errClass(err)})`,
+      `[publication-review] request ${args.requestId} (${args.datasetId}): start failed (${errorWords(err)})`,
     );
     return answer("dispatch_failed");
   }
@@ -357,9 +344,9 @@ export interface StartOptions {
 
 /**
  * The one start path: a screen result's (through {@link startPublicationReviewForScreen}) and an
- * administrator's (`adminUserId` set, WP6's route). Every refusal returns its reason and writes
- * nothing. A database error after the row is written marks the row `dispatch_failed` and
- * throws.
+ * administrator's (`adminUserId` set, from `routes/admin/publication-review.ts`). Every refusal
+ * returns its reason and writes nothing. A database error after the row is written marks the row
+ * `dispatch_failed` and throws.
  */
 export async function startPublicationReview(
   env: Bindings,
@@ -400,7 +387,7 @@ export async function startPublicationReview(
   const anonymous = request.anonymous === 1;
 
   const secret = env.PRESCREEN_CALLBACK_SECRET;
-  const configured = Boolean(secret) && hasGithubCredential(env);
+  const missing = missingConfiguration(env);
 
   // A row may be moved by another writer between the read and the write (a second screen result,
   // an administrator, the watchdog, a report). Each lost race is re-read and planned again.
@@ -409,8 +396,17 @@ export async function startPublicationReview(
     const plan = planFor(existing, admin);
     if (plan.kind === "refuse") return answer(plan.reason, existing?.id ?? null);
 
-    if (!configured || !secret) {
-      return await recordUnconfigured(env, request, head, anonymous, plan, args.adminUserId, mail);
+    if (missing.length > 0 || !secret) {
+      return await recordUnconfigured(
+        env,
+        request,
+        head,
+        anonymous,
+        plan,
+        args.adminUserId,
+        mail,
+        missing,
+      );
     }
 
     const nonce = crypto.randomUUID();
@@ -492,14 +488,21 @@ export async function startPublicationReview(
   return answer(admin ? reasonForRow(latest) : "duplicate", latest?.id ?? null);
 }
 
-/** Whether a credential for the `nemarDatasets` org is configured at all. */
-function hasGithubCredential(env: Bindings): boolean {
+/**
+ * What the Worker lacks to hand a review over, as fixed words for a log line: the callback secret
+ * (`callback_secret unset`) and a credential for the `nemarDatasets` org (`github_credential
+ * unusable`, with the words of the error that said so, never its message). Empty when it can.
+ * Both are looked at, so a Worker missing both is told so once.
+ */
+function missingConfiguration(env: Bindings): string[] {
+  const missing: string[] = [];
+  if (!env.PRESCREEN_CALLBACK_SECRET) missing.push("callback_secret unset");
   try {
     getDatasetsAuth(env);
-    return true;
-  } catch {
-    return false;
+  } catch (err) {
+    missing.push(`github_credential unusable: ${errorWords(err)}`);
   }
+  return missing;
 }
 
 /**
@@ -516,6 +519,7 @@ async function recordUnconfigured(
   plan: Plan,
   adminUserId: number | undefined,
   mail: boolean,
+  missing: string[],
 ): Promise<StartOutcome> {
   const db = env.DB;
   let reviewId: number | null = null;
@@ -561,7 +565,7 @@ async function recordUnconfigured(
     }
   }
   console.warn(
-    `[publication-review] ${request.dataset_id} request ${request.id}: dispatch_unconfigured`,
+    `[publication-review] ${request.dataset_id} request ${request.id}: dispatch_unconfigured (${missing.join(", ")})`,
   );
   if (mail) await tryMail(env, request.id);
   return answer("dispatch_unconfigured", reviewId);
@@ -586,7 +590,7 @@ async function markDispatchFailed(db: Db, reviewId: number, nonce: string): Prom
       .run();
   } catch (inner) {
     console.error(
-      `[publication-review] review ${reviewId}: failure not recorded (${errClass(inner)})`,
+      `[publication-review] review ${reviewId}: failure not recorded (${errorWords(inner)})`,
     );
   }
 }
@@ -641,7 +645,7 @@ async function handOver(env: Bindings, h: HandOver): Promise<StartOutcome> {
     );
   } catch (err) {
     console.error(
-      `[publication-review] review ${h.reviewId} (${h.request.dataset_id}): dispatch failed (${errClass(err)})`,
+      `[publication-review] review ${h.reviewId} (${h.request.dataset_id}): dispatch failed (${errorWords(err)})`,
     );
     try {
       // Fenced by the nonce and by `claimed_at IS NULL`: GitHub may have accepted the dispatch
@@ -667,7 +671,7 @@ async function handOver(env: Bindings, h: HandOver): Promise<StartOutcome> {
       }
     } catch (inner) {
       console.error(
-        `[publication-review] review ${h.reviewId}: failure not recorded (${errClass(inner)})`,
+        `[publication-review] review ${h.reviewId}: failure not recorded (${errorWords(inner)})`,
       );
     }
     return answer("dispatch_failed", h.reviewId);
@@ -680,25 +684,25 @@ async function handOver(env: Bindings, h: HandOver): Promise<StartOutcome> {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * The nonce of a review still waiting for its report, and the state it waits in. Replays and
- * strangers find nothing: a stored result has no nonce, a declined or errored row has none, and
- * a re-start replaced it. The one place a nonce is read; every other read of a review selects
- * `ROW_COLUMNS`, which leaves it out.
+ * The nonce of a review still waiting for its report (`dispatched`, or `unreported` after the
+ * watchdog gave up). Replays and strangers find nothing: a stored result has no nonce, a declined
+ * or errored row has none, and a re-start replaced it. The one place a nonce is read; every other
+ * read of a review selects `ROW_COLUMNS`, which leaves it out.
  */
 export async function pendingPublicationReviewNonce(
   db: Db,
   reviewId: number,
   datasetId: string,
-): Promise<{ nonce: string; state: "dispatched" | "unreported" } | null> {
+): Promise<{ nonce: string } | null> {
   const row = await db
     .prepare(
-      `SELECT nonce, state FROM publication_reviews
+      `SELECT nonce FROM publication_reviews
         WHERE id = ? AND dataset_id = ? AND state IN ('dispatched', 'unreported')
           AND nonce IS NOT NULL LIMIT 1`,
     )
     .bind(reviewId, datasetId)
-    .first<{ nonce: string; state: "dispatched" | "unreported" }>();
-  return row ? { nonce: row.nonce, state: row.state } : null;
+    .first<{ nonce: string }>();
+  return row ? { nonce: row.nonce } : null;
 }
 
 export type PublicationClaimResult =
@@ -728,13 +732,13 @@ const REQUEST_IS_CURRENT = `(SELECT 1 FROM publication_requests AS pr
  * The claim: one conditional write, so a dispatch buys one model call. It takes the review only
  * while its nonce is the live one, it was never claimed, and the request still stands as above.
  */
-export const CLAIM_SQL = `UPDATE publication_reviews SET claimed_at = datetime('now')
+const CLAIM_SQL = `UPDATE publication_reviews SET claimed_at = datetime('now')
   WHERE id = ? AND dataset_id = ? AND nonce = ? AND claimed_at IS NULL
     AND state IN ('dispatched', 'unreported')
     AND EXISTS ${REQUEST_IS_CURRENT}`;
 
 /** The refusal of a claim: the same row predicate, with the request no longer current. */
-export const CLAIM_STALE_SQL = `UPDATE publication_reviews
+const CLAIM_STALE_SQL = `UPDATE publication_reviews
     SET state = 'errored', detail = 'stale_head', nonce = NULL, decided_at = datetime('now')
   WHERE id = ? AND dataset_id = ? AND nonce = ? AND claimed_at IS NULL
     AND state IN ('dispatched', 'unreported')
@@ -835,12 +839,20 @@ function whileWaiting(
  * kind, same screened commit), so a result for a superseded commit changes nothing. The screen's
  * columns are facts about that commit and stay; the depositor's re-request resets them.
  *
+ * The web approval's claim (`approval_requested_by`, `approval_dispatched_at`, ADR 0080) is
+ * cleared in the same statement, as the orchestrator's own walk-back to `blocked` does: a click
+ * takes it while the request is still `requested`, this run of the request is over, and a claim
+ * left on the blocked row would read as live for the rest of its lease once the depositor
+ * requests again, so the next click is refused as running and a terminal approval is attributed
+ * to the administrator who clicked before the block.
+ *
  * Fires only while the claimed review it came from is still waiting under its nonce (the last
  * three binds), so a replay, a stranger's nonce or a report nobody claimed re-blocks nothing.
  */
-export const REBLOCK_SQL = `UPDATE publication_requests
+const REBLOCK_SQL = `UPDATE publication_requests
     SET status = 'blocked', block_reason = 'min_requirements_failed',
-        min_requirements_reasons = ?, updated_at = datetime('now')
+        min_requirements_reasons = ?, approval_requested_by = NULL, approval_dispatched_at = NULL,
+        updated_at = datetime('now')
   WHERE id = ? AND status = 'requested' AND anonymous = ?
     AND ${screenedHeadSql("publication_requests")} = ?
     AND ${whileWaiting(["dispatched", "unreported"], true)}`;
@@ -851,7 +863,7 @@ export const REBLOCK_SQL = `UPDATE publication_requests
  * `unreported` (the last three binds), so a replay does not re-arm a mail that was since sent.
  * `needsClaim` is whether the result being stored is a report, which needs a claim.
  */
-export function rearmMailSql(needsClaim: boolean): string {
+function rearmMailSql(needsClaim: boolean): string {
   return `UPDATE publication_requests
     SET identifier_screen_emailed_at = NULL, identifier_screen_mail_claimed_at = NULL
   WHERE id = ? AND status IN ('requested', 'blocked') AND anonymous = ?
@@ -868,7 +880,7 @@ export function rearmMailSql(needsClaim: boolean): string {
  * guarded like the others, so it fires only when the write of the result takes effect. The binds are
  * those of {@link rearmMailSql} followed by the review's id.
  */
-export function rearmOverdueMailSql(needsClaim: boolean): string {
+function rearmOverdueMailSql(needsClaim: boolean): string {
   return `UPDATE publication_requests
     SET identifier_screen_emailed_at = NULL, identifier_screen_mail_claimed_at = NULL
   WHERE id = ? AND status IN ('requested', 'blocked') AND anonymous = ?
@@ -879,10 +891,18 @@ export function rearmOverdueMailSql(needsClaim: boolean): string {
                    AND r.created_at < datetime('now', '-${PUBLICATION_REVIEW_DEADLINE_MINUTES} minutes'))`;
 }
 
+/**
+ * How the write of a result starts after its `UPDATE`: the first assignments of its `SET`. It is
+ * spliced into the statement ({@link storeSql}), so a test that picks the write out of a batch by
+ * it (to fault it or to land another writer beside it) matches whatever the statement is
+ * reformatted to, and the one place the words are typed is here.
+ */
+export const STORE_RESULT_SQL_MARKER = "SET state = ?, verdict = ?";
+
 /** The write of a result, keyed on the nonce and on the state the row waits in. */
 function storeSql(from: "unreported" | "dispatched", needsClaim: boolean): string {
   return `UPDATE publication_reviews
-      SET state = ?, verdict = ?, detail = ?, report = ?, nonce = NULL,
+      ${STORE_RESULT_SQL_MARKER}, detail = ?, report = ?, nonce = NULL,
           decided_at = datetime('now')
     WHERE ${waitingRow([from], needsClaim)}`;
 }
@@ -1060,7 +1080,7 @@ export async function sweepPublicationReviews(
     ).results;
   } catch (err) {
     result.errors++;
-    console.error(`[publication-review-sweep] overdue query failed (${errClass(err)})`);
+    console.error(`[publication-review-sweep] overdue query failed (${errorWords(err)})`);
     return result;
   }
   for (const { id, request_id } of rows) {
@@ -1078,7 +1098,7 @@ export async function sweepPublicationReviews(
       if ((await tryMail(env, request_id)) === "sent") result.mailed++;
     } catch (err) {
       result.errors++;
-      console.error(`[publication-review-sweep] review ${id} failed (${errClass(err)})`);
+      console.error(`[publication-review-sweep] review ${id} failed (${errorWords(err)})`);
     }
   }
   return result;
