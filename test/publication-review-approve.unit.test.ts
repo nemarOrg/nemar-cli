@@ -186,7 +186,7 @@ describe("1. a review that could not be read is the Worker's to judge", () => {
 
   test("the Worker's own refusal of the read (a bad id, no key, not an administrator) changes nothing for a caller that does not stop on it", () => {
     // `approve` stops on `refused`; `next` does not read it, and decides as it did.
-    const refused = new ApiError("Admin access required", 403);
+    const refused = new ApiError(403, "Admin access required");
     const d = proceeds(
       decideApproval(ID, { kind: "unreadable", why: "HTTP 403", refused }, NO_FLAGS),
     );
