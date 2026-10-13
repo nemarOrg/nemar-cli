@@ -567,15 +567,22 @@ async function corpusCommand(argv: readonly string[]): Promise<number> {
     }
   }
   const remoteBase = values.get("remote-base");
+  let ids: string[];
+  try {
+    ids = readIds(idsFile);
+  } catch {
+    return usage("the ids file could not be read");
+  }
   let result: BuildCorpusResult;
   try {
     result = await buildCorpus({
-      ids: readIds(idsFile),
+      ids,
       outDir,
       remoteBase: typeof remoteBase === "string" ? remoteBase : GITHUB_DATASETS,
     });
   } catch (e) {
-    return usage(e instanceof CorpusError ? e.code : "the ids file could not be read");
+    if (e instanceof CorpusError) return usage(e.code);
+    throw e;
   }
   console.log(`corpus: ${result.built} built, ${result.skipped} skipped`);
   for (const skip of result.skips) console.log(`skipped ${skip.id}: ${skip.reason}`);

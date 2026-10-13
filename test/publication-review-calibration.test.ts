@@ -1818,6 +1818,23 @@ describe('main(["calibrate", ...]) never posts, and refuses everything that woul
     expect(received).toHaveLength(0);
   });
 
+  test("calibrate corpus with an ids file it cannot read is refused with a word", async () => {
+    const outDir = join(root, "corpus-main-noids");
+    const { code, log } = await runMain([
+      "calibrate",
+      "corpus",
+      "--ids-file",
+      join(root, "no-such-ids.txt"),
+      "--out",
+      outDir,
+      "--remote-base",
+      REMOTE_BASE,
+    ]);
+    expect(code).toBe(2);
+    expect(log).toContain("the ids file could not be read");
+    expect(existsSync(outDir)).toBe(false);
+  });
+
   test("calibrate corpus refuses an id that is not a repository id and a remote that is not public https", async () => {
     const ids = join(root, "ids-bad.txt");
     writeFileSync(ids, "nm000001\n../etc\n");
