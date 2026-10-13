@@ -16,12 +16,14 @@
  * The principle: normalize first, then examine the normalized thing, then send EXACTLY the string
  * that was examined. Four rules fix what that means:
  *
- *  1. Every string is normalized before any rule looks at it (`normalizeText`): the invisible
- *     variation selectors and any half of a surrogate pair are removed, and control and format
- *     characters are replaced by spaces (`tidy`). A document with a NUL byte is not text and is
- *     withheld as not UTF-8. For a JSON document the same normalization is applied to every key
- *     and every string value of the parsed structure, so the rules see the key the model will read
- *     (`patient<zero-width space>name` is `patient name` to it).
+ *  1. Every string is normalized before any rule looks at it (`normalizeText`): code points that
+ *     render as nothing (variation selectors, the Hangul fillers, the combining grapheme joiner and
+ *     the other default-ignorable ones) and any half of a surrogate pair are removed, Unicode
+ *     compatibility normalization (NFKC) makes a fullwidth solidus a slash and a fullwidth letter
+ *     its letter, and control and format characters are replaced by spaces (`tidy`). A document with
+ *     a NUL byte is not text and is withheld as not UTF-8. For a JSON document the same
+ *     normalization is applied to every key and every string value of the parsed structure, so the
+ *     rules see the key the model will read (`patient<zero-width space>name` is `patient name` to it).
  *  2. The string is then built in full and cut: the prose text, or the serialized normalized
  *     structure (the shown keys of `dataset_description.json`; the column descriptions of
  *     `participants.json`, which are only `LongName`, `Description` and `Units`, each cut short),
@@ -168,25 +170,49 @@ function normalizeStructure(value: unknown): unknown {
 }
 
 /**
- * Marks that render as nothing and survive the control-character cleaning: the variation selectors
- * (U+FE00 to U+FE0F, U+E0100 to U+E01EF) and the Mongolian free variation selectors (U+180B to
- * U+180D, U+180F), which together are the Unicode property `Variation_Selector`. Text spelled in
- * them is invisible to a person reading the file and still in the prompt, and one inside a path
- * hides it from the rule.
+ * Code points that render as nothing, or as a blank letter, and that the control-character cleaning
+ * does not touch: the Unicode property `Default_Ignorable_Code_Point` less the format characters
+ * (`Cf`), which `tidy` turns into spaces. That is the combining grapheme joiner (U+034F), the
+ * Hangul fillers (U+115F, U+1160, U+3164, U+FFA0), the Khmer inherent vowels (U+17B4, U+17B5), the
+ * variation selectors (U+FE00 to U+FE0F, U+E0100 to U+E01EF) and Mongolian free variation
+ * selectors (U+180B to U+180D, U+180F), and the unassigned default-ignorable code points. They are
+ * REMOVED, not spaced: a reader sees no gap where one stands, so a path or a key split by one is,
+ * to the reader and to the model, the whole path or key, and the rules must see it whole.
+ *
+ * Not in the set, on purpose: the zero-width joiner and non-joiner and the other format characters
+ * stay as `tidy` leaves them (a space), so nothing here changes how text in the scripts that use
+ * them is read; and the braille blank is handled apart, see {@link BRAILLE_BLANK}.
  */
-const INVISIBLE_SELECTORS = /\p{Variation_Selector}/gu;
+const INVISIBLE = /(?!\p{Cf})\p{Default_Ignorable_Code_Point}/gu;
+/**
+ * U+2800, the braille pattern with no dots. It is not invisible: it has the width of a cell and is
+ * the word space of braille text, so a reader sees a gap. It becomes a space, which keeps braille
+ * words apart and gives a path no way past the rule that an ordinary space does not.
+ */
+const BRAILLE_BLANK = /\u2800/g;
 /** In unicode mode this matches only a surrogate that is not half of a pair. */
 const LONE_SURROGATE = /\p{Cs}/gu;
 
 /**
- * The one normalization every string goes through before any rule looks at it: the invisible
- * selectors and any half of a surrogate pair removed, then control characters replaced (`tidy`).
- * The rules run over the result and the result is what is sent, so nothing the model can read is
- * something the rules could not.
+ * The one normalization every string goes through before any rule looks at it, and the string the
+ * model is sent: invisible code points and any half of a surrogate pair removed, the braille blank
+ * made a space, Unicode compatibility normalization (NFKC: a fullwidth solidus is `/`, a fullwidth
+ * letter its ASCII letter, a ligature its letters, a superscript its digit, an accent and its
+ * letter one character), and control and format characters replaced by spaces (`tidy`).
+ *
+ * The order is what makes the result a fixed point (normalizing it again changes nothing, which a
+ * test sweeps): the removals come BEFORE the compatibility normalization, so characters that were
+ * only apart because a mark stood between them compose, and the two code points that normalize INTO
+ * the removed set (U+3164 and U+FFA0, both to U+1160) are removed before they can. Exported so that
+ * test can reach it; nothing else imports it.
  */
-function normalizeText(text: string): string {
+export function normalizeText(text: string): string {
   return tidy(
-    text.replace(INVISIBLE_SELECTORS, "").replace(LONE_SURROGATE, ""),
+    text
+      .replace(INVISIBLE, "")
+      .replace(LONE_SURROGATE, "")
+      .replace(BRAILLE_BLANK, " ")
+      .normalize("NFKC"),
     Number.MAX_SAFE_INTEGER,
   );
 }
