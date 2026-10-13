@@ -28,7 +28,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { parse } from "yaml";
 import { CALLBACK_ORIGINS, main } from "../scripts/ci/publication-review";
 import {
@@ -955,9 +955,12 @@ describe("the shell steps, run for real", () => {
   // The fetch, the validation runs, and the script's arguments: the chain the job really runs
   // -------------------------------------------------------------------------------------------
 
-  /** A dataset repository as GitHub would serve it: `main`, with an annotated tag and a later commit. */
-  function servedDataset() {
-    const dir = mkdtempSync(join(tmpdir(), "publication-review-remote-"));
+  /**
+   * An empty repository standing in for a dataset's remote: `main`, with the filter capability the
+   * hosting service has. `put` writes a file (creating its directories), `run` is the real git.
+   */
+  function servedRepo(prefix: string) {
+    const dir = mkdtempSync(join(tmpdir(), prefix));
     const env = {
       PATH: process.env.PATH ?? "",
       HOME: dir,
@@ -971,8 +974,12 @@ describe("the shell steps, run for real", () => {
     run("init", "-q", "-b", "main");
     run("config", "uploadpack.allowFilter", "true");
     run("config", "uploadpack.allowAnySHA1InWant", "true");
-    writeFileSync(
-      join(dir, "dataset_description.json"),
+    const put = (rel: string, text: string) => {
+      mkdirSync(dirname(join(dir, rel)), { recursive: true });
+      writeFileSync(join(dir, rel), text);
+    };
+    put(
+      "dataset_description.json",
       JSON.stringify({
         Name: "Resting EEG of healthy volunteers, eyes open and closed",
         BIDSVersion: "1.9.0",
@@ -982,18 +989,23 @@ describe("the shell steps, run for real", () => {
         EthicsApprovals: ["IRB 2024-0001, University X"],
       }),
     );
-    writeFileSync(join(dir, "README.md"), "# Resting EEG\nTwelve volunteers at rest.\n");
-    mkdirSync(join(dir, "sub-01", "eeg"), { recursive: true });
-    writeFileSync(join(dir, "sub-01", "eeg", "sub-01_task-rest_eeg.edf"), "recording");
-    writeFileSync(
-      join(dir, "sub-01", "eeg", "sub-01_task-rest_eeg.json"),
+    return { dir, run, put };
+  }
+
+  /** A dataset repository as GitHub would serve it: `main`, with an annotated tag and a later commit. */
+  function servedDataset() {
+    const { dir, run, put } = servedRepo("publication-review-remote-");
+    put("README.md", "# Resting EEG\nTwelve volunteers at rest.\n");
+    put("sub-01/eeg/sub-01_task-rest_eeg.edf", "recording");
+    put(
+      "sub-01/eeg/sub-01_task-rest_eeg.json",
       JSON.stringify({ SamplingFrequency: 250, EEGChannelCount: 8 }),
     );
     run("add", ".");
     run("commit", "-q", "-m", "first");
     const first = run("rev-parse", "HEAD");
     run("tag", "-a", "v1.0.0", "-m", "release one");
-    writeFileSync(join(dir, "CHANGES"), "1.0.1 later\n");
+    put("CHANGES", "1.0.1 later\n");
     run("add", ".");
     run("commit", "-q", "-m", "main moved on");
     return { dir, first, mainTip: run("rev-parse", "HEAD") };
@@ -1171,35 +1183,7 @@ describe("the shell steps, run for real", () => {
 
   /** A dataset with many data sidecars, some in places the review never reads. */
   function servedBigDataset(count: number) {
-    const dir = mkdtempSync(join(tmpdir(), "publication-review-big-remote-"));
-    const env = {
-      PATH: process.env.PATH ?? "",
-      HOME: dir,
-      GIT_AUTHOR_NAME: "t",
-      GIT_AUTHOR_EMAIL: "t@example.com",
-      GIT_COMMITTER_NAME: "t",
-      GIT_COMMITTER_EMAIL: "t@example.com",
-    };
-    const run = (...args: string[]) =>
-      execFileSync("git", args, { cwd: dir, encoding: "utf8", env }).trim();
-    run("init", "-q", "-b", "main");
-    run("config", "uploadpack.allowFilter", "true");
-    run("config", "uploadpack.allowAnySHA1InWant", "true");
-    const put = (rel: string, text: string) => {
-      mkdirSync(join(dir, rel, ".."), { recursive: true });
-      writeFileSync(join(dir, rel), text);
-    };
-    put(
-      "dataset_description.json",
-      JSON.stringify({
-        Name: "Resting EEG of healthy volunteers, eyes open and closed",
-        BIDSVersion: "1.9.0",
-        Version: "1.0.0",
-        License: "CC0",
-        Authors: ["Ada Lovelace"],
-        EthicsApprovals: ["IRB 2024-0001, University X"],
-      }),
-    );
+    const { dir, run, put } = servedRepo("publication-review-big-remote-");
     put("README.md", "# Resting EEG\nVolunteers at rest.\n");
     put("CHANGES", "1.0.0 first\n");
     put("LICENSE", "CC0\n");
