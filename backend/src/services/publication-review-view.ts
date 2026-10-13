@@ -125,6 +125,13 @@ export function publicationReviewApplies(dataset: {
 const LIVE_FACT_STATUSES: ReadonlySet<string> = new Set(["requested", "blocked"]);
 
 /**
+ * The statuses of a request an approval could still act on, the same set as
+ * `ACTIVE_REQUEST_TAIL_SQL`: a request in any other status is over, and with no review on record
+ * there is nothing to assess about it.
+ */
+const ACTIVE_STATUSES: ReadonlySet<string> = new Set(["requested", "approving", "blocked"]);
+
+/**
  * `isScreenExempt` of `identifier-screen.ts`, stated again because that module imports this one.
  * A test keeps the two equal.
  */
@@ -182,7 +189,11 @@ export interface DerivedPublicationReview {
   rowView: ReviewRowView;
   live: LiveFacts;
   reasons: Reason[];
-  /** The stricter of the stored verdict and the re-derived one; null only when the review does not apply. */
+  /**
+   * The stricter of the stored verdict and the re-derived one. Null when the request is not
+   * assessed: the review does not apply to it, or no review is on record and none gates it (the
+   * review is off, or the request is over).
+   */
   outcome: PublicationOutcome | null;
   description: PublicationReviewDescription;
 }
@@ -312,6 +323,36 @@ export async function derivePublicationReview(
     };
   }
 
+  // Not assessed: no review is on record AND nothing of the review gates this request (the review
+  // is off, or the request is over). Such a request has no outcome and no reason, as a mirror has
+  // none, so a client that renders `outcome` cannot contradict the headline ("not reviewed"). An
+  // open request with the review on and no row IS assessed: the missing review is its reason.
+  const closed = !ACTIVE_STATUSES.has(request.status);
+  if (row === null && (!enabled || closed)) {
+    return {
+      applies,
+      enabled,
+      gate: enabled ? "enforced" : "off",
+      row: null,
+      rowView,
+      live,
+      reasons: [],
+      outcome: null,
+      description: describePublicationReview({
+        datasetId: request.dataset_id,
+        applies,
+        enabled,
+        outcome: null,
+        reasons: [],
+        row: rowView,
+        model: null,
+        head: null,
+        version: null,
+        closed,
+      }),
+    };
+  }
+
   const reasons = reasonsOf({ live, row: rowView });
   // The stricter of the stored verdict and the outcome of the reasons just derived. `reasonsOf`
   // already says why a stored verdict is stricter than its report, so the two agree in practice;
@@ -337,6 +378,7 @@ export async function derivePublicationReview(
       model: report?.model ?? null,
       head: row?.headSha ?? head,
       version,
+      closed,
     }),
   };
 }

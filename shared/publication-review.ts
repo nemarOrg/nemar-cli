@@ -1487,8 +1487,9 @@ function nextCommand(id: string, reasons: readonly Reason[], row: ReviewRowView)
  * the three cannot disagree about what a review means. Every rendering ends with
  * {@link NOT_ASSESSED_LINE}.
  *
- * Not applicable (a mirror or an exemplar) and the flag being off are not reasons; they are their
- * own renderings. With the flag off a stored review is still shown, as advice that gates nothing.
+ * Not applicable (a mirror or an exemplar), the flag being off and a closed request with no review
+ * are not reasons; they are their own renderings, and a caller gives them no outcome. With the
+ * flag off a stored review is still shown, as advice that gates nothing.
  * The outcome shown is never milder than the reasons: a caller's `outcome` is combined with
  * {@link verdictOf} of the reasons by {@link stricterOf}, and a missing one is `action_required`.
  */
@@ -1502,6 +1503,11 @@ export function describePublicationReview(input: {
   model: string | null;
   head: string | null;
   version: string | null;
+  /**
+   * The request is over (published or denied), so no review is waiting for or gating it. With no
+   * review on record it reads as not reviewed, never as "action required". Default false.
+   */
+  closed?: boolean;
 }): PublicationReviewDescription {
   const { applies, enabled, reasons, row } = input;
   const id = DATASET_ID.test(input.datasetId) ? input.datasetId : "<dataset>";
@@ -1522,6 +1528,18 @@ export function describePublicationReview(input: {
       tone: "note",
       lines: [
         "The automated review is off, so this request was not reviewed and no review gates its approval.",
+        NOT_ASSESSED_LINE,
+      ],
+      next: null,
+    };
+  }
+
+  if (input.closed === true && row.kind === "none") {
+    return {
+      headline: "Publication review: not reviewed (the request is closed)",
+      tone: "note",
+      lines: [
+        "This request is no longer waiting for a decision, and no review of it is on record.",
         NOT_ASSESSED_LINE,
       ],
       next: null,

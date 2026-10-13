@@ -195,11 +195,51 @@ describe("GET /admin/publish/requests: the review of each request", () => {
     expect(off.enabled).toBe(false);
     expect(off.gate).toBe("off");
     expect(off.headline).toBe("Publication review: not reviewed (the automated review is off)");
-    expect(off.outcome).not.toBe("pass");
+    // Not assessed: no outcome and no reason, as for a mirror, so a client that renders `outcome`
+    // cannot contradict the headline.
+    expect(off.outcome).toBeNull();
+    expect(off.reasons).toEqual([]);
     // Exactly "1" turns it on: nothing else does.
     for (const flag of ["0", "true", "yes", " 1", "1 "]) {
       expect((await review(datasetId, env({ PUBLICATION_REVIEW_ENABLED: flag }))).kind).toBe("off");
     }
+  });
+
+  test("a request that is over and has no review on record is not assessed: no outcome, no reason", async () => {
+    // A published or denied request that predates the review has nothing to be "action required"
+    // about, and the headline says "not reviewed", so the outcome must not say otherwise.
+    for (const requestStatus of ["published", "denied"] as const) {
+      const { datasetId } = request({ requestStatus });
+      expect(await review(datasetId)).toEqual({
+        kind: "not_reviewed",
+        enabled: true,
+        gate: "enforced",
+        outcome: null,
+        headline: "Publication review: not reviewed (the request is closed)",
+        tone: "note",
+        reasons: [],
+        review_id: null,
+        head_sha: null,
+      });
+    }
+    // The same request, still open, IS assessed: the missing review is its reason.
+    const open = request();
+    expect(await review(open.datasetId)).toMatchObject({
+      outcome: "action_required",
+      reasons: ["review_not_started"],
+    });
+  });
+
+  test("with the review off the detail of a request with no review has no outcome and no reason either", async () => {
+    const { datasetId } = request();
+    const d = await detail(datasetId, env({ PUBLICATION_REVIEW_ENABLED: undefined }));
+    expect(d).toMatchObject({
+      enabled: false,
+      gate: "off",
+      outcome: null,
+      reasons: [],
+      review: null,
+    });
   });
 
   test("a stored review is still shown with the review off, as advice that gates nothing", async () => {
@@ -728,7 +768,10 @@ describe("GET /admin/publish/requests: the review of each request", () => {
     for (const row of rows) {
       const r = row.publication_review;
       for (const code of r.reasons) expect(REASON_CODES).toContain(code);
-      if (r.outcome !== "pass" && r.kind !== "not_applicable") {
+      if (r.outcome === null) {
+        // Not assessed (a mirror, or no review on record that gates anything): nothing to explain.
+        expect(r.reasons).toEqual([]);
+      } else if (r.outcome !== "pass") {
         expect(r.reasons.length).toBeGreaterThan(0);
       }
     }

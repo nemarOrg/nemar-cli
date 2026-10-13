@@ -1563,6 +1563,40 @@ describe("describePublicationReview", () => {
     );
   });
 
+  test("a closed request with no review on record reads as not reviewed, with no command; a review on record is still shown", () => {
+    const closed = (over: Record<string, unknown>) =>
+      describePublicationReview({
+        ...base,
+        applies: true,
+        enabled: true,
+        outcome: null,
+        reasons: [],
+        row: { kind: "none" },
+        closed: true,
+        ...over,
+      });
+    const d = closed({});
+    expect(d).toEqual({
+      headline: "Publication review: not reviewed (the request is closed)",
+      tone: "note",
+      lines: [
+        "This request is no longer waiting for a decision, and no review of it is on record.",
+        NOT_ASSESSED_LINE,
+      ],
+      next: null,
+    });
+    // Off wins over closed: the flag is the more basic fact. A review on record is shown as
+    // history whatever the request's status, and an open request is assessed.
+    expect(closed({ enabled: false }).headline).toContain("the automated review is off");
+    expect(
+      closed({ row: { kind: "reported", report: PARSED_REPORTS[0].report, stored: "pass" } })
+        .headline,
+    ).not.toContain("not reviewed");
+    expect(closed({ closed: false, reasons: [R("review_not_started")] }).headline).toBe(
+      "Publication review: action required",
+    );
+  });
+
   test("a hostile summary or note reaches the lines as plain words, or not at all", () => {
     const d = describePublicationReview({
       ...base,
