@@ -35,6 +35,7 @@ import { notifyAdminsOfScreen } from "../src/services/identifier-screen";
 import {
   CAP_CALLS_SQL,
   PLATFORM_RANK_SQL,
+  STORE_RESULT_SQL_MARKER,
   startPublicationReview,
   storePublicationReviewResult,
   sweepPublicationReviews,
@@ -985,7 +986,7 @@ describe("a failed submission minimum re-blocks the request", () => {
     let writes = 0;
     const faulty = hookedD1(realD1(h.db), {
       statement: (sql) => {
-        if (sql.includes("SET state = ?, verdict = ?") && ++writes === 2) {
+        if (sql.includes(STORE_RESULT_SQL_MARKER) && ++writes === 2) {
           throw new Error("D1_ERROR: transient");
         }
       },
@@ -996,6 +997,8 @@ describe("a failed submission minimum re-blocks the request", () => {
       token,
       h.env({ DB: faulty }),
     );
+    // The fault was the second write of the result: a hook that never fired would also leave a 200.
+    expect(writes).toBe(2);
     expect(res.status).toBe(500);
     expect(state(reviewId)).toMatchObject({ state: "dispatched", report: null });
     expect(h.nonceOf(reviewId)).toBe(nonce);
@@ -1026,7 +1029,7 @@ describe("a failed submission minimum re-blocks the request", () => {
     expect(batches[0].some((q) => q.includes("SET identifier_screen_emailed_at = NULL"))).toBe(
       true,
     );
-    expect(batches[0].filter((q) => q.includes("SET state = ?, verdict = ?"))).toHaveLength(2);
+    expect(batches[0].filter((q) => q.includes(STORE_RESULT_SQL_MARKER))).toHaveLength(2);
     // Nothing that changes a review or a request ran outside it (the mail lease is the mail's own).
     expect(alone.filter((q) => !q.includes("identifier_screen_mail_claimed_at"))).toEqual([]);
   });
@@ -1455,12 +1458,17 @@ describe("a result that arrives as the watchdog fires", () => {
     // `unreported`, so the write for `dispatched` must come first: written the other way round, a
     // flip between the two leaves BOTH matching nothing, the route says "duplicate", the job does
     // not retry a 200, and the spent model call is lost.
+    //
+    // The two writes are one batch, which D1 runs as a transaction, so no writer can land between
+    // them there: this pins an ordering that matters only if the batch is ever undone. The race
+    // has to happen for the pin to mean anything, which is what the two assertions on `writes`
+    // and on the stored row below insist on.
     const { reviewId } = dispatched({ minutesAgo: 45, claimed: true });
     const token = await h.tokenFor(reviewId);
     let writes = 0;
     const racing = hookedD1(realD1(h.db), {
       statement: (sql) => {
-        if (sql.includes("SET state = ?, verdict = ?")) {
+        if (sql.includes(STORE_RESULT_SQL_MARKER)) {
           writes++;
           if (writes === 2) h.db.run(FLIP, [reviewId]);
         }
@@ -1472,6 +1480,8 @@ describe("a result that arrives as the watchdog fires", () => {
       token,
       h.env({ DB: racing }),
     );
+    // Both writes were attempted, and the flip landed between them.
+    expect(writes).toBe(2);
     // Stored, and answered as stored: not the harmless "duplicate" of a lost race.
     expect(res).toEqual({ status: 200, body: { ok: true, dataset_id: PROD_DATASET } });
     expect(state(reviewId)).toMatchObject({ state: "reported", verdict: "pass", nonce: null });
@@ -2116,7 +2126,7 @@ describe("no secret reaches the Worker's logs", () => {
     const nonces = [h.nonceOf(claimed.reviewId), h.nonceOf(unclaimed.reviewId)];
     const faulty = hookedD1(realD1(h.db), {
       statement: (sql) => {
-        if (sql.includes("SET state = ?, verdict = ?")) {
+        if (sql.includes(STORE_RESULT_SQL_MARKER)) {
           throw new Error("D1_ERROR: SECRET-DRIVER-MESSAGE with HOSTILE-SUMMARY-TEXT");
         }
       },

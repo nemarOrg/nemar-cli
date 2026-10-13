@@ -887,10 +887,18 @@ export function rearmOverdueMailSql(needsClaim: boolean): string {
                    AND r.created_at < datetime('now', '-${PUBLICATION_REVIEW_DEADLINE_MINUTES} minutes'))`;
 }
 
+/**
+ * How the write of a result starts after its `UPDATE`: the first assignments of its `SET`. It is
+ * spliced into the statement ({@link storeSql}), so a test that picks the write out of a batch by
+ * it (to fault it or to land another writer beside it) matches whatever the statement is
+ * reformatted to, and the one place the words are typed is here.
+ */
+export const STORE_RESULT_SQL_MARKER = "SET state = ?, verdict = ?";
+
 /** The write of a result, keyed on the nonce and on the state the row waits in. */
 function storeSql(from: "unreported" | "dispatched", needsClaim: boolean): string {
   return `UPDATE publication_reviews
-      SET state = ?, verdict = ?, detail = ?, report = ?, nonce = NULL,
+      ${STORE_RESULT_SQL_MARKER}, detail = ?, report = ?, nonce = NULL,
           decided_at = datetime('now')
     WHERE ${waitingRow([from], needsClaim)}`;
 }
