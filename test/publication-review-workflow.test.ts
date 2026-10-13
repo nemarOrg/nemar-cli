@@ -604,6 +604,21 @@ describe("nothing from the dataset runs", () => {
     expect(fetch).toContain('echo "fetched=$(git rev-parse refs/remotes/origin/main)"');
   });
 
+  test("the fetch step reads GH_TOKEN once, into the header, and unsets it before any other command", () => {
+    const fetch = step(FETCH).run ?? "";
+    const header = fetch.indexOf("auth=");
+    const unset = fetch.indexOf("unset GH_TOKEN");
+    expect(header).toBeGreaterThan(-1);
+    expect(unset).toBeGreaterThan(header);
+    // The header is encoded without the token in the encoder's environment, and every command that
+    // follows (git init, config, remote, ls-tree, perl) comes after the unset.
+    expect(fetch.slice(header, unset)).toContain("env -u GH_TOKEN base64");
+    expect(fetch.indexOf("git init")).toBeGreaterThan(unset);
+    expect(fetch.indexOf("perl ")).toBeGreaterThan(unset);
+    // Nothing in the step puts it back.
+    expect(fetch.indexOf("GH_TOKEN", unset + "unset GH_TOKEN".length)).toBe(-1);
+  });
+
   test("the fetch credential is masked before it is written anywhere", () => {
     const fetch = step(FETCH).run ?? "";
     const mask = fetch.indexOf('echo "::add-mask::$auth"');
@@ -1074,26 +1089,43 @@ describe("the shell steps, run for real", () => {
   });
 
   /**
-   * A `git` on the PATH that records, for each call, its arguments and the `GIT_CONFIG_*`
-   * environment it was started with, and then runs the real git. The credential travels as
-   * `GIT_CONFIG_*` variables of one command, so this is what shows which commands were given it.
+   * `git`, `perl`, `sort` and `base64` on the PATH that record, for each call, the command, whether
+   * `GH_TOKEN` was in its environment, and (for git, whose arguments are one line) its arguments and
+   * the `GIT_CONFIG_*` environment it was started with; each then runs the real command. The
+   * credential travels as `GIT_CONFIG_*` variables of one git command, so this is what shows which
+   * commands were given it and which of the step's commands could have read the environment variable.
    */
-  function gitSpy() {
-    const dir = mkdtempSync(join(tmpdir(), "publication-review-gitspy-"));
-    const real = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+  function commandSpy() {
+    const dir = mkdtempSync(join(tmpdir(), "publication-review-spy-"));
     const log = join(dir, "calls.txt");
-    writeFileSync(
-      join(dir, "git"),
-      `#!/usr/bin/env bash\n{ printf '%s\\t' "$*"; env | grep '^GIT_CONFIG_' | sort | tr '\\n' ' '; printf '\\n'; } >> "${log}"\nexec "${real}" "$@"\n`,
-    );
-    chmodSync(join(dir, "git"), 0o755);
+    const where = (name: string) =>
+      execFileSync("sh", ["-c", `command -v ${name}`], { encoding: "utf8" }).trim();
+    // The recorder sorts too, and must not call its own spy.
+    const realSort = where("sort");
+    for (const name of ["git", "perl", "sort", "base64"]) {
+      const real = where(name);
+      const args = name === "git" ? '"$*"' : '""';
+      writeFileSync(
+        join(dir, name),
+        [
+          "#!/usr/bin/env bash",
+          // One write of one line: the commands of a pipeline start together, and a record built
+          // by several writes would be torn by its neighbour's.
+          `line="$({ printf '%s\\t%s\\t' "${name}" ${args}; env | grep '^GIT_CONFIG_' | ${realSort} | tr '\\n' ' '; printf '\\t'; if [ -n "\${GH_TOKEN+x}" ]; then printf 'GH_TOKEN'; fi; })"`,
+          `printf '%s\\n' "$line" >> "${log}"`,
+          `exec "${real}" "$@"`,
+          "",
+        ].join("\n"),
+      );
+      chmodSync(join(dir, name), 0o755);
+    }
     const calls = () =>
       readFileSync(log, "utf8")
         .trim()
         .split("\n")
         .map((l) => {
-          const [args, env] = l.split("\t") as [string, string];
-          return { args, env };
+          const [tool, args, env, token] = l.split("\t") as [string, string, string, string];
+          return { tool, args, env, hasToken: token === "GH_TOKEN" };
         });
     return { dir, calls };
   }
@@ -1102,14 +1134,15 @@ describe("the shell steps, run for real", () => {
 
   test("fetch: the credential is given to the three git commands that need it, through their own environment, and to no other", async () => {
     const remote = servedDataset();
-    const spy = gitSpy();
+    const spy = commandSpy();
     const r = await runStepScript(
       FETCH,
       fetchEnv(remote, { PATH: `${spy.dir}:${process.env.PATH ?? ""}` }),
     );
     expect(r.status, r.stderr).toBe(0);
     const calls = spy.calls();
-    const withCredential = calls.filter((c) => c.env.includes(`AUTHORIZATION: basic ${AUTH}`));
+    const gitCalls = calls.filter((c) => c.tool === "git");
+    const withCredential = gitCalls.filter((c) => c.env.includes(`AUTHORIZATION: basic ${AUTH}`));
     // The tree fetch, the tag listing and the one fetch of the blobs the review reads.
     expect(
       withCredential.map((c) => c.args.split(" ").find((a) => ["fetch", "ls-remote"].includes(a))),
@@ -1121,12 +1154,18 @@ describe("the shell steps, run for real", () => {
       expect(c.env).toContain("GIT_CONFIG_KEY_0=url.file://");
     }
     // Every other call (init, config, remote, rev-parse, ls-tree) had none of it.
-    for (const c of calls.filter((x) => !withCredential.includes(x))) {
+    for (const c of gitCalls.filter((x) => !withCredential.includes(x))) {
       expect(c.env, c.args).not.toMatch(/extraheader|AUTHORIZATION/);
       expect(c.args, c.args).not.toMatch(/extraheader|AUTHORIZATION|ghs_/);
     }
     // And never on a command line, where any process can read it.
     for (const c of calls) expect(c.args).not.toMatch(/AUTHORIZATION|ghs_|x-access-token/);
+
+    // `GH_TOKEN` is the step's own input, read once to make the header: after that no command the
+    // step starts has it in its environment, the credentialed git commands included (they get the
+    // header, not the token), and neither do the commands that select the blobs or encode the header.
+    expect(new Set(calls.map((c) => c.tool))).toEqual(new Set(["git", "perl", "sort", "base64"]));
+    expect(calls.filter((c) => c.hasToken)).toEqual([]);
   });
 
   test("fetch: nothing of the credential is written anywhere in the repository, or left in what the step wrote", async () => {
