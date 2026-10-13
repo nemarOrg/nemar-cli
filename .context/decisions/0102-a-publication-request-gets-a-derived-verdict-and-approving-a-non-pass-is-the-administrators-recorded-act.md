@@ -262,9 +262,11 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   and use the STRICTER of the two, so either can lower a verdict and neither can raise it (ADR 0093's rule).
   A stored report that no longer parses, or whose echoed commit or release kind differs from its row's,
   reads as `review_could_not_run` (`report_invalid`), and as `stored_verdict_fail` as well when the column says `fail`.
-  Live facts (a release row, a tag, the concept DOI, an earlier anonymous release) are read only for a request that is `requested` or `blocked`,
+  Live facts (a release row, a tag, the concept DOI, an earlier anonymous release) are read only for a request that is `requested`,
+  for one that is `blocked` before it started publishing,
   and for an `approving` run that stopped before it published (only the validation-only steps completed), which the gate checks again when it resumes and which has written neither a version row nor a DOI:
-  a run that has started publishing has written its own version row and DOI, and a request that is over shows its stored review only.
+  a run that has started publishing has written its own version row and DOI, whether it is `approving` or has been walked back to `blocked` by the owner-name check (judgment call 5),
+  and a request that is over shows its stored review only.
   A request that is not assessed (the review is off and no row exists, the request is over and has no row, a mirror or an exemplar)
   has no outcome and no reasons on any surface.
   A review that cannot be read says so and is never a pass: with the review on, a list row reads `unreadable` (action required, no reasons, one fixed headline)
@@ -430,9 +432,10 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
 
 `nemar admin publish` takes the shape of `nemar admin pr-reviews` (ADR 0093).
 
-- **`list`** keeps its filters and shows the review's outcome, or its state, beside the screen's headline;
-  `--needs-me` keeps the requests an administrator can act on.
-  A request with no review of its current commit reads `not reviewed`, which is not an error.
+- **`list`** keeps its filters and shows the review's headline and its reason codes on a line of their own under the screen's;
+  `--needs-me` keeps the requests an administrator can act on (the ones the list marks `*`), and `--json` prints the response and nothing else on standard output.
+  A request that is not assessed has no review line in `list`, and `show` says why (`not reviewed` or `not applicable`).
+  With the review on, a request whose current commit has no review reads `action required` with the reason `review_not_started`, which is not an error: `start` is its cure.
 - **`show <dataset>`** prints the screen through `describeScreen`, then the review:
   the outcome, every reason with what clears it, the findings, the summary, the evidence counts,
   what the model was shown and what was withheld, the standing line, the model, the commit, the version, and the next command.
@@ -449,14 +452,16 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   Every other non-pass needs `--force`.
   `--yes` skips the question, never the reason and never the force.
   The override is sent with the id of the review shown and the reasons shown, so it attaches to what was shown or to nothing.
-  Every failure exits non-zero (#1581).
+  Every failure exits non-zero, and so does a declined or cancelled confirmation (#1581, for every command of the `publish` group).
 - **`--skip-ci-check` keeps its meaning and gains a record.**
-  It still skips the orchestrator's live `ci_check` step, and it is now written to the approval's audit row.
+  It still skips the orchestrator's live `ci_check` step, and it is now written to the approval's audit row
+  and to a row of its own when the step is skipped (`publication_ci_check_skipped`), because a resumed run's final row says only what the call that finished it asked for.
   It never clears a review reason: `bids_failed_at_review` and `bids_unconcluded_at_review` are about the reviewed commit,
   and need `--force`.
 - **`next`** walks the requests that need a person, oldest first, one card each:
   dataset, depositor, release kind, version, the screen, a short read of the review,
-  and, for a large dataset, the object count and the expected duration of the lock step.
+  and, for a large dataset (5,000 files or more), the file count and the number of calls the lock step takes, at 100 objects a call;
+  no duration is claimed, because none has been measured.
   `y` approves from this terminal and runs the same loop as `approve` (a stopped run continues with `approve --resume`);
   `n` denies with a typed reason, which the depositor is mailed as today;
   `c` mails the depositor a typed message and leaves the request open;
@@ -467,7 +472,7 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   This differs from ADR 0093 on purpose: there an uncertain or missing review only asks for confirmation,
   and here every non-pass needs the force path, because the act that follows publishes a DOI.
 - **The web page shows the same words.**
-  The list route carries each request's review as a summary (a headline, a tone, the closed reason codes and ids), not as sentences;
+  The list route carries each request's review as a summary (a headline, a tone, the closed reason codes, whether a start is offered, and ids), not as sentences;
   the sentences, the cures and the next command come from `GET /admin/publish/:id/review`, which renders `describePublicationReview`.
   So the page either fetches that detail for the request being decided or renders the reasons from the shared words,
   transcribed into `nemarOrg/website` and pinned by a drift test on each side (ADR 0045's pattern); Phase 4 chooses and records which.
@@ -581,7 +586,8 @@ and each has a closed word and a sentence in the shared module.
   the model still reviews it, and one recorded reason clears that reason without `--force`.
   How large a share of native requests that is has not been measured.
 - A terminal can no longer approve a `blocked` request after re-running its screen, which it can today,
-  and that holds whatever the flag says, because the mechanical refusals are unconditional.
+  and that holds whatever the flag says, because the mechanical refusals are unconditional;
+  a request that has started publishing is the exception, and is resumed (judgment call 5).
 - The email waits a few minutes longer while the flag is on.
 - Accepted risks, stated so nobody rediscovers them:
   - **Prose that names a person.**
@@ -645,7 +651,7 @@ The maintainer decided all twelve on 2026-10-12, as recommended, and amended cal
 7. The mail waits for the review.
 8. Depositors do not see the review in this epic.
 9. Caps of 5 model calls per depositor and 50 per platform per day.
-10. `y` in `next` runs the approval in the terminal, showing the object count and expected duration first for a large dataset.
+10. (Amended.) `y` in `next` runs the approval in the terminal, showing the file count and the number of lock calls first for a large dataset.
 11. (Amended.) The flag turns off the model review and its gate; the mechanical refusals do not depend on it.
 12. Production is turned on only after Phases 3 and 4 have shipped.
 
@@ -685,4 +691,7 @@ The maintainer decided all twelve on 2026-10-12, as recommended, and amended cal
   `src/commands/admin-pr-reviews.ts`, `src/lib/pr-review-*.ts`.
 - The approval path: `backend/src/routes/admin/publish.ts`, `backend/src/services/publication-orchestrator.ts`,
   `backend/src/services/identifier-screen.ts`, `backend/src/services/approval-dispatch.ts`,
-  `backend/src/services/github/contents.ts` (`createTag`), `src/commands/admin.ts`, `src/lib/api/publish.ts`.
+  `backend/src/services/github/contents.ts` (`createTag`), `src/lib/api/publish.ts`.
+- Phase 2: the gate, `backend/src/services/publication-review-gate.ts`; the comment route, `backend/src/routes/admin/publish-comment.ts`;
+  the commands, `src/commands/admin-publish.ts` and its `admin-publish-*.ts` siblings (the `publish` group left `src/commands/admin.ts`);
+  their rules, `src/lib/publication-review-approve.ts`, `-display.ts`, `-next.ts` and `-queue.ts`.
