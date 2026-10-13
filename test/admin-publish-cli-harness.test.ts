@@ -128,9 +128,10 @@ describe("the real command against the real backend", () => {
 
     expect(r.exitCode).toBe(0);
     expect(requestRow(requestId)?.status).toBe("published");
-    // The banner read the request's state first, then the approval was posted once.
+    // The banner read the request's state and its review first, then the approval was posted once.
     expect(h.requests.map((c) => `${c.method} ${c.path}`)).toEqual([
       `GET /datasets/${DATASET}/publish/status`,
+      `GET /admin/publish/${DATASET}/review`,
       `POST /admin/publish/${DATASET}/approve`,
     ]);
   });
@@ -275,8 +276,8 @@ describe("the account and the configuration a command runs under", () => {
 describe("what a test can change between a command's read and its write", () => {
   test("`after` runs once, after the matched answer and before the command's next request", async () => {
     const requestId = seedGoldenRequest();
-    // `approve` reads the request's state, then posts the approval. Break the screen in between:
-    // the real gate, not the harness, refuses the write.
+    // `approve` reads the request's state and its review, then posts the approval. Break the
+    // screen after the first read: the real gate, not the harness, refuses the write.
     h.after(`GET /datasets/${DATASET}/publish/status`, () => {
       h.db.run("UPDATE publication_requests SET identifier_screen_status = 'error' WHERE id = ?", [
         requestId,
@@ -292,6 +293,7 @@ describe("what a test can change between a command's read and its write", () => 
     });
     expect(h.requests.map((c) => `${c.method} ${c.path} ${c.status}`)).toEqual([
       `GET /datasets/${DATASET}/publish/status 200`,
+      `GET /admin/publish/${DATASET}/review 200`,
       `POST /admin/publish/${DATASET}/approve 409`,
     ]);
   });

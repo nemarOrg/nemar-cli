@@ -1,0 +1,71 @@
+/**
+ * The requests and reviews the approval's tests seed (`admin-publish-approve-cli.test.ts`,
+ * `admin-publish-approve-agreement.test.ts`), written as real rows over the harness's database:
+ * the review reports are the production parser's output (`goodPublicationReport` parses before it
+ * returns), and the screen's report is the production screen parser's. Nothing here decides
+ * anything; each helper only puts a state in the database for the real command and the real Worker
+ * to read.
+ */
+
+import type { Database } from "bun:sqlite";
+import { SCREENED_HEAD } from "../../backend/test/helpers/identifier-screen";
+import {
+  type SeedScreenedRequest,
+  evidenceFor,
+  failingReport,
+  goodPublicationReport,
+  seedPublicationReview,
+  seedScreenedRequest,
+} from "../../backend/test/helpers/publication-review";
+import { PUBLICATION_STEPS } from "../../shared/publication-steps";
+
+export const DATASET = "nm000460";
+
+/** Every step but the two logged no-ops: a run the gates let through reaches `published`. */
+export const DONE = PUBLICATION_STEPS.filter((s) => s !== "upload_to_zenodo" && s !== "sync_nemar");
+
+/** A request waiting for its decision (or in `over.requestStatus`), with every step but the two no-ops done. */
+export function seedGolden(db: Database, over: Partial<SeedScreenedRequest> = {}): number {
+  const { requestId } = seedScreenedRequest(db, { datasetId: DATASET, ...over });
+  db.run("UPDATE publication_requests SET steps_completed = ? WHERE id = ?", [
+    JSON.stringify(DONE),
+    requestId,
+  ]);
+  return requestId;
+}
+
+/** The review in force of `requestId`, reported with `report` (a pass by default); returns its id. */
+export function seedReport(
+  db: Database,
+  requestId: number,
+  report?: Record<string, unknown>,
+): number {
+  return seedPublicationReview(db, { requestId, datasetId: DATASET, state: "reported", report });
+}
+
+/** A report with the given evidence; every question passes. */
+export const reportWith = (evidence: Parameters<typeof evidenceFor>[2]) =>
+  goodPublicationReport({ evidence: evidenceFor(SCREENED_HEAD, false, evidence) });
+
+/** A failed question and no Version: two override-class reasons (`question_failed`, `version_missing`). */
+export const twoReasons = () => ({
+  ...failingReport(),
+  evidence: evidenceFor(SCREENED_HEAD, false, { version: null, version_shape: "missing" }),
+});
+
+/** A report whose evidence failed ADR 0026's minimums: a hard reason (`submission_minimum_failed`). */
+export const hardReport = () =>
+  reportWith({ minimums: "failed", minimum_failures: ["name_too_short"], name_length: 5 });
+
+/** Record an override on a review row, as the Worker does (the migration's CHECK needs all three columns). */
+export function seedOverride(
+  db: Database,
+  reviewId: number,
+  by: number,
+  reasons: readonly string[],
+): void {
+  db.run(
+    "UPDATE publication_reviews SET override_by = ?, override_at = datetime('now'), override_reasons = ? WHERE id = ?",
+    [by, JSON.stringify(reasons), reviewId],
+  );
+}
