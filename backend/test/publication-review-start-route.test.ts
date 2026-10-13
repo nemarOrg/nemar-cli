@@ -38,7 +38,6 @@ import {
   startResponseOf,
 } from "../src/routes/admin/publication-review";
 import { START_RESULTS, type StartResult } from "../src/services/publication-review";
-import { hashApiKey } from "../src/services/token";
 import { issueSession } from "../src/services/web-session";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { realD1, wrapD1 } from "./helpers/d1";
@@ -48,6 +47,7 @@ import {
   type SeedScreenedRequest,
   seedPublicationReview,
   seedScreenedRequest,
+  seedUser,
 } from "./helpers/publication-review";
 import { DEV_DATASET, PROD_DATASET, createHarness } from "./helpers/publication-review-harness";
 
@@ -61,27 +61,11 @@ let admin: Hono<{ Bindings: Bindings; Variables: Variables }>;
 let adminId: number;
 let memberId: number;
 
-async function seedUser(username: string, role: string, key: string): Promise<number> {
-  h.db.run(
-    `INSERT INTO users (username, email, password_hash, status, role, email_verified,
-                        service_access, sandbox_completed, given_name, family_name)
-     VALUES (?, ?, 'x', 'approved', ?, 1, 1, 1, 'Ada', 'Lovelace')`,
-    [username, `${username}@example.org`, role],
-  );
-  const id = h.db
-    .query<{ id: number }, [string]>("SELECT id FROM users WHERE username = ?")
-    .get(username)?.id as number;
-  h.db
-    .query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)")
-    .run(id, await hashApiKey(key), key.slice(0, 8));
-  return id;
-}
-
 beforeEach(async () => {
   admin = new Hono<{ Bindings: Bindings; Variables: Variables }>();
   admin.route("/admin", adminRoutes);
-  adminId = await seedUser("startadmin", "admin", ADMIN_KEY);
-  memberId = await seedUser("startmember", "member", MEMBER_KEY);
+  adminId = await seedUser(h.db, "startadmin", "admin", ADMIN_KEY);
+  memberId = await seedUser(h.db, "startmember", "member", MEMBER_KEY);
 });
 
 /** The n-th extra production-owned dataset id (never a live one, never a reserved fixture). */

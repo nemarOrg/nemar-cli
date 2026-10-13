@@ -31,56 +31,44 @@ import {
 import { adminRoutes } from "../src/routes/admin";
 import { isScreenExempt } from "../src/services/identifier-screen";
 import { isScreenExempt as storedIsScreenExempt } from "../src/services/identifier-screen-stored";
-import { HISTORY_LIMIT, overrideReasonsOf } from "../src/services/publication-review-view";
-import { hashApiKey } from "../src/services/token";
+import {
+  HISTORY_LIMIT,
+  LIST_CONCURRENCY,
+  overrideReasonsOf,
+} from "../src/services/publication-review-view";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, interceptingD1, realD1 } from "./helpers/d1";
 import { SCREENED_HEAD } from "./helpers/identifier-screen";
 import { logged } from "./helpers/logs";
 import {
+  NOTE_SENTINEL,
+  SUMMARY_SENTINEL,
   type SeedReview,
   type SeedScreenedRequest,
   evidenceFor,
+  failingReport,
   goodPublicationReport,
   seedPublicationReview,
   seedScreenedRequest,
+  seedUser,
 } from "./helpers/publication-review";
 
 const ADMIN_KEY = "review-admin-key-0123456789abcdef0123456789abcdef";
 const MEMBER_KEY = "review-member-key-0123456789abcdef0123456789abcd";
 const OTHER_HEAD = "f".repeat(40);
-const SUMMARY_SENTINEL = "SUMMARY-SENTINEL-the-model-wrote-this";
-const NOTE_SENTINEL = "NOTE-SENTINEL-the-model-wrote-this-too";
 const NONCE_SENTINEL = "NONCE-SENTINEL-0123456789abcdef";
 
 let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
 let counter = 0;
 
-async function seedUser(username: string, role: string, key: string) {
-  db.run(
-    `INSERT INTO users (username, email, password_hash, status, role, email_verified,
-                        service_access, sandbox_completed, given_name, family_name)
-     VALUES (?, ?, 'x', 'approved', ?, 1, 1, 1, 'Ada', 'Lovelace')`,
-    [username, `${username}@example.org`, role],
-  );
-  const id = db
-    .query<{ id: number }, [string]>("SELECT id FROM users WHERE username = ?")
-    .get(username)?.id as number;
-  db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)").run(
-    id,
-    await hashApiKey(key),
-    key.slice(0, 8),
-  );
-}
-
 beforeEach(async () => {
   db = freshDb();
   counter = 0;
   app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
   app.route("/admin", adminRoutes);
-  await seedUser("reviewadmin", "admin", ADMIN_KEY);
-  await seedUser("reviewmember", "member", MEMBER_KEY);
+  await seedUser(db, "reviewadmin", "admin", ADMIN_KEY);
+  await seedUser(db, "reviewmember", "member", MEMBER_KEY);
 });
 
 function env(over: Partial<Bindings> = {}): Bindings {
@@ -134,28 +122,6 @@ async function detail(datasetId: string, bindings: Bindings = env()) {
   const res = await get(`/admin/publish/${datasetId}/review`, ADMIN_KEY, bindings);
   expect(res.status).toBe(200);
   return (await res.json()) as PublicationReviewDetail;
-}
-
-function failingReport(head = SCREENED_HEAD) {
-  return goodPublicationReport({
-    summary: SUMMARY_SENTINEL,
-    questions: {
-      complete_and_honest: "fail",
-      meets_standards: "pass",
-      authors_and_license: "pass",
-      name_adequate: "pass",
-    },
-    findings: [
-      {
-        question: "complete_and_honest",
-        severity: "blocker",
-        code: "readme_mismatch",
-        document: "readme",
-        note: NOTE_SENTINEL,
-      },
-    ],
-    evidence: evidenceFor(head),
-  });
 }
 
 function addVersionRow(datasetId: string, version = "1.0.0") {
@@ -1047,7 +1013,9 @@ describe("the list's cost and isolation", () => {
   });
 
   test("the rows that could still be approved are read a few at a time, never all at once", async () => {
-    for (let i = 0; i < 20; i++) listed("requested");
+    // More rows than the bound, so the bound is what holds the count down.
+    const rowCount = LIST_CONCURRENCY * 2 + 4;
+    for (let i = 0; i < rowCount; i++) listed("requested");
     let inFlight = 0;
     let most = 0;
     const slow = env({
@@ -1061,8 +1029,8 @@ describe("the list's cost and isolation", () => {
       }),
     });
     const { rows } = await listBody(slow);
-    expect(rows).toHaveLength(20);
-    expect(most).toBe(8);
+    expect(rows).toHaveLength(rowCount);
+    expect(most).toBe(LIST_CONCURRENCY);
   });
 });
 

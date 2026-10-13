@@ -44,21 +44,21 @@ import { freshDb, interceptingD1, realD1, yieldingD1 } from "./helpers/d1";
 import { SCREENED_HEAD, cleanScreenReportBody } from "./helpers/identifier-screen";
 import { logged } from "./helpers/logs";
 import {
+  NOTE_SENTINEL,
+  SUMMARY_SENTINEL,
   type SeedReview,
   type SeedScreenedRequest,
-  evidenceFor,
+  failingReport,
   goodPublicationReport,
   seedPublicationReview,
   seedScreenedRequest,
+  textOf,
 } from "./helpers/publication-review";
 import { type CapturedEmail, type ResendSendBody, asSend, withFakeResend } from "./helpers/resend";
 
 const ADMIN_EMAIL = "reviewadmin@example.org";
 const SECRET = "publication-review-mail-secret";
 const OTHER_HEAD = "f".repeat(40);
-/** Words a depositor could influence: they must never reach an inbox through the review section. */
-const SUMMARY_SENTINEL = "SUMMARY-SENTINEL-the-model-wrote-this";
-const NOTE_SENTINEL = "NOTE-SENTINEL-the-model-wrote-this-too";
 
 let db: Database;
 let counter = 0;
@@ -106,18 +106,6 @@ function sends(calls: CapturedEmail[]): ResendSendBody[] {
     .filter((b) => b.to.includes(ADMIN_EMAIL));
 }
 
-/** The visible text of a mail: tags dropped, entities decoded, whitespace collapsed. */
-function textOf(html: string): string {
-  return html
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&#39;/g, "'")
-    .replace(/&quot;/g, '"')
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&amp;/g, "&")
-    .replace(/\s+/g, " ");
-}
-
 function mailState(requestId: number) {
   return db
     .query<{ emailed: string | null; claimed: string | null }, [number]>(
@@ -132,29 +120,6 @@ function failingReviewReads(error: Error): D1Database {
   return interceptingD1(realD1(db), (sql) => {
     // The review row's read, not the lease (which only checks that one exists).
     if (/^\s*SELECT .*FROM publication_reviews/s.test(sql)) throw error;
-  });
-}
-
-/** A report whose first question failed with a finding, and whose model wrote the two sentinels. */
-function failingReport(head = SCREENED_HEAD) {
-  return goodPublicationReport({
-    summary: SUMMARY_SENTINEL,
-    questions: {
-      complete_and_honest: "fail",
-      meets_standards: "pass",
-      authors_and_license: "pass",
-      name_adequate: "pass",
-    },
-    findings: [
-      {
-        question: "complete_and_honest",
-        severity: "blocker",
-        code: "readme_mismatch",
-        document: "readme",
-        note: NOTE_SENTINEL,
-      },
-    ],
-    evidence: evidenceFor(head),
   });
 }
 

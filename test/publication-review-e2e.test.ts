@@ -54,6 +54,8 @@ import { freshDb, realD1 } from "../backend/test/helpers/d1";
 import {
   screenReportBodyFor,
   seedScreenedRequest,
+  seedUser,
+  textOf,
 } from "../backend/test/helpers/publication-review";
 import { makePublicationReviewApp } from "../backend/test/helpers/publication-review-app";
 import {
@@ -229,20 +231,11 @@ beforeEach(async () => {
   dispatches = [];
   modelRequests.length = 0;
   modelStatus = 200;
-  db.run(
-    `INSERT INTO users (username, email, password_hash, status, role, email_verified,
-                        service_access, sandbox_completed, given_name, family_name)
-     VALUES ('e2eadmin', ?, 'x', 'approved', 'admin', 1, 1, 1, 'Grace', 'Hopper')`,
-    [ADMIN_EMAIL],
-  );
-  const adminId = (
-    db.query("SELECT id FROM users WHERE username = 'e2eadmin'").get() as { id: number }
-  ).id;
-  db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)").run(
-    adminId,
-    await hashApiKey(ADMIN_KEY),
-    ADMIN_KEY.slice(0, 8),
-  );
+  await seedUser(db, "e2eadmin", "admin", ADMIN_KEY, {
+    email: ADMIN_EMAIL,
+    givenName: "Grace",
+    familyName: "Hopper",
+  });
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -502,18 +495,6 @@ async function adminMails(calls: CapturedEmail[]): Promise<ResendSendBody[]> {
     .filter((c) => c.path === "/emails")
     .map(asSend)
     .filter((b) => b.to.includes(ADMIN_EMAIL));
-}
-
-/** The visible text of a mail: tags dropped, entities decoded, whitespace collapsed. */
-function textOf(html: string): string {
-  return html
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&#39;/g, "'")
-    .replace(/&quot;/g, '"')
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&amp;/g, "&")
-    .replace(/\s+/g, " ");
 }
 
 /** A depositor's request whose identifier screen is running, and whose mail has not gone out. */
