@@ -55,6 +55,7 @@ import {
   reviewErrorCode,
   startPublicationReview,
 } from "../src/lib/api/publish";
+import { decideApproval, readReview } from "../src/lib/publication-review-approve";
 
 const ADMIN_KEY = "client-admin-key-0123456789abcdef0123456789abcdef";
 const MEMBER_KEY = "client-member-key-0123456789abcdef0123456789abcd";
@@ -567,5 +568,29 @@ describe("the wait between approval attempts", () => {
     ]) {
       expect(await withKnob(value), JSON.stringify(value)).toBe(APPROVE_RETRY_DELAY_MS);
     }
+  });
+});
+
+describe("readReview tells a backend with no review route from a request with no review", () => {
+  test("a 404 without the review's word is no_route, and the approval goes on with its own sentence", async () => {
+    // An older backend has no `/review` route: its 404 is a bare `{ error }` with no `code`.
+    scripted = [{ status: 404, body: { error: "Not found" } }];
+    const read = await readReview(PROD_DATASET);
+    expect(read).toEqual({ kind: "absent", why: "no_route" });
+    const decision = decideApproval(PROD_DATASET, read, {
+      force: false,
+      acknowledge: undefined,
+      resume: false,
+    });
+    expect(decision.kind).toBe("proceed");
+    if (decision.kind === "proceed") {
+      expect(decision.notes).toEqual(["This API has no publication review."]);
+      expect(decision.override).toBeNull();
+    }
+  });
+
+  test("a 404 with the review's not_found word is no_request: the Worker, not the CLI, answers for the request", async () => {
+    const read = await readReview(PROD_DATASET);
+    expect(read).toEqual({ kind: "absent", why: "no_request" });
   });
 });
