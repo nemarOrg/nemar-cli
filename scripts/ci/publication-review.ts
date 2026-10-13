@@ -16,6 +16,10 @@
  * job that fails before this script can report is reported by the workflow's own curl step, which
  * needs nothing installed.
  *
+ * `calibrate` is the offline calibration run from an operator's machine
+ * (`publication-review-calibrate.ts`): the same pre-send, prompt, model call and report assembly
+ * over a corpus of published datasets, and it posts nothing.
+ *
  * **Nothing in the dispatch is trusted for a decision.** The ref the workflow fetched is GitHub's
  * own record of `main`, and it must be the commit the review was dispatched for before a model is
  * called (`stale_head` otherwise). The callback goes to an origin chosen from a fixed table by the
@@ -141,15 +145,24 @@ export function describeError(e: unknown): string {
   return cls;
 }
 
+/** What one call to the model cost, in the units the API counts. */
+export interface ModelUsage {
+  input_tokens: number;
+  output_tokens: number;
+}
+
 /**
  * One call to the model: Haiku 5.5 at high effort, no tools, a schema-constrained answer. The
- * model can read the prompt and write a JSON object; it cannot do anything else. `model` is for
- * the offline calibration only; the review never passes it.
+ * model can read the prompt and write a JSON object; it cannot do anything else. `model` and
+ * `onUsage` are for the offline calibration only; the review never passes them. `onUsage` is told
+ * the call's token counts as soon as the answer arrives, before the answer is judged, so a call the
+ * job then refuses (a refusal, a cut-off answer) still reports what it cost.
  */
 export async function callPublicationReviewModel(
   system: string,
   user: string,
   model: ReviewerModel = PUBLICATION_REVIEW_MODEL,
+  onUsage?: (usage: ModelUsage) => void,
 ): Promise<unknown> {
   // A client given no credentials resolves workload identity federation from the environment
   // (ANTHROPIC_FEDERATION_RULE_ID, _ORGANIZATION_ID, _SERVICE_ACCOUNT_ID, _WORKSPACE_ID and
@@ -165,6 +178,13 @@ export async function callPublicationReviewModel(
       format: { type: "json_schema", schema: PUBLICATION_OUTPUT_SCHEMA },
     },
   });
+  if (
+    onUsage &&
+    Number.isFinite(res.usage?.input_tokens) &&
+    Number.isFinite(res.usage?.output_tokens)
+  ) {
+    onUsage({ input_tokens: res.usage.input_tokens, output_tokens: res.usage.output_tokens });
+  }
   if (res.stop_reason === "refusal") throw new RunFailure("model_refused");
   if (res.stop_reason === "max_tokens") throw new RunFailure("model_truncated");
   const text = res.content.find((b) => b.type === "text");
@@ -300,8 +320,14 @@ export async function main(
 ): Promise<number> {
   const cmd = argv[0];
   const rest = argv.slice(1);
+  if (cmd === "calibrate") {
+    // The offline calibration: its own module, loaded only here, so the review's load path is
+    // unchanged. It posts nothing and takes no origin table: `origins` is not passed on.
+    const { calibrateMain } = await import("./publication-review-calibrate");
+    return calibrateMain(rest);
+  }
   if (cmd !== "review") {
-    console.error("usage: publication-review.ts review ...");
+    console.error("usage: publication-review.ts review|calibrate ...");
     return 2;
   }
   const dataset = need(rest, "dataset");

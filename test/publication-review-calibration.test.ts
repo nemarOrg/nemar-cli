@@ -20,7 +20,7 @@
  *    model's words; the review sheet is the one place the model's words go, outside the repository.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
   cpSync,
@@ -30,10 +30,26 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import {
+  callPublicationReviewModel,
+  main,
+  runPublicationReview,
+} from "../scripts/ci/publication-review";
+import {
+  CalibrationError,
+  type CalibrationRecord,
+  assertOutsideRepository,
+  calibrate,
+  defaultSheetPath,
+  deriveOutcome,
+  evidenceOf,
+  isInsideRepository,
+} from "../scripts/ci/publication-review-calibrate";
 import {
   type CorpusEntry,
   CorpusError,
@@ -62,10 +78,23 @@ import {
   structuralSummary,
 } from "../scripts/ci/publication-review-evidence";
 import { presend } from "../scripts/ci/publication-review-presend";
+import { assemblePublicationReport } from "../scripts/ci/publication-review-prompt";
 import {
+  ANSWERS,
+  CALIBRATION_MODELS,
   DOCUMENT_CHAR_CAPS,
+  DOCUMENT_STATES,
+  PUBLICATION_FINDING_CODES,
+  PUBLICATION_OUTCOMES,
+  PUBLICATION_REVIEW_MODELS,
+  PUBLICATION_RUN_ERRORS,
+  PublicationReviewReportError,
+  QUESTIONS,
+  REASON_CODES,
   REVIEW_DOCUMENTS,
   type ReviewDocument,
+  parsePublicationReviewReport,
+  reportReasons,
 } from "../shared/publication-review";
 import {
   MIN_NAME_LENGTH,
@@ -633,3 +662,1049 @@ function safeRead(path: string): string | null {
     return null;
   }
 }
+
+// ---------------------------------------------------------------------------------------------
+// A stand-in for api.anthropic.com, spoken to by the real SDK, and a recorder around fetch
+// ---------------------------------------------------------------------------------------------
+
+const REPO_ROOT = join(import.meta.dir, "..");
+// No underscores: the shared sanitizer strips markup characters from the model's words.
+const MODEL_SUMMARY_SENTINEL = "SENTINELMODELSUMMARY";
+const MODEL_NOTE_SENTINEL = "SENTINELMODELNOTE";
+const USAGE = { input_tokens: 1234, output_tokens: 56 };
+
+interface ModelRequest {
+  method: string;
+  path: string;
+  raw: string;
+  body: Record<string, unknown>;
+}
+const modelRequests: ModelRequest[] = [];
+const fetched: string[] = [];
+
+const PASS_ANSWERS = {
+  complete_and_honest: "pass",
+  meets_standards: "pass",
+  authors_and_license: "pass",
+  name_adequate: "pass",
+};
+const PASS_OUTPUT = {
+  questions: PASS_ANSWERS,
+  findings: [],
+  summary: `A resting EEG dataset. ${MODEL_SUMMARY_SENTINEL}`,
+  steering: false,
+};
+
+/** A Messages API reply whose one text block holds `text`. */
+function messageReply(text: string, stopReason = "end_turn"): Response {
+  return Response.json({
+    id: "msg_stand_in",
+    type: "message",
+    role: "assistant",
+    model: "claude-haiku-5-5",
+    content: [{ type: "text", text }],
+    stop_reason: stopReason,
+    stop_sequence: null,
+    usage: USAGE,
+  });
+}
+
+/** A failure the SDK must not retry, so a test is not slowed by its backoff. */
+function failureReply(status: number, message: string): Response {
+  return new Response(JSON.stringify({ type: "error", error: { type: "api_error", message } }), {
+    status,
+    headers: { "content-type": "application/json", "x-should-retry": "false" },
+  });
+}
+
+let modelReply: (req: ModelRequest) => Response = () => messageReply(JSON.stringify(PASS_OUTPUT));
+let modelServer: ReturnType<typeof Bun.serve>;
+const SDK_ENV = [
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_PROFILE",
+  "ANTHROPIC_CONFIG_DIR",
+  "ANTHROPIC_FEDERATION_RULE_ID",
+  "ANTHROPIC_ORGANIZATION_ID",
+  "ANTHROPIC_SERVICE_ACCOUNT_ID",
+  "ANTHROPIC_WORKSPACE_ID",
+  "ANTHROPIC_IDENTITY_TOKEN_FILE",
+  "ANTHROPIC_IDENTITY_TOKEN",
+  "PUBLICATION_REVIEW_CALLBACK_TOKEN",
+] as const;
+const savedSdkEnv: Record<string, string | undefined> = {};
+const realFetch = globalThis.fetch;
+
+beforeAll(() => {
+  modelServer = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const raw = await req.text();
+      const request: ModelRequest = {
+        method: req.method,
+        path: new URL(req.url).pathname,
+        raw,
+        body: JSON.parse(raw || "{}") as Record<string, unknown>,
+      };
+      modelRequests.push(request);
+      return modelReply(request);
+    },
+  });
+  for (const k of SDK_ENV) {
+    savedSdkEnv[k] = process.env[k];
+    delete process.env[k];
+  }
+  process.env.ANTHROPIC_API_KEY = "sk-ant-stand-in";
+  process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${modelServer.port}`;
+  // A recorder, not a replacement: every call still goes to the real fetch, and the test says where.
+  const recorder = (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    fetched.push(input instanceof Request ? input.url : String(input));
+    return realFetch(input, init);
+  };
+  globalThis.fetch = Object.assign(recorder, { preconnect: realFetch.preconnect });
+});
+afterAll(() => {
+  globalThis.fetch = realFetch;
+  modelServer.stop(true);
+  for (const k of SDK_ENV) {
+    if (savedSdkEnv[k] === undefined) delete process.env[k];
+    else process.env[k] = savedSdkEnv[k];
+  }
+});
+beforeEach(() => {
+  modelRequests.length = 0;
+  fetched.length = 0;
+  modelReply = () => messageReply(JSON.stringify(PASS_OUTPUT));
+});
+
+// ---------------------------------------------------------------------------------------------
+// Running the calibration
+// ---------------------------------------------------------------------------------------------
+
+let mutatedCorpus: string;
+let seq = 0;
+
+function oneEntryCorpus(id: string): string {
+  const dir = join(root, `corpus-one-${++seq}`);
+  cpSync(join(mutatedCorpus, id), join(dir, id), { recursive: true });
+  return dir;
+}
+
+function readRecords(path: string): CalibrationRecord[] {
+  return readFileSync(path, "utf8")
+    .split("\n")
+    .filter((line) => line !== "")
+    .map((line) => JSON.parse(line) as CalibrationRecord);
+}
+
+async function run(corpusDir: string, over: Partial<Parameters<typeof calibrate>[0]> = {}) {
+  const out = join(root, `records-${++seq}.jsonl`);
+  const result = await calibrate({ corpusDir, out, ...over });
+  return { result, out, records: readRecords(out) };
+}
+
+/** The request body with the run's random nonce made constant, for comparing two runs' prompts. */
+function withoutNonce(raw: string): string {
+  return raw.replace(/[0-9a-f]{32}/g, "<nonce>");
+}
+
+const MODEL_ORIGIN = () => `http://127.0.0.1:${modelServer.port}`;
+
+describe("calibrate runs the production review over every entry and records one line each", () => {
+  beforeAll(() => {
+    mutatedCorpus = join(root, "corpus-calibrate");
+    cpSync(goodCorpus, mutatedCorpus, { recursive: true });
+    expect(mutateCorpus(mutatedCorpus, { perDefect: 1 }).made).toBe(DEFECTS.length);
+  });
+
+  test("one record per entry, in id order, with the model's token counts and a timing", async () => {
+    const { result, records } = await run(mutatedCorpus);
+    const ids = listEntries(mutatedCorpus).map((e) => e.id);
+    expect(ids.length).toBe(4 + DEFECTS.length);
+    expect(records.map((r) => r.id)).toEqual(ids);
+    expect(result).toMatchObject({ records: ids.length, errors: 0 });
+    for (const r of records) {
+      expect(r.model).toBe("claude-haiku-5-5");
+      expect(r.input_tokens).toBe(USAGE.input_tokens);
+      expect(r.output_tokens).toBe(USAGE.output_tokens);
+      expect(Number.isFinite(r.ms) && r.ms >= 0).toBe(true);
+      expect(r.error).toBeNull();
+    }
+    expect(records.filter((r) => r.label === "good")).toHaveLength(4);
+    expect(new Set(records.map((r) => r.label)).size).toBe(1 + DEFECTS.length);
+  });
+
+  test("the request is the production request: Haiku, high effort, the schema, no tools", async () => {
+    await run(oneEntryCorpus("nm000001"));
+    expect(modelRequests).toHaveLength(1);
+    const body = (modelRequests[0] as ModelRequest).body;
+    expect(body.model).toBe("claude-haiku-5-5");
+    expect((body.output_config as { effort: string }).effort).toBe("high");
+    expect(Object.keys(body)).not.toContain("tools");
+    expect(Object.keys(body)).not.toContain("tool_choice");
+  });
+
+  test("it posts nothing and reaches no host but the model stand-in", async () => {
+    await run(mutatedCorpus);
+    expect(modelRequests.length).toBe(4 + DEFECTS.length);
+    for (const r of modelRequests) {
+      expect(r.method).toBe("POST");
+      expect(r.path).toBe("/v1/messages");
+    }
+    expect(fetched.length).toBeGreaterThan(0);
+    for (const url of fetched) expect(url.startsWith(`${MODEL_ORIGIN()}/`), url).toBe(true);
+  });
+
+  test("calibration and production send the same request for the same dataset", async () => {
+    // The drift guard: calibration measures what production does only if the two prompts agree.
+    for (const id of ["nm000001", "nm000002", "nm000003", "nm000006"]) {
+      const origin = origins[id] as Origin;
+      modelRequests.length = 0;
+      const production = await runPublicationReview({
+        repoDir: origin.dir,
+        head: origin.head,
+        fetchedHead: origin.head,
+        tagsFile: sideFile(""),
+        bidsRunsFile: sideFile(null),
+        anonymous: false,
+      });
+      expect(production.outcome, id).toBe("reported");
+      await run(oneEntryCorpus(id));
+      expect(modelRequests, id).toHaveLength(2);
+      const [fromProduction, fromCalibration] = modelRequests as [ModelRequest, ModelRequest];
+      expect(withoutNonce(fromCalibration.raw), id).toBe(withoutNonce(fromProduction.raw));
+    }
+  });
+
+  test("a README with a path on somebody's machine is withheld, exactly as in production", async () => {
+    const { records } = await run(oneEntryCorpus("nm000002"));
+    const [record] = records as [CalibrationRecord];
+    expect(record.documents?.readme).toBe("withheld_finding");
+    expect(record.reasons).toContain("text_withheld");
+    expect(record.outcome).not.toBe("pass");
+    expect(modelRequests).toHaveLength(1);
+    const { raw } = modelRequests[0] as ModelRequest;
+    expect(raw).not.toContain(PATH_SENTINEL);
+    expect(raw).not.toContain("/Users/");
+    expect(raw).not.toContain("Processed under");
+  });
+
+  test("the model never sees a table byte, a label or a file name, whatever the corpus holds", async () => {
+    await run(mutatedCorpus);
+    for (const { raw } of modelRequests) {
+      for (const s of ["SENTINEL_PARTICIPANT_ROW", "SENTINELSUBJ", "SENTINELTASK", "SENTINELDIR"]) {
+        expect(raw, s).not.toContain(s);
+      }
+      expect(raw).not.toMatch(/\bsub-/);
+      expect(raw).not.toMatch(/README\.md|README\.rst|dataset_description\.json/);
+    }
+  });
+});
+
+// A file the evidence test also needs: text for the `--tags-file` and `--bids-runs-file` arguments.
+let fileSeq = 0;
+function sideFile(content: string | null): string {
+  const path = join(root, `side-${++fileSeq}.txt`);
+  if (content !== null) writeFileSync(path, content);
+  return path;
+}
+
+describe("a record holds ids, labels, closed words, counts and timings, and no one's words", () => {
+  const CLOSED = new Set<string>([
+    "good",
+    ...DEFECTS,
+    ...PUBLICATION_OUTCOMES,
+    "error",
+    ...REASON_CODES,
+    ...QUESTIONS,
+    ...ANSWERS,
+    ...PUBLICATION_FINDING_CODES,
+    ...REVIEW_DOCUMENTS,
+    ...DOCUMENT_STATES,
+    ...PUBLICATION_RUN_ERRORS,
+    ...CALIBRATION_MODELS,
+  ]);
+
+  function leaves(value: unknown): unknown[] {
+    if (Array.isArray(value)) return value.flatMap(leaves);
+    if (typeof value === "object" && value !== null) return Object.values(value).flatMap(leaves);
+    return [value];
+  }
+
+  test("the keys are fixed and every string is an id or a closed word", async () => {
+    modelReply = () =>
+      messageReply(
+        JSON.stringify({
+          ...PASS_OUTPUT,
+          findings: [
+            {
+              question: "complete_and_honest",
+              severity: "concern",
+              code: "other",
+              document: "none",
+              note: MODEL_NOTE_SENTINEL,
+            },
+          ],
+        }),
+      );
+    const { records } = await run(mutatedCorpus);
+    const ids = new Set(listEntries(mutatedCorpus).map((e) => e.id));
+    for (const r of records) {
+      expect(Object.keys(r), r.id).toEqual([
+        "id",
+        "label",
+        "model",
+        "outcome",
+        "error",
+        "reasons",
+        "answers",
+        "model_answers",
+        "steering",
+        "finding_codes",
+        "documents",
+        "input_tokens",
+        "output_tokens",
+        "ms",
+      ]);
+      for (const leaf of leaves(r)) {
+        if (typeof leaf === "string") expect(CLOSED.has(leaf) || ids.has(leaf), leaf).toBe(true);
+        else
+          expect(["number", "boolean"].includes(typeof leaf) || leaf === null, String(leaf)).toBe(
+            true,
+          );
+      }
+      expect(r.finding_codes).toEqual(["other"]);
+    }
+  });
+
+  test("no document's text and none of the model's words is in the output file", async () => {
+    modelReply = () =>
+      messageReply(
+        JSON.stringify({
+          ...PASS_OUTPUT,
+          findings: [
+            {
+              question: "meets_standards",
+              severity: "concern",
+              code: "ethics_statement_inadequate",
+              document: "readme",
+              note: MODEL_NOTE_SENTINEL,
+            },
+          ],
+        }),
+      );
+    const { out } = await run(mutatedCorpus);
+    const text = readFileSync(out, "utf8");
+    for (const s of [
+      ...DOCUMENT_SENTINELS,
+      MODEL_SUMMARY_SENTINEL,
+      MODEL_NOTE_SENTINEL,
+      "Resting state EEG",
+      "Ada Lovelace",
+      "IRB 2024",
+      "TODO",
+      "REVIEWER",
+    ]) {
+      expect(text, s).not.toContain(s);
+    }
+    // Control: the stand-in's words and the documents really were in play.
+    expect(modelRequests.some((r) => r.raw.includes(README_SENTINEL))).toBe(true);
+  });
+});
+
+describe("the outcome is derived, never reported, and facts the calibration cannot know are left out", () => {
+  test("a good dataset and a model that passes everything is a pass, with no reasons", async () => {
+    const { records } = await run(oneEntryCorpus("nm000001"));
+    const [record] = records as [CalibrationRecord];
+    expect(record).toMatchObject({
+      outcome: "pass",
+      reasons: [],
+      steering: false,
+      finding_codes: [],
+    });
+    expect(record.answers).toEqual(PASS_ANSWERS as CalibrationRecord["answers"]);
+    expect(record.model_answers).toEqual(record.answers);
+  });
+
+  test("the evidence is that of an unreleased named dataset: no tag unless there is a version, BIDS unknown", () => {
+    const withVersion = evidenceOf(readEntry(join(mutatedCorpus, "nm000001"))).facts;
+    expect(withVersion).toMatchObject({
+      anonymous: false,
+      version: "1.0.0",
+      version_shape: "ok",
+      tag: "absent",
+      bids: "unknown",
+    });
+    expect(withVersion.head).toBe((origins.nm000001 as Origin).head);
+    const without = evidenceOf(readEntry(join(mutatedCorpus, "nm000003"))).facts;
+    expect(without).toMatchObject({
+      version: null,
+      version_shape: "missing",
+      tag: "not_applicable",
+    });
+    expect(without.bids).toBe("unknown");
+  });
+
+  test("an unknown BIDS result would make every dataset a non-pass, so that one reason is not counted", () => {
+    const { facts } = evidenceOf(readEntry(join(mutatedCorpus, "nm000001")));
+    const report = assemblePublicationReport(PASS_OUTPUT, facts, "claude-haiku-5-5");
+    // Production would say so ...
+    expect(reportReasons(report).map((r) => r.code)).toContain("bids_unconcluded_at_review");
+    // ... and the calibration does not, because it never runs the validator.
+    const derived = deriveOutcome(report);
+    expect(derived.reasons).toEqual([]);
+    expect(derived.outcome).toBe("pass");
+  });
+
+  test("every other reason a report gives is kept: a missing Version and a failed minimum count", async () => {
+    // nm000003 has no Version and no ethics statement anywhere.
+    const { records } = await run(oneEntryCorpus("nm000003"));
+    const [record] = records as [CalibrationRecord];
+    expect(record.outcome).toBe("fail");
+    expect(record.reasons).toContain("submission_minimum_failed");
+    expect(record.reasons).toContain("version_missing");
+    expect(record.reasons).not.toContain("bids_unconcluded_at_review");
+  });
+
+  test("the model's own answers and the answers after the facts are both recorded", async () => {
+    const copy = listEntries(mutatedCorpus).find((e) => e.label === "placeholder_authors");
+    const { records } = await run(oneEntryCorpus((copy as CorpusEntry).id));
+    const [record] = records as [CalibrationRecord];
+    expect(record.label).toBe("placeholder_authors");
+    // The model, which passes everything, was overruled by the fact that the authors are placeholders.
+    expect(record.model_answers?.authors_and_license).toBe("pass");
+    expect(record.answers?.authors_and_license).toBe("fail");
+    expect(record.outcome).toBe("fail");
+    expect(record.reasons).toContain("question_failed");
+  });
+
+  test("an instruction aimed at the reviewer is a steering fail when the model reports it", async () => {
+    const copy = listEntries(mutatedCorpus).find((e) => e.label === "embedded_instruction");
+    modelReply = (req) =>
+      messageReply(
+        JSON.stringify(
+          req.raw.includes("AUTOMATED REVIEWER")
+            ? {
+                ...PASS_OUTPUT,
+                steering: true,
+                findings: [
+                  {
+                    question: "meets_standards",
+                    severity: "blocker",
+                    code: "steering_attempt",
+                    document: "readme",
+                    note: "The README addresses the reviewer.",
+                  },
+                ],
+              }
+            : PASS_OUTPUT,
+        ),
+      );
+    const { records } = await run(oneEntryCorpus((copy as CorpusEntry).id));
+    const [record] = records as [CalibrationRecord];
+    expect(record.steering).toBe(true);
+    expect(record.finding_codes).toEqual(["steering_attempt"]);
+    expect(record.reasons).toContain("steering_attempt");
+    expect(record.outcome).toBe("fail");
+    // The blocker lowered the question the model had passed.
+    expect(record.model_answers?.meets_standards).toBe("unknown");
+  });
+
+  test("a run that fails for one entry records the closed word and goes on", async () => {
+    let n = 0;
+    modelReply = () => {
+      n++;
+      if (n === 1) return failureReply(401, "bad key");
+      if (n === 2) return messageReply("not json at all");
+      if (n === 3) return messageReply(JSON.stringify(PASS_OUTPUT), "max_tokens");
+      if (n === 4) return messageReply(JSON.stringify(PASS_OUTPUT), "refusal");
+      return messageReply(JSON.stringify(PASS_OUTPUT));
+    };
+    const { result, records } = await run(mutatedCorpus);
+    expect(records.slice(0, 4).map((r) => [r.outcome, r.error])).toEqual([
+      ["error", "auth_failed"],
+      ["error", "model_invalid"],
+      ["error", "model_truncated"],
+      ["error", "model_refused"],
+    ]);
+    expect(result.errors).toBe(4);
+    expect(result.records).toBe(records.length);
+    // A failure carries no verdict, and an answer that did arrive still has its token counts.
+    expect(records[0]).toMatchObject({ answers: null, reasons: [], input_tokens: null });
+    expect(records[2]).toMatchObject({ answers: null, input_tokens: 1234, output_tokens: 56 });
+    expect(records.slice(4).every((r) => r.error === null)).toBe(true);
+  });
+
+  test("the same corpus gives the same records, apart from timings", async () => {
+    const a = await run(mutatedCorpus);
+    const b = await run(mutatedCorpus);
+    const stable = (rs: CalibrationRecord[]) => rs.map((r) => ({ ...r, ms: 0 }));
+    expect(stable(a.records)).toEqual(stable(b.records));
+    const bytes = (rs: CalibrationRecord[]) => stable(rs).map((r) => JSON.stringify(r));
+    expect(bytes(a.records)).toEqual(bytes(b.records));
+  });
+});
+
+describe("the calibration model: Sonnet is accepted here and refused everywhere else", () => {
+  const SONNET = "claude-sonnet-5-5";
+
+  test("a Sonnet report parses with the calibration list and is refused by the default parser", () => {
+    const { facts } = evidenceOf(readEntry(join(mutatedCorpus, "nm000001")));
+    const report = assemblePublicationReport(PASS_OUTPUT, facts, SONNET);
+    expect(report.model).toBe(SONNET);
+    const raw = {
+      v: 1,
+      model: SONNET,
+      questions: PASS_ANSWERS,
+      findings: [],
+      summary: "x",
+      steering: false,
+      evidence: facts,
+    };
+    expect(parsePublicationReviewReport(raw, { models: CALIBRATION_MODELS }).model).toBe(SONNET);
+    expect(() => parsePublicationReviewReport(raw)).toThrow(PublicationReviewReportError);
+    try {
+      parsePublicationReviewReport(raw);
+    } catch (e) {
+      expect((e as PublicationReviewReportError).code).toBe("bad_model");
+    }
+    expect([...PUBLICATION_REVIEW_MODELS]).not.toContain(SONNET);
+    // The calibration list names exactly the production model and Sonnet.
+    expect([...CALIBRATION_MODELS]).toEqual(["claude-haiku-5-5", SONNET]);
+  });
+
+  test("calibrate sends the model it was given and records it", async () => {
+    const { records } = await run(oneEntryCorpus("nm000001"), { model: SONNET });
+    expect((modelRequests[0] as ModelRequest).body.model).toBe(SONNET);
+    expect(records).toMatchObject([{ model: SONNET, outcome: "pass", error: null }]);
+  });
+
+  test("without a model it is the production model", async () => {
+    const { records } = await run(oneEntryCorpus("nm000001"));
+    expect((modelRequests[0] as ModelRequest).body.model).toBe(PUBLICATION_REVIEW_MODELS[0]);
+    expect(records[0]?.model).toBe(PUBLICATION_REVIEW_MODELS[0]);
+  });
+
+  test("the model call reports its token usage to a caller that asks, and changes nothing for one that does not", async () => {
+    const seen: { input_tokens: number; output_tokens: number }[] = [];
+    const answer = await callPublicationReviewModel("system", "user", SONNET, (u) => seen.push(u));
+    expect(seen).toEqual([USAGE]);
+    expect(answer).toEqual(PASS_OUTPUT);
+    expect((modelRequests[0] as ModelRequest).body.model).toBe(SONNET);
+    expect(await callPublicationReviewModel("system", "user")).toEqual(PASS_OUTPUT);
+    expect((modelRequests[1] as ModelRequest).body.model).toBe("claude-haiku-5-5");
+  });
+});
+
+describe("the review sheet is the one place the model's words go, and never inside the repository", () => {
+  const SHEET_DIR_IN_REPO = join(REPO_ROOT, ".calibration-sheet-guard-test");
+  afterEach(() => {
+    // A directory only the guard test below can create, and only when the guard has failed.
+    rmSync(SHEET_DIR_IN_REPO, { recursive: true, force: true });
+  });
+
+  test("it holds the model's summary and notes for the maintainer, and none of the documents' text", async () => {
+    modelReply = () =>
+      messageReply(
+        JSON.stringify({
+          ...PASS_OUTPUT,
+          questions: { ...PASS_ANSWERS, name_adequate: "fail" },
+          findings: [
+            {
+              question: "name_adequate",
+              severity: "concern",
+              code: "name_not_descriptive",
+              document: "dataset_description",
+              note: MODEL_NOTE_SENTINEL,
+            },
+          ],
+        }),
+      );
+    const reviewSheet = join(root, "sheets", "one.csv");
+    const { result } = await run(mutatedCorpus, { reviewSheet });
+    const csv = readFileSync(reviewSheet, "utf8");
+    const lines = csv.split("\n").filter((l) => l !== "");
+    expect(lines).toHaveLength(1 + result.records);
+    expect(lines[0]).toBe(
+      "id,label,outcome,reasons,complete_and_honest,meets_standards,authors_and_license,name_adequate,steering,summary,notes,judged_wrong,comment",
+    );
+    expect(csv).toContain(MODEL_SUMMARY_SENTINEL);
+    expect(csv).toContain(MODEL_NOTE_SENTINEL);
+    expect(csv).toContain("name_not_descriptive");
+    for (const s of DOCUMENT_SENTINELS) expect(csv, s).not.toContain(s);
+    // The maintainer's columns start empty.
+    expect(lines[1]?.endsWith(",,")).toBe(true);
+  });
+
+  test("a cell that a spreadsheet would run as a formula is made text", async () => {
+    modelReply = () =>
+      messageReply(
+        JSON.stringify({
+          ...PASS_OUTPUT,
+          summary: '=HYPERLINK("http://corpus.invalid/x","click"), with "quotes"\nand a line break',
+        }),
+      );
+    const reviewSheet = join(root, "sheets", "formula.csv");
+    await run(oneEntryCorpus("nm000001"), { reviewSheet });
+    const csv = readFileSync(reviewSheet, "utf8");
+    // The shared sanitizer already removes the link; what is left starts with `=`, and the cell
+    // is made text and quoted (it holds quotes).
+    expect(csv).toContain(`,"'=HYPERLINK(`);
+    expect(csv).not.toMatch(/(^|,)=HYPERLINK/m);
+  });
+
+  test("a path inside the repository is refused before any model is called, and nothing is made", async () => {
+    const reviewSheet = join(SHEET_DIR_IN_REPO, "sheet.csv");
+    const out = join(root, `records-${++seq}.jsonl`);
+    await expect(
+      calibrate({ corpusDir: oneEntryCorpus("nm000001"), out, reviewSheet }),
+    ).rejects.toMatchObject({ code: "sheet_inside_repository" });
+    expect(modelRequests).toHaveLength(0);
+    expect(existsSync(SHEET_DIR_IN_REPO)).toBe(false);
+    expect(existsSync(out)).toBe(false);
+  });
+
+  test("an existing sheet, and the records file named as the sheet, are refused up front", async () => {
+    const corpusDir = oneEntryCorpus("nm000001");
+    const reviewSheet = join(root, "sheets", "taken.csv");
+    mkdirSync(dirname(reviewSheet), { recursive: true });
+    writeFileSync(reviewSheet, "kept");
+    await expect(
+      calibrate({ corpusDir, out: join(root, `records-${++seq}.jsonl`), reviewSheet }),
+    ).rejects.toMatchObject({ code: "sheet_exists" });
+    const out = join(root, `records-${++seq}.jsonl`);
+    await expect(calibrate({ corpusDir, out, reviewSheet: out })).rejects.toMatchObject({
+      code: "sheet_is_out",
+    });
+    expect(readFileSync(reviewSheet, "utf8")).toBe("kept");
+    expect(modelRequests).toHaveLength(0);
+  });
+
+  test("the default path is outside the repository", () => {
+    const path = defaultSheetPath("claude-haiku-5-5");
+    expect(isInsideRepository(path)).toBe(false);
+    expect(path.startsWith(tmpdir()) || path.startsWith(realTmp())).toBe(true);
+    expect(() => assertOutsideRepository(path)).not.toThrow();
+  });
+
+  test("inside means inside any working tree of the repository, by any spelling of the path", () => {
+    const repo = join(root, "guard-repo");
+    mkdirSync(repo);
+    git(repo, "init", "-q", "-b", "main");
+    write(repo, "a.txt", "a");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-q", "-m", "initial");
+    const worktree = join(root, "guard-worktree");
+    git(repo, "worktree", "add", "-q", worktree, "-b", "side");
+    const link = join(root, "guard-link");
+    symlinkSync(repo, link);
+    const other = join(root, "guard-other");
+    mkdirSync(other);
+    git(other, "init", "-q", "-b", "main");
+
+    const inside = [
+      join(repo, "x.csv"),
+      join(repo, "new", "deeper", "x.csv"),
+      join(repo, "..", "guard-repo", "x.csv"),
+      join(worktree, "x.csv"),
+      join(worktree, "new", "x.csv"),
+      join(link, "new", "x.csv"),
+      repo,
+    ];
+    for (const p of inside) expect(isInsideRepository(p, repo), p).toBe(true);
+    const outside = [
+      join(root, "sheets", "x.csv"),
+      join(root, "guard-repo-sibling", "x.csv"),
+      join(other, "x.csv"),
+      join(tmpdir(), "x.csv"),
+    ];
+    for (const p of outside) expect(isInsideRepository(p, repo), p).toBe(false);
+    expect(() => assertOutsideRepository(join(worktree, "x.csv"), repo)).toThrow(CalibrationError);
+    expect(() => assertOutsideRepository(join(other, "x.csv"), repo)).not.toThrow();
+  });
+});
+
+function realTmp(): string {
+  return realpathOf(tmpdir());
+}
+
+function realpathOf(p: string): string {
+  return execFileSync("realpath", [p], { encoding: "utf8" }).trim();
+}
+
+describe("the run refuses what would make it unsafe or useless, before it calls a model", () => {
+  test("an existing records file is never overwritten", async () => {
+    const corpusDir = oneEntryCorpus("nm000001");
+    const out = join(root, `records-${++seq}.jsonl`);
+    writeFileSync(out, "kept");
+    await expect(calibrate({ corpusDir, out })).rejects.toMatchObject({ code: "out_exists" });
+    expect(readFileSync(out, "utf8")).toBe("kept");
+    expect(modelRequests).toHaveLength(0);
+  });
+
+  test("a corpus that is empty or holds something that is not an entry is refused", async () => {
+    const empty = join(root, "corpus-empty");
+    mkdirSync(empty);
+    await expect(
+      calibrate({ corpusDir: empty, out: join(root, `records-${++seq}.jsonl`) }),
+    ).rejects.toMatchObject({ code: "empty_corpus" });
+    const broken = join(root, "corpus-broken");
+    cpSync(join(mutatedCorpus, "nm000001"), join(broken, "nm000001"), { recursive: true });
+    writeFileSync(join(broken, "nm000001", "entry.json"), "{}");
+    await expect(
+      calibrate({ corpusDir: broken, out: join(root, `records-${++seq}.jsonl`) }),
+    ).rejects.toMatchObject({ code: "bad_entry" });
+    expect(modelRequests).toHaveLength(0);
+  });
+
+  test("--limit takes the first entries in id order, and a bad limit is refused", async () => {
+    const { records } = await run(mutatedCorpus, { limit: 3 });
+    expect(records.map((r) => r.id)).toEqual(
+      listEntries(mutatedCorpus)
+        .map((e) => e.id)
+        .slice(0, 3),
+    );
+    expect(modelRequests).toHaveLength(3);
+    for (const limit of [0, -1, 1.5, Number.NaN]) {
+      await expect(
+        calibrate({ corpusDir: mutatedCorpus, out: join(root, `records-${++seq}.jsonl`), limit }),
+      ).rejects.toMatchObject({ code: "bad_limit" });
+    }
+  });
+
+  test("records are written as they are made, so a run that stops keeps what it did", async () => {
+    // The third answer cannot be read; the first two lines are already on disk when it arrives.
+    let n = 0;
+    let seenOnDisk = -1;
+    const out = join(root, `records-${++seq}.jsonl`);
+    modelReply = () => {
+      n++;
+      if (n === 3) seenOnDisk = readRecords(out).length;
+      return messageReply(JSON.stringify(PASS_OUTPUT));
+    };
+    await calibrate({ corpusDir: mutatedCorpus, out, limit: 3 });
+    expect(seenOnDisk).toBe(2);
+  });
+});
+
+describe("the calibration modules post nothing: no poster, no origin table, no network call of their own", () => {
+  const FILES = ["publication-review-calibrate.ts", "publication-review-corpus.ts"];
+  const BANNED_NAMES = ["postPublicationCallback", "CALLBACK_ORIGINS", "main"];
+
+  /** What is wrong with `source`, in words; empty when it is clean. */
+  function violations(source: string): string[] {
+    const found: string[] = [];
+    const imports = source.matchAll(/import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+["']([^"']+)["']/g);
+    for (const [, names, from] of imports) {
+      for (const raw of (names as string).split(",")) {
+        const name =
+          raw
+            .replace(/^\s*type\s+/, "")
+            .split(/\s+as\s+/)[0]
+            ?.trim() ?? "";
+        if (BANNED_NAMES.includes(name)) found.push(`imports ${name} from ${from}`);
+      }
+    }
+    if (/\bpostPublicationCallback\b|\bCALLBACK_ORIGINS\b/.test(source))
+      found.push("names the poster");
+    if (/webhooks\/|X-Webhook-Token/.test(source)) found.push("names the callback route");
+    if (/\bfetch\s*\(/.test(source)) found.push("calls fetch");
+    return found;
+  }
+
+  test.each(FILES)("%s", (file) => {
+    const source = readFileSync(join(REPO_ROOT, "scripts", "ci", file), "utf8");
+    expect(violations(source)).toEqual([]);
+  });
+
+  test("the guard sees each spelling: fixtures, not violations", () => {
+    const BAD = [
+      'import { postPublicationCallback } from "./publication-review";',
+      'import {\n  callPublicationReviewModel,\n  postPublicationCallback as post,\n} from "./publication-review";',
+      'import { type Environment, CALLBACK_ORIGINS } from "./publication-review";',
+      'import { main } from "./publication-review";',
+      "const r = await fetch(url, { method: 'POST' });",
+      'const route = "/webhooks/publication-review-result";',
+      'headers: { "X-Webhook-Token": token }',
+    ];
+    for (const source of BAD) expect(violations(source), source).not.toEqual([]);
+    const GOOD = [
+      'import { callPublicationReviewModel, mapError } from "./publication-review";',
+      'import { type JobRunError } from "./publication-review";',
+      "const prefetch = 1; // fetched later",
+    ];
+    for (const source of GOOD) expect(violations(source), source).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// main(["calibrate", ...]): the entry point the operator runs
+// ---------------------------------------------------------------------------------------------
+
+describe('main(["calibrate", ...]) never posts, and refuses everything that would', () => {
+  interface Received {
+    path: string;
+  }
+  const received: Received[] = [];
+  let worker: ReturnType<typeof Bun.serve>;
+  beforeAll(() => {
+    worker = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        received.push({ path: new URL(req.url).pathname });
+        return Response.json({ ok: true });
+      },
+    });
+  });
+  afterAll(() => {
+    worker.stop(true);
+  });
+  beforeEach(() => {
+    received.length = 0;
+  });
+
+  /** Run `main` with its output captured and both callback origins pointed at the Worker stand-in. */
+  async function runMain(argv: string[], env: Record<string, string> = {}) {
+    const lines: string[] = [];
+    const original = { log: console.log, error: console.error };
+    console.log = (...a: unknown[]) => void lines.push(a.map(String).join(" "));
+    console.error = (...a: unknown[]) => void lines.push(a.map(String).join(" "));
+    for (const [k, v] of Object.entries(env)) process.env[k] = v;
+    try {
+      const code = await main(argv, {
+        production: `http://127.0.0.1:${worker.port}`,
+        dev: `http://127.0.0.1:${worker.port}`,
+      });
+      return { code, log: lines.join("\n") };
+    } finally {
+      Object.assign(console, original);
+      for (const k of Object.keys(env)) Reflect.deleteProperty(process.env, k);
+    }
+  }
+
+  function runArgv(extra: string[] = []): { argv: string[]; out: string } {
+    const out = join(root, `records-${++seq}.jsonl`);
+    return {
+      argv: ["calibrate", "run", "--corpus", oneEntryCorpus("nm000001"), "--out", out, ...extra],
+      out,
+    };
+  }
+
+  function expectNothingHappened(out: string) {
+    expect(modelRequests).toHaveLength(0);
+    expect(received).toHaveLength(0);
+    expect(existsSync(out)).toBe(false);
+  }
+
+  test("--environment is refused, for either subcommand, before anything is read or sent", async () => {
+    for (const environment of ["dev", "production"]) {
+      const { argv, out } = runArgv(["--environment", environment]);
+      const { code, log } = await runMain(argv);
+      expect(code, environment).toBe(2);
+      expect(log).toContain("--environment is refused");
+      expectNothingHappened(out);
+    }
+    const ids = join(root, "ids-refused.txt");
+    writeFileSync(ids, "nm000001\n");
+    const outDir = join(root, "corpus-refused-env");
+    const { code } = await runMain([
+      "calibrate",
+      "corpus",
+      "--ids-file",
+      ids,
+      "--out",
+      outDir,
+      "--environment",
+      "dev",
+    ]);
+    expect(code).toBe(2);
+    expect(existsSync(outDir)).toBe(false);
+  });
+
+  test.each([
+    ["callback-url", "http://corpus.invalid/x"],
+    ["callback-token", "t"],
+    ["origin", "http://corpus.invalid"],
+    ["token", "t"],
+    ["review-id", "41"],
+    ["request-id", "17"],
+    ["dataset", "nm000001"],
+    ["repo-dir", "/tmp/x"],
+    ["head", "a".repeat(40)],
+    ["fetched-head", "a".repeat(40)],
+    ["tags-file", "/tmp/x"],
+    ["bids-runs-file", "/tmp/x"],
+    ["anonymous", "false"],
+  ])("--%s, an argument of the review that posts, is refused", async (flag, value) => {
+    const { argv, out } = runArgv([`--${flag}`, value]);
+    const { code, log } = await runMain(argv);
+    expect(code).toBe(2);
+    expect(log).toContain(`--${flag} is refused`);
+    expectNothingHappened(out);
+  });
+
+  test("a callback token in the environment stops the run: this is not a review", async () => {
+    const { argv, out } = runArgv();
+    const { code, log } = await runMain(argv, { PUBLICATION_REVIEW_CALLBACK_TOKEN: "a-token" });
+    expect(code).toBe(2);
+    expect(log).toContain("posts nothing");
+    expectNothingHappened(out);
+  });
+
+  test("anything it does not know is refused: unknown flags, stray words, missing and repeated values", async () => {
+    const cases: string[][] = [
+      ["--surprise", "1"],
+      ["stray"],
+      ["--limit"],
+      ["--limit", "3", "--limit", "4"],
+      ["--limit", "0"],
+      ["--limit", "two"],
+      ["--model", "claude-opus-5-5"],
+      ["--model", "claude-haiku-5-5-latest"],
+    ];
+    for (const extra of cases) {
+      const { argv, out } = runArgv(extra);
+      const { code } = await runMain(argv);
+      expect(code, extra.join(" ")).toBe(2);
+      expectNothingHappened(out);
+    }
+    for (const argv of [["calibrate"], ["calibrate", "post"], ["calibrate", "--corpus", "x"]]) {
+      const { code } = await runMain(argv);
+      expect(code, argv.join(" ")).toBe(2);
+    }
+    expect(modelRequests).toHaveLength(0);
+  });
+
+  test("a run through main reviews the corpus, prints only counts, and sends nothing to the Worker", async () => {
+    modelReply = () =>
+      messageReply(
+        JSON.stringify({
+          ...PASS_OUTPUT,
+          findings: [
+            {
+              question: "name_adequate",
+              severity: "note",
+              code: "other",
+              document: "none",
+              note: MODEL_NOTE_SENTINEL,
+            },
+          ],
+        }),
+      );
+    const { argv, out } = runArgv(["--model", "claude-sonnet-5-5"]);
+    const { code, log } = await runMain(argv);
+    expect(code).toBe(0);
+    expect(log).toBe(
+      "calibrate: 1 records, 0 errors (pass 1, fail 0, action_required 0); model claude-sonnet-5-5",
+    );
+    expect(modelRequests).toHaveLength(1);
+    expect((modelRequests[0] as ModelRequest).body.model).toBe("claude-sonnet-5-5");
+    expect(received).toHaveLength(0);
+    expect(readRecords(out)).toMatchObject([{ id: "nm000001", model: "claude-sonnet-5-5" }]);
+    for (const url of fetched) expect(url.startsWith(`${MODEL_ORIGIN()}/`), url).toBe(true);
+  });
+
+  test("--review-sheet with no path writes to the system temporary directory and says where", async () => {
+    const { argv } = runArgv(["--review-sheet"]);
+    const { code, log } = await runMain(argv);
+    expect(code).toBe(0);
+    const line = log.split("\n").find((l) => l.startsWith("review sheet: "));
+    const path = (line as string).slice("review sheet: ".length);
+    try {
+      expect(isInsideRepository(path)).toBe(false);
+      expect(readFileSync(path, "utf8")).toContain(MODEL_SUMMARY_SENTINEL);
+    } finally {
+      // The file this very run made, at the path it printed.
+      rmSync(path, { force: true });
+    }
+  });
+
+  test("--review-sheet inside the repository is refused, and so is a model it cannot reach", async () => {
+    const dir = join(REPO_ROOT, ".calibration-sheet-main-test");
+    try {
+      const { argv, out } = runArgv(["--review-sheet", join(dir, "sheet.csv")]);
+      const { code, log } = await runMain(argv);
+      expect(code).toBe(2);
+      expect(log).toContain("sheet_inside_repository");
+      expectNothingHappened(out);
+      expect(existsSync(dir)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a run in which every review failed exits 1, and one in which some did not exits 0", async () => {
+    modelReply = () => failureReply(401, "bad key");
+    const bad = runArgv();
+    expect((await runMain(bad.argv)).code).toBe(1);
+    expect(readRecords(bad.out)).toMatchObject([{ outcome: "error", error: "auth_failed" }]);
+  });
+
+  test("calibrate corpus builds a corpus from the repositories it is given and adds the copies", async () => {
+    const ids = join(root, "ids.txt");
+    writeFileSync(ids, "# the ids\nnm000001\n\nnm000003\nnm000004\nnm000099\nnm000001\n");
+    const outDir = join(root, "corpus-main");
+    const { code, log } = await runMain([
+      "calibrate",
+      "corpus",
+      "--ids-file",
+      ids,
+      "--out",
+      outDir,
+      "--remote-base",
+      REMOTE_BASE,
+      "--mutate-per-defect",
+      "1",
+    ]);
+    expect(code).toBe(0);
+    expect(log).toContain("corpus: 2 built, 2 skipped");
+    expect(log).toContain("skipped nm000004: description_unreadable");
+    expect(log).toContain("skipped nm000099: clone_failed");
+    expect(log).toMatch(/mutated copies: \d+ made/);
+    const entries = listEntries(outDir);
+    expect(entries.filter((e) => e.label === "good").map((e) => e.id)).toEqual([
+      "nm000001",
+      "nm000003",
+    ]);
+    expect(entries.length).toBeGreaterThan(2);
+    for (const line of log.split("\n")) {
+      for (const s of DOCUMENT_SENTINELS) expect(line, s).not.toContain(s);
+    }
+    expect(received).toHaveLength(0);
+  });
+
+  test("calibrate corpus refuses an id that is not a repository id and a remote that is not public https", async () => {
+    const ids = join(root, "ids-bad.txt");
+    writeFileSync(ids, "nm000001\n../etc\n");
+    const outDir = join(root, "corpus-main-bad");
+    expect(
+      (
+        await runMain([
+          "calibrate",
+          "corpus",
+          "--ids-file",
+          ids,
+          "--out",
+          outDir,
+          "--remote-base",
+          REMOTE_BASE,
+        ])
+      ).code,
+    ).toBe(2);
+    writeFileSync(ids, "nm000001\n");
+    const { code, log } = await runMain([
+      "calibrate",
+      "corpus",
+      "--ids-file",
+      ids,
+      "--out",
+      outDir,
+      "--remote-base",
+      "ssh://corpus.invalid/x",
+    ]);
+    expect(code).toBe(2);
+    expect(log).toContain("bad_remote");
+    expect(existsSync(outDir)).toBe(false);
+  });
+});
