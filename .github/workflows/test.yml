@@ -48,9 +48,11 @@ jobs:
   # Check what files changed to determine which tests to run
   changes:
     runs-on: ubuntu-latest
-    # p95 10 s (50 green runs to 2026-10-13). Bounded so a hang costs minutes, not the 360-minute default.
+    # p95 10 s (50 green runs to 2026-10-13); 10 is the floor.
     timeout-minutes: 10
     outputs:
+      # True on the release bot's version-only push (scripts/ci/classify-push.sh).
+      version_bump: ${{ steps.push.outputs.version_bump }}
       cli: ${{ steps.filter.outputs.cli }}
       backend: ${{ steps.filter.outputs.backend }}
       tests: ${{ steps.filter.outputs.tests }}
@@ -71,8 +73,28 @@ jobs:
       scrub_suites: ${{ steps.filter.outputs.scrub }}
     steps:
       - uses: actions/checkout@v4
+      # THE RELEASE BOT'S VERSION COMMITS RUN NOTHING. auto-bump-dev.yml pushes one on
+      # top of every merge into dev, auto-tag.yml one on main per release, and
+      # sync-dev.yml one with its merge of main into dev. Each changes nothing but the
+      # `version` field of package.json and backend/package.json, so its code is the code
+      # of the commit before it, which its own push run already tested; yet package.json
+      # matched `cli` and backend/package.json `backend`, so each one re-ran lint,
+      # unit-pure, integration-dev and the sandbox jobs (23% of this workflow's runner
+      # time, 2026-09-15 to 2026-10-13). Skipping the filter leaves every output empty,
+      # every job below is skipped by its `if:`, and a skipped job still reports its
+      # required check (`lint`, `unit-pure`, `integration-dev`) as passing.
+      #
+      # Push events only: on a pull request the filter sees the whole PR diff, and a
+      # release pull request's head is always such a commit. The script also checks the
+      # diff, not only the author and subject, and falls back to running everything
+      # whenever it cannot tell.
+      - name: Classify the push
+        id: push
+        if: github.event_name == 'push'
+        run: scripts/ci/classify-push.sh >> "$GITHUB_OUTPUT"
       - uses: dorny/paths-filter@v3
         id: filter
+        if: steps.push.outputs.version_bump != 'true'
         with:
           filters: |
             cli:
