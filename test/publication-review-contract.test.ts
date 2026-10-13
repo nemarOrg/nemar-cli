@@ -1256,6 +1256,38 @@ describe("the reasons table", () => {
     }
   });
 
+  test("the order is exactly ADR 0102's: the hard reasons, the screen's acknowledgment, then the overrides", () => {
+    expect([...REASON_CODES]).toEqual([
+      // Hard: the request, the minimums and the screen's finding (fail), the screen's gaps
+      // (unknown), then the release's own (fail).
+      "request_blocked",
+      "submission_minimum_failed",
+      "identifier_screen_blocks",
+      "identifier_screen_not_run",
+      "identifier_screen_pending",
+      "identifier_screen_stale",
+      "version_kept_after_anonymous_release",
+      "identifier_screen_needs_acknowledgment",
+      // Overrides, fail class first.
+      "question_failed",
+      "steering_attempt",
+      "bids_failed_at_review",
+      "version_already_released",
+      "version_malformed",
+      "stored_verdict_fail",
+      "review_not_started",
+      "review_running",
+      "review_did_not_report",
+      "review_limit_reached",
+      "review_could_not_run",
+      "text_withheld",
+      "question_unknown",
+      "bids_unconcluded_at_review",
+      "version_missing",
+      "doi_state_unexpected",
+    ]);
+  });
+
   test("the order lists what nothing clears first, then the screen's, then the overrides, fail first", () => {
     const by = REASON_CODES.map((c) => REASONS[c]);
     const stage = (r: (typeof by)[number]) =>

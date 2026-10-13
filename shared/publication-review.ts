@@ -989,8 +989,17 @@ export function isPublicationOutcome(x: unknown): x is PublicationOutcome {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Every reason a request is not a pass, in the order surfaces list them: what nothing clears
- * first, then the screen's own, then what an administrator's override clears, fail before unknown.
+ * Every reason a request is not a pass, in the order surfaces list them. Three groups, in this order:
+ *
+ *  1. What nothing clears (the hard reasons): `request_blocked`, `submission_minimum_failed` and
+ *     `identifier_screen_blocks` (fail), then the screen's own gaps (`identifier_screen_not_run`,
+ *     `identifier_screen_pending`, `identifier_screen_stale`, unknown), then
+ *     `version_kept_after_anonymous_release` (fail). The last one is hard but sits after the
+ *     screen's gaps because it is about the release, not the request or the screen.
+ *  2. The screen's acknowledgment reason, which a recorded acknowledgment clears.
+ *  3. What an administrator's override clears, fail class before unknown class.
+ *
+ * A test pins the exact order, so a new code is placed on purpose.
  */
 export const REASON_CODES = [
   "request_blocked",
