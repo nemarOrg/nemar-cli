@@ -237,7 +237,8 @@ and otherwise record `action_required`. Three readings were weighed.
   and Phase 1 widens that summary to the numbers a README states (subjects, sessions, channels, sampling rates, recording formats, modalities),
   so `readme_mismatch` compares prose with facts the platform computed, and the model is shown the numbers and never the values.
   A richer, administrator-run look at a local clone with their own tools stays the administrator's own act (ADR 0093) and is not built here.
-  The maintainer decides whether to reopen this; it would amend ADR 0101's hard constraint and the policy statement, not just the job.
+  The maintainer confirmed on 2026-10-13 that it is not built: the review stays a no-tools call over cleared prose, with the checks moved into code.
+  Reopening it would amend ADR 0101's hard constraint and the policy statement, not just the job.
 
 Under B the ordering still matters:
 a request with direct identifiers in its headers, which the screen blocks, never reaches a model,
