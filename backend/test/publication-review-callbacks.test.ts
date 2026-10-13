@@ -31,6 +31,7 @@ import {
   signPrReviewCallbackToken,
   signPublicationReviewCallbackToken,
 } from "../src/services/github/callback-tokens";
+import { notifyAdminsOfScreen } from "../src/services/identifier-screen";
 import {
   CAP_CALLS_SQL,
   PLATFORM_RANK_SQL,
@@ -1168,6 +1169,93 @@ describe("the watchdog", () => {
       expect(state(reviewId)).toMatchObject({ state: "reported", verdict: "pass", nonce: null });
       // The mail already sent said the review did not report: the late report mails again.
       expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(2);
+    });
+  });
+
+  test("a report past the deadline re-arms the mail even when no watchdog has marked the row", async () => {
+    // The mail goes at the deadline and says the review did not report (the lease frees it
+    // there). The watchdog may not have run, errored, or not reached this row among the twenty
+    // it takes in a tick, so the row can still be `dispatched` when the report arrives: it is
+    // late all the same, and the result has to reach the administrators.
+    seedAdmin();
+    const { requestId, reviewId } = dispatched({ minutesAgo: 45, mailed: false, claimed: true });
+    const token = await h.tokenFor(reviewId);
+    await withFakeResend(async (calls) => {
+      expect(await notifyAdminsOfScreen(h.env(), requestId)).toBe("sent");
+      expect(state(reviewId).state).toBe("dispatched");
+      expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(1);
+
+      const late = await h.result(
+        reviewId,
+        { outcome: "reported", report: reportFor(SCREENED_HEAD, false) },
+        token,
+      );
+      expect(late.status).toBe(200);
+      expect(state(reviewId)).toMatchObject({ state: "reported", verdict: "pass" });
+      const mails = sendsTo(calls, ADMIN_EMAIL);
+      expect(mails).toHaveLength(2);
+      expect(mails[1].html).toContain("Publication review: pass");
+    });
+  });
+
+  test("a report inside the deadline does not re-arm a mail that has already gone", async () => {
+    seedAdmin();
+    const { requestId, reviewId } = dispatched({ minutesAgo: 10, mailed: true, claimed: true });
+    const token = await h.tokenFor(reviewId);
+    const stamp = h.requestRow(requestId).identifier_screen_emailed_at;
+    await withFakeResend(async (calls) => {
+      const res = await h.result(
+        reviewId,
+        { outcome: "reported", report: reportFor(SCREENED_HEAD, false) },
+        token,
+      );
+      expect(res.status).toBe(200);
+      expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(0);
+    });
+    expect(h.requestRow(requestId).identifier_screen_emailed_at).toBe(stamp);
+  });
+
+  test("a report nobody claimed is refused past the deadline too, and re-arms nothing", async () => {
+    // The re-arm rides in the same batch as the write and is guarded by the same predicate, so a
+    // report the write refuses (no claim was taken) cannot release a mail that already went.
+    seedAdmin();
+    const { requestId, reviewId } = dispatched({ minutesAgo: 45, mailed: true });
+    const token = await h.tokenFor(reviewId);
+    const stamp = h.requestRow(requestId).identifier_screen_emailed_at;
+    await withFakeResend(async (calls) => {
+      const res = await h.result(
+        reviewId,
+        { outcome: "reported", report: reportFor(SCREENED_HEAD, false) },
+        token,
+      );
+      expect(res.status).toBe(401);
+      expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(0);
+    });
+    expect(state(reviewId)).toMatchObject({ state: "dispatched" });
+    expect(h.requestRow(requestId).identifier_screen_emailed_at).toBe(stamp);
+  });
+
+  test("a late error outcome re-arms the mail too: a late outcome of any kind is new information", async () => {
+    seedAdmin();
+    const { requestId, reviewId } = dispatched({ minutesAgo: 45, mailed: false });
+    const token = await h.tokenFor(reviewId);
+    await withFakeResend(async (calls) => {
+      await sweepPublicationReviews(h.env());
+      expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(1);
+      expect(state(reviewId).state).toBe("unreported");
+
+      const late = await h.result(reviewId, { outcome: "error", error: "model_refused" }, token);
+      expect(late.status).toBe(200);
+      expect(state(reviewId)).toMatchObject({
+        state: "errored",
+        detail: "model_refused",
+        nonce: null,
+      });
+      // The first mail said the review did not report; this one says why it could not run.
+      const mails = sendsTo(calls, ADMIN_EMAIL);
+      expect(mails).toHaveLength(2);
+      expect(mails[1].html).toContain("The review could not run");
+      expect(h.requestRow(requestId).identifier_screen_emailed_at).not.toBeNull();
     });
   });
 

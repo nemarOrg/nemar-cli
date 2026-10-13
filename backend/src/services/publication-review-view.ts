@@ -7,8 +7,9 @@
  * rebuilds the reasons from the stored report ({@link rowViewOf} re-parses it every time) and
  * from facts read now ({@link LiveFacts}), and shows the STRICTER of the stored verdict and the
  * re-derived outcome. Either can lower an outcome and neither can raise it. A fact that cannot be
- * read is never guessed: the read throws, and the caller says so (the mail names it, the routes
- * answer 500), because an outcome built on a guess could be a pass.
+ * read is never guessed: the read throws, and the caller says so (the mail names it, the detail
+ * route answers 500, and the list shows that one row as unreadable and still answers), because an
+ * outcome built on a guess could be a pass.
  *
  * **The review in force is the row of the screened head and the request's flag.** The head comes
  * from `readStoredReport(...)?.head`, the gate's own reader. A row of another head or flag is
@@ -17,15 +18,20 @@
  * **Only a request in `requested` is reviewed** (ADR 0101, section 7: the claim requires it). A
  * request in another state shows its stored review as history and never as a wait: a dispatched
  * row of such a request reads as one that did not report, so no surface says "running" about a
- * review whose result can no longer settle anything. Its live facts are not read either: they
- * describe an approval that is not going to happen, and a published request would otherwise read
- * as one whose version "was already released".
+ * review whose result can no longer settle anything. Its live facts are not read either, apart from
+ * the two statuses {@link LIVE_FACT_STATUSES} names: they describe an approval that is not going to
+ * happen (a published request would otherwise read as one whose version "was already released"),
+ * or one that is under way and has written them itself (an `approving` request).
  *
  * **What a viewer may read** is counts, closed words and the shared sentences. The model's summary
  * and the notes of its findings, both sanitized by the parser, appear in the detail view and
  * nowhere else: the list carries the headline and the reason codes, and the email carries the
  * headline, the reasons, the next command and no model-written text at all. No nonce is read:
  * every statement here selects named columns, and `publication-review-rows.ts` never selects it.
+ *
+ * **Not assessed is not "action required".** A request with no review on record and no gate on it
+ * (the review is off, or the request is over) has no outcome and no reasons, like a mirror, so the
+ * outcome never contradicts a headline that says "not reviewed".
  *
  * The module imports the row readers and the stored-screen readers, and nothing of the screen's
  * mail or the review's write path, so `identifier-screen.ts` can import it without a cycle.
@@ -44,6 +50,7 @@ import { type ScreenGate, screenGate } from "../../../shared/identifier-screen-r
 import {
   type LiveFacts,
   NOT_ASSESSED_LINE,
+  PUBLICATION_REVIEW_DEADLINE_MINUTES,
   type PublicationDeclineDetail,
   type PublicationOutcome,
   type PublicationReviewDescription,
@@ -52,11 +59,13 @@ import {
   type PublicationRunError,
   REASONS,
   REASON_CODES,
+  REVIEW_OVERDUE_VIEW_MINUTES,
   type Reason,
   type ReasonCode,
   type ReviewRowView,
   answersOf,
   describePublicationReview,
+  effectiveVersionOf,
   isPublicationDeclineDetail,
   isPublicationOutcome,
   isPublicationReviewState,
@@ -72,9 +81,13 @@ import type { PublicationReviewSection } from "./email.js";
 import { isNonProductionEnv } from "./environment.js";
 import { readStoredReport, readStoredState } from "./identifier-screen-stored.js";
 import {
+  MAX_KEYS_PER_READ,
   type PublicationReviewRow,
+  type ReviewKey,
   listReviewsOfRequest,
   readReviewByKey,
+  readReviewsByKeys,
+  reviewKeyText,
   rowViewOf,
 } from "./publication-review-rows.js";
 import { requiresUploaderName } from "./uploader-identity.js";
@@ -102,10 +115,30 @@ export function publicationReviewApplies(dataset: {
 }
 
 /**
- * The statuses whose live facts are read: the requests an approval could still act on, the same
- * set as `ACTIVE_REQUEST_TAIL_SQL`. A request in any other status shows its stored review only.
+ * The statuses whose live version and DOI facts are read: those where nothing of an approval has
+ * been written yet, so a `dataset_versions` row or a concept DOI on the dataset can only belong to
+ * an EARLIER release, which is what the checks look for.
+ *
+ *  - `requested`: waiting for its decision.
+ *  - `blocked`: a request is blocked before an approval step runs (the one walk back from
+ *    `approving`, the owner-name check, is ahead of the first step), so it has written nothing
+ *    either. Its facts are informative, and the hard `request_blocked` stands beside them.
+ *
+ * Not `approving`: the approval run has by then written its own `dataset_versions` row and concept
+ * DOI, and read as live facts they would say "already released" and "unexpected DOI" about a run
+ * that should be RESUMED, with `approve --force` as its next command. An `approving` request, like
+ * every request that is over (`published`, `denied`), shows its stored review and the stored
+ * verdict only; the approval gate (Phase 2) skips a resumed run that has started publishing for the
+ * same reason (`hasStartedPublishing`).
  */
-const LIVE_FACT_STATUSES: ReadonlySet<string> = new Set(["requested", "approving", "blocked"]);
+const LIVE_FACT_STATUSES: ReadonlySet<string> = new Set(["requested", "blocked"]);
+
+/**
+ * The statuses of a request an approval could still act on, the same set as
+ * `ACTIVE_REQUEST_TAIL_SQL`: a request in any other status is over, and with no review on record
+ * there is nothing to assess about it.
+ */
+const ACTIVE_STATUSES: ReadonlySet<string> = new Set(["requested", "approving", "blocked"]);
 
 /**
  * `isScreenExempt` of `identifier-screen.ts`, stated again because that module imports this one.
@@ -148,6 +181,18 @@ export interface ReviewContext {
   nowMs: number;
   request: ReviewRequestFields;
   dataset: ReviewDatasetFields | null;
+  /**
+   * How old a dispatched row is before it reads as one that did not report. Default
+   * {@link REVIEW_OVERDUE_VIEW_MINUTES}, which the list and the detail use. The admin mail passes
+   * {@link PUBLICATION_REVIEW_DEADLINE_MINUTES}: see {@link publicationReviewEmailSection}.
+   */
+  overdueMinutes?: number;
+  /**
+   * The review in force, when the caller has already read it (the list reads every row's in one
+   * statement, {@link readReviewsByKeys}): the row, or null for "none on record". Left out, the
+   * derivation reads it itself.
+   */
+  reviewRow?: PublicationReviewRow | null;
 }
 
 export interface DerivedPublicationReview {
@@ -159,7 +204,11 @@ export interface DerivedPublicationReview {
   rowView: ReviewRowView;
   live: LiveFacts;
   reasons: Reason[];
-  /** The stricter of the stored verdict and the re-derived one; null only when the review does not apply. */
+  /**
+   * The stricter of the stored verdict and the re-derived one. Null when the request is not
+   * assessed: the review does not apply to it, or no review is on record and none gates it (the
+   * review is off, or the request is over).
+   */
   outcome: PublicationOutcome | null;
   description: PublicationReviewDescription;
 }
@@ -190,11 +239,39 @@ const VERSION_ROW_SQL =
 const EARLIER_ANONYMOUS_REQUEST_SQL =
   "SELECT 1 AS found FROM publication_requests WHERE dataset_id = ? AND anonymous = 1 AND id < ? LIMIT 1";
 
+/** The screen's side of a request: the commit it read and the gate its state gives. */
+function screenOf(request: ReviewRequestFields): {
+  head: string | null;
+  gate: ScreenGate | "exempt";
+} {
+  const state = readStoredState(request.identifier_screen_status);
+  const screenReport = state === null ? null : readStoredReport(request.identifier_screen_report);
+  return {
+    head: screenReport?.head ?? null,
+    gate: screenExempt(request.dataset_id) ? "exempt" : screenGate(state),
+  };
+}
+
 /**
- * Everything a surface shows, re-derived now. Reads the review in force and, for a request an
- * approval could still act on, three facts: a version row, an earlier anonymous request and the
- * concept DOI. No GitHub call is made anywhere in this module: `head_current` stays null, and only
- * the approval gate (Phase 2) asks GitHub whether the screened commit is still `main`.
+ * The coordinates of the review in force: the request, the commit its screen read and its release
+ * kind. Null when the review does not apply to the dataset, or the screen read no commit, so there
+ * is no row to look for.
+ */
+function reviewKeyOf(
+  request: ReviewRequestFields,
+  dataset: ReviewDatasetFields | null,
+): ReviewKey | null {
+  const { head } = screenOf(request);
+  if (!publicationReviewApplies(dataset ?? {}) || head === null || !HEAD.test(head)) return null;
+  return { requestId: request.id, headSha: head, anonymous: request.anonymous === 1 };
+}
+
+/**
+ * Everything a surface shows, re-derived now. Reads the review in force and, for a request whose
+ * approval has written nothing yet ({@link LIVE_FACT_STATUSES}), three facts: a version row for
+ * the version an approval would publish, an earlier anonymous request and the concept DOI. No
+ * GitHub call is made anywhere in this module: `head_current` stays null, and only the approval
+ * gate (Phase 2) asks GitHub whether the screened commit is still `main`.
  *
  * Throws when a read fails. It never answers from a fact it could not read.
  */
@@ -207,19 +284,17 @@ export async function derivePublicationReview(
   const applies = publicationReviewApplies(dataset ?? {});
   const anonymous = request.anonymous === 1;
 
-  const state = readStoredState(request.identifier_screen_status);
-  const screenReport = state === null ? null : readStoredReport(request.identifier_screen_report);
-  const head = screenReport?.head ?? null;
-  const gate: ScreenGate | "exempt" = screenExempt(request.dataset_id)
-    ? "exempt"
-    : screenGate(state);
+  const { head, gate } = screenOf(request);
 
   let row: PublicationReviewRow | null = null;
   let rowView: ReviewRowView = { kind: "none" };
   if (applies && head !== null && HEAD.test(head)) {
-    row = await readReviewByKey(db, request.id, head, anonymous);
+    row =
+      ctx.reviewRow !== undefined
+        ? ctx.reviewRow
+        : await readReviewByKey(db, request.id, head, anonymous);
     if (row !== null) {
-      rowView = rowViewOf(row, ctx.nowMs);
+      rowView = rowViewOf(row, ctx.nowMs, ctx.overdueMinutes);
       // Only `requested` is reviewed: a dispatched row of any other request is not waited for.
       if (request.status !== "requested" && rowView.kind === "dispatched") {
         rowView = { kind: "dispatched", overdue: true };
@@ -227,12 +302,23 @@ export async function derivePublicationReview(
     }
   }
 
+  // Not assessed: no review is on record AND nothing of the review gates this request (the review
+  // is off, or the request is over). Such a request has no outcome and no reason, as a mirror has
+  // none, so a client that renders `outcome` cannot contradict the headline ("not reviewed"), and
+  // no live fact is read for it. An open request with the review on and no row IS assessed: the
+  // missing review is its reason.
+  const closed = !ACTIVE_STATUSES.has(request.status);
+  const assessed = !(row === null && (!enabled || closed));
+
   const report = reportOf(rowView);
   const version = report?.evidence.version ?? null;
-  const readFacts = applies && LIVE_FACT_STATUSES.has(request.status);
+  // What an approval would publish: a dataset with no Version is published as 1.0.0, so that is
+  // the version whose release the live checks must look for (a malformed one has none).
+  const publishedVersion = report === null ? null : effectiveVersionOf(report.evidence);
+  const readFacts = applies && assessed && LIVE_FACT_STATUSES.has(request.status);
   const versionRowExists =
-    readFacts && version !== null
-      ? await exists(db, VERSION_ROW_SQL, request.dataset_id, version)
+    readFacts && publishedVersion !== null
+      ? await exists(db, VERSION_ROW_SQL, request.dataset_id, publishedVersion)
       : false;
   const conceptDoiPresent = readFacts && (dataset?.concept_doi ?? "").trim() !== "";
   // Asked only when a rule below can use the answer: a version row (which of the two version
@@ -285,6 +371,31 @@ export async function derivePublicationReview(
     };
   }
 
+  if (!assessed) {
+    return {
+      applies,
+      enabled,
+      gate: enabled ? "enforced" : "off",
+      row: null,
+      rowView,
+      live,
+      reasons: [],
+      outcome: null,
+      description: describePublicationReview({
+        datasetId: request.dataset_id,
+        applies,
+        enabled,
+        outcome: null,
+        reasons: [],
+        row: rowView,
+        model: null,
+        head: null,
+        version: null,
+        closed,
+      }),
+    };
+  }
+
   const reasons = reasonsOf({ live, row: rowView });
   // The stricter of the stored verdict and the outcome of the reasons just derived. `reasonsOf`
   // already says why a stored verdict is stricter than its report, so the two agree in practice;
@@ -310,6 +421,7 @@ export async function derivePublicationReview(
       model: report?.model ?? null,
       head: row?.headSha ?? head,
       version,
+      closed,
     }),
   };
 }
@@ -326,18 +438,14 @@ function viewKindOf(d: DerivedPublicationReview): PublicationReviewViewKind {
   return "decided";
 }
 
+/** What every surface says when it could not read the review: a fixed sentence, never a pass. */
+const UNREADABLE_HEADLINE = "Publication review: could not be read";
+
 /**
- * The review of one row of `GET /admin/publish/requests`: the outcome, the headline and the
- * reason codes. No sentence of the model's, and no sentence a client could not take from the
- * shared words.
+ * One row of `GET /admin/publish/requests`: the outcome, the headline and the reason codes. No
+ * sentence of the model's, and no sentence a client could not take from the shared words.
  */
-export async function publicationReviewSummary(
-  env: Bindings,
-  request: ReviewRequestFields,
-  dataset: ReviewDatasetFields | null,
-  nowMs: number = Date.now(),
-): Promise<PublicationReviewSummary> {
-  const d = await derivePublicationReview({ env, nowMs, request, dataset });
+function summaryOf(d: DerivedPublicationReview): PublicationReviewSummary {
   return {
     kind: viewKindOf(d),
     enabled: d.enabled,
@@ -349,6 +457,107 @@ export async function publicationReviewSummary(
     review_id: d.row?.id ?? null,
     head_sha: d.row?.headSha ?? null,
   };
+}
+
+/**
+ * The summary of a request whose review could not be read: not a pass, and not a reason to fail
+ * the rest of a list. The fixed headline of the mail's unreadable section and the reason
+ * `review_could_not_run`, so a client that renders the server's words says the same everywhere.
+ */
+function unreadableSummary(enabled: boolean): PublicationReviewSummary {
+  return {
+    kind: enabled ? "decided" : "off",
+    enabled,
+    gate: enabled ? "enforced" : "off",
+    outcome: "action_required",
+    headline: UNREADABLE_HEADLINE,
+    tone: "warn",
+    reasons: ["review_could_not_run"],
+    review_id: null,
+    head_sha: null,
+  };
+}
+
+/** One request of a list, with the dataset columns the derivation reads. */
+export interface ReviewListItem {
+  request: ReviewRequestFields;
+  dataset: ReviewDatasetFields | null;
+}
+
+/** How many requests of a list derive at once: each can ask D1 for up to two live facts. */
+export const LIST_CONCURRENCY = 8;
+
+/**
+ * The summaries of a whole list, in order, at a cost that does not grow with what each row needs.
+ *
+ *  - The review in force of every row is read in batches of {@link MAX_KEYS_PER_READ} requests (one
+ *    statement each), never once per row. A request that is over, or being approved, then needs no
+ *    other statement: its live facts are not read ({@link LIVE_FACT_STATUSES}).
+ *  - The rest of a row's derivation (a version row, an earlier anonymous request) runs
+ *    {@link LIST_CONCURRENCY} rows at a time, so a long list does not put a request for every row
+ *    in flight at once.
+ *  - Each row stands alone. A read that fails costs the rows it was for, and nothing else: they
+ *    read as {@link unreadableSummary} (never a pass), only ids and a closed class are logged, and
+ *    the list still answers. One bad row used to fail the queue for every administrator.
+ */
+export async function publicationReviewSummaries(
+  env: Bindings,
+  items: readonly ReviewListItem[],
+  nowMs: number = Date.now(),
+): Promise<PublicationReviewSummary[]> {
+  const enabled = reviewEnabled(env);
+  const keys = items.map((i) => reviewKeyOf(i.request, i.dataset));
+
+  // The review rows, one statement per chunk. A chunk that cannot be read marks its rows.
+  const rows = new Map<string, PublicationReviewRow>();
+  const unreadable = new Set<number>();
+  const wanted = keys.flatMap((key, index) => (key === null ? [] : [{ key, index }]));
+  for (let i = 0; i < wanted.length; i += MAX_KEYS_PER_READ) {
+    const chunk = wanted.slice(i, i + MAX_KEYS_PER_READ);
+    try {
+      const got = await readReviewsByKeys(
+        env.DB,
+        chunk.map((w) => w.key),
+      );
+      for (const [text, row] of got) rows.set(text, row);
+    } catch (err) {
+      console.error(
+        `[publication-review] could not read the reviews of ${chunk.length} requests for the list (${readFailureWords(err)})`,
+      );
+      for (const w of chunk) unreadable.add(w.index);
+    }
+  }
+
+  const summaries: PublicationReviewSummary[] = [];
+  for (let start = 0; start < items.length; start += LIST_CONCURRENCY) {
+    const batch = items.slice(start, start + LIST_CONCURRENCY);
+    summaries.push(
+      ...(await Promise.all(
+        batch.map(async (item, offset) => {
+          const index = start + offset;
+          if (unreadable.has(index)) return unreadableSummary(enabled);
+          try {
+            const key = keys[index];
+            return summaryOf(
+              await derivePublicationReview({
+                env,
+                nowMs,
+                request: item.request,
+                dataset: item.dataset,
+                reviewRow: key === null ? undefined : (rows.get(reviewKeyText(key)) ?? null),
+              }),
+            );
+          } catch (err) {
+            console.error(
+              `[publication-review] could not read the review of request ${item.request.id} for the list (${readFailureWords(err)})`,
+            );
+            return unreadableSummary(enabled);
+          }
+        }),
+      )),
+    );
+  }
+  return summaries;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -540,10 +749,28 @@ export async function publicationReviewDetail(
  */
 export const SUMMARY_LINE_PREFIX = "Reviewer's summary: ";
 
+/**
+ * What a failed read is called in a log line: the error's name and one word of a closed list, and
+ * never its message, which can carry SQL or text a service echoed. `no_such_table` is the one a
+ * deploy before the review's migration is applied produces; `timeout` is a read that did not
+ * answer; anything else is `other`. The name is shown only when it is a plain identifier.
+ */
+export function readFailureWords(err: unknown): string {
+  const name =
+    err instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,39}$/.test(err.name) ? err.name : "unknown";
+  const message = err instanceof Error ? err.message : "";
+  const kind = /no such table/i.test(message)
+    ? "no_such_table"
+    : name === "TimeoutError" || name === "AbortError" || /time(d)? ?out/i.test(message)
+      ? "timeout"
+      : "other";
+  return `${name}, ${kind}`;
+}
+
 /** What the mail says when the review could not be read: a fixed sentence, never a pass. */
 function unreadableSection(datasetId: string): PublicationReviewSection {
   return {
-    headline: "Publication review: could not be read",
+    headline: UNREADABLE_HEADLINE,
     tone: "warn",
     lines: [
       "The review's state could not be read just now, so it is not known. This is not a pass.",
@@ -558,12 +785,26 @@ function unreadableSection(datasetId: string): PublicationReviewSection {
  * words, the next command and the standing line. Never the model's summary, and never any text
  * the model wrote.
  *
- * Null when there is nothing to add: the request is gone, or the review is off and has no row,
- * which leaves the mail exactly as it was before the review existed. A request the review does
- * not apply to says so while the review is on, as the screen's section does for a sandbox.
+ * Null when there is nothing to add: the request is gone, or the review is off and has no row
+ * (or its rows cannot be read), which leaves the mail exactly as it was before the review
+ * existed. A request the review does not apply to says so while the review is on, as the screen's
+ * section does for a sandbox.
  *
- * Never throws: a read that fails is logged (ids and fixed words only) and the mail says the
- * review could not be read, so an administrator is never told less than the truth.
+ * **The mail ages a dispatched row by the deadline, the lists by the deadline plus a tick.** The
+ * mail lease frees a held request when its review is older than
+ * {@link PUBLICATION_REVIEW_DEADLINE_MINUTES} (`reviewInFlightSql`), and the mail then goes out and
+ * is marked sent, so what it says about the review has to be true at that moment and cannot be
+ * corrected later by the watchdog, whose own mail would find nothing left to send. A row past the
+ * deadline is therefore read here as one that did not report, whether or not a watchdog has marked
+ * it yet, ran, or reached it among the rows it takes in a tick. The lists and the detail have no
+ * lease to explain and keep the longer window (ADR 0101, section 7: the deadline plus one tick),
+ * so they do not say "did not report" about a review the watchdog is about to close. (The lease
+ * reads SQLite's clock and this the Worker's, so a row within their skew of the deadline can be
+ * read either way: a matter of milliseconds.)
+ *
+ * Never throws: a read that fails is logged (ids and fixed words only) and, while the review is
+ * on, the mail says the review could not be read, so an administrator is never told less than the
+ * truth.
  */
 export async function publicationReviewEmailSection(
   env: Bindings,
@@ -575,7 +816,12 @@ export async function publicationReviewEmailSection(
     const ctx = await readContext(env, requestId);
     if (!ctx) return null;
     datasetId = ctx.request.dataset_id;
-    const d = await derivePublicationReview({ env, nowMs, ...ctx });
+    const d = await derivePublicationReview({
+      env,
+      nowMs,
+      ...ctx,
+      overdueMinutes: PUBLICATION_REVIEW_DEADLINE_MINUTES,
+    });
     if (!d.enabled && d.row === null) return null;
     return {
       headline: d.description.headline,
@@ -585,10 +831,14 @@ export async function publicationReviewEmailSection(
     };
   } catch (err) {
     console.error(
-      `[publication-review] could not read the review of request ${requestId} for the admin email (${
-        err instanceof Error ? err.name : "unknown"
-      })`,
+      `[publication-review] could not read the review of request ${requestId} for the admin email (${readFailureWords(err)})`,
     );
+    // With the review off there is nothing to add to the mail unless a stored review shows as
+    // advice, and the mail must then be exactly what it was before the review existed: a deploy
+    // before the review's migration is applied has no table to read, and no administrator should
+    // be told a review "could not be read" that nothing was ever going to start. With it on, the
+    // review is a gate, and not knowing its state is said so.
+    if (!reviewEnabled(env)) return null;
     return unreadableSection(datasetId);
   }
 }

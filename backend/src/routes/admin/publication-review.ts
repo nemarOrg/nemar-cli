@@ -18,7 +18,7 @@
 import type { Context } from "hono";
 import type { PublicationReviewErrorCode } from "../../../../shared/contract/publication-review-admin";
 import { isValidDatasetId } from "../../services/datasetId";
-import { publicationReviewDetail } from "../../services/publication-review-view";
+import { publicationReviewDetail, readFailureWords } from "../../services/publication-review-view";
 import type { AdminRouter } from "./shared";
 
 /** Answer with a fixed sentence and a code from the contract's closed list. */
@@ -45,9 +45,7 @@ export function registerPublicationReviewRoutes(admin: AdminRouter): void {
     } catch (err) {
       // Ids and fixed words only: the error text can carry SQL.
       console.error(
-        `[admin/publication-review] could not read the review of ${datasetId} (${
-          err instanceof Error ? err.name : "unknown"
-        })`,
+        `[admin/publication-review] could not read the review of ${datasetId} (${readFailureWords(err)})`,
       );
       return refuse(c, 500, "internal", "The publication review could not be read. Try again.");
     }

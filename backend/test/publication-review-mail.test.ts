@@ -24,6 +24,7 @@ import {
   describePublicationReview,
   parsePublicationReviewReport,
 } from "../../shared/publication-review";
+import { datasetRoutes } from "../src/routes/datasets";
 import webhooks from "../src/routes/webhooks";
 import { sendPublicationRequestEmail } from "../src/services/email";
 import { signIdentifierScreenCallbackToken } from "../src/services/github";
@@ -33,10 +34,16 @@ import {
   screenEmailSection,
   sweepIdentifierScreens,
 } from "../src/services/identifier-screen";
+import {
+  storePublicationReviewResult,
+  sweepPublicationReviews,
+} from "../src/services/publication-review";
 import { SUMMARY_LINE_PREFIX } from "../src/services/publication-review-view";
+import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
-import { freshDb, interceptingD1, realD1 } from "./helpers/d1";
+import { freshDb, interceptingD1, realD1, yieldingD1 } from "./helpers/d1";
 import { SCREENED_HEAD, cleanScreenReportBody } from "./helpers/identifier-screen";
+import { logged } from "./helpers/logs";
 import {
   type SeedReview,
   type SeedScreenedRequest,
@@ -119,6 +126,14 @@ function mailState(requestId: number) {
          FROM publication_requests WHERE id = ?`,
     )
     .get(requestId) as { emailed: string | null; claimed: string | null };
+}
+
+/** A D1 whose read of the review rows fails with `error`, and nothing else does. */
+function failingReviewReads(error: Error): D1Database {
+  return interceptingD1(realD1(db), (sql) => {
+    // The review row's read, not the lease (which only checks that one exists).
+    if (/^\s*SELECT .*FROM publication_reviews/s.test(sql)) throw error;
+  });
 }
 
 /** A report whose first question failed with a finding, and whose model wrote the two sentinels. */
@@ -209,17 +224,18 @@ describe("the mail waits for a review that is in flight", () => {
       next: "nemar admin publish start",
     },
     {
+      // The mail goes once the lease frees it, at the 30-minute deadline, and says what is true
+      // then: the review did not report. The lists and the detail wait for the deadline plus a
+      // watchdog tick (60 minutes) before they say it, because they have no lease to explain.
       name: "dispatched past the 30-minute deadline",
       seed: { state: "dispatched", createdMinutesAgo: 31 },
       headline: "Publication review: action required",
-      // The view's own bound is 60 minutes (a watchdog tick longer): the mail goes at 30 and
-      // says the review is running until then.
-      reasons: ["review_running"],
+      reasons: ["review_did_not_report"],
       words: [],
-      next: "nemar admin publish show",
+      next: "nemar admin publish start",
     },
     {
-      name: "dispatched past the view's overdue bound",
+      name: "dispatched past the views' overdue bound",
       seed: { state: "dispatched", createdMinutesAgo: 61 },
       headline: "Publication review: action required",
       reasons: ["review_did_not_report"],
@@ -461,6 +477,45 @@ describe("with the review off, the mail is what it was before the review existed
     });
   });
 
+  test("with the review off and no review row, a failed read of the review rows leaves the mail exactly as it was", async () => {
+    // A deploy before migration 0096 is applied: the table is not there, and the review is off, so
+    // the mail has nothing to say about it. It must not gain a "could not be read" section.
+    const { requestId, datasetId } = unmailed();
+    const row = db
+      .query<{ s: string; r: string }, [number]>(
+        "SELECT identifier_screen_status AS s, identifier_screen_report AS r FROM publication_requests WHERE id = ?",
+      )
+      .get(requestId) as { s: string; r: string };
+    const failing = failingReviewReads(new Error("no such table: publication_reviews"));
+    await withFakeResend(async (calls) => {
+      await sendPublicationRequestEmail(
+        [ADMIN_EMAIL],
+        datasetId,
+        `depositor_${datasetId}`,
+        "re_test",
+        "NEMAR <noreply@nemar.org>",
+        undefined,
+        false,
+        { ENVIRONMENT: "production" },
+        { anonymous: false, screen: screenEmailSection(datasetId, row.s, row.r) },
+      );
+      let outcome: string | undefined;
+      const lines = await logged(async () => {
+        outcome = await notifyAdminsOfScreen(
+          env({ PUBLICATION_REVIEW_ENABLED: undefined, DB: failing }),
+          requestId,
+        );
+      });
+      expect(outcome).toBe("sent");
+      const [direct, viaRoute] = sends(calls);
+      expect(viaRoute.html).toBe(direct.html);
+      expect(viaRoute.subject).toBe(direct.subject);
+      expect(viaRoute.html).not.toContain("Publication review");
+      // The failure is still logged, with its class and never its message.
+      expect(lines.join("\n")).toContain("no_such_table");
+    });
+  });
+
   test("a request the review does not apply to says so only while the review is on", async () => {
     const exempt: Array<Partial<SeedScreenedRequest>> = [
       { source: "openneuro" },
@@ -571,6 +626,250 @@ describe("the watchdog's unmailed pass", () => {
 
 // ============================================================================
 
+describe("a review that never reports is mailed once, and the mail says so", () => {
+  const DID_NOT_REPORT = REASONS.review_did_not_report.sentence.replace(/\.$/, "");
+  const RUNNING = REASONS.review_running.sentence;
+
+  /** An unmailed request whose screen is old enough for the watchdog and whose review is dispatched. */
+  function neverReporting(minutesAgo = 40) {
+    const r = unmailed();
+    db.run(
+      "UPDATE publication_requests SET identifier_screen_at = datetime('now', '-90 minutes') WHERE id = ?",
+      [r.requestId],
+    );
+    seedPublicationReview(db, {
+      requestId: r.requestId,
+      datasetId: r.datasetId,
+      state: "dispatched",
+      createdMinutesAgo: minutesAgo,
+    });
+    return r;
+  }
+
+  const mailsOf = (calls: CapturedEmail[], datasetId: string) =>
+    sends(calls).filter((m) => m.subject.includes(datasetId));
+
+  test("at the deadline the lease frees the mail, and the mail says the review did not report", async () => {
+    // The lease and the mail's section read the same window: a mail the lease lets go is never
+    // told the review is running, because nothing would mail the "did not report" afterwards.
+    const young = unmailed();
+    seedPublicationReview(db, {
+      requestId: young.requestId,
+      datasetId: young.datasetId,
+      state: "dispatched",
+      createdMinutesAgo: 29,
+    });
+    const old = unmailed();
+    seedPublicationReview(db, {
+      requestId: old.requestId,
+      datasetId: old.datasetId,
+      state: "dispatched",
+      createdMinutesAgo: 31,
+    });
+    await withFakeResend(async (calls) => {
+      expect(await notifyAdminsOfScreen(env(), young.requestId)).toBe("not-claimed");
+      expect(await notifyAdminsOfScreen(env(), old.requestId)).toBe("sent");
+      const text = textOf(mailsOf(calls, old.datasetId)[0].html);
+      expect(text).toContain(DID_NOT_REPORT);
+      expect(text).not.toContain(RUNNING);
+      expect(sends(calls)).toHaveLength(1);
+    });
+  });
+
+  test("the identifier sweep alone mails it once, as did not report, and the review sweep then adds nothing", async () => {
+    const { requestId, datasetId } = neverReporting();
+    await withFakeResend(async (calls) => {
+      expect((await sweepIdentifierScreens(env())).emailed).toBe(1);
+      const first = mailsOf(calls, datasetId);
+      expect(first).toHaveLength(1);
+      expect(textOf(first[0].html)).toContain(DID_NOT_REPORT);
+      expect(textOf(first[0].html)).not.toContain(RUNNING);
+
+      // The review's own watchdog finds the row afterwards: the mail has gone, so there is
+      // nothing for it to send, and the row is closed as unreported.
+      expect(await sweepPublicationReviews(env())).toMatchObject({ timedOut: 1, mailed: 0 });
+      expect(mailsOf(calls, datasetId)).toHaveLength(1);
+    });
+    expect(mailState(requestId).emailed).not.toBeNull();
+  });
+
+  test("the review sweep first mails it once, as did not report, and the identifier sweep then adds nothing", async () => {
+    const { datasetId } = neverReporting();
+    await withFakeResend(async (calls) => {
+      expect(await sweepPublicationReviews(env())).toMatchObject({ timedOut: 1, mailed: 1 });
+      const first = mailsOf(calls, datasetId);
+      expect(first).toHaveLength(1);
+      expect(textOf(first[0].html)).toContain(DID_NOT_REPORT);
+      expect((await sweepIdentifierScreens(env())).emailed).toBe(0);
+      expect(mailsOf(calls, datasetId)).toHaveLength(1);
+    });
+  });
+
+  test("the review sweep failing outright changes nothing: the identifier sweep mails it, as did not report", async () => {
+    const { requestId, datasetId } = neverReporting();
+    const broken = env({
+      DB: interceptingD1(realD1(db), (sql) => {
+        // The review watchdog's own query, and nothing else.
+        if (/^\s*SELECT id, request_id FROM publication_reviews/.test(sql)) {
+          throw new Error("D1_ERROR: simulated");
+        }
+      }),
+    });
+    await withFakeResend(async (calls) => {
+      let swept: Awaited<ReturnType<typeof sweepPublicationReviews>> | undefined;
+      await logged(async () => {
+        swept = await sweepPublicationReviews(broken);
+      });
+      expect(swept).toMatchObject({ timedOut: 0, errors: 1 });
+      expect((await sweepIdentifierScreens(env())).emailed).toBe(1);
+      const mails = mailsOf(calls, datasetId);
+      expect(mails).toHaveLength(1);
+      expect(textOf(mails[0].html)).toContain(DID_NOT_REPORT);
+    });
+    expect(mailState(requestId).emailed).not.toBeNull();
+  });
+
+  test("both sweeps at once, over more requests than the review sweep takes in a tick: each is mailed once and none is told the review is running", async () => {
+    // 25 never-reporting reviews: the review sweep takes 20 a tick and the identifier sweep 10,
+    // each in the same order, so both reach the same requests at the same time, and a few
+    // requests are left for the next tick.
+    const requests = Array.from({ length: 25 }, () => neverReporting());
+    const racing = env({ DB: yieldingD1(realD1(db)) });
+    await withFakeResend(async (calls) => {
+      await Promise.all([sweepIdentifierScreens(racing), sweepPublicationReviews(racing)]);
+      for (const r of requests) expect(mailsOf(calls, r.datasetId).length).toBeLessThanOrEqual(1);
+      // The next tick finishes the rest, and nothing is ever mailed twice.
+      await Promise.all([sweepIdentifierScreens(racing), sweepPublicationReviews(racing)]);
+      await Promise.all([sweepIdentifierScreens(racing), sweepPublicationReviews(racing)]);
+      for (const r of requests) {
+        const mails = mailsOf(calls, r.datasetId);
+        expect(mails).toHaveLength(1);
+        const text = textOf(mails[0].html);
+        expect(text).toContain(DID_NOT_REPORT);
+        expect(text).not.toContain(RUNNING);
+      }
+      expect(sends(calls)).toHaveLength(25);
+    });
+  });
+});
+
+// ============================================================================
+
+describe("the depositor's resend carries the review's section", () => {
+  const KEY = "resend-owner-key-0123456789abcdef0123456789abcdef";
+  const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+  app.route("/datasets", datasetRoutes);
+  /** Each depositor's key, by dataset: a key's hash is unique. */
+  const keys = new Map<string, string>();
+
+  /** A request whose screen reported, owned by a depositor who holds a key, last touched days ago. */
+  async function resendable(over: Partial<SeedScreenedRequest> = {}) {
+    const datasetId = over.datasetId ?? nextDataset();
+    const { requestId, userId } = seedScreenedRequest(db, { ...over, datasetId, mailed: false });
+    const key = `${KEY}-${datasetId}`;
+    keys.set(datasetId, key);
+    db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)").run(
+      userId,
+      await hashApiKey(key),
+      key.slice(0, 8),
+    );
+    // Days, not hours: the route reads this text as LOCAL time, and a suite that has changed the
+    // process's time zone (as a neighbouring file's does) must not turn "hours ago" into "later".
+    db.run("UPDATE publication_requests SET updated_at = datetime('now', '-2 days') WHERE id = ?", [
+      requestId,
+    ]);
+    return { requestId, datasetId };
+  }
+
+  const resend = (datasetId: string, bindings: Bindings = env()) =>
+    app.request(
+      `/datasets/${datasetId}/publish/resend`,
+      { method: "POST", headers: { Authorization: `Bearer ${keys.get(datasetId)}` } },
+      bindings,
+    );
+
+  test("a review in flight is in the reminder, and the review's own mail still goes when it reports", async () => {
+    const { requestId, datasetId } = await resendable();
+    const reviewId = seedPublicationReview(db, {
+      requestId,
+      datasetId,
+      state: "dispatched",
+      createdMinutesAgo: 2,
+      // The job took its claim, as every real run does before it reports.
+      claimed: true,
+    });
+    await withFakeResend(async (calls) => {
+      expect((await resend(datasetId)).status).toBe(200);
+      const [reminder] = sends(calls);
+      const text = textOf(reminder.html);
+      expect(text).toContain("Publication review: action required");
+      expect(text).toContain(REASONS.review_running.sentence);
+      expect(text).toContain(NOT_ASSESSED_LINE);
+      // The mail that waits for the review has NOT gone: the reminder said it is still running.
+      expect(mailState(requestId).emailed).toBeNull();
+
+      // The review reports: its result tries the mail, and it goes, carrying the verdict.
+      const nonce = db
+        .query<{ nonce: string }, [number]>("SELECT nonce FROM publication_reviews WHERE id = ?")
+        .get(reviewId)?.nonce as string;
+      const stored = await storePublicationReviewResult(env(), reviewId, datasetId, nonce, {
+        kind: "reported",
+        report: parsePublicationReviewReport(goodPublicationReport()),
+      });
+      expect(stored).toEqual({ stored: true, state: "reported" });
+      const mails = sends(calls);
+      expect(mails).toHaveLength(2);
+      expect(textOf(mails[1].html)).toContain("Publication review: pass");
+      expect(mailState(requestId).emailed).not.toBeNull();
+    });
+  });
+
+  test("a review that has reported is in the reminder, and the reminder counts as the mail", async () => {
+    const { requestId, datasetId } = await resendable();
+    seedPublicationReview(db, { requestId, datasetId, state: "reported" });
+    await withFakeResend(async (calls) => {
+      expect((await resend(datasetId)).status).toBe(200);
+      const mail = sends(calls);
+      expect(mail).toHaveLength(1);
+      expect(textOf(mail[0].html)).toContain("Publication review: pass");
+      expect(textOf(mail[0].html)).toContain(`nemar admin publish approve ${datasetId}`);
+      // Nothing waits for a review any more, so the watchdog must not send it again.
+      expect(mailState(requestId).emailed).not.toBeNull();
+      expect(await notifyAdminsOfScreen(env(), requestId)).toBe("not-claimed");
+    });
+  });
+
+  test("a review past its deadline is in the reminder as one that did not report", async () => {
+    const { requestId, datasetId } = await resendable();
+    seedPublicationReview(db, { requestId, datasetId, state: "dispatched", createdMinutesAgo: 31 });
+    await withFakeResend(async (calls) => {
+      expect((await resend(datasetId)).status).toBe(200);
+      const text = textOf(sends(calls)[0].html);
+      expect(text).toContain(REASONS.review_did_not_report.sentence.replace(/\.$/, ""));
+      expect(text).not.toContain(REASONS.review_running.sentence);
+    });
+  });
+
+  test("with the review off the reminder is what it was: no review section", async () => {
+    const { requestId, datasetId } = await resendable();
+    seedPublicationReview(db, { requestId, datasetId, state: "dispatched", createdMinutesAgo: 2 });
+    const other = await resendable();
+    await withFakeResend(async (calls) => {
+      // A stored row shows as advice, as in the screen's own mail; no row, no section at all.
+      expect((await resend(datasetId, env({ PUBLICATION_REVIEW_ENABLED: undefined }))).status).toBe(
+        200,
+      );
+      expect(textOf(sends(calls)[0].html)).toContain("advice only, the automated review is off");
+      expect(
+        (await resend(other.datasetId, env({ PUBLICATION_REVIEW_ENABLED: undefined }))).status,
+      ).toBe(200);
+      expect(sends(calls)[1].html).not.toContain("Publication review");
+    });
+  });
+});
+
+// ============================================================================
+
 describe("what the mail may carry", () => {
   test("never a nonce, never the model's summary, never a finding's note", async () => {
     const { requestId, datasetId } = unmailed();
@@ -637,6 +936,32 @@ describe("what the mail may carry", () => {
       );
       expect(text).toContain("Publication review: pass");
     });
+  });
+
+  test("a failed read is logged by the error's name and a closed class, never by its message", async () => {
+    const message = "D1_ERROR: SECRET-SQL-SENTINEL near publication_reviews";
+    const timeout = Object.assign(new Error(message), { name: "TimeoutError" });
+    const cases: Array<[Error, string]> = [
+      [new Error(`${message}: no such table: publication_reviews`), "Error, no_such_table"],
+      [timeout, "TimeoutError, timeout"],
+      [new Error(message), "Error, other"],
+    ];
+    for (const [error, words] of cases) {
+      const { requestId } = unmailed();
+      const failing = env({ DB: failingReviewReads(error) });
+      await withFakeResend(async (calls) => {
+        const lines = await logged(async () => {
+          expect(await notifyAdminsOfScreen(failing, requestId)).toBe("sent");
+        });
+        // Still the fixed sentence for the administrator: the flag is on.
+        expect(textOf(sends(calls).at(-1)?.html ?? "")).toContain(
+          "Publication review: could not be read",
+        );
+        const log = lines.join("\n");
+        expect(log).toContain(`(${words})`);
+        expect(log).not.toContain("SECRET-SQL-SENTINEL");
+      });
+    }
   });
 
   test("a review that cannot be read is said so, never passed over and never a pass", async () => {

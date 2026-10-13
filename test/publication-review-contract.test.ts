@@ -22,6 +22,7 @@ import {
   type Answer,
   BIDS_STATES,
   CALIBRATION_MODELS,
+  DEFAULT_PUBLICATION_VERSION,
   DEPOSITOR_DAILY_CAP,
   DESCRIPTION_KEYS_SHOWN,
   DOCUMENT_CHAR_CAPS,
@@ -62,6 +63,7 @@ import {
   WORKER_ONLY_RUN_ERRORS,
   answersOf,
   describePublicationReview,
+  effectiveVersionOf,
   isWithheld,
   parsePublicationCallbackOutcome,
   parsePublicationReviewEvidence,
@@ -1561,6 +1563,40 @@ describe("describePublicationReview", () => {
     );
   });
 
+  test("a closed request with no review on record reads as not reviewed, with no command; a review on record is still shown", () => {
+    const closed = (over: Record<string, unknown>) =>
+      describePublicationReview({
+        ...base,
+        applies: true,
+        enabled: true,
+        outcome: null,
+        reasons: [],
+        row: { kind: "none" },
+        closed: true,
+        ...over,
+      });
+    const d = closed({});
+    expect(d).toEqual({
+      headline: "Publication review: not reviewed (the request is closed)",
+      tone: "note",
+      lines: [
+        "This request is no longer waiting for a decision, and no review of it is on record.",
+        NOT_ASSESSED_LINE,
+      ],
+      next: null,
+    });
+    // Off wins over closed: the flag is the more basic fact. A review on record is shown as
+    // history whatever the request's status, and an open request is assessed.
+    expect(closed({ enabled: false }).headline).toContain("the automated review is off");
+    expect(
+      closed({ row: { kind: "reported", report: PARSED_REPORTS[0].report, stored: "pass" } })
+        .headline,
+    ).not.toContain("not reviewed");
+    expect(closed({ closed: false, reasons: [R("review_not_started")] }).headline).toBe(
+      "Publication review: action required",
+    );
+  });
+
   test("a hostile summary or note reaches the lines as plain words, or not at all", () => {
     const d = describePublicationReview({
       ...base,
@@ -1827,5 +1863,35 @@ describe("the brands are minted in one place each", () => {
         expect(pattern.test(source), `${spelling}: ${source}`).toBe(false);
       }
     }
+  });
+});
+
+describe("the version an approval would publish", () => {
+  const evidenceOf = (over: Record<string, unknown>) =>
+    parsePublicationReviewEvidence(evidenceBody(over));
+
+  test("the described X.Y.Z, or the orchestrator's default when none is set, and nothing for a malformed one", () => {
+    expect(effectiveVersionOf(evidenceOf({}))).toBe("1.2.0");
+    expect(
+      effectiveVersionOf(
+        evidenceOf({ version: null, version_shape: "missing", tag: "not_applicable" }),
+      ),
+    ).toBe(DEFAULT_PUBLICATION_VERSION);
+    expect(
+      effectiveVersionOf(
+        evidenceOf({ version: null, version_shape: "malformed", tag: "not_applicable" }),
+      ),
+    ).toBeNull();
+    // Every shape is answered, so a new one cannot slip through unlooked-up.
+    expect(VERSION_SHAPES.length).toBe(3);
+  });
+
+  test('the default is the one the orchestrator\'s `Version || "1.0.0"` publishes', () => {
+    expect(DEFAULT_PUBLICATION_VERSION).toBe("1.0.0");
+    const src = readFileSync(
+      join(import.meta.dir, "../backend/src/services/publication-orchestrator.ts"),
+      "utf8",
+    );
+    expect(src).toContain(`String(datasetDesc.Version || "${DEFAULT_PUBLICATION_VERSION}")`);
   });
 });

@@ -36,7 +36,7 @@ import {
   approveSchema,
   runPublicationApproval,
 } from "../../services/publication-orchestrator";
-import { publicationReviewSummary } from "../../services/publication-review-view";
+import { publicationReviewSummaries } from "../../services/publication-review-view";
 import { errorMessage } from "../../services/repo-metadata";
 import { applyObjectLockBatch } from "../../services/s3";
 import { isAllowedOrigin } from "../../services/web-session";
@@ -134,57 +134,61 @@ export function registerPublishRoutes(admin: AdminRouter): void {
 
     // One clock for the whole list, so two rows are aged by the same instant.
     const nowMs = Date.now();
-    const rows = await Promise.all(
-      requests.results.map(async (r) => {
-        // `pr.*` puts every column on the wire without naming it. The two
-        // callback nonces are credentials (each one verifies a workflow's
-        // callback), and the stored screen report is shown ONLY through
-        // describeScreen's words below, so all three are withheld here, from
-        // everyone (epic #1610 phase 4). The dataset columns the review reads
-        // were joined in for it and are not part of the contract either.
-        const {
-          prescreen_nonce: _prescreenNonce,
-          identifier_screen_nonce: _screenNonce,
-          identifier_screen_report: screenReport,
-          review_ds_id: dsId,
-          review_ds_source: dsSource,
-          review_ds_is_exemplar: dsIsExemplar,
-          review_ds_concept_doi: dsConceptDoi,
-          review_ds_ezid_status: dsEzidStatus,
-          review_ds_first_published_at: dsFirstPublishedAt,
-          ...rest
-        } = r;
-        return {
-          ...rest,
-          steps_completed: JSON.parse(r.steps_completed || "[]"),
-          approval_in_flight: r.approval_in_flight === 1,
-          identifier_screen: screenView(r.dataset_id, r.identifier_screen_status, screenReport),
-          publication_review: await publicationReviewSummary(
-            c.env,
-            {
-              id: r.id,
-              dataset_id: r.dataset_id,
-              status: r.status,
-              block_reason: r.block_reason,
-              anonymous: r.anonymous,
-              identifier_screen_status: r.identifier_screen_status,
-              identifier_screen_report: screenReport ?? null,
-              identifier_screen_ack_by: r.identifier_screen_ack_by,
-            },
-            dsId === null
-              ? null
-              : {
-                  source: dsSource,
-                  is_exemplar: dsIsExemplar,
-                  concept_doi: dsConceptDoi,
-                  ezid_status: dsEzidStatus,
-                  first_published_at: dsFirstPublishedAt,
-                },
-            nowMs,
-          ),
-        };
-      }),
+    // The review of every row, read in a few statements and derived a few rows at a time; a row
+    // whose review cannot be read says so for itself and never fails the list (ADR 0101).
+    const reviews = await publicationReviewSummaries(
+      c.env,
+      requests.results.map((r) => ({
+        request: {
+          id: r.id,
+          dataset_id: r.dataset_id,
+          status: r.status,
+          block_reason: r.block_reason,
+          anonymous: r.anonymous,
+          identifier_screen_status: r.identifier_screen_status,
+          identifier_screen_report: r.identifier_screen_report ?? null,
+          identifier_screen_ack_by: r.identifier_screen_ack_by,
+        },
+        dataset:
+          r.review_ds_id === null
+            ? null
+            : {
+                source: r.review_ds_source,
+                is_exemplar: r.review_ds_is_exemplar,
+                concept_doi: r.review_ds_concept_doi,
+                ezid_status: r.review_ds_ezid_status,
+                first_published_at: r.review_ds_first_published_at,
+              },
+      })),
+      nowMs,
     );
+    const rows = requests.results.map((r, index) => {
+      // `pr.*` puts every column on the wire without naming it. The two
+      // callback nonces are credentials (each one verifies a workflow's
+      // callback), and the stored screen report is shown ONLY through
+      // describeScreen's words below, so all three are withheld here, from
+      // everyone (epic #1610 phase 4). The dataset columns the review reads
+      // were joined in for it and are not part of the contract either.
+      const {
+        prescreen_nonce: _prescreenNonce,
+        identifier_screen_nonce: _screenNonce,
+        identifier_screen_report: screenReport,
+        review_ds_id: _dsId,
+        review_ds_source: _dsSource,
+        review_ds_is_exemplar: _dsIsExemplar,
+        review_ds_concept_doi: _dsConceptDoi,
+        review_ds_ezid_status: _dsEzidStatus,
+        review_ds_first_published_at: _dsFirstPublishedAt,
+        ...rest
+      } = r;
+      return {
+        ...rest,
+        steps_completed: JSON.parse(r.steps_completed || "[]"),
+        approval_in_flight: r.approval_in_flight === 1,
+        identifier_screen: screenView(r.dataset_id, r.identifier_screen_status, screenReport),
+        publication_review: reviews[index],
+      };
+    });
 
     return c.json({ requests: rows, count: rows.length });
   });

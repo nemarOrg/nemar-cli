@@ -38,6 +38,7 @@ import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, interceptingD1, realD1 } from "./helpers/d1";
 import { SCREENED_HEAD } from "./helpers/identifier-screen";
+import { logged } from "./helpers/logs";
 import {
   type SeedReview,
   type SeedScreenedRequest,
@@ -195,11 +196,51 @@ describe("GET /admin/publish/requests: the review of each request", () => {
     expect(off.enabled).toBe(false);
     expect(off.gate).toBe("off");
     expect(off.headline).toBe("Publication review: not reviewed (the automated review is off)");
-    expect(off.outcome).not.toBe("pass");
+    // Not assessed: no outcome and no reason, as for a mirror, so a client that renders `outcome`
+    // cannot contradict the headline.
+    expect(off.outcome).toBeNull();
+    expect(off.reasons).toEqual([]);
     // Exactly "1" turns it on: nothing else does.
     for (const flag of ["0", "true", "yes", " 1", "1 "]) {
       expect((await review(datasetId, env({ PUBLICATION_REVIEW_ENABLED: flag }))).kind).toBe("off");
     }
+  });
+
+  test("a request that is over and has no review on record is not assessed: no outcome, no reason", async () => {
+    // A published or denied request that predates the review has nothing to be "action required"
+    // about, and the headline says "not reviewed", so the outcome must not say otherwise.
+    for (const requestStatus of ["published", "denied"] as const) {
+      const { datasetId } = request({ requestStatus });
+      expect(await review(datasetId)).toEqual({
+        kind: "not_reviewed",
+        enabled: true,
+        gate: "enforced",
+        outcome: null,
+        headline: "Publication review: not reviewed (the request is closed)",
+        tone: "note",
+        reasons: [],
+        review_id: null,
+        head_sha: null,
+      });
+    }
+    // The same request, still open, IS assessed: the missing review is its reason.
+    const open = request();
+    expect(await review(open.datasetId)).toMatchObject({
+      outcome: "action_required",
+      reasons: ["review_not_started"],
+    });
+  });
+
+  test("with the review off the detail of a request with no review has no outcome and no reason either", async () => {
+    const { datasetId } = request();
+    const d = await detail(datasetId, env({ PUBLICATION_REVIEW_ENABLED: undefined }));
+    expect(d).toMatchObject({
+      enabled: false,
+      gate: "off",
+      outcome: null,
+      reasons: [],
+      review: null,
+    });
   });
 
   test("a stored review is still shown with the review off, as advice that gates nothing", async () => {
@@ -367,6 +408,66 @@ describe("GET /admin/publish/requests: the review of each request", () => {
     expect((await review(datasetId)).reasons).toEqual(["version_already_released"]);
   });
 
+  // A review of a dataset whose description sets no Version: the orchestrator publishes
+  // `Version || "1.0.0"`, so the live version checks look 1.0.0 up, as the approval will.
+  const noVersion = () =>
+    goodPublicationReport({
+      evidence: evidenceFor(SCREENED_HEAD, false, {
+        version: null,
+        version_shape: "missing",
+        tag: "not_applicable",
+      }),
+    });
+
+  test("a request with no Version is published as 1.0.0, so a released 1.0.0 is a fail, not just a missing version", async () => {
+    const { requestId, datasetId } = request();
+    seedPublicationReview(db, { requestId, datasetId, state: "reported", report: noVersion() });
+    // Nothing released: only the overridable word.
+    expect((await review(datasetId)).reasons).toEqual(["version_missing"]);
+    addVersionRow(datasetId, "1.0.0");
+    const r = await review(datasetId);
+    expect(r.outcome).toBe("fail");
+    expect(r.reasons).toEqual(["version_already_released", "version_missing"]);
+    // A release of another version is not the one the approval would publish.
+    db.run("DELETE FROM dataset_versions WHERE dataset_id = ?", [datasetId]);
+    addVersionRow(datasetId, "2.0.0");
+    expect((await review(datasetId)).reasons).toEqual(["version_missing"]);
+  });
+
+  test("a named request with no Version after an anonymous release at 1.0.0 is the hard reason", async () => {
+    const datasetId = nextDataset();
+    request({ datasetId, anonymous: true, requestStatus: "published" });
+    const { requestId } = request({ datasetId });
+    seedPublicationReview(db, { requestId, datasetId, state: "reported", report: noVersion() });
+    addVersionRow(datasetId, "1.0.0");
+    const r = await review(datasetId);
+    expect(r.outcome).toBe("fail");
+    expect(r.reasons).toEqual(["version_kept_after_anonymous_release", "version_missing"]);
+    expect(
+      (await detail(datasetId)).reasons.find(
+        (x) => x.code === "version_kept_after_anonymous_release",
+      ),
+    ).toMatchObject({ class: "fail", cleared_by: "nothing" });
+  });
+
+  test("a malformed Version stays malformed and is not looked up", async () => {
+    const { requestId, datasetId } = request();
+    seedPublicationReview(db, {
+      requestId,
+      datasetId,
+      state: "reported",
+      report: goodPublicationReport({
+        evidence: evidenceFor(SCREENED_HEAD, false, {
+          version: null,
+          version_shape: "malformed",
+          tag: "not_applicable",
+        }),
+      }),
+    });
+    addVersionRow(datasetId, "1.0.0");
+    expect((await review(datasetId)).reasons).toEqual(["version_malformed"]);
+  });
+
   test("a concept DOI no earlier anonymous release reserved is unexpected", async () => {
     const { requestId, datasetId } = request();
     seedPublicationReview(db, { requestId, datasetId, state: "reported" });
@@ -486,6 +587,52 @@ describe("GET /admin/publish/requests: the review of each request", () => {
     });
   });
 
+  test("a stored report whose evidence is about another commit or release kind could not be read back, and is never a pass", async () => {
+    // The write path refuses such a report, and the database has no CHECK that does: a row edited
+    // by hand (or written by an older build) must not read as the review of this commit.
+    const cases: Array<[string, string, string | number | boolean]> = [
+      ["another commit", "$.evidence.head", OTHER_HEAD],
+      ["the other kind of release", "$.evidence.anonymous", 1],
+    ];
+    for (const [name, path, value] of cases) {
+      const { requestId, datasetId } = request();
+      const id = seedPublicationReview(db, { requestId, datasetId, state: "reported" });
+      expect((await review(datasetId)).outcome).toBe("pass");
+      db.run("UPDATE publication_reviews SET report = json_set(report, ?, ?) WHERE id = ?", [
+        path,
+        value,
+        id,
+      ]);
+      const r = await review(datasetId);
+      expect({ name, outcome: r.outcome, reasons: r.reasons }).toEqual({
+        name,
+        outcome: "action_required",
+        reasons: ["review_could_not_run"],
+      });
+      const d = await detail(datasetId);
+      expect(d.reasons).toMatchObject([{ code: "review_could_not_run", detail: "report_invalid" }]);
+      // Nothing of a report that does not belong to the row is shown as the row's.
+      expect(d.review).toMatchObject({ id, questions: null, evidence: null, summary: null });
+      expect(d.review?.findings).toEqual([]);
+    }
+    // A stored fail over such a report stays a fail, as for a report that does not parse.
+    const { requestId, datasetId } = request();
+    const id = seedPublicationReview(db, {
+      requestId,
+      datasetId,
+      state: "reported",
+      verdict: "fail",
+    });
+    db.run(
+      "UPDATE publication_reviews SET report = json_set(report, '$.evidence.head', ?) WHERE id = ?",
+      [OTHER_HEAD, id],
+    );
+    expect((await review(datasetId)).reasons).toEqual([
+      "stored_verdict_fail",
+      "review_could_not_run",
+    ]);
+  });
+
   test("a failed minimum at the reviewed commit shows with the block it caused", async () => {
     const { requestId, datasetId } = request({
       requestStatus: "blocked",
@@ -543,6 +690,66 @@ describe("GET /admin/publish/requests: the review of each request", () => {
     }
   });
 
+  test("an approving request is read from its stored review only: what its own run wrote is not held against it", async () => {
+    // The approval has already written the version row and the concept DOI of THIS release. Read
+    // as live facts they would say "already released" and "unexpected DOI" about a run that is to
+    // be resumed, and point at `approve --force` for it.
+    const { requestId, datasetId } = request({ requestStatus: "approving" });
+    seedPublicationReview(db, { requestId, datasetId, state: "reported" });
+    addVersionRow(datasetId);
+    db.run(
+      "UPDATE datasets SET concept_doi = '10.82901/nm.own-run', ezid_status = 'draft' WHERE dataset_id = ?",
+      [datasetId],
+    );
+    expect(await review(datasetId)).toMatchObject({ outcome: "pass", reasons: [] });
+    const d = await detail(datasetId);
+    expect(d.request_status).toBe("approving");
+    expect(d.outcome).toBe("pass");
+    expect(d.reasons).toEqual([]);
+    expect(d.description.next).not.toContain("--force");
+  });
+
+  test("an approving request still shows its stored review: a failed question and a stored fail stand", async () => {
+    const failed = request({ requestStatus: "approving" });
+    seedPublicationReview(db, {
+      requestId: failed.requestId,
+      datasetId: failed.datasetId,
+      state: "reported",
+      report: failingReport(),
+    });
+    addVersionRow(failed.datasetId);
+    expect(await review(failed.datasetId)).toMatchObject({
+      outcome: "fail",
+      reasons: ["question_failed"],
+    });
+    const storedFail = request({ requestStatus: "approving" });
+    seedPublicationReview(db, {
+      requestId: storedFail.requestId,
+      datasetId: storedFail.datasetId,
+      state: "reported",
+      verdict: "fail",
+    });
+    expect(await review(storedFail.datasetId)).toMatchObject({
+      outcome: "fail",
+      reasons: ["stored_verdict_fail"],
+    });
+  });
+
+  test("a blocked request has written nothing of an approval, so its live facts are still read", async () => {
+    // A request is blocked before any approval step runs (the only walk back from approving is
+    // the owner-name check, ahead of the first step), so a version row or a concept DOI on its
+    // dataset belongs to an earlier release, which is what the checks look for.
+    const { requestId, datasetId } = request({
+      requestStatus: "blocked",
+      blockReason: "min_requirements_failed",
+    });
+    seedPublicationReview(db, { requestId, datasetId, state: "reported" });
+    addVersionRow(datasetId);
+    const r = await review(datasetId);
+    expect(r.outcome).toBe("fail");
+    expect(r.reasons).toEqual(["request_blocked", "version_already_released"]);
+  });
+
   test("every row's reasons are codes of the closed vocabulary, and a non-pass always has one", async () => {
     // A broad sweep of seeded states: no row may be an outcome without a reason.
     const seeds: Array<Partial<SeedScreenedRequest>> = [
@@ -562,7 +769,10 @@ describe("GET /admin/publish/requests: the review of each request", () => {
     for (const row of rows) {
       const r = row.publication_review;
       for (const code of r.reasons) expect(REASON_CODES).toContain(code);
-      if (r.outcome !== "pass" && r.kind !== "not_applicable") {
+      if (r.outcome === null) {
+        // Not assessed (a mirror, or no review on record that gates anything): nothing to explain.
+        expect(r.reasons).toEqual([]);
+      } else if (r.outcome !== "pass") {
         expect(r.reasons.length).toBeGreaterThan(0);
       }
     }
@@ -649,19 +859,158 @@ describe("what the list carries", () => {
     db.run("DELETE FROM datasets WHERE dataset_id = ?", [datasetId]);
     expect((await review(datasetId)).outcome).toBe("pass");
   });
+});
 
-  test("a list that cannot read a fact fails loudly, with no SQL in the answer", async () => {
-    const { requestId, datasetId } = request();
+// ============================================================================
+
+describe("the list's cost and isolation", () => {
+  /** The statements one list request issues, with the values each was bound with. */
+  async function listStatements(rows: number, bindings: Partial<Bindings> = {}) {
+    const seen: Array<{ sql: string; binds: readonly unknown[] }> = [];
+    const counting = interceptingD1(realD1(db), (sql, binds) => {
+      seen.push({ sql: sql.replace(/\s+/g, " ").trim(), binds });
+    });
+    const { rows: listed } = await listBody(env({ DB: counting, ...bindings }));
+    expect(listed).toHaveLength(rows);
+    const count = (re: RegExp) => seen.filter((x) => re.test(x.sql)).length;
+    return {
+      total: seen.length,
+      reviewReads: count(/^SELECT .* FROM publication_reviews/),
+      versionLookups: count(/FROM dataset_versions/),
+      earlierAnonymous: count(/FROM publication_requests WHERE dataset_id = \? AND anonymous = 1/),
+      mostBinds: Math.max(0, ...seen.map((x) => x.binds.length)),
+    };
+  }
+
+  let n = 0;
+  /** A request with a stored review, in `status`, with `versioned` meaning a version row exists. */
+  function listed(status: SeedScreenedRequest["requestStatus"], versioned = false) {
+    n += 1;
+    const datasetId = `nm${String(9000 + n).padStart(6, "0")}`;
+    const { requestId } = request({ datasetId, requestStatus: status });
     seedPublicationReview(db, { requestId, datasetId, state: "reported" });
+    if (versioned) addVersionRow(datasetId);
+    return datasetId;
+  }
+
+  test("reads every review row in one query, and a version fact only for a request that could still be approved", async () => {
+    // 20 rows: 8 over, 3 being approved, 6 waiting, 3 waiting whose version has a release.
+    for (let i = 0; i < 8; i++) listed("published");
+    for (let i = 0; i < 3; i++) listed("approving");
+    for (let i = 0; i < 6; i++) listed("requested");
+    for (let i = 0; i < 3; i++) listed("requested", true);
+    const cost = await listStatements(20);
+    // The cost is the 3 statements of the request itself (the key's lookup and its stamp, and
+    // the list), ONE read of all 20 review rows, a version lookup for each of the 9 requests that
+    // could still be approved, and the earlier-anonymous lookup for the 3 with a release.
+    // Requests that are over or being approved read nothing beyond the one batch.
+    expect(cost.reviewReads).toBe(1);
+    expect(cost.versionLookups).toBe(9);
+    expect(cost.earlierAnonymous).toBe(3);
+    expect(cost.total).toBe(3 + 1 + 9 + 3);
+  });
+
+  test("a list of requests that are over costs one read however long it is, and stays inside D1's bound limit", async () => {
+    for (let i = 0; i < 100; i++) listed("published");
+    const cost = await listStatements(100);
+    expect(cost.versionLookups).toBe(0);
+    expect(cost.earlierAnonymous).toBe(0);
+    // 45 requests a read (two values each), so three reads for 100 rows, none past D1's 100 binds.
+    expect(cost.reviewReads).toBe(3);
+    expect(cost.mostBinds).toBeLessThanOrEqual(100);
+  });
+
+  test("each row is read on its own: one that cannot be read does not hide the others", async () => {
+    const ids = [listed("requested"), listed("requested"), listed("requested")];
+    const poisoned = ids[1];
     const failing = env({
-      DB: interceptingD1(realD1(db), (sql) => {
-        if (/^\s*SELECT .*FROM publication_reviews/s.test(sql))
+      DB: interceptingD1(realD1(db), (sql, binds) => {
+        if (/FROM dataset_versions/.test(sql) && binds.includes(poisoned)) {
           throw new Error("D1_ERROR: simulated SQL text");
+        }
       }),
     });
-    const res = await get("/admin/publish/requests", ADMIN_KEY, failing);
-    expect(res.status).toBe(500);
-    expect(await res.text()).not.toContain("simulated");
+    let text = "";
+    let rows: ListRow[] = [];
+    const lines = await logged(async () => {
+      ({ text, rows } = await listBody(failing));
+    });
+    expect(rows).toHaveLength(3);
+    for (const id of [ids[0], ids[2]]) {
+      expect(rows.find((r) => r.dataset_id === id)?.publication_review).toMatchObject({
+        outcome: "pass",
+        reasons: [],
+      });
+    }
+    // The poisoned row is not a pass, and says so in the fixed words.
+    expect(rows.find((r) => r.dataset_id === poisoned)?.publication_review).toEqual({
+      kind: "decided",
+      enabled: true,
+      gate: "enforced",
+      outcome: "action_required",
+      headline: "Publication review: could not be read",
+      tone: "warn",
+      reasons: ["review_could_not_run"],
+      review_id: null,
+      head_sha: null,
+    });
+    // No SQL, no message, in the answer or the log: the request's id and a closed class.
+    expect(text).not.toContain("simulated");
+    const log = lines.join("\n");
+    const poisonedRequest = rows.find((r) => r.dataset_id === poisoned)?.id;
+    expect(log).toContain(`request ${poisonedRequest}`);
+    expect(log).toContain("(Error, other)");
+    expect(log).not.toContain("simulated");
+    expect(log).not.toContain(poisoned);
+  });
+
+  test("a list whose review rows cannot be read still answers, and none of its rows is a pass", async () => {
+    const waiting = listed("requested");
+    const over = listed("published");
+    const mirror = request({ source: "openneuro" }).datasetId;
+    const failing = env({
+      DB: interceptingD1(realD1(db), (sql) => {
+        if (/^\s*SELECT .*FROM publication_reviews/s.test(sql)) {
+          throw new Error("D1_ERROR: simulated SQL text");
+        }
+      }),
+    });
+    let text = "";
+    let rows: ListRow[] = [];
+    await logged(async () => {
+      ({ text, rows } = await listBody(failing));
+    });
+    for (const id of [waiting, over]) {
+      expect(rows.find((r) => r.dataset_id === id)?.publication_review).toMatchObject({
+        outcome: "action_required",
+        headline: "Publication review: could not be read",
+        reasons: ["review_could_not_run"],
+      });
+    }
+    // A mirror needs no review row, so there was nothing to fail to read.
+    expect(rows.find((r) => r.dataset_id === mirror)?.publication_review.kind).toBe(
+      "not_applicable",
+    );
+    expect(text).not.toContain("simulated");
+  });
+
+  test("the rows that could still be approved are read a few at a time, never all at once", async () => {
+    for (let i = 0; i < 20; i++) listed("requested");
+    let inFlight = 0;
+    let most = 0;
+    const slow = env({
+      DB: interceptingD1(realD1(db), async (sql) => {
+        if (!/FROM dataset_versions/.test(sql)) return;
+        inFlight++;
+        most = Math.max(most, inFlight);
+        // Hold the slot across a macrotask, as a network round trip would.
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        inFlight--;
+      }),
+    });
+    const { rows } = await listBody(slow);
+    expect(rows).toHaveLength(20);
+    expect(most).toBe(8);
   });
 });
 

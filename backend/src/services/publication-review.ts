@@ -859,6 +859,26 @@ export function rearmMailSql(needsClaim: boolean): string {
     AND ${whileWaiting(["unreported"], needsClaim)}`;
 }
 
+/**
+ * {@link rearmMailSql} for a result that lands on a row still `dispatched`, which is late all the
+ * same once the row is past the deadline: the request's mail is released at the deadline and says
+ * the review did not report, whether or not the watchdog has marked the row (it may not have run,
+ * errored, or not reached this row among the {@link SWEEP_LIMIT} it takes in a tick). Read from the
+ * row's own age, which a result never changes, so a report inside the deadline re-arms nothing, and
+ * guarded like the others, so it fires only when the write of the result takes effect. The binds are
+ * those of {@link rearmMailSql} followed by the review's id.
+ */
+export function rearmOverdueMailSql(needsClaim: boolean): string {
+  return `UPDATE publication_requests
+    SET identifier_screen_emailed_at = NULL, identifier_screen_mail_claimed_at = NULL
+  WHERE id = ? AND status IN ('requested', 'blocked') AND anonymous = ?
+    AND ${screenedHeadSql("publication_requests")} = ?
+    AND ${whileWaiting(["dispatched"], needsClaim)}
+    AND EXISTS (SELECT 1 FROM publication_reviews AS r
+                 WHERE r.id = ?
+                   AND r.created_at < datetime('now', '-${PUBLICATION_REVIEW_DEADLINE_MINUTES} minutes'))`;
+}
+
 /** The write of a result, keyed on the nonce and on the state the row waits in. */
 function storeSql(from: "unreported" | "dispatched", needsClaim: boolean): string {
   return `UPDATE publication_reviews
@@ -879,7 +899,8 @@ function storeSql(from: "unreported" | "dispatched", needsClaim: boolean): strin
  * dispatch payload cannot change what a stored review claims to be about.
  *
  * ONE batch, which D1 runs as a transaction: the re-block (when the report says a minimum failed),
- * the mail re-arm (when the row waits as `unreported`) and the two writes of the result, `dispatched`
+ * the mail re-arm (when the row waits as `unreported`, or as `dispatched` past the deadline: see
+ * {@link rearmOverdueMailSql}) and the two writes of the result, `dispatched`
  * first and then `unreported`. Each follow-on is guarded by the very predicate its write uses and
  * runs ahead of it, so it fires exactly when the write takes effect, and a fault on any of them
  * leaves nothing stored and the token unspent, which is what lets the job's retry land. The
@@ -947,6 +968,11 @@ export async function storePublicationReviewResult(
   }
   statements.push(
     db.prepare(rearmMailSql(needsClaim)).bind(row.requestId, kind, row.headSha, ...guard),
+  );
+  statements.push(
+    db
+      .prepare(rearmOverdueMailSql(needsClaim))
+      .bind(row.requestId, kind, row.headSha, ...guard, reviewId),
   );
   statements.push(db.prepare(storeSql("dispatched", needsClaim)).bind(...binds));
   statements.push(db.prepare(storeSql("unreported", needsClaim)).bind(...binds));

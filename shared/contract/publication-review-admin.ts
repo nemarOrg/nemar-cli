@@ -44,7 +44,8 @@ export type PublicationReviewEnvironment = "production" | "non-production";
  *  - `not_applicable`: an OpenNeuro mirror or an exemplar; no row, no gate, no outcome.
  *  - `off`: `PUBLICATION_REVIEW_ENABLED` is not `1`. A stored review is still derived and shown,
  *    as advice that gates nothing.
- *  - `not_reviewed`: no review of the screened commit and flag is on record.
+ *  - `not_reviewed`: no review of the screened commit and flag is on record, or the request is
+ *    over and none ever was.
  *  - `running`: the review in force was handed to GitHub and has not reported or aged out.
  *  - `decided`: the review in force reached a terminal state (reported, declined, errored or
  *    unreported); the outcome and its reasons say what that means.
@@ -78,7 +79,12 @@ export interface PublicationReviewSummary {
   /** `PUBLICATION_REVIEW_ENABLED` is exactly `"1"`. */
   enabled: boolean;
   gate: PublicationReviewGateState;
-  /** Null only for `not_applicable`. */
+  /**
+   * Null when the request is not assessed: `not_applicable`, or no review is on record and none
+   * gates the request (`off`, or a `not_reviewed` request that is over). Such a row has no reasons
+   * either. An open request with the review on and no review on record is assessed, and reads
+   * `action_required` with `review_not_started`.
+   */
   outcome: PublicationOutcome | null;
   headline: string;
   tone: "ok" | "note" | "warn" | "stop";
@@ -141,6 +147,7 @@ export interface PublicationReviewDetail {
   anonymous: boolean;
   applies: boolean;
   gate: PublicationReviewGateState;
+  /** Null when the request is not assessed; see {@link PublicationReviewSummary.outcome}. */
   outcome: PublicationOutcome | null;
   reasons: ReasonView[];
   /** Headline, tone, lines (the standing line last) and the next command. */
