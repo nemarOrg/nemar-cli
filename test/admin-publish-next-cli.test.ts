@@ -53,7 +53,7 @@ import {
   cureOf,
 } from "../shared/publication-review";
 import { type CliResult, startPublishCli } from "./helpers/admin-publish-cli";
-import { hardReport, twoReasons } from "./helpers/approve-seeds";
+import { hardReport, twoReasons, withheldReport } from "./helpers/approve-seeds";
 
 setDefaultTimeout(60_000);
 
@@ -259,6 +259,16 @@ describe("a review that is not a pass needs --force", () => {
     expect(r.stdout).toContain(REASONS.version_missing.sentence);
     expect(r.stdout).not.toContain(SUMMARY_SENTINEL);
     expect(r.stdout).not.toContain(NOTE_SENTINEL);
+  });
+
+  test("a reason with closed words reads on the card as the Worker's line, in words for a person", async () => {
+    seed(A, withheldReport());
+
+    const r = await next("q\n");
+
+    expect(r.stdout).toContain("(README, participants.json)");
+    expect(r.stdout).not.toContain("(readme, participants_json)");
+    expect(r.stdout).not.toContain("participants_json");
   });
 
   test("with --force y is offered, and the card says it will ask about each reason", async () => {

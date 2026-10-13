@@ -22,7 +22,7 @@ import {
   parsePublicationReviewEvidence,
 } from "../shared/publication-review";
 import { LineReader } from "../src/lib/prompt-lines";
-import type { ReviewRead } from "../src/lib/publication-review-approve";
+import { type ReviewRead, reasonViewLine } from "../src/lib/publication-review-approve";
 import {
   type NextTally,
   OBJECTS_PER_LOCK_CALL,
@@ -417,13 +417,42 @@ describe("cardLines", () => {
     expect(text).toContain(REASONS.question_failed.sentence);
   });
 
-  test("a detail word is shown with the sentence, and no cure (d has the whole)", () => {
-    const text = card(
-      { reasons: [["review_could_not_run", "dispatch_failed,model_refused"]] },
-      true,
+  test("a reason reads as the line the Worker sent, the same words approve prints", () => {
+    // `text_withheld` carries closed words (readme, participants_json); the words for a person are
+    // the shared ones, and the card, `d` and the refusal of `approve` all say the same thing.
+    const reasons: Spec["reasons"] = [["text_withheld", "readme,participants_json"]];
+    const text = card({ reasons }, true);
+    expect(text).toContain("(README, participants.json)");
+    expect(text).not.toContain("(readme, participants_json)");
+    expect(text).not.toContain("participants_json");
+    const r = read({ reasons });
+    if (r.kind !== "detail") throw new Error("expected a detail");
+    expect(text).toContain(reasonViewLine(r.detail.reasons[0]));
+  });
+
+  test("a Worker that sent no line is read as approve reads it: the sentence and the cure, never the closed words", () => {
+    const r = read({ reasons: [["text_withheld", "readme,participants_json"]] });
+    if (r.kind !== "detail") throw new Error("expected a detail");
+    const old: ReviewRead = {
+      kind: "detail",
+      detail: { ...r.detail, reasons: r.detail.reasons.map(({ line: _line, ...rest }) => rest) },
+    };
+    const text = uncolored(
+      cardLines({
+        position: 1,
+        total: 3,
+        row: row(),
+        read: old,
+        answer: yAnswer(ID, old, true, false),
+        force: true,
+        now,
+      }).join("\n"),
     );
-    expect(text).toContain("(dispatch_failed, model_refused)");
-    expect(text).not.toContain(cureOf("review_could_not_run", ID, true));
+    expect(text).toContain(
+      `${REASONS.text_withheld.sentence} ${cureOf("text_withheld", ID, true)}`,
+    );
+    expect(text).not.toContain("participants_json");
+    expect(text).not.toContain("readme");
   });
 
   test("at most six reasons, then how many more", () => {

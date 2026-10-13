@@ -28,7 +28,6 @@ import chalk from "chalk";
 import type {
   PublicationReviewDetail,
   PublicationReviewOverride,
-  ReasonView,
 } from "../../shared/contract/publication-review-admin.js";
 import {
   type PublicationReviewEvidence,
@@ -36,7 +35,7 @@ import {
   effectiveVersionOf,
 } from "../../shared/publication-review.js";
 import type { PublishRequestsResponse } from "./api/publish.js";
-import { type ReviewRead, decideApproval } from "./publication-review-approve.js";
+import { type ReviewRead, decideApproval, reasonViewLine } from "./publication-review-approve.js";
 import { toneColor } from "./publication-review-display.js";
 import { byOldestFirst, needsAdministrator } from "./publication-review-queue.js";
 import { ageOf, plain } from "./terminal-text.js";
@@ -204,14 +203,6 @@ export function requestedAge(requestedAt: string, now: number = Date.now()): str
 /** Reasons a card lists before saying how many more `d` shows. */
 const CARD_REASONS = 6;
 
-/** A reason's sentence with its closed detail word, and without its cure (`d` shows the whole). */
-function reasonSentence(r: Pick<ReasonView, "sentence" | "detail">): string {
-  const sentence = plain(r.sentence);
-  return r.detail === null
-    ? sentence
-    : `${sentence.replace(/\.$/, "")} (${plain(r.detail).replaceAll(",", ", ")}).`;
-}
-
 /** `Version:` for the card: the one an approval would publish, or why none is known. */
 function versionWord(read: ReviewRead): string {
   if (read.kind !== "detail") return "not read (the review could not be read)";
@@ -260,7 +251,7 @@ export function cardLines(input: CardInput): string[] {
   const indent = " ".repeat(12);
   if (detail !== null) {
     for (const r of detail.reasons.slice(0, CARD_REASONS)) {
-      out.push(`${indent}${reasonSentence(r)}`);
+      out.push(`${indent}${plain(reasonViewLine(r))}`);
     }
     if (detail.reasons.length > CARD_REASONS) {
       out.push(`${indent}+${detail.reasons.length - CARD_REASONS} more (d shows them)`);
