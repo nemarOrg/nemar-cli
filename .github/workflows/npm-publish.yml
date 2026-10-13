@@ -17,8 +17,8 @@ on:
     #
     # dev is not here: auto-bump-dev.yml dispatches this workflow once per push to
     # dev, after the version bump. A push to dev used to publish itself, so every
-    # merge started two publishes 14 s apart, and the second (the bump's) cancelled
-    # the first (128 of 132 merge publishes cancelled, 2026-09-15 to 2026-10-13). The
+    # merge started two publishes 14 s apart, and the second (the bump's) canceled
+    # the first (128 of 132 merge publishes canceled, 2026-09-15 to 2026-10-13). The
     # one that survived built the bump, and the dispatched one still does, so `dev`
     # on npm ends at the same build from one run.
     branches:
