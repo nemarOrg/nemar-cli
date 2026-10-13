@@ -32,8 +32,11 @@ import { dirname, isAbsolute, join } from "node:path";
 import { parse } from "yaml";
 import { CALLBACK_ORIGINS, main } from "../scripts/ci/publication-review";
 import {
+  DATA_SIDECAR,
+  NOT_RAW,
   SIDECAR_SAMPLE,
   bidsState,
+  blobsToRead,
   readRootDocuments,
   readTree,
   structuralSummary,
@@ -1156,29 +1159,32 @@ describe("the shell steps, run for real", () => {
   });
 
   test("fetch: the names, patterns and sample size it selects by are the review script's own", () => {
+    // The behavior is held by the tests that run the step over a repository and compare what it
+    // fetched with `blobsToRead`; these pin the words and numbers the shell spells for itself.
     const run = step(FETCH).run ?? "";
-    // The root documents: exactly the names the reader looks for, and no others.
-    const names = [
-      ...README_CANDIDATES,
-      ...CHANGES_CANDIDATES,
-      ...LICENSE_CANDIDATES,
-      "dataset_description.json",
-      PARTICIPANTS_JSON,
-    ];
-    const listed = [...run.matchAll(/\$2 == "([^"]+)"/g)].map((m) => m[1]);
-    expect(listed.sort()).toEqual([...names].sort());
-    // The raw-tree and sidecar patterns, and the sample size, as the script spells them.
-    const source = readFileSync(
-      join(REPO_ROOT, "scripts", "ci", "publication-review-evidence.ts"),
-      "utf8",
+    expect(run).toContain("git ls-tree -r -z --full-tree");
+    const perl = run.slice(run.indexOf("perl -0ne"));
+    const lists = [...perl.matchAll(/qw\(([^)]*)\)/g)].map((m) =>
+      (m[1] as string).trim().split(/\s+/),
     );
-    expect(source).toContain("const NOT_RAW = /^(?:derivatives|sourcedata|code)\\//;");
-    expect(source).toContain("const DATA_SIDECAR = /_(?:eeg|ieeg|meg|emg|nirs)\\.json$/;");
-    expect(run).toContain("/^(derivatives|sourcedata|code)\\//");
-    expect(run).toContain("/_(eeg|ieeg|meg|emg|nirs)\\.json$/");
-    expect(run).toContain(`n <= ${SIDECAR_SAMPLE}`);
-    expect(run).toContain(`i < ${SIDECAR_SAMPLE}`);
-    expect(run).toContain(`i * n / ${SIDECAR_SAMPLE}`);
+    // The README forms in the order the reader chooses the first present, then the other documents.
+    expect(lists).toHaveLength(2);
+    expect(lists[0]).toEqual([...README_CANDIDATES]);
+    expect([...(lists[1] ?? [])].sort()).toEqual(
+      [
+        ...CHANGES_CANDIDATES,
+        ...LICENSE_CANDIDATES,
+        "dataset_description.json",
+        PARTICIPANTS_JSON,
+      ].sort(),
+    );
+    // The raw-tree and sidecar patterns, as the reader spells them (`$` is `\z` in perl, which does
+    // not stop before a final newline as `$` does), and the sample size.
+    expect(perl).toContain(`m{${NOT_RAW.source.replaceAll("\\/", "/")}}`);
+    expect(perl).toContain(`m{${DATA_SIDECAR.source.replace(/\$$/, "\\z")}}`);
+    expect(perl).toContain(`$n <= ${SIDECAR_SAMPLE}`);
+    expect(perl).toContain(`$_ * $n / ${SIDECAR_SAMPLE}`);
+    expect(perl).toContain(`0 .. ${SIDECAR_SAMPLE - 1}`);
   });
 
   /** A dataset with many data sidecars, some in places the review never reads. */
@@ -1213,27 +1219,36 @@ describe("the shell steps, run for real", () => {
     return { dir, head: run("rev-parse", "HEAD") };
   }
 
+  /** Every blob the clone holds, by object id, asked without any lazy fetch. */
+  function localBlobs(repo: string): string[] {
+    return execFileSync(
+      "git",
+      ["-C", repo, "cat-file", "--batch-all-objects", "--batch-check=%(objecttype) %(objectname)"],
+      { encoding: "utf8", env: { PATH: process.env.PATH ?? "", GIT_NO_LAZY_FETCH: "1" } },
+    )
+      .split("\n")
+      .filter((l) => l.startsWith("blob "))
+      .map((l) => l.slice("blob ".length))
+      .sort();
+  }
+
   test("fetch: the blobs the review reads are fetched, exactly those, so that nothing later needs the credential", async () => {
     const count = 150;
     const remote = servedBigDataset(count);
     const r = await runStepScript(FETCH, fetchEnv(remote));
     expect(r.status, r.stderr).toBe(0);
     const repo = join(r.dir, "repo");
-    const localBlobs = execFileSync(
-      "git",
-      ["-C", repo, "cat-file", "--batch-all-objects", "--batch-check=%(objecttype)"],
-      { encoding: "utf8", env: { PATH: process.env.PATH ?? "", GIT_NO_LAZY_FETCH: "1" } },
-    )
-      .split("\n")
-      .filter((l) => l === "blob").length;
+    const tree = await readTree(repo, remote.head);
+    // The reader's own selection, which the readers below then find already in the clone.
+    const wanted = blobsToRead(tree);
     // Five root documents (README.md, dataset_description.json, CHANGES, LICENSE, participants.json)
     // and the 64 sidecars the review samples: not the 150, and none of the other sidecars or files.
-    expect(localBlobs).toBe(5 + 64);
+    expect(wanted).toHaveLength(5 + 64);
+    expect(localBlobs(repo)).toEqual(wanted);
 
     // Now cut the clone off from every remote and run the review's own readers over it: whatever
     // they ask for must already be there.
     execFileSync("git", ["-C", repo, "config", "remote.origin.url", "file:///nonexistent/remote"]);
-    const tree = await readTree(repo, remote.head);
     const docs = readRootDocuments(repo, tree);
     for (const name of [
       "readme",
@@ -1248,7 +1263,80 @@ describe("the shell steps, run for real", () => {
     // The top-level inherited sidecar matches the review's pattern too, so there is one more.
     expect(summary.sidecars_total).toBe(count + 1);
     expect(summary.sidecars_read).toBe(64);
-  });
+  }, 20_000);
+
+  /**
+   * File names git would print quoted and escaped without `-z`: a non-ASCII letter, a double
+   * quote, a tab, a backslash and a newline. Each is a data sidecar of the raw tree, with content of
+   * its own (identical content would be one blob, and the comparison below would prove nothing).
+   */
+  const AWKWARD_SIDECARS = [
+    "sub-01/eeg/sub-01_task-caf\u00e9_eeg.json",
+    'sub-02/eeg/sub-02_task-"q"_eeg.json',
+    "sub-03/eeg/sub-03_task-a\tb_eeg.json",
+    "sub-04/eeg/sub-04_task-a\\b_eeg.json",
+    "sub-05/eeg/sub-05_task-a\nb_eeg.json",
+  ];
+
+  function servedAwkwardDataset(ordinary: number) {
+    const { dir, run, put } = servedRepo("publication-review-awkward-remote-");
+    put("README.md", "# Resting EEG\nVolunteers at rest.\n");
+    for (const rel of AWKWARD_SIDECARS)
+      put(rel, JSON.stringify({ Which: rel, SamplingFrequency: 250 }));
+    for (let i = 0; i < ordinary; i++) {
+      const sub = `sub-9${String(i).padStart(3, "0")}`;
+      put(`${sub}/eeg/${sub}_task-rest_eeg.json`, JSON.stringify({ Index: i }));
+    }
+    run("add", ".");
+    run("commit", "-q", "-m", "first");
+    return { dir, head: run("rev-parse", "HEAD") };
+  }
+
+  test("fetch: a path git would quote is selected as the reader selects it, whole and in the same place of the sample", async () => {
+    // 70 ordinary sidecars and the five awkward ones: more than the sample takes, so a sidecar the
+    // step does not see also moves every position after it.
+    for (const ordinary of [70, 0]) {
+      const remote = servedAwkwardDataset(ordinary);
+      const r = await runStepScript(FETCH, fetchEnv(remote));
+      expect(r.status, r.stderr).toBe(0);
+      const repo = join(r.dir, "repo");
+      const tree = await readTree(repo, remote.head);
+      expect(tree.entries.map((e) => e.path)).toEqual(expect.arrayContaining(AWKWARD_SIDECARS));
+      expect(structuralSummary(repo, tree).sidecars_total).toBe(ordinary + AWKWARD_SIDECARS.length);
+      expect(localBlobs(repo), `${ordinary} ordinary sidecars`).toEqual(blobsToRead(tree));
+      // The description, the README and every sidecar: all of them, when there are fewer than 64.
+      if (ordinary === 0) expect(localBlobs(repo)).toHaveLength(2 + AWKWARD_SIDECARS.length);
+    }
+  }, 20_000);
+
+  test("fetch: of several README forms only the one the reader opens is fetched, and a symlinked one is never opened", async () => {
+    const both = servedRepo("publication-review-readmes-remote-");
+    both.put("README.md", "# the one the reader opens\n");
+    both.put("README.txt", "# a second form, never opened\n");
+    both.run("add", ".");
+    both.run("commit", "-q", "-m", "first");
+    const linked = servedRepo("publication-review-readmes-linked-remote-");
+    symlinkSync(
+      "../.git/annex/objects/Xz/pQ/SHA256E-s9--0123456789abcdef.md/SHA256E-s9--0123456789abcdef.md",
+      join(linked.dir, "README.md"),
+    );
+    linked.put("README.txt", "# the reader opens README.md first, finds it annexed, and stops\n");
+    linked.run("add", ".");
+    linked.run("commit", "-q", "-m", "first");
+    // The description and the one README the reader opens; then the description alone, because the
+    // reader finds README.md annexed and never looks at README.txt.
+    for (const [remote, expected] of [
+      [both, 2],
+      [linked, 1],
+    ] as const) {
+      const r = await runStepScript(FETCH, fetchEnv(remote));
+      expect(r.status, r.stderr).toBe(0);
+      const repo = join(r.dir, "repo");
+      const tree = await readTree(repo, remote.run("rev-parse", "HEAD"));
+      expect(blobsToRead(tree)).toHaveLength(expected);
+      expect(localBlobs(repo)).toEqual(blobsToRead(tree));
+    }
+  }, 20_000);
 
   test("fetch: a dataset with fewer than 64 sidecars has every one of them, and one with few still fetches its documents", async () => {
     const small = servedBigDataset(7);

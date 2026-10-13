@@ -415,9 +415,9 @@ export function bidsState(runsJson: string, head: string): BidsState {
 // ---------------------------------------------------------------------------------------------
 
 /** What is not the dataset's own raw data: never counted as recordings, never sampled. */
-const NOT_RAW = /^(?:derivatives|sourcedata|code)\//;
+export const NOT_RAW = /^(?:derivatives|sourcedata|code)\//;
 /** A BIDS data sidecar: `..._<suffix>.json` for a signal modality. */
-const DATA_SIDECAR = /_(?:eeg|ieeg|meg|emg|nirs)\.json$/;
+export const DATA_SIDECAR = /_(?:eeg|ieeg|meg|emg|nirs)\.json$/;
 
 function datatypeOf(directory: string): ReviewDatatype {
   return (REVIEW_DATATYPES as readonly string[]).includes(directory)
