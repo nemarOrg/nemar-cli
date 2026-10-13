@@ -1008,10 +1008,9 @@ describe("with the Worker's gate: what the Worker refuses is printed, and exits 
       // sentence and the cure, never the closed words.
       expect(output(r), reason.code).toContain(reason.line ?? `${reason.sentence} ${reason.cure}`);
       if (reason.line !== undefined) {
-        // ... and that line is the one the review above the question printed.
-        const sentence = REASONS[reason.code].sentence.replace(/\.$/, "");
-        const described = (shown.description.lines as string[]).find((l) => l.startsWith(sentence));
-        expect(reason.line, reason.code).toBe(described);
+        // ... and that line is one the review above the question printed (a reason that stands
+        // twice, as `question_unknown` does for two questions, has two lines).
+        expect(shown.description.lines as string[], reason.code).toContain(reason.line);
       }
     }
     // The words for a person, not the closed ones behind them.

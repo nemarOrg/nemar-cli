@@ -372,7 +372,19 @@ describe("5. a hard reason is refused, with the cure, even with --force", () => 
     );
     expect(refusal(withLine).lines[1]).toBe(line);
     // An older Worker sends none: sentence and cure, and not the closed words behind the reason.
-    const without = refusal(decide(shown, FORCE));
+    // `detailOf` builds its reasons through the Worker's own `reasonViewsOf`, which now sends a
+    // `line`; drop it to stand for a Worker that predates the field.
+    const old = detailOf(shown);
+    const without = refusal(
+      decideApproval(
+        ID,
+        {
+          kind: "detail",
+          detail: { ...old, reasons: old.reasons.map(({ line: _line, ...r }) => r) },
+        },
+        FORCE,
+      ),
+    );
     expect(without.lines[1]).toBe(
       `${REASONS.submission_minimum_failed.sentence} ${REASONS.submission_minimum_failed.cure}`,
     );
