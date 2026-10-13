@@ -27,30 +27,30 @@
  */
 
 import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { SCREENED_HEAD } from "../backend/test/helpers/identifier-screen";
 import {
   NOTE_SENTINEL,
   SUMMARY_SENTINEL,
-  type SeedScreenedRequest,
-  evidenceFor,
   failingReport,
-  goodPublicationReport,
-  seedPublicationReview,
   seedScreenedRequest,
 } from "../backend/test/helpers/publication-review";
 import { makePublicationReviewApp } from "../backend/test/helpers/publication-review-app";
 import { NOT_ASSESSED_LINE, REASONS, REVIEW_GATE_REFUSAL_TEXT } from "../shared/publication-review";
-import { PUBLICATION_STEPS } from "../shared/publication-steps";
 import { type CliResult, startPublishCli } from "./helpers/admin-publish-cli";
+import {
+  DATASET,
+  hardReport,
+  reportWith,
+  seedGolden as seedGoldenIn,
+  seedOverride,
+  seedReport as seedReportIn,
+  twoReasons,
+} from "./helpers/approve-seeds";
 
 setDefaultTimeout(60_000);
 
-const DATASET = "nm000460";
 const ADMIN_KEY = "approve-admin-key-0123456789abcdef0123456789abcdef";
 const OTHER_ADMIN_KEY = "approve-other-key-0123456789abcdef0123456789abcdef";
 const EXECUTOR_KEY = "approve-executor-key-0123456789abcdef0123456789abcdef";
-/** Every step but the two logged no-ops: a run the gates let through reaches `published`. */
-const DONE = PUBLICATION_STEPS.filter((s) => s !== "upload_to_zenodo" && s !== "sync_nemar");
 const APPROVE_PATH = `/admin/publish/${DATASET}/approve`;
 
 const h = startPublishCli();
@@ -88,39 +88,11 @@ const requestRow = (id: number) =>
     )
     .get(id);
 
-/** A request waiting for its decision, with every step but the two no-ops done. */
-function seedGolden(over: Partial<SeedScreenedRequest> = {}): number {
-  const { requestId } = seedScreenedRequest(h.db, { datasetId: DATASET, ...over });
-  h.db.run("UPDATE publication_requests SET steps_completed = ? WHERE id = ?", [
-    JSON.stringify(DONE),
-    requestId,
-  ]);
-  return requestId;
-}
+const seedGolden = (over?: Parameters<typeof seedGoldenIn>[1]) => seedGoldenIn(h.db, over);
+const seedReport = (requestId: number, report?: Record<string, unknown>) =>
+  seedReportIn(h.db, requestId, report);
 
-/** The review in force of `requestId`, reported with `report` (a pass by default). */
-function seedReport(requestId: number, report?: Record<string, unknown>): number {
-  return seedPublicationReview(h.db, {
-    requestId,
-    datasetId: DATASET,
-    state: "reported",
-    report,
-  });
-}
-
-/** A report with the given evidence; every question passes. */
-const reportWith = (evidence: Parameters<typeof evidenceFor>[2]) =>
-  goodPublicationReport({ evidence: evidenceFor(SCREENED_HEAD, false, evidence) });
-
-/** A failed question and no Version: two override-class reasons (`question_failed`, `version_missing`). */
-const twoReasons = () => ({
-  ...failingReport(),
-  evidence: evidenceFor(SCREENED_HEAD, false, { version: null, version_shape: "missing" }),
-});
-
-/** A report whose evidence failed ADR 0026's minimums: a hard reason (`submission_minimum_failed`). */
-const hardReport = () =>
-  reportWith({ minimums: "failed", minimum_failures: ["name_too_short"], name_length: 5 });
+const WHY_ACK = "Read the recording formats by hand, nothing to remove";
 
 const approve = (flags: string[], opts: Parameters<typeof h.cli>[1] = {}) =>
   h.cli(["admin", "publish", "approve", DATASET, ...flags], opts);
@@ -249,8 +221,75 @@ describe("the command decides: a review that is not a pass", () => {
   });
 });
 
+describe("the command decides: what is sent is what was shown", () => {
+  test("a reason that comes up after the review was read is not in the override", async () => {
+    const requestId = seedGolden();
+    const reviewId = seedReport(requestId, twoReasons());
+    // Between the command's read of the review and its post, a release of the version appears.
+    // The override names the review and the reasons that were SHOWN; the Worker, which is the gate,
+    // is the one that sees the new reason (refused in "with the Worker's gate" below). Its answer
+    // is not asserted here: with no gate the run goes through, with one it is refused.
+    h.after(`GET /admin/publish/${DATASET}/review`, () => {
+      h.db.run("INSERT INTO dataset_versions (dataset_id, version, doi) VALUES (?, '1.0.0', ?)", [
+        DATASET,
+        "10.5072/FK2.late",
+      ]);
+    });
+
+    await approve(["--resume", "--yes", "--force"]);
+
+    expect(approveBodies()).toHaveLength(1);
+    expect(approveBodies()[0]?.override_publication_review).toEqual({
+      review_id: reviewId,
+      reasons: ["question_failed", "version_missing"],
+    });
+  });
+
+  test("a retry after a 5xx sends the override and the acknowledgment again", async () => {
+    const requestId = seedGolden({ status: "unchecked" });
+    const reviewId = seedReport(requestId, twoReasons());
+    // The approval's own request lookup fails once, after the command's reads, and answers 500: the
+    // command retries on its own after a wait. A retry that lands before the run is marked
+    // approving passes the gates again, so it must carry what the first call carried.
+    let armed = false;
+    let failed = false;
+    h.after(`GET /admin/publish/${DATASET}/review`, () => {
+      armed = true;
+    });
+    h.hookDb({
+      statement(sql) {
+        if (armed && !failed && /FROM publication_requests/.test(sql)) {
+          failed = true;
+          throw new Error("simulated read failure");
+        }
+      },
+    });
+
+    const r = await approve([
+      "--resume",
+      "--yes",
+      "--force",
+      "--acknowledge-identifier-screen",
+      WHY_ACK,
+    ]);
+
+    expect(failed).toBe(true);
+    expect(output(r)).toContain("Retrying in 10s");
+    expect(approveBodies()).toHaveLength(2);
+    for (const body of approveBodies()) {
+      expect(body?.override_publication_review).toEqual({
+        review_id: reviewId,
+        reasons: ["question_failed", "version_missing"],
+      });
+      expect(body?.acknowledge_identifier_screen).toBe(WHY_ACK);
+    }
+    expect(r.exitCode).toBe(0);
+    expect(requestRow(requestId)?.status).toBe("published");
+  });
+});
+
 describe("the command decides: the screen's acknowledgment is its own flag", () => {
-  const WHY = "Read the recording formats by hand, nothing to remove";
+  const WHY = WHY_ACK;
 
   test("not given: refused before anything is posted, and --force does not stand in for it", async () => {
     const requestId = seedGolden({ status: "unchecked" });
@@ -548,10 +587,7 @@ describe("with the Worker's gate: what the Worker refuses is printed, and exits 
     const requestId = seedGolden();
     const reviewId = seedReport(requestId, twoReasons());
     const otherId = await h.admin("otheradmin", OTHER_ADMIN_KEY);
-    h.db.run(
-      "UPDATE publication_reviews SET override_by = ?, override_at = datetime('now'), override_reasons = ? WHERE id = ?",
-      [otherId, JSON.stringify(["question_failed", "version_missing"]), reviewId],
-    );
+    seedOverride(h.db, reviewId, otherId, ["question_failed", "version_missing"]);
 
     // The command cannot know whose key is whose, so it goes on; the Worker is the gate.
     const r = await approve(["--resume", "--yes"], { as: "approveradmin" });
