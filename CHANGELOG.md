@@ -15,6 +15,17 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Changed
+
+- **The parity test for `run-pr-review.yml` now runs in CI against the deployed copy (ADR 0092).**
+  The workflow reached `nemarDatasets/.github` `main` on 2026-10-12 (commit `fe7f821a`), so the
+  `unit-pure` job's sparse checkout of that repository lists it beside `onboard-openneuro.yml` and
+  sets `NEMAR_PR_REVIEW_WORKFLOW_LIVE` to it. Until now the test skipped in CI, because there was
+  nothing to compare. With the variable set, a missing deployed copy fails the test, and so does a
+  deployed copy that differs from `.github/dataset-workflows/run-pr-review.yml` by a single byte.
+  A change to either copy now has to be deployed to the other in the same step, as it already
+  had to be for the onboarding workflow. Step 3 of ADR 0092's "Before it is switched on" is done.
+
 ### Fixed
 
 - **The weekly summary.json drift check can file its issue.** The job has no checkout, so `gh`
@@ -40,6 +51,39 @@ earlier releases are described only by their generated notes.
   or `.yaml`, and the per-dataset templates for a `gh` call with no checkout, `GH_REPO` or
   `--repo`, a swallowed issue lookup, a lookup in a step that does not stop on error, and a
   swallowed label create. A pull request that edited only a workflow used to run no job at all.
+- **The `modality` filter matches a whole modality, not a substring (#1711, ADR 0032
+  amendment).** `GET /datasets`, `GET /datasets/search` and the MCP `search_datasets` tool
+  matched `LIKE '%eeg%'` over the comma-joined modality list, so `modality=EEG` also returned
+  datasets that were intracranial only (`ieeg`), and a `%` or `_` in the value matched every
+  row or any character. The filter now matches a whole token, ignoring case, and a space
+  inside a token is part of it. **A partial name no longer matches:** `modality=ee` and
+  `modality=mot` used to return datasets and now return nothing; use the full name (`eeg`,
+  `motion`). A comma-separated value matches a dataset holding any of its tokens (it used to
+  match only a list that held them adjacent and in stored order). A value that names no
+  modality, such as whitespace or a bare comma, matches nothing. **At most 32 distinct
+  modalities may be named in one request**; more is a 400 (a refused tool call on MCP) rather
+  than a truncated list. Result counts for `modality=eeg` drop to the datasets that hold an
+  `eeg` token, which is the count `GET /datasets/facets` reports. `task` and `author` are
+  still substring filters. Adjacent fix: `GET /datasets/search` now sends `Cache-Control:
+  no-store` on every response; it sent no `Cache-Control` at all, including on its 400s, which
+  `GET /datasets` already sent as `no-store`. No migration and no deploy coupling.
+- **`nemar admin pr-reviews approve --merge` and `y` in `next` no longer approve a pull request
+  they then refuse to merge (ADR 0093 amendment).** Both approved first and read GitHub's
+  `mergeable_state` afterwards, and `y` was offered for every state but `dirty` and `behind`, so a
+  pull request the automated review holds (its check is not required, so GitHub is expected to
+  report `unstable`: a check or status that is not required is not passing or has not reported) was
+  approved and left unmerged. The state is now read before anything is written, and again just before
+  the approval is written: unless GitHub says `clean` (asked again while it says `unknown`; an
+  unreadable or unrecognised state, a moved head and a pull request no longer open are not clean),
+  nothing is approved or merged, the state or the failed read is named with why it blocks, and the
+  way forward is given (approve without `--merge` for a state that will not clear, run the command
+  again for one that may or whose head changed; in `next`, `s` skips it and a fresh run looks again).
+  The second look narrows the window to one request and does not close it: GitHub has no
+  approve-and-merge call. `y` is not offered for such a pull request, `--force` does not reach it,
+  and `approve` without `--merge` is unchanged. The "clean only" rule itself is unchanged. A
+  repository whose protection required an approving review would read `blocked` before the approval
+  and is now refused; neither the ruleset applied to published datasets nor the classic protection on
+  the four legacy repositories requires one.
 - **A Cache API that keeps stalling no longer costs every API request half a second (#1715,
   ADR 0098 amendment).** Every rate-limiter wait on the cache was bounded at 500 ms with no
   memory, so while the cache stayed stalled each request paid the bound in each place it used
