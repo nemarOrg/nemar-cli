@@ -117,34 +117,104 @@ export function describesEthicsApproval(descriptionJson: string | null): boolean
   }
 }
 
-/** Reasons are user-facing: each states the failure AND the fix. */
-export function evaluateSubmissionMinimums(
+/**
+ * Each way a submission can miss a minimum, as a closed word, in the order the
+ * rules are evaluated (the description first, then Name, Authors and the
+ * ethics statement). The three description words are exclusive: a description
+ * that is missing or unreadable is the only failure reported. `authors_missing`
+ * applies to a publication only, and `authors_empty_for_anonymous` and
+ * `authors_not_blinded` to an anonymous release only.
+ *
+ * A word, not a sentence, because the publication review (ADR 0101) carries
+ * its evidence in closed words only: the sentence for an anonymous release
+ * quotes the names it found, and a report, a log line or a stored row must not.
+ */
+export const MINIMUM_FAILURES = [
+  "description_missing",
+  "description_not_json",
+  "description_not_object",
+  "name_too_short",
+  "authors_missing",
+  "authors_empty_for_anonymous",
+  "authors_not_blinded",
+  "ethics_statement_missing",
+] as const;
+export type MinimumFailure = (typeof MINIMUM_FAILURES)[number];
+
+/**
+ * The sentence for each word that quotes nothing from the dataset. Every word
+ * but two is said the same way by {@link evaluateSubmissionMinimums}; for
+ * `name_too_short` it adds the current length, and for `authors_not_blinded` it
+ * names the authors it found, which is why this table exists: the review
+ * re-blocks a request with these sentences and never with a name.
+ */
+const FAILURE_SENTENCES: Record<MinimumFailure, string> = {
+  description_missing: "dataset_description.json was not found at the dataset root.",
+  description_not_json: "dataset_description.json is not valid JSON.",
+  description_not_object: "dataset_description.json is not a JSON object.",
+  name_too_short: `Dataset Name must be a descriptive title of at least ${MIN_NAME_LENGTH} characters. If the study is known by a short acronym, expand it with a subtitle, e.g. "ACRO: auditory cortex recordings during natural speech".`,
+  authors_missing:
+    "Authors in dataset_description.json must name the people responsible for the " +
+    "dataset; anonymous submissions and placeholder entries are not accepted.",
+  authors_empty_for_anonymous:
+    "Authors in dataset_description.json must not be empty, even for an anonymous " +
+    'release: set it to a placeholder such as "Anonymous" so the field states that ' +
+    "attribution is withheld rather than missing.",
+  authors_not_blinded:
+    'This is an anonymous release, but Authors in dataset_description.json still names somebody. That file is part of the dataset and is served publicly, so NEMAR cannot conceal what it says. Replace the entries with a placeholder such as "Anonymous", commit, and request the release again. Restore the real names when you publish after acceptance.',
+  ethics_statement_missing:
+    "An ethics approval statement is required: fill the EthicsApprovals field of " +
+    "dataset_description.json, or add an ethics/IRB statement to the README.",
+};
+
+/** The sentence for a failure that quotes nothing from the dataset; used when the review re-blocks. */
+export function minimumFailureSentence(code: MinimumFailure): string {
+  return FAILURE_SENTENCES[code];
+}
+
+interface MinimumMiss {
+  code: MinimumFailure;
+  /** User-facing: states the failure AND the fix. */
+  sentence: string;
+}
+
+/**
+ * The one evaluation behind {@link evaluateSubmissionMinimums} and
+ * {@link submissionMinimumFailures}, so the sentences and the words cannot
+ * disagree about which rules failed or in what order.
+ */
+function evaluateMinimums(
   descriptionJson: string | null,
   readme: string | null,
-  options: SubmissionMinimumsOptions = {},
-): string[] {
+  options: SubmissionMinimumsOptions,
+): MinimumMiss[] {
+  const fixed = (code: MinimumFailure): MinimumMiss => ({
+    code,
+    sentence: FAILURE_SENTENCES[code],
+  });
   if (descriptionJson === null) {
-    return ["dataset_description.json was not found at the dataset root."];
+    return [fixed("description_missing")];
   }
 
   let desc: Record<string, unknown>;
   try {
     const parsed: unknown = JSON.parse(descriptionJson);
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      return ["dataset_description.json is not a JSON object."];
+      return [fixed("description_not_object")];
     }
     desc = parsed as Record<string, unknown>;
   } catch {
-    return ["dataset_description.json is not valid JSON."];
+    return [fixed("description_not_json")];
   }
 
-  const reasons: string[] = [];
+  const reasons: MinimumMiss[] = [];
 
   const name = typeof desc.Name === "string" ? desc.Name.trim() : "";
   if (name.length < MIN_NAME_LENGTH) {
-    reasons.push(
-      `Dataset Name must be a descriptive title of at least ${MIN_NAME_LENGTH} characters (currently ${name.length}). If the study is known by a short acronym, expand it with a subtitle, e.g. "ACRO: auditory cortex recordings during natural speech".`,
-    );
+    reasons.push({
+      code: "name_too_short",
+      sentence: `Dataset Name must be a descriptive title of at least ${MIN_NAME_LENGTH} characters (currently ${name.length}). If the study is known by a short acronym, expand it with a subtitle, e.g. "ACRO: auditory cortex recordings during natural speech".`,
+    });
   }
 
   const authors = Array.isArray(desc.Authors)
@@ -159,30 +229,39 @@ export function evaluateSubmissionMinimums(
   // than a blinded one.
   if (options.anonymousRelease) {
     if (authors.length === 0) {
-      reasons.push(
-        "Authors in dataset_description.json must not be empty, even for an anonymous " +
-          'release: set it to a placeholder such as "Anonymous" so the field states that ' +
-          "attribution is withheld rather than missing.",
-      );
+      reasons.push(fixed("authors_empty_for_anonymous"));
     } else if (realAuthors.length > 0) {
-      reasons.push(
-        `This is an anonymous release, but Authors in dataset_description.json still names ${realAuthors.join(", ")}. That file is part of the dataset and is served publicly, so NEMAR cannot conceal what it says. Replace the entries with a placeholder such as "Anonymous", commit, and request the release again. Restore the real names when you publish after acceptance.`,
-      );
+      reasons.push({
+        code: "authors_not_blinded",
+        sentence: `This is an anonymous release, but Authors in dataset_description.json still names ${realAuthors.join(", ")}. That file is part of the dataset and is served publicly, so NEMAR cannot conceal what it says. Replace the entries with a placeholder such as "Anonymous", commit, and request the release again. Restore the real names when you publish after acceptance.`,
+      });
     }
   } else if (realAuthors.length === 0) {
-    reasons.push(
-      "Authors in dataset_description.json must name the people responsible for the " +
-        "dataset; anonymous submissions and placeholder entries are not accepted.",
-    );
+    reasons.push(fixed("authors_missing"));
   }
 
   const ethicsInReadme = readme !== null && ETHICS_IN_README.test(readme);
   if (!listsEthicsApproval(desc) && !ethicsInReadme) {
-    reasons.push(
-      "An ethics approval statement is required: fill the EthicsApprovals field of " +
-        "dataset_description.json, or add an ethics/IRB statement to the README.",
-    );
+    reasons.push(fixed("ethics_statement_missing"));
   }
 
   return reasons;
+}
+
+/** Reasons are user-facing: each states the failure AND the fix. */
+export function evaluateSubmissionMinimums(
+  descriptionJson: string | null,
+  readme: string | null,
+  options: SubmissionMinimumsOptions = {},
+): string[] {
+  return evaluateMinimums(descriptionJson, readme, options).map((miss) => miss.sentence);
+}
+
+/** The same rules as {@link evaluateSubmissionMinimums}, as words, in the same order. */
+export function submissionMinimumFailures(
+  descriptionJson: string | null,
+  readme: string | null,
+  options: SubmissionMinimumsOptions = {},
+): MinimumFailure[] {
+  return evaluateMinimums(descriptionJson, readme, options).map((miss) => miss.code);
 }
