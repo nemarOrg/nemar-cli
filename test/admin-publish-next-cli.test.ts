@@ -994,6 +994,27 @@ describe.skipIf(process.platform === "win32")("on a terminal", () => {
     expect(requestRow(requestId)?.status).toBe("requested");
   });
 
+  test("Ctrl+D while an approval runs ends the walk after it, and the command exits", async () => {
+    // The input ends while the approval is running: the walk must not wake the terminal again.
+    const a = seed(A);
+    seed(B);
+    requestedAt(A, "2026-10-10 09:00:00");
+    requestedAt(B, "2026-10-11 09:00:00");
+
+    const r = await h.cli(NEXT, {
+      terminal: async (t) => {
+        await t.waitFor(PROMPT);
+        t.type("y\n");
+        t.type("\u0004");
+        await t.waitFor("Input ended; stopping.");
+      },
+    });
+
+    expect(r.exitCode).toBe(0);
+    expect(requestRow(a.requestId)?.status).toBe("published");
+    expect(r.stdout).toContain("Done: 1 approved.");
+  });
+
   test("Ctrl+C stops the walk with the shell's code for an interrupt, and says so", async () => {
     seed(A);
 

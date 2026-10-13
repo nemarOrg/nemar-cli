@@ -10,6 +10,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { PassThrough } from "node:stream";
 import { reasonViewsOf } from "../backend/src/services/publication-review-view";
 import { evidenceFor } from "../backend/test/helpers/publication-review";
 import type {
@@ -28,6 +29,7 @@ import {
   parsePublicationReviewEvidence,
 } from "../shared/publication-review";
 import type { PublicationReviewSummary, PublishRequestsResponse } from "../src/lib/api/publish";
+import { LineReader } from "../src/lib/prompt-lines";
 import type { ReviewRead } from "../src/lib/publication-review-approve";
 import {
   type NextTally,
@@ -643,5 +645,21 @@ describe("the tally and the exit code", () => {
     expect(exitCodeOf(tally({ approved: 5, failed: 1 }), false)).toBe(1);
     expect(exitCodeOf(tally(), true)).toBe(130);
     expect(exitCodeOf(tally({ failed: 2 }), true)).toBe(130);
+  });
+});
+
+describe("LineReader.open", () => {
+  test("is true while the input can still be read, false once it has ended or the reader was closed", async () => {
+    const ended = new LineReader(new PassThrough(), new PassThrough());
+    expect(ended.open).toBe(true);
+    ended.close();
+    expect(ended.open).toBe(false);
+
+    const input = new PassThrough();
+    const piped = new LineReader(input, new PassThrough());
+    const waiting = piped.ask("? ");
+    input.end();
+    expect(await waiting).toBeNull();
+    expect(piped.open).toBe(false);
   });
 });

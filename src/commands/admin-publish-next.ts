@@ -416,7 +416,7 @@ async function approve(step: Step, card: Card): Promise<Outcome> {
     // The review and the reasons the card showed: never a second read.
     override: answer.override,
   });
-  keepListening();
+  keepListening(step.reader);
   if (run.ok) step.tally.approved++;
   else step.tally.failed++;
   return "done";
@@ -508,10 +508,15 @@ function printFailure(error: unknown, fallback: string): void {
 /**
  * Put a terminal's input back the way the walk's reader needs it. The approval's spinner takes
  * over standard input while it spins, and when it stops it pauses the stream and leaves the
- * terminal in line mode; a walk that went on from there would never hear another answer.
+ * terminal in line mode; a walk that went on from there would never hear another answer, and
+ * would end without a word, because nothing is left to keep the process alive.
+ *
+ * Only while the reader is still open: after Ctrl+C or Ctrl+D (which can arrive while the
+ * approval runs) the stream has been paused on purpose, and resuming it would keep the process
+ * from ever exiting.
  */
-function keepListening(): void {
-  if (!process.stdin.isTTY) return;
+function keepListening(reader: LineReader): void {
+  if (!process.stdin.isTTY || !reader.open) return;
   process.stdin.setRawMode(true);
   process.stdin.resume();
 }
