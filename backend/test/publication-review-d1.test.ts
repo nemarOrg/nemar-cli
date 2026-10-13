@@ -395,6 +395,39 @@ describe("the review's statements on D1", () => {
     expect(await request(d1)).toMatchObject({ status: "blocked" });
   });
 
+  test("a fault after the re-block takes the re-block back with it on D1", async () => {
+    // The re-block runs first in the batch and the write of the result after it. A trigger that
+    // aborts the write of the result makes D1 prove the transaction: the re-block is undone too.
+    const d1 = await seededD1();
+    const started = await startPublicationReview(env(d1), { requestId: 1, datasetId: DATASET });
+    const id = started.reviewId as number;
+    const nonce = await nonceOf(d1, id);
+    expect(await claimPublicationReview(env(d1), id, DATASET, nonce)).toBe("claimed");
+    const failing = parsePublicationReviewReport(
+      goodPublicationReport({
+        evidence: evidenceFor(SCREENED_HEAD, false, {
+          minimums: "failed",
+          minimum_failures: ["name_too_short"],
+          name_length: 10,
+        }),
+      }),
+    );
+    await d1
+      .prepare(
+        `CREATE TRIGGER abort_store BEFORE UPDATE ON publication_reviews
+           WHEN NEW.state = 'reported' BEGIN SELECT RAISE(ABORT, 'simulated fault'); END`,
+      )
+      .run();
+    await expect(
+      storePublicationReviewResult(env(d1), id, DATASET, nonce, {
+        kind: "reported",
+        report: failing,
+      }),
+    ).rejects.toThrow();
+    expect((await reviews(d1))[0]).toMatchObject({ state: "dispatched", report: null, nonce });
+    expect(await request(d1)).toMatchObject({ status: "requested", block_reason: null });
+  });
+
   test("the watchdog ages a row, keeps its nonce, and a late report lands and re-arms the mail", async () => {
     const d1 = await seededD1();
     const started = await startPublicationReview(env(d1), { requestId: 1, datasetId: DATASET });

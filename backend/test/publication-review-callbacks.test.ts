@@ -949,6 +949,33 @@ describe("a failed submission minimum re-blocks the request", () => {
     });
   });
 
+  test("a fault after the re-block has run takes the re-block back with it", async () => {
+    // The unit is atomic in both directions: a fault on a LATER statement of the batch (here the
+    // last write of the result) must undo the re-block that ran before it, not only a fault on
+    // the re-block itself stop the writes after it.
+    const { requestId, reviewId } = dispatched({ claimed: true });
+    const token = await h.tokenFor(reviewId);
+    const nonce = h.nonceOf(reviewId);
+    let writes = 0;
+    const faulty = hookedD1(realD1(h.db), {
+      statement: (sql) => {
+        if (sql.includes("SET state = ?, verdict = ?") && ++writes === 2) {
+          throw new Error("D1_ERROR: transient");
+        }
+      },
+    });
+    const res = await h.result(
+      reviewId,
+      { outcome: "reported", report: failing() },
+      token,
+      h.env({ DB: faulty }),
+    );
+    expect(res.status).toBe(500);
+    expect(state(reviewId)).toMatchObject({ state: "dispatched", report: null });
+    expect(h.nonceOf(reviewId)).toBe(nonce);
+    expect(h.requestRow(requestId)).toMatchObject({ status: "requested", block_reason: null });
+  });
+
   test("the store, the re-block and the mail re-arm go to the database as one batch", async () => {
     const { reviewId } = dispatched({ claimed: true, minutesAgo: 45 });
     await sweepPublicationReviews(h.env());
