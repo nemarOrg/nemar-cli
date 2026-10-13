@@ -244,6 +244,15 @@ export interface Bindings {
   // Worker answers only for repositories it owns (see the ownership fence in the webhook).
   PR_REVIEW_ENABLED?: string; // "1" enables the review
 
+  // Publication review (ADR 0101). When PUBLICATION_REVIEW_ENABLED is exactly "1", a stored
+  // identifier-screen result whose gate is clear or acknowledge starts a model review of the
+  // screened commit, the claim route accepts new claims, and the request's admin mail waits for
+  // the review. Any other value (unset included) starts nothing and refuses new claims; a result
+  // whose run was already claimed is still stored, and the production watchdog still closes rows.
+  // The callback token reuses PRESCREEN_CALLBACK_SECRET under its own domain tag. Set in
+  // [env.dev.vars] only; production turns it on by adding it to [vars] in a reviewed change.
+  PUBLICATION_REVIEW_ENABLED?: string; // "1" enables the review
+
   // Import recovery (issue #754). onboard-openneuro.yml POSTs import state to
   // /webhooks/import-state (bearer NEMAR_WEBHOOK_TOKEN). On a terminal failure
   // an unambiguous orphan (private, no DOI, no versions, never completed) is
