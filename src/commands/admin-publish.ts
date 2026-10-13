@@ -33,6 +33,7 @@ import { reviewListLine } from "../lib/publication-review-display.js";
 import { needsAdministrator } from "../lib/publication-review-queue.js";
 import { plain } from "../lib/terminal-text.js";
 import { registerApproveCommand } from "./admin-publish-approve.js";
+import { registerReviewCommands } from "./admin-publish-review.js";
 
 export const publishCommand = new Command("publish").description("Publication workflow management");
 
@@ -182,6 +183,8 @@ Examples:
       reportFailure(error, spinner, "Failed to list publication requests", json);
     }
   });
+
+registerReviewCommands(publishCommand);
 
 publishCommand
   .command("deny")

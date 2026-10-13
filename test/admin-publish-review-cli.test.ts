@@ -24,13 +24,26 @@
  */
 
 import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { SCREENED_HEAD } from "../backend/test/helpers/identifier-screen";
 import {
+  NOTE_SENTINEL,
+  SUMMARY_SENTINEL,
   type SeedScreenedRequest,
+  evidenceFor,
   failingReport,
   goodPublicationReport,
   seedPublicationReview,
   seedScreenedRequest,
 } from "../backend/test/helpers/publication-review";
+import type { PublicationReviewDetail } from "../shared/contract/publication-review-admin";
+import {
+  NOT_ASSESSED_LINE,
+  PUBLICATION_FINDING_LABEL,
+  QUESTION_FACT_TEXT,
+  QUESTION_LABEL,
+  REASONS,
+  cureOf,
+} from "../shared/publication-review";
 import type { PublishRequestsResponse } from "../src/lib/api/publish";
 import { type CliResult, startPublishCli } from "./helpers/admin-publish-cli";
 
@@ -47,6 +60,16 @@ beforeEach(async () => {
   h.setEnv({ PUBLICATION_REVIEW_ENABLED: "1" });
   await h.admin("reviewadmin", ADMIN_KEY);
 });
+
+/**
+ * The generic nudge the exit hook prints on a non-zero exit (src/index.ts). Where exit 1 is the
+ * command's answer it is noise, and `markReportedExit` suppresses it; where the Worker itself
+ * failed it stays, because that may be a bug worth a report.
+ */
+const BUG_HINT = "attach the log to a new issue";
+
+/** Anything a terminal could act on, in any line of what was printed. */
+const DANGEROUS_IN_LINES = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 
 /** What the command printed, standard output and standard error together. */
 const output = (r: CliResult) => `${r.stdout}\n${r.stderr}`;
@@ -269,5 +292,333 @@ describe("list with the review off", () => {
     expect(blockOf(r.stdout, "nm000480").join("\n")).not.toContain("Publication review");
     // Every row says the review is off, whether or not it holds a review.
     expect(r.stdout).toContain("The automated review is off on this Worker");
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// show
+// ---------------------------------------------------------------------------------------------
+
+const ACK_AT = "2026-10-13 10:01:00";
+const OVERRIDE_AT = "2026-10-13 10:02:11";
+
+/**
+ * A request whose review has everything `show` prints: a question the platform's own facts failed
+ * (no README), a finding and a summary in the model's words, a cut and a withheld document, an
+ * older review of another commit, an override on record and a screen acknowledgment.
+ */
+function seedRich(datasetId: string): { requestId: number; reviewId: number } {
+  const adminId = h.db
+    .query<{ id: number }, []>("SELECT id FROM users WHERE username = 'reviewadmin'")
+    .get()?.id as number;
+  const { requestId } = seedScreenedRequest(h.db, { datasetId, status: "review" });
+  h.db.run(
+    `UPDATE publication_requests
+        SET identifier_screen_ack_by = ?, identifier_screen_ack_reason = 'dates only, read them',
+            identifier_screen_ack_at = ?
+      WHERE id = ?`,
+    [adminId, ACK_AT, requestId],
+  );
+  const report = goodPublicationReport({
+    summary: SUMMARY_SENTINEL,
+    findings: [
+      {
+        question: "meets_standards",
+        severity: "concern",
+        code: "ethics_statement_inadequate",
+        document: "dataset_description",
+        note: NOTE_SENTINEL,
+      },
+    ],
+    evidence: evidenceFor(SCREENED_HEAD, false, {
+      version: "1.2.0",
+      documents: {
+        readme: "absent",
+        dataset_description: "sent",
+        changes: "absent",
+        license: "sent_cut",
+        participants_json: "withheld_finding",
+      },
+      withheld_findings: { "edf-patient-name": 1 },
+    }),
+  });
+  const reviewId = seedPublicationReview(h.db, {
+    requestId,
+    datasetId,
+    state: "reported",
+    report,
+    claimed: true,
+    createdMinutesAgo: 5,
+  });
+  h.db.run(
+    `UPDATE publication_reviews
+        SET override_by = ?, override_at = ?, override_reasons = '["question_failed","text_withheld"]'
+      WHERE id = ?`,
+    [adminId, OVERRIDE_AT, reviewId],
+  );
+  // An earlier attempt on another commit: history, not the review in force.
+  seedPublicationReview(h.db, {
+    requestId,
+    datasetId,
+    head: "a".repeat(40),
+    state: "errored",
+    detail: "model_unavailable",
+    createdMinutesAgo: 120,
+  });
+  return { requestId, reviewId };
+}
+
+/** The detail as the Worker answered it: the oracle for the words `show` must print as they are. */
+async function detailOf(datasetId: string): Promise<PublicationReviewDetail> {
+  const r = await h.cli(["admin", "publish", "show", datasetId, "--json"]);
+  expect(r.exitCode).toBe(0);
+  return JSON.parse(r.stdout) as PublicationReviewDetail;
+}
+
+/** The positions of `markers` in `text`, which must all be found and in this order. */
+function expectInOrder(text: string, markers: string[]): void {
+  let from = 0;
+  for (const marker of markers) {
+    const at = text.indexOf(marker, from);
+    expect(at, `"${marker}" after position ${from}`).toBeGreaterThanOrEqual(0);
+    from = at + marker.length;
+  }
+}
+
+describe("show", () => {
+  test("prints the screen, the headline, the gate, the reasons with their cures, the questions, the facts, the findings and summary under their labels, the evidence, what was shown, the standing line and the next command", async () => {
+    const { requestId } = seedRich("nm000480");
+    const detail = await detailOf("nm000480");
+    // The words come from the Worker; the test reads what it said and holds the CLI to printing it.
+    expect(detail.description.headline).toBe("Publication review: FAIL");
+    expect(detail.description.next).not.toBeNull();
+
+    const before = h.requests.length;
+    const r = await h.cli(["admin", "publish", "show", "nm000480"]);
+
+    expect(r.exitCode).toBe(0);
+    const questionFailed = REASONS.question_failed.sentence.replace(/\.$/, "");
+    expectInOrder(r.stdout, [
+      `nm000480  request ${requestId}, requested, named publication`,
+      "Identifier screen:",
+      `Acknowledged by administrator ${detail.screen_acknowledgment?.by} at ${ACK_AT}.`,
+      detail.description.headline,
+      "Gate: enforced",
+      questionFailed,
+      cureOf("question_failed", "nm000480", true),
+      "Questions:",
+      "complete_and_honest",
+      "fail",
+      QUESTION_LABEL.complete_and_honest,
+      "Platform facts that lowered an answer:",
+      `complete_and_honest: ${QUESTION_FACT_TEXT.readme_absent}`,
+      "Findings (written by the model; the depositor's text can steer them):",
+      `[concern] ${PUBLICATION_FINDING_LABEL.ethics_statement_inadequate} (dataset_description.json): ${NOTE_SENTINEL}`,
+      "Summary (written by the model; the depositor's text can steer it):",
+      SUMMARY_SENTINEL,
+      "Evidence: version 1.2.0 (tag absent), BIDS pass, minimums met, 4 subjects, 0 sessions, 4 recordings (.edf 4), datatypes eeg, sampling rates 256 Hz, channel counts 32, sidecars read 4 of 4",
+      "Shown to the model: README absent, dataset_description.json sent (9 keys shown, 1 not), CHANGES absent, LICENSE sent (cut), participants.json withheld (finding)",
+      "Withheld for findings: edf-patient-name 1",
+      `Override: by administrator ${detail.review?.override?.by} at ${OVERRIDE_AT} for question_failed, text_withheld`,
+      NOT_ASSESSED_LINE,
+      `Next: ${detail.description.next}`,
+      "History",
+    ]);
+    // Every line of the Worker's description is printed as it came.
+    for (const line of detail.description.lines) expect(r.stdout).toContain(line);
+    // The history lists the reviews, the one in force marked.
+    const history = r.stdout.slice(r.stdout.indexOf("History"));
+    expect(history).toContain("reported");
+    expect(history).toContain("errored");
+    expect(history).toContain("in force");
+    // Read-only: the command wrote nothing.
+    expect(h.requests.slice(before).map((c) => `${c.method} ${c.path}`)).toEqual([
+      "GET /admin/publish/nm000480/review",
+    ]);
+  });
+
+  test("the model's words are printed once, under their labels, and nowhere else", async () => {
+    seedRich("nm000480");
+
+    const r = await h.cli(["admin", "publish", "show", "nm000480"]);
+
+    const lines = r.stdout.split("\n");
+    expect(lines.filter((l) => l.includes(SUMMARY_SENTINEL))).toHaveLength(1);
+    expect(lines.filter((l) => l.includes(NOTE_SENTINEL))).toHaveLength(1);
+    const labelAt = lines.findIndex((l) => l.includes("Summary (written by the model;"));
+    expect(lines[labelAt + 1]).toContain(SUMMARY_SENTINEL);
+    const findingsAt = lines.findIndex((l) => l.includes("Findings (written by the model;"));
+    expect(lines[findingsAt + 1]).toContain(NOTE_SENTINEL);
+    // The list, which an administrator reads at a glance, carries neither.
+    const list = await h.cli(LIST);
+    expect(list.stdout).not.toContain(SUMMARY_SENTINEL);
+    expect(list.stdout).not.toContain(NOTE_SENTINEL);
+  });
+
+  test("a passing review prints its pass, no findings and no reason, and the approve command", async () => {
+    seedPassing("nm000484");
+
+    const r = await h.cli(["admin", "publish", "show", "nm000484"]);
+
+    expect(r.exitCode).toBe(0);
+    const detail = await detailOf("nm000484");
+    expectInOrder(r.stdout, [
+      "nm000484  request",
+      "Identifier screen:",
+      "Publication review: pass",
+      "Gate: enforced",
+      "Questions:",
+      "Summary (written by the model; the depositor's text can steer it):",
+      "Evidence:",
+      "Shown to the model:",
+      NOT_ASSESSED_LINE,
+      `Next: ${detail.description.next}`,
+    ]);
+    expect(r.stdout).not.toContain("Findings (");
+    expect(r.stdout).not.toContain("Platform facts");
+    expect(r.stdout).not.toContain("Override:");
+    expect(r.stdout).not.toContain("History");
+  });
+
+  test("a request with no review says so in the Worker's words, and the flag off says the gate is off", async () => {
+    h.setEnv({ PUBLICATION_REVIEW_ENABLED: "0" });
+    seedScreenedRequest(h.db, { datasetId: "nm000480" });
+
+    const r = await h.cli(["admin", "publish", "show", "nm000480"]);
+
+    expect(r.exitCode).toBe(0);
+    const detail = await detailOf("nm000480");
+    expectInOrder(r.stdout, [
+      detail.description.headline,
+      "Gate: off (advice only)",
+      NOT_ASSESSED_LINE,
+    ]);
+    expect(r.stdout).not.toContain("Questions:");
+  });
+
+  test("a blocked request shows why, even with the review off and no reasons", async () => {
+    h.setEnv({ PUBLICATION_REVIEW_ENABLED: "0" });
+    seedScreenedRequest(h.db, {
+      datasetId: "nm000480",
+      requestStatus: "blocked",
+      blockReason: "min_requirements_failed",
+    });
+
+    const r = await h.cli(["admin", "publish", "show", "nm000480"]);
+
+    expect(r.stdout).toContain("blocked (min_requirements_failed)");
+  });
+
+  test("an anonymous release says so up front", async () => {
+    seedScreenedRequest(h.db, { datasetId: "nm000480", anonymous: true });
+
+    const r = await h.cli(["admin", "publish", "show", "nm000480"]);
+
+    expect(r.stdout.split("\n")[1]).toContain("ANONYMOUS RELEASE");
+  });
+
+  test("the non-production Worker says it is not production", async () => {
+    h.setEnv({ ENVIRONMENT: "staging" });
+    seedScreenedRequest(h.db, { datasetId: "nm000480" });
+
+    const r = await h.cli(["admin", "publish", "show", "nm000480"]);
+
+    expect(r.stdout).toContain("This is the non-production Worker.");
+    const production = await h.cli(LIST);
+    expect(production.stdout).not.toContain("non-production");
+  });
+
+  test("--json prints the detail and nothing else", async () => {
+    seedRich("nm000480");
+
+    const r = await h.cli(["admin", "publish", "show", "nm000480", "--json"]);
+
+    expect(r.exitCode).toBe(0);
+    const body = JSON.parse(r.stdout) as PublicationReviewDetail;
+    expect(body.dataset_id).toBe("nm000480");
+    expect(body.review?.summary).toBe(SUMMARY_SENTINEL);
+    expect(r.stdout.trimStart().startsWith("{")).toBe(true);
+    expect(r.stdout.trimEnd().endsWith("}")).toBe(true);
+  });
+
+  test("a model's text carrying a terminal escape and a bidirectional override prints without them", async () => {
+    // The Worker reduces the model's words to plain ones before it sends them; this is the end of
+    // the chain, a stored report that carries the controls, read back through the real route. The
+    // CLI's own `plain()` is held to the same by publication-review-display.unit.test.ts, which
+    // feeds it hostile text the Worker would never send.
+    const ESC = String.fromCharCode(27);
+    const hostile = `${ESC}[2J${ESC}]0;title\u0007steered‮reversed​ end`;
+    const { requestId } = seedScreenedRequest(h.db, { datasetId: "nm000480" });
+    const base = failingReport() as { findings: Array<{ note: string }>; summary: string };
+    base.summary = hostile;
+    base.findings[0].note = hostile;
+    seedPublicationReview(h.db, {
+      requestId,
+      datasetId: "nm000480",
+      state: "reported",
+      rawReport: JSON.stringify(base),
+      verdict: "fail",
+      claimed: true,
+    });
+
+    const r = await h.cli(["admin", "publish", "show", "nm000480"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("Summary (written by the model;");
+    // Every line, split on the newline that separates them: any other control is hostile (the run
+    // has no colour, so none of it is the CLI's own).
+    for (const line of r.stdout.split("\n")) expect(line).not.toMatch(DANGEROUS_IN_LINES);
+  });
+
+  test("a dataset with no active request exits 1 with the Worker's sentence and no bug-report hint", async () => {
+    seedScreenedRequest(h.db, { datasetId: "nm000480", requestStatus: "published" });
+
+    const r = await h.cli(["admin", "publish", "show", "nm000480"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(output(r)).toContain("nm000480 has no active publication request.");
+    expect(output(r)).not.toContain(BUG_HINT);
+    expect(h.requests.at(-1)?.status).toBe(404);
+  });
+
+  test("a malformed id exits 1 before any request is made", async () => {
+    const r = await h.cli(["admin", "publish", "show", "not-a-dataset"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(output(r)).toContain('"not-a-dataset" is not a dataset id');
+    expect(output(r)).not.toContain(BUG_HINT);
+    expect(h.requests).toEqual([]);
+  });
+
+  test("signed out exits 1 and says so on standard output, or on standard error under --json", async () => {
+    seedScreenedRequest(h.db, { datasetId: "nm000480" });
+
+    const text = await h.cli(["admin", "publish", "show", "nm000480"], { signedOut: true });
+    expect(text.exitCode).toBe(1);
+    expect(text.stdout).toContain("Not authenticated");
+
+    const json = await h.cli(["admin", "publish", "show", "nm000480", "--json"], {
+      signedOut: true,
+    });
+    expect(json.exitCode).toBe(1);
+    expect(json.stdout).toBe("");
+    expect(json.stderr).toContain("Not authenticated");
+    expect(h.requests).toEqual([]);
+  });
+
+  test("a read the Worker could not make exits 1 and keeps the bug-report hint", async () => {
+    seedPassing("nm000484");
+    h.hookDb({
+      statement(sql) {
+        if (/FROM publication_reviews/.test(sql)) throw new Error("simulated read failure");
+      },
+    });
+
+    const r = await h.cli(["admin", "publish", "show", "nm000484"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(h.requests.at(-1)?.status).toBe(500);
+    expect(output(r)).toContain("The publication review could not be read. Try again.");
+    expect(output(r)).toContain(BUG_HINT);
   });
 });
