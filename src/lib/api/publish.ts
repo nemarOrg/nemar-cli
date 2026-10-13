@@ -8,6 +8,7 @@
 
 import {
   OVERRIDE_FIELD,
+  type PublicationCommentBody,
   type PublicationCommentResponse,
   type PublicationReviewDetail,
   type PublicationReviewGateRefusalBody,
@@ -294,12 +295,13 @@ export async function commentOnPublication(
   datasetId: string,
   message: string,
 ): Promise<PublicationCommentResponse> {
+  const body: PublicationCommentBody = { message };
   return request<PublicationCommentResponse>(
     `/admin/publish/${datasetId}/comment`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message }),
+      body: JSON.stringify(body),
     },
     true,
   );

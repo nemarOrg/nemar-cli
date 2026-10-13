@@ -329,7 +329,7 @@ describe("commentOnPublication, against the real router", () => {
     expect(h.requestRow(requestId).status).toBe("requested");
   });
 
-  test("a message that could not be mailed throws the route's 502 with its closed word", async () => {
+  test("a message that certainly was not mailed throws the route's 502 with its closed word and says nothing was sent", async () => {
     seedScreenedRequest(h.db, { datasetId: PROD_DATASET });
     const err = await withFakeResend(
       () => thrown(() => commentOnPublication(PROD_DATASET, "Please add a license.")),
@@ -337,6 +337,19 @@ describe("commentOnPublication, against the real router", () => {
     );
     expect(err.statusCode).toBe(502);
     expect(reviewErrorCode(err)).toBe("comment_not_sent");
+    expect(err.message).toBe(
+      "The message could not be mailed, so nothing was sent to the depositor.",
+    );
+  });
+
+  test("a message that may have been mailed throws the route's 502 with its own closed word and the hedge", async () => {
+    seedScreenedRequest(h.db, { datasetId: PROD_DATASET });
+    const err = await withFakeResend(
+      () => thrown(() => commentOnPublication(PROD_DATASET, "Please add a license.")),
+      { status: 503 },
+    );
+    expect(err.statusCode).toBe(502);
+    expect(reviewErrorCode(err)).toBe("comment_not_confirmed");
     expect(err.message).toBe(
       "The mail may not have been sent, and it may also have arrived. Check with the depositor before sending it again.",
     );

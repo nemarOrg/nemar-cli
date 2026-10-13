@@ -18,6 +18,7 @@
  * No shape here carries a nonce, a token, a path, a file name or a screen finding.
  */
 
+import type { ScreenState } from "../identifier-screen-report.js";
 import type {
   Answer,
   PublicationDeclineDetail,
@@ -195,7 +196,7 @@ export interface PublicationReviewHistoryEntry {
  * a sandbox dataset, or null when no screen was started.
  */
 export interface PublicationReviewScreenView {
-  state: string | null;
+  state: ScreenState | "exempt" | null;
   headline: string;
   tone: "ok" | "note" | "warn" | "stop";
   lines: string[];
@@ -374,23 +375,60 @@ export const PUBLICATION_REVIEW_NOT_CLEAR_CODE = "publication_review_not_clear";
 /** The `error` of the 409 `POST /admin/publish/:id/approve` answers with for a blocked request. */
 export const REQUEST_BLOCKED_CODE = "request_blocked";
 
-/** 409 from `POST /admin/publish/:id/approve` and `approve-dispatch` when the review gate refuses. */
-export interface PublicationReviewGateRefusalBody {
+/**
+ * 409 from `POST /admin/publish/:id/approve` and `approve-dispatch` when the review gate cannot
+ * read what it needs (`refusal: "unverified"`): it refuses rather than guess, so it has no review
+ * to describe. The refusal says nothing about the review: no outcome, no reason, no review id.
+ * `fact` names the check that could not be completed (the request or the review; a failed record of
+ * an override is the review's too), a field no client reads: the sentence in `message` is what an
+ * administrator is told.
+ */
+export interface PublicationReviewUnverifiedRefusalBody {
   error: typeof PUBLICATION_REVIEW_NOT_CLEAR_CODE;
-  refusal: ReviewGateRefusal;
-  /** The review's headline, or `REVIEW_UNREADABLE_HEADLINE` for `unverified`. */
+  refusal: "unverified";
+  /** `REVIEW_UNREADABLE_HEADLINE`. */
+  headline: string;
+  /** `reviewGateRefusalText("unverified", ...)`. */
+  message: string;
+  outcome: null;
+  reasons: [];
+  uncovered: [];
+  review_id: null;
+  fact: "request" | "review";
+}
+
+/**
+ * 409 from `POST /admin/publish/:id/approve` and `approve-dispatch` when the review gate refuses a
+ * review it read: every refusal word but `unverified`. It carries no `fact`. The review's headline
+ * and every live reason in the shared words come with it, except on the `review_changed` fallback
+ * after a re-read that failed, which is bare (the unreadable headline, no outcome, no reasons).
+ */
+export interface PublicationReviewReasonedRefusalBody {
+  error: typeof PUBLICATION_REVIEW_NOT_CLEAR_CODE;
+  refusal: Exclude<ReviewGateRefusal, "unverified">;
+  /** The review's headline (`REVIEW_UNREADABLE_HEADLINE` on the bare `review_changed` fallback). */
   headline: string;
   /** `reviewGateRefusalText`, then for `hard_reason` the first hard reason's sentence and cure. */
   message: string;
   outcome: PublicationOutcome | null;
-  /** Every live reason in the shared words (`reasonViewsOf`); empty for `unverified`. */
+  /** Every live reason in the shared words (`reasonViewsOf`). */
   reasons: ReasonView[];
-  /** The override-class codes the override did not name; empty unless the refusal is about them. */
+  /**
+   * The override-class codes the override did not name; empty unless the refusal is about them
+   * (`override_not_covering`, `needs_override`).
+   */
   uncovered: ReasonCode[];
   review_id: number | null;
-  /** `unverified` only: which read failed. */
-  fact?: "request" | "review";
 }
+
+/**
+ * 409 from `POST /admin/publish/:id/approve` and `approve-dispatch` when the review gate refuses,
+ * discriminated by `refusal` so a client switches on it exhaustively: `unverified` carries a
+ * `fact` and nothing of a review, every other word carries the review and no `fact`.
+ */
+export type PublicationReviewGateRefusalBody =
+  | PublicationReviewUnverifiedRefusalBody
+  | PublicationReviewReasonedRefusalBody;
 
 /**
  * 409 from `POST /admin/publish/:id/approve` for a blocked request, whatever the flag says: a
@@ -423,13 +461,26 @@ export interface PublicationCommentResponse {
   mailed: true;
 }
 
-/** Every error word the comment route answers with, in the body's `code`. */
+/**
+ * Every error word the comment route answers with, in the body's `code`. A send that failed is one
+ * of two, by what the Worker knows of the mail:
+ *
+ *  - `comment_not_sent`: it knows nothing was delivered (the provider refused the message with a
+ *    4xx, the environment's fence refused the recipient, the depositor has no address, or the
+ *    depositor could not be read), so it says so.
+ *  - `comment_not_confirmed`: it cannot know (a provider's server error, an unreachable host or a
+ *    lost answer), so the mail may also have arrived and the sentence tells the administrator to
+ *    check with the depositor before sending it again.
+ *
+ * Both are HTTP 502, and the audit row records the first as `not_sent` and the second as `unknown`.
+ */
 export const PUBLICATION_COMMENT_ERROR_CODES = [
   "bad_dataset",
   "not_found",
   "origin_not_allowed",
   "invalid_body",
   "comment_not_sent",
+  "comment_not_confirmed",
   "internal",
 ] as const;
 export type PublicationCommentErrorCode = (typeof PUBLICATION_COMMENT_ERROR_CODES)[number];

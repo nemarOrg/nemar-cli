@@ -22,7 +22,10 @@ import {
   PUBLICATION_REVIEW_ERROR_CODES,
   PUBLICATION_REVIEW_NOT_CLEAR_CODE,
   PUBLICATION_REVIEW_VIEW_KINDS,
+  type PublicationReviewGateRefusalBody,
+  type PublicationReviewScreenView,
   REQUEST_BLOCKED_CODE,
+  type ReasonView,
   START_NOT_HANDED_OVER_REASONS,
   START_REASONS,
   START_REFUSED_REASONS,
@@ -88,6 +91,7 @@ import {
   effectiveVersionOf,
   hardReasonsOf,
   isWithheld,
+  overrideClassReasonsOf,
   parsePublicationCallbackOutcome,
   parsePublicationReviewEvidence,
   parsePublicationReviewReport,
@@ -2434,6 +2438,43 @@ describe("what an administrator's override clears", () => {
     ]);
   });
 
+  test("overrideClassReasonsOf keeps exactly the override-class reasons, in the order given, as the objects given", () => {
+    expect(overrideClassReasonsOf([])).toEqual([]);
+    for (const code of REASON_CODES) {
+      const reason = { code, detail: "x", extra: 7 };
+      const got = overrideClassReasonsOf([reason]);
+      expect({ code, kept: got.length }).toEqual({
+        code,
+        kept: OVERRIDABLE.includes(code) ? 1 : 0,
+      });
+      if (got.length === 1) expect(got[0]).toBe(reason);
+    }
+    const mixed = [
+      R("request_blocked", "min_requirements_failed"),
+      R("text_withheld", "readme"),
+      R("identifier_screen_stale"),
+      R(ACK),
+      R("question_failed", "meets_standards"),
+      R("review_running"),
+      R("version_missing"),
+    ];
+    expect(overrideClassReasonsOf(mixed).map((r) => r.code)).toEqual([
+      "text_withheld",
+      "question_failed",
+      "review_running",
+      "version_missing",
+    ]);
+    // Every reason is exactly one of hard, the acknowledgment's or override-class.
+    for (const code of REASON_CODES) {
+      const reasons = [R(code)];
+      expect(
+        hardReasonsOf(reasons).length +
+          overrideClassReasonsOf(reasons).length +
+          (code === ACK ? 1 : 0),
+      ).toBe(1);
+    }
+  });
+
   test("uncoveredByOverride names the override-class reasons the override did not name, and never a hard or acknowledgment one", () => {
     for (const code of REASON_CODES) {
       const overridable = OVERRIDABLE.includes(code);
@@ -2771,6 +2812,46 @@ describe("where an approval stands (describePublicationReview's approval input)"
     }
   });
 
+  test("an approval that is not `none` is never startable: startable true changes nothing about the words or the command", () => {
+    // `startable` and `approval` both derive from the request's status (`requested`, or
+    // `approving`/`blocked`), so the pair `startable: true` with a stopped or publishing approval
+    // describes no request. It must not be read as one that a start can reach: that would offer
+    // `start`, with no `--resume`, to a request whose route refuses it.
+    const offers = [
+      [R("review_not_started")],
+      [R("review_could_not_run")],
+      [R("review_did_not_report")],
+      [R("review_limit_reached")],
+      [R("question_failed", "meets_standards"), R("review_not_started")],
+    ];
+    for (const approval of ["stopped", "publishing"] as const) {
+      for (const reasons of offers) {
+        for (const { row } of ROWS) {
+          const asked = describe_(reasons, approval, row, { startable: true });
+          const not = describe_(reasons, approval, row, { startable: false });
+          expect([approval, reasons.map((r) => r.code), row.kind, asked]).toEqual([
+            approval,
+            reasons.map((r) => r.code),
+            row.kind,
+            not,
+          ]);
+          expect(asked.next).not.toMatch(/ start /);
+        }
+      }
+    }
+    // The same pair with no approval is the one a start can reach, so it still is.
+    const fresh = describe_(
+      [R("review_not_started")],
+      "none",
+      { kind: "none" },
+      { startable: true },
+    );
+    expect(fresh.next).toBe("nemar admin publish start nm000123");
+    expect(
+      describe_([R("review_not_started")], "stopped", { kind: "none" }, { startable: true }).next,
+    ).toBe("nemar admin publish approve nm000123 --resume --force");
+  });
+
   test("publishing says why no gate applies, once, ahead of the standing line", () => {
     for (const reasons of [[], [R("question_failed", "meets_standards")], [R("request_blocked")]]) {
       const d = describe_(reasons, "publishing");
@@ -2881,7 +2962,7 @@ describe("where an approval stands (describePublicationReview's approval input)"
 });
 
 describe("the approval gate's words", () => {
-  test("the refusals, in the order the gate tries them", () => {
+  test("the refusals, in declaration order (not the order the gate tries them)", () => {
     expect([...REVIEW_GATE_REFUSALS]).toEqual([
       "hard_reason",
       "needs_override",
@@ -2966,8 +3047,112 @@ describe("the wire vocabulary the approval refusals and the comment route share"
       "origin_not_allowed",
       "invalid_body",
       "comment_not_sent",
+      "comment_not_confirmed",
       "internal",
     ]);
     expect(PUBLICATION_COMMENT_MAX_LENGTH).toBe(2000);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Types. `test/publication-review-contract.test.ts` is covered by `bun run typecheck`, so the
+// `@ts-expect-error` lines below are checked there: one that stops being an error fails the
+// typecheck, which is how these pin a type's shape.
+// ---------------------------------------------------------------------------------------------
+
+describe("the gate refusal body is a union keyed on `refusal`", () => {
+  const view: ReasonView = {
+    code: "question_failed",
+    class: "fail",
+    cleared_by: "override",
+    detail: "meets_standards",
+    sentence: "A question failed.",
+    cure: "Read it.",
+  };
+  const unverified: PublicationReviewGateRefusalBody = {
+    error: PUBLICATION_REVIEW_NOT_CLEAR_CODE,
+    refusal: "unverified",
+    headline: REVIEW_UNREADABLE_HEADLINE,
+    message: "Could not be checked.",
+    outcome: null,
+    reasons: [],
+    uncovered: [],
+    review_id: null,
+    fact: "review",
+  };
+  const reasoned: PublicationReviewGateRefusalBody = {
+    error: PUBLICATION_REVIEW_NOT_CLEAR_CODE,
+    refusal: "needs_override",
+    headline: "Publication review: action required",
+    message: "Read it.",
+    outcome: "action_required",
+    reasons: [view],
+    uncovered: ["question_failed"],
+    review_id: 7,
+  };
+
+  /** What a client prints for a refusal: a switch over every word, which must stay exhaustive. */
+  function subject(body: PublicationReviewGateRefusalBody): string {
+    switch (body.refusal) {
+      case "unverified":
+        return `could not read the ${body.fact}`;
+      case "hard_reason":
+      case "needs_override":
+      case "override_not_covering":
+      case "review_changed":
+      case "no_review_row":
+        return `${body.reasons.length} reasons, review ${body.review_id}`;
+      default: {
+        const unreachable: never = body;
+        return unreachable;
+      }
+    }
+  }
+
+  test("a client switches on the word and reads each variant's own fields", () => {
+    expect(subject(unverified)).toBe("could not read the review");
+    expect(subject(reasoned)).toBe("1 reasons, review 7");
+    // Every word of the list is a case of the switch: the union and the list cannot drift apart.
+    for (const word of REVIEW_GATE_REFUSALS) {
+      const body: PublicationReviewGateRefusalBody =
+        word === "unverified" ? unverified : { ...reasoned, refusal: word };
+      expect(subject(body)).not.toBe("");
+    }
+  });
+
+  test("the types refuse what the wire never carries (checked by `bun run typecheck`)", () => {
+    const wrong: PublicationReviewGateRefusalBody[] = [
+      // @ts-expect-error a refusal of a review it read carries no `fact`
+      { ...reasoned, refusal: "hard_reason", fact: "request" },
+      // @ts-expect-error `unverified` carries no reasons
+      { ...unverified, reasons: [view] },
+      // @ts-expect-error `unverified` carries no outcome
+      { ...unverified, outcome: "pass" },
+      // @ts-expect-error `unverified` has no review id
+      { ...unverified, review_id: 3 },
+      // @ts-expect-error `unverified` without the check that failed
+      { ...unverified, fact: undefined },
+      // @ts-expect-error a word outside the closed list
+      { ...reasoned, refusal: "maybe" },
+    ];
+    // The values are only built here to be typed; nothing about them is asserted at run time.
+    expect(wrong).toHaveLength(6);
+  });
+
+  test("the screen's state is a stored state, `exempt` or null (checked by `bun run typecheck`)", () => {
+    const screen: PublicationReviewScreenView = {
+      state: "clean",
+      headline: "Identifier screen: clean",
+      tone: "ok",
+      lines: [],
+    };
+    for (const state of ["exempt", null, "pending", "error", "unreported"] as const) {
+      expect({ ...screen, state }.state).toBe(state);
+    }
+    const wrong: PublicationReviewScreenView[] = [
+      // @ts-expect-error a state is not any string
+      { ...screen, state: "whatever" },
+    ];
+    expect(wrong).toHaveLength(1);
   });
 });

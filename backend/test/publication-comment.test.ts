@@ -6,7 +6,8 @@
  * a session cookie from a NEMAR page and nobody else, because it mails a real person), that the
  * mail is the typed words in a fixed frame and nothing of the review, that it goes to the
  * depositor and to nobody else through the environment's delivery fence, which answer each
- * outcome gets, and that the audit row says what happened whichever way the send went.
+ * outcome gets (a send that certainly did not go is told apart from one that may have), and that
+ * the audit row says what happened whichever way the send went.
  *
  * Real engine only: bun:sqlite behind realD1 with every migration applied, the real `/admin`
  * router behind its real auth middleware (hashed API keys, and a real web session for the cookie
@@ -26,6 +27,7 @@ import {
   type PublicationCommentResponse,
   type PublicationReviewDetail,
 } from "../../shared/contract/publication-review-admin";
+import { PUBLICATION_COMMENT_SENTENCES } from "../src/routes/admin/publish-comment";
 import { issueSession } from "../src/services/web-session";
 import type { Bindings } from "../src/types/bindings";
 import { realD1 } from "./helpers/d1";
@@ -47,12 +49,17 @@ const MEMBER_KEY = "comment-member-key-0123456789abcdef0123456789abcd";
 const APP_ORIGIN = "https://app.nemar.org";
 const ACTION = "publication_request_commented";
 
-/** The sentence the frame carries so the depositor knows who wrote and how to answer. */
-const FRAME_SENTENCE =
-  "This is a message from a NEMAR administrator. Your request stays open; reply to this email to answer.";
+/** What the frame says so the depositor knows who wrote. */
+const FRAME_SENTENCE = "This is a message from a NEMAR administrator. Your request stays open";
+/** The invitation to answer, which the frame carries only when the Worker has a reply address. */
+const REPLY_INVITATION = "reply to this email to answer";
+const REPLY_TO = "admin-inbox@example.org";
+// The oracle for the two failure sentences, kept as literals: the route's own constants are
+// compared with these in one test and used by the rest.
+const NOT_SENT_SENTENCE = "The message could not be mailed, so nothing was sent to the depositor.";
 // Deliberately not "nothing was sent": a Resend 5xx or a lost answer can leave the mail accepted,
 // and an administrator who read "nothing was sent" might send it again.
-const NOT_SENT_SENTENCE =
+const NOT_CONFIRMED_SENTENCE =
   "The mail may not have been sent, and it may also have arrived. Check with the depositor before sending it again.";
 
 const h = createHarness();
@@ -96,6 +103,8 @@ interface SendOptions {
   raw?: string;
   /** What the Resend stand-in answers with. Default 200. */
   resendStatus?: number;
+  /** The Resend host cannot be reached at all: the send's `fetch` rejects, as in a network fault. */
+  resendUnreachable?: boolean;
 }
 
 /** POST the comment route as the Worker would answer it, inside the Resend stand-in. */
@@ -105,11 +114,26 @@ function send(datasetId: string, body: unknown, o: SendOptions = {}): Promise<Se
   else headers.Authorization = `Bearer ${o.key ?? ADMIN_KEY}`;
   return withFakeResend(
     async (calls) => {
-      const res = await h.app.request(
-        `/admin/publish/${datasetId}/comment`,
-        { method: "POST", headers, body: o.raw ?? JSON.stringify(body) },
-        h.env(o.env),
-      );
+      // The network fault is the Resend boundary's too: only the destination host is cut off.
+      const reachable = globalThis.fetch;
+      if (o.resendUnreachable) {
+        globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+          const url = new URL(input instanceof Request ? input.url : String(input));
+          if (url.hostname === "api.resend.com")
+            return Promise.reject(new TypeError("fetch failed"));
+          return reachable(input as RequestInfo, init);
+        }) as typeof fetch;
+      }
+      let res: Response;
+      try {
+        res = await h.app.request(
+          `/admin/publish/${datasetId}/comment`,
+          { method: "POST", headers, body: o.raw ?? JSON.stringify(body) },
+          h.env(o.env),
+        );
+      } finally {
+        globalThis.fetch = reachable;
+      }
       const text = await res.text();
       let json: unknown = null;
       try {
@@ -177,7 +201,7 @@ describe("the mail is the typed words in a fixed frame, to the depositor", () =>
     expect(textOf(mail.html)).toContain(
       `Please add a LICENSE file. <script>alert("x")</script> & thanks, it's fine. Second paragraph.`,
     );
-    expect(textOf(mail.html)).toContain(FRAME_SENTENCE);
+    expect(textOf(mail.html)).toContain(`${FRAME_SENTENCE}.`);
     expect(textOf(mail.html)).toContain("Hello depositor_nm000480,");
 
     // The request is not touched: still waiting for its decision.
@@ -198,6 +222,31 @@ describe("the mail is the typed words in a fixed frame, to the depositor", () =>
       outcome: "sent",
       message: typed.trim(),
     });
+  });
+
+  test("the reply invitation is in the frame only when the Worker has a reply address to send answers to", async () => {
+    request();
+    const without = await send(PROD_DATASET, { message: "Please add a LICENSE file." });
+    expect(without.res.status).toBe(200);
+    expect((without.calls[0].body as { reply_to?: string }).reply_to).toBeUndefined();
+    const bare = textOf(asSend(without.calls[0]).html);
+    expect(bare).toContain(`${FRAME_SENTENCE}.`);
+    expect(bare).not.toContain(REPLY_INVITATION);
+    expect(bare).not.toContain("reply");
+
+    const withReply = await send(
+      PROD_DATASET,
+      { message: "Please add a LICENSE file." },
+      { env: { REPLY_TO } },
+    );
+    expect(withReply.res.status).toBe(200);
+    expect((withReply.calls[0].body as { reply_to?: string }).reply_to).toBe(REPLY_TO);
+    expect(textOf(asSend(withReply.calls[0]).html)).toContain(
+      `${FRAME_SENTENCE}; ${REPLY_INVITATION}.`,
+    );
+    // The rest of the frame does not depend on it.
+    expect(textOf(asSend(withReply.calls[0]).html)).toContain("Hello depositor_nm000480,");
+    expect(textOf(asSend(withReply.calls[0]).html)).toContain("Please add a LICENSE file.");
   });
 
   test("the review is not gated by its switch: with the review off the mail still goes", async () => {
@@ -282,7 +331,7 @@ describe("nothing of the review reaches the depositor", () => {
     expect(mail.subject).toBe(`About your publication request: ${PROD_DATASET}`);
     // What does arrive: the typed words and the frame.
     expect(text).toContain("Please describe the recording setup in the README.");
-    expect(text).toContain(FRAME_SENTENCE);
+    expect(text).toContain(`${FRAME_SENTENCE}.`);
   });
 });
 
@@ -433,85 +482,131 @@ describe("who may call it, and what it refuses", () => {
       await send(ds(7), { message: "Hello." }),
       await send(PROD_DATASET, { message: "" }),
       await send(PROD_DATASET, { message: "Hello." }, { resendStatus: 422 }),
+      await send(PROD_DATASET, { message: "Hello." }, { resendStatus: 503 }),
     ];
     const codes = answers.map((a) => (a.json as PublicationCommentErrorBody).code);
-    expect(codes).toEqual(["bad_dataset", "not_found", "invalid_body", "comment_not_sent"]);
+    expect(codes).toEqual([
+      "bad_dataset",
+      "not_found",
+      "invalid_body",
+      "comment_not_sent",
+      "comment_not_confirmed",
+    ]);
     for (const code of codes) {
       expect(PUBLICATION_COMMENT_ERROR_CODES as readonly string[]).toContain(code);
     }
+  });
+
+  test("every closed code has a sentence of its own, and the two failure sentences are the oracle's", () => {
+    expect(Object.keys(PUBLICATION_COMMENT_SENTENCES).sort()).toEqual(
+      [...PUBLICATION_COMMENT_ERROR_CODES].sort(),
+    );
+    expect(new Set(Object.values(PUBLICATION_COMMENT_SENTENCES)).size).toBe(
+      PUBLICATION_COMMENT_ERROR_CODES.length,
+    );
+    expect(PUBLICATION_COMMENT_SENTENCES.comment_not_sent).toBe(NOT_SENT_SENTENCE);
+    expect(PUBLICATION_COMMENT_SENTENCES.comment_not_confirmed).toBe(NOT_CONFIRMED_SENTENCE);
+    // The certain one says nothing was sent; the other never does, because it may have arrived.
+    expect(NOT_SENT_SENTENCE).toContain("nothing was sent");
+    expect(NOT_CONFIRMED_SENTENCE).not.toMatch(/nothing was sent/i);
+    expect(NOT_CONFIRMED_SENTENCE).toContain("may also have arrived");
   });
 });
 
 // ============================================================================
 
-describe("a send that fails", () => {
-  test("Resend refusing the message is 502 comment_not_sent, the audit row says not_sent, and the request is unchanged", async () => {
-    const { requestId } = request();
-    const before = h.requestRow(requestId);
-    const typed = "Please add a LICENSE file.";
+describe("a send that fails, and whether the mail can have arrived", () => {
+  const typed = "Please add a LICENSE file.";
 
-    const { res, calls, json } = await send(
-      PROD_DATASET,
-      { message: typed },
-      { resendStatus: 422 },
-    );
-
-    expect(res.status).toBe(502);
-    expect(json).toEqual({
-      error: NOT_SENT_SENTENCE,
-      code: "comment_not_sent",
+  /** The answer and the audit row of a failed send, with what must hold of both. */
+  function expectFailure(
+    r: Sent,
+    want: { code: "comment_not_sent" | "comment_not_confirmed"; outcome: "not_sent" | "unknown" },
+    requestId: number,
+    before: Record<string, unknown>,
+  ) {
+    expect(r.res.status).toBe(502);
+    expect(r.json).toEqual({
+      error: PUBLICATION_COMMENT_SENTENCES[want.code],
+      code: want.code,
     } satisfies PublicationCommentErrorBody);
-    // The send was attempted: it is Resend that refused.
-    expect(calls).toHaveLength(1);
     expect(h.requestRow(requestId)).toEqual(before);
-
     const rows = auditRows();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ user_id: adminId, resource_id: PROD_DATASET });
     expect(JSON.parse(rows[0].details as string)).toEqual({
       request_id: requestId,
-      outcome: "not_sent",
+      outcome: want.outcome,
       message: typed,
     });
+    // Neither what the administrator reads nor what is on record carries the depositor's address.
+    expect(r.text).not.toContain(depositorEmail());
+    expect(JSON.stringify(rows)).not.toContain(depositorEmail());
+  }
+
+  // Resend answered with a 4xx: it refused the message itself, whatever the 4xx.
+  for (const resendStatus of [400, 401, 422, 429]) {
+    test(`Resend refusing the message (${resendStatus}) certainly delivered nothing: it says so and is audited not_sent`, async () => {
+      const { requestId } = request();
+      const before = h.requestRow(requestId);
+      const r = await send(PROD_DATASET, { message: typed }, { resendStatus });
+      // The send was attempted: it is Resend that refused.
+      expect(r.calls).toHaveLength(1);
+      expectFailure(r, { code: "comment_not_sent", outcome: "not_sent" }, requestId, before);
+    });
+  }
+
+  // Resend answered with a 5xx: the mail may have been accepted and only the answer failed.
+  for (const resendStatus of [500, 502, 503, 504]) {
+    test(`a Resend outage (${resendStatus}) may have delivered the mail: it says so and is audited unknown`, async () => {
+      const { requestId } = request();
+      const before = h.requestRow(requestId);
+      const r = await send(PROD_DATASET, { message: typed }, { resendStatus });
+      expect(r.calls).toHaveLength(1);
+      expectFailure(r, { code: "comment_not_confirmed", outcome: "unknown" }, requestId, before);
+    });
+  }
+
+  test("a host that cannot be reached may have delivered the mail: it says so and is audited unknown", async () => {
+    const { requestId } = request();
+    const before = h.requestRow(requestId);
+    const r = await send(PROD_DATASET, { message: typed }, { resendUnreachable: true });
+    // The request never reached the stand-in: the send threw before an answer came.
+    expect(r.calls).toHaveLength(0);
+    expectFailure(r, { code: "comment_not_confirmed", outcome: "unknown" }, requestId, before);
   });
 
-  test("a Resend outage (5xx) is 502 comment_not_sent too", async () => {
-    request();
-    const { res, json } = await send(
-      PROD_DATASET,
-      { message: "Please add a LICENSE file." },
-      { resendStatus: 503 },
-    );
-    expect(res.status).toBe(502);
-    expect(json).toEqual({
-      error: NOT_SENT_SENTENCE,
-      code: "comment_not_sent",
-    } satisfies PublicationCommentErrorBody);
-    expect(auditRows()).toHaveLength(1);
-  });
-
-  test("what the answer and the audit row say never carries the depositor's address", async () => {
-    request();
-    const { text } = await send(
-      PROD_DATASET,
-      { message: "Please add a LICENSE file." },
-      { resendStatus: 422 },
-    );
-    expect(text).not.toContain(depositorEmail());
-    expect(JSON.stringify(auditRows())).not.toContain(depositorEmail());
-  });
-
-  test("a depositor with no address on record is 502 and nothing reaches Resend", async () => {
-    const { userId } = request();
+  test("a depositor with no address on record is a certain non-delivery and nothing reaches Resend", async () => {
+    const { userId, requestId } = request();
     h.db.run("UPDATE users SET email = '' WHERE id = ?", [userId]);
-    const { res, calls, json } = await send(PROD_DATASET, { message: "Hello." });
-    expect(res.status).toBe(502);
-    expect(json).toEqual({
-      error: NOT_SENT_SENTENCE,
-      code: "comment_not_sent",
-    } satisfies PublicationCommentErrorBody);
-    expectNothingMailed(calls);
-    expect(JSON.parse(auditRows()[0].details as string).outcome).toBe("not_sent");
+    const before = h.requestRow(requestId);
+    const r = await send(PROD_DATASET, { message: typed });
+    expectNothingMailed(r.calls);
+    expectFailure(r, { code: "comment_not_sent", outcome: "not_sent" }, requestId, before);
+  });
+
+  test("a depositor whose row cannot be read is a certain non-delivery and nothing reaches Resend", async () => {
+    const { requestId } = request();
+    const before = h.requestRow(requestId);
+    const DB = hookedD1(realD1(h.db), {
+      statement: (sql) => {
+        if (sql.includes("FROM users")) throw new Error("D1_ERROR: simulated fault");
+      },
+    });
+    const r = await send(PROD_DATASET, { message: typed }, { env: { DB } });
+    expectNothingMailed(r.calls);
+    expectFailure(r, { code: "comment_not_sent", outcome: "not_sent" }, requestId, before);
+  });
+
+  test("an ambiguous failure never reads as 'nothing was sent', and a certain one never invites a second check", async () => {
+    request();
+    const certain = await send(PROD_DATASET, { message: typed }, { resendStatus: 422 });
+    const ambiguous = await send(PROD_DATASET, { message: typed }, { resendStatus: 503 });
+    const say = (r: Sent) => (r.json as PublicationCommentErrorBody).error;
+    expect(say(certain)).toContain("nothing was sent");
+    expect(say(certain)).not.toContain("may also have arrived");
+    expect(say(ambiguous)).not.toMatch(/nothing was sent/i);
+    expect(say(ambiguous)).toContain("Check with the depositor");
   });
 });
 
@@ -562,21 +657,24 @@ describe("the environment's delivery fence", () => {
       // An unrecognized environment is not production.
       { ENVIRONMENT: "nowhere", DEV_EMAIL_ALLOWLIST: OTHER },
     ] as Partial<Bindings>[]) {
-      const { res, calls, json } = await send(PROD_DATASET, { message: "Hello." }, { env });
+      const { res, calls, json, text } = await send(PROD_DATASET, { message: "Hello." }, { env });
       expect([env.ENVIRONMENT, res.status]).toEqual([env.ENVIRONMENT, 502]);
+      expect(text).not.toContain(depositorEmail());
+      // The fence refuses before any request is made: a certain non-delivery.
       expect(json).toEqual({
-        error: NOT_SENT_SENTENCE,
+        error: PUBLICATION_COMMENT_SENTENCES.comment_not_sent,
         code: "comment_not_sent",
       } satisfies PublicationCommentErrorBody);
       expectNothingMailed(calls);
     }
     expect(h.requestRow(requestId).status).toBe("requested");
-    // Each refusal is a send failure and is audited as one.
+    // Each refusal is a send failure that certainly delivered nothing, audited as one.
     const rows = auditRows();
     expect(rows).toHaveLength(4);
     for (const row of rows) {
       expect(JSON.parse(row.details as string).outcome).toBe("not_sent");
     }
+    expect(JSON.stringify(rows)).not.toContain(depositorEmail());
   });
 
   test("outside production a depositor on DEV_EMAIL_ALLOWLIST is mailed: the fence refuses the others, not everyone", async () => {
