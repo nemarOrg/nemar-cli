@@ -40,6 +40,7 @@ let dispatches: Dispatch[] = [];
 let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
 let envOverrides: Partial<Bindings> = {};
+let ownerId: number;
 
 function b64(text: string): string {
   return btoa(text);
@@ -120,25 +121,44 @@ beforeEach(async () => {
      VALUES ('handoverowner', 'handoverowner@example.org', 'x', 'approved', 'member', 1, 1, 1,
              'Ada', 'Lovelace')`,
   );
-  const id = (
+  ownerId = (
     db.query("SELECT id FROM users WHERE username = 'handoverowner'").get() as { id: number }
   ).id;
   db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)").run(
-    id,
+    ownerId,
     await hashApiKey(OWNER_KEY),
     OWNER_KEY.slice(0, 8),
   );
-  db.run(
-    `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, is_sandbox,
-                           github_repo, is_exemplar)
-     VALUES (?, ?, ?, 'active', 'private', 0, ?, 0)`,
-    [DATASET, `A sufficiently descriptive title for ${DATASET}`, id, `nemarDatasets/${DATASET}`],
-  );
+  seedDataset(DATASET);
 });
 
-function requestPublication(bindings: Bindings = env()): Promise<Response> {
+/** A private dataset of the owner's, native unless `over` makes it a mirror or an exemplar. */
+function seedDataset(
+  datasetId: string,
+  over: { source?: string; isExemplar?: 0 | 1; isSandbox?: 0 | 1 } = {},
+): void {
+  db.run(
+    `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, is_sandbox,
+                           github_repo, source, is_exemplar)
+     VALUES (?, ?, ?, 'active', 'private', ?, ?, ?, ?)`,
+    [
+      datasetId,
+      `A sufficiently descriptive title for ${datasetId}`,
+      ownerId,
+      over.isSandbox ?? 0,
+      `nemarDatasets/${datasetId}`,
+      over.source ?? null,
+      over.isExemplar ?? 0,
+    ],
+  );
+}
+
+function requestPublication(
+  bindings: Bindings = env(),
+  datasetId: string = DATASET,
+): Promise<Response> {
   return app.request(
-    `/datasets/${DATASET}/publish/request`,
+    `/datasets/${datasetId}/publish/request`,
     { method: "POST", headers: { Authorization: `Bearer ${OWNER_KEY}` } },
     bindings,
   );
@@ -146,12 +166,12 @@ function requestPublication(bindings: Bindings = env()): Promise<Response> {
 
 const events = () => dispatches.map((d) => d.event_type).sort();
 
-function prescreenState() {
+function prescreenState(datasetId: string = DATASET) {
   return db
     .query(
       "SELECT prescreen_status, prescreen_nonce FROM publication_requests WHERE dataset_id = ?",
     )
-    .get(DATASET) as { prescreen_status: string | null; prescreen_nonce: string | null };
+    .get(datasetId) as { prescreen_status: string | null; prescreen_nonce: string | null };
 }
 
 describe("the request route and the pre-screen", () => {
@@ -221,5 +241,62 @@ describe("the request route and the pre-screen", () => {
     expect(events()).toEqual(["run-identifier-screen", "run-publication-review"]);
     const review = dispatches.find((d) => d.event_type === "run-publication-review");
     expect(review?.client_payload).toMatchObject({ dataset_id: DATASET, anonymous: false });
+  });
+});
+
+describe("the pre-screen is handed over only where the review will run", () => {
+  // With the flag on, the review replaces the pre-screen for the requests it covers: a native
+  // dataset this Worker owns. A request it does not cover (an OpenNeuro mirror and an exemplar
+  // passed an upstream review, and a dataset the other Worker owns is reviewed by that Worker, if
+  // by anyone) would otherwise get neither, so the pre-screen runs for it exactly as before.
+  const on = { PUBLICATION_REVIEW_ENABLED: "1" };
+
+  test("a native dataset this Worker owns is covered: the pre-screen is skipped", async () => {
+    envOverrides = on;
+    expect((await requestPublication()).status).toBe(200);
+    expect(events()).toEqual(["run-identifier-screen"]);
+    expect(prescreenState()).toEqual({ prescreen_status: null, prescreen_nonce: null });
+  });
+
+  test("an OpenNeuro mirror is not covered: the pre-screen is dispatched", async () => {
+    seedDataset("on000455", { source: "openneuro" });
+    envOverrides = on;
+    expect((await requestPublication(env(), "on000455")).status).toBe(200);
+    expect(events()).toEqual(["run-identifier-screen", "run-prescreen"]);
+    expect(prescreenState("on000455")).toMatchObject({ prescreen_status: "pending" });
+    expect(prescreenState("on000455").prescreen_nonce).not.toBeNull();
+  });
+
+  test("an exemplar is not covered: the pre-screen is dispatched", async () => {
+    // Exemplars publish only outside production, and the screen does not read a sandbox id.
+    seedDataset("xx099900", { isExemplar: 1, isSandbox: 1 });
+    envOverrides = { ...on, ENVIRONMENT: "development" };
+    expect((await requestPublication(env(), "xx099900")).status).toBe(200);
+    expect(events()).toEqual(["run-prescreen"]);
+    expect(prescreenState("xx099900")).toMatchObject({ prescreen_status: "pending" });
+  });
+
+  test("a dataset the other Worker owns is not covered here: the pre-screen is dispatched", async () => {
+    // Production does not own the dev fixture nm099998, and the dev Worker does not own nm000455.
+    seedDataset("nm099998");
+    envOverrides = on;
+    expect((await requestPublication(env(), "nm099998")).status).toBe(200);
+    expect(events()).toEqual(["run-identifier-screen", "run-prescreen"]);
+    expect(prescreenState("nm099998")).toMatchObject({ prescreen_status: "pending" });
+
+    db.run("DELETE FROM publication_requests");
+    dispatches = [];
+    envOverrides = { ...on, ENVIRONMENT: "development" };
+    expect((await requestPublication()).status).toBe(200);
+    expect(events()).toEqual(["run-identifier-screen", "run-prescreen"]);
+    expect(prescreenState()).toMatchObject({ prescreen_status: "pending" });
+  });
+
+  test("the dev Worker covers a dataset it owns: the pre-screen is skipped there too", async () => {
+    seedDataset("nm099998");
+    envOverrides = { ...on, ENVIRONMENT: "development" };
+    expect((await requestPublication(env(), "nm099998")).status).toBe(200);
+    expect(events()).toEqual(["run-identifier-screen"]);
+    expect(prescreenState("nm099998")).toEqual({ prescreen_status: null, prescreen_nonce: null });
   });
 });

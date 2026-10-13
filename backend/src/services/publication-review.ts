@@ -91,8 +91,8 @@ const SHA40 = /^[0-9a-f]{40}$/;
 // The flag (exactly the word `1`, so the kill switch is one reviewed character) and the scope
 // (OpenNeuro mirrors and exemplars passed an upstream review, so there is no row, no gate and no
 // change to ADR 0089's importer) are declared once, in the view module: the admin mail imports
-// that module, and this one imports the mail, so a declaration here would be a cycle.
-export { publicationReviewApplies, reviewEnabled };
+// that module, and this one imports the mail, so a declaration here would be a cycle. Every
+// caller imports them from there.
 
 /** A closed word of lowercase letters and underscores, safe to splice into SQL. */
 function sqlWord(w: string): string {
