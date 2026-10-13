@@ -1532,8 +1532,18 @@ export interface PublicationReviewDescription {
   /** One line, safe for a table cell. */
   headline: string;
   tone: "ok" | "note" | "warn" | "stop";
-  /** Fixed words, closed words and the sanitized summary, one per line; {@link NOT_ASSESSED_LINE} is last. */
+  /**
+   * Fixed words and closed words, one per line; {@link NOT_ASSESSED_LINE} is last. Never a word the
+   * model wrote: the email is built from these lines alone, so what a depositor could influence
+   * cannot reach an inbox through them.
+   */
   lines: string[];
+  /**
+   * The model's own summary, sanitized by the parser, or null when there is none to show. The one
+   * sentence of a description that is not the platform's: a surface that shows the model's words
+   * (the detail view) prints it under a label of its own, and the email never receives it.
+   */
+  summary: string | null;
   /** The command an administrator runs next, or null when it is not theirs to run. */
   next: string | null;
 }
@@ -1612,6 +1622,7 @@ export function describePublicationReview(input: {
         "OpenNeuro mirrors and exemplars passed an upstream review, so the automated review does not apply.",
         NOT_ASSESSED_LINE,
       ],
+      summary: null,
       next: null,
     };
   }
@@ -1623,6 +1634,7 @@ export function describePublicationReview(input: {
         "The automated review is off, so this request was not reviewed and no review gates its approval.",
         NOT_ASSESSED_LINE,
       ],
+      summary: null,
       next: null,
     };
   }
@@ -1635,6 +1647,7 @@ export function describePublicationReview(input: {
         "This request is no longer waiting for a decision, and no review of it is on record.",
         NOT_ASSESSED_LINE,
       ],
+      summary: null,
       next: null,
     };
   }
@@ -1642,7 +1655,7 @@ export function describePublicationReview(input: {
   const outcome = stricterOf(input.outcome ?? "action_required", verdictOf(reasons));
   const report = row.kind === "reported" ? row.report : null;
   const lines = reasons.map((r) => reasonLine(r, id, report));
-  if (report !== null && report.summary !== "") lines.push(`Reviewer's summary: ${report.summary}`);
+  const summary = report !== null && report.summary !== "" ? report.summary : null;
   if (row.kind === "reported") {
     const parts: string[] = [];
     if (input.model !== null && isOneOf(CALIBRATION_MODELS, input.model)) {
@@ -1661,6 +1674,7 @@ export function describePublicationReview(input: {
       headline: `Publication review (advice only, the automated review is off): ${OUTCOME_WORD[outcome]}`,
       tone: "note",
       lines,
+      summary,
       next: null,
     };
   }
@@ -1669,6 +1683,7 @@ export function describePublicationReview(input: {
     headline: `Publication review: ${OUTCOME_WORD[outcome]}`,
     tone: OUTCOME_TONE[outcome],
     lines,
+    summary,
     next: nextCommand(id, reasons, row),
   };
 }

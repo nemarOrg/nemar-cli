@@ -38,7 +38,6 @@ import {
   storePublicationReviewResult,
   sweepPublicationReviews,
 } from "../src/services/publication-review";
-import { SUMMARY_LINE_PREFIX } from "../src/services/publication-review-view";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, interceptingD1, realD1, yieldingD1 } from "./helpers/d1";
@@ -904,9 +903,9 @@ describe("what the mail may carry", () => {
     });
   });
 
-  test("the shared module still says the summary on a line of its own, which the mail leaves out", () => {
-    // The mail drops that line by its prefix. If the shared words ever change the prefix, this
-    // fails and the filter has to follow, instead of the summary reaching an inbox quietly.
+  test("the shared description keeps the summary in a field of its own, so the mail never receives it", () => {
+    // The mail is built from `description.lines`. The summary is not one of them, by construction,
+    // so no filter has to recognize it and no rewording can let it through.
     const report = parsePublicationReviewReport(failingReport());
     const described = describePublicationReview({
       datasetId: "nm000601",
@@ -919,10 +918,9 @@ describe("what the mail may carry", () => {
       head: SCREENED_HEAD,
       version: "1.0.0",
     });
-    expect(described.lines.some((l) => l.startsWith(SUMMARY_LINE_PREFIX))).toBe(true);
-    expect(described.lines.find((l) => l.startsWith(SUMMARY_LINE_PREFIX))).toContain(
-      SUMMARY_SENTINEL,
-    );
+    expect(described.summary).toBe(SUMMARY_SENTINEL);
+    expect(described.lines.join("\n")).not.toContain(SUMMARY_SENTINEL);
+    expect(described.lines.join("\n")).not.toContain("summary");
   });
 
   test("an anonymous release's notice is unchanged, and its review is the anonymous one", async () => {

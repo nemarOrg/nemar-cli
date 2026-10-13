@@ -1781,6 +1781,7 @@ describe("describePublicationReview", () => {
         "This request is no longer waiting for a decision, and no review of it is on record.",
         NOT_ASSESSED_LINE,
       ],
+      summary: null,
       next: null,
     });
     // Off wins over closed: the flag is the more basic fact. A review on record is shown as
@@ -1804,8 +1805,12 @@ describe("describePublicationReview", () => {
       reasons: reportReasons(hostileReport),
       row: { kind: "reported", report: hostileReport, stored: "fail" },
     });
+    // The model's summary is a field of its own, in plain words; it is never one of the lines.
+    expect(d.summary).not.toBeNull();
+    expect(d.summary).not.toMatch(/[@#<>`‮]/);
+    expect(d.summary).not.toContain("evil.example");
     const text = d.lines.join("\n");
-    expect(text).toContain("Reviewer's summary:");
+    expect(text).not.toContain("summary");
     expect(text).not.toMatch(/[@#<>`‮]/);
     expect(text).not.toContain("evil.example");
     expect(text).not.toContain("script");

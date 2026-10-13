@@ -745,13 +745,6 @@ export async function publicationReviewDetail(
 // ---------------------------------------------------------------------------------------------
 
 /**
- * The start of the line `describePublicationReview` adds for the model's summary. The mail
- * leaves that line out: it is the one place a sentence a depositor could influence would travel
- * to a person's inbox unprompted. A test keeps this prefix equal to the shared module's.
- */
-export const SUMMARY_LINE_PREFIX = "Reviewer's summary: ";
-
-/**
  * What a failed read is called in a log line: the error's name and one word of a closed list, and
  * never its message, which can carry SQL or text a service echoed. `no_such_table` is the one a
  * deploy before the review's migration is applied produces; `timeout` is a read that did not
@@ -828,7 +821,7 @@ export async function publicationReviewEmailSection(
     return {
       headline: d.description.headline,
       tone: d.description.tone,
-      lines: d.description.lines.filter((line) => !line.startsWith(SUMMARY_LINE_PREFIX)),
+      lines: d.description.lines,
       next: d.description.next ?? undefined,
     };
   } catch (err) {
