@@ -66,7 +66,7 @@ import {
   readReviewByKey,
   screenedHeadSql,
 } from "./publication-review-rows.js";
-import { requiresUploaderName } from "./uploader-identity.js";
+import { publicationReviewApplies, reviewEnabled } from "./publication-review-view.js";
 
 type Db = D1Database;
 
@@ -82,26 +82,11 @@ const SHA40 = /^[0-9a-f]{40}$/;
 // The flag, applicability, words
 // ---------------------------------------------------------------------------------------------
 
-/**
- * Whether the automated review is on. Exactly the word `1`: any other value, `true`, `0`, a
- * stray space and unset included, is off, so the kill switch is one reviewed character.
- */
-export function reviewEnabled(env: Pick<Bindings, "PUBLICATION_REVIEW_ENABLED">): boolean {
-  return env.PUBLICATION_REVIEW_ENABLED === "1";
-}
-
-/**
- * Whether the review applies to a dataset's requests at all (ADR 0101, section 5). OpenNeuro
- * mirrors and exemplars passed an upstream review (ADR 0014, ADR 0026), so for them there is no
- * row, no gate and no change to ADR 0089's importer. A named wrapper over `requiresUploaderName`,
- * so that a change to the name rule cannot silently change the review's scope.
- */
-export function publicationReviewApplies(dataset: {
-  source?: string | null;
-  is_exemplar?: number | null;
-}): boolean {
-  return requiresUploaderName(dataset);
-}
+// The flag (exactly the word `1`, so the kill switch is one reviewed character) and the scope
+// (OpenNeuro mirrors and exemplars passed an upstream review, so there is no row, no gate and no
+// change to ADR 0089's importer) are declared once, in the view module: the admin mail imports
+// that module, and this one imports the mail, so a declaration here would be a cycle.
+export { publicationReviewApplies, reviewEnabled };
 
 /** A closed word of lowercase letters and underscores, safe to splice into SQL. */
 function sqlWord(w: string): string {
