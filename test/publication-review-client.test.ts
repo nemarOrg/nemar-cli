@@ -338,7 +338,7 @@ describe("commentOnPublication, against the real router", () => {
     expect(err.statusCode).toBe(502);
     expect(reviewErrorCode(err)).toBe("comment_not_sent");
     expect(err.message).toBe(
-      "The message could not be mailed, so nothing was sent to the depositor.",
+      "The message could not be mailed, and it may not have reached the depositor. Check with them before sending it again.",
     );
   });
 

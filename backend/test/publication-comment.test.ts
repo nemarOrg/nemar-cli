@@ -50,7 +50,10 @@ const ACTION = "publication_request_commented";
 /** The sentence the frame carries so the depositor knows who wrote and how to answer. */
 const FRAME_SENTENCE =
   "This is a message from a NEMAR administrator. Your request stays open; reply to this email to answer.";
-const NOT_SENT_SENTENCE = "The message could not be mailed, so nothing was sent to the depositor.";
+// Deliberately not "nothing was sent": a Resend 5xx or a lost answer can leave the mail accepted,
+// and an administrator who read "nothing was sent" might send it again.
+const NOT_SENT_SENTENCE =
+  "The message could not be mailed, and it may not have reached the depositor. Check with them before sending it again.";
 
 const h = createHarness();
 
@@ -480,7 +483,10 @@ describe("a send that fails", () => {
       { resendStatus: 503 },
     );
     expect(res.status).toBe(502);
-    expect((json as PublicationCommentErrorBody).code).toBe("comment_not_sent");
+    expect(json).toEqual({
+      error: NOT_SENT_SENTENCE,
+      code: "comment_not_sent",
+    } satisfies PublicationCommentErrorBody);
     expect(auditRows()).toHaveLength(1);
   });
 
@@ -500,7 +506,10 @@ describe("a send that fails", () => {
     h.db.run("UPDATE users SET email = '' WHERE id = ?", [userId]);
     const { res, calls, json } = await send(PROD_DATASET, { message: "Hello." });
     expect(res.status).toBe(502);
-    expect((json as PublicationCommentErrorBody).code).toBe("comment_not_sent");
+    expect(json).toEqual({
+      error: NOT_SENT_SENTENCE,
+      code: "comment_not_sent",
+    } satisfies PublicationCommentErrorBody);
     expectNothingMailed(calls);
     expect(JSON.parse(auditRows()[0].details as string).outcome).toBe("not_sent");
   });
@@ -555,7 +564,10 @@ describe("the environment's delivery fence", () => {
     ] as Partial<Bindings>[]) {
       const { res, calls, json } = await send(PROD_DATASET, { message: "Hello." }, { env });
       expect([env.ENVIRONMENT, res.status]).toEqual([env.ENVIRONMENT, 502]);
-      expect((json as PublicationCommentErrorBody).code).toBe("comment_not_sent");
+      expect(json).toEqual({
+        error: NOT_SENT_SENTENCE,
+        code: "comment_not_sent",
+      } satisfies PublicationCommentErrorBody);
       expectNothingMailed(calls);
     }
     expect(h.requestRow(requestId).status).toBe("requested");

@@ -13,7 +13,9 @@
  * It mails a real person, so a session cookie is accepted only from a NEMAR page (the rule of
  * `review/start`), and the send goes through the environment's delivery fence: outside production
  * only a depositor on `DEV_EMAIL_ALLOWLIST` is mailed, and a refusal is a failed send like any
- * other. A failed send is 502 and says so; it is never answered as a success.
+ * other. A failed send is 502 and says so; it is never answered as a success, and its sentence is
+ * deliberately not "nothing was sent", because a Resend 5xx or a lost answer can leave the mail
+ * accepted (the audit outcome `not_sent` records only that the route did not get a success).
  *
  * The audit row, `publication_request_commented`, is written whichever way the send went, with the
  * typed words (the denial's reason is stored on its request the same way), so what a depositor was
@@ -42,7 +44,8 @@ const SENTENCES: Record<PublicationCommentErrorCode, string> = {
   not_found: "That dataset has no active publication request.",
   origin_not_allowed: "This request did not come from a NEMAR page, so it was not accepted.",
   invalid_body: `The body must be a JSON object with one field, message, of 1 to ${PUBLICATION_COMMENT_MAX_LENGTH} characters.`,
-  comment_not_sent: "The message could not be mailed, so nothing was sent to the depositor.",
+  comment_not_sent:
+    "The message could not be mailed, and it may not have reached the depositor. Check with them before sending it again.",
   internal: "The publication request could not be read, so nothing was sent. Try again.",
 };
 
