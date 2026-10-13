@@ -260,19 +260,27 @@ const CLOSED_FILES = [
   "summary.json",
 ];
 
+/** The four datasets the review can read, as the builder stores them. */
 let goodCorpus: string;
+/** The same, with one copy of each defect added. */
+let mutatedCorpus: string;
+
+beforeAll(async () => {
+  goodCorpus = join(root, "corpus-good");
+  const result = await buildCorpus({
+    ids: ["nm000001", "nm000002", "nm000003", "nm000004", "nm000006", "nm000099"],
+    outDir: goodCorpus,
+    remoteBase: REMOTE_BASE,
+  });
+  if (result.built !== 4) throw new Error("the test corpus did not build");
+  mutatedCorpus = join(root, "corpus-calibrate");
+  cpSync(goodCorpus, mutatedCorpus, { recursive: true });
+  if (mutateCorpus(mutatedCorpus, { perDefect: 1 }).made !== DEFECTS.length) {
+    throw new Error("the test corpus did not get one copy of each defect");
+  }
+});
 
 describe("the corpus builder reads public repositories through the job's own readers", () => {
-  beforeAll(async () => {
-    goodCorpus = join(root, "corpus-good");
-    const result = await buildCorpus({
-      ids: ["nm000001", "nm000002", "nm000003", "nm000004", "nm000006", "nm000099"],
-      outDir: goodCorpus,
-      remoteBase: REMOTE_BASE,
-    });
-    expect(result.built).toBe(4);
-  });
-
   test("it reports what it built and what it skipped, with a closed word each", async () => {
     const again = await buildCorpus({
       ids: ["nm000001", "nm000004", "nm000099"],
@@ -925,7 +933,6 @@ beforeEach(() => {
 // Running the calibration
 // ---------------------------------------------------------------------------------------------
 
-let mutatedCorpus: string;
 let seq = 0;
 
 function oneEntryCorpus(id: string): string {
@@ -955,12 +962,6 @@ function withoutNonce(raw: string): string {
 const MODEL_ORIGIN = () => `http://127.0.0.1:${modelServer.port}`;
 
 describe("calibrate runs the production review over every entry and records one line each", () => {
-  beforeAll(() => {
-    mutatedCorpus = join(root, "corpus-calibrate");
-    cpSync(goodCorpus, mutatedCorpus, { recursive: true });
-    expect(mutateCorpus(mutatedCorpus, { perDefect: 1 }).made).toBe(DEFECTS.length);
-  });
-
   test("one record per entry, in id order, with the model's token counts and a timing", async () => {
     const { result, records } = await run(mutatedCorpus);
     const ids = listEntries(mutatedCorpus).map((e) => e.id);
