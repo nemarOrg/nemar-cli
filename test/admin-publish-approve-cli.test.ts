@@ -533,6 +533,29 @@ describe("the command decides: the evidence behind a reason is read before the q
     expect(r.stdout).not.toContain("Withheld for findings");
   });
 
+  test("a review the Worker could not read back has no evidence to print, and the gate still speaks", async () => {
+    // A stored report about another commit is read back as no report: the review row exists and its
+    // evidence is null in the detail, so `approve` prints no half a block and does not stop short.
+    // (A detail whose evidence has another shape cannot be made by this Worker; the reader of that
+    // shape is tested on its own in `publication-review-display.unit.test.ts`.)
+    const requestId = seedGolden();
+    const reviewId = seedReport(requestId, withheldReport());
+    h.db.run(
+      "UPDATE publication_reviews SET report = json_set(report, '$.evidence.head', ?) WHERE id = ?",
+      ["b".repeat(40), reviewId],
+    );
+
+    const r = await approve(["--resume"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain(REASONS.review_could_not_run.sentence.replace(/\.$/, ""));
+    expect(r.stdout).toContain("Not approved:");
+    expect(r.stdout).not.toContain("Shown to the model");
+    expect(r.stdout).not.toContain("Withheld for findings");
+    expect(r.stdout).not.toContain("The whole review");
+    expect(h.posted).toEqual([]);
+  });
+
   test("a request with no review row prints neither, nor the pointer", async () => {
     const requestId = seedGolden();
 

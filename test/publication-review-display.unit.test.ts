@@ -28,6 +28,7 @@ import {
 } from "../shared/publication-review";
 import type { PublicationReviewSummary, PublishRequestsResponse } from "../src/lib/api/publish";
 import {
+  approveEvidenceLines,
   evidenceLine,
   historyLines,
   reviewDetailLines,
@@ -335,6 +336,92 @@ describe("shownLine and withheldLine", () => {
 
   test("nothing withheld for a finding, nothing said", () => {
     expect(withheldLine(evidenceOf())).toBeNull();
+  });
+});
+
+describe("approveEvidenceLines", () => {
+  const review = (evidence: unknown) => ({ id: 1, evidence }) as unknown as PublicationReviewRecord;
+  const POINTER =
+    "The whole review, with the model's questions and findings: nemar admin publish show nm000480";
+  const full = () =>
+    evidenceOf({
+      documents: {
+        readme: "sent",
+        dataset_description: "sent",
+        changes: "absent",
+        license: "withheld_annexed",
+        participants_json: "withheld_finding",
+      },
+      withheld_findings: { "edf-patient-name": 2 },
+    });
+
+  test("what was shown, what was withheld for findings, then the pointer: the lines show prints, no more", () => {
+    const e = full();
+    expect(approveEvidenceLines(review(e), "nm000480")).toEqual([
+      shownLine(e),
+      withheldLine(e) as string,
+      POINTER,
+    ]);
+    expect(approveEvidenceLines(review(e), "nm000480")[1]).toBe(
+      "Withheld for findings: edf-patient-name 2",
+    );
+  });
+
+  test("nothing withheld for a finding: the shown line and the pointer", () => {
+    const e = evidenceOf();
+    expect(approveEvidenceLines(review(e), "nm000480")).toEqual([shownLine(e), POINTER]);
+  });
+
+  test("no review, or a review with no evidence yet, has nothing to show", () => {
+    expect(approveEvidenceLines(null, "nm000480")).toEqual([]);
+    expect(approveEvidenceLines(undefined, "nm000480")).toEqual([]);
+    expect(approveEvidenceLines(review(null), "nm000480")).toEqual([]);
+    expect(approveEvidenceLines(review(undefined), "nm000480")).toEqual([]);
+  });
+
+  test("evidence this CLI cannot read is left out whole: no throw, no half a block, no pointer", () => {
+    const good = evidenceFor(undefined, false, { withheld_findings: { "edf-patient-name": 2 } });
+    const without = (key: string) => {
+      const { [key]: _gone, ...rest } = good;
+      return rest;
+    };
+    const documents = good.documents as Record<string, unknown>;
+    const unreadable: Array<[string, unknown]> = [
+      ["a string", "evidence"],
+      ["a number", 7],
+      ["an array", [good]],
+      ["an empty object", {}],
+      ["no documents", without("documents")],
+      ["documents null", { ...good, documents: null }],
+      ["documents a string", { ...good, documents: "sent" }],
+      ["documents an array", { ...good, documents: ["sent"] }],
+      ["a document missing", { ...good, documents: { ...documents, readme: undefined } }],
+      ["a document state a number", { ...good, documents: { ...documents, readme: 3 } }],
+      ["a document state null", { ...good, documents: { ...documents, license: null } }],
+      ["the keys shown a string", { ...good, description_keys_shown: "9" }],
+      ["the keys shown missing", without("description_keys_shown")],
+      ["the keys not shown null", { ...good, description_keys_not_shown: null }],
+      ["a finding count a string", { ...good, withheld_findings: { "edf-patient-name": "2" } }],
+      ["findings a string", { ...good, withheld_findings: "edf-patient-name" }],
+      ["findings an array", { ...good, withheld_findings: [2] }],
+    ];
+    for (const [what, evidence] of unreadable) {
+      let lines: string[] = ["not run"];
+      expect(() => {
+        lines = approveEvidenceLines(review(evidence), "nm000480");
+      }, what).not.toThrow();
+      expect({ what, lines }).toEqual({ what, lines: [] });
+    }
+    // Findings that were never sent (null, or absent) are what `withheldLine` already reads as none.
+    for (const evidence of [{ ...good, withheld_findings: null }, without("withheld_findings")]) {
+      expect(approveEvidenceLines(review(evidence), "nm000480")).toHaveLength(2);
+    }
+  });
+
+  test("the dataset id in the pointer is reduced to plain text", () => {
+    const pointer = approveEvidenceLines(review(evidenceOf()), `nm000480${HOSTILE}`).at(-1) ?? "";
+    expect(pointer).not.toMatch(DANGEROUS);
+    expect(pointer).toContain("nemar admin publish show nm000480");
   });
 });
 

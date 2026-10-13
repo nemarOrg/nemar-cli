@@ -182,19 +182,43 @@ export function withheldLine(e: PublicationReviewEvidence): string | null {
   return `Withheld for findings: ${entries.map(([kind, n]) => `${plain(kind)} ${n}`).join(", ")}`;
 }
 
+const isRecord = (x: unknown): x is Record<string, unknown> =>
+  typeof x === "object" && x !== null && !Array.isArray(x);
+
+/**
+ * Whether `e` has what {@link shownLine} and {@link withheldLine} read, as the types they read it
+ * as: a state for each of the review's documents, the two counts of description keys, and a count
+ * for every finding kind withheld (none sent is none withheld). The shape is checked, not caught:
+ * `approve` prints this before the gate speaks, and a detail from another version of the server is
+ * not read by `parseReviewDetail`, so evidence it does not recognize must cost the lines, never the
+ * approval.
+ */
+function readsAsEvidence(e: unknown): e is PublicationReviewEvidence {
+  if (!isRecord(e)) return false;
+  const documents = e.documents;
+  if (!isRecord(documents)) return false;
+  if (!REVIEW_DOCUMENTS.every((d) => typeof documents[d] === "string")) return false;
+  if (typeof e.description_keys_shown !== "number") return false;
+  if (typeof e.description_keys_not_shown !== "number") return false;
+  const withheld = e.withheld_findings;
+  if (withheld === undefined || withheld === null) return true;
+  return isRecord(withheld) && Object.values(withheld).every((n) => typeof n === "number");
+}
+
 /**
  * What `approve` adds to the review it prints, so an administrator is not asked to `--force` over a
  * reason such as `text_withheld` blind: what the model was shown, what was withheld for findings,
  * and a pointer to `show` for the rest. The same two lines `show` prints, from the same helpers;
  * the model's own summary and notes stay in `show`, under their labels. Empty for a request with no
- * review in force, or one whose review has no evidence yet.
+ * review in force, one whose review has no evidence yet, and evidence of a shape this CLI does not
+ * read ({@link readsAsEvidence}).
  */
 export function approveEvidenceLines(
   review: PublicationReviewRecord | null | undefined,
   datasetId: string,
 ): string[] {
   const evidence = review?.evidence;
-  if (evidence === null || evidence === undefined) return [];
+  if (!readsAsEvidence(evidence)) return [];
   const withheld = withheldLine(evidence);
   return [
     shownLine(evidence),
