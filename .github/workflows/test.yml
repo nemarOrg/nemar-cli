@@ -96,6 +96,22 @@ jobs:
         id: filter
         if: steps.push.outputs.version_bump != 'true'
         with:
+          # A PUSH TO DEV IS COMPARED WITH THE COMMIT BEFORE IT. With no `base`, the
+          # filter compares a push to any branch but the default (`main`) with its merge
+          # base on main ("Changes will be detected between main and dev" in the log), so
+          # every push to dev saw every change since the last release and ran nearly every
+          # job: 116 of 152 runs on a docs-only commit ran real jobs (3,155 runner
+          # minutes, 2026-09-15 to 2026-10-13). Naming the pushed branch makes the filter
+          # diff the push itself (`github.event.before` to the head). What the push did
+          # not change, earlier pushes' runs already tested. A docs-only push now runs
+          # only what reads docs: `agentdocs` and `decisions` still start lint and
+          # unit-pure for the docs-links and ADR-index tests.
+          #
+          # Empty, which means the default, everywhere else: a pull request always sees
+          # its whole diff (the filter ignores `base` there), main is the default branch
+          # and already compares with the commit before, and an epic branch keeps its
+          # comparison with main.
+          base: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && 'dev' || '' }}
           filters: |
             cli:
               - 'src/**'
