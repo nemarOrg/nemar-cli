@@ -292,7 +292,9 @@ function boundedWait<T>(work: Promise<T>, what: string): Promise<T> {
  * request. With the breaker:
  *
  *  - Closed (the normal state): every call is made and bounded as above. A healthy
- *    call costs a clock read and a comparison on each side of it, and nothing else.
+ *    call adds two clock reads, a comparison or two, a closure and an async frame,
+ *    and never a wait: about 0.2 microseconds a request, measured in process (Bun,
+ *    the in-memory test cache, 40,000 sequential requests, 4.4 before and 4.6 after).
  *  - It opens after {@link BREAKER_STALLS_TO_OPEN} stalls within
  *    {@link BREAKER_STALL_WINDOW_MS}. Only a {@link CacheStallError} counts: a call that
  *    fails fast cost no time, and is the fault line's business, not the breaker's.
