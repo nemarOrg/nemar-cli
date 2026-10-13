@@ -202,6 +202,26 @@ The Cloudflare account is the trust boundary, as in ADR 0078, and no secret head
 - **Keying the website's strict buckets on the session cookie (#1354, option 1).**
   Not done: the address is the key everywhere else, and a cookie-derived key needs its own forgery analysis.
 
+## Open follow-ups, and where the verification gate stands (2026-10-12)
+
+The change that carries this decision filed these follow-ups, none built:
+
+- **#1712: downgrade the site-caller identity line** to a counter, or remove it, once production keying is confirmed.
+  Its done-when is that "How to verify after the first deploy" above says the gate was passed, and when.
+- **#1716: a Worker-side canary** that logs when a counted site request did not persist.
+  Today the only detector of a counter that does not persist is on the website side (pull request #450).
+- **#1717: send forwarded non-public addresses to the unattributed bucket.**
+  Decision 2 refuses only the placeholders and loopback, so an RFC 1918, CGNAT, link-local or unique local address still becomes a `site:` key and would pool the visitors behind it.
+- **#1718: a coarse counter for the whole class of site callers,** so that a forward that minted unlimited fresh `site:` keys would trip a visible limit.
+  It is an owner decision, filed and not built, and its cap is a judgment about the website's headroom.
+
+#1713 and #1715, filed with them, are settled by the two amendments below.
+
+**The verification gate has not been run.**
+The check in "How to verify after the first deploy" (the count falling across calls for one visitor, and two visitors that each read `site-ip` and start at 1999) needs the change released to production and the website promoted to call the binding, and neither has happened.
+Until it is run, that a service-binding call carries no `CF-Connecting-IP`, and that the counter persists for one, are the hypotheses this ADR says they are.
+The gate closes with #1712, after the release and the website promotion, and this ADR then says it was passed and when.
+
 ## Receipts
 
 - Issue #1709 (the 429s on `/discover`) and #1354 (the strict bucket shared by every visitor).
