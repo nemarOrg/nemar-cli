@@ -94,6 +94,13 @@ export interface ReasonView {
   detail: string | null;
   sentence: string;
   cure: string;
+  /**
+   * The whole reason as one line in the shared words (`reasonLine`: the sentence, the detail in
+   * words and the cure), the line `description.lines` carries for it. A client prints this and
+   * composes nothing from `detail`, whose closed words are not words for a person. Absent from a
+   * Worker that predates the field; a client then falls back to the sentence and the cure.
+   */
+  line?: string;
 }
 
 /** The review of one row of `GET /admin/publish/requests`. */
