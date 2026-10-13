@@ -189,6 +189,41 @@ describe("the submission minimums as closed words", () => {
   });
 });
 
+describe("the two minimum sentences that take a value", () => {
+  // Pinned in full, both forms. The short form (a stored, mailed or logged word) and the long form
+  // (what the depositor reads) are one template each, so they cannot drift; a change to either
+  // sentence is a change to both, and to this test.
+  const NAME_TAIL =
+    ' If the study is known by a short acronym, expand it with a subtitle, e.g. "ACRO: auditory cortex recordings during natural speech".';
+  const BLIND_TAIL =
+    ' That file is part of the dataset and is served publicly, so NEMAR cannot conceal what it says. Replace the entries with a placeholder such as "Anonymous", commit, and request the release again. Restore the real names when you publish after acceptance.';
+
+  test("name_too_short: the long form adds the current length to the short one", () => {
+    expect(minimumFailureSentence("name_too_short")).toBe(
+      `Dataset Name must be a descriptive title of at least 25 characters.${NAME_TAIL}`,
+    );
+    expect(evaluateSubmissionMinimums(JSON.stringify({ Name: "x" }), "IRB approved")).toEqual([
+      `Dataset Name must be a descriptive title of at least 25 characters (currently 1).${NAME_TAIL}`,
+      // The Authors rule fires too: a named release needs a real author.
+      minimumFailureSentence("authors_missing"),
+    ]);
+  });
+
+  test("authors_not_blinded: the long form names the authors it found, the short one says somebody", () => {
+    expect(minimumFailureSentence("authors_not_blinded")).toBe(
+      `This is an anonymous release, but Authors in dataset_description.json still names somebody.${BLIND_TAIL}`,
+    );
+    const description = JSON.stringify({
+      Name: "A sufficiently descriptive title of a dataset",
+      Authors: [SENTINEL, "Ada Lovelace"],
+      EthicsApprovals: ["Approved by the board, ref 12"],
+    });
+    expect(evaluateSubmissionMinimums(description, null, { anonymousRelease: true })).toEqual([
+      `This is an anonymous release, but Authors in dataset_description.json still names ${SENTINEL}, Ada Lovelace.${BLIND_TAIL}`,
+    ]);
+  });
+});
+
 describe("one README list (shared/readme-candidates.ts)", () => {
   test("is the four forms BIDS allows, in the order the first present one is chosen", () => {
     expect([...README_CANDIDATES]).toEqual(["README.md", "README", "README.rst", "README.txt"]);
