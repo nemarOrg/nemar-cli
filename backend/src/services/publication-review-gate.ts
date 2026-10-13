@@ -291,10 +291,12 @@ function decide(args: ReviewGateArgs, d: DerivedPublicationReview): ReviewGateRe
  * `unverified`: an override that could not be recorded approves nothing.
  *
  * With no review row (a terminal's override for `review_not_started`) nothing is written to the
- * review table and the audit row alone is the record.
+ * review table and the audit row alone is the record, so there a failed audit write refuses
+ * `unverified` as well: approving over a non-pass with the override recorded nowhere is the one
+ * thing this function exists to prevent.
  *
- * The audit row is best effort, as the screen acknowledgment's is: the override is on the row, and
- * losing the second record must not refuse an approval already decided.
+ * With a review row the audit row is best effort, as the screen acknowledgment's is: the override
+ * is on the row, and losing the second record must not refuse an approval already decided.
  */
 export async function recordApprovalOverride(
   env: Bindings,
@@ -358,6 +360,8 @@ export async function recordApprovalOverride(
     console.error(
       `[publication-review-gate] audit write for the override on ${datasetId} failed (${errorWords(err)})`,
     );
+    // The audit row is the only record of an override that has no review row to hold it.
+    if (row === null) return unverified(datasetId, "review");
   }
   return { ok: true };
 }

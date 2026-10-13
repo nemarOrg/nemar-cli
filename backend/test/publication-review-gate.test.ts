@@ -1129,6 +1129,64 @@ describe("what the gate cannot decide it refuses", () => {
     expect(overrideRows()).toHaveLength(0);
   });
 
+  test("18. an override with no review row is recorded nowhere but the audit row, so a failed audit write approves nothing", async () => {
+    // A terminal's `--force` over `review_not_started`: there is no row to hold the override, so
+    // the audit row is the ONLY record of it. Best effort here would approve over a non-pass with
+    // the override recorded nowhere, so a write that fails refuses, as a failed write to the row does.
+    const { requestId } = seed();
+    const noAudit = hookedD1(realD1(db), {
+      statement: (sql) => {
+        if (/INSERT INTO audit_log/.test(sql)) throw new Error("the audit write failed");
+      },
+    });
+    const res = await approve(
+      {
+        resume: true,
+        override_publication_review: { review_id: null, reasons: ["review_not_started"] },
+      },
+      { bindings: env({ DB: noAudit }) },
+    );
+    const body = await refusalOf(res);
+    expect(body.refusal).toBe("unverified");
+    expect(body.fact).toBe("review");
+    expect(body.message).toBe(reviewGateRefusalText("unverified", DATASET));
+    expect(requestRow(requestId).status).toBe("requested");
+    expect(requestRow(requestId).approved_by).toBeNull();
+    expect(reviewRows()).toHaveLength(0);
+    expect(overrideRows()).toHaveLength(0);
+    expect(auditRows("dataset_published")).toHaveLength(0);
+
+    // With the audit table writable again the same request goes through, so the refusal was the
+    // missing record and nothing else.
+    const again = await approve({
+      resume: true,
+      override_publication_review: { review_id: null, reasons: ["review_not_started"] },
+    });
+    expect(again.status).toBe(200);
+    expect(overrideRows()).toHaveLength(1);
+  });
+
+  test("18. with a review row the audit row stays best effort: the override is on the row, and a lost audit write refuses nothing", async () => {
+    const { requestId, reviewId } = seedFailing();
+    const noAudit = hookedD1(realD1(db), {
+      statement: (sql) => {
+        if (/INSERT INTO audit_log/.test(sql)) throw new Error("the audit write failed");
+      },
+    });
+    const res = await approve(
+      {
+        resume: true,
+        override_publication_review: { review_id: reviewId, reasons: ["question_failed"] },
+      },
+      { bindings: env({ DB: noAudit }) },
+    );
+    expect(res.status).toBe(200);
+    expect(requestRow(requestId).status).toBe("published");
+    expect(reviewRow(reviewId).override_by).toBe(adminA);
+    expect(reviewRow(reviewId).override_reasons).toBe(JSON.stringify(["question_failed"]));
+    expect(overrideRows()).toHaveLength(0);
+  });
+
   test("the gate's state names the environment and the dataset, and a block reason is never echoed raw", () => {
     expect(reviewGateStateOf(env({}, false), {})).toBe("off");
     expect(reviewGateStateOf(env(), {})).toBe("enforced");

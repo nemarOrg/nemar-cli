@@ -482,6 +482,8 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
 - **Records.**
   An override writes an audit row, `publication_review_overridden`, with the request, the review, the outcome and the reasons,
   as the screen acknowledgment does; `start` writes `publication_review_started`, as `pr_review_started` does.
+  The audit row is best effort when the review row holds the override, and the only record when there is no row to hold it (a terminal's override of `review_not_started`),
+  so there a failed audit write refuses the approval as `unverified`.
   The approval's audit row records `review_gate` (`enforced`, `off` or `n/a`) and whether `--skip-ci-check` was used.
 
 ### 9. Who approves
