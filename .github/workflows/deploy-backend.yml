@@ -46,12 +46,26 @@ jobs:
     runs-on: ubuntu-latest
     # p95 4 s (50 green runs to 2026-10-13); 10 is the floor.
     timeout-minutes: 10
+    permissions:
+      actions: read # the release merge commit's deploy run, below
+      contents: read
     outputs:
       environment: ${{ steps.detect.outputs.environment }}
       # The commit every job below checks out: the pushed commit on main, the
       # dispatched `sha` (or the head of dev) for the dev worker.
       sha: ${{ steps.detect.outputs.sha }}
+      # 'true' when test-gate is skipped because the commit before passed it.
+      gate_reused: ${{ steps.reuse.outputs.gate_reused }}
     steps:
+      - name: Checkout code
+        if: github.event_name == 'push'
+        uses: actions/checkout@v4
+
+      - name: Classify the push
+        id: push
+        if: github.event_name == 'push'
+        run: scripts/ci/classify-push.sh >> "$GITHUB_OUTPUT"
+
       - name: Detect environment
         id: detect
         env:
@@ -82,6 +96,38 @@ jobs:
             echo "::notice::$EVENT on $REF deploys nothing: production deploys on a push to main, dev on a dispatch from dev"
           fi
 
+      # THE RELEASE STRIP COMMIT REUSES THE RELEASE MERGE'S GATE. A release pushes
+      # two commits to main: the dev -> main merge, then auto-tag.yml's commit that
+      # only strips -devN from the version. Both deploy (see the note on concurrency
+      # above), and each ran the full 18-minute test-gate over the same code. When
+      # this push is that strip commit (the bot's single version-only commit on top
+      # of the previous head, scripts/ci/classify-push.sh) and the previous head's
+      # own deploy run passed test-gate, this run skips it. The concurrency group
+      # means that run has finished by the time this one starts. In every other
+      # case, including any doubt or API failure, test-gate runs as before.
+      - name: Reuse the previous commit's gate
+        id: reuse
+        if: steps.detect.outputs.environment == 'production' && steps.push.outputs.auto_bump == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          run_id=$(gh api "repos/$GH_REPO/actions/workflows/deploy-backend.yml/runs?head_sha=$BEFORE&event=push&branch=main&status=completed&per_page=1" \
+            --jq '.workflow_runs[0].id // empty') || run_id=""
+          gate=""
+          if [ -n "$run_id" ]; then
+            gate=$(gh api "repos/$GH_REPO/actions/runs/$run_id/jobs?per_page=100" \
+              --jq '[.jobs[] | select(.name == "test-gate")][0].conclusion // empty') || gate=""
+          fi
+          if [ "$gate" = "success" ]; then
+            echo "gate_reused=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::test-gate skipped: $BEFORE passed it in run $run_id, and this push only changes the version"
+          else
+            echo "gate_reused=false" >> "$GITHUB_OUTPUT"
+            echo "test-gate runs: the deploy run of $BEFORE is '${run_id:-not found}', its test-gate '${gate:-unknown}'"
+          fi
+
   # Gate (#897): the exact commit being deployed must pass the same required
   # tier test.yml enforces for landing (typecheck + lint + pure unit tests)
   # BEFORE it can reach dev or prod. test.yml runs on PRs/pushes, but nothing
@@ -90,7 +136,7 @@ jobs:
   # failing gate blocks the deploy instead of racing it.
   test-gate:
     needs: detect-environment
-    if: needs.detect-environment.outputs.environment != ''
+    if: needs.detect-environment.outputs.environment != '' && needs.detect-environment.outputs.gate_reused != 'true'
     runs-on: ubuntu-latest
     # p95 21.8 min (50 green runs to 2026-10-13), so twice that.
     timeout-minutes: 44
@@ -292,8 +338,15 @@ jobs:
     needs: [detect-environment, test-gate]
     # Explicit test-gate.result check (see deploy-dev): a custom `if:` drops the
     # implicit needs-success gate, so this is what actually blocks a prod deploy
-    # on a red build.
-    if: needs.detect-environment.outputs.environment == 'production' && needs.test-gate.result == 'success'
+    # on a red build. `!cancelled()` lets this job run when test-gate was skipped,
+    # which it is only when detect-environment found the gate already passed for
+    # this exact code (the release strip commit, see "Reuse the previous commit's
+    # gate"); any other skip, a failure or a cancellation still blocks the deploy.
+    if: >-
+      !cancelled()
+      && needs.detect-environment.outputs.environment == 'production'
+      && (needs.test-gate.result == 'success'
+          || (needs.test-gate.result == 'skipped' && needs.detect-environment.outputs.gate_reused == 'true'))
     runs-on: ubuntu-latest
     # p95 0.7 min (8 green runs to 2026-10-13); 20 for the same reasons as deploy-dev.
     timeout-minutes: 20
