@@ -245,6 +245,22 @@ describe("the command decides: what is sent is what was shown", () => {
     });
   });
 
+  test("a recorded override that covers the run is enough: no --force, and none is sent", async () => {
+    const requestId = seedGolden();
+    const reviewId = seedReport(requestId, twoReasons());
+    // The web executor's `--yes` run proceeds on the confirmation its clicker recorded; here it is
+    // this administrator's own, so the Worker accepts it too.
+    seedOverride(h.db, reviewId, adminId, ["question_failed", "version_missing"]);
+
+    const r = await approve(["--resume", "--yes"]);
+
+    expect(r.stdout).toContain(`An override by administrator #${adminId}`);
+    expect(r.exitCode).toBe(0);
+    expect(approveBodies()).toHaveLength(1);
+    expect(approveBodies()[0]).not.toHaveProperty("override_publication_review");
+    expect(requestRow(requestId)?.status).toBe("published");
+  });
+
   test("a retry after a 5xx sends the override and the acknowledgment again", async () => {
     const requestId = seedGolden({ status: "unchecked" });
     const reviewId = seedReport(requestId, twoReasons());
