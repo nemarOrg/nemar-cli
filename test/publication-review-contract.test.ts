@@ -676,8 +676,12 @@ describe("the parser refuses what the job must never send", () => {
       { version: "v1.2.0", version_shape: "ok" },
       { version: "1.2", version_shape: "ok" },
       { version: "1.2.0", version_shape: "ok", tag: "not_applicable" },
-      { version: null, version_shape: "missing", tag: "absent" },
+      // No Version is published as 1.0.0, so there is a tag to look up, and a state for it is required.
+      { version: null, version_shape: "missing", tag: "not_applicable" },
+      // A malformed Version has no version to look up: any tag state would be invented.
+      { version: null, version_shape: "malformed", tag: "absent" },
       { version: null, version_shape: "malformed", tag: "at_head" },
+      { version: null, version_shape: "malformed", tag: "elsewhere" },
       { minimums: "failed", minimum_failures: [] },
       { minimums: "met", minimum_failures: ["ethics_statement_missing"] },
       {
@@ -706,7 +710,9 @@ describe("the parser refuses what the job must never send", () => {
     ];
     for (const over of refused) expect(refusal(withEvidence(over))).toBe("bad_evidence");
     const accepted = [
-      { version: null, version_shape: "missing", tag: "not_applicable" },
+      { version: null, version_shape: "missing", tag: "absent" },
+      { version: null, version_shape: "missing", tag: "at_head" },
+      { version: null, version_shape: "missing", tag: "elsewhere" },
       { version: null, version_shape: "malformed", tag: "not_applicable" },
       { version: "1.2.0", version_shape: "ok", tag: "elsewhere" },
       {
@@ -1111,7 +1117,7 @@ const REPORTS: Array<{ name: string; body: Record<string, unknown>; own: Reason[
       bids: "unconcluded",
       version: null,
       version_shape: "missing",
-      tag: "not_applicable",
+      tag: "absent",
     }),
     own: [
       R("text_withheld", "readme"),
@@ -1348,7 +1354,9 @@ describe("reportReasons, over every report dimension", () => {
     { version: "1.2.0", version_shape: "ok", tag: "absent" },
     { version: "1.2.0", version_shape: "ok", tag: "at_head" },
     { version: "1.2.0", version_shape: "ok", tag: "elsewhere" },
-    { version: null, version_shape: "missing", tag: "not_applicable" },
+    { version: null, version_shape: "missing", tag: "absent" },
+    { version: null, version_shape: "missing", tag: "at_head" },
+    { version: null, version_shape: "missing", tag: "elsewhere" },
     { version: null, version_shape: "malformed", tag: "not_applicable" },
   ];
   const DOCS: Array<Record<string, unknown>> = [
@@ -1465,7 +1473,7 @@ describe("reportReasons, over every report dimension", () => {
                     }
                   }
     expect(mismatches).toEqual([]);
-    expect(reports).toBe(3 * 2 * 4 * 2 * 5 * 5 * 5 * 2);
+    expect(reports).toBe(3 * 2 * 4 * 2 * 7 * 5 * 5 * 2);
   }, 120_000);
 });
 
@@ -1874,9 +1882,7 @@ describe("the version an approval would publish", () => {
   test("the described X.Y.Z, or the orchestrator's default when none is set, and nothing for a malformed one", () => {
     expect(effectiveVersionOf(evidenceOf({}))).toBe("1.2.0");
     expect(
-      effectiveVersionOf(
-        evidenceOf({ version: null, version_shape: "missing", tag: "not_applicable" }),
-      ),
+      effectiveVersionOf(evidenceOf({ version: null, version_shape: "missing", tag: "absent" })),
     ).toBe(DEFAULT_PUBLICATION_VERSION);
     expect(
       effectiveVersionOf(
@@ -1885,6 +1891,39 @@ describe("the version an approval would publish", () => {
     ).toBeNull();
     // Every shape is answered, so a new one cannot slip through unlooked-up.
     expect(VERSION_SHAPES.length).toBe(3);
+  });
+
+  test("a tag of the version an approval would publish is reported for a dataset with no Version too", () => {
+    const reasonCodes = (over: Record<string, unknown>) =>
+      reportReasons(
+        parsePublicationReviewReport(
+          reportBody({
+            evidence: evidenceBody({ version: null, version_shape: "missing", ...over }),
+          }),
+        ),
+      ).map((r) => r.code);
+    // 1.0.0 is released at another commit: the same fact, and the same reason, as an explicit
+    // Version in that position; the overridable word for the missing Version rides beside it.
+    expect(reasonCodes({ tag: "elsewhere" })).toEqual([
+      "version_already_released",
+      "version_missing",
+    ]);
+    expect(reasonCodes({ tag: "at_head" })).toEqual(["version_missing"]);
+    expect(reasonCodes({ tag: "absent" })).toEqual(["version_missing"]);
+    // A malformed Version has nothing to look up and says so with its own word.
+    expect(
+      reportReasons(
+        parsePublicationReviewReport(
+          reportBody({
+            evidence: evidenceBody({
+              version: null,
+              version_shape: "malformed",
+              tag: "not_applicable",
+            }),
+          }),
+        ),
+      ).map((r) => r.code),
+    ).toContain("version_malformed");
   });
 
   test('the default is the one the orchestrator\'s `Version || "1.0.0"` publishes', () => {

@@ -923,6 +923,65 @@ describe("the tag lookup reads git ls-remote output, annotated tags included", (
   });
 });
 
+describe("a dataset with no Version is looked up as the version an approval would publish", () => {
+  const withVersion = (version: unknown) => JSON.stringify({ ...DESCRIPTION, Version: version });
+
+  /** A real repository at 1.0.0 (tagged), then a later commit on `main`, and its real tag listing. */
+  function released(name: string, version: unknown) {
+    const ds = newDataset(name, { "dataset_description.json": withVersion(version) });
+    const first = ds.head;
+    git(ds.dir, "tag", "-a", "v1.0.0", "-m", "release one");
+    write(ds.dir, "CHANGES", "later\n");
+    git(ds.dir, "add", "-A");
+    git(ds.dir, "commit", "-q", "-m", "later");
+    return {
+      dir: ds.dir,
+      first,
+      later: git(ds.dir, "rev-parse", "HEAD"),
+      ls: git(ds.dir, "ls-remote", "--tags", ds.dir),
+    };
+  }
+
+  test("a v1.0.0 tag at another commit is a version already released, as it is for an explicit Version", async () => {
+    for (const version of [undefined, "", null, 0]) {
+      const r = released(`tag-missing-${String(version)}`, version);
+      const report = await reviewOf({ dir: r.dir, head: r.later }, { tags: r.ls });
+      expect(report.evidence).toMatchObject({
+        version: null,
+        version_shape: "missing",
+        tag: "elsewhere",
+      });
+      expect(reportReasons(report).map((x) => x.code)).toEqual([
+        "version_already_released",
+        "version_missing",
+      ]);
+    }
+    // The same repository with the version written down gives the same reason.
+    const explicit = released("tag-explicit", "1.0.0");
+    const same = await reviewOf({ dir: explicit.dir, head: explicit.later }, { tags: explicit.ls });
+    expect(same.evidence.tag).toBe("elsewhere");
+    expect(reportReasons(same).map((x) => x.code)).toContain("version_already_released");
+  });
+
+  test("a v1.0.0 tag at the reviewed commit, and no tag at all, are their own states", async () => {
+    const r = released("tag-missing-states", undefined);
+    const atHead = await reviewOf({ dir: r.dir, head: r.first }, { tags: r.ls });
+    expect(atHead.evidence).toMatchObject({ version_shape: "missing", tag: "at_head" });
+    expect(reportReasons(atHead).map((x) => x.code)).toEqual(["version_missing"]);
+    const none = await reviewOf({ dir: r.dir, head: r.later }, { tags: "" });
+    expect(none.evidence).toMatchObject({ version_shape: "missing", tag: "absent" });
+  });
+
+  test("a malformed Version has no tag to look up, whatever tags exist", async () => {
+    const r = released("tag-malformed", "one.two");
+    const report = await reviewOf({ dir: r.dir, head: r.later }, { tags: r.ls });
+    expect(report.evidence).toMatchObject({ version: null, version_shape: "malformed" });
+    expect(report.evidence.tag).toBe("not_applicable");
+    expect(reportReasons(report).map((x) => x.code)).toContain("version_malformed");
+    expect(reportReasons(report).map((x) => x.code)).not.toContain("version_already_released");
+  });
+});
+
 describe("the BIDS validation run", () => {
   const H = "a".repeat(40);
   const run = (over: Record<string, unknown>) => ({
@@ -1790,9 +1849,20 @@ describe("the evidence block is the Worker's, built and parsed", () => {
     expect(() => buildPublicationEvidence({ ...base, head: "not-a-sha" })).toThrow(
       PublicationReviewReportError,
     );
-    // A tag state for a dataset that has no version contradicts itself.
+    // A tag state for a Version that is malformed has nothing to look up and contradicts itself;
+    // a missing Version is published as 1.0.0, so it has a tag state like any other.
+    expect(() =>
+      buildPublicationEvidence({ ...base, version: { version: null, shape: "malformed" } }),
+    ).toThrow(PublicationReviewReportError);
     expect(() =>
       buildPublicationEvidence({ ...base, version: { version: null, shape: "missing" } }),
+    ).not.toThrow();
+    expect(() =>
+      buildPublicationEvidence({
+        ...base,
+        version: { version: null, shape: "missing" },
+        tag: "not_applicable",
+      }),
     ).toThrow(PublicationReviewReportError);
   });
 

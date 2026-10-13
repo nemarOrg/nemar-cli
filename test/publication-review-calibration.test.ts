@@ -1325,7 +1325,7 @@ describe("the outcome is derived, never reported, and facts the calibration cann
     expect(record.model_answers).toEqual(record.answers);
   });
 
-  test("the evidence is that of an unreleased named dataset: no tag unless there is a version, BIDS unknown", () => {
+  test("the evidence is that of an unreleased named dataset: the tag absent (a malformed Version has none to look up), BIDS unknown", () => {
     const withVersion = evidenceOf(readEntry(join(mutatedCorpus, "nm000001"))).facts;
     expect(withVersion).toMatchObject({
       anonymous: false,
@@ -1335,13 +1335,31 @@ describe("the outcome is derived, never reported, and facts the calibration cann
       bids: "unknown",
     });
     expect(withVersion.head).toBe((origins.nm000001 as Origin).head);
+    // No Version: published as 1.0.0, so there is a tag to look up, and it does not exist yet.
     const without = evidenceOf(readEntry(join(mutatedCorpus, "nm000003"))).facts;
     expect(without).toMatchObject({
       version: null,
       version_shape: "missing",
-      tag: "not_applicable",
+      tag: "absent",
     });
     expect(without.bids).toBe("unknown");
+    // A Version that is not X.Y.Z has nothing to look up.
+    const entry = readEntry(join(mutatedCorpus, "nm000001"));
+    const malformed = evidenceOf({
+      ...entry,
+      docs: {
+        ...entry.docs,
+        dataset_description: {
+          ...entry.docs.dataset_description,
+          text: JSON.stringify({ ...DESCRIPTION, Version: "one.two" }),
+        },
+      },
+    }).facts;
+    expect(malformed).toMatchObject({
+      version: null,
+      version_shape: "malformed",
+      tag: "not_applicable",
+    });
   });
 
   test("an unknown BIDS result would make every dataset a non-pass, so that one reason is not counted", () => {

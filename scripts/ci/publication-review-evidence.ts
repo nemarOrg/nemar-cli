@@ -59,6 +59,7 @@ import {
   type StructuralSummary,
   type TagState,
   type VersionShape,
+  effectiveVersionOf,
   parsePublicationReviewEvidence,
 } from "../../shared/publication-review";
 import { firstReadme } from "../../shared/readme-candidates";
@@ -362,9 +363,11 @@ export function versionFacts(descriptionText: string | null): {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Where the tag `v<version>` points, from `git ls-remote --tags` output. Tags are annotated, so the
- * line that names the commit is the peeled `refs/tags/v<version>^{}` one, and it wins over the tag
- * object's own line; a lightweight tag has only the plain line, which is the commit.
+ * Where the tag `v<version>` points, from `git ls-remote --tags` output. `version` is the one to
+ * look up ({@link effectiveVersionOf}); null is a Version with nothing to look up, and is
+ * `not_applicable`. Tags are annotated, so the line that names the commit is the peeled
+ * `refs/tags/v<version>^{}` one, and it wins over the tag object's own line; a lightweight tag has
+ * only the plain line, which is the commit.
  */
 export function tagState(tagsText: string, version: string | null, head: string): TagState {
   if (version === null) return "not_applicable";
@@ -654,7 +657,14 @@ export function evidenceFromDocuments(
     anonymous: inputs.anonymous,
     description,
     version,
-    tag: tagState(inputs.tagsText, version.version, inputs.head),
+    // The tag of the version an approval would publish: the described one, or 1.0.0 when the
+    // description sets none, so a release of 1.0.0 at another commit is found for a dataset with no
+    // Version too. A malformed Version has nothing to look up.
+    tag: tagState(
+      inputs.tagsText,
+      effectiveVersionOf({ version: version.version, version_shape: version.shape }),
+      inputs.head,
+    ),
     bids: inputs.bidsRuns === null ? "unknown" : bidsState(inputs.bidsRuns, inputs.head),
     presend: checked,
     summary: inputs.summary,
