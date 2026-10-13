@@ -227,11 +227,17 @@ function storedReport(row: PublicationReviewRow): PublicationReviewReport | null
 
 /**
  * The row as `reasonsOf` needs it, with every stored word checked again. A dispatched row older
- * than {@link REVIEW_OVERDUE_VIEW_MINUTES} at `nowMs` is overdue, so a dev Worker with no watchdog
- * still says the review did not report. A row whose words do not read back is a review that could
- * not run (`report_invalid`), never one that passed.
+ * than `overdueMinutes` at `nowMs` is overdue, so a dev Worker with no watchdog still says the
+ * review did not report. The window is {@link REVIEW_OVERDUE_VIEW_MINUTES} (the deadline plus one
+ * watchdog tick) unless a caller says otherwise: the admin mail passes the deadline itself, because
+ * it goes out the moment the lease frees it and must say what is true then. A row whose words do
+ * not read back is a review that could not run (`report_invalid`), never one that passed.
  */
-export function rowViewOf(row: PublicationReviewRow, nowMs: number): ReviewRowView {
+export function rowViewOf(
+  row: PublicationReviewRow,
+  nowMs: number,
+  overdueMinutes: number = REVIEW_OVERDUE_VIEW_MINUTES,
+): ReviewRowView {
   const unreadable = (field: string): ReviewRowView => {
     console.warn(`[publication-review] review ${row.id}: stored ${field} does not read back`);
     return { kind: "errored", detail: "report_invalid" };
@@ -240,8 +246,7 @@ export function rowViewOf(row: PublicationReviewRow, nowMs: number): ReviewRowVi
   switch (row.state) {
     case "dispatched": {
       const created = sqliteTimeMs(row.createdAt);
-      const overdue =
-        Number.isNaN(created) || nowMs - created > REVIEW_OVERDUE_VIEW_MINUTES * 60_000;
+      const overdue = Number.isNaN(created) || nowMs - created > overdueMinutes * 60_000;
       return { kind: "dispatched", overdue };
     }
     case "unreported":

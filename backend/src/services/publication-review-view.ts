@@ -44,6 +44,7 @@ import { type ScreenGate, screenGate } from "../../../shared/identifier-screen-r
 import {
   type LiveFacts,
   NOT_ASSESSED_LINE,
+  PUBLICATION_REVIEW_DEADLINE_MINUTES,
   type PublicationDeclineDetail,
   type PublicationOutcome,
   type PublicationReviewDescription,
@@ -52,6 +53,7 @@ import {
   type PublicationRunError,
   REASONS,
   REASON_CODES,
+  REVIEW_OVERDUE_VIEW_MINUTES,
   type Reason,
   type ReasonCode,
   type ReviewRowView,
@@ -148,6 +150,12 @@ export interface ReviewContext {
   nowMs: number;
   request: ReviewRequestFields;
   dataset: ReviewDatasetFields | null;
+  /**
+   * How old a dispatched row is before it reads as one that did not report. Default
+   * {@link REVIEW_OVERDUE_VIEW_MINUTES}, which the list and the detail use. The admin mail passes
+   * {@link PUBLICATION_REVIEW_DEADLINE_MINUTES}: see {@link publicationReviewEmailSection}.
+   */
+  overdueMinutes?: number;
 }
 
 export interface DerivedPublicationReview {
@@ -219,7 +227,7 @@ export async function derivePublicationReview(
   if (applies && head !== null && HEAD.test(head)) {
     row = await readReviewByKey(db, request.id, head, anonymous);
     if (row !== null) {
-      rowView = rowViewOf(row, ctx.nowMs);
+      rowView = rowViewOf(row, ctx.nowMs, ctx.overdueMinutes);
       // Only `requested` is reviewed: a dispatched row of any other request is not waited for.
       if (request.status !== "requested" && rowView.kind === "dispatched") {
         rowView = { kind: "dispatched", overdue: true };
@@ -562,6 +570,16 @@ function unreadableSection(datasetId: string): PublicationReviewSection {
  * which leaves the mail exactly as it was before the review existed. A request the review does
  * not apply to says so while the review is on, as the screen's section does for a sandbox.
  *
+ * **The mail ages a dispatched row by the deadline, the lists by the deadline plus a tick.** The
+ * mail lease frees a held request when its review is older than
+ * {@link PUBLICATION_REVIEW_DEADLINE_MINUTES} (`reviewInFlightSql`), and the mail then goes out and
+ * is marked sent, so what it says about the review has to be true at that moment and cannot be
+ * corrected later by the watchdog, whose own mail would find nothing left to send. A row past the
+ * deadline is therefore read here as one that did not report, whether or not a watchdog has marked
+ * it yet, ran, or reached it among the rows it takes in a tick. The lists and the detail have no
+ * lease to explain and keep the longer window (ADR 0101, section 7: the deadline plus one tick),
+ * so they do not say "did not report" about a review the watchdog is about to close.
+ *
  * Never throws: a read that fails is logged (ids and fixed words only) and the mail says the
  * review could not be read, so an administrator is never told less than the truth.
  */
@@ -575,7 +593,12 @@ export async function publicationReviewEmailSection(
     const ctx = await readContext(env, requestId);
     if (!ctx) return null;
     datasetId = ctx.request.dataset_id;
-    const d = await derivePublicationReview({ env, nowMs, ...ctx });
+    const d = await derivePublicationReview({
+      env,
+      nowMs,
+      ...ctx,
+      overdueMinutes: PUBLICATION_REVIEW_DEADLINE_MINUTES,
+    });
     if (!d.enabled && d.row === null) return null;
     return {
       headline: d.description.headline,

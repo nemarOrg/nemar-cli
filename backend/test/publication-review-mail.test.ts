@@ -33,9 +33,10 @@ import {
   screenEmailSection,
   sweepIdentifierScreens,
 } from "../src/services/identifier-screen";
+import { sweepPublicationReviews } from "../src/services/publication-review";
 import { SUMMARY_LINE_PREFIX } from "../src/services/publication-review-view";
 import type { Bindings, Variables } from "../src/types/bindings";
-import { freshDb, interceptingD1, realD1 } from "./helpers/d1";
+import { freshDb, interceptingD1, realD1, yieldingD1 } from "./helpers/d1";
 import { SCREENED_HEAD, cleanScreenReportBody } from "./helpers/identifier-screen";
 import {
   type SeedReview,
@@ -209,17 +210,18 @@ describe("the mail waits for a review that is in flight", () => {
       next: "nemar admin publish start",
     },
     {
+      // The mail goes once the lease frees it, at the 30-minute deadline, and says what is true
+      // then: the review did not report. The lists and the detail wait for the deadline plus a
+      // watchdog tick (60 minutes) before they say it, because they have no lease to explain.
       name: "dispatched past the 30-minute deadline",
       seed: { state: "dispatched", createdMinutesAgo: 31 },
       headline: "Publication review: action required",
-      // The view's own bound is 60 minutes (a watchdog tick longer): the mail goes at 30 and
-      // says the review is running until then.
-      reasons: ["review_running"],
+      reasons: ["review_did_not_report"],
       words: [],
-      next: "nemar admin publish show",
+      next: "nemar admin publish start",
     },
     {
-      name: "dispatched past the view's overdue bound",
+      name: "dispatched past the views' overdue bound",
       seed: { state: "dispatched", createdMinutesAgo: 61 },
       headline: "Publication review: action required",
       reasons: ["review_did_not_report"],
@@ -565,6 +567,111 @@ describe("the watchdog's unmailed pass", () => {
         (await sweepIdentifierScreens(env({ PUBLICATION_REVIEW_ENABLED: undefined }))).emailed,
       ).toBe(1);
       expect(sends(calls)).toHaveLength(1);
+    });
+  });
+});
+
+// ============================================================================
+
+describe("a review that never reports is mailed once, and the mail says so", () => {
+  const DID_NOT_REPORT = REASONS.review_did_not_report.sentence.replace(/\.$/, "");
+  const RUNNING = REASONS.review_running.sentence;
+
+  /** An unmailed request whose screen is old enough for the watchdog and whose review is dispatched. */
+  function neverReporting(minutesAgo = 40) {
+    const r = unmailed();
+    db.run(
+      "UPDATE publication_requests SET identifier_screen_at = datetime('now', '-90 minutes') WHERE id = ?",
+      [r.requestId],
+    );
+    seedPublicationReview(db, {
+      requestId: r.requestId,
+      datasetId: r.datasetId,
+      state: "dispatched",
+      createdMinutesAgo: minutesAgo,
+    });
+    return r;
+  }
+
+  const mailsOf = (calls: CapturedEmail[], datasetId: string) =>
+    sends(calls).filter((m) => m.subject.includes(datasetId));
+
+  test("at the deadline the lease frees the mail, and the mail says the review did not report", async () => {
+    // The lease and the mail's section read the same window: a mail the lease lets go is never
+    // told the review is running, because nothing would mail the "did not report" afterwards.
+    const young = unmailed();
+    seedPublicationReview(db, {
+      requestId: young.requestId,
+      datasetId: young.datasetId,
+      state: "dispatched",
+      createdMinutesAgo: 29,
+    });
+    const old = unmailed();
+    seedPublicationReview(db, {
+      requestId: old.requestId,
+      datasetId: old.datasetId,
+      state: "dispatched",
+      createdMinutesAgo: 31,
+    });
+    await withFakeResend(async (calls) => {
+      expect(await notifyAdminsOfScreen(env(), young.requestId)).toBe("not-claimed");
+      expect(await notifyAdminsOfScreen(env(), old.requestId)).toBe("sent");
+      const text = textOf(mailsOf(calls, old.datasetId)[0].html);
+      expect(text).toContain(DID_NOT_REPORT);
+      expect(text).not.toContain(RUNNING);
+      expect(sends(calls)).toHaveLength(1);
+    });
+  });
+
+  test("the identifier sweep alone mails it once, as did not report, and the review sweep then adds nothing", async () => {
+    const { requestId, datasetId } = neverReporting();
+    await withFakeResend(async (calls) => {
+      expect((await sweepIdentifierScreens(env())).emailed).toBe(1);
+      const first = mailsOf(calls, datasetId);
+      expect(first).toHaveLength(1);
+      expect(textOf(first[0].html)).toContain(DID_NOT_REPORT);
+      expect(textOf(first[0].html)).not.toContain(RUNNING);
+
+      // The review's own watchdog finds the row afterwards: the mail has gone, so there is
+      // nothing for it to send, and the row is closed as unreported.
+      expect(await sweepPublicationReviews(env())).toMatchObject({ timedOut: 1, mailed: 0 });
+      expect(mailsOf(calls, datasetId)).toHaveLength(1);
+    });
+    expect(mailState(requestId).emailed).not.toBeNull();
+  });
+
+  test("the review sweep first mails it once, as did not report, and the identifier sweep then adds nothing", async () => {
+    const { datasetId } = neverReporting();
+    await withFakeResend(async (calls) => {
+      expect(await sweepPublicationReviews(env())).toMatchObject({ timedOut: 1, mailed: 1 });
+      const first = mailsOf(calls, datasetId);
+      expect(first).toHaveLength(1);
+      expect(textOf(first[0].html)).toContain(DID_NOT_REPORT);
+      expect((await sweepIdentifierScreens(env())).emailed).toBe(0);
+      expect(mailsOf(calls, datasetId)).toHaveLength(1);
+    });
+  });
+
+  test("both sweeps at once, over more requests than the review sweep takes in a tick: each is mailed once and none is told the review is running", async () => {
+    // 25 never-reporting reviews: the review sweep takes 20 a tick and the identifier sweep 10,
+    // each in the same order, so both reach the same requests at the same time, and a few
+    // requests are left for the next tick.
+    const requests = Array.from({ length: 25 }, () => neverReporting());
+    const racing = env({ DB: yieldingD1(realD1(db)) });
+    await withFakeResend(async (calls) => {
+      await Promise.all([sweepIdentifierScreens(racing), sweepPublicationReviews(racing)]);
+      for (const r of requests) expect(mailsOf(calls, r.datasetId).length).toBeLessThanOrEqual(1);
+      // The next tick finishes the rest, and nothing is ever mailed twice.
+      await Promise.all([sweepIdentifierScreens(racing), sweepPublicationReviews(racing)]);
+      await Promise.all([sweepIdentifierScreens(racing), sweepPublicationReviews(racing)]);
+      for (const r of requests) {
+        const mails = mailsOf(calls, r.datasetId);
+        expect(mails).toHaveLength(1);
+        const text = textOf(mails[0].html);
+        expect(text).toContain(DID_NOT_REPORT);
+        expect(text).not.toContain(RUNNING);
+      }
+      expect(sends(calls)).toHaveLength(25);
     });
   });
 });
