@@ -15,7 +15,7 @@ import {
   PUBLICATION_REVIEW_VIEW_KINDS,
   START_REASONS,
 } from "../shared/contract/publication-review-admin";
-import { FINDING_KINDS, KNOWN_FORMATS, type ScreenGate } from "../shared/identifier-screen-report";
+import { KNOWN_FORMATS, type ScreenGate } from "../shared/identifier-screen-report";
 import * as prReview from "../shared/pr-review";
 import {
   ANSWERS,
@@ -457,7 +457,13 @@ describe("the closed lists are the ones ADR 0102 and the design note name", () =
     });
     // Version is the platform's fact, never the model's to read.
     expect(DESCRIPTION_KEYS_SHOWN).not.toContain("Version");
-    for (const key of ["EthicsApprovals", "License", "Authors", "Funding", "SourceDatasets"]) {
+    for (const key of [
+      "EthicsApprovals",
+      "License",
+      "Authors",
+      "Funding",
+      "SourceDatasets",
+    ] as const) {
       expect(DESCRIPTION_KEYS_SHOWN).toContain(key);
     }
   });
@@ -511,7 +517,8 @@ describe("the closed lists are the ones ADR 0102 and the design note name", () =
   });
 
   test("the datatypes are the Worker's BIDS datatypes plus other", () => {
-    expect([...REVIEW_DATATYPES]).toEqual([...BIDS_DATATYPES, "other"]);
+    // The Worker's list is a Set of plain strings, so the comparison is between lists of strings.
+    expect<string[]>([...REVIEW_DATATYPES]).toEqual([...BIDS_DATATYPES, "other"]);
   });
 
   test("the formats are the preflight's closed list plus EDF and BDF, and nothing else", () => {
@@ -836,7 +843,7 @@ describe("the report agrees with itself, in the safe direction only", () => {
     );
     expect(parsed.findings).toHaveLength(8);
     expect(parsed.findings.slice(0, 6).map((f) => f.note)).toEqual(
-      eight.slice(0, 6).map((f) => f.note),
+      eight.slice(0, 6).map((f) => String(f.note)),
     );
     expect(parsed.findings.slice(6)).toEqual([
       {
@@ -1728,7 +1735,7 @@ describe("parsePublicationCallbackOutcome", () => {
   });
 
   test("a claimed pass, a worker-only word, an unknown word or a missing outcome is workflow_failed", () => {
-    const failed = { kind: "error", error: "workflow_failed" };
+    const failed = { kind: "error", error: "workflow_failed" } as const;
     expect(
       parsePublicationCallbackOutcome({ outcome: "pass", report: reportBody(), error: undefined }),
     ).toEqual(failed);
