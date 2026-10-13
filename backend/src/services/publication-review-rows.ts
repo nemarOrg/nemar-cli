@@ -31,10 +31,8 @@ import {
 } from "../../../shared/identifier-screen-report.js";
 import {
   PUBLICATION_REVIEW_DEADLINE_MINUTES,
-  type PublicationOutcome,
   type PublicationReviewReport,
   PublicationReviewReportError,
-  type PublicationReviewState,
   REVIEW_OVERDUE_VIEW_MINUTES,
   type ReviewRowView,
   isPublicationDeclineDetail,
@@ -52,8 +50,14 @@ export interface PublicationReviewRow {
   anonymous: boolean;
   requestedBy: number;
   startedBy: number | null;
-  state: PublicationReviewState;
-  verdict: PublicationOutcome | null;
+  /**
+   * The words as the database returns them, never narrowed here: the migration's CHECKs keep them
+   * closed, but a row edited by hand, or written by another build, can hold another word. A reader
+   * narrows with `isPublicationReviewState` and `isPublicationOutcome` and treats a word that does
+   * not narrow as unreadable ({@link rowViewOf}), never as a state or a verdict.
+   */
+  state: string;
+  verdict: string | null;
   detail: string | null;
   report: string | null;
   claimedAt: string | null;
@@ -85,8 +89,8 @@ export function toRow(raw: Record<string, unknown>): PublicationReviewRow {
     anonymous: num(raw.anonymous) === 1,
     requestedBy: num(raw.requested_by),
     startedBy: numOrNull(raw.started_by),
-    state: raw.state as PublicationReviewState,
-    verdict: (raw.verdict ?? null) as PublicationOutcome | null,
+    state: String(raw.state),
+    verdict: strOrNull(raw.verdict),
     detail: strOrNull(raw.detail),
     report: strOrNull(raw.report),
     claimedAt: strOrNull(raw.claimed_at),
