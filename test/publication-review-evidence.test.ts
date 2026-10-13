@@ -8,8 +8,9 @@
  * the way the Messages API does. That exercises the request the job really sends (the model, the
  * effort, the schema, no tools, and exactly the text a model would read) and the way each kind of
  * answer is read. The one thing not exercised is the live federated sign-in, which needs the real
- * identity provider; and the lazy blob fetch over https, which needs GitHub (a file:// remote stands
- * in for it, through the same git calls).
+ * identity provider; and the workflow's fetch over https, which needs GitHub (a file:// remote
+ * stands in for it, through the same git calls, where a test needs a blob-less clone). The job itself
+ * fetches nothing.
  *
  * The property the report depends on is the hard constraint of ADR 0102, section 2: the model
  * receives cleared prose from the closed document list and numbers and words from the evidence, and

@@ -6,7 +6,8 @@
  * token, and no GitHub credential, and neither does the clone: an earlier step fetched the
  * repository, and with it the blobs this script reads, giving its read-only token to each git
  * command through that command's own environment and writing it nowhere. This script's git calls
- * need nothing from the network, and no git child process inherits any token.
+ * need nothing from the network and, with lazy fetching off, cannot ask for it, and no git child
+ * process inherits any token.
  *
  *   bun run scripts/ci/publication-review.ts review \
  *     --repo-dir DIR --head SHA --fetched-head SHA --tags-file FILE --bids-runs-file FILE \

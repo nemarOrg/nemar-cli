@@ -38,10 +38,11 @@
 # which reads GH_TOKEN and needs it there, so the token is in that step's environment throughout
 # and in no other step's. The clone is blob-less, so the same step also fetches, in one batch, the
 # blobs the review reads (the root documents and the sampled data sidecars), and the model step's
-# git then needs nothing from the network and, with lazy fetching off, cannot ask for it. Apart from the one-shot callback token, which can post
-# one report for this review and nothing else, the job has no credential that can write to GitHub
-# or to NEMAR. `id-token: write` puts the OIDC request variables in every step's environment, which
-# the federation rule's conditions (this repository, this workflow, main) bound.
+# git then needs nothing from the network and, with lazy fetching off, cannot ask for it. Apart
+# from the one-shot callback token, which can post one report for this review and nothing else, the
+# job has no credential that can write to GitHub or to NEMAR. `id-token: write` puts the OIDC
+# request variables in every step's environment, which the federation rule's conditions (this
+# repository, this workflow, main) bound.
 #
 # WHAT THE ORDER CLOSES, AND WHAT IT DOES NOT. The mint step is given the GitHub App's private key,
 # and the runner passes the same inputs again to the action's post step at the end of the job. So
