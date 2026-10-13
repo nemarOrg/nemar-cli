@@ -17,6 +17,7 @@ import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
 import { failWith, requireSignedIn } from "../lib/admin-command.js";
+import { reportFailure, signedIn } from "../lib/admin-output.js";
 import { denyPublication, listPublishRequests, rerunIdentifierScreen } from "../lib/api/publish.js";
 import {
   type ConfirmOptions,
@@ -28,6 +29,9 @@ import {
 } from "../lib/confirm.js";
 import { markReportedExit } from "../lib/debug-log.js";
 import { identifierScreenLines } from "../lib/identifier-screen-display.js";
+import { reviewListLine } from "../lib/publication-review-display.js";
+import { needsAdministrator } from "../lib/publication-review-queue.js";
+import { plain } from "../lib/terminal-text.js";
 import { registerApproveCommand } from "./admin-publish-approve.js";
 
 export const publishCommand = new Command("publish").description("Publication workflow management");
@@ -35,43 +39,69 @@ export const publishCommand = new Command("publish").description("Publication wo
 publishCommand
   .command("list")
   .description("List publication requests")
-  .option("-s, --status <status>", "Filter by status (requested, approving, published, denied)")
+  .option(
+    "-s, --status <status>",
+    "Filter by status (requested, approving, blocked, published, denied)",
+  )
+  .option("--needs-me", "Only the requests you can act on now (marked *)")
+  .option("--json", "Output the response as JSON instead of the list")
   .addHelpText(
     "after",
     `
 Description:
   List all publication requests from users, with optional filtering by status.
-  Shows dataset ID, status, requesting user, and current progress.
+  Shows dataset ID, status, requesting user, the identifier screen and the
+  automated review of each (ADR 0102): its outcome, then the reasons it is not a
+  pass, as codes. 'nemar admin publish show <dataset>' says what each one means.
+
+  A * marks a request you can act on now: one waiting for your decision (unless
+  it is only waiting for the screen or the review to report), or an approval that
+  stopped and can be resumed. It is not marked when it is blocked (the depositor
+  acts) or an approval is running.
 
 Filter Options:
   requested  - Pending requests awaiting admin action
   approving  - Currently being processed by orchestrator
+  blocked    - Held until the depositor fixes something and requests again
   published  - Successfully published datasets
   denied     - Denied requests with reasons
+
+  --needs-me keeps only the requests marked *, after any --status filter.
+  --json prints the response (with --needs-me, the rows it keeps) and nothing else
+  on standard output; errors go to standard error.
 
 Examples:
   $ nemar admin publish list                # All requests
   $ nemar admin publish list --status requested   # Pending only
+  $ nemar admin publish list --needs-me     # What is yours to act on
   $ nemar admin publish list --status approving   # In progress
   $ nemar admin publish list --status denied      # View denied`,
   )
-  .action(async (options: { status?: string }) => {
-    if (!requireSignedIn()) return;
+  .action(async (options: { status?: string; needsMe?: boolean; json?: boolean }) => {
+    const json = options.json === true;
+    if (!signedIn(json)) return;
 
-    const spinner = ora("Fetching publication requests...").start();
+    const spinner = json ? null : ora("Fetching publication requests...").start();
 
     try {
       const result = await listPublishRequests(options.status);
-      spinner.stop();
+      spinner?.stop();
+
+      const rows = options.needsMe ? result.requests.filter(needsAdministrator) : result.requests;
+      if (json) {
+        console.log(JSON.stringify({ ...result, requests: rows, count: rows.length }, null, 2));
+        return;
+      }
 
       if (result.requests.length === 0) {
         console.log(chalk.dim("\n  No publication requests found.\n"));
         return;
       }
 
-      console.log(`\n${chalk.cyan("Publication Requests")} (${result.count})\n`);
+      console.log(`\n${chalk.cyan("Publication Requests")} (${rows.length})\n`);
+      if (rows.length === 0) console.log(chalk.dim("  No publication request needs you now.\n"));
 
-      for (const req of result.requests) {
+      for (const req of rows) {
         const statusColor =
           req.status === "published"
             ? chalk.green
@@ -81,8 +111,15 @@ Examples:
                 ? chalk.yellow
                 : chalk.white;
 
+        // `*` is the CLI's reading of what the Worker said (`needsAdministrator`); an approval that
+        // is running says so instead, because it is neither the administrator's nor stopped.
+        const mark = needsAdministrator(req)
+          ? `  ${chalk.bold.cyan("*")}`
+          : req.approval_in_flight === true
+            ? `  ${chalk.yellow("(approval running)")}`
+            : "";
         console.log(
-          `  ${chalk.bold(req.dataset_id)}  ${statusColor(req.status)}  by ${req.requested_by_username}  ${chalk.dim(req.requested_at)}`,
+          `  ${chalk.bold(plain(req.dataset_id))}  ${statusColor(plain(req.status))}  by ${plain(req.requested_by_username)}  ${chalk.dim(plain(req.requested_at))}${mark}`,
         );
         // #1408: an anonymous release and a publication reach this list
         // looking identical, and approving the wrong one is not reversible in
@@ -97,6 +134,10 @@ Examples:
         }
         // Epic #1610 phase 4: the identifier screen, in the backend's words.
         for (const line of identifierScreenLines(req.identifier_screen, 4)) console.log(line);
+        // ADR 0102: the automated review, in the backend's words; nothing for a request it did
+        // not assess.
+        const review = reviewListLine(req.publication_review, 4);
+        if (review !== null) console.log(review);
         if (req.current_step && req.status === "approving") {
           console.log(
             `    ${chalk.yellow(">")} ${req.current_step.replace(/_/g, " ")}${req.last_error ? chalk.red(` (${req.last_error})`) : ""}`,
@@ -116,9 +157,29 @@ Examples:
           console.log(`    ${chalk.yellow("! pre-screen advisory:")} ${chalk.dim(summary)}`);
         }
       }
+
+      const total = result.requests.length;
+      const count =
+        rows.length === total
+          ? `${total} request${total === 1 ? "" : "s"}`
+          : `Showing ${rows.length} of ${total} request${total === 1 ? "" : "s"}`;
+      const mine = result.requests.filter(needsAdministrator).length;
+      console.log();
+      console.log(
+        `${count}, ${chalk.bold(String(mine))} you can act on.  ${chalk.dim("nemar admin publish next | show <dataset> | approve <dataset>")}`,
+      );
+      // Said once, and only when every row says it: a Worker answers for one flag, so a mix would
+      // mean an older backend, whose rows carry no summary at all.
+      if (result.requests.every((req) => req.publication_review?.enabled === false)) {
+        console.log(
+          chalk.dim(
+            "  The automated review is off on this Worker, so no review gates an approval.",
+          ),
+        );
+      }
       console.log();
     } catch (error) {
-      failWith(error, spinner, "Failed to list publication requests");
+      reportFailure(error, spinner, "Failed to list publication requests", json);
     }
   });
 
