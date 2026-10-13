@@ -325,7 +325,7 @@ function prepareParticipants(parsed: Record<string, unknown>, cap: number): Prep
 /**
  * The pre-send check. Examines each document with the shared rules over the string that will be
  * sent, and returns that string, branded, for the documents the rules found nothing in. See the
- * file header for the three rules, and `PreSendResult` for what each state means.
+ * file header for the rules, and `PreSendResult` for what each state means.
  */
 export const presend: PreSend = (docs): PreSendResult => {
   const cleared: ClearedDocuments = {};
