@@ -762,7 +762,7 @@ describe("the depositor's resend carries the review's section", () => {
   /** Each depositor's key, by dataset: a key's hash is unique. */
   const keys = new Map<string, string>();
 
-  /** A request whose screen reported, owned by a depositor who holds a key, last touched hours ago. */
+  /** A request whose screen reported, owned by a depositor who holds a key, last touched days ago. */
   async function resendable(over: Partial<SeedScreenedRequest> = {}) {
     const datasetId = over.datasetId ?? nextDataset();
     const { requestId, userId } = seedScreenedRequest(db, { ...over, datasetId, mailed: false });
@@ -773,10 +773,11 @@ describe("the depositor's resend carries the review's section", () => {
       await hashApiKey(key),
       key.slice(0, 8),
     );
-    db.run(
-      "UPDATE publication_requests SET updated_at = datetime('now', '-2 hours') WHERE id = ?",
-      [requestId],
-    );
+    // Days, not hours: the route reads this text as LOCAL time, and a suite that has changed the
+    // process's time zone (as a neighbouring file's does) must not turn "hours ago" into "later".
+    db.run("UPDATE publication_requests SET updated_at = datetime('now', '-2 days') WHERE id = ?", [
+      requestId,
+    ]);
     return { requestId, datasetId };
   }
 
