@@ -1,4 +1,4 @@
-# ADR 0102: A publication request gets a derived verdict, and approving over a non-pass is the administrator's recorded act
+# Architecture Decision Record (ADR) 0102: A publication request gets a derived verdict, and approving over a non-pass is the administrator's recorded act
 
 **Status:** proposed
 **Date:** 2026-10-12
@@ -25,7 +25,7 @@ A publication request is checked today by parts that do not meet.
 The submission minimums hard-block at request time (ADR 0026).
 A request waits for its Brain Imaging Data Structure (BIDS) validation run before it is recorded as `requested`
 (ADR 0086, amendment of 2026-10-07).
-The identifier screen reads bytes in CI and reports kinds and counts in a closed vocabulary (ADR 0086).
+The identifier screen reads bytes in continuous integration (CI) and reports kinds and counts in a closed vocabulary (ADR 0086).
 An advisory pre-screen (ADR 0014) asks a model about the README, the name and the authors, and its result is shown to administrators.
 The administrator then gets one email and approves or denies,
 from a terminal or from a web button that dispatches an executor (ADR 0080).
@@ -145,7 +145,7 @@ This rule is not negotiable, and nothing in this ADR or a later phase may weaken
   No rule recognizes a name, email address or date in prose.
   Extending the screen to the root documents is #1736.
   The input limit and the cost bound assume about four characters to a token; adversarial text can cost more,
-  the API's refusal of an oversize call is `model_invalid`, and the daily caps bound the cost either way.
+  the application programming interface (API)'s refusal of an oversize call is `model_invalid`, and the daily caps bound the cost either way.
 - **Why prose is sent at all.**
   Enrichment and the pre-screen already send this prose to a model in production,
   the depositor has asked for exactly this content to be made public,
@@ -263,9 +263,9 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   A stored report that no longer parses, or whose echoed commit or release kind differs from its row's,
   reads as `review_could_not_run` (`report_invalid`), and as `stored_verdict_fail` as well when the column says `fail`.
   Live facts (a release row, a tag, the concept DOI, an earlier anonymous release) are read only for a request that is `requested`,
-  for one that is `blocked` before it started publishing,
+  for one that is `blocked` and is not a run the owner-name check walked back (amendment, item 6),
   and for an `approving` run that stopped before it published (only the validation-only steps completed), which the gate checks again when it resumes and which has written neither a version row nor a DOI:
-  a run that has started publishing has written its own version row and DOI, whether it is `approving` or has been walked back to `blocked` by the owner-name check (judgment call 5),
+  a run that has started publishing has written its own version row and DOI, whether it is `approving` or has been walked back to `blocked` by the owner-name check (judgment call 5; amendment, item 6),
   and a request that is over shows its stored review only.
   A request that is not assessed (the review is off and no row exists, the request is over and has no row, a mirror or an exemplar)
   has no outcome and no reasons on any surface.
@@ -400,7 +400,7 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   and the hand-over from the advisory pre-screen (with the flag on, the pre-screen of ADR 0014 is not dispatched for a dataset the review applies to,
   so the deploy that turns the review on is the one that stops it); it switches nothing else.
   The mechanical refusals ship unconditionally in Phase 2:
-  a `blocked` request that has not started publishing cannot be approved, and the ADR 0026 minimums refuse wherever they are evaluated, whatever the flag says.
+  a `blocked` request cannot be approved unless the owner-name check blocked a run that has started publishing (amendment, item 6), and the ADR 0026 minimums refuse wherever they are evaluated, whatever the flag says.
   With the flag off, no review is started, the claim route refuses a new claim so that no model call is spent,
   the result route still stores the result of a run that took its claim (the call was spent, and the record stays honest),
   the watchdog still closes rows, the mail does not wait for a review,
@@ -488,7 +488,7 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
 - **The Worker is the gate; the command-line tool explains.**
   `/approve` and `approve-dispatch` run the review gate after ADR 0086's screen gate and before the request is marked `approving`,
   and refuse with 409 `publication_review_not_clear` and the shared words.
-  The gate is skipped for a resumed run that has already started publishing, as the screen gate is (`hasStartedPublishing`).
+  The gate is skipped for a resumed run that has already started publishing, as the screen gate is (`publishingStanding`).
   It refuses when the live reasons include one the recorded override was not given for,
   and it refuses when it cannot be evaluated (a read that fails, a fact it cannot establish), as `verifyScreenHead` does.
   The command-line interface (CLI) refuses earlier, with the same words, only when its caller would be the one deciding.
@@ -650,7 +650,7 @@ The maintainer decided all twelve on 2026-10-12, as recommended, and amended cal
 4. (Amended.) The version facts need `--force`,
    except that a named publication after an anonymous release that keeps its version is hard;
    `version_already_released` fires only for a version row, or for a tag that names another commit than the reviewed head.
-5. (Amended.) A `blocked` request cannot be approved from a terminal, unconditionally, unless it has started publishing:
+5. (Amended.) A `blocked` request cannot be approved from a terminal, unconditionally, unless it has started publishing and was blocked for the owner-name reason (amendment, item 6):
    the owner-name check walks a request back to `blocked` on every call of a run, so a depositor who clears their name mid-run blocks a half-published run,
    and that run is resumed once the name is back, with no gate asked, as an `approving` one is (the detail's `started_publishing` is true for it).
 6. Haiku 5.5 at `high`, checked by an offline calibration before the soak (design note),
@@ -708,7 +708,7 @@ The maintainer decided all twelve on 2026-10-12, as recommended, and amended cal
 Phase 2 built the Worker's approval gate and `nemar admin publish list|show|start|approve|next`.
 The text above was corrected in place where the built behavior made a sentence false or stale
 (sections 5, 7, 8 and 9, the consequences, judgment calls 5 and 10, the receipts, and "Before it is switched on", which gained its item 7);
-this amendment to the Architecture Decision Record (ADR) states the decisions it does not otherwise carry.
+this amendment states the decisions it does not otherwise carry.
 Where the two differ, this is the later text.
 
 1. **The gate is the Worker's, and a client that skips the CLI cannot publish over a non-pass.**
@@ -750,11 +750,11 @@ Where the two differ, this is the later text.
 
 3. **With the flag off the gate reads nothing, and production changes only by what no flag controls.**
    Those are:
-   a `blocked` request that has not started publishing cannot be approved (409 `request_blocked`);
+   a `blocked` request that has not started publishing, or that is blocked for a reason other than the owner's name (item 6), cannot be approved (409 `request_blocked`);
    a `blocked` request that has started publishing for the owner-name reason (item 6) and is approved with `--resume` passes neither the screen's gate nor the review's gate,
    where before the phase the screen's gate ran on it;
    the `dataset_published` audit row gains `review_gate` and `skip_ci_check`;
-   a skipped continuous integration (CI) check and an administrator's comment each write an audit row of their own (`publication_ci_check_skipped`, `publication_request_commented`);
+   a skipped CI check and an administrator's comment each write an audit row of their own (`publication_ci_check_skipped`, `publication_request_commented`);
    a request that changed while an approval was being checked is refused (409 `request_changed`);
    an override sent with a session cookie to `/approve`, or inside a web approval, is refused (item 5);
    and the comment route exists (item 11).
@@ -779,7 +779,7 @@ Where the two differ, this is the later text.
    the override then stays on its row, bound to that review, those reasons and its approver.
 
 5. **Who may send an override, and whose it is.**
-   `/approve` accepts an override only with an application programming interface (API) key and answers a session cookie 403 `origin_not_allowed`,
+   `/approve` accepts an override only with an API key and answers a session cookie 403 `origin_not_allowed`,
    because a cookie rides along with any cross-site request a browser can be made to send;
    this is the one slice of #1603 that Phase 2 needs, and the rest of #1603 stays in Phase 3.
    `approve-dispatch` accepts one under its own Origin rule.
@@ -800,8 +800,7 @@ Where the two differ, this is the later text.
    the admin mail alone reads the deadline itself (section 6).
    A run that has started publishing is told so, in the shared words, and its next command is `nemar admin publish approve <dataset> --resume`.
    The detail's `started_publishing` is true for such a run, including one that the owner-name check has walked back to `blocked`.
-   A `blocked` request counts as having started publishing only when its block reason is the owner-name one (`owner_name_missing`)
-   and a step after the validation-only ones has completed.
+   A `blocked` request counts as having started publishing only when its block reason is the owner-name one (`owner_name_missing`) and a step after the validation-only ones has completed.
    A `blocked` request with any other reason is refused `request_blocked` however stale its recorded steps,
    because a re-request keeps `steps_completed`, and a request blocked again by the screen or the review would otherwise be resumed past every gate.
    Clearing the steps on a re-request is left to a follow-up.
@@ -839,8 +838,8 @@ Where the two differ, this is the later text.
    `--force` where the gate is `off` or `n/a` changes nothing, and says so.
    When the Worker refuses a run the CLI let through (a reason that came up after the read, a record that is another administrator's),
    the refusal's reasons are printed in the shared words, with the command that shows the review.
-   The limits a command checks before it sends (a denial's reason of at most 2,000 characters, an acknowledgment of 10 to 500, and the shape of a dataset id)
-   have one home, `shared/publication-limits.ts`, which the Worker and the commands both read.
+   The limits a command checks before it sends (a denial's reason of at most 2,000 characters, an acknowledgment of 10 to 500, and the shape of a dataset id) have one home,
+   `shared/publication-limits.ts`, which the Worker and the commands both read.
 
 10. **`next` is a walk whose rules are tested without a terminal.**
     It takes `--force`, `--once` and `--dataset <id>`, and has no `--all` and no `--yes`.
@@ -866,8 +865,8 @@ Where the two differ, this is the later text.
     and is not behind `PUBLICATION_REVIEW_ENABLED`, which switches the review and not a message an administrator types.
     The send goes through the environment's delivery fence, so outside production only an address on the allowlist is mailed, and a refusal is a failed send.
     A failed send is never answered as a success, and it is one of two kinds by what the Worker knows, both 502.
-    `comment_not_sent` is for a send that certainly delivered nothing
-    (the provider refused the message with a 4xx, the fence refused the recipient, the depositor has no address, or the depositor could not be read),
+    `comment_not_sent` is for a send that certainly delivered nothing (the provider refused the message with a 4xx,
+    the fence refused the recipient, the depositor has no address, or the depositor could not be read),
     and says so: "The message could not be mailed, so nothing was sent to the depositor."
     `comment_not_confirmed` is for a send that may have been accepted (a provider's server error, an unreachable host or a lost answer),
     and says that the mail may not have been sent and may also have arrived, and that the administrator is to check with the depositor before sending it again;

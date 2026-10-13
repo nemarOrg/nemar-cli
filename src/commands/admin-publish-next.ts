@@ -175,7 +175,9 @@ async function walk(options: WalkOptions): Promise<void> {
   let first = true;
   let noted = false;
   const endedWords = () =>
-    reader.interrupted ? "Interrupted; stopping." : "Input ended; stopping.";
+    reader.interrupted
+      ? "Interrupted; stopping."
+      : "Input ended; stopping.\nSee what needs you with: nemar admin publish list --needs-me";
 
   // Whatever the loop throws (a field this version of the CLI did not expect, from a Worker of
   // another version), the reader is closed and the tally says what was done before it.

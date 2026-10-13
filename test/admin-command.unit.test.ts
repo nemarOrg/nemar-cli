@@ -21,7 +21,7 @@ import chalk from "chalk";
 import ora from "ora";
 import { failMessage, failWith, handleCommandError, isAnswered } from "../src/lib/admin-command";
 import { ApiError } from "../src/lib/api/errors";
-import { markReportedExit, unmarkReportedExit, wasReportedExit } from "../src/lib/debug-log";
+import { markReportedExit, resetReportedExit, wasReportedExit } from "../src/lib/debug-log";
 
 /** ESC sequences, a BEL, a bidirectional override and a zero-width space: what `plain()` removes. */
 const HOSTILE = "bad\u001b[2J\u001b]0;pwned\u0007 words\u202e\u200b here";
@@ -83,13 +83,13 @@ beforeEach(() => {
   // Colour codes are control characters too: the assertions are about the Worker's bytes.
   colors = chalk.level;
   chalk.level = 0;
-  unmarkReportedExit();
+  resetReportedExit();
 });
 afterEach(() => {
   // Setting it back to undefined does not clear a 1 under Bun, and a 1 would fail the whole run.
   process.exitCode = exitCode ?? 0;
   chalk.level = colors;
-  unmarkReportedExit();
+  resetReportedExit();
 });
 
 describe("isAnswered: the one rule for 'exit 1 is the command's answer'", () => {
@@ -177,14 +177,33 @@ describe("failWith", () => {
     expect(json.err).toContain("Error details: boom");
   });
 
-  test("the bug-report hint follows the LAST failure: an answer, then a fault that may be a bug", () => {
+  test("the bug-report hint stays once a fault that may be a bug was seen: an answer, then a fault, then an answer", () => {
     capture((spinner) => failWith(apiError(409, "refused"), spinner, "Failed"));
     expect(wasReportedExit()).toBe(true);
 
     capture((spinner) => failWith(apiError(500, "broke"), spinner, "Failed"));
     expect(wasReportedExit()).toBe(false);
 
+    // A later answer does not hide the earlier fault, which may be a bug.
     capture((spinner) => failWith(apiError(404, "gone"), spinner, "Failed"));
+    expect(wasReportedExit()).toBe(false);
+  });
+
+  test("a fault that may be a bug, then an answer, keeps the hint", () => {
+    capture((spinner) => failWith(apiError(500, "broke"), spinner, "Failed"));
+    capture((spinner) => failWith(apiError(409, "refused"), spinner, "Failed"));
+    expect(wasReportedExit()).toBe(false);
+    capture(() => failMessage("mistyped", { answered: true }));
+    expect(wasReportedExit()).toBe(false);
+    // Nor can a command's own mark of its exit code as the answer hide it.
+    markReportedExit();
+    expect(wasReportedExit()).toBe(false);
+  });
+
+  test("answers only suppress the hint", () => {
+    capture((spinner) => failWith(apiError(409, "refused"), spinner, "Failed"));
+    capture((spinner) => failWith(apiError(404, "gone"), spinner, "Failed"));
+    capture(() => failMessage("mistyped", { answered: true }));
     expect(wasReportedExit()).toBe(true);
   });
 

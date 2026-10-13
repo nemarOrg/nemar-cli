@@ -2654,16 +2654,18 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // it since (a failed submission minimum, ADR 0102) or a denial would be overwritten by an
   // unconditional write, and the run would publish over it. Nothing has run yet, so a request
   // that changed is refused and read again. A request that was `blocked` when it was read got
-  // here only because it has started publishing (above), and is marked `approving` again: the
-  // last bound value (1 only for such a request) is what lets a `blocked` row through, so a
-  // request that was not blocked when it was read cannot be marked once it has become one.
+  // here only because the owner-name walk-back blocked a run that has started publishing (above),
+  // and is marked `approving` again. Two terms let a `blocked` row through: the last bound value
+  // (1 only for such a request), so a request that was not blocked when it was read cannot be
+  // marked once it has become one, and the owner-name reason itself, so a row a re-request moved
+  // to another reason since is refused as well.
   const readAsBlocked = request.status === "blocked" ? 1 : 0;
   const marked = await db
     .prepare(
       // `last_error = NULL`: a new attempt begins, so the previous attempt's
       // error is history (the caller's own output has it), and the row reads as
       // running, not failed, from this moment (services/approval-dispatch.ts).
-      "UPDATE publication_requests SET status = 'approving', approved_by = ?, last_error = NULL, updated_at = datetime('now') WHERE id = ? AND (status IN ('requested', 'approving') OR (status = 'blocked' AND ? = 1))",
+      `UPDATE publication_requests SET status = 'approving', approved_by = ?, last_error = NULL, updated_at = datetime('now') WHERE id = ? AND (status IN ('requested', 'approving') OR (status = 'blocked' AND block_reason = '${OWNER_NAME_MISSING_REASON}' AND ? = 1))`,
     )
     .bind(c.approver.id, request.id, readAsBlocked)
     .run();

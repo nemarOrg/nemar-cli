@@ -67,7 +67,8 @@ const expectCleanText = (text: string) => expectClean(text.split("\n"));
 
 /** A detail whose every network string is hostile. */
 function hostileDetail(): PublicationReviewDetail {
-  const reasons = reasonViewsOf([{ code: "question_failed", detail: null }], ID, true);
+  // No report: these lines lack the report-derived findings text of a failed question.
+  const reasons = reasonViewsOf([{ code: "question_failed", detail: null }], ID, true, null);
   return {
     environment: "production",
     enabled: true,
@@ -191,7 +192,8 @@ describe("the lines approve prints are clean of anything a terminal could act on
       ...hostileDetail(),
       reasons: [
         {
-          ...reasonViewsOf([{ code: "request_blocked", detail: null }], ID, true)[0],
+          // No report: this line lacks the report-derived findings text (the test replaces it anyway).
+          ...reasonViewsOf([{ code: "request_blocked", detail: null }], ID, true, null)[0],
           line: `Blocked ${HOSTILE}`,
         },
       ],
@@ -363,6 +365,38 @@ describe("runApproval against a Worker that answers with hostile text", () => {
     expect(text).toContain(`Published ${CLEANED}`);
     expect(text).toContain(`Warning: Mail ${CLEANED}`);
   });
+
+  for (const [what, total, line] of [
+    ["with a total", "5\u2028", /Locking S3 objects: 03\/5 \(60\.0%\)$/m],
+    ["without one", undefined, /Locking S3 objects: 03$/m],
+  ] as const) {
+    test(`the lock progress the Worker reports, ${what}, in the spinner line the retry notice puts back`, async () => {
+      // The counts are numbers in the Worker's contract, and nothing here checks that they are: a
+      // string with a line separator in it passes the `> 0` test (it reads as a number) and is
+      // printed as it came. The spinner line is shown again after a retry notice, which is how it
+      // reaches the stream in a test (a spinner that is not on a terminal prints only then).
+      scripted = [
+        {
+          status: 200,
+          body: {
+            step: "s3_lock",
+            hasMore: true,
+            s3_lock_continuation_token: "token-1",
+            s3_lock_batch_count: "3\u2028",
+            s3_lock_total: total,
+          },
+        },
+        { status: 500, body: { error: "a transient fault" } },
+        { status: 200, body: { message: "Published", dataset_id: ID, step_results: [] } },
+      ];
+
+      const { value, text } = await printed(() => runApproval(ID, options));
+
+      expect(value).toEqual({ ok: true });
+      expect(plainText(text)).toMatch(line);
+      expectCleanText(text);
+    });
+  }
 
   test("a refusal whose message and reasons are hostile", async () => {
     scripted = [

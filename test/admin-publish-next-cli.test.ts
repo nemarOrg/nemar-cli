@@ -20,7 +20,8 @@
  * before the extra question; skip the extra question; never ask for the screen's acknowledgment;
  * resume every request; leave the terminal paused after an approval's spinner, or wake it after
  * the input has ended; never clear the reported mark (a refusal, then a fault that may be a bug, exits
- * with the hint suppressed); list a request whose identifier screen is still running with the review
+ * with the hint suppressed); let a later answer set the mark again (a fault that may be a bug, then
+ * a refusal, exits with the hint suppressed); list a request whose identifier screen is still running with the review
  * off; draw a card after the input has ended; let `d` throw on a detail it cannot render; skip the
  * `finally` of the walk; drop the SIGINT listener of an approval (Ctrl+C then kills the walk silently).
  *
@@ -52,7 +53,7 @@ import {
   cureOf,
 } from "../shared/publication-review";
 import { type CliResult, startPublishCli } from "./helpers/admin-publish-cli";
-import { hardReport, twoReasons } from "./helpers/approve-seeds";
+import { hardReport, twoReasons, withheldReport } from "./helpers/approve-seeds";
 
 setDefaultTimeout(60_000);
 
@@ -172,6 +173,7 @@ describe("y approves from the terminal", () => {
     expect(r.stdout).not.toContain(B);
     expect(h.requests.filter((c) => c.path === `/admin/publish/${B}/review`)).toEqual([]);
     expect(count(r.stdout, "Input ended; stopping.")).toBe(1);
+    expect(count(r.stdout, "See what needs you with: nemar admin publish list --needs-me")).toBe(1);
     expect(r.stdout).toContain("Done: 1 approved.");
   });
 
@@ -239,7 +241,7 @@ describe("a review that is not a pass needs --force", () => {
     const r = await next("y\nq\n");
 
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).not.toContain("y approve");
+    expect(r.stdout).not.toContain("y approve, ");
     expect(r.stdout).toContain("y is not offered:");
     expect(r.stdout).toContain("Not approved: this review is not a pass.");
     expect(r.stdout).toContain("nemar admin publish next --force");
@@ -258,6 +260,16 @@ describe("a review that is not a pass needs --force", () => {
     expect(r.stdout).toContain(REASONS.version_missing.sentence);
     expect(r.stdout).not.toContain(SUMMARY_SENTINEL);
     expect(r.stdout).not.toContain(NOTE_SENTINEL);
+  });
+
+  test("a reason with closed words reads on the card as the Worker's line, in words for a person", async () => {
+    seed(A, withheldReport());
+
+    const r = await next("q\n");
+
+    expect(r.stdout).toContain("(README, participants.json)");
+    expect(r.stdout).not.toContain("(readme, participants_json)");
+    expect(r.stdout).not.toContain("participants_json");
   });
 
   test("with --force y is offered, and the card says it will ask about each reason", async () => {
@@ -371,7 +383,7 @@ describe("a reason nothing clears is never offered", () => {
     const r = await next("y\nq\n", ["--force"]);
 
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).not.toContain("y approve");
+    expect(r.stdout).not.toContain("y approve, ");
     expect(r.stdout).toContain("y is not offered:");
     expect(r.stdout).toContain("Not approved:");
     expect(r.stdout).toContain(cureOf("submission_minimum_failed", A, true));
@@ -765,6 +777,8 @@ describe("which requests are shown, and in what order", () => {
 
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("Input ended; stopping.");
+    // Nothing was shown, so the way to see what is waiting is named.
+    expect(r.stdout).toContain("See what needs you with: nemar admin publish list --needs-me");
     expect(h.posted).toEqual([]);
   });
 
@@ -864,7 +878,7 @@ describe("what fails exits 1, and the walk goes on", () => {
     expect(output(r)).not.toContain("attach the log to a new issue");
   });
 
-  test("a request the Worker refused, then one that failed for a reason that may be a bug: the bug-report hint follows the LAST failure", async () => {
+  test("a request the Worker refused, then one that failed for a reason that may be a bug: the bug-report hint is present", async () => {
     // Card 1: the Worker's refusal (409), an answer, which marks the exit as reported. Card 2: a
     // denial the Worker could not write (500 with no closed word), which may be a bug and must
     // bring the hint back; a mark that nothing can clear would leave it suppressed.
@@ -889,6 +903,35 @@ describe("what fails exits 1, and the walk goes on", () => {
     expect(r.exitCode).toBe(1);
     expect(h.requests.filter((c) => c.path === approvePath(A)).map((c) => c.status)).toEqual([409]);
     expect(h.requests.filter((c) => c.path.endsWith("/deny")).map((c) => c.status)).toEqual([500]);
+    expect(r.stdout).toContain("Done: 2 failed.");
+    expect(output(r)).toContain("attach the log to a new issue");
+  });
+
+  test("a request that failed for a reason that may be a bug, then one the Worker refused: the bug-report hint is still present", async () => {
+    // Card 1: a denial the Worker could not write (500 with no closed word), which may be a bug.
+    // Card 2: the Worker's refusal (409), an answer, which marks the exit as reported. A later
+    // answer must not hide the earlier fault.
+    seed(A);
+    seed(B, twoReasons());
+    requestedAt(A, "2026-10-10 09:00:00");
+    requestedAt(B, "2026-10-11 09:00:00");
+    h.after(`GET /admin/publish/${B}/review`, () => {
+      h.db.run("INSERT INTO dataset_versions (dataset_id, version, doi) VALUES (?, '1.0.0', ?)", [
+        B,
+        "10.5072/FK2.late",
+      ]);
+    });
+    h.hookDb({
+      statement(sql) {
+        if (/SET status = 'denied'/.test(sql)) throw new Error("simulated write failure");
+      },
+    });
+
+    const r = await next("n\nThe participants file is missing\ny\ny\n", ["--force"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(h.requests.filter((c) => c.path.endsWith("/deny")).map((c) => c.status)).toEqual([500]);
+    expect(h.requests.filter((c) => c.path === approvePath(B)).map((c) => c.status)).toEqual([409]);
     expect(r.stdout).toContain("Done: 2 failed.");
     expect(output(r)).toContain("attach the log to a new issue");
   });

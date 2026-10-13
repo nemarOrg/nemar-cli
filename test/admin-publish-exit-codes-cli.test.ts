@@ -305,6 +305,16 @@ describe("deny with no reason and nothing to ask on", () => {
     expect(requestStatus(requestId)).toBe("requested");
   });
 
+  test("--help-all says where the reason comes from, and that a script passes --reason", async () => {
+    const r = await h.cli(["admin", "publish", "deny", "--help-all"]);
+    expect(r.exitCode).toBe(0);
+    const text = output(r).replace(/\s+/g, " ");
+    expect(text).toContain(
+      "with no --reason, one typed at a terminal or the first line of piped input (in a script, pass --reason)",
+    );
+    expect(text).not.toContain("nothing is asked when there is neither");
+  });
+
   test("a reason piped in is read as the reason, and nothing is asked", async () => {
     const requestId = seedGolden(h.db);
     const r = await h.cli(["admin", "publish", "deny", DATASET, "--yes"], {

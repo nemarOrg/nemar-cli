@@ -22,7 +22,7 @@ import {
   parsePublicationReviewEvidence,
 } from "../shared/publication-review";
 import { LineReader } from "../src/lib/prompt-lines";
-import type { ReviewRead } from "../src/lib/publication-review-approve";
+import { type ReviewRead, reasonViewLine } from "../src/lib/publication-review-approve";
 import {
   type NextTally,
   OBJECTS_PER_LOCK_CALL,
@@ -336,6 +336,10 @@ describe("sizeLine", () => {
  * Run `body` with the process in time zone `zone` (Bun honours a change of `TZ` at run time), and
  * put the zone back afterwards. A test of a timestamp that carries no zone must not pass only
  * because the machine it runs on is in UTC, as a CI runner is.
+ *
+ * The zone is put back by assigning it, never by deleting `TZ`: Bun keeps the last zone it was
+ * given after the key is deleted, so a delete would leave every later file in this process in the
+ * zone of the call. `bun test` runs in UTC when `TZ` is unset, so UTC is what an unset one means.
  */
 function inZone(zone: string, body: () => void): void {
   const previous = process.env.TZ;
@@ -343,13 +347,35 @@ function inZone(zone: string, body: () => void): void {
   try {
     body();
   } finally {
-    if (previous === undefined) Reflect.deleteProperty(process.env, "TZ");
-    else process.env.TZ = previous;
+    process.env.TZ = previous ?? "UTC";
   }
 }
 
 /** Zones west and east of UTC: a timestamp read in either as local time is hours off. */
 const ZONES = ["America/Los_Angeles", "Pacific/Auckland"] as const;
+
+describe("inZone", () => {
+  // A date in October 2026: Los Angeles is on daylight time (UTC-7), Auckland too (UTC+13).
+  const offsetNow = () => new Date("2026-10-13 12:00:00").getTimezoneOffset();
+
+  // First of the file's uses of `inZone`: a restore that leaks would leave the next measurement
+  // of "before" in the zone it leaked, and the test could not see it.
+  test("puts the zone back, so no later test in the process is left in it", () => {
+    // Bun keeps the last zone it was given when `TZ` is deleted, so a restore that deletes the key
+    // leaves the process in the zone of the call: every later file would then read a timestamp
+    // with no zone (SQLite's UTC ones) as local time.
+    const before = offsetNow();
+    inZone("America/Los_Angeles", () => {});
+    expect(offsetNow()).toBe(before);
+    inZone("Pacific/Auckland", () => {});
+    expect(offsetNow()).toBe(before);
+  });
+
+  test("really changes the zone inside the call", () => {
+    inZone("America/Los_Angeles", () => expect(offsetNow()).toBe(420));
+    inZone("Pacific/Auckland", () => expect(offsetNow()).toBe(-780));
+  });
+});
 
 describe("requestedAge", () => {
   test("a timestamp the database wrote (UTC, no zone) is read as UTC, in any time zone", () => {
@@ -417,13 +443,42 @@ describe("cardLines", () => {
     expect(text).toContain(REASONS.question_failed.sentence);
   });
 
-  test("a detail word is shown with the sentence, and no cure (d has the whole)", () => {
-    const text = card(
-      { reasons: [["review_could_not_run", "dispatch_failed,model_refused"]] },
-      true,
+  test("a reason reads as the line the Worker sent, the same words approve prints", () => {
+    // `text_withheld` carries closed words (readme, participants_json); the words for a person are
+    // the shared ones, and the card, `d` and the refusal of `approve` all say the same thing.
+    const reasons: Spec["reasons"] = [["text_withheld", "readme,participants_json"]];
+    const text = card({ reasons }, true);
+    expect(text).toContain("(README, participants.json)");
+    expect(text).not.toContain("(readme, participants_json)");
+    expect(text).not.toContain("participants_json");
+    const r = read({ reasons });
+    if (r.kind !== "detail") throw new Error("expected a detail");
+    expect(text).toContain(reasonViewLine(r.detail.reasons[0]));
+  });
+
+  test("a Worker that sent no line is read as approve reads it: the sentence and the cure, never the closed words", () => {
+    const r = read({ reasons: [["text_withheld", "readme,participants_json"]] });
+    if (r.kind !== "detail") throw new Error("expected a detail");
+    const old: ReviewRead = {
+      kind: "detail",
+      detail: { ...r.detail, reasons: r.detail.reasons.map(({ line: _line, ...rest }) => rest) },
+    };
+    const text = uncolored(
+      cardLines({
+        position: 1,
+        total: 3,
+        row: row(),
+        read: old,
+        answer: yAnswer(ID, old, true, false),
+        force: true,
+        now,
+      }).join("\n"),
     );
-    expect(text).toContain("(dispatch_failed, model_refused)");
-    expect(text).not.toContain(cureOf("review_could_not_run", ID, true));
+    expect(text).toContain(
+      `${REASONS.text_withheld.sentence} ${cureOf("text_withheld", ID, true)}`,
+    );
+    expect(text).not.toContain("participants_json");
+    expect(text).not.toContain("readme");
   });
 
   test("at most six reasons, then how many more", () => {
