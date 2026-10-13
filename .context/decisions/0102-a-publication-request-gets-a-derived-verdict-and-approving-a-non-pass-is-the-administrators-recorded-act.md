@@ -216,13 +216,15 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   Each reason has a class, fail or unknown, which sets the outcome, and says what clears it.
   The table lives in `shared/publication-review.ts` with the words every surface shows.
 - **Hard reasons: nothing clears them, and the approval is refused with the cure named.**
-  They are exactly what an earlier decision already made unconditional, plus one amendment of call 4:
+  They are what an earlier decision already made unconditional, one amendment of call 4, and the pending screen:
   - `request_blocked` (fail): the request's block reason is shown; the depositor fixes it and requests again;
   - `submission_minimum_failed` (fail): ADR 0026's minimums, evaluated by the review at the reviewed commit;
     the Worker then moves the request from `requested` to `blocked` with `min_requirements_failed`,
     the transition the blocked-request sweep already makes, so that the depositor can fix it and request again;
   - `identifier_screen_blocks` (fail): direct identifiers; the request is already blocked by ADR 0086;
   - `identifier_screen_not_run` and `identifier_screen_stale` (unknown): an administrator re-runs the screen;
+  - `identifier_screen_pending` (unknown): the screen is still running; nothing clears it but its result,
+    and the review starts when it reports;
   - `version_kept_after_anonymous_release` (fail): a named publication after an anonymous release of this dataset
     keeps the version the release used; the depositor bumps the version, which is cheap.
 - **The screen's reason: cleared by ADR 0086's recorded acknowledgment, unchanged.**
@@ -232,7 +234,9 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   - Fail class: `question_failed` (per question, with its findings), `steering_attempt`, `bids_failed_at_review`,
     `version_already_released` (a `dataset_versions` row exists for the version,
     or the tag `v<version>` exists and names a commit other than the reviewed head;
-    a tag naming the reviewed head is a harmless re-run), and `version_malformed` (not `X.Y.Z`).
+    a tag naming the reviewed head is a harmless re-run), `version_malformed` (not `X.Y.Z`),
+    and `stored_verdict_fail` (the stored review concluded `fail` and its report no longer shows why;
+    a person reads the review's record).
   - Unknown class: `review_not_started`, `review_running`, `review_did_not_report`, `review_limit_reached`,
     `review_could_not_run` (with the closed run-error word), `text_withheld`, `question_unknown`,
     `bids_unconcluded_at_review`, `version_missing` (the orchestrator would publish its default `1.0.0`),
@@ -249,7 +253,12 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   The queue, the detail view and the gate re-derive it from the stored report and the live facts
   (the request's state, its screen and acknowledgment, the `dataset_versions` rows, the concept DOI)
   and use the STRICTER of the two, so either can lower a verdict and neither can raise it (ADR 0093's rule).
-  A stored report that no longer parses reads as `review_could_not_run` unless the column says `fail`.
+  A stored report that no longer parses, or whose echoed commit or release kind differs from its row's,
+  reads as `review_could_not_run` (`report_invalid`), and as `stored_verdict_fail` as well when the column says `fail`.
+  Live facts (a release row, a tag, the concept DOI, an earlier anonymous release) are read only for a request that is `requested` or `blocked`:
+  a request that is `approving` has written its own version row and DOI, and a request that is over shows its stored review only.
+  A request that is not assessed (the review is off and no row exists, the request is over and has no row, a mirror or an exemplar)
+  has no outcome and no reasons on any surface.
 - **Every rendering of a review carries one standing line:** "Not assessed: whether the text names the depositors."
   ADR 0065 leaves README, Funding, Acknowledgements and EthicsApprovals to the depositor to scrub, and the model is not asked.
 - **Requests the submission gate exempts are not reviewed.**
@@ -262,8 +271,8 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
 
 - **The chain is request, BIDS, screen, review, mail.**
   A request is recorded `requested` only after BIDS validation and the minimums pass;
-  the screen is dispatched then; when its result is stored (`storeScreenResult`) or an administrator's re-run reports,
-  the Worker starts the review for that head if section 2 allows it.
+  the screen is dispatched then; once the screen's callback has stored its result (`storeScreenResult`, in the callback route, which starts the review after the store and before the mail)
+  or an administrator's re-run reports, the Worker starts the review for that head if section 2 allows it.
 - **The admin email waits for the review, as it waits for the screen, and cannot be lost.**
   While the flag is on, ADR 0086's mail lease is taken only when the screen is not pending
   and no review of the screened head is `dispatched` and younger than the review deadline.
@@ -307,18 +316,20 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
 - **The reviewer.** `run-publication-review.yml` in `nemarDatasets/.github`,
   authored in this repository and deployed by whole-file copy,
   holds the only federated Anthropic identity for this review.
-  It follows `run-pr-review.yml` with one deliberate reordering:
-  mask the callback token first; validate every payload field; claim before anything is installed, minted or read;
+  It follows `run-pr-review.yml` with one deliberate reordering, and its steps run in this order:
+  mask the callback token; validate every payload field; claim before anything is installed, minted or read;
+  check the federation configuration;
   mint a read-only token (contents and actions: read) for ONE dataset repository;
   fetch `main` as git data, shallow and blob-less, with `init` and `fetch` and never a checkout,
-  handing the token to each git command for that command alone and never writing it into the clone,
-  and prefetch in one batch exactly the blobs the script reads (the root documents and the sampled sidecars),
-  because the model step holds no credential and cannot read lazily;
-  refuse as `stale_head` when the fetched `main` is not the dispatched head;
+  handing the token to each git command for that command alone, never writing it into the clone and unsetting it from the step's environment afterwards,
+  prefetching in one batch exactly the blobs the script reads (the root documents and the sampled sidecars),
+  because the model step holds no credential and cannot read lazily, and recording the fetched commit;
+  read the BIDS validation runs of that commit (the one other step that holds the dataset token, because it needs it);
   only THEN check out `nemarOrg/nemar-cli` at `main` for the script, set up the runtime, and install its dependencies
   with `--frozen-lockfile --ignore-scripts`;
   mint the OpenID Connect token last;
-  give the model step the federated identity and the callback token, and no GitHub credential;
+  run the review, which gives the model step the federated identity and the callback token and no GitHub credential,
+  and whose script refuses as `stale_head`, before it calls the model, when the fetched commit is not the dispatched head;
   report a failure after the claim through a dependency-free `curl` step;
   pin every third-party action to a full commit SHA;
   use one concurrency group per run; and print ids and fixed words only, because the log is public.
@@ -326,14 +337,17 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   What it does not close: the pinned actions' own code; the callback token, which the dispatch payload carries in the event file that every step can read
   (the model step needs it to post, as in the pull-request review); and the mint action's post step, which the dependency tree's runtime code in the model step could reach.
   A two-job split that hands the clone over as an artifact was rejected, because the central repository's logs and artifacts are public and the clone is private dataset text.
-  The head is checked when the clone is fetched, a little before the model call, so a push to `main` in that gap still costs one model call;
-  the approval's own head check (ADR 0086) still refuses a stale approval.
+  The head is compared in the script, before the model call but after the checkout and the install that follow the fetch,
+  so a push to `main` in that gap still costs one model call; the approval's own head check (ADR 0086) still refuses a stale approval.
+  The prefetch downloads each selected blob whole, because a missing blob cannot be sized beforehand;
+  the reader's ceilings (4 MiB a document, 1 MiB a sidecar) apply after the download, and the job's 20-minute timeout is the only bound before it.
 - **Where it departs from the pull-request review.**
   There is no GitHub event: the Worker starts the review from the screen result, so the App needs no new subscription.
   There is no pull-request text and no fork: the job reads `main` at the screened commit.
-  Nothing is written to GitHub, so there is no republish pass.
-  The claim checks, in the same conditional update that claims, that the review is the newest of its request,
-  that the request is still `requested`, and that its screened head and flag are still the row's;
+  Nothing is written to a dataset repository, so there is no republish pass.
+  The claim checks, in the same conditional update that claims, that the request is still `requested`,
+  that its flag and screened head are still the row's, and that the screen's gate is still clear or acknowledge
+  (the unique key on the request, the head and the flag makes that row the review in force);
   a claim that cannot settle closes the attempt as `stale_head`, as in ADR 0092.
   The callback origin comes from the workflow's own table keyed by the environment's NAME, never from the payload.
   The token domain is `publication-review`;
@@ -353,7 +367,7 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   so nothing that happens to an attempt (a decline, a failed dispatch, the watchdog giving up) lowers what the calls before it cost.
   An attempt counts when it is still `dispatched`, has reported, or took its claim and did not end in a word that says no model was reached;
   one nobody claimed (the workflow undeployed, Actions down) held no model, because the claim precedes any model spend, and does not count.
-  Over a cap the row is `declined` (`review_limit_reached`).
+  Over a cap the row is `declined`, with the detail `depositor_limit` or `platform_limit`, both shown as `review_limit_reached`.
   An administrator's `start` is held by the platform's cap only; the call still counts toward the depositor's tally,
   because it costs the platform and bounds the depositor's own next request.
   There is no contributor tally and no override table:
@@ -361,7 +375,9 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
 - **The flag, and what it does not switch** (call 11, amended).
   `PUBLICATION_REVIEW_ENABLED = "1"` is set in `[env.dev.vars]` and absent from `[vars]` of `backend/wrangler-sccn.toml`,
   so production is dark, and turning it on is a reviewed change to that file.
-  The flag switches the model review and its gate, nothing else.
+  The flag switches the review: whether one is started, its gate, the admin mail's wait for it and its section,
+  and the hand-over from the advisory pre-screen (with the flag on, the pre-screen of ADR 0014 is not dispatched for a dataset the review applies to,
+  so the deploy that turns the review on is the one that stops it); it switches nothing else.
   The mechanical refusals ship unconditionally in Phase 2:
   a `blocked` request cannot be approved, and the ADR 0026 minimums refuse wherever they are evaluated, whatever the flag says.
   With the flag off, no review is started, the claim route refuses a new claim so that no model call is spent,
@@ -384,10 +400,15 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
 - **Environment fences.** The dev Worker starts reviews only for the datasets it owns (`isDevOwnedDatasetId`),
   and production never for those; each Worker answers only from its own D1.
   The review mails administrators only, under the production-only fence of `getAdminEmailsForCategory`,
-  and makes no write to `nemarDatasets`.
+  and makes no write to a dataset repository: the one call it makes to GitHub is the dispatch of the workflow to the central repository.
 - **Credentials.** The only credential minted is the one-shot callback token,
   an HMAC over the review id and a nonce, spent by the result;
   it grants nothing beyond posting that review's report, and joins no revocation list (AGENTS.md).
+- **Bounds, in one place.** A document is read up to 4 MiB (`DOCUMENT_BYTE_CEILING`) and a sidecar up to 1 MiB;
+  the model sees at most the caps of section 3 after normalization, a `participants.json` column's fields are cut at 100, 500 and 50 characters,
+  the job samples at most 64 data sidecars and reduces them to at most 8 distinct sampling rates and 8 distinct channel counts,
+  the watchdog takes at most 20 rows a tick, the job times out at 20 minutes, and the deadline for a report is 30.
+  A request's live facts are read only while it is `requested` or `blocked` (section 5).
 
 ### 8. What the administrator sees and may do
 
@@ -425,10 +446,11 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   This differs from ADR 0093 on purpose: there an uncertain or missing review only asks for confirmation,
   and here every non-pass needs the force path, because the act that follows publishes a DOI.
 - **The web page shows the same words.**
-  The Worker serves the review rendered by `describePublicationReview` beside `identifier_screen`
-  in `GET /admin/publish/requests`, so the page renders the server's sentences.
-  The small fixed vocabulary the page needs to decide by itself is declared once in `shared/contract/publication-review-copy.ts`,
-  transcribed into `nemarOrg/website` and pinned by a drift test on each side (ADR 0045's pattern).
+  The list route carries each request's review as a summary (a headline, a tone, the closed reason codes and ids), not as sentences;
+  the sentences, the cures and the next command come from `GET /admin/publish/:id/review`, which renders `describePublicationReview`.
+  So the page either fetches that detail for the request being decided or renders the reasons from the shared words,
+  transcribed into `nemarOrg/website` and pinned by a drift test on each side (ADR 0045's pattern); Phase 4 chooses and records which.
+  The small fixed vocabulary the page needs to decide by itself is declared once in `shared/contract/publication-review-copy.ts` (Phase 4).
   A non-pass needs the same explicit confirmation on the page,
   sent as the review id and the reasons shown in `approve-dispatch`'s body.
 - **The Worker is the gate; the command-line tool explains.**
@@ -513,7 +535,7 @@ and each has a closed word and a sentence in the shared module.
 | The model is unavailable, refuses, runs out of room, or returns nothing usable | `errored` / `model_*` | `review_could_not_run` |
 | The report fails the parser | `errored` / `report_invalid` | `review_could_not_run` |
 | The job fails after the claim | `errored` / `workflow_failed` | `review_could_not_run` |
-| A cap is reached | `declined` / `review_limit_reached` | `review_limit_reached`; `start` |
+| A cap is reached | `declined` / `depositor_limit` or `platform_limit` | `review_limit_reached`; `start` |
 | The gate cannot read a live fact | nothing stored | a refusal that names the fact, and says to try again |
 
 ## Consequences
