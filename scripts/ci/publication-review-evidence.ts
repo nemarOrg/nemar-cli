@@ -46,6 +46,9 @@ import {
   type ClearedDocuments,
   DOCUMENT_BYTE_CEILING,
   LICENSE_CANDIDATES,
+  MAX_COUNT,
+  MAX_SAMPLING_RATE_HZ,
+  MAX_SUMMARY_VALUES,
   PARTICIPANTS_JSON,
   type PreSendResult,
   type PublicationReviewEvidence,
@@ -81,9 +84,6 @@ export const SIDECAR_SAMPLE = 64;
 export const SIDECAR_BYTE_CEILING = 1024 * 1024;
 /** A file this small can be an unlocked git-annex pointer, which is one short line. */
 const POINTER_MAX_BYTES = 1024;
-/** The bounds the Worker's evidence parser puts on a rate (hertz) and on a count. */
-const MAX_SAMPLING_RATE_HZ = 1_000_000;
-const MAX_COUNT = 10_000_000;
 
 /**
  * Why the evidence could not be read. A closed list, because the word is printed in a public log:
@@ -563,8 +563,8 @@ export function structuralSummary(dir: string, tree: Tree): StructuralSummary {
     has_derivatives: entries.some((e) => e.path.startsWith("derivatives/")),
     has_sourcedata: entries.some((e) => e.path.startsWith("sourcedata/")),
     has_code: entries.some((e) => e.path.startsWith("code/")),
-    sampling_rates_hz: topValues(rates, 8),
-    channel_counts: topValues(channels, 8),
+    sampling_rates_hz: topValues(rates, MAX_SUMMARY_VALUES),
+    channel_counts: topValues(channels, MAX_SUMMARY_VALUES),
     sidecars_read: sidecarsRead,
     sidecars_total: sidecars.length,
   };

@@ -466,9 +466,9 @@ export class PublicationReviewReportError extends Error {
 
 const HEAD = /^[0-9a-f]{40}$/;
 /** A count: a non-negative safe integer no larger than this. */
-const MAX_COUNT = 10_000_000;
+export const MAX_COUNT = 10_000_000;
 /** A sampling rate is a positive number below this, in hertz. */
-const MAX_SAMPLING_RATE_HZ = 1_000_000;
+export const MAX_SAMPLING_RATE_HZ = 1_000_000;
 const FINDING_KIND_SET: ReadonlySet<string> = new Set(FINDING_KINDS);
 
 function isRecord(x: unknown): x is Record<string, unknown> {

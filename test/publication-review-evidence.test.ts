@@ -57,6 +57,9 @@ import type { Tree } from "../scripts/identifier-screen-ci-lib";
 import {
   DOCUMENT_BYTE_CEILING,
   DOCUMENT_CHAR_CAPS,
+  MAX_COUNT,
+  MAX_SAMPLING_RATE_HZ,
+  MAX_SUMMARY_VALUES,
   type PublicationReviewReport,
   PublicationReviewReportError,
   REVIEW_FORMATS,
@@ -811,7 +814,7 @@ describe("the structural summary is counts and closed words", () => {
     const total = SIDECAR_SAMPLE + 36;
     for (let i = 0; i < total; i++) {
       const s = `sub-${String(i).padStart(3, "0")}`;
-      // Ten distinct rates and channel counts, so the eight-value bound must bite.
+      // Ten distinct rates and channel counts, so the bound on how many are carried must bite.
       entries[`${s}/eeg/${s}_task-r_eeg.json`] = JSON.stringify({
         SamplingFrequency: 100 + (i % 10) + 0.123,
         EEGChannelCount: 16 + (i % 10),
@@ -823,8 +826,8 @@ describe("the structural summary is counts and closed words", () => {
     const s = structuralSummary(ds.dir, await readTree(ds.dir, ds.head));
     expect(s.sidecars_total).toBe(total);
     expect(s.sidecars_read).toBe(SIDECAR_SAMPLE);
-    expect(s.sampling_rates_hz).toHaveLength(8);
-    expect(s.channel_counts).toHaveLength(8);
+    expect(s.sampling_rates_hz).toHaveLength(MAX_SUMMARY_VALUES);
+    expect(s.channel_counts).toHaveLength(MAX_SUMMARY_VALUES);
     for (const list of [s.sampling_rates_hz, s.channel_counts]) {
       expect([...list].sort((a, b) => a - b)).toEqual(list);
     }
@@ -832,6 +835,32 @@ describe("the structural summary is counts and closed words", () => {
     expect(JSON.stringify(s)).not.toContain("SENTINEL");
     // The whole evidence block the Worker will parse accepts what the sample produced.
     expect((await reviewOf(ds)).evidence.summary.sidecars_read).toBe(SIDECAR_SAMPLE);
+  });
+
+  test("a sidecar at the Worker's own bounds is carried, and one past them is not: the job follows the parser", async () => {
+    // The largest rate and count the parser accepts, and the first ones it refuses. The job imports
+    // these bounds from the parser, so narrowing one cannot leave a dataset whose summary the Worker
+    // refuses on every restart.
+    const justUnder = Math.round((MAX_SAMPLING_RATE_HZ - 0.01) * 100) / 100;
+    const ds = newDataset("summary-bounds", {
+      [`${EEG}.json`]: null,
+      "sub-A/eeg/sub-A_task-r_eeg.json": JSON.stringify({
+        SamplingFrequency: justUnder,
+        EEGChannelCount: MAX_COUNT,
+      }),
+      "sub-B/eeg/sub-B_task-r_eeg.json": JSON.stringify({
+        SamplingFrequency: MAX_SAMPLING_RATE_HZ,
+        EEGChannelCount: MAX_COUNT + 1,
+      }),
+    });
+    const s = structuralSummary(ds.dir, await readTree(ds.dir, ds.head));
+    expect(s.sidecars_read).toBe(2);
+    expect(s.sampling_rates_hz).toEqual([justUnder]);
+    expect(s.channel_counts).toEqual([MAX_COUNT]);
+    // And the Worker's parser accepts the block the review builds from it.
+    const report = await reviewOf(ds);
+    expect(report.evidence.summary.sampling_rates_hz).toEqual([justUnder]);
+    expect(report.evidence.summary.channel_counts).toEqual([MAX_COUNT]);
   });
 
   test("a sidecar value that is not a usable number contributes nothing", async () => {
