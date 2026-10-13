@@ -4,7 +4,9 @@
  * **This is the only file that mints `ClearedText`.** The prompt builder accepts nothing else, and
  * `test/publication-review-contract.test.ts` fails if any other source file casts to the type. So
  * the one place that decides what a model may read is this file, and it is short enough to read
- * whole.
+ * whole. The brand is checked by the compiler and by a lexical test, and neither can see a type
+ * predicate, an assertion function, a generic cast, `JSON.parse` or a suppressed error, so the
+ * prompt builder also asks {@link isCleared}, at run time, about every string it sends.
  *
  * The rule: every document is examined by the shared mechanical rules (`shared/identifier-scan.ts`)
  * immediately before it is sent, over exactly the string that will be sent, and text is cleared
@@ -52,6 +54,7 @@
  * neither a finding's value nor a byte of a document leaves the function.
  */
 
+import { createHash } from "node:crypto";
 import {
   type Finding,
   type FindingKind,
@@ -505,6 +508,33 @@ function prepareParticipants(parsed: Record<string, unknown>, cap: number): Prep
  * sent, and returns that string, branded, for the documents the rules found nothing in. See the
  * file header for the rules, and `PreSendResult` for what each state means.
  */
+/**
+ * What this module has cleared, as SHA-256 digests of the document and the exact string, in a set no
+ * one else can reach. The brand on `ClearedText` is a compile-time property: a type predicate, an
+ * assertion function, a generic cast, `JSON.parse` or a suppressed error all produce "cleared" text
+ * the compiler accepts. This is the run-time half: the prompt builder asks {@link isCleared} for
+ * every document it is about to send and throws on a string this module did not clear.
+ *
+ * A set of digests, not of strings: the same guarantee by value, a fixed 32 bytes per entry however
+ * long the document, and no copy of a depositor's text kept in module state for the life of the
+ * process. It is per document, because the rules differ (a string cleared as prose is not what the
+ * JSON rules cleared), and it is the process's, not a call's: nothing in a job calls presend twice,
+ * and a registry that forgot would make a legitimate result from an earlier call throw.
+ */
+const clearedDigests = new Set<string>();
+
+function digestOf(document: ReviewDocument, text: string): string {
+  return createHash("sha256").update(document).update("\0").update(text, "utf8").digest("hex");
+}
+
+/**
+ * Whether pre-send cleared exactly `text` as the `document`. The only thing exported about the
+ * registry: nothing outside this file can add to it.
+ */
+export function isCleared(document: ReviewDocument, text: unknown): boolean {
+  return typeof text === "string" && clearedDigests.has(digestOf(document, text));
+}
+
 export const presend: PreSend = (docs): PreSendResult => {
   const cleared: ClearedDocuments = {};
   const states = {} as Record<ReviewDocument, DocumentState>;
@@ -535,6 +565,7 @@ export const presend: PreSend = (docs): PreSendResult => {
       // The one cast of the repository: this string was examined, byte for byte, and nothing was
       // found in it.
       cleared[document] = prepared.sent as ClearedText;
+      clearedDigests.add(digestOf(document, prepared.sent));
       states[document] = prepared.cut ? "sent_cut" : "sent";
       keysShown += prepared.keysShown;
       keysNotShown += prepared.keysNotShown;

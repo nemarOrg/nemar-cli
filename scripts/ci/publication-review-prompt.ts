@@ -39,6 +39,7 @@ import {
   parsePublicationReviewReport,
 } from "../../shared/publication-review";
 import { fence } from "../../shared/untrusted-text";
+import { isCleared } from "./publication-review-presend";
 
 /** The model that reviews. One place, one reviewed change to move it. */
 export const PUBLICATION_REVIEW_MODEL = PUBLICATION_REVIEW_MODELS[0];
@@ -113,6 +114,13 @@ export function buildPublicationReviewMessages(input: {
     const sent = facts.documents[d] === "sent" || facts.documents[d] === "sent_cut";
     if ((cleared[d] !== undefined) !== sent) {
       throw new Error("cleared documents disagree with the facts");
+    }
+  }
+  // The brand is checked by the compiler; this is the same check at run time. A string that the
+  // pre-send module did not clear, by whatever route it got here, is never sent.
+  for (const d of REVIEW_DOCUMENTS) {
+    if (cleared[d] !== undefined && !isCleared(d, cleared[d])) {
+      throw new Error("a document was not cleared by pre-send");
     }
   }
   const blocks = REVIEW_DOCUMENTS.flatMap((d) => {

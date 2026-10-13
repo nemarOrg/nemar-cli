@@ -9,7 +9,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { presend } from "../scripts/ci/publication-review-presend";
+import * as presendModule from "../scripts/ci/publication-review-presend";
+import { isCleared, presend } from "../scripts/ci/publication-review-presend";
 import {
   PUBLICATION_OUTPUT_SCHEMA,
   PUBLICATION_REVIEW_MODEL,
@@ -19,9 +20,12 @@ import {
   modelFacts,
 } from "../scripts/ci/publication-review-prompt";
 import {
+  type ClearedDocuments,
+  type ClearedText,
   MAX_PUBLICATION_FINDINGS,
   PUBLICATION_FINDING_CODES,
   PUBLICATION_REVIEW_MODELS,
+  type PreSendResult,
   type PublicationReviewEvidence,
   PublicationReviewReportError,
   QUESTIONS,
@@ -129,6 +133,143 @@ describe("the builder takes cleared text and evidence, and nothing else", () => 
     expect(() =>
       buildPublicationReviewMessages({ facts: facts(), cleared: rest, nonce: NONCE }),
     ).toThrow("cleared documents disagree with the facts");
+  });
+});
+
+describe("the builder checks at run time that pre-send cleared each string, whatever the types say (#1728)", () => {
+  // The brand is a compile-time property. These are the spellings that typecheck and still hand the
+  // builder a string no rule examined; at run time each one reaches the builder and is refused.
+  const UNCLEARED = "Unexamined text that names /Users/jsmith/data";
+  const build = (cleared: ClearedDocuments) =>
+    buildPublicationReviewMessages({ facts: facts(), cleared, nonce: NONCE });
+  /** The legitimate documents the string is slipped in among, so the facts and the others agree. */
+  const real = () => cleared();
+
+  test("a type predicate that answers yes", () => {
+    const isClearedText = (_x: string): _x is ClearedText => true;
+    const raw: string = UNCLEARED;
+    if (!isClearedText(raw)) throw new Error("unreachable");
+    expect(() => build({ ...real(), readme: raw })).toThrow(/not cleared by pre-send/);
+  });
+
+  test("an assertion function that asserts nothing", () => {
+    function assertCleared(_x: string): asserts _x is ClearedText {}
+    const raw: string = UNCLEARED;
+    assertCleared(raw);
+    expect(() => build({ ...real(), readme: raw })).toThrow(/not cleared by pre-send/);
+  });
+
+  test("a generic function that returns what it is given as what is asked for", () => {
+    const launder = <T>(x: unknown): T => x as T;
+    expect(() => build({ ...real(), readme: launder(UNCLEARED) })).toThrow(
+      /not cleared by pre-send/,
+    );
+  });
+
+  test("JSON.parse, which returns any", () => {
+    const parsed = JSON.parse(JSON.stringify({ ...real(), readme: UNCLEARED }));
+    expect(() => build(parsed)).toThrow(/not cleared by pre-send/);
+  });
+
+  test("a cast to a type that contains the brand, and then the property", () => {
+    const r = JSON.parse(
+      JSON.stringify({ cleared: { ...real(), readme: UNCLEARED } }),
+    ) as PreSendResult;
+    expect(() => build(r.cleared)).toThrow(/not cleared by pre-send/);
+  });
+
+  test("a cast through ReturnType of presend", () => {
+    const forged = { ...real(), readme: UNCLEARED } as unknown as ReturnType<
+      typeof presend
+    >["cleared"];
+    expect(() => build(forged)).toThrow(/not cleared by pre-send/);
+  });
+
+  test("a suppressed type error", () => {
+    expect(() =>
+      build(
+        // @ts-expect-error a plain string is not ClearedText, and the error is suppressed on purpose
+        { ...real(), readme: UNCLEARED },
+      ),
+    ).toThrow(/not cleared by pre-send/);
+  });
+
+  test("a value that is not even a string", () => {
+    for (const odd of [7, null, {}, [], true]) {
+      expect(() => build({ ...real(), readme: odd as never })).toThrow(/not cleared by pre-send/);
+    }
+  });
+
+  test("any document is checked, not only the first", () => {
+    for (const d of ["dataset_description", "changes", "license", "participants_json"] as const) {
+      expect(() => build({ ...real(), [d]: UNCLEARED as never }), d).toThrow(
+        /not cleared by pre-send/,
+      );
+    }
+  });
+
+  test("a string pre-send cleared for one document is not cleared for another", () => {
+    const docs = real();
+    expect(() => build({ ...docs, readme: docs.license })).toThrow(/not cleared by pre-send/);
+    expect(() => build({ ...docs, participants_json: docs.dataset_description })).toThrow(
+      /not cleared by pre-send/,
+    );
+  });
+
+  test("one byte changed, or a cleared string with something added, is not cleared", () => {
+    const docs = real();
+    expect(() => build({ ...docs, readme: `${docs.readme}.` as never })).toThrow(
+      /not cleared by pre-send/,
+    );
+    expect(() => build({ ...docs, license: `x${docs.license}` as never })).toThrow(
+      /not cleared by pre-send/,
+    );
+  });
+
+  test("what pre-send itself cleared passes, and is sent byte for byte", () => {
+    const docs = real();
+    const { user } = build(docs);
+    for (const d of REVIEW_DOCUMENTS) expect(user).toContain(fence(d, NONCE, docs[d] as string));
+  });
+
+  test("the cleared text of an earlier call is still cleared: the registry is the process's", () => {
+    const first = presend(DOCS).cleared;
+    presend({ ...DOCS, readme: present("another readme\n", "README.md") });
+    expect(() => build(first)).not.toThrow();
+  });
+
+  describe("the registry holds only what pre-send cleared", () => {
+    test("a string nobody cleared is not in it, and neither is the raw text of a document that was cut or withheld", () => {
+      expect(isCleared("readme", "never seen by pre-send")).toBe(false);
+      const long = "w".repeat(30_000);
+      const cut = presend({ ...DOCS, readme: present(long, "README.md") });
+      expect(cut.states.readme).toBe("sent_cut");
+      expect(isCleared("readme", long)).toBe(false);
+      expect(isCleared("readme", cut.cleared.readme as string)).toBe(true);
+      const withheld = "Scripts in /Users/jsmith/projects\n";
+      expect(presend({ ...DOCS, readme: present(withheld, "README.md") }).states.readme).toBe(
+        "withheld_finding",
+      );
+      expect(isCleared("readme", withheld)).toBe(false);
+    });
+
+    test("it is per document, and a non-string is never in it", () => {
+      const r = presend(DOCS);
+      expect(isCleared("readme", r.cleared.readme)).toBe(true);
+      expect(isCleared("changes", r.cleared.readme)).toBe(false);
+      for (const odd of [undefined, null, 7, {}, []]) expect(isCleared("readme", odd)).toBe(false);
+    });
+
+    test("the module offers a check and nothing to add to: no set, no function that registers", () => {
+      const exported = Object.entries(presendModule);
+      expect(exported.some(([, v]) => v instanceof Set || v instanceof Map)).toBe(false);
+      expect(
+        Object.keys(presendModule).filter(
+          (k) => k !== "isCleared" && /regist|add|clear|mark/i.test(k),
+        ),
+      ).toEqual([]);
+      expect(typeof presendModule.isCleared).toBe("function");
+    });
   });
 });
 
