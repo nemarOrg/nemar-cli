@@ -835,12 +835,20 @@ function whileWaiting(
  * kind, same screened commit), so a result for a superseded commit changes nothing. The screen's
  * columns are facts about that commit and stay; the depositor's re-request resets them.
  *
+ * The web approval's claim (`approval_requested_by`, `approval_dispatched_at`, ADR 0080) is
+ * cleared in the same statement, as the orchestrator's own walk-back to `blocked` does: a click
+ * takes it while the request is still `requested`, this run of the request is over, and a claim
+ * left on the blocked row would read as live for the rest of its lease once the depositor
+ * requests again, so the next click is refused as running and a terminal approval is attributed
+ * to the administrator who clicked before the block.
+ *
  * Fires only while the claimed review it came from is still waiting under its nonce (the last
  * three binds), so a replay, a stranger's nonce or a report nobody claimed re-blocks nothing.
  */
 export const REBLOCK_SQL = `UPDATE publication_requests
     SET status = 'blocked', block_reason = 'min_requirements_failed',
-        min_requirements_reasons = ?, updated_at = datetime('now')
+        min_requirements_reasons = ?, approval_requested_by = NULL, approval_dispatched_at = NULL,
+        updated_at = datetime('now')
   WHERE id = ? AND status = 'requested' AND anonymous = ?
     AND ${screenedHeadSql("publication_requests")} = ?
     AND ${whileWaiting(["dispatched", "unreported"], true)}`;

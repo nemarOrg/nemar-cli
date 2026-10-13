@@ -39,6 +39,7 @@ import {
   storePublicationReviewResult,
   sweepPublicationReviews,
 } from "../src/services/publication-review";
+import { hashApiKey } from "../src/services/token";
 import type { Bindings } from "../src/types/bindings";
 import { interceptingD1, realD1 } from "./helpers/d1";
 import { SCREENED_HEAD } from "./helpers/identifier-screen";
@@ -72,6 +73,30 @@ function seedAdmin() {
      VALUES ('rev_admin', ?, 'x', 'approved', 'admin', 1, 1)`,
     [ADMIN_EMAIL],
   );
+}
+
+/** A bearer key for an existing account, which is how a terminal (and these tests) reach a route. */
+async function keyFor(userId: number, label: string): Promise<string> {
+  const key = `${label}-key-0123456789abcdef0123456789abcdef`;
+  h.db
+    .query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)")
+    .run(userId, await hashApiKey(key), key.slice(0, 8));
+  return key;
+}
+
+/** A new account that can use the API, with its bearer key. */
+async function keyedUser(
+  username: string,
+  role: "admin" | "member",
+): Promise<{ id: number; key: string }> {
+  h.db.run(
+    `INSERT INTO users (username, email, password_hash, status, role, email_verified,
+                        service_access, sandbox_completed)
+     VALUES (?, ?, 'x', 'approved', ?, 1, 1, 1)`,
+    [username, `${username}@example.org`, role],
+  );
+  const row = h.db.query("SELECT id FROM users WHERE username = ?").get(username) as { id: number };
+  return { id: row.id, key: await keyFor(row.id, username) };
 }
 
 /** A native request with a clear screen at SCREENED_HEAD and one review of it, dispatched. */
@@ -1071,6 +1096,116 @@ describe("a failed submission minimum re-blocks the request", () => {
       await h.result(reviewId, { outcome: "reported", report: failing() });
       expect(sendsTo(calls, depositor.email)).toHaveLength(0);
     });
+  });
+});
+
+describe("a web approval's claim does not outlive the block it meets", () => {
+  /** The website's Approve click, as the route sees it. */
+  const click = (key: string, datasetId = PROD_DATASET) =>
+    h.app.request(
+      `/admin/publish/${datasetId}/approve-dispatch`,
+      { method: "POST", headers: { Authorization: `Bearer ${key}`, "X-CLI-Version": "99.0.0" } },
+      h.env(),
+    );
+
+  const claimOf = (requestId: number) => {
+    const { approval_requested_by, approval_dispatched_at } = h.requestRow(requestId);
+    return { approval_requested_by, approval_dispatched_at };
+  };
+
+  // Storing a result tries the administrators' mail: the capture keeps it off the network.
+
+  test("an administrator's click, then a failed minimum: the request is blocked and holds no claim", async () => {
+    // The click claims `approval_requested_by` and `approval_dispatched_at` while the request is
+    // still `requested`, and the report that arrives afterwards moves it to `blocked`. The
+    // orchestrator's own walk-back to `blocked` clears both, for the reason given there.
+    const admin = await keyedUser("rev_clicker", "admin");
+    const { requestId, reviewId } = dispatched();
+    expect((await click(admin.key)).status).toBe(202);
+    expect(claimOf(requestId)).toEqual({
+      approval_requested_by: admin.id,
+      approval_dispatched_at: expect.any(String),
+    });
+
+    const token = await h.tokenFor(reviewId);
+    await withFakeResend(async () => {
+      expect((await h.claim(reviewId, token)).status).toBe(200);
+      await h.result(reviewId, { outcome: "reported", report: failing() }, token);
+    });
+
+    expect(h.requestRow(requestId)).toMatchObject({
+      status: "blocked",
+      block_reason: "min_requirements_failed",
+    });
+    expect(claimOf(requestId)).toEqual({
+      approval_requested_by: null,
+      approval_dispatched_at: null,
+    });
+  });
+
+  test("a depositor who fixes it and asks again inside the lease can be approved at once", async () => {
+    // With the claim left on the blocked row, the re-request made it `requested` again with a
+    // live lease: the next click was refused as "already running" and a terminal approval was
+    // attributed to the administrator who had clicked before the block.
+    const clicker = await keyedUser("rev_clicker", "admin");
+    const next = await keyedUser("rev_next_admin", "admin");
+    const { requestId, reviewId, datasetId } = dispatched();
+    const depositorId = h.requestRow(requestId).requested_by as number;
+    h.db.run("UPDATE users SET sandbox_completed = 1 WHERE id = ?", [depositorId]);
+    const depositorKey = await keyFor(depositorId, "rev_depositor");
+
+    await withFakeResend(async () => {
+      expect((await click(clicker.key)).status).toBe(202);
+      const token = await h.tokenFor(reviewId);
+      await h.claim(reviewId, token);
+      await h.result(reviewId, { outcome: "reported", report: failing() }, token);
+      expect(h.requestRow(requestId).status).toBe("blocked");
+
+      // The depositor asks again, through the real route.
+      const again = await h.app.request(
+        `/datasets/${datasetId}/publish/request`,
+        { method: "POST", headers: { Authorization: `Bearer ${depositorKey}` } },
+        h.env(),
+      );
+      expect(again.status).toBe(200);
+      expect(h.requestRow(requestId)).toMatchObject({ status: "requested", block_reason: null });
+      expect(claimOf(requestId)).toEqual({
+        approval_requested_by: null,
+        approval_dispatched_at: null,
+      });
+
+      // The re-request reset the screen, as it does; once the screen has read the commit again,
+      // nothing is in flight and the next administrator's click is the run, in their name.
+      h.rearmScreen(requestId);
+      expect((await h.screenResult(requestId, datasetId)).status).toBe(200);
+    });
+    const list = await h.app.request(
+      "/admin/publish/requests?status=requested",
+      { headers: { Authorization: `Bearer ${next.key}`, "X-CLI-Version": "99.0.0" } },
+      h.env(),
+    );
+    const rows = ((await list.json()) as { requests: Record<string, unknown>[] }).requests;
+    expect(rows.find((r) => r.dataset_id === datasetId)?.approval_in_flight).toBe(false);
+    expect((await click(next.key)).status).toBe(202);
+    expect(claimOf(requestId).approval_requested_by).toBe(next.id);
+  });
+
+  test("a request the report does not block keeps the claim of a run that is going", async () => {
+    // Only the re-block releases it: a met minimum leaves the request, and the run, alone.
+    const admin = await keyedUser("rev_clicker", "admin");
+    const { requestId, reviewId } = dispatched();
+    expect((await click(admin.key)).status).toBe(202);
+    const token = await h.tokenFor(reviewId);
+    await withFakeResend(async () => {
+      await h.claim(reviewId, token);
+      await h.result(
+        reviewId,
+        { outcome: "reported", report: reportFor(SCREENED_HEAD, false) },
+        token,
+      );
+    });
+    expect(h.requestRow(requestId).status).toBe("requested");
+    expect(claimOf(requestId).approval_requested_by).toBe(admin.id);
   });
 });
 
