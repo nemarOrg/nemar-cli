@@ -695,3 +695,158 @@ The maintainer decided all twelve on 2026-10-12, as recommended, and amended cal
 - Phase 2: the gate, `backend/src/services/publication-review-gate.ts`; the comment route, `backend/src/routes/admin/publish-comment.ts`;
   the commands, `src/commands/admin-publish.ts` and its `admin-publish-*.ts` siblings (the `publish` group left `src/commands/admin.ts`);
   their rules, `src/lib/publication-review-approve.ts`, `-display.ts`, `-next.ts` and `-queue.ts`.
+
+## Amendment 2026-10-13 (#1729): Phase 2, what the approval gate and the commands decided
+
+Phase 2 built the Worker's approval gate and `nemar admin publish list|show|start|approve|next`.
+The text above was corrected in place where the built behavior made a sentence false or stale
+(sections 5, 7, 8 and 9, the consequences, judgment calls 5 and 10, and the receipts);
+this amendment states the decisions it does not otherwise carry.
+Where the two differ, this is the later text.
+
+1. **The gate is the Worker's, and a client that skips the CLI cannot publish over a non-pass.**
+   `evaluateApprovalReviewGate` decides and `recordApprovalOverride` records;
+   `/approve` (through `runPublicationApproval`) and `approve-dispatch` both call them, and nothing else decides.
+   In `/approve` the order is:
+   a request that is `blocked` and has not started publishing (409 `request_blocked`);
+   the approver of record (ADR 0080);
+   an override sent inside a web approval (409 `override_inside_web_approval`, item 5);
+   the identifier screen's gate;
+   the review gate (409 `publication_review_not_clear`);
+   the recording of the override;
+   and a conditional move to `approving`, which refuses with 409 `request_changed` when the request was denied or re-blocked while it was being checked, and so never overwrites that change.
+   In `approve-dispatch` the review gate follows the screen's state check and precedes the claim, so a refusal claims nothing,
+   and the override is recorded after the screened commit has been checked against `main`, so an override is recorded only for an approval that goes on.
+
+2. **The gate answers in a fixed order, with six refusal words.**
+   With the flag off it reads nothing and passes (`off`).
+   Otherwise it reads the request (a read that fails, or a request that is gone, refuses `unverified`),
+   passes a mirror or an exemplar (`n/a`),
+   and derives the review exactly as the detail view does.
+   A hard reason refuses `hard_reason`, whatever the body says.
+   With no override-class reason standing it passes, and an override in the body is ignored and not recorded.
+   Otherwise an override in the body must name the review in force (`review_changed`) and every override-class reason that stands (`override_not_covering`),
+   and `approve-dispatch` refuses one that has no review row to hold it (`no_review_row`);
+   with no override in the body, the one on record counts only when it is this approver's and covers every reason, and otherwise the refusal is `needs_override`.
+   Anything that throws after the request was read refuses `unverified`.
+   The words are `REVIEW_GATE_REFUSALS` in `shared/publication-review.ts`, and each refusal carries the review's headline and every live reason in the shared words.
+   `request_blocked`, `request_changed` and `override_inside_web_approval` are 409 codes of their own, not refusal words of the gate.
+   The gate reads no GitHub, so `identifier_screen_stale` is never derived from the review's own read;
+   whether the screened commit is still `main` stays the identifier screen's gate's, which runs first.
+
+3. **With the flag off the gate reads nothing, and production changes only by what no flag controls.**
+   Those are:
+   a `blocked` request that has not started publishing cannot be approved (409 `request_blocked`);
+   the `dataset_published` audit row gains `review_gate` and `skip_ci_check`;
+   a skipped CI check and an administrator's comment each write an audit row of their own (`publication_ci_check_skipped`, `publication_request_commented`);
+   a request that changed while an approval was being checked is refused (409 `request_changed`);
+   an override sent with a session cookie to `/approve`, or inside a web approval, is refused (item 5);
+   and the comment route exists (item 11).
+   `publication_review_overridden` is written only when the gate is enforced, so never with the flag off.
+
+4. **The override is given by reason code, to one review, as it was read.**
+   It names the review id in force (null when there was no review row) and the override-class reason codes shown.
+   A code covers its reason whatever its detail word, so an override for `question_failed` covers every question that fails,
+   and a reason that comes up after the administrator read the review is not covered.
+   It is recorded by one conditional statement that pins the review row as the gate read it (`RECORD_OVERRIDE_SQL`: its state, its creation time and its decision time),
+   so it attaches only to the result the administrator was shown, and zero changes refuse `review_changed`.
+   A restart of a review clears the recorded override, because a restart is a new attempt.
+   The override columns hold one administrator's act: another administrator's override of the same review replaces it.
+   A recorded override counts only for a run attributed to the administrator who recorded it,
+   and the same override sent on every call of a run is recorded once when a review row holds it.
+   With no review row (a terminal's override of `review_not_started`) nothing is written to the review table and the audit row is the only record,
+   so a failed audit write refuses `unverified`;
+   `approve-dispatch` refuses that case as `no_review_row`, because the executor that follows reads the clicker's override off the row.
+   The override is recorded before the request is marked `approving`, and that mark can still refuse `request_changed`:
+   the override then stays on its row, bound to that review, those reasons and its approver.
+
+5. **Who may send an override, and whose it is.**
+   `/approve` accepts an override only with an API key and answers a session cookie 403 `origin_not_allowed`,
+   because a cookie rides along with any cross-site request a browser can be made to send;
+   this is the one slice of #1603 that Phase 2 needs, and the rest of #1603 stays in Phase 3.
+   `approve-dispatch` accepts one under its own Origin rule.
+   ADR 0080's attribution is unchanged and the gate inherits it:
+   its approver is the approver of record in `/approve` and the clicker in `approve-dispatch`.
+   Until Phase 3 fixes #1604, an override sent inside a live web lease by anyone but the clicker is refused (`override_inside_web_approval`),
+   so none is recorded under another administrator's name,
+   and a terminal approval inside that lease still rides on the clicker's own recorded override.
+   The executor's account sends no override.
+   Production must not be switched on before #1604 is fixed ("Before it is switched on", item 7).
+
+6. **A dispatched review is read by time while a request can still be gated, and the gate derives as the detail does.**
+   For a request that is `requested` or `approving`, a row that is `dispatched` reads as `review_running` until the overdue window and as `review_did_not_report` after it;
+   for any other status it reads as one that did not report.
+   An `approving` request that has not started publishing is gated again when it resumes, so its review can still report before then,
+   and a run that has started publishing is never gated again, so its reasons decide nothing.
+   The detail, the list and the gate read a row one way, because the gate derives through the detail's own read (`readReviewContext`, `derivePublicationReview`);
+   the admin mail alone reads the deadline itself (section 6).
+   A run that has started publishing is told so, in the shared words, and its next command is `nemar admin publish approve <dataset> --resume`.
+   The detail's `started_publishing` is true for such a run, including one that the owner-name check has walked back to `blocked`.
+
+7. **One rule decides whether a start is offered, and the detail carries what the commands decide from.**
+   `startOffered` (`shared/publication-review.ts`) is the rule behind the detail's next command and the list summary's `start_offered`:
+   the request is `requested`, the row is one a start can create or restart, a reason's cure is a start, and no hard reason stands.
+   The list route adds the screen's part (a clear or acknowledgeable result for a commit), so `start --all` offers only what `show` would;
+   the platform's allowance and the Worker's ownership of the dataset are the start route's to refuse, with a 409 that writes nothing.
+   The detail also carries the request's screen in the list's own words, the acknowledgment on record (who and when, never why),
+   the block reason when it is a plain word, `started_publishing` and `datasets.total_files`,
+   so that `approve` and `next` decide from one read.
+
+8. **`show` and `start`.**
+   `show` also prints the four questions' answers, the platform facts that lowered one, the acknowledgment and the override on record, and the history, and `--json` prints the detail.
+   The model's findings and summary are printed under labels that say who wrote them and that the depositor's text can steer them,
+   and every string from the network passes `plain()`, which removes control, zero-width and bidirectional-override characters.
+   `start --all` takes the requests that are `requested` and whose summary offers a start, oldest first, so that the platform's allowance serves the request that has waited longest;
+   it takes `--dry-run`, `--yes` and `--json`, stops at the first `platform_limit` and reports how many it did not try, and refuses when every request says the review is off.
+   Exit status 0 means a review is going or exists (a start, a run that is already running, a review that has reported);
+   1 means anything else: any other refusal, a hand-over that failed, and for `--all` a cancelled run or any request that was not started, failed or was not tried.
+
+9. **`approve` decides before it asks, from the detail it showed.**
+   `decideApproval` (`src/lib/publication-review-approve.ts`) runs ten steps over the one detail the command read and printed.
+   It refuses only where the Worker would, or where a flag that is the administrator's own act is missing (`--force`, `--acknowledge-identifier-screen`, `--resume`),
+   and it shares `hardReasonsOf` and `uncoveredByOverride` with the gate, so what is hard and what an override covers is one rule.
+   `--yes` is the answer to the confirmation and nothing else: `decideApproval` has no input for it.
+   The override it sends is built only from the detail shown, the review id in force and exactly the override-class codes shown, never from a second read, and it is sent on every call of the run.
+   A run that has started publishing is refused without `--resume`, because the Worker would start it over.
+   A review the CLI cannot read, or a Worker that has none, is said so, and the approval goes on to the Worker, which decides.
+   A recorded override that covers the reasons proceeds without `--force`, which is how the executor's `--yes` run goes on;
+   `--force` where the gate is `off` or `n/a` changes nothing, and says so.
+   When the Worker refuses a run the CLI let through (a reason that came up after the read, a record that is another administrator's),
+   the refusal's reasons are printed in the shared words, with the command that shows the review.
+
+10. **`next` is a walk whose rules are tested without a terminal.**
+    It takes `--force`, `--once` and `--dataset <id>`, and has no `--all` and no `--yes`.
+    Its queue is the requests an administrator can act on, oldest first, and it reads the review once per card,
+    so the card, `d` and an override come from one read.
+    `y` is offered where `approve` would proceed, with the screen's acknowledgment asked for on the spot;
+    it is not offered for a blocked request, for a hard reason or, without `--force`, for a non-pass, and the card says why.
+    The size line appears from 5,000 files and counts calls of 100 objects.
+    In a terminal an answer is one line the person typed:
+    what was typed before a card was shown is ignored,
+    a reason or message that arrives with further lines is cancelled and sends nothing,
+    and the extra question before approving over reasons cannot be answered by type-ahead;
+    a piped run is a script, and its lines are its own answers, each lined up with the question it answers.
+    The exit status is 0 when nothing failed;
+    1 when an approval was refused or failed, a denial or a comment could not be sent, or the requests could not be read;
+    and 130 after Ctrl+C.
+    Skipping a request, or leaving it open, is not a failure.
+
+11. **The comment (`c`) is the administrator's words in a fixed frame.**
+    `POST /admin/publish/:id/comment` takes `{ message }`, 1 to 2,000 characters once trimmed, and mails the depositor of the dataset's active request.
+    The mail is a fixed frame around the escaped words and carries nothing of the review, and the request stays as it is.
+    The route is admin-only, accepts a session cookie only from a NEMAR origin because it mails a real person,
+    and is not behind `PUBLICATION_REVIEW_ENABLED`, which switches the review and not a message an administrator types.
+    The send goes through the environment's delivery fence, so outside production only an address on the allowlist is mailed, and a refusal is a failed send.
+    A failed send answers 502 `comment_not_sent`, with the sentence that the mail may not have been sent and may also have arrived,
+    because a provider's server error or a lost answer can leave it accepted; it is never answered as a success, and never as "nothing was sent".
+    The audit row, `publication_request_commented`, is written whichever way the send went, with the typed words and the outcome (`sent` or `not_sent`),
+    as a denial's reason is stored with its request.
+
+12. **Every failure of the `publish` group exits non-zero.**
+    That is #1581 for this group:
+    `list`, `show`, `start`, `deny`, `screen`, `approve` and `next` exit 1 on any failure, including not being signed in, a refusal by the Worker, a network failure,
+    and a declined or cancelled confirmation, because nothing was done and a script has to be able to tell.
+    The hint to attach the log to a new issue is not printed where exit 1 is the command's own answer
+    (a refusal the Worker made with a 4xx or a closed word, not being signed in, a declined confirmation),
+    and is kept for a server error, a network failure and anything else that may be a bug.
+    The other admin commands keep their exit-0 shape, which is left to a follow-up.
