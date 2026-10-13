@@ -258,6 +258,7 @@ The Haiku to Sonnet ratio of about 1 to 20 is what the page states.
 These are first-party rates; the pull-request review's federation audience is the first-party API, and the publication review uses the same.
 Thinking is billed as output and counts toward `max_tokens`.
 Token counts use four characters per token; nothing here was measured with `count_tokens`.
+Accepted (second adversarial review): rare characters can cost more tokens than four to the character, so an adversarial document may cost more than this estimate and exceed the model's input limit; the API's refusal of an over-long input maps to `model_invalid`, which fails closed, and the daily caps bound the spend.
 
 Input, worst case: the system prompt and schema about 1,500 tokens; the facts about 1,000;
 the README 24,000 characters (6,000 tokens); the description 16,000 (4,000); CHANGES 8,000 (2,000);

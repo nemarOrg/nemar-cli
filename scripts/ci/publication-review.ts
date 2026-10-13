@@ -152,6 +152,11 @@ export async function callPublicationReviewModel(
   user: string,
   model: ReviewerModel = PUBLICATION_REVIEW_MODEL,
 ): Promise<unknown> {
+  // The documents are bounded in characters, not tokens, and the estimate behind the daily caps
+  // assumes four characters to a token. Rare characters can cost more, so an adversarial document
+  // may cost more than estimated or exceed the model's input limit; the API's refusal of that is a
+  // BadRequestError, which `mapError` turns into `model_invalid` (it fails closed), and the daily
+  // caps bound the spend. Accepted.
   // A client given no credentials resolves workload identity federation from the environment
   // (ANTHROPIC_FEDERATION_RULE_ID, _ORGANIZATION_ID, _SERVICE_ACCOUNT_ID, _WORKSPACE_ID and
   // ANTHROPIC_IDENTITY_TOKEN_FILE), exchanges the job's OIDC token, and refreshes it.
