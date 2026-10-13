@@ -737,6 +737,14 @@ describe("each defect is applied once, to a copy, and is visible in the mutated 
     expect(existsSync(out)).toBe(false);
   });
 
+  test("a copy is never mutated again: it would carry two defects under one label", () => {
+    const first = join(root, "mutant-twice-1");
+    mutate(join(goodCorpus, "nm000001"), "placeholder_authors", first);
+    const second = join(root, "mutant-twice-2");
+    expect(() => mutate(first, "stub_readme", second)).toThrow("mutation_not_applicable");
+    expect(existsSync(second)).toBe(false);
+  });
+
   test("an existing directory is never overwritten", () => {
     const out = join(root, "mutant-exists");
     mkdirSync(out);
