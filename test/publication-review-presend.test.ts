@@ -14,6 +14,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  MAX_JSON_DEPTH,
   PARTICIPANT_FIELD_CAPS,
   normalizeText,
   presend,
@@ -1170,6 +1171,88 @@ describe("participants.json: the column descriptions only, under the same rules 
       const r = presend(docs({ participants_json: present(text, "participants.json") }));
       expect(r.states.participants_json, text).toBe("withheld_not_json");
     }
+  });
+});
+
+describe("nesting deeper than the limit is refused before anything is re-serialized (#1728)", () => {
+  // Pretty-printing indents every level, so a value nested n deep serializes to about n squared
+  // characters: a 54 KB description nested 27,000 deep took gigabytes before it was withheld.
+  const arrays = (n: number) => `${"[".repeat(n)}${"]".repeat(n)}`;
+  const objects = (n: number) => `${'{"a":'.repeat(n)}1${"}".repeat(n)}`;
+  const description = (extra: string) =>
+    `{"Name":"A descriptive dataset name that is long enough",${extra}}`;
+  const sendDescription = (text: string) =>
+    presend(docs({ dataset_description: present(text, "dataset_description.json") }));
+
+  test("the limit is 32 levels, counting the object that holds the shown keys", () => {
+    expect(MAX_JSON_DEPTH).toBe(32);
+    // The shown keys' object is level 1, so the arrays may add 31 more.
+    expect(sendDescription(description(`"Funding":${arrays(31)}`)).states.dataset_description).toBe(
+      "sent",
+    );
+    for (const text of [
+      description(`"Funding":${arrays(32)}`),
+      description(`"GeneratedBy":${objects(32)}`),
+    ]) {
+      const r = sendDescription(text);
+      expect(r.states.dataset_description).toBe("withheld_unreadable");
+      expect(r.cleared.dataset_description).toBeUndefined();
+      expect(r.withheld_findings).toEqual({});
+    }
+  });
+
+  test("participants.json is held to the same limit, whatever part of it is sent", () => {
+    const ok = presend(
+      docs({
+        participants_json: present(`{"age":{"Levels":${arrays(30)}}}`, "participants.json"),
+      }),
+    );
+    expect(ok.states.participants_json).toBe("sent");
+    const deep = presend(
+      docs({
+        participants_json: present(`{"age":{"Levels":${arrays(31)}}}`, "participants.json"),
+      }),
+    );
+    expect(deep.states.participants_json).toBe("withheld_unreadable");
+  });
+
+  test("a very deep value is refused fast, and a hidden key that is not shown is never walked", () => {
+    const depth = 27_000;
+    for (const text of [
+      description(`"Funding":${arrays(depth)}`),
+      description(`"GeneratedBy":${objects(depth)}`),
+    ]) {
+      const started = performance.now();
+      const r = sendDescription(text);
+      expect(performance.now() - started).toBeLessThan(1000);
+      expect(r.states.dataset_description).toBe("withheld_unreadable");
+    }
+    const started = performance.now();
+    const deepParticipants = presend(
+      docs({
+        participants_json: present(`{"age":{"Levels":${arrays(depth)}}}`, "participants.json"),
+      }),
+    );
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(deepParticipants.states.participants_json).toBe("withheld_unreadable");
+    // Not a shown key: it is dropped before it is walked, so it costs nothing and withholds nothing.
+    const hidden = performance.now();
+    const r = sendDescription(description(`"Extra":${arrays(depth)}`));
+    expect(performance.now() - hidden).toBeLessThan(1000);
+    expect(r.states.dataset_description).toBe("sent");
+  });
+
+  test("the other documents are untouched by one that is refused", () => {
+    const r = presend(
+      docs({
+        dataset_description: present(
+          description(`"Funding":${arrays(40)}`),
+          "dataset_description.json",
+        ),
+      }),
+    );
+    expect(r.states.readme).toBe("sent");
+    expect(r.states.participants_json).toBe("sent");
   });
 });
 

@@ -95,6 +95,28 @@ type Prepared =
  */
 export const PARTICIPANT_FIELD_CAPS = { LongName: 100, Description: 500, Units: 50 } as const;
 
+/**
+ * The deepest nesting a JSON document may have, counting the object at its root as level 1. Real
+ * metadata is a handful of levels deep; pretty-printing indents every level, so a value nested n deep
+ * serializes to about n squared characters, and walking it recursively can overflow the stack. The
+ * limit is checked, iteratively, before the structure is normalized or serialized.
+ */
+export const MAX_JSON_DEPTH = 32;
+
+/** Whether `value` is nested deeper than `max`, walked with a stack of its own and stopping at once. */
+function nestedDeeperThan(value: unknown, max: number): boolean {
+  const pending: [unknown, number][] = [[value, 1]];
+  for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+    const [node, depth] = next;
+    if (typeof node !== "object" || node === null) continue;
+    if (depth > max) return true;
+    for (const child of Array.isArray(node) ? node : Object.values(node)) {
+      pending.push([child, depth + 1]);
+    }
+  }
+  return false;
+}
+
 function isPlainObject(x: unknown): x is Record<string, unknown> {
   return typeof x === "object" && x !== null && !Array.isArray(x);
 }
@@ -282,6 +304,8 @@ function prepare(document: ReviewDocument, raw: RawDocument): Prepared {
       keysShown++;
     }
   }
+  if (nestedDeeperThan(kept, MAX_JSON_DEPTH))
+    return { kind: "no-text", state: "withheld_unreadable" };
   // Normalize first, then examine the normalized structure, then send that same structure.
   const object = normalizeStructure(kept);
   return {
@@ -308,7 +332,7 @@ const SUBJECT_LABEL_KEY = /^\s*sub-/i;
  * identifier is a finding whatever it holds. The path rules read what is sent.
  */
 function prepareParticipants(parsed: Record<string, unknown>, cap: number): Prepared {
-  if (!Object.values(parsed).every(isPlainObject)) {
+  if (!Object.values(parsed).every(isPlainObject) || nestedDeeperThan(parsed, MAX_JSON_DEPTH)) {
     return { kind: "no-text", state: "withheld_unreadable" };
   }
   const whole = normalizeStructure(parsed) as Record<string, Record<string, unknown>>;
