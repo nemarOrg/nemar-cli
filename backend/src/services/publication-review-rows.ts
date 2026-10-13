@@ -211,10 +211,25 @@ function sqliteTimeMs(text: string): number {
     : Number.NaN;
 }
 
-/** The stored report re-parsed by the shared parser, or null when it no longer parses. */
+/**
+ * The stored report re-parsed by the shared parser, or null when it no longer parses or is not
+ * about this row. The write path refuses a report whose echoed commit or release kind differs from
+ * the row's (`evidence_mismatch`), but the database has no CHECK that says so, so a row written
+ * another way (edited by hand, or by an older build) is held to the same rule here: evidence of
+ * another commit, or of the other kind of release, is not evidence of THIS review, and a verdict
+ * derived from it could be a pass about content nobody reviewed. It reads as one that no longer
+ * parses.
+ */
 function storedReport(row: PublicationReviewRow): PublicationReviewReport | null {
   try {
-    return parsePublicationReviewReport(JSON.parse(row.report ?? "null"));
+    const report = parsePublicationReviewReport(JSON.parse(row.report ?? "null"));
+    if (report.evidence.head !== row.headSha || report.evidence.anonymous !== row.anonymous) {
+      console.warn(
+        `[publication-review] review ${row.id}: stored report refused (evidence_mismatch)`,
+      );
+      return null;
+    }
+    return report;
   } catch (err) {
     // A report that no longer parses (the contract moved under it, or the column was edited by
     // hand) reads as one that could not be read back. Anything else is a bug and surfaces.

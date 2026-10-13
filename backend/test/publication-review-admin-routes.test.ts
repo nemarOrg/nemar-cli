@@ -546,6 +546,52 @@ describe("GET /admin/publish/requests: the review of each request", () => {
     });
   });
 
+  test("a stored report whose evidence is about another commit or release kind could not be read back, and is never a pass", async () => {
+    // The write path refuses such a report, and the database has no CHECK that does: a row edited
+    // by hand (or written by an older build) must not read as the review of this commit.
+    const cases: Array<[string, string, string | number | boolean]> = [
+      ["another commit", "$.evidence.head", OTHER_HEAD],
+      ["the other kind of release", "$.evidence.anonymous", 1],
+    ];
+    for (const [name, path, value] of cases) {
+      const { requestId, datasetId } = request();
+      const id = seedPublicationReview(db, { requestId, datasetId, state: "reported" });
+      expect((await review(datasetId)).outcome).toBe("pass");
+      db.run("UPDATE publication_reviews SET report = json_set(report, ?, ?) WHERE id = ?", [
+        path,
+        value,
+        id,
+      ]);
+      const r = await review(datasetId);
+      expect({ name, outcome: r.outcome, reasons: r.reasons }).toEqual({
+        name,
+        outcome: "action_required",
+        reasons: ["review_could_not_run"],
+      });
+      const d = await detail(datasetId);
+      expect(d.reasons).toMatchObject([{ code: "review_could_not_run", detail: "report_invalid" }]);
+      // Nothing of a report that does not belong to the row is shown as the row's.
+      expect(d.review).toMatchObject({ id, questions: null, evidence: null, summary: null });
+      expect(d.review?.findings).toEqual([]);
+    }
+    // A stored fail over such a report stays a fail, as for a report that does not parse.
+    const { requestId, datasetId } = request();
+    const id = seedPublicationReview(db, {
+      requestId,
+      datasetId,
+      state: "reported",
+      verdict: "fail",
+    });
+    db.run(
+      "UPDATE publication_reviews SET report = json_set(report, '$.evidence.head', ?) WHERE id = ?",
+      [OTHER_HEAD, id],
+    );
+    expect((await review(datasetId)).reasons).toEqual([
+      "stored_verdict_fail",
+      "review_could_not_run",
+    ]);
+  });
+
   test("a failed minimum at the reviewed commit shows with the block it caused", async () => {
     const { requestId, datasetId } = request({
       requestStatus: "blocked",
