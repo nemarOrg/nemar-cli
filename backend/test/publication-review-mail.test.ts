@@ -24,6 +24,7 @@ import {
   describePublicationReview,
   parsePublicationReviewReport,
 } from "../../shared/publication-review";
+import { datasetRoutes } from "../src/routes/datasets";
 import webhooks from "../src/routes/webhooks";
 import { sendPublicationRequestEmail } from "../src/services/email";
 import { signIdentifierScreenCallbackToken } from "../src/services/github";
@@ -33,8 +34,12 @@ import {
   screenEmailSection,
   sweepIdentifierScreens,
 } from "../src/services/identifier-screen";
-import { sweepPublicationReviews } from "../src/services/publication-review";
+import {
+  storePublicationReviewResult,
+  sweepPublicationReviews,
+} from "../src/services/publication-review";
 import { SUMMARY_LINE_PREFIX } from "../src/services/publication-review-view";
+import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, interceptingD1, realD1, yieldingD1 } from "./helpers/d1";
 import { SCREENED_HEAD, cleanScreenReportBody } from "./helpers/identifier-screen";
@@ -735,6 +740,118 @@ describe("a review that never reports is mailed once, and the mail says so", () 
         expect(text).not.toContain(RUNNING);
       }
       expect(sends(calls)).toHaveLength(25);
+    });
+  });
+});
+
+// ============================================================================
+
+describe("the depositor's resend carries the review's section", () => {
+  const KEY = "resend-owner-key-0123456789abcdef0123456789abcdef";
+  const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+  app.route("/datasets", datasetRoutes);
+  /** Each depositor's key, by dataset: a key's hash is unique. */
+  const keys = new Map<string, string>();
+
+  /** A request whose screen reported, owned by a depositor who holds a key, last touched hours ago. */
+  async function resendable(over: Partial<SeedScreenedRequest> = {}) {
+    const datasetId = over.datasetId ?? nextDataset();
+    const { requestId, userId } = seedScreenedRequest(db, { ...over, datasetId, mailed: false });
+    const key = `${KEY}-${datasetId}`;
+    keys.set(datasetId, key);
+    db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)").run(
+      userId,
+      await hashApiKey(key),
+      key.slice(0, 8),
+    );
+    db.run(
+      "UPDATE publication_requests SET updated_at = datetime('now', '-2 hours') WHERE id = ?",
+      [requestId],
+    );
+    return { requestId, datasetId };
+  }
+
+  const resend = (datasetId: string, bindings: Bindings = env()) =>
+    app.request(
+      `/datasets/${datasetId}/publish/resend`,
+      { method: "POST", headers: { Authorization: `Bearer ${keys.get(datasetId)}` } },
+      bindings,
+    );
+
+  test("a review in flight is in the reminder, and the review's own mail still goes when it reports", async () => {
+    const { requestId, datasetId } = await resendable();
+    const reviewId = seedPublicationReview(db, {
+      requestId,
+      datasetId,
+      state: "dispatched",
+      createdMinutesAgo: 2,
+    });
+    await withFakeResend(async (calls) => {
+      expect((await resend(datasetId)).status).toBe(200);
+      const [reminder] = sends(calls);
+      const text = textOf(reminder.html);
+      expect(text).toContain("Publication review: action required");
+      expect(text).toContain(REASONS.review_running.sentence);
+      expect(text).toContain(NOT_ASSESSED_LINE);
+      // The mail that waits for the review has NOT gone: the reminder said it is still running.
+      expect(mailState(requestId).emailed).toBeNull();
+
+      // The review reports: its result tries the mail, and it goes, carrying the verdict.
+      const nonce = db
+        .query<{ nonce: string }, [number]>("SELECT nonce FROM publication_reviews WHERE id = ?")
+        .get(reviewId)?.nonce as string;
+      const stored = await storePublicationReviewResult(env(), reviewId, datasetId, nonce, {
+        kind: "reported",
+        report: parsePublicationReviewReport(goodPublicationReport()),
+      });
+      expect(stored).toEqual({ stored: true, state: "reported" });
+      const mails = sends(calls);
+      expect(mails).toHaveLength(2);
+      expect(textOf(mails[1].html)).toContain("Publication review: pass");
+      expect(mailState(requestId).emailed).not.toBeNull();
+    });
+  });
+
+  test("a review that has reported is in the reminder, and the reminder counts as the mail", async () => {
+    const { requestId, datasetId } = await resendable();
+    seedPublicationReview(db, { requestId, datasetId, state: "reported" });
+    await withFakeResend(async (calls) => {
+      expect((await resend(datasetId)).status).toBe(200);
+      const mail = sends(calls);
+      expect(mail).toHaveLength(1);
+      expect(textOf(mail[0].html)).toContain("Publication review: pass");
+      expect(textOf(mail[0].html)).toContain(`nemar admin publish approve ${datasetId}`);
+      // Nothing waits for a review any more, so the watchdog must not send it again.
+      expect(mailState(requestId).emailed).not.toBeNull();
+      expect(await notifyAdminsOfScreen(env(), requestId)).toBe("not-claimed");
+    });
+  });
+
+  test("a review past its deadline is in the reminder as one that did not report", async () => {
+    const { requestId, datasetId } = await resendable();
+    seedPublicationReview(db, { requestId, datasetId, state: "dispatched", createdMinutesAgo: 31 });
+    await withFakeResend(async (calls) => {
+      expect((await resend(datasetId)).status).toBe(200);
+      const text = textOf(sends(calls)[0].html);
+      expect(text).toContain(REASONS.review_did_not_report.sentence.replace(/\.$/, ""));
+      expect(text).not.toContain(REASONS.review_running.sentence);
+    });
+  });
+
+  test("with the review off the reminder is what it was: no review section", async () => {
+    const { requestId, datasetId } = await resendable();
+    seedPublicationReview(db, { requestId, datasetId, state: "dispatched", createdMinutesAgo: 2 });
+    const other = await resendable();
+    await withFakeResend(async (calls) => {
+      // A stored row shows as advice, as in the screen's own mail; no row, no section at all.
+      expect((await resend(datasetId, env({ PUBLICATION_REVIEW_ENABLED: undefined }))).status).toBe(
+        200,
+      );
+      expect(textOf(sends(calls)[0].html)).toContain("advice only, the automated review is off");
+      expect(
+        (await resend(other.datasetId, env({ PUBLICATION_REVIEW_ENABLED: undefined }))).status,
+      ).toBe(200);
+      expect(sends(calls)[1].html).not.toContain("Publication review");
     });
   });
 });

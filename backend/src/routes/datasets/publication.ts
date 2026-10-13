@@ -38,11 +38,13 @@ import {
   RESET_SCREEN_COLUMNS_SQL,
   type ScreenView,
   mailPublicationRequest,
+  reviewHoldSql,
   screenEmailSection,
   screenView,
   startScreenAndNotify,
 } from "../../services/identifier-screen";
 import { reviewEnabled } from "../../services/publication-review";
+import { publicationReviewEmailSection } from "../../services/publication-review-view";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../services/repo-spec";
 import { markDatasetPrivate, markDatasetPublic } from "../../services/s3";
 import { checkSubmissionGate } from "../../services/submission-gate";
@@ -893,7 +895,9 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
 
     // Resend notification to admins who have publication_request notifications
     // enabled, with the screen section as stored: a request that predates the
-    // screen says "NOT RUN for this request", never nothing.
+    // screen says "NOT RUN for this request", never nothing. The review's section
+    // is the one the screen callback and the watchdog build (ADR 0101), so the
+    // reminder never says less about the review than the mail it reminds of.
     try {
       const outcome = await mailPublicationRequest(c.env, {
         datasetId,
@@ -904,13 +908,19 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
           request.identifier_screen_status,
           request.identifier_screen_report,
         ),
+        review: await publicationReviewEmailSection(c.env, request.id),
       });
       if (outcome.delivered > 0 && request.identifier_screen_status !== null) {
         // A result whose first mail was lost has now reached an admin, so the
-        // watchdog must not send it a third time.
+        // watchdog must not send it a third time. Not while the mail is held for
+        // a review in flight: the reminder then said the review is running, the
+        // mail that carries its verdict has not gone, and stamping it here would
+        // stop that mail for good (the lease takes only an unstamped request).
         await db
           .prepare(
-            "UPDATE publication_requests SET identifier_screen_emailed_at = COALESCE(identifier_screen_emailed_at, datetime('now')) WHERE id = ?",
+            `UPDATE publication_requests
+                SET identifier_screen_emailed_at = COALESCE(identifier_screen_emailed_at, datetime('now'))
+              WHERE id = ?${reviewHoldSql(reviewEnabled(c.env))}`,
           )
           .bind(request.id)
           .run();
