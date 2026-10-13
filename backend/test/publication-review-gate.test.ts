@@ -892,6 +892,44 @@ describe("an override is its approver's, and it is recorded once", () => {
     expect(requestRow(requestId).status).toBe("approving");
   });
 
+  test("an override that now names more than the one on record is recorded again, by the same administrator", async () => {
+    // The record is skipped only when it says exactly what stands: a reason that came up since
+    // the first override is one the administrator confirms again, and the new set replaces the old.
+    bidsConclusion = "failure";
+    const { requestId, reviewId } = seedFailing({ requestStatus: "approving", steps: [] });
+    const first = await approve({
+      resume: true,
+      override_publication_review: { review_id: reviewId, reasons: ["question_failed"] },
+    });
+    expect(first.status).toBe(422);
+    expect(reviewRow(reviewId).override_reasons).toBe(JSON.stringify(["question_failed"]));
+    expect(overrideRows()).toHaveLength(1);
+
+    db.run("INSERT INTO dataset_versions (dataset_id, version, doi) VALUES (?, '1.0.0', ?)", [
+      DATASET,
+      "10.82901/nm.test",
+    ]);
+    const second = await approve({
+      resume: true,
+      override_publication_review: {
+        review_id: reviewId,
+        reasons: ["question_failed", "version_already_released"],
+      },
+    });
+    expect(second.status).toBe(422);
+    expect(reviewRow(reviewId).override_by).toBe(adminA);
+    expect(reviewRow(reviewId).override_reasons).toBe(
+      JSON.stringify(["question_failed", "version_already_released"]),
+    );
+    const audit = overrideRows();
+    expect(audit).toHaveLength(2);
+    expect(audit[1].details).toMatchObject({
+      review_id: reviewId,
+      reasons: ["question_failed", "version_already_released"],
+    });
+    expect(requestRow(requestId).status).toBe("approving");
+  });
+
   test("an override records the codes that stand, not every override-class code the body lists, so a later reason is not pre-covered", async () => {
     // A client other than the CLI may list a code that does not stand. Only the codes that stand
     // are recorded, so the record cannot cover a reason that comes up afterwards.
@@ -1981,6 +2019,56 @@ describe("approve-dispatch runs the gate before it claims, and records after the
     expect(reviewRows()).toHaveLength(0);
     expect(overrideRows()).toHaveLength(0);
     expect(dispatchesSent()).toBe(0);
+  });
+
+  /** An `approving` row whose last heartbeat is old: no run is live, so a dispatch may claim it. */
+  const idle = (requestId: number) =>
+    db.run(
+      "UPDATE publication_requests SET updated_at = datetime('now', '-20 minutes') WHERE id = ?",
+      [requestId],
+    );
+
+  test("16. an approving run that has started publishing is dispatched with no gate: no review refusal, nothing recorded", async () => {
+    // The route accepts `requested` and `approving` requests (a `blocked` one is 409), and a
+    // resume of a run that has started publishing is continued without a gate, as `/approve` does.
+    const { requestId, reviewId } = seedFailing({ requestStatus: "approving", steps: DONE });
+    idle(requestId);
+    // The screened commit is no longer `main`, as it is once the run's own steps committed.
+    mainHead = OTHER_HEAD;
+    for (const body of [
+      undefined,
+      { override_publication_review: { review_id: reviewId, reasons: ["question_failed"] } },
+    ]) {
+      const res = await dispatchApproval(body);
+      expect(res.status).toBe(202);
+      // The claim is released again between the two, as a finished dispatch's lease would lapse.
+      db.run(
+        "UPDATE publication_requests SET approval_requested_by = NULL, approval_dispatched_at = NULL WHERE id = ?",
+        [requestId],
+      );
+    }
+    expect(dispatchesSent()).toBe(2);
+    // Neither the review's gate nor the screen's head check ran, so nothing was recorded.
+    expect(overrideRows()).toHaveLength(0);
+    expect(reviewRow(reviewId).override_by).toBeNull();
+    expect(calls.filter((c) => /\/git\/ref\//.test(c.path))).toHaveLength(0);
+  });
+
+  test("16. an approving run that stopped before it published is gated like a fresh one", async () => {
+    const { requestId, reviewId } = seedFailing({ requestStatus: "approving", steps: [] });
+    idle(requestId);
+    const refused = await refusalOf(await dispatchApproval());
+    expect(refused.refusal).toBe("needs_override");
+    expect(refused.uncovered).toEqual(["question_failed"]);
+    expect(requestRow(requestId).approval_requested_by).toBeNull();
+    expect(dispatchesSent()).toBe(0);
+    // With the override it goes on, after the head check, and the override is recorded.
+    const res = await dispatchApproval({
+      override_publication_review: { review_id: reviewId, reasons: ["question_failed"] },
+    });
+    expect(res.status).toBe(202);
+    expect(reviewRow(reviewId).override_by).toBe(adminA);
+    expect(dispatchesSent()).toBe(1);
   });
 
   test("a review that passes dispatches with nothing recorded, the flag off too", async () => {
