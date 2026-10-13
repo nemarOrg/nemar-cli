@@ -1022,6 +1022,18 @@ describe("the minimums, at the reviewed commit", () => {
     ]);
   });
 
+  test("through the whole job: the minimums read the whole README, though the model is shown only its start", async () => {
+    const cap = DOCUMENT_CHAR_CAPS.readme;
+    const ds = newDataset("minimums-whole-readme", {
+      "dataset_description.json": JSON.stringify({ ...DESCRIPTION, EthicsApprovals: [] }),
+      "README.md": `${"Filler line.\n".repeat(cap)}The study had institutional review board approval.\n`,
+    });
+    const report = await reviewOf(ds);
+    expect(report.evidence.documents.readme).toBe("sent_cut");
+    expect(theRequest().user).not.toContain("institutional review board");
+    expect(report.evidence.minimums).toBe("met");
+  });
+
   test("a missing, broken or non-object description has one failure, and facts that lower", () => {
     expect(descriptionFacts(null, "", false).minimum_failures).toEqual(["description_missing"]);
     expect(descriptionFacts("{", "", false).minimum_failures).toEqual(["description_not_json"]);
