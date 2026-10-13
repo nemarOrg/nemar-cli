@@ -265,7 +265,7 @@ function parseFinding(raw: unknown): ReviewFinding {
   }
   if (path !== null && typeof path !== "string") throw new PrReviewReportError("bad_findings");
   if (typeof note !== "string") throw new PrReviewReportError("bad_findings");
-  return { criterion, severity, code, path: safePath(path), note: sanitizeNote(note) };
+  return { criterion, severity, code, path: safePath(path), note: sanitizeNote(note, NOTE_MAX) };
 }
 
 /** A count of files or subjects: a non-negative integer no larger than {@link MAX_FILES}. */
