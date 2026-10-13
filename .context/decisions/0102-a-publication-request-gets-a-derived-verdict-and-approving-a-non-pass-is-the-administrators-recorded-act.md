@@ -163,7 +163,8 @@ This rule is not negotiable, and nothing in this ADR or a later phase may weaken
 - CHANGES, at most 8,000 characters, and the root LICENSE, at most 4,000, to compare with the `License` field.
 - `participants.json`, the column descriptions only, at most 8,000 characters:
   a count of columns and, for each column in the file's order, the string fields `LongName`, `Description` and `Units`, each capped,
-  and never a column's name, a `Levels` value or any per-participant value.
+  and never a column's name, a `Levels` value or any per-participant value;
+  the system prompt names the block and says it holds column descriptions only.
   The whole file is withheld when a column name is a study code (`sub01`, `S01`, `P001`, `participant_01`, a pure number), is longer than 64 characters or names an identifier,
   and as unreadable when it holds more than 200 columns or is not an object of objects (a subject-keyed file).
 - A structural summary the job computes from the tree, in counts and closed words only:
@@ -239,7 +240,9 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
     a person reads the review's record).
   - Unknown class: `review_not_started`, `review_running`, `review_did_not_report`, `review_limit_reached`,
     `review_could_not_run` (with the closed run-error word), `text_withheld`, `question_unknown`,
-    `bids_unconcluded_at_review`, `version_missing` (the orchestrator would publish its default `1.0.0`),
+    `bids_unconcluded_at_review`, `version_missing` (the orchestrator would publish its default `1.0.0`,
+    so the release row, the earlier anonymous release and the tag `v1.0.0` are looked up as for an explicit Version,
+    and only a Version that is malformed has no tag to look up),
     and `doi_state_unexpected` (the row carries a concept Digital Object Identifier (DOI)
     that no earlier anonymous release of this dataset reserved).
 - **Facts overrule the model, and can only lower it.**
@@ -247,8 +250,12 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   A missing README fails `complete_and_honest`; a missing `License` fails `authors_and_license`;
   a name under 25 characters fails `name_adequate`; a placeholder author on a named release fails `authors_and_license`;
   a summary that counts no recordings makes `complete_and_honest` at best `unknown`.
+  A fact that lowers an answer says so in a closed word and a shared sentence (`readme_absent`, `text_not_seen_in_full`, `no_recordings`,
+  `license_field_missing`, `name_too_short`, `placeholder_author`), shown in the detail view as `fact_notes`,
+  so a failure the model did not give is never worded as the reviewer's own.
   A report agrees with itself in the safe direction, as in ADR 0092:
-  a finding that names a steering attempt sets the flag, and a question passed with a blocker against it becomes `unknown`.
+  a finding that names a steering attempt sets the flag, and a question passed with a blocker against it becomes `unknown`;
+  a failed question keeps at least one finding to read, and parsing a stored report again gives the same report.
 - **The verdict is stored when decided and re-derived when used.**
   The queue, the detail view and the gate re-derive it from the stored report and the live facts
   (the request's state, its screen and acknowledgment, the `dataset_versions` rows, the concept DOI)
@@ -259,6 +266,12 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   a request that is `approving` has written its own version row and DOI, and a request that is over shows its stored review only.
   A request that is not assessed (the review is off and no row exists, the request is over and has no row, a mirror or an exemplar)
   has no outcome and no reasons on any surface.
+  A review that cannot be read says so and is never a pass: with the review on, a list row reads `unreadable` (action required, no reasons, one fixed headline)
+  and the detail view answers 500 with a fixed sentence; with the review off it reads as not assessed.
+  A cure that says to start a review is shown only for a request that is `requested`, because the start refuses any other;
+  for an `approving` or `blocked` request the same reason is worded without it, and the next command is the approval or none.
+  The evidence's tag rule: a Version that is malformed has the tag state `not_applicable` and every other Version has the tag state of the version the approval would publish.
+  A report stored under an earlier rule (a missing Version with `not_applicable`) would now read as `review_could_not_run`; none exists, because the review is dark.
 - **Every rendering of a review carries one standing line:** "Not assessed: whether the text names the depositors."
   ADR 0065 leaves README, Funding, Acknowledgements and EthicsApprovals to the depositor to scrub, and the model is not asked.
 - **Requests the submission gate exempts are not reviewed.**
@@ -322,8 +335,10 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   mint a read-only token (contents and actions: read) for ONE dataset repository;
   fetch `main` as git data, shallow and blob-less, with `init` and `fetch` and never a checkout,
   handing the token to each git command for that command alone, never writing it into the clone and unsetting it from the step's environment afterwards,
-  prefetching in one batch exactly the blobs the script reads (the root documents and the sampled sidecars),
-  because the model step holds no credential and cannot read lazily, and recording the fetched commit;
+  prefetching in one batch exactly the blobs the script reads (the root documents and the sampled sidecars,
+  chosen from `git ls-tree -r -z` so that a path git would quote is still found, by the same rule as the reader),
+  because the model step holds no credential and cannot read lazily: the reader runs with lazy fetching off,
+  so a blob the prefetch missed reads as unreadable and never as a network fetch; the step then records the fetched commit;
   read the BIDS validation runs of that commit (the one other step that holds the dataset token, because it needs it);
   only THEN check out `nemarOrg/nemar-cli` at `main` for the script, set up the runtime, and install its dependencies
   with `--frozen-lockfile --ignore-scripts`;
