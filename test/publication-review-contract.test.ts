@@ -1750,9 +1750,82 @@ describe("the brands are minted in one place each", () => {
     expect(offendersOf(/\bas\s+ReviewFacts\b/, "shared/publication-review.ts")).toEqual([]);
   });
 
-  test("no file but the job's pre-send module casts to ClearedText", () => {
-    expect(offendersOf(/\bas\s+ClearedText\b/, "scripts/ci/publication-review-presend.ts")).toEqual(
-      [],
-    );
+  /**
+   * Every spelling of "this is cleared text" that does not go through the pre-send module's one cast.
+   * Each is a type assertion to a brand only that module may mint (issue #1728: the guard used to
+   * look for `as ClearedText` alone, which `as ClearedDocuments`, an angle-bracket cast and a cast
+   * inside a generic all walk around). A value typed `any` cannot be found by reading source; the
+   * type-level negative tests in `publication-review-prompt.test.ts` and the pre-send module's
+   * single cast are what hold that half.
+   */
+  const CLEARED_CASTS: [string, RegExp][] = [
+    ["as <brand>", /\bas\s+Cleared(?:Text|Documents)\b/],
+    ["as unknown as <brand>", /\bas\s+unknown\s+as\s+Cleared(?:Text|Documents)\b/],
+    ["as <generic over the brand>", /\bas\s+[A-Za-z_.]+<[^;\n]*\bCleared(?:Text|Documents)\b/],
+    ["<brand>value", /(?<![\w$)\]>])<\s*Cleared(?:Text|Documents)\s*>\s*[\w$("'`[{]/],
+    [
+      "x: <brand> = y as any",
+      /\bCleared(?:Text|Documents)\b[^;\n]*=\s*[^;\n]*\bas\s+(?:any|unknown)\b/,
+    ],
+  ];
+
+  test("no file but the job's pre-send module casts to ClearedText or ClearedDocuments, however it is spelled", () => {
+    for (const [spelling, pattern] of CLEARED_CASTS) {
+      expect(offendersOf(pattern, "scripts/ci/publication-review-presend.ts"), spelling).toEqual(
+        [],
+      );
+    }
+  });
+
+  test("the guard sees each spelling: fixtures, not violations", () => {
+    const VIOLATIONS: [string, string][] = [
+      ["as <brand>", "const t = x as ClearedText;"],
+      ["as <brand>", "const d = JSON.parse(x) as ClearedDocuments;"],
+      ["as <brand>", "const d = x as\n  ClearedDocuments;"],
+      ["as <brand>", "return text as ClearedText | undefined;"],
+      ["as unknown as <brand>", "const t = x as unknown as ClearedText;"],
+      ["as unknown as <brand>", "const d = x as unknown as ClearedDocuments;"],
+      ["as <generic over the brand>", "const d = x as Record<ReviewDocument, ClearedText>;"],
+      [
+        "as <generic over the brand>",
+        "const d = x as Partial<Record<ReviewDocument, ClearedText>>;",
+      ],
+      ["<brand>value", "const t = <ClearedText>x;"],
+      ["<brand>value", "const d = <ClearedDocuments>JSON.parse(x);"],
+      ["<brand>value", "f(<ClearedText> (y));"],
+      ["<brand>value", "const d = < ClearedDocuments >{ readme: x };"],
+      ["x: <brand> = y as any", "const t: ClearedText = y as any;"],
+      ["x: <brand> = y as any", "const d: ClearedDocuments = JSON.parse(y) as unknown;"],
+    ];
+    for (const [spelling, source] of VIOLATIONS) {
+      const hit = CLEARED_CASTS.find(([name]) => name === spelling);
+      expect(hit, spelling).toBeDefined();
+      expect((hit as [string, RegExp])[1].test(source), `${spelling}: ${source}`).toBe(true);
+    }
+    // Every pattern is exercised by at least one fixture, so none can be dead.
+    for (const [spelling] of CLEARED_CASTS) {
+      expect(
+        VIOLATIONS.some(([name]) => name === spelling),
+        spelling,
+      ).toBe(true);
+    }
+  });
+
+  test("the guard does not flag the legitimate uses of the two types", () => {
+    const LEGITIMATE = [
+      'import { type ClearedDocuments, type ClearedText } from "../../shared/publication-review";',
+      "const cleared: ClearedDocuments = {};",
+      "cleared: ClearedDocuments;",
+      "export type ClearedDocuments = Partial<Record<ReviewDocument, ClearedText>>;",
+      "function f(texts: Array<ClearedText>, one: Set<ClearedText>) {}",
+      "const text = cleared[d]; // as a ClearedText, it is a string",
+      "const n = x as number; const t: ClearedText | undefined = cleared.readme;",
+      "if (a < b && c > d) {}",
+    ];
+    for (const source of LEGITIMATE) {
+      for (const [spelling, pattern] of CLEARED_CASTS) {
+        expect(pattern.test(source), `${spelling}: ${source}`).toBe(false);
+      }
+    }
   });
 });
