@@ -135,7 +135,7 @@ jobs:
 
   # The one dev deploy and dev publish for this push (see the note at the top).
   # Runs whatever `bump` did: skipped (a bot or bump commit, [skip-bump]), no
-  # bump (no -devN suffix, push rejected) or failed; only a cancelled run
+  # bump (no -devN suffix, push rejected) or failed; only a canceled run
   # deploys and publishes nothing.
   plan:
     needs: bump
@@ -160,8 +160,13 @@ jobs:
         if: needs.bump.outputs.sha == ''
         run: scripts/ci/classify-push.sh >> "$GITHUB_OUTPUT"
 
+      # Runs even when the checkout or the classifier failed, and then fails open
+      # like the classifier does: no answer means "not the bot's own bump" and
+      # "touched backend paths", so the push is deployed and published as it
+      # would have been when it triggered both itself.
       - name: Decide what to deploy and publish
         id: plan
+        if: ${{ !cancelled() }}
         env:
           BUMP_SHA: ${{ needs.bump.outputs.sha }}
           AUTO_BUMP: ${{ steps.push.outputs.auto_bump }}
@@ -181,7 +186,7 @@ jobs:
           else
             # Every other push to dev published before, so it still does.
             echo "publish=true" >> "$GITHUB_OUTPUT"
-            if [ "$DEPLOY_PATHS" = "true" ]; then
+            if [ "$DEPLOY_PATHS" != "false" ]; then
               echo "deploy_sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
               echo "dev deploy: the pushed commit $GITHUB_SHA (no bump)"
             else
@@ -192,7 +197,7 @@ jobs:
   # Its own job so a failed dispatch cannot hold back the deploy, or the reverse.
   publish:
     needs: plan
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.publish == 'true' }}
+    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' }}
     runs-on: ubuntu-latest
     # New job: one API call; 10 is the floor.
     timeout-minutes: 10
@@ -219,9 +224,18 @@ jobs:
           exit 1
 
   # deploy-backend.yml's test-gate, then deploy-dev, on the planned commit.
+  #
+  # One at a time, in the order the pushes planned them, so an older commit
+  # (a merge whose bump push was rejected) cannot finish its gate later and
+  # deploy over a newer bump. The whole call waits, gate included, as the
+  # per-ref group did when a push to dev deployed itself; a newer waiting call
+  # replaces an older waiting one, and the newer commit contains the older.
   deploy:
     needs: plan
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.deploy_sha != '' }}
+    if: ${{ !cancelled() && needs.plan.outputs.deploy_sha != '' }}
+    concurrency:
+      group: auto-bump-dev-deploy
+      cancel-in-progress: false
     permissions:
       actions: read
       contents: read

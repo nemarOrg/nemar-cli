@@ -10,8 +10,8 @@
 #     main into dev.
 # Their code is the code of the commit before them, which its own push already
 # tested, so Tests skips them; and the dev deploy and publish that the bump owes
-# are dispatched by auto-bump-dev.yml itself, once, so the bump's own push must
-# not start them a second time.
+# are run by auto-bump-dev.yml itself, once, so the bump's own push must not
+# start them a second time.
 #
 # The author and the subject are not trusted alone: the push also has to change
 # nothing but the `version` field of package.json and backend/package.json.

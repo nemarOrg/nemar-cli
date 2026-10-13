@@ -36,8 +36,7 @@ on:
         required: false
         default: ""
 
-# Serialize deploys per ref (#897); a called or dispatched dev deploy's ref is
-# dev. The release pipeline pushes TWO commits to
+# Serialize deploys per ref (#897). The release pipeline pushes TWO commits to
 # main that both match backend/** (the dev->main merge commit writes
 # backend/package.json's version, and auto-tag.yml's strip commit rewrites it
 # again seconds later). Without this group both fired `wrangler d1 migrations
@@ -45,6 +44,10 @@ on:
 # so a queued deploy WAITS for the in-flight one to finish its migrate+deploy
 # rather than cancelling it mid-migration (a cancelled prod migration is worse
 # than a slightly stale deploy; the queued run then deploys the newer commit).
+# A dispatched dev deploy runs on ref dev and takes the dev group. A call from
+# auto-bump-dev.yml evaluates this group in its caller's context (also dev);
+# whether it then applies to the call is not documented, which is why the
+# caller serializes its calls and deploy-dev takes a job-level lock as well.
 concurrency:
   group: deploy-backend-${{ github.ref }}
   cancel-in-progress: false
@@ -224,9 +227,9 @@ jobs:
     # loops below can take 7 minutes on their own, and a limit that cancels a D1
     # migration midway is worse than a slow deploy (see the concurrency note above).
     timeout-minutes: 20
-    # The workflow-level group above serializes this workflow's own runs. A call
-    # from auto-bump-dev.yml runs inside that workflow's run, so the dev migrate and
-    # deploy also take this job-level lock, with the same never-cancel-midway rule.
+    # A lock on the dev migrate and deploy themselves, whatever started them (a
+    # call from auto-bump-dev.yml or a dispatch), with the same never-cancel-midway
+    # rule as the workflow-level group above.
     concurrency:
       group: deploy-backend-dev-worker
       cancel-in-progress: false
