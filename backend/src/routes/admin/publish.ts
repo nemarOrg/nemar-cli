@@ -9,7 +9,11 @@ import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 
 import { screenGate } from "../../../../shared/identifier-screen-report.js";
-import { DENIAL_REASON_MAX_LENGTH } from "../../../../shared/publication-limits.js";
+import {
+  ACKNOWLEDGMENT_MAX_LENGTH,
+  ACKNOWLEDGMENT_MIN_LENGTH,
+  DENIAL_REASON_MAX_LENGTH,
+} from "../../../../shared/publication-limits.js";
 import { publishingStanding } from "../../../../shared/publication-steps.js";
 import { auditLogStatement } from "../../db/audit-log";
 import { ACTIVE_REQUEST_TAIL_SQL, approvalInFlightSql } from "../../services/approval-dispatch";
@@ -417,8 +421,7 @@ export function registerPublishRoutes(admin: AdminRouter): void {
         return c.json(
           {
             error: "invalid_body",
-            message:
-              "The only fields this accepts are acknowledge_identifier_screen, a reason of 10 to 500 characters, and override_publication_review, the review shown and the reasons shown.",
+            message: `The only fields this accepts are acknowledge_identifier_screen, a reason of ${ACKNOWLEDGMENT_MIN_LENGTH} to ${ACKNOWLEDGMENT_MAX_LENGTH} characters, and override_publication_review, the review shown and the reasons shown.`,
           },
           400,
         );
