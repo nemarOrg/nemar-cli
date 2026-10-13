@@ -23,6 +23,10 @@ import {
   REQUEST_CHANGED_MESSAGE,
 } from "../../../shared/contract/publication.js";
 import { datasetLandingUrl } from "../../../shared/datacite-constants.js";
+import {
+  ACKNOWLEDGMENT_MAX_LENGTH,
+  ACKNOWLEDGMENT_MIN_LENGTH,
+} from "../../../shared/publication-limits.js";
 import { REASON_CODES } from "../../../shared/publication-review.js";
 import { auditLogStatement } from "../db/audit-log";
 import { getS3Config } from "../routes/admin/shared";
@@ -241,8 +245,14 @@ function executorName(adminUser: Pick<AuthUser, "id" | "username">): string {
 export const acknowledgeIdentifierScreenSchema = z
   .string()
   .trim()
-  .min(10, "The acknowledgment needs a reason of at least 10 characters")
-  .max(500, "The acknowledgment is limited to 500 characters");
+  .min(
+    ACKNOWLEDGMENT_MIN_LENGTH,
+    `The acknowledgment needs a reason of at least ${ACKNOWLEDGMENT_MIN_LENGTH} characters`,
+  )
+  .max(
+    ACKNOWLEDGMENT_MAX_LENGTH,
+    `The acknowledgment is limited to ${ACKNOWLEDGMENT_MAX_LENGTH} characters`,
+  );
 
 /**
  * The override of the publication review as the approval routes accept it. Shared by `/approve` and

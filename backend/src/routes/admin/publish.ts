@@ -9,6 +9,7 @@ import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 
 import { screenGate } from "../../../../shared/identifier-screen-report.js";
+import { DENIAL_REASON_MAX_LENGTH } from "../../../../shared/publication-limits.js";
 import { publishingStanding } from "../../../../shared/publication-steps.js";
 import { auditLogStatement } from "../../db/audit-log";
 import { ACTIVE_REQUEST_TAIL_SQL, approvalInFlightSql } from "../../services/approval-dispatch";
@@ -212,7 +213,10 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    * POST /admin/publish/:id/deny - Deny a publication request
    */
   const denySchema = z.object({
-    reason: z.string().min(1, "Reason is required").max(2000, "Reason too long"),
+    reason: z
+      .string()
+      .min(1, "Reason is required")
+      .max(DENIAL_REASON_MAX_LENGTH, "Reason too long"),
   });
 
   admin.post("/publish/:id/deny", zValidator("json", denySchema), async (c) => {

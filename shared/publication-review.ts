@@ -36,6 +36,7 @@
 import type { FindingKind } from "./identifier-scan.js";
 import { FINDING_KINDS, KNOWN_FORMATS, type ScreenGate } from "./identifier-screen-report.js";
 import { SEMVER, isOneOf } from "./pr-review.js";
+import { PUBLICATION_DATASET_ID_RE } from "./publication-limits.js";
 import { MINIMUM_FAILURES, MIN_NAME_LENGTH, type MinimumFailure } from "./submission-minimums.js";
 import { sanitizeNote } from "./untrusted-text.js";
 
@@ -466,7 +467,7 @@ export class PublicationReviewReportError extends Error {
 
 export const HEAD = /^[0-9a-f]{40}$/;
 /** A dataset id as the platform mints them: the only text a command is built from. */
-const DATASET_ID = /^(nm|on|xx)\d{6}$/;
+const DATASET_ID = PUBLICATION_DATASET_ID_RE;
 /** A count: a non-negative safe integer no larger than this. */
 export const MAX_COUNT = 10_000_000;
 /** A sampling rate is a positive number below this, in hertz. */
