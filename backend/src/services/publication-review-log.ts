@@ -4,8 +4,8 @@
  *
  * It imports nothing from the other review modules, which import it: the write path, the view,
  * the mail and the admin routes each need both, and a module they all import cannot be one of
- * them without a cycle. The commit pattern is declared once in the shared contract (a browser
- * and the command-line interface read it there too) and re-exported here for the Worker.
+ * them without a cycle. The commit pattern is declared once in the shared contract (the job's
+ * scripts read it there too) and re-exported here for the Worker.
  */
 
 export { HEAD as SHA40 } from "../../../shared/publication-review.js";
