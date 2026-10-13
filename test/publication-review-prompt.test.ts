@@ -9,7 +9,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { presend } from "../scripts/ci/publication-review-presend";
+import * as presendModule from "../scripts/ci/publication-review-presend";
+import { isCleared, presend } from "../scripts/ci/publication-review-presend";
 import {
   PUBLICATION_OUTPUT_SCHEMA,
   PUBLICATION_REVIEW_MODEL,
@@ -19,9 +20,12 @@ import {
   modelFacts,
 } from "../scripts/ci/publication-review-prompt";
 import {
+  type ClearedDocuments,
+  type ClearedText,
   MAX_PUBLICATION_FINDINGS,
   PUBLICATION_FINDING_CODES,
   PUBLICATION_REVIEW_MODELS,
+  type PreSendResult,
   type PublicationReviewEvidence,
   PublicationReviewReportError,
   QUESTIONS,
@@ -129,6 +133,143 @@ describe("the builder takes cleared text and evidence, and nothing else", () => 
     expect(() =>
       buildPublicationReviewMessages({ facts: facts(), cleared: rest, nonce: NONCE }),
     ).toThrow("cleared documents disagree with the facts");
+  });
+});
+
+describe("the builder checks at run time that pre-send cleared each string, whatever the types say (#1728)", () => {
+  // The brand is a compile-time property. These are the spellings that typecheck and still hand the
+  // builder a string no rule examined; at run time each one reaches the builder and is refused.
+  const UNCLEARED = "Unexamined text that names /Users/jsmith/data";
+  const build = (cleared: ClearedDocuments) =>
+    buildPublicationReviewMessages({ facts: facts(), cleared, nonce: NONCE });
+  /** The legitimate documents the string is slipped in among, so the facts and the others agree. */
+  const real = () => cleared();
+
+  test("a type predicate that answers yes", () => {
+    const isClearedText = (_x: string): _x is ClearedText => true;
+    const raw: string = UNCLEARED;
+    if (!isClearedText(raw)) throw new Error("unreachable");
+    expect(() => build({ ...real(), readme: raw })).toThrow(/not cleared by pre-send/);
+  });
+
+  test("an assertion function that asserts nothing", () => {
+    function assertCleared(_x: string): asserts _x is ClearedText {}
+    const raw: string = UNCLEARED;
+    assertCleared(raw);
+    expect(() => build({ ...real(), readme: raw })).toThrow(/not cleared by pre-send/);
+  });
+
+  test("a generic function that returns what it is given as what is asked for", () => {
+    const launder = <T>(x: unknown): T => x as T;
+    expect(() => build({ ...real(), readme: launder(UNCLEARED) })).toThrow(
+      /not cleared by pre-send/,
+    );
+  });
+
+  test("JSON.parse, which returns any", () => {
+    const parsed = JSON.parse(JSON.stringify({ ...real(), readme: UNCLEARED }));
+    expect(() => build(parsed)).toThrow(/not cleared by pre-send/);
+  });
+
+  test("a cast to a type that contains the brand, and then the property", () => {
+    const r = JSON.parse(
+      JSON.stringify({ cleared: { ...real(), readme: UNCLEARED } }),
+    ) as PreSendResult;
+    expect(() => build(r.cleared)).toThrow(/not cleared by pre-send/);
+  });
+
+  test("a cast through ReturnType of presend", () => {
+    const forged = { ...real(), readme: UNCLEARED } as unknown as ReturnType<
+      typeof presend
+    >["cleared"];
+    expect(() => build(forged)).toThrow(/not cleared by pre-send/);
+  });
+
+  test("a suppressed type error", () => {
+    expect(() =>
+      build(
+        // @ts-expect-error a plain string is not ClearedText, and the error is suppressed on purpose
+        { ...real(), readme: UNCLEARED },
+      ),
+    ).toThrow(/not cleared by pre-send/);
+  });
+
+  test("a value that is not even a string", () => {
+    for (const odd of [7, null, {}, [], true]) {
+      expect(() => build({ ...real(), readme: odd as never })).toThrow(/not cleared by pre-send/);
+    }
+  });
+
+  test("any document is checked, not only the first", () => {
+    for (const d of ["dataset_description", "changes", "license", "participants_json"] as const) {
+      expect(() => build({ ...real(), [d]: UNCLEARED as never }), d).toThrow(
+        /not cleared by pre-send/,
+      );
+    }
+  });
+
+  test("a string pre-send cleared for one document is not cleared for another", () => {
+    const docs = real();
+    expect(() => build({ ...docs, readme: docs.license })).toThrow(/not cleared by pre-send/);
+    expect(() => build({ ...docs, participants_json: docs.dataset_description })).toThrow(
+      /not cleared by pre-send/,
+    );
+  });
+
+  test("one byte changed, or a cleared string with something added, is not cleared", () => {
+    const docs = real();
+    expect(() => build({ ...docs, readme: `${docs.readme}.` as never })).toThrow(
+      /not cleared by pre-send/,
+    );
+    expect(() => build({ ...docs, license: `x${docs.license}` as never })).toThrow(
+      /not cleared by pre-send/,
+    );
+  });
+
+  test("what pre-send itself cleared passes, and is sent byte for byte", () => {
+    const docs = real();
+    const { user } = build(docs);
+    for (const d of REVIEW_DOCUMENTS) expect(user).toContain(fence(d, NONCE, docs[d] as string));
+  });
+
+  test("the cleared text of an earlier call is still cleared: the registry is the process's", () => {
+    const first = presend(DOCS).cleared;
+    presend({ ...DOCS, readme: present("another readme\n", "README.md") });
+    expect(() => build(first)).not.toThrow();
+  });
+
+  describe("the registry holds only what pre-send cleared", () => {
+    test("a string nobody cleared is not in it, and neither is the raw text of a document that was cut or withheld", () => {
+      expect(isCleared("readme", "never seen by pre-send")).toBe(false);
+      const long = "w".repeat(30_000);
+      const cut = presend({ ...DOCS, readme: present(long, "README.md") });
+      expect(cut.states.readme).toBe("sent_cut");
+      expect(isCleared("readme", long)).toBe(false);
+      expect(isCleared("readme", cut.cleared.readme as string)).toBe(true);
+      const withheld = "Scripts in /Users/jsmith/projects\n";
+      expect(presend({ ...DOCS, readme: present(withheld, "README.md") }).states.readme).toBe(
+        "withheld_finding",
+      );
+      expect(isCleared("readme", withheld)).toBe(false);
+    });
+
+    test("it is per document, and a non-string is never in it", () => {
+      const r = presend(DOCS);
+      expect(isCleared("readme", r.cleared.readme)).toBe(true);
+      expect(isCleared("changes", r.cleared.readme)).toBe(false);
+      for (const odd of [undefined, null, 7, {}, []]) expect(isCleared("readme", odd)).toBe(false);
+    });
+
+    test("the module offers a check and nothing to add to: no set, no function that registers", () => {
+      const exported = Object.entries(presendModule);
+      expect(exported.some(([, v]) => v instanceof Set || v instanceof Map)).toBe(false);
+      expect(
+        Object.keys(presendModule).filter(
+          (k) => k !== "isCleared" && /regist|add|clear|mark/i.test(k),
+        ),
+      ).toEqual([]);
+      expect(typeof presendModule.isCleared).toBe("function");
+    });
   });
 });
 
@@ -537,13 +678,79 @@ describe("the output schema and the assembled report", () => {
         ),
       ).toThrow(PublicationReviewReportError);
     });
+  });
 
-    test("findings that are not findings are not mistaken for priority ones", () => {
-      for (const junk of [null, 7, "steering_attempt", [], { code: ["steering_attempt"] }]) {
-        expect(() =>
-          assemblePublicationReport(output({ findings: [...eight(), junk] }), facts()),
-        ).not.toThrow();
+  // The parser refuses an output with one invalid finding among the first eight. The same finding
+  // used to be dropped, silently, when it sat past the cap, and the output was accepted as a pass.
+  describe("every finding is validated, wherever it sits (#1728)", () => {
+    const note = (i: number) => finding({ severity: "note", note: `Note number ${i}.` });
+    const valid = (n: number) => Array.from({ length: n }, (_, i) => note(i));
+    const BAD: [string, Record<string, unknown>][] = [
+      ["a code that is not on the list", { code: "privacy_leak" }],
+      ["a severity that is not one", { severity: "critical" }],
+      ["a question that is not one", { question: "privacy" }],
+      ["a document that is not one", { document: "participants_tsv" }],
+      ["a note that is not a string", { note: 7 }],
+      ["a key that is not allowed", { path: "/Users/jsmith/x" }],
+    ];
+
+    test.each(BAD)("%s is refused inside the first eight", (_what, over) => {
+      expect(() =>
+        assemblePublicationReport(
+          output({ findings: [...valid(MAX_PUBLICATION_FINDINGS - 1), finding(over)] }),
+          facts(),
+        ),
+      ).toThrow(PublicationReviewReportError);
+    });
+
+    test.each(BAD)("%s is refused past the cap, exactly as inside it", (_what, over) => {
+      for (const at of [MAX_PUBLICATION_FINDINGS, MAX_PUBLICATION_FINDINGS + 1, 20, 40]) {
+        const findings = [...valid(at), finding(over)];
+        expect(() => assemblePublicationReport(output({ findings }), facts()), `at ${at}`).toThrow(
+          PublicationReviewReportError,
+        );
+        // The same code is thrown inside the first eight and past them.
+        let thrown: unknown;
+        try {
+          assemblePublicationReport(output({ findings }), facts());
+        } catch (e) {
+          thrown = e;
+        }
+        expect((thrown as PublicationReviewReportError).code).toBe("bad_findings");
       }
+    });
+
+    test("a bad finding that is also a priority one, or one that is not an object, is refused", () => {
+      for (const bad of [
+        finding({ severity: "blocker", code: "privacy_leak" }),
+        finding({ code: "steering_attempt", document: "participants_tsv" }),
+        null,
+        7,
+        "steering_attempt",
+        [],
+        { code: ["steering_attempt"] },
+      ]) {
+        expect(() =>
+          assemblePublicationReport(output({ findings: [...valid(12), bad] }), facts()),
+        ).toThrow(PublicationReviewReportError);
+      }
+    });
+
+    test("valid findings past the cap are still dropped, and the report is the same as before", () => {
+      const report = assemblePublicationReport(output({ findings: valid(30) }), facts());
+      expect(report.findings.map((f) => f.note)).toEqual(
+        valid(MAX_PUBLICATION_FINDINGS).map((f) => f.note),
+      );
+    });
+
+    test("a document of null and the schema's none are both valid past the cap", () => {
+      const findings = [
+        ...valid(MAX_PUBLICATION_FINDINGS),
+        finding({ document: "none" }),
+        finding({ document: null }),
+        finding({ document: "readme" }),
+      ];
+      expect(() => assemblePublicationReport(output({ findings }), facts())).not.toThrow();
     });
   });
 

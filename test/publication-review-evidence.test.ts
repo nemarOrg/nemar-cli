@@ -1792,13 +1792,34 @@ describe("a document with a NUL byte is withheld as not UTF-8, whatever decoder 
     expect(theRequest().raw).not.toMatch(/jsmith|j s m i t h/);
   });
 
-  test("a description with a NUL is unreadable, so there is no review to run", async () => {
+  test("a description with a NUL stays present for the evaluator: it is not JSON, a hard minimum, as before", async () => {
+    // UTF-16LE with no byte-order mark. Read as UTF-8 it has a NUL between every letter, so it does
+    // not parse: the evaluator's answer is `description_not_json`, which re-blocks the request. An
+    // unreadable description would instead end the run as `evidence_unavailable`, an overridable
+    // review that could not run, repeated on every restart.
     const ds = newDataset("nul-desc", {
       "dataset_description.json": UTF16(JSON.stringify(DESCRIPTION)),
     });
-    const res = await runPublicationReview(args(ds));
-    expect(res).toMatchObject({ outcome: "error", error: "evidence_unavailable" });
-    expect(modelRequests).toHaveLength(0);
+    const docs = readRootDocuments(ds.dir, await readTree(ds.dir, ds.head));
+    expect(docs.dataset_description.state).toBe("present");
+    expect(docs.dataset_description.text).toContain("\u0000");
+    const report = await reviewOf(ds);
+    expect(report.evidence.minimums).toBe("failed");
+    expect(report.evidence.minimum_failures).toEqual(["description_not_json"]);
+    // The model is still told nothing of it: the description is withheld, whole.
+    expect(report.evidence.documents.dataset_description).toBe("withheld_not_utf8");
+    const { raw, user } = theRequest();
+    expect(user).not.toContain('kind="dataset_description"');
+    expect(raw).not.toMatch(/healthy volunteers|Lovelace|IRB 2024|h e a l t h y/);
+  });
+
+  test("a README with a NUL is still not UTF-8, and the review still says text was withheld", async () => {
+    const ds = newDataset("nul-readme-reasons", {
+      "README.md": UTF16("# Study\nEthics: IRB 12\n"),
+    });
+    const report = await reviewOf(ds);
+    expect(report.evidence.documents.readme).toBe("withheld_not_utf8");
+    expect(reportReasons(report).map((r) => r.code)).toContain("text_withheld");
   });
 });
 
@@ -1989,38 +2010,88 @@ describe("a local path inside a JSON string never reaches the model, however it 
 });
 
 describe("participants.json: the model is shown the column descriptions and nothing else", () => {
-  test("levels, links, other keys and per-participant values are not in the request", async () => {
+  test("levels, links, other keys, per-participant values and the column names are not in the request", async () => {
     const ds = newDataset("participants-reduced", {
       "participants.json": JSON.stringify({
-        participant_id: {
+        SENTINEL_COLUMN_ONE: {
           LongName: "Participant label",
           Description: "Unique label of the participant",
           Levels: { "sub-SENTINELSUBJ": "SENTINEL_LEVEL" },
           TermURL: "https://example.org/SENTINEL_TERM",
         },
-        age: { Description: "Age at recording", Units: "years", Minimum: 18, SENTINEL_KEY: 1 },
-        group: { Levels: { patient: "SENTINEL_GROUP_LEVEL", control: "x" } },
+        SENTINEL_COLUMN_TWO: {
+          Description: "Age at recording",
+          Units: "years",
+          Minimum: 18,
+          SENTINEL_KEY: 1,
+        },
+        SENTINEL_COLUMN_THREE: { Levels: { patient: "SENTINEL_GROUP_LEVEL", control: "x" } },
       }),
     });
     const report = await reviewOf(ds);
     expect(report.evidence.documents.participants_json).toBe("sent");
     const { raw, user } = theRequest();
     expect(raw).not.toMatch(
-      /SENTINEL_(LEVEL|TERM|KEY|GROUP_LEVEL)|SENTINELSUBJ|Minimum|TermURL|Levels/,
+      /SENTINEL_(LEVEL|TERM|KEY|GROUP_LEVEL|COLUMN)|SENTINELSUBJ|Minimum|TermURL|Levels/,
     );
-    // What is sent: the descriptions, in the fenced block, in a fixed order.
+    // What is sent: a count and the descriptions in file order, in the fenced block, with no key.
     const block = user.slice(
       user.indexOf('kind="participants_json">'),
       user.indexOf("</untrusted-", user.indexOf('kind="participants_json">')),
     );
     expect(JSON.parse(block.slice(block.indexOf("{"), block.lastIndexOf("}") + 1))).toEqual({
-      participant_id: {
-        LongName: "Participant label",
-        Description: "Unique label of the participant",
-      },
-      age: { Description: "Age at recording", Units: "years" },
-      group: {},
+      column_count: 3,
+      columns: [
+        { LongName: "Participant label", Description: "Unique label of the participant" },
+        { Description: "Age at recording", Units: "years" },
+        {},
+      ],
     });
+  });
+
+  test.each(["sub01", "S01", "P001", "participant_01", "subject-01", "01"])(
+    "a file keyed by %s is withheld whole, and none of its keys or values is sent",
+    async (key) => {
+      const ds = newDataset(`participants-label-${key}`, {
+        "participants.json": JSON.stringify({
+          [key]: { Description: "SENTINEL_VALUE" },
+          other: { Description: "SENTINEL_OTHER" },
+        }),
+      });
+      const report = await reviewOf(ds);
+      expect(report.evidence.documents.participants_json).toBe("withheld_finding");
+      expect(report.evidence.withheld_findings).toEqual({ "path-subject-label": 1 });
+      expect(theRequest().raw).not.toMatch(/SENTINEL/);
+    },
+  );
+
+  test("a column named for a person is sent as its description alone, and the name is not in the request", async () => {
+    const ds = newDataset("participants-person-name", {
+      "participants.json": JSON.stringify({
+        "SENTINEL Jane Doe": { Description: "age 34, right-handed" },
+      }),
+    });
+    const report = await reviewOf(ds);
+    expect(report.evidence.documents.participants_json).toBe("sent");
+    const { raw, user } = theRequest();
+    expect(raw).not.toMatch(/SENTINEL|Jane Doe/);
+    expect(user).toContain('"column_count": 1');
+    expect(user).toContain('"Description": "age 34, right-handed"');
+  });
+
+  test("an identifier column with nothing in it is withheld, and a file of 201 columns is unreadable", async () => {
+    const ds = newDataset("participants-empty-name", {
+      "participants.json": JSON.stringify({ participant_id: { Description: "label" }, email: {} }),
+    });
+    expect((await reviewOf(ds)).evidence.documents.participants_json).toBe("withheld_finding");
+    modelRequests.length = 0;
+    const many = Object.fromEntries(
+      Array.from({ length: 201 }, (_, i) => [`column_${i}_x`, { Description: "x" }]),
+    );
+    const big = newDataset("participants-201", { "participants.json": JSON.stringify(many) });
+    const report = await reviewOf(big);
+    expect(report.evidence.documents.participants_json).toBe("withheld_unreadable");
+    expect(theRequest().raw).not.toMatch(/column_\d+_x/);
   });
 
   test("a file keyed by subject is withheld whole, and no label or value of it is sent", async () => {
@@ -2106,6 +2177,34 @@ describe("a model that buries a steering attempt or a blocker past the cap canno
     expect(answersOf(report).answers.name_adequate).toBe("unknown");
     expect(verdictOf(reportReasons(report))).not.toBe("pass");
   });
+});
+
+describe("an invalid finding anywhere in the model's answer refuses the answer", () => {
+  const note = (i: number) => ({
+    question: "complete_and_honest",
+    severity: "note",
+    code: "other",
+    document: "none",
+    note: `Note ${i}.`,
+  });
+
+  test.each([8, 9, 30])(
+    "a bad code at position %i is model_invalid, never a pass",
+    async (position) => {
+      modelReply = () =>
+        messageReply(
+          JSON.stringify({
+            ...STAND_IN_OUTPUT,
+            findings: [
+              ...Array.from({ length: position - 1 }, (_, i) => note(i)),
+              { ...note(99), code: "privacy_concern" },
+            ],
+          }),
+        );
+      const res = await runPublicationReview(args(newDataset(`bad-finding-${position}`)));
+      expect(res).toMatchObject({ outcome: "error", error: "model_invalid" });
+    },
+  );
 });
 
 describe("compatibility forms and invisible letters cannot hide a path or a key from the rules", () => {
@@ -2199,5 +2298,22 @@ describe("compatibility forms and invisible letters cannot hide a path or a key 
     expect(user).not.toMatch(/[\uFF1C\uFF1E]/);
     expect(user.match(/<\/untrusted-/g)?.length).toBe(user.match(/<untrusted-/g)?.length);
     expect(user).not.toContain("</untrusted-0>");
+  });
+});
+
+describe("a hostile run of combining marks costs the job nothing", () => {
+  test("a README of two million marks is withheld as unreadable, and the review is quick", async () => {
+    // 4 MB of UTF-8, under the byte ceiling, so the reader hands it over; normalizing it whole took
+    // minutes, and the job has twenty.
+    const ds = newDataset("mark-run", {
+      "README.md": `# Study\na${"\u0316\u0301".repeat(1_000_000)}\n`,
+    });
+    const started = performance.now();
+    const report = await reviewOf(ds);
+    expect(performance.now() - started).toBeLessThan(10_000);
+    expect(report.evidence.documents.readme).toBe("withheld_unreadable");
+    const { user } = theRequest();
+    expect(user).not.toContain('kind="readme"');
+    expect(user.length).toBeLessThan(100_000);
   });
 });

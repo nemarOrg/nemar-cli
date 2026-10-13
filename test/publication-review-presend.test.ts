@@ -14,7 +14,13 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  MAX_COMBINING_RUN,
+  MAX_JSON_DEPTH,
   PARTICIPANT_FIELD_CAPS,
+  PARTICIPANT_KEY_MAX,
+  PARTICIPANT_LABEL,
+  PARTICIPANT_MAX_COLUMNS,
+  normalizeBounded,
   normalizeText,
   presend,
   scanLocalPathForms,
@@ -72,8 +78,13 @@ describe("a clean set of documents is sent, exactly as it will be fenced", () =>
     expect(r.cleared.readme as string).toBe(input.readme.text as string);
     expect(r.cleared.changes as string).toBe(input.changes.text as string);
     expect(r.cleared.license as string).toBe(input.license.text as string);
+    // participants.json is sent as a count and its column descriptions, without the column names.
     expect(r.cleared.participants_json as string).toBe(
-      JSON.stringify(JSON.parse(input.participants_json.text as string), null, 2),
+      JSON.stringify(
+        { column_count: 2, columns: [{ Description: "Unique label" }, { Units: "years" }] },
+        null,
+        2,
+      ),
     );
     expect(r.cleared.dataset_description as string).toBe(
       JSON.stringify(
@@ -654,6 +665,221 @@ describe("default-ignorable characters are removed, so a path split by one is a 
   });
 });
 
+describe("normalization is bounded: no input makes it quadratic (#1728)", () => {
+  // NFKC reorders combining marks, which is quadratic in the length of a run of marks of mixed
+  // classes: 32,000 marks took a second, 256 KB of them eighteen, and it ran on the whole raw
+  // document before any cut. The input of the compatibility step is bounded, and a run of marks no
+  // text has is refused.
+  const marks = (n: number) => "\u0316\u0301".repeat(n / 2).padEnd(n, "\u0316");
+  const run = (n: number) => `a${marks(n)}b`;
+  const cap = DOCUMENT_CHAR_CAPS.readme;
+
+  test("the limit is 64 marks in a row, counted after the invisible characters are removed", () => {
+    expect(MAX_COMBINING_RUN).toBe(64);
+    // A run of exactly 64 is text (it only has to be canonically ordered), one more is not.
+    expect(presend(docs({ readme: present(run(64)) })).states.readme).toBe("sent");
+    for (const document of ["readme", "changes", "license"] as const) {
+      const r = presend(docs({ [document]: present(run(65)) }));
+      expect(r.states[document], document).toBe("withheld_unreadable");
+      expect(r.cleared[document]).toBeUndefined();
+      expect(r.withheld_findings).toEqual({});
+    }
+    // Invisible characters between the marks do not break the run: they are removed first.
+    const hidden = `a${marks(40)}\u3164${marks(40)}b`;
+    expect(presend(docs({ readme: present(hidden) })).states.readme).toBe("withheld_unreadable");
+    // A visible separator does.
+    const apart = `a${marks(40)} ${marks(40)}b`;
+    expect(presend(docs({ readme: present(apart) })).states.readme).toBe("sent");
+  });
+
+  test("the same limit holds for every string and key of a JSON document", () => {
+    const base = { Name: "A descriptive dataset name that is long enough" };
+    for (const object of [
+      { ...base, Acknowledgements: run(65) },
+      { ...base, GeneratedBy: [{ Name: "x", [`k${marks(65)}`]: "v" }] },
+    ]) {
+      const r = presend(
+        docs({
+          dataset_description: present(JSON.stringify(object), "dataset_description.json"),
+        }),
+      );
+      expect(r.states.dataset_description).toBe("withheld_unreadable");
+    }
+    const column = presend(
+      docs({
+        participants_json: present(
+          JSON.stringify({ age: { Description: run(65) } }),
+          "participants.json",
+        ),
+      }),
+    );
+    expect(column.states.participants_json).toBe("withheld_unreadable");
+    const ok = presend(
+      docs({
+        dataset_description: present(
+          JSON.stringify({ ...base, Acknowledgements: run(64) }),
+          "dataset_description.json",
+        ),
+      }),
+    );
+    expect(ok.states.dataset_description).toBe("sent");
+  });
+
+  test("a hostile README of two million marks is refused in well under two seconds", () => {
+    const started = performance.now();
+    const r = presend(docs({ readme: present(`a${"\u0316\u0301".repeat(1_000_000)}`) }));
+    expect(performance.now() - started).toBeLessThan(2000);
+    expect(r.states.readme).toBe("withheld_unreadable");
+  });
+
+  test("two megabytes of the longest legal runs are cut before normalization, and are fast", () => {
+    const text = `a${marks(64)}`.repeat(30_000);
+    expect(text.length).toBeGreaterThan(1_900_000);
+    const started = performance.now();
+    const r = presend(docs({ readme: present(text) }));
+    expect(performance.now() - started).toBeLessThan(2000);
+    expect(r.states.readme).toBe("sent_cut");
+    expect((r.cleared.readme as string).length).toBe(cap + "\n[cut]".length);
+  });
+
+  test("a hostile JSON string is bounded the same way, and a long one is cut and says so", () => {
+    const base = { Name: "A descriptive dataset name that is long enough" };
+    const started = performance.now();
+    const hostile = presend(
+      docs({
+        dataset_description: present(
+          JSON.stringify({ ...base, Acknowledgements: `a${"\u0316\u0301".repeat(1_000_000)}` }),
+          "dataset_description.json",
+        ),
+      }),
+    );
+    const longLegal = presend(
+      docs({
+        dataset_description: present(
+          JSON.stringify({ ...base, Acknowledgements: `a${marks(64)}`.repeat(30_000) }),
+          "dataset_description.json",
+        ),
+      }),
+    );
+    expect(performance.now() - started).toBeLessThan(2000);
+    expect(hostile.states.dataset_description).toBe("withheld_unreadable");
+    expect(longLegal.states.dataset_description).toBe("sent_cut");
+    const capJson = DOCUMENT_CHAR_CAPS.dataset_description;
+    expect((longLegal.cleared.dataset_description as string).length).toBe(
+      capJson + "\n[cut]".length,
+    );
+  });
+
+  test("a JSON string longer than the document's cap is cut with the mark, and the state says so", () => {
+    const capJson = DOCUMENT_CHAR_CAPS.dataset_description;
+    // Two shown strings, each longer than the cap: each is cut where it stands, and the document
+    // says it was cut even though its serialization would otherwise be short enough.
+    const r = presend(
+      docs({
+        dataset_description: present(
+          JSON.stringify({
+            Name: "A descriptive dataset name that is long enough",
+            Acknowledgements: "x".repeat(capJson * 5),
+          }),
+          "dataset_description.json",
+        ),
+      }),
+    );
+    expect(r.states.dataset_description).toBe("sent_cut");
+    const sent = r.cleared.dataset_description as string;
+    expect(
+      sent.startsWith('{\n  "Name": "A descriptive dataset name that is long enough",\n'),
+    ).toBe(true);
+    expect(sent.endsWith("\n[cut]")).toBe(true);
+    // The string was cut where it stood (to the cap), not read whole: 5 caps of text never got here.
+    expect(sent.length).toBe(capJson + "\n[cut]".length);
+  });
+
+  test("a long string that is not sent does not make participants.json look cut", () => {
+    const r = presend(
+      docs({
+        participants_json: present(
+          JSON.stringify({
+            age: {
+              Description: "Age at recording",
+              Levels: { a: "y".repeat(DOCUMENT_CHAR_CAPS.participants_json * 6) },
+            },
+          }),
+          "participants.json",
+        ),
+      }),
+    );
+    expect(r.states.participants_json).toBe("sent");
+  });
+
+  test("normalizeBounded: the compatibility step sees at most four caps, and a drop is a cut", () => {
+    expect(normalizeBounded("x".repeat(100), 30)).toEqual({
+      text: `${"x".repeat(30)}\n[cut]`,
+      cut: true,
+    });
+    expect(normalizeBounded("x".repeat(30), 30)).toEqual({ text: "x".repeat(30), cut: false });
+    // The mark run is checked on the WHOLE input, even the part the bound would drop.
+    expect(() => normalizeBounded(`${"x".repeat(1000)}a${marks(65)}`, 30)).toThrow();
+    // The bound: only the first four caps reach the compatibility step. Text past them cannot
+    // change the result, so a fullwidth letter there is never normalized (it is never sent).
+    const past = normalizeBounded(`${"x".repeat(120)}\uFF21`, 30);
+    expect(past).toEqual({ text: `${"x".repeat(30)}\n[cut]`, cut: true });
+  });
+
+  test("normalizeBounded: text the bound drops is a cut even when what is left is shorter than the cap", () => {
+    // Composition shrinks text, so a prefix bounded at one cap can normalize to less than the cap.
+    // With the real factor of four that cannot happen; the factor is a parameter so it is tested.
+    const dropped = normalizeBounded("e\u0301".repeat(40), 30, 1);
+    expect(dropped.cut).toBe(true);
+    expect(dropped.text).toBe(`${"\u00E9".repeat(15)}\n[cut]`);
+    // And the bound never ends in half of a surrogate pair.
+    const pair = normalizeBounded(`${"x".repeat(9)}\u{1F600}${"y".repeat(5)}`, 10, 1);
+    expect(pair).toEqual({ text: `${"x".repeat(9)}\n[cut]`, cut: true });
+  });
+
+  test.each([
+    [
+      "Vietnamese, precomposed and with several marks",
+      "Vi\u1EC7t Nam, \u1EA1\u0309 \u1EA5 \u1EAD \u1EB1 \u1EF3 \u1EF9",
+    ],
+    [
+      "Arabic with harakat and shadda",
+      "\u0627\u0644\u0633\u064E\u0651\u0644\u064E\u0627\u0645\u064F \u0639\u064E\u0644\u064E\u064A\u0652\u0643\u064F\u0645\u0652",
+    ],
+    ["Tibetan stacks", "\u0F66\u0FA1\u0FB2\u0F74\u0F42 \u0F45\u0FB1\u0F72\u0F7C"],
+    [
+      "Hebrew with points and cantillation",
+      "\u05D1\u05B0\u05BC\u05E8\u05B5\u05D0\u05E9\u05B4\u05C1\u05D9\u05EA \u05D1\u05B8\u05BC\u05E8\u05B8\u05D0",
+    ],
+    [
+      "Devanagari with signs",
+      "\u0915\u094D\u0937\u093F \u0928\u093F\u0903 \u0938\u0902\u0938\u094D\u0915\u0943\u0924\u092E\u094D",
+    ],
+    ["Thai with tone marks", "\u0E19\u0E49\u0E32 \u0E01\u0E34\u0E19 \u0E0A\u0E48\u0E27\u0E22"],
+  ])(
+    "legitimate text with several combining marks per letter is not touched: %s",
+    (_what, text) => {
+      // Already in the form normalization leaves it, so the sent text is the text.
+      expect(text.normalize("NFKC")).toBe(text);
+      const r = presend(docs({ readme: present(text) }));
+      expect(r.states.readme).toBe("sent");
+      expect(r.cleared.readme as string).toBe(text);
+      const json = presend(
+        docs({
+          dataset_description: present(JSON.stringify({ Name: text }), "dataset_description.json"),
+        }),
+      );
+      expect(JSON.parse(json.cleared.dataset_description as string).Name).toBe(text);
+    },
+  );
+
+  test("text that is not yet in canonical order is reordered, as before, and is still fast", () => {
+    const r = presend(docs({ readme: present("a\u0301\u0316 a\u0316\u0301") }));
+    // Reordered (the lower class first), after which the accent composes with its base.
+    expect(r.cleared.readme as string).toBe("\u00E1\u0316 \u00E1\u0316");
+  });
+});
+
 describe("the cut is on a character boundary and no half of one is sent (#1728)", () => {
   const cap = DOCUMENT_CHAR_CAPS.readme;
   const wellFormed = (text: string) =>
@@ -1002,12 +1228,16 @@ describe("a path in a JSON string is found as the person who reads the string wo
   });
 });
 
-describe("participants.json: the column descriptions only, under the same rules (#1728)", () => {
+describe("participants.json: the column descriptions only, and never a column's name (#1728)", () => {
   // ADR 0101, section 3: "participants.json, the column descriptions". A column description is
   // LongName, Description and Units. Everything else a participants.json can hold (the levels of a
-  // categorical column, links, per-participant values someone typed in) is not sent.
+  // categorical column, links, per-participant values someone typed in) is not sent, and neither is
+  // the key of a column: a file keyed by participant (`sub01`, `S01`, `Jane Doe`) would send every
+  // label. What is sent is a count and the descriptions in file order, with no key.
   const sendParticipants = (object: unknown) =>
     presend(docs({ participants_json: present(JSON.stringify(object), "participants.json") }));
+  const sentOf = (object: unknown) =>
+    JSON.parse(sendParticipants(object).cleared.participants_json as string);
 
   test("an identifier-named column key with content withholds it", () => {
     const text = JSON.stringify({
@@ -1020,12 +1250,26 @@ describe("participants.json: the column descriptions only, under the same rules 
     expect(r.withheld_findings).toEqual({ "json-identifier-key": 1 });
   });
 
-  test("the key rule reads the whole file, so an identifier column that is not sent still withholds it", () => {
-    // A column named for an identifier is a finding wherever its content sits: the rule is stricter
-    // than what is sent, never weaker.
+  test.each([
+    ["an empty object", {}],
+    ["an empty description", { Description: "" }],
+    ["levels only", { Levels: { a: "b" } }],
+    ["a description", { Description: "Full name of the participant" }],
+  ])("an identifier-named column is withheld whatever it holds: %s", (_what, value) => {
+    for (const key of ["name", "email", "birthdate", "patientname", "Phone"]) {
+      const r = sendParticipants({ participant_id: { Description: "label" }, [key]: value });
+      expect(r.states.participants_json, key).toBe("withheld_finding");
+      // One finding for the one column, of the JSON key kind or the table-column kind.
+      expect(
+        Object.values(r.withheld_findings).reduce((a, b) => a + (b ?? 0), 0),
+        key,
+      ).toBe(1);
+    }
+  });
+
+  test("a key inside a column is still read by the key rule", () => {
     const r = sendParticipants({
-      participant_id: { Description: "label" },
-      email: { Levels: { a: "b" } },
+      participant_id: { Description: "label", Levels: { email: "a@example.org" } },
     });
     expect(r.states.participants_json).toBe("withheld_finding");
     expect(r.withheld_findings).toEqual({ "json-identifier-key": 1 });
@@ -1036,7 +1280,7 @@ describe("participants.json: the column descriptions only, under the same rules 
     expect(cut.states.participants_json).toBe("withheld_finding");
   });
 
-  test("only LongName, Description and Units of each column are sent, in that order", () => {
+  test("a count and the descriptions in file order are sent: LongName, Description, Units, no key", () => {
     const r = sendParticipants({
       participant_id: {
         Units: "n/a",
@@ -1054,28 +1298,59 @@ describe("participants.json: the column descriptions only, under the same rules 
     expect(sent).toBe(
       JSON.stringify(
         {
-          participant_id: { LongName: "Participant", Description: "Unique label", Units: "n/a" },
-          sex: {},
-          age: { Description: "Age at recording", Units: "years" },
+          column_count: 3,
+          columns: [
+            { LongName: "Participant", Description: "Unique label", Units: "n/a" },
+            {},
+            { Description: "Age at recording", Units: "years" },
+          ],
         },
         null,
         2,
       ),
     );
-    for (const leak of ["SENTINEL", "sub-01", "male", "Minimum", "TermURL", "Levels"]) {
+    // No column key, and nothing else of the file.
+    for (const leak of [
+      "participant_id",
+      '"sex"',
+      '"age"',
+      "SENTINEL",
+      "sub-01",
+      "male",
+      "TermURL",
+    ]) {
       expect(sent).not.toContain(leak);
     }
   });
 
+  test("the keys are never sent, whatever they look like", () => {
+    const keys = [
+      "Jane Doe",
+      "visual_acuity",
+      "handedness",
+      "x".repeat(60),
+      "p300_amplitude",
+      "colonne é",
+    ];
+    const sent = sendParticipants(
+      Object.fromEntries(keys.map((k, i) => [k, { Description: `column ${i}` }])),
+    ).cleared.participants_json as string;
+    for (const key of keys) expect(sent).not.toContain(key);
+    expect(JSON.parse(sent).columns).toHaveLength(keys.length);
+  });
+
+  test("a column named for a person is not a name in the sent text, only its description is", () => {
+    const sent = sentOf({ "Jane Doe": { Description: "age 34, right-handed" } });
+    expect(sent).toEqual({ column_count: 1, columns: [{ Description: "age 34, right-handed" }] });
+  });
+
   test("a field that is not a string is not sent", () => {
-    const r = sendParticipants({
-      a: { LongName: 5, Description: ["x", "y"], Units: { u: "years" } },
-      b: { LongName: null, Description: true, Units: "years" },
-    });
-    expect(JSON.parse(r.cleared.participants_json as string)).toEqual({
-      a: {},
-      b: { Units: "years" },
-    });
+    expect(
+      sentOf({
+        a: { LongName: 5, Description: ["x", "y"], Units: { u: "years" } },
+        b: { LongName: null, Description: true, Units: "years" },
+      }),
+    ).toEqual({ column_count: 2, columns: [{}, { Units: "years" }] });
   });
 
   test("each field is cut to its own short cap, and a cut is a fact", () => {
@@ -1095,8 +1370,8 @@ describe("participants.json: the column descriptions only, under the same rules 
     const sent = JSON.parse(r.cleared.participants_json as string);
     for (const field of ["LongName", "Description", "Units"] as const) {
       const cap = PARTICIPANT_FIELD_CAPS[field];
-      expect(sent.col[field]).toBe(`${field[0]?.repeat(cap)}\n[cut]`);
-      expect(sent.whole[field]).toBe(field[0]?.repeat(cap));
+      expect(sent.columns[0][field]).toBe(`${field[0]?.repeat(cap)}\n[cut]`);
+      expect(sent.columns[1][field]).toBe(field[0]?.repeat(cap));
     }
     // And a column nothing was cut from says nothing of the kind.
     const clean = sendParticipants({ col: { Units: "years" } });
@@ -1105,20 +1380,28 @@ describe("participants.json: the column descriptions only, under the same rules 
 
   test("a cut between the halves of an emoji ends before it", () => {
     const cap = PARTICIPANT_FIELD_CAPS.Description;
-    const r = sendParticipants({ col: { Description: `${"a".repeat(cap - 1)}\u{1F600}b` } });
-    expect(JSON.parse(r.cleared.participants_json as string).col.Description).toBe(
-      `${"a".repeat(cap - 1)}\n[cut]`,
-    );
+    expect(
+      sentOf({ col: { Description: `${"a".repeat(cap - 1)}\u{1F600}b` } }).columns[0].Description,
+    ).toBe(`${"a".repeat(cap - 1)}\n[cut]`);
   });
 
   test.each([
     ["sub-01", "sub-01"],
+    ["sub01", "sub01"],
+    ["sub_01", "sub_01"],
+    ["S01", "S01"],
+    ["P001", "P001"],
+    ["pt7", "pt7"],
+    ["participant_01", "participant_01"],
+    ["subject-01", "subject-01"],
+    ["subj 12", "subj 12"],
     ["in capitals", "SUB-02"],
     ["mixed case", "Sub-jsmith"],
     ["after a space", " sub-03"],
     ["after an invisible character", "\u200bsub-04"],
     ["after a variation selector", "\uFE0Fsub-05"],
-  ])("a column named like a subject label withholds the whole file: %s", (_what, key) => {
+    ["fullwidth", fullwidth("sub01")],
+  ])("a column named like a participant label withholds the whole file: %s", (_what, key) => {
     const r = sendParticipants({
       participant_id: { Description: "label" },
       [key]: { Description: "x", Units: "y" },
@@ -1126,24 +1409,93 @@ describe("participants.json: the column descriptions only, under the same rules 
     expect(r.states.participants_json).toBe("withheld_finding");
     expect(r.cleared.participants_json).toBeUndefined();
     expect(r.withheld_findings).toEqual({ "path-subject-label": 1 });
-    expect(JSON.stringify(r)).not.toMatch(/jsmith|sub-0/i);
+    expect(JSON.stringify(r)).not.toMatch(/jsmith|sub-0|S01|P001/i);
+  });
+
+  test.each(["01", "1", "123", "-4", "12.5", "007"])(
+    "a column that is a number is a label: %s",
+    (key) => {
+      const r = sendParticipants({ [key]: { Description: "x" } });
+      expect(r.states.participants_json).toBe("withheld_finding");
+      expect(r.withheld_findings).toEqual({ "path-subject-label": 1 });
+    },
+  );
+
+  test("a key longer than 64 characters is not a column name, and withholds the file", () => {
+    const ok = sendParticipants({ [`${"c".repeat(PARTICIPANT_KEY_MAX)}`]: { Description: "x" } });
+    expect(ok.states.participants_json).toBe("sent");
+    const long = sendParticipants({
+      [`${"c".repeat(PARTICIPANT_KEY_MAX + 1)}`]: { Description: "x" },
+    });
+    expect(long.states.participants_json).toBe("withheld_finding");
+    expect(long.withheld_findings).toEqual({ "participants-identifier-column": 1 });
   });
 
   test("a file keyed by subject is one finding, however many subjects", () => {
     const keyed = Object.fromEntries(
       Array.from({ length: 50 }, (_, i) => [`sub-${i}`, { age: 30 }]),
     );
-    const r = sendParticipants(keyed);
-    expect(r.withheld_findings).toEqual({ "path-subject-label": 1 });
+    expect(sendParticipants(keyed).withheld_findings).toEqual({ "path-subject-label": 1 });
+    const numbers = Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`${i}`, { age: 30 }]));
+    expect(sendParticipants(numbers).withheld_findings).toEqual({ "path-subject-label": 1 });
   });
 
-  test("only a prefix is a subject label: sub inside a name, or without the hyphen, is a column", () => {
+  test("two columns whose names normalize alike are two columns, and are counted as two", () => {
+    // As keys of one object they would be one; the count and the list follow the file.
+    const text =
+      '{"a\\u200b":{"Description":"first"},"a ":{"Description":"second"},"b":{"Units":"u"}}';
+    const r = presend(docs({ participants_json: present(text, "participants.json") }));
+    expect(JSON.parse(r.cleared.participants_json as string)).toEqual({
+      column_count: 3,
+      columns: [{ Description: "first" }, { Description: "second" }, { Units: "u" }],
+    });
+  });
+
+  test("a word that begins like a label is a column: subject_group, subtype, a hyphenated sub", () => {
     const r = sendParticipants({
       subject_group: { Description: "g" },
       subtype: { Description: "t" },
       "pre-sub-": { Description: "x" },
+      participant_id: { Description: "label" },
+      age: { Units: "years" },
     });
     expect(r.states.participants_json).toBe("sent");
+  });
+
+  test("the shared rule's own pattern is the one used here (the shared constant is not exported)", () => {
+    const shared = readFileSync(
+      join(import.meta.dir, "..", "shared", "identifier-scan.ts"),
+      "utf8",
+    );
+    expect(shared).toContain(`const SUBJECT_LABEL = ${PARTICIPANT_LABEL.toString()};`);
+  });
+
+  test("more than 200 columns is a file keyed by participant: unreadable, not sent", () => {
+    const columns = (n: number) =>
+      Object.fromEntries(Array.from({ length: n }, (_, i) => [`col${i}x`, { Description: "x" }]));
+    expect(PARTICIPANT_MAX_COLUMNS).toBe(200);
+    // 200 is the limit and is read: its column_count is 200 whether or not the text is cut.
+    expect(sentOf(columns(200)).column_count).toBe(200);
+    expect(sentOf(columns(100)).column_count).toBe(100);
+    const r = sendParticipants(columns(201));
+    expect(r.states.participants_json).toBe("withheld_unreadable");
+    expect(r.cleared.participants_json).toBeUndefined();
+    expect(r.withheld_findings).toEqual({});
+  });
+
+  test("a __proto__ column is a column, and its description is read", () => {
+    const text = '{"__proto__":{"Description":"/Users/jsmith/x"}}';
+    const r = presend(docs({ participants_json: present(text, "participants.json") }));
+    expect(r.states.participants_json).toBe("withheld_finding");
+    expect(r.withheld_findings).toEqual({ "local-user-path": 1 });
+  });
+
+  test("a path in a description is still a path, whatever the column is called", () => {
+    for (const key of ["age", "Jane Doe", "visual_acuity"]) {
+      const r = sendParticipants({ [key]: { Description: "Collected by /home/jsmith/forms" } });
+      expect(r.states.participants_json, key).toBe("withheld_finding");
+      expect(r.withheld_findings).toEqual({ "local-user-path": 1 });
+    }
   });
 
   test.each([
@@ -1159,10 +1511,13 @@ describe("participants.json: the column descriptions only, under the same rules 
     expect(r.withheld_findings).toEqual({});
   });
 
-  test("an empty object is a file with no columns, and is sent as one", () => {
+  test("an empty object is a file with no columns, and is sent as a count of none", () => {
     const r = sendParticipants({});
     expect(r.states.participants_json).toBe("sent");
-    expect(r.cleared.participants_json as string).toBe("{}");
+    expect(JSON.parse(r.cleared.participants_json as string)).toEqual({
+      column_count: 0,
+      columns: [],
+    });
   });
 
   test("an array, or text that is not JSON, is withheld as not JSON", () => {
@@ -1170,6 +1525,88 @@ describe("participants.json: the column descriptions only, under the same rules 
       const r = presend(docs({ participants_json: present(text, "participants.json") }));
       expect(r.states.participants_json, text).toBe("withheld_not_json");
     }
+  });
+});
+
+describe("nesting deeper than the limit is refused before anything is re-serialized (#1728)", () => {
+  // Pretty-printing indents every level, so a value nested n deep serializes to about n squared
+  // characters: a 54 KB description nested 27,000 deep took gigabytes before it was withheld.
+  const arrays = (n: number) => `${"[".repeat(n)}${"]".repeat(n)}`;
+  const objects = (n: number) => `${'{"a":'.repeat(n)}1${"}".repeat(n)}`;
+  const description = (extra: string) =>
+    `{"Name":"A descriptive dataset name that is long enough",${extra}}`;
+  const sendDescription = (text: string) =>
+    presend(docs({ dataset_description: present(text, "dataset_description.json") }));
+
+  test("the limit is 32 levels, counting the object that holds the shown keys", () => {
+    expect(MAX_JSON_DEPTH).toBe(32);
+    // The shown keys' object is level 1, so the arrays may add 31 more.
+    expect(sendDescription(description(`"Funding":${arrays(31)}`)).states.dataset_description).toBe(
+      "sent",
+    );
+    for (const text of [
+      description(`"Funding":${arrays(32)}`),
+      description(`"GeneratedBy":${objects(32)}`),
+    ]) {
+      const r = sendDescription(text);
+      expect(r.states.dataset_description).toBe("withheld_unreadable");
+      expect(r.cleared.dataset_description).toBeUndefined();
+      expect(r.withheld_findings).toEqual({});
+    }
+  });
+
+  test("participants.json is held to the same limit, whatever part of it is sent", () => {
+    const ok = presend(
+      docs({
+        participants_json: present(`{"age":{"Levels":${arrays(30)}}}`, "participants.json"),
+      }),
+    );
+    expect(ok.states.participants_json).toBe("sent");
+    const deep = presend(
+      docs({
+        participants_json: present(`{"age":{"Levels":${arrays(31)}}}`, "participants.json"),
+      }),
+    );
+    expect(deep.states.participants_json).toBe("withheld_unreadable");
+  });
+
+  test("a very deep value is refused fast, and a hidden key that is not shown is never walked", () => {
+    const depth = 27_000;
+    for (const text of [
+      description(`"Funding":${arrays(depth)}`),
+      description(`"GeneratedBy":${objects(depth)}`),
+    ]) {
+      const started = performance.now();
+      const r = sendDescription(text);
+      expect(performance.now() - started).toBeLessThan(1000);
+      expect(r.states.dataset_description).toBe("withheld_unreadable");
+    }
+    const started = performance.now();
+    const deepParticipants = presend(
+      docs({
+        participants_json: present(`{"age":{"Levels":${arrays(depth)}}}`, "participants.json"),
+      }),
+    );
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(deepParticipants.states.participants_json).toBe("withheld_unreadable");
+    // Not a shown key: it is dropped before it is walked, so it costs nothing and withholds nothing.
+    const hidden = performance.now();
+    const r = sendDescription(description(`"Extra":${arrays(depth)}`));
+    expect(performance.now() - hidden).toBeLessThan(1000);
+    expect(r.states.dataset_description).toBe("sent");
+  });
+
+  test("the other documents are untouched by one that is refused", () => {
+    const r = presend(
+      docs({
+        dataset_description: present(
+          description(`"Funding":${arrays(40)}`),
+          "dataset_description.json",
+        ),
+      }),
+    );
+    expect(r.states.readme).toBe("sent");
+    expect(r.states.participants_json).toBe("sent");
   });
 });
 

@@ -139,8 +139,10 @@ type BlobRead = { ok: true; bytes: Buffer } | { ok: false; reason: "missing" | "
 
 /**
  * One blob's bytes, never more than `ceiling` of them. The size is asked first, so a blob that is
- * too large is never held in memory. In the job's blob-less clone both calls fetch the blob lazily
- * through the repository's own read-only credential, which this module never reads.
+ * too large is never held in memory. The job's clone is blob-less, but the workflow's fetch step
+ * already fetched every blob this module reads (the root documents and the sampled sidecars), and
+ * the clone holds no credential: a blob that was not fetched would be requested from the remote
+ * without one, which fails, and is `missing` here.
  */
 function readBlob(dir: string, oid: string, ceiling: number): BlobRead {
   if (!/^[0-9a-f]{40,64}$/.test(oid)) return { ok: false, reason: "missing" };
@@ -217,9 +219,15 @@ function readDocument(dir: string, name: string, entry: TreeEntry): RawDocument 
   // UTF-16 with no byte-order mark and only ASCII characters is valid UTF-8, with a NUL between
   // every letter. It is not text a person wrote in UTF-8, and the cleaning that comes later would
   // turn each NUL into a space and split every word the shared rules look for. No text document
-  // holds a NUL, so one makes the file `not_utf8`, for every document type, here and again in the
-  // pre-send module (which cannot assume its caller was this function).
-  if (text.includes("\u0000")) return { name, state: "not_utf8", text: null };
+  // holds a NUL, so one makes the file `not_utf8`, here and again in the pre-send module (which
+  // cannot assume its caller was this function). The exception is the description: it stays
+  // `present`, so the evaluator reads the same bytes it always did and says `description_not_json`
+  // (a hard minimum that re-blocks the request). An unreadable description would end the run as
+  // `evidence_unavailable` instead, an overridable review that could not run, on every restart;
+  // the pre-send module still withholds it from the model.
+  if (text.includes("\u0000") && name !== DESCRIPTION_FILE) {
+    return { name, state: "not_utf8", text: null };
+  }
   return { name, state: "present", text };
 }
 

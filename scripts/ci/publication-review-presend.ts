@@ -4,7 +4,9 @@
  * **This is the only file that mints `ClearedText`.** The prompt builder accepts nothing else, and
  * `test/publication-review-contract.test.ts` fails if any other source file casts to the type. So
  * the one place that decides what a model may read is this file, and it is short enough to read
- * whole.
+ * whole. The brand is checked by the compiler and by a lexical test, and neither can see a type
+ * predicate, an assertion function, a generic cast, `JSON.parse` or a suppressed error, so the
+ * prompt builder also asks {@link isCleared}, at run time, about every string it sends.
  *
  * The rule: every document is examined by the shared mechanical rules (`shared/identifier-scan.ts`)
  * immediately before it is sent, over exactly the string that will be sent, and text is cleared
@@ -24,9 +26,13 @@
  *     a NUL byte is not text and is withheld as not UTF-8. For a JSON document the same
  *     normalization is applied to every key and every string value of the parsed structure, so the
  *     rules see the key the model will read (`patient<zero-width space>name` is `patient name` to it).
+ *     The work is bounded: a run of more than 64 combining marks (which no text has, and which
+ *     makes compatibility normalization quadratic) withholds the document as unreadable, the
+ *     compatibility step sees at most four caps of text, and JSON nesting past 32 levels is refused.
  *  2. The string is then built in full and cut: the prose text, or the serialized normalized
- *     structure (the shown keys of `dataset_description.json`; the column descriptions of
- *     `participants.json`, which are only `LongName`, `Description` and `Units`, each cut short),
+ *     structure (the shown keys of `dataset_description.json`; for `participants.json` a count and
+ *     the column descriptions, which are only `LongName`, `Description` and `Units`, each cut
+ *     short, and never a column's name),
  *     cut to its cap on a character boundary. The text rule runs over THAT string, so a finding in
  *     the part a cut removes does not withhold prose whose sent bytes are clean, and no byte the
  *     rules did not see is ever sent.
@@ -48,11 +54,13 @@
  * neither a finding's value nor a byte of a document leaves the function.
  */
 
+import { createHash } from "node:crypto";
 import {
   type Finding,
   type FindingKind,
   countByKind,
   scanJsonKeys,
+  scanTableColumns,
   scanTextForLocalPaths,
   shapeOf,
 } from "../../shared/identifier-scan";
@@ -94,6 +102,42 @@ type Prepared =
  * (a column description is a short name, a sentence or two, and a unit).
  */
 export const PARTICIPANT_FIELD_CAPS = { LongName: 100, Description: 500, Units: 50 } as const;
+/**
+ * A participants.json of more columns than this is keyed by participant, not by variable: it is
+ * withheld as unreadable. Real files have a few dozen columns.
+ */
+export const PARTICIPANT_MAX_COLUMNS = 200;
+/** A column name longer than this is not a variable name (it is a phrase, or a person). */
+export const PARTICIPANT_KEY_MAX = 64;
+/**
+ * What a study code looks like (`sub01`, `S01`, `P001`, `participant_01`, `subject-01`): the shared
+ * rule's own pattern, `SUBJECT_LABEL` in `shared/identifier-scan.ts`, which does not export it. A
+ * test reads that file and fails if the two differ, so the copy cannot drift.
+ */
+export const PARTICIPANT_LABEL = /^(sub|subj|subject|s|p|pt|participant)[-_ ]?\d+$/i;
+const PARTICIPANT_NUMBER = /^[+-]?\d+(?:[.,]\d+)?$/;
+
+/**
+ * The deepest nesting a JSON document may have, counting the object at its root as level 1. Real
+ * metadata is a handful of levels deep; pretty-printing indents every level, so a value nested n deep
+ * serializes to about n squared characters, and walking it recursively can overflow the stack. The
+ * limit is checked, iteratively, before the structure is normalized or serialized.
+ */
+export const MAX_JSON_DEPTH = 32;
+
+/** Whether `value` is nested deeper than `max`, walked with a stack of its own and stopping at once. */
+function nestedDeeperThan(value: unknown, max: number): boolean {
+  const pending: [unknown, number][] = [[value, 1]];
+  for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+    const [node, depth] = next;
+    if (typeof node !== "object" || node === null) continue;
+    if (depth > max) return true;
+    for (const child of Array.isArray(node) ? node : Object.values(node)) {
+      pending.push([child, depth + 1]);
+    }
+  }
+  return false;
+}
 
 function isPlainObject(x: unknown): x is Record<string, unknown> {
   return typeof x === "object" && x !== null && !Array.isArray(x);
@@ -152,21 +196,26 @@ function scanStructureForPaths(value: unknown): Finding[] {
 }
 
 /**
- * A parsed JSON value with {@link normalizeText} applied to every string AND every key, to any
+ * A parsed JSON value with {@link normalizeBounded} applied to every string AND every key, to any
  * depth. The model is sent the cleaned text, so the rules must look at the cleaned structure: a key
  * `patient<zero-width space>name` is the key `patient name` to the model, and `scanJsonKeys` would
- * not have matched the first. Built with `Object.fromEntries`, which defines each key as data, so a
- * key named `__proto__` is kept and examined instead of becoming a prototype.
+ * not have matched the first. Each string is cut to the document's cap with the cut mark (a string
+ * longer than the cap makes the serialization longer than it, so the document is `sent_cut` by the
+ * ordinary cut and no flag is needed). Built with `Object.fromEntries`, which defines each key as
+ * data, so a key named `__proto__` is kept and examined instead of becoming a prototype.
  */
-function normalizeStructure(value: unknown): unknown {
-  if (typeof value === "string") return normalizeText(value);
-  if (Array.isArray(value)) return value.map(normalizeStructure);
-  if (isPlainObject(value)) {
-    return Object.fromEntries(
-      Object.entries(value).map(([k, v]) => [normalizeText(k), normalizeStructure(v)]),
-    );
-  }
-  return value;
+function normalizeStructure(value: unknown, cap: number): unknown {
+  const walk = (v: unknown): unknown => {
+    if (typeof v === "string") return normalizeBounded(v, cap).text;
+    if (Array.isArray(v)) return v.map(walk);
+    if (isPlainObject(v)) {
+      return Object.fromEntries(
+        Object.entries(v).map(([k, child]) => [normalizeBounded(k, cap).text, walk(child)]),
+      );
+    }
+    return v;
+  };
+  return walk(value);
 }
 
 /**
@@ -193,6 +242,43 @@ const BRAILLE_BLANK = /\u2800/g;
 /** In unicode mode this matches only a surrogate that is not half of a pair. */
 const LONE_SURROGATE = /\p{Cs}/gu;
 
+/** The longest run of combining marks real text has; a longer one is refused. */
+export const MAX_COMBINING_RUN = 64;
+/**
+ * The compatibility step sees at most this many caps of text. NFKC reorders combining marks, which
+ * is quadratic in the length of a run of marks of mixed classes, and it used to run on the whole
+ * raw document before any cut.
+ */
+const COMPATIBILITY_INPUT_CAPS = 4;
+const MARK_RUN = /\p{M}+/gu;
+
+/** Whether `run` is more than `limit` code points, without spreading a long one. */
+function longerThan(run: string, limit: number): boolean {
+  if (run.length <= limit) return false;
+  if (run.length > 2 * limit) return true;
+  let n = 0;
+  for (const _ of run) n++;
+  return n > limit;
+}
+
+/** The linear part of the normalization: everything that removes or replaces, and no NFKC. */
+function strip(text: string): string {
+  return text.replace(INVISIBLE, "").replace(LONE_SURROGATE, "").replace(BRAILLE_BLANK, " ");
+}
+
+/** Throws on a run of more than {@link MAX_COMBINING_RUN} combining marks, which no text has. */
+function refuseLongMarkRuns(text: string): void {
+  for (const m of text.matchAll(MARK_RUN)) {
+    if (longerThan(m[0], MAX_COMBINING_RUN))
+      throw new Error("a run of combining marks no text has");
+  }
+}
+
+/** The part of the normalization that needs a bounded input: compatibility form, then `tidy`. */
+function settle(text: string): string {
+  return tidy(text.normalize("NFKC"), Number.MAX_SAFE_INTEGER);
+}
+
 /**
  * The one normalization every string goes through before any rule looks at it, and the string the
  * model is sent: invisible code points and any half of a surrogate pair removed, the braille blank
@@ -204,17 +290,41 @@ const LONE_SURROGATE = /\p{Cs}/gu;
  * test sweeps): the removals come BEFORE the compatibility normalization, so characters that were
  * only apart because a mark stood between them compose, and the two code points that normalize INTO
  * the removed set (U+3164 and U+FFA0, both to U+1160) are removed before they can. Exported so that
- * test can reach it; nothing else imports it.
+ * test can reach it; nothing else imports it. It is NOT bounded: see {@link normalizeBounded}.
  */
 export function normalizeText(text: string): string {
-  return tidy(
-    text
-      .replace(INVISIBLE, "")
-      .replace(LONE_SURROGATE, "")
-      .replace(BRAILLE_BLANK, " ")
-      .normalize("NFKC"),
-    Number.MAX_SAFE_INTEGER,
-  );
+  return settle(strip(text));
+}
+
+/**
+ * {@link normalizeText} with its cost bounded, and the text cut to `cap` characters with the mark.
+ * The removals run first (they are linear), then a run of more than {@link MAX_COMBINING_RUN}
+ * combining marks anywhere in the text throws (the caller withholds the document as unreadable),
+ * then the text is cut to a bounded prefix on a character boundary before the compatibility step
+ * sees it, and then to the cap. A cut at either step is a cut: `cut` says so, and the mark is there
+ * even when the normalized prefix happens to be shorter than the cap. `inputCaps` is a parameter
+ * only so a test can make that last case reachable: composition shrinks text by at most about three
+ * to one, so with the real factor of four a bounded prefix always normalizes to more than the cap.
+ */
+export function normalizeBounded(
+  text: string,
+  cap: number,
+  inputCaps: number = COMPATIBILITY_INPUT_CAPS,
+): { text: string; cut: boolean } {
+  const stripped = strip(text);
+  refuseLongMarkRuns(stripped);
+  const bound = inputCaps * cap;
+  const bounded = stripped.length > bound;
+  const normalized = settle(bounded ? cutAtBoundary(stripped, bound) : stripped);
+  const result = cutTo(normalized, cap);
+  if (bounded && !result.cut) return { text: `${normalized}\n[cut]`, cut: true };
+  return result;
+}
+
+/** The first `n` characters of `text`, never ending in the first half of a surrogate pair. */
+function cutAtBoundary(text: string, n: number): string {
+  const last = text.charCodeAt(n - 1);
+  return text.slice(0, last >= 0xd800 && last <= 0xdbff ? n - 1 : n);
 }
 
 /**
@@ -229,12 +339,12 @@ function cutTo(text: string, cap: number): { text: string; cut: boolean } {
 }
 
 /**
- * The string a document is sent as: normalized, then cut to `cap` characters. Whether it was cut is
- * judged on the normalized text, because a control character outside the Basic Multilingual Plane
- * is replaced by one space and so shortens the text.
+ * The string a document is sent as: normalized (bounded), then cut to `cap` characters. Whether it
+ * was cut is judged on the normalized text, because a control character outside the Basic
+ * Multilingual Plane is replaced by one space and so shortens the text.
  */
 function toSent(text: string, cap: number): { sent: string; cut: boolean } {
-  const { text: sent, cut } = cutTo(normalizeText(text), cap);
+  const { text: sent, cut } = normalizeBounded(text, cap);
   return { sent, cut };
 }
 
@@ -282,8 +392,10 @@ function prepare(document: ReviewDocument, raw: RawDocument): Prepared {
       keysShown++;
     }
   }
+  if (nestedDeeperThan(kept, MAX_JSON_DEPTH))
+    return { kind: "no-text", state: "withheld_unreadable" };
   // Normalize first, then examine the normalized structure, then send that same structure.
-  const object = normalizeStructure(kept);
+  const object = normalizeStructure(kept, cap);
   return {
     kind: "text",
     ...toSent(JSON.stringify(object, null, 2), cap),
@@ -297,39 +409,46 @@ function prepare(document: ReviewDocument, raw: RawDocument): Prepared {
 const SUBJECT_LABEL_KEY = /^\s*sub-/i;
 
 /**
- * participants.json, reduced to what ADR 0101 says the model is shown: the column descriptions.
- * For each top-level column that is its `LongName`, `Description` and `Units` where they are
- * strings, each cut to {@link PARTICIPANT_FIELD_CAPS}, and nothing else: no levels, links, other
- * keys or values of any participant. The file must be an object of objects (a column is an object);
- * anything else is unreadable. A column named like a subject label means the file is keyed by
- * participant, and it is withheld whole.
+ * participants.json, reduced to what ADR 0101 says the model is shown: the column descriptions, and
+ * not the columns' names. What is sent is `{ column_count, columns }`: for each top-level column, in
+ * file order and with no key, its `LongName`, `Description` and `Units` where they are strings, each
+ * cut to {@link PARTICIPANT_FIELD_CAPS}, and nothing else (no levels, links, other keys or values of
+ * any participant). The key of a column is never sent: a file keyed by participant (`sub01`, `S01`,
+ * `Jane Doe`) would send every label.
  *
- * The key rule reads the whole normalized file, not only what is kept, so a column named for an
- * identifier is a finding whatever it holds. The path rules read what is sent.
+ * Withheld as unreadable: not an object of objects, more than {@link PARTICIPANT_MAX_COLUMNS}
+ * columns, nested too deep. Withheld with a finding: a key that is a study code (the shared
+ * `SUBJECT_LABEL` pattern, or `sub-` followed by anything), a number, longer than
+ * {@link PARTICIPANT_KEY_MAX}, or named for an identifier (read by the JSON key rule and the
+ * participants table's column rule whatever the column holds, because a column called `name` or
+ * `email` is the finding even when it is empty). Every key
+ * of the file is read as it would be normalized. The key rule also reads the keys inside each
+ * column, and the path rules read what is sent.
  */
 function prepareParticipants(parsed: Record<string, unknown>, cap: number): Prepared {
-  if (!Object.values(parsed).every(isPlainObject)) {
+  const entries = Object.entries(parsed);
+  if (
+    entries.length > PARTICIPANT_MAX_COLUMNS ||
+    !entries.every(([, column]) => isPlainObject(column)) ||
+    nestedDeeperThan(parsed, MAX_JSON_DEPTH)
+  ) {
     return { kind: "no-text", state: "withheld_unreadable" };
   }
-  const whole = normalizeStructure(parsed) as Record<string, Record<string, unknown>>;
-  let fieldCut = false;
-  const reduced = Object.fromEntries(
-    Object.entries(whole).map(([column, description]) => {
-      const fields: Record<string, string> = {};
-      for (const field of Object.keys(
-        PARTICIPANT_FIELD_CAPS,
-      ) as (keyof typeof PARTICIPANT_FIELD_CAPS)[]) {
-        const value = Object.hasOwn(description, field) ? description[field] : undefined;
-        if (typeof value !== "string") continue;
-        const { text, cut } = cutTo(value, PARTICIPANT_FIELD_CAPS[field]);
-        fields[field] = text;
-        fieldCut ||= cut;
-      }
-      return [column, fields];
-    }),
-  );
-  const findings: Finding[] = [...scanJsonKeys(whole), ...scanStructureForPaths(reduced)];
-  if (Object.keys(whole).some((column) => SUBJECT_LABEL_KEY.test(column))) {
+  // Every column kept, in order: an object keyed by the normalized names would lose one of two
+  // names that normalize alike, and the count would be wrong.
+  const columns = entries.map(([key, column]) => ({
+    key: normalizeBounded(key, cap).text,
+    value: normalizeStructure(column, cap) as Record<string, unknown>,
+  }));
+
+  const findings: Finding[] = [];
+  const labelled = columns.some(({ key }) => {
+    const bare = key.trim();
+    return (
+      SUBJECT_LABEL_KEY.test(key) || PARTICIPANT_LABEL.test(bare) || PARTICIPANT_NUMBER.test(bare)
+    );
+  });
+  if (labelled) {
     findings.push({
       kind: "path-subject-label",
       severity: "review",
@@ -337,7 +456,43 @@ function prepareParticipants(parsed: Record<string, unknown>, cap: number): Prep
       shape: shapeOf("sub-"),
     });
   }
-  const sent = toSent(JSON.stringify(reduced, null, 2), cap);
+  if (columns.some(({ key }) => key.length > PARTICIPANT_KEY_MAX)) {
+    findings.push({
+      kind: "participants-identifier-column",
+      severity: "review",
+      field: "participants-key",
+      shape: shapeOf("long"),
+    });
+  }
+  for (const { key, value } of columns) {
+    // The name of the column, by the two shared rules that know names: the JSON key rule (given a
+    // value, because it looks for content, so that it reads the name only) and the participants
+    // table's column rule (`name`, `email`, `dob`, ...). One finding per column at most. Then the
+    // keys inside the column.
+    const named = scanJsonKeys({ [key]: "x" });
+    findings.push(...(named.length > 0 ? named : scanTableColumns(key)), ...scanJsonKeys(value));
+  }
+
+  let fieldCut = false;
+  const descriptions = columns.map(({ value }) => {
+    const fields: Record<string, string> = {};
+    for (const field of Object.keys(
+      PARTICIPANT_FIELD_CAPS,
+    ) as (keyof typeof PARTICIPANT_FIELD_CAPS)[]) {
+      const text = Object.hasOwn(value, field) ? value[field] : undefined;
+      if (typeof text !== "string") continue;
+      const { text: kept, cut } = cutTo(text, PARTICIPANT_FIELD_CAPS[field]);
+      fields[field] = kept;
+      fieldCut ||= cut;
+    }
+    return fields;
+  });
+  findings.push(...scanStructureForPaths(descriptions));
+
+  const sent = toSent(
+    JSON.stringify({ column_count: descriptions.length, columns: descriptions }, null, 2),
+    cap,
+  );
   return {
     kind: "text",
     sent: sent.sent,
@@ -353,6 +508,33 @@ function prepareParticipants(parsed: Record<string, unknown>, cap: number): Prep
  * sent, and returns that string, branded, for the documents the rules found nothing in. See the
  * file header for the rules, and `PreSendResult` for what each state means.
  */
+/**
+ * What this module has cleared, as SHA-256 digests of the document and the exact string, in a set no
+ * one else can reach. The brand on `ClearedText` is a compile-time property: a type predicate, an
+ * assertion function, a generic cast, `JSON.parse` or a suppressed error all produce "cleared" text
+ * the compiler accepts. This is the run-time half: the prompt builder asks {@link isCleared} for
+ * every document it is about to send and throws on a string this module did not clear.
+ *
+ * A set of digests, not of strings: the same guarantee by value, a fixed 32 bytes per entry however
+ * long the document, and no copy of a depositor's text kept in module state for the life of the
+ * process. It is per document, because the rules differ (a string cleared as prose is not what the
+ * JSON rules cleared), and it is the process's, not a call's: nothing in a job calls presend twice,
+ * and a registry that forgot would make a legitimate result from an earlier call throw.
+ */
+const clearedDigests = new Set<string>();
+
+function digestOf(document: ReviewDocument, text: string): string {
+  return createHash("sha256").update(document).update("\0").update(text, "utf8").digest("hex");
+}
+
+/**
+ * Whether pre-send cleared exactly `text` as the `document`. The only thing exported about the
+ * registry: nothing outside this file can add to it.
+ */
+export function isCleared(document: ReviewDocument, text: unknown): boolean {
+  return typeof text === "string" && clearedDigests.has(digestOf(document, text));
+}
+
 export const presend: PreSend = (docs): PreSendResult => {
   const cleared: ClearedDocuments = {};
   const states = {} as Record<ReviewDocument, DocumentState>;
@@ -383,6 +565,7 @@ export const presend: PreSend = (docs): PreSendResult => {
       // The one cast of the repository: this string was examined, byte for byte, and nothing was
       // found in it.
       cleared[document] = prepared.sent as ClearedText;
+      clearedDigests.add(digestOf(document, prepared.sent));
       states[document] = prepared.cut ? "sent_cut" : "sent";
       keysShown += prepared.keysShown;
       keysNotShown += prepared.keysNotShown;

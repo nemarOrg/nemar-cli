@@ -27,34 +27,46 @@
 # fetched as `main` against the dispatched commit before it calls the model.
 #
 # WHAT EACH STEP CAN HOLD. The step that calls the model has the federated Anthropic identity and
-# the callback token in its environment, and no GitHub credential in it. The GitHub App's private
-# key is used by exactly one step, which mints a read-only token (contents and actions: read) for
-# ONE dataset repository, one hour at most. That token is passed to the two steps that read the
-# repository (the git fetch and the validation-run lookup), and the fetch step also leaves it in
-# the repository's git config, because the model step's git reads fetch blobs lazily (the clone is
-# blob-less) and need it. So the model step can USE the read-only token through git, and its git
-# child processes are given an environment without it; it cannot print it, send it anywhere, or
-# write with it, and nothing from the dataset runs. Apart from the one-shot callback token, which
-# can post one report for this review and nothing else, the job has no credential that can write to
-# GitHub or to NEMAR. `id-token: write` puts the OIDC request variables in every step's
-# environment, which the federation rule's conditions (this repository, this workflow, main) bound.
+# the callback token in its environment, and NO GitHub credential: none in its environment, and
+# none in the clone's configuration. The GitHub App's private key is used by exactly one step, which
+# mints a read-only token (contents and actions: read) for ONE dataset repository, one hour at most.
+# That token is passed to the two steps that read the repository (the git fetch and the
+# validation-run lookup) and to no other. The fetch step gives it to each git command that needs it
+# through that command's own environment, and writes it nowhere: the repository's configuration
+# holds no credential. The clone is blob-less, so the same step also fetches, in one batch, the
+# blobs the review reads (the root documents and the sampled data sidecars), and the model step's
+# git then needs nothing from the network. Apart from the one-shot callback token, which can post
+# one report for this review and nothing else, the job has no credential that can write to GitHub
+# or to NEMAR. `id-token: write` puts the OIDC request variables in every step's environment, which
+# the federation rule's conditions (this repository, this workflow, main) bound.
 #
-# THE ORDER KEEPS THE APP'S PRIVATE KEY AWAY FROM INSTALLED CODE. The mint step is given the GitHub
-# App's private key, so nothing the dependency tree or a setup action brought may have run on the
-# runner before it: code that ran earlier could leave a hook in the environment (a variable, a path
-# entry) for the minting action to load. The claim, the mint and the dataset fetch therefore come
-# first, and the checkout of the review script, the setup of Bun and `bun install` come after them;
-# the first step that runs anything of the repository's is the install. What could not move: the
-# masking step must be first (and is GitHub's own action, with no env and no secret); the mint
-# action itself runs with the key; and the OIDC token is still requested by an action in the job
-# that installs the tree, because the model step needs that identity and runs the same tree, so
-# `id-token: write` stays job-wide and a step that runs installed code could request a token too;
-# the federation rule's conditions (this repository, this workflow, main) bound what one can do.
-# One cost of the order, accepted: the read-only dataset token is in the clone's git config before
-# the install, so the setup action and the install can read it, as the model step already can.
-# It reads one repository for an hour at most, and the private key that mints it is out of reach.
-# Every action is pinned to a full commit, with the version it was resolved from in a trailing
-# comment; moving a pin is a reviewed change to this file.
+# WHAT THE ORDER CLOSES, AND WHAT IT DOES NOT. The mint step is given the GitHub App's private key,
+# and the runner passes the same inputs again to the action's post step at the end of the job. So
+# code that ran on the runner before the mint could leave a hook in the environment for the minting
+# action to load, and code that runs between the mint and the end of the job could try to tamper
+# with the post step. Closed: (1) hooks planted before the mint, because nothing the repository's
+# dependency tree or a setup action brought runs before it (the claim, the mint and the dataset
+# fetch come first; the checkout, Bun and the install after them); (2) install-time code, because
+# `bun install --frozen-lockfile --ignore-scripts` runs no lifecycle scripts at all, neither the
+# repository's own (`prepare`, `postinstall`) nor any dependency's, trusted by default or not
+# (`--production` is not used: the review script imports the Anthropic SDK, which this repository
+# lists as a development dependency); (3) the dataset token in a configuration file, because it is
+# in none. Not closed: (a) the pinned third-party actions' own code (the masking, checkout, Bun and
+# OIDC steps and the mint action itself) runs on the runner, which is why every action is pinned to
+# a full commit with its version in a trailing comment, and moving a pin is a reviewed change to
+# this file; (b) the callback token travels in the repository_dispatch payload, which is in the
+# event file that every step can read, exactly as in the pull-request review's workflow, and the
+# Review step needs it anyway; (c) the mint action's post step is reachable by code that runs during
+# the Review step itself, that is the dependency tree's runtime code (the SDK and what it imports),
+# because this is one job and `id-token: write` is job-wide. Splitting it into two jobs and handing
+# the clone over as an artifact was considered and rejected: this repository's logs and artifacts
+# are public, and the clone is private dataset text.
+#
+# THE HEAD CHECK AND ITS WINDOW. The fetch step records the commit it fetched as `main`, and the
+# review script checks it against the dispatched commit before it calls the model. The checkout,
+# Bun and the install now sit between the two, so the window in which `main` can move is wider than
+# it was. That is accepted: the cost is one wasted call, and the Worker's own head check at approval
+# still blocks an approval of a review that is about an older commit.
 #
 # THE CALLBACK TOKEN IS MASKED BEFORE ANYTHING CAN PRINT IT. This repository's logs are public and
 # Actions prints a step's `env:` in its header, so the token is never in job-level env, the first
@@ -228,8 +240,8 @@ jobs:
             exit 1
           fi
 
-      # Read-only, one repository. This token is handed to the next two steps and to no other; the
-      # fetch step also stores it in the repository's git config (see the header).
+      # Read-only, one repository. This token is handed to the fetch step and to the validation-run
+      # lookup and to no other, and is written to no configuration file (see the header).
       - name: Mint a read-only token for the dataset repository
         if: steps.claim.outputs.claimed == 'true'
         id: app-token
@@ -244,9 +256,21 @@ jobs:
 
       # init + fetch, never checkout: there is no working tree, so nothing in the dataset can run.
       # One commit deep and without blobs: the review reads the tree, the five root documents and a
-      # bounded sample of sidecars, which are fetched lazily. The tags come from ls-remote, because
-      # they are annotated and a fetch with --no-tags does not carry them; an annotated tag prints
-      # its commit on a second, peeled line.
+      # bounded sample of sidecars. The tags come from ls-remote, because they are annotated and a
+      # fetch with --no-tags does not carry them; an annotated tag prints its commit on a second,
+      # peeled line.
+      #
+      # The credential reaches git only through the environment of the command that needs it
+      # (`gitauth`: git's own GIT_CONFIG_COUNT variables, set in a subshell), never through the
+      # repository's configuration, never on a command line, and never in an environment variable
+      # of the step's other commands. The blobs are then fetched in one batch, the way git's own lazy
+      # fetch does it, so the model step reads them locally and holds no credential. The selection
+      # is the review's own: the root documents by their BIDS names (shared/readme-candidates.ts
+      # and shared/publication-review.ts), and the data sidecars of the raw tree (not derivatives,
+      # sourcedata or code, no symlinks), in the order `git ls-tree -r` lists them (full-path byte
+      # order, which is the order `structuralSummary` sorts into), evenly sampled to 64 as it does.
+      # test/publication-review-workflow.test.ts runs the review's readers over the clone with no
+      # remote and counts the blobs, and checks the names and patterns below against the script's.
       - name: Fetch the dataset as git data
         if: steps.claim.outputs.claimed == 'true'
         id: fetch
@@ -263,11 +287,30 @@ jobs:
           git config core.hooksPath /dev/null
           git config extensions.partialClone origin
           git remote add origin "https://github.com/nemarDatasets/${DATASET_ID}.git"
-          git config http.https://github.com/.extraheader "AUTHORIZATION: basic $auth"
-          git fetch -q --no-tags --depth=1 --filter=blob:none origin \
+          gitauth() {
+            (
+              n="${GIT_CONFIG_COUNT:-0}"
+              export GIT_CONFIG_COUNT="$((n + 1))"
+              export "GIT_CONFIG_KEY_${n}=http.https://github.com/.extraheader"
+              export "GIT_CONFIG_VALUE_${n}=AUTHORIZATION: basic ${auth}"
+              exec git "$@"
+            )
+          }
+          gitauth fetch -q --no-tags --depth=1 --filter=blob:none origin \
             "+refs/heads/main:refs/remotes/origin/main"
           echo "fetched=$(git rev-parse refs/remotes/origin/main)" >> "$GITHUB_OUTPUT"
-          git ls-remote --tags origin > "$RUNNER_TEMP/tags.txt"
+          gitauth ls-remote --tags origin > "$RUNNER_TEMP/tags.txt"
+          {
+            git ls-tree --full-tree refs/remotes/origin/main \
+              | awk -F'\t' '{ split($1, f, " "); if (f[1] != "120000" && f[2] == "blob" && ($2 == "README.md" || $2 == "README" || $2 == "README.rst" || $2 == "README.txt" || $2 == "CHANGES" || $2 == "LICENSE" || $2 == "dataset_description.json" || $2 == "participants.json")) print f[3] }'
+            git ls-tree -r --full-tree refs/remotes/origin/main \
+              | awk -F'\t' '{ split($1, f, " "); if (f[1] != "120000" && f[2] == "blob" && $2 !~ /^(derivatives|sourcedata|code)\// && $2 ~ /_(eeg|ieeg|meg|emg|nirs)\.json$/) print f[3] }' \
+              | awk '{ oid[NR] = $1 } END { n = NR; if (n <= 64) { for (i = 1; i <= n; i++) print oid[i] } else { for (i = 0; i < 64; i++) print oid[int(i * n / 64) + 1] } }'
+          } | sort -u > "$RUNNER_TEMP/blobs.txt"
+          if [ -s "$RUNNER_TEMP/blobs.txt" ]; then
+            gitauth -c fetch.negotiationAlgorithm=noop fetch -q --no-tags --no-write-fetch-head \
+              --recurse-submodules=no --filter=blob:none --stdin origin < "$RUNNER_TEMP/blobs.txt"
+          fi
 
       # The newest BIDS validation run at the dispatched commit. A lookup that fails is recorded as
       # unreadable, which the review reads as "not concluded", not as a failed job.
@@ -280,9 +323,9 @@ jobs:
           gh api "repos/nemarDatasets/${DATASET_ID}/actions/workflows/bids-validation.yml/runs?head_sha=${HEAD_SHA}&per_page=10" \
             > "$RUNNER_TEMP/bids-runs.json" || echo '{"unavailable":true}' > "$RUNNER_TEMP/bids-runs.json"
 
-      # From here on, code that was not written for this job runs on the runner: a setup action and
-      # the review script's whole dependency tree. The App's private key was used by the mint step
-      # above and is out of reach of everything below (see the header).
+      # From here on, code that was not written for this job runs on the runner: a setup action and,
+      # in the Review step, the review script's whole dependency tree (the install runs no script).
+      # What that can and cannot reach of the mint step's credentials is in the header.
       - name: Check out the review script
         if: steps.claim.outputs.claimed == 'true'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -298,10 +341,14 @@ jobs:
         with:
           bun-version: 1.4.3
 
+      # No lifecycle script runs: neither the repository's own (`prepare`, `postinstall`) nor any
+      # dependency's, trusted by default or not (`--ignore-scripts` skips both; checked with Bun
+      # 1.4.3 against a dependency trusted by name). The review script needs no build step. Not
+      # `--production`: the Anthropic SDK it imports is a development dependency of this repository.
       - name: Install the review script's dependencies
         if: steps.claim.outputs.claimed == 'true'
         working-directory: tool
-        run: bun install --frozen-lockfile
+        run: bun install --frozen-lockfile --ignore-scripts
 
       # Minted last, so it has not aged when the script exchanges it. The audience is the one the
       # federation rule expects.
@@ -316,7 +363,8 @@ jobs:
             fs.writeFileSync(`${process.env.RUNNER_TEMP}/anthropic-oidc.jwt`, token, { mode: 0o600 });
 
       # The model step: the federated identity and the callback token in its environment, and no
-      # GitHub credential in it (git reads the stored read-only token, see the header).
+      # GitHub credential: none in its environment and none in the clone, whose blobs the fetch step
+      # already fetched (see the header, and its note on the window before the head check).
       - name: Review
         if: steps.claim.outputs.claimed == 'true'
         working-directory: tool

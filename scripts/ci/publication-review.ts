@@ -3,9 +3,10 @@
  * The publication review job's script (ADR 0101). Run by the central workflow
  * `run-publication-review.yml` in `nemarDatasets/.github`, after the workflow has claimed the
  * review. This step's environment holds a federated Anthropic identity and the one-shot callback
- * token, and no GitHub credential. The repository was fetched by an earlier step, whose read-only
- * token stays in the clone's git config for the lazy blob reads this script's git calls make; this
- * script never reads it, prints it or sends it, and no git child process inherits any token.
+ * token, and no GitHub credential, and neither does the clone: an earlier step fetched the
+ * repository, and with it the blobs this script reads, giving its read-only token to each git
+ * command through that command's own environment and writing it nowhere. This script's git calls
+ * need nothing from the network, and no git child process inherits any token.
  *
  *   bun run scripts/ci/publication-review.ts review \
  *     --repo-dir DIR --head SHA --fetched-head SHA --tags-file FILE --bids-runs-file FILE \
@@ -164,6 +165,11 @@ export async function callPublicationReviewModel(
   model: ReviewerModel = PUBLICATION_REVIEW_MODEL,
   onUsage?: (usage: ModelUsage) => void,
 ): Promise<unknown> {
+  // The documents are bounded in characters, not tokens, and the estimate behind the daily caps
+  // assumes four characters to a token. Rare characters can cost more, so an adversarial document
+  // may cost more than estimated or exceed the model's input limit; the API's refusal of that is a
+  // BadRequestError, which `mapError` turns into `model_invalid` (it fails closed), and the daily
+  // caps bound the spend. Accepted.
   // A client given no credentials resolves workload identity federation from the environment
   // (ANTHROPIC_FEDERATION_RULE_ID, _ORGANIZATION_ID, _SERVICE_ACCOUNT_ID, _WORKSPACE_ID and
   // ANTHROPIC_IDENTITY_TOKEN_FILE), exchanges the job's OIDC token, and refreshes it.

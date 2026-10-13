@@ -1790,9 +1790,10 @@ describe("the brands are minted in one place each", () => {
    * Every spelling of "this is cleared text" that does not go through the pre-send module's one cast.
    * Each is a type assertion to a brand only that module may mint (issue #1728: the guard used to
    * look for `as ClearedText` alone, which `as ClearedDocuments`, an angle-bracket cast and a cast
-   * inside a generic all walk around). A value typed `any` cannot be found by reading source; the
-   * type-level negative tests in `publication-review-prompt.test.ts` and the pre-send module's
-   * single cast are what hold that half.
+   * inside a generic all walk around). This guard is lexical, and some spellings that typecheck
+   * cannot be found by reading source (a type predicate, an assertion function, a generic cast,
+   * `JSON.parse`, a suppressed error): the run-time half is the pre-send module's registry, which
+   * the prompt builder asks about every document, tested in `publication-review-prompt.test.ts`.
    */
   const CLEARED_CASTS: [string, RegExp][] = [
     ["as <brand>", /\bas\s+Cleared(?:Text|Documents)\b/],
