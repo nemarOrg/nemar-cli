@@ -427,6 +427,8 @@ describe("an entry is read back only if it is exactly what the builder writes", 
   function tampered(change: (meta: Record<string, unknown>) => void): string {
     const dir = join(root, `corpus-tampered-${++tamperSeq}`, "nm000001");
     cpSync(join(goodCorpus, "nm000001"), dir, { recursive: true });
+    // A file the entry has no business reading, where a name with `..` in it would find it.
+    writeFileSync(join(dirname(dir), "outside.md"), "outside the entry\n");
     const meta = JSON.parse(readFileSync(join(dir, "entry.json"), "utf8")) as Record<
       string,
       unknown
@@ -443,7 +445,7 @@ describe("an entry is read back only if it is exactly what the builder writes", 
     [
       "a file name outside the closed lists",
       (m: Record<string, unknown>) => {
-        documents(m).readme = { name: "../../outside.md", state: "present" };
+        documents(m).readme = { name: "../outside.md", state: "present" };
       },
     ],
     [
