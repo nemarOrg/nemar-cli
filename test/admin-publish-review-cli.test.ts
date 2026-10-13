@@ -316,6 +316,25 @@ describe("list with the review off", () => {
     );
   });
 
+  test("a request whose identifier screen is still running is only waiting, with the review off too", async () => {
+    seedScreenedRequest(h.db, { datasetId: "nm000480", status: "pending" });
+    seedScreenedRequest(h.db, { datasetId: "nm000481" });
+
+    const r = await h.cli(LIST);
+
+    expect(r.exitCode).toBe(0);
+    // No review reports a wait here (the flag is off), so the screen's own state is the only word.
+    expect(blockOf(r.stdout, "nm000480")[0].trimEnd().endsWith("*")).toBe(false);
+    expect(blockOf(r.stdout, "nm000481")[0].trimEnd().endsWith("*")).toBe(true);
+    expect(r.stdout).toContain("2 requests, 1 you can act on.");
+
+    const mine = await h.cli([...LIST, "--needs-me"]);
+
+    expect(mine.stdout).toContain("Publication Requests (1)");
+    expect(mine.stdout).toContain("nm000481");
+    expect(mine.stdout).not.toContain("nm000480");
+  });
+
   test("a stored review is printed as advice, and the footer still says the review is off", async () => {
     seedScreenedRequest(h.db, { datasetId: "nm000480" });
     seedFailing("nm000481");

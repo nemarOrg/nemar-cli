@@ -21,10 +21,15 @@ type Row = PublishRequestsResponse["requests"][number];
 const WAITS: ReadonlySet<string> = new Set(["review_running", "identifier_screen_pending"]);
 
 /**
- * A request an administrator can act on now: `requested` and not in flight, unless every reason is
- * a wait (`review_running`, `identifier_screen_pending`); or `approving` and not in flight (a
- * stopped run, resumed with `--resume`). Blocked (the depositor acts), published and denied are
- * not. A row from an older backend with no summary counts when it is `requested` and not in flight.
+ * A request an administrator can act on now: `requested` and not in flight, unless it is only
+ * waiting for the platform; or `approving` and not in flight (a stopped run, resumed with
+ * `--resume`). Blocked (the depositor acts), published and denied are not. A row from an older
+ * backend with no summary counts when it is `requested` and not in flight.
+ *
+ * Only waiting means one of two things. Its identifier screen is still running (the row's own
+ * `identifier_screen.state`), which holds whatever the review says and is the only word there is
+ * while the review is off, as it is in production today. Or every reason of the review is a wait
+ * (`review_running`, `identifier_screen_pending`).
  *
  * A summary with no reason at all is not "only waiting": a pass, a review that is off and one that
  * could not be read all leave a request waiting for a person.
@@ -33,6 +38,7 @@ export function needsAdministrator(row: Row): boolean {
   if (row.approval_in_flight === true) return false;
   if (row.status === "approving") return true;
   if (row.status !== "requested") return false;
+  if (row.identifier_screen?.state === "pending") return false;
   const reasons = row.publication_review?.reasons ?? [];
   return reasons.length === 0 || !reasons.every((r) => WAITS.has(r));
 }

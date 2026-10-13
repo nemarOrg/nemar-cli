@@ -629,6 +629,20 @@ describe("which requests are shown, and in what order", () => {
     expect(r.stdout).toContain("Done: 3 skipped.");
   });
 
+  test("with the review off, a request whose identifier screen is still running is not shown either", async () => {
+    // Nothing reports a wait when the review is off (production today), so the screen's own state
+    // is the only word: a card for it would offer y, and y would fail on "Identifier screen: running".
+    h.setEnv({ PUBLICATION_REVIEW_ENABLED: "0" });
+    seed(A, null, { status: "pending" });
+    seed(B, null);
+
+    const r = await next("q\n");
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(`[1 of 1] ${B}`);
+    expect(r.stdout).not.toContain(A);
+  });
+
   test("a skipped request is not shown again in the same run, and the run says it still needs the administrator", async () => {
     seed(A);
 

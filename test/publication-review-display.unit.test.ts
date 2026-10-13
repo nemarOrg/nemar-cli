@@ -138,6 +138,70 @@ describe("needsAdministrator", () => {
     ).toBe(false);
   });
 
+  // The review is off in production today: its summary has no reason at all, so the screen's own
+  // state is the only word that a request is still waiting for the platform.
+  const SCREEN_PENDING = {
+    state: "pending",
+    headline: "Identifier screen: RUNNING",
+    tone: "note" as const,
+    lines: [],
+  };
+  const OFF = () =>
+    summary({ kind: "off", enabled: false, outcome: null, reasons: [], gate: "off" });
+
+  test("a request whose identifier screen is still running is only waiting, whatever the review says", () => {
+    // The review is off (no reasons): the screen is the wait.
+    expect(
+      needsAdministrator(row({ identifier_screen: SCREEN_PENDING, publication_review: OFF() })),
+    ).toBe(false);
+    // No summary at all (an older backend) but a row that says its screen is running.
+    expect(
+      needsAdministrator(row({ identifier_screen: SCREEN_PENDING, publication_review: undefined })),
+    ).toBe(false);
+    // The review is on and says something else: the screen still has to report first.
+    expect(
+      needsAdministrator(
+        row({
+          identifier_screen: SCREEN_PENDING,
+          publication_review: summary({ reasons: ["question_failed"] }),
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  test("a screen that reported, did not run or is not on the row does not make a request wait", () => {
+    for (const state of [
+      "clean",
+      "dates-only",
+      "review",
+      "direct-identifiers",
+      "error",
+      "unreported",
+    ]) {
+      expect(
+        needsAdministrator(
+          row({ identifier_screen: { ...SCREEN_PENDING, state }, publication_review: OFF() }),
+        ),
+      ).toBe(true);
+    }
+    expect(
+      needsAdministrator(
+        row({ identifier_screen: { ...SCREEN_PENDING, state: null }, publication_review: OFF() }),
+      ),
+    ).toBe(true);
+    expect(
+      needsAdministrator(row({ identifier_screen: undefined, publication_review: OFF() })),
+    ).toBe(true);
+  });
+
+  test("a screen that is running does not hide an approval that stopped, and an approving request is never only waiting", () => {
+    expect(
+      needsAdministrator(
+        row({ status: "approving", identifier_screen: SCREEN_PENDING, publication_review: OFF() }),
+      ),
+    ).toBe(true);
+  });
+
   test("a wait next to anything else is still the administrator's", () => {
     expect(
       needsAdministrator(
