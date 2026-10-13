@@ -281,6 +281,23 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    * POST /admin/publish/:id/approve - Approve and run the publication
    * orchestrator. The 16-step state machine lives in
    * services/publication-orchestrator.ts (#904); this route is a thin adapter.
+   *
+   * The body carries `resume`, `skip_ci_check` and the S3 lock fields as before, and two fields
+   * of an approval that is gated: `acknowledge_identifier_screen` (the identifier screen's
+   * reason, ADR 0086) and `override_publication_review` (the review shown and the reasons shown,
+   * ADR 0102).
+   *
+   * Refusals, each with a stable code in `error` and a sentence in `message`:
+   *   403 origin_not_allowed  an override sent with a session cookie: it is accepted only with
+   *                         an API key, and the website records one through approve-dispatch
+   *   409 request_blocked   the request is `blocked` and is not a run that started publishing
+   *                         (the owner-name walk-back); whatever the flag says
+   *   409 identifier_screen_not_clear  the identifier screen does not allow it (ADR 0086)
+   *   409 publication_review_not_clear  the review does not allow it, with a `refusal` word and
+   *                         the review's words (ADR 0102)
+   *   409 override_inside_web_approval  an override sent inside a live web approval of the
+   *                         request, which would be recorded under the administrator who clicked
+   *   409 request_changed   the request was denied or blocked while the approval was checked
    */
   admin.post("/publish/:id/approve", zValidator("json", approveSchema), async (c) => {
     const body = c.req.valid("json");
@@ -327,8 +344,13 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    * The executor calls `POST /publish/:id/approve` with its own service key; the
    * orchestrator reads `approval_requested_by` as the approver while the run is
    * live, so the record names the admin who clicked rather than the bot.
-   * `/approve`'s request and response contract is unchanged and stays the
-   * contract for every executor, a terminal included.
+   * `/approve` is the contract for every executor, a terminal included: it also
+   * takes the review's override in its body, and answers 403 origin_not_allowed
+   * for an override sent with a cookie, and the 409s `request_blocked`,
+   * `request_changed`, `override_inside_web_approval` and
+   * `publication_review_not_clear`, besides the identifier screen's own
+   * (see its docblock). The executor sends no override: its run rides on the
+   * clicker's, recorded here before the dispatch.
    *
    * A cookie request must come from a NEMAR origin; a bearer key is not asked.
    *
@@ -464,8 +486,8 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       // The publication review's gate (ADR 0102) is asked next, still before the
       // claim, so a refusal claims nothing and changes nothing. It reads no GitHub
       // and writes nothing: only the OVERRIDE it says to record waits, until the head
-      // check below has passed, so it is recorded last and only for an approval that
-      // goes on. (The screen's acknowledgment is recorded when the screen gate passes,
+      // check below has passed, so it is recorded last, only after every gate has passed.
+      // (The screen's acknowledgment is recorded when the screen gate passes,
       // on its own, and stands whether or not the review then refuses.)
       // `requireRow`: the executor that follows reads the clicker's override off the
       // review row, so an override with no row to hold it cannot be carried.
@@ -641,10 +663,12 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       }
       // The override the review gate asked to record, last, now that the screened commit
       // is still `main`: it attaches to content that is still the content being published,
-      // and is recorded only for an approval that goes on. The screen's acknowledgment
-      // above was recorded when its own check passed and does not depend on this one.
-      // Still before the dispatch, so the executor's run finds it on the row. A row
-      // that moved since the gate read it refuses, and nothing has been sent.
+      // and is recorded only after every gate has passed. It can remain on its row, bound to
+      // that review, those reasons and its approver, when the dispatch then fails or goes
+      // unconfirmed. The screen's acknowledgment above was recorded when its own check passed
+      // and does not depend on this one. Still before the dispatch, so the executor's run
+      // finds it on the row. A row that moved since the gate read it refuses, and nothing has
+      // been sent.
       if (review.ok && review.state === "enforced" && review.record !== null) {
         const recorded = await recordApprovalOverride(c.env, {
           requestId: request.id,

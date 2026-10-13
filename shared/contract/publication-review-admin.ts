@@ -400,7 +400,7 @@ export interface PublicationReviewGateRefusalBody {
 export interface RequestBlockedRefusalBody {
   error: typeof REQUEST_BLOCKED_CODE;
   block_reason: string | null;
-  /** `REASONS.request_blocked.sentence` with the word, and its cure. */
+  /** `REASONS.request_blocked.sentence` and its cure; the word is the separate `block_reason`. */
   message: string;
 }
 

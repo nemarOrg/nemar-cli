@@ -15,15 +15,19 @@
  * from `readStoredReport(...)?.head`, the gate's own reader. A row of another head or flag is
  * history in the detail view and never the outcome here.
  *
- * **Only a request in `requested` is reviewed** (ADR 0102, section 7: the claim requires it). A
- * request in any other state shows its stored review as history and never as a wait: a dispatched
- * row of such a request reads as one that did not report, so no surface says "running" about a
- * review whose result can no longer settle anything. Its live facts are not read either, with one
- * exception, `blocked` ({@link LIVE_FACT_STATUSES}): a blocked request that never started
- * publishing has written nothing of an approval, so a version row or a concept DOI can only belong
- * to an EARLIER release, and is shown beside the hard `request_blocked`. A request that is over
- * (`published`, `denied`) would read as one whose own release "was already released", and an
- * `approving` or `blocked` request that has started publishing has written those facts itself, so
+ * **A dispatched review is waited for in two statuses, `requested` and `approving`.** Only a request
+ * in `requested` is claimed for a review (ADR 0102, section 7: the claim requires it), but an
+ * approval that has not started publishing is gated again when it resumes, so a review claimed
+ * before the approval began can still report and settle that gate; none starts once the request is
+ * `approving`. A request in any other state shows its stored review as history and never as a wait:
+ * a dispatched row of such a request reads as one that did not report, so no surface says
+ * "running" about a review whose result can no longer settle anything. Its live facts are not read
+ * either, with one exception, `blocked` ({@link LIVE_FACT_STATUSES}): a blocked request that is not
+ * a run that started publishing has written nothing of an approval, so a version row or a concept
+ * DOI can only belong to an EARLIER release, and is shown beside the hard `request_blocked`. A
+ * request that is over (`published`, `denied`) would read as one whose own release "was already
+ * released", and an `approving` request that has started publishing, or a `blocked` one the
+ * owner-name walk-back stopped half way (`publishingStanding`), has written those facts itself, so
  * they show their stored review only. An `approving` request that stopped before it published has
  * written neither, is gated again when it resumes, and reads them like a `requested` one.
  *
@@ -145,10 +149,11 @@ export function publicationReviewApplies(dataset: {
  * an EARLIER release, which is what the checks look for.
  *
  *  - `requested`: waiting for its decision.
- *  - `blocked`: a request that never started publishing has written nothing either. Its facts
- *    are informative, and the hard `request_blocked` stands beside them. One that HAS started
+ *  - `blocked`: a request that is not a run that started publishing has written nothing either. Its
+ *    facts are informative, and the hard `request_blocked` stands beside them. One that HAS started
  *    publishing is a run the owner-name walk-back blocked half way (the check runs on every call
- *    of a run), so it wrote its own version row and DOI and reads none, like `approving`.
+ *    of a run; `publishingStanding` reads the reason too), so it wrote its own version row and DOI
+ *    and reads none, like `approving`.
  *
  * Not `approving` as such: a run that HAS started publishing has by then written its own
  * `dataset_versions` row and concept DOI, and read as live facts they would say "already released"
@@ -335,9 +340,10 @@ export async function derivePublicationReview(
       rowView = rowViewOf(row, ctx.nowMs, ctx.overdueMinutes);
       // A review is waited for only while it can still settle something: for a request that is
       // `requested`, and for one that is `approving`, because an approval that has not started
-      // publishing is gated again when it resumes, so its review can still report before then. The
-      // gate, the detail, the list and the mail therefore read a dispatched row one way, by time
-      // alone. A run that HAS started publishing is never gated again, so its reasons do not
+      // publishing is gated again when it resumes, and a review claimed before the approval began
+      // can still report before then (the claim requires `requested`, so none starts once the
+      // request is approving). The gate, the detail, the list and the mail therefore read a
+      // dispatched row one way, by time alone. A run that HAS started publishing is never gated again, so its reasons do not
       // matter to the gate, and reading its row as running is harmless. For any other status a
       // dispatched row is not waited for.
       if (
@@ -604,8 +610,10 @@ export const LIST_CONCURRENCY = 8;
  * The summaries of a whole list, in order, at a cost that does not grow with what each row needs.
  *
  *  - The review in force of every row is read in batches of {@link MAX_KEYS_PER_READ} requests (one
- *    statement each), never once per row. A request that is over, or being approved, then needs no
- *    other statement: its live facts are not read ({@link LIVE_FACT_STATUSES}).
+ *    statement each), never once per row. A request that is over, or that has started
+ *    publishing, then needs no other statement: its live facts are not read
+ *    ({@link LIVE_FACT_STATUSES}). A stopped `approving` run reads up to three live-fact
+ *    statements, like a `requested` one.
  *  - The rest of a row's derivation (a version row, an earlier anonymous request) runs
  *    {@link LIST_CONCURRENCY} rows at a time, so a long list does not put a request for every row
  *    in flight at once.
