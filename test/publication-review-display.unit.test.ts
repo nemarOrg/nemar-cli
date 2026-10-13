@@ -33,6 +33,7 @@ import {
   historyLines,
   reviewDetailLines,
   reviewListLine,
+  screenViewLines,
   shownLine,
   startedSentence,
   withheldLine,
@@ -455,6 +456,42 @@ describe("reviewListLine", () => {
       summary({ headline: `Publication review: ${HOSTILE}`, reasons: [HOSTILE as ReasonCode] }),
     );
     expect(plainText(line ?? "")).not.toMatch(DANGEROUS);
+  });
+});
+
+describe("screenViewLines", () => {
+  const view = (over: Record<string, unknown> = {}) => ({
+    state: "review",
+    headline: "Identifier screen: needs review",
+    tone: "warn" as const,
+    lines: ["3 files hold an identifier-like word."],
+    ...over,
+  });
+
+  test("is the headline and its lines, indented", () => {
+    const lines = screenViewLines(view(), 4).map(plainText);
+    expect(lines[0]).toBe("    Identifier screen: needs review");
+    expect(lines[1]).toBe("      3 files hold an identifier-like word.");
+  });
+
+  test("passes the headline and every line through plain()", () => {
+    const lines = screenViewLines(
+      view({ headline: HOSTILE, lines: [HOSTILE, `a ${HOSTILE} b`] }),
+      2,
+    );
+    expect(lines).toHaveLength(3);
+    for (const line of lines) expect(plainText(line)).not.toMatch(DANGEROUS);
+  });
+
+  test("is nothing for a view an older backend did not send or one with no headline", () => {
+    expect(screenViewLines(undefined, 4)).toEqual([]);
+    expect(screenViewLines(view({ headline: undefined }), 4)).toEqual([]);
+  });
+
+  test("a view whose lines are not a list prints its headline alone", () => {
+    expect(screenViewLines(view({ lines: "not a list" }), 0).map(plainText)).toEqual([
+      "Identifier screen: needs review",
+    ]);
   });
 });
 

@@ -31,9 +31,8 @@ import {
   confirm,
 } from "../lib/confirm.js";
 import { markReportedExit } from "../lib/debug-log.js";
-import { identifierScreenLines } from "../lib/identifier-screen-display.js";
 import { LineReader } from "../lib/prompt-lines.js";
-import { reviewListLine } from "../lib/publication-review-display.js";
+import { reviewListLine, screenViewLines } from "../lib/publication-review-display.js";
 import { needsAdministrator } from "../lib/publication-review-queue.js";
 import { plain } from "../lib/terminal-text.js";
 import { registerApproveCommand } from "./admin-publish-approve.js";
@@ -139,14 +138,14 @@ Examples:
           );
         }
         // Epic #1610 phase 4: the identifier screen, in the backend's words.
-        for (const line of identifierScreenLines(req.identifier_screen, 4)) console.log(line);
+        for (const line of screenViewLines(req.identifier_screen, 4)) console.log(line);
         // ADR 0102: the automated review, in the backend's words; nothing for a request it did
         // not assess.
         const review = reviewListLine(req.publication_review, 4);
         if (review !== null) console.log(review);
         if (req.current_step && req.status === "approving") {
           console.log(
-            `    ${chalk.yellow(">")} ${req.current_step.replace(/_/g, " ")}${req.last_error ? chalk.red(` (${req.last_error})`) : ""}`,
+            `    ${chalk.yellow(">")} ${plain(req.current_step).replace(/_/g, " ")}${req.last_error ? chalk.red(` (${plain(req.last_error)})`) : ""}`,
           );
         }
         // Non-blocking pre-screen advisory (#756): a concern for the admin to
@@ -155,7 +154,8 @@ Examples:
           let reasons: string[] = [];
           try {
             const parsed = JSON.parse(req.prescreen_reasons || "[]");
-            if (Array.isArray(parsed)) reasons = parsed.filter((x) => typeof x === "string");
+            if (Array.isArray(parsed))
+              reasons = parsed.filter((x) => typeof x === "string").map(plain);
           } catch {
             // malformed -> show the flag without inline reasons
           }
@@ -312,7 +312,7 @@ Examples:
         console.log(chalk.dim("  The admins are mailed when it reports."));
       } else {
         spinner.warn(`The identifier screen for ${datasetId} could not be started`);
-        for (const line of identifierScreenLines(result.identifier_screen)) console.log(line);
+        for (const line of screenViewLines(result.identifier_screen, 2)) console.log(line);
         console.log(chalk.dim("  The admins have been mailed this result."));
       }
     } catch (error) {

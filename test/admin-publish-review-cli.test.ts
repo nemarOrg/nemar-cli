@@ -258,6 +258,40 @@ describe("list with the review", () => {
   });
 });
 
+describe("list prints what came from the network as plain text", () => {
+  // The fields a request row holds raw: the step and error of a run, and the pre-screen's reasons,
+  // which the model writes from text the depositor wrote. None of them passes through the Worker's
+  // own words, so the CLI's `plain()` is the only thing between them and the terminal.
+  const ESC = String.fromCharCode(27);
+  const hostile = `${ESC}[2J${ESC}]0;title\u0007steered\u202ereversed\u200b\u2028end`;
+  const cleaned = "[2J]0;titlesteeredreversedend";
+
+  test("the step, the error and the pre-screen's reasons carry no terminal control", async () => {
+    const running = seedScreenedRequest(h.db, {
+      datasetId: "nm000480",
+      requestStatus: "approving",
+    });
+    h.db.run("UPDATE publication_requests SET current_step = ?, last_error = ? WHERE id = ?", [
+      `ci_check${hostile}`,
+      hostile,
+      running.requestId,
+    ]);
+    const concern = seedScreenedRequest(h.db, { datasetId: "nm000481" });
+    h.db.run(
+      "UPDATE publication_requests SET prescreen_status = 'concern', prescreen_reasons = ? WHERE id = ?",
+      [JSON.stringify([hostile, "a plain reason"]), concern.requestId],
+    );
+
+    const r = await h.cli(LIST);
+
+    expect(r.exitCode).toBe(0);
+    expect(blockOf(r.stdout, "nm000480").join("\n")).toContain(`ci check${cleaned}`);
+    expect(blockOf(r.stdout, "nm000480").join("\n")).toContain(`(${cleaned})`);
+    expect(blockOf(r.stdout, "nm000481").join("\n")).toContain(`${cleaned}; a plain reason`);
+    for (const line of r.stdout.split("\n")) expect(line).not.toMatch(DANGEROUS_IN_LINES);
+  });
+});
+
 describe("list with the review off", () => {
   beforeEach(() => {
     h.setEnv({ PUBLICATION_REVIEW_ENABLED: "0" });

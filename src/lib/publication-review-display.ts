@@ -31,7 +31,7 @@ import {
   type ReviewDocument,
   effectiveVersionOf,
 } from "../../shared/publication-review.js";
-import { identifierScreenLines } from "./identifier-screen-display.js";
+import { type IdentifierScreenView, identifierScreenLines } from "./identifier-screen-display.js";
 import { plain } from "./terminal-text.js";
 
 type Tone = "ok" | "note" | "warn" | "stop";
@@ -82,6 +82,27 @@ export function startedSentence(reason: string, datasetId: string): string {
 // ---------------------------------------------------------------------------------------------
 // The list's line
 // ---------------------------------------------------------------------------------------------
+
+/**
+ * The identifier screen of a request as the lines to print, `indent` spaces in. The headline and
+ * every line crossed the network, so each passes `plain()` before `identifierScreenLines` colours
+ * it: the colour's own escape sequences are the CLI's, anything else is not. Nothing for a view an
+ * older backend did not send, as `identifierScreenLines` itself says.
+ */
+export function screenViewLines(
+  screen: IdentifierScreenView | undefined,
+  indent: number,
+): string[] {
+  if (!screen || typeof screen.headline !== "string") return [];
+  return identifierScreenLines(
+    {
+      ...screen,
+      headline: plain(screen.headline),
+      lines: Array.isArray(screen.lines) ? screen.lines.map(plain) : [],
+    },
+    indent,
+  );
+}
 
 /**
  * The review line under a request in `list`: the headline in its tone's colour, then the reason
@@ -321,17 +342,7 @@ export function reviewDetailLines(d: PublicationReviewDetail): string[] {
   if (d.environment !== "production") out.push(`  ${chalk.yellow(NON_PRODUCTION_NOTE)}`);
 
   out.push("");
-  const screen = d.identifier_screen;
-  out.push(
-    ...identifierScreenLines(
-      screen && {
-        ...screen,
-        headline: plain(screen.headline),
-        lines: Array.isArray(screen.lines) ? screen.lines.map(plain) : [],
-      },
-      0,
-    ),
-  );
+  out.push(...screenViewLines(d.identifier_screen, 0));
   if (d.screen_acknowledgment) {
     out.push(
       `  Acknowledged by administrator ${plain(String(d.screen_acknowledgment.by))} at ${plain(d.screen_acknowledgment.at)}.`,
