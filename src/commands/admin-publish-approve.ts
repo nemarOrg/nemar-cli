@@ -197,6 +197,12 @@ After Approval:
           : `Approve and publish ${datasetId}`;
         console.log(chalk.cyan(`\n${action}\n`));
 
+        // The review of the request (ADR 0102): the screen and the review, in the Worker's words,
+        // then the decision. Read once, shown, and decided from what was shown, so an override is
+        // built from exactly this and never from a second read.
+        const read = await readReview(datasetId);
+        if (read.kind === "detail") printReview(read.detail, datasetId);
+
         // Ask the server what this request IS before describing what approving
         // it will do (#1447). An anonymous release runs a strictly smaller step
         // set, and the banner used to be a hand-numbered literal of all sixteen:
@@ -204,24 +210,26 @@ After Approval:
         // and the DOI published irreversibly, and neither happens. A banner that
         // describes the wrong operation is worse than no banner, because it is
         // the screen the decision is made from.
+        //
+        // The detail just read carries `anonymous`, so that is the answer when there is one; a
+        // second source could disagree with what was printed above it, or fail while it did not.
         let anonymousRelease = false;
         let planUnknownReason: string | null = null;
-        try {
-          anonymousRelease = (await getPublishStatus(datasetId)).anonymous === true;
-        } catch (err) {
-          // Unreadable state is not a reason to refuse an approval the admin can
-          // still make, but it IS a reason to stop asserting what will happen --
-          // and to say WHY. A bare `catch {}` here printed "could not read the
-          // request's state" for an expired key, a 404 and a network failure
-          // alike, which is three different next actions rendered as one.
-          planUnknownReason = err instanceof Error ? err.message : String(err);
+        if (read.kind === "detail" && typeof read.detail.anonymous === "boolean") {
+          anonymousRelease = read.detail.anonymous;
+        } else {
+          try {
+            anonymousRelease = (await getPublishStatus(datasetId)).anonymous === true;
+          } catch (err) {
+            // Unreadable state is not a reason to refuse an approval the admin can
+            // still make, but it IS a reason to stop asserting what will happen --
+            // and to say WHY. A bare `catch {}` here printed "could not read the
+            // request's state" for an expired key, a 404 and a network failure
+            // alike, which is three different next actions rendered as one.
+            planUnknownReason = err instanceof Error ? err.message : String(err);
+          }
         }
 
-        // The review of the request (ADR 0102): the screen and the review, in the Worker's words,
-        // then the decision. Read once, shown, and decided from what was shown, so an override is
-        // built from exactly this and never from a second read.
-        const read = await readReview(datasetId);
-        if (read.kind === "detail") printReview(read.detail, datasetId);
         const decision = decideApproval(datasetId, read, {
           force: !!options.force,
           acknowledge: ack,

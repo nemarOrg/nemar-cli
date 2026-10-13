@@ -31,6 +31,7 @@ import {
   NOTE_SENTINEL,
   SUMMARY_SENTINEL,
   failingReport,
+  seedPublicationReview,
   seedScreenedRequest,
 } from "../backend/test/helpers/publication-review";
 import { makePublicationReviewApp } from "../backend/test/helpers/publication-review-app";
@@ -656,6 +657,78 @@ describe("the command decides: the evidence behind a reason is read before the q
     expect(r.stdout).not.toContain("Withheld for findings");
     expect(r.stdout).not.toContain("The whole review");
     expect(requestRow(requestId)?.status).toBe("published");
+  });
+});
+
+describe("the command decides: the banner names the kind of request from the review it read", () => {
+  const STATUS_PATH = `/datasets/${DATASET}/publish/status`;
+  const ANONYMOUS_BANNER = "This is an ANONYMOUS RELEASE and will run";
+  const UNKNOWN_BANNER = "Could not read the request's state";
+  /** Fails the request-status route's own read and nothing else. */
+  const failStatusReads = () => {
+    h.hookDb({
+      statement(sql) {
+        if (/requested_by_username/.test(sql)) throw new Error("simulated status failure");
+      },
+    });
+  };
+
+  test("an anonymous release is named from the detail, whatever the status read would say", async () => {
+    const requestId = seedGolden({ anonymous: true });
+    seedPublicationReview(h.db, {
+      requestId,
+      datasetId: DATASET,
+      state: "reported",
+      anonymous: true,
+    });
+    failStatusReads();
+
+    const r = await approve(["--resume"]);
+
+    expect(r.stdout).toContain(ANONYMOUS_BANNER);
+    expect(r.stdout).not.toContain(UNKNOWN_BANNER);
+    // The detail carries `anonymous`, so the command did not ask a second source.
+    expect(h.requests.some((c) => c.path === STATUS_PATH)).toBe(false);
+  });
+
+  test("a named publication is named from the detail too, with no status read", async () => {
+    const requestId = seedGolden();
+    seedReport(requestId);
+
+    const r = await approve(["--resume"]);
+
+    expect(r.stdout).toContain("This will run the following 16-step orchestrator:");
+    expect(h.requests.some((c) => c.path === STATUS_PATH)).toBe(false);
+  });
+
+  test("with no detail to read, the status read decides, and a failing one says it could not", async () => {
+    const requestId = seedGolden({ anonymous: true });
+    seedPublicationReview(h.db, {
+      requestId,
+      datasetId: DATASET,
+      state: "reported",
+      anonymous: true,
+    });
+    // The review cannot be read at all: the status read is the only source left.
+    h.hookDb({
+      statement(sql) {
+        if (/FROM publication_reviews/.test(sql)) throw new Error("simulated read failure");
+      },
+    });
+    const fallback = await approve(["--resume"]);
+    expect(fallback.stdout).toContain(ANONYMOUS_BANNER);
+    expect(h.requests.some((c) => c.path === STATUS_PATH && c.status === 200)).toBe(true);
+
+    h.hookDb({
+      statement(sql) {
+        if (/FROM publication_reviews/.test(sql) || /requested_by_username/.test(sql)) {
+          throw new Error("simulated read failure");
+        }
+      },
+    });
+    const neither = await approve(["--resume"]);
+    expect(neither.stdout).toContain(UNKNOWN_BANNER);
+    expect(neither.stdout).toContain("lists all 16 steps; an anonymous release runs fewer");
   });
 });
 
