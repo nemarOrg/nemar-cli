@@ -53,7 +53,7 @@ const FRAME_SENTENCE =
 // Deliberately not "nothing was sent": a Resend 5xx or a lost answer can leave the mail accepted,
 // and an administrator who read "nothing was sent" might send it again.
 const NOT_SENT_SENTENCE =
-  "The message could not be mailed, and it may not have reached the depositor. Check with them before sending it again.";
+  "The mail may not have been sent, and it may also have arrived. Check with the depositor before sending it again.";
 
 const h = createHarness();
 
