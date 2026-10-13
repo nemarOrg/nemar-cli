@@ -62,6 +62,7 @@ import {
   publicationReviewApplies,
   readReviewContext,
   reasonViewsOf,
+  reportOf,
   reviewEnabled,
 } from "./publication-review-view.js";
 
@@ -171,7 +172,7 @@ function refusal(
   d: DerivedPublicationReview,
   uncovered: ReasonCode[] = [],
 ): Refused {
-  const reasons = reasonViewsOf(d.reasons, datasetId, d.startable);
+  const reasons = reasonViewsOf(d.reasons, datasetId, d.startable, reportOf(d.rowView));
   let message = reviewGateRefusalText(kind, datasetId);
   if (kind === "hard_reason") {
     const first = hardReasonsOf(reasons)[0];

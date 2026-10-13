@@ -574,6 +574,11 @@ describe("a review that is not a pass needs the administrator's override", () =>
     const detail = await detailOf();
     expect(body.reasons).toEqual(detail.reasons);
     expect(body.headline).toBe(detail.description.headline);
+    // Each reason carries the humanized line the detail prints for it.
+    expect(body.reasons.map((r) => r.line)).toEqual(
+      detail.description.lines.slice(0, body.reasons.length),
+    );
+    expect(body.reasons.every((r) => typeof r.line === "string" && r.line !== "")).toBe(true);
     // Nothing started, nothing recorded.
     expect(requestRow(requestId).status).toBe("requested");
     expect(requestRow(requestId).approved_by).toBeNull();

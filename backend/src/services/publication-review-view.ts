@@ -86,6 +86,7 @@ import {
   isPublicationOutcome,
   isPublicationReviewState,
   isPublicationRunError,
+  reasonLine,
   reasonsOf,
   shownBlockReason,
   startOffered,
@@ -240,7 +241,7 @@ export interface DerivedPublicationReview {
 }
 
 /** The report of the review in force, when it reported and still parses. */
-function reportOf(view: ReviewRowView): PublicationReviewReport | null {
+export function reportOf(view: ReviewRowView): PublicationReviewReport | null {
   return view.kind === "reported" ? view.report : null;
 }
 
@@ -702,13 +703,17 @@ export function overrideReasonsOf(raw: string | null): ReasonCode[] {
 }
 
 /**
- * The reasons in the shared words, each with its cure for this dataset: the detail's `reasons`, and
- * what the approval gate's refusal carries, so the two say the same thing.
+ * The reasons in the shared words, each with its cure for this dataset and the whole reason as the
+ * one line `description.lines` prints for it (`reasonLine`, which needs the report of the review in
+ * force for a failed question's findings): the detail's `reasons`, and what the approval gate's
+ * refusal carries, so the two say the same thing. A caller that has no report passes none, and the
+ * line then lacks only what the report adds.
  */
 export function reasonViewsOf(
   reasons: readonly Reason[],
   datasetId: string,
   startable: boolean,
+  report: PublicationReviewReport | null = null,
 ): ReasonView[] {
   return reasons.map((r) => {
     const rule = REASONS[r.code];
@@ -719,6 +724,7 @@ export function reasonViewsOf(
       detail: r.detail,
       sentence: rule.sentence,
       cure: cureOf(r.code, datasetId, startable),
+      line: reasonLine(r, datasetId, report, startable),
     };
   });
 }
@@ -875,7 +881,7 @@ export async function publicationReviewDetail(
     applies: d.applies,
     gate: d.gate,
     outcome: d.outcome,
-    reasons: reasonViewsOf(d.reasons, ctx.request.dataset_id, d.startable),
+    reasons: reasonViewsOf(d.reasons, ctx.request.dataset_id, d.startable, reportOf(d.rowView)),
     description: d.description,
     review: d.row === null ? null : recordOf(d.row, d.rowView),
     history: past.slice(0, HISTORY_LIMIT).map(historyEntryOf),

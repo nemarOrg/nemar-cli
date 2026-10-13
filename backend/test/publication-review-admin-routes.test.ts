@@ -44,6 +44,7 @@ import {
   overrideReasonsOf,
   readReviewContext,
   reasonViewsOf,
+  reportOf,
 } from "../src/services/publication-review-view";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, interceptingD1, realD1 } from "./helpers/d1";
@@ -1164,7 +1165,7 @@ describe("GET /admin/publish/:id/review", () => {
       ["id", "head_sha", "anonymous", "state", "stored_verdict", "created_at", "decided_at"].sort(),
     );
     expect(Object.keys(d.reasons[0]).sort()).toEqual(
-      ["code", "class", "cleared_by", "detail", "sentence", "cure"].sort(),
+      ["code", "class", "cleared_by", "detail", "sentence", "cure", "line"].sort(),
     );
     expect(d.reasons).toEqual([
       {
@@ -1174,8 +1175,12 @@ describe("GET /admin/publish/:id/review", () => {
         detail: "complete_and_honest",
         sentence: REASONS.question_failed.sentence,
         cure: REASONS.question_failed.cure,
+        // The line the description prints for the reason, which the detail repeats so a client
+        // prints it and composes nothing from `detail`.
+        line: d.description.lines[0],
       },
     ]);
+    expect(d.reasons[0].line).toContain(REASONS.question_failed.cure);
     expect(d.description.headline).toBe("Publication review: FAIL");
     expect(d.description.tone).toBe("stop");
     expect(d.description.lines.at(-1)).toBe(NOT_ASSESSED_LINE);
@@ -2281,13 +2286,66 @@ describe("the exports the approval gate reads through", () => {
     await expect(readReviewContext(failing, requestId)).rejects.toThrow("simulated");
   });
 
+  test("each reason carries the line the description prints for it, with the detail in words", async () => {
+    // A client prints `line` and composes nothing from `detail`, whose closed words (a document
+    // key, a run error) are not words for a person.
+    const withheld = request();
+    seedPublicationReview(db, {
+      requestId: withheld.requestId,
+      datasetId: withheld.datasetId,
+      state: "reported",
+      report: {
+        ...failingReport(),
+        evidence: evidenceFor(SCREENED_HEAD, false, {
+          documents: {
+            readme: "withheld_unreadable",
+            dataset_description: "sent",
+            changes: "sent",
+            license: "sent",
+            participants_json: "withheld_not_json",
+          },
+        }),
+      },
+    });
+    const a = await detail(withheld.datasetId);
+    expect(a.reasons.map((r) => r.code)).toEqual([
+      "question_failed",
+      "text_withheld",
+      "question_unknown",
+    ]);
+    for (const [i, r] of a.reasons.entries()) {
+      expect({ code: r.code, line: r.line }).toEqual({
+        code: r.code,
+        line: a.description.lines[i],
+      });
+    }
+    const withheldLine = a.reasons[1].line as string;
+    expect(withheldLine).toContain("README");
+    expect(withheldLine).not.toContain("participants_json");
+    // The model's findings against a failed question are in the line the description prints.
+    expect(a.reasons[0].line).toContain("findings:");
+
+    const errored = request();
+    seedPublicationReview(db, {
+      requestId: errored.requestId,
+      datasetId: errored.datasetId,
+      state: "errored",
+      detail: "model_unavailable",
+    });
+    const b = await detail(errored.datasetId);
+    expect(b.reasons.map((r) => r.code)).toEqual(["review_could_not_run"]);
+    expect(b.reasons[0].line).toBe(b.description.lines[0]);
+    expect(b.reasons[0].line).toContain("the reviewing model was unavailable");
+    expect(b.reasons[0].line).not.toContain("model_unavailable");
+  });
+
   test("reasonViewsOf is the detail's reasons: the shared words, with the cure for this dataset and request", async () => {
     const { requestId, datasetId } = request();
     seedPublicationReview(db, { requestId, datasetId, state: "errored", detail: "model_refused" });
     const ctx = await readReviewContext(env(), requestId);
     if (ctx === null) throw new Error("no such request");
     const d = await derivePublicationReview({ env: env(), nowMs: Date.now(), ...ctx });
-    const views = reasonViewsOf(d.reasons, datasetId, d.startable);
+    const views = reasonViewsOf(d.reasons, datasetId, d.startable, reportOf(d.rowView));
     expect(views).toEqual((await detail(datasetId)).reasons);
     expect(views.map((v) => v.code)).toEqual(["review_could_not_run"]);
     expect(views[0].cure).toContain(`nemar admin publish start ${datasetId}`);
