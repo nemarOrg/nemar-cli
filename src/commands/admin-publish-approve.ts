@@ -32,6 +32,7 @@ import { failWith, requireSignedIn } from "../lib/admin-command.js";
 import { ApiError } from "../lib/api/errors.js";
 import {
   type PublishProgressInfo,
+  type PublishRetryInfo,
   type StepResult,
   approvePublication,
   getPublishStatus,
@@ -217,10 +218,12 @@ After Approval:
           // do not ask a question about an approval it would refuse. A 404 for a request that is
           // not there is different, and goes on: the Worker's answer to the approval is the one
           // that ends it.
-          failWith(read.refused, ora(), "The publication review could not be read");
+          failWith(printable(read.refused), ora(), "The publication review could not be read");
           return;
         }
-        if (read.kind === "detail") printReview(read.detail, datasetId);
+        if (read.kind === "detail") {
+          for (const line of reviewLines(read.detail, datasetId)) console.log(line);
+        }
 
         // Ask the server what this request IS before describing what approving
         // it will do (#1447). An anonymous release runs a strictly smaller step
@@ -258,8 +261,7 @@ After Approval:
           printRefusal(decision);
           return;
         }
-        for (const note of decision.notes) console.log(chalk.yellow(`  ${note}`));
-        if (decision.notes.length > 0) console.log();
+        for (const line of noteLines(decision.notes)) console.log(line);
 
         const steps = stepsForRelease(anonymousRelease);
         if (planUnknownReason === null) {
@@ -271,7 +273,7 @@ After Approval:
         } else {
           console.log(
             chalk.yellow(
-              `Could not read the request's state (${planUnknownReason}), so this lists all ${steps.length} steps; an anonymous release runs fewer.`,
+              `Could not read the request's state (${plain(planUnknownReason)}), so this lists all ${steps.length} steps; an anonymous release runs fewer.`,
             ),
           );
         }
@@ -339,35 +341,62 @@ After Approval:
 }
 
 /**
- * The screen and the review of the request, as the Worker worded them (colour and indentation
- * only), with the evidence behind the reasons from the same detail ({@link approveEvidenceLines}).
+ * The lines of the screen and the review of the request, as the Worker worded them (colour and
+ * indentation only), with the evidence behind the reasons from the same detail
+ * ({@link approveEvidenceLines}), and a blank line after. Every string of the detail passes
+ * `plain()`: the Worker reduces what it stores, and a terminal should not depend on that alone.
  */
-function printReview(detail: PublicationReviewDetail, datasetId: string): void {
-  for (const line of identifierScreenLines(detail.identifier_screen, 2)) console.log(line);
+export function reviewLines(detail: PublicationReviewDetail, datasetId: string): string[] {
   const { headline, tone, lines } = detail.description;
   // What the administrator needs to decide goes ahead of the standing line, which is last, as in
   // `show`: what the model was shown and what was withheld, and where the whole review is.
   const evidence = approveEvidenceLines(detail.review, datasetId);
   const review = {
     state: null,
-    headline,
+    headline: plain(headline),
     tone,
-    lines: [`Gate: ${detail.gate}`, ...lines.slice(0, -1), ...evidence, ...lines.slice(-1)],
+    lines: [
+      `Gate: ${plain(detail.gate)}`,
+      ...lines.slice(0, -1),
+      ...evidence,
+      ...lines.slice(-1),
+    ].map(plain),
   };
-  for (const line of identifierScreenLines(review, 2)) console.log(line);
-  console.log();
+  const screen = detail.identifier_screen;
+  return [
+    ...identifierScreenLines(
+      screen && typeof screen.headline === "string"
+        ? {
+            ...screen,
+            headline: plain(screen.headline),
+            lines: Array.isArray(screen.lines) ? screen.lines.map(plain) : [],
+          }
+        : undefined,
+      2,
+    ),
+    ...identifierScreenLines(review, 2),
+    "",
+  ];
 }
 
 /** A refusal before anything was asked or posted: the reasons, the cure, and exit 1. */
 function printRefusal(decision: Extract<ApproveDecision, { kind: "refuse" }>): void {
-  // What nothing clears reads as a stop; what the administrator can clear with a flag, as a note.
-  const colour = decision.why === "hard" || decision.why === "blocked" ? chalk.red : chalk.yellow;
-  console.log(colour("Not approved:"));
-  for (const line of decision.lines) console.log(colour(`  ${line}`));
-  console.log();
+  for (const line of refusalLines(decision)) console.log(line);
   // The command declined to act; that is its answer, not a crash, so no bug-report hint.
   process.exitCode = 1;
   markReportedExit();
+}
+
+/** The lines of a refusal: "Not approved:", each reason with its cure, and a blank line. */
+export function refusalLines(decision: Extract<ApproveDecision, { kind: "refuse" }>): string[] {
+  // What nothing clears reads as a stop; what the administrator can clear with a flag, as a note.
+  const colour = decision.why === "hard" || decision.why === "blocked" ? chalk.red : chalk.yellow;
+  return [colour("Not approved:"), ...decision.lines.map((line) => colour(`  ${plain(line)}`)), ""];
+}
+
+/** The notes of a decision that goes on, indented, with a blank line after; nothing for none. */
+export function noteLines(notes: readonly string[]): string[] {
+  return notes.length === 0 ? [] : [...notes.map((note) => chalk.yellow(`  ${plain(note)}`)), ""];
 }
 
 /** Whether the approval ran to the end. A refusal, a failure and a run that gave up are all `ok: false`, and already reported. */
@@ -382,6 +411,16 @@ interface RunApprovalOptions {
   override: PublicationReviewOverride | null;
 }
 
+/**
+ * `error` with a message that is safe to print: `failWith` prints it as it is, and it came from the
+ * network (a Worker's refusal, a body that was not JSON). The message is cleaned in place; the error
+ * is about to be reported and dropped.
+ */
+function printable(error: unknown): unknown {
+  if (error instanceof Error) error.message = plain(error.message);
+  return error;
+}
+
 /** Whether the Worker refused the approval for the review: a 409 whose `error` is the review gate's word. */
 function isReviewRefusal(error: unknown): boolean {
   return (
@@ -391,8 +430,29 @@ function isReviewRefusal(error: unknown): boolean {
   );
 }
 
+/** The lines that tell an administrator the CLI is about to retry a step the Worker failed. */
+export function retryNoticeLines(info: PublishRetryInfo): string[] {
+  const stepLabel = info.step ? plain(info.step).replace(/_/g, " ") : "step";
+  return [
+    chalk.yellow(`  [!] ${stepLabel} failed: ${plain(info.error)}`),
+    chalk.dim(
+      `  Retrying in ${Math.round(info.delayMs / 1000)}s (attempt ${info.attempt + 1}/${info.maxAttempts})...`,
+    ),
+  ];
+}
+
+/** Each reason of a review refusal with its cure, then where to read the whole review; nothing when it carries none. */
+export function reviewRefusalLines(error: unknown, datasetId: string): string[] {
+  const reasons = refusalReasons(error);
+  if (reasons.length === 0) return [];
+  return [
+    ...reasons.map((line) => chalk.dim(`  ${line}`)),
+    `  Next: nemar admin publish show ${plain(datasetId)}`,
+  ];
+}
+
 /** The reasons a review refusal carries, one sentence and cure each; those it does not carry are left out. */
-function refusalReasons(error: unknown): string[] {
+export function refusalReasons(error: unknown): string[] {
   const body = error instanceof ApiError ? error.rawBody : undefined;
   const reasons = (body as { reasons?: unknown } | undefined)?.reasons;
   if (!Array.isArray(reasons)) return [];
@@ -405,12 +465,67 @@ function refusalReasons(error: unknown): string[] {
         typeof (r as { cure?: unknown }).cure === "string",
     )
     .map((r) =>
-      reasonViewLine({
-        sentence: r.sentence,
-        cure: r.cure,
-        line: typeof r.line === "string" ? r.line : undefined,
-      }),
+      plain(
+        reasonViewLine({
+          sentence: r.sentence,
+          cure: r.cure,
+          line: typeof r.line === "string" ? r.line : undefined,
+        }),
+      ),
     );
+}
+
+/** One step of the run as one line, for the result of a run and for the timeline of one that failed. */
+export function stepResultLine(sr: StepResult, idx: number, total: number): string {
+  const stepNum = `[${String(idx + 1).padStart(2, " ")}/${total}]`;
+  const stepName = plain(sr.step).replace(/_/g, " ");
+  if (sr.status === "completed") {
+    const durationSec = (sr.duration_ms / 1000).toFixed(1);
+    const retryNote = sr.attempts > 1 ? ` (attempt ${plain(String(sr.attempts))})` : "";
+    return `  ${chalk.green("[x]")} ${chalk.dim(stepNum)} ${stepName} ${chalk.dim(`(${durationSec}s${retryNote})`)}`;
+  }
+  if (sr.status === "failed") {
+    return `  ${chalk.red("[!]")} ${chalk.dim(stepNum)} ${stepName}${sr.error ? `: ${chalk.red(plain(sr.error))}` : ""}`;
+  }
+  return `  ${chalk.dim("[-]")} ${chalk.dim(stepNum)} ${chalk.dim(stepName)} ${chalk.dim("(skipped)")}`;
+}
+
+/** What follows the spinner's success line: the step results (or the bare list of steps), and any warning. */
+export function resultLines(result: {
+  step_results?: StepResult[];
+  steps_completed?: string[];
+  warning?: string;
+}): string[] {
+  const out: string[] = [];
+  if (result.step_results && result.step_results.length > 0) {
+    const total = result.step_results.length;
+    out.push("", ...result.step_results.map((sr, idx) => stepResultLine(sr, idx, total)), "");
+  } else if (result.steps_completed) {
+    // Fallback for responses without step_results
+    out.push(
+      "",
+      ...result.steps_completed.map(
+        (step) => `  ${chalk.green("[x]")} ${plain(step).replace(/_/g, " ")}`,
+      ),
+      "",
+    );
+  }
+  // Surface non-fatal orchestrator warnings (e.g. notify_user email failure) so operators know to
+  // follow up without re-running.
+  if (result.warning) out.push(chalk.yellow(`  Warning: ${plain(result.warning)}`));
+  return out;
+}
+
+/** The per-attempt step timeline the retry loop attached to a failed run; nothing when there is none. */
+export function timelineLines(stepResults: StepResult[] | undefined): string[] {
+  if (!stepResults || stepResults.length === 0) return [];
+  const total = stepResults.length;
+  return [
+    "",
+    chalk.dim("Step timeline (last attempt):"),
+    ...stepResults.map((sr, idx) => stepResultLine(sr, idx, total)),
+    "",
+  ];
 }
 
 /**
@@ -441,7 +556,7 @@ export async function runApproval(
    * instead of staring at a static spinner for minutes. See #284.
    */
   function renderProgress(info: PublishProgressInfo): string {
-    const stepLabel = info.step.replace(/_/g, " ");
+    const stepLabel = plain(info.step).replace(/_/g, " ");
     const head = `Step ${info.stepIndex}/${info.stepTotal}: ${stepLabel}`;
     if (
       info.step === "s3_lock" &&
@@ -473,13 +588,7 @@ export async function runApproval(
         // Surface transient failures the CLI is about to retry. We pause
         // the spinner so the message isn't overwritten, then resume it.
         spinner.stop();
-        const stepLabel = info.step ? info.step.replace(/_/g, " ") : "step";
-        console.log(chalk.yellow(`  [!] ${stepLabel} failed: ${info.error}`));
-        console.log(
-          chalk.dim(
-            `  Retrying in ${Math.round(info.delayMs / 1000)}s (attempt ${info.attempt + 1}/${info.maxAttempts})...`,
-          ),
-        );
+        for (const line of retryNoticeLines(info)) console.log(line);
         spinner.start(currentSpinnerText);
       },
       (info) => {
@@ -489,50 +598,11 @@ export async function runApproval(
       opts.acknowledge,
       opts.override ?? undefined,
     );
-    spinner.succeed(result.message);
-
-    // Display step-by-step results if available
-    if (result.step_results && result.step_results.length > 0) {
-      console.log();
-      const allSteps = result.step_results;
-      const totalSteps = allSteps.length;
-      allSteps.forEach((sr: StepResult, idx: number) => {
-        const stepNum = `[${String(idx + 1).padStart(2, " ")}/${totalSteps}]`;
-        const stepName = sr.step.replace(/_/g, " ");
-        if (sr.status === "completed") {
-          const durationSec = (sr.duration_ms / 1000).toFixed(1);
-          const retryNote = sr.attempts > 1 ? ` (attempt ${sr.attempts})` : "";
-          console.log(
-            `  ${chalk.green("[x]")} ${chalk.dim(stepNum)} ${stepName} ${chalk.dim(`(${durationSec}s${retryNote})`)}`,
-          );
-        } else if (sr.status === "failed") {
-          console.log(
-            `  ${chalk.red("[!]")} ${chalk.dim(stepNum)} ${stepName}${sr.error ? `: ${chalk.red(sr.error)}` : ""}`,
-          );
-        } else {
-          console.log(
-            `  ${chalk.dim("[-]")} ${chalk.dim(stepNum)} ${chalk.dim(stepName)} ${chalk.dim("(skipped)")}`,
-          );
-        }
-      });
-      console.log();
-    } else if (result.steps_completed) {
-      // Fallback for responses without step_results
-      console.log();
-      for (const step of result.steps_completed) {
-        console.log(`  ${chalk.green("[x]")} ${step.replace(/_/g, " ")}`);
-      }
-      console.log();
-    }
-
-    // Surface non-fatal orchestrator warnings (e.g. notify_user email
-    // failure) so operators know to follow up without re-running.
-    if (result.warning) {
-      console.log(chalk.yellow(`  Warning: ${result.warning}`));
-    }
+    spinner.succeed(plain(result.message));
+    for (const line of resultLines(result)) console.log(line);
     return { ok: true };
   } catch (error) {
-    failWith(error, spinner, "Failed to approve publication", {
+    failWith(printable(error), spinner, "Failed to approve publication", {
       422: "Fix the CI issues and retry with --resume",
     });
 
@@ -540,40 +610,14 @@ export async function runApproval(
     // its cure, then where to read the whole review. `unverified` carries none (the Worker could
     // not read the review, and its sentence says to try again).
     if (isReviewRefusal(error)) {
-      const reasons = refusalReasons(error);
-      for (const line of reasons) console.log(chalk.dim(`  ${line}`));
-      if (reasons.length > 0) console.log(`  Next: nemar admin publish show ${datasetId}`);
+      for (const line of reviewRefusalLines(error, datasetId)) console.log(line);
     }
 
     // After all retries fail, surface the per-attempt step timeline the
     // retry loop attached to the error so the admin sees which step
     // failed when, instead of just the final 500 message.
     const stepResults = (error as { stepResults?: StepResult[] }).stepResults;
-    if (stepResults && stepResults.length > 0) {
-      console.log();
-      console.log(chalk.dim("Step timeline (last attempt):"));
-      const totalSteps = stepResults.length;
-      stepResults.forEach((sr, idx) => {
-        const stepNum = `[${String(idx + 1).padStart(2, " ")}/${totalSteps}]`;
-        const stepName = sr.step.replace(/_/g, " ");
-        const durationSec = (sr.duration_ms / 1000).toFixed(1);
-        const retryNote = sr.attempts > 1 ? ` (attempt ${sr.attempts})` : "";
-        if (sr.status === "completed") {
-          console.log(
-            `  ${chalk.green("[x]")} ${chalk.dim(stepNum)} ${stepName} ${chalk.dim(`(${durationSec}s${retryNote})`)}`,
-          );
-        } else if (sr.status === "failed") {
-          console.log(
-            `  ${chalk.red("[!]")} ${chalk.dim(stepNum)} ${stepName}${sr.error ? `: ${chalk.red(sr.error)}` : ""}`,
-          );
-        } else {
-          console.log(
-            `  ${chalk.dim("[-]")} ${chalk.dim(stepNum)} ${chalk.dim(stepName)} ${chalk.dim("(skipped)")}`,
-          );
-        }
-      });
-      console.log();
-    }
+    for (const line of timelineLines(stepResults)) console.log(line);
     return { ok: false };
   }
 }

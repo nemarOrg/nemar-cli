@@ -741,6 +741,55 @@ describe("the command decides: the banner names the kind of request from the rev
   });
 });
 
+describe("the command decides: nothing from the review reaches the terminal as an instruction", () => {
+  const ESC = String.fromCharCode(27);
+  const HOSTILE = `${ESC}[2J${ESC}]0;title\u0007x\u202ey\u200bz`;
+  /** Anything a terminal could act on, in a line of output (a line end is the run's own). */
+  const DANGEROUS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+  const expectClean = (text: string) => {
+    for (const line of text.split("\n")) expect(line).not.toMatch(DANGEROUS);
+  };
+
+  // The Worker reduces what it stores, so this is the Worker and the command together; the
+  // command's own `plain()` calls are held by `admin-publish-approve-print.test.ts`, which feeds
+  // them text the Worker would never send.
+  test("hostile text in the stored report, the request and the screen's report is cleaned or left out, with the question and without", async () => {
+    const requestId = seedGolden();
+    seedReport(requestId, {
+      ...failingReport(),
+      summary: `Summary ${HOSTILE}`,
+      findings: [
+        {
+          question: "complete_and_honest",
+          severity: "blocker",
+          code: "readme_mismatch",
+          document: "readme",
+          note: `Note ${HOSTILE}`,
+        },
+      ],
+    });
+    h.db.run("UPDATE publication_requests SET block_reason = ? WHERE id = ?", [HOSTILE, requestId]);
+
+    for (const flags of [["--resume"], ["--resume", "--yes", "--force"]]) {
+      const r = await approve(flags);
+      expectClean(output(r));
+      expect(output(r)).not.toContain("Summary x");
+      expect(output(r)).not.toContain("Note x");
+    }
+  });
+
+  test("a blocked request with a hostile block reason is refused in clean words", async () => {
+    seedBlockedUnstarted(HOSTILE);
+
+    const r = await approve(["--resume", "--yes", "--force"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("Not approved:");
+    expectClean(output(r));
+    expect(h.posted).toEqual([]);
+  });
+});
+
 describe("the command decides: a gate that is off or does not apply", () => {
   test("the review off: a stored failing review is advice, --force changes nothing and says so", async () => {
     h.setEnv({ PUBLICATION_REVIEW_ENABLED: "0" });
