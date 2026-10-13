@@ -23,6 +23,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -74,6 +75,7 @@ import {
   readEntry,
 } from "../scripts/ci/publication-review-corpus";
 import {
+  blobsToRead,
   readRootDocuments,
   readTree,
   structuralSummary,
@@ -246,6 +248,57 @@ beforeAll(() => {
   origins.nm000006 = newOrigin("nm000006", { "README.md": null });
 });
 
+/**
+ * A `git` on the PATH that records, for each call, its subcommand, its `HOME` and whether lazy
+ * fetching was left on, and then runs the real git (stdin of a fetch is kept, so the objects it
+ * asked for can be read back). With `failFetch` it stands in for a network that goes away: a fetch
+ * exits 1 and nothing else changes.
+ */
+function gitSpy(options: { failFetch?: boolean } = {}) {
+  const dir = mkdtempSync(join(root, "gitspy-"));
+  const real = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+  const log = join(dir, "calls.txt");
+  const stdin = join(dir, "fetch-stdin.txt");
+  const script = [
+    "#!/usr/bin/env bash",
+    "sub=",
+    'for a in "$@"; do case "$a" in clone|fetch|cat-file|ls-tree|rev-parse) sub="$a"; break ;; esac; done',
+    `printf '%s\\t%s\\t%s\\n' "$sub" "$HOME" "\${GIT_NO_LAZY_FETCH:-lazy}" >> "${log}"`,
+    options.failFetch ? 'if [ "$sub" = fetch ]; then exit 1; fi' : "",
+    `if [ "$sub" = fetch ]; then cat > "${stdin}"; exec "${real}" "$@" < "${stdin}"; fi`,
+    `exec "${real}" "$@"`,
+    "",
+  ].join("\n");
+  writeFileSync(join(dir, "git"), script);
+  chmodSync(join(dir, "git"), 0o755);
+  return {
+    dir,
+    calls: () =>
+      existsSync(log)
+        ? readFileSync(log, "utf8")
+            .trim()
+            .split("\n")
+            .map((l) => {
+              const [sub, home, lazy] = l.split("\t") as [string, string, string];
+              return { sub, home, lazy };
+            })
+        : [],
+    fetched: () => (existsSync(stdin) ? readFileSync(stdin, "utf8").trim().split("\n").sort() : []),
+  };
+}
+
+/** Run `body` with the spy first on the PATH, which every git child process of this file inherits. */
+async function withSpy<T>(spy: { dir: string }, body: () => Promise<T>): Promise<T> {
+  const saved = process.env.PATH;
+  process.env.PATH = `${spy.dir}:${saved ?? ""}`;
+  try {
+    return await body();
+  } finally {
+    if (saved === undefined) Reflect.deleteProperty(process.env, "PATH");
+    else process.env.PATH = saved;
+  }
+}
+
 // ---------------------------------------------------------------------------------------------
 // The corpus builder
 // ---------------------------------------------------------------------------------------------
@@ -358,6 +411,48 @@ describe("the corpus builder reads public repositories through the job's own rea
     ).toThrow();
     // Nothing was checked out either.
     expect(readdirSync(dest)).toEqual([".git"]);
+  });
+
+  test("the blobs the readers open are fetched in ONE anonymous fetch, exactly those and no others", async () => {
+    const origin = origins.nm000001 as Origin;
+    const spy = gitSpy();
+    const out = join(root, "corpus-prefetch");
+    const result = await withSpy(spy, () =>
+      buildCorpus({ ids: ["nm000001"], outDir: out, remoteBase: REMOTE_BASE }),
+    );
+    expect(result).toMatchObject({ built: 1, skipped: 0 });
+
+    // The readers' own selection: the five root documents and the one sidecar, not the participants
+    // table, not the recording and not the code, which the origin holds too.
+    const wanted = blobsToRead(await readTree(origin.dir, origin.head));
+    expect(wanted).toHaveLength(6);
+    const every = git(origin.dir, "ls-tree", "-r", "HEAD").split("\n").length;
+    expect(every).toBeGreaterThan(wanted.length);
+    expect(spy.fetched()).toEqual(wanted);
+
+    // One fetch for the clone's blobs, and it runs in the clone's own empty home, as the clone does.
+    const calls = spy.calls();
+    expect(calls.filter((c) => c.sub === "fetch")).toHaveLength(1);
+    const homes = new Set(
+      calls.filter((c) => ["clone", "fetch"].includes(c.sub)).map((c) => c.home),
+    );
+    expect(homes.size).toBe(1);
+    const [home] = [...homes] as [string];
+    expect(home).not.toBe(process.env.HOME);
+    expect(home).toMatch(/publication-review-corpus-[^/]+\/home$/);
+  });
+
+  test("a fetch that fails is a clone that failed, never a README read as unreadable", async () => {
+    const spy = gitSpy({ failFetch: true });
+    const out = join(root, "corpus-prefetch-fails");
+    const result = await withSpy(spy, () =>
+      buildCorpus({ ids: ["nm000001"], outDir: out, remoteBase: REMOTE_BASE }),
+    );
+    // The clone itself succeeded (only a `fetch` is cut off), so what is skipped is the dataset
+    // whose blobs could not be brought in, and nothing half-read is stored.
+    expect(result.built).toBe(0);
+    expect(result.skips).toEqual([{ id: "nm000001", reason: "clone_failed" }]);
+    expect(existsSync(join(out, "nm000001"))).toBe(false);
   });
 
   test("the clone carries no credential of the operator's: an empty home and nothing inherited", () => {

@@ -231,6 +231,22 @@ function readDocument(dir: string, name: string, entry: TreeEntry): RawDocument 
   return { name, state: "present", text };
 }
 
+/** The root file each review document is read from, by the rule {@link readRootDocuments} reads by. */
+function rootDocumentFiles(
+  tree: Tree,
+): Record<ReviewDocument, { name: string; entry: TreeEntry } | null> {
+  const root = new Map<string, TreeEntry>();
+  for (const entry of tree.entries) if (!entry.path.includes("/")) root.set(entry.path, entry);
+  const rootNames = [...root.keys()];
+  const out = {} as Record<ReviewDocument, { name: string; entry: TreeEntry } | null>;
+  for (const document of REVIEW_DOCUMENTS) {
+    const name = candidatesOf(document, rootNames).find((n) => root.has(n));
+    const entry = name === undefined ? undefined : root.get(name);
+    out[document] = name === undefined || entry === undefined ? null : { name, entry };
+  }
+  return out;
+}
+
 /**
  * The five root documents, each `absent` or as the depositor wrote it. The README is the first
  * present of the four BIDS forms (`shared/readme-candidates.ts`, the order the submission gate
@@ -238,17 +254,14 @@ function readDocument(dir: string, name: string, entry: TreeEntry): RawDocument 
  * pre-send module's job, over the string it is about to send.
  */
 export function readRootDocuments(dir: string, tree: Tree): Record<ReviewDocument, RawDocument> {
-  const root = new Map<string, TreeEntry>();
-  for (const entry of tree.entries) if (!entry.path.includes("/")) root.set(entry.path, entry);
-  const rootNames = [...root.keys()];
+  const files = rootDocumentFiles(tree);
   const out = {} as Record<ReviewDocument, RawDocument>;
   for (const document of REVIEW_DOCUMENTS) {
-    const name = candidatesOf(document, rootNames).find((n) => root.has(n));
-    const entry = name === undefined ? undefined : root.get(name);
+    const found = files[document];
     out[document] =
-      name === undefined || entry === undefined
+      found === null
         ? { name: "", state: "absent", text: null }
-        : readDocument(dir, name, entry);
+        : readDocument(dir, found.name, found.entry);
   }
   return out;
 }
@@ -419,6 +432,29 @@ function topValues(counts: Map<number, number>, n: number): number[] {
     .sort((a, b) => a - b);
 }
 
+/** The raw tree's data sidecars (no symlink: an annexed sidecar is never opened), in path order. */
+function dataSidecars(entries: readonly TreeEntry[]): TreeEntry[] {
+  return entries
+    .filter((e) => !NOT_RAW.test(e.path) && DATA_SIDECAR.test(e.path) && e.mode !== "120000")
+    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+}
+
+/**
+ * Every blob this module opens for a tree, by object id: the root documents it reads (never a
+ * symlink, which is never opened) and the bounded sample of data sidecars {@link structuralSummary}
+ * opens. The one place that says which blobs a review needs, for a caller that has to bring them
+ * into a blob-less clone before the readers run. The workflow's fetch step is a shell
+ * transcription of this selection, and a test holds the two equal.
+ */
+export function blobsToRead(tree: Tree): string[] {
+  const oids = new Set<string>();
+  for (const found of Object.values(rootDocumentFiles(tree))) {
+    if (found !== null && found.entry.mode !== "120000") oids.add(found.entry.oid);
+  }
+  for (const entry of evenly(dataSidecars(tree.entries), SIDECAR_SAMPLE)) oids.add(entry.oid);
+  return [...oids].sort();
+}
+
 /**
  * The two numbers one data sidecar contributes: its sampling rate (rounded to 0.01 hertz, which is
  * how the Worker's parser wants it) and its channel total (the sum of every `*ChannelCount` key).
@@ -483,9 +519,7 @@ export function structuralSummary(dir: string, tree: Tree): StructuralSummary {
   }
   const recordings = Object.values(formats).reduce((a, b) => a + b, 0);
 
-  const sidecars = raw
-    .filter((e) => DATA_SIDECAR.test(e.path) && e.mode !== "120000")
-    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const sidecars = dataSidecars(entries);
   const rates = new Map<number, number>();
   const channels = new Map<number, number>();
   let sidecarsRead = 0;

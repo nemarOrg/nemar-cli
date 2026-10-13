@@ -16,9 +16,11 @@
  * mutator imports the production `presend` only to prove a defect is visible; it never builds a
  * prompt and never mints `ClearedText` (only the pre-send module may).
  *
- * **Public repositories only, and no credential.** The clone runs with an empty home directory, no
- * user or system git configuration, no terminal prompt and only the `https` and `file` transports,
- * so it carries no credential of the operator's and a private repository cannot be cloned.
+ * **Public repositories only, and no credential.** The clone and the one fetch of blobs that follows
+ * it run with an empty home directory, no user or system git configuration, no terminal prompt and
+ * only the `https` and `file` transports, so they carry no credential of the operator's and a
+ * private repository cannot be cloned. The readers themselves fetch nothing: the blobs they open
+ * are brought in first, by that one fetch, as the review workflow does.
  *
  * **Nothing here posts anything.** This module has no network code of its own beyond that one clone.
  *
@@ -54,9 +56,10 @@ import {
   isPlaceholderAuthor,
   submissionMinimumFailures,
 } from "../../shared/submission-minimums";
-import { GITHUB_DATASETS } from "../identifier-screen-ci-lib";
+import { GITHUB_DATASETS, type Tree } from "../identifier-screen-ci-lib";
 import {
   SHA40,
+  blobsToRead,
   readRootDocuments,
   readTree,
   structuralSummary,
@@ -275,7 +278,7 @@ const CLONE_TIMEOUT_MS = 10 * 60_000;
 /**
  * A shallow, blob-less clone with nothing checked out: the commits' trees and nothing else, so no
  * recording data is fetched. The blobs the job reads (the root documents and a bounded sample of
- * sidecars) are fetched lazily, one at a time, by the readers themselves.
+ * sidecars) are fetched afterwards, in one batch, by {@link fetchReadBlobs}.
  */
 export function cloneBlobless(url: string, dest: string, home: string): void {
   execFileSync(
@@ -296,6 +299,44 @@ export function cloneBlobless(url: string, dest: string, home: string): void {
       dest,
     ],
     { env: cloneEnv(home), stdio: "ignore", timeout: CLONE_TIMEOUT_MS },
+  );
+}
+
+/**
+ * Fetch, in one batch and under the clone's own environment, exactly the blobs the review's readers
+ * open for this tree (`blobsToRead`, the same selection the workflow's fetch step transcribes). The
+ * readers fetch nothing themselves, so a blob that is not here reads as unreadable: a failed fetch
+ * must not become a README that looks unreadable, and it throws instead.
+ */
+export function fetchReadBlobs(dir: string, tree: Tree, home: string): void {
+  const oids = blobsToRead(tree);
+  if (oids.length === 0) return;
+  execFileSync(
+    "git",
+    [
+      "-C",
+      dir,
+      "-c",
+      "core.hooksPath=/dev/null",
+      "-c",
+      "protocol.ext.allow=never",
+      "-c",
+      "fetch.negotiationAlgorithm=noop",
+      "fetch",
+      "--quiet",
+      "--no-tags",
+      "--no-write-fetch-head",
+      "--recurse-submodules=no",
+      "--filter=blob:none",
+      "--stdin",
+      "origin",
+    ],
+    {
+      env: cloneEnv(home),
+      input: `${oids.join("\n")}\n`,
+      stdio: ["pipe", "ignore", "ignore"],
+      timeout: CLONE_TIMEOUT_MS,
+    },
   );
 }
 
@@ -335,8 +376,8 @@ function checkRemoteBase(base: string): string {
 }
 
 /**
- * Clone each dataset (shallow, blob-less, anonymously), read it through the job's own readers, and
- * store the root documents and the summary. A dataset that cannot be cloned, whose tree cannot be
+ * Clone each dataset (shallow, blob-less, anonymously), fetch the blobs the job's readers open in
+ * one batch, read it through those readers, and store the root documents and the summary. A dataset that cannot be cloned, whose tree cannot be
  * read, or whose `dataset_description.json` is not readable is skipped with a closed word (the job
  * would stop at `description_unreadable` for it too); an entry already in the corpus is left alone.
  */
@@ -367,11 +408,23 @@ export async function buildCorpus(opts: BuildCorpusOptions): Promise<BuildCorpus
           continue;
         }
         let head: string;
+        let tree: Tree;
+        try {
+          head = headOf(clone, home);
+          tree = await readTree(clone, head);
+        } catch {
+          skips.push({ id, reason: "tree_unreadable" });
+          continue;
+        }
+        try {
+          fetchReadBlobs(clone, tree, home);
+        } catch {
+          skips.push({ id, reason: "clone_failed" });
+          continue;
+        }
         let docs: Record<ReviewDocument, RawDocument>;
         let summary: StructuralSummary;
         try {
-          head = headOf(clone, home);
-          const tree = await readTree(clone, head);
           docs = readRootDocuments(clone, tree);
           // The job stops here too: every fact below a description nobody could read is invented.
           if (docs.dataset_description.state !== "present") {
