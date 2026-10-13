@@ -57,6 +57,29 @@ export const MODEL_WRITTEN_FINDINGS = "written by the model; the depositor's tex
 export const MODEL_WRITTEN_SUMMARY = "written by the model; the depositor's text can steer it";
 
 // ---------------------------------------------------------------------------------------------
+// A start that went
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * What `start` says for an answer of 202. `dispatch_claimed` is a failed hand-over that found its
+ * run already claimed: the review exists and stands, which "started" would misstate. A word a newer
+ * Worker invents is said as it is, and never as a start that did not happen.
+ */
+export function startedSentence(reason: string, datasetId: string): string {
+  const id = plain(datasetId);
+  switch (reason) {
+    case "dispatched":
+      return `${id}: review started.`;
+    case "redispatched":
+      return `${id}: review started again.`;
+    case "dispatch_claimed":
+      return `${id}: a review of this commit was already handed over and stands.`;
+    default:
+      return `${id}: review started (${plain(reason)}).`;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // The list's line
 // ---------------------------------------------------------------------------------------------
 

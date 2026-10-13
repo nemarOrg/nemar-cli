@@ -36,9 +36,27 @@ export function signedIn(json?: boolean): boolean {
 }
 
 /**
- * Report a failure and exit 1. A refusal or a not-found (a 4xx) is the Worker's answer and not a
- * crash, so the "attach the log to a new issue" hint is suppressed; a 5xx, a network failure and
- * anything that is not an `ApiError` may be a bug and keep it.
+ * Print a failure that has a message of its own, and exit 1. `answered` says exit 1 is the
+ * command's answer and not a crash (a refusal the Worker made, a mistyped argument), which
+ * suppresses the "attach the log to a new issue" hint (`markReportedExit`); anything that may be a
+ * bug leaves it.
+ */
+export function failMessage(
+  message: string,
+  opts: { spinner?: Ora | null; json?: boolean; answered: boolean; hint?: string },
+): void {
+  const out = say(opts.json);
+  if (opts.spinner) opts.spinner.fail(message);
+  else out(chalk.red(message));
+  if (opts.hint) out(chalk.dim(`  ${opts.hint}`));
+  process.exitCode = 1;
+  if (opts.answered) markReportedExit();
+}
+
+/**
+ * Report an error of a request and exit 1. A refusal or a not-found (a 4xx) is the Worker's answer
+ * and not a crash; a 5xx, a network failure and anything that is not an `ApiError` may be a bug,
+ * and keep the hint.
  */
 export function reportFailure(
   error: unknown,
@@ -46,17 +64,19 @@ export function reportFailure(
   fallback: string,
   json?: boolean,
 ): void {
-  const out = say(json);
-  const message = error instanceof ApiError ? plain(error.message) : fallback;
-  if (spinner) spinner.fail(message);
-  else out(chalk.red(message));
   if (error instanceof ApiError) {
-    if (error.statusCode === 403) out(chalk.dim("  This command requires admin privileges"));
-  } else {
-    out(chalk.dim(`  Error details: ${plain(errorDetail(error))}`));
+    failMessage(plain(error.message), {
+      spinner,
+      json,
+      answered: error.statusCode >= 400 && error.statusCode < 500,
+      hint: error.statusCode === 403 ? "This command requires admin privileges" : undefined,
+    });
+    return;
   }
-  process.exitCode = 1;
-  if (error instanceof ApiError && error.statusCode >= 400 && error.statusCode < 500) {
-    markReportedExit();
-  }
+  failMessage(fallback, {
+    spinner,
+    json,
+    answered: false,
+    hint: `Error details: ${plain(errorDetail(error))}`,
+  });
 }

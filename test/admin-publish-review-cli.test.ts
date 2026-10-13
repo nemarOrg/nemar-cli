@@ -24,6 +24,7 @@
  */
 
 import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { NOT_HANDED_OVER, START_REFUSALS } from "../backend/src/routes/admin/publication-review";
 import { SCREENED_HEAD } from "../backend/test/helpers/identifier-screen";
 import {
   NOTE_SENTINEL,
@@ -38,10 +39,12 @@ import {
 import type { PublicationReviewDetail } from "../shared/contract/publication-review-admin";
 import {
   NOT_ASSESSED_LINE,
+  PLATFORM_DAILY_CAP,
   PUBLICATION_FINDING_LABEL,
   QUESTION_FACT_TEXT,
   QUESTION_LABEL,
   REASONS,
+  START_CURE_REASONS,
   cureOf,
 } from "../shared/publication-review";
 import type { PublishRequestsResponse } from "../src/lib/api/publish";
@@ -620,5 +623,505 @@ describe("show", () => {
     expect(h.requests.at(-1)?.status).toBe(500);
     expect(output(r)).toContain("The publication review could not be read. Try again.");
     expect(output(r)).toContain(BUG_HINT);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// start
+// ---------------------------------------------------------------------------------------------
+
+const START = ["admin", "publish", "start"];
+
+/** The reviews of the platform's database, newest last. */
+const reviewRows = () =>
+  h.db
+    .query<
+      {
+        id: number;
+        dataset_id: string;
+        state: string;
+        detail: string | null;
+        started_by: number | null;
+      },
+      []
+    >("SELECT id, dataset_id, state, detail, started_by FROM publication_reviews ORDER BY id")
+    .all();
+
+/** The review dispatches the Worker sent GitHub, by the dataset each was for, in order. */
+const dispatchedDatasets = () =>
+  h.github.dispatches
+    .filter((d) => d.event_type === "run-publication-review")
+    .map((d) => d.client_payload.dataset_id);
+
+/** The requests the NEMAR API served that started something. */
+const startPosts = () => h.requests.filter((c) => c.method === "POST");
+
+/** A request whose screen is clean and which has no review yet: the one a start is offered for. */
+function seedStartable(datasetId: string, requestedAt?: string): number {
+  const { requestId } = seedScreenedRequest(h.db, { datasetId });
+  if (requestedAt) {
+    h.db.run("UPDATE publication_requests SET requested_at = ? WHERE id = ?", [
+      requestedAt,
+      requestId,
+    ]);
+  }
+  return requestId;
+}
+
+describe("start", () => {
+  test("dispatches the review, exits 0 and points at show", async () => {
+    seedStartable("nm000480");
+
+    const r = await h.cli([...START, "nm000480"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("nm000480: review started.");
+    expect(r.stdout).toContain("nemar admin publish show nm000480");
+    expect(dispatchedDatasets()).toEqual(["nm000480"]);
+    const rows = reviewRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ dataset_id: "nm000480", state: "dispatched" });
+    expect(rows[0].started_by).not.toBeNull();
+  });
+
+  test("a second start answers that a review is running, exits 0 and sends nothing", async () => {
+    seedStartable("nm000480");
+    await h.cli([...START, "nm000480"]);
+
+    const r = await h.cli([...START, "nm000480"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(output(r)).toContain(START_REFUSALS.running.error);
+    expect(output(r)).toContain("(running)");
+    expect(output(r)).not.toContain(BUG_HINT);
+    expect(dispatchedDatasets()).toEqual(["nm000480"]);
+    expect(reviewRows()).toHaveLength(1);
+  });
+
+  test("a review that already reported answers has_result and exits 0", async () => {
+    seedPassing("nm000480");
+
+    const r = await h.cli([...START, "nm000480"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(output(r)).toContain(START_REFUSALS.has_result.error);
+    expect(output(r)).toContain("(has_result)");
+    expect(dispatchedDatasets()).toEqual([]);
+  });
+
+  test("a review that ended without a report is started again and says so", async () => {
+    const { requestId } = seedScreenedRequest(h.db, { datasetId: "nm000480" });
+    seedPublicationReview(h.db, {
+      requestId,
+      datasetId: "nm000480",
+      state: "errored",
+      detail: "dispatch_failed",
+    });
+
+    const r = await h.cli([...START, "nm000480"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("nm000480: review started again.");
+    expect(dispatchedDatasets()).toEqual(["nm000480"]);
+  });
+
+  test("a request that is not waiting for its decision exits 1 with the Worker's sentence and word", async () => {
+    seedScreenedRequest(h.db, {
+      datasetId: "nm000480",
+      requestStatus: "blocked",
+      blockReason: "min_requirements_failed",
+    });
+
+    const r = await h.cli([...START, "nm000480"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(output(r)).toContain(START_REFUSALS.request_not_requested.error);
+    expect(output(r)).toContain("(request_not_requested)");
+    expect(output(r)).not.toContain(BUG_HINT);
+    expect(dispatchedDatasets()).toEqual([]);
+    expect(reviewRows()).toEqual([]);
+  });
+
+  // Every other refusal is a start that did not happen, and a script must be able to tell.
+  test("every other refusal exits 1", async () => {
+    // The screen has not reported.
+    seedScreenedRequest(h.db, { datasetId: "nm000481", status: "pending" });
+    const notReady = await h.cli([...START, "nm000481"]);
+    expect(notReady.exitCode).toBe(1);
+    expect(output(notReady)).toContain("(screen_not_ready)");
+
+    // An OpenNeuro mirror is not reviewed.
+    seedScreenedRequest(h.db, { datasetId: "on000482", source: "openneuro" });
+    const mirror = await h.cli([...START, "on000482"]);
+    expect(mirror.exitCode).toBe(1);
+    expect(output(mirror)).toContain("(not_applicable)");
+
+    // The other environment's Worker answers for it: the production Worker does not own a fixture
+    // the dev Worker does, so there is no row here at all.
+    const gone = await h.cli([...START, "nm000483"]);
+    expect(gone.exitCode).toBe(1);
+    expect(output(gone)).toContain("nm000483 has no active publication request.");
+    expect(gone.stderr + gone.stdout).not.toContain(BUG_HINT);
+
+    expect(dispatchedDatasets()).toEqual([]);
+  });
+
+  test("the review being off exits 1 and starts nothing", async () => {
+    h.setEnv({ PUBLICATION_REVIEW_ENABLED: "0" });
+    seedStartable("nm000480");
+
+    const r = await h.cli([...START, "nm000480"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(output(r)).toContain("(review_disabled)");
+    expect(output(r)).toContain(START_REFUSALS.review_disabled.error);
+    expect(reviewRows()).toEqual([]);
+  });
+
+  test("a Worker that cannot hand the review to GitHub exits 1 and the row records it", async () => {
+    h.setEnv({ PRESCREEN_CALLBACK_SECRET: undefined });
+    seedStartable("nm000480");
+
+    const r = await h.cli([...START, "nm000480"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(output(r)).toContain(NOT_HANDED_OVER.dispatch_unconfigured.error);
+    expect(output(r)).toContain("(dispatch_unconfigured)");
+    // The Worker's own clear answer, not a crash of the command.
+    expect(output(r)).not.toContain(BUG_HINT);
+    expect(dispatchedDatasets()).toEqual([]);
+    expect(reviewRows()[0]).toMatchObject({ state: "errored", detail: "dispatch_unconfigured" });
+  });
+
+  test("a fault of the Worker exits 1 and keeps the bug-report hint", async () => {
+    seedStartable("nm000480");
+    h.hookDb({
+      statement(sql) {
+        if (/INSERT INTO publication_reviews/.test(sql)) throw new Error("simulated write failure");
+      },
+    });
+
+    const r = await h.cli([...START, "nm000480"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(h.requests.at(-1)?.status).toBe(500);
+    expect(output(r)).toContain(BUG_HINT);
+  });
+
+  test("a member is refused by the Worker and exits 1", async () => {
+    seedStartable("nm000480");
+    await h.user("plainmember", "member", "member-key-0123456789abcdef0123456789abcdef");
+
+    const r = await h.cli([...START, "nm000480"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(output(r)).toContain("This command requires admin privileges");
+    expect(reviewRows()).toEqual([]);
+  });
+
+  test("a malformed id exits 1 before any request is made, and so does no id at all", async () => {
+    const bad = await h.cli([...START, "nm12"]);
+    expect(bad.exitCode).toBe(1);
+    expect(output(bad)).toContain('"nm12" is not a dataset id');
+    const none = await h.cli(START);
+    expect(none.exitCode).toBe(1);
+    expect(output(none)).toContain("Give a dataset id, or --all.");
+    expect(h.requests).toEqual([]);
+  });
+
+  test("signed out exits 1 and sends nothing", async () => {
+    seedStartable("nm000480");
+
+    const r = await h.cli([...START, "nm000480"], { signedOut: true });
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("Not authenticated");
+    expect(h.requests).toEqual([]);
+  });
+
+  test("--json prints the Worker's answer and nothing else on standard output", async () => {
+    seedStartable("nm000480");
+
+    const r = await h.cli([...START, "nm000480", "--json"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(JSON.parse(r.stdout)).toMatchObject({
+      started: true,
+      reason: "dispatched",
+      environment: "production",
+    });
+    // A refusal that leaves a review standing is still an answer, and is the document.
+    const again = await h.cli([...START, "nm000480", "--json"]);
+    expect(again.exitCode).toBe(0);
+    expect(JSON.parse(again.stdout)).toMatchObject({ code: "running" });
+    // Any other refusal goes to standard error and leaves standard output empty.
+    seedScreenedRequest(h.db, { datasetId: "nm000481", status: "pending" });
+    const refused = await h.cli([...START, "nm000481", "--json"]);
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stdout).toBe("");
+    expect(refused.stderr).toContain(START_REFUSALS.screen_not_ready.error);
+  });
+
+  test("--dry-run goes with --all", async () => {
+    seedStartable("nm000480");
+
+    const r = await h.cli([...START, "nm000480", "--dry-run"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(output(r)).toContain("--dry-run goes with --all.");
+    expect(h.requests).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// start --all
+// ---------------------------------------------------------------------------------------------
+
+describe("start --all", () => {
+  /**
+   * Four requests a start is offered for, oldest first (the Worker lists newest first), and the
+   * ones it is not offered for: a review that reported, one running, a blocked request, a request
+   * whose screen has not reported (its reasons name a start as the cure, and the Worker says no),
+   * and a request that needs the screen re-run.
+   */
+  function seedFleet() {
+    seedStartable("nm000480", "2026-10-10 08:00:00");
+    seedStartable("nm000481", "2026-10-10 09:00:00");
+    // A review that errored before it reached a model: started again, free.
+    const errored = seedScreenedRequest(h.db, { datasetId: "nm000482" });
+    seedPublicationReview(h.db, {
+      requestId: errored.requestId,
+      datasetId: "nm000482",
+      state: "errored",
+      detail: "dispatch_failed",
+    });
+    seedStartable("nm000483", "2026-10-10 11:00:00");
+    h.db.run(
+      "UPDATE publication_requests SET requested_at = '2026-10-10 10:00:00' WHERE dataset_id = 'nm000482'",
+    );
+    // Not offered.
+    seedPassing("nm000484");
+    const running = seedScreenedRequest(h.db, { datasetId: "nm000485" });
+    seedPublicationReview(h.db, {
+      requestId: running.requestId,
+      datasetId: "nm000485",
+      state: "dispatched",
+      createdMinutesAgo: 1,
+    });
+    seedScreenedRequest(h.db, {
+      datasetId: "nm000486",
+      requestStatus: "blocked",
+      blockReason: "min_requirements_failed",
+    });
+    seedScreenedRequest(h.db, { datasetId: "nm000487", status: "pending" });
+    seedScreenedRequest(h.db, { datasetId: "nm000488", status: "error" });
+  }
+  const CANDIDATES = ["nm000480", "nm000481", "nm000482", "nm000483"];
+
+  test("--dry-run lists the candidates, oldest first, with their reasons, and starts nothing", async () => {
+    seedFleet();
+
+    const r = await h.cli([...START, "--all", "--dry-run"]);
+
+    expect(r.exitCode).toBe(0);
+    expectInOrder(r.stdout, CANDIDATES);
+    for (const id of ["nm000484", "nm000485", "nm000486", "nm000487", "nm000488"]) {
+      expect(r.stdout).not.toContain(id);
+    }
+    // The reasons the Worker gave each, as codes.
+    const lineOf = (id: string) => r.stdout.split("\n").find((l) => l.trimStart().startsWith(id));
+    expect(lineOf("nm000480")).toContain("review_not_started");
+    expect(lineOf("nm000482")).toContain("review_could_not_run");
+    expect(lineOf("nm000480")).toContain("depositor_nm000480");
+    expect(r.stdout).toContain("This was a dry run: nothing was started.");
+    // One read, no write.
+    expect(startPosts()).toEqual([]);
+    expect(dispatchedDatasets()).toEqual([]);
+    expect(reviewRows().filter((row) => row.state === "dispatched")).toHaveLength(1);
+  });
+
+  test("without --yes in a pipe it is cancelled, exits 1 and starts nothing", async () => {
+    seedFleet();
+
+    const none = await h.cli([...START, "--all"]);
+    // Piped input is not a person at a terminal: a stray `y` cannot spend the platform's money.
+    const typed = await h.cli([...START, "--all"], { input: "y\n" });
+
+    for (const r of [none, typed]) {
+      expect(r.exitCode).toBe(1);
+      expect(output(r)).toContain("Cancelled.");
+      expect(output(r)).not.toContain(BUG_HINT);
+    }
+    expect(startPosts()).toEqual([]);
+    expect(dispatchedDatasets()).toEqual([]);
+  });
+
+  test("--yes starts each candidate, oldest first, and says what came of it", async () => {
+    seedFleet();
+
+    const r = await h.cli([...START, "--all", "--yes"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(dispatchedDatasets()).toEqual(CANDIDATES);
+    expect(r.stdout).toContain("4 started, 0 already had a review, 0 not started, 0 failed");
+    for (const id of CANDIDATES) expect(r.stdout).toContain(`${id}  started`);
+    expect(r.stdout).not.toContain("Stopped:");
+    // The two that were not candidates were not asked about.
+    expect(startPosts().map((c) => c.path)).toEqual(
+      CANDIDATES.map((id) => `/admin/publish/${id}/review/start`),
+    );
+  });
+
+  test("a request that is not offered is never started, whatever its reason codes say", async () => {
+    // A review that reported and whose stored report no longer reads is `review_could_not_run`,
+    // whose cure is "start it", and the route would answer has_result: the Worker's
+    // `start_offered` says no. Deciding from the reason codes would offer it.
+    const stale = seedScreenedRequest(h.db, { datasetId: "nm000480" });
+    seedPublicationReview(h.db, {
+      requestId: stale.requestId,
+      datasetId: "nm000480",
+      state: "reported",
+      rawReport: "this is not a report",
+      verdict: "action_required",
+      claimed: true,
+    });
+    seedStartable("nm000481");
+    const list = JSON.parse((await h.cli([...LIST, "--json"])).stdout) as PublishRequestsResponse;
+    const summary = list.requests.find((q) => q.dataset_id === "nm000480")?.publication_review;
+    expect(summary?.start_offered).toBe(false);
+    expect(summary?.reasons.some((code) => START_CURE_REASONS.includes(code))).toBe(true);
+
+    const r = await h.cli([...START, "--all", "--yes"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(dispatchedDatasets()).toEqual(["nm000481"]);
+    expect(startPosts().map((c) => c.path)).toEqual(["/admin/publish/nm000481/review/start"]);
+  });
+
+  test("the platform's allowance spent: the loop stops, the rest are not tried, exit 1", async () => {
+    for (const [i, id] of CANDIDATES.entries())
+      seedStartable(id, `2026-10-10 ${String(8 + i).padStart(2, "0")}:00:00`);
+    // 49 model calls in the last day: the next start is the 50th, the one after is over.
+    for (let i = 0; i < PLATFORM_DAILY_CAP - 1; i++) {
+      const datasetId = `nm${String(1000 + i).padStart(6, "0")}`;
+      const { requestId } = seedScreenedRequest(h.db, { datasetId, requestStatus: "published" });
+      seedPublicationReview(h.db, { requestId, datasetId, state: "reported", claimed: true });
+    }
+
+    const r = await h.cli([...START, "--all", "--yes"]);
+
+    expect(r.exitCode).toBe(1);
+    // The first went; the second was declined by the platform's allowance; the others were never asked.
+    expect(dispatchedDatasets()).toEqual(["nm000480"]);
+    expect(startPosts().map((c) => c.path)).toEqual([
+      "/admin/publish/nm000480/review/start",
+      "/admin/publish/nm000481/review/start",
+    ]);
+    expect(reviewRows().find((row) => row.dataset_id === "nm000481")).toMatchObject({
+      state: "declined",
+      detail: "platform_limit",
+    });
+    expect(reviewRows().some((row) => row.dataset_id === "nm000482")).toBe(false);
+    expect(r.stdout).toContain("1 started, 0 already had a review, 1 not started, 0 failed");
+    expect(r.stdout).toContain(
+      "Stopped: the platform's allowance for the last 24 hours is spent, so 2 were not tried.",
+    );
+    expect(output(r)).not.toContain(BUG_HINT);
+  });
+
+  test("a run with nothing to start says so and exits 0", async () => {
+    seedPassing("nm000480");
+
+    const r = await h.cli([...START, "--all", "--yes"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("Nothing to start");
+    expect(startPosts()).toEqual([]);
+  });
+
+  test("the review being off dies before asking, with --yes or without", async () => {
+    h.setEnv({ PUBLICATION_REVIEW_ENABLED: "0" });
+    seedStartable("nm000480");
+
+    for (const args of [
+      [...START, "--all"],
+      [...START, "--all", "--yes"],
+    ]) {
+      const r = await h.cli(args);
+      expect(r.exitCode).toBe(1);
+      expect(output(r)).toContain(
+        "The automated review is off on this Worker, so nothing was started.",
+      );
+      expect(output(r)).not.toContain("Cancelled.");
+    }
+    expect(startPosts()).toEqual([]);
+  });
+
+  test("one that was started meanwhile already has a review and is not a failure", async () => {
+    seedFleet();
+    // After the list was read and before the first start: someone else starts nm000481.
+    h.after("GET /admin/publish/requests", () => {
+      const row = h.db
+        .query<{ id: number }, []>(
+          "SELECT id FROM publication_requests WHERE dataset_id = 'nm000481'",
+        )
+        .get();
+      seedPublicationReview(h.db, {
+        requestId: row?.id as number,
+        datasetId: "nm000481",
+        state: "dispatched",
+        createdMinutesAgo: 0,
+      });
+    });
+
+    const r = await h.cli([...START, "--all", "--yes"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("nm000481  already has a review");
+    expect(r.stdout).toContain("3 started, 1 already had a review, 0 not started, 0 failed");
+    expect(dispatchedDatasets()).toEqual(["nm000480", "nm000482", "nm000483"]);
+  });
+
+  test("--json prints one document: the candidates on a dry run, the results of a run", async () => {
+    seedFleet();
+
+    const dry = await h.cli([...START, "--all", "--dry-run", "--json"]);
+    expect(dry.exitCode).toBe(0);
+    const would = JSON.parse(dry.stdout) as {
+      dry_run: boolean;
+      would_start: Array<{ dataset_id: string }>;
+    };
+    expect(would.dry_run).toBe(true);
+    expect(would.would_start.map((q) => q.dataset_id)).toEqual(CANDIDATES);
+
+    const run = await h.cli([...START, "--all", "--yes", "--json"]);
+    expect(run.exitCode).toBe(0);
+    const done = JSON.parse(run.stdout) as {
+      started: number;
+      failed: number;
+      not_tried: number;
+      results: Array<{ dataset_id: string; outcome: string }>;
+    };
+    expect(done).toMatchObject({ started: 4, failed: 0, not_tried: 0 });
+    expect(done.results.map((q) => q.dataset_id)).toEqual(CANDIDATES);
+    expect(done.results.every((q) => q.outcome === "started")).toBe(true);
+  });
+
+  test("--json cancelled prints nothing on standard output and exits 1", async () => {
+    seedFleet();
+
+    const r = await h.cli([...START, "--all", "--json"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toContain("Cancelled.");
+  });
+
+  test("--all with a dataset id is refused", async () => {
+    const r = await h.cli([...START, "nm000480", "--all"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(output(r)).toContain("Give either a dataset id or --all, not both.");
+    expect(h.requests).toEqual([]);
   });
 });
