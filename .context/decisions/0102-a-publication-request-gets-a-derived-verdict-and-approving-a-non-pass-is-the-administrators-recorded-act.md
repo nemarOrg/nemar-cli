@@ -438,7 +438,12 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
 - **`start <dataset>`** and **`start --all`** start the review of the current screened commit,
   as ADR 0092's amendment of 2026-10-10 does; `--all` asks before spending and stops when the platform's cap is spent.
 - **`approve <dataset>`** shows the screen, the review and the gate's state (`enforced`, `off` or `n/a`) before it asks.
+  The review block carries the evidence an administrator decides from, ahead of the standing line:
+  what the model was shown and what was withheld for findings (the lines `show` prints, from the same helpers), and a pointer to `show`.
+  The model's own summary and notes stay in `show`, under their labels.
   A hard reason refuses and names its cure.
+  A stopped approval (`approving`, not yet publishing) behind a hard reason that the depositor must fix is also told it cannot be resumed and is to be denied,
+  because the move to `blocked` in section 5 takes only a `requested` request.
   The screen's reason needs `--acknowledge-identifier-screen "<reason>"`, as today.
   Every other non-pass needs `--force`.
   `--yes` skips the question, never the reason and never the force.
