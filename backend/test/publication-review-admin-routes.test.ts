@@ -373,13 +373,14 @@ describe("GET /admin/publish/requests: the review of each request", () => {
   });
 
   // A review of a dataset whose description sets no Version: the orchestrator publishes
-  // `Version || "1.0.0"`, so the live version checks look 1.0.0 up, as the approval will.
+  // `Version || "1.0.0"`, so the live version checks look 1.0.0 up, as the approval will, and the
+  // job looks up the tag `v1.0.0` too: only a Version that is malformed has no tag to look up.
   const noVersion = () =>
     goodPublicationReport({
       evidence: evidenceFor(SCREENED_HEAD, false, {
         version: null,
         version_shape: "missing",
-        tag: "not_applicable",
+        tag: "absent",
       }),
     });
 
