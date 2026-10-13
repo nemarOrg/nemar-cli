@@ -21,6 +21,7 @@ import {
 import {
   ACKNOWLEDGMENT_MAX_LENGTH,
   ACKNOWLEDGMENT_MIN_LENGTH,
+  PUBLICATION_DATASET_ID_RE,
 } from "../../shared/publication-limits.js";
 import {
   PUBLICATION_STEPS,
@@ -52,6 +53,7 @@ import {
   reasonViewLine,
 } from "../lib/publication-review-approve.js";
 import { approveEvidenceLines } from "../lib/publication-review-display.js";
+import { plain } from "../lib/terminal-text.js";
 
 export function registerApproveCommand(group: Command): void {
   group
@@ -177,6 +179,15 @@ After Approval:
       ) => {
         if (!requireSignedIn()) return;
 
+        // A malformed id is refused here, as `show` and `start` do, before anything is sent: the
+        // Worker would answer 400 to the read, and the rest of the command would go on to ask.
+        if (!PUBLICATION_DATASET_ID_RE.test(datasetId)) {
+          console.log(chalk.red(`"${plain(datasetId)}" is not a dataset id (like nm000108).`));
+          process.exitCode = 1;
+          markReportedExit();
+          return;
+        }
+
         const ack = options.acknowledgeIdentifierScreen?.trim();
         if (
           ack !== undefined &&
@@ -201,6 +212,14 @@ After Approval:
         // then the decision. Read once, shown, and decided from what was shown, so an override is
         // built from exactly this and never from a second read.
         const read = await readReview(datasetId);
+        if (read.kind === "unreadable" && read.refused !== undefined) {
+          // The Worker's final word on the read (no key, not an administrator): say it, exit 1, and
+          // do not ask a question about an approval it would refuse. A 404 for a request that is
+          // not there is different, and goes on: the Worker's answer to the approval is the one
+          // that ends it.
+          failWith(read.refused, ora(), "The publication review could not be read");
+          return;
+        }
         if (read.kind === "detail") printReview(read.detail, datasetId);
 
         // Ask the server what this request IS before describing what approving

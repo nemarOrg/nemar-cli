@@ -57,6 +57,7 @@ setDefaultTimeout(60_000);
 
 const ADMIN_KEY = "approve-admin-key-0123456789abcdef0123456789abcdef";
 const OTHER_ADMIN_KEY = "approve-other-key-0123456789abcdef0123456789abcdef";
+const MEMBER_KEY = "approve-member-key-0123456789abcdef0123456789abcdef";
 const EXECUTOR_KEY = "approve-executor-key-0123456789abcdef0123456789abcdef";
 const APPROVE_PATH = `/admin/publish/${DATASET}/approve`;
 
@@ -765,6 +766,61 @@ describe("the command decides: a gate that is off or does not apply", () => {
     expect(r.stdout).toContain("--force changes nothing: the review gate is n/a.");
     expect(approveBodies()[0]).not.toHaveProperty("override_publication_review");
     expect(requestRow(requestId)?.status).toBe("published");
+  });
+});
+
+describe("the command decides: a definitive answer to the read ends it before the question", () => {
+  const BUG_HINT = "attach the log to a new issue";
+
+  test("a malformed dataset id is refused before anything is sent", async () => {
+    seedReport(seedGolden());
+
+    for (const flags of [["--yes"], ["--yes", "--force"], []]) {
+      const r = await h.cli(["admin", "publish", "approve", "nm0004", ...flags]);
+
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain('"nm0004" is not a dataset id (like nm000108).');
+      expect(output(r)).not.toContain("could not be read");
+      expect(output(r)).not.toContain(BUG_HINT);
+    }
+    expect(h.requests).toEqual([]);
+    expect(h.posted).toEqual([]);
+  });
+
+  test("a key that is not an administrator's gets the Worker's refusal and exit 1, with and without --yes, and nothing is posted", async () => {
+    const requestId = seedGolden();
+    seedReport(requestId);
+    await h.user("plainmember", "member", MEMBER_KEY);
+
+    for (const flags of [["--resume", "--yes"], ["--resume", "--yes", "--force"], ["--resume"]]) {
+      const r = await approve(flags, { as: "plainmember" });
+
+      expect(r.exitCode, flags.join(" ")).toBe(1);
+      expect(r.stdout).not.toContain("could not be read");
+      expect(r.stdout).not.toContain("This will run the following");
+      expect(r.stdout).not.toContain("Cancelled");
+      expect(output(r)).toContain("This command requires admin privileges");
+      // A refusal is the Worker's answer, not a crash: no invitation to report a bug.
+      expect(output(r)).not.toContain(BUG_HINT);
+    }
+    expect(h.posted).toEqual([]);
+    expect(h.requests.map((c) => `${c.method} ${c.path} ${c.status}`)).toEqual([
+      `GET /admin/publish/${DATASET}/review 403`,
+      `GET /admin/publish/${DATASET}/review 403`,
+      `GET /admin/publish/${DATASET}/review 403`,
+    ]);
+    expect(requestRow(requestId)?.status).toBe("requested");
+  });
+
+  test("a 404 for a dataset with no active request is not definitive: the Worker still decides", async () => {
+    // The documented choice (`readReview`): `no_request` goes on, so the Worker's own answer ends it.
+    seedScreenedRequest(h.db, { datasetId: DATASET });
+    h.db.run("DELETE FROM publication_requests");
+
+    const r = await approve(["--resume", "--yes"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(h.posted.filter((p) => p.path === APPROVE_PATH)).toHaveLength(1);
   });
 });
 

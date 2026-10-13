@@ -613,6 +613,38 @@ describe("readReview and a review the CLI cannot classify as the API does", () =
   });
 });
 
+describe("readReview carries the Worker's definitive refusal of the read", () => {
+  test("a 400, 401 or 403 is the Worker's final word on the read; no other status is", async () => {
+    for (const status of [400, 401, 403]) {
+      scripted = [{ status, body: { error: "Refused", code: "refused" } }];
+      const read = await readReview(PROD_DATASET);
+      expect(read.kind, String(status)).toBe("unreadable");
+      if (read.kind === "unreadable") {
+        expect(read.refused?.statusCode, String(status)).toBe(status);
+        expect(read.refused?.message).toBe("Refused");
+        expect(read.why).toBe(`HTTP ${status}`);
+      }
+    }
+    for (const status of [409, 429, 500, 502, 503]) {
+      scripted = [{ status, body: { error: "Not final" } }];
+      const read = await readReview(PROD_DATASET);
+      expect(read.kind, String(status)).toBe("unreadable");
+      if (read.kind === "unreadable") expect(read.refused, String(status)).toBeUndefined();
+    }
+    // A request with no active request is not one: the Worker decides what the approval says.
+    scripted = [{ status: 404, body: { error: "None", code: "not_found" } }];
+    expect(await readReview(PROD_DATASET)).toEqual({ kind: "absent", why: "no_request" });
+  });
+
+  test("a member's key, against the real router, is a refusal", async () => {
+    useKey(MEMBER_KEY);
+    seedScreenedRequest(h.db, { datasetId: PROD_DATASET });
+    const read = await readReview(PROD_DATASET);
+    expect(read.kind).toBe("unreadable");
+    if (read.kind === "unreadable") expect(read.refused?.statusCode).toBe(403);
+  });
+});
+
 describe("readReview tells a backend with no review route from a request with no review", () => {
   test("a 404 without the review's word is no_route, and the approval goes on with its own sentence", async () => {
     // An older backend has no `/review` route: its 404 is a bare `{ error }` with no `code`.

@@ -31,6 +31,7 @@ import {
   reasonLine,
   reviewGateRefusalText,
 } from "../shared/publication-review";
+import { ApiError } from "../src/lib/api/errors";
 import {
   type ApproveDecision,
   type ApproveOptions,
@@ -181,6 +182,17 @@ describe("1. a review that could not be read is the Worker's to judge", () => {
     ] as const) {
       expect(proceeds(decideApproval(ID, r, FORCE)).override).toBeNull();
     }
+  });
+
+  test("the Worker's own refusal of the read (a bad id, no key, not an administrator) changes nothing for a caller that does not stop on it", () => {
+    // `approve` stops on `refused`; `next` does not read it, and decides as it did.
+    const refused = new ApiError("Admin access required", 403);
+    const d = proceeds(
+      decideApproval(ID, { kind: "unreadable", why: "HTTP 403", refused }, NO_FLAGS),
+    );
+    expect(d.notes).toEqual([
+      "The publication review could not be read (HTTP 403); the API still checks it.",
+    ]);
   });
 
   test("--force says it was not sent, for every read that gave nothing to override", () => {

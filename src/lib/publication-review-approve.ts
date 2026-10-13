@@ -49,7 +49,13 @@ export type ReviewRead =
   | { kind: "detail"; detail: PublicationReviewDetail }
   /** The backend has no review route (a 404 without a review code), or no active request (`not_found`). */
   | { kind: "absent"; why: "no_route" | "no_request" }
-  | { kind: "unreadable"; why: string };
+  /**
+   * `refused` is the Worker's own definitive answer to the read (HTTP 400, 401 or 403: a bad id, no
+   * key, a key that is not an administrator's). Nothing the command could ask next would change
+   * it, so `approve` stops there; a caller that does not read it treats it like any other read that
+   * failed.
+   */
+  | { kind: "unreadable"; why: string; refused?: ApiError };
 
 /** The flags that are the administrator's own act. There is no `yes` here, on purpose. */
 export interface ApproveOptions {
@@ -152,6 +158,9 @@ export function parseReviewDetail(raw: unknown): PublicationReviewDetail | null 
   return ok ? (raw as unknown as PublicationReviewDetail) : null;
 }
 
+/** The statuses of the review read that are the Worker's final word: a bad id, no key, not an administrator. */
+const REFUSING_STATUSES: readonly number[] = [400, 401, 403];
+
 /** `GET /admin/publish/:id/review`, as a {@link ReviewRead}: never throws. */
 export async function readReview(datasetId: string): Promise<ReviewRead> {
   try {
@@ -173,13 +182,11 @@ export async function readReview(datasetId: string): Promise<ReviewRead> {
         why: reviewErrorCode(err) === "not_found" ? "no_request" : "no_route",
       };
     }
-    return {
-      kind: "unreadable",
-      why:
-        err instanceof ApiError && err.statusCode !== 0
-          ? `HTTP ${err.statusCode}`
-          : errorDetail(err),
-    };
+    const why =
+      err instanceof ApiError && err.statusCode !== 0 ? `HTTP ${err.statusCode}` : errorDetail(err);
+    return err instanceof ApiError && REFUSING_STATUSES.includes(err.statusCode)
+      ? { kind: "unreadable", why, refused: err }
+      : { kind: "unreadable", why };
   }
 }
 
