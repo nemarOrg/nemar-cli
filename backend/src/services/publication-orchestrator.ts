@@ -71,6 +71,7 @@ import { getDatasetsToken } from "./github-auth";
 import { checkApprovalScreenGate, hasStartedPublishing } from "./identifier-screen";
 import { generateManifest } from "./manifest";
 import { scheduleNeurobagelSync } from "./neurobagel-hooks.js";
+import { requestBlockedRefusal } from "./publication-review-gate.js";
 import { BIDS_METADATA_UNAVAILABLE, errorMessage, readRepoMetadata } from "./repo-metadata";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "./repo-spec";
 import { withRetry } from "./retry";
@@ -2412,13 +2413,14 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // fresh heartbeat and a stale click would always look live.
   const request = await db
     .prepare(
-      `SELECT id, status, steps_completed, anonymous, approval_requested_by,
+      `SELECT id, status, block_reason, steps_completed, anonymous, approval_requested_by,
               ${approvalLeaseLiveSql()} AS approval_lease_live ${ACTIVE_REQUEST_TAIL_SQL}`,
     )
     .bind(datasetId)
     .first<{
       id: number;
       status: string;
+      block_reason: string | null;
       steps_completed: string;
       anonymous: number | null;
       approval_requested_by: number | null;
@@ -2427,6 +2429,15 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
 
   if (!request) {
     return c.json({ error: "No active publication request found" }, 404);
+  }
+
+  // A blocked request is refused by the mechanical rules (ADR 0102): whatever the flag says, and
+  // for every dataset, before anything else decides anything, as `approve-dispatch` refuses it
+  // before its screen gate. A blocked request has never started a step (the one walk back to
+  // `blocked`, the owner-name check below, comes before the first), so this strands no run, and
+  // it holds for a resume too. The depositor fixes what blocked it and requests again.
+  if (request.status === "blocked") {
+    return c.json(requestBlockedRefusal(datasetId, request.block_reason), 409);
   }
 
   // Attribution forks (ADR 0080): a web click records the admin who clicked,
