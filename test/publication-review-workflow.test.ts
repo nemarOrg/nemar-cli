@@ -1286,6 +1286,9 @@ describe("the shell steps, run for real", () => {
     put("README.md", "# Resting EEG\nVolunteers at rest.\n");
     for (const rel of AWKWARD_SIDECARS)
       put(rel, JSON.stringify({ Which: rel, SamplingFrequency: 250 }));
+    // Not a sidecar: the name ends in a newline after `.json`. `$` in a perl pattern would match
+    // before it, and the reader's pattern does not, which is why the step ends the pattern with `\z`.
+    put("sub-06/eeg/sub-06_task-x_eeg.json\n", JSON.stringify({ Which: "trailing newline" }));
     for (let i = 0; i < ordinary; i++) {
       const sub = `sub-9${String(i).padStart(3, "0")}`;
       put(`${sub}/eeg/${sub}_task-rest_eeg.json`, JSON.stringify({ Index: i }));
