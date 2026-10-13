@@ -173,6 +173,7 @@ describe("y approves from the terminal", () => {
     expect(r.stdout).not.toContain(B);
     expect(h.requests.filter((c) => c.path === `/admin/publish/${B}/review`)).toEqual([]);
     expect(count(r.stdout, "Input ended; stopping.")).toBe(1);
+    expect(count(r.stdout, "See what needs you with: nemar admin publish list --needs-me")).toBe(1);
     expect(r.stdout).toContain("Done: 1 approved.");
   });
 
@@ -240,7 +241,7 @@ describe("a review that is not a pass needs --force", () => {
     const r = await next("y\nq\n");
 
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).not.toContain("y approve");
+    expect(r.stdout).not.toContain("y approve, ");
     expect(r.stdout).toContain("y is not offered:");
     expect(r.stdout).toContain("Not approved: this review is not a pass.");
     expect(r.stdout).toContain("nemar admin publish next --force");
@@ -382,7 +383,7 @@ describe("a reason nothing clears is never offered", () => {
     const r = await next("y\nq\n", ["--force"]);
 
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).not.toContain("y approve");
+    expect(r.stdout).not.toContain("y approve, ");
     expect(r.stdout).toContain("y is not offered:");
     expect(r.stdout).toContain("Not approved:");
     expect(r.stdout).toContain(cureOf("submission_minimum_failed", A, true));
@@ -776,6 +777,8 @@ describe("which requests are shown, and in what order", () => {
 
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("Input ended; stopping.");
+    // Nothing was shown, so the way to see what is waiting is named.
+    expect(r.stdout).toContain("See what needs you with: nemar admin publish list --needs-me");
     expect(h.posted).toEqual([]);
   });
 
