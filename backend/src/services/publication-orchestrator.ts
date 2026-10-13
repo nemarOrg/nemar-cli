@@ -17,6 +17,7 @@ import {
 } from "../../../shared/publication-steps.js";
 
 import { datasetLandingUrl } from "../../../shared/datacite-constants.js";
+import { REASON_CODES } from "../../../shared/publication-review.js";
 import { auditLogStatement } from "../db/audit-log";
 import { getS3Config } from "../routes/admin/shared";
 import type { AuthUser, Bindings } from "../types/bindings";
@@ -71,7 +72,12 @@ import { getDatasetsToken } from "./github-auth";
 import { checkApprovalScreenGate, hasStartedPublishing } from "./identifier-screen";
 import { generateManifest } from "./manifest";
 import { scheduleNeurobagelSync } from "./neurobagel-hooks.js";
-import { requestBlockedRefusal, reviewGateStateOf } from "./publication-review-gate.js";
+import {
+  evaluateApprovalReviewGate,
+  recordApprovalOverride,
+  requestBlockedRefusal,
+  reviewGateStateOf,
+} from "./publication-review-gate.js";
 import { BIDS_METADATA_UNAVAILABLE, errorMessage, readRepoMetadata } from "./repo-metadata";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "./repo-spec";
 import { withRetry } from "./retry";
@@ -225,6 +231,17 @@ export const acknowledgeIdentifierScreenSchema = z
   .max(500, "The acknowledgment is limited to 500 characters");
 
 /**
+ * The override of the publication review as the approval routes accept it. Shared by `/approve` and
+ * `approve-dispatch` so the two read one shape; its type is `PublicationReviewOverride`.
+ */
+export const publicationReviewOverrideSchema = z
+  .object({
+    review_id: z.number().int().positive().nullable(),
+    reasons: z.array(z.enum(REASON_CODES)).max(REASON_CODES.length),
+  })
+  .strict();
+
+/**
  * POST /admin/publish/:id/approve - Approve and run publication orchestrator
  *
  * The step inventory and execution order live in PUBLICATION_STEPS
@@ -264,6 +281,11 @@ export const approveSchema = z.object({
   // Recorded on the request with the admin and audited; ignored for any other
   // screen state, and never enough for direct identifiers.
   acknowledge_identifier_screen: acknowledgeIdentifierScreenSchema.optional(),
+  // ADR 0102: an administrator's override of a publication review that is not a pass, given for
+  // the review shown (`review_id`, null when there was none) and the reasons shown. Strict, so a
+  // field the gate does not know cannot ride along, and it means nothing unless the review gate
+  // is on and a reason stands that an override clears. `/approve` takes it from a bearer key only.
+  override_publication_review: publicationReviewOverrideSchema.optional(),
 });
 
 export type ApproveBody = z.infer<typeof approveSchema>;
@@ -2536,6 +2558,41 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
         `[publish] ${datasetId}: approval refused by the identifier screen (${gate.refusal.gate})`,
       );
       return c.json(gate.refusal, 409);
+    }
+
+    // The publication review's gate (ADR 0102), after the screen's and before anything is
+    // marked: a review that is not a pass needs the approver's recorded override, and a hard
+    // reason is refused whatever the body says. Skipped (with the screen's) only for a run that has
+    // started publishing. Off and not-applicable datasets pass without a read of the review.
+    const review = await evaluateApprovalReviewGate(env, {
+      requestId: request.id,
+      datasetId,
+      approverId: c.approver.id,
+      override: body.override_publication_review,
+    });
+    if (!review.ok) {
+      console.warn(
+        `[publish] ${datasetId}: approval refused by the publication review (${review.body.refusal})`,
+      );
+      return c.json(review.body, 409);
+    }
+    if (review.state === "enforced" && review.record !== null) {
+      const recorded = await recordApprovalOverride(env, {
+        requestId: request.id,
+        datasetId,
+        approverId: c.approver.id,
+        executedBy: c.approver.id !== adminUser.id ? adminUser.id : null,
+        via: "approve",
+        outcome: review.outcome,
+        headSha: review.headSha,
+        record: review.record,
+      });
+      if (!recorded.ok) {
+        console.warn(
+          `[publish] ${datasetId}: approval refused by the publication review (${recorded.body.refusal})`,
+        );
+        return c.json(recorded.body, 409);
+      }
     }
   }
 
