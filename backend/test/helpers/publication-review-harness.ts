@@ -51,6 +51,13 @@ export interface Harness {
   duringDispatch: (() => Promise<void>) | null;
   /** Merged over the default bindings; reset after every test. */
   envOverrides: Partial<Bindings>;
+  /**
+   * When set to a list, every request carries an execution context whose `waitUntil` pushes to it,
+   * as the Workers runtime keeps work alive after the answer; a test awaits the list to let that
+   * work finish. When null (the default) a request has no context, and a route that would defer
+   * its work awaits it instead. Reset after every test.
+   */
+  deferred: Promise<unknown>[] | null;
   env(over?: Partial<Bindings>): Bindings;
   dispatches(): DispatchBody[];
   reviews(): Record<string, unknown>[];
@@ -82,10 +89,28 @@ export interface Harness {
   ): Promise<{ status: number; body: Record<string, unknown> }>;
 }
 
+/** A route's answer as an object: its JSON, or `{ raw }` for a body that is not JSON (a bare 500). */
+async function bodyOf(res: Response): Promise<Record<string, unknown>> {
+  const text = await res.text();
+  try {
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    return { raw: text };
+  }
+}
+
 export function createHarness(): Harness {
   let server: Server;
   let db: Database;
   let app: App;
+
+  const ctx = (): ExecutionContext | undefined =>
+    h.deferred
+      ? ({
+          waitUntil: (task: Promise<unknown>) => void h.deferred?.push(task),
+          passThroughOnException: () => {},
+        } as unknown as ExecutionContext)
+      : undefined;
 
   const h: Harness = {
     get db() {
@@ -98,6 +123,7 @@ export function createHarness(): Harness {
     dispatchStatus: 204,
     duringDispatch: null,
     envOverrides: {},
+    deferred: null,
     env(over = {}) {
       return {
         DB: realD1(db),
@@ -163,8 +189,9 @@ export function createHarness(): Harness {
           }),
         },
         o.bindings ?? h.env(),
+        ctx(),
       );
-      return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+      return { status: res.status, body: await bodyOf(res) };
     },
     rearmScreen(requestId) {
       db.run(
@@ -188,8 +215,9 @@ export function createHarness(): Harness {
           body: JSON.stringify({ review_id: reviewId, dataset_id: datasetId }),
         },
         bindings ?? h.env(),
+        ctx(),
       );
-      return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+      return { status: res.status, body: await bodyOf(res) };
     },
     async result(reviewId, body, token, bindings, datasetId = PROD_DATASET) {
       const res = await app.request(
@@ -203,8 +231,9 @@ export function createHarness(): Harness {
           body: JSON.stringify({ review_id: reviewId, dataset_id: datasetId, ...body }),
         },
         bindings ?? h.env(),
+        ctx(),
       );
-      return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+      return { status: res.status, body: await bodyOf(res) };
     },
   };
 
@@ -236,6 +265,7 @@ export function createHarness(): Harness {
     h.dispatchStatus = 204;
     h.duringDispatch = null;
     h.envOverrides = {};
+    h.deferred = null;
   });
 
   beforeEach(() => {
@@ -254,4 +284,78 @@ export function reportFor(
   over: Record<string, unknown> = {},
 ): Record<string, unknown> {
   return goodPublicationReport({ evidence: evidenceFor(head, anonymous), ...over });
+}
+
+/** What {@link hookedD1} runs, and when. */
+export interface D1Hooks {
+  /**
+   * Before every statement, whether it runs alone or inside a batch (`inBatch`). It is
+   * synchronous because a batched statement runs inside the transaction, which a hook cannot wait
+   * out. A hook that throws fails that statement (and so the whole batch, which D1 rolls back).
+   */
+  statement?: (sql: string, inBatch: boolean) => void;
+  /** Before a batch begins, with the SQL of every statement in it, ahead of its transaction. */
+  batch?: (sqls: string[]) => void | Promise<void>;
+}
+
+/**
+ * A D1 that runs {@link D1Hooks} around the real database, so a test can land another writer
+ * exactly where the route is exposed to one (between its statements, or just before its batch) or
+ * make a named statement fail. The hooks write through the real database; nothing is canned.
+ * `interceptingD1` of `helpers/d1.ts` cannot do this for the statements of a batch, which are
+ * executed through `__execForBatch` and never through `run`.
+ */
+export function hookedD1(inner: D1Database, hooks: D1Hooks): D1Database {
+  return {
+    prepare(sql: string) {
+      const stmt = inner.prepare(sql) as unknown as {
+        bind(...p: unknown[]): unknown;
+        run(): Promise<unknown>;
+        first(): Promise<unknown>;
+        all(): Promise<unknown>;
+        __execForBatch(): unknown;
+      };
+      const api = {
+        sql,
+        bind(...p: unknown[]) {
+          stmt.bind(...p);
+          return api;
+        },
+        run() {
+          hooks.statement?.(sql, false);
+          return stmt.run();
+        },
+        first() {
+          hooks.statement?.(sql, false);
+          return stmt.first();
+        },
+        all() {
+          hooks.statement?.(sql, false);
+          return stmt.all();
+        },
+        __execForBatch() {
+          hooks.statement?.(sql, true);
+          return stmt.__execForBatch();
+        },
+      };
+      return api;
+    },
+    async batch(stmts: { sql: string }[]) {
+      await hooks.batch?.(stmts.map((s) => s.sql));
+      return (inner as unknown as { batch(s: unknown[]): Promise<unknown> }).batch(stmts);
+    },
+  } as unknown as D1Database;
+}
+
+/**
+ * Await a request that must answer without waiting for work that should follow its answer, and
+ * fail with that reason instead of hanging until the test times out when it does wait.
+ */
+export function answersWithin<T>(request: Promise<T>, ms = 4000): Promise<T> {
+  return Promise.race([
+    request,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("the answer waited on work that should follow it")), ms),
+    ),
+  ]);
 }

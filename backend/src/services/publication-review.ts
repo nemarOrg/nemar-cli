@@ -70,6 +70,12 @@ import { publicationReviewApplies, reviewEnabled } from "./publication-review-vi
 
 type Db = D1Database;
 
+/**
+ * Hand work to the runtime so the caller's answer need not wait for it: true when it took the
+ * task, false when it cannot (a test harness has no execution context), and the caller awaits it.
+ */
+export type Defer = (task: Promise<unknown>) => boolean;
+
 /** Rows the watchdog handles per tick. */
 const SWEEP_LIMIT = 20;
 
@@ -98,7 +104,7 @@ function sqlWord(w: string): string {
  * What an error is called in a log line: a class or a status, never its message, which may carry
  * text from a service that echoed something it was sent.
  */
-function errClass(err: unknown): string {
+export function errClass(err: unknown): string {
   if (!(err instanceof Error)) return "unknown";
   if (err.name === "TimeoutError" || err.name === "AbortError") return "timeout";
   const status = /^Publication review dispatch rejected: HTTP (\d{3})$/.exec(err.message);
@@ -116,63 +122,104 @@ async function tryMail(env: Bindings, requestId: number): Promise<"sent" | "othe
   }
 }
 
+/**
+ * Try the mail after the caller's answer when it can be deferred (the job's POST must not wait on
+ * Resend), and now when it cannot.
+ */
+async function tryMailAfterAnswer(
+  env: Bindings,
+  requestId: number,
+  defer: Defer | undefined,
+): Promise<void> {
+  const mail = tryMail(env, requestId);
+  if (!defer?.(mail)) await mail;
+}
+
 // ---------------------------------------------------------------------------------------------
 // The caps
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Rows that cost a model call, or may yet: everything except a decline (never sent) and an
- * attempt that never reached a model (the request changed before the claim, the dispatch failed or
- * was impossible, the review was off). Derived from `NEVER_REACHED_MODEL`, so the cap and the
- * restart rule cannot disagree about which attempts were free.
+ * What a row's `attempts` stands for. It is the number of model calls the row may have cost, ONE
+ * SLOT PER ATTEMPT: an insert starts with one (the call it is about to make), and a restart of an
+ * attempt that reached a model adds one (that call is now an earlier, spent one, and the restart
+ * has its own slot). An attempt that never reached a model gives its slot back, which is not a
+ * write but a reading ({@link CAP_CALLS_SQL}), so nothing that happens to an attempt (a decline, a
+ * failed dispatch, the watchdog giving up) can change what the calls before it cost.
+ *
+ * An attempt reached a model, or may yet, when it is still `dispatched` (the job may claim it) or
+ * has reported, or a claim was taken and it did not end in a word that says no model was reached.
+ * The claim precedes any model spend, so a row nobody claimed (the workflow undeployed, Actions
+ * down) held no model: it does not count, and five of them do not exhaust a depositor.
+ * Derived from `NEVER_REACHED_MODEL`, so the cap and the restart rule cannot disagree about which
+ * attempts were free.
  */
-export const COUNTS_TOWARD_CAPS = `state <> 'declined' AND NOT (state = 'errored' AND detail IN (${NEVER_REACHED_MODEL.map(sqlWord).join(", ")}))`;
+const ATTEMPT_REACHED_SQL = `(state IN ('dispatched', 'reported')
+    OR (claimed_at IS NOT NULL AND (state = 'unreported'
+        OR (state = 'errored' AND detail NOT IN (${NEVER_REACHED_MODEL.map(sqlWord).join(", ")})))))`;
+
+/**
+ * The model calls that count against an allowance: every slot, less the current attempt's when it
+ * never reached a model. Over a window of rows, so `SUM(attempts) - COUNT(unreached rows)`.
+ */
+export const CAP_CALLS_SQL = `COALESCE(SUM(attempts), 0)
+    - COUNT(CASE WHEN NOT ${ATTEMPT_REACHED_SQL} THEN 1 END)`;
 
 /**
  * A row's place in an allowance: the model calls that count against it, up to and including this
- * row, started inside the window. Counted AFTER the row is inserted, so two starts that race each
- * see the other and at most the cap survive; checking before inserting let a burst all pass the
- * same check.
+ * row, started inside the window. Counted AFTER the row is inserted (or restarted, which bumps its
+ * slots in the same write), so two starts that race each see the other and at most the cap
+ * survive; checking before inserting let a burst all pass the same check.
+ *
+ * The depositor's tally includes calls an administrator started on the depositor's requests, and
+ * it is intended: an administrator is not held by the depositor's allowance (it exists to stop a
+ * depositor spending the platform's money), but the call still costs the platform, so it bounds
+ * the depositor's own next request. See `capDecision`.
  */
-export const DEPOSITOR_RANK_SQL = `SELECT COALESCE(SUM(attempts), 0) AS n FROM publication_reviews
-  WHERE requested_by = ? AND ${COUNTS_TOWARD_CAPS} AND created_at >= datetime('now', '-1 day') AND id <= ?`;
-export const PLATFORM_RANK_SQL = `SELECT COALESCE(SUM(attempts), 0) AS n FROM publication_reviews
-  WHERE ${COUNTS_TOWARD_CAPS} AND created_at >= datetime('now', '-1 day') AND id <= ?`;
+export const DEPOSITOR_RANK_SQL = `SELECT ${CAP_CALLS_SQL} AS n FROM publication_reviews
+  WHERE requested_by = ? AND created_at >= datetime('now', '-1 day') AND id <= ?`;
+export const PLATFORM_RANK_SQL = `SELECT ${CAP_CALLS_SQL} AS n FROM publication_reviews
+  WHERE created_at >= datetime('now', '-1 day') AND id <= ?`;
 
 /**
  * Which allowance, if any, the row just inserted (or restarted) is over. An administrator who
  * starts a review by name is held by the platform's allowance only: the depositor's exists to
- * stop a depositor spending the platform's money, and an administrator is not one.
- *
- * `extraCalls` is a call the row already spent that no row yet shows: a restart of an attempt
- * that reached the model is a second call. It is added here and recorded once the attempt is
- * handed over.
+ * stop a depositor spending the platform's money, and an administrator is not one. The call still
+ * counts toward the depositor's tally (see {@link DEPOSITOR_RANK_SQL}).
  */
 async function capDecision(
   db: Db,
   row: { requestedBy: number },
   rankId: number,
   skipDepositorCap: boolean,
-  extraCalls: number,
 ): Promise<PublicationDeclineDetail | null> {
   if (!skipDepositorCap) {
     const depositor = await db
       .prepare(DEPOSITOR_RANK_SQL)
       .bind(row.requestedBy, rankId)
       .first<{ n: number }>();
-    if ((depositor?.n ?? 0) + extraCalls > DEPOSITOR_DAILY_CAP) return "depositor_limit";
+    if ((depositor?.n ?? 0) > DEPOSITOR_DAILY_CAP) return "depositor_limit";
   }
   const platform = await db.prepare(PLATFORM_RANK_SQL).bind(rankId).first<{ n: number }>();
-  if ((platform?.n ?? 0) + extraCalls > PLATFORM_DAILY_CAP) return "platform_limit";
+  if ((platform?.n ?? 0) > PLATFORM_DAILY_CAP) return "platform_limit";
   return null;
 }
 
-/** Whether a row's attempt may have cost a model call: not a decline, not an attempt no model saw. */
-function spentACall(row: PublicationReviewRow): boolean {
-  if (row.state === "declined") return false;
-  return !(
+/** An attempt that ended in a word that says no model was reached (and so may be started again free). */
+function endedBeforeAModel(row: PublicationReviewRow): boolean {
+  return (
     row.state === "errored" && (NEVER_REACHED_MODEL as readonly string[]).includes(row.detail ?? "")
   );
+}
+
+/**
+ * Whether a row's attempt reached a model, as far as a restart can tell. A restart replaces the
+ * nonce, so an attempt that is not claimed by then never can be: a `dispatched` row counts here
+ * only once a claim was taken. (The allowance counts a `dispatched` row whole, because there the
+ * job may still claim it.)
+ */
+function attemptReachedModel(row: PublicationReviewRow): boolean {
+  return row.claimedAt !== null && row.state !== "declined" && !endedBeforeAModel(row);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -226,21 +273,38 @@ type Plan =
  */
 function planFor(existing: PublicationReviewRow | null, admin: boolean): Plan {
   if (existing === null) return { kind: "insert" };
-  const free = !spentACall(existing);
-  if (existing.state === "errored" && free) {
-    return { kind: "restart", row: existing, extraCalls: 0 };
-  }
+  // A call the row already spent is a second one when the attempt is made again.
+  const extraCalls = attemptReachedModel(existing) ? 1 : 0;
+  if (endedBeforeAModel(existing)) return { kind: "restart", row: existing, extraCalls };
   if (!admin) return { kind: "refuse", reason: "duplicate" };
   switch (existing.state) {
     case "reported":
       return { kind: "refuse", reason: "has_result" };
-    case "dispatched":
-      // Whether it is overdue is decided by the compare-and-set itself, in SQL, on the clock the
-      // watchdog uses; a fresh row simply matches nothing.
-      return { kind: "restart", row: existing, extraCalls: 1 };
     default:
-      return { kind: "restart", row: existing, extraCalls: free ? 0 : 1 };
+      // A `dispatched` row is restarted only once overdue, which the compare-and-set decides in
+      // SQL on the clock the watchdog uses ({@link restartGuard}); a fresh row matches nothing.
+      return { kind: "restart", row: existing, extraCalls };
   }
+}
+
+/**
+ * What a restart's write is conditioned on: the row is the one that was read (state, word and
+ * claim, so the call it is charged for is the call that was made), and a `dispatched` row is past
+ * its deadline. One rule for every restart, whether it hands the review over or records that it
+ * cannot be handed over.
+ */
+function restartGuard(row: PublicationReviewRow): {
+  sql: string;
+  binds: (string | number | null)[];
+} {
+  const overdue =
+    row.state === "dispatched"
+      ? ` AND created_at < datetime('now', '-${PUBLICATION_REVIEW_DEADLINE_MINUTES} minutes')`
+      : "";
+  return {
+    sql: `id = ? AND state = ? AND detail IS ? AND claimed_at IS ?${overdue}`,
+    binds: [row.id, row.state, row.detail, row.claimedAt],
+  };
 }
 
 /** Why a row that could not be restarted cannot be, as an administrator reads it. */
@@ -352,7 +416,6 @@ export async function startPublicationReview(
     const nonce = crypto.randomUUID();
     let reviewId: number;
     let rankId: number;
-    let extraCalls = 0;
     if (plan.kind === "insert") {
       const inserted = await db
         .prepare(
@@ -376,19 +439,19 @@ export async function startPublicationReview(
       reviewId = Number(inserted.meta.last_row_id);
       rankId = reviewId;
     } else {
+      // The call the row already spent is recorded HERE, in the same write that takes the row
+      // back, and never after the allowances have been consulted: a restart that is then declined
+      // or fails to dispatch has still not undone the call before it.
+      const guard = restartGuard(plan.row);
       const reset = await db
         .prepare(
           `UPDATE publication_reviews
               SET state = 'dispatched', detail = NULL, nonce = ?, claimed_at = NULL,
                   decided_at = NULL, created_at = datetime('now'),
-                  started_by = COALESCE(?, started_by)
-            WHERE id = ? AND state = ? AND detail IS ?${
-              plan.row.state === "dispatched"
-                ? ` AND created_at < datetime('now', '-${PUBLICATION_REVIEW_DEADLINE_MINUTES} minutes')`
-                : ""
-            }`,
+                  attempts = attempts + ?, started_by = COALESCE(?, started_by)
+            WHERE ${guard.sql}`,
         )
-        .bind(nonce, args.adminUserId ?? null, plan.row.id, plan.row.state, plan.row.detail)
+        .bind(nonce, plan.extraCalls, args.adminUserId ?? null, ...guard.binds)
         .run();
       if ((reset.meta.changes ?? 0) !== 1) {
         // A dispatched row that is not overdue matches nothing: it is running, and an
@@ -403,7 +466,6 @@ export async function startPublicationReview(
       // A restarted row keeps its old id, which the allowance queries (`id <= ?`) would rank
       // ahead of everything inserted since: it is ranked as the newest instead.
       rankId = Number.MAX_SAFE_INTEGER;
-      extraCalls = plan.extraCalls;
     }
 
     const restarted = plan.kind === "restart";
@@ -411,7 +473,6 @@ export async function startPublicationReview(
       return await handOver(env, {
         reviewId,
         rankId,
-        extraCalls,
         restarted,
         request,
         head,
@@ -478,17 +539,26 @@ async function recordUnconfigured(
       .run();
     if ((inserted.meta.changes ?? 0) === 1) reviewId = Number(inserted.meta.last_row_id);
   } else if (plan.kind === "restart") {
+    // The same rule as the restart that does hand over (`restartGuard`): a `dispatched` row is
+    // closed only once it is overdue. A review that is running is not made unanswerable because
+    // the Worker could not have started another.
+    const guard = restartGuard(plan.row);
     const closed = await db
       .prepare(
         `UPDATE publication_reviews
             SET state = 'errored', detail = 'dispatch_unconfigured', nonce = NULL,
                 claimed_at = NULL, decided_at = datetime('now'),
-                started_by = COALESCE(?, started_by)
-          WHERE id = ? AND state = ? AND detail IS ?`,
+                attempts = attempts + ?, started_by = COALESCE(?, started_by)
+          WHERE ${guard.sql}`,
       )
-      .bind(adminUserId ?? null, plan.row.id, plan.row.state, plan.row.detail)
+      .bind(plan.extraCalls, adminUserId ?? null, ...guard.binds)
       .run();
-    if ((closed.meta.changes ?? 0) === 1) reviewId = plan.row.id;
+    if ((closed.meta.changes ?? 0) === 1) {
+      reviewId = plan.row.id;
+    } else if (plan.row.state === "dispatched") {
+      const now = await readReview(db, plan.row.id);
+      if (now?.state === "dispatched") return answer("running", now.id);
+    }
   }
   console.warn(
     `[publication-review] ${request.dataset_id} request ${request.id}: dispatch_unconfigured`,
@@ -524,7 +594,6 @@ async function markDispatchFailed(db: Db, reviewId: number, nonce: string): Prom
 interface HandOver {
   reviewId: number;
   rankId: number;
-  extraCalls: number;
   restarted: boolean;
   request: RequestRow;
   head: string;
@@ -538,13 +607,7 @@ interface HandOver {
 /** Everything after the row is written: the allowances, then the dispatch. */
 async function handOver(env: Bindings, h: HandOver): Promise<StartOutcome> {
   const db = env.DB;
-  const over = await capDecision(
-    db,
-    { requestedBy: h.request.requested_by },
-    h.rankId,
-    h.admin,
-    h.extraCalls,
-  );
+  const over = await capDecision(db, { requestedBy: h.request.requested_by }, h.rankId, h.admin);
   if (over) {
     await db
       .prepare(
@@ -556,14 +619,6 @@ async function handOver(env: Bindings, h: HandOver): Promise<StartOutcome> {
       .run();
     if (h.mail) await tryMail(env, h.request.id);
     return answer(over, h.reviewId);
-  }
-
-  // The attempt is going ahead, so a call the row had already spent is now a second one.
-  if (h.extraCalls > 0) {
-    await db
-      .prepare("UPDATE publication_reviews SET attempts = attempts + ? WHERE id = ?")
-      .bind(h.extraCalls, h.reviewId)
-      .run();
   }
 
   try {
@@ -710,6 +765,7 @@ export async function claimPublicationReview(
   reviewId: number,
   datasetId: string,
   nonce: string,
+  defer?: Defer,
 ): Promise<PublicationClaimResult> {
   const db = env.DB;
   const row = await readReview(db, reviewId);
@@ -717,7 +773,7 @@ export async function claimPublicationReview(
 
   if (!reviewEnabled(env)) {
     const closed = await db.prepare(CLAIM_DISABLED_SQL).bind(reviewId, datasetId, nonce).run();
-    if ((closed.meta.changes ?? 0) === 1) await tryMail(env, row.requestId);
+    if ((closed.meta.changes ?? 0) === 1) await tryMailAfterAnswer(env, row.requestId, defer);
     return "review_disabled";
   }
   if (!ownedHere(env, datasetId)) return "not_owned_here";
@@ -730,7 +786,7 @@ export async function claimPublicationReview(
 
     const stale = await db.prepare(CLAIM_STALE_SQL).bind(reviewId, datasetId, nonce).run();
     if ((stale.meta.changes ?? 0) === 1) {
-      await tryMail(env, row.requestId);
+      await tryMailAfterAnswer(env, row.requestId, defer);
       return "stale_head";
     }
   }
@@ -739,7 +795,7 @@ export async function claimPublicationReview(
   // so it neither waits for the watchdog nor reaches a model without a settled claim.
   const unsettled = await db.prepare(CLAIM_UNSETTLED_SQL).bind(reviewId, datasetId, nonce).run();
   if ((unsettled.meta.changes ?? 0) === 1) {
-    await tryMail(env, row.requestId);
+    await tryMailAfterAnswer(env, row.requestId, defer);
     return "claim_unsettled";
   }
   return "already_claimed";
@@ -750,33 +806,65 @@ export async function claimPublicationReview(
 // ---------------------------------------------------------------------------------------------
 
 /**
+ * The row a result may be stored on: waiting under THIS nonce, in one of `states`, and, for a
+ * report, claimed. One predicate, spliced into the write of the result and into the guard of every
+ * statement that must fire only if that write will take effect.
+ */
+function waitingRow(states: readonly ("dispatched" | "unreported")[], needsClaim: boolean): string {
+  return `id = ? AND dataset_id = ? AND nonce = ? AND state IN (${states.map(sqlWord).join(", ")})${
+    needsClaim ? " AND claimed_at IS NOT NULL" : ""
+  }`;
+}
+
+/**
+ * The guard of a statement that follows a result: the review row is still waiting as `waitingRow`
+ * says. Evaluated BEFORE the write of the result in the same batch, so it is true exactly when
+ * that write will match: a batch is one transaction, and nothing can move the row between them.
+ */
+function whileWaiting(
+  states: readonly ("dispatched" | "unreported")[],
+  needsClaim: boolean,
+): string {
+  return `EXISTS (SELECT 1 FROM publication_reviews WHERE ${waitingRow(states, needsClaim)})`;
+}
+
+/**
  * A request whose submission minimum failed at the reviewed commit goes back to `blocked`, the
  * transition the blocked-request sweep already makes, so the depositor can fix it and request
  * again. Only the request the review is the one in force for (still `requested`, same release
  * kind, same screened commit), so a result for a superseded commit changes nothing. The screen's
  * columns are facts about that commit and stay; the depositor's re-request resets them.
+ *
+ * Fires only while the claimed review it came from is still waiting under its nonce (the last
+ * three binds), so a replay, a stranger's nonce or a report nobody claimed re-blocks nothing.
  */
 export const REBLOCK_SQL = `UPDATE publication_requests
     SET status = 'blocked', block_reason = 'min_requirements_failed',
         min_requirements_reasons = ?, updated_at = datetime('now')
   WHERE id = ? AND status = 'requested' AND anonymous = ?
-    AND ${screenedHeadSql("publication_requests")} = ?`;
+    AND ${screenedHeadSql("publication_requests")} = ?
+    AND ${whileWaiting(["dispatched", "unreported"], true)}`;
 
 /**
  * A late report re-arms the request's mail: the mail already sent said the review did not report.
- * Only for the request whose review this is, as above.
+ * Only for the request whose review this is, as above, and only while the review waits as
+ * `unreported` (the last three binds), so a replay does not re-arm a mail that was since sent.
+ * `needsClaim` is whether the result being stored is a report, which needs a claim.
  */
-export const REARM_MAIL_SQL = `UPDATE publication_requests
+export function rearmMailSql(needsClaim: boolean): string {
+  return `UPDATE publication_requests
     SET identifier_screen_emailed_at = NULL, identifier_screen_mail_claimed_at = NULL
   WHERE id = ? AND status IN ('requested', 'blocked') AND anonymous = ?
-    AND ${screenedHeadSql("publication_requests")} = ?`;
+    AND ${screenedHeadSql("publication_requests")} = ?
+    AND ${whileWaiting(["unreported"], needsClaim)}`;
+}
 
 /** The write of a result, keyed on the nonce and on the state the row waits in. */
-function storeSql(from: "unreported" | "dispatched"): string {
+function storeSql(from: "unreported" | "dispatched", needsClaim: boolean): string {
   return `UPDATE publication_reviews
       SET state = ?, verdict = ?, detail = ?, report = ?, nonce = NULL,
           decided_at = datetime('now')
-    WHERE id = ? AND dataset_id = ? AND nonce = ? AND state = '${from}'`;
+    WHERE ${waitingRow([from], needsClaim)}`;
 }
 
 /**
@@ -790,10 +878,21 @@ function storeSql(from: "unreported" | "dispatched"): string {
  * whose echoed commit or release kind differs from the row's is refused as `report_invalid`: a
  * dispatch payload cannot change what a stored review claims to be about.
  *
- * Two conditional writes, so a watchdog that flips the row between the read and the write cannot
- * hide the late path: `unreported` first (a late report, which re-arms the mail), then
- * `dispatched`. The flag is not consulted: a result whose run was already claimed is stored
- * whatever the flag says, because the call was spent and the record stays honest.
+ * ONE batch, which D1 runs as a transaction: the re-block (when the report says a minimum failed),
+ * the mail re-arm (when the row waits as `unreported`) and the two writes of the result, `dispatched`
+ * first and then `unreported`. Each follow-on is guarded by the very predicate its write uses and
+ * runs ahead of it, so it fires exactly when the write takes effect, and a fault on any of them
+ * leaves nothing stored and the token unspent, which is what lets the job's retry land. The
+ * state only moves from `dispatched` to `unreported`, so no gap lies between the two writes. The
+ * flag is not consulted: a result whose run was already claimed is stored whatever the flag says,
+ * because the call was spent and the record stays honest.
+ *
+ * A report (which implies a model call) needs a claim; an error word does not, so a failure before
+ * the claim (a payload the job could not validate, a fetch that failed) is still recorded.
+ * `refusal` says why nothing was stored when that is the reason.
+ *
+ * The mail follows the store, handed to `defer` when the caller can finish it after its answer
+ * (the job's POST has a timeout, and its retry finds the token spent); without one it is awaited.
  */
 export async function storePublicationReviewResult(
   env: Bindings,
@@ -801,7 +900,12 @@ export async function storePublicationReviewResult(
   datasetId: string,
   nonce: string,
   result: PublicationCallbackOutcome,
-): Promise<{ stored: boolean; state: PublicationReviewState | null }> {
+  defer?: Defer,
+): Promise<{
+  stored: boolean;
+  state: PublicationReviewState | null;
+  refusal?: "unclaimed";
+}> {
   const db = env.DB;
   const row = await readReview(db, reviewId);
   if (!row || row.datasetId !== datasetId) return { stored: false, state: null };
@@ -827,40 +931,52 @@ export async function storePublicationReviewResult(
     datasetId,
     nonce,
   ];
+  const guard = [reviewId, datasetId, nonce];
+  // A report implies a model call, and a call is made only by a run that took its claim.
+  const needsClaim = reported !== null;
+  const kind = row.anonymous ? 1 : 0;
 
-  let late = true;
-  let res = await db
-    .prepare(storeSql("unreported"))
-    .bind(...binds)
-    .run();
-  if ((res.meta.changes ?? 0) !== 1) {
-    late = false;
-    res = await db
-      .prepare(storeSql("dispatched"))
-      .bind(...binds)
-      .run();
-  }
-  if ((res.meta.changes ?? 0) !== 1) return { stored: false, state: null };
-
+  const statements: D1PreparedStatement[] = [];
   if (reported && reported.evidence.minimums === "failed") {
     const reasons = reported.evidence.minimum_failures.map(minimumFailureSentence);
-    const reblocked = await db
-      .prepare(REBLOCK_SQL)
-      .bind(JSON.stringify(reasons), row.requestId, row.anonymous ? 1 : 0, row.headSha)
-      .run();
-    if ((reblocked.meta.changes ?? 0) === 1) {
-      console.log(
-        `[publication-review] review ${reviewId} (${datasetId}): request ${row.requestId} blocked (min_requirements_failed)`,
-      );
-    }
+    statements.push(
+      db
+        .prepare(REBLOCK_SQL)
+        .bind(JSON.stringify(reasons), row.requestId, kind, row.headSha, ...guard),
+    );
   }
-  if (late) {
-    await db
-      .prepare(REARM_MAIL_SQL)
-      .bind(row.requestId, row.anonymous ? 1 : 0, row.headSha)
-      .run();
+  statements.push(
+    db.prepare(rearmMailSql(needsClaim)).bind(row.requestId, kind, row.headSha, ...guard),
+  );
+  statements.push(db.prepare(storeSql("dispatched", needsClaim)).bind(...binds));
+  statements.push(db.prepare(storeSql("unreported", needsClaim)).bind(...binds));
+
+  const results = await db.batch(statements);
+  const fromDispatched = (results[statements.length - 2]?.meta?.changes ?? 0) === 1;
+  const fromUnreported = (results[statements.length - 1]?.meta?.changes ?? 0) === 1;
+  if (!fromDispatched && !fromUnreported) {
+    // Nothing waited for this result: a duplicate, a restart that replaced the nonce, or a report
+    // nobody claimed (which the claim, and not this route, must precede).
+    const now = await readReview(db, reviewId);
+    const unclaimed =
+      needsClaim &&
+      now !== null &&
+      now.claimedAt === null &&
+      (now.state === "dispatched" || now.state === "unreported");
+    return unclaimed
+      ? { stored: false, state: null, refusal: "unclaimed" }
+      : { stored: false, state: null };
   }
-  await tryMail(env, row.requestId);
+  if (
+    reported &&
+    reported.evidence.minimums === "failed" &&
+    (results[0]?.meta?.changes ?? 0) === 1
+  ) {
+    console.log(
+      `[publication-review] review ${reviewId} (${datasetId}): request ${row.requestId} blocked (min_requirements_failed)`,
+    );
+  }
+  await tryMailAfterAnswer(env, row.requestId, defer);
   return { stored: true, state: reported ? "reported" : "errored" };
 }
 

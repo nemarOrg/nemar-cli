@@ -34,11 +34,13 @@ import { isValidDatasetId } from "../../services/datasetId.js";
 import { verifyPublicationReviewCallbackToken } from "../../services/github/callback-tokens.js";
 import {
   claimPublicationReview,
+  errClass,
   pendingPublicationReviewNonce,
   storePublicationReviewResult,
 } from "../../services/publication-review.js";
 import type { WebhookContext, WebhookRouter } from "../webhooks/shared.js";
 import { readBoundedJsonObject } from "./bounded-json.js";
+import { deferAfterAnswer } from "./defer.js";
 
 /** Every refusal says the same bytes, so the answer does not tell a caller which reviews are running. */
 const UNAUTHORIZED = { error: "Invalid or expired callback token" } as const;
@@ -94,7 +96,13 @@ export function registerPublicationReviewRoutes(webhooks: WebhookRouter): void {
   webhooks.post("/publication-review-claim", async (c) => {
     const v = await verify(c, "publication-review-claim");
     if (v instanceof Response) return v;
-    const claim = await claimPublicationReview(c.env, v.reviewId, v.datasetId, v.nonce);
+    const claim = await claimPublicationReview(
+      c.env,
+      v.reviewId,
+      v.datasetId,
+      v.nonce,
+      deferAfterAnswer(c),
+    );
     console.log(`[publication-review-claim] review ${v.reviewId} (${v.datasetId}): ${claim}`);
     if (claim === "claimed") return c.json({ ok: true, claimed: true });
     return c.json({ ok: false, claimed: false, reason: claim }, 409);
@@ -114,13 +122,32 @@ export function registerPublicationReviewRoutes(webhooks: WebhookRouter): void {
           `[publication-review-result] review ${v.reviewId} (${v.datasetId}): report refused (${code})`,
         ),
     );
-    const stored = await storePublicationReviewResult(
-      c.env,
-      v.reviewId,
-      v.datasetId,
-      v.nonce,
-      outcome,
-    );
+    let stored: Awaited<ReturnType<typeof storePublicationReviewResult>>;
+    try {
+      stored = await storePublicationReviewResult(
+        c.env,
+        v.reviewId,
+        v.datasetId,
+        v.nonce,
+        outcome,
+        deferAfterAnswer(c),
+      );
+    } catch (err) {
+      // Nothing was stored and the token is not spent (the store is one transaction), so the job
+      // may try again. The class of the error is logged, never its message.
+      console.error(
+        `[publication-review-result] review ${v.reviewId} (${v.datasetId}): store failed (${errClass(err)})`,
+      );
+      return c.json({ error: "The result could not be stored; try again" }, 500);
+    }
+    if (stored.refusal === "unclaimed") {
+      // A report implies a model call, and a call is only made by a run that took its claim.
+      // Answered as a row that is not waiting is, so the answer says nothing more than that.
+      console.warn(
+        `[publication-review-result] review ${v.reviewId} (${v.datasetId}): report refused (not_claimed)`,
+      );
+      return c.json(UNAUTHORIZED, 401);
+    }
     if (!stored.stored) {
       // Verified, but another writer (a duplicate callback) won the one conditional UPDATE
       // between the read and the write. Harmless.
