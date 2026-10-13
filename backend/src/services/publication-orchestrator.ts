@@ -2496,6 +2496,26 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     { id: adminUser.id, username: adminUser.username },
   );
 
+  // An override is the act of the administrator who sends it, and is recorded under the approver
+  // of record (ADR 0102, section 9). Inside a live web lease the approver is the administrator who
+  // clicked (ADR 0080), so another administrator's override would be recorded under the clicker's
+  // name, with the sender only as the executor. Refused until a dispatch token makes the
+  // attribution exact (#1604, Phase 3); this also means the executor's service account never
+  // records one (it sends none, and its run rides on the clicker's recorded override).
+  if (body.override_publication_review !== undefined && c.approver.id !== adminUser.id) {
+    console.warn(
+      `[publish] ${datasetId}: override refused, a web approval of request ${request.id} is in progress`,
+    );
+    return c.json(
+      {
+        error: "override_inside_web_approval",
+        message:
+          "A web approval of this request is in progress, so an override sent now would be recorded under the administrator who clicked. Wait for it to finish or stop, then approve again with --force.",
+      },
+      409,
+    );
+  }
+
   const stepsCompleted: PublicationStep[] = resume
     ? JSON.parse(request.steps_completed || "[]")
     : [];

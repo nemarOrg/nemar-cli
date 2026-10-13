@@ -2854,13 +2854,16 @@ describe("the wire vocabulary the approval refusals and the comment route share"
       "publication_review_not_clear",
       "request_blocked",
       "request_changed",
+      "override_inside_web_approval",
     ]);
-    // The first two words are the `error` of the two bodies in the review's contract; the third
-    // is the orchestrator's own refusal of a request that changed while it was checked.
+    // The first two words are the `error` of the two bodies in the review's contract; the others
+    // are the orchestrator's own refusals (a request that changed while it was checked, and an
+    // override sent inside a web approval).
     expect([...APPROVAL_REFUSAL_ERROR_CODES]).toEqual([
       PUBLICATION_REVIEW_NOT_CLEAR_CODE,
       REQUEST_BLOCKED_CODE,
       "request_changed",
+      "override_inside_web_approval",
     ]);
     // One word, one family: none of them is also another family's.
     for (const code of APPROVAL_REFUSAL_ERROR_CODES) {

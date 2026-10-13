@@ -500,6 +500,8 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
 - **Making "attributed to" exact is Phase 3's, and its shape is set here.**
   Until then ADR 0080's lease-based attribution stands, with the gap #1604 describes:
   a terminal approval inside a live web lease is recorded as the clicker's, and could ride on the clicker's recorded override.
+  Until then an override sent inside a live web lease by anyone but the clicker is refused (`override_inside_web_approval`),
+  so none is ever recorded under another administrator's name; the ride on the clicker's own recorded override stays as it is.
   The proposed fix is a dispatch token minted per claim and valid only while that claim's lease is live.
   The executor presents it on every `/approve` call of that run, one per batch and retry, so it cannot be single-use,
   and `approve-publication.yml` masks it as its first step, as `run-pr-review.yml` masks its token.
@@ -658,7 +660,9 @@ The maintainer decided all twelve on 2026-10-12, as recommended, and amended cal
    (ADR 0068 names `nm099997` as the next one; created only after step 3, and never approved under a name).
    A fix to the script found by the soak reaches the soak only through another production release.
 6. Add the review's statement to the policy pages, after the separate docs change that corrects them for current practice.
-7. Ship Phases 3 and 4, then add `PUBLICATION_REVIEW_ENABLED = "1"` to `[vars]`,
+7. Fix #1604 (a terminal approval inside a live web lease is attributed to the administrator who clicked; Phase 3 attributes it to its own caller),
+   which production must not be lit without; until then the Worker refuses an override sent inside a web approval (`override_inside_web_approval`).
+8. Ship Phases 3 and 4, then add `PUBLICATION_REVIEW_ENABLED = "1"` to `[vars]`,
    delete the `PRESCREEN_ENABLED` secret and disable `run-prescreen.yml` (section 10),
    and run `nemar admin publish start --all` once for the requests already open.
 

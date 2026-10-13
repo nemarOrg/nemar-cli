@@ -833,8 +833,8 @@ describe("an override is its approver's, and it is recorded once", () => {
   test("23. #1604 as it stands: a terminal approval by B inside A's live web lease is A's, and rides on A's override", async () => {
     // Pinned so Phase 3 flips it on purpose: until a dispatch token makes attribution exact
     // (ADR 0102 section 9, #1604), a run inside a live lease is attributed to the clicker, and so
-    // satisfies the gate on the clicker's recorded override and records new ones under the
-    // clicker's id.
+    // satisfies the gate on the clicker's recorded override. (A NEW override sent from a terminal
+    // inside the lease is refused, below, so none is recorded under the clicker's id.)
     const { requestId, reviewId } = seedFailing();
     db.run(
       `UPDATE publication_reviews
@@ -859,16 +859,66 @@ describe("an override is its approver's, and it is recorded once", () => {
   });
 });
 
-describe("#1604 as it stands: a terminal approval inside a live web lease is the clicker's", () => {
-  test("23. an override given by B inside A's live lease is recorded under A, with B as the executor", async () => {
-    // Pinned with the test above so Phase 3 flips both on purpose.
-    const { requestId, reviewId } = seedFailing();
+describe("#1604 as it stands: an override is never recorded under another administrator's name", () => {
+  // Until a dispatch token makes attribution exact (ADR 0102 section 9, #1604, Phase 3), a terminal
+  // approval inside a live web lease is attributed to the clicker. The ride on the clicker's own
+  // recorded override (test 23, above) stays as it is; a NEW override sent from a terminal inside
+  // a lease would be recorded as the clicker's, with the sender as the executor, so it is refused.
+  const lease = (requestId: number) =>
     db.run(
       `UPDATE publication_requests
           SET approval_requested_by = ?, approval_dispatched_at = datetime('now', '-1 minutes')
         WHERE id = ?`,
       [adminA, requestId],
     );
+  const INSIDE_MESSAGE =
+    "A web approval of this request is in progress, so an override sent now would be recorded under the administrator who clicked. Wait for it to finish or stop, then approve again with --force.";
+
+  test("23. an override sent by B inside A's live lease is refused, and recorded under nobody", async () => {
+    const { requestId, reviewId } = seedFailing();
+    lease(requestId);
+    const res = await approve(
+      {
+        resume: true,
+        override_publication_review: { review_id: reviewId, reasons: ["question_failed"] },
+      },
+      { key: ADMIN_B_KEY },
+    );
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body).toEqual({ error: "override_inside_web_approval", message: INSIDE_MESSAGE });
+    expect(APPROVAL_REFUSAL_ERROR_CODES).toContain(body.error);
+    // Nothing ran and nothing was recorded, under A or under B.
+    expect(reviewRow(reviewId).override_by).toBeNull();
+    expect(reviewRow(reviewId).override_reasons).toBeNull();
+    expect(overrideRows()).toHaveLength(0);
+    const row = requestRow(requestId);
+    expect(row.status).toBe("requested");
+    expect(row.approved_by).toBeNull();
+    expect(auditRows("dataset_published")).toHaveLength(0);
+    // The lease is the clicker's still: refusing the override did not touch it.
+    expect(row.approval_requested_by).toBe(adminA);
+  });
+
+  test("23. the refusal is for the override and nothing else: B's bodies without one, and A's own, pass as before", async () => {
+    const { requestId, reviewId } = seedFailing();
+    lease(requestId);
+    // No override from B: the gate answers as it does (A recorded none, so one is needed).
+    const bare = await approve({ resume: true }, { key: ADMIN_B_KEY });
+    expect((await refusalOf(bare)).refusal).toBe("needs_override");
+    // A's own override inside A's own lease is A's act, recorded under A.
+    const own = await approve({
+      resume: true,
+      override_publication_review: { review_id: reviewId, reasons: ["question_failed"] },
+    });
+    expect(own.status).toBe(200);
+    expect(reviewRow(reviewId).override_by).toBe(adminA);
+    expect(overrideRows()).toHaveLength(1);
+    expect(requestRow(requestId).status).toBe("published");
+  });
+
+  test("23. outside any lease a terminal's override is its own, B's included", async () => {
+    const { reviewId } = seedFailing();
     const res = await approve(
       {
         resume: true,
@@ -877,11 +927,22 @@ describe("#1604 as it stands: a terminal approval inside a live web lease is the
       { key: ADMIN_B_KEY },
     );
     expect(res.status).toBe(200);
-    expect(reviewRow(reviewId).override_by).toBe(adminA);
-    const audit = overrideRows();
-    expect(audit).toHaveLength(1);
-    expect(audit[0].user_id).toBe(adminA);
-    expect(audit[0].details).toMatchObject({ via: "approve", executed_by: adminB });
+    expect(reviewRow(reviewId).override_by).toBe(adminB);
+    expect(overrideRows()[0].details).not.toHaveProperty("executed_by");
+  });
+
+  test("23. the executor sends no override, so the run rides on the clicker's recorded one: unchanged, #1604 is Phase 3's", async () => {
+    // The shape of `approve-dispatch` followed by the executor's run (test 12, above), with the
+    // refusal in place: nothing the executor needs is an override.
+    const { requestId, reviewId } = seedFailing();
+    const dispatched = await dispatchApproval({
+      override_publication_review: { review_id: reviewId, reasons: ["question_failed"] },
+    });
+    expect(dispatched.status).toBe(202);
+    const run = await approve({ resume: true }, { key: ADMIN_B_KEY });
+    expect(run.status).toBe(200);
+    expect(requestRow(requestId).approved_by).toBe(adminA);
+    expect(overrideRows()).toHaveLength(1);
   });
 });
 

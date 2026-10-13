@@ -481,11 +481,27 @@ describe("how the client reads an approval refusal (the gate's bodies, which the
     expect(err.code).toBe("request_changed");
   });
 
+  test("a 409 override_inside_web_approval leads with the sentence, not the bare word", async () => {
+    const body = {
+      error: "override_inside_web_approval",
+      message:
+        "A web approval of this request is in progress, so an override sent now would be recorded under the administrator who clicked. Wait for it to finish or stop, then approve again with --force.",
+    };
+    scripted = [{ status: 409, body }];
+    const err = await thrown(() =>
+      request("/admin/publish/nm000480/approve", { method: "POST" }, true),
+    );
+    expect(err.statusCode).toBe(409);
+    expect(err.message).toBe(body.message);
+    expect(err.code).toBe("override_inside_web_approval");
+  });
+
   test("the words are declared once, with the screen's, and do not collide with it", () => {
     expect([...APPROVAL_REFUSAL_ERROR_CODES]).toEqual([
       PUBLICATION_REVIEW_NOT_CLEAR_CODE,
       REQUEST_BLOCKED_CODE,
       "request_changed",
+      "override_inside_web_approval",
     ]);
     for (const code of APPROVAL_REFUSAL_ERROR_CODES) {
       expect(IDENTIFIER_SCREEN_ERROR_CODES).not.toContain(code);
