@@ -17,8 +17,9 @@
  *  - **With the flag off it reads nothing.** Production is dark until the review is switched on, so
  *    a fault of the review table must not stop an approval there. The mechanical rules that hold
  *    with the flag off live outside this module (the blocked refusal, the store's re-block).
- *  - **It fails closed.** A read that fails, or anything that throws after the request was read,
- *    is a refusal (`unverified`), never a pass and never a 500 (ADR 0053, ADR 0054).
+ *  - **It fails closed.** A read that fails, a record of the override that cannot be written, or
+ *    anything that throws after the request was read, is a refusal (`unverified`), never a pass
+ *    and never a 500 (ADR 0053, ADR 0054).
  *  - **Hard reasons are checked before the override.** Nothing clears them, so an override in the
  *    body changes nothing for a request that has one.
  *  - **An override attaches to what was shown, or to nothing.** It names the review it was given
@@ -129,7 +130,10 @@ export type ReviewGateResult =
 
 type Refused = { ok: false; body: PublicationReviewGateRefusalBody };
 
-/** A refusal for a review that could not be read: no reasons, no outcome, and which read failed. */
+/**
+ * A refusal for a request or a review the gate could not check: a read that failed, or a write of
+ * the override that did. No reasons, no outcome, and which fact it was.
+ */
 function unverified(datasetId: string, fact: "request" | "review"): Refused {
   return {
     ok: false,

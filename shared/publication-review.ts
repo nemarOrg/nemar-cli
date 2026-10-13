@@ -1900,8 +1900,9 @@ export function describeUnreadableReview(datasetId: string): PublicationReviewDe
  *    between the read and the write that records the override.
  *  - `no_review_row`: the web executor's dispatch needs an override and there is no review row to
  *    record it on.
- *  - `unverified`: the gate could not read the request or the review, so it refuses rather than
- *    guess (ADR 0053, ADR 0054).
+ *  - `unverified`: the gate could not check the request or the review, so it refuses rather than
+ *    guess (ADR 0053, ADR 0054). A read that failed, or a record of the override that could not be
+ *    written: an override that is recorded nowhere approves nothing.
  */
 export const REVIEW_GATE_REFUSALS = [
   "hard_reason",
@@ -1926,7 +1927,7 @@ export const REVIEW_GATE_REFUSAL_TEXT: Record<ReviewGateRefusal, string> = {
   no_review_row:
     "No review of this commit is on record to attach the override to. Start it (nemar admin publish start <dataset>), or approve from a terminal with --force.",
   unverified:
-    "The publication review could not be read just now, so the approval is refused. Try again.",
+    "The publication review could not be checked just now, so the approval is refused. Try again.",
 };
 
 /**

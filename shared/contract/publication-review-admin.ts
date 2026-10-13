@@ -388,7 +388,7 @@ export interface PublicationReviewGateRefusalBody {
   /** The override-class codes the override did not name; empty unless the refusal is about them. */
   uncovered: ReasonCode[];
   review_id: number | null;
-  /** `unverified` only: which read failed. */
+  /** `unverified` only: which fact could not be checked, the request or the review (read or recorded). */
   fact?: "request" | "review";
 }
 

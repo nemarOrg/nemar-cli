@@ -2985,4 +2985,15 @@ describe("the sentences the Worker's tests import are pinned here, once", () => 
       "A web approval of this request is in progress, so an override sent now would be recorded under the administrator who clicked. Wait for it to finish or stop, then approve again with --force.",
     );
   });
+
+  test("the refusal for a review the gate could not check covers a failed read and a failed record alike", () => {
+    // `unverified` is also what a failed write of the override, or of its audit row, answers, so
+    // it must not claim the review "could not be read".
+    expect(REVIEW_GATE_REFUSAL_TEXT.unverified).toBe(
+      "The publication review could not be checked just now, so the approval is refused. Try again.",
+    );
+    expect(reviewGateRefusalText("unverified", "nm000123")).toBe(
+      REVIEW_GATE_REFUSAL_TEXT.unverified,
+    );
+  });
 });
