@@ -276,11 +276,12 @@ const LEASE_EXPIRED_SQL = `strftime('%Y-%m-%d %H:%M:%f', 'now', '-${SCREEN_EMAIL
  * `reviewInFlightSql` reads from the row's own age whether or not a watchdog runs.
  *
  * Empty while the flag is off, so the statements are then exactly what they were before the
- * review existed. A module-level function of fixed text, never input.
+ * review existed. A module-level function of fixed text, never input. `atMs` decides at an instant
+ * of the caller's instead of the database's clock ({@link reviewInFlightSql}).
  */
-export function reviewHoldSql(reviewOn: boolean): string {
+export function reviewHoldSql(reviewOn: boolean, atMs?: number): string {
   return reviewOn
-    ? `\n     AND NOT (status = 'requested' AND ${reviewInFlightSql("publication_requests")})`
+    ? `\n     AND NOT (status = 'requested' AND ${reviewInFlightSql("publication_requests", atMs)})`
     : "";
 }
 

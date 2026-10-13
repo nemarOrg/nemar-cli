@@ -239,21 +239,39 @@ export function screenedHeadSql(name: string): string {
 }
 
 /**
+ * A whole-second instant as SQLite's `datetime()` text (UTC, no zone), for a statement that must
+ * decide at the same instant as a reading made in code. Digits, `-`, `:` and one space by
+ * construction (and checked), so it is safe to put in SQL; a value that is not a real instant
+ * throws rather than reaching a statement.
+ */
+export function sqliteInstant(ms: number): string {
+  const text = new Date(Math.floor(ms / 1000) * 1000).toISOString().slice(0, 19).replace("T", " ");
+  if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text)) throw new RangeError("not an instant");
+  return text;
+}
+
+/**
  * True when a review of the request's screened head and flag is dispatched and younger than the
  * deadline: the one condition under which the request's admin mail waits for the review. A row
  * older than the deadline no longer holds the mail, so a review that never reports cannot keep it
  * for good, whether or not a watchdog runs. The mail's own review section reads a dispatched row
  * past this same deadline as one that did not report (`publicationReviewEmailSection`), so what
  * the mail says is true at the moment the lease lets it go.
+ *
+ * `atMs` is the instant to decide at, in place of the database's own clock. Pass it when a section
+ * was built at an instant of the Worker's (the depositor's resend), so the section and the
+ * decision cannot straddle the deadline between them; leave it out when the statement IS the
+ * moment (the lease, the watchdog).
  */
-export function reviewInFlightSql(name: string): string {
+export function reviewInFlightSql(name: string, atMs?: number): string {
   const a = alias(name);
+  const now = atMs === undefined ? "'now'" : `'${sqliteInstant(atMs)}'`;
   return `EXISTS (SELECT 1 FROM publication_reviews AS r
          WHERE r.request_id = ${a}.id
            AND r.anonymous = ${a}.anonymous
            AND r.head_sha = ${screenedHeadSql(a)}
            AND r.state = 'dispatched'
-           AND r.created_at >= datetime('now', '-${PUBLICATION_REVIEW_DEADLINE_MINUTES} minutes'))`;
+           AND r.created_at >= datetime(${now}, '-${PUBLICATION_REVIEW_DEADLINE_MINUTES} minutes'))`;
 }
 
 // ---------------------------------------------------------------------------------------------

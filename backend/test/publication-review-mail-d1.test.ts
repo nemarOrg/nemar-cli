@@ -18,9 +18,11 @@ import { parseScreenReport } from "../../shared/identifier-screen-report";
 import {
   SCREEN_SWEEP_LIMIT,
   notifyAdminsOfScreen,
+  reviewHoldSql,
   sweepIdentifierScreens,
   unmailedScreensSql,
 } from "../src/services/identifier-screen";
+import { sqliteInstant } from "../src/services/publication-review-rows";
 import type { Bindings } from "../src/types/bindings";
 import { SCREENED_HEAD, cleanScreenReportBody } from "./helpers/identifier-screen";
 import { applyMigrations, migrationFiles } from "./helpers/miniflare-d1";
@@ -135,6 +137,38 @@ describe("the review's lease on D1", () => {
       expect(sends[0].html).toContain("Publication review: action required");
       expect((await mailState(d1))?.emailed).not.toBeNull();
     });
+  });
+
+  test("the hold can be decided at an instant of the caller's, not only the database's", async () => {
+    // The depositor's resend builds its section at an instant of the Worker's, and decides whether
+    // the reminder counts as the mail at the SAME instant: a review a second past its deadline by
+    // the database's clock is still in flight a few seconds earlier, and not at the later one.
+    const d1 = await seededD1();
+    await dispatchedReview(d1, { minutesAgo: 30 });
+    await d1
+      .prepare("UPDATE publication_reviews SET created_at = datetime('now', '-1801 seconds')")
+      .run();
+    const held = async (atMs?: number) =>
+      (await d1
+        .prepare(
+          `SELECT 1 AS free FROM publication_requests WHERE id = 1${reviewHoldSql(true, atMs)}`,
+        )
+        .first()) === null;
+    const now = Date.now();
+    expect(await held(now - 5_000)).toBe(true);
+    expect(await held(now + 5_000)).toBe(false);
+    // With no instant the statement is what it always was, decided by the database's clock.
+    expect(await held()).toBe(false);
+    expect(reviewHoldSql(true, now - 5_000)).toContain(sqliteInstant(now - 5_000));
+    expect(reviewHoldSql(false, now)).toBe("");
+  });
+
+  test("an instant that is not one never reaches a statement", () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, 1e20]) {
+      expect(() => sqliteInstant(bad)).toThrow(RangeError);
+    }
+    expect(sqliteInstant(Date.UTC(2026, 9, 13, 7, 41, 43, 999))).toBe("2026-10-13 07:41:43");
+    expect(sqliteInstant(0)).toBe("1970-01-01 00:00:00");
   });
 
   test("a review of another commit or the other kind of release holds nothing", async () => {

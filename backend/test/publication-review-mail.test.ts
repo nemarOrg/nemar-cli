@@ -15,12 +15,13 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { beforeEach, describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, setSystemTime, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import {
   NOT_ASSESSED_LINE,
   PLATFORM_DAILY_CAP,
+  PUBLICATION_REVIEW_DEADLINE_MINUTES,
   REASONS,
   describePublicationReview,
   parsePublicationReviewReport,
@@ -783,6 +784,53 @@ describe("the depositor's resend carries the review's section", () => {
         report: parsePublicationReviewReport(goodPublicationReport()),
       });
       expect(stored).toEqual({ stored: true, state: "reported" });
+      const mails = sends(calls);
+      expect(mails).toHaveLength(2);
+      expect(textOf(mails[1].html)).toContain("Publication review: pass");
+      expect(mailState(requestId).emailed).not.toBeNull();
+    });
+  });
+
+  test("one instant decides both what the reminder says and whether it counts as the mail", async () => {
+    // The review is a second past its deadline by the database's clock and a few seconds short of it
+    // by the Worker's: the reminder, built from the Worker's clock, says it is running, so the
+    // review's own mail has to still go. Deciding "counts as the mail" at a later instant than the
+    // section was built at stamped the request as mailed, and the review's mail was skipped.
+    const { requestId, datasetId } = await resendable();
+    const reviewId = seedPublicationReview(db, {
+      requestId,
+      datasetId,
+      state: "dispatched",
+      claimed: true,
+    });
+    const deadlineSeconds = PUBLICATION_REVIEW_DEADLINE_MINUTES * 60;
+    db.run("UPDATE publication_reviews SET created_at = datetime('now', ?) WHERE id = ?", [
+      `-${deadlineSeconds + 1} seconds`,
+      reviewId,
+    ]);
+    await withFakeResend(async (calls) => {
+      try {
+        // The Worker's clock reads five seconds earlier than the database's.
+        setSystemTime(new Date(Date.now() - 5_000));
+        expect((await resend(datasetId)).status).toBe(200);
+      } finally {
+        setSystemTime();
+      }
+      const [reminder] = sends(calls);
+      expect(textOf(reminder.html)).toContain(REASONS.review_running.sentence);
+      // The reminder said the review is running, so it is NOT the mail that carries the verdict.
+      expect(mailState(requestId).emailed).toBeNull();
+
+      // The review reports: its result tries the mail, and it goes.
+      const nonce = db
+        .query<{ nonce: string }, [number]>("SELECT nonce FROM publication_reviews WHERE id = ?")
+        .get(reviewId)?.nonce as string;
+      expect(
+        await storePublicationReviewResult(env(), reviewId, datasetId, nonce, {
+          kind: "reported",
+          report: parsePublicationReviewReport(goodPublicationReport()),
+        }),
+      ).toEqual({ stored: true, state: "reported" });
       const mails = sends(calls);
       expect(mails).toHaveLength(2);
       expect(textOf(mails[1].html)).toContain("Publication review: pass");
