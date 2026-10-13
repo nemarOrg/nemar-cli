@@ -1,0 +1,234 @@
+{
+ "probe": "GET https://data.nemar.org/<id>/qa/?format=json for 858 public catalog ids, 2026-10-12",
+ "covered": 32,
+ "by_prefix": {
+  "on": 32
+ },
+ "license_bucket_mix": {
+  "SA": 9,
+  "CC0": 23
+ },
+ "raw_license_counts": {
+  "CC-BY-SA 4.0": 9,
+  "CC0": 23
+ },
+ "non_cc0_covered": [
+  "on005514:CC-BY-SA 4.0",
+  "on005511:CC-BY-SA 4.0",
+  "on005509:CC-BY-SA 4.0",
+  "on005508:CC-BY-SA 4.0",
+  "on005512:CC-BY-SA 4.0",
+  "on005507:CC-BY-SA 4.0",
+  "on005506:CC-BY-SA 4.0",
+  "on005510:CC-BY-SA 4.0",
+  "on005505:CC-BY-SA 4.0"
+ ],
+ "csv_list": {
+  "ds_count": 238,
+  "mapped_to_on": 225,
+  "unmapped_ds": [
+   "ds001784",
+   "ds003754",
+   "ds003816",
+   "ds003987",
+   "ds004186",
+   "ds004197",
+   "ds004212",
+   "ds004215",
+   "ds004284",
+   "ds004330",
+   "ds004575",
+   "ds004770",
+   "ds004771"
+  ],
+  "mix": {
+   "CC0": 224,
+   "other/Creative commons": 1
+  }
+ },
+ "csv_on_probe_covered": 22,
+ "probe_covered_not_in_csv": [
+  "on005028",
+  "on005505",
+  "on005506",
+  "on005507",
+  "on005508",
+  "on005509",
+  "on005510",
+  "on005511",
+  "on005512",
+  "on005514"
+ ],
+ "detail": {
+  "on005514": {
+   "license": "CC-BY-SA 4.0",
+   "bucket": "SA",
+   "qa_children": 284
+  },
+  "on005511": {
+   "license": "CC-BY-SA 4.0",
+   "bucket": "SA",
+   "qa_children": 365
+  },
+  "on005509": {
+   "license": "CC-BY-SA 4.0",
+   "bucket": "SA",
+   "qa_children": 327
+  },
+  "on005508": {
+   "license": "CC-BY-SA 4.0",
+   "bucket": "SA",
+   "qa_children": 321
+  },
+  "on005512": {
+   "license": "CC-BY-SA 4.0",
+   "bucket": "SA",
+   "qa_children": 240
+  },
+  "on005507": {
+   "license": "CC-BY-SA 4.0",
+   "bucket": "SA",
+   "qa_children": 181
+  },
+  "on005506": {
+   "license": "CC-BY-SA 4.0",
+   "bucket": "SA",
+   "qa_children": 151
+  },
+  "on005510": {
+   "license": "CC-BY-SA 4.0",
+   "bucket": "SA",
+   "qa_children": 136
+  },
+  "on002718": {
+   "license": "CC0",
+   "bucket": "CC0",
+   "qa_children": 20
+  },
+  "on004022": {
+   "license": "CC0",
+   "bucket": "CC0",
+   "qa_children": 8
+  },
+  "on005505": {
+   "license": "CC-BY-SA 4.0",
+   "bucket": "SA",
+   "qa_children": 138
+  },
+  "on003190": {
+   "license": "CC0",
+   "bucket": "CC0",
+   "qa_children": 20
+  },
+  "on005028": {
+   "license": "CC0",
+   "bucket": "CC0",
+   "qa_children": 12
+  },
+  "on004745": {
+   "license": "CC0",
+   "bucket": "CC0",
+   "qa_children": 7
+  },
+  "on004661": {
+   "license": "CC0",
+   "bucket": "CC0",
+   "qa_children": 18
+  },
+  "on004588": {
+   "license": "CC0",
+   "bucket": "CC0",
+   "qa_children": 38
+  },
+  "on004368": {
+   "license": "CC0",
+   "bucket": "CC0",
+   "qa_children": 40
+  },
+  "on004018": {
+   "license": "CC0",
+   "bucket": "CC0",
+   "qa_children": 17
+  },
+  "on003810": {
+   "license": "CC0",
+   "bucket": "CC0",
+   "qa_children": 11
+  },
+  "on003801": {
+   "license": "CC0",
+   "bucket": "CC0",
+   "qa_children": 21
+  },
+  "on003380": {
+   "license": "CC0",
+   "bucket": "CC0",
+   "qa_children": 2
+  },
+  "on003343": {
+   "license": "CC0",
+   "bucket": "CC0",
+   "qa_children": 22
+  },
+  "on003195": {
+   "license": "CC0",
+   "bucket": "CC0",
+   "qa_children": 12
+  },
+  "on003194": {
+   "license": "CC0",
+   "bucket": "CC0",
+   "qa_children": 17
+  },
+  "on002778": {
+   "license": "CC0",
+   "bucket": "CC0",
+   "qa_children": 33
+  },
+  "on002578": {
+   "license": "CC0",
+   "bucket": "CC0",
+   "qa_children": 3
+  },
+  "on001787": {
+   "license": "CC0",
+   "bucket": "CC0",
+   "qa_children": 26
+  },
+  "on003800": {
+   "license": "CC0",
+   "bucket": "CC0",
+   "qa_children": 14
+  },
+  "on004362": {
+   "license": "CC0",
+   "bucket": "CC0",
+   "qa_children": 111
+  },
+  "on003825": {
+   "license": "CC0",
+   "bucket": "CC0",
+   "qa_children": 50
+  },
+  "on003645": {
+   "license": "CC0",
+   "bucket": "CC0",
+   "qa_children": 2
+  },
+  "on000117": {
+   "license": "CC0",
+   "bucket": "CC0",
+   "qa_children": 2
+  }
+ },
+ "catalog_wide_bucket_mix": {
+  "NC": 23,
+  "CC0": 610,
+  "other": 14,
+  "CC-BY": 160,
+  "SA": 21,
+  "ND": 26,
+  "unknown": 4
+ },
+ "note": "ND bucket takes precedence over NC for CC-BY-NC-ND; Creative commons / other free text lands in other"
+}

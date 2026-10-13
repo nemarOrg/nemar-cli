@@ -1,0 +1,268 @@
+{
+ "total_count": 858,
+ "rows": 858,
+ "eeg_like_rows": 832,
+ "file_size_bytes": {
+  "n": 858,
+  "sum": 70885908777118.0,
+  "median": 13460401371.0,
+  "p05": 259186215.3,
+  "p95": 274939298613.8,
+  "max": 9583322403449.0
+ },
+ "file_size_bytes_eeg_like": {
+  "n": 832,
+  "sum": 70428841732999.0,
+  "median": 14100628650.5,
+  "p05": 306464153.35,
+  "p95": 276426007552.6,
+  "max": 9583322403449.0
+ },
+ "recording_count": {
+  "n": 729,
+  "sum": 241351.0,
+  "median": 65.0,
+  "p05": 3.0,
+  "p95": 1019.0,
+  "max": 36123.0
+ },
+ "total_recording_duration_s": {
+  "n": 714,
+  "sum": 518054970.0748173,
+  "median": 71731.0,
+  "p05": 3050.0,
+  "p95": 663142.0480000002,
+  "max": 158247419.0
+ },
+ "recording_duration_max_s": {
+  "n": 714,
+  "sum": 3083883.989290666,
+  "median": 1536.492,
+  "p05": 182.5,
+  "p95": 8935.59,
+  "max": 570181.0
+ },
+ "channel_count_max": {
+  "n": 714,
+  "sum": 68751.0,
+  "median": 64.0,
+  "p05": 9.5,
+  "p95": 332.5,
+  "max": 450.0
+ },
+ "subject_count": {
+  "n": 832,
+  "sum": 41764.0,
+  "median": 23.0,
+  "p05": 2.0,
+  "p95": 152.1,
+  "max": 2417.0
+ },
+ "sampling_frequency_hist_top": [
+  [
+   null,
+   206
+  ],
+  [
+   1000,
+   151
+  ],
+  [
+   500,
+   147
+  ],
+  [
+   256,
+   60
+  ],
+  [
+   512,
+   48
+  ],
+  [
+   250,
+   48
+  ],
+  [
+   1024,
+   29
+  ],
+  [
+   200,
+   27
+  ],
+  [
+   2048,
+   22
+  ],
+  [
+   128,
+   21
+  ],
+  [
+   5000,
+   16
+  ],
+  [
+   10000,
+   15
+  ]
+ ],
+ "power_line_hist": {
+  "null": 247,
+  "60": 234,
+  "50": 351
+ },
+ "license_raw_hist": [
+  [
+   "CC0",
+   578
+  ],
+  [
+   "CC-BY-4.0",
+   131
+  ],
+  [
+   "CC0-1.0",
+   27
+  ],
+  [
+   "CC-BY-NC-ND-4.0",
+   23
+  ],
+  [
+   "CC BY 4.0",
+   18
+  ],
+  [
+   "CC-BY-SA 4.0",
+   11
+  ],
+  [
+   "CC-BY-NC-SA-4.0",
+   8
+  ],
+  [
+   "CC-BY-SA-4.0",
+   8
+  ],
+  [
+   "CC-BY-NC-4.0",
+   7
+  ],
+  [
+   "ODC-By-1.0",
+   6
+  ],
+  [
+   "other-open",
+   5
+  ],
+  [
+   "GPL-3.0",
+   4
+  ],
+  [
+   "CC0 BY 4.0",
+   3
+  ],
+  [
+   "CC-BY-ND-4.0",
+   3
+  ],
+  [
+   "CC-BY-NC 4.0",
+   3
+  ],
+  [
+   "CC BY-SA 4.0",
+   2
+  ],
+  [
+   "Unknown",
+   2
+  ],
+  [
+   "CC-BY 4.0",
+   2
+  ],
+  [
+   "MIT",
+   1
+  ],
+  [
+   "ODC-BY",
+   1
+  ],
+  [
+   "CDLA-Permissive-2.0",
+   1
+  ],
+  [
+   "CC-BY-3.0",
+   1
+  ],
+  [
+   "PD",
+   1
+  ],
+  [
+   "Creative commons",
+   1
+  ],
+  [
+   "CC-BY-NC-SA-3.0",
+   1
+  ],
+  [
+   "n/a",
+   1
+  ],
+  [
+   "",
+   1
+  ],
+  [
+   "CC-BY-1.0",
+   1
+  ],
+  [
+   "Open Data Commons Attribution License v1.0",
+   1
+  ],
+  [
+   "ODbL v1.0",
+   1
+  ],
+  [
+   "Non-commercial research use",
+   1
+  ],
+  [
+   "CC BY-NC 4.0",
+   1
+  ],
+  [
+   "Attribution-NonCommercial 4.0 International License (CC BY-NC 4.0) for the EEG data. Stimuli can only be used for non-commercial purposes.",
+   1
+  ],
+  [
+   "CC0 1.0",
+   1
+  ],
+  [
+   "CC-BY-NC-SA 4.0",
+   1
+  ]
+ ],
+ "zarr_status_hist": {
+  "None": 78,
+  "ready": 750,
+  "pending": 5,
+  "failed": 25
+ },
+ "anonymous_rows": 1,
+ "data_complete_zero": 12,
+ "nm_rows": 279,
+ "on_rows": 579
+}

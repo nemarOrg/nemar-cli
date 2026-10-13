@@ -66,6 +66,7 @@ here, since an index that misses a document cannot classify it either.
 | [draft-anonymous-deposit-analysis.md](draft-anonymous-deposit-analysis.md) | Pseudonymous deposit for double-blind review: the leak inventory, and what the chosen design (public data, private repository) requires. ADR still to be written. | public |
 | [draft-eegdash-zarr-issues.sh](draft-eegdash-zarr-issues.sh) | Script drafting the EEGDash Zarr issues. The one non-markdown document here, which is why a markdown-only sweep missed it. | public |
 | [plans/spec-pr1.md](plans/spec-pr1.md) | Column-budget rebuild spec (issue #1182). In `plans/`, which a top-level sweep missed. | public |
+| [first-party-processing-design.md](first-party-processing-design.md) | **Draft** design for NEMAR's own cleaning, independent component analysis and quality assurance with signalJourney provenance and DOI-bearing products. Three owner questions are open in #1750, #1751 and #1752; the plan is not final and no epic is filed. Supporting files are in `first-party-processing/`: the first cut (`design-v1.md`, historical, still cited by v2), the measured evidence, and the SDSC Expanse spike code and results (`sp-p/`). | public |
 
 ## Research — point-in-time findings
 
@@ -105,6 +106,7 @@ A table rather than a list, so each carries a destination like every other docum
 | [plan-import-robustness.md](plan-import-robustness.md) | public |
 | [plan-phase2-retry-engine.md](plan-phase2-retry-engine.md) | public |
 | [draft-1023-service-access-endpoints-plan.md](draft-1023-service-access-endpoints-plan.md) | public |
+| [first-party-processing/design-v1.md](first-party-processing/design-v1.md) | public |
 
 Historical does not mean harmless: a completed plan can still name things that are current, which
 is why these are classified individually rather than as a block.
