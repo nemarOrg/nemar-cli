@@ -13,7 +13,7 @@
  *    asserts that nothing was posted, or what exactly was.
  *  - "with the Worker's gate": the refusal or the record is the Worker's own (the 409 the command
  *    prints, the override on the row, the web executor's run). These need the gate
- *    (`publication-review-gate.ts`, WP2) and stay red until it is in the tree.
+ *    (`backend/src/services/publication-review-gate.ts`) and say so in their name.
  *
  * Mutation checks (each turns a named test red; the diff is shown in the work package's report):
  * treat `--yes` as `--force` (the `--yes without --force` rows); build the override from a second

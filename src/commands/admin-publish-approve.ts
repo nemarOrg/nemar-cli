@@ -57,7 +57,10 @@ export function registerApproveCommand(group: Command): void {
     .argument("<dataset-id>", "Dataset ID")
     .option("--resume", "Resume from last failed step")
     .option("--sandbox", "Use Zenodo sandbox for testing")
-    .option("--skip-ci-check", "Skip BIDS validation CI check (admin override)")
+    .option(
+      "--skip-ci-check",
+      "Skip the orchestrator's live BIDS validation check (recorded; clears no review reason)",
+    )
     .option(
       "--acknowledge-identifier-screen <reason>",
       "Approve over an identifier screen that needs review, recording why (10 to 500 characters)",
