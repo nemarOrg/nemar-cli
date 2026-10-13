@@ -257,7 +257,7 @@ export function listEntries(corpusDir: string): CorpusEntry[] {
  * read), no user or system configuration (so no credential helper), no prompt, and only the
  * transports a public dataset repository can be reached by.
  */
-function cloneEnv(home: string): Record<string, string> {
+export function cloneEnv(home: string): Record<string, string> {
   return {
     PATH: process.env.PATH ?? "/usr/bin:/bin",
     HOME: home,

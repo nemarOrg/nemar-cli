@@ -66,6 +66,7 @@ import {
   STUB_README,
   buildCorpus,
   cloneBlobless,
+  cloneEnv,
   listEntries,
   mismatchedLicense,
   mutate,
@@ -349,6 +350,48 @@ describe("the corpus builder reads public repositories through the job's own rea
     ).toThrow();
     // Nothing was checked out either.
     expect(readdirSync(dest)).toEqual([".git"]);
+  });
+
+  test("the clone carries no credential of the operator's: an empty home and nothing inherited", () => {
+    const planted: Record<string, string> = {
+      GH_TOKEN: "planted",
+      GITHUB_TOKEN: "planted",
+      GIT_ASKPASS: "/bin/planted",
+      SSH_ASKPASS: "/bin/planted",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "http.extraheader",
+      GIT_CONFIG_VALUE_0: "AUTHORIZATION: basic planted",
+      GIT_CONFIG_GLOBAL: "/planted",
+    };
+    const saved: Record<string, string | undefined> = {};
+    for (const [k, v] of Object.entries(planted)) {
+      saved[k] = process.env[k];
+      process.env[k] = v;
+    }
+    try {
+      const env = cloneEnv("/an/empty/home");
+      expect(Object.keys(env).sort()).toEqual([
+        "GIT_ALLOW_PROTOCOL",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_TERMINAL_PROMPT",
+        "HOME",
+        "LC_ALL",
+        "PATH",
+      ]);
+      expect(env).toMatchObject({
+        HOME: "/an/empty/home",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_TERMINAL_PROMPT: "0",
+        GIT_ALLOW_PROTOCOL: "https:file",
+      });
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) Reflect.deleteProperty(process.env, k);
+        else process.env[k] = v;
+      }
+    }
   });
 
   test("an entry already in the corpus is left alone", async () => {
@@ -646,6 +689,21 @@ describe("each defect is applied once, to a copy, and is visible in the mutated 
     } catch (e) {
       expect((e as CorpusError).code).toBe("mutation_not_visible");
     }
+    expect(existsSync(out)).toBe(false);
+  });
+
+  test("a removal that leaves the statement behind is refused, however much else it changed", () => {
+    // The statement is wrapped over two lines, so removing lines one at a time cannot find it. The
+    // description still loses its EthicsApprovals and the copy would look different to the model,
+    // but it would still carry an ethics statement: it is not an ethics_removed copy.
+    const base = join(root, "corpus-wrapped", "nm000001");
+    cpSync(join(goodCorpus, "nm000001"), base, { recursive: true });
+    writeFileSync(
+      join(base, "README.md"),
+      "# Resting EEG\n\nThe study was approved by the institutional review\nboard of University X.\n",
+    );
+    const out = join(root, "corpus-wrapped", "mutant");
+    expect(() => mutate(base, "ethics_removed", out)).toThrow("mutation_not_visible");
     expect(existsSync(out)).toBe(false);
   });
 
