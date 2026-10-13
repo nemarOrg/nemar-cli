@@ -17,10 +17,10 @@
  * `runPublicationReview`'s reading of git: it takes the documents and the summary from the corpus
  * instead.
  *
- * **It posts nothing.** It never imports the review's callback poster, the callback origin table or
- * a token, it has no network call of its own, and `calibrateMain` refuses every argument that names
- * a review, an environment or an origin, and refuses to run where a callback token is set. The
- * model call is the only network traffic.
+ * **It posts nothing.** It never imports the review's callback poster or the callback origin
+ * table, it has no network call of its own, and `calibrateMain` refuses every argument that names a
+ * review, an environment or an origin, and refuses to run where the review's callback token is set.
+ * The model call is the only network traffic.
  *
  * **What a record holds.** An id, a label, closed words (the outcome, the reason codes, the
  * answers, the finding codes, the document states, the error word), token counts and a timing. Never
