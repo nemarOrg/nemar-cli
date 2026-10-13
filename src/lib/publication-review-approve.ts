@@ -28,7 +28,6 @@
 
 import type {
   PublicationReviewDetail,
-  PublicationReviewGateState,
   PublicationReviewOverride,
   ReasonView,
 } from "../../shared/contract/publication-review-admin.js";
@@ -61,8 +60,6 @@ export type ApproveRefusal = "blocked" | "needs_resume" | "hard" | "needs_ack" |
 export type ApproveDecision =
   | {
       kind: "proceed";
-      /** What the review gate is for this request, as the Worker reported it; `unknown` when nothing was read. */
-      gate: PublicationReviewGateState | "unknown";
       /** What to send: the review shown and the reasons shown; null when nothing is overridden here. */
       override: PublicationReviewOverride | null;
       notes: string[];
@@ -203,7 +200,7 @@ export function decideApproval(
         : read.why === "no_route"
           ? "This API has no publication review."
           : `No active publication request was found for ${datasetId}; the API decides.`;
-    return { kind: "proceed", gate: "unknown", override: null, notes: [note] };
+    return { kind: "proceed", override: null, notes: [note] };
   }
   const { detail } = read;
   const id = datasetId;
@@ -224,7 +221,6 @@ export function decideApproval(
     }
     return {
       kind: "proceed",
-      gate: detail.gate,
       override: null,
       notes: [
         "It passed the gates when it started; a resume that has started publishing is not gated again.",
@@ -247,7 +243,6 @@ export function decideApproval(
   if (detail.gate !== "enforced") {
     return {
       kind: "proceed",
-      gate: detail.gate,
       override: null,
       notes: options.force ? [`--force changes nothing: the review gate is ${detail.gate}.`] : [],
     };
@@ -287,7 +282,7 @@ export function decideApproval(
   // 7. Nothing an override clears: a pass, or only the acknowledgment reason, which the screen
   // gate decides.
   if (need.length === 0) {
-    return { kind: "proceed", gate: "enforced", override: null, notes: [] };
+    return { kind: "proceed", override: null, notes: [] };
   }
 
   // 8. --force: the administrator's own act. The override names the review shown and the
@@ -295,7 +290,6 @@ export function decideApproval(
   if (options.force) {
     return {
       kind: "proceed",
-      gate: "enforced",
       override: { review_id: detail.review?.id ?? null, reasons: need },
       notes: [`Approving over: ${need.join(", ")} (--force; recorded with your account).`],
     };
@@ -307,7 +301,6 @@ export function decideApproval(
   if (recorded !== null && recordedCovers) {
     return {
       kind: "proceed",
-      gate: "enforced",
       override: null,
       notes: [
         `An override by administrator #${recorded.by} at ${recorded.at} covers these reasons. The API accepts it only for a run recorded as theirs.`,

@@ -17,9 +17,7 @@ import {
   PUBLICATION_REVIEW_NOT_CLEAR_CODE,
   type PublicationReviewDetail,
   type PublicationReviewOverride,
-  REQUEST_BLOCKED_CODE,
 } from "../../shared/contract/publication-review-admin.js";
-import { IDENTIFIER_SCREEN_ERROR_CODES } from "../../shared/contract/publication.js";
 import {
   PUBLICATION_STEPS,
   PUBLICATION_STEP_LABELS,
@@ -336,12 +334,10 @@ function printRefusal(decision: Extract<ApproveDecision, { kind: "refuse" }>): v
   markReportedExit();
 }
 
-/** What an approval can be refused for, as the loop that follows the question reports it. */
-export type ApprovalRefusal = "review" | "screen" | "blocked" | "other";
+/** Whether the approval ran to the end. A refusal, a failure and a run that gave up are all `ok: false`, and already reported. */
+export type ApprovalRun = { ok: true } | { ok: false };
 
-export type ApprovalRun = { ok: true } | { ok: false; refusal: ApprovalRefusal };
-
-export interface RunApprovalOptions {
+interface RunApprovalOptions {
   resume: boolean;
   sandbox: boolean;
   skipCiCheck: boolean;
@@ -350,14 +346,13 @@ export interface RunApprovalOptions {
   override: PublicationReviewOverride | null;
 }
 
-/** Which kind of refusal the Worker answered with, from the closed word in the 409's `error`. */
-function refusalOf(error: unknown): ApprovalRefusal {
-  if (!(error instanceof ApiError) || error.statusCode !== 409) return "other";
-  const code = error.code ?? "";
-  if (code === PUBLICATION_REVIEW_NOT_CLEAR_CODE) return "review";
-  if (code === REQUEST_BLOCKED_CODE) return "blocked";
-  if (IDENTIFIER_SCREEN_ERROR_CODES.includes(code)) return "screen";
-  return "other";
+/** Whether the Worker refused the approval for the review: a 409 whose `error` is the review gate's word. */
+function isReviewRefusal(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.statusCode === 409 &&
+    error.code === PUBLICATION_REVIEW_NOT_CLEAR_CODE
+  );
 }
 
 /** The reasons a review refusal carries, one sentence and cure each; those it does not carry are left out. */
@@ -389,8 +384,7 @@ function refusalReasons(error: unknown): string[] {
  * The override is sent on every call of the run (`approvePublication`), so a retry that lands
  * before the run is marked approving passes the gate again with the same override. A refusal the
  * Worker answers with (the review gate, the screen, a blocked request) is printed in the shared
- * words and returned as its kind, so a caller can tell a decision of the Worker's from a run that
- * failed.
+ * words, and so is a failure; the result says only whether the run went through.
  */
 export async function runApproval(
   datasetId: string,
@@ -505,12 +499,11 @@ export async function runApproval(
     failWith(error, spinner, "Failed to approve publication", {
       422: "Fix the CI issues and retry with --resume",
     });
-    const refusal = refusalOf(error);
 
     // The review gate's refusal carries every live reason in the shared words: print each with
     // its cure, then where to read the whole review. `unverified` carries none (the Worker could
     // not read the review, and its sentence says to try again).
-    if (refusal === "review") {
+    if (isReviewRefusal(error)) {
       const reasons = refusalReasons(error);
       for (const line of reasons) console.log(chalk.dim(`  ${line}`));
       if (reasons.length > 0) console.log(`  Next: nemar admin publish show ${datasetId}`);
@@ -545,6 +538,6 @@ export async function runApproval(
       });
       console.log();
     }
-    return { ok: false, refusal };
+    return { ok: false };
   }
 }

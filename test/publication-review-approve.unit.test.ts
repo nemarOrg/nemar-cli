@@ -139,9 +139,8 @@ function proceeds(d: ApproveDecision) {
 }
 
 describe("1. a review that could not be read is the Worker's to judge", () => {
-  test("unreadable: proceed with no override, the gate unknown, and say why", () => {
+  test("unreadable: proceed with no override, and say why", () => {
     const d = proceeds(decideApproval(ID, { kind: "unreadable", why: "HTTP 500" }, FORCE));
-    expect(d.gate).toBe("unknown");
     expect(d.override).toBeNull();
     expect(d.notes).toEqual([
       "The publication review could not be read (HTTP 500); the API still checks it.",
@@ -150,14 +149,12 @@ describe("1. a review that could not be read is the Worker's to judge", () => {
 
   test("a backend with no review route", () => {
     const d = proceeds(decideApproval(ID, { kind: "absent", why: "no_route" }, NO_FLAGS));
-    expect(d.gate).toBe("unknown");
     expect(d.override).toBeNull();
     expect(d.notes).toEqual(["This API has no publication review."]);
   });
 
   test("no active request: the Worker answers 404, the CLI does not decide for it", () => {
     const d = proceeds(decideApproval(ID, { kind: "absent", why: "no_request" }, NO_FLAGS));
-    expect(d.gate).toBe("unknown");
     expect(d.override).toBeNull();
     expect(d.notes.join(" ")).toContain("No active publication request");
   });
@@ -187,10 +184,9 @@ describe("2. a run that has started publishing is continued, not gated", () => {
     expect(refusal(decide(spec, FORCE)).why).toBe("needs_resume");
   });
 
-  test("with --resume it proceeds with no override, the gate as the Worker reported it", () => {
+  test("with --resume it proceeds with no override, whatever the gate", () => {
     for (const gate of ["enforced", "off", "n/a"] as const) {
       const d = proceeds(decide({ ...spec, gate }, { ...NO_FLAGS, resume: true }));
-      expect(d.gate).toBe(gate);
       expect(d.override).toBeNull();
       expect(d.notes.join(" ")).toContain(
         "a resume that has started publishing is not gated again",
@@ -222,7 +218,6 @@ describe("2. a run that has started publishing is continued, not gated", () => {
     expect(refusal(decide(blockedMidRun, FORCE)).why).toBe("needs_resume");
     for (const gate of ["enforced", "off", "n/a"] as const) {
       const d = proceeds(decide({ ...blockedMidRun, gate }, { ...NO_FLAGS, resume: true }));
-      expect(d.gate).toBe(gate);
       expect(d.override).toBeNull();
     }
   });
@@ -279,9 +274,8 @@ describe("3. a blocked request that has not started publishing is refused whatev
 });
 
 describe("4. a gate that is off or does not apply is not enforced", () => {
-  test("off: proceed with no override, and say what the gate is", () => {
+  test("off: proceed with no override and no note", () => {
     const d = proceeds(decide({ gate: "off" }));
-    expect(d.gate).toBe("off");
     expect(d.override).toBeNull();
     expect(d.notes).toEqual([]);
   });
@@ -290,7 +284,6 @@ describe("4. a gate that is off or does not apply is not enforced", () => {
     for (const gate of ["off", "n/a"] as const) {
       const spec = { gate, reasons: ["question_failed" as const, "review_running" as const] };
       const d = proceeds(decide(spec));
-      expect(d.gate).toBe(gate);
       expect(d.override).toBeNull();
     }
   });
@@ -363,7 +356,6 @@ describe("6. the screen's acknowledgment is its own reason, cleared by its own f
   test("given this run: it is not the CLI's to refuse, and nothing is overridden by it", () => {
     const d = proceeds(decide(spec, { ...NO_FLAGS, acknowledge: "a reason long enough" }));
     expect(d.override).toBeNull();
-    expect(d.gate).toBe("enforced");
   });
 
   test("recorded earlier (by anyone: the Worker decides whose it must be)", () => {
@@ -398,7 +390,6 @@ describe("7. nothing for an override to clear", () => {
   test("a pass proceeds with no override, with and without --force", () => {
     for (const options of [NO_FLAGS, FORCE]) {
       const d = proceeds(decide({ reasons: [] }, options));
-      expect(d.gate).toBe("enforced");
       expect(d.override).toBeNull();
       expect(d.notes).toEqual([]);
     }
