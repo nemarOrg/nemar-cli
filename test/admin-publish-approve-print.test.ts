@@ -366,6 +366,38 @@ describe("runApproval against a Worker that answers with hostile text", () => {
     expect(text).toContain(`Warning: Mail ${CLEANED}`);
   });
 
+  for (const [what, total, line] of [
+    ["with a total", "5\u2028", /Locking S3 objects: 03\/5 \(60\.0%\)$/m],
+    ["without one", undefined, /Locking S3 objects: 03$/m],
+  ] as const) {
+    test(`the lock progress the Worker reports, ${what}, in the spinner line the retry notice puts back`, async () => {
+      // The counts are numbers in the Worker's contract, and nothing here checks that they are: a
+      // string with a line separator in it passes the `> 0` test (it reads as a number) and is
+      // printed as it came. The spinner line is shown again after a retry notice, which is how it
+      // reaches the stream in a test (a spinner that is not on a terminal prints only then).
+      scripted = [
+        {
+          status: 200,
+          body: {
+            step: "s3_lock",
+            hasMore: true,
+            s3_lock_continuation_token: "token-1",
+            s3_lock_batch_count: "3\u2028",
+            s3_lock_total: total,
+          },
+        },
+        { status: 500, body: { error: "a transient fault" } },
+        { status: 200, body: { message: "Published", dataset_id: ID, step_results: [] } },
+      ];
+
+      const { value, text } = await printed(() => runApproval(ID, options));
+
+      expect(value).toEqual({ ok: true });
+      expect(plainText(text)).toMatch(line);
+      expectCleanText(text);
+    });
+  }
+
   test("a refusal whose message and reasons are hostile", async () => {
     scripted = [
       {

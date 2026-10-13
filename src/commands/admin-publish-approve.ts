@@ -568,14 +568,16 @@ export async function runApproval(
     ) {
       const pct = ((info.s3LockLocked / info.s3LockTotal) * 100).toFixed(1);
       const resumeSuffix = info.s3LockResumed ? " (resumed)" : "";
-      return `${head} | Locking S3 objects: ${info.s3LockLocked}/${info.s3LockTotal} (${pct}%)${resumeSuffix}`;
+      // The counts are numbers by contract and the client does not check that they are, so
+      // they pass `plain` like every other network string (a number is unchanged by it).
+      return `${head} | Locking S3 objects: ${plain(String(info.s3LockLocked))}/${plain(String(info.s3LockTotal))} (${pct}%)${resumeSuffix}`;
     }
     if (info.step === "s3_lock" && info.s3LockLocked !== undefined) {
       // Total not yet known (rare; first response before server has
       // counted). Show running count without the denominator so the
       // line still advances.
       const resumeSuffix = info.s3LockResumed ? " (resumed)" : "";
-      return `${head} | Locking S3 objects: ${info.s3LockLocked}${resumeSuffix}`;
+      return `${head} | Locking S3 objects: ${plain(String(info.s3LockLocked))}${resumeSuffix}`;
     }
     return head;
   }
