@@ -783,6 +783,32 @@ describe("an override is its approver's, and it is recorded once", () => {
   });
 });
 
+describe("#1604 as it stands: a terminal approval inside a live web lease is the clicker's", () => {
+  test("23. an override given by B inside A's live lease is recorded under A, with B as the executor", async () => {
+    // Pinned with the test above so Phase 3 flips both on purpose.
+    const { requestId, reviewId } = seedFailing();
+    db.run(
+      `UPDATE publication_requests
+          SET approval_requested_by = ?, approval_dispatched_at = datetime('now', '-1 minutes')
+        WHERE id = ?`,
+      [adminA, requestId],
+    );
+    const res = await approve(
+      {
+        resume: true,
+        override_publication_review: { review_id: reviewId, reasons: ["question_failed"] },
+      },
+      { key: ADMIN_B_KEY },
+    );
+    expect(res.status).toBe(200);
+    expect(reviewRow(reviewId).override_by).toBe(adminA);
+    const audit = overrideRows();
+    expect(audit).toHaveLength(1);
+    expect(audit[0].user_id).toBe(adminA);
+    expect(audit[0].details).toMatchObject({ via: "approve", executed_by: adminB });
+  });
+});
+
 describe("the gate runs on a resume that has not started publishing, and only on that one", () => {
   test("16. a run that has started publishing is not gated, whatever the review says", async () => {
     const { requestId } = seedFailing({ requestStatus: "approving", steps: DONE });
