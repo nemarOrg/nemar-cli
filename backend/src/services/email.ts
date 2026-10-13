@@ -1593,6 +1593,68 @@ export async function sendPublicationDeniedEmail(
 }
 
 /**
+ * Mail a depositor an administrator's typed message about their open publication request
+ * (ADR 0102, section 8). The body is a fixed frame around the message and nothing else: no
+ * headline, no reason and no sentence of the automated review reaches the depositor through this
+ * mail, whatever the review says (the review is shown to administrators only). The message is
+ * escaped and kept in a `pre-wrap` block so its line breaks survive. The request stays open, so
+ * the frame says so and asks for a reply.
+ *
+ * Like every sender here it goes through `sendEmail`'s delivery fence, and a send that does not
+ * go (a fence refusal, a Resend refusal, an unreachable host) throws: the route reports it, so an
+ * administrator is never told that a message went when it did not.
+ */
+export async function sendPublicationCommentEmail(
+  to: string,
+  username: string,
+  datasetId: string,
+  message: string,
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
+): Promise<void> {
+  // The message starts right after its tag: `pre-wrap` would render any indentation before it.
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #2563eb;">About Your Publication Request</h1>
+
+  <p>Hello ${escapeHtml(username)},</p>
+
+  <p>An administrator has a message about your publication request for dataset <strong>${escapeHtml(datasetId)}</strong>:</p>
+
+  <div style="background-color: #eff6ff; padding: 16px; border-radius: 8px; margin: 16px 0; border-left: 4px solid #2563eb; white-space: pre-wrap;">${escapeHtml(message)}</div>
+
+  <p>This is a message from a NEMAR administrator. Your request stays open; reply to this email to answer.</p>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+  <p style="color: #999; font-size: 12px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
+  </p>
+</body>
+</html>
+  `;
+
+  await sendEmail(
+    to,
+    `About your publication request: ${datasetId}`,
+    html,
+    resendApiKey,
+    fromEmail,
+    replyTo,
+    isDev,
+    deliveryEnv,
+  );
+}
+
+/**
  * Notify a user that the automated pre-screen blocked their publication
  * request (issue #666). Unlike a manual denial, this is a self-serve gate:
  * the listed gaps are the publisher-minimum checks, and a fix + re-request
