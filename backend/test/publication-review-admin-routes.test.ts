@@ -2349,6 +2349,7 @@ describe("the exports the approval gate reads through", () => {
     expect(views.map((v) => v.code)).toEqual(["review_could_not_run"]);
     expect(views[0].cure).toContain(`nemar admin publish start ${datasetId}`);
     // The cure of a request no start reaches is worded without the start.
-    expect(reasonViewsOf(d.reasons, datasetId, false)[0].cure).not.toContain("publish start");
+    // No report: the cure does not depend on one.
+    expect(reasonViewsOf(d.reasons, datasetId, false, null)[0].cure).not.toContain("publish start");
   });
 });

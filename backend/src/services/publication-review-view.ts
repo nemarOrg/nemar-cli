@@ -714,14 +714,15 @@ export function overrideReasonsOf(raw: string | null): ReasonCode[] {
  * The reasons in the shared words, each with its cure for this dataset and the whole reason as the
  * one line `description.lines` prints for it (`reasonLine`, which needs the report of the review in
  * force for a failed question's findings): the detail's `reasons`, and what the approval gate's
- * refusal carries, so the two say the same thing. A caller that has no report passes none, and the
- * line then lacks only what the report adds.
+ * refusal carries, so the two say the same thing. The report is required so that a caller cannot
+ * leave it out by accident: one that has no report passes `null`, and the line then lacks only
+ * what the report adds.
  */
 export function reasonViewsOf(
   reasons: readonly Reason[],
   datasetId: string,
   startable: boolean,
-  report: PublicationReviewReport | null = null,
+  report: PublicationReviewReport | null,
 ): ReasonView[] {
   return reasons.map((r) => {
     const rule = REASONS[r.code];

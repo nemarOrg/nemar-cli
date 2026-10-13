@@ -67,7 +67,8 @@ const expectCleanText = (text: string) => expectClean(text.split("\n"));
 
 /** A detail whose every network string is hostile. */
 function hostileDetail(): PublicationReviewDetail {
-  const reasons = reasonViewsOf([{ code: "question_failed", detail: null }], ID, true);
+  // No report: these lines lack the report-derived findings text of a failed question.
+  const reasons = reasonViewsOf([{ code: "question_failed", detail: null }], ID, true, null);
   return {
     environment: "production",
     enabled: true,
@@ -191,7 +192,8 @@ describe("the lines approve prints are clean of anything a terminal could act on
       ...hostileDetail(),
       reasons: [
         {
-          ...reasonViewsOf([{ code: "request_blocked", detail: null }], ID, true)[0],
+          // No report: this line lacks the report-derived findings text (the test replaces it anyway).
+          ...reasonViewsOf([{ code: "request_blocked", detail: null }], ID, true, null)[0],
           line: `Blocked ${HOSTILE}`,
         },
       ],

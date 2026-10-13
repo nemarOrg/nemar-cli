@@ -70,6 +70,8 @@ export function detailOf(spec: Spec = {}): PublicationReviewDetail {
     ),
     ID,
     status === "requested",
+    // No report: these lines lack the report-derived findings text of a failed question.
+    null,
   );
   const reviewId = spec.reviewId === undefined ? 11 : spec.reviewId;
   return {
