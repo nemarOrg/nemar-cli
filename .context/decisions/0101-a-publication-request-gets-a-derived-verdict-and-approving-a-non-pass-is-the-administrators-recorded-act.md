@@ -139,7 +139,10 @@ This rule is not negotiable, and nothing in this ADR or a later phase may weaken
 ### 3. What the model is shown
 
 - The root README, at most 24,000 characters, fenced; a longer file is cut and the cut is a fact.
-- The BIDS-defined top-level keys of `dataset_description.json`, re-serialized, at most 16,000 characters;
+  The README is the first present of `README.md`, `README`, `README.rst` and `README.txt`, the four forms BIDS allows, in the order `submission-gate.ts` already uses;
+  the format makes no difference to the review, and a `.rst` or `.txt` README is read as text like the others.
+- The BIDS-defined top-level keys of `dataset_description.json`, re-serialized, at most 16,000 characters
+  (these include `EthicsApprovals`, `License`, `Authors`, `Funding`, `ReferencesAndLinks` and `SourceDatasets`, the fields the questions below turn on);
   any other key is counted and not shown.
 - CHANGES, at most 8,000 characters, and the root LICENSE, at most 4,000, to compare with the `License` field.
 - `participants.json`, the column descriptions, at most 8,000 characters.
@@ -165,7 +168,8 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   - `complete_and_honest`: the README says what the data is, how it was collected and how to use it,
     and what it claims agrees with the structural summary;
   - `meets_standards`: the README, the description and the ethics statement meet the published submission standards
-    beyond the mechanical floor, the ethics statement stating an approval or exemption rather than boilerplate;
+    beyond the mechanical floor, the ethics statement stating an approval or exemption (naming the approving body or a reference) rather than boilerplate,
+    and the data's origin stated: when it derives from another dataset, a paper or a public archive, the source is named (`SourceDatasets`, `ReferencesAndLinks` or the README), and a license that conflicts with a named source is a finding;
   - `authors_and_license`: the authors are real people or named bodies, consistent between files,
     and the license is a recognized one, consistent between `License` and `LICENSE`;
   - `name_adequate`: the name describes this dataset (ADR 0014's adequacy question, above ADR 0026's 25-character floor).

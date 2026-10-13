@@ -1,7 +1,7 @@
 # Publication review: design analysis and phase plan
 
 > **STATUS: ANALYSIS, NOT A RULING.**
-> [ADR 0100](decisions/0100-a-publication-request-gets-a-derived-verdict-and-approving-a-non-pass-is-the-administrators-recorded-act.md) is the verdict.
+> [ADR 0101](decisions/0101-a-publication-request-gets-a-derived-verdict-and-approving-a-non-pass-is-the-administrators-recorded-act.md) is the verdict.
 > Where this note and the ADR disagree, the ADR wins.
 > This note keeps what was read, the comparisons, the arithmetic, the initial vocabularies and the refined plan for epic #1726.
 > Written 2026-10-12 for Phase 0 (#1727) against the epic branch at `9cc6586f`,
@@ -119,7 +119,7 @@ Each was checked against the code, or, where marked, reported by the review of #
     has six values where nemar-cli's `publicationBlockReasonSchema` has seven (it lacks `identifier_screen_findings`).
     The website's drift tests check out nemar-cli `dev`, so a new contract file is visible to them only once it is on `dev`.
 12. **The pull-request review never sends an unpublished dataset to a model** (`REVIEWABLE_DATASET_PREDICATE` requires `first_published_at`).
-    A publication review is always about an unpublished dataset, so its licence to read is stated in ADR 0100:
+    A publication review is always about an unpublished dataset, so its licence to read is stated in ADR 0101:
     the depositor's request to publish this content, with the precedent of enrichment and the pre-screen.
 13. **Cron.** Production runs `0 3 * * *` and `*/30 * * * *`; dev runs only `0 4 * * *`.
     Every watchdog is production-only, which is why ADR 0093's surfaces age a dispatched row by time.
@@ -132,7 +132,7 @@ Each was checked against the code, or, where marked, reported by the review of #
 
 ## 3. Pull-request review and publication review, side by side
 
-| Concern | Pull-request review (ADR 0092, 0093) | Publication review (ADR 0100) |
+| Concern | Pull-request review (ADR 0092, 0093) | Publication review (ADR 0101) |
 |---|---|---|
 | What starts it | The App's `pull_request` delivery | The stored screen result, or an administrator's `start` |
 | Unit | (dataset, pull request, head commit) | (request, screened commit, anonymous flag) |
@@ -224,6 +224,21 @@ and otherwise record `action_required`. Three readings were weighed.
   The same rules over the same files, but a change to the scanner that the upload preflight and the fleet scan share,
   with new findings on published datasets; tracked as #1736, outside this epic.
 
+- **D. A reviewer that runs code: an agent with tools (Claude Code, in Actions or in the cloud) that opens the images, tables and recordings.**
+  Suggested by the maintainer on 2026-10-12; recommended against for the automated path, on three grounds.
+  (1) It sends participant-level content to a model: anatomical images carry faces, `participants.tsv` and event tables carry values, and the AI-use page says participant-level data files are never sent to a model;
+  the identifier screen exists because those bytes are the risk, and ADR 0101's hard constraint is that the model receives none.
+  (2) The depositor writes the README, so a tool-using agent reading it is the prompt-injection arrangement:
+  a no-tools call can be steered into a wrong verdict, which a person still sees and which the code never reads from the model;
+  an agent holding a shell, a read token and an Anthropic identity in the runner can be steered into acting.
+  (3) It is dearer by one to two orders of magnitude, not reproducible, and its answer cannot be re-derived by the administrator who must approve from it.
+  What the idea is after, a reviewer that checks the prose against the data, is done by code instead:
+  the job already runs in a checkout and computes the structural summary, the minimums, the BIDS result and the counts,
+  and Phase 1 widens that summary to the numbers a README states (subjects, sessions, channels, sampling rates, recording formats, modalities),
+  so `readme_mismatch` compares prose with facts the platform computed, and the model is shown the numbers and never the values.
+  A richer, administrator-run look at a local clone with their own tools stays the administrator's own act (ADR 0093) and is not built here.
+  The maintainer decides whether to reopen this; it would amend ADR 0101's hard constraint and the policy statement, not just the job.
+
 Under B the ordering still matters:
 a request with direct identifiers in its headers, which the screen blocks, never reaches a model,
 and a review is never about another commit than the screen's.
@@ -284,7 +299,7 @@ These are the starting lists for `shared/publication-review.ts`; Phase 1 may ref
 - **Questions:** `complete_and_honest`, `meets_standards`, `authors_and_license`, `name_adequate`.
 - **Findings:** `readme_missing_or_stub`, `readme_mismatch`, `description_incomplete`, `ethics_statement_missing`,
   `ethics_statement_inadequate`, `authors_placeholder`, `authors_inconsistent`, `license_missing`, `license_inconsistent`,
-  `name_not_descriptive`, `changes_inconsistent`, `evidence_incomplete`, `steering_attempt`, `other`.
+  `name_not_descriptive`, `changes_inconsistent`, `provenance_unclear`, `source_license_conflict`, `evidence_incomplete`, `steering_attempt`, `other`.
 - **Run errors:** `evidence_unavailable`, `stale_head`, `auth_failed`, `model_unavailable`, `model_refused`, `model_truncated`,
   `model_invalid`, `report_invalid`, `dispatch_failed`, `dispatch_unconfigured`, `review_disabled`, `workflow_failed`.
 - **Reasons, by what clears them and their class:**
@@ -336,6 +351,10 @@ Files:
 - `shared/submission-minimums.ts`: the pure rules moved out of `backend/src/services/submission-minimums.ts`, which re-exports them,
   so the review job and the Worker evaluate one function.
 - `shared/untrusted-text.ts`: `fence`, `tidy`, `tidyPath` and `sanitizeNote` moved out of the pull-request review, which imports them back.
+- `shared/readme-candidates.ts`: one `README_CANDIDATES` (`README.md`, `README`, `README.rst`, `README.txt`), which the review job, `backend/src/services/submission-gate.ts` and `anonymity-sweep.ts` import.
+  Three other places disagree with it today and are not changed by this epic, so each is filed as its own issue: enrichment (`enrich-dataset.ts`: `README.md`, `README`, `readme.md`, so a `.rst` or `.txt` README is "No README found"),
+  the reindex (`dataset-reindex.ts`: `README`, `README.md`) and the webhook's trigger list (`routes/webhooks/github.ts`: `README.md`).
+  Publishing renames a `.rst` or `.txt` README to `README.md` (`publication-orchestrator.ts`, step `update_readme`); the review reads the file as the depositor wrote it.
 - Migration `0096_publication_reviews.sql` (the next free number at the time; check `ls backend/src/db/migrations`).
 - `backend/src/services/publication-review.ts`: start (from `storeScreenResult` and an admin start), the applicability wrapper
   `publicationReviewApplies`, caps ranked after insert, dispatch, claim, store, the re-block on a failed minimum, the production-only watchdog,
@@ -375,6 +394,7 @@ Tests (real D1 through `backend/test/helpers/d1.ts` with every migration, the re
   no path, no subject label and no task label.
 - `test/publication-review-workflow.test.ts`: the workflow's shell steps against a stand-in Worker, as `test/pr-review-workflow.test.ts` does.
 - `backend/test/prescreen-handover.test.ts`: the pre-screen is dispatched with the review flag off and not with it on.
+- A README in each of the four forms is read, and a request with only a `README.rst` is never judged `readme_missing_or_stub`.
 - Mutation checks in the dangerous direction: removing the pre-send check, the screen-head predicate in the claim,
   the flag check, or the re-block must turn a test red.
 
@@ -487,7 +507,7 @@ Must not: approve `nm099997` under a name; delete `PRESCREEN_CALLBACK_SECRET`.
    the gate's allow path is covered by the Phase 2 tests only.
 9. **A behaviour change ships dark.** The unconditional refusal of a `blocked` request reaches production with the first release after finalization.
 10. **Two copies of the fence and sanitizer helpers.** Phase 1 moves them to one shared module.
-11. **The ADR number.** Open pull request #1722 also claims 0100; whichever merges second renumbers.
+11. **The ADR number.** Pull request #1722 merged first and took 0100, so this decision is 0101 (renumbered 2026-10-13, before it merged).
 12. **The `c` comment is a new mail type.** It must carry only the administrator's typed words, never the review's text.
 13. **Unmeasured volume.** The caps are guesses until Phase 5 counts native requests.
 14. **A model change** moves the cost table by a factor of about twenty.
