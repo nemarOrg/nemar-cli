@@ -504,11 +504,6 @@ function prepareParticipants(parsed: Record<string, unknown>, cap: number): Prep
 }
 
 /**
- * The pre-send check. Examines each document with the shared rules over the string that will be
- * sent, and returns that string, branded, for the documents the rules found nothing in. See the
- * file header for the rules, and `PreSendResult` for what each state means.
- */
-/**
  * What this module has cleared, as SHA-256 digests of the document and the exact string, in a set no
  * one else can reach. The brand on `ClearedText` is a compile-time property: a type predicate, an
  * assertion function, a generic cast, `JSON.parse` or a suppressed error all produce "cleared" text
@@ -535,6 +530,11 @@ export function isCleared(document: ReviewDocument, text: unknown): boolean {
   return typeof text === "string" && clearedDigests.has(digestOf(document, text));
 }
 
+/**
+ * The pre-send check. Examines each document with the shared rules over the string that will be
+ * sent, and returns that string, branded, for the documents the rules found nothing in. See the
+ * file header for the rules, and `PreSendResult` for what each state means.
+ */
 export const presend: PreSend = (docs): PreSendResult => {
   const cleared: ClearedDocuments = {};
   const states = {} as Record<ReviewDocument, DocumentState>;
