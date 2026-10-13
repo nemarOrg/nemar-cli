@@ -344,9 +344,9 @@ export interface StartOptions {
 
 /**
  * The one start path: a screen result's (through {@link startPublicationReviewForScreen}) and an
- * administrator's (`adminUserId` set, WP6's route). Every refusal returns its reason and writes
- * nothing. A database error after the row is written marks the row `dispatch_failed` and
- * throws.
+ * administrator's (`adminUserId` set, from `routes/admin/publication-review.ts`). Every refusal
+ * returns its reason and writes nothing. A database error after the row is written marks the row
+ * `dispatch_failed` and throws.
  */
 export async function startPublicationReview(
   env: Bindings,
