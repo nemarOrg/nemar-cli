@@ -170,6 +170,21 @@ describe("y approves from the terminal", () => {
     expect(requestRow(requestId)?.status).toBe("published");
   });
 
+  test("a request with no step done starts from the first: resume is false, and a step the Worker stops at is a failure", async () => {
+    const { requestId } = seed(A);
+    h.db.run("UPDATE publication_requests SET steps_completed = '[]' WHERE id = ?", [requestId]);
+    // The BIDS validation the first step reads did not pass: a 422 the walk does not retry.
+    h.bidsConclusion.value = "failure";
+
+    const r = await next("y\n");
+
+    expect(approveBodies(A)[0]?.resume).toBe(false);
+    expect(r.exitCode).toBe(1);
+    expect(output(r)).toContain("Fix the CI issues and retry with --resume");
+    expect(r.stdout).toContain("Done: 1 failed.");
+    expect(requestRow(requestId)?.status).toBe("approving");
+  });
+
   test("with the review switched off nothing is gated: y is offered and approves", async () => {
     h.setEnv({ PUBLICATION_REVIEW_ENABLED: "0" });
     const { requestId } = seed(A, failingReport());
