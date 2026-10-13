@@ -128,6 +128,9 @@ coupling).
   no-store` on every response; it sent no `Cache-Control` at all, including on its 400s, which
   `GET /datasets` already sent as `no-store`. No migration and no deploy coupling.
   The CLI help, the MCP schema text and the OpenAPI description for `modality` say so too.
+  To match both EEG and intracranial datasets, pass `eeg,ieeg`. An empty `modality=` is still no
+  filter. A `modality` value of 49 or more characters used to return 500, because of D1's 50-byte
+  `LIKE` pattern limit, and now matches nothing.
 - **`nemar admin pr-reviews approve --merge` and `y` in `next` no longer approve a pull request
   they then refuse to merge (ADR 0093 amendment).** Both approved first and read GitHub's
   `mergeable_state` afterwards, and `y` was offered for every state but `dirty` and `behind`, so a
