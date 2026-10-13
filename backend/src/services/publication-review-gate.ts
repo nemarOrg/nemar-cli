@@ -112,7 +112,7 @@ export interface ReviewGateArgs {
 export interface OverrideToRecord {
   /** The review in force as it was read, or null when there is none (terminal only). */
   row: PublicationReviewRow | null;
-  /** The override-class codes of the caller's override, unique, in `REASON_CODES` order. */
+  /** The override-class codes that stand and the override covers, unique, in `REASON_CODES` order. */
   reasons: ReasonCode[];
 }
 
@@ -210,7 +210,8 @@ function sameCodes(a: readonly string[], b: readonly string[]): boolean {
  *     reason, which the screen gate enforced). An override in the body is ignored.
  *  7. With an override in the body: it must name the review in force (`review_changed`) and every
  *     override-class reason that stands (`override_not_covering`). It passes with the override to
- *     record, unless this administrator's own record on the row already says the same.
+ *     record, which holds exactly the reasons that stand, unless this administrator's own record on
+ *     the row already says the same.
  *  8. Without one, the override recorded on the review in force counts only when it is this
  *     approver's and covers every reason that stands; otherwise `needs_override`.
  *
@@ -268,7 +269,10 @@ function decide(args: ReviewGateArgs, d: DerivedPublicationReview): ReviewGateRe
     if (override.review_id !== (row?.id ?? null)) return refusal("review_changed", datasetId, d);
     const uncovered = uncoveredByOverride(need, override.reasons);
     if (uncovered.length > 0) return refusal("override_not_covering", datasetId, d, uncovered);
-    const reasons = OVERRIDE_REASONS.filter((code) => override.reasons.includes(code));
+    // Recorded: the override-class codes that STAND, in the table's order (`uncoveredByOverride`
+    // just guaranteed the body names every one), never the others the body lists. A record that
+    // held a code that does not stand would pre-cover a reason that comes up on this row later.
+    const reasons = OVERRIDE_REASONS.filter((code) => need.some((r) => r.code === code));
     if (row === null && args.requireRow === true) return refusal("no_review_row", datasetId, d);
     if (
       row !== null &&

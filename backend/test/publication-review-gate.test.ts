@@ -892,6 +892,52 @@ describe("an override is its approver's, and it is recorded once", () => {
     expect(requestRow(requestId).status).toBe("approving");
   });
 
+  test("an override records the codes that stand, not every override-class code the body lists, so a later reason is not pre-covered", async () => {
+    // A client other than the CLI may list a code that does not stand. Only the codes that stand
+    // are recorded, so the record cannot cover a reason that comes up afterwards.
+    bidsConclusion = "failure";
+    const { requestId, reviewId } = seedFailing({ requestStatus: "approving", steps: [] });
+    const body = {
+      resume: true,
+      override_publication_review: {
+        review_id: reviewId,
+        reasons: ["question_failed", "version_already_released"],
+      },
+    };
+    const first = await approve(body);
+    // Past the gate, stopped by the BIDS check.
+    expect(first.status).toBe(422);
+    expect(reviewRow(reviewId).override_reasons).toBe(JSON.stringify(["question_failed"]));
+    expect(overrideRows()).toHaveLength(1);
+    expect(overrideRows()[0].details).toMatchObject({ reasons: ["question_failed"] });
+
+    // Sent again as it was, the set that stands is the set on record: not recorded again.
+    const again = await approve(body);
+    expect(again.status).toBe(422);
+    expect(overrideRows()).toHaveLength(1);
+
+    // The release of this very version lands afterwards. The record does not cover it.
+    db.run("INSERT INTO dataset_versions (dataset_id, version, doi) VALUES (?, '1.0.0', ?)", [
+      DATASET,
+      "10.82901/nm.test",
+    ]);
+    // Seeded after the fact, so the run is gated again: it has not started publishing.
+    const bare = await refusalOf(await approve({ resume: true }));
+    expect(bare.refusal).toBe("needs_override");
+    // A bare approval names everything an override would have to cover.
+    expect(bare.uncovered).toEqual(["question_failed", "version_already_released"]);
+    const named = await refusalOf(
+      await approve({
+        resume: true,
+        override_publication_review: { review_id: reviewId, reasons: ["question_failed"] },
+      }),
+    );
+    expect(named.refusal).toBe("override_not_covering");
+    expect(named.uncovered).toEqual(["version_already_released"]);
+    expect(reviewRow(reviewId).override_reasons).toBe(JSON.stringify(["question_failed"]));
+    expect(requestRow(requestId).status).toBe("approving");
+  });
+
   test("an override from another administrator for the same review replaces the recorded one", async () => {
     const { reviewId } = seedFailing();
     db.run(
