@@ -283,6 +283,11 @@ jobs:
       # NUL (awk cannot on every platform). A test runs this very step over such a repository and
       # holds the blobs it fetched equal to `blobsToRead`'s, and checks the names and patterns below
       # against the script's.
+      #
+      # Accepted: the batch downloads every selected blob whole, whatever its size, because a blob
+      # that is not in the clone cannot be sized before it is fetched. The reader's ceilings (4 MiB
+      # for a document, 1 MiB for a sidecar) apply after the download, and the job's 20-minute
+      # timeout is the only bound on the download itself.
       - name: Fetch the dataset as git data
         if: steps.claim.outputs.claimed == 'true'
         id: fetch

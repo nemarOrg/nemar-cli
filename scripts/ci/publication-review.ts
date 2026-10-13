@@ -65,6 +65,10 @@ import {
   buildPublicationReviewMessages,
 } from "./publication-review-prompt";
 
+// RunFailure, mapError, describeError, the callback poster, flag and need, and CALLBACK_ORIGINS
+// below are copies of the ones in pr-review.ts, on purpose: the live pull-request review stays
+// untouched.
+
 /** The API origin for each environment NAME. A payload never supplies a URL. */
 export const CALLBACK_ORIGINS = {
   production: "https://api.nemar.org",
