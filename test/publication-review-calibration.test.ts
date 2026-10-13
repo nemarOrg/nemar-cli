@@ -859,6 +859,23 @@ describe("each defect is applied once, to a copy, and is visible in the mutated 
     expect(existsSync(second)).toBe(false);
   });
 
+  // A directory made with no permission to create a file in it: the umask is the real filesystem's
+  // way to make the write fail after the directory exists. Not meaningful for root, which ignores it.
+  test.skipIf(process.getuid?.() === 0)(
+    "a write that fails after the directory was made leaves no half-written entry behind",
+    () => {
+      const out = join(root, "mutant-write-fails");
+      const saved = process.umask(0o377);
+      try {
+        expect(() => mutate(join(goodCorpus, "nm000001"), "stub_readme", out)).toThrow();
+      } finally {
+        process.umask(saved);
+      }
+      // A directory without entry.json is not an entry, and listEntries would refuse the corpus.
+      expect(existsSync(out)).toBe(false);
+    },
+  );
+
   test("an existing directory is never overwritten", () => {
     const out = join(root, "mutant-exists");
     mkdirSync(out);

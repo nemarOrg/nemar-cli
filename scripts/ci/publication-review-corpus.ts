@@ -713,7 +713,8 @@ export function verifyDefect(defect: Defect, before: CorpusEntry, after: CorpusE
 /**
  * Apply `defect` once to a copy of the entry in `entryDir`, written to `outDir`, which must not
  * exist. The copy is read back and checked ({@link verifyDefect}); one that does not show its
- * defect is removed and refused, so a defect is never silently a no-op.
+ * defect is removed and refused, so a defect is never silently a no-op, and so is one whose write
+ * failed, so no half-written entry is left behind.
  */
 export function mutate(entryDir: string, defect: Defect, outDir: string): void {
   const before = readEntry(entryDir);
@@ -724,11 +725,12 @@ export function mutate(entryDir: string, defect: Defect, outDir: string): void {
     id: `${before.base}.${defect}`,
     label: defect,
   };
-  writeEntry(outDir, after);
   try {
+    writeEntry(outDir, after);
     verifyDefect(defect, before, readEntry(outDir));
   } catch (e) {
-    // This call made the directory a moment ago.
+    // This call made the directory a moment ago, and a directory without `entry.json` (a write that
+    // failed halfway) would make `listEntries` refuse the whole corpus.
     rmSync(outDir, { recursive: true, force: true });
     throw e;
   }
