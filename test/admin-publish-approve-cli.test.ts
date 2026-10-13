@@ -44,6 +44,7 @@ import {
   seedOverride,
   seedReport as seedReportIn,
   twoReasons,
+  withheldReport,
 } from "./helpers/approve-seeds";
 
 setDefaultTimeout(60_000);
@@ -444,6 +445,105 @@ describe("the command decides: an approval that stopped behind a reason nothing 
     expect(refused.exitCode).toBe(1);
     expect(refused.stdout).toContain("Not approved:");
     expect(refused.stdout).not.toContain(STOPPED);
+  });
+});
+
+describe("the command decides: the evidence behind a reason is read before the question", () => {
+  const SHOWN =
+    "Shown to the model: README withheld (finding), dataset_description.json sent (9 keys shown, 1 not), CHANGES absent, LICENSE sent (cut), participants.json withheld (finding)";
+  const WITHHELD = "Withheld for findings: edf-patient-name 2, local-user-path 1";
+  const POINTER = `The whole review, with the model's questions and findings: nemar admin publish show ${DATASET}`;
+  const text_withheld = REASONS.text_withheld.sentence.replace(/\.$/, "");
+
+  /** Where `text` is in the output, which it must be: a missing marker is a failure of its own. */
+  const at = (r: CliResult, text: string) => {
+    const i = r.stdout.indexOf(text);
+    expect(i, `"${text}" in the output`).toBeGreaterThanOrEqual(0);
+    return i;
+  };
+
+  test("without --force: what the model was shown and what was withheld for findings, then the pointer to show, before the refusal", async () => {
+    const requestId = seedGolden();
+    seedReport(requestId, withheldReport());
+
+    const r = await approve(["--resume"]);
+
+    expect(r.exitCode).toBe(1);
+    // In the review block: after the reasons, ahead of the standing line and the refusal.
+    expect(at(r, "Publication review: FAIL")).toBeLessThan(at(r, text_withheld));
+    expect(at(r, text_withheld)).toBeLessThan(at(r, SHOWN));
+    expect(at(r, SHOWN)).toBeLessThan(at(r, WITHHELD));
+    expect(at(r, WITHHELD)).toBeLessThan(at(r, POINTER));
+    expect(at(r, POINTER)).toBeLessThan(at(r, NOT_ASSESSED_LINE));
+    expect(at(r, NOT_ASSESSED_LINE)).toBeLessThan(at(r, "Not approved:"));
+    expect(h.posted).toEqual([]);
+    expect(requestRow(requestId)?.status).toBe("requested");
+  });
+
+  test("with --force --yes: the same lines come before the override note and before the question", async () => {
+    const requestId = seedGolden();
+    const reviewId = seedReport(requestId, withheldReport());
+
+    const r = await approve(["--resume", "--yes", "--force"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(at(r, SHOWN)).toBeLessThan(at(r, WITHHELD));
+    expect(at(r, WITHHELD)).toBeLessThan(at(r, POINTER));
+    expect(at(r, POINTER)).toBeLessThan(at(r, "Approving over:"));
+    expect(at(r, "Approving over:")).toBeLessThan(at(r, "This will run the following"));
+    expect(approveBodies()[0]?.override_publication_review).toEqual({
+      review_id: reviewId,
+      reasons: ["question_failed", "text_withheld", "question_unknown"],
+    });
+    expect(requestRow(requestId)?.status).toBe("published");
+  });
+
+  test("the model's own words stay in show: neither the summary nor a finding's note is printed", async () => {
+    const requestId = seedGolden();
+    seedReport(requestId, withheldReport());
+
+    // They are in the review, and `show` prints them under their labels; `approve` does not.
+    const shown = await h.cli(["admin", "publish", "show", DATASET]);
+    expect(shown.stdout).toContain(
+      "Summary (written by the model; the depositor's text can steer it):",
+    );
+    expect(shown.stdout).toContain(SUMMARY_SENTINEL);
+    expect(shown.stdout).toContain(NOTE_SENTINEL);
+
+    for (const flags of [["--resume"], ["--resume", "--yes", "--force"]]) {
+      const r = await approve(flags);
+      expect(output(r)).not.toContain(SUMMARY_SENTINEL);
+      expect(output(r)).not.toContain(NOTE_SENTINEL);
+      expect(output(r)).not.toContain("Summary (");
+      expect(output(r)).not.toContain("Findings (");
+    }
+  });
+
+  test("a review that withheld nothing prints what was shown and the pointer, and no withheld line", async () => {
+    const requestId = seedGolden();
+    seedReport(requestId);
+
+    const r = await approve(["--resume", "--yes"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(
+      "Shown to the model: README sent, dataset_description.json sent (9 keys shown, 1 not), CHANGES sent, LICENSE sent, participants.json absent",
+    );
+    expect(r.stdout).toContain(POINTER);
+    expect(r.stdout).not.toContain("Withheld for findings");
+  });
+
+  test("a request with no review row prints neither, nor the pointer", async () => {
+    const requestId = seedGolden();
+
+    const r = await approve(["--resume", "--yes", "--force"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(REASONS.review_not_started.sentence);
+    expect(r.stdout).not.toContain("Shown to the model");
+    expect(r.stdout).not.toContain("Withheld for findings");
+    expect(r.stdout).not.toContain("The whole review");
+    expect(requestRow(requestId)?.status).toBe("published");
   });
 });
 

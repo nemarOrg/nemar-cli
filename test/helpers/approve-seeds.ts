@@ -57,6 +57,25 @@ export const twoReasons = () => ({
 export const hardReport = () =>
   reportWith({ minimums: "failed", minimum_failures: ["name_too_short"], name_length: 5 });
 
+/**
+ * A failed question over evidence that withheld two documents for findings: `question_failed`,
+ * `text_withheld` and the `question_unknown` the withheld README leaves. The model's summary and
+ * its finding's note are the usual sentinels.
+ */
+export const withheldReport = () => ({
+  ...failingReport(),
+  evidence: evidenceFor(SCREENED_HEAD, false, {
+    documents: {
+      readme: "withheld_finding",
+      dataset_description: "sent",
+      changes: "absent",
+      license: "sent_cut",
+      participants_json: "withheld_finding",
+    },
+    withheld_findings: { "edf-patient-name": 2, "local-user-path": 1 },
+  }),
+});
+
 /** Record an override on a review row, as the Worker does (the migration's CHECK needs all three columns). */
 export function seedOverride(
   db: Database,
