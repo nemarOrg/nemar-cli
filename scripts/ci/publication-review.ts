@@ -278,9 +278,12 @@ function flag(argv: string[], name: string): string | undefined {
   return i >= 0 ? argv[i + 1] : undefined;
 }
 
+/** A flag that is not there: exit 2, and the message is the flag's own name, never a value. */
+class UsageError extends Error {}
+
 function need(argv: string[], name: string): string {
   const v = flag(argv, name);
-  if (!v) throw new Error(`missing --${name}`);
+  if (!v) throw new UsageError(`missing --${name}`);
   return v;
 }
 
@@ -310,11 +313,40 @@ export async function main(
     console.error("usage: publication-review.ts review|calibrate ...");
     return 2;
   }
-  const dataset = need(rest, "dataset");
-  const reviewId = positive(need(rest, "review-id"));
-  const requestId = positive(need(rest, "request-id"));
-  const environment = need(rest, "environment");
-  const anonymous = need(rest, "anonymous");
+  let flags: Record<
+    | "dataset"
+    | "review-id"
+    | "request-id"
+    | "environment"
+    | "anonymous"
+    | "repo-dir"
+    | "head"
+    | "fetched-head"
+    | "tags-file"
+    | "bids-runs-file",
+    string
+  >;
+  try {
+    flags = {
+      dataset: need(rest, "dataset"),
+      "review-id": need(rest, "review-id"),
+      "request-id": need(rest, "request-id"),
+      environment: need(rest, "environment"),
+      anonymous: need(rest, "anonymous"),
+      "repo-dir": need(rest, "repo-dir"),
+      head: need(rest, "head"),
+      "fetched-head": need(rest, "fetched-head"),
+      "tags-file": need(rest, "tags-file"),
+      "bids-runs-file": need(rest, "bids-runs-file"),
+    };
+  } catch (e) {
+    if (!(e instanceof UsageError)) throw e;
+    console.error(e.message);
+    return 2;
+  }
+  const { dataset, environment, anonymous } = flags;
+  const reviewId = positive(flags["review-id"]);
+  const requestId = positive(flags["request-id"]);
   const token = process.env.PUBLICATION_REVIEW_CALLBACK_TOKEN;
   if (!DATASET_ID.test(dataset) || reviewId === null || requestId === null) {
     console.error("bad --dataset, --review-id or --request-id");
@@ -334,11 +366,11 @@ export async function main(
   }
 
   const result: PublicationReviewResult = await runPublicationReview({
-    repoDir: need(rest, "repo-dir"),
-    head: need(rest, "head"),
-    fetchedHead: need(rest, "fetched-head"),
-    tagsFile: need(rest, "tags-file"),
-    bidsRunsFile: need(rest, "bids-runs-file"),
+    repoDir: flags["repo-dir"],
+    head: flags.head,
+    fetchedHead: flags["fetched-head"],
+    tagsFile: flags["tags-file"],
+    bidsRunsFile: flags["bids-runs-file"],
     anonymous: anonymous === "true",
   });
 

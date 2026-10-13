@@ -1706,6 +1706,36 @@ describe("main: the whole script, from git to the callback", () => {
     expect(modelRequests).toHaveLength(0);
   });
 
+  test.each([
+    "repo-dir",
+    "head",
+    "fetched-head",
+    "tags-file",
+    "bids-runs-file",
+    "review-id",
+    "request-id",
+    "dataset",
+    "anonymous",
+    "environment",
+  ])(
+    "a missing --%s exits 2, says the flag's name and nothing else, and contacts nobody",
+    async (flag) => {
+      const ds = newDataset(`main-missing-${flag}`);
+      const full = argvFor(ds);
+      const at = full.indexOf(`--${flag}`);
+      expect(at).toBeGreaterThan(0);
+      // Both the flag and its value are absent; or the flag is the last word, with no value.
+      const without = [...full.slice(0, at), ...full.slice(at + 2)];
+      for (const argv of [without, [...without, `--${flag}`]]) {
+        const { code, log } = await runMain(argv);
+        expect(code).toBe(2);
+        expect(log).toBe(`missing --${flag}`);
+        expect(received).toHaveLength(0);
+        expect(modelRequests).toHaveLength(0);
+      }
+    },
+  );
+
   test("any command but review is refused", async () => {
     const { code } = await runMain(["calibrate", "--out", "x"]);
     expect(code).toBe(2);
