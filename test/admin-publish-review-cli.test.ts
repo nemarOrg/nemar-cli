@@ -23,7 +23,9 @@
  * `list` without `plain()`; count a request whose identifier screen is running as needing a person
  * when the review is off.
  *
- * CI TIER: integration, like the other CLI suites that start the binary against a local server.
+ * CI TIER: unit-pure. Hermetic: an in-process backend over a local database, the CLI spawned
+ * against it, stand-ins only at GitHub and Resend, no live network; it sets its own default
+ * timeout.
  */
 
 import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";

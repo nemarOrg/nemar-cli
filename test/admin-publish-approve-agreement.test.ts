@@ -24,7 +24,9 @@
  * either the command would refuse what the Worker passes, or it would send what the Worker
  * rejects.
  *
- * CI TIER: integration. Needs the Worker's review gate
+ * CI TIER: unit-pure. Hermetic: an in-process backend over a local database, the CLI spawned
+ * against it, stand-ins only at GitHub and Resend, no live network; it sets its own default
+ * timeout. It needs the Worker's review gate
  * (`backend/src/services/publication-review-gate.ts`), which refuses with the shared words.
  */
 

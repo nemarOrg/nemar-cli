@@ -24,7 +24,9 @@
  * off; draw a card after the input has ended; let `d` throw on a detail it cannot render; skip the
  * `finally` of the walk; drop the SIGINT listener of an approval (Ctrl+C then kills the walk silently).
  *
- * CI TIER: integration, like the other CLI suites that start the binary against a local server.
+ * CI TIER: unit-pure. Hermetic: an in-process backend over a local database, the CLI spawned
+ * against it, stand-ins only at GitHub and Resend, no live network; it sets its own default
+ * timeout.
  */
 
 import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
