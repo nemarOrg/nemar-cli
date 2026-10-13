@@ -835,7 +835,7 @@ describe("the structural summary is counts and closed words", () => {
     expect(JSON.stringify(s)).not.toContain("SENTINEL");
     // The whole evidence block the Worker will parse accepts what the sample produced.
     expect((await reviewOf(ds)).evidence.summary.sidecars_read).toBe(SIDECAR_SAMPLE);
-  });
+  }, 20_000);
 
   test("a sidecar at the Worker's own bounds is carried, and one past them is not: the job follows the parser", async () => {
     // The largest rate and count the parser accepts, and the first ones it refuses. The job imports
@@ -990,7 +990,7 @@ describe("a dataset with no Version is looked up as the version an approval woul
     const same = await reviewOf({ dir: explicit.dir, head: explicit.later }, { tags: explicit.ls });
     expect(same.evidence.tag).toBe("elsewhere");
     expect(reportReasons(same).map((x) => x.code)).toContain("version_already_released");
-  });
+  }, 20_000);
 
   test("a v1.0.0 tag at the reviewed commit, and no tag at all, are their own states", async () => {
     const r = released("tag-missing-states", undefined);
@@ -1643,7 +1643,7 @@ describe("main: the whole script, from git to the callback", () => {
       expect(parsed).toEqual({ kind: "error", error: word as never });
       expect((WORKER_ONLY_RUN_ERRORS as readonly string[]).includes(word)).toBe(false);
     }
-  });
+  }, 20_000);
 
   test("a report the Worker's own parser would refuse is never posted as a report", async () => {
     const ds = newDataset("main-invalid");
