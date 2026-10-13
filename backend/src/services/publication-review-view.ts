@@ -612,7 +612,7 @@ export const LIST_CONCURRENCY = 8;
  *  - The review in force of every row is read in batches of {@link MAX_KEYS_PER_READ} requests (one
  *    statement each), never once per row. A request that is over, or that has started
  *    publishing, then needs no other statement: its live facts are not read
- *    ({@link LIVE_FACT_STATUSES}). A stopped `approving` run reads up to three live-fact
+ *    ({@link LIVE_FACT_STATUSES}). A stopped `approving` run reads up to two live-fact
  *    statements, like a `requested` one.
  *  - The rest of a row's derivation (a version row, an earlier anonymous request) runs
  *    {@link LIST_CONCURRENCY} rows at a time, so a long list does not put a request for every row
