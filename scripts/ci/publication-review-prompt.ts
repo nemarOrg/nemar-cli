@@ -176,11 +176,25 @@ function unwrapDocument(finding: unknown): unknown {
   return f !== null && f.document === "none" ? { ...f, document: null } : finding;
 }
 
+/** A finding the parser's rules act on: a steering attempt, or a blocker. Anything else is not one. */
+function isPriorityFinding(finding: unknown): boolean {
+  const f = asRecord(finding);
+  return f !== null && (f.code === "steering_attempt" || f.severity === "blocker");
+}
+
 /**
  * Join what the model said with what git said, and validate the result with the same parser the
- * Worker will use. The model's findings beyond the cap are dropped here rather than failing the
- * review; everything else that does not fit is an error the caller reports as `model_invalid`.
- * Only the calibration names a model outside the production list.
+ * Worker will use. Everything else that does not fit is an error the caller reports as
+ * `model_invalid`. Only the calibration names a model outside the production list.
+ *
+ * **The cap is applied last.** The parser coerces toward "needs a person" over the findings it is
+ * given: a `steering_attempt` finding sets `steering`, and a blocker against a passed question makes
+ * that question `unknown`. If the model gave more than the cap, those two rules are applied here to
+ * ALL of its findings first (a ninth finding that is a steering attempt still sets `steering`, and a
+ * ninth blocker still lowers its question), and the cut then keeps the steering and blocker
+ * findings ahead of the others, each group in the model's order, so what is dropped is the least
+ * important. The result still goes through the parser, which applies both rules again to what is
+ * kept and refuses everything it does not know.
  */
 export function assemblePublicationReport(
   modelOutput: unknown,
@@ -188,18 +202,48 @@ export function assemblePublicationReport(
   model: ReviewerModel = PUBLICATION_REVIEW_MODEL,
 ): PublicationReviewReport {
   const m = asRecord(modelOutput) ?? {};
-  const findings = Array.isArray(m.findings)
-    ? m.findings.slice(0, MAX_PUBLICATION_FINDINGS).map(unwrapDocument)
-    : m.findings;
+  let findings: unknown = m.findings;
+  let steering: unknown = m.steering;
+  let questions: unknown = m.questions;
+  if (Array.isArray(m.findings)) {
+    const all = m.findings.map(unwrapDocument);
+    // Only a boolean is lifted: a missing or odd value is still the parser's to refuse.
+    if (
+      typeof steering === "boolean" &&
+      all.some((f) => asRecord(f)?.code === "steering_attempt")
+    ) {
+      steering = true;
+    }
+    const answers = asRecord(questions);
+    if (answers !== null) {
+      const lowered: Record<string, unknown> = { ...answers };
+      for (const f of all) {
+        const r = asRecord(f);
+        const question = r?.severity === "blocker" ? r.question : undefined;
+        if (
+          typeof question === "string" &&
+          (QUESTIONS as readonly string[]).includes(question) &&
+          lowered[question] === "pass"
+        ) {
+          lowered[question] = "unknown";
+        }
+      }
+      questions = lowered;
+    }
+    findings = [
+      ...all.filter(isPriorityFinding),
+      ...all.filter((f) => !isPriorityFinding(f)),
+    ].slice(0, MAX_PUBLICATION_FINDINGS);
+  }
   const production = (PUBLICATION_REVIEW_MODELS as readonly string[]).includes(model);
   return parsePublicationReviewReport(
     {
       v: PUBLICATION_REPORT_VERSION,
       model,
-      questions: m.questions,
+      questions,
       findings,
       summary: m.summary,
-      steering: m.steering,
+      steering,
       evidence: facts,
     },
     production ? {} : { models: CALIBRATION_MODELS },

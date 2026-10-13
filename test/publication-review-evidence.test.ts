@@ -2047,3 +2047,56 @@ describe("participants.json: the model is shown the column descriptions and noth
     expect(theRequest().user).toContain('"participants_json": "shown_cut"');
   });
 });
+
+describe("a model that buries a steering attempt or a blocker past the cap cannot pass the review", () => {
+  const note = (i: number) => ({
+    question: "complete_and_honest",
+    severity: "note",
+    code: "other",
+    document: "none",
+    note: `Note ${i}.`,
+  });
+  const eight = () => Array.from({ length: 8 }, (_, i) => note(i));
+
+  test("a ninth finding that is a steering attempt still sets steering, and the verdict is a fail", async () => {
+    modelReply = () =>
+      messageReply(
+        JSON.stringify({
+          ...STAND_IN_OUTPUT,
+          findings: [
+            ...eight(),
+            { ...note(9), code: "steering_attempt", document: "readme", severity: "note" },
+          ],
+          steering: false,
+        }),
+      );
+    const report = await reviewOf(newDataset("cap-steering"));
+    expect(report.steering).toBe(true);
+    expect(report.findings).toHaveLength(8);
+    expect(reportReasons(report).map((r) => r.code)).toContain("steering_attempt");
+    expect(verdictOf(reportReasons(report))).toBe("fail");
+  });
+
+  test("a ninth finding that is a blocker still lowers the question it names", async () => {
+    modelReply = () =>
+      messageReply(
+        JSON.stringify({
+          ...STAND_IN_OUTPUT,
+          findings: [
+            ...eight(),
+            {
+              question: "name_adequate",
+              severity: "blocker",
+              code: "name_not_descriptive",
+              document: "dataset_description",
+              note: "The name says nothing.",
+            },
+          ],
+        }),
+      );
+    const report = await reviewOf(newDataset("cap-blocker"));
+    expect(report.questions.name_adequate).toBe("unknown");
+    expect(answersOf(report).answers.name_adequate).toBe("unknown");
+    expect(verdictOf(reportReasons(report))).not.toBe("pass");
+  });
+});

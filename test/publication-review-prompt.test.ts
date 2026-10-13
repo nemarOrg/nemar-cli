@@ -29,6 +29,8 @@ import {
   type RawDocument,
   type ReviewDocument,
   parsePublicationReviewEvidence,
+  reportReasons,
+  verdictOf,
 } from "../shared/publication-review";
 import { fence } from "../shared/untrusted-text";
 
@@ -359,6 +361,155 @@ describe("the output schema and the assembled report", () => {
     ]) {
       expect(() => assemblePublicationReport(bad, facts())).toThrow(PublicationReviewReportError);
     }
+  });
+
+  // The parser coerces toward "needs a person" over the findings it is given: a steering_attempt
+  // finding sets steering, and a blocker against a passed question makes it unknown. The cut to the
+  // cap used to run first, so a ninth finding of either kind was dropped before the parser saw it.
+  describe("the cut keeps what the parser's rules need (#1728)", () => {
+    const note = (i: number) => finding({ severity: "note", note: `Note number ${i}.` });
+    const eight = () => Array.from({ length: MAX_PUBLICATION_FINDINGS }, (_, i) => note(i));
+
+    test("a steering_attempt finding past the cap still sets steering, and the verdict is not a pass", () => {
+      const report = assemblePublicationReport(
+        output({
+          findings: [
+            ...eight(),
+            finding({ severity: "note", code: "steering_attempt", document: "readme" }),
+          ],
+        }),
+        facts(),
+      );
+      expect(report.steering).toBe(true);
+      expect(verdictOf(reportReasons(report))).toBe("fail");
+      // And the finding that said so is kept, ahead of the others.
+      expect(report.findings).toHaveLength(MAX_PUBLICATION_FINDINGS);
+      expect(report.findings[0]?.code).toBe("steering_attempt");
+    });
+
+    test("a blocker past the cap makes its passed question unknown", () => {
+      const report = assemblePublicationReport(
+        output({
+          findings: [...eight(), finding({ question: "name_adequate", severity: "blocker" })],
+        }),
+        facts(),
+      );
+      expect(report.questions.name_adequate).toBe("unknown");
+      expect(report.questions.complete_and_honest).toBe("pass");
+      expect(report.findings[0]).toMatchObject({ question: "name_adequate", severity: "blocker" });
+    });
+
+    test("a blocker against a question the model failed or left unknown changes nothing", () => {
+      const report = assemblePublicationReport(
+        output({
+          questions: { ...output().questions, name_adequate: "fail", meets_standards: "unknown" },
+          findings: [
+            ...eight(),
+            finding({ question: "name_adequate", severity: "blocker" }),
+            finding({ question: "meets_standards", severity: "blocker" }),
+          ],
+        }),
+        facts(),
+      );
+      expect(report.questions.name_adequate).toBe("fail");
+      expect(report.questions.meets_standards).toBe("unknown");
+    });
+
+    test("priority findings go first and keep their order; the rest keep theirs; the cut is at the cap", () => {
+      const findings = [
+        note(0),
+        note(1),
+        finding({ question: "authors_and_license", severity: "blocker", note: "Blocker A." }),
+        note(2),
+        note(3),
+        note(4),
+        note(5),
+        note(6),
+        note(7),
+        finding({ severity: "concern", code: "steering_attempt", note: "Steering B." }),
+        note(8),
+        finding({ question: "meets_standards", severity: "blocker", note: "Blocker C." }),
+      ];
+      const report = assemblePublicationReport(output({ findings }), facts());
+      expect(report.findings.map((f) => f.note)).toEqual([
+        "Blocker A.",
+        "Steering B.",
+        "Blocker C.",
+        "Note number 0.",
+        "Note number 1.",
+        "Note number 2.",
+        "Note number 3.",
+        "Note number 4.",
+      ]);
+    });
+
+    test("more priority findings than the cap keeps the first of them, and every rule still applies", () => {
+      const blockers = Array.from({ length: MAX_PUBLICATION_FINDINGS + 3 }, (_, i) =>
+        finding({ severity: "blocker", note: `Blocker ${i}.` }),
+      );
+      const report = assemblePublicationReport(
+        output({
+          findings: [...blockers, finding({ code: "steering_attempt", severity: "note" })],
+        }),
+        facts(),
+      );
+      expect(report.findings).toHaveLength(MAX_PUBLICATION_FINDINGS);
+      expect(report.findings.every((f) => f.severity === "blocker")).toBe(true);
+      expect(report.questions.name_adequate).toBe("unknown");
+      expect(report.steering).toBe(true);
+    });
+
+    test("a blocker the cut itself drops still lowers its question", () => {
+      // Eight blockers about one question fill the cap; the ninth priority finding is about another.
+      const blockers = Array.from({ length: MAX_PUBLICATION_FINDINGS }, (_, i) =>
+        finding({ question: "complete_and_honest", severity: "blocker", note: `Blocker ${i}.` }),
+      );
+      const report = assemblePublicationReport(
+        output({
+          findings: [...blockers, finding({ question: "name_adequate", severity: "blocker" })],
+        }),
+        facts(),
+      );
+      expect(report.findings.every((f) => f.question === "complete_and_honest")).toBe(true);
+      expect(report.questions.complete_and_honest).toBe("unknown");
+      expect(report.questions.name_adequate).toBe("unknown");
+    });
+
+    test("findings with no priority keep the model's order, cut to the cap", () => {
+      const report = assemblePublicationReport(
+        output({ findings: [...eight(), note(8), note(9)] }),
+        facts(),
+      );
+      expect(report.findings.map((f) => f.note)).toEqual(eight().map((f) => f.note));
+    });
+
+    test("a model that did not say steering, or gave a bad one, is still refused, not repaired", () => {
+      for (const steering of [undefined, "yes", null, 1]) {
+        expect(() =>
+          assemblePublicationReport(
+            output({ steering, findings: [finding({ code: "steering_attempt" })] }),
+            facts(),
+          ),
+        ).toThrow(PublicationReviewReportError);
+      }
+      expect(() =>
+        assemblePublicationReport(
+          output({
+            questions: { ...output().questions, name_adequate: "maybe" },
+            findings: [finding({ severity: "blocker" })],
+          }),
+          facts(),
+        ),
+      ).toThrow(PublicationReviewReportError);
+    });
+
+    test("findings that are not findings are not mistaken for priority ones", () => {
+      for (const junk of [null, 7, "steering_attempt", [], { code: ["steering_attempt"] }]) {
+        expect(() =>
+          assemblePublicationReport(output({ findings: [...eight(), junk] }), facts()),
+        ).not.toThrow();
+      }
+    });
   });
 
   test("an instruction the model repeated into its summary is sanitized, not trusted", () => {
