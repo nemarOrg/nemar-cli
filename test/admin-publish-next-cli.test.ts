@@ -24,12 +24,15 @@
  * off; draw a card after the input has ended; let `d` throw on a detail it cannot render; skip the
  * `finally` of the walk; drop the SIGINT listener of an approval (Ctrl+C then kills the walk silently).
  *
- * CI TIER: integration, like the other CLI suites that start the binary against a local server.
+ * CI TIER: unit-pure. Hermetic: an in-process backend over a local database, the CLI spawned
+ * against it, stand-ins only at GitHub and Resend, no live network; it sets its own default
+ * timeout.
  */
 
 import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { PUBLICATION_COMMENT_SENTENCES } from "../backend/src/routes/admin/publish-comment";
 import {
+  DONE,
   NOTE_SENTINEL,
   SUMMARY_SENTINEL,
   type SeedScreenedRequest,
@@ -37,6 +40,7 @@ import {
   goodPublicationReport,
   seedPublicationReview,
   seedScreenedRequest,
+  setOverride,
   textOf,
 } from "../backend/test/helpers/publication-review";
 import { asSend } from "../backend/test/helpers/resend";
@@ -48,7 +52,7 @@ import {
   cureOf,
 } from "../shared/publication-review";
 import { type CliResult, startPublishCli } from "./helpers/admin-publish-cli";
-import { DONE, hardReport, seedOverride, twoReasons } from "./helpers/approve-seeds";
+import { hardReport, twoReasons } from "./helpers/approve-seeds";
 
 setDefaultTimeout(60_000);
 
@@ -1024,7 +1028,7 @@ describe("what the walk says about itself", () => {
 describe("an override already on record", () => {
   test("this administrator's own, covering every reason: y is offered without --force, nothing is sent, and it publishes", async () => {
     const { requestId, reviewId } = seed(A, twoReasons());
-    seedOverride(h.db, reviewId as number, adminId, ["question_failed", "version_missing"]);
+    setOverride(h.db, reviewId as number, adminId, ["question_failed", "version_missing"]);
 
     const r = await next("y\n");
 
@@ -1039,7 +1043,7 @@ describe("an override already on record", () => {
   test("another administrator's covers nothing for this run: the Worker refuses and the walk prints it", async () => {
     const { requestId, reviewId } = seed(A, twoReasons());
     const otherId = await h.admin("otheradmin", OTHER_ADMIN_KEY);
-    seedOverride(h.db, reviewId as number, otherId, ["question_failed", "version_missing"]);
+    setOverride(h.db, reviewId as number, otherId, ["question_failed", "version_missing"]);
 
     const r = await next("y\n", [], { as: "nextadmin" });
 

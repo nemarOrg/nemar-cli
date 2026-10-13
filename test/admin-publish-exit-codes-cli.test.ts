@@ -20,22 +20,22 @@
  * guard of `deny`'s reason prompt turns the no-terminal rows red, and dropping the dataset id check
  * of `deny` or `screen` turns the mistyped-id rows red.
  *
- * CI TIER: integration, like the other CLI suites that start the binary against a local server.
+ * CI TIER: unit-pure. Hermetic: an in-process backend over a local database, the CLI spawned
+ * against it, stand-ins only at GitHub and Resend, no live network; it sets its own default
+ * timeout.
  */
 
 import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { markScreen } from "../backend/test/helpers/identifier-screen";
 import { seedScreenedRequest } from "../backend/test/helpers/publication-review";
-import { PUBLICATION_STEPS } from "../shared/publication-steps";
 import { type CliResult, startPublishCli } from "./helpers/admin-publish-cli";
+import { seedGolden } from "./helpers/approve-seeds";
 
 setDefaultTimeout(60_000);
 
 const DATASET = "nm000460";
 const ADMIN_KEY = "exit-admin-key-0123456789abcdef0123456789abcdef";
 const MEMBER_KEY = "exit-member-key-0123456789abcdef0123456789abcdef";
-/** Every step but the two logged no-ops: a run the gates let through reaches `published`. */
-const DONE = PUBLICATION_STEPS.filter((s) => s !== "upload_to_zenodo" && s !== "sync_nemar");
 
 const h = startPublishCli();
 afterAll(() => h.stop());
@@ -63,16 +63,6 @@ const requestStatus = (id: number) =>
     .query<{ status: string }, [number]>("SELECT status FROM publication_requests WHERE id = ?")
     .get(id)?.status;
 
-/** A clean request awaiting a decision, with every step but the two no-ops done. */
-function seedGolden(): number {
-  const { requestId } = seedScreenedRequest(h.db, { datasetId: DATASET });
-  h.db.run("UPDATE publication_requests SET steps_completed = ? WHERE id = ?", [
-    JSON.stringify(DONE),
-    requestId,
-  ]);
-  return requestId;
-}
-
 /** A dataset with no publication request at all. */
 function seedDatasetOnly(): void {
   seedScreenedRequest(h.db, { datasetId: DATASET });
@@ -92,7 +82,7 @@ const COMMANDS: ReadonlyArray<{ name: string; args: string[] }> = [
 describe("not signed in", () => {
   for (const { name, args } of COMMANDS) {
     test(`${name} says so, exits 1 and sends nothing`, async () => {
-      seedGolden();
+      seedGolden(h.db);
       const r = await h.cli(args, { signedOut: true });
       expect(r.exitCode).toBe(1);
       expect(output(r)).not.toContain(BUG_HINT);
@@ -127,7 +117,7 @@ describe("an API error", () => {
   // because it retries a 5xx for a minute by design (the orchestrator's CLI-driven retry).
   for (const name of ["list", "deny", "screen"]) {
     test(`${name} exits 1 when the backend answers 500`, async () => {
-      seedGolden();
+      seedGolden(h.db);
       h.hookDb({
         statement(sql) {
           if (/FROM publication_requests/.test(sql)) throw new Error("simulated read failure");
@@ -146,7 +136,7 @@ describe("an API error", () => {
 describe("a key without the role (403)", () => {
   for (const { name, args } of COMMANDS) {
     test(`${name} exits 1 and does not change the request`, async () => {
-      const requestId = seedGolden();
+      const requestId = seedGolden(h.db);
       await h.user("exitmember", "member", MEMBER_KEY);
       const r = await h.cli(args);
       expect(r.exitCode).toBe(1);
@@ -161,7 +151,7 @@ describe("a key without the role (403)", () => {
 
 describe("a call the Worker refuses", () => {
   test("approve over a screen that did not run exits 1 and the request stays requested", async () => {
-    const requestId = seedGolden();
+    const requestId = seedGolden(h.db);
     h.db.run("UPDATE publication_requests SET identifier_screen_status = 'error' WHERE id = ?", [
       requestId,
     ]);
@@ -176,7 +166,7 @@ describe("a call the Worker refuses", () => {
   });
 
   test("approve over a screen that found direct identifiers exits 1", async () => {
-    const requestId = seedGolden();
+    const requestId = seedGolden(h.db);
     markScreen(h.db, requestId, DATASET, { status: "direct-identifiers" });
 
     const r = await h.cli(["admin", "publish", "approve", DATASET, "--resume", "--yes"]);
@@ -187,7 +177,7 @@ describe("a call the Worker refuses", () => {
   });
 
   test("approve of a screen whose commit is no longer main exits 1", async () => {
-    const requestId = seedGolden();
+    const requestId = seedGolden(h.db);
     h.mainHead.value = "fedcba9876543210fedcba9876543210fedcba98";
 
     const r = await h.cli(["admin", "publish", "approve", DATASET, "--resume", "--yes"]);
@@ -213,7 +203,7 @@ describe("a call the Worker refuses", () => {
   });
 
   test("approve exits 1 for an acknowledgment that is too short, before it sends anything", async () => {
-    seedGolden();
+    seedGolden(h.db);
 
     const r = await h.cli([
       "admin",
@@ -233,7 +223,7 @@ describe("a call the Worker refuses", () => {
   });
 
   test("deny with no reason exits 1 and sends nothing", async () => {
-    const requestId = seedGolden();
+    const requestId = seedGolden(h.db);
 
     // The command asks for the reason on standard input; an empty line is no reason.
     const r = await h.cli(["admin", "publish", "deny", DATASET, "--yes"], { input: "\n" });
@@ -253,7 +243,7 @@ describe("a confirmation that is declined or cannot be asked", () => {
   ];
   for (const { name, args } of DECLINED) {
     test(`${name} --no exits 1, says Skipped and posts nothing`, async () => {
-      const requestId = seedGolden();
+      const requestId = seedGolden(h.db);
       const r = await h.cli(args);
       expect(r.exitCode).toBe(1);
       expect(output(r)).not.toContain(BUG_HINT);
@@ -269,7 +259,7 @@ describe("a confirmation that is declined or cannot be asked", () => {
   ];
   for (const { name, args } of UNASKED) {
     test(`${name} with no terminal and no --yes exits 1 and posts nothing`, async () => {
-      const requestId = seedGolden();
+      const requestId = seedGolden(h.db);
       const r = await h.cli(args);
       expect(r.exitCode).toBe(1);
       expect(output(r)).not.toContain(BUG_HINT);
@@ -288,7 +278,7 @@ describe("a mistyped dataset id is refused before any request is made", () => {
   ];
   for (const { name, args } of MISTYPED) {
     test(`${name} nm0004 exits 1 and sends nothing`, async () => {
-      const requestId = seedGolden();
+      const requestId = seedGolden(h.db);
       const r = await h.cli(args);
       expect(r.exitCode).toBe(1);
       expect(output(r)).toContain('"nm0004" is not a dataset id');
@@ -303,7 +293,7 @@ describe("deny with no reason and nothing to ask on", () => {
   // `inquirer` on a stdin that is not a terminal dies with an uncatchable ERR_USE_AFTER_CLOSE
   // stack trace (the case `confirm()` already guards), so the reason prompt is guarded the same way.
   test("a closed stdin exits 1 with a sentence, no stack trace and nothing posted", async () => {
-    const requestId = seedGolden();
+    const requestId = seedGolden(h.db);
     const r = await h.cli(["admin", "publish", "deny", DATASET, "--yes"]);
     expect(r.exitCode).toBe(1);
     expect(output(r)).toContain("Reason is required");
@@ -316,7 +306,7 @@ describe("deny with no reason and nothing to ask on", () => {
   });
 
   test("a reason piped in is read as the reason, and nothing is asked", async () => {
-    const requestId = seedGolden();
+    const requestId = seedGolden(h.db);
     const r = await h.cli(["admin", "publish", "deny", DATASET, "--yes"], {
       input: "Please add the participants file\n",
     });
@@ -326,7 +316,7 @@ describe("deny with no reason and nothing to ask on", () => {
 
   describe.skipIf(process.platform === "win32")("on a terminal", () => {
     test("the reason is asked for, and an empty one is refused", async () => {
-      const requestId = seedGolden();
+      const requestId = seedGolden(h.db);
       const r = await h.cli(["admin", "publish", "deny", DATASET, "--yes"], {
         terminal: async (t) => {
           const asked = await t.waitFor("Reason for denial:");
@@ -340,7 +330,7 @@ describe("deny with no reason and nothing to ask on", () => {
     });
 
     test("a typed reason is sent", async () => {
-      const requestId = seedGolden();
+      const requestId = seedGolden(h.db);
       const r = await h.cli(["admin", "publish", "deny", DATASET, "--yes"], {
         terminal: async (t) => {
           const asked = await t.waitFor("Reason for denial:");
@@ -364,7 +354,7 @@ describe("under --json a failure goes to standard error and standard output stay
 
   for (const { name, args } of JSON_COMMANDS) {
     test(`${name} signed out`, async () => {
-      seedGolden();
+      seedGolden(h.db);
       const r = await h.cli(args, { signedOut: true });
       expect(r.exitCode).toBe(1);
       expect(r.stdout).toBe("");
@@ -373,7 +363,7 @@ describe("under --json a failure goes to standard error and standard output stay
     });
 
     test(`${name} with a member's key: the Worker's refusal and its hint`, async () => {
-      seedGolden();
+      seedGolden(h.db);
       await h.user("exitmember", "member", MEMBER_KEY);
       const r = await h.cli(args);
       expect(r.exitCode).toBe(1);
@@ -396,7 +386,7 @@ describe("under --json a failure goes to standard error and standard output stay
   }
 
   test("a fault of the Worker is on standard error too", async () => {
-    seedGolden();
+    seedGolden(h.db);
     h.hookDb({
       statement(sql) {
         if (/FROM publication_requests/.test(sql)) throw new Error("simulated read failure");
@@ -423,7 +413,7 @@ describe("whether a 5xx may be a bug: the Worker's closed word makes it an answe
 
   test("a comment the Worker could not mail (502, comment_not_sent) exits 1, no bug-report hint", async () => {
     h.setEnv({ PUBLICATION_REVIEW_ENABLED: "1" });
-    seedGolden();
+    seedGolden(h.db);
     const r = await h.cli(["admin", "publish", "next"], {
       input: "c\nCould you check the README?\n",
       resend: { status: 422 },
@@ -437,7 +427,7 @@ describe("whether a 5xx may be a bug: the Worker's closed word makes it an answe
 
   test("a 5xx that names the word internal may be a bug: show keeps the hint", async () => {
     h.setEnv({ PUBLICATION_REVIEW_ENABLED: "1" });
-    seedGolden();
+    seedGolden(h.db);
     h.hookDb({
       statement(sql) {
         if (/FROM publication_reviews/.test(sql)) throw new Error("simulated read failure");
@@ -452,7 +442,7 @@ describe("whether a 5xx may be a bug: the Worker's closed word makes it an answe
 
 describe("success still exits 0", () => {
   test("list of requests", async () => {
-    seedGolden();
+    seedGolden(h.db);
     const r = await h.cli(["admin", "publish", "list"]);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain(DATASET);
@@ -465,21 +455,21 @@ describe("success still exits 0", () => {
   });
 
   test("deny --yes of an active request", async () => {
-    const requestId = seedGolden();
+    const requestId = seedGolden(h.db);
     const r = await h.cli(["admin", "publish", "deny", DATASET, ...WHY, "--yes"]);
     expect(r.exitCode).toBe(0);
     expect(requestStatus(requestId)).toBe("denied");
   });
 
   test("approve --resume --yes of a golden-path request", async () => {
-    const requestId = seedGolden();
+    const requestId = seedGolden(h.db);
     const r = await h.cli(["admin", "publish", "approve", DATASET, "--resume", "--yes"]);
     expect(r.exitCode).toBe(0);
     expect(requestStatus(requestId)).toBe("published");
   });
 
   test("screen dispatches the identifier screen again", async () => {
-    seedGolden();
+    seedGolden(h.db);
     const r = await h.cli(["admin", "publish", "screen", DATASET]);
     expect(r.exitCode).toBe(0);
     expect(output(r)).toContain(`Identifier screen dispatched for ${DATASET}`);

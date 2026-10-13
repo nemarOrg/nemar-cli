@@ -24,7 +24,9 @@
  * either the command would refuse what the Worker passes, or it would send what the Worker
  * rejects.
  *
- * CI TIER: integration. Needs the Worker's review gate
+ * CI TIER: unit-pure. Hermetic: an in-process backend over a local database, the CLI spawned
+ * against it, stand-ins only at GitHub and Resend, no live network; it sets its own default
+ * timeout. It needs the Worker's review gate
  * (`backend/src/services/publication-review-gate.ts`), which refuses with the shared words.
  */
 
@@ -34,6 +36,7 @@ import {
   failingReport,
   seedPublicationReview,
   seedScreenedRequest,
+  setOverride,
 } from "../backend/test/helpers/publication-review";
 import { makePublicationReviewApp } from "../backend/test/helpers/publication-review-app";
 import type { PublicationReviewOverride } from "../shared/contract/publication-review-admin";
@@ -50,7 +53,6 @@ import {
   hardReport,
   reportWith,
   seedGolden,
-  seedOverride,
   seedReport,
   twoReasons,
 } from "./helpers/approve-seeds";
@@ -399,7 +401,7 @@ const SCENARIOS: Scenario[] = [
     name: "an override this administrator recorded covers the run",
     seed: (w) => {
       const reviewId = seedReport(w.db, golden(w), twoReasons());
-      seedOverride(w.db, reviewId, w.adminId, ["question_failed", "version_missing"]);
+      setOverride(w.db, reviewId, w.adminId, ["question_failed", "version_missing"]);
     },
     decision: "proceed",
     override: "none",
@@ -408,7 +410,7 @@ const SCENARIOS: Scenario[] = [
     name: "an override another administrator recorded: the command goes on, the Worker decides",
     seed: (w) => {
       const reviewId = seedReport(w.db, golden(w), twoReasons());
-      seedOverride(w.db, reviewId, w.otherId, ["question_failed", "version_missing"]);
+      setOverride(w.db, reviewId, w.otherId, ["question_failed", "version_missing"]);
     },
     decision: "proceed",
     override: "none",
@@ -419,7 +421,7 @@ const SCENARIOS: Scenario[] = [
     name: "a recorded override that misses one reason",
     seed: (w) => {
       const reviewId = seedReport(w.db, golden(w), twoReasons());
-      seedOverride(w.db, reviewId, w.adminId, ["question_failed"]);
+      setOverride(w.db, reviewId, w.adminId, ["question_failed"]);
     },
     decision: "needs_force",
     workerRefusal: "needs_override",

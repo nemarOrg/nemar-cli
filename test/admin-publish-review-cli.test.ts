@@ -23,7 +23,9 @@
  * `list` without `plain()`; count a request whose identifier screen is running as needing a person
  * when the review is off.
  *
- * CI TIER: integration, like the other CLI suites that start the binary against a local server.
+ * CI TIER: unit-pure. Hermetic: an in-process backend over a local database, the CLI spawned
+ * against it, stand-ins only at GitHub and Resend, no live network; it sets its own default
+ * timeout.
  */
 
 import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
@@ -38,6 +40,7 @@ import {
   goodPublicationReport,
   seedPublicationReview,
   seedScreenedRequest,
+  setOverride,
 } from "../backend/test/helpers/publication-review";
 import type { PublicationReviewDetail } from "../shared/contract/publication-review-admin";
 import {
@@ -409,12 +412,7 @@ function seedRich(datasetId: string): { requestId: number; reviewId: number } {
     claimed: true,
     createdMinutesAgo: 5,
   });
-  h.db.run(
-    `UPDATE publication_reviews
-        SET override_by = ?, override_at = ?, override_reasons = '["question_failed","text_withheld"]'
-      WHERE id = ?`,
-    [adminId, OVERRIDE_AT, reviewId],
-  );
+  setOverride(h.db, reviewId, adminId, ["question_failed", "text_withheld"], OVERRIDE_AT);
   // An earlier attempt on another commit: history, not the review in force.
   seedPublicationReview(h.db, {
     requestId,

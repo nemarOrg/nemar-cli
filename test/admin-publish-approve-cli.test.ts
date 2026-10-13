@@ -25,7 +25,9 @@
  * "keeps failing" row); ask the question after a refused read (the "definitive answer" rows);
  * read the banner's release kind from the status again (the "banner names the kind" rows).
  *
- * CI TIER: integration, like the other CLI suites that start the binary against a local server.
+ * CI TIER: unit-pure. Hermetic: an in-process backend over a local database, the CLI spawned
+ * against it, stand-ins only at GitHub and Resend, no live network; it sets its own default
+ * timeout.
  */
 
 import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
@@ -35,6 +37,7 @@ import {
   failingReport,
   seedPublicationReview,
   seedScreenedRequest,
+  setOverride,
 } from "../backend/test/helpers/publication-review";
 import { makePublicationReviewApp } from "../backend/test/helpers/publication-review-app";
 import {
@@ -50,7 +53,6 @@ import {
   hardReport,
   reportWith,
   seedGolden as seedGoldenIn,
-  seedOverride,
   seedReport as seedReportIn,
   twoReasons,
   withheldReport,
@@ -274,7 +276,7 @@ describe("the command decides: what is sent is what was shown", () => {
     const reviewId = seedReport(requestId, twoReasons());
     // The web executor's `--yes` run proceeds on the confirmation its clicker recorded; here it is
     // this administrator's own, so the Worker accepts it too.
-    seedOverride(h.db, reviewId, adminId, ["question_failed", "version_missing"]);
+    setOverride(h.db, reviewId, adminId, ["question_failed", "version_missing"]);
 
     const r = await approve(["--resume", "--yes"]);
 
@@ -991,7 +993,7 @@ describe("with the Worker's gate: what the Worker refuses is printed, and exits 
     // Another administrator's record names every reason, so this run goes to the Worker with no
     // override and the Worker refuses with all three reasons in its body.
     const otherId = await h.admin("otheradmin", OTHER_ADMIN_KEY);
-    seedOverride(h.db, reviewId, otherId, ["question_failed", "text_withheld", "question_unknown"]);
+    setOverride(h.db, reviewId, otherId, ["question_failed", "text_withheld", "question_unknown"]);
     const shown = JSON.parse((await h.cli(["admin", "publish", "show", DATASET, "--json"])).stdout);
 
     const r = await approve(["--resume", "--yes"], { as: "approveradmin" });
@@ -1117,7 +1119,7 @@ describe("with the Worker's gate: what the Worker refuses is printed, and exits 
     const requestId = seedGolden();
     const reviewId = seedReport(requestId, twoReasons());
     const otherId = await h.admin("otheradmin", OTHER_ADMIN_KEY);
-    seedOverride(h.db, reviewId, otherId, ["question_failed", "version_missing"]);
+    setOverride(h.db, reviewId, otherId, ["question_failed", "version_missing"]);
 
     // The command cannot know whose key is whose, so it goes on; the Worker is the gate.
     const r = await approve(["--resume", "--yes"], { as: "approveradmin" });

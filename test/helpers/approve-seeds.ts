@@ -10,6 +10,7 @@
 import type { Database } from "bun:sqlite";
 import { SCREENED_HEAD } from "../../backend/test/helpers/identifier-screen";
 import {
+  DONE,
   type SeedScreenedRequest,
   evidenceFor,
   failingReport,
@@ -17,12 +18,8 @@ import {
   seedPublicationReview,
   seedScreenedRequest,
 } from "../../backend/test/helpers/publication-review";
-import { PUBLICATION_STEPS } from "../../shared/publication-steps";
 
 export const DATASET = "nm000460";
-
-/** Every step but the two logged no-ops: a run the gates let through reaches `published`. */
-export const DONE = PUBLICATION_STEPS.filter((s) => s !== "upload_to_zenodo" && s !== "sync_nemar");
 
 /** A request waiting for its decision (or in `over.requestStatus`), with every step but the two no-ops done. */
 export function seedGolden(db: Database, over: Partial<SeedScreenedRequest> = {}): number {
@@ -75,16 +72,3 @@ export const withheldReport = () => ({
     withheld_findings: { "edf-patient-name": 2, "local-user-path": 1 },
   }),
 });
-
-/** Record an override on a review row, as the Worker does (the migration's CHECK needs all three columns). */
-export function seedOverride(
-  db: Database,
-  reviewId: number,
-  by: number,
-  reasons: readonly string[],
-): void {
-  db.run(
-    "UPDATE publication_reviews SET override_by = ?, override_at = datetime('now'), override_reasons = ? WHERE id = ?",
-    [by, JSON.stringify(reasons), reviewId],
-  );
-}
