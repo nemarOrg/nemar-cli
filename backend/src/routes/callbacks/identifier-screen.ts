@@ -21,6 +21,7 @@
 import { isValidDatasetId } from "../../services/datasetId.js";
 import { verifyIdentifierScreenCallbackToken } from "../../services/github.js";
 import { notifyAdminsOfScreen, storeScreenResult } from "../../services/identifier-screen.js";
+import { startPublicationReviewForScreen } from "../../services/publication-review.js";
 import type { WebhookRouter } from "../webhooks/shared.js";
 import { readBoundedJsonObject } from "./bounded-json.js";
 
@@ -127,6 +128,14 @@ export function registerIdentifierScreenRoutes(webhooks: WebhookRouter): void {
         runId ? ` run=${runId}` : ""
       }`,
     );
+    // ADR 0101: a stored result whose gate is clear or acknowledge starts the model review of
+    // ITS commit (nothing happens when the flag is off, the dataset is the other Worker's, the
+    // request no longer waits for its decision, or the gate blocks, waits or reruns). It goes
+    // here and not in `storeScreenResult`, whose outcome is pinned and which must not depend on
+    // the review; it goes BEFORE the mail, so the review's row exists when the mail is tried, and
+    // it never throws, so a fault in the review cannot fail the callback that stores the screen.
+    await startPublicationReviewForScreen(c.env, { requestId, datasetId });
+
     // The mail goes after the answer: the result is stored, and the mail lease
     // makes the send safe to finish in the background (a send that dies is
     // retried by the watchdog once the lease expires). The workflow's callback

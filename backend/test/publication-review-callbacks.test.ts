@@ -36,6 +36,7 @@ import {
   storePublicationReviewResult,
   sweepPublicationReviews,
 } from "../src/services/publication-review";
+import type { Bindings } from "../src/types/bindings";
 import { interceptingD1, realD1 } from "./helpers/d1";
 import { SCREENED_HEAD } from "./helpers/identifier-screen";
 import {
@@ -1164,6 +1165,62 @@ describe("an administrator's start", () => {
     expect(out.reason).toBe("redispatched");
     expect(state(target.reviewId).attempts).toBe(1);
     // One more other call and the same restart is the 51st.
+  });
+
+  test("without the callback secret or a GitHub credential nothing is sent, and the row says why", async () => {
+    const { requestId } = seedScreenedRequest(h.db, { datasetId: PROD_DATASET });
+    const go = (env: Bindings) =>
+      startPublicationReview(env, { requestId, datasetId: PROD_DATASET, ...admin });
+
+    const noSecret = await go(h.env({ PRESCREEN_CALLBACK_SECRET: undefined }));
+    expect(noSecret).toMatchObject({ started: false, reason: "dispatch_unconfigured" });
+    const id = noSecret.reviewId as number;
+    expect(state(id)).toMatchObject({
+      state: "errored",
+      detail: "dispatch_unconfigured",
+      nonce: null,
+      attempts: 1,
+      started_by: 1,
+    });
+    expect(h.dispatches()).toHaveLength(0);
+
+    // Once it is fixed, a start takes the same row up again, and it cost no call.
+    expect(await go(h.env())).toEqual({ started: true, reason: "redispatched", reviewId: id });
+    expect(state(id)).toMatchObject({ state: "dispatched", attempts: 1 });
+
+    // A credential missing is the same word, whatever the row held before.
+    h.db.run(
+      "UPDATE publication_reviews SET state = 'errored', detail = 'model_unavailable', nonce = NULL, decided_at = datetime('now') WHERE id = ?",
+      [id],
+    );
+    expect(await go(h.env({ GITHUB_ADMIN_PAT: undefined }))).toMatchObject({
+      started: false,
+      reason: "dispatch_unconfigured",
+    });
+    expect(state(id)).toMatchObject({
+      state: "errored",
+      detail: "dispatch_unconfigured",
+      attempts: 1,
+    });
+    expect(h.dispatches()).toHaveLength(1);
+  });
+
+  test("a GitHub failure is dispatch_failed, and a start can try again", async () => {
+    const { requestId } = seedScreenedRequest(h.db, { datasetId: PROD_DATASET });
+    h.dispatchStatus = 500;
+    const failed = await startPublicationReview(h.env(), {
+      requestId,
+      datasetId: PROD_DATASET,
+      ...admin,
+    });
+    expect(failed).toMatchObject({ started: false, reason: "dispatch_failed" });
+    const id = failed.reviewId as number;
+    expect(state(id)).toMatchObject({ state: "errored", detail: "dispatch_failed", nonce: null });
+
+    h.dispatchStatus = 204;
+    expect(
+      await startPublicationReview(h.env(), { requestId, datasetId: PROD_DATASET, ...admin }),
+    ).toEqual({ started: true, reason: "redispatched", reviewId: id });
   });
 
   test("names the reason it cannot start: off, not ours, not applicable, not waiting, not screened", async () => {
