@@ -19,8 +19,9 @@ The website's server-side requests are counted per visitor instead of as one cli
 the fix for the `/discover` 429 errors (#1709), together with a rate limiter whose windows no
 longer slide, a modality filter that matches a whole token, a corrected check before an
 administrator approves a pull request, and a weekly drift check that can finally file its
-issue. The automated review of dataset pull requests stays off in production, as in 0.10.16.
-There is no migration and no new secret. The `/discover` fix needs a second deploy to take
+issue. The automated review of dataset pull requests stays off in production, as in 0.10.16;
+its first live run passed on dev on 2026-10-12, with a throwaway pull request to an exemplar
+dataset. There is no migration and no new secret. The `/discover` fix needs a second deploy to take
 effect for visitors: the website must be promoted to production after this release (see Deploy
 coupling).
 
@@ -44,7 +45,10 @@ coupling).
   whatever the cap; that is most of the 40 percent in #1709. The record now carries the window's
   end, a block ends where the window does, `Retry-After` is the seconds left and
   `X-RateLimit-Reset` is the window's end. One read, write and refuse path serves every bucket,
-  including the data-plane miss budget, the private-grant budget and the observe-only path.
+  including the data-plane miss budget, the private-grant budget and the observe-only path. A
+  fixed window can admit up to twice a cap across a boundary, so the strict sign-in bucket can
+  pass up to 20 requests across a boundary instead of 10; ADR 0099 accepts that, because the
+  sign-in routes also limit per email.
 - **Every answer says how the caller was identified, and browsers can read the headers (ADR
   0098).** `X-RateLimit-Caller` is `edge`, `site` or `unattributed` on every answer, including
   the admin-bypass answer and the private-grant refusal; `X-RateLimit-Bucket` values are
@@ -93,9 +97,11 @@ coupling).
   the step after the third failure instead of reading an error as "no issue", which would have
   filed a duplicate every Monday. A lookup also keeps only an issue whose title starts with its
   own prefix, so the probe-broken and report-broken issues are no longer taken for the drift
-  issue. The first run after the fix files the first drift issue; the report on 2026-10-12
-  listed 96 of 1303 versions with no `summary.json`. **This takes effect when it reaches
-  `main`:** scheduled workflows run from the default branch, and this change targets `dev`.
+  issue. The backfill of 2026-10-12 cleared the 96 of 1303 versions that had no `summary.json`,
+  so the first corrected run is expected to file nothing; dispatch the workflow once from
+  `main` after the release to confirm that the job runs green. **This takes effect when it
+  reaches `main`:** scheduled workflows run from the default branch, and this change targets
+  `dev`.
 - **The nightly dev-suite issue no longer files a duplicate when its lookup fails.** The same
   `|| true` pattern read a failed lookup as "no open issue", and the label step hid a real
   failure behind "already exists". The lookup is now retried three times and fails the step if
@@ -121,6 +127,7 @@ coupling).
   still substring filters. Adjacent fix: `GET /datasets/search` now sends `Cache-Control:
   no-store` on every response; it sent no `Cache-Control` at all, including on its 400s, which
   `GET /datasets` already sent as `no-store`. No migration and no deploy coupling.
+  The CLI help, the MCP schema text and the OpenAPI description for `modality` say so too.
 - **`nemar admin pr-reviews approve --merge` and `y` in `next` no longer approve a pull request
   they then refuse to merge (ADR 0093 amendment).** Both approved first and read GitHub's
   `mergeable_state` afterwards, and `y` was offered for every state but `dirty` and `behind`, so a
@@ -174,7 +181,13 @@ coupling).
   its forwarded visitor` line should appear and no "request with neither" warning. #1712 (demote
   that line) stays open until this has been observed.
 - The weekly summary.json drift check runs from `main`, so its first corrected run is the Monday
-  after this release.
+  after this release. Dispatch it once from `main` after the release; it should run green and
+  file nothing, because production coverage is 1303 of 1303.
+- Check the fixed windows after deploy: `Retry-After` counts down within a window and
+  `X-RateLimit-Reset` stays fixed until the window ends (the check ADR 0099 relies on).
+- The CLI command reference on docs.nemar.org is regenerated for 0.10.17 afterwards: the
+  `--merge` help of `admin pr-reviews approve` and the `--modality` help of `dataset list` and
+  `search` changed.
 - Watch how often the `[rate-limit] the cache keeps stalling` line appears after deploy; the
   breaker's three constants are the knob, and production stall rates are unknown.
 
