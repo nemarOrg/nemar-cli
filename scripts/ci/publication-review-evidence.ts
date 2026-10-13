@@ -607,7 +607,7 @@ export function buildPublicationEvidence(parts: EvidenceParts): ReviewFacts {
   });
 }
 
-/** What a document's state says about the README when it is not read: it exists, and is not text. */
+/** The states of a README that exists and could not be read as text. */
 const UNREAD_STATES: readonly RawDocument["state"][] = ["annexed", "unreadable", "not_utf8"];
 
 export interface DocumentEvidenceInputs {

@@ -22,7 +22,8 @@
  * private repository cannot be cloned. The readers themselves fetch nothing: the blobs they open
  * are brought in first, by that one fetch, as the review workflow does.
  *
- * **Nothing here posts anything.** This module has no network code of its own beyond that one clone.
+ * **Nothing here posts anything.** This module has no network code of its own beyond that one clone
+ * and the one fetch of blobs that follows it.
  *
  * On disk an entry is a directory named for its id: each present document under its own BIDS file
  * name, `summary.json`, and `entry.json` (written last, so a directory without it is not an entry).

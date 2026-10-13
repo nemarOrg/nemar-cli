@@ -32,9 +32,10 @@
  * **What the facts are.** The release is named and unreleased. The tag is `absent` (the tag does
  * not exist before the release; for a description with no Version it is the tag of 1.0.0, which
  * is what an approval would publish), and `not_applicable` only for a malformed Version, which has
- * no version to look up. BIDS is `unknown`: the calibration does not run the validator, and an unknown result is
- * a reason of the production verdict (`bids_unconcluded_at_review`) that would make every entry a
- * non-pass, so that one reason is left out of the outcome and everything else is kept.
+ * no version to look up. BIDS is `unknown`: the calibration does not run the validator, and an
+ * unknown result is a reason of the production verdict (`bids_unconcluded_at_review`) that would
+ * make every entry a non-pass, so that one reason is left out of the outcome and everything else is
+ * kept.
  */
 
 import { execFileSync } from "node:child_process";
