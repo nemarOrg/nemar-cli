@@ -174,18 +174,24 @@ export function registerPublicationReviewRoutes(admin: AdminRouter): void {
     // A start that could not hand the review over: the row is recorded (so `start` can try again)
     // and the answer carries the reason with the review it concerns. Not a refusal of the
     // request, and not a start, so it is no 2xx.
-    return c.json(
-      {
-        ...answer(),
-        error:
-          outcome.reason === "dispatch_unconfigured"
-            ? "This Worker cannot hand a review to GitHub: a credential is not configured."
-            : "The review could not be handed to GitHub. Try again.",
-      },
-      502,
+    const notHandedOver = NOT_HANDED_OVER[outcome.reason];
+    if (notHandedOver) return c.json({ ...answer(), error: notHandedOver }, 502);
+    // Every reason an administrator's start can end in is answered above. `depositor_limit` is not
+    // one (an administrator is held by the platform's allowance only, which is why the contract
+    // has no code for it), so a word here is a fault in this route, not a state of the request.
+    console.error(
+      `[admin/publication-review] ${datasetId}: unexpected start reason ${outcome.reason}`,
     );
+    return refuse(c, 500, "internal", "The publication review could not be started. Try again.");
   });
 }
+
+/** Why a start could not hand its review over, for the two reasons that leave a recorded row. */
+const NOT_HANDED_OVER: Partial<Record<StartOutcome["reason"], string>> = {
+  dispatch_unconfigured:
+    "This Worker cannot hand a review to GitHub: a credential is not configured.",
+  dispatch_failed: "The review could not be handed to GitHub. Try again.",
+};
 
 /**
  * The audit row of a start (`publication_review_started`, as `pr_review_started` is for a pull
