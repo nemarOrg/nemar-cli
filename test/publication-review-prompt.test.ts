@@ -537,13 +537,79 @@ describe("the output schema and the assembled report", () => {
         ),
       ).toThrow(PublicationReviewReportError);
     });
+  });
 
-    test("findings that are not findings are not mistaken for priority ones", () => {
-      for (const junk of [null, 7, "steering_attempt", [], { code: ["steering_attempt"] }]) {
-        expect(() =>
-          assemblePublicationReport(output({ findings: [...eight(), junk] }), facts()),
-        ).not.toThrow();
+  // The parser refuses an output with one invalid finding among the first eight. The same finding
+  // used to be dropped, silently, when it sat past the cap, and the output was accepted as a pass.
+  describe("every finding is validated, wherever it sits (#1728)", () => {
+    const note = (i: number) => finding({ severity: "note", note: `Note number ${i}.` });
+    const valid = (n: number) => Array.from({ length: n }, (_, i) => note(i));
+    const BAD: [string, Record<string, unknown>][] = [
+      ["a code that is not on the list", { code: "privacy_leak" }],
+      ["a severity that is not one", { severity: "critical" }],
+      ["a question that is not one", { question: "privacy" }],
+      ["a document that is not one", { document: "participants_tsv" }],
+      ["a note that is not a string", { note: 7 }],
+      ["a key that is not allowed", { path: "/Users/jsmith/x" }],
+    ];
+
+    test.each(BAD)("%s is refused inside the first eight", (_what, over) => {
+      expect(() =>
+        assemblePublicationReport(
+          output({ findings: [...valid(MAX_PUBLICATION_FINDINGS - 1), finding(over)] }),
+          facts(),
+        ),
+      ).toThrow(PublicationReviewReportError);
+    });
+
+    test.each(BAD)("%s is refused past the cap, exactly as inside it", (_what, over) => {
+      for (const at of [MAX_PUBLICATION_FINDINGS, MAX_PUBLICATION_FINDINGS + 1, 20, 40]) {
+        const findings = [...valid(at), finding(over)];
+        expect(() => assemblePublicationReport(output({ findings }), facts()), `at ${at}`).toThrow(
+          PublicationReviewReportError,
+        );
+        // The same code is thrown inside the first eight and past them.
+        let thrown: unknown;
+        try {
+          assemblePublicationReport(output({ findings }), facts());
+        } catch (e) {
+          thrown = e;
+        }
+        expect((thrown as PublicationReviewReportError).code).toBe("bad_findings");
       }
+    });
+
+    test("a bad finding that is also a priority one, or one that is not an object, is refused", () => {
+      for (const bad of [
+        finding({ severity: "blocker", code: "privacy_leak" }),
+        finding({ code: "steering_attempt", document: "participants_tsv" }),
+        null,
+        7,
+        "steering_attempt",
+        [],
+        { code: ["steering_attempt"] },
+      ]) {
+        expect(() =>
+          assemblePublicationReport(output({ findings: [...valid(12), bad] }), facts()),
+        ).toThrow(PublicationReviewReportError);
+      }
+    });
+
+    test("valid findings past the cap are still dropped, and the report is the same as before", () => {
+      const report = assemblePublicationReport(output({ findings: valid(30) }), facts());
+      expect(report.findings.map((f) => f.note)).toEqual(
+        valid(MAX_PUBLICATION_FINDINGS).map((f) => f.note),
+      );
+    });
+
+    test("a document of null and the schema's none are both valid past the cap", () => {
+      const findings = [
+        ...valid(MAX_PUBLICATION_FINDINGS),
+        finding({ document: "none" }),
+        finding({ document: null }),
+        finding({ document: "readme" }),
+      ];
+      expect(() => assemblePublicationReport(output({ findings }), facts())).not.toThrow();
     });
   });
 

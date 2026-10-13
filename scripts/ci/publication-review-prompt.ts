@@ -208,6 +208,7 @@ export function assemblePublicationReport(
   let findings: unknown = m.findings;
   let steering: unknown = m.steering;
   let questions: unknown = m.questions;
+  let pastTheCap: unknown[] = [];
   if (Array.isArray(m.findings)) {
     const all = m.findings.map(unwrapDocument);
     // Only a boolean is lifted: a missing or odd value is still the parser's to refuse.
@@ -233,22 +234,31 @@ export function assemblePublicationReport(
       }
       questions = lowered;
     }
-    findings = [
-      ...all.filter(isPriorityFinding),
-      ...all.filter((f) => !isPriorityFinding(f)),
-    ].slice(0, MAX_PUBLICATION_FINDINGS);
+    const ordered = [...all.filter(isPriorityFinding), ...all.filter((f) => !isPriorityFinding(f))];
+    findings = ordered.slice(0, MAX_PUBLICATION_FINDINGS);
+    // Every finding the model returned is validated, not only the ones kept: one that is invalid
+    // refuses the whole output, as it would inside the first eight, instead of being dropped by the
+    // cut. The parser's own rules do the checking (it has no entry point for a single finding), a
+    // cap's worth at a time.
+    pastTheCap = ordered.slice(MAX_PUBLICATION_FINDINGS);
   }
   const production = (PUBLICATION_REVIEW_MODELS as readonly string[]).includes(model);
-  return parsePublicationReviewReport(
-    {
-      v: PUBLICATION_REPORT_VERSION,
-      model,
-      questions,
-      findings,
-      summary: m.summary,
-      steering,
-      evidence: facts,
-    },
-    production ? {} : { models: CALIBRATION_MODELS },
-  );
+  const options = production ? {} : { models: CALIBRATION_MODELS };
+  const report = (findingsOf: unknown) =>
+    parsePublicationReviewReport(
+      {
+        v: PUBLICATION_REPORT_VERSION,
+        model,
+        questions,
+        findings: findingsOf,
+        summary: m.summary,
+        steering,
+        evidence: facts,
+      },
+      options,
+    );
+  for (let i = 0; i < pastTheCap.length; i += MAX_PUBLICATION_FINDINGS) {
+    report(pastTheCap.slice(i, i + MAX_PUBLICATION_FINDINGS));
+  }
+  return report(findings);
 }

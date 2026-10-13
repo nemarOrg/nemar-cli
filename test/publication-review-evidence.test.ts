@@ -2129,6 +2129,34 @@ describe("a model that buries a steering attempt or a blocker past the cap canno
   });
 });
 
+describe("an invalid finding anywhere in the model's answer refuses the answer", () => {
+  const note = (i: number) => ({
+    question: "complete_and_honest",
+    severity: "note",
+    code: "other",
+    document: "none",
+    note: `Note ${i}.`,
+  });
+
+  test.each([8, 9, 30])(
+    "a bad code at position %i is model_invalid, never a pass",
+    async (position) => {
+      modelReply = () =>
+        messageReply(
+          JSON.stringify({
+            ...STAND_IN_OUTPUT,
+            findings: [
+              ...Array.from({ length: position - 1 }, (_, i) => note(i)),
+              { ...note(99), code: "privacy_concern" },
+            ],
+          }),
+        );
+      const res = await runPublicationReview(args(newDataset(`bad-finding-${position}`)));
+      expect(res).toMatchObject({ outcome: "error", error: "model_invalid" });
+    },
+  );
+});
+
 describe("compatibility forms and invisible letters cannot hide a path or a key from the rules", () => {
   /** ASCII text in its fullwidth forms, a space as the ideographic space. */
   const fullwidth = (text: string) =>
