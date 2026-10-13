@@ -37,8 +37,14 @@
  * row keeps a reviewable state. That risk is accepted.
  */
 
-import type { StartReason } from "../../../shared/contract/publication-review-admin.js";
+import {
+  START_NOT_HANDED_OVER_REASONS,
+  START_REFUSED_REASONS,
+  START_STARTED_REASONS,
+  type StartStartedReason,
+} from "../../../shared/contract/publication-review-admin.js";
 import { screenGate } from "../../../shared/identifier-screen-report.js";
+import { isOneOf } from "../../../shared/pr-review.js";
 import {
   DEPOSITOR_DAILY_CAP,
   NEVER_REACHED_MODEL,
@@ -227,25 +233,50 @@ function attemptReachedModel(row: PublicationReviewRow): boolean {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * What a start did, or why it did not. The reasons are `StartReason` of the admin contract, plus
+ * Every word a start can answer with: the admin contract's (a run went, a request that cannot be
+ * started, a hand-over that failed), plus two that belong to a screen result's start alone.
  * `duplicate`: a screen result found a review of its commit and release kind already on record,
- * which is not an error and buys nothing. An administrator's start never answers `duplicate`: it
- * restarts what can be restarted and names what cannot (`running`, `has_result`).
+ * which is not an error and buys nothing. `depositor_limit`: the depositor's allowance, which holds
+ * a screen result's start and never an administrator's, because an administrator is held by the
+ * platform's allowance only. An administrator's start restarts what can be restarted and names
+ * what cannot (`running`, `has_result`), so it answers neither of the two.
  */
-export type StartResult = StartReason | "duplicate";
+export const START_RESULTS = [
+  ...START_STARTED_REASONS,
+  ...START_REFUSED_REASONS,
+  ...START_NOT_HANDED_OVER_REASONS,
+  "duplicate",
+  "depositor_limit",
+] as const;
+export type StartResult = (typeof START_RESULTS)[number];
 
-export interface StartOutcome {
-  /** A run is going: handed to GitHub now, or an earlier hand-over whose claim stands. */
-  started: boolean;
-  reason: StartResult;
-  reviewId: number | null;
+/** The words of a start that did not go. */
+export type StartNotStartedReason = Exclude<StartResult, StartStartedReason>;
+
+/**
+ * What a start did. A union on `started`, and `started` is a function of the reason (see
+ * {@link answer}): a run is going exactly when the reason is one of
+ * {@link START_STARTED_REASONS}, so the two cannot disagree, and a run that is going always has
+ * the review it concerns.
+ */
+export type StartOutcome =
+  | { started: true; reason: StartStartedReason; reviewId: number }
+  | { started: false; reason: StartNotStartedReason; reviewId: number | null };
+
+/**
+ * The one place a {@link StartOutcome} is made. The overloads keep a started word from being
+ * paired with no review at compile time; `started` itself is read off the reason.
+ */
+function answer(reason: StartStartedReason, reviewId: number): StartOutcome;
+function answer(reason: StartNotStartedReason, reviewId?: number | null): StartOutcome;
+function answer(reason: StartResult, reviewId: number | null = null): StartOutcome {
+  if (isOneOf(START_STARTED_REASONS, reason)) {
+    // Unreachable through the overloads above; a started word with no review would be a lie.
+    if (reviewId === null) throw new Error("a start that went has a review");
+    return { started: true, reason, reviewId };
+  }
+  return { started: false, reason, reviewId };
 }
-
-const answer = (
-  reason: StartResult,
-  reviewId: number | null = null,
-  started = false,
-): StartOutcome => ({ started, reason, reviewId });
 
 interface RequestRow {
   id: number;
@@ -263,7 +294,7 @@ interface RequestRow {
 type Plan =
   | { kind: "insert" }
   | { kind: "restart"; row: PublicationReviewRow; extraCalls: number }
-  | { kind: "refuse"; reason: StartResult };
+  | { kind: "refuse"; reason: StartNotStartedReason };
 
 /**
  * A screen result starts a review only for a commit that has none, or whose last attempt never
@@ -308,7 +339,7 @@ function restartGuard(row: PublicationReviewRow): {
 }
 
 /** Why a row that could not be restarted cannot be, as an administrator reads it. */
-function reasonForRow(row: PublicationReviewRow | null): StartResult {
+function reasonForRow(row: PublicationReviewRow | null): StartNotStartedReason {
   if (row?.state === "reported") return "has_result";
   return "running";
 }
@@ -663,7 +694,7 @@ async function handOver(env: Bindings, h: HandOver): Promise<StartOutcome> {
           .prepare("SELECT claimed_at FROM publication_reviews WHERE id = ?")
           .bind(h.reviewId)
           .first<{ claimed_at: string | null }>();
-        if (claim?.claimed_at) return answer("dispatch_claimed", h.reviewId, true);
+        if (claim?.claimed_at) return answer("dispatch_claimed", h.reviewId);
       }
     } catch (inner) {
       console.error(
@@ -672,7 +703,7 @@ async function handOver(env: Bindings, h: HandOver): Promise<StartOutcome> {
     }
     return answer("dispatch_failed", h.reviewId);
   }
-  return answer(h.restarted ? "redispatched" : "dispatched", h.reviewId, true);
+  return answer(h.restarted ? "redispatched" : "dispatched", h.reviewId);
 }
 
 // ---------------------------------------------------------------------------------------------

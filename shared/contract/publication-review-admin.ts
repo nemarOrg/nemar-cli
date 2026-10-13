@@ -186,37 +186,89 @@ export interface PublicationReviewDetail {
   history_truncated: boolean;
 }
 
+// ---------------------------------------------------------------------------------------------
+// The administrator's start
+// ---------------------------------------------------------------------------------------------
+
 /**
- * What a start did, or why it did not. `dispatched` and `redispatched` started a run;
+ * A start that went (HTTP 202): `dispatched` and `redispatched` handed a run to GitHub, and
  * `dispatch_claimed` means a failed dispatch found its run already claimed, so the run stands.
  */
-export const START_REASONS = [
-  "dispatched",
-  "redispatched",
-  "dispatch_claimed",
-  "running",
-  "has_result",
+export const START_STARTED_REASONS = ["dispatched", "redispatched", "dispatch_claimed"] as const;
+export type StartStartedReason = (typeof START_STARTED_REASONS)[number];
+
+/**
+ * A request that cannot be started as it stands (HTTP 409, an {@link PublicationReviewErrorBody}):
+ * each word is also the body's `code`, one of {@link PUBLICATION_REVIEW_ERROR_CODES}.
+ * `depositor_limit` is not here: the depositor's allowance holds a screen result's start, never
+ * an administrator's, which only the platform's allowance holds.
+ */
+export const START_REFUSED_REASONS = [
   "review_disabled",
   "not_applicable",
   "not_owned_here",
   "request_not_requested",
   "screen_not_ready",
-  "depositor_limit",
+  "running",
+  "has_result",
   "platform_limit",
-  "dispatch_failed",
-  "dispatch_unconfigured",
+] as const;
+export type StartRefusedReason = (typeof START_REFUSED_REASONS)[number];
+
+/**
+ * A start that could not hand its review over (HTTP 502): the row is recorded, so a start can try
+ * again. Each word is also the body's `code`.
+ */
+export const START_NOT_HANDED_OVER_REASONS = ["dispatch_failed", "dispatch_unconfigured"] as const;
+export type StartNotHandedOverReason = (typeof START_NOT_HANDED_OVER_REASONS)[number];
+
+/** Every word a start's answer carries as its `reason`: went, refused, or not handed over. */
+export const START_REASONS = [
+  ...START_STARTED_REASONS,
+  ...START_REFUSED_REASONS,
+  ...START_NOT_HANDED_OVER_REASONS,
 ] as const;
 export type StartReason = (typeof START_REASONS)[number];
 
-/** `POST /admin/publish/:id/review/start`. */
-export interface StartPublicationReviewResponse {
+/** `POST /admin/publish/:id/review/start`, HTTP 202: a run is going. It always has a review. */
+export interface StartedPublicationReview {
   environment: PublicationReviewEnvironment;
-  started: boolean;
-  reason: StartReason;
-  review_id: number | null;
+  started: true;
+  reason: StartStartedReason;
+  review_id: number;
 }
 
-/** Every error word these routes answer with, in the body's `code` field. */
+/**
+ * `POST /admin/publish/:id/review/start`, HTTP 502: the row is recorded and nothing is running.
+ * `error` is a fixed sentence and `code` the same word as `reason`, so a client that reads the
+ * error body of any refusal reads this one the same way.
+ */
+export interface NotHandedOverPublicationReview {
+  environment: PublicationReviewEnvironment;
+  started: false;
+  reason: StartNotHandedOverReason;
+  /** The row that records the failure, or null when none could be written. */
+  review_id: number | null;
+  error: string;
+  code: StartNotHandedOverReason;
+}
+
+/**
+ * `POST /admin/publish/:id/review/start`, on the two answers that carry a start's own shape,
+ * discriminated by `started` so a started answer cannot carry a refusal's word and the reverse.
+ * The field is `started`, not `dispatched` as in the pull-request review's start: a start here
+ * also stands on a run that was dispatched earlier (`dispatch_claimed`), which "dispatched" would
+ * misstate. Every other answer (a refusal, a missing request, a fault) is a
+ * {@link PublicationReviewErrorBody}.
+ */
+export type StartPublicationReviewResponse =
+  | StartedPublicationReview
+  | NotHandedOverPublicationReview;
+
+/**
+ * Every error word these routes answer with, in the body's `code` field: a refusal, a missing
+ * request, a fault, and the two ways a start could not hand its review over.
+ */
 export const PUBLICATION_REVIEW_ERROR_CODES = [
   "bad_dataset",
   "not_found",
@@ -229,6 +281,14 @@ export const PUBLICATION_REVIEW_ERROR_CODES = [
   "running",
   "has_result",
   "platform_limit",
+  "dispatch_failed",
+  "dispatch_unconfigured",
   "internal",
 ] as const;
 export type PublicationReviewErrorCode = (typeof PUBLICATION_REVIEW_ERROR_CODES)[number];
+
+/** The body of every refusal and fault of these routes: a fixed sentence and a closed code. */
+export interface PublicationReviewErrorBody {
+  error: string;
+  code: PublicationReviewErrorCode;
+}

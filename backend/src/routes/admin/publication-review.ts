@@ -22,10 +22,18 @@
  */
 
 import type { Context } from "hono";
-import type {
-  PublicationReviewErrorCode,
-  StartPublicationReviewResponse,
+import {
+  type NotHandedOverPublicationReview,
+  type PublicationReviewEnvironment,
+  type PublicationReviewErrorBody,
+  type PublicationReviewErrorCode,
+  START_NOT_HANDED_OVER_REASONS,
+  START_REFUSED_REASONS,
+  type StartNotHandedOverReason,
+  type StartRefusedReason,
+  type StartedPublicationReview,
 } from "../../../../shared/contract/publication-review-admin";
+import { isOneOf } from "../../../../shared/pr-review";
 import { auditLogStatement } from "../../db/audit-log";
 import { ACTIVE_REQUEST_TAIL_SQL } from "../../services/approval-dispatch";
 import { isValidDatasetId } from "../../services/datasetId";
@@ -47,17 +55,23 @@ function refuse(
   code: PublicationReviewErrorCode,
   error: string,
 ) {
-  return c.json({ error, code }, status);
+  const body: PublicationReviewErrorBody = { error, code };
+  return c.json(body, status);
 }
+
+/** The sentence of the 500 for a start the service answered in a word an administrator's start never gets. */
+const START_FAULT: PublicationReviewErrorBody = {
+  error: "The publication review could not be started. Try again.",
+  code: "internal",
+};
 
 /**
  * The refusals of a start: what the service said, as a closed code and a sentence for a person.
- * Each is a request that cannot be started as it stands (409), never a fault. A start that was
- * HANDED OVER (or whose run stands) and a start that could not hand over are answered below.
+ * Each is a request that cannot be started as it stands (409), never a fault. The code is the
+ * service's own word, so a client reads one word in the body's `code` and the same word anywhere
+ * the service says it.
  */
-const START_REFUSALS: Partial<
-  Record<StartOutcome["reason"], { code: PublicationReviewErrorCode; error: string }>
-> = {
+export const START_REFUSALS: Record<StartRefusedReason, PublicationReviewErrorBody> = {
   review_disabled: {
     code: "review_disabled",
     error: "The publication review is switched off on this Worker.",
@@ -90,9 +104,71 @@ const START_REFUSALS: Partial<
   },
   platform_limit: {
     code: "platform_limit",
-    error: "The platform's daily allowance of reviews is spent. Try again tomorrow.",
+    // The allowance is the reviews of any rolling 24 hours, not a calendar day.
+    error:
+      "The platform's allowance of reviews for the last 24 hours is spent. A start works again as earlier reviews pass 24 hours.",
   },
 };
+
+/**
+ * Why a start could not hand its review over, for the two reasons that leave a recorded row: a
+ * fixed sentence, and the same word as the answer's `reason` in its `code`.
+ */
+export const NOT_HANDED_OVER: Record<
+  StartNotHandedOverReason,
+  { code: StartNotHandedOverReason; error: string }
+> = {
+  dispatch_unconfigured: {
+    code: "dispatch_unconfigured",
+    error: "This Worker cannot hand a review to GitHub: a credential is not configured.",
+  },
+  dispatch_failed: {
+    code: "dispatch_failed",
+    error: "The review could not be handed to GitHub. Try again.",
+  },
+};
+
+/** What a start answers with: the status, and the body the contract types for it. */
+export type StartResponse =
+  | { status: 202; body: StartedPublicationReview }
+  | { status: 409; body: PublicationReviewErrorBody }
+  | { status: 502; body: NotHandedOverPublicationReview }
+  | { status: 500; body: PublicationReviewErrorBody };
+
+/**
+ * The one mapping from what the service said to what the route answers: a run that is going is 202
+ * with the review; a request that cannot be started as it stands is 409 and a closed code; a
+ * hand-over that failed is 502 with the row that records it (not a refusal of the request, and not
+ * a start, so no 2xx); and any other word is a fault of this route, a 500. `duplicate` and
+ * `depositor_limit` are those other words: they belong to a screen result's start, and an
+ * administrator's start never answers them.
+ */
+export function startResponseOf(
+  outcome: StartOutcome,
+  environment: PublicationReviewEnvironment,
+): StartResponse {
+  if (outcome.started) {
+    return {
+      status: 202,
+      body: { environment, started: true, reason: outcome.reason, review_id: outcome.reviewId },
+    };
+  }
+  const { reason } = outcome;
+  if (isOneOf(START_REFUSED_REASONS, reason)) return { status: 409, body: START_REFUSALS[reason] };
+  if (isOneOf(START_NOT_HANDED_OVER_REASONS, reason)) {
+    return {
+      status: 502,
+      body: {
+        environment,
+        started: false,
+        reason,
+        review_id: outcome.reviewId,
+        ...NOT_HANDED_OVER[reason],
+      },
+    };
+  }
+  return { status: 500, body: START_FAULT };
+}
 
 export function registerPublicationReviewRoutes(admin: AdminRouter): void {
   admin.get("/publish/:id/review", async (c) => {
@@ -133,6 +209,7 @@ export function registerPublicationReviewRoutes(admin: AdminRouter): void {
       return refuse(c, 400, "bad_dataset", "That is not a dataset id.");
     }
     const environment = isNonProductionEnv(c.env) ? "non-production" : "production";
+    const userId = c.get("user").id;
 
     let outcome: StartOutcome;
     let requestId: number;
@@ -147,7 +224,7 @@ export function registerPublicationReviewRoutes(admin: AdminRouter): void {
       outcome = await startPublicationReview(c.env, {
         requestId,
         datasetId,
-        adminUserId: c.get("user").id,
+        adminUserId: userId,
       });
     } catch (err) {
       // Ids and fixed words only: the error text can carry SQL. `startPublicationReview` throws
@@ -155,43 +232,22 @@ export function registerPublicationReviewRoutes(admin: AdminRouter): void {
       console.error(
         `[admin/publication-review] could not start the review of ${datasetId} (${readFailureWords(err)})`,
       );
-      return refuse(c, 500, "internal", "The publication review could not be started. Try again.");
+      return c.json(START_FAULT, 500);
     }
 
-    const answer = (): StartPublicationReviewResponse => ({
-      environment,
-      started: outcome.started,
-      reason: outcome.reason === "duplicate" ? "running" : outcome.reason,
-      review_id: outcome.reviewId,
-    });
-
-    if (outcome.started) {
-      await recordStart(c, datasetId, requestId, outcome);
-      return c.json(answer(), 202);
+    const response = startResponseOf(outcome, environment);
+    if (response.status === 202) {
+      await recordStart(c.env.DB, userId, datasetId, requestId, outcome);
+    } else if (response.status === 500) {
+      // Every word an administrator's start can end in is answered above. A word that is not one of
+      // them (a screen result's) is a fault in this route, not a state of the request.
+      console.error(
+        `[admin/publication-review] ${datasetId}: unexpected start reason ${outcome.reason}`,
+      );
     }
-    const refusal = START_REFUSALS[outcome.reason];
-    if (refusal) return refuse(c, 409, refusal.code, refusal.error);
-    // A start that could not hand the review over: the row is recorded (so `start` can try again)
-    // and the answer carries the reason with the review it concerns. Not a refusal of the
-    // request, and not a start, so it is no 2xx.
-    const notHandedOver = NOT_HANDED_OVER[outcome.reason];
-    if (notHandedOver) return c.json({ ...answer(), error: notHandedOver }, 502);
-    // Every reason an administrator's start can end in is answered above. `depositor_limit` is not
-    // one (an administrator is held by the platform's allowance only, which is why the contract
-    // has no code for it), so a word here is a fault in this route, not a state of the request.
-    console.error(
-      `[admin/publication-review] ${datasetId}: unexpected start reason ${outcome.reason}`,
-    );
-    return refuse(c, 500, "internal", "The publication review could not be started. Try again.");
+    return c.json(response.body, response.status);
   });
 }
-
-/** Why a start could not hand its review over, for the two reasons that leave a recorded row. */
-const NOT_HANDED_OVER: Partial<Record<StartOutcome["reason"], string>> = {
-  dispatch_unconfigured:
-    "This Worker cannot hand a review to GitHub: a credential is not configured.",
-  dispatch_failed: "The review could not be handed to GitHub. Try again.",
-};
 
 /**
  * The audit row of a start (`publication_review_started`, as `pr_review_started` is for a pull
@@ -200,7 +256,8 @@ const NOT_HANDED_OVER: Partial<Record<StartOutcome["reason"], string>> = {
  * logged by ids and fixed words and the start stands.
  */
 async function recordStart(
-  c: Context,
+  db: D1Database,
+  userId: number,
   datasetId: string,
   requestId: number,
   outcome: StartOutcome,
@@ -208,9 +265,9 @@ async function recordStart(
   const reviewId = outcome.reviewId;
   try {
     // The commit the review is of is on its row, not in the answer.
-    const row = reviewId === null ? null : await readReview(c.env.DB, reviewId);
-    await auditLogStatement(c.env.DB, {
-      userId: c.get("user").id,
+    const row = reviewId === null ? null : await readReview(db, reviewId);
+    await auditLogStatement(db, {
+      userId,
       action: "publication_review_started",
       resourceType: "dataset",
       resourceId: datasetId,

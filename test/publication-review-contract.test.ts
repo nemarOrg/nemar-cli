@@ -13,7 +13,10 @@ import * as prompt from "../scripts/ci/pr-review-prompt";
 import {
   PUBLICATION_REVIEW_ERROR_CODES,
   PUBLICATION_REVIEW_VIEW_KINDS,
+  START_NOT_HANDED_OVER_REASONS,
   START_REASONS,
+  START_REFUSED_REASONS,
+  START_STARTED_REASONS,
 } from "../shared/contract/publication-review-admin";
 import { FINDING_KINDS, KNOWN_FORMATS, type ScreenGate } from "../shared/identifier-screen-report";
 import * as prReview from "../shared/pr-review";
@@ -521,22 +524,28 @@ describe("the closed lists are the ones ADR 0102 and the design note name", () =
       "decided",
       "unreadable",
     ]);
-    expect([...START_REASONS]).toEqual([
-      "dispatched",
-      "redispatched",
-      "dispatch_claimed",
-      "running",
-      "has_result",
+    expect([...START_STARTED_REASONS]).toEqual(["dispatched", "redispatched", "dispatch_claimed"]);
+    expect([...START_REFUSED_REASONS]).toEqual([
       "review_disabled",
       "not_applicable",
       "not_owned_here",
       "request_not_requested",
       "screen_not_ready",
-      "depositor_limit",
+      "running",
+      "has_result",
       "platform_limit",
+    ]);
+    expect([...START_NOT_HANDED_OVER_REASONS]).toEqual([
       "dispatch_failed",
       "dispatch_unconfigured",
     ]);
+    // `depositor_limit` is a screen result's answer, never an administrator's: not in the contract.
+    expect([...START_REASONS]).toEqual([
+      ...START_STARTED_REASONS,
+      ...START_REFUSED_REASONS,
+      ...START_NOT_HANDED_OVER_REASONS,
+    ]);
+    expect(START_REASONS as readonly string[]).not.toContain("depositor_limit");
     expect([...PUBLICATION_REVIEW_ERROR_CODES]).toEqual([
       "bad_dataset",
       "not_found",
@@ -549,8 +558,15 @@ describe("the closed lists are the ones ADR 0102 and the design note name", () =
       "running",
       "has_result",
       "platform_limit",
+      "dispatch_failed",
+      "dispatch_unconfigured",
       "internal",
     ]);
+    // Every word a refusal or a failed hand-over carries as `reason` is also a `code`, so the one
+    // word means one thing wherever a client reads it.
+    for (const word of [...START_REFUSED_REASONS, ...START_NOT_HANDED_OVER_REASONS]) {
+      expect(PUBLICATION_REVIEW_ERROR_CODES as readonly string[]).toContain(word);
+    }
   });
 
   test("the datatypes are the Worker's BIDS datatypes plus other", () => {

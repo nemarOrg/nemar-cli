@@ -21,12 +21,23 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import {
   PUBLICATION_REVIEW_ERROR_CODES,
+  type PublicationReviewErrorBody,
   type PublicationReviewErrorCode,
+  START_NOT_HANDED_OVER_REASONS,
   START_REASONS,
+  START_REFUSED_REASONS,
+  START_STARTED_REASONS,
   type StartPublicationReviewResponse,
 } from "../../shared/contract/publication-review-admin";
+import { isOneOf } from "../../shared/pr-review";
 import { DEPOSITOR_DAILY_CAP, PLATFORM_DAILY_CAP } from "../../shared/publication-review";
 import { adminRoutes } from "../src/routes/admin";
+import {
+  NOT_HANDED_OVER,
+  START_REFUSALS,
+  startResponseOf,
+} from "../src/routes/admin/publication-review";
+import { START_RESULTS, type StartResult } from "../src/services/publication-review";
 import { hashApiKey } from "../src/services/token";
 import { issueSession } from "../src/services/web-session";
 import type { Bindings, Variables } from "../src/types/bindings";
@@ -110,10 +121,7 @@ function startWithCookie(datasetId: string, cookie: string, origin?: string) {
   );
 }
 
-interface ErrorBody {
-  error: string;
-  code: PublicationReviewErrorCode;
-}
+type ErrorBody = PublicationReviewErrorBody;
 
 async function bodyOf<T>(res: Response): Promise<T> {
   return (await res.json()) as T;
@@ -398,20 +406,23 @@ describe("a request that cannot be started", () => {
     });
   }
 
-  test("every closed code a refusal can carry is exercised above", () => {
-    const refusing = new Set(refusals.map(([code]) => code));
-    // The codes a start's own refusals use; the rest belong to the other answers.
-    for (const code of [
-      "review_disabled",
-      "not_applicable",
-      "not_owned_here",
-      "request_not_requested",
-      "screen_not_ready",
-      "running",
-      "has_result",
-    ] as const) {
-      expect(refusing.has(code)).toBe(true);
+  test("every refusal the route can make is exercised, and each is a closed code of the contract", () => {
+    // The route's own table, not a list typed here: a refusal added to it without a case above (or
+    // in the platform's cap, which writes a declined row and so has its own test below) fails here.
+    const exercised = new Set<string>([...refusals.map(([code]) => code), "platform_limit"]);
+    expect([...exercised].sort()).toEqual(Object.keys(START_REFUSALS).sort());
+    expect(Object.keys(START_REFUSALS).sort()).toEqual([...START_REFUSED_REASONS].sort());
+    for (const [reason, refusal] of Object.entries(START_REFUSALS)) {
+      expect(PUBLICATION_REVIEW_ERROR_CODES as readonly string[]).toContain(refusal.code);
+      // One word each: what the service says and what the body's `code` carries are the same.
+      expect(refusal.code).toBe(reason);
+      expect(refusal.error.length).toBeGreaterThan(10);
     }
+  });
+
+  test("the platform's allowance is worded for a rolling window, not a calendar day", () => {
+    expect(START_REFUSALS.platform_limit.error).not.toMatch(/tomorrow/i);
+    expect(START_REFUSALS.platform_limit.error).toContain("24 hours");
   });
 });
 
@@ -619,13 +630,18 @@ describe("a start that did not hand the review over", () => {
     h.dispatchStatus = 500;
     const res = await start(PROD_DATASET);
     expect(res.status).toBe(502);
-    const body = await bodyOf<StartPublicationReviewResponse & { error: string }>(res);
-    expect(body).toMatchObject({
+    const body = await bodyOf<StartPublicationReviewResponse>(res);
+    // The union is narrowed by `started`, so `error` and `code` are read without a cast.
+    if (body.started) throw new Error("a start that was not handed over said it started");
+    expect(body).toEqual({
       environment: "production",
       started: false,
       reason: "dispatch_failed",
+      review_id: expect.any(Number),
+      code: "dispatch_failed",
+      error: NOT_HANDED_OVER.dispatch_failed.error,
     });
-    expect(typeof body.error).toBe("string");
+    expect(PUBLICATION_REVIEW_ERROR_CODES).toContain(body.code);
     expect(h.reviews()[0]).toMatchObject({
       id: body.review_id,
       state: "errored",
@@ -653,10 +669,15 @@ describe("a start that did not hand the review over", () => {
     ] as Partial<Bindings>[]) {
       const res = await start(PROD_DATASET, { bindings: h.env(missing) });
       expect(res.status).toBe(502);
-      expect(await bodyOf<StartPublicationReviewResponse>(res)).toMatchObject({
+      const body = await bodyOf<StartPublicationReviewResponse>(res);
+      if (body.started) throw new Error("a start that was not handed over said it started");
+      expect(body).toMatchObject({
         started: false,
         reason: "dispatch_unconfigured",
+        code: "dispatch_unconfigured",
+        error: NOT_HANDED_OVER.dispatch_unconfigured.error,
       });
+      expect(PUBLICATION_REVIEW_ERROR_CODES).toContain(body.code);
     }
     expect(h.reviews()[0]).toMatchObject({ state: "errored", detail: "dispatch_unconfigured" });
     expect(h.dispatches()).toHaveLength(0);
@@ -759,11 +780,59 @@ describe("what a response carries", () => {
     }
   });
 
-  test("every reason the route answers with is one of the contract's", async () => {
-    // The route can only say a word the contract lists: a closed list in a response a CLI reads.
-    request();
-    const res = await start(PROD_DATASET);
-    const body = await bodyOf<StartPublicationReviewResponse>(res);
-    expect(START_REASONS).toContain(body.reason);
+  test("every word the service can answer a start with has exactly one answer, from the contract's words", () => {
+    // Over EVERY word of the service's result, not a sample: the route's mapping is total, and the
+    // words it puts in a body are the contract's. `duplicate` (a screen result's own answer) and
+    // `depositor_limit` (the depositor's allowance, which holds only a screen result's start) are
+    // never an administrator's, so they are the route's unexpected branch: a 500, not a made-up
+    // 2xx or 4xx, and not a word the contract does not list.
+    const statusOf = new Map<StartResult, number>();
+    for (const reason of START_RESULTS) {
+      const out = startResponseOf(
+        isOneOf(START_STARTED_REASONS, reason)
+          ? { started: true, reason, reviewId: 7 }
+          : { started: false, reason, reviewId: null },
+        "production",
+      );
+      statusOf.set(reason, out.status);
+      if (out.status === 202) {
+        expect(out.body).toEqual({
+          environment: "production",
+          started: true,
+          reason,
+          review_id: 7,
+        });
+        expect(START_REASONS).toContain(out.body.reason);
+      } else if (out.status === 409) {
+        if (!isOneOf(START_REFUSED_REASONS, reason)) throw new Error("a 409 for a non-refusal");
+        expect(out.body).toEqual(START_REFUSALS[reason]);
+        expect(PUBLICATION_REVIEW_ERROR_CODES).toContain(out.body.code);
+      } else if (out.status === 502) {
+        if (!isOneOf(START_NOT_HANDED_OVER_REASONS, reason))
+          throw new Error("a 502 for a hand-over");
+        expect(out.body).toEqual({
+          environment: "production",
+          started: false,
+          reason,
+          review_id: null,
+          code: reason,
+          error: NOT_HANDED_OVER[reason].error,
+        });
+        expect(START_REASONS).toContain(out.body.reason);
+        expect(PUBLICATION_REVIEW_ERROR_CODES).toContain(out.body.code);
+      } else {
+        expect(out.status).toBe(500);
+        expect(out.body).toEqual({
+          error: "The publication review could not be started. Try again.",
+          code: "internal",
+        });
+      }
+    }
+    const answeredWith = (status: number) =>
+      [...statusOf].filter(([, s]) => s === status).map(([word]) => word);
+    expect(answeredWith(202)).toEqual([...START_STARTED_REASONS]);
+    expect(answeredWith(409)).toEqual([...START_REFUSED_REASONS]);
+    expect(answeredWith(502)).toEqual([...START_NOT_HANDED_OVER_REASONS]);
+    expect(answeredWith(500)).toEqual(["duplicate", "depositor_limit"]);
   });
 });
