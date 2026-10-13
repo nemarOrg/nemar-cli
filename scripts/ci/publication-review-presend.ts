@@ -13,18 +13,27 @@
  * or that is JSON that does not parse is withheld WHOLE and gets a closed state; it is never
  * sent, and never sent in part.
  *
- * Three rules fix what "exactly the string that will be sent" means:
+ * The principle: normalize first, then examine the normalized thing, then send EXACTLY the string
+ * that was examined. Four rules fix what that means:
  *
- *  1. The string is built first, in full: the text cut to its cap and cleaned of control
- *     characters (`tidy`), or, for the two JSON documents, the re-serialized object (the shown keys
- *     of `dataset_description.json`, or all of `participants.json`) cut and cleaned the same way.
- *     The text rule runs over THAT string, so a finding in the part a cut removes does not withhold
- *     a document whose sent bytes are clean, and no byte the rules did not see is ever sent.
- *  2. For the two JSON documents the key rule also runs, over the parsed object that string was
- *     made from. That object holds at least what was sent (a cut string is a prefix of it), so the
- *     key rule can only be stricter than the string, never weaker.
- *  3. The text rule also runs over the serialized JSON, because a local user path can sit in a
- *     string value (`GeneratedBy[0].CodeURL`) that no key rule would look at.
+ *  1. Every string is normalized before any rule looks at it (`normalizeText`): the invisible
+ *     variation selectors and any half of a surrogate pair are removed, and control and format
+ *     characters are replaced by spaces (`tidy`). A document with a NUL byte is not text and is
+ *     withheld as not UTF-8. For a JSON document the same normalization is applied to every key
+ *     and every string value of the parsed structure, so the rules see the key the model will read
+ *     (`patient<zero-width space>name` is `patient name` to it).
+ *  2. The string is then built in full and cut: the prose text, or the serialized normalized
+ *     structure (the shown keys of `dataset_description.json`; the column descriptions of
+ *     `participants.json`, which are only `LongName`, `Description` and `Units`, each cut short),
+ *     cut to its cap on a character boundary. The text rule runs over THAT string, so a finding in
+ *     the part a cut removes does not withhold prose whose sent bytes are clean, and no byte the
+ *     rules did not see is ever sent.
+ *  3. For the two JSON documents the rules also run over the normalized structure: the key rule
+ *     (`participants.json`: the whole file, which is at least what is sent, so it can only be
+ *     stricter), and the path rules over EACH string value and EACH key on its own. Over the
+ *     serialized text a newline or tab inside a string is two characters, and the shared rule's
+ *     lookbehind then skips a path that, as the parsed string, starts a line.
+ *  4. Anything the rules cannot clear, or that throws, is withheld, never sent.
  *
  * What the rules can and cannot see is stated in ADR 0101: for prose the only rule is a local
  * user path, so this is a consistency control, not a privacy control. It never decides anything
@@ -77,6 +86,12 @@ type Prepared =
       keysShown: number;
       keysNotShown: number;
     };
+
+/**
+ * The fields of a participants.json column the model is shown, and the most characters of each
+ * (a column description is a short name, a sentence or two, and a unit).
+ */
+export const PARTICIPANT_FIELD_CAPS = { LongName: 100, Description: 500, Units: 50 } as const;
 
 function isPlainObject(x: unknown): x is Record<string, unknown> {
   return typeof x === "object" && x !== null && !Array.isArray(x);
@@ -231,28 +246,79 @@ function prepare(document: ReviewDocument, raw: RawDocument): Prepared {
   }
   if (!isPlainObject(parsed)) return { kind: "no-text", state: "withheld_not_json" };
 
-  let shown: Record<string, unknown> = parsed;
+  if (document === "participants_json") return prepareParticipants(parsed, cap);
+
+  const kept: Record<string, unknown> = {};
   let keysShown = 0;
-  let keysNotShown = 0;
-  if (document === "dataset_description") {
-    const kept: Record<string, unknown> = {};
-    for (const key of DESCRIPTION_KEYS_SHOWN) {
-      if (Object.hasOwn(parsed, key)) {
-        kept[key] = parsed[key];
-        keysShown++;
-      }
+  for (const key of DESCRIPTION_KEYS_SHOWN) {
+    if (Object.hasOwn(parsed, key)) {
+      kept[key] = parsed[key];
+      keysShown++;
     }
-    shown = kept;
-    keysNotShown = Object.keys(parsed).length - keysShown;
   }
   // Normalize first, then examine the normalized structure, then send that same structure.
-  const object = normalizeStructure(shown);
+  const object = normalizeStructure(kept);
   return {
     kind: "text",
     ...toSent(JSON.stringify(object, null, 2), cap),
     findings: [...scanJsonKeys(object), ...scanStructureForPaths(object)],
     keysShown,
-    keysNotShown,
+    keysNotShown: Object.keys(parsed).length - keysShown,
+  };
+}
+
+/** A top-level key that is a subject label, as the model would read it. */
+const SUBJECT_LABEL_KEY = /^\s*sub-/i;
+
+/**
+ * participants.json, reduced to what ADR 0101 says the model is shown: the column descriptions.
+ * For each top-level column that is its `LongName`, `Description` and `Units` where they are
+ * strings, each cut to {@link PARTICIPANT_FIELD_CAPS}, and nothing else: no levels, links, other
+ * keys or values of any participant. The file must be an object of objects (a column is an object);
+ * anything else is unreadable. A column named like a subject label means the file is keyed by
+ * participant, and it is withheld whole.
+ *
+ * The key rule reads the whole normalized file, not only what is kept, so a column named for an
+ * identifier is a finding whatever it holds. The path rules read what is sent.
+ */
+function prepareParticipants(parsed: Record<string, unknown>, cap: number): Prepared {
+  if (!Object.values(parsed).every(isPlainObject)) {
+    return { kind: "no-text", state: "withheld_unreadable" };
+  }
+  const whole = normalizeStructure(parsed) as Record<string, Record<string, unknown>>;
+  let fieldCut = false;
+  const reduced = Object.fromEntries(
+    Object.entries(whole).map(([column, description]) => {
+      const fields: Record<string, string> = {};
+      for (const field of Object.keys(
+        PARTICIPANT_FIELD_CAPS,
+      ) as (keyof typeof PARTICIPANT_FIELD_CAPS)[]) {
+        const value = Object.hasOwn(description, field) ? description[field] : undefined;
+        if (typeof value !== "string") continue;
+        const { text, cut } = cutTo(value, PARTICIPANT_FIELD_CAPS[field]);
+        fields[field] = text;
+        fieldCut ||= cut;
+      }
+      return [column, fields];
+    }),
+  );
+  const findings: Finding[] = [...scanJsonKeys(whole), ...scanStructureForPaths(reduced)];
+  if (Object.keys(whole).some((column) => SUBJECT_LABEL_KEY.test(column))) {
+    findings.push({
+      kind: "path-subject-label",
+      severity: "review",
+      field: "participants-key",
+      shape: shapeOf("sub-"),
+    });
+  }
+  const sent = toSent(JSON.stringify(reduced, null, 2), cap);
+  return {
+    kind: "text",
+    sent: sent.sent,
+    cut: sent.cut || fieldCut,
+    findings,
+    keysShown: 0,
+    keysNotShown: 0,
   };
 }
 

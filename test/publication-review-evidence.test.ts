@@ -1980,3 +1980,70 @@ describe("a local path inside a JSON string never reaches the model, however it 
     expect(user).toContain(`"${document}": "withheld"`);
   });
 });
+
+describe("participants.json: the model is shown the column descriptions and nothing else", () => {
+  test("levels, links, other keys and per-participant values are not in the request", async () => {
+    const ds = newDataset("participants-reduced", {
+      "participants.json": JSON.stringify({
+        participant_id: {
+          LongName: "Participant label",
+          Description: "Unique label of the participant",
+          Levels: { "sub-SENTINELSUBJ": "SENTINEL_LEVEL" },
+          TermURL: "https://example.org/SENTINEL_TERM",
+        },
+        age: { Description: "Age at recording", Units: "years", Minimum: 18, SENTINEL_KEY: 1 },
+        group: { Levels: { patient: "SENTINEL_GROUP_LEVEL", control: "x" } },
+      }),
+    });
+    const report = await reviewOf(ds);
+    expect(report.evidence.documents.participants_json).toBe("sent");
+    const { raw, user } = theRequest();
+    expect(raw).not.toMatch(
+      /SENTINEL_(LEVEL|TERM|KEY|GROUP_LEVEL)|SENTINELSUBJ|Minimum|TermURL|Levels/,
+    );
+    // What is sent: the descriptions, in the fenced block, in a fixed order.
+    const block = user.slice(
+      user.indexOf('kind="participants_json">'),
+      user.indexOf("</untrusted-", user.indexOf('kind="participants_json">')),
+    );
+    expect(JSON.parse(block.slice(block.indexOf("{"), block.lastIndexOf("}") + 1))).toEqual({
+      participant_id: {
+        LongName: "Participant label",
+        Description: "Unique label of the participant",
+      },
+      age: { Description: "Age at recording", Units: "years" },
+      group: {},
+    });
+  });
+
+  test("a file keyed by subject is withheld whole, and no label or value of it is sent", async () => {
+    const ds = newDataset("participants-keyed", {
+      "participants.json": JSON.stringify({
+        "sub-SENTINELSUBJ": { age: 34, sex: "M", Description: "SENTINEL_VALUE" },
+        "sub-SENTINELTWO": { age: 41 },
+      }),
+    });
+    const report = await reviewOf(ds);
+    expect(report.evidence.documents.participants_json).toBe("withheld_finding");
+    expect(report.evidence.withheld_findings).toEqual({ "path-subject-label": 1 });
+    expect(theRequest().raw).not.toMatch(/SENTINEL|sub-/);
+  });
+
+  test("a file that is not an object of objects is withheld as unreadable", async () => {
+    const ds = newDataset("participants-shape", {
+      "participants.json": JSON.stringify({ participant_id: "label", age: { Units: "years" } }),
+    });
+    const report = await reviewOf(ds);
+    expect(report.evidence.documents.participants_json).toBe("withheld_unreadable");
+    expect(theRequest().user).toContain('"participants_json": "withheld"');
+  });
+
+  test("a description cut to its cap makes the file shown_cut, in the facts the model is given", async () => {
+    const ds = newDataset("participants-field-cut", {
+      "participants.json": JSON.stringify({ participant_id: { Description: "x".repeat(2000) } }),
+    });
+    const report = await reviewOf(ds);
+    expect(report.evidence.documents.participants_json).toBe("sent_cut");
+    expect(theRequest().user).toContain('"participants_json": "shown_cut"');
+  });
+});

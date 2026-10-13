@@ -13,7 +13,11 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { presend, scanLocalPathForms } from "../scripts/ci/publication-review-presend";
+import {
+  PARTICIPANT_FIELD_CAPS,
+  presend,
+  scanLocalPathForms,
+} from "../scripts/ci/publication-review-presend";
 import { scanJsonKeys, scanTextForLocalPaths } from "../shared/identifier-scan";
 import {
   DESCRIPTION_KEYS_SHOWN,
@@ -217,14 +221,25 @@ describe("the cut: a longer document is cut and the cut is a fact", () => {
   }
 
   test("a JSON document is cut after it is re-serialized, and says so", () => {
-    const big = {
-      participant_id: { Description: "d".repeat(DOCUMENT_CHAR_CAPS.participants_json) },
-    };
+    const big = { Acknowledgements: "d".repeat(DOCUMENT_CHAR_CAPS.dataset_description) };
     const r = presend(
-      docs({ participants_json: present(JSON.stringify(big), "participants.json") }),
+      docs({ dataset_description: present(JSON.stringify(big), "dataset_description.json") }),
+    );
+    expect(r.states.dataset_description).toBe("sent_cut");
+    expect((r.cleared.dataset_description as string).endsWith("[cut]")).toBe(true);
+  });
+
+  test("participants.json is cut after it is reduced, when its columns alone are longer than the cap", () => {
+    const columns = Object.fromEntries(
+      Array.from({ length: 40 }, (_, i) => [`column_${i}`, { Description: "d".repeat(400) }]),
+    );
+    const r = presend(
+      docs({ participants_json: present(JSON.stringify(columns), "participants.json") }),
     );
     expect(r.states.participants_json).toBe("sent_cut");
-    expect((r.cleared.participants_json as string).endsWith("[cut]")).toBe(true);
+    const sent = r.cleared.participants_json as string;
+    expect(sent.endsWith("\n[cut]")).toBe(true);
+    expect(sent.length).toBe(DOCUMENT_CHAR_CAPS.participants_json + "\n[cut]".length);
   });
 });
 
@@ -685,7 +700,13 @@ describe("a path in a JSON string is found as the person who reads the string wo
   });
 });
 
-describe("participants.json: the whole object, under the same two rules", () => {
+describe("participants.json: the column descriptions only, under the same rules (#1728)", () => {
+  // ADR 0101, section 3: "participants.json, the column descriptions". A column description is
+  // LongName, Description and Units. Everything else a participants.json can hold (the levels of a
+  // categorical column, links, per-participant values someone typed in) is not sent.
+  const sendParticipants = (object: unknown) =>
+    presend(docs({ participants_json: present(JSON.stringify(object), "participants.json") }));
+
   test("an identifier-named column key with content withholds it", () => {
     const text = JSON.stringify({
       participant_id: { Description: "label" },
@@ -697,12 +718,149 @@ describe("participants.json: the whole object, under the same two rules", () => 
     expect(r.withheld_findings).toEqual({ "json-identifier-key": 1 });
   });
 
-  test("the key rule reads the whole object, so a key in the cut part still withholds it", () => {
-    // The key rule is stricter than the string, never weaker: the object holds at least what was sent.
-    const filler = { Description: "f".repeat(DOCUMENT_CHAR_CAPS.participants_json) };
-    const text = JSON.stringify({ participant_id: filler, birthdate: { Description: "d" } });
-    const r = presend(docs({ participants_json: present(text, "participants.json") }));
+  test("the key rule reads the whole file, so an identifier column that is not sent still withholds it", () => {
+    // A column named for an identifier is a finding wherever its content sits: the rule is stricter
+    // than what is sent, never weaker.
+    const r = sendParticipants({
+      participant_id: { Description: "label" },
+      email: { Levels: { a: "b" } },
+    });
     expect(r.states.participants_json).toBe("withheld_finding");
+    expect(r.withheld_findings).toEqual({ "json-identifier-key": 1 });
+    const cut = sendParticipants({
+      participant_id: { Description: "f".repeat(DOCUMENT_CHAR_CAPS.participants_json) },
+      birthdate: { Description: "d" },
+    });
+    expect(cut.states.participants_json).toBe("withheld_finding");
+  });
+
+  test("only LongName, Description and Units of each column are sent, in that order", () => {
+    const r = sendParticipants({
+      participant_id: {
+        Units: "n/a",
+        TermURL: "https://example.org/term/SENTINEL_TERM",
+        Levels: { "sub-01": "SENTINEL_LEVEL" },
+        Description: "Unique label",
+        LongName: "Participant",
+        SENTINEL_KEY: "SENTINEL_VALUE",
+      },
+      sex: { Levels: { M: "male", F: "female" } },
+      age: { Description: "Age at recording", Units: "years", Minimum: 18, Maximum: 89 },
+    });
+    expect(r.states.participants_json).toBe("sent");
+    const sent = r.cleared.participants_json as string;
+    expect(sent).toBe(
+      JSON.stringify(
+        {
+          participant_id: { LongName: "Participant", Description: "Unique label", Units: "n/a" },
+          sex: {},
+          age: { Description: "Age at recording", Units: "years" },
+        },
+        null,
+        2,
+      ),
+    );
+    for (const leak of ["SENTINEL", "sub-01", "male", "Minimum", "TermURL", "Levels"]) {
+      expect(sent).not.toContain(leak);
+    }
+  });
+
+  test("a field that is not a string is not sent", () => {
+    const r = sendParticipants({
+      a: { LongName: 5, Description: ["x", "y"], Units: { u: "years" } },
+      b: { LongName: null, Description: true, Units: "years" },
+    });
+    expect(JSON.parse(r.cleared.participants_json as string)).toEqual({
+      a: {},
+      b: { Units: "years" },
+    });
+  });
+
+  test("each field is cut to its own short cap, and a cut is a fact", () => {
+    const r = sendParticipants({
+      col: {
+        LongName: "L".repeat(PARTICIPANT_FIELD_CAPS.LongName + 1),
+        Description: "D".repeat(PARTICIPANT_FIELD_CAPS.Description + 1),
+        Units: "U".repeat(PARTICIPANT_FIELD_CAPS.Units + 1),
+      },
+      whole: {
+        LongName: "L".repeat(PARTICIPANT_FIELD_CAPS.LongName),
+        Description: "D".repeat(PARTICIPANT_FIELD_CAPS.Description),
+        Units: "U".repeat(PARTICIPANT_FIELD_CAPS.Units),
+      },
+    });
+    expect(r.states.participants_json).toBe("sent_cut");
+    const sent = JSON.parse(r.cleared.participants_json as string);
+    for (const field of ["LongName", "Description", "Units"] as const) {
+      const cap = PARTICIPANT_FIELD_CAPS[field];
+      expect(sent.col[field]).toBe(`${field[0]?.repeat(cap)}\n[cut]`);
+      expect(sent.whole[field]).toBe(field[0]?.repeat(cap));
+    }
+    // And a column nothing was cut from says nothing of the kind.
+    const clean = sendParticipants({ col: { Units: "years" } });
+    expect(clean.states.participants_json).toBe("sent");
+  });
+
+  test("a cut between the halves of an emoji ends before it", () => {
+    const cap = PARTICIPANT_FIELD_CAPS.Description;
+    const r = sendParticipants({ col: { Description: `${"a".repeat(cap - 1)}\u{1F600}b` } });
+    expect(JSON.parse(r.cleared.participants_json as string).col.Description).toBe(
+      `${"a".repeat(cap - 1)}\n[cut]`,
+    );
+  });
+
+  test.each([
+    ["sub-01", "sub-01"],
+    ["in capitals", "SUB-02"],
+    ["mixed case", "Sub-jsmith"],
+    ["after a space", " sub-03"],
+    ["after an invisible character", "\u200bsub-04"],
+    ["after a variation selector", "\uFE0Fsub-05"],
+  ])("a column named like a subject label withholds the whole file: %s", (_what, key) => {
+    const r = sendParticipants({
+      participant_id: { Description: "label" },
+      [key]: { Description: "x", Units: "y" },
+    });
+    expect(r.states.participants_json).toBe("withheld_finding");
+    expect(r.cleared.participants_json).toBeUndefined();
+    expect(r.withheld_findings).toEqual({ "path-subject-label": 1 });
+    expect(JSON.stringify(r)).not.toMatch(/jsmith|sub-0/i);
+  });
+
+  test("a file keyed by subject is one finding, however many subjects", () => {
+    const keyed = Object.fromEntries(
+      Array.from({ length: 50 }, (_, i) => [`sub-${i}`, { age: 30 }]),
+    );
+    const r = sendParticipants(keyed);
+    expect(r.withheld_findings).toEqual({ "path-subject-label": 1 });
+  });
+
+  test("only a prefix is a subject label: sub inside a name, or without the hyphen, is a column", () => {
+    const r = sendParticipants({
+      subject_group: { Description: "g" },
+      subtype: { Description: "t" },
+      "pre-sub-": { Description: "x" },
+    });
+    expect(r.states.participants_json).toBe("sent");
+  });
+
+  test.each([
+    ["a string", { age: "years" }],
+    ["a number", { age: 5 }],
+    ["null", { age: null }],
+    ["an array", { age: ["a"] }],
+    ["one column among objects", { participant_id: { Description: "d" }, age: "years" }],
+  ])("a file that is not an object of objects is unreadable, not sent: %s", (_what, object) => {
+    const r = sendParticipants(object);
+    expect(r.states.participants_json).toBe("withheld_unreadable");
+    expect(r.cleared.participants_json).toBeUndefined();
+    expect(r.withheld_findings).toEqual({});
+  });
+
+  test("an empty object is a file with no columns, and is sent as one", () => {
+    const r = sendParticipants({});
+    expect(r.states.participants_json).toBe("sent");
+    expect(r.cleared.participants_json as string).toBe("{}");
   });
 
   test("an array, or text that is not JSON, is withheld as not JSON", () => {
