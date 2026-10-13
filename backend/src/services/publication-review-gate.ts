@@ -142,16 +142,16 @@ function unverified(datasetId: string, fact: "request" | "review"): Refused {
 }
 
 function bareRefusal(
-  refusal: ReviewGateRefusal,
+  kind: ReviewGateRefusal,
   datasetId: string,
   headline: string,
   extra: Pick<PublicationReviewGateRefusalBody, "fact"> = {},
 ): PublicationReviewGateRefusalBody {
   return {
     error: PUBLICATION_REVIEW_NOT_CLEAR_CODE,
-    refusal,
+    refusal: kind,
     headline,
-    message: reviewGateRefusalText(refusal, datasetId),
+    message: reviewGateRefusalText(kind, datasetId),
     outcome: null,
     reasons: [],
     uncovered: [],
