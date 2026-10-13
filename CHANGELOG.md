@@ -21,9 +21,9 @@ longer slide, a modality filter that matches a whole token, a corrected check be
 administrator approves a pull request, and a weekly drift check that can finally file its
 issue. The automated review of dataset pull requests stays off in production, as in 0.10.16;
 its first live run passed on dev on 2026-10-12, with a throwaway pull request to an exemplar
-dataset. There is no migration and no new secret. The `/discover` fix needs a second deploy to take
-effect for visitors: the website must be promoted to production after this release (see Deploy
-coupling).
+dataset. There is no migration and no new secret. Counting per visitor needs a second deploy: the
+website must be promoted to production after this release (see Deploy coupling), while the
+fixed windows and the higher cap help the shared pool at once.
 
 ### Changed
 
@@ -79,8 +79,8 @@ coupling).
   and the development bypass are unchanged. To be honest about the number: a default Discover
   page costs 11 API calls (about 180 views per window) and the largest page the website can
   render costs about 101 (about 19 views), so capping what one page hydrates is the website's
-  to decide. **Nothing changes for the website's visitors until the website is promoted to
-  production.**
+  to decide. **Per-visitor counting waits for the website's promotion to production;** the fixed
+  windows and the 1000 cap apply to the shared pool as soon as this Worker is released.
 - **A stalled Cache API can no longer hang a request, and a failed cache write no longer demotes
   an admin (ADR 0098).** Every wait on the cache is bounded at 500 ms and fails open, including
   deferred writes and body reads. An admin the database had just confirmed keeps the admin
@@ -173,17 +173,22 @@ coupling).
 
 - No migration, no new Worker secret or variable, and the automated pull-request review stays
   off in production. The keyed log pseudonym derives from the existing `ENCRYPTION_KEY`.
-- **Release the Worker first, then promote the website.** Until the website calls through the
-  service binding with `X-Forwarded-For` (nemarOrg/website, merged to `staging`), its
-  visitors keep arriving from shared addresses and the `/discover` errors continue to depend on
-  the 1000 cap and the fixed windows alone. Releasing the website first would count its calls per
-  visitor in the old 500-per-window `ip` bucket, with none of the new headers, and the website's
-  own first-call check would warn.
-- After the website is in production: calls for one visitor should read
-  `X-RateLimit-Bucket: site-ip`, with the first `X-RateLimit-Remaining` at 1999 and, across six
-  or more calls a second or two apart, a reading that falls overall (the count is kept per data
-  center, so an occasional repeat or small rise is normal), and a second visitor should start
-  at 1999. The `[rate-limit] counting a request without CF-Connecting-IP by
+- **Release the Worker first, then promote the website,** so the first binding calls are counted
+  in `site-ip` and the keying can be checked. Until the website calls through the service binding
+  with `X-Forwarded-For` (nemarOrg/website, merged to `staging`), its visitors keep arriving from
+  shared addresses and the `/discover` errors depend on the 1000 cap and the fixed windows
+  alone. The order is not a safety gate: 0.10.16 counts a binding call by its raw
+  `X-Forwarded-For` in the old `ip` bucket (cap 500, sliding), per visitor, so promoting the
+  website first would be safe and only the website's own first-call check would warn.
+- The keying cannot be read from the website's logs or from a browser: the website logs
+  `remaining` once per bucket kind per isolate, and its proxy forwards no rate-limit headers. To
+  check it before promoting the website, make calls for one visitor and one other from a
+  throwaway Worker bound to `nemar-api` through a service binding (`X-Forwarded-For` set to
+  reserved documentation addresses such as `203.0.113.201` and `203.0.113.202`), delete the
+  Worker afterwards, and expect `X-RateLimit-Bucket: site-ip` and `X-RateLimit-Caller: site`, a
+  first `X-RateLimit-Remaining` of 1999 that falls overall across six or more calls a second or
+  two apart (the count is kept per data center, so an occasional repeat or small rise is
+  normal), and the other visitor starting at 1999. The `[rate-limit] counting a request without CF-Connecting-IP by
   its forwarded visitor` line should appear and no "request with neither" warning. #1712 (demote
   that line) stays open until this has been observed.
 - The weekly summary.json drift check runs from `main`, so its first corrected run is the Monday
