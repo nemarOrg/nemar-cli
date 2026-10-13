@@ -5,6 +5,7 @@
  *   nemar admin publish deny <ds> [-r <why>]   deny one, mailing the depositor the reason
  *   nemar admin publish screen <ds>            run the identifier screen of a request again
  *   nemar admin publish approve <ds>           approve and publish (admin-publish-approve.ts)
+ *   nemar admin publish next                   the requests that need you, one card each (admin-publish-next.ts)
  *
  * Split out of `admin.ts` (epic #1726, phase 2) so the publication review's commands do not grow
  * a file of ten thousand lines. The group is registered on `adminCommand` at the position it
@@ -33,6 +34,7 @@ import { reviewListLine } from "../lib/publication-review-display.js";
 import { needsAdministrator } from "../lib/publication-review-queue.js";
 import { plain } from "../lib/terminal-text.js";
 import { registerApproveCommand } from "./admin-publish-approve.js";
+import { registerNextCommand } from "./admin-publish-next.js";
 import { registerReviewCommands } from "./admin-publish-review.js";
 
 export const publishCommand = new Command("publish").description("Publication workflow management");
@@ -290,3 +292,4 @@ Examples:
   });
 
 registerApproveCommand(publishCommand);
+registerNextCommand(publishCommand);
