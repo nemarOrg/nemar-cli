@@ -32,6 +32,7 @@
 import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { PUBLICATION_COMMENT_SENTENCES } from "../backend/src/routes/admin/publish-comment";
 import {
+  DONE,
   NOTE_SENTINEL,
   SUMMARY_SENTINEL,
   type SeedScreenedRequest,
@@ -39,6 +40,7 @@ import {
   goodPublicationReport,
   seedPublicationReview,
   seedScreenedRequest,
+  setOverride,
   textOf,
 } from "../backend/test/helpers/publication-review";
 import { asSend } from "../backend/test/helpers/resend";
@@ -50,7 +52,7 @@ import {
   cureOf,
 } from "../shared/publication-review";
 import { type CliResult, startPublishCli } from "./helpers/admin-publish-cli";
-import { DONE, hardReport, seedOverride, twoReasons } from "./helpers/approve-seeds";
+import { hardReport, twoReasons } from "./helpers/approve-seeds";
 
 setDefaultTimeout(60_000);
 
@@ -1026,7 +1028,7 @@ describe("what the walk says about itself", () => {
 describe("an override already on record", () => {
   test("this administrator's own, covering every reason: y is offered without --force, nothing is sent, and it publishes", async () => {
     const { requestId, reviewId } = seed(A, twoReasons());
-    seedOverride(h.db, reviewId as number, adminId, ["question_failed", "version_missing"]);
+    setOverride(h.db, reviewId as number, adminId, ["question_failed", "version_missing"]);
 
     const r = await next("y\n");
 
@@ -1041,7 +1043,7 @@ describe("an override already on record", () => {
   test("another administrator's covers nothing for this run: the Worker refuses and the walk prints it", async () => {
     const { requestId, reviewId } = seed(A, twoReasons());
     const otherId = await h.admin("otheradmin", OTHER_ADMIN_KEY);
-    seedOverride(h.db, reviewId as number, otherId, ["question_failed", "version_missing"]);
+    setOverride(h.db, reviewId as number, otherId, ["question_failed", "version_missing"]);
 
     const r = await next("y\n", [], { as: "nextadmin" });
 

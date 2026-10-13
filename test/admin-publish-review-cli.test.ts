@@ -40,6 +40,7 @@ import {
   goodPublicationReport,
   seedPublicationReview,
   seedScreenedRequest,
+  setOverride,
 } from "../backend/test/helpers/publication-review";
 import type { PublicationReviewDetail } from "../shared/contract/publication-review-admin";
 import {
@@ -411,12 +412,7 @@ function seedRich(datasetId: string): { requestId: number; reviewId: number } {
     claimed: true,
     createdMinutesAgo: 5,
   });
-  h.db.run(
-    `UPDATE publication_reviews
-        SET override_by = ?, override_at = ?, override_reasons = '["question_failed","text_withheld"]'
-      WHERE id = ?`,
-    [adminId, OVERRIDE_AT, reviewId],
-  );
+  setOverride(h.db, reviewId, adminId, ["question_failed", "text_withheld"], OVERRIDE_AT);
   // An earlier attempt on another commit: history, not the review in force.
   seedPublicationReview(h.db, {
     requestId,

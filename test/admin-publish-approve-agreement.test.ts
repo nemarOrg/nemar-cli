@@ -36,6 +36,7 @@ import {
   failingReport,
   seedPublicationReview,
   seedScreenedRequest,
+  setOverride,
 } from "../backend/test/helpers/publication-review";
 import { makePublicationReviewApp } from "../backend/test/helpers/publication-review-app";
 import type { PublicationReviewOverride } from "../shared/contract/publication-review-admin";
@@ -52,7 +53,6 @@ import {
   hardReport,
   reportWith,
   seedGolden,
-  seedOverride,
   seedReport,
   twoReasons,
 } from "./helpers/approve-seeds";
@@ -401,7 +401,7 @@ const SCENARIOS: Scenario[] = [
     name: "an override this administrator recorded covers the run",
     seed: (w) => {
       const reviewId = seedReport(w.db, golden(w), twoReasons());
-      seedOverride(w.db, reviewId, w.adminId, ["question_failed", "version_missing"]);
+      setOverride(w.db, reviewId, w.adminId, ["question_failed", "version_missing"]);
     },
     decision: "proceed",
     override: "none",
@@ -410,7 +410,7 @@ const SCENARIOS: Scenario[] = [
     name: "an override another administrator recorded: the command goes on, the Worker decides",
     seed: (w) => {
       const reviewId = seedReport(w.db, golden(w), twoReasons());
-      seedOverride(w.db, reviewId, w.otherId, ["question_failed", "version_missing"]);
+      setOverride(w.db, reviewId, w.otherId, ["question_failed", "version_missing"]);
     },
     decision: "proceed",
     override: "none",
@@ -421,7 +421,7 @@ const SCENARIOS: Scenario[] = [
     name: "a recorded override that misses one reason",
     seed: (w) => {
       const reviewId = seedReport(w.db, golden(w), twoReasons());
-      seedOverride(w.db, reviewId, w.adminId, ["question_failed"]);
+      setOverride(w.db, reviewId, w.adminId, ["question_failed"]);
     },
     decision: "needs_force",
     workerRefusal: "needs_override",

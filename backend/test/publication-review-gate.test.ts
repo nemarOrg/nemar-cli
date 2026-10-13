@@ -37,7 +37,6 @@ import {
   parsePublicationReviewReport,
   reviewGateRefusalText,
 } from "../../shared/publication-review";
-import { PUBLICATION_STEPS } from "../../shared/publication-steps";
 import { adminRoutes } from "../src/routes/admin";
 import { approveSchema } from "../src/services/publication-orchestrator";
 import {
@@ -54,6 +53,7 @@ import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, interceptingD1, realD1 } from "./helpers/d1";
 import { SCREENED_HEAD } from "./helpers/identifier-screen";
 import {
+  DONE,
   type SeedScreenedRequest,
   evidenceFor,
   failingReport,
@@ -61,6 +61,7 @@ import {
   seedPublicationReview,
   seedScreenedRequest,
   seedUser,
+  setOverride,
 } from "./helpers/publication-review";
 import { hookedD1 } from "./helpers/publication-review-harness";
 
@@ -69,7 +70,6 @@ const ADMIN_B_KEY = "review-gate-admin-b-0123456789abcdef0123456789abcdef";
 const DATASET = "nm000481";
 const MIRROR = "nm000482";
 const EXEMPLAR = "xx099960";
-const DONE = PUBLICATION_STEPS.filter((s) => s !== "upload_to_zenodo" && s !== "sync_nemar");
 
 let server: Server;
 let calls: { method: string; path: string; event?: string }[] = [];
@@ -842,12 +842,7 @@ describe("a review that is not a pass needs the administrator's override", () =>
 describe("an override is its approver's, and it is recorded once", () => {
   test("11. an override recorded by an administrator satisfies that administrator's run and nobody else's", async () => {
     const { requestId, reviewId } = seedFailing();
-    db.run(
-      `UPDATE publication_reviews
-          SET override_by = ?, override_at = datetime('now'), override_reasons = ?
-        WHERE id = ?`,
-      [adminA, JSON.stringify(["question_failed"]), reviewId],
-    );
+    setOverride(db, reviewId, adminA, ["question_failed"]);
     // Administrator B has no lease on this request and no override of their own.
     const asB = await approve({ resume: true }, { key: ADMIN_B_KEY });
     const body = await refusalOf(asB);
@@ -866,12 +861,7 @@ describe("an override is its approver's, and it is recorded once", () => {
 
   test("11. a recorded override does not cover a reason it was not given for", async () => {
     const { reviewId } = seedFailing();
-    db.run(
-      `UPDATE publication_reviews
-          SET override_by = ?, override_at = datetime('now'), override_reasons = ?
-        WHERE id = ?`,
-      [adminA, JSON.stringify(["review_running"]), reviewId],
-    );
+    setOverride(db, reviewId, adminA, ["review_running"]);
     const body = await refusalOf(await approve());
     expect(body.refusal).toBe("needs_override");
     expect(body.uncovered).toEqual(["question_failed"]);
@@ -983,12 +973,7 @@ describe("an override is its approver's, and it is recorded once", () => {
 
   test("an override from another administrator for the same review replaces the recorded one", async () => {
     const { reviewId } = seedFailing();
-    db.run(
-      `UPDATE publication_reviews
-          SET override_by = ?, override_at = datetime('now'), override_reasons = ?
-        WHERE id = ?`,
-      [adminA, JSON.stringify(["question_failed"]), reviewId],
-    );
+    setOverride(db, reviewId, adminA, ["question_failed"]);
     const res = await approve(
       {
         resume: true,
@@ -1008,12 +993,7 @@ describe("an override is its approver's, and it is recorded once", () => {
     // satisfies the gate on the clicker's recorded override. (A NEW override sent from a terminal
     // inside the lease is refused, below, so none is recorded under the clicker's id.)
     const { requestId, reviewId } = seedFailing();
-    db.run(
-      `UPDATE publication_reviews
-          SET override_by = ?, override_at = datetime('now'), override_reasons = ?
-        WHERE id = ?`,
-      [adminA, JSON.stringify(["question_failed"]), reviewId],
-    );
+    setOverride(db, reviewId, adminA, ["question_failed"]);
     db.run(
       `UPDATE publication_requests
           SET approval_requested_by = ?, approval_dispatched_at = datetime('now', '-1 minutes')

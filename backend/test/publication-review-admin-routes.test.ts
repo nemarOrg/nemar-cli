@@ -61,6 +61,7 @@ import {
   seedPublicationReview,
   seedScreenedRequest,
   seedUser,
+  setOverride,
 } from "./helpers/publication-review";
 
 const ADMIN_KEY = "review-admin-key-0123456789abcdef0123456789abcdef";
@@ -1473,10 +1474,7 @@ describe("GET /admin/publish/:id/review", () => {
     const admin = db
       .query<{ id: number }, []>("SELECT id FROM users WHERE username = 'reviewadmin'")
       .get() as { id: number };
-    db.run(
-      `UPDATE publication_reviews SET override_by = ?, override_at = datetime('now'), override_reasons = ? WHERE id = ?`,
-      [admin.id, JSON.stringify(["question_failed", "not_a_reason", "text_withheld"]), id],
-    );
+    setOverride(db, id, admin.id, ["question_failed", "not_a_reason", "text_withheld"]);
     const d = await detail(datasetId);
     expect(d.review?.override).toEqual({
       by: admin.id,

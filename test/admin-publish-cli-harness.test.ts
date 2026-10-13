@@ -23,16 +23,14 @@ import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { SCREENED_HEAD, markScreen } from "../backend/test/helpers/identifier-screen";
 import { seedScreenedRequest } from "../backend/test/helpers/publication-review";
-import { PUBLICATION_STEPS } from "../shared/publication-steps";
 import { type CliResult, WORKER_GITHUB_TOKEN, startPublishCli } from "./helpers/admin-publish-cli";
+import { seedGolden } from "./helpers/approve-seeds";
 
 setDefaultTimeout(60_000);
 
 const DATASET = "nm000460";
 const ADMIN_KEY = "harness-admin-key-0123456789abcdef0123456789abcdef";
 const OTHER_ADMIN_KEY = "harness-other-admin-key-0123456789abcdef0123456789";
-/** Every step but the two logged no-ops: a run the gates let through reaches `published`. */
-const DONE = PUBLICATION_STEPS.filter((s) => s !== "upload_to_zenodo" && s !== "sync_nemar");
 
 const h = startPublishCli();
 afterAll(() => h.stop());
@@ -61,16 +59,6 @@ function requestRow(id: number) {
       "SELECT status, denied_by, denied_reason, identifier_screen_status FROM publication_requests WHERE id = ?",
     )
     .get(id);
-}
-
-/** A clean request with every step but the two no-ops done, ready for `approve --resume`. */
-function seedGoldenRequest(): number {
-  const { requestId } = seedScreenedRequest(h.db, { datasetId: DATASET });
-  h.db.run("UPDATE publication_requests SET steps_completed = ? WHERE id = ?", [
-    JSON.stringify(DONE),
-    requestId,
-  ]);
-  return requestId;
 }
 
 describe("the real command against the real backend", () => {
@@ -128,7 +116,7 @@ describe("the real command against the real backend", () => {
   });
 
   test("a golden-path approval reaches `published` through the real orchestrator", async () => {
-    const requestId = seedGoldenRequest();
+    const requestId = seedGolden(h.db);
 
     const r = await h.cli(["admin", "publish", "approve", DATASET, "--resume", "--yes"]);
 
@@ -145,7 +133,7 @@ describe("the real command against the real backend", () => {
 
 describe("the stand-ins record what they were sent", () => {
   test("the GitHub stand-in records the gate's one read, made with the Worker's own token", async () => {
-    seedGoldenRequest();
+    seedGolden(h.db);
 
     await h.cli(["admin", "publish", "approve", DATASET, "--resume", "--yes"]);
 
@@ -161,7 +149,7 @@ describe("the stand-ins record what they were sent", () => {
   });
 
   test("the head the stand-in answers is the head the real gate compares against", async () => {
-    const requestId = seedGoldenRequest();
+    const requestId = seedGolden(h.db);
     h.mainHead.value = "fedcba9876543210fedcba9876543210fedcba98";
 
     const r = await h.cli(["admin", "publish", "approve", DATASET, "--resume", "--yes"]);
@@ -281,7 +269,7 @@ describe("the account and the configuration a command runs under", () => {
 
 describe("what a test can change between a command's read and its write", () => {
   test("`after` runs once, after the matched answer and before the command's next request", async () => {
-    const requestId = seedGoldenRequest();
+    const requestId = seedGolden(h.db);
     // `approve` reads the review, then posts the approval. Break the screen after that read: the
     // real gate, not the harness, refuses the write.
     h.after(`GET /admin/publish/${DATASET}/review`, () => {
@@ -367,7 +355,7 @@ describe("what a test can change between a command's read and its write", () => 
   });
 
   test("a screen the test marks clean again is the screen the gate reads", async () => {
-    const requestId = seedGoldenRequest();
+    const requestId = seedGolden(h.db);
     markScreen(h.db, requestId, DATASET, { status: "review" });
 
     const r = await h.cli(["admin", "publish", "approve", DATASET, "--resume", "--yes"]);
