@@ -89,6 +89,8 @@ const EXPECTED_ENTRIES: Record<string, number> = {
 
   // Publication workflow
   "GET /publish/requests": 1,
+  // ADR 0101: the review of the active request, with its history.
+  "GET /publish/:id/review": 1,
   "POST /publish/:id/deny": 2,
   "POST /publish/:id/approve": 2,
   // ADR 0080: launch an approval from the web by dispatching it to an executor.
@@ -216,7 +218,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(142);
+    expect(adminRoutes.routes.length).toBe(143);
   });
 
   // The count pin above can't see a SWAP of the two router-level middleware
