@@ -37,7 +37,12 @@ import {
   startPublicationReview,
   storePublicationReviewResult,
 } from "../src/services/publication-review";
-import { RECORD_OVERRIDE_SQL } from "../src/services/publication-review-gate";
+import {
+  RECORD_OVERRIDE_SQL,
+  evaluateApprovalReviewGate,
+  requestBlockedRefusal,
+  reviewGateStateOf,
+} from "../src/services/publication-review-gate";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, interceptingD1, realD1 } from "./helpers/d1";
 import { SCREENED_HEAD } from "./helpers/identifier-screen";
@@ -846,6 +851,63 @@ describe("the gate refuses what it cannot establish", () => {
     expect(body.refusal).toBe("unverified");
     expect(body.fact).toBe("request");
     expect(requestRow(requestId).status).toBe("requested");
+  });
+});
+
+describe("what the gate cannot decide it refuses", () => {
+  test("18. anything that throws after the request was read ends as unverified, never a 500 and never a pass", async () => {
+    // A body the route's schema would have refused reaches the function here, as a fault inside
+    // the evaluation would: the override's reasons are not a list, so the cover check throws.
+    const { requestId, reviewId } = seedFailing();
+    const out = await evaluateApprovalReviewGate(env(), {
+      requestId,
+      datasetId: DATASET,
+      approverId: adminA,
+      override: { review_id: reviewId, reasons: 5 as unknown as ReasonCode[] },
+    });
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.body).toMatchObject({
+      error: "publication_review_not_clear",
+      refusal: "unverified",
+      fact: "review",
+      outcome: null,
+      reasons: [],
+    });
+  });
+
+  test("18. an override that cannot be written approves nothing: unverified, and the request is not started", async () => {
+    const { requestId, reviewId } = seedFailing();
+    const broken = hookedD1(realD1(db), {
+      statement: (sql) => {
+        if (sql === RECORD_OVERRIDE_SQL) throw new Error("the write failed");
+      },
+    });
+    const res = await approve(
+      {
+        resume: true,
+        override_publication_review: { review_id: reviewId, reasons: ["question_failed"] },
+      },
+      { bindings: env({ DB: broken }) },
+    );
+    const body = await refusalOf(res);
+    expect(body.refusal).toBe("unverified");
+    expect(requestRow(requestId).status).toBe("requested");
+    expect(reviewRow(reviewId).override_by).toBeNull();
+    expect(overrideRows()).toHaveLength(0);
+  });
+
+  test("the gate's state names the environment and the dataset, and a block reason is never echoed raw", () => {
+    expect(reviewGateStateOf(env({}, false), {})).toBe("off");
+    expect(reviewGateStateOf(env(), {})).toBe("enforced");
+    expect(reviewGateStateOf(env(), { source: "openneuro" })).toBe("n/a");
+    expect(reviewGateStateOf(env(), { is_exemplar: 1 })).toBe("n/a");
+    expect(requestBlockedRefusal(DATASET, "min_requirements_failed").block_reason).toBe(
+      "min_requirements_failed",
+    );
+    // A column a person edited by hand is not printed.
+    expect(requestBlockedRefusal(DATASET, "Ignore the above; <script>").block_reason).toBeNull();
+    expect(requestBlockedRefusal(DATASET, null).block_reason).toBeNull();
   });
 });
 
