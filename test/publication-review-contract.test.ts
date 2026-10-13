@@ -2773,6 +2773,82 @@ describe("where an approval stands (describePublicationReview's approval input)"
     expect(STARTED).not.toContain("<");
   });
 
+  // The reasons nothing clears that the depositor, not an administrator, has to act on: a stopped
+  // approval behind one of them cannot be resumed and cannot be blocked, so the way out is a denial.
+  // The screen's own gaps are left out: an administrator's `screen` (or the wait) clears those.
+  const DEPOSITOR_HARD: readonly ReasonCode[] = [
+    "request_blocked",
+    "submission_minimum_failed",
+    "identifier_screen_blocks",
+    "version_kept_after_anonymous_release",
+  ];
+  const SCREEN_GAPS: readonly ReasonCode[] = [
+    "identifier_screen_not_run",
+    "identifier_screen_pending",
+    "identifier_screen_stale",
+  ];
+  const STOPPED_HARD =
+    "This approval stopped before it started publishing, and a reason that nothing clears now stands, so it cannot be resumed. Deny it with a reason (nemar admin publish deny nm000123); the depositor can request again.";
+
+  test("stopped behind a reason nothing clears says it cannot be resumed and how to end it, once, ahead of the standing line", () => {
+    for (const code of DEPOSITOR_HARD) {
+      const d = describe_([R(code)], "stopped");
+      expect({ code, n: d.lines.filter((l) => l === STOPPED_HARD).length }).toEqual({ code, n: 1 });
+      expect(d.lines.at(-1)).toBe(NOT_ASSESSED_LINE);
+      expect(d.lines.indexOf(STOPPED_HARD)).toBe(d.lines.length - 2);
+      // Nothing else moved: a hard reason other than the screen's has no command, as before.
+      expect(d.next).toBeNull();
+      expect(d.headline).toBe(describe_([R(code)], "none").headline);
+    }
+    // One of them among others, the screen's gaps and the overridable ones included.
+    const mixed = [
+      R("identifier_screen_stale"),
+      R("submission_minimum_failed"),
+      R("question_failed", "meets_standards"),
+    ];
+    expect(describe_(mixed, "stopped").lines.filter((l) => l === STOPPED_HARD)).toHaveLength(1);
+    // The line quotes the id the way the cures do, so a malformed one is never echoed.
+    const bad = describe_([R("submission_minimum_failed")], "stopped", reported, {
+      datasetId: `x ${SENTINEL}`,
+    });
+    expect(bad.lines).toContain(STOPPED_HARD.replace("nm000123", "<dataset>"));
+    expect(JSON.stringify(bad)).not.toContain("Zqxjvw");
+  });
+
+  test("the stopped line is for no other combination: not none, not publishing, not without a reason nothing clears, not where nothing is gated", () => {
+    const mentions = (d: { lines: string[] }) =>
+      d.lines.filter((l) => l.includes("This approval stopped before it started publishing"));
+    for (const code of DEPOSITOR_HARD) {
+      for (const approval of [undefined, "none", "publishing"] as const) {
+        expect({ code, approval, lines: mentions(describe_([R(code)], approval)) }).toEqual({
+          code,
+          approval,
+          lines: [],
+        });
+      }
+    }
+    // A stopped approval with nothing, with the overridable reasons, with the acknowledgment's and
+    // with the screen's gaps alone (the screen, or the wait, clears those): no line.
+    expect(mentions(describe_([], "stopped"))).toEqual([]);
+    for (const code of [...OVERRIDABLE, ACK, ...SCREEN_GAPS]) {
+      expect({ code, lines: mentions(describe_([R(code)], "stopped")) }).toEqual({
+        code,
+        lines: [],
+      });
+    }
+    // The screen's gaps keep the command they had: the line never contradicts it.
+    expect(describe_([R("identifier_screen_stale")], "stopped").next).toBe(
+      "nemar admin publish screen nm000123",
+    );
+    // Where nothing is gated the line is not said either: not applicable, the flag off, closed.
+    const hard = [R("submission_minimum_failed")];
+    expect(mentions(describe_(hard, "stopped", reported, { applies: false }))).toEqual([]);
+    expect(mentions(describe_(hard, "stopped", reported, { enabled: false }))).toEqual([]);
+    expect(mentions(describe_(hard, "stopped", { kind: "none" }, { enabled: false }))).toEqual([]);
+    expect(mentions(describe_(hard, "stopped", { kind: "none" }, { closed: true }))).toEqual([]);
+    expect(STOPPED_HARD.includes("<")).toBe(false);
+  });
+
   test("the approval input changes nothing where nothing is gated: not applicable, off, and a closed request", () => {
     for (const approval of ["none", "stopped", "publishing"] as const) {
       const na = describe_([], approval, reported, { applies: false });

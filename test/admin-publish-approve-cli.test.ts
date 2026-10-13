@@ -398,6 +398,55 @@ describe("the command decides: a run that has started publishing", () => {
   });
 });
 
+describe("the command decides: an approval that stopped behind a reason nothing clears", () => {
+  const STOPPED =
+    "This approval stopped before it started publishing, and a reason that nothing clears now stands, so it cannot be resumed.";
+
+  test("the review says to deny it, under the review and before the refusal, and the hard reason refuses", async () => {
+    // A failed-minimum report can land on an `approving` request that has not started publishing,
+    // and the request stays `approving`: the table's "moved to blocked" is not what happens to it.
+    const requestId = seedGolden({ requestStatus: "approving" });
+    h.db.run("UPDATE publication_requests SET steps_completed = '[]' WHERE id = ?", [requestId]);
+    seedReport(requestId, hardReport());
+
+    for (const flags of [["--resume", "--yes", "--force"], ["--yes"]]) {
+      const r = await approve(flags);
+
+      expect(r.exitCode).toBe(1);
+      const line = `${STOPPED} Deny it with a reason (nemar admin publish deny ${DATASET}); the depositor can request again.`;
+      expect(r.stdout).toContain(line);
+      // Under the review it belongs to, ahead of the standing line and the refusal.
+      const at = (text: string) => r.stdout.indexOf(text);
+      expect(at("Publication review: FAIL")).toBeGreaterThanOrEqual(0);
+      expect(at("Publication review: FAIL")).toBeLessThan(at(line));
+      expect(at(line)).toBeLessThan(at(NOT_ASSESSED_LINE));
+      expect(at(NOT_ASSESSED_LINE)).toBeLessThan(at("Not approved:"));
+      // The refusal is the hard one, whatever the flags: it names the reason, and nothing posted.
+      expect(r.stdout).toContain(REASONS.submission_minimum_failed.sentence.replace(/\.$/, ""));
+      expect(h.posted).toEqual([]);
+      expect(requestRow(requestId)?.status).toBe("approving");
+    }
+  });
+
+  test("a request that has started publishing, or that waits for its decision, is not told this", async () => {
+    const started = seedGolden({ requestStatus: "approving" });
+    seedReport(started, hardReport());
+    const resumed = await approve(["--resume", "--yes"]);
+    expect(resumed.exitCode).toBe(0);
+    expect(resumed.stdout).not.toContain(STOPPED);
+
+    h.reset();
+    adminId = await h.admin("approveradmin", ADMIN_KEY);
+    h.setEnv({ PUBLICATION_REVIEW_ENABLED: "1" });
+    const waiting = seedGolden();
+    seedReport(waiting, hardReport());
+    const refused = await approve(["--resume", "--yes", "--force"]);
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stdout).toContain("Not approved:");
+    expect(refused.stdout).not.toContain(STOPPED);
+  });
+});
+
 describe("the command decides: a gate that is off or does not apply", () => {
   test("the review off: a stored failing review is advice, --force changes nothing and says so", async () => {
     h.setEnv({ PUBLICATION_REVIEW_ENABLED: "0" });

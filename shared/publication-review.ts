@@ -1683,6 +1683,26 @@ export type ApprovalStanding = "none" | "stopped" | "publishing";
 const APPROVAL_PUBLISHING_LINE =
   "This approval has started publishing; it passed the gates when it started and is continued without them.";
 
+/**
+ * What the description says about an approval that stopped before it started publishing while a
+ * reason nothing clears stands: a resume would be refused, and the reasons table's cure for such a
+ * reason ("the request is moved to blocked") is true only of a request still waiting for its
+ * decision, since the store's move takes only that one. The way out is a denial. `<dataset>` is
+ * filled like a cure's.
+ */
+const APPROVAL_STOPPED_HARD_LINE =
+  "This approval stopped before it started publishing, and a reason that nothing clears now stands, so it cannot be resumed. Deny it with a reason (nemar admin publish deny <dataset>); the depositor can request again.";
+
+/**
+ * The hard reasons an administrator's own `screen` (or the wait for it) clears. They are left out of
+ * {@link APPROVAL_STOPPED_HARD_LINE}: the request is not stuck behind them, and `next` says so.
+ */
+const SCREEN_GAP_REASONS: readonly ReasonCode[] = [
+  "identifier_screen_not_run",
+  "identifier_screen_pending",
+  "identifier_screen_stale",
+];
+
 function nextCommand(
   id: string,
   reasons: readonly Reason[],
@@ -1820,6 +1840,12 @@ export function describePublicationReview(input: {
     };
   }
   if (approval === "publishing") lines.push(APPROVAL_PUBLISHING_LINE);
+  if (
+    approval === "stopped" &&
+    hardReasonsOf(reasons).some((r) => !SCREEN_GAP_REASONS.includes(r.code))
+  ) {
+    lines.push(APPROVAL_STOPPED_HARD_LINE.replaceAll("<dataset>", id));
+  }
   lines.push(NOT_ASSESSED_LINE);
   return {
     headline: `Publication review: ${OUTCOME_WORD[outcome]}`,

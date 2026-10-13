@@ -1754,6 +1754,68 @@ describe("the detail carries what approve and next show from one read", () => {
     );
   });
 
+  test("a stopped approval behind a failed minimum is told it cannot be resumed and is to be denied, until it starts publishing", async () => {
+    // A failed-minimum report that lands on an `approving` request leaves it approving (the store's
+    // move to blocked takes only a `requested` one), so the reasons table's "moved to blocked" is
+    // not what happens to it; the way out is a denial, and the detail says so.
+    const STOPPED =
+      "This approval stopped before it started publishing, and a reason that nothing clears now stands, so it cannot be resumed.";
+    const { requestId, datasetId } = request({ requestStatus: "approving" });
+    seedPublicationReview(db, {
+      requestId,
+      datasetId,
+      state: "reported",
+      report: goodPublicationReport({
+        evidence: evidenceFor(SCREENED_HEAD, false, {
+          minimums: "failed",
+          minimum_failures: ["name_too_short"],
+          name_length: 5,
+        }),
+      }),
+    });
+    const stopped = await detail(datasetId);
+    expect(stopped.request_status).toBe("approving");
+    expect(stopped.started_publishing).toBe(false);
+    expect(stopped.reasons.map((r) => r.code)).toContain("submission_minimum_failed");
+    const lines = stopped.description.lines;
+    const at = lines.findIndex((l) => l.startsWith(STOPPED));
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(lines[at]).toBe(
+      `${STOPPED} Deny it with a reason (nemar admin publish deny ${datasetId}); the depositor can request again.`,
+    );
+    expect(lines.filter((l) => l.startsWith(STOPPED))).toHaveLength(1);
+    expect(lines.at(-1)).toBe(NOT_ASSESSED_LINE);
+    expect(at).toBe(lines.length - 2);
+
+    // A request waiting for its decision is blocked by the minimum instead, and is not told this.
+    const open = request();
+    seedPublicationReview(db, {
+      requestId: open.requestId,
+      datasetId: open.datasetId,
+      state: "reported",
+      report: goodPublicationReport({
+        evidence: evidenceFor(SCREENED_HEAD, false, {
+          minimums: "failed",
+          minimum_failures: ["name_too_short"],
+          name_length: 5,
+        }),
+      }),
+    });
+    const waiting = await detail(open.datasetId);
+    expect(waiting.description.lines.some((l) => l.startsWith(STOPPED))).toBe(false);
+
+    // Once it has started publishing, no gate applies and the line is the other one.
+    db.run("UPDATE publication_requests SET steps_completed = ? WHERE id = ?", [
+      JSON.stringify(["ci_check", "enrichment_check", "s3_public_read"]),
+      requestId,
+    ]);
+    const publishing = await detail(datasetId);
+    expect(publishing.description.lines.some((l) => l.startsWith(STOPPED))).toBe(false);
+    expect(publishing.description.lines).toContain(
+      "This approval has started publishing; it passed the gates when it started and is continued without them.",
+    );
+  });
+
   test("total_files is the dataset's count, or null when it is not known", async () => {
     const { datasetId } = request();
     expect((await detail(datasetId)).total_files).toBeNull();
