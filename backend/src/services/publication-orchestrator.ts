@@ -228,6 +228,15 @@ export function isRespond(v: unknown): v is RespondOutcome {
   return typeof v === "object" && v !== null && RESPOND in v;
 }
 
+/**
+ * How the audit trail names the administrator whose key executed a run attributed to another (a
+ * web approval, ADR 0080): the username, or the id as text when there is none. One form for every
+ * row that carries `executed_by`, so the field has one type across the trail.
+ */
+function executorName(adminUser: Pick<AuthUser, "id" | "username">): string {
+  return adminUser.username || String(adminUser.id);
+}
+
 /** An acknowledgment of the identifier screen: a stated reason, 10 to 500 characters once trimmed. */
 export const acknowledgeIdentifierScreenSchema = z
   .string()
@@ -497,7 +506,7 @@ async function stepCiCheck(c: ApproveStepContext): Promise<RespondOutcome | unde
           resourceId: datasetId,
           details: JSON.stringify({
             request_id: c.requestId,
-            ...(c.approver.id !== adminUser.id ? { executed_by: adminUser.id } : {}),
+            ...(c.approver.id !== adminUser.id ? { executed_by: executorName(adminUser) } : {}),
           }),
         }).run();
       } catch (auditError) {
@@ -2868,9 +2877,7 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
         approved_by: c.approver.username,
         // Only when the executor is not the approver, so a terminal approval's
         // row is byte-identical to what it always was.
-        ...(c.approver.id !== adminUser.id
-          ? { executed_by: adminUser.username || String(adminUser.id) }
-          : {}),
+        ...(c.approver.id !== adminUser.id ? { executed_by: executorName(adminUser) } : {}),
         steps: allSteps,
         // The review gate's state for this environment and dataset when the row is written, and
         // the flag of the call that finished the run. A skip is also its own row when it happens

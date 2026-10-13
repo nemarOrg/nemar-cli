@@ -480,6 +480,33 @@ describe("--skip-ci-check is recorded", () => {
   });
 });
 
+describe("the audit trail names the executor one way", () => {
+  test("19. a skip inside a web approval records executed_by as the same username the approval row does", async () => {
+    // The executor's service account (B) runs the clicker's (A's) approval. Both rows name B as
+    // the executor, and both as the username: one type for the field across the whole trail.
+    const { requestId } = seed({
+      requestStatus: "approving",
+      steps: DONE.filter((s) => s !== "ci_check"),
+    });
+    seedPublicationReview(db, { requestId, datasetId: DATASET, state: "reported" });
+    db.run(
+      `UPDATE publication_requests
+          SET approval_requested_by = ?, approval_dispatched_at = datetime('now', '-1 minutes')
+        WHERE id = ?`,
+      [adminA, requestId],
+    );
+    const res = await approve({ resume: true, skip_ci_check: true }, { key: ADMIN_B_KEY });
+    expect(res.status).toBe(200);
+    const skipped = auditRows("publication_ci_check_skipped");
+    expect(skipped).toHaveLength(1);
+    // Attributed to the clicker, executed by the service account.
+    expect(skipped[0].user_id).toBe(adminA);
+    expect(skipped[0].details).toEqual({ request_id: requestId, executed_by: "gateadminb" });
+    expect(skipped[0].details.executed_by).toBe(published().details.executed_by as string);
+    expect(typeof skipped[0].details.executed_by).toBe("string");
+  });
+});
+
 // ============================================================================
 // The gate's decisions
 // ============================================================================
