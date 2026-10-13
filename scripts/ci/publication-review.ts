@@ -53,16 +53,11 @@ import {
 import {
   PublicationEvidenceError,
   SHA40,
-  bidsState,
-  buildPublicationEvidence,
-  descriptionFacts,
+  evidenceFromDocuments,
   readRootDocuments,
   readTree,
   structuralSummary,
-  tagState,
-  versionFacts,
 } from "./publication-review-evidence";
-import { presend } from "./publication-review-presend";
 import {
   PUBLICATION_OUTPUT_SCHEMA,
   PUBLICATION_REVIEW_MODEL,
@@ -232,37 +227,16 @@ export async function runPublicationReview(args: ReviewArgs): Promise<Publicatio
 
     const tree = await readTree(args.repoDir, args.head);
     const docs = readRootDocuments(args.repoDir, tree);
-
-    // A description nobody could read leaves every fact below it invented, so it is not a fact.
-    const descriptionState = docs.dataset_description.state;
-    if (descriptionState !== "present" && descriptionState !== "absent") {
-      throw new PublicationEvidenceError("description_unreadable");
-    }
-    const description = descriptionFacts(
-      docs.dataset_description.text,
-      docs.readme.text,
-      args.anonymous,
-      { readmeUnread: ["annexed", "unreadable", "not_utf8"].includes(docs.readme.state) },
-    );
-    const version = versionFacts(docs.dataset_description.text);
-    const tagsText = readText(args.tagsFile);
-    if (tagsText === null) throw new PublicationEvidenceError("tags_unreadable");
-    const bidsRuns = readText(args.bidsRunsFile);
-
-    const checked = presend(docs);
-    const facts = buildPublicationEvidence({
+    const { facts, cleared } = evidenceFromDocuments(docs, {
       head: args.head,
       anonymous: args.anonymous,
-      description,
-      version,
-      tag: tagState(tagsText, version.version, args.head),
-      bids: bidsRuns === null ? "unknown" : bidsState(bidsRuns, args.head),
-      presend: checked,
+      tagsText: readText(args.tagsFile),
+      bidsRuns: readText(args.bidsRunsFile),
       summary: structuralSummary(args.repoDir, tree),
     });
     const { system, user } = buildPublicationReviewMessages({
       facts,
-      cleared: checked.cleared,
+      cleared,
       nonce: randomUUID().replaceAll("-", ""),
     });
     const modelOutput = await callPublicationReviewModel(system, user);

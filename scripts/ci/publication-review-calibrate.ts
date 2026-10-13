@@ -13,9 +13,9 @@
  * argument) and the production report assembly (`assemblePublicationReport`, which parses with the
  * calibration list of models only when the model is not the production one). None of it is copied;
  * a test compares the request calibration sends with the request the review sends for the same
- * dataset. The only part that is calibration's own is the small orchestration that stands in for
- * `runPublicationReview`'s reading of git: it takes the documents and the summary from the corpus
- * instead.
+ * dataset. The facts are put together by the one function the review uses too
+ * (`evidenceFromDocuments`), over the documents and the summary taken from the corpus instead of
+ * from git, and a test compares the evidence both sides produce for the same dataset.
  *
  * **It posts nothing.** It never imports the review's callback poster or the callback origin
  * table, it has no network call of its own, and `calibrateMain` refuses every argument that names a
@@ -84,14 +84,7 @@ import {
   listEntries,
   mutateCorpus,
 } from "./publication-review-corpus";
-import {
-  PublicationEvidenceError,
-  buildPublicationEvidence,
-  descriptionFacts,
-  tagState,
-  versionFacts,
-} from "./publication-review-evidence";
-import { presend } from "./publication-review-presend";
+import { evidenceFromDocuments } from "./publication-review-evidence";
 import {
   PUBLICATION_REVIEW_MODEL,
   assemblePublicationReport,
@@ -200,34 +193,18 @@ export function deriveOutcome(report: PublicationReviewReport): {
 }
 
 /**
- * The evidence and the cleared documents for one entry: the job's own steps (the minimums and the
- * version from the whole raw files, the pre-send check over each document, the evidence parsed by
- * the Worker's parser) with the documents and the summary read from the corpus instead of git.
+ * The evidence and the cleared documents for one entry: the job's own function over the documents
+ * and the summary read from the corpus instead of git. A named, unreleased release (no tags file, so
+ * no tag exists), and the BIDS result is not established here (`unknown`).
  */
 export function evidenceOf(entry: CorpusEntry): { facts: ReviewFacts; cleared: ClearedDocuments } {
-  const docs = entry.docs;
-  // A description nobody could read leaves every fact below it invented, so it is not a fact.
-  const descriptionState = docs.dataset_description.state;
-  if (descriptionState !== "present" && descriptionState !== "absent") {
-    throw new PublicationEvidenceError("description_unreadable");
-  }
-  const description = descriptionFacts(docs.dataset_description.text, docs.readme.text, false, {
-    readmeUnread: ["annexed", "unreadable", "not_utf8"].includes(docs.readme.state),
-  });
-  const version = versionFacts(docs.dataset_description.text);
-  const checked = presend(docs);
-  const facts = buildPublicationEvidence({
+  return evidenceFromDocuments(entry.docs, {
     head: entry.head,
     anonymous: false,
-    description,
-    version,
-    // No tags file: a release that has not happened has no tag.
-    tag: tagState("", version.version, entry.head),
-    bids: "unknown",
-    presend: checked,
+    tagsText: "",
+    bidsRuns: null,
     summary: entry.summary,
   });
-  return { facts, cleared: checked.cleared };
 }
 
 async function reviewEntry(

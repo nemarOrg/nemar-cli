@@ -43,6 +43,7 @@ import { SEMVER } from "../../shared/pr-review";
 import {
   type BidsState,
   CHANGES_CANDIDATES,
+  type ClearedDocuments,
   DOCUMENT_BYTE_CEILING,
   LICENSE_CANDIDATES,
   PARTICIPANTS_JSON,
@@ -68,6 +69,7 @@ import {
   listTree,
   parseAnnexPointer,
 } from "../identifier-screen-ci-lib";
+import { presend } from "./publication-review-presend";
 
 /** A full commit id. Every revision this module hands to git has this shape. */
 export const SHA40 = /^[0-9a-f]{40}$/;
@@ -600,4 +602,62 @@ export function buildPublicationEvidence(parts: EvidenceParts): ReviewFacts {
     description_keys_not_shown: parts.presend.description_keys_not_shown,
     summary: parts.summary,
   });
+}
+
+/** What a document's state says about the README when it is not read: it exists, and is not text. */
+const UNREAD_STATES: readonly RawDocument["state"][] = ["annexed", "unreadable", "not_utf8"];
+
+export interface DocumentEvidenceInputs {
+  /** The commit the documents were read at: 40 hex. */
+  head: string;
+  /** The release kind: inverts the Authors rule, exactly as the request gate does. */
+  anonymous: boolean;
+  /**
+   * `git ls-remote --tags` output; the empty string is a repository with no tag. `null` is a file
+   * that could not be read, which is an evidence error: no tag state is invented for it.
+   */
+  tagsText: string | null;
+  /** The BIDS validation workflow's runs at `head`, or `null` when they could not be read (`unknown`). */
+  bidsRuns: string | null;
+  summary: StructuralSummary;
+}
+
+/**
+ * The evidence and the cleared documents for the root documents of one commit: the single place the
+ * review's facts are put together, run by the review job over what it read from git and by the
+ * calibration over what it read from a corpus. The minimums and the version come from the whole raw
+ * files, the pre-send check examines each document, and the Worker's parser validates the block.
+ *
+ * Throws {@link PublicationEvidenceError}: `description_unreadable` when the description exists and
+ * could not be read (every fact below it would be invented), and `tags_unreadable` for a tags file
+ * that could not be read.
+ */
+export function evidenceFromDocuments(
+  docs: Record<ReviewDocument, RawDocument>,
+  inputs: DocumentEvidenceInputs,
+): { facts: ReviewFacts; cleared: ClearedDocuments } {
+  const descriptionState = docs.dataset_description.state;
+  if (descriptionState !== "present" && descriptionState !== "absent") {
+    throw new PublicationEvidenceError("description_unreadable");
+  }
+  const description = descriptionFacts(
+    docs.dataset_description.text,
+    docs.readme.text,
+    inputs.anonymous,
+    { readmeUnread: UNREAD_STATES.includes(docs.readme.state) },
+  );
+  const version = versionFacts(docs.dataset_description.text);
+  if (inputs.tagsText === null) throw new PublicationEvidenceError("tags_unreadable");
+  const checked = presend(docs);
+  const facts = buildPublicationEvidence({
+    head: inputs.head,
+    anonymous: inputs.anonymous,
+    description,
+    version,
+    tag: tagState(inputs.tagsText, version.version, inputs.head),
+    bids: inputs.bidsRuns === null ? "unknown" : bidsState(inputs.bidsRuns, inputs.head),
+    presend: checked,
+    summary: inputs.summary,
+  });
+  return { facts, cleared: checked.cleared };
 }

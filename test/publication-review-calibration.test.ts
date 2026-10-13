@@ -200,13 +200,13 @@ interface Origin {
 }
 
 /** A dataset repository at `<origins>/<id>.git` with `files` laid over the defaults. */
-function newOrigin(id: string, files: Record<string, string | null> = {}): Origin {
+function newOrigin(id: string, files: Record<string, string | Buffer | null> = {}): Origin {
   const dir = join(originsDir, `${id}.git`);
   mkdirSync(dir, { recursive: true });
   git(dir, "init", "-q", "-b", "main");
   git(dir, "config", "uploadpack.allowFilter", "true");
   git(dir, "config", "uploadpack.allowAnySHA1InWant", "true");
-  const all: Record<string, string | null> = { ...BASE_FILES, ...files };
+  const all: Record<string, string | Buffer | null> = { ...BASE_FILES, ...files };
   for (const [rel, content] of Object.entries(all)) {
     if (content !== null) write(dir, rel, content);
   }
@@ -246,6 +246,18 @@ beforeAll(() => {
   origins.nm000005.head = git(origins.nm000005.dir, "rev-parse", "HEAD");
   // No README at all.
   origins.nm000006 = newOrigin("nm000006", { "README.md": null });
+  // A README nobody can read (not UTF-8) and no ethics statement in the description: the minimum that
+  // may rest on the README is left out, not failed. Kept out of the corpora the other tests count.
+  origins.nm000007 = newOrigin("nm000007", {
+    "README.md": Buffer.from([0xff, 0xfe, 0x41, 0x80]),
+    "dataset_description.json": JSON.stringify({
+      Name: `Resting EEG with a README nobody can read ${NAME_SENTINEL}`,
+      BIDSVersion: "1.9.0",
+      Version: "1.0.0",
+      License: "CC0",
+      Authors: ["Ada Lovelace"],
+    }),
+  });
 });
 
 /**
@@ -1129,6 +1141,38 @@ describe("calibrate runs the production review over every entry and records one 
       const [fromProduction, fromCalibration] = modelRequests as [ModelRequest, ModelRequest];
       expect(withoutNonce(fromCalibration.raw), id).toBe(withoutNonce(fromProduction.raw));
     }
+  });
+
+  test("calibration and production derive the same evidence for the same dataset, a README nobody could read included", async () => {
+    // The request drift test above compares what the model is sent; this compares the facts the
+    // report carries (the minimums, the version, the tag, the BIDS result, the documents' states),
+    // which the verdict is derived from. Each side orchestrates the same function over its own input.
+    const unread = join(root, "corpus-unread-readme");
+    const built = await buildCorpus({ ids: ["nm000007"], outDir: unread, remoteBase: REMOTE_BASE });
+    expect(built.built).toBe(1);
+    const dirs: Record<string, string> = { nm000007: join(unread, "nm000007") };
+    for (const id of ["nm000001", "nm000002", "nm000003", "nm000006"]) {
+      dirs[id] = join(goodCorpus, id);
+    }
+    for (const [id, dir] of Object.entries(dirs)) {
+      const origin = origins[id] as Origin;
+      const production = await runPublicationReview({
+        repoDir: origin.dir,
+        head: origin.head,
+        fetchedHead: origin.head,
+        tagsFile: sideFile(""),
+        bidsRunsFile: sideFile(null),
+        anonymous: false,
+      });
+      if (production.outcome !== "reported") throw new Error(`${id}: ${production.error}`);
+      expect(evidenceOf(readEntry(dir)).facts, id).toEqual(production.report.evidence);
+    }
+    // The case the two sides used to copy separately: the README exists and could not be read, so the
+    // ethics minimum that may rest on it is not recorded as failed, and the review says the text was
+    // withheld instead.
+    const { facts } = evidenceOf(readEntry(join(unread, "nm000007")));
+    expect(facts.documents.readme).toBe("withheld_not_utf8");
+    expect(facts).toMatchObject({ minimums: "met", minimum_failures: [] });
   });
 
   test("a README with a path on somebody's machine is withheld, exactly as in production", async () => {
