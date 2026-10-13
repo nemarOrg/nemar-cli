@@ -13,7 +13,10 @@ import * as prompt from "../scripts/ci/pr-review-prompt";
 import {
   PUBLICATION_REVIEW_ERROR_CODES,
   PUBLICATION_REVIEW_VIEW_KINDS,
+  START_NOT_HANDED_OVER_REASONS,
   START_REASONS,
+  START_REFUSED_REASONS,
+  START_STARTED_REASONS,
 } from "../shared/contract/publication-review-admin";
 import { FINDING_KINDS, KNOWN_FORMATS, type ScreenGate } from "../shared/identifier-screen-report";
 import * as prReview from "../shared/pr-review";
@@ -47,6 +50,8 @@ import {
   type PublicationReviewReport,
   PublicationReviewReportError,
   QUESTIONS,
+  QUESTION_FACTS,
+  QUESTION_FACT_TEXT,
   QUESTION_NEEDS,
   type Question,
   REASONS,
@@ -55,19 +60,24 @@ import {
   REVIEW_DOCUMENTS,
   REVIEW_FORMATS,
   REVIEW_OVERDUE_VIEW_MINUTES,
+  REVIEW_UNREADABLE_HEADLINE,
   type Reason,
   type ReasonCode,
   type ReviewRowView,
+  START_CURE_REASONS,
   TAG_STATES,
   VERSION_SHAPES,
   WORKER_ONLY_RUN_ERRORS,
   answersOf,
+  cureOf,
   describePublicationReview,
+  describeUnreadableReview,
   effectiveVersionOf,
   isWithheld,
   parsePublicationCallbackOutcome,
   parsePublicationReviewEvidence,
   parsePublicationReviewReport,
+  reasonLine,
   reasonsOf,
   reportReasons,
   stricterOf,
@@ -183,6 +193,41 @@ describe("the submission minimums as closed words", () => {
       expect(minimumFailureSentence(w)).not.toMatch(/currently \d/);
       expect(minimumFailureSentence(w).length).toBeGreaterThan(20);
     }
+  });
+});
+
+describe("the two minimum sentences that take a value", () => {
+  // Pinned in full, both forms. The short form (a stored, mailed or logged word) and the long form
+  // (what the depositor reads) are one template each, so they cannot drift; a change to either
+  // sentence is a change to both, and to this test.
+  const NAME_TAIL =
+    ' If the study is known by a short acronym, expand it with a subtitle, e.g. "ACRO: auditory cortex recordings during natural speech".';
+  const BLIND_TAIL =
+    ' That file is part of the dataset and is served publicly, so NEMAR cannot conceal what it says. Replace the entries with a placeholder such as "Anonymous", commit, and request the release again. Restore the real names when you publish after acceptance.';
+
+  test("name_too_short: the long form adds the current length to the short one", () => {
+    expect(minimumFailureSentence("name_too_short")).toBe(
+      `Dataset Name must be a descriptive title of at least 25 characters.${NAME_TAIL}`,
+    );
+    expect(evaluateSubmissionMinimums(JSON.stringify({ Name: "x" }), "IRB approved")).toEqual([
+      `Dataset Name must be a descriptive title of at least 25 characters (currently 1).${NAME_TAIL}`,
+      // The Authors rule fires too: a named release needs a real author.
+      minimumFailureSentence("authors_missing"),
+    ]);
+  });
+
+  test("authors_not_blinded: the long form names the authors it found, the short one says somebody", () => {
+    expect(minimumFailureSentence("authors_not_blinded")).toBe(
+      `This is an anonymous release, but Authors in dataset_description.json still names somebody.${BLIND_TAIL}`,
+    );
+    const description = JSON.stringify({
+      Name: "A sufficiently descriptive title of a dataset",
+      Authors: [SENTINEL, "Ada Lovelace"],
+      EthicsApprovals: ["Approved by the board, ref 12"],
+    });
+    expect(evaluateSubmissionMinimums(description, null, { anonymousRelease: true })).toEqual([
+      `This is an anonymous release, but Authors in dataset_description.json still names ${SENTINEL}, Ada Lovelace.${BLIND_TAIL}`,
+    ]);
   });
 });
 
@@ -477,23 +522,30 @@ describe("the closed lists are the ones ADR 0102 and the design note name", () =
       "not_reviewed",
       "running",
       "decided",
+      "unreadable",
     ]);
-    expect([...START_REASONS]).toEqual([
-      "dispatched",
-      "redispatched",
-      "dispatch_claimed",
-      "running",
-      "has_result",
+    expect([...START_STARTED_REASONS]).toEqual(["dispatched", "redispatched", "dispatch_claimed"]);
+    expect([...START_REFUSED_REASONS]).toEqual([
       "review_disabled",
       "not_applicable",
       "not_owned_here",
       "request_not_requested",
       "screen_not_ready",
-      "depositor_limit",
+      "running",
+      "has_result",
       "platform_limit",
+    ]);
+    expect([...START_NOT_HANDED_OVER_REASONS]).toEqual([
       "dispatch_failed",
       "dispatch_unconfigured",
     ]);
+    // `depositor_limit` is a screen result's answer, never an administrator's: not in the contract.
+    expect([...START_REASONS]).toEqual([
+      ...START_STARTED_REASONS,
+      ...START_REFUSED_REASONS,
+      ...START_NOT_HANDED_OVER_REASONS,
+    ]);
+    expect(START_REASONS as readonly string[]).not.toContain("depositor_limit");
     expect([...PUBLICATION_REVIEW_ERROR_CODES]).toEqual([
       "bad_dataset",
       "not_found",
@@ -506,8 +558,15 @@ describe("the closed lists are the ones ADR 0102 and the design note name", () =
       "running",
       "has_result",
       "platform_limit",
+      "dispatch_failed",
+      "dispatch_unconfigured",
       "internal",
     ]);
+    // Every word a refusal or a failed hand-over carries as `reason` is also a `code`, so the one
+    // word means one thing wherever a client reads it.
+    for (const word of [...START_REFUSED_REASONS, ...START_NOT_HANDED_OVER_REASONS]) {
+      expect(PUBLICATION_REVIEW_ERROR_CODES as readonly string[]).toContain(word);
+    }
   });
 
   test("the datatypes are the Worker's BIDS datatypes plus other", () => {
@@ -849,6 +908,82 @@ describe("the report agrees with itself, in the safe direction only", () => {
       },
     ]);
   });
+
+  /** Parse, serialize as the store does, and parse again: what a read of a stored report does. */
+  const reparsed = (report: PublicationReviewReport) =>
+    parsePublicationReviewReport(JSON.parse(JSON.stringify(report)));
+
+  test("room is never made by dropping the only finding of another failed question", () => {
+    // Seven notes for one question, and the one blocker of a second failed question last: the
+    // cut that makes room for the third question's `other` finding used to take the blocker, so
+    // the second question read as failed with nothing to read, and a re-parse (every read of a
+    // stored report) moved the same hole to the third.
+    const notes = Array.from({ length: 7 }, (_, i) =>
+      finding("complete_and_honest", "note", "other", null, `note ${i}`),
+    );
+    const parsed = parsePublicationReviewReport(
+      reportBody({
+        questions: { ...ALL_PASS, meets_standards: "fail", name_adequate: "fail" },
+        findings: [...notes, finding("meets_standards", "blocker", "ethics_statement_missing")],
+      }),
+    );
+    expect(parsed.findings).toHaveLength(8);
+    for (const q of QUESTIONS) {
+      if (parsed.questions[q] === "fail") {
+        expect(parsed.findings.some((f) => f.question === q)).toBe(true);
+      }
+    }
+    // The model's own finding for the second question stands; the third gets the filler; the
+    // model's last NOTE made the room.
+    expect(parsed.findings.filter((f) => f.question === "meets_standards")).toEqual([
+      expect.objectContaining({ code: "ethics_statement_missing" }),
+    ]);
+    expect(parsed.findings.filter((f) => f.question === "name_adequate")).toEqual([
+      expect.objectContaining({ code: "other", note: "No detail given." }),
+    ]);
+    expect(parsed.findings.filter((f) => f.question === "complete_and_honest")).toHaveLength(6);
+    expect(reparsed(parsed)).toEqual(parsed);
+  });
+
+  test("parsing is idempotent over random reports, and a failed question always has a finding", () => {
+    // mulberry32: a small seeded generator, so a failure is reproducible from the seed alone.
+    let state = 0x1ea5e5;
+    const next = () => {
+      state = (state + 0x6d2b79f5) | 0;
+      let t = Math.imul(state ^ (state >>> 15), 1 | state);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const pick = <T>(all: readonly T[]): T => all[Math.floor(next() * all.length)];
+    for (let i = 0; i < 4000; i++) {
+      const questions = Object.fromEntries(QUESTIONS.map((q) => [q, pick(ANSWERS)])) as Record<
+        Question,
+        Answer
+      >;
+      const findings = Array.from(
+        { length: Math.floor(next() * (MAX_PUBLICATION_FINDINGS + 1)) },
+        () =>
+          finding(
+            pick(QUESTIONS),
+            pick(PUBLICATION_SEVERITIES),
+            // Most findings are plain; some steer.
+            next() < 0.1 ? "steering_attempt" : "other",
+          ),
+      );
+      const parsed = parsePublicationReviewReport(
+        reportBody({ questions, findings, steering: next() < 0.1 }),
+      );
+      expect(reparsed(parsed)).toEqual(parsed);
+      expect(parsed.findings.length).toBeLessThanOrEqual(MAX_PUBLICATION_FINDINGS);
+      for (const q of QUESTIONS) {
+        if (parsed.questions[q] === "fail") {
+          expect(parsed.findings.some((f) => f.question === q)).toBe(true);
+        }
+      }
+      // The cut never lowers what the report says: a steering finding that made room still steers.
+      if (findings.some((f) => f.code === "steering_attempt")) expect(parsed.steering).toBe(true);
+    }
+  });
 });
 
 describe("facts only lower an answer (answersOf)", () => {
@@ -870,36 +1005,66 @@ describe("facts only lower an answer (answersOf)", () => {
   const FACTS: Array<{
     name: string;
     evidence: Record<string, unknown>;
-    lowers: Partial<Record<Question, { to: "fail" | "unknown"; code: string }>>;
+    lowers: Partial<Record<Question, { to: "fail" | "unknown"; code: string; fact: string }>>;
   }> = [
     {
       name: "no README",
       evidence: { documents: { ...ALL_SENT, readme: "absent" } },
-      lowers: { complete_and_honest: { to: "fail", code: "readme_missing_or_stub" } },
+      lowers: {
+        complete_and_honest: { to: "fail", code: "readme_missing_or_stub", fact: "readme_absent" },
+      },
     },
     {
       name: "the README was cut",
       evidence: { documents: { ...ALL_SENT, readme: "sent_cut" } },
       lowers: {
-        complete_and_honest: { to: "unknown", code: "evidence_incomplete" },
-        meets_standards: { to: "unknown", code: "evidence_incomplete" },
+        complete_and_honest: {
+          to: "unknown",
+          code: "evidence_incomplete",
+          fact: "text_not_seen_in_full",
+        },
+        meets_standards: {
+          to: "unknown",
+          code: "evidence_incomplete",
+          fact: "text_not_seen_in_full",
+        },
       },
     },
     {
       name: "the README is annexed (withheld, never a stub)",
       evidence: { documents: { ...ALL_SENT, readme: "withheld_annexed" } },
       lowers: {
-        complete_and_honest: { to: "unknown", code: "evidence_incomplete" },
-        meets_standards: { to: "unknown", code: "evidence_incomplete" },
+        complete_and_honest: {
+          to: "unknown",
+          code: "evidence_incomplete",
+          fact: "text_not_seen_in_full",
+        },
+        meets_standards: {
+          to: "unknown",
+          code: "evidence_incomplete",
+          fact: "text_not_seen_in_full",
+        },
       },
     },
     {
       name: "the description was withheld",
       evidence: { documents: { ...ALL_SENT, dataset_description: "withheld_not_json" } },
       lowers: {
-        meets_standards: { to: "unknown", code: "evidence_incomplete" },
-        authors_and_license: { to: "unknown", code: "evidence_incomplete" },
-        name_adequate: { to: "unknown", code: "evidence_incomplete" },
+        meets_standards: {
+          to: "unknown",
+          code: "evidence_incomplete",
+          fact: "text_not_seen_in_full",
+        },
+        authors_and_license: {
+          to: "unknown",
+          code: "evidence_incomplete",
+          fact: "text_not_seen_in_full",
+        },
+        name_adequate: {
+          to: "unknown",
+          code: "evidence_incomplete",
+          fact: "text_not_seen_in_full",
+        },
       },
     },
     {
@@ -908,12 +1073,24 @@ describe("facts only lower an answer (answersOf)", () => {
         documents: { ...ALL_SENT, changes: "withheld_finding" },
         withheld_findings: { "local-user-path": 1 },
       },
-      lowers: { complete_and_honest: { to: "unknown", code: "evidence_incomplete" } },
+      lowers: {
+        complete_and_honest: {
+          to: "unknown",
+          code: "evidence_incomplete",
+          fact: "text_not_seen_in_full",
+        },
+      },
     },
     {
       name: "LICENSE was cut",
       evidence: { documents: { ...ALL_SENT, license: "sent_cut" } },
-      lowers: { authors_and_license: { to: "unknown", code: "evidence_incomplete" } },
+      lowers: {
+        authors_and_license: {
+          to: "unknown",
+          code: "evidence_incomplete",
+          fact: "text_not_seen_in_full",
+        },
+      },
     },
     {
       name: "participants.json was withheld (no question needs it)",
@@ -923,22 +1100,34 @@ describe("facts only lower an answer (answersOf)", () => {
     {
       name: "no recordings",
       evidence: { summary: summaryBody({ recordings: 0, formats: {} }) },
-      lowers: { complete_and_honest: { to: "unknown", code: "evidence_incomplete" } },
+      lowers: {
+        complete_and_honest: { to: "unknown", code: "evidence_incomplete", fact: "no_recordings" },
+      },
     },
     {
       name: "no License",
       evidence: { license_field: false },
-      lowers: { authors_and_license: { to: "fail", code: "license_missing" } },
+      lowers: {
+        authors_and_license: { to: "fail", code: "license_missing", fact: "license_field_missing" },
+      },
     },
     {
       name: "a short name",
       evidence: { name_length: 24 },
-      lowers: { name_adequate: { to: "fail", code: "name_not_descriptive" } },
+      lowers: {
+        name_adequate: { to: "fail", code: "name_not_descriptive", fact: "name_too_short" },
+      },
     },
     {
       name: "a placeholder author on a named release",
       evidence: { placeholder_authors: 1 },
-      lowers: { authors_and_license: { to: "fail", code: "authors_placeholder" } },
+      lowers: {
+        authors_and_license: {
+          to: "fail",
+          code: "authors_placeholder",
+          fact: "placeholder_author",
+        },
+      },
     },
     {
       name: "a placeholder author on an anonymous release (the minimum answers it)",
@@ -953,6 +1142,67 @@ describe("facts only lower an answer (answersOf)", () => {
       expect(answers).toEqual(questions);
       expect(notes).toEqual([]);
     }
+  });
+
+  test("every fact has a closed word and one sentence, and the table above produces each word", () => {
+    expect([...QUESTION_FACTS]).toEqual([
+      "readme_absent",
+      "text_not_seen_in_full",
+      "no_recordings",
+      "license_field_missing",
+      "name_too_short",
+      "placeholder_author",
+    ]);
+    expect(QUESTION_FACT_TEXT).toEqual({
+      readme_absent: "no README was found at the dataset root",
+      text_not_seen_in_full: "the reviewer was not shown all of the text this question needs",
+      no_recordings: "the dataset's structure shows no recordings",
+      license_field_missing: "dataset_description.json sets no License",
+      name_too_short: "the Name in dataset_description.json is shorter than 25 characters",
+      placeholder_author: "Authors names a placeholder instead of a person",
+    });
+    const produced = new Set(FACTS.flatMap((f) => Object.values(f.lowers).map((l) => l.fact)));
+    expect([...produced].sort()).toEqual([...QUESTION_FACTS].sort());
+  });
+
+  test("a fact that lowered an answer is explained in the question's line, never as the reviewer's answer", () => {
+    const report = parsePublicationReviewReport(
+      reportBody({ evidence: evidenceBody({ license_field: false, name_length: 3 }) }),
+    );
+    const reasons = reportReasons(report);
+    expect(reasons.map((r) => [r.code, r.detail])).toEqual([
+      ["question_failed", "authors_and_license"],
+      ["question_failed", "name_adequate"],
+    ]);
+    const lines = describePublicationReview({
+      datasetId: "nm000123",
+      applies: true,
+      enabled: true,
+      outcome: "fail",
+      reasons,
+      row: { kind: "reported", report, stored: "fail" },
+      model: report.model,
+      head: HEAD,
+      version: "1.2.0",
+      startable: true,
+    }).lines;
+    expect(lines[0]).toStartWith(
+      "A question of the review failed (the authors and the license are real and consistent; dataset_description.json sets no License).",
+    );
+    expect(lines[1]).toStartWith(
+      "A question of the review failed (the name describes the dataset; the Name in dataset_description.json is shorter than 25 characters).",
+    );
+    expect(lines.join("\n")).not.toContain("answered no");
+    // A question the model failed itself lists its findings, and no fact.
+    const own = parsePublicationReviewReport(
+      reportBody({
+        questions: { ...ALL_PASS, name_adequate: "fail" },
+        findings: [finding("name_adequate", "blocker", "name_not_descriptive")],
+      }),
+    );
+    expect(reasonLine(reportReasons(own)[0], "nm000123", own, true)).toStartWith(
+      "A question of the review failed (the name describes the dataset; findings: Name not descriptive).",
+    );
   });
 
   for (const fact of FACTS) {
@@ -972,7 +1222,12 @@ describe("facts only lower an answer (answersOf)", () => {
           const note = notes.find((n) => n.question === q);
           if (want !== questions[q]) {
             lowered++;
-            expect(note).toEqual({ question: q, code: rule?.code as never, result: want as never });
+            expect(note).toEqual({
+              question: q,
+              code: rule?.code as never,
+              fact: rule?.fact as never,
+              result: want as never,
+            });
           } else {
             expect(note).toBeUndefined();
           }
@@ -1021,6 +1276,38 @@ describe("the reasons table", () => {
       if (REASONS[c].clearedBy === "override") expect(REASONS[c].cure).toContain("override");
       else expect(REASONS[c].cure).not.toContain("--force");
     }
+  });
+
+  test("the order is exactly ADR 0102's: the hard reasons, the screen's acknowledgment, then the overrides", () => {
+    expect([...REASON_CODES]).toEqual([
+      // Hard: the request, the minimums and the screen's finding (fail), the screen's gaps
+      // (unknown), then the release's own (fail).
+      "request_blocked",
+      "submission_minimum_failed",
+      "identifier_screen_blocks",
+      "identifier_screen_not_run",
+      "identifier_screen_pending",
+      "identifier_screen_stale",
+      "version_kept_after_anonymous_release",
+      "identifier_screen_needs_acknowledgment",
+      // Overrides, fail class first.
+      "question_failed",
+      "steering_attempt",
+      "bids_failed_at_review",
+      "version_already_released",
+      "version_malformed",
+      "stored_verdict_fail",
+      "review_not_started",
+      "review_running",
+      "review_did_not_report",
+      "review_limit_reached",
+      "review_could_not_run",
+      "text_withheld",
+      "question_unknown",
+      "bids_unconcluded_at_review",
+      "version_missing",
+      "doi_state_unexpected",
+    ]);
   });
 
   test("the order lists what nothing clears first, then the screen's, then the overrides, fail first", () => {
@@ -1495,42 +1782,58 @@ describe("describePublicationReview", () => {
     [R("identifier_screen_needs_acknowledgment"), R("text_withheld", "readme,license")],
     [R("request_blocked", "min_requirements_failed")],
     [R("identifier_screen_stale"), R("review_not_started")],
+    // Every cure that says "start it", without a hard reason ahead of it.
+    [R("review_not_started"), R("review_did_not_report")],
+    [R("review_limit_reached", "platform_limit"), R("review_could_not_run", "model_refused")],
   ];
-  const base = { datasetId: "nm000123", model: "claude-haiku-5-5", head: HEAD, version: "1.2.0" };
+  const base = {
+    datasetId: "nm000123",
+    model: "claude-haiku-5-5",
+    head: HEAD,
+    version: "1.2.0",
+    startable: true,
+  };
 
   test("every rendering ends with the standing line, and none is milder than its reasons", () => {
     let renderings = 0;
     for (const applies of [true, false])
       for (const enabled of [true, false])
-        for (const row of rows)
-          for (const reasons of reasonSets)
-            for (const outcome of [...PUBLICATION_OUTCOMES, null]) {
-              renderings++;
-              const d = describePublicationReview({
-                ...base,
-                applies,
-                enabled,
-                outcome,
-                reasons,
-                row,
-              });
-              expect(d.lines[d.lines.length - 1]).toBe(NOT_ASSESSED_LINE);
-              expect(d.lines.filter((l) => l === NOT_ASSESSED_LINE)).toHaveLength(1);
-              if (!applies) {
-                expect(d.headline).toBe("Publication review: not applicable");
-                expect(d.tone).toBe("note");
-              } else if (!enabled) {
-                expect(d.tone).toBe("note");
-                expect(d.headline).toContain("the automated review is off");
-                expect(d.next).toBeNull();
-              } else {
-                const shown = stricterOf(outcome ?? "action_required", oracleVerdict(reasons));
-                expect(d.tone).toBe(
-                  ({ pass: "ok", action_required: "warn", fail: "stop" } as const)[shown],
-                );
-                if (reasons.length > 0) expect(d.headline).not.toBe("Publication review: pass");
+        for (const startable of [true, false])
+          for (const row of rows)
+            for (const reasons of reasonSets)
+              for (const outcome of [...PUBLICATION_OUTCOMES, null]) {
+                renderings++;
+                const d = describePublicationReview({
+                  ...base,
+                  startable,
+                  applies,
+                  enabled,
+                  outcome,
+                  reasons,
+                  row,
+                });
+                expect(d.lines[d.lines.length - 1]).toBe(NOT_ASSESSED_LINE);
+                expect(d.lines.filter((l) => l === NOT_ASSESSED_LINE)).toHaveLength(1);
+                // A request no start can reach is never sent to one, in a line or in `next`.
+                if (!startable) {
+                  expect(d.lines.join("\n")).not.toContain("publish start");
+                  expect(d.next ?? "").not.toContain("publish start");
+                }
+                if (!applies) {
+                  expect(d.headline).toBe("Publication review: not applicable");
+                  expect(d.tone).toBe("note");
+                } else if (!enabled) {
+                  expect(d.tone).toBe("note");
+                  expect(d.headline).toContain("the automated review is off");
+                  expect(d.next).toBeNull();
+                } else {
+                  const shown = stricterOf(outcome ?? "action_required", oracleVerdict(reasons));
+                  expect(d.tone).toBe(
+                    ({ pass: "ok", action_required: "warn", fail: "stop" } as const)[shown],
+                  );
+                  if (reasons.length > 0) expect(d.headline).not.toBe("Publication review: pass");
+                }
               }
-            }
     expect(renderings).toBeGreaterThan(1000);
   });
 
@@ -1583,6 +1886,7 @@ describe("describePublicationReview", () => {
         "This request is no longer waiting for a decision, and no review of it is on record.",
         NOT_ASSESSED_LINE,
       ],
+      summary: null,
       next: null,
     });
     // Off wins over closed: the flag is the more basic fact. A review on record is shown as
@@ -1606,13 +1910,88 @@ describe("describePublicationReview", () => {
       reasons: reportReasons(hostileReport),
       row: { kind: "reported", report: hostileReport, stored: "fail" },
     });
+    // The model's summary is a field of its own, in plain words; it is never one of the lines.
+    expect(d.summary).not.toBeNull();
+    expect(d.summary).not.toMatch(/[@#<>`‮]/);
+    expect(d.summary).not.toContain("evil.example");
     const text = d.lines.join("\n");
-    expect(text).toContain("Reviewer's summary:");
+    expect(text).not.toContain("summary");
     expect(text).not.toMatch(/[@#<>`‮]/);
     expect(text).not.toContain("evil.example");
     expect(text).not.toContain("script");
     // The question's line names its finding by its closed label, not by the model's note.
     expect(text).toContain("Ethics statement inadequate");
+  });
+
+  test("a review that could not be read has its own fixed words, from this module, and is never a pass", () => {
+    expect(describeUnreadableReview("nm000123")).toEqual({
+      headline: "Publication review: could not be read",
+      tone: "warn",
+      lines: [
+        "The review's state could not be read just now, so it is not known. This is not a pass.",
+        NOT_ASSESSED_LINE,
+      ],
+      summary: null,
+      next: "nemar admin publish show nm000123",
+    });
+    expect(REVIEW_UNREADABLE_HEADLINE).toBe("Publication review: could not be read");
+    // No dataset id to show, or one that is not one: no command, and nothing is quoted.
+    for (const id of ["", `x ${SENTINEL}`, "nm00012"]) {
+      const d = describeUnreadableReview(id);
+      expect(d.next).toBeNull();
+      expect(JSON.stringify(d)).not.toContain("Zqxjvw");
+    }
+  });
+
+  test("the cures that say 'start it' are exactly four, and each has what is true for a request no start reaches", () => {
+    expect([...START_CURE_REASONS]).toEqual([
+      "review_not_started",
+      "review_did_not_report",
+      "review_limit_reached",
+      "review_could_not_run",
+    ]);
+    for (const code of REASON_CODES) {
+      const startCure = START_CURE_REASONS.includes(code);
+      expect(REASONS[code].cure.includes("publish start")).toBe(startCure);
+      expect(REASONS[code].cureNotStartable !== undefined).toBe(startCure);
+      // The cure of a reason that is not a start cure is the same either way.
+      if (!startCure) expect(cureOf(code, "nm000123", false)).toBe(cureOf(code, "nm000123", true));
+    }
+    for (const code of START_CURE_REASONS) {
+      expect(cureOf(code, "nm000123", true)).toContain("nemar admin publish start nm000123");
+      const plain = cureOf(code, "nm000123", false);
+      expect(plain).toBe(
+        "A review starts only for a request that is waiting for its decision. An administrator may approve over it; the approval records the override (--force).",
+      );
+      expect(plain).not.toContain("publish start");
+    }
+    // A malformed id is never quoted, in either form.
+    expect(cureOf("review_not_started", `x ${SENTINEL}`, true)).toContain(
+      "publish start <dataset>",
+    );
+  });
+
+  test("a request no start reaches is never told to start: not in a line, and not as the next command", () => {
+    const next = (reasons: Reason[], row: ReviewRowView, startable: boolean) =>
+      describePublicationReview({
+        ...base,
+        applies: true,
+        enabled: true,
+        outcome: null,
+        reasons,
+        row,
+        startable,
+      }).next;
+    const errored: ReviewRowView = { kind: "errored", detail: "model_refused" };
+    const reasons = [R("review_could_not_run", "model_refused")];
+    expect(next(reasons, errored, true)).toBe("nemar admin publish start nm000123");
+    // Being approved: the approval is the next thing, with the override its reason needs.
+    expect(next(reasons, errored, false)).toBe("nemar admin publish approve nm000123 --force");
+    expect(next([R("review_not_started")], { kind: "none" }, false)).toBe(
+      "nemar admin publish approve nm000123 --force",
+    );
+    // Blocked: a hard reason, so there is no command at all, startable or not.
+    expect(next([R("request_blocked"), ...reasons], errored, false)).toBeNull();
   });
 
   test("the next command follows from the reasons, and a malformed dataset id is never quoted", () => {

@@ -2108,18 +2108,11 @@ describe("an administrator's start", () => {
 });
 
 describe("no secret reaches the Worker's logs", () => {
+  // Everything `fn` logged, as one text: the shared capture sees console.log, warn and error.
   async function captured(fn: () => Promise<unknown>): Promise<string> {
-    const lines: string[] = [];
-    const originals = { log: console.log, warn: console.warn, error: console.error };
-    const grab = (...a: unknown[]) => void lines.push(a.map(String).join(" "));
-    console.log = grab;
-    console.warn = grab;
-    console.error = grab;
-    try {
+    const lines = await logged(async () => {
       await fn();
-    } finally {
-      Object.assign(console, originals);
-    }
+    });
     return lines.join("\n");
   }
 

@@ -7,6 +7,9 @@
  * through them and `screenGate`. They live in their own module, with nothing else, so the review
  * can import them without importing `identifier-screen.ts`, which in turn waits for the review
  * before it mails. `identifier-screen.ts` re-exports both, so its importers are unchanged.
+ *
+ * The sandbox exemption lives here too, for the same reason: the review's view must decide it
+ * exactly as the screen does, and a copy kept equal by a test is a second place to forget.
  */
 
 import {
@@ -15,6 +18,18 @@ import {
   isScreenState,
   parseScreenReport,
 } from "../../../shared/identifier-screen-report.js";
+import { isSandboxDatasetId } from "./datasetId.js";
+
+/**
+ * Sandbox (`xx`) datasets are not screened: the band is training and staging
+ * exemplars, which never publish real data (ADR 0068's bands). The same rule
+ * `isSandboxDatasetId` states, used by name so the exemption reads as a policy.
+ */
+export function isScreenExempt(datasetId: string): boolean {
+  // A well-formed `xx` id only: anything else is screened, never waved through
+  // because it happens to start with the letters.
+  return /^xx\d{6}$/.test(datasetId) && isSandboxDatasetId(datasetId);
+}
 
 /** The stored status column, read without trusting it: anything that is not a state is null. */
 export function readStoredState(raw: unknown): ScreenState | null {

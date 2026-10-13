@@ -17,9 +17,86 @@ import {
   reportReasons,
   verdictOf,
 } from "../../../shared/publication-review";
+import { hashApiKey } from "../../src/services/token";
 import { SCREENED_HEAD, cleanScreenReportBody, markScreen } from "./identifier-screen";
 
 export { SCREENED_HEAD };
+
+/** Words a model wrote: they must reach a person through the detail view and never through a list or a mail. */
+export const SUMMARY_SENTINEL = "SUMMARY-SENTINEL-the-model-wrote-this";
+export const NOTE_SENTINEL = "NOTE-SENTINEL-the-model-wrote-this-too";
+
+/**
+ * A report whose first question failed with one blocker finding, and whose model wrote the two
+ * sentinels above. Parsed by the production parser before it is returned, like every report here.
+ */
+export function failingReport(head: string = SCREENED_HEAD): Record<string, unknown> {
+  return goodPublicationReport({
+    summary: SUMMARY_SENTINEL,
+    questions: {
+      complete_and_honest: "fail",
+      meets_standards: "pass",
+      authors_and_license: "pass",
+      name_adequate: "pass",
+    },
+    findings: [
+      {
+        question: "complete_and_honest",
+        severity: "blocker",
+        code: "readme_mismatch",
+        document: "readme",
+        note: NOTE_SENTINEL,
+      },
+    ],
+    evidence: evidenceFor(head),
+  });
+}
+
+/** The visible text of a mail: tags dropped, entities decoded, whitespace collapsed. */
+export function textOf(html: string): string {
+  return html
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ");
+}
+
+/**
+ * An approved user with `role` and a bearer key, returning the user's id. The email is
+ * `<username>@example.org` unless told otherwise, so nothing leaves the machine.
+ */
+export async function seedUser(
+  db: Database,
+  username: string,
+  role: string,
+  key: string,
+  over: { email?: string; givenName?: string; familyName?: string } = {},
+): Promise<number> {
+  db.run(
+    `INSERT INTO users (username, email, password_hash, status, role, email_verified,
+                        service_access, sandbox_completed, given_name, family_name)
+     VALUES (?, ?, 'x', 'approved', ?, 1, 1, 1, ?, ?)`,
+    [
+      username,
+      over.email ?? `${username}@example.org`,
+      role,
+      over.givenName ?? "Ada",
+      over.familyName ?? "Lovelace",
+    ],
+  );
+  const id = db
+    .query<{ id: number }, [string]>("SELECT id FROM users WHERE username = ?")
+    .get(username)?.id as number;
+  db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)").run(
+    id,
+    await hashApiKey(key),
+    key.slice(0, 8),
+  );
+  return id;
+}
 
 /** An evidence block as the job would post it for a clean, named release of `head`. */
 export function evidenceFor(

@@ -16,12 +16,14 @@
  * history in the detail view and never the outcome here.
  *
  * **Only a request in `requested` is reviewed** (ADR 0102, section 7: the claim requires it). A
- * request in another state shows its stored review as history and never as a wait: a dispatched
+ * request in any other state shows its stored review as history and never as a wait: a dispatched
  * row of such a request reads as one that did not report, so no surface says "running" about a
- * review whose result can no longer settle anything. Its live facts are not read either, apart from
- * the two statuses {@link LIVE_FACT_STATUSES} names: they describe an approval that is not going to
- * happen (a published request would otherwise read as one whose version "was already released"),
- * or one that is under way and has written them itself (an `approving` request).
+ * review whose result can no longer settle anything. Its live facts are not read either, with one
+ * exception, `blocked` ({@link LIVE_FACT_STATUSES}): a blocked request has written nothing of an
+ * approval, so a version row or a concept DOI can only belong to an EARLIER release, and is shown
+ * beside the hard `request_blocked`. A request that is over (`published`, `denied`) would read as
+ * one whose own release "was already released", and an `approving` request has written those facts
+ * itself, so both show their stored review only.
  *
  * **What a viewer may read** is counts, closed words and the shared sentences. The model's summary
  * and the notes of its findings, both sanitized by the parser, appear in the detail view and
@@ -49,7 +51,6 @@ import type {
 import { type ScreenGate, screenGate } from "../../../shared/identifier-screen-report.js";
 import {
   type LiveFacts,
-  NOT_ASSESSED_LINE,
   PUBLICATION_REVIEW_DEADLINE_MINUTES,
   type PublicationDeclineDetail,
   type PublicationOutcome,
@@ -60,12 +61,16 @@ import {
   REASONS,
   REASON_CODES,
   REVIEW_OVERDUE_VIEW_MINUTES,
+  REVIEW_UNREADABLE_HEADLINE,
   type Reason,
   type ReasonCode,
   type ReviewRowView,
   answersOf,
+  cureOf,
   describePublicationReview,
+  describeUnreadableReview,
   effectiveVersionOf,
+  factNotesOf,
   isPublicationDeclineDetail,
   isPublicationOutcome,
   isPublicationReviewState,
@@ -76,10 +81,9 @@ import {
 } from "../../../shared/publication-review.js";
 import type { Bindings } from "../types/bindings.js";
 import { ACTIVE_REQUEST_TAIL_SQL } from "./approval-dispatch.js";
-import { isSandboxDatasetId, isValidDatasetId } from "./datasetId.js";
 import type { PublicationReviewSection } from "./email.js";
 import { isNonProductionEnv } from "./environment.js";
-import { readStoredReport, readStoredState } from "./identifier-screen-stored.js";
+import { isScreenExempt, readStoredReport, readStoredState } from "./identifier-screen-stored.js";
 import { SHA40, errorWords } from "./publication-review-log.js";
 import {
   MAX_KEYS_PER_READ,
@@ -141,14 +145,6 @@ const LIVE_FACT_STATUSES: ReadonlySet<string> = new Set(["requested", "blocked"]
  */
 const ACTIVE_STATUSES: ReadonlySet<string> = new Set(["requested", "approving", "blocked"]);
 
-/**
- * `isScreenExempt` of `identifier-screen.ts`, stated again because that module imports this one.
- * A test keeps the two equal.
- */
-export function screenExempt(datasetId: string): boolean {
-  return /^xx\d{6}$/.test(datasetId) && isSandboxDatasetId(datasetId);
-}
-
 // ---------------------------------------------------------------------------------------------
 // The derivation
 // ---------------------------------------------------------------------------------------------
@@ -209,6 +205,8 @@ export interface DerivedPublicationReview {
    * review is off, or the request is over).
    */
   outcome: PublicationOutcome | null;
+  /** An administrator's start can reach this request (it is `requested`); the cures and `next` say so. */
+  startable: boolean;
   description: PublicationReviewDescription;
 }
 
@@ -247,7 +245,7 @@ function screenOf(request: ReviewRequestFields): {
   const screenReport = state === null ? null : readStoredReport(request.identifier_screen_report);
   return {
     head: screenReport?.head ?? null,
-    gate: screenExempt(request.dataset_id) ? "exempt" : screenGate(state),
+    gate: isScreenExempt(request.dataset_id) ? "exempt" : screenGate(state),
   };
 }
 
@@ -282,6 +280,9 @@ export async function derivePublicationReview(
   const enabled = reviewEnabled(env);
   const applies = publicationReviewApplies(dataset ?? {});
   const anonymous = request.anonymous === 1;
+  // An administrator's start is refused for any request that is not waiting for its decision, so
+  // only such a request is ever told to start a review.
+  const startable = request.status === "requested";
 
   const { head, gate } = screenOf(request);
 
@@ -356,6 +357,7 @@ export async function derivePublicationReview(
       live,
       reasons: [],
       outcome: null,
+      startable,
       description: describePublicationReview({
         datasetId: request.dataset_id,
         applies,
@@ -366,6 +368,7 @@ export async function derivePublicationReview(
         model: null,
         head: null,
         version: null,
+        startable,
       }),
     };
   }
@@ -380,6 +383,7 @@ export async function derivePublicationReview(
       live,
       reasons: [],
       outcome: null,
+      startable,
       description: describePublicationReview({
         datasetId: request.dataset_id,
         applies,
@@ -390,6 +394,7 @@ export async function derivePublicationReview(
         model: null,
         head: null,
         version: null,
+        startable,
         closed,
       }),
     };
@@ -410,6 +415,7 @@ export async function derivePublicationReview(
     live,
     reasons,
     outcome,
+    startable,
     description: describePublicationReview({
       datasetId: request.dataset_id,
       applies,
@@ -420,6 +426,7 @@ export async function derivePublicationReview(
       model: report?.model ?? null,
       head: row?.headSha ?? head,
       version,
+      startable,
       closed,
     }),
   };
@@ -436,9 +443,6 @@ function viewKindOf(d: DerivedPublicationReview): PublicationReviewViewKind {
   if (d.rowView.kind === "dispatched" && !d.rowView.overdue) return "running";
   return "decided";
 }
-
-/** What every surface says when it could not read the review: a fixed sentence, never a pass. */
-const UNREADABLE_HEADLINE = "Publication review: could not be read";
 
 /**
  * One row of `GET /admin/publish/requests`: the outcome, the headline and the reason codes. No
@@ -459,19 +463,50 @@ function summaryOf(d: DerivedPublicationReview): PublicationReviewSummary {
 }
 
 /**
- * The summary of a request whose review could not be read: not a pass, and not a reason to fail
- * the rest of a list. The fixed headline of the mail's unreadable section and the reason
- * `review_could_not_run`, so a client that renders the server's words says the same everywhere.
+ * The summary of a request whose review could not be read: not a reason to fail the rest of a list.
+ *
+ * With the review ON it is the `unreadable` kind: `action_required`, never a pass, in the shared
+ * words, with no reason (the cure of `review_could_not_run`, "start it again", is wrong advice for
+ * a read fault). With it OFF nothing is gated and nothing is assessed, so it is what a request with
+ * no review on record is while the review is off: the not-assessed `off` summary, with no outcome
+ * and no reason. That is also what the admin email does, so the list and the mail cannot disagree
+ * about a request whose rows cannot be read.
  */
-function unreadableSummary(enabled: boolean): PublicationReviewSummary {
+function unreadableSummary(enabled: boolean, datasetId: string): PublicationReviewSummary {
+  if (!enabled) {
+    const off = describePublicationReview({
+      datasetId,
+      applies: true,
+      enabled: false,
+      outcome: null,
+      reasons: [],
+      row: { kind: "none" },
+      model: null,
+      head: null,
+      version: null,
+      // Not an offer of anything: the review is off, so no command is built.
+      startable: false,
+    });
+    return {
+      kind: "off",
+      enabled: false,
+      gate: "off",
+      outcome: null,
+      headline: off.headline,
+      tone: off.tone,
+      reasons: [],
+      review_id: null,
+      head_sha: null,
+    };
+  }
   return {
-    kind: enabled ? "decided" : "off",
-    enabled,
-    gate: enabled ? "enforced" : "off",
+    kind: "unreadable",
+    enabled: true,
+    gate: "enforced",
     outcome: "action_required",
-    headline: UNREADABLE_HEADLINE,
+    headline: REVIEW_UNREADABLE_HEADLINE,
     tone: "warn",
-    reasons: ["review_could_not_run"],
+    reasons: [],
     review_id: null,
     head_sha: null,
   };
@@ -497,7 +532,7 @@ export const LIST_CONCURRENCY = 8;
  *    in flight at once.
  *  - Each row stands alone. A read that fails costs the rows it was for, and nothing else: they
  *    read as {@link unreadableSummary} (never a pass), only ids and a closed class are logged, and
- *    the list still answers. One bad row used to fail the queue for every administrator.
+ *    the list still answers.
  */
 export async function publicationReviewSummaries(
   env: Bindings,
@@ -534,7 +569,7 @@ export async function publicationReviewSummaries(
       ...(await Promise.all(
         batch.map(async (item, offset) => {
           const index = start + offset;
-          if (unreadable.has(index)) return unreadableSummary(enabled);
+          if (unreadable.has(index)) return unreadableSummary(enabled, item.request.dataset_id);
           try {
             const key = keys[index];
             return summaryOf(
@@ -550,7 +585,7 @@ export async function publicationReviewSummaries(
             console.error(
               `[publication-review] could not read the review of request ${item.request.id} for the list (${errorWords(err)})`,
             );
-            return unreadableSummary(enabled);
+            return unreadableSummary(enabled, item.request.dataset_id);
           }
         }),
       )),
@@ -588,8 +623,11 @@ export function overrideReasonsOf(raw: string | null): ReasonCode[] {
   return [...new Set(known)];
 }
 
-function reasonViewsOf(reasons: readonly Reason[], datasetId: string): ReasonView[] {
-  const id = isValidDatasetId(datasetId) ? datasetId : "<dataset>";
+function reasonViewsOf(
+  reasons: readonly Reason[],
+  datasetId: string,
+  startable: boolean,
+): ReasonView[] {
   return reasons.map((r) => {
     const rule = REASONS[r.code];
     return {
@@ -598,7 +636,7 @@ function reasonViewsOf(reasons: readonly Reason[], datasetId: string): ReasonVie
       cleared_by: rule.clearedBy,
       detail: r.detail,
       sentence: rule.sentence,
-      cure: rule.cure.replaceAll("<dataset>", id),
+      cure: cureOf(r.code, datasetId, startable),
     };
   });
 }
@@ -633,6 +671,7 @@ function recordOf(row: PublicationReviewRow, view: ReviewRowView): PublicationRe
           }
         : null,
     questions: report === null ? null : answersOf(report).answers,
+    fact_notes: report === null ? [] : factNotesOf(report),
     findings: (report?.findings ?? []).map((f) => ({
       question: f.question,
       severity: f.severity,
@@ -652,7 +691,7 @@ function historyEntryOf(row: PublicationReviewRow): PublicationReviewHistoryEntr
     head_sha: row.headSha,
     anonymous: row.anonymous,
     state,
-    verdict: isPublicationOutcome(row.verdict) ? row.verdict : null,
+    stored_verdict: isPublicationOutcome(row.verdict) ? row.verdict : null,
     created_at: row.createdAt,
     decided_at: row.decidedAt,
   };
@@ -729,7 +768,7 @@ export async function publicationReviewDetail(
     applies: d.applies,
     gate: d.gate,
     outcome: d.outcome,
-    reasons: reasonViewsOf(d.reasons, ctx.request.dataset_id),
+    reasons: reasonViewsOf(d.reasons, ctx.request.dataset_id, d.startable),
     description: d.description,
     review: d.row === null ? null : recordOf(d.row, d.rowView),
     history: past.slice(0, HISTORY_LIMIT).map(historyEntryOf),
@@ -740,26 +779,6 @@ export async function publicationReviewDetail(
 // ---------------------------------------------------------------------------------------------
 // The mail's section
 // ---------------------------------------------------------------------------------------------
-
-/**
- * The start of the line `describePublicationReview` adds for the model's summary. The mail
- * leaves that line out: it is the one place a sentence a depositor could influence would travel
- * to a person's inbox unprompted. A test keeps this prefix equal to the shared module's.
- */
-export const SUMMARY_LINE_PREFIX = "Reviewer's summary: ";
-
-/** What the mail says when the review could not be read: a fixed sentence, never a pass. */
-function unreadableSection(datasetId: string): PublicationReviewSection {
-  return {
-    headline: UNREADABLE_HEADLINE,
-    tone: "warn",
-    lines: [
-      "The review's state could not be read just now, so it is not known. This is not a pass.",
-      NOT_ASSESSED_LINE,
-    ],
-    next: isValidDatasetId(datasetId) ? `nemar admin publish show ${datasetId}` : undefined,
-  };
-}
 
 /**
  * The review's part of the publication-request email: the headline, each reason in its shared
@@ -807,7 +826,7 @@ export async function publicationReviewEmailSection(
     return {
       headline: d.description.headline,
       tone: d.description.tone,
-      lines: d.description.lines.filter((line) => !line.startsWith(SUMMARY_LINE_PREFIX)),
+      lines: d.description.lines,
       next: d.description.next ?? undefined,
     };
   } catch (err) {
@@ -820,6 +839,12 @@ export async function publicationReviewEmailSection(
     // be told a review "could not be read" that nothing was ever going to start. With it on, the
     // review is a gate, and not knowing its state is said so.
     if (!reviewEnabled(env)) return null;
-    return unreadableSection(datasetId);
+    const unreadable = describeUnreadableReview(datasetId);
+    return {
+      headline: unreadable.headline,
+      tone: unreadable.tone,
+      lines: unreadable.lines,
+      next: unreadable.next ?? undefined,
+    };
   }
 }

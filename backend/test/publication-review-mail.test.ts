@@ -15,11 +15,13 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { beforeEach, describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, setSystemTime, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import {
   NOT_ASSESSED_LINE,
+  PLATFORM_DAILY_CAP,
+  PUBLICATION_REVIEW_DEADLINE_MINUTES,
   REASONS,
   describePublicationReview,
   parsePublicationReviewReport,
@@ -35,31 +37,31 @@ import {
   sweepIdentifierScreens,
 } from "../src/services/identifier-screen";
 import {
+  startPublicationReview,
   storePublicationReviewResult,
   sweepPublicationReviews,
 } from "../src/services/publication-review";
-import { SUMMARY_LINE_PREFIX } from "../src/services/publication-review-view";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, interceptingD1, realD1, yieldingD1 } from "./helpers/d1";
 import { SCREENED_HEAD, cleanScreenReportBody } from "./helpers/identifier-screen";
 import { logged } from "./helpers/logs";
 import {
+  NOTE_SENTINEL,
+  SUMMARY_SENTINEL,
   type SeedReview,
   type SeedScreenedRequest,
-  evidenceFor,
+  failingReport,
   goodPublicationReport,
   seedPublicationReview,
   seedScreenedRequest,
+  textOf,
 } from "./helpers/publication-review";
 import { type CapturedEmail, type ResendSendBody, asSend, withFakeResend } from "./helpers/resend";
 
 const ADMIN_EMAIL = "reviewadmin@example.org";
 const SECRET = "publication-review-mail-secret";
 const OTHER_HEAD = "f".repeat(40);
-/** Words a depositor could influence: they must never reach an inbox through the review section. */
-const SUMMARY_SENTINEL = "SUMMARY-SENTINEL-the-model-wrote-this";
-const NOTE_SENTINEL = "NOTE-SENTINEL-the-model-wrote-this-too";
 
 let db: Database;
 let counter = 0;
@@ -107,18 +109,6 @@ function sends(calls: CapturedEmail[]): ResendSendBody[] {
     .filter((b) => b.to.includes(ADMIN_EMAIL));
 }
 
-/** The visible text of a mail: tags dropped, entities decoded, whitespace collapsed. */
-function textOf(html: string): string {
-  return html
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&#39;/g, "'")
-    .replace(/&quot;/g, '"')
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&amp;/g, "&")
-    .replace(/\s+/g, " ");
-}
-
 function mailState(requestId: number) {
   return db
     .query<{ emailed: string | null; claimed: string | null }, [number]>(
@@ -136,28 +126,37 @@ function failingReviewReads(error: Error): D1Database {
   });
 }
 
-/** A report whose first question failed with a finding, and whose model wrote the two sentinels. */
-function failingReport(head = SCREENED_HEAD) {
-  return goodPublicationReport({
-    summary: SUMMARY_SENTINEL,
-    questions: {
-      complete_and_honest: "fail",
-      meets_standards: "pass",
-      authors_and_license: "pass",
-      name_adequate: "pass",
-    },
-    findings: [
-      {
-        question: "complete_and_honest",
-        severity: "blocker",
-        code: "readme_mismatch",
-        document: "readme",
-        note: NOTE_SENTINEL,
-      },
-    ],
-    evidence: evidenceFor(head),
-  });
+const RESEND_KEY = "resend-owner-key-0123456789abcdef0123456789abcdef";
+const resendApp = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+resendApp.route("/datasets", datasetRoutes);
+/** Each depositor's key, by dataset: a key's hash is unique. */
+const resendKeys = new Map<string, string>();
+
+/** A request whose screen reported, owned by a depositor who holds a key, last touched days ago. */
+async function resendable(over: Partial<SeedScreenedRequest> = {}) {
+  const datasetId = over.datasetId ?? nextDataset();
+  const { requestId, userId } = seedScreenedRequest(db, { ...over, datasetId, mailed: false });
+  const key = `${RESEND_KEY}-${datasetId}`;
+  resendKeys.set(datasetId, key);
+  db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)").run(
+    userId,
+    await hashApiKey(key),
+    key.slice(0, 8),
+  );
+  // Days, not hours: the route reads this text as LOCAL time, and a suite that has changed the
+  // process's time zone (as a neighbouring file's does) must not turn "hours ago" into "later".
+  db.run("UPDATE publication_requests SET updated_at = datetime('now', '-2 days') WHERE id = ?", [
+    requestId,
+  ]);
+  return { requestId, datasetId };
 }
+
+const resend = (datasetId: string, bindings: Bindings = env()) =>
+  resendApp.request(
+    `/datasets/${datasetId}/publish/resend`,
+    { method: "POST", headers: { Authorization: `Bearer ${resendKeys.get(datasetId)}` } },
+    bindings,
+  );
 
 // ============================================================================
 
@@ -756,38 +755,6 @@ describe("a review that never reports is mailed once, and the mail says so", () 
 // ============================================================================
 
 describe("the depositor's resend carries the review's section", () => {
-  const KEY = "resend-owner-key-0123456789abcdef0123456789abcdef";
-  const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
-  app.route("/datasets", datasetRoutes);
-  /** Each depositor's key, by dataset: a key's hash is unique. */
-  const keys = new Map<string, string>();
-
-  /** A request whose screen reported, owned by a depositor who holds a key, last touched days ago. */
-  async function resendable(over: Partial<SeedScreenedRequest> = {}) {
-    const datasetId = over.datasetId ?? nextDataset();
-    const { requestId, userId } = seedScreenedRequest(db, { ...over, datasetId, mailed: false });
-    const key = `${KEY}-${datasetId}`;
-    keys.set(datasetId, key);
-    db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)").run(
-      userId,
-      await hashApiKey(key),
-      key.slice(0, 8),
-    );
-    // Days, not hours: the route reads this text as LOCAL time, and a suite that has changed the
-    // process's time zone (as a neighbouring file's does) must not turn "hours ago" into "later".
-    db.run("UPDATE publication_requests SET updated_at = datetime('now', '-2 days') WHERE id = ?", [
-      requestId,
-    ]);
-    return { requestId, datasetId };
-  }
-
-  const resend = (datasetId: string, bindings: Bindings = env()) =>
-    app.request(
-      `/datasets/${datasetId}/publish/resend`,
-      { method: "POST", headers: { Authorization: `Bearer ${keys.get(datasetId)}` } },
-      bindings,
-    );
-
   test("a review in flight is in the reminder, and the review's own mail still goes when it reports", async () => {
     const { requestId, datasetId } = await resendable();
     const reviewId = seedPublicationReview(db, {
@@ -817,6 +784,53 @@ describe("the depositor's resend carries the review's section", () => {
         report: parsePublicationReviewReport(goodPublicationReport()),
       });
       expect(stored).toEqual({ stored: true, state: "reported" });
+      const mails = sends(calls);
+      expect(mails).toHaveLength(2);
+      expect(textOf(mails[1].html)).toContain("Publication review: pass");
+      expect(mailState(requestId).emailed).not.toBeNull();
+    });
+  });
+
+  test("one instant decides both what the reminder says and whether it counts as the mail", async () => {
+    // The review is a second past its deadline by the database's clock and a few seconds short of it
+    // by the Worker's: the reminder, built from the Worker's clock, says it is running, so the
+    // review's own mail has to still go. Deciding "counts as the mail" at a later instant than the
+    // section was built at stamped the request as mailed, and the review's mail was skipped.
+    const { requestId, datasetId } = await resendable();
+    const reviewId = seedPublicationReview(db, {
+      requestId,
+      datasetId,
+      state: "dispatched",
+      claimed: true,
+    });
+    const deadlineSeconds = PUBLICATION_REVIEW_DEADLINE_MINUTES * 60;
+    db.run("UPDATE publication_reviews SET created_at = datetime('now', ?) WHERE id = ?", [
+      `-${deadlineSeconds + 1} seconds`,
+      reviewId,
+    ]);
+    await withFakeResend(async (calls) => {
+      try {
+        // The Worker's clock reads five seconds earlier than the database's.
+        setSystemTime(new Date(Date.now() - 5_000));
+        expect((await resend(datasetId)).status).toBe(200);
+      } finally {
+        setSystemTime();
+      }
+      const [reminder] = sends(calls);
+      expect(textOf(reminder.html)).toContain(REASONS.review_running.sentence);
+      // The reminder said the review is running, so it is NOT the mail that carries the verdict.
+      expect(mailState(requestId).emailed).toBeNull();
+
+      // The review reports: its result tries the mail, and it goes.
+      const nonce = db
+        .query<{ nonce: string }, [number]>("SELECT nonce FROM publication_reviews WHERE id = ?")
+        .get(reviewId)?.nonce as string;
+      expect(
+        await storePublicationReviewResult(env(), reviewId, datasetId, nonce, {
+          kind: "reported",
+          report: parsePublicationReviewReport(goodPublicationReport()),
+        }),
+      ).toEqual({ stored: true, state: "reported" });
       const mails = sends(calls);
       expect(mails).toHaveLength(2);
       expect(textOf(mails[1].html)).toContain("Publication review: pass");
@@ -904,9 +918,9 @@ describe("what the mail may carry", () => {
     });
   });
 
-  test("the shared module still says the summary on a line of its own, which the mail leaves out", () => {
-    // The mail drops that line by its prefix. If the shared words ever change the prefix, this
-    // fails and the filter has to follow, instead of the summary reaching an inbox quietly.
+  test("the shared description keeps the summary in a field of its own, so the mail never receives it", () => {
+    // The mail is built from `description.lines`. The summary is not one of them, by construction,
+    // so no filter has to recognize it and no rewording can let it through.
     const report = parsePublicationReviewReport(failingReport());
     const described = describePublicationReview({
       datasetId: "nm000601",
@@ -918,11 +932,11 @@ describe("what the mail may carry", () => {
       model: report.model,
       head: SCREENED_HEAD,
       version: "1.0.0",
+      startable: true,
     });
-    expect(described.lines.some((l) => l.startsWith(SUMMARY_LINE_PREFIX))).toBe(true);
-    expect(described.lines.find((l) => l.startsWith(SUMMARY_LINE_PREFIX))).toContain(
-      SUMMARY_SENTINEL,
-    );
+    expect(described.summary).toBe(SUMMARY_SENTINEL);
+    expect(described.lines.join("\n")).not.toContain(SUMMARY_SENTINEL);
+    expect(described.lines.join("\n")).not.toContain("summary");
   });
 
   test("an anonymous release's notice is unchanged, and its review is the anonymous one", async () => {
@@ -1037,6 +1051,155 @@ describe("through the real screen callback", () => {
       const mail = sends(calls);
       expect(mail).toHaveLength(1);
       expect(textOf(mail[0].html)).toContain("Publication review: pass");
+    });
+  });
+});
+
+// ============================================================================
+
+describe("from a development Worker, no review mail is sent unless DEV_ADMIN_NOTIFICATIONS opts in", () => {
+  // AGENTS.md: the dev Worker shares the users table with production, so a mail it sends can reach
+  // a real person. Every review mail goes through `getAdminEmailsForCategory`, which is the fence;
+  // this walks each new way to a mail and shows that none of them has a way around it. Each
+  // trigger also has its positive control (opted in, with the admin on the allowlist, it IS sent),
+  // so a silent run proves the fence and not a trigger that never fired.
+  const DEV_DATASET = "nm099998"; // a standing fixture the dev Worker owns
+  // The admin is on the delivery allowlist in BOTH cases, so the only thing that can stop a mail
+  // here is the admin-notification fence this test is about, not the recipient fence behind it.
+  const dev = (over: Partial<Bindings> = {}) =>
+    env({
+      ENVIRONMENT: "development",
+      GITHUB_ADMIN_PAT: "ghp_dev_test",
+      DEV_EMAIL_ALLOWLIST: ADMIN_EMAIL,
+      ...over,
+    });
+  const optedIn = () => dev({ DEV_ADMIN_NOTIFICATIONS: "1" });
+
+  const adminId = () =>
+    db.query<{ id: number }, []>("SELECT id FROM users WHERE username = 'reviewadmin'").get()
+      ?.id as number;
+
+  interface Trigger {
+    name: string;
+    /** Whether an opted-in dev Worker sends this mail (the two watchdogs are production-only). */
+    sendsWhenOptedIn: boolean;
+    run: (e: Bindings) => Promise<void>;
+  }
+
+  const triggers: Trigger[] = [
+    {
+      name: "an administrator's start that is declined",
+      sendsWhenOptedIn: true,
+      async run(e) {
+        const { requestId, datasetId } = unmailed({ datasetId: DEV_DATASET });
+        // The platform's allowance is spent by other depositors' reviews in the last day.
+        for (let i = 0; i < PLATFORM_DAILY_CAP; i++) {
+          const other = unmailed();
+          seedPublicationReview(db, {
+            requestId: other.requestId,
+            datasetId: other.datasetId,
+            state: "reported",
+            claimed: true,
+          });
+        }
+        const out = await startPublicationReview(e, {
+          requestId,
+          datasetId,
+          adminUserId: adminId(),
+        });
+        // The trigger fired: the start reached the allowance and recorded a decline.
+        expect(out).toMatchObject({ started: false, reason: "platform_limit" });
+      },
+    },
+    {
+      name: "a review's result being stored",
+      sendsWhenOptedIn: true,
+      async run(e) {
+        const { requestId, datasetId } = unmailed({ datasetId: DEV_DATASET });
+        const reviewId = seedPublicationReview(db, {
+          requestId,
+          datasetId,
+          state: "dispatched",
+          createdMinutesAgo: 2,
+          claimed: true,
+        });
+        const nonce = db
+          .query<{ nonce: string }, [number]>("SELECT nonce FROM publication_reviews WHERE id = ?")
+          .get(reviewId)?.nonce as string;
+        const stored = await storePublicationReviewResult(e, reviewId, datasetId, nonce, {
+          kind: "reported",
+          report: parsePublicationReviewReport(goodPublicationReport()),
+        });
+        expect(stored).toEqual({ stored: true, state: "reported" });
+      },
+    },
+    {
+      name: "the review watchdog",
+      // Production only, whatever the opt-in says: the dev Worker never ages or mails a row.
+      sendsWhenOptedIn: false,
+      async run(e) {
+        const { requestId, datasetId } = unmailed({ datasetId: DEV_DATASET });
+        seedPublicationReview(db, {
+          requestId,
+          datasetId,
+          state: "dispatched",
+          createdMinutesAgo: 90,
+        });
+        expect(await sweepPublicationReviews(e)).toMatchObject({ skipped: true, mailed: 0 });
+      },
+    },
+    {
+      name: "the identifier watchdog's unmailed pass, which now waits for a review",
+      // Production only too: the identifier sweep is skipped on any other Worker.
+      sendsWhenOptedIn: false,
+      async run(e) {
+        const { requestId, datasetId } = unmailed({ datasetId: DEV_DATASET });
+        db.run(
+          "UPDATE publication_requests SET identifier_screen_at = datetime('now', '-10 minutes') WHERE id = ?",
+          [requestId],
+        );
+        seedPublicationReview(db, { requestId, datasetId, state: "reported" });
+        expect(await sweepIdentifierScreens(e)).toMatchObject({ skipped: true, emailed: 0 });
+      },
+    },
+    {
+      name: "the depositor's resend",
+      sendsWhenOptedIn: true,
+      async run(e) {
+        const { datasetId } = await resendable({ datasetId: DEV_DATASET });
+        expect((await resend(datasetId, e)).status).toBe(200);
+      },
+    },
+  ];
+
+  for (const trigger of triggers) {
+    test(`${trigger.name}: sends nothing without the opt-in`, async () => {
+      await withFakeResend(async (calls) => {
+        let lines: string[] = [];
+        lines = await logged(async () => {
+          await trigger.run(dev());
+        });
+        expect(calls).toHaveLength(0);
+        // The fence says so where it fires; the review watchdog never reaches it.
+        if (trigger.sendsWhenOptedIn) expect(lines.join("\n")).toContain("suppressed");
+      });
+    });
+
+    test(`${trigger.name}: ${trigger.sendsWhenOptedIn ? "is sent once the Worker opts in" : "still sends nothing when the Worker opts in"}`, async () => {
+      await withFakeResend(async (calls) => {
+        await trigger.run(optedIn());
+        expect(sends(calls)).toHaveLength(trigger.sendsWhenOptedIn ? 1 : 0);
+      });
+    });
+  }
+
+  test("a production Worker sends the same mail with no opt-in at all", async () => {
+    // The fence turns on the environment alone: this is the contrast the cases above rest on.
+    const { requestId, datasetId } = unmailed();
+    seedPublicationReview(db, { requestId, datasetId, state: "reported" });
+    await withFakeResend(async (calls) => {
+      expect(await notifyAdminsOfScreen(env(), requestId)).toBe("sent");
+      expect(sends(calls)).toHaveLength(1);
     });
   });
 });

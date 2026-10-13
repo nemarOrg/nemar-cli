@@ -908,6 +908,11 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     // screen says "NOT RUN for this request", never nothing. The review's section
     // is the one the screen callback and the watchdog build (ADR 0102), so the
     // reminder never says less about the review than the mail it reminds of.
+    // ONE instant, in whole seconds, decides what that section says about a review
+    // in flight and whether the reminder counts as the mail below: a review that
+    // crossed its deadline between the two would otherwise be called running in
+    // the reminder and not in flight at the stamp, and its own mail skipped.
+    const reviewAtMs = Math.floor(Date.now() / 1000) * 1000;
     try {
       const outcome = await mailPublicationRequest(c.env, {
         datasetId,
@@ -918,7 +923,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
           request.identifier_screen_status,
           request.identifier_screen_report,
         ),
-        review: await publicationReviewEmailSection(c.env, request.id),
+        review: await publicationReviewEmailSection(c.env, request.id, reviewAtMs),
       });
       if (outcome.delivered > 0 && request.identifier_screen_status !== null) {
         // A result whose first mail was lost has now reached an admin, so the
@@ -930,7 +935,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
           .prepare(
             `UPDATE publication_requests
                 SET identifier_screen_emailed_at = COALESCE(identifier_screen_emailed_at, datetime('now'))
-              WHERE id = ?${reviewHoldSql(reviewEnabled(c.env))}`,
+              WHERE id = ?${reviewHoldSql(reviewEnabled(c.env), reviewAtMs)}`,
           )
           .bind(request.id)
           .run();

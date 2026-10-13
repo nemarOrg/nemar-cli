@@ -25,64 +25,50 @@ import {
   REASONS,
   REASON_CODES,
   REVIEW_OVERDUE_VIEW_MINUTES,
+  REVIEW_UNREADABLE_HEADLINE,
   type ReasonCode,
 } from "../../shared/publication-review";
 import { adminRoutes } from "../src/routes/admin";
 import { isScreenExempt } from "../src/services/identifier-screen";
+import { isScreenExempt as storedIsScreenExempt } from "../src/services/identifier-screen-stored";
 import {
   HISTORY_LIMIT,
+  LIST_CONCURRENCY,
   overrideReasonsOf,
-  screenExempt,
 } from "../src/services/publication-review-view";
-import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, interceptingD1, realD1 } from "./helpers/d1";
 import { SCREENED_HEAD } from "./helpers/identifier-screen";
 import { logged } from "./helpers/logs";
 import {
+  NOTE_SENTINEL,
+  SUMMARY_SENTINEL,
   type SeedReview,
   type SeedScreenedRequest,
   evidenceFor,
+  failingReport,
   goodPublicationReport,
   seedPublicationReview,
   seedScreenedRequest,
+  seedUser,
 } from "./helpers/publication-review";
 
 const ADMIN_KEY = "review-admin-key-0123456789abcdef0123456789abcdef";
 const MEMBER_KEY = "review-member-key-0123456789abcdef0123456789abcd";
 const OTHER_HEAD = "f".repeat(40);
-const SUMMARY_SENTINEL = "SUMMARY-SENTINEL-the-model-wrote-this";
-const NOTE_SENTINEL = "NOTE-SENTINEL-the-model-wrote-this-too";
 const NONCE_SENTINEL = "NONCE-SENTINEL-0123456789abcdef";
 
 let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
 let counter = 0;
 
-async function seedUser(username: string, role: string, key: string) {
-  db.run(
-    `INSERT INTO users (username, email, password_hash, status, role, email_verified,
-                        service_access, sandbox_completed, given_name, family_name)
-     VALUES (?, ?, 'x', 'approved', ?, 1, 1, 1, 'Ada', 'Lovelace')`,
-    [username, `${username}@example.org`, role],
-  );
-  const id = db
-    .query<{ id: number }, [string]>("SELECT id FROM users WHERE username = ?")
-    .get(username)?.id as number;
-  db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)").run(
-    id,
-    await hashApiKey(key),
-    key.slice(0, 8),
-  );
-}
-
 beforeEach(async () => {
   db = freshDb();
   counter = 0;
   app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
   app.route("/admin", adminRoutes);
-  await seedUser("reviewadmin", "admin", ADMIN_KEY);
-  await seedUser("reviewmember", "member", MEMBER_KEY);
+  await seedUser(db, "reviewadmin", "admin", ADMIN_KEY);
+  await seedUser(db, "reviewmember", "member", MEMBER_KEY);
 });
 
 function env(over: Partial<Bindings> = {}): Bindings {
@@ -136,28 +122,6 @@ async function detail(datasetId: string, bindings: Bindings = env()) {
   const res = await get(`/admin/publish/${datasetId}/review`, ADMIN_KEY, bindings);
   expect(res.status).toBe(200);
   return (await res.json()) as PublicationReviewDetail;
-}
-
-function failingReport(head = SCREENED_HEAD) {
-  return goodPublicationReport({
-    summary: SUMMARY_SENTINEL,
-    questions: {
-      complete_and_honest: "fail",
-      meets_standards: "pass",
-      authors_and_license: "pass",
-      name_adequate: "pass",
-    },
-    findings: [
-      {
-        question: "complete_and_honest",
-        severity: "blocker",
-        code: "readme_mismatch",
-        document: "readme",
-        note: NOTE_SENTINEL,
-      },
-    ],
-    evidence: evidenceFor(head),
-  });
 }
 
 function addVersionRow(datasetId: string, version = "1.0.0") {
@@ -942,15 +906,16 @@ describe("the list's cost and isolation", () => {
         reasons: [],
       });
     }
-    // The poisoned row is not a pass, and says so in the fixed words.
+    // The poisoned row is not a pass, and says so in the fixed words. It has no reason: "start it
+    // again", the cure of review_could_not_run, is wrong advice for a fault of our own reads.
     expect(rows.find((r) => r.dataset_id === poisoned)?.publication_review).toEqual({
-      kind: "decided",
+      kind: "unreadable",
       enabled: true,
       gate: "enforced",
       outcome: "action_required",
-      headline: "Publication review: could not be read",
+      headline: REVIEW_UNREADABLE_HEADLINE,
       tone: "warn",
-      reasons: ["review_could_not_run"],
+      reasons: [],
       review_id: null,
       head_sha: null,
     });
@@ -982,9 +947,10 @@ describe("the list's cost and isolation", () => {
     });
     for (const id of [waiting, over]) {
       expect(rows.find((r) => r.dataset_id === id)?.publication_review).toMatchObject({
+        kind: "unreadable",
         outcome: "action_required",
-        headline: "Publication review: could not be read",
-        reasons: ["review_could_not_run"],
+        headline: REVIEW_UNREADABLE_HEADLINE,
+        reasons: [],
       });
     }
     // A mirror needs no review row, so there was nothing to fail to read.
@@ -994,8 +960,62 @@ describe("the list's cost and isolation", () => {
     expect(text).not.toContain("simulated");
   });
 
+  test("with the review off, a read that fails leaves the row not assessed, as the mail does", async () => {
+    const waiting = listed("requested");
+    const over = listed("published");
+    const off = { PUBLICATION_REVIEW_ENABLED: undefined };
+    const unreadableRows = env({
+      ...off,
+      DB: interceptingD1(realD1(db), (sql) => {
+        if (/^\s*SELECT .*FROM publication_reviews/s.test(sql)) {
+          throw new Error("no such table: publication_reviews");
+        }
+      }),
+    });
+    const unreadableFacts = env({
+      ...off,
+      DB: interceptingD1(realD1(db), (sql) => {
+        if (/FROM dataset_versions/.test(sql)) throw new Error("D1_ERROR: simulated SQL text");
+      }),
+    });
+    // The row reads fail for both requests; the version lookup only for the one that could still
+    // be approved (a request that is over is shown from its stored review alone).
+    for (const [failing, affected] of [
+      [unreadableRows, [waiting, over]],
+      [unreadableFacts, [waiting]],
+    ] as const) {
+      let rows: ListRow[] = [];
+      await logged(async () => {
+        ({ rows } = await listBody(failing));
+      });
+      // Not "action required": a review that is off gates nothing, so a read that failed has
+      // nothing to be unknown about. No outcome and no reason, whichever read failed.
+      for (const id of affected) {
+        expect(rows.find((r) => r.dataset_id === id)?.publication_review).toEqual({
+          kind: "off",
+          enabled: false,
+          gate: "off",
+          outcome: null,
+          headline: "Publication review: not reviewed (the automated review is off)",
+          tone: "note",
+          reasons: [],
+          review_id: null,
+          head_sha: null,
+        });
+      }
+    }
+    // The same fault with the review on is the unreadable row, which is never a pass.
+    let on: ListRow[] = [];
+    await logged(async () => {
+      ({ rows: on } = await listBody(env({ DB: unreadableRows.DB })));
+    });
+    expect(on.find((r) => r.dataset_id === waiting)?.publication_review.kind).toBe("unreadable");
+  });
+
   test("the rows that could still be approved are read a few at a time, never all at once", async () => {
-    for (let i = 0; i < 20; i++) listed("requested");
+    // More rows than the bound, so the bound is what holds the count down.
+    const rowCount = LIST_CONCURRENCY * 2 + 4;
+    for (let i = 0; i < rowCount; i++) listed("requested");
     let inFlight = 0;
     let most = 0;
     const slow = env({
@@ -1009,8 +1029,8 @@ describe("the list's cost and isolation", () => {
       }),
     });
     const { rows } = await listBody(slow);
-    expect(rows).toHaveLength(20);
-    expect(most).toBe(8);
+    expect(rows).toHaveLength(rowCount);
+    expect(most).toBe(LIST_CONCURRENCY);
   });
 });
 
@@ -1071,13 +1091,14 @@ describe("GET /admin/publish/:id/review", () => {
         "started_by",
         "override",
         "questions",
+        "fact_notes",
         "findings",
         "summary",
         "evidence",
       ].sort(),
     );
     expect(Object.keys(d.history[0]).sort()).toEqual(
-      ["id", "head_sha", "anonymous", "state", "verdict", "created_at", "decided_at"].sort(),
+      ["id", "head_sha", "anonymous", "state", "stored_verdict", "created_at", "decided_at"].sort(),
     );
     expect(Object.keys(d.reasons[0]).sort()).toEqual(
       ["code", "class", "cleared_by", "detail", "sentence", "cure"].sort(),
@@ -1134,7 +1155,7 @@ describe("GET /admin/publish/:id/review", () => {
         head_sha: SCREENED_HEAD,
         anonymous: false,
         state: "reported",
-        verdict: "fail",
+        stored_verdict: "fail",
         created_at: expect.any(String),
         decided_at: expect.any(String),
       },
@@ -1158,6 +1179,159 @@ describe("GET /admin/publish/:id/review", () => {
     });
     expect(d.review?.findings).toEqual([]);
     expect(d.review?.summary).toBeNull();
+  });
+
+  test("a question that a fact failed says which fact, and is not blamed on the reviewer", async () => {
+    // A model that passed every question, over a dataset with no License and a three-character
+    // Name. Both answers are the facts' (`answersOf`), there is no finding to read, and the line
+    // used to say "The reviewer answered no to a question" with nothing after it.
+    const { requestId, datasetId } = request();
+    seedPublicationReview(db, {
+      requestId,
+      datasetId,
+      state: "reported",
+      report: goodPublicationReport({
+        evidence: evidenceFor(SCREENED_HEAD, false, { name_length: 3, license_field: false }),
+      }),
+    });
+    const d = await detail(datasetId);
+    expect(d.outcome).toBe("fail");
+    expect(d.reasons.map((r) => [r.code, r.detail])).toEqual([
+      ["question_failed", "authors_and_license"],
+      ["question_failed", "name_adequate"],
+    ]);
+    const failedSentence = REASONS.question_failed.sentence.replace(/\.$/, "");
+    const lines = d.description.lines.filter((l) => l.startsWith(failedSentence));
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain("dataset_description.json sets no License");
+    expect(lines[1]).toContain(
+      "the Name in dataset_description.json is shorter than 25 characters",
+    );
+    expect(d.description.lines.join("\n")).not.toContain("answered no");
+    // The record says it too, in closed words and the shared sentence, beside the (empty) findings.
+    expect(d.review?.findings).toEqual([]);
+    expect(d.review?.fact_notes).toEqual([
+      {
+        question: "authors_and_license",
+        fact: "license_field_missing",
+        result: "fail",
+        text: "dataset_description.json sets no License",
+      },
+      {
+        question: "name_adequate",
+        fact: "name_too_short",
+        result: "fail",
+        text: "the Name in dataset_description.json is shorter than 25 characters",
+      },
+    ]);
+    expect(d.review?.questions).toMatchObject({
+      authors_and_license: "fail",
+      name_adequate: "fail",
+      complete_and_honest: "pass",
+    });
+  });
+
+  test("a question a fact made unknown says so too, and a model's own fail still lists its findings", async () => {
+    const cut = request();
+    seedPublicationReview(db, {
+      requestId: cut.requestId,
+      datasetId: cut.datasetId,
+      state: "reported",
+      report: goodPublicationReport({
+        evidence: evidenceFor(SCREENED_HEAD, false, {
+          documents: {
+            readme: "sent_cut",
+            dataset_description: "sent",
+            changes: "sent",
+            license: "sent",
+            participants_json: "absent",
+          },
+        }),
+      }),
+    });
+    const unknown = await detail(cut.datasetId);
+    expect(unknown.reasons.map((r) => [r.code, r.detail])).toEqual([
+      ["question_unknown", "complete_and_honest"],
+      ["question_unknown", "meets_standards"],
+    ]);
+    expect(unknown.description.lines.join("\n")).toContain(
+      "the reviewer was not shown all of the text this question needs",
+    );
+    expect(unknown.review?.fact_notes.map((n) => [n.question, n.fact, n.result])).toEqual([
+      ["complete_and_honest", "text_not_seen_in_full", "unknown"],
+      ["meets_standards", "text_not_seen_in_full", "unknown"],
+    ]);
+
+    // The model's own fail is not a fact: its findings are listed and no fact note is made up.
+    const own = request();
+    seedPublicationReview(db, {
+      requestId: own.requestId,
+      datasetId: own.datasetId,
+      state: "reported",
+      report: failingReport(),
+    });
+    const failed = await detail(own.datasetId);
+    expect(failed.review?.fact_notes).toEqual([]);
+    expect(failed.description.lines.join("\n")).toContain(
+      "findings: README does not match the dataset",
+    );
+  });
+
+  describe("a request an administrator cannot start a review for is not told to start one", () => {
+    // `POST /admin/publish/:id/review/start` refuses any request that is not `requested`
+    // (409 request_not_requested), so the reasons whose cure is "start it" must not send an
+    // administrator there for a request that is being approved or is blocked.
+    const START = "nemar admin publish start";
+    const NOT_STARTABLE = "A review starts only for a request that is waiting for its decision.";
+    const startCures: Array<[ReasonCode, Omit<SeedReview, "requestId" | "datasetId"> | null]> = [
+      ["review_not_started", null],
+      ["review_did_not_report", { state: "unreported" }],
+      ["review_limit_reached", { state: "declined", detail: "platform_limit" }],
+      ["review_could_not_run", { state: "errored", detail: "model_refused" }],
+    ];
+
+    for (const status of ["approving", "blocked"] as const) {
+      for (const [code, seed] of startCures) {
+        test(`${status}: ${code} says what is true, and no start command is offered`, async () => {
+          const { requestId, datasetId } = request({
+            requestStatus: status,
+            blockReason: status === "blocked" ? "min_requirements_failed" : null,
+          });
+          if (seed !== null) seedPublicationReview(db, { ...seed, requestId, datasetId });
+          const d = await detail(datasetId);
+          const reason = d.reasons.find((r) => r.code === code);
+          expect(reason).toBeDefined();
+          expect(reason?.cure).not.toContain(START);
+          expect(reason?.cure).toContain(NOT_STARTABLE);
+          expect(d.description.lines.join("\n")).not.toContain(START);
+          expect(d.description.lines.join("\n")).toContain(NOT_STARTABLE);
+          expect(d.description.next ?? "").not.toContain(START);
+        });
+      }
+    }
+
+    test("an approving request's next command is the approval, not a start the route refuses", async () => {
+      const { requestId, datasetId } = request({ requestStatus: "approving" });
+      seedPublicationReview(db, {
+        requestId,
+        datasetId,
+        state: "errored",
+        detail: "model_refused",
+      });
+      const d = await detail(datasetId);
+      expect(d.description.next).toBe(`nemar admin publish approve ${datasetId} --force`);
+      // A request waiting for its decision is still told to start it.
+      const open = request();
+      seedPublicationReview(db, {
+        requestId: open.requestId,
+        datasetId: open.datasetId,
+        state: "errored",
+        detail: "model_refused",
+      });
+      const dOpen = await detail(open.datasetId);
+      expect(dOpen.description.next).toBe(`nemar admin publish start ${open.datasetId}`);
+      expect(dOpen.reasons[0].cure).toContain(`${START} ${open.datasetId}`);
+    });
   });
 
   test("a hard reason is cleared by nothing, and the screen's by its acknowledgment", async () => {
@@ -1350,19 +1524,23 @@ describe("GET /admin/publish/:id/review", () => {
 // ============================================================================
 
 describe("the view's own helpers", () => {
-  test("the sandbox exemption agrees with the screen's, for every kind of id", () => {
-    for (const id of [
-      "xx000001",
-      "xx099999",
-      "xx12345",
-      "nm000001",
-      "on000001",
-      "xxabcdef",
-      "XX000001",
-      "",
-    ]) {
-      expect(screenExempt(id)).toBe(isScreenExempt(id));
-    }
+  test("the sandbox exemption is one predicate, which the screen and the view both use", () => {
+    // `identifier-screen.ts` re-exports the predicate that lives beside the stored-screen readers
+    // (the view imports it from there, because `identifier-screen.ts` imports the view), so there
+    // is nothing to keep equal.
+    expect(isScreenExempt).toBe(storedIsScreenExempt);
+    const exempt: Array<[string, boolean]> = [
+      ["xx000001", true],
+      ["xx099999", true],
+      ["xx12345", false],
+      ["xx1234567", false],
+      ["nm000001", false],
+      ["on000001", false],
+      ["xxabcdef", false],
+      ["XX000001", false],
+      ["", false],
+    ];
+    for (const [id, want] of exempt) expect([id, storedIsScreenExempt(id)]).toEqual([id, want]);
   });
 
   test("an override's reasons read from a JSON list or a comma list, and unknown words are dropped", () => {

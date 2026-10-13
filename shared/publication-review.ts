@@ -461,6 +461,8 @@ export class PublicationReviewReportError extends Error {
 // ---------------------------------------------------------------------------------------------
 
 export const HEAD = /^[0-9a-f]{40}$/;
+/** A dataset id as the platform mints them: the only text a command is built from. */
+const DATASET_ID = /^(nm|on|xx)\d{6}$/;
 /** A count: a non-negative safe integer no larger than this. */
 const MAX_COUNT = 10_000_000;
 /** A sampling rate is a positive number below this, in hertz. */
@@ -710,7 +712,8 @@ const REPORT_KEYS = ["v", "model", "questions", "findings", "summary", "steering
  * The report must agree with itself, in the safe direction only (as ADR 0092's report does): a
  * finding coded `steering_attempt` sets `steering`; a question passed with a blocker against it
  * becomes `unknown`; a failed question with no finding gets one `other` finding, made room for by
- * dropping the model's LAST findings, so a fail always has something for a person to read.
+ * dropping the model's LAST findings (never the first finding of another failed question), so a
+ * fail always has something for a person to read, and parsing a parsed report changes nothing.
  *
  * `options.models` is for the offline calibration only, and is still limited to
  * {@link CALIBRATION_MODELS}; the Worker passes nothing.
@@ -754,7 +757,23 @@ export function parsePublicationReviewReport(
   const unexplained = QUESTIONS.filter(
     (q) => questions[q] === "fail" && !findings.some((f) => f.question === q),
   );
-  findings.splice(MAX_PUBLICATION_FINDINGS - unexplained.length);
+  // Make room for one filler per unexplained question by dropping the model's LAST findings, but
+  // never the one finding that explains another failed question: the first of each stays. Cutting
+  // blindly from the end could take it, leaving that question failed with nothing to read, and
+  // then a re-parse (every read of a stored report) would move the same hole to another question.
+  // At most four questions fail and the list holds eight, so there is always room.
+  const explains = new Set<PublicationFinding>();
+  for (const q of QUESTIONS) {
+    const first = findings.find((f) => f.question === q);
+    if (questions[q] === "fail" && first !== undefined) explains.add(first);
+  }
+  for (
+    let i = findings.length - 1;
+    i >= 0 && findings.length + unexplained.length > MAX_PUBLICATION_FINDINGS;
+    i--
+  ) {
+    if (!explains.has(findings[i])) findings.splice(i, 1);
+  }
   for (const q of unexplained) {
     findings.push({
       question: q,
@@ -781,10 +800,41 @@ export function parsePublicationReviewReport(
 // Facts lower answers, never raise them
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * The facts that can lower an answer, each a closed word (two of them share the finding code
+ * `evidence_incomplete`, which is why the finding code alone does not say which fact it was).
+ */
+export const QUESTION_FACTS = [
+  "readme_absent",
+  "text_not_seen_in_full",
+  "no_recordings",
+  "license_field_missing",
+  "name_too_short",
+  "placeholder_author",
+] as const;
+export type QuestionFactWord = (typeof QUESTION_FACTS)[number];
+
+/**
+ * What each fact says, in the words every surface shows beside the question it lowered. Written
+ * so that it reads after the name of a question and never claims the reviewer said anything: a
+ * fact is the platform's, and the model may have passed the question.
+ */
+export const QUESTION_FACT_TEXT: Record<QuestionFactWord, string> = {
+  readme_absent: "no README was found at the dataset root",
+  text_not_seen_in_full: "the reviewer was not shown all of the text this question needs",
+  no_recordings: "the dataset's structure shows no recordings",
+  license_field_missing: "dataset_description.json sets no License",
+  name_too_short: `the Name in dataset_description.json is shorter than ${MIN_NAME_LENGTH} characters`,
+  placeholder_author: "Authors names a placeholder instead of a person",
+};
+
 /** A fact from the evidence that moved a question away from what the model said. */
 export interface QuestionFact {
   question: Question;
+  /** The finding code a fact of this kind would carry. */
   code: PublicationFindingCode;
+  /** Which fact it was. */
+  fact: QuestionFactWord;
   /** What the fact made of the question. */
   result: "fail" | "unknown";
 }
@@ -803,6 +853,10 @@ const ANSWER_RANK: Record<Answer, number> = { pass: 2, unknown: 1, fail: 0 };
  *  - A `Name` shorter than ADR 0026's floor: `name_adequate` fails.
  *  - A placeholder author on a NAMED release: `authors_and_license` fails. For an anonymous
  *    release the Authors half is answered by ADR 0065's inverted rule, which is a minimum.
+ *
+ * `notes` lists only the facts that moved an answer, so a question the model itself failed has no
+ * note. Every surface that explains a failed or unknown question reads them
+ * ({@link factNotesOf}, and the detail of {@link reasonLine}).
  */
 export function answersOf(report: PublicationReviewReport): {
   answers: Record<Question, Answer>;
@@ -810,30 +864,59 @@ export function answersOf(report: PublicationReviewReport): {
 } {
   const answers = { ...report.questions };
   const notes: QuestionFact[] = [];
-  const lower = (question: Question, code: PublicationFindingCode, to: "fail" | "unknown") => {
+  const lower = (
+    question: Question,
+    fact: QuestionFactWord,
+    code: PublicationFindingCode,
+    to: "fail" | "unknown",
+  ) => {
     // Only ever lower: a fail stays a fail, and unknown never replaces a fail.
     if (ANSWER_RANK[to] < ANSWER_RANK[answers[question]]) {
       answers[question] = to;
-      notes.push({ question, code, result: to });
+      notes.push({ question, code, fact, result: to });
     }
   };
   const e = report.evidence;
   if (e.documents.readme === "absent") {
-    lower("complete_and_honest", "readme_missing_or_stub", "fail");
+    lower("complete_and_honest", "readme_absent", "readme_missing_or_stub", "fail");
   }
   for (const q of QUESTIONS) {
     const s = QUESTION_NEEDS[q].map((d) => e.documents[d]);
     if (s.some((state) => state === "sent_cut" || isWithheld(state))) {
-      lower(q, "evidence_incomplete", "unknown");
+      lower(q, "text_not_seen_in_full", "evidence_incomplete", "unknown");
     }
   }
-  if (e.summary.recordings === 0) lower("complete_and_honest", "evidence_incomplete", "unknown");
-  if (!e.license_field) lower("authors_and_license", "license_missing", "fail");
-  if (e.name_length < MIN_NAME_LENGTH) lower("name_adequate", "name_not_descriptive", "fail");
+  if (e.summary.recordings === 0) {
+    lower("complete_and_honest", "no_recordings", "evidence_incomplete", "unknown");
+  }
+  if (!e.license_field) {
+    lower("authors_and_license", "license_field_missing", "license_missing", "fail");
+  }
+  if (e.name_length < MIN_NAME_LENGTH) {
+    lower("name_adequate", "name_too_short", "name_not_descriptive", "fail");
+  }
   if (!e.anonymous && e.placeholder_authors > 0) {
-    lower("authors_and_license", "authors_placeholder", "fail");
+    lower("authors_and_license", "placeholder_author", "authors_placeholder", "fail");
   }
   return { answers, notes };
+}
+
+/** One fact that lowered an answer, with its sentence, as the detail view shows it. */
+export interface QuestionFactNote {
+  question: Question;
+  fact: QuestionFactWord;
+  result: "fail" | "unknown";
+  text: string;
+}
+
+/** The facts that lowered an answer, each with the shared sentence for it. */
+export function factNotesOf(report: PublicationReviewReport): QuestionFactNote[] {
+  return answersOf(report).notes.map(({ question, fact, result }) => ({
+    question,
+    fact,
+    result,
+    text: QUESTION_FACT_TEXT[fact],
+  }));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -908,8 +991,17 @@ export function isPublicationOutcome(x: unknown): x is PublicationOutcome {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Every reason a request is not a pass, in the order surfaces list them: what nothing clears
- * first, then the screen's own, then what an administrator's override clears, fail before unknown.
+ * Every reason a request is not a pass, in the order surfaces list them. Three groups, in this order:
+ *
+ *  1. What nothing clears (the hard reasons): `request_blocked`, `submission_minimum_failed` and
+ *     `identifier_screen_blocks` (fail), then the screen's own gaps (`identifier_screen_not_run`,
+ *     `identifier_screen_pending`, `identifier_screen_stale`, unknown), then
+ *     `version_kept_after_anonymous_release` (fail). The last one is hard but sits after the
+ *     screen's gaps because it is about the release, not the request or the screen.
+ *  2. The screen's acknowledgment reason, which a recorded acknowledgment clears.
+ *  3. What an administrator's override clears, fail class before unknown class.
+ *
+ * A test pins the exact order, so a new code is placed on purpose.
  */
 export const REASON_CODES = [
   "request_blocked",
@@ -952,10 +1044,20 @@ export interface ReasonRule {
   sentence: string;
   /** What clears it. May contain `<dataset>`, which {@link describePublicationReview} fills. */
   cure: string;
+  /**
+   * What is true instead of `cure` when an administrator's `start` would be refused, because the
+   * request is not waiting for its decision (`POST .../review/start` answers 409
+   * `request_not_requested`). Present exactly on the reasons whose cure is "start it", so a
+   * request that is being approved or is blocked is never sent to a command that cannot work.
+   */
+  cureNotStartable?: string;
 }
 
 const OVERRIDE =
   "An administrator may approve over it; the approval records the override (--force).";
+
+/** What a start cure says for a request no start can reach (see {@link ReasonRule.cureNotStartable}). */
+const NOT_STARTABLE = `A review starts only for a request that is waiting for its decision. ${OVERRIDE}`;
 
 /** The reasons table (ADR 0102, section 5). A `Record`, so a code without a rule fails the build. */
 export const REASONS: Record<ReasonCode, ReasonRule> = {
@@ -1012,8 +1114,10 @@ export const REASONS: Record<ReasonCode, ReasonRule> = {
   question_failed: {
     class: "fail",
     clearedBy: "override",
-    sentence: "The reviewer answered no to a question.",
-    cure: `Read the findings and the dataset's text. ${OVERRIDE}`,
+    // Neutral about who failed it: the reviewer's own answer, or a fact of the dataset that lowered
+    // the reviewer's answer (`answersOf`). The detail in parentheses says which.
+    sentence: "A question of the review failed.",
+    cure: `Read any findings and the dataset's text. ${OVERRIDE}`,
   },
   steering_attempt: {
     class: "fail",
@@ -1051,6 +1155,7 @@ export const REASONS: Record<ReasonCode, ReasonRule> = {
     clearedBy: "override",
     sentence: "No review of the screened commit has started.",
     cure: `Start it: nemar admin publish start <dataset>. ${OVERRIDE}`,
+    cureNotStartable: NOT_STARTABLE,
   },
   review_running: {
     class: "unknown",
@@ -1063,18 +1168,21 @@ export const REASONS: Record<ReasonCode, ReasonRule> = {
     clearedBy: "override",
     sentence: "The review did not report in time.",
     cure: `Start it again: nemar admin publish start <dataset>. ${OVERRIDE}`,
+    cureNotStartable: NOT_STARTABLE,
   },
   review_limit_reached: {
     class: "unknown",
     clearedBy: "override",
     sentence: "The daily limit of automated reviews was reached.",
     cure: `Start it later: nemar admin publish start <dataset>; an administrator's start is held by the platform's limit only. ${OVERRIDE}`,
+    cureNotStartable: NOT_STARTABLE,
   },
   review_could_not_run: {
     class: "unknown",
     clearedBy: "override",
     sentence: "The review could not run.",
     cure: `Once the cause is fixed, start it again: nemar admin publish start <dataset>. ${OVERRIDE}`,
+    cureNotStartable: NOT_STARTABLE,
   },
   text_withheld: {
     class: "unknown",
@@ -1085,7 +1193,7 @@ export const REASONS: Record<ReasonCode, ReasonRule> = {
   question_unknown: {
     class: "unknown",
     clearedBy: "override",
-    sentence: "The reviewer could not answer a question.",
+    sentence: "A question of the review could not be answered.",
     cure: `Answer it yourself from the dataset. ${OVERRIDE}`,
   },
   bids_unconcluded_at_review: {
@@ -1112,6 +1220,24 @@ export const REASONS: Record<ReasonCode, ReasonRule> = {
 export const HARD_REASONS: readonly ReasonCode[] = REASON_CODES.filter(
   (c) => REASONS[c].clearedBy === "nothing",
 );
+
+/** The reasons whose cure is an administrator's `start`: the ones with a {@link ReasonRule.cureNotStartable}. */
+export const START_CURE_REASONS: readonly ReasonCode[] = REASON_CODES.filter(
+  (c) => REASONS[c].cureNotStartable !== undefined,
+);
+
+/**
+ * The cure of a reason for this dataset: `<dataset>` filled (a malformed id is never quoted), and,
+ * when `startable` is false, what is true for a request no `start` can reach. One function for the
+ * detail's `cure` field and the lines every surface prints, so they cannot differ.
+ */
+export function cureOf(code: ReasonCode, datasetId: string, startable: boolean): string {
+  const rule = REASONS[code];
+  const id = DATASET_ID.test(datasetId) ? datasetId : "<dataset>";
+  const text =
+    !startable && rule.cureNotStartable !== undefined ? rule.cureNotStartable : rule.cure;
+  return text.replaceAll("<dataset>", id);
+}
 
 export interface Reason {
   code: ReasonCode;
@@ -1389,9 +1515,11 @@ const OUTCOME_TONE: Record<PublicationOutcome, "ok" | "warn" | "stop"> = {
   fail: "stop",
 };
 
-const DATASET_ID = /^(nm|on|xx)\d{6}$/;
-
-/** A detail word as a person reads it; anything unexpected is shown as the closed word it is. */
+/**
+ * A detail word as a person reads it; anything unexpected is shown as the closed word it is. A
+ * failed or unknown question names the question, then the fact that lowered the answer when a fact
+ * did (the model may have passed it), then the model's findings against it.
+ */
 function detailText(reason: Reason, report: PublicationReviewReport | null): string | null {
   const d = reason.detail;
   if (d === null) return null;
@@ -1399,13 +1527,19 @@ function detailText(reason: Reason, report: PublicationReviewReport | null): str
     case "question_failed":
     case "question_unknown": {
       if (!isOneOf(QUESTIONS, d)) return d;
+      const result = reason.code === "question_failed" ? "fail" : "unknown";
+      const parts: string[] = [QUESTION_LABEL[d]];
+      if (report !== null) {
+        for (const note of factNotesOf(report)) {
+          if (note.question === d && note.result === result) parts.push(note.text);
+        }
+      }
       const codes = (report?.findings ?? [])
         .filter((f) => f.question === d)
         .map((f) => PUBLICATION_FINDING_LABEL[f.code]);
       const unique = [...new Set(codes)];
-      return unique.length > 0
-        ? `${QUESTION_LABEL[d]}; findings: ${unique.join(", ")}`
-        : QUESTION_LABEL[d];
+      if (unique.length > 0) parts.push(`findings: ${unique.join(", ")}`);
+      return parts.join("; ");
     }
     case "text_withheld":
       return d
@@ -1425,28 +1559,38 @@ function detailText(reason: Reason, report: PublicationReviewReport | null): str
 export function reasonLine(
   reason: Reason,
   datasetId: string,
-  report: PublicationReviewReport | null = null,
+  report: PublicationReviewReport | null,
+  startable: boolean,
 ): string {
   const rule = REASONS[reason.code];
-  const id = DATASET_ID.test(datasetId) ? datasetId : "<dataset>";
   const detail = detailText(reason, report);
   const sentence =
     detail === null ? rule.sentence : `${rule.sentence.replace(/\.$/, "")} (${detail}).`;
-  return `${sentence} ${rule.cure.replaceAll("<dataset>", id)}`;
+  return `${sentence} ${cureOf(reason.code, datasetId, startable)}`;
 }
 
 export interface PublicationReviewDescription {
   /** One line, safe for a table cell. */
   headline: string;
   tone: "ok" | "note" | "warn" | "stop";
-  /** Fixed words, closed words and the sanitized summary, one per line; {@link NOT_ASSESSED_LINE} is last. */
+  /**
+   * Fixed words and closed words, one per line; {@link NOT_ASSESSED_LINE} is last. Never a word the
+   * model wrote: the email is built from these lines alone, so what a depositor could influence
+   * cannot reach an inbox through them.
+   */
   lines: string[];
+  /**
+   * The model's own summary, sanitized by the parser, or null when there is none to show. The one
+   * sentence of a description that is not the platform's: a surface that shows the model's words
+   * (the detail view) prints it under a label of its own, and the email never receives it.
+   */
+  summary: string | null;
   /** The command an administrator runs next, or null when it is not theirs to run. */
   next: string | null;
 }
 
 /** Can an administrator's `start` create or restart this row? Never a running or reported one. */
-function startable(row: ReviewRowView): boolean {
+function rowRestartable(row: ReviewRowView): boolean {
   return (
     row.kind === "none" ||
     row.kind === "declined" ||
@@ -1456,7 +1600,12 @@ function startable(row: ReviewRowView): boolean {
   );
 }
 
-function nextCommand(id: string, reasons: readonly Reason[], row: ReviewRowView): string | null {
+function nextCommand(
+  id: string,
+  reasons: readonly Reason[],
+  row: ReviewRowView,
+  startable: boolean,
+): string | null {
   const codes = new Set(reasons.map((r) => r.code));
   if (reasons.length === 0) return `nemar admin publish approve ${id}`;
   if (reasons.some((r) => REASONS[r.code].clearedBy === "nothing")) {
@@ -1465,13 +1614,9 @@ function nextCommand(id: string, reasons: readonly Reason[], row: ReviewRowView)
       ? `nemar admin publish screen ${id}`
       : null;
   }
-  const startCures: readonly ReasonCode[] = [
-    "review_not_started",
-    "review_did_not_report",
-    "review_limit_reached",
-    "review_could_not_run",
-  ];
-  if (startable(row) && startCures.some((c) => codes.has(c))) {
+  // A start is offered only where the route would take it: the request is waiting for its
+  // decision, and the row is one a start can create or restart.
+  if (startable && rowRestartable(row) && START_CURE_REASONS.some((c) => codes.has(c))) {
     return `nemar admin publish start ${id}`;
   }
   if (codes.has("review_running")) return `nemar admin publish show ${id}`;
@@ -1504,12 +1649,19 @@ export function describePublicationReview(input: {
   head: string | null;
   version: string | null;
   /**
+   * An administrator's `start` can reach this request: it is waiting for its decision
+   * (`requested`). The route refuses any other status, so a request that is blocked or being
+   * approved is never told to start a review, in a cure or in `next`. Required, so that a caller
+   * cannot forget it and offer a command that cannot work.
+   */
+  startable: boolean;
+  /**
    * The request is over (published or denied), so no review is waiting for or gating it. With no
    * review on record it reads as not reviewed, never as "action required". Default false.
    */
   closed?: boolean;
 }): PublicationReviewDescription {
-  const { applies, enabled, reasons, row } = input;
+  const { applies, enabled, reasons, row, startable } = input;
   const id = DATASET_ID.test(input.datasetId) ? input.datasetId : "<dataset>";
   if (!applies) {
     return {
@@ -1519,6 +1671,7 @@ export function describePublicationReview(input: {
         "OpenNeuro mirrors and exemplars passed an upstream review, so the automated review does not apply.",
         NOT_ASSESSED_LINE,
       ],
+      summary: null,
       next: null,
     };
   }
@@ -1530,6 +1683,7 @@ export function describePublicationReview(input: {
         "The automated review is off, so this request was not reviewed and no review gates its approval.",
         NOT_ASSESSED_LINE,
       ],
+      summary: null,
       next: null,
     };
   }
@@ -1542,14 +1696,15 @@ export function describePublicationReview(input: {
         "This request is no longer waiting for a decision, and no review of it is on record.",
         NOT_ASSESSED_LINE,
       ],
+      summary: null,
       next: null,
     };
   }
 
   const outcome = stricterOf(input.outcome ?? "action_required", verdictOf(reasons));
   const report = row.kind === "reported" ? row.report : null;
-  const lines = reasons.map((r) => reasonLine(r, id, report));
-  if (report !== null && report.summary !== "") lines.push(`Reviewer's summary: ${report.summary}`);
+  const lines = reasons.map((r) => reasonLine(r, id, report, startable));
+  const summary = report !== null && report.summary !== "" ? report.summary : null;
   if (row.kind === "reported") {
     const parts: string[] = [];
     if (input.model !== null && isOneOf(CALIBRATION_MODELS, input.model)) {
@@ -1568,6 +1723,7 @@ export function describePublicationReview(input: {
       headline: `Publication review (advice only, the automated review is off): ${OUTCOME_WORD[outcome]}`,
       tone: "note",
       lines,
+      summary,
       next: null,
     };
   }
@@ -1576,7 +1732,32 @@ export function describePublicationReview(input: {
     headline: `Publication review: ${OUTCOME_WORD[outcome]}`,
     tone: OUTCOME_TONE[outcome],
     lines,
-    next: nextCommand(id, reasons, row),
+    summary,
+    next: nextCommand(id, reasons, row, startable),
+  };
+}
+
+/**
+ * What every surface says when the review could not be read just now (a fault of the Worker's own
+ * reads, not a state of the request): a fixed headline, never a pass. The sentences live here, with
+ * the others, so the email, the list and the detail say the same words.
+ */
+export const REVIEW_UNREADABLE_HEADLINE = "Publication review: could not be read";
+export const REVIEW_UNREADABLE_LINE =
+  "The review's state could not be read just now, so it is not known. This is not a pass.";
+
+/**
+ * The description of a review that could not be read. Not an outcome and not a reason: the cure for
+ * a read fault is not to start the review again, so it has no reason code, and its one command
+ * shows the request, which reads the review again.
+ */
+export function describeUnreadableReview(datasetId: string): PublicationReviewDescription {
+  return {
+    headline: REVIEW_UNREADABLE_HEADLINE,
+    tone: "warn",
+    lines: [REVIEW_UNREADABLE_LINE, NOT_ASSESSED_LINE],
+    summary: null,
+    next: DATASET_ID.test(datasetId) ? `nemar admin publish show ${datasetId}` : null,
   };
 }
 

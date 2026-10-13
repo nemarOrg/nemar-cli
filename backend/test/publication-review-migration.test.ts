@@ -758,14 +758,22 @@ describe("the stored-screen readers moved without changing who can import them",
   test("identifier-screen.ts re-exports the same functions", () => {
     expect(screen.readStoredState).toBe(stored.readStoredState);
     expect(screen.readStoredReport).toBe(stored.readStoredReport);
+    expect(screen.isScreenExempt).toBe(stored.isScreenExempt);
   });
 
-  test("the stored-screen module imports the shared contract only", () => {
-    const text = readFileSync(
-      join(import.meta.dir, "../src/services/identifier-screen-stored.ts"),
-      "utf8",
-    );
-    const imports = [...text.matchAll(/from "([^"]+)"/g)].map((m) => m[1]);
-    expect(imports).toEqual(["../../../shared/identifier-screen-report.js"]);
+  test("the stored-screen module imports the shared contract and one leaf module, and nothing that can cycle", () => {
+    const importsOf = (file: string) =>
+      [
+        ...readFileSync(join(import.meta.dir, "../src/services", file), "utf8").matchAll(
+          /from "([^"]+)"/g,
+        ),
+      ].map((m) => m[1]);
+    // The leaf is `datasetId.ts`, for the sandbox exemption; it imports nothing itself, so the
+    // review can import this module without importing `identifier-screen.ts`.
+    expect(importsOf("identifier-screen-stored.ts")).toEqual([
+      "../../../shared/identifier-screen-report.js",
+      "./datasetId.js",
+    ]);
+    expect(importsOf("datasetId.ts")).toEqual([]);
   });
 });

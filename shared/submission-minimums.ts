@@ -6,7 +6,9 @@
  * named non-placeholder Authors, and an ethics approval statement are hard
  * requirements for native submissions. These are the mechanically checkable
  * checks; adequacy beyond them (is the name meaningful, is the README about
- * THIS dataset) stays LLM-judged and advisory per ADR 0014's surviving half.
+ * THIS dataset) is judged by the publication review's model, and a non-pass
+ * there needs the administrator's recorded override (ADR 0102, section 10,
+ * which narrows ADR 0026's "adequacy stays advisory" clause).
  *
  * Pure evaluation over file contents so the decision is unit-testable without
  * GitHub; the route fetches the two files and passes them in. OpenNeuro
@@ -142,6 +144,22 @@ export const MINIMUM_FAILURES = [
 export type MinimumFailure = (typeof MINIMUM_FAILURES)[number];
 
 /**
+ * The two sentences that take a value, one template each. The long form is what a depositor reads
+ * (the current length, the authors found); the short form says "somebody" and carries no length, so
+ * a stored row, a report or a log line can hold it. Both come from the same template, so they
+ * cannot drift.
+ */
+function nameTooShortSentence(currentLength?: number): string {
+  const current = currentLength === undefined ? "" : ` (currently ${currentLength})`;
+  return `Dataset Name must be a descriptive title of at least ${MIN_NAME_LENGTH} characters${current}. If the study is known by a short acronym, expand it with a subtitle, e.g. "ACRO: auditory cortex recordings during natural speech".`;
+}
+
+function authorsNotBlindedSentence(authorsFound?: readonly string[]): string {
+  const who = authorsFound === undefined ? "somebody" : authorsFound.join(", ");
+  return `This is an anonymous release, but Authors in dataset_description.json still names ${who}. That file is part of the dataset and is served publicly, so NEMAR cannot conceal what it says. Replace the entries with a placeholder such as "Anonymous", commit, and request the release again. Restore the real names when you publish after acceptance.`;
+}
+
+/**
  * The sentence for each word that quotes nothing from the dataset. Every word
  * but two is said the same way by {@link evaluateSubmissionMinimums}; for
  * `name_too_short` it adds the current length, and for `authors_not_blinded` it
@@ -152,7 +170,7 @@ const FAILURE_SENTENCES: Record<MinimumFailure, string> = {
   description_missing: "dataset_description.json was not found at the dataset root.",
   description_not_json: "dataset_description.json is not valid JSON.",
   description_not_object: "dataset_description.json is not a JSON object.",
-  name_too_short: `Dataset Name must be a descriptive title of at least ${MIN_NAME_LENGTH} characters. If the study is known by a short acronym, expand it with a subtitle, e.g. "ACRO: auditory cortex recordings during natural speech".`,
+  name_too_short: nameTooShortSentence(),
   authors_missing:
     "Authors in dataset_description.json must name the people responsible for the " +
     "dataset; anonymous submissions and placeholder entries are not accepted.",
@@ -160,8 +178,7 @@ const FAILURE_SENTENCES: Record<MinimumFailure, string> = {
     "Authors in dataset_description.json must not be empty, even for an anonymous " +
     'release: set it to a placeholder such as "Anonymous" so the field states that ' +
     "attribution is withheld rather than missing.",
-  authors_not_blinded:
-    'This is an anonymous release, but Authors in dataset_description.json still names somebody. That file is part of the dataset and is served publicly, so NEMAR cannot conceal what it says. Replace the entries with a placeholder such as "Anonymous", commit, and request the release again. Restore the real names when you publish after acceptance.',
+  authors_not_blinded: authorsNotBlindedSentence(),
   ethics_statement_missing:
     "An ethics approval statement is required: fill the EthicsApprovals field of " +
     "dataset_description.json, or add an ethics/IRB statement to the README.",
@@ -211,10 +228,7 @@ function evaluateMinimums(
 
   const name = typeof desc.Name === "string" ? desc.Name.trim() : "";
   if (name.length < MIN_NAME_LENGTH) {
-    reasons.push({
-      code: "name_too_short",
-      sentence: `Dataset Name must be a descriptive title of at least ${MIN_NAME_LENGTH} characters (currently ${name.length}). If the study is known by a short acronym, expand it with a subtitle, e.g. "ACRO: auditory cortex recordings during natural speech".`,
-    });
+    reasons.push({ code: "name_too_short", sentence: nameTooShortSentence(name.length) });
   }
 
   const authors = Array.isArray(desc.Authors)
@@ -233,7 +247,7 @@ function evaluateMinimums(
     } else if (realAuthors.length > 0) {
       reasons.push({
         code: "authors_not_blinded",
-        sentence: `This is an anonymous release, but Authors in dataset_description.json still names ${realAuthors.join(", ")}. That file is part of the dataset and is served publicly, so NEMAR cannot conceal what it says. Replace the entries with a placeholder such as "Anonymous", commit, and request the release again. Restore the real names when you publish after acceptance.`,
+        sentence: authorsNotBlindedSentence(realAuthors),
       });
     }
   } else if (realAuthors.length === 0) {

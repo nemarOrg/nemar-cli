@@ -31,10 +31,8 @@ import {
 } from "../../../shared/identifier-screen-report.js";
 import {
   PUBLICATION_REVIEW_DEADLINE_MINUTES,
-  type PublicationOutcome,
   type PublicationReviewReport,
   PublicationReviewReportError,
-  type PublicationReviewState,
   REVIEW_OVERDUE_VIEW_MINUTES,
   type ReviewRowView,
   isPublicationDeclineDetail,
@@ -52,8 +50,14 @@ export interface PublicationReviewRow {
   anonymous: boolean;
   requestedBy: number;
   startedBy: number | null;
-  state: PublicationReviewState;
-  verdict: PublicationOutcome | null;
+  /**
+   * The words as the database returns them, never narrowed here: the migration's CHECKs keep them
+   * closed, but a row edited by hand, or written by another build, can hold another word. A reader
+   * narrows with `isPublicationReviewState` and `isPublicationOutcome` and treats a word that does
+   * not narrow as unreadable ({@link rowViewOf}), never as a state or a verdict.
+   */
+  state: string;
+  verdict: string | null;
   detail: string | null;
   report: string | null;
   claimedAt: string | null;
@@ -85,8 +89,8 @@ export function toRow(raw: Record<string, unknown>): PublicationReviewRow {
     anonymous: num(raw.anonymous) === 1,
     requestedBy: num(raw.requested_by),
     startedBy: numOrNull(raw.started_by),
-    state: raw.state as PublicationReviewState,
-    verdict: (raw.verdict ?? null) as PublicationOutcome | null,
+    state: String(raw.state),
+    verdict: strOrNull(raw.verdict),
     detail: strOrNull(raw.detail),
     report: strOrNull(raw.report),
     claimedAt: strOrNull(raw.claimed_at),
@@ -235,21 +239,39 @@ export function screenedHeadSql(name: string): string {
 }
 
 /**
+ * A whole-second instant as SQLite's `datetime()` text (UTC, no zone), for a statement that must
+ * decide at the same instant as a reading made in code. Digits, `-`, `:` and one space by
+ * construction (and checked), so it is safe to put in SQL; a value that is not a real instant
+ * throws rather than reaching a statement.
+ */
+export function sqliteInstant(ms: number): string {
+  const text = new Date(Math.floor(ms / 1000) * 1000).toISOString().slice(0, 19).replace("T", " ");
+  if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text)) throw new RangeError("not an instant");
+  return text;
+}
+
+/**
  * True when a review of the request's screened head and flag is dispatched and younger than the
  * deadline: the one condition under which the request's admin mail waits for the review. A row
  * older than the deadline no longer holds the mail, so a review that never reports cannot keep it
  * for good, whether or not a watchdog runs. The mail's own review section reads a dispatched row
  * past this same deadline as one that did not report (`publicationReviewEmailSection`), so what
  * the mail says is true at the moment the lease lets it go.
+ *
+ * `atMs` is the instant to decide at, in place of the database's own clock. Pass it when a section
+ * was built at an instant of the Worker's (the depositor's resend), so the section and the
+ * decision cannot straddle the deadline between them; leave it out when the statement IS the
+ * moment (the lease, the watchdog).
  */
-export function reviewInFlightSql(name: string): string {
+export function reviewInFlightSql(name: string, atMs?: number): string {
   const a = alias(name);
+  const now = atMs === undefined ? "'now'" : `'${sqliteInstant(atMs)}'`;
   return `EXISTS (SELECT 1 FROM publication_reviews AS r
          WHERE r.request_id = ${a}.id
            AND r.anonymous = ${a}.anonymous
            AND r.head_sha = ${screenedHeadSql(a)}
            AND r.state = 'dispatched'
-           AND r.created_at >= datetime('now', '-${PUBLICATION_REVIEW_DEADLINE_MINUTES} minutes'))`;
+           AND r.created_at >= datetime(${now}, '-${PUBLICATION_REVIEW_DEADLINE_MINUTES} minutes'))`;
 }
 
 // ---------------------------------------------------------------------------------------------

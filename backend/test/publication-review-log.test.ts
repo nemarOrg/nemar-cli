@@ -71,7 +71,9 @@ function walk(dir: string): string[] {
 }
 
 describe("the review's modules share one copy of each helper", () => {
-  const files = walk(SRC).filter((f) => /publication-review/.test(f));
+  // Matched on the path under `src`, never the whole path: a checkout whose own directory name
+  // says `publication-review` would otherwise pull every file of the backend into the scan.
+  const files = walk(SRC).filter((f) => /publication-review/.test(relative(SRC, f)));
 
   test("the review's modules are found (the scan is not vacuous)", () => {
     const names = files.map((f) => relative(SRC, f));
