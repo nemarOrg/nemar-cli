@@ -29,11 +29,8 @@ import {
 } from "../../shared/publication-review";
 import { adminRoutes } from "../src/routes/admin";
 import { isScreenExempt } from "../src/services/identifier-screen";
-import {
-  HISTORY_LIMIT,
-  overrideReasonsOf,
-  screenExempt,
-} from "../src/services/publication-review-view";
+import { isScreenExempt as storedIsScreenExempt } from "../src/services/identifier-screen-stored";
+import { HISTORY_LIMIT, overrideReasonsOf } from "../src/services/publication-review-view";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, interceptingD1, realD1 } from "./helpers/d1";
@@ -1447,19 +1444,23 @@ describe("GET /admin/publish/:id/review", () => {
 // ============================================================================
 
 describe("the view's own helpers", () => {
-  test("the sandbox exemption agrees with the screen's, for every kind of id", () => {
-    for (const id of [
-      "xx000001",
-      "xx099999",
-      "xx12345",
-      "nm000001",
-      "on000001",
-      "xxabcdef",
-      "XX000001",
-      "",
-    ]) {
-      expect(screenExempt(id)).toBe(isScreenExempt(id));
-    }
+  test("the sandbox exemption is one predicate, which the screen and the view both use", () => {
+    // `identifier-screen.ts` re-exports the predicate that lives beside the stored-screen readers
+    // (the view imports it from there, because `identifier-screen.ts` imports the view), so there
+    // is nothing to keep equal.
+    expect(isScreenExempt).toBe(storedIsScreenExempt);
+    const exempt: Array<[string, boolean]> = [
+      ["xx000001", true],
+      ["xx099999", true],
+      ["xx12345", false],
+      ["xx1234567", false],
+      ["nm000001", false],
+      ["on000001", false],
+      ["xxabcdef", false],
+      ["XX000001", false],
+      ["", false],
+    ];
+    for (const [id, want] of exempt) expect([id, storedIsScreenExempt(id)]).toEqual([id, want]);
   });
 
   test("an override's reasons read from a JSON list or a comma list, and unknown words are dropped", () => {

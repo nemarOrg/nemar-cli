@@ -77,10 +77,10 @@ import {
 } from "../../../shared/publication-review.js";
 import type { Bindings } from "../types/bindings.js";
 import { ACTIVE_REQUEST_TAIL_SQL } from "./approval-dispatch.js";
-import { isSandboxDatasetId, isValidDatasetId } from "./datasetId.js";
+import { isValidDatasetId } from "./datasetId.js";
 import type { PublicationReviewSection } from "./email.js";
 import { isNonProductionEnv } from "./environment.js";
-import { readStoredReport, readStoredState } from "./identifier-screen-stored.js";
+import { isScreenExempt, readStoredReport, readStoredState } from "./identifier-screen-stored.js";
 import {
   MAX_KEYS_PER_READ,
   type PublicationReviewRow,
@@ -140,14 +140,6 @@ const LIVE_FACT_STATUSES: ReadonlySet<string> = new Set(["requested", "blocked"]
  * there is nothing to assess about it.
  */
 const ACTIVE_STATUSES: ReadonlySet<string> = new Set(["requested", "approving", "blocked"]);
-
-/**
- * `isScreenExempt` of `identifier-screen.ts`, stated again because that module imports this one.
- * A test keeps the two equal.
- */
-export function screenExempt(datasetId: string): boolean {
-  return /^xx\d{6}$/.test(datasetId) && isSandboxDatasetId(datasetId);
-}
 
 const HEAD = /^[0-9a-f]{40}$/;
 
@@ -249,7 +241,7 @@ function screenOf(request: ReviewRequestFields): {
   const screenReport = state === null ? null : readStoredReport(request.identifier_screen_report);
   return {
     head: screenReport?.head ?? null,
-    gate: screenExempt(request.dataset_id) ? "exempt" : screenGate(state),
+    gate: isScreenExempt(request.dataset_id) ? "exempt" : screenGate(state),
   };
 }
 

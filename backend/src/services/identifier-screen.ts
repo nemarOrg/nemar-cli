@@ -50,7 +50,6 @@ import {
 import { PUBLICATION_STEPS } from "../../../shared/publication-steps.js";
 import { auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
-import { isSandboxDatasetId } from "./datasetId.js";
 import {
   type PublicationReviewSection,
   type PublicationScreenSection,
@@ -66,13 +65,14 @@ import {
   signIdentifierScreenCallbackToken,
   triggerIdentifierScreenRun,
 } from "./github.js";
-import { readStoredReport, readStoredState } from "./identifier-screen-stored.js";
+import { isScreenExempt, readStoredReport, readStoredState } from "./identifier-screen-stored.js";
 import { reviewInFlightSql } from "./publication-review-rows.js";
 import { publicationReviewEmailSection, reviewEnabled } from "./publication-review-view.js";
 
-// The two readers of a stored screen live in their own module so the publication review
-// (ADR 0102) can use them without importing this one; re-exported for every existing importer.
-export { readStoredReport, readStoredState };
+// The two readers of a stored screen, and the sandbox exemption, live in their own module so the
+// publication review (ADR 0102) can use them without importing this one; re-exported for every
+// existing importer.
+export { isScreenExempt, readStoredReport, readStoredState };
 
 /**
  * A screen still pending this long after its dispatch has not reported, and is
@@ -132,17 +132,6 @@ export const IDENTIFIER_SCREEN_BLOCK_REASON = "identifier_screen_findings";
 
 /** Where the workflow posts its report, under API_BASE_URL. */
 export const IDENTIFIER_SCREEN_CALLBACK_PATH = "/webhooks/identifier-screen-result";
-
-/**
- * Sandbox (`xx`) datasets are not screened: the band is training and staging
- * exemplars, which never publish real data (ADR 0068's bands). The same rule
- * `isSandboxDatasetId` states, used by name so the exemption reads as a policy.
- */
-export function isScreenExempt(datasetId: string): boolean {
-  // A well-formed `xx` id only: anything else is screened, never waved through
-  // because it happens to start with the letters.
-  return /^xx\d{6}$/.test(datasetId) && isSandboxDatasetId(datasetId);
-}
 
 /** What an exempt dataset's email and status say about the screen. Worker-fixed words. */
 export const EXEMPT_SCREEN_DESCRIPTION: ScreenDescription = {
