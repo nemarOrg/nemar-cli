@@ -380,6 +380,89 @@ describe("the corpus builder reads public repositories through the job's own rea
   });
 });
 
+describe("an entry is read back only if it is exactly what the builder writes", () => {
+  function tampered(change: (meta: Record<string, unknown>) => void): string {
+    const dir = join(root, `corpus-tampered-${++tamperSeq}`, "nm000001");
+    cpSync(join(goodCorpus, "nm000001"), dir, { recursive: true });
+    const meta = JSON.parse(readFileSync(join(dir, "entry.json"), "utf8")) as Record<
+      string,
+      unknown
+    >;
+    change(meta);
+    writeFileSync(join(dir, "entry.json"), JSON.stringify(meta));
+    return dir;
+  }
+  let tamperSeq = 0;
+  const documents = (meta: Record<string, unknown>) =>
+    meta.documents as Record<string, Record<string, unknown>>;
+
+  test.each([
+    [
+      "a file name outside the closed lists",
+      (m: Record<string, unknown>) => {
+        documents(m).readme = { name: "../../outside.md", state: "present" };
+      },
+    ],
+    [
+      "a name for a document that is absent",
+      (m: Record<string, unknown>) => {
+        documents(m).changes = { name: "CHANGES", state: "absent" };
+      },
+    ],
+    [
+      "a state that is not one of the five",
+      (m: Record<string, unknown>) => {
+        documents(m).readme = { name: "README.md", state: "sent" };
+      },
+    ],
+    [
+      "a label that is not a defect",
+      (m: Record<string, unknown>) => {
+        m.label = "worse";
+      },
+    ],
+    [
+      "an id that does not follow from the base and the label",
+      (m: Record<string, unknown>) => {
+        m.id = "nm000009";
+      },
+    ],
+    [
+      "a head that is not a commit id",
+      (m: Record<string, unknown>) => {
+        m.head = "main";
+      },
+    ],
+    [
+      "a key it does not write",
+      (m: Record<string, unknown>) => {
+        m.note = "x";
+      },
+    ],
+    [
+      "a document missing from the list",
+      (m: Record<string, unknown>) => {
+        Reflect.deleteProperty(documents(m), "license");
+      },
+    ],
+  ])("%s is refused", (_why, change) => {
+    expect(() => readEntry(tampered(change))).toThrow("bad_entry");
+  });
+
+  test("a present document whose file is gone is refused, and an untouched entry reads fine", () => {
+    const dir = tampered(() => {});
+    expect(readEntry(dir).id).toBe("nm000001");
+    rmSync(join(dir, "README.md"));
+    expect(() => readEntry(dir)).toThrow("bad_entry");
+  });
+
+  test("a directory in a corpus that is named for another id is refused", () => {
+    const corpus = join(root, "corpus-misnamed");
+    cpSync(join(goodCorpus, "nm000001"), join(corpus, "nm000002"), { recursive: true });
+    expect(() => listEntries(corpus)).toThrow("bad_entry");
+  });
+});
+
 // ---------------------------------------------------------------------------------------------
 // The defect mutator
 // ---------------------------------------------------------------------------------------------
