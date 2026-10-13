@@ -266,6 +266,27 @@ export type TagState = (typeof TAG_STATES)[number];
 export const VERSION_SHAPES = ["ok", "missing", "malformed"] as const;
 export type VersionShape = (typeof VERSION_SHAPES)[number];
 
+/**
+ * The version the approval publishes when `dataset_description.json` sets none: the orchestrator
+ * reads `String(Version || "1.0.0")`.
+ */
+export const DEFAULT_PUBLICATION_VERSION = "1.0.0";
+
+/**
+ * The version an approval of this evidence would PUBLISH, and so the one every live version check
+ * looks up: the described `X.Y.Z`, or {@link DEFAULT_PUBLICATION_VERSION} when the description sets
+ * none. A malformed Version has no version to look up and stays malformed (`version_malformed`).
+ * Checking the evidence's own `version` alone skipped every live check for a dataset with no
+ * Version, and a release of 1.0.0 then read as the overridable `version_missing`.
+ */
+export function effectiveVersionOf(
+  evidence: Pick<PublicationReviewEvidence, "version" | "version_shape">,
+): string | null {
+  if (evidence.version_shape === "ok") return evidence.version;
+  if (evidence.version_shape === "missing") return DEFAULT_PUBLICATION_VERSION;
+  return null;
+}
+
 export interface StructuralSummary {
   /** Root `sub-*` directories. */
   subjects: number;
@@ -1159,9 +1180,10 @@ export interface LiveFacts {
   };
   versions: {
     /**
-     * A `dataset_versions` row exists for the version the review in force read. False when that
-     * review carries no version: there is then nothing for a row to match. A boolean, never
-     * "unknown": a caller that could not read the table refuses rather than guess.
+     * A `dataset_versions` row exists for the version an approval would publish
+     * ({@link effectiveVersionOf}: the review in force's Version, or 1.0.0 when it sets none).
+     * False when that review has no version to look up (none read, or a malformed one). A boolean,
+     * never "unknown": a caller that could not read the table refuses rather than guess.
      */
     version_row_exists: boolean;
     /** An earlier request of this dataset asked for an anonymous release. */

@@ -367,6 +367,66 @@ describe("GET /admin/publish/requests: the review of each request", () => {
     expect((await review(datasetId)).reasons).toEqual(["version_already_released"]);
   });
 
+  // A review of a dataset whose description sets no Version: the orchestrator publishes
+  // `Version || "1.0.0"`, so the live version checks look 1.0.0 up, as the approval will.
+  const noVersion = () =>
+    goodPublicationReport({
+      evidence: evidenceFor(SCREENED_HEAD, false, {
+        version: null,
+        version_shape: "missing",
+        tag: "not_applicable",
+      }),
+    });
+
+  test("a request with no Version is published as 1.0.0, so a released 1.0.0 is a fail, not just a missing version", async () => {
+    const { requestId, datasetId } = request();
+    seedPublicationReview(db, { requestId, datasetId, state: "reported", report: noVersion() });
+    // Nothing released: only the overridable word.
+    expect((await review(datasetId)).reasons).toEqual(["version_missing"]);
+    addVersionRow(datasetId, "1.0.0");
+    const r = await review(datasetId);
+    expect(r.outcome).toBe("fail");
+    expect(r.reasons).toEqual(["version_already_released", "version_missing"]);
+    // A release of another version is not the one the approval would publish.
+    db.run("DELETE FROM dataset_versions WHERE dataset_id = ?", [datasetId]);
+    addVersionRow(datasetId, "2.0.0");
+    expect((await review(datasetId)).reasons).toEqual(["version_missing"]);
+  });
+
+  test("a named request with no Version after an anonymous release at 1.0.0 is the hard reason", async () => {
+    const datasetId = nextDataset();
+    request({ datasetId, anonymous: true, requestStatus: "published" });
+    const { requestId } = request({ datasetId });
+    seedPublicationReview(db, { requestId, datasetId, state: "reported", report: noVersion() });
+    addVersionRow(datasetId, "1.0.0");
+    const r = await review(datasetId);
+    expect(r.outcome).toBe("fail");
+    expect(r.reasons).toEqual(["version_kept_after_anonymous_release", "version_missing"]);
+    expect(
+      (await detail(datasetId)).reasons.find(
+        (x) => x.code === "version_kept_after_anonymous_release",
+      ),
+    ).toMatchObject({ class: "fail", cleared_by: "nothing" });
+  });
+
+  test("a malformed Version stays malformed and is not looked up", async () => {
+    const { requestId, datasetId } = request();
+    seedPublicationReview(db, {
+      requestId,
+      datasetId,
+      state: "reported",
+      report: goodPublicationReport({
+        evidence: evidenceFor(SCREENED_HEAD, false, {
+          version: null,
+          version_shape: "malformed",
+          tag: "not_applicable",
+        }),
+      }),
+    });
+    addVersionRow(datasetId, "1.0.0");
+    expect((await review(datasetId)).reasons).toEqual(["version_malformed"]);
+  });
+
   test("a concept DOI no earlier anonymous release reserved is unexpected", async () => {
     const { requestId, datasetId } = request();
     seedPublicationReview(db, { requestId, datasetId, state: "reported" });

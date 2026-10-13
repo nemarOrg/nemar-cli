@@ -59,6 +59,7 @@ import {
   type ReviewRowView,
   answersOf,
   describePublicationReview,
+  effectiveVersionOf,
   isPublicationDeclineDetail,
   isPublicationOutcome,
   isPublicationReviewState,
@@ -237,10 +238,13 @@ export async function derivePublicationReview(
 
   const report = reportOf(rowView);
   const version = report?.evidence.version ?? null;
+  // What an approval would publish: a dataset with no Version is published as 1.0.0, so that is
+  // the version whose release the live checks must look for (a malformed one has none).
+  const publishedVersion = report === null ? null : effectiveVersionOf(report.evidence);
   const readFacts = applies && LIVE_FACT_STATUSES.has(request.status);
   const versionRowExists =
-    readFacts && version !== null
-      ? await exists(db, VERSION_ROW_SQL, request.dataset_id, version)
+    readFacts && publishedVersion !== null
+      ? await exists(db, VERSION_ROW_SQL, request.dataset_id, publishedVersion)
       : false;
   const conceptDoiPresent = readFacts && (dataset?.concept_doi ?? "").trim() !== "";
   // Asked only when a rule below can use the answer: a version row (which of the two version
