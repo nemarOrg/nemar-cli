@@ -1071,6 +1071,7 @@ describe("GET /admin/publish/:id/review", () => {
         "started_by",
         "override",
         "questions",
+        "fact_notes",
         "findings",
         "summary",
         "evidence",
@@ -1158,6 +1159,102 @@ describe("GET /admin/publish/:id/review", () => {
     });
     expect(d.review?.findings).toEqual([]);
     expect(d.review?.summary).toBeNull();
+  });
+
+  test("a question that a fact failed says which fact, and is not blamed on the reviewer", async () => {
+    // A model that passed every question, over a dataset with no License and a three-character
+    // Name. Both answers are the facts' (`answersOf`), there is no finding to read, and the line
+    // used to say "The reviewer answered no to a question" with nothing after it.
+    const { requestId, datasetId } = request();
+    seedPublicationReview(db, {
+      requestId,
+      datasetId,
+      state: "reported",
+      report: goodPublicationReport({
+        evidence: evidenceFor(SCREENED_HEAD, false, { name_length: 3, license_field: false }),
+      }),
+    });
+    const d = await detail(datasetId);
+    expect(d.outcome).toBe("fail");
+    expect(d.reasons.map((r) => [r.code, r.detail])).toEqual([
+      ["question_failed", "authors_and_license"],
+      ["question_failed", "name_adequate"],
+    ]);
+    const failedSentence = REASONS.question_failed.sentence.replace(/\.$/, "");
+    const lines = d.description.lines.filter((l) => l.startsWith(failedSentence));
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain("dataset_description.json sets no License");
+    expect(lines[1]).toContain(
+      "the Name in dataset_description.json is shorter than 25 characters",
+    );
+    expect(d.description.lines.join("\n")).not.toContain("answered no");
+    // The record says it too, in closed words and the shared sentence, beside the (empty) findings.
+    expect(d.review?.findings).toEqual([]);
+    expect(d.review?.fact_notes).toEqual([
+      {
+        question: "authors_and_license",
+        fact: "license_field_missing",
+        result: "fail",
+        text: "dataset_description.json sets no License",
+      },
+      {
+        question: "name_adequate",
+        fact: "name_too_short",
+        result: "fail",
+        text: "the Name in dataset_description.json is shorter than 25 characters",
+      },
+    ]);
+    expect(d.review?.questions).toMatchObject({
+      authors_and_license: "fail",
+      name_adequate: "fail",
+      complete_and_honest: "pass",
+    });
+  });
+
+  test("a question a fact made unknown says so too, and a model's own fail still lists its findings", async () => {
+    const cut = request();
+    seedPublicationReview(db, {
+      requestId: cut.requestId,
+      datasetId: cut.datasetId,
+      state: "reported",
+      report: goodPublicationReport({
+        evidence: evidenceFor(SCREENED_HEAD, false, {
+          documents: {
+            readme: "sent_cut",
+            dataset_description: "sent",
+            changes: "sent",
+            license: "sent",
+            participants_json: "absent",
+          },
+        }),
+      }),
+    });
+    const unknown = await detail(cut.datasetId);
+    expect(unknown.reasons.map((r) => [r.code, r.detail])).toEqual([
+      ["question_unknown", "complete_and_honest"],
+      ["question_unknown", "meets_standards"],
+    ]);
+    expect(unknown.description.lines.join("\n")).toContain(
+      "the reviewer was not shown all of the text this question needs",
+    );
+    expect(unknown.review?.fact_notes.map((n) => [n.question, n.fact, n.result])).toEqual([
+      ["complete_and_honest", "text_not_seen_in_full", "unknown"],
+      ["meets_standards", "text_not_seen_in_full", "unknown"],
+    ]);
+
+    // The model's own fail is not a fact: its findings are listed and no fact note is made up.
+    const own = request();
+    seedPublicationReview(db, {
+      requestId: own.requestId,
+      datasetId: own.datasetId,
+      state: "reported",
+      report: failingReport(),
+    });
+    const failed = await detail(own.datasetId);
+    expect(failed.review?.fact_notes).toEqual([]);
+    expect(failed.description.lines.join("\n")).toContain(
+      "findings: README does not match the dataset",
+    );
   });
 
   test("a hard reason is cleared by nothing, and the screen's by its acknowledgment", async () => {

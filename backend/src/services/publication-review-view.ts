@@ -66,6 +66,7 @@ import {
   answersOf,
   describePublicationReview,
   effectiveVersionOf,
+  factNotesOf,
   isPublicationDeclineDetail,
   isPublicationOutcome,
   isPublicationReviewState,
@@ -634,6 +635,7 @@ function recordOf(row: PublicationReviewRow, view: ReviewRowView): PublicationRe
           }
         : null,
     questions: report === null ? null : answersOf(report).answers,
+    fact_notes: report === null ? [] : factNotesOf(report),
     findings: (report?.findings ?? []).map((f) => ({
       question: f.question,
       severity: f.severity,

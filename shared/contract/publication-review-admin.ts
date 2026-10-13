@@ -113,6 +113,14 @@ export interface PublicationReviewRecord {
   override: { by: number; at: string; reasons: ReasonCode[] } | null;
   /** After the facts (`answersOf`); null when there is no readable report. */
   questions: Record<Question, Answer> | null;
+  /**
+   * The facts that lowered an answer below the model's, in closed words with the shared sentence
+   * for each, so an answer the platform's own facts failed is never read as the reviewer's. A
+   * question the model itself failed has no entry here and lists its findings instead. Empty when
+   * there is no readable report. `fact` is a plain string so a newer server's word does not break
+   * an older client.
+   */
+  fact_notes: Array<{ question: Question; fact: string; result: "fail" | "unknown"; text: string }>;
   /** Severity and code are plain strings so a newer server's word does not break an older client. */
   findings: Array<{
     question: Question;

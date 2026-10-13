@@ -798,10 +798,41 @@ export function parsePublicationReviewReport(
 // Facts lower answers, never raise them
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * The facts that can lower an answer, each a closed word (two of them share the finding code
+ * `evidence_incomplete`, which is why the finding code alone does not say which fact it was).
+ */
+export const QUESTION_FACTS = [
+  "readme_absent",
+  "text_not_seen_in_full",
+  "no_recordings",
+  "license_field_missing",
+  "name_too_short",
+  "placeholder_author",
+] as const;
+export type QuestionFactWord = (typeof QUESTION_FACTS)[number];
+
+/**
+ * What each fact says, in the words every surface shows beside the question it lowered. Written
+ * so that it reads after the name of a question and never claims the reviewer said anything: a
+ * fact is the platform's, and the model may have passed the question.
+ */
+export const QUESTION_FACT_TEXT: Record<QuestionFactWord, string> = {
+  readme_absent: "no README was found at the dataset root",
+  text_not_seen_in_full: "the reviewer was not shown all of the text this question needs",
+  no_recordings: "the dataset's structure shows no recordings",
+  license_field_missing: "dataset_description.json sets no License",
+  name_too_short: `the Name in dataset_description.json is shorter than ${MIN_NAME_LENGTH} characters`,
+  placeholder_author: "Authors names a placeholder instead of a person",
+};
+
 /** A fact from the evidence that moved a question away from what the model said. */
 export interface QuestionFact {
   question: Question;
+  /** The finding code a fact of this kind would carry. */
   code: PublicationFindingCode;
+  /** Which fact it was. */
+  fact: QuestionFactWord;
   /** What the fact made of the question. */
   result: "fail" | "unknown";
 }
@@ -820,6 +851,10 @@ const ANSWER_RANK: Record<Answer, number> = { pass: 2, unknown: 1, fail: 0 };
  *  - A `Name` shorter than ADR 0026's floor: `name_adequate` fails.
  *  - A placeholder author on a NAMED release: `authors_and_license` fails. For an anonymous
  *    release the Authors half is answered by ADR 0065's inverted rule, which is a minimum.
+ *
+ * `notes` lists only the facts that moved an answer, so a question the model itself failed has no
+ * note. Every surface that explains a failed or unknown question reads them
+ * ({@link factNotesOf}, and the detail of {@link reasonLine}).
  */
 export function answersOf(report: PublicationReviewReport): {
   answers: Record<Question, Answer>;
@@ -827,30 +862,59 @@ export function answersOf(report: PublicationReviewReport): {
 } {
   const answers = { ...report.questions };
   const notes: QuestionFact[] = [];
-  const lower = (question: Question, code: PublicationFindingCode, to: "fail" | "unknown") => {
+  const lower = (
+    question: Question,
+    fact: QuestionFactWord,
+    code: PublicationFindingCode,
+    to: "fail" | "unknown",
+  ) => {
     // Only ever lower: a fail stays a fail, and unknown never replaces a fail.
     if (ANSWER_RANK[to] < ANSWER_RANK[answers[question]]) {
       answers[question] = to;
-      notes.push({ question, code, result: to });
+      notes.push({ question, code, fact, result: to });
     }
   };
   const e = report.evidence;
   if (e.documents.readme === "absent") {
-    lower("complete_and_honest", "readme_missing_or_stub", "fail");
+    lower("complete_and_honest", "readme_absent", "readme_missing_or_stub", "fail");
   }
   for (const q of QUESTIONS) {
     const s = QUESTION_NEEDS[q].map((d) => e.documents[d]);
     if (s.some((state) => state === "sent_cut" || isWithheld(state))) {
-      lower(q, "evidence_incomplete", "unknown");
+      lower(q, "text_not_seen_in_full", "evidence_incomplete", "unknown");
     }
   }
-  if (e.summary.recordings === 0) lower("complete_and_honest", "evidence_incomplete", "unknown");
-  if (!e.license_field) lower("authors_and_license", "license_missing", "fail");
-  if (e.name_length < MIN_NAME_LENGTH) lower("name_adequate", "name_not_descriptive", "fail");
+  if (e.summary.recordings === 0) {
+    lower("complete_and_honest", "no_recordings", "evidence_incomplete", "unknown");
+  }
+  if (!e.license_field) {
+    lower("authors_and_license", "license_field_missing", "license_missing", "fail");
+  }
+  if (e.name_length < MIN_NAME_LENGTH) {
+    lower("name_adequate", "name_too_short", "name_not_descriptive", "fail");
+  }
   if (!e.anonymous && e.placeholder_authors > 0) {
-    lower("authors_and_license", "authors_placeholder", "fail");
+    lower("authors_and_license", "placeholder_author", "authors_placeholder", "fail");
   }
   return { answers, notes };
+}
+
+/** One fact that lowered an answer, with its sentence, as the detail view shows it. */
+export interface QuestionFactNote {
+  question: Question;
+  fact: QuestionFactWord;
+  result: "fail" | "unknown";
+  text: string;
+}
+
+/** The facts that lowered an answer, each with the shared sentence for it. */
+export function factNotesOf(report: PublicationReviewReport): QuestionFactNote[] {
+  return answersOf(report).notes.map(({ question, fact, result }) => ({
+    question,
+    fact,
+    result,
+    text: QUESTION_FACT_TEXT[fact],
+  }));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1029,8 +1093,10 @@ export const REASONS: Record<ReasonCode, ReasonRule> = {
   question_failed: {
     class: "fail",
     clearedBy: "override",
-    sentence: "The reviewer answered no to a question.",
-    cure: `Read the findings and the dataset's text. ${OVERRIDE}`,
+    // Neutral about who failed it: the reviewer's own answer, or a fact of the dataset that lowered
+    // the reviewer's answer (`answersOf`). The detail in parentheses says which.
+    sentence: "A question of the review failed.",
+    cure: `Read any findings and the dataset's text. ${OVERRIDE}`,
   },
   steering_attempt: {
     class: "fail",
@@ -1102,7 +1168,7 @@ export const REASONS: Record<ReasonCode, ReasonRule> = {
   question_unknown: {
     class: "unknown",
     clearedBy: "override",
-    sentence: "The reviewer could not answer a question.",
+    sentence: "A question of the review could not be answered.",
     cure: `Answer it yourself from the dataset. ${OVERRIDE}`,
   },
   bids_unconcluded_at_review: {
@@ -1408,7 +1474,11 @@ const OUTCOME_TONE: Record<PublicationOutcome, "ok" | "warn" | "stop"> = {
 
 const DATASET_ID = /^(nm|on|xx)\d{6}$/;
 
-/** A detail word as a person reads it; anything unexpected is shown as the closed word it is. */
+/**
+ * A detail word as a person reads it; anything unexpected is shown as the closed word it is. A
+ * failed or unknown question names the question, then the fact that lowered the answer when a fact
+ * did (the model may have passed it), then the model's findings against it.
+ */
 function detailText(reason: Reason, report: PublicationReviewReport | null): string | null {
   const d = reason.detail;
   if (d === null) return null;
@@ -1416,13 +1486,19 @@ function detailText(reason: Reason, report: PublicationReviewReport | null): str
     case "question_failed":
     case "question_unknown": {
       if (!isOneOf(QUESTIONS, d)) return d;
+      const result = reason.code === "question_failed" ? "fail" : "unknown";
+      const parts: string[] = [QUESTION_LABEL[d]];
+      if (report !== null) {
+        for (const note of factNotesOf(report)) {
+          if (note.question === d && note.result === result) parts.push(note.text);
+        }
+      }
       const codes = (report?.findings ?? [])
         .filter((f) => f.question === d)
         .map((f) => PUBLICATION_FINDING_LABEL[f.code]);
       const unique = [...new Set(codes)];
-      return unique.length > 0
-        ? `${QUESTION_LABEL[d]}; findings: ${unique.join(", ")}`
-        : QUESTION_LABEL[d];
+      if (unique.length > 0) parts.push(`findings: ${unique.join(", ")}`);
+      return parts.join("; ");
     }
     case "text_withheld":
       return d

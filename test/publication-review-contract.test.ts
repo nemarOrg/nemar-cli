@@ -47,6 +47,8 @@ import {
   type PublicationReviewReport,
   PublicationReviewReportError,
   QUESTIONS,
+  QUESTION_FACTS,
+  QUESTION_FACT_TEXT,
   QUESTION_NEEDS,
   type Question,
   REASONS,
@@ -68,6 +70,7 @@ import {
   parsePublicationCallbackOutcome,
   parsePublicationReviewEvidence,
   parsePublicationReviewReport,
+  reasonLine,
   reasonsOf,
   reportReasons,
   stricterOf,
@@ -946,36 +949,66 @@ describe("facts only lower an answer (answersOf)", () => {
   const FACTS: Array<{
     name: string;
     evidence: Record<string, unknown>;
-    lowers: Partial<Record<Question, { to: "fail" | "unknown"; code: string }>>;
+    lowers: Partial<Record<Question, { to: "fail" | "unknown"; code: string; fact: string }>>;
   }> = [
     {
       name: "no README",
       evidence: { documents: { ...ALL_SENT, readme: "absent" } },
-      lowers: { complete_and_honest: { to: "fail", code: "readme_missing_or_stub" } },
+      lowers: {
+        complete_and_honest: { to: "fail", code: "readme_missing_or_stub", fact: "readme_absent" },
+      },
     },
     {
       name: "the README was cut",
       evidence: { documents: { ...ALL_SENT, readme: "sent_cut" } },
       lowers: {
-        complete_and_honest: { to: "unknown", code: "evidence_incomplete" },
-        meets_standards: { to: "unknown", code: "evidence_incomplete" },
+        complete_and_honest: {
+          to: "unknown",
+          code: "evidence_incomplete",
+          fact: "text_not_seen_in_full",
+        },
+        meets_standards: {
+          to: "unknown",
+          code: "evidence_incomplete",
+          fact: "text_not_seen_in_full",
+        },
       },
     },
     {
       name: "the README is annexed (withheld, never a stub)",
       evidence: { documents: { ...ALL_SENT, readme: "withheld_annexed" } },
       lowers: {
-        complete_and_honest: { to: "unknown", code: "evidence_incomplete" },
-        meets_standards: { to: "unknown", code: "evidence_incomplete" },
+        complete_and_honest: {
+          to: "unknown",
+          code: "evidence_incomplete",
+          fact: "text_not_seen_in_full",
+        },
+        meets_standards: {
+          to: "unknown",
+          code: "evidence_incomplete",
+          fact: "text_not_seen_in_full",
+        },
       },
     },
     {
       name: "the description was withheld",
       evidence: { documents: { ...ALL_SENT, dataset_description: "withheld_not_json" } },
       lowers: {
-        meets_standards: { to: "unknown", code: "evidence_incomplete" },
-        authors_and_license: { to: "unknown", code: "evidence_incomplete" },
-        name_adequate: { to: "unknown", code: "evidence_incomplete" },
+        meets_standards: {
+          to: "unknown",
+          code: "evidence_incomplete",
+          fact: "text_not_seen_in_full",
+        },
+        authors_and_license: {
+          to: "unknown",
+          code: "evidence_incomplete",
+          fact: "text_not_seen_in_full",
+        },
+        name_adequate: {
+          to: "unknown",
+          code: "evidence_incomplete",
+          fact: "text_not_seen_in_full",
+        },
       },
     },
     {
@@ -984,12 +1017,24 @@ describe("facts only lower an answer (answersOf)", () => {
         documents: { ...ALL_SENT, changes: "withheld_finding" },
         withheld_findings: { "local-user-path": 1 },
       },
-      lowers: { complete_and_honest: { to: "unknown", code: "evidence_incomplete" } },
+      lowers: {
+        complete_and_honest: {
+          to: "unknown",
+          code: "evidence_incomplete",
+          fact: "text_not_seen_in_full",
+        },
+      },
     },
     {
       name: "LICENSE was cut",
       evidence: { documents: { ...ALL_SENT, license: "sent_cut" } },
-      lowers: { authors_and_license: { to: "unknown", code: "evidence_incomplete" } },
+      lowers: {
+        authors_and_license: {
+          to: "unknown",
+          code: "evidence_incomplete",
+          fact: "text_not_seen_in_full",
+        },
+      },
     },
     {
       name: "participants.json was withheld (no question needs it)",
@@ -999,22 +1044,34 @@ describe("facts only lower an answer (answersOf)", () => {
     {
       name: "no recordings",
       evidence: { summary: summaryBody({ recordings: 0, formats: {} }) },
-      lowers: { complete_and_honest: { to: "unknown", code: "evidence_incomplete" } },
+      lowers: {
+        complete_and_honest: { to: "unknown", code: "evidence_incomplete", fact: "no_recordings" },
+      },
     },
     {
       name: "no License",
       evidence: { license_field: false },
-      lowers: { authors_and_license: { to: "fail", code: "license_missing" } },
+      lowers: {
+        authors_and_license: { to: "fail", code: "license_missing", fact: "license_field_missing" },
+      },
     },
     {
       name: "a short name",
       evidence: { name_length: 24 },
-      lowers: { name_adequate: { to: "fail", code: "name_not_descriptive" } },
+      lowers: {
+        name_adequate: { to: "fail", code: "name_not_descriptive", fact: "name_too_short" },
+      },
     },
     {
       name: "a placeholder author on a named release",
       evidence: { placeholder_authors: 1 },
-      lowers: { authors_and_license: { to: "fail", code: "authors_placeholder" } },
+      lowers: {
+        authors_and_license: {
+          to: "fail",
+          code: "authors_placeholder",
+          fact: "placeholder_author",
+        },
+      },
     },
     {
       name: "a placeholder author on an anonymous release (the minimum answers it)",
@@ -1029,6 +1086,66 @@ describe("facts only lower an answer (answersOf)", () => {
       expect(answers).toEqual(questions);
       expect(notes).toEqual([]);
     }
+  });
+
+  test("every fact has a closed word and one sentence, and the table above produces each word", () => {
+    expect([...QUESTION_FACTS]).toEqual([
+      "readme_absent",
+      "text_not_seen_in_full",
+      "no_recordings",
+      "license_field_missing",
+      "name_too_short",
+      "placeholder_author",
+    ]);
+    expect(QUESTION_FACT_TEXT).toEqual({
+      readme_absent: "no README was found at the dataset root",
+      text_not_seen_in_full: "the reviewer was not shown all of the text this question needs",
+      no_recordings: "the dataset's structure shows no recordings",
+      license_field_missing: "dataset_description.json sets no License",
+      name_too_short: "the Name in dataset_description.json is shorter than 25 characters",
+      placeholder_author: "Authors names a placeholder instead of a person",
+    });
+    const produced = new Set(FACTS.flatMap((f) => Object.values(f.lowers).map((l) => l.fact)));
+    expect([...produced].sort()).toEqual([...QUESTION_FACTS].sort());
+  });
+
+  test("a fact that lowered an answer is explained in the question's line, never as the reviewer's answer", () => {
+    const report = parsePublicationReviewReport(
+      reportBody({ evidence: evidenceBody({ license_field: false, name_length: 3 }) }),
+    );
+    const reasons = reportReasons(report);
+    expect(reasons.map((r) => [r.code, r.detail])).toEqual([
+      ["question_failed", "authors_and_license"],
+      ["question_failed", "name_adequate"],
+    ]);
+    const lines = describePublicationReview({
+      datasetId: "nm000123",
+      applies: true,
+      enabled: true,
+      outcome: "fail",
+      reasons,
+      row: { kind: "reported", report, stored: "fail" },
+      model: report.model,
+      head: HEAD,
+      version: "1.2.0",
+    }).lines;
+    expect(lines[0]).toStartWith(
+      "A question of the review failed (the authors and the license are real and consistent; dataset_description.json sets no License).",
+    );
+    expect(lines[1]).toStartWith(
+      "A question of the review failed (the name describes the dataset; the Name in dataset_description.json is shorter than 25 characters).",
+    );
+    expect(lines.join("\n")).not.toContain("answered no");
+    // A question the model failed itself lists its findings, and no fact.
+    const own = parsePublicationReviewReport(
+      reportBody({
+        questions: { ...ALL_PASS, name_adequate: "fail" },
+        findings: [finding("name_adequate", "blocker", "name_not_descriptive")],
+      }),
+    );
+    expect(reasonLine(reportReasons(own)[0], "nm000123", own)).toStartWith(
+      "A question of the review failed (the name describes the dataset; findings: Name not descriptive).",
+    );
   });
 
   for (const fact of FACTS) {
@@ -1048,7 +1165,12 @@ describe("facts only lower an answer (answersOf)", () => {
           const note = notes.find((n) => n.question === q);
           if (want !== questions[q]) {
             lowered++;
-            expect(note).toEqual({ question: q, code: rule?.code as never, result: want as never });
+            expect(note).toEqual({
+              question: q,
+              code: rule?.code as never,
+              fact: rule?.fact as never,
+              result: want as never,
+            });
           } else {
             expect(note).toBeUndefined();
           }
