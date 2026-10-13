@@ -18,7 +18,10 @@
  * model's summary without its label or a note without `plain()` (show); let `--json` print a line
  * besides the JSON; exit 0 for a refused start other than `running` and `has_result`; recompute
  * `start --all`'s candidates from reason codes; continue `start --all` after `platform_limit`;
- * start without a confirmation in a pipe.
+ * start without a confirmation in a pipe; ask the confirmation of `start --all --json` at a terminal
+ * (its question goes to standard output); print the step, the error or the pre-screen's reasons of
+ * `list` without `plain()`; count a request whose identifier screen is running as needing a person
+ * when the review is off.
  *
  * CI TIER: integration, like the other CLI suites that start the binary against a local server.
  */

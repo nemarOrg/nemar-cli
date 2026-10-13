@@ -9,6 +9,9 @@
  * The rendering functions are tested with hostile text fed straight in: the spawned-CLI suite goes
  * through the real Worker, which has already reduced the model's words to plain ones, so it would
  * pass with every `plain()` call of the CLI deleted.
+ *
+ * Mutation checks (each turns a named test red): drop the pending-screen wait of `needsAdministrator`;
+ * drop `plain()` from `screenViewLines`.
  */
 
 import { describe, expect, test } from "bun:test";

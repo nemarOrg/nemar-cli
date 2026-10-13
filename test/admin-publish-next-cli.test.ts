@@ -19,7 +19,10 @@
  * (a skipped card comes back); exit 0 after a failed approval; keep the type-ahead before a card or
  * before the extra question; skip the extra question; never ask for the screen's acknowledgment;
  * resume every request; leave the terminal paused after an approval's spinner, or wake it after
- * the input has ended.
+ * the input has ended; never clear the reported mark (a refusal, then a fault that may be a bug, exits
+ * with the hint suppressed); list a request whose identifier screen is still running with the review
+ * off; draw a card after the input has ended; let `d` throw on a detail it cannot render; skip the
+ * `finally` of the walk; drop the SIGINT listener of an approval (Ctrl+C then kills the walk silently).
  *
  * CI TIER: integration, like the other CLI suites that start the binary against a local server.
  */

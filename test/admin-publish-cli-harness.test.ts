@@ -7,7 +7,11 @@
  *   - the stand-ins record what the backend sent them, and answer what the test told them to;
  *   - nothing leaves the machine: a mail goes to the Resend stand-in, the command runs under its
  *     own configuration directory and the signed-in account is the one the test chose;
- *   - the hooks that let a test change the world between a command's read and its write work.
+ *   - the hooks that let a test change the world between a command's read and its write work, and
+ *     the ones that slow the GitHub stand-in, change an answer of the real route, or pipe a
+ *     terminal command's standard output;
+ *   - a command run on a terminal is read to its end: the transcript is taken only once the
+ *     terminal has delivered everything.
  *
  * CI TIER: integration, like the other CLI suites that start the binary against a local server.
  */
