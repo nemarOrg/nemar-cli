@@ -27,7 +27,7 @@ name: Auto Bump Dev
 # pushed commit. `deploy` runs deploy-backend.yml on it (a reusable-workflow
 # call) when there was a bump or the push touched backend/**, shared/** or
 # deploy-backend.yml (the paths that used to trigger a dev deploy directly).
-# `plan` also dispatches npm-publish.yml once, which builds the head of dev;
+# `publish` dispatches npm-publish.yml once, which builds the head of dev;
 # every push to dev used to publish itself. The bump's own push does neither:
 # the run that made it has. So one merge is one dev deploy, at the bumped
 # version, and one dev publish, where it used to be two of each (see the notes
@@ -126,7 +126,7 @@ jobs:
           # bump-version.sh has already created the commit; push it.
           # If a parallel push raced us, abort: the next push will
           # trigger this workflow again from the new HEAD. With no
-          # `sha` output, `dispatch` deploys the pushed commit instead.
+          # `sha` output, `plan` picks the pushed commit instead.
           if git push origin dev; then
             echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           else
@@ -141,14 +141,15 @@ jobs:
     needs: bump
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
-    # New job: a checkout, the classifier and an API call; 10 is the floor.
+    # New job: a checkout and the classifier; 10 is the floor.
     timeout-minutes: 10
     permissions:
-      actions: write # gh workflow run
       contents: read
     outputs:
       # The commit to deploy to the dev worker; empty for no deploy.
       deploy_sha: ${{ steps.plan.outputs.deploy_sha }}
+      # 'true' when this push owes the dev publish.
+      publish: ${{ steps.plan.outputs.publish }}
     steps:
       - name: Checkout code
         if: needs.bump.outputs.sha == ''
@@ -188,11 +189,20 @@ jobs:
             fi
           fi
 
+  # Its own job so a failed dispatch cannot hold back the deploy, or the reverse.
+  publish:
+    needs: plan
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.publish == 'true' }}
+    runs-on: ubuntu-latest
+    # New job: one API call; 10 is the floor.
+    timeout-minutes: 10
+    permissions:
+      actions: write # gh workflow run
+    steps:
       # Builds the head of dev, like the push run it replaces. A dispatch, not a
       # call: npm trusts this repository's npm-publish.yml as the publisher, and
       # main's copy already accepts a dispatch.
       - name: Dispatch the dev publish
-        if: steps.plan.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
