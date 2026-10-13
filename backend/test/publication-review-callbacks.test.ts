@@ -1,0 +1,1269 @@
+/**
+ * The publication review's callbacks and watchdog, through the real routes (ADR 0101).
+ *
+ * The job claims a review (one shot, before it spends anything), and posts its report. The Worker
+ * parses the report at the door, derives the verdict, moves a request whose minimum failed back to
+ * blocked, and closes a review that never reported. Every way of NOT getting a verdict is checked
+ * to leave a row a surface reads as needing a person, never as a pass.
+ *
+ * Real engine only: bun:sqlite behind realD1 with every migration applied, the real Hono routes,
+ * real WebCrypto tokens. GitHub is a `Bun.serve()` stand-in (helpers/publication-review-harness).
+ * The one statement the stand-in cannot prove is D1's own behavior, which
+ * publication-review-d1.test.ts runs on Miniflare.
+ */
+
+import { describe, expect, test } from "bun:test";
+import {
+  NEVER_REACHED_MODEL,
+  PUBLICATION_RUN_ERRORS,
+  WORKER_ONLY_RUN_ERRORS,
+} from "../../shared/publication-review";
+import { MINIMUM_FAILURES, minimumFailureSentence } from "../../shared/submission-minimums";
+import { sanitizeNote } from "../../shared/untrusted-text";
+import {
+  signIdentifierScreenCallbackToken,
+  signIdentifierSweepCallbackToken,
+  signManifestCallbackToken,
+  signPrescreenCallbackToken,
+} from "../src/services/github";
+import {
+  signPrReviewCallbackToken,
+  signPublicationReviewCallbackToken,
+} from "../src/services/github/callback-tokens";
+import {
+  COUNTS_TOWARD_CAPS,
+  startPublicationReview,
+  storePublicationReviewResult,
+  sweepPublicationReviews,
+} from "../src/services/publication-review";
+import { interceptingD1, realD1 } from "./helpers/d1";
+import { SCREENED_HEAD } from "./helpers/identifier-screen";
+import {
+  evidenceFor,
+  seedPublicationReview,
+  seedScreenedRequest,
+} from "./helpers/publication-review";
+import {
+  CALLBACK_SECRET,
+  DEV_DATASET,
+  PROD_DATASET,
+  createHarness,
+  reportFor,
+} from "./helpers/publication-review-harness";
+import { sendsTo, withFakeResend } from "./helpers/resend";
+
+const h = createHarness();
+
+const OTHER_HEAD = "f".repeat(40);
+const ADMIN_EMAIL = "revadmin@example.org";
+
+/** The n-th extra production-owned dataset id (never a live one, never a reserved fixture). */
+const ds = (n: number) => `nm${String(1000 + n).padStart(6, "0")}`;
+
+function seedAdmin() {
+  h.db.run(
+    `INSERT INTO users (username, email, password_hash, status, role, email_verified, service_access)
+     VALUES ('rev_admin', ?, 'x', 'approved', 'admin', 1, 1)`,
+    [ADMIN_EMAIL],
+  );
+}
+
+/** A native request with a clear screen at SCREENED_HEAD and one review of it, dispatched. */
+function dispatched(
+  o: {
+    dataset?: string;
+    anonymous?: boolean;
+    state?: "dispatched" | "unreported";
+    minutesAgo?: number;
+    mailed?: boolean;
+  } = {},
+) {
+  const datasetId = o.dataset ?? PROD_DATASET;
+  const { requestId } = seedScreenedRequest(h.db, {
+    datasetId,
+    anonymous: o.anonymous,
+    mailed: o.mailed,
+  });
+  const reviewId = seedPublicationReview(h.db, {
+    requestId,
+    datasetId,
+    anonymous: o.anonymous,
+    state: o.state ?? "dispatched",
+    createdMinutesAgo: o.minutesAgo,
+  });
+  return { requestId, reviewId, datasetId };
+}
+
+const state = (id: number) => h.review(id);
+
+describe("the claim", () => {
+  test("the first claim is taken, once; a replay is refused and the nonce stays live", async () => {
+    const { reviewId } = dispatched();
+    const token = await h.tokenFor(reviewId);
+    const first = await h.claim(reviewId, token);
+    expect(first).toEqual({ status: 200, body: { ok: true, claimed: true } });
+    expect(state(reviewId)).toMatchObject({ state: "dispatched", claimed_at: expect.any(String) });
+    expect(h.nonceOf(reviewId)).not.toBeNull();
+
+    const again = await h.claim(reviewId, token);
+    expect(again).toEqual({
+      status: 409,
+      body: { ok: false, claimed: false, reason: "already_claimed" },
+    });
+  });
+
+  test("a review the watchdog gave up on can still be claimed by a slow job", async () => {
+    const { reviewId } = dispatched({ state: "unreported", minutesAgo: 120 });
+    expect((await h.claim(reviewId)).status).toBe(200);
+  });
+
+  test("a missing, forged or truncated token is 401 with the same bytes every time", async () => {
+    const { reviewId } = dispatched();
+    const good = await h.tokenFor(reviewId);
+    const bodies = new Set<string>();
+    for (const token of [`${good.slice(0, -4)}0000`, good.slice(0, 20), "x"]) {
+      const res = await h.app.request(
+        "/webhooks/publication-review-claim",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Webhook-Token": token },
+          body: JSON.stringify({ review_id: reviewId, dataset_id: PROD_DATASET }),
+        },
+        h.env(),
+      );
+      expect(res.status).toBe(401);
+      bodies.add(await res.text());
+    }
+    const none = await h.app.request(
+      "/webhooks/publication-review-claim",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ review_id: reviewId, dataset_id: PROD_DATASET }),
+      },
+      h.env(),
+    );
+    expect(none.status).toBe(401);
+    bodies.add(await none.text());
+    // A review that does not exist gives the same answer as a token that does not verify.
+    const missing = await h.claim(9999, good);
+    expect(missing.status).toBe(401);
+    bodies.add(JSON.stringify(missing.body));
+    expect(bodies.size).toBe(1);
+    expect(state(reviewId).claimed_at).toBeNull();
+  });
+
+  test("a token minted for any other kind of callback opens nothing", async () => {
+    const { requestId, reviewId } = dispatched();
+    const nonce = h.nonceOf(reviewId) as string;
+    const screenShaped = { datasetId: PROD_DATASET, requestId: reviewId, nonce };
+    const others = [
+      await signPrReviewCallbackToken(
+        { datasetId: PROD_DATASET, reviewId, nonce },
+        CALLBACK_SECRET,
+      ),
+      await signPrescreenCallbackToken(screenShaped, CALLBACK_SECRET),
+      await signIdentifierScreenCallbackToken(screenShaped, CALLBACK_SECRET),
+      await signIdentifierSweepCallbackToken({ datasetId: PROD_DATASET, nonce }, CALLBACK_SECRET),
+      await signManifestCallbackToken(
+        { datasetId: PROD_DATASET, version: String(reviewId), nonce },
+        CALLBACK_SECRET,
+      ),
+    ];
+    for (const token of others) {
+      expect((await h.claim(reviewId, token)).status).toBe(401);
+      expect(
+        (await h.result(reviewId, { outcome: "error", error: "model_refused" }, token)).status,
+      ).toBe(401);
+    }
+    expect(requestId).toBeGreaterThan(0);
+    expect(state(reviewId)).toMatchObject({ state: "dispatched", claimed_at: null });
+  });
+
+  test("a token for another review, another dataset or another secret opens nothing", async () => {
+    const a = dispatched();
+    const b = dispatched({ dataset: "nm000481" });
+    const nonceA = h.nonceOf(a.reviewId) as string;
+    // Review B's token presented for review A.
+    expect((await h.claim(a.reviewId, await h.tokenFor(b.reviewId, "nm000481"))).status).toBe(401);
+    // A's token signed for the wrong dataset.
+    const wrongDataset = await signPublicationReviewCallbackToken(
+      { datasetId: "nm000481", reviewId: a.reviewId, nonce: nonceA },
+      CALLBACK_SECRET,
+    );
+    expect((await h.claim(a.reviewId, wrongDataset)).status).toBe(401);
+    // The right payload under the wrong secret.
+    const wrongSecret = await signPublicationReviewCallbackToken(
+      { datasetId: PROD_DATASET, reviewId: a.reviewId, nonce: nonceA },
+      "another-secret",
+    );
+    expect((await h.claim(a.reviewId, wrongSecret)).status).toBe(401);
+    // A body naming the other dataset finds no waiting review of that id.
+    expect(
+      (await h.claim(a.reviewId, await h.tokenFor(a.reviewId), undefined, "nm000481")).status,
+    ).toBe(401);
+    expect(state(a.reviewId).claimed_at).toBeNull();
+  });
+
+  test("the callback secret unset is a 500 and nothing is touched", async () => {
+    const { reviewId } = dispatched();
+    const token = await h.tokenFor(reviewId);
+    const res = await h.claim(reviewId, token, h.env({ PRESCREEN_CALLBACK_SECRET: undefined }));
+    expect(res.status).toBe(500);
+    expect(state(reviewId).claimed_at).toBeNull();
+  });
+
+  test("a malformed dataset id or review id is a 400 before anything is read", async () => {
+    const { reviewId } = dispatched();
+    for (const body of [
+      { review_id: reviewId, dataset_id: "not-a-dataset" },
+      { review_id: reviewId },
+      { review_id: 0, dataset_id: PROD_DATASET },
+      { review_id: "1", dataset_id: PROD_DATASET },
+      { review_id: 1.5, dataset_id: PROD_DATASET },
+    ]) {
+      const res = await h.app.request(
+        "/webhooks/publication-review-claim",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Webhook-Token": "t" },
+          body: JSON.stringify(body),
+        },
+        h.env(),
+      );
+      expect(res.status).toBe(400);
+    }
+  });
+
+  test("a claim after the result finds nothing to verify", async () => {
+    const { reviewId } = dispatched();
+    const token = await h.tokenFor(reviewId);
+    expect((await h.claim(reviewId, token)).status).toBe(200);
+    expect(
+      (
+        await h.result(
+          reviewId,
+          { outcome: "reported", report: reportFor(SCREENED_HEAD, false) },
+          token,
+        )
+      ).status,
+    ).toBe(200);
+    expect((await h.claim(reviewId, token)).status).toBe(401);
+  });
+
+  // Each of these is a way the request stopped being the one the review was dispatched for. The
+  // claim must refuse, record `stale_head`, and leave the row free of the caps: no model was reached.
+  const staleBy: [string, string, (requestId: number) => void][] = [
+    [
+      "the screen was run again and moved the head",
+      "moved head",
+      (id) => {
+        h.rearmScreen(id);
+        h.db.run(
+          `UPDATE publication_requests SET identifier_screen_status = 'clean',
+                  identifier_screen_report = json_set((SELECT identifier_screen_report FROM
+                    publication_requests WHERE id = ?1), '$.head', ?2) WHERE id = ?1`,
+          [id, OTHER_HEAD],
+        );
+      },
+    ],
+    [
+      "the request was blocked",
+      "blocked",
+      (id) =>
+        h.db.run(
+          "UPDATE publication_requests SET status = 'blocked', block_reason = 'ci_failed' WHERE id = ?",
+          [id],
+        ),
+    ],
+    [
+      "the request was denied",
+      "denied",
+      (id) => h.db.run("UPDATE publication_requests SET status = 'denied' WHERE id = ?", [id]),
+    ],
+    [
+      "the request moved on to approving",
+      "approving",
+      (id) => h.db.run("UPDATE publication_requests SET status = 'approving' WHERE id = ?", [id]),
+    ],
+    [
+      "the request was published",
+      "published",
+      (id) => h.db.run("UPDATE publication_requests SET status = 'published' WHERE id = ?", [id]),
+    ],
+    [
+      "the release kind changed",
+      "flag",
+      (id) => h.db.run("UPDATE publication_requests SET anonymous = 1 WHERE id = ?", [id]),
+    ],
+    [
+      "the screen now blocks",
+      "blocks",
+      (id) =>
+        h.db.run(
+          "UPDATE publication_requests SET identifier_screen_status = 'direct-identifiers' WHERE id = ?",
+          [id],
+        ),
+    ],
+    [
+      "the screen is running again",
+      "pending",
+      (id) =>
+        h.db.run(
+          "UPDATE publication_requests SET identifier_screen_status = 'pending' WHERE id = ?",
+          [id],
+        ),
+    ],
+    [
+      "the screen has no report to name a commit",
+      "no report",
+      (id) =>
+        h.db.run("UPDATE publication_requests SET identifier_screen_report = NULL WHERE id = ?", [
+          id,
+        ]),
+    ],
+  ];
+  for (const [label, , change] of staleBy) {
+    test(`${label}: the claim is refused and recorded as stale_head`, async () => {
+      const { requestId, reviewId } = dispatched();
+      const token = await h.tokenFor(reviewId);
+      change(requestId);
+      const res = await h.claim(reviewId, token);
+      expect(res).toEqual({
+        status: 409,
+        body: { ok: false, claimed: false, reason: "stale_head" },
+      });
+      expect(state(reviewId)).toMatchObject({
+        state: "errored",
+        detail: "stale_head",
+        nonce: null,
+        claimed_at: null,
+      });
+      // It never reached a model, so it is not counted against any cap.
+      const counted = h.db
+        .query(
+          `SELECT COUNT(*) AS n FROM publication_reviews WHERE id = ? AND ${COUNTS_TOWARD_CAPS}`,
+        )
+        .get(reviewId) as { n: number };
+      expect(counted.n).toBe(0);
+      // And the token is spent.
+      expect((await h.claim(reviewId, token)).status).toBe(401);
+    });
+  }
+
+  test("every state the screen's gate clears or acknowledges is claimable", async () => {
+    // The control for the refusals above: the SAME request, in each reviewable state, is claimed.
+    const reviewable = [
+      "clean",
+      "dates-only",
+      "no-recordings",
+      "review",
+      "unchecked",
+      "not-screened",
+      "clean-edf-only-others-unscreened",
+    ];
+    for (const [i, screenState] of reviewable.entries()) {
+      const dataset = ds(i);
+      const { requestId } = seedScreenedRequest(h.db, {
+        datasetId: dataset,
+        status: screenState as never,
+      });
+      const reviewId = seedPublicationReview(h.db, {
+        requestId,
+        datasetId: dataset,
+        state: "dispatched",
+      });
+      expect((await h.claim(reviewId, undefined, undefined, dataset)).status).toBe(200);
+    }
+  });
+
+  test("the review switched off before the job starts: 409, closed as review_disabled", async () => {
+    const { reviewId } = dispatched();
+    const token = await h.tokenFor(reviewId);
+    const res = await h.claim(reviewId, token, h.env({ PUBLICATION_REVIEW_ENABLED: undefined }));
+    expect(res).toEqual({
+      status: 409,
+      body: { ok: false, claimed: false, reason: "review_disabled" },
+    });
+    expect(state(reviewId)).toMatchObject({
+      state: "errored",
+      detail: "review_disabled",
+      nonce: null,
+      claimed_at: null,
+    });
+    expect((await h.claim(reviewId, token)).status).toBe(401);
+  });
+
+  test("the kill switch is the word 1: nothing else lets a claim through", async () => {
+    for (const [i, value] of ["0", "", "true", " 1", "1 ", "yes", "ON"].entries()) {
+      const dataset = ds(20 + i);
+      const { reviewId } = dispatched({ dataset });
+      const res = await h.claim(
+        reviewId,
+        undefined,
+        h.env({ PUBLICATION_REVIEW_ENABLED: value }),
+        dataset,
+      );
+      expect(res.status).toBe(409);
+      expect(res.body.reason).toBe("review_disabled");
+    }
+  });
+
+  test("a review of a dataset the other Worker owns is not claimed here, and nothing is written", async () => {
+    // The dev Worker answers only from its own D1, for the datasets it owns.
+    const prodRow = dispatched();
+    const asDev = await h.claim(prodRow.reviewId, undefined, h.env({ ENVIRONMENT: "development" }));
+    expect(asDev).toEqual({
+      status: 409,
+      body: { ok: false, claimed: false, reason: "not_owned_here" },
+    });
+    expect(state(prodRow.reviewId)).toMatchObject({ state: "dispatched", claimed_at: null });
+    expect(h.nonceOf(prodRow.reviewId)).not.toBeNull();
+
+    // Production never claims for a dataset dev owns.
+    const devRow = dispatched({ dataset: DEV_DATASET });
+    const asProd = await h.claim(devRow.reviewId, undefined, undefined, DEV_DATASET);
+    expect(asProd.body.reason).toBe("not_owned_here");
+    expect(state(devRow.reviewId)).toMatchObject({ state: "dispatched", claimed_at: null });
+
+    // And the owners do claim.
+    expect(
+      (
+        await h.claim(
+          devRow.reviewId,
+          undefined,
+          h.env({ ENVIRONMENT: "development" }),
+          DEV_DATASET,
+        )
+      ).status,
+    ).toBe(200);
+  });
+
+  test("a request that changes between the claim and its refusal is closed, not stranded", async () => {
+    // The claim and the refusal each read the request. If it flips between them twice, neither
+    // settles, and the attempt must still end: closed as stale_head, never left dispatched.
+    const { requestId, reviewId } = dispatched();
+    let claimTries = 0;
+    let staleTries = 0;
+    const flipping = interceptingD1(realD1(h.db), (sql) => {
+      if (sql.includes("SET claimed_at = datetime('now')")) {
+        claimTries++;
+        h.db.run("UPDATE publication_requests SET status = 'blocked' WHERE id = ?", [requestId]);
+      }
+      if (sql.includes("detail = 'stale_head'") && sql.includes("NOT EXISTS")) {
+        staleTries++;
+        h.db.run("UPDATE publication_requests SET status = 'requested' WHERE id = ?", [requestId]);
+      }
+    });
+    const res = await h.claim(reviewId, undefined, h.env({ DB: flipping }));
+    expect(res).toEqual({
+      status: 409,
+      body: { ok: false, claimed: false, reason: "claim_unsettled" },
+    });
+    expect(claimTries).toBe(2);
+    expect(staleTries).toBe(2);
+    expect(state(reviewId)).toMatchObject({ state: "errored", detail: "stale_head", nonce: null });
+  });
+
+  test("a request that becomes current again before the refusal is written is claimed", async () => {
+    const { requestId, reviewId } = dispatched();
+    h.db.run("UPDATE publication_requests SET status = 'blocked' WHERE id = ?", [requestId]);
+    let claimTries = 0;
+    const healing = interceptingD1(realD1(h.db), (sql) => {
+      if (sql.includes("SET claimed_at = datetime('now')")) claimTries++;
+      if (sql.includes("detail = 'stale_head'") && sql.includes("NOT EXISTS")) {
+        h.db.run("UPDATE publication_requests SET status = 'requested' WHERE id = ?", [requestId]);
+      }
+    });
+    const res = await h.claim(reviewId, undefined, h.env({ DB: healing }));
+    expect(res.status).toBe(200);
+    expect(claimTries).toBe(2);
+    expect(state(reviewId).claimed_at).not.toBeNull();
+  });
+
+  test("a refused claim tells the administrators, once, because the request is waiting on it", async () => {
+    seedAdmin();
+    const { requestId, reviewId } = dispatched({ mailed: false });
+    h.db.run(
+      "UPDATE publication_requests SET identifier_screen_report = json_set(identifier_screen_report, '$.head', ?) WHERE id = ?",
+      [OTHER_HEAD, requestId],
+    );
+    await withFakeResend(async (calls) => {
+      expect((await h.claim(reviewId)).body.reason).toBe("stale_head");
+      expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(1);
+    });
+  });
+});
+
+describe("the result", () => {
+  test("a passing report is stored, its verdict derived, the token spent", async () => {
+    const { reviewId } = dispatched();
+    const token = await h.tokenFor(reviewId);
+    await h.claim(reviewId, token);
+    const res = await h.result(
+      reviewId,
+      { outcome: "reported", report: reportFor(SCREENED_HEAD, false) },
+      token,
+    );
+    expect(res).toEqual({ status: 200, body: { ok: true, dataset_id: PROD_DATASET } });
+    const row = state(reviewId);
+    expect(row).toMatchObject({ state: "reported", verdict: "pass", detail: null, nonce: null });
+    expect(row.decided_at).not.toBeNull();
+    const stored = JSON.parse(row.report as string);
+    expect(stored.evidence.head).toBe(SCREENED_HEAD);
+    expect(stored.questions.name_adequate).toBe("pass");
+    // A replay finds nothing to verify.
+    expect(
+      (
+        await h.result(
+          reviewId,
+          { outcome: "reported", report: reportFor(SCREENED_HEAD, false) },
+          token,
+        )
+      ).status,
+    ).toBe(401);
+  });
+
+  test("the verdict is derived by the Worker: a failing question fails, an unknown one needs a person", async () => {
+    const cases: [Record<string, string>, string][] = [
+      [{ meets_standards: "fail" }, "fail"],
+      [{ authors_and_license: "unknown" }, "action_required"],
+    ];
+    for (const [answers, verdict] of cases) {
+      const { reviewId } = dispatched({ dataset: ds(verdict === "fail" ? 40 : 41) });
+      const questions = {
+        complete_and_honest: "pass",
+        meets_standards: "pass",
+        authors_and_license: "pass",
+        name_adequate: "pass",
+        ...answers,
+      };
+      await h.result(
+        reviewId,
+        { outcome: "reported", report: reportFor(SCREENED_HEAD, false, { questions }) },
+        undefined,
+        undefined,
+        h.review(reviewId).dataset_id as string,
+      );
+      expect(state(reviewId)).toMatchObject({ state: "reported", verdict });
+    }
+  });
+
+  test("a steering attempt is a fail whatever the questions say", async () => {
+    const { reviewId } = dispatched();
+    await h.result(reviewId, {
+      outcome: "reported",
+      report: reportFor(SCREENED_HEAD, false, { steering: true }),
+    });
+    expect(state(reviewId)).toMatchObject({ state: "reported", verdict: "fail" });
+  });
+
+  test("a verdict the job claims is not a field of the report: the report is refused", async () => {
+    const { reviewId } = dispatched();
+    const res = await h.result(reviewId, {
+      outcome: "reported",
+      report: { ...reportFor(SCREENED_HEAD, false), verdict: "pass" },
+    });
+    expect(res.status).toBe(200);
+    expect(state(reviewId)).toMatchObject({
+      state: "errored",
+      detail: "report_invalid",
+      verdict: null,
+      report: null,
+    });
+  });
+
+  test("hostile free text is stored as plain words, never as markup", async () => {
+    const { reviewId } = dispatched();
+    const note =
+      "<script>alert(1)</script> @everyone [click](http://evil.example) ![x](http://evil)";
+    await h.result(reviewId, {
+      outcome: "reported",
+      report: reportFor(SCREENED_HEAD, false, {
+        summary: note,
+        findings: [
+          { question: "name_adequate", severity: "note", code: "other", document: null, note },
+        ],
+      }),
+    });
+    const stored = JSON.parse(state(reviewId).report as string);
+    expect(stored.summary).toBe(sanitizeNote(note, 400));
+    expect(stored.findings[0].note).toBe(sanitizeNote(note, 200));
+    for (const text of [stored.summary, stored.findings[0].note]) {
+      expect(text).not.toMatch(/[<>]/);
+      expect(text).not.toContain("](");
+    }
+  });
+
+  test("a result that is not a report is never a verdict", async () => {
+    const cases: [Record<string, unknown>, string][] = [
+      [{ outcome: "pass" }, "workflow_failed"],
+      [{ outcome: "reported", report: { v: 1 } }, "report_invalid"],
+      [{ outcome: "reported" }, "report_invalid"],
+      [{ outcome: "error", error: "something_else" }, "workflow_failed"],
+      [{ outcome: "error" }, "workflow_failed"],
+      [{}, "workflow_failed"],
+    ];
+    let n = 0;
+    for (const [body, detail] of cases) {
+      const { reviewId } = dispatched({ dataset: ds(50 + n++) });
+      await h.result(reviewId, body, undefined, undefined, h.review(reviewId).dataset_id as string);
+      expect(state(reviewId)).toMatchObject({
+        state: "errored",
+        detail,
+        verdict: null,
+        nonce: null,
+      });
+    }
+  });
+
+  test("a job may report any run error but the Worker's own words", async () => {
+    let n = 0;
+    for (const word of PUBLICATION_RUN_ERRORS) {
+      const { reviewId } = dispatched({ dataset: ds(100 + n++) });
+      await h.result(
+        reviewId,
+        { outcome: "error", error: word },
+        undefined,
+        undefined,
+        h.review(reviewId).dataset_id as string,
+      );
+      const expected = (WORKER_ONLY_RUN_ERRORS as readonly string[]).includes(word)
+        ? "workflow_failed"
+        : word;
+      expect(state(reviewId)).toMatchObject({ state: "errored", detail: expected });
+    }
+  });
+
+  test("a report about another commit or another release kind is refused", async () => {
+    const wrongHead = dispatched();
+    await h.result(wrongHead.reviewId, {
+      outcome: "reported",
+      report: reportFor(OTHER_HEAD, false),
+    });
+    expect(state(wrongHead.reviewId)).toMatchObject({ state: "errored", detail: "report_invalid" });
+
+    const wrongKind = dispatched({ dataset: "nm000481" });
+    await h.result(
+      wrongKind.reviewId,
+      { outcome: "reported", report: reportFor(SCREENED_HEAD, true) },
+      undefined,
+      undefined,
+      "nm000481",
+    );
+    expect(state(wrongKind.reviewId)).toMatchObject({ state: "errored", detail: "report_invalid" });
+
+    const anonymous = dispatched({ dataset: "nm000482", anonymous: true });
+    await h.result(
+      anonymous.reviewId,
+      { outcome: "reported", report: reportFor(SCREENED_HEAD, true) },
+      undefined,
+      undefined,
+      "nm000482",
+    );
+    expect(state(anonymous.reviewId)).toMatchObject({ state: "reported" });
+  });
+
+  test("a run that was claimed is stored whatever the flag says now", async () => {
+    const { reviewId } = dispatched();
+    const token = await h.tokenFor(reviewId);
+    await h.claim(reviewId, token);
+    const off = h.env({ PUBLICATION_REVIEW_ENABLED: undefined });
+    const res = await h.result(
+      reviewId,
+      { outcome: "reported", report: reportFor(SCREENED_HEAD, false) },
+      token,
+      off,
+    );
+    expect(res.status).toBe(200);
+    expect(state(reviewId)).toMatchObject({ state: "reported", verdict: "pass" });
+  });
+
+  test("the stored report is the parsed one, not the callback body", async () => {
+    const { reviewId } = dispatched();
+    const body = reportFor(SCREENED_HEAD, false);
+    await h.result(reviewId, { outcome: "reported", report: body });
+    const stored = JSON.parse(state(reviewId).report as string);
+    expect(Object.keys(stored).sort()).toEqual(Object.keys(body).sort());
+    // The raw callback body, with its envelope, is never stored.
+    expect(state(reviewId).report as string).not.toContain("review_id");
+  });
+
+  test("a replayed result through the service stores nothing twice", async () => {
+    const { reviewId } = dispatched();
+    const nonce = h.nonceOf(reviewId) as string;
+    const outcome = { kind: "error", error: "model_refused" } as const;
+    const first = await storePublicationReviewResult(
+      h.env(),
+      reviewId,
+      PROD_DATASET,
+      nonce,
+      outcome,
+    );
+    expect(first).toEqual({ stored: true, state: "errored" });
+    const second = await storePublicationReviewResult(h.env(), reviewId, PROD_DATASET, nonce, {
+      kind: "error",
+      error: "model_truncated",
+    });
+    expect(second).toEqual({ stored: false, state: null });
+    expect(state(reviewId).detail).toBe("model_refused");
+  });
+});
+
+describe("a failed submission minimum re-blocks the request", () => {
+  const failing = (head = SCREENED_HEAD, anonymous = false) =>
+    reportFor(head, anonymous, {
+      evidence: evidenceFor(head, anonymous, {
+        minimums: "failed",
+        minimum_failures: anonymous
+          ? ["authors_not_blinded", "ethics_statement_missing"]
+          : ["name_too_short", "ethics_statement_missing"],
+        name_length: 10,
+      }),
+    });
+
+  test("requested becomes blocked/min_requirements_failed, with sentences that quote nothing", async () => {
+    const { requestId, reviewId } = dispatched();
+    await h.result(reviewId, { outcome: "reported", report: failing() });
+    const req = h.requestRow(requestId);
+    expect(req).toMatchObject({ status: "blocked", block_reason: "min_requirements_failed" });
+    expect(JSON.parse(req.min_requirements_reasons as string)).toEqual([
+      minimumFailureSentence("name_too_short"),
+      minimumFailureSentence("ethics_statement_missing"),
+    ]);
+    // The review itself still reports: a fail with its reason, for the administrator.
+    expect(state(reviewId)).toMatchObject({ state: "reported", verdict: "fail" });
+  });
+
+  test("every failure word has a sentence, and an anonymous release's names no author", async () => {
+    const { requestId, reviewId } = dispatched({ anonymous: true });
+    await h.result(reviewId, { outcome: "reported", report: failing(SCREENED_HEAD, true) });
+    const reasons = JSON.parse(h.requestRow(requestId).min_requirements_reasons as string);
+    expect(reasons).toEqual([
+      minimumFailureSentence("authors_not_blinded"),
+      minimumFailureSentence("ethics_statement_missing"),
+    ]);
+    for (const word of MINIMUM_FAILURES) {
+      expect(minimumFailureSentence(word).length).toBeGreaterThan(10);
+    }
+  });
+
+  test("a met minimum leaves the request alone", async () => {
+    const { requestId, reviewId } = dispatched();
+    await h.result(reviewId, { outcome: "reported", report: reportFor(SCREENED_HEAD, false) });
+    expect(h.requestRow(requestId)).toMatchObject({ status: "requested", block_reason: null });
+  });
+
+  test("it does not re-block a request that is no longer waiting for its decision", async () => {
+    let n = 0;
+    for (const [status, reason] of [
+      ["blocked", "ci_failed"],
+      ["denied", null],
+      ["approving", null],
+      ["published", null],
+    ] as const) {
+      const { requestId, reviewId } = dispatched({ dataset: ds(200 + n++) });
+      h.db.run("UPDATE publication_requests SET status = ?, block_reason = ? WHERE id = ?", [
+        status,
+        reason,
+        requestId,
+      ]);
+      await h.result(
+        reviewId,
+        { outcome: "reported", report: failing() },
+        undefined,
+        undefined,
+        h.review(reviewId).dataset_id as string,
+      );
+      expect(h.requestRow(requestId)).toMatchObject({ status, block_reason: reason });
+      expect(h.requestRow(requestId).min_requirements_reasons).toBeNull();
+    }
+  });
+
+  test("it does not re-block when the screened commit has moved since the review started", async () => {
+    const { requestId, reviewId } = dispatched();
+    h.db.run(
+      "UPDATE publication_requests SET identifier_screen_report = json_set(identifier_screen_report, '$.head', ?) WHERE id = ?",
+      [OTHER_HEAD, requestId],
+    );
+    await h.result(reviewId, { outcome: "reported", report: failing() });
+    expect(h.requestRow(requestId).status).toBe("requested");
+    expect(state(reviewId)).toMatchObject({ state: "reported" });
+  });
+
+  test("it does not re-block when the release kind has changed since", async () => {
+    const { requestId, reviewId } = dispatched();
+    h.db.run("UPDATE publication_requests SET anonymous = 1 WHERE id = ?", [requestId]);
+    await h.result(reviewId, { outcome: "reported", report: failing() });
+    expect(h.requestRow(requestId).status).toBe("requested");
+  });
+
+  test("it holds with the flag off: a mechanical refusal does not depend on the review being on", async () => {
+    const { requestId, reviewId } = dispatched();
+    const token = await h.tokenFor(reviewId);
+    await h.claim(reviewId, token);
+    await h.result(
+      reviewId,
+      { outcome: "reported", report: failing() },
+      token,
+      h.env({ PUBLICATION_REVIEW_ENABLED: undefined }),
+    );
+    expect(h.requestRow(requestId)).toMatchObject({
+      status: "blocked",
+      block_reason: "min_requirements_failed",
+    });
+  });
+
+  test("the depositor is not mailed about it", async () => {
+    // Administrators only (ADR 0101, section 6); the depositor reads the block on the status view.
+    seedAdmin();
+    const { reviewId, requestId } = dispatched({ mailed: false });
+    const depositor = h.db
+      .query(
+        "SELECT u.email FROM publication_requests pr JOIN users u ON u.id = pr.requested_by WHERE pr.id = ?",
+      )
+      .get(requestId) as { email: string };
+    await withFakeResend(async (calls) => {
+      await h.result(reviewId, { outcome: "reported", report: failing() });
+      expect(sendsTo(calls, depositor.email)).toHaveLength(0);
+    });
+  });
+});
+
+describe("the watchdog", () => {
+  test("an overdue review becomes unreported with its nonce kept, and the mail is tried once", async () => {
+    seedAdmin();
+    const { reviewId } = dispatched({ minutesAgo: 45, mailed: false });
+    const nonce = h.nonceOf(reviewId);
+    await withFakeResend(async (calls) => {
+      const r = await sweepPublicationReviews(h.env());
+      expect(r).toEqual({ timedOut: 1, mailed: 1, errors: 0, skipped: false });
+      expect(state(reviewId)).toMatchObject({ state: "unreported", nonce });
+      expect(state(reviewId).decided_at).not.toBeNull();
+      expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(1);
+
+      // A second pass finds nothing to do and sends nothing.
+      expect(await sweepPublicationReviews(h.env())).toEqual({
+        timedOut: 0,
+        mailed: 0,
+        errors: 0,
+        skipped: false,
+      });
+      expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(1);
+    });
+  });
+
+  test("a review inside its deadline is untouched, and the boundary is the deadline", async () => {
+    const young = dispatched({ minutesAgo: 29 });
+    const old = dispatched({ dataset: "nm000481", minutesAgo: 31 });
+    await sweepPublicationReviews(h.env());
+    expect(state(young.reviewId).state).toBe("dispatched");
+    expect(state(old.reviewId).state).toBe("unreported");
+  });
+
+  test("only a dispatched row is aged: a reported, errored or unreported one is left alone", async () => {
+    const a = dispatched({ minutesAgo: 600 });
+    h.db.run(
+      "UPDATE publication_reviews SET state='errored', detail='model_refused', nonce=NULL, decided_at=datetime('now') WHERE id = ?",
+      [a.reviewId],
+    );
+    const b = dispatched({ dataset: "nm000481", minutesAgo: 600, state: "unreported" });
+    const before = JSON.stringify([state(a.reviewId), state(b.reviewId)]);
+    expect(await sweepPublicationReviews(h.env())).toMatchObject({ timedOut: 0 });
+    expect(JSON.stringify([state(a.reviewId), state(b.reviewId)])).toBe(before);
+  });
+
+  test("outside production nothing changes: the dev Worker never ages a row", async () => {
+    const { reviewId } = dispatched({ dataset: DEV_DATASET, minutesAgo: 600 });
+    const before = JSON.stringify(state(reviewId));
+    for (const environment of ["development", "staging", "test"]) {
+      const r = await sweepPublicationReviews(h.env({ ENVIRONMENT: environment }));
+      expect(r).toEqual({ timedOut: 0, mailed: 0, errors: 0, skipped: true });
+    }
+    expect(JSON.stringify(state(reviewId))).toBe(before);
+  });
+
+  test("an unknown environment is production, which is the side that ages rows", async () => {
+    const { reviewId } = dispatched({ minutesAgo: 600 });
+    const r = await sweepPublicationReviews(h.env({ ENVIRONMENT: undefined }));
+    expect(r.skipped).toBe(false);
+    expect(state(reviewId).state).toBe("unreported");
+  });
+
+  test("it runs whatever the flag says, so a switched-off review does not strand a request", async () => {
+    const { reviewId } = dispatched({ minutesAgo: 600 });
+    await sweepPublicationReviews(h.env({ PUBLICATION_REVIEW_ENABLED: undefined }));
+    expect(state(reviewId).state).toBe("unreported");
+  });
+
+  test("it handles a bounded batch a tick, oldest first, and finishes the rest on the next", async () => {
+    const ids: number[] = [];
+    for (let i = 0; i < 25; i++) {
+      ids.push(dispatched({ dataset: ds(300 + i), minutesAgo: 600 }).reviewId);
+    }
+    expect(await sweepPublicationReviews(h.env())).toMatchObject({ timedOut: 20 });
+    const left = ids.filter((id) => state(id).state === "dispatched");
+    expect(left).toEqual(ids.slice(20));
+    expect(await sweepPublicationReviews(h.env())).toMatchObject({ timedOut: 5 });
+  });
+
+  test("a late report still lands, re-arms the mail and mails again", async () => {
+    seedAdmin();
+    const { requestId, reviewId } = dispatched({ minutesAgo: 45, mailed: false });
+    const token = await h.tokenFor(reviewId);
+    await withFakeResend(async (calls) => {
+      await sweepPublicationReviews(h.env());
+      expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(1);
+      expect(h.requestRow(requestId).identifier_screen_emailed_at).not.toBeNull();
+
+      const late = await h.result(
+        reviewId,
+        { outcome: "reported", report: reportFor(SCREENED_HEAD, false) },
+        token,
+      );
+      expect(late.status).toBe(200);
+      expect(state(reviewId)).toMatchObject({ state: "reported", verdict: "pass", nonce: null });
+      // The mail already sent said the review did not report: the late report mails again.
+      expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(2);
+    });
+  });
+
+  test("a late report for a commit that is no longer the request's does not re-arm its mail", async () => {
+    const { requestId, reviewId } = dispatched({ minutesAgo: 45 });
+    const token = await h.tokenFor(reviewId);
+    await sweepPublicationReviews(h.env());
+    h.db.run(
+      "UPDATE publication_requests SET identifier_screen_report = json_set(identifier_screen_report, '$.head', ?) WHERE id = ?",
+      [OTHER_HEAD, requestId],
+    );
+    const stamp = h.requestRow(requestId).identifier_screen_emailed_at;
+    expect(stamp).not.toBeNull();
+    await h.result(
+      reviewId,
+      { outcome: "reported", report: reportFor(SCREENED_HEAD, false) },
+      token,
+    );
+    expect(h.requestRow(requestId).identifier_screen_emailed_at).toBe(stamp);
+  });
+
+  test("a row the watchdog flips between the read and the write is still stored as late", async () => {
+    // The route finds the row `dispatched`; the watchdog moves it to `unreported` before the
+    // write. The write must still be recognised as a late report and re-arm the mail: a single
+    // write that decided "late" from the earlier read would send nothing here.
+    seedAdmin();
+    const { requestId, reviewId } = dispatched({ minutesAgo: 45, mailed: true });
+    const token = await h.tokenFor(reviewId);
+    let flipped = false;
+    const racing = interceptingD1(realD1(h.db), (sql) => {
+      if (!flipped && sql.includes("SET state = ?, verdict = ?")) {
+        flipped = true;
+        h.db.run(
+          "UPDATE publication_reviews SET state = 'unreported', decided_at = datetime('now') WHERE id = ? AND state = 'dispatched'",
+          [reviewId],
+        );
+      }
+    });
+    await withFakeResend(async (calls) => {
+      const res = await h.result(
+        reviewId,
+        { outcome: "reported", report: reportFor(SCREENED_HEAD, false) },
+        token,
+        h.env({ DB: racing }),
+      );
+      expect(res.status).toBe(200);
+      expect(flipped).toBe(true);
+      expect(state(reviewId)).toMatchObject({ state: "reported", nonce: null });
+      expect(h.requestRow(requestId).identifier_screen_emailed_at).not.toBeNull();
+      // Re-armed and mailed: the screen's mail had already gone, so this send IS the late path.
+      expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(1);
+    });
+  });
+});
+
+describe("an administrator's start", () => {
+  const admin = { adminUserId: 1 };
+
+  function startable(
+    state: "declined" | "errored" | "unreported" | "dispatched" | "reported",
+    detail?: string,
+    minutesAgo = 0,
+    dataset = PROD_DATASET,
+  ) {
+    const { requestId } = seedScreenedRequest(h.db, { datasetId: dataset });
+    const reviewId = seedPublicationReview(h.db, {
+      requestId,
+      datasetId: dataset,
+      state,
+      detail,
+      createdMinutesAgo: minutesAgo,
+    });
+    return { requestId, reviewId, datasetId: dataset };
+  }
+
+  test("restarts a declined row: a new nonce, a new dispatch, no new call spent", async () => {
+    const { requestId, reviewId } = startable("declined", "depositor_limit");
+    const out = await startPublicationReview(h.env(), {
+      requestId,
+      datasetId: PROD_DATASET,
+      ...admin,
+    });
+    expect(out).toEqual({ started: true, reason: "redispatched", reviewId });
+    expect(state(reviewId)).toMatchObject({
+      state: "dispatched",
+      detail: null,
+      attempts: 1,
+      started_by: 1,
+      claimed_at: null,
+      decided_at: null,
+    });
+    expect(h.nonceOf(reviewId)).not.toBeNull();
+    expect(h.dispatches()).toHaveLength(1);
+  });
+
+  test("restarts an errored row that reached a model: it costs a second call", async () => {
+    const { requestId, reviewId } = startable("errored", "model_unavailable");
+    const out = await startPublicationReview(h.env(), {
+      requestId,
+      datasetId: PROD_DATASET,
+      ...admin,
+    });
+    expect(out.reason).toBe("redispatched");
+    expect(state(reviewId)).toMatchObject({ state: "dispatched", attempts: 2 });
+  });
+
+  test("restarts an unreported row, and the older run can no longer answer", async () => {
+    const { requestId, reviewId } = startable("unreported");
+    const oldToken = await h.tokenFor(reviewId);
+    const out = await startPublicationReview(h.env(), {
+      requestId,
+      datasetId: PROD_DATASET,
+      ...admin,
+    });
+    expect(out.reason).toBe("redispatched");
+    expect(state(reviewId).attempts).toBe(2);
+    // The late report of the abandoned run is refused: its nonce was replaced.
+    expect((await h.claim(reviewId, oldToken)).status).toBe(401);
+    expect((await h.claim(reviewId)).status).toBe(200);
+  });
+
+  test("restarts a dispatched row only once it is past its deadline", async () => {
+    const fresh = startable("dispatched", undefined, 5);
+    const nonceBefore = h.nonceOf(fresh.reviewId);
+    expect(
+      await startPublicationReview(h.env(), {
+        requestId: fresh.requestId,
+        datasetId: PROD_DATASET,
+        ...admin,
+      }),
+    ).toEqual({ started: false, reason: "running", reviewId: fresh.reviewId });
+    expect(h.nonceOf(fresh.reviewId)).toBe(nonceBefore);
+    expect(h.dispatches()).toHaveLength(0);
+
+    const overdue = startable("dispatched", undefined, 45, "nm000481");
+    const out = await startPublicationReview(h.env(), {
+      requestId: overdue.requestId,
+      datasetId: "nm000481",
+      ...admin,
+    });
+    expect(out).toEqual({ started: true, reason: "redispatched", reviewId: overdue.reviewId });
+    expect(state(overdue.reviewId)).toMatchObject({ state: "dispatched", attempts: 2 });
+    expect(h.nonceOf(overdue.reviewId)).not.toBe(null);
+  });
+
+  test("never restarts a row that has a result", async () => {
+    const { requestId, reviewId } = startable("reported");
+    const before = JSON.stringify(state(reviewId));
+    expect(
+      await startPublicationReview(h.env(), { requestId, datasetId: PROD_DATASET, ...admin }),
+    ).toEqual({ started: false, reason: "has_result", reviewId });
+    expect(JSON.stringify(state(reviewId))).toBe(before);
+    expect(h.dispatches()).toHaveLength(0);
+  });
+
+  test("is held by the platform's cap only: the depositor's cap does not stop it", async () => {
+    // Five model calls by one depositor in a day is the depositor's whole allowance.
+    const { requestId } = seedScreenedRequest(h.db, { datasetId: PROD_DATASET });
+    const depositor = h.requestRow(requestId).requested_by as number;
+    for (let i = 0; i < 5; i++) {
+      const dataset = ds(400 + i);
+      const r = seedScreenedRequest(h.db, { datasetId: dataset, requestedBy: depositor });
+      seedPublicationReview(h.db, {
+        requestId: r.requestId,
+        datasetId: dataset,
+        state: "reported",
+      });
+    }
+    const target = seedPublicationReview(h.db, {
+      requestId,
+      datasetId: PROD_DATASET,
+      state: "errored",
+      detail: "model_unavailable",
+    });
+    const out = await startPublicationReview(h.env(), {
+      requestId,
+      datasetId: PROD_DATASET,
+      ...admin,
+    });
+    expect(out).toEqual({ started: true, reason: "redispatched", reviewId: target });
+  });
+
+  /** `n` calls by other depositors in the last day, each a review that reported. */
+  function fillPlatform(n: number) {
+    for (let i = 0; i < n; i++) {
+      const dataset = ds(500 + i);
+      const r = seedScreenedRequest(h.db, { datasetId: dataset });
+      seedPublicationReview(h.db, {
+        requestId: r.requestId,
+        datasetId: dataset,
+        state: "reported",
+      });
+    }
+  }
+
+  test("a restart of an attempt that reached a model is a second call: it fits at fifty", async () => {
+    // 48 other calls and this row's own earlier call are 49; the restart is the 50th.
+    fillPlatform(48);
+    const target = startable("errored", "model_unavailable");
+    const out = await startPublicationReview(h.env(), {
+      requestId: target.requestId,
+      datasetId: PROD_DATASET,
+      ...admin,
+    });
+    expect(out.reason).toBe("redispatched");
+    expect(state(target.reviewId)).toMatchObject({ state: "dispatched", attempts: 2 });
+  });
+
+  test("and it is declined at fifty-one, where counting it once would have let it through", async () => {
+    // 49 other calls and this row's own earlier call are 50. Counted once the restart would
+    // read 50 and pass; it is a second call, so it is the 51st, and the platform's cap holds.
+    fillPlatform(49);
+    const target = startable("errored", "model_unavailable");
+    const out = await startPublicationReview(h.env(), {
+      requestId: target.requestId,
+      datasetId: PROD_DATASET,
+      ...admin,
+    });
+    expect(out).toEqual({ started: false, reason: "platform_limit", reviewId: target.reviewId });
+    expect(state(target.reviewId)).toMatchObject({
+      state: "declined",
+      detail: "platform_limit",
+      nonce: null,
+      attempts: 1,
+    });
+    expect(h.dispatches()).toHaveLength(0);
+  });
+
+  test("a declined row costs one call, not two, when it is restarted", async () => {
+    fillPlatform(49);
+    const target = startable("declined", "depositor_limit");
+    const out = await startPublicationReview(h.env(), {
+      requestId: target.requestId,
+      datasetId: PROD_DATASET,
+      ...admin,
+    });
+    expect(out.reason).toBe("redispatched");
+    expect(state(target.reviewId).attempts).toBe(1);
+    // One more other call and the same restart is the 51st.
+  });
+
+  test("names the reason it cannot start: off, not ours, not applicable, not waiting, not screened", async () => {
+    const { requestId } = seedScreenedRequest(h.db, { datasetId: PROD_DATASET });
+    const go = (env = h.env(), id = requestId, dataset = PROD_DATASET) =>
+      startPublicationReview(env, { requestId: id, datasetId: dataset, ...admin });
+    expect((await go(h.env({ PUBLICATION_REVIEW_ENABLED: undefined }))).reason).toBe(
+      "review_disabled",
+    );
+    expect((await go(h.env({ ENVIRONMENT: "development" }))).reason).toBe("not_owned_here");
+    expect((await go(h.env(), requestId + 100)).reason).toBe("request_not_requested");
+    h.db.run("UPDATE publication_requests SET status = 'blocked' WHERE id = ?", [requestId]);
+    expect((await go()).reason).toBe("request_not_requested");
+    h.db.run(
+      "UPDATE publication_requests SET status = 'requested', identifier_screen_status = 'pending' WHERE id = ?",
+      [requestId],
+    );
+    expect((await go()).reason).toBe("screen_not_ready");
+    h.db.run(
+      "UPDATE publication_requests SET identifier_screen_status = 'unreported' WHERE id = ?",
+      [requestId],
+    );
+    expect((await go()).reason).toBe("screen_not_ready");
+    const mirror = seedScreenedRequest(h.db, { datasetId: "nm000483", source: "openneuro" });
+    expect((await go(h.env(), mirror.requestId, "nm000483")).reason).toBe("not_applicable");
+    expect(h.reviews()).toHaveLength(0);
+    expect(h.dispatches()).toHaveLength(0);
+  });
+});
+
+describe("no secret reaches the Worker's logs", () => {
+  async function captured(fn: () => Promise<unknown>): Promise<string> {
+    const lines: string[] = [];
+    const originals = { log: console.log, warn: console.warn, error: console.error };
+    const grab = (...a: unknown[]) => void lines.push(a.map(String).join(" "));
+    console.log = grab;
+    console.warn = grab;
+    console.error = grab;
+    try {
+      await fn();
+    } finally {
+      Object.assign(console, originals);
+    }
+    return lines.join("\n");
+  }
+
+  test("a wrong token, a claim, a refused report and a result print no token, nonce or secret", async () => {
+    const { reviewId } = dispatched();
+    const good = await h.tokenFor(reviewId);
+    const nonce = h.nonceOf(reviewId) as string;
+    const bad = `${good.slice(0, -4)}0000`;
+    const note = "SMITH-SECRET-NAME wrote this";
+    const out = await captured(async () => {
+      await h.result(
+        reviewId,
+        { outcome: "reported", report: reportFor(SCREENED_HEAD, false) },
+        bad,
+      );
+      await h.claim(reviewId, bad);
+      await h.claim(reviewId, good);
+      // A refused report, with text in it that must not be echoed.
+      await h.result(
+        reviewId,
+        {
+          outcome: "reported",
+          report: { ...reportFor(SCREENED_HEAD, false), summary: note, extra: note },
+        },
+        good,
+      );
+    });
+    expect(out.length).toBeGreaterThan(0);
+    for (const secret of [
+      good,
+      bad,
+      nonce,
+      "ghp_publication_review_test",
+      CALLBACK_SECRET,
+      "SMITH-SECRET",
+    ]) {
+      expect(out).not.toContain(secret);
+    }
+  });
+
+  test("a hostile report's text is not logged when it is stored either", async () => {
+    const { reviewId } = dispatched();
+    const out = await captured(async () => {
+      await h.result(reviewId, {
+        outcome: "reported",
+        report: reportFor(SCREENED_HEAD, false, { summary: "HOSTILE-SUMMARY-TEXT" }),
+      });
+    });
+    expect(out).not.toContain("HOSTILE-SUMMARY-TEXT");
+  });
+});
+
+describe("what the caps count", () => {
+  test("an attempt no model saw is not counted, whatever else is", () => {
+    // The widening direction matters: a word dropped from this list would make a free attempt
+    // cost a call, and a word added would let a costly one through for nothing.
+    for (const word of NEVER_REACHED_MODEL) expect(COUNTS_TOWARD_CAPS).toContain(`'${word}'`);
+    expect(COUNTS_TOWARD_CAPS).toContain("state <> 'declined'");
+  });
+});
