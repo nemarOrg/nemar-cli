@@ -47,7 +47,8 @@ The issue reports 3.7 s for a 25 GB file on CephFS.
   An empty value counts: git reads an empty filter process as no filter at all, so with the repository's value out, an empty one in a lower scope (global, system, an include before the repository's entry) would take effect and every `git add` in the window would store raw content in git. A review reproduced exactly that against the first version of this code, which dropped empty values when it read the configuration.
   After the unset, and before each chunk is refreshed, no filter process may be left in any scope; otherwise the chunk is not refreshed and the value is put back.
   With no filter process at all (the issue's own workaround), git already uses the per-file filter and nothing is changed.
-- The paths are refreshed in chunks of 100, and the value is taken out for one chunk at a time and put back before the next, so the window is one chunk long (about six minutes at the issue's 3.7 s a file) rather than the whole refresh. Measured locally it costs nothing: 200 files took 15.8 to 17.4 s chunked against 16.4 to 16.7 s in one window.
+- The paths are refreshed in chunks of 100, and the value is taken out for one chunk at a time and put back before the next, so the window is one chunk long (about six minutes at the issue's 3.7 s a file) rather than the whole refresh. Measured locally it has no measurable cost: 200 files took 15.8 to 17.4 s chunked against 16.4 to 16.7 s in one window, which is noise.
+  A value someone sets in the repository while the priming runs is theirs: a restore leaves it in place, and a chunk that finds the value changed since the first read stops instead of writing the old value back.
 - The value is written to `filter.annex.process-temp-disabled` before `filter.annex.process` is unset, and put back after each chunk, retried once and read back.
   On SIGINT, SIGTERM and SIGHUP it is put back synchronously, retried for about 2.5 seconds in case this process's own `git config` holds `.git/config.lock` at that moment, and the CLI's child processes are then asked to stop before the signal is re-raised.
   The restore does not wait on the refresh (`git config` takes `config.lock`, not the `index.lock` the refresh holds), but a refresh left running would hold `index.lock` until it had been through every file, and a signal sent to the CLI alone does not reach it.
@@ -70,6 +71,9 @@ The issue reports 3.7 s for a 25 GB file on CephFS.
 - Each large file costs one git-annex process per run that finds its entry without stat data, and an `lstat` on runs that do not.
 - Files below 1 GiB keep the old behavior, including ADR 0094's deferred read, because for them the per-file process can cost more than the read it saves.
   At 1 GiB the per-file process is cheaper than the read on both measured hosts: about 0.6 s to re-read on APFS against 0.06 to 0.26 s a file (a thin margin of 2.4 times at worst, where the read is fast anyway), and 11 to 14 s on the issue's CephFS against 3.7 s (3 times). It is not a measured crossover on CephFS, where only the one per-file figure from the issue is known.
+- Nothing here was run on CephFS, on a multi-terabyte tree, or against S3.
+- The check that no filter process is left in any scope sees only the scopes the CLI's own environment shows it. A scope that environment hides can defeat it: with an empty value in the system configuration and the CLI run under `GIT_CONFIG_NOSYSTEM=1`, a review reproduced a `git add` run elsewhere without that override storing a 500,000-byte raw blob during the window. It needs a deliberate override and is not handled.
+- `git annex init` does not set `filter.annex.required`, so in either filter mode a clean filter that fails during someone's `git add` lets git store the raw content. That is how git-annex repositories already behave and is not changed here.
 
 ## Data for the threshold decision
 
@@ -83,7 +87,6 @@ The break-even file size is the per-file cost times the filter-process read rate
 
 A file primed after the add also spares the next upload's two reads when nothing refreshed the index in between, which moves its break-even toward the second row.
 1 GiB is above every figure in the table; anything between about 350 MB and 1 GiB is a gain on the issue's figures that the shipped value leaves unused.
-- Nothing here was run on CephFS, on a multi-terabyte tree, or against S3.
 
 ## Alternatives considered
 
@@ -94,7 +97,7 @@ A file primed after the add also spares the next upload's two reads when nothing
 - **Leave the filter process unset for the whole upload (the issue's workaround).** Rejected as a default: every `git add -A` and `git status` would start one git-annex process per file, and a tree of many small files pays far more than the read (129.9 s against 0.75 s for 500 files of 150 KB).
 - **Hand already-indexed files to `git annex add --batch` instead of checking them with `git diff`.** Rejected: git-annex re-hashes them (2.55 s for 600 MB), one read instead of two, not none.
 - **`assume-unchanged` around the add's check, as ADR 0094 does around the save.** Defers the read rather than removing it, hides edits while set, and needs the same restoration machinery as this does.
-- **A lower threshold.** Not chosen here: a 256 MiB file re-reads in about 3 s on CephFS, less than the 3.7 s the issue reported for one per-file process, and only that one per-file figure is known. The table above is the data for revisiting it.
+- **A lower threshold.** Not chosen here. For the call after the add, which saves one read, a file below about 350 MB re-reads on the issue's CephFS in less than the 3.7 s the issue reported for one per-file process; the call before the add saves two reads, so its break-even is about half that (140 to 175 MB, from the table). Only that one per-file figure is known, and the table above is the data for revisiting it.
 - **One window for the whole refresh.** Replaced by one window per chunk of 100 paths, which measured the same locally and keeps the window from spanning hours on slow storage.
 
 ## Receipts
