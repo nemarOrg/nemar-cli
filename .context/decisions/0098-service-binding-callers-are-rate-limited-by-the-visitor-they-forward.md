@@ -114,15 +114,26 @@ The Cloudflare account is the trust boundary, as in ADR 0078, and no secret head
 - **How to verify after the first deploy, as a gate and not a glance.**
   The Cache API's `put` "resolves to undefined regardless of whether the cache successfully stored the response", and Cloudflare says nothing about a call that arrived over a service binding.
   If the counter silently does not persist there, every answer reads `site-ip` with `X-RateLimit-Remaining` at 1999 for ever and nothing is ever limited, with no log line and no failure.
-  So the property that must be shown, not assumed, is that **two sequential calls from one visitor over the binding show `X-RateLimit-Remaining` falling**.
-  The website logs `remaining` on its first call and logs one error per isolate, `the API's rate-limit count did not move`, if five calls for a visitor inside one window leave it unchanged (website pull request #450).
-  Read that line, or the header by hand, before treating the deploy as done; "no log means fine" is not evidence.
+  So the property that must be shown, not assumed, is that **the count for one visitor falls across calls over the binding**.
+  The first reading is the cap minus one (1999), and across six or more calls spaced one to two seconds apart the reading falls overall, with an occasional repeat or small rise, because the count is kept per data center and is not strictly monotonic.
+  A check that insists on a strict fall from the second call to the third would fail a healthy counter.
+  Measured on production, on the anonymous bucket through `/health` when its cap was 500: five calls 1.5 seconds apart read 499, 498, 499, 497, 498, and twelve calls read 499, 499, 496, 495, 494, 493, 492, 491, 490, 498, 489, 488.
   A bare "remaining must fall" is not enough either: a mis-forward that put every visitor under one `site:<address>` key would pass it.
-  So the gate is also that **two different visitors each read `X-RateLimit-Bucket: site-ip` and a first call of 1999**, one per visitor.
+  So the gate is also that **two different visitors each read `X-RateLimit-Bucket: site-ip` and `X-RateLimit-Caller: site`, and each starts at the cap minus one (1999)**, one per visitor.
+  That cannot be observed from the website as it ships, so it is observed from a throwaway Worker, before the website is promoted:
+  deploy a Worker in the same Cloudflare account with `[[services]]`, `binding = "API"` and `service = "nemar-api"` and no `entrypoint`, so that the binding reaches the default entrypoint this decision is about;
+  have it call a cheap anonymous read such as `/health` over the binding with `X-Forwarded-For` set to a reserved documentation address, 203.0.113.201 for one visitor and 203.0.113.202 for the other, and return the `X-RateLimit-Bucket`, `X-RateLimit-Remaining` and `X-RateLimit-Caller` values from each answer;
+  expect `site-ip`, `site`, and a first remaining of 1999 for each visitor that falls overall across six or more calls a second or two apart;
+  then delete the Worker.
+  A service binding has no URL, so there is nothing to call by hand, and the API never logs `remaining`.
+  The website's `reportBucket` logs `remaining` once per bucket kind per isolate, so it cannot show a fall either.
+  The only automated check is the website's own stuck-counter warning, `the API's rate-limit count did not fall over 4 calls for one visitor`, which one isolate raises once when three comparisons in a row, between calls one to ten seconds apart, show no fall (website pull request #450).
+  It detects that one failure and no other, and "no log means fine" is not evidence.
   Website pull request #450, already merged to staging, is a prerequisite of the deploy and not a nicety:
   it is the only detector for "put resolves but nothing persists" and for a binding call that carries a `CF-Connecting-IP` after all.
-  Then tail the production API Worker while a few website pages load:
-  `bunx cfman wrangler --account sccn tail nemar-api --search "[rate-limit]"`.
+  The development Worker bypasses the limiter, so the site-identity rule, the fixed windows (ADR 0099) and the stall breaker (the amendment below) have never run on a deployed Worker.
+  When the release reaches production, tail the API Worker from `backend/`:
+  `bunx cfman wrangler --account sccn tail nemar-api --search "[rate-limit]"`, and keep watching it while a few website pages load.
   A line `counting a request without CF-Connecting-IP by its forwarded visitor` (once per isolate per window for each source, bucket and reason, with no repeats, and never for a token bucket) means the hypothesis about the missing header holds.
   A warning `request with neither` means the website is not forwarding a usable visitor, and says why;
   its responses carry `X-RateLimit-Caller: unattributed`.
@@ -135,7 +146,7 @@ The Cloudflare account is the trust boundary, as in ADR 0078, and no secret head
   An answer without them was not announced as counted: the development Worker, a bypass, a cache fault (which is logged, once per window per bucket kind and again at the milestones described below), or an observe-only count.
   That last is the zarr redirect path, which counts a request against the shared bucket and never announces it, so "no headers" does not mean "not counted" there.
   They are not proof of a count either: the data plane hands its write to `waitUntil`, so its answer states a count whether or not the write lands, and a failing `put` there leaves `X-RateLimit-Remaining` unchanged while the line is logged.
-  The falling `X-RateLimit-Remaining` above is the evidence; the header's presence alone is not.
+  The overall fall in `X-RateLimit-Remaining` described above is the evidence; the header's presence alone is not.
 - **The limiter reports its own faults and does not wait on the cache for ever.**
   A repaired counter record, a damaged admin-flag record found (which is then read again from the database and replaced if the database and the write allow), a refusal, and a cache fault are each logged once per window per bucket kind (refusals and identities also per caller source, a fault, and the admin-flag lookup's, also per phase and error class, so a transient stall in a write cannot hide a persistent bug of another class in the same phase; a class not on a short list counts as `other`, which bounds the key space), by name and never with an address or a message.
   A line says how many calls for its key were swallowed since the previous line (`suppressed`, which does not count the call that is speaking) and how long ago that previous line was (`sinceMs`, the time since the previous line, not since the window opened).
