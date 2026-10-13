@@ -21,9 +21,10 @@ import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Server } from "bun";
 import { Hono } from "hono";
-import type {
-  PublicationReviewDetail,
-  PublicationReviewGateRefusalBody,
+import {
+  OVERRIDE_FIELD,
+  type PublicationReviewDetail,
+  type PublicationReviewGateRefusalBody,
 } from "../../shared/contract/publication-review-admin";
 import {
   REASONS,
@@ -33,6 +34,7 @@ import {
 } from "../../shared/publication-review";
 import { PUBLICATION_STEPS } from "../../shared/publication-steps";
 import { adminRoutes } from "../src/routes/admin";
+import { approveSchema } from "../src/services/publication-orchestrator";
 import {
   startPublicationReview,
   storePublicationReviewResult,
@@ -1138,6 +1140,18 @@ describe("the override comes from an API key", () => {
 });
 
 describe("the override is shape-checked before anything is read", () => {
+  test("the field is named as the contract names it, on both routes", async () => {
+    expect(Object.keys(approveSchema.shape)).toContain(OVERRIDE_FIELD);
+    const { requestId, reviewId } = seedFailing();
+    const body = {
+      [OVERRIDE_FIELD]: { review_id: reviewId, reasons: ["question_failed"] },
+    };
+    // approve-dispatch's strict body takes the same key: a 202, where an unknown key is a 400.
+    expect((await dispatchApproval(body)).status).toBe(202);
+    expect(reviewRow(reviewId).override_by).toBe(adminA);
+    expect(requestRow(requestId).approval_requested_by).toBe(adminA);
+  });
+
   test("a malformed override is a 400 before anything is read", async () => {
     const { requestId, reviewId } = seedFailing();
     for (const bad of [
