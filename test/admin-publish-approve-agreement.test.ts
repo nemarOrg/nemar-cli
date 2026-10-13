@@ -213,6 +213,28 @@ const SCENARIOS: Scenario[] = [
     workerRefusal: "hard_reason",
   },
   {
+    name: "a stopped approval that keeps the version of an earlier anonymous release",
+    seed: (w) => {
+      seedScreenedRequest(w.db, {
+        datasetId: DATASET,
+        anonymous: true,
+        requestStatus: "published",
+      });
+      const requestId = golden(w, { requestStatus: "approving" });
+      w.db.run("UPDATE publication_requests SET steps_completed = '[]' WHERE id = ?", [requestId]);
+      seedReport(w.db, requestId);
+      w.db.run("INSERT INTO dataset_versions (dataset_id, version, doi) VALUES (?, '1.0.0', ?)", [
+        DATASET,
+        "10.5072/FK2.anon",
+      ]);
+    },
+    // The run stopped before it published, so it is gated again and the version row is an
+    // earlier release's: the detail shows the hard reason, and the Worker refuses it as the command does.
+    options: { force: true },
+    decision: "hard",
+    workerRefusal: "hard_reason",
+  },
+  {
     name: "direct identifiers: the screen's gate answers before the review's",
     seed: (w) => seedReport(w.db, golden(w, { status: "direct-identifiers" })),
     options: { force: true },

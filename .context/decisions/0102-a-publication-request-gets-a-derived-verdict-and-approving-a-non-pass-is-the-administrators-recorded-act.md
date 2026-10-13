@@ -262,8 +262,9 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   and use the STRICTER of the two, so either can lower a verdict and neither can raise it (ADR 0093's rule).
   A stored report that no longer parses, or whose echoed commit or release kind differs from its row's,
   reads as `review_could_not_run` (`report_invalid`), and as `stored_verdict_fail` as well when the column says `fail`.
-  Live facts (a release row, a tag, the concept DOI, an earlier anonymous release) are read only for a request that is `requested` or `blocked`:
-  a request that is `approving` has written its own version row and DOI, and a request that is over shows its stored review only.
+  Live facts (a release row, a tag, the concept DOI, an earlier anonymous release) are read only for a request that is `requested` or `blocked`,
+  and for an `approving` run that stopped before it published (only the validation-only steps completed), which the gate checks again when it resumes and which has written neither a version row nor a DOI:
+  a run that has started publishing has written its own version row and DOI, and a request that is over shows its stored review only.
   A request that is not assessed (the review is off and no row exists, the request is over and has no row, a mirror or an exemplar)
   has no outcome and no reasons on any surface.
   A review that cannot be read says so and is never a pass: with the review on, a list row reads `unreadable` (action required, no reasons, one fixed headline)

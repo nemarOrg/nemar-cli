@@ -879,6 +879,178 @@ describe("the gate runs on a resume that has not started publishing, and only on
   });
 });
 
+describe("a run that stopped before it published is gated on the version and DOI facts too", () => {
+  // `approving` with no step after the validation-only ones done: the run is gated again when it
+  // resumes (test 16's counterpart), and nothing it ran so far wrote a `dataset_versions` row or a
+  // concept DOI, so those facts are about an EARLIER release exactly as they are for `requested`.
+  const STOPPED = { requestStatus: "approving", steps: [] } as const;
+  const VERSION_DOI = "10.82901/nm.test";
+
+  /** An anonymous release of 1.0.0 that left its version row, before this request. */
+  function anonymousReleaseOfOneZero(): void {
+    seed({ anonymous: true, requestStatus: "published" });
+    db.run("INSERT INTO dataset_versions (dataset_id, version, doi) VALUES (?, '1.0.0', ?)", [
+      DATASET,
+      VERSION_DOI,
+    ]);
+  }
+
+  test("5. the probe: forced over a running review, stopped at the CI check, resumed with the report a pass: refused, and the detail says why", async () => {
+    // The review had not reported when the administrator forced past it, so no version was known
+    // and the gate had nothing to refuse. The report lands as a pass, naming 1.0.0, which an
+    // anonymous release already used; the resume is gated again and must see it.
+    bidsConclusion = "failure";
+    anonymousReleaseOfOneZero();
+    const { requestId } = seed({ steps: [] });
+    const reviewId = seedPublicationReview(db, {
+      requestId,
+      datasetId: DATASET,
+      state: "dispatched",
+      createdMinutesAgo: 5,
+      claimed: true,
+    });
+    const forced = await approve({
+      resume: true,
+      override_publication_review: { review_id: reviewId, reasons: ["review_running"] },
+    });
+    expect(forced.status).toBe(422);
+    expect(((await forced.json()) as { step?: string }).step).toBe("ci_check");
+    expect(requestRow(requestId).status).toBe("approving");
+    expect(JSON.parse(String(requestRow(requestId).steps_completed))).toEqual([]);
+
+    const nonce = (
+      db.query("SELECT nonce FROM publication_reviews WHERE id = ?").get(reviewId) as {
+        nonce: string;
+      }
+    ).nonce;
+    const stored = await storePublicationReviewResult(env(), reviewId, DATASET, nonce, {
+      kind: "reported",
+      report: parsePublicationReviewReport(goodPublicationReport()),
+    });
+    expect(stored.stored).toBe(true);
+
+    // What the administrator is shown now, and what the gate says to a resume with no flag.
+    const detail = await detailOf();
+    expect(detail.request_status).toBe("approving");
+    expect(detail.started_publishing).toBe(false);
+    expect(detail.reasons.map((r) => r.code)).toEqual(["version_kept_after_anonymous_release"]);
+    const resumed = await approve({ resume: true });
+    const body = await refusalOf(resumed);
+    expect(body.refusal).toBe("hard_reason");
+    expect(body.message).toContain(REASONS.version_kept_after_anonymous_release.sentence);
+    expect(body.reasons).toEqual(detail.reasons);
+    // The earlier forced run's step list is untouched: nothing ran for the refused resume.
+    expect(JSON.parse(String(requestRow(requestId).steps_completed))).toEqual([]);
+    expect(requestRow(requestId).approved_by).toBe(adminA);
+    expect(auditRows("dataset_published")).toHaveLength(0);
+  });
+
+  test("5. a named run that keeps the version an anonymous release used is refused the same way when it stopped before publishing", async () => {
+    anonymousReleaseOfOneZero();
+    const { requestId, reviewId } = seedFailing(STOPPED, goodPublicationReport());
+    const res = await approve({
+      resume: true,
+      override_publication_review: {
+        review_id: reviewId,
+        reasons: ["version_kept_after_anonymous_release", "version_already_released"],
+      },
+    });
+    const body = await refusalOf(res);
+    expect(body.refusal).toBe("hard_reason");
+    expect(body.message).toContain(REASONS.version_kept_after_anonymous_release.sentence);
+    expect(body.reasons.map((r) => r.code)).toEqual(["version_kept_after_anonymous_release"]);
+    expect((await detailOf()).reasons).toEqual(body.reasons);
+    expect(requestRow(requestId).approved_by).toBeNull();
+    expect(overrideRows()).toHaveLength(0);
+  });
+
+  test("5. a failed submission minimum is refused whatever the override says when the run stopped before publishing", async () => {
+    const { requestId, reviewId } = seedFailing(
+      STOPPED,
+      goodPublicationReport({
+        evidence: evidenceFor(SCREENED_HEAD, false, {
+          minimums: "failed",
+          minimum_failures: ["name_too_short"],
+          name_length: 5,
+        }),
+      }),
+    );
+    const res = await approve({
+      resume: true,
+      override_publication_review: {
+        review_id: reviewId,
+        reasons: ["submission_minimum_failed", "question_failed"],
+      },
+    });
+    const body = await refusalOf(res);
+    expect(body.refusal).toBe("hard_reason");
+    expect(body.reasons.map((r) => r.code)).toContain("submission_minimum_failed");
+    expect((await detailOf()).reasons).toEqual(body.reasons);
+    expect(requestRow(requestId).approved_by).toBeNull();
+    expect(overrideRows()).toHaveLength(0);
+  });
+
+  test("9. a version the dataset already released needs the override from a run that stopped before publishing, and the override then passes", async () => {
+    bidsConclusion = "failure";
+    // A named request for a version an earlier NAMED release already published: not the anonymous
+    // case, so `version_already_released`, which an override clears.
+    seed({ requestStatus: "published" });
+    db.run("INSERT INTO dataset_versions (dataset_id, version, doi) VALUES (?, '1.0.0', ?)", [
+      DATASET,
+      VERSION_DOI,
+    ]);
+    const { requestId, reviewId } = seedFailing(STOPPED, goodPublicationReport());
+    const detail = await detailOf();
+    expect(detail.reasons.map((r) => r.code)).toEqual(["version_already_released"]);
+
+    const refused = await refusalOf(await approve({ resume: true }));
+    expect(refused.refusal).toBe("needs_override");
+    expect(refused.uncovered).toEqual(["version_already_released"]);
+    expect(requestRow(requestId).approved_by).toBeNull();
+
+    const res = await approve({
+      resume: true,
+      override_publication_review: { review_id: reviewId, reasons: ["version_already_released"] },
+    });
+    // Past the gate, stopped by the BIDS check: the override named what stood.
+    expect(res.status).toBe(422);
+    expect(((await res.json()) as { step?: string }).step).toBe("ci_check");
+    expect(reviewRow(reviewId).override_reasons).toBe(JSON.stringify(["version_already_released"]));
+  });
+
+  test("9. a concept DOI the dataset already carries is a reason for a run that stopped before publishing", async () => {
+    seedFailing(STOPPED, goodPublicationReport());
+    db.run("UPDATE datasets SET concept_doi = '10.82901/nm.concept' WHERE dataset_id = ?", [
+      DATASET,
+    ]);
+    const refused = await refusalOf(await approve({ resume: true }));
+    expect(refused.refusal).toBe("needs_override");
+    expect(refused.uncovered).toEqual(["doi_state_unexpected"]);
+  });
+
+  test("16. a run that HAS started publishing reads none of them: its own version row and DOI are not an earlier release", async () => {
+    // The run wrote these itself (`doi_create`, `create_tag`), so reading them as live facts would
+    // say "already released" about a run that has to be resumed, with `approve --force` as the way.
+    const { requestId } = seedFailing({ requestStatus: "approving", steps: DONE });
+    db.run("INSERT INTO dataset_versions (dataset_id, version, doi) VALUES (?, '1.0.0', ?)", [
+      DATASET,
+      VERSION_DOI,
+    ]);
+    db.run("UPDATE datasets SET concept_doi = '10.82901/nm.concept' WHERE dataset_id = ?", [
+      DATASET,
+    ]);
+    const detail = await detailOf();
+    expect(detail.started_publishing).toBe(true);
+    expect(detail.reasons.map((r) => r.code)).not.toContain("version_already_released");
+    expect(detail.reasons.map((r) => r.code)).not.toContain("doi_state_unexpected");
+    expect(detail.reasons.map((r) => r.code)).not.toContain("version_kept_after_anonymous_release");
+    const res = await approve({ resume: true });
+    expect(res.status).toBe(200);
+    expect(requestRow(requestId).status).toBe("published");
+    expect(overrideRows()).toHaveLength(0);
+  });
+});
+
 describe("the gate refuses what it cannot establish", () => {
   test("18. with the review table unreadable the gate refuses, as unverified, and starts nothing", async () => {
     const { requestId } = seedFailing();

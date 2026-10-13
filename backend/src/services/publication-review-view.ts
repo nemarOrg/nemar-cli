@@ -22,8 +22,10 @@
  * exception, `blocked` ({@link LIVE_FACT_STATUSES}): a blocked request has written nothing of an
  * approval, so a version row or a concept DOI can only belong to an EARLIER release, and is shown
  * beside the hard `request_blocked`. A request that is over (`published`, `denied`) would read as
- * one whose own release "was already released", and an `approving` request has written those facts
- * itself, so both show their stored review only.
+ * one whose own release "was already released", and an `approving` request that has started
+ * publishing has written those facts itself, so both show their stored review only. An `approving`
+ * request that stopped before it published has written neither, is gated again when it resumes,
+ * and reads them like a `requested` one.
  *
  * **What a viewer may read** is counts, closed words and the shared sentences. The model's summary
  * and the notes of its findings, both sanitized by the parser, appear in the detail view and
@@ -145,12 +147,15 @@ export function publicationReviewApplies(dataset: {
  *    `approving`, the owner-name check, is ahead of the first step), so it has written nothing
  *    either. Its facts are informative, and the hard `request_blocked` stands beside them.
  *
- * Not `approving`: the approval run has by then written its own `dataset_versions` row and concept
- * DOI, and read as live facts they would say "already released" and "unexpected DOI" about a run
- * that should be RESUMED, with `approve --force` as its next command. An `approving` request, like
- * every request that is over (`published`, `denied`), shows its stored review and the stored
- * verdict only; the approval gate (Phase 2) skips a resumed run that has started publishing for the
- * same reason (`hasStartedPublishing`).
+ * Not `approving` as such: a run that HAS started publishing has by then written its own
+ * `dataset_versions` row and concept DOI, and read as live facts they would say "already released"
+ * and "unexpected DOI" about a run that should be RESUMED, with `approve --force` as its next
+ * command. It, like every request that is over (`published`, `denied`), shows its stored review and
+ * the stored verdict only; the approval gate skips such a run for the same reason
+ * (`hasStartedPublishing`). An `approving` run that STOPPED before it published (`approval ===
+ * "stopped"`: only the validation-only steps, `ci_check` and `enrichment_check`, completed) is
+ * gated again when it resumes and has written neither a version row nor a DOI, so its facts are
+ * about an earlier release and are read, whatever its status says.
  */
 const LIVE_FACT_STATUSES: ReadonlySet<string> = new Set(["requested", "blocked"]);
 
@@ -287,10 +292,11 @@ function reviewKeyOf(
 
 /**
  * Everything a surface shows, re-derived now. Reads the review in force and, for a request whose
- * approval has written nothing yet ({@link LIVE_FACT_STATUSES}), three facts: a version row for
- * the version an approval would publish, an earlier anonymous request and the concept DOI. No
- * GitHub call is made anywhere in this module: `head_current` stays null, and only the approval
- * gate (Phase 2) asks GitHub whether the screened commit is still `main`.
+ * approval has written nothing yet ({@link LIVE_FACT_STATUSES}, or a run that stopped before it
+ * published), three facts: a version row for the version an approval would publish, an earlier
+ * anonymous request and the concept DOI. No GitHub call is made anywhere in this module:
+ * `head_current` stays null, and only the approval gate (Phase 2) asks GitHub whether the screened
+ * commit is still `main`.
  *
  * Throws when a read fails. It never answers from a fact it could not read.
  */
@@ -355,7 +361,8 @@ export async function derivePublicationReview(
   // What an approval would publish: a dataset with no Version is published as 1.0.0, so that is
   // the version whose release the live checks must look for (a malformed one has none).
   const publishedVersion = report === null ? null : effectiveVersionOf(report.evidence);
-  const readFacts = applies && assessed && LIVE_FACT_STATUSES.has(request.status);
+  const readFacts =
+    applies && assessed && (LIVE_FACT_STATUSES.has(request.status) || approval === "stopped");
   const versionRowExists =
     readFacts && publishedVersion !== null
       ? await exists(db, VERSION_ROW_SQL, request.dataset_id, publishedVersion)

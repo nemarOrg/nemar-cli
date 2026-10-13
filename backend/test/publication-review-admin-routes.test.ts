@@ -139,6 +139,16 @@ function addVersionRow(datasetId: string, version = "1.0.0") {
   ]);
 }
 
+/** The steps of an approval that has started publishing: one outside the validation-only ones is done. */
+const PUBLISHING_STEPS = JSON.stringify(["ci_check", "enrichment_check", "s3_public_read"]);
+
+function startPublishing(requestId: number): void {
+  db.run("UPDATE publication_requests SET steps_completed = ? WHERE id = ?", [
+    PUBLISHING_STEPS,
+    requestId,
+  ]);
+}
+
 // ============================================================================
 
 describe("GET /admin/publish/requests: the review of each request", () => {
@@ -662,11 +672,12 @@ describe("GET /admin/publish/requests: the review of each request", () => {
     }
   });
 
-  test("an approving request is read from its stored review only: what its own run wrote is not held against it", async () => {
+  test("an approving request that has started publishing is read from its stored review only: what its own run wrote is not held against it", async () => {
     // The approval has already written the version row and the concept DOI of THIS release. Read
     // as live facts they would say "already released" and "unexpected DOI" about a run that is to
     // be resumed, and point at `approve --force` for it.
     const { requestId, datasetId } = request({ requestStatus: "approving" });
+    startPublishing(requestId);
     seedPublicationReview(db, { requestId, datasetId, state: "reported" });
     addVersionRow(datasetId);
     db.run(
@@ -681,8 +692,32 @@ describe("GET /admin/publish/requests: the review of each request", () => {
     expect(d.description.next).not.toContain("--force");
   });
 
+  test("an approving request that stopped before it published reads its live facts: they are an earlier release's", async () => {
+    // Only the validation-only steps ran, which write neither a version row nor a DOI, so the run
+    // is gated again when it resumes and a release row of this version is not its own.
+    const { requestId, datasetId } = request({ requestStatus: "approving" });
+    seedPublicationReview(db, { requestId, datasetId, state: "reported" });
+    addVersionRow(datasetId);
+    db.run(
+      "UPDATE datasets SET concept_doi = '10.82901/nm.earlier', ezid_status = 'public' WHERE dataset_id = ?",
+      [datasetId],
+    );
+    expect(await review(datasetId)).toMatchObject({
+      outcome: "fail",
+      reasons: ["version_already_released", "doi_state_unexpected"],
+    });
+    const d = await detail(datasetId);
+    expect(d.started_publishing).toBe(false);
+    expect(d.reasons.map((r) => r.code)).toEqual([
+      "version_already_released",
+      "doi_state_unexpected",
+    ]);
+    expect(d.description.next).toContain("--force");
+  });
+
   test("an approving request still shows its stored review: a failed question and a stored fail stand", async () => {
     const failed = request({ requestStatus: "approving" });
+    startPublishing(failed.requestId);
     seedPublicationReview(db, {
       requestId: failed.requestId,
       datasetId: failed.datasetId,
@@ -863,24 +898,34 @@ describe("the list's cost and isolation", () => {
     const { requestId } = request({ datasetId, requestStatus: status });
     seedPublicationReview(db, { requestId, datasetId, state: "reported" });
     if (versioned) addVersionRow(datasetId);
+    // An approval being run has started publishing: its own release rows are not read.
+    if (status === "approving") startPublishing(requestId);
     return datasetId;
   }
 
   test("reads every review row in one query, and a version fact only for a request that could still be approved", async () => {
-    // 20 rows: 8 over, 3 being approved, 6 waiting, 3 waiting whose version has a release.
+    // 22 rows: 8 over, 3 publishing, 2 approving that stopped before it published, 6 waiting, 3
+    // waiting whose version has a release.
     for (let i = 0; i < 8; i++) listed("published");
     for (let i = 0; i < 3; i++) listed("approving");
+    for (let i = 0; i < 2; i++) {
+      const stopped = listed("approving");
+      db.run("UPDATE publication_requests SET steps_completed = '[]' WHERE dataset_id = ?", [
+        stopped,
+      ]);
+    }
     for (let i = 0; i < 6; i++) listed("requested");
     for (let i = 0; i < 3; i++) listed("requested", true);
-    const cost = await listStatements(20);
+    const cost = await listStatements(22);
     // The cost is the 3 statements of the request itself (the key's lookup and its stamp, and
-    // the list), ONE read of all 20 review rows, a version lookup for each of the 9 requests that
-    // could still be approved, and the earlier-anonymous lookup for the 3 with a release.
-    // Requests that are over or being approved read nothing beyond the one batch.
+    // the list), ONE read of all 22 review rows, a version lookup for each of the 11 requests that
+    // could still be approved (waiting, or stopped before it published), and the earlier-anonymous
+    // lookup for the 3 with a release. Requests that are over or publishing read nothing beyond
+    // the one batch.
     expect(cost.reviewReads).toBe(1);
-    expect(cost.versionLookups).toBe(9);
+    expect(cost.versionLookups).toBe(11);
     expect(cost.earlierAnonymous).toBe(3);
-    expect(cost.total).toBe(3 + 1 + 9 + 3);
+    expect(cost.total).toBe(3 + 1 + 11 + 3);
   });
 
   test("a list of requests that are over costs one read however long it is, and stays inside D1's bound limit", async () => {
