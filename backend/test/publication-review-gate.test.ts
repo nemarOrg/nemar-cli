@@ -60,9 +60,12 @@ const EXEMPLAR = "xx099960";
 const DONE = PUBLICATION_STEPS.filter((s) => s !== "upload_to_zenodo" && s !== "sync_nemar");
 
 let server: Server;
-let calls: { method: string; path: string }[] = [];
+let calls: { method: string; path: string; event?: string }[] = [];
 let mainHead = SCREENED_HEAD;
 let bidsConclusion = "success";
+/** Runs inside the stand-in as the request for `main` and the dispatch arrive: for ordering. */
+let onRefRead: (() => void) | null = null;
+let onDispatch: (() => void) | null = null;
 
 let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
@@ -74,11 +77,17 @@ beforeAll(() => {
     port: 0,
     async fetch(req) {
       const p = new URL(req.url).pathname;
-      calls.push({ method: req.method, path: p });
+      const sent =
+        req.method === "POST"
+          ? ((await req.json().catch(() => null)) as { event_type?: string } | null)
+          : null;
+      calls.push({ method: req.method, path: p, event: sent?.event_type });
       if (req.method === "GET" && /\/git\/ref\/heads\/main$/.test(p)) {
+        onRefRead?.();
         return Response.json({ object: { sha: mainHead } });
       }
       if (req.method === "POST" && p === "/repos/nemarDatasets/.github/dispatches") {
+        onDispatch?.();
         return new Response(null, { status: 204 });
       }
       if (/\/actions\/workflows\/bids-validation\.yml\/runs$/.test(p)) {
@@ -105,6 +114,8 @@ afterEach(() => {
   calls = [];
   mainHead = SCREENED_HEAD;
   bidsConclusion = "success";
+  onRefRead = null;
+  onDispatch = null;
 });
 
 beforeEach(async () => {
@@ -1025,5 +1036,271 @@ describe("the override is shape-checked before anything is read", () => {
       expect(res.status).toBe(400);
     }
     expect(requestRow(requestId).status).toBe("requested");
+  });
+});
+
+// ============================================================================
+// approve-dispatch: the web executor's path
+// ============================================================================
+
+/** The clicker's call, as the website sends it (a bearer key here; the cookie path is below). */
+function dispatchApproval(
+  body?: Record<string, unknown>,
+  o: { key?: string; dataset?: string; bindings?: Bindings } = {},
+): Promise<Response> {
+  return app.request(
+    `/admin/publish/${o.dataset ?? DATASET}/approve-dispatch`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${o.key ?? ADMIN_A_KEY}`,
+        ...(body ? { "Content-Type": "application/json" } : {}),
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    },
+    o.bindings ?? env(),
+  );
+}
+
+/** Approvals handed to the executor: the dispatch this route sends, not a review's. */
+function dispatchesSent(): number {
+  return calls.filter((c) => c.event === "approve-publication").length;
+}
+
+function overrideOf(reviewId: number): number | null {
+  return (
+    db.query("SELECT override_by FROM publication_reviews WHERE id = ?").get(reviewId) as {
+      override_by: number | null;
+    }
+  ).override_by;
+}
+
+describe("approve-dispatch runs the gate before it claims, and records after the head check", () => {
+  test("12. the clicker's override is recorded after the head check and before the dispatch, and the executor's run rides on it", async () => {
+    const { requestId, reviewId } = seedFailing();
+    let atRefRead: number | null | undefined;
+    let atDispatch: number | null | undefined;
+    onRefRead = () => {
+      atRefRead = overrideOf(reviewId);
+    };
+    onDispatch = () => {
+      atDispatch = overrideOf(reviewId);
+    };
+    const res = await dispatchApproval({
+      override_publication_review: { review_id: reviewId, reasons: ["question_failed"] },
+    });
+    expect(res.status).toBe(202);
+    // The order, off the wire: main is read, then the override is recorded, then the dispatch.
+    expect(atRefRead).toBeNull();
+    expect(atDispatch).toBe(adminA);
+    const reads = calls.map((c) => (c.method === "GET" ? "ref" : "dispatch"));
+    expect(reads).toEqual(["ref", "dispatch"]);
+    expect(reviewRow(reviewId).override_reasons).toBe(JSON.stringify(["question_failed"]));
+    expect(overrideRows()).toHaveLength(1);
+    expect(overrideRows()[0]).toMatchObject({ user_id: adminA });
+    expect(overrideRows()[0].details).toEqual({
+      request_id: requestId,
+      review_id: reviewId,
+      head_sha: SCREENED_HEAD,
+      outcome: "fail",
+      reasons: ["question_failed"],
+      via: "approve-dispatch",
+    });
+    expect(requestRow(requestId).approval_requested_by).toBe(adminA);
+
+    // What the workflow does next: the executor's own key, no override, the lease live. It is
+    // attributed to the clicker, so it finds the clicker's recorded override and passes.
+    const run = await approve({ resume: true }, { key: ADMIN_B_KEY });
+    expect(run.status).toBe(200);
+    expect(requestRow(requestId).approved_by).toBe(adminA);
+    expect(published().user_id).toBe(adminA);
+    expect(published().details).toMatchObject({
+      approved_by: "gateadmina",
+      executed_by: "gateadminb",
+    });
+    // Recorded once: the executor wrote nothing.
+    expect(overrideRows()).toHaveLength(1);
+  });
+
+  test("13. a refusal by the gate claims nothing and dispatches nothing", async () => {
+    const { requestId, reviewId } = seedFailing();
+    for (const [body, refusal] of [
+      [undefined, "needs_override"],
+      [
+        { override_publication_review: { review_id: reviewId, reasons: [] } },
+        "override_not_covering",
+      ],
+      [
+        { override_publication_review: { review_id: reviewId + 1, reasons: ["question_failed"] } },
+        "review_changed",
+      ],
+    ] as const) {
+      const res = await dispatchApproval(body);
+      expect((await refusalOf(res)).refusal).toBe(refusal);
+      expect(requestRow(requestId).approval_requested_by).toBeNull();
+      expect(requestRow(requestId).approval_dispatched_at).toBeNull();
+    }
+    expect(dispatchesSent()).toBe(0);
+    expect(overrideRows()).toHaveLength(0);
+    expect(reviewRow(reviewId).override_by).toBeNull();
+    // The gate is the state half and reads no GitHub: main was never asked for.
+    expect(calls).toHaveLength(0);
+  });
+
+  test("13. a hard reason is refused at the dispatch, whatever override came with it", async () => {
+    const { requestId, reviewId } = seedFailing(
+      {},
+      goodPublicationReport({
+        evidence: evidenceFor(SCREENED_HEAD, false, {
+          minimums: "failed",
+          minimum_failures: ["name_too_short"],
+          name_length: 5,
+        }),
+      }),
+    );
+    const res = await dispatchApproval({
+      override_publication_review: {
+        review_id: reviewId,
+        reasons: ["submission_minimum_failed", "question_failed"],
+      },
+    });
+    expect((await refusalOf(res)).refusal).toBe("hard_reason");
+    expect(requestRow(requestId).approval_requested_by).toBeNull();
+    expect(dispatchesSent()).toBe(0);
+  });
+
+  test("13. a stale screen refuses after the claim, releases it, and records no override", async () => {
+    const { requestId, reviewId } = seedFailing();
+    mainHead = OTHER_HEAD;
+    const res = await dispatchApproval({
+      override_publication_review: { review_id: reviewId, reasons: ["question_failed"] },
+    });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { gate?: string }).gate).toBe("stale");
+    expect(requestRow(requestId).approval_requested_by).toBeNull();
+    // The override is recorded only once the head check has passed: it attaches to content that
+    // is still the content being published.
+    expect(reviewRow(reviewId).override_by).toBeNull();
+    expect(overrideRows()).toHaveLength(0);
+    expect(dispatchesSent()).toBe(0);
+  });
+
+  test("13. a row that moves between the gate and the record refuses, releases the claim and dispatches nothing", async () => {
+    const { requestId } = seed();
+    const reviewId = seedPublicationReview(db, {
+      requestId,
+      datasetId: DATASET,
+      state: "errored",
+      detail: "model_unavailable",
+      claimed: true,
+    });
+    const real = realD1(db);
+    const racing = interceptingD1(real, async (sql) => {
+      if (sql === RECORD_OVERRIDE_SQL) {
+        await startPublicationReview(env({ DB: real }), {
+          requestId,
+          datasetId: DATASET,
+          adminUserId: adminB,
+        });
+      }
+    });
+    const res = await dispatchApproval(
+      { override_publication_review: { review_id: reviewId, reasons: ["review_could_not_run"] } },
+      { bindings: env({ DB: racing }) },
+    );
+    expect((await refusalOf(res)).refusal).toBe("review_changed");
+    expect(requestRow(requestId).approval_requested_by).toBeNull();
+    expect(reviewRow(reviewId).override_by).toBeNull();
+    expect(dispatchesSent()).toBe(0);
+  });
+
+  test("13. a malformed override is a 400 invalid_body that names both fields", async () => {
+    const { requestId } = seedFailing();
+    for (const bad of [
+      { override_publication_review: { review_id: 1 } },
+      { override_publication_review: { review_id: 1, reasons: ["nope"] } },
+      { override_publication_review: { review_id: 1, reasons: [], extra: 1 } },
+      { override_publication_review: "yes", extra: true },
+    ]) {
+      const res = await dispatchApproval(bad);
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string; message: string };
+      expect(body.error).toBe("invalid_body");
+      expect(body.message).toContain("acknowledge_identifier_screen");
+      expect(body.message).toContain("override_publication_review");
+    }
+    expect(requestRow(requestId).approval_requested_by).toBeNull();
+  });
+
+  test("14. an override that needs a review row is refused with no_review_row, and nothing is claimed", async () => {
+    const { requestId } = seed();
+    // First the page is told what stands: no review of this commit, so an override is needed.
+    const first = await refusalOf(await dispatchApproval());
+    expect(first.refusal).toBe("needs_override");
+    expect(first.uncovered).toEqual(["review_not_started"]);
+    // Then it confirms. The executor could not carry an override with nothing to hold it.
+    const res = await dispatchApproval({
+      override_publication_review: { review_id: null, reasons: ["review_not_started"] },
+    });
+    const body = await refusalOf(res);
+    expect(body.refusal).toBe("no_review_row");
+    expect(body.message).toBe(reviewGateRefusalText("no_review_row", DATASET));
+    expect(requestRow(requestId).approval_requested_by).toBeNull();
+    expect(reviewRows()).toHaveLength(0);
+    expect(overrideRows()).toHaveLength(0);
+    expect(dispatchesSent()).toBe(0);
+  });
+
+  test("a review that passes dispatches with nothing recorded, the flag off too", async () => {
+    const { requestId } = seed();
+    seedPublicationReview(db, { requestId, datasetId: DATASET, state: "reported" });
+    expect((await dispatchApproval()).status).toBe(202);
+    expect(dispatchesSent()).toBe(1);
+    expect(overrideRows()).toHaveLength(0);
+
+    // With the flag off the gate reads nothing and an override means nothing.
+    const other = seed({ datasetId: MIRROR, source: "openneuro" });
+    expect((await dispatchApproval({}, { dataset: MIRROR })).status).toBe(202);
+    const failing = seedFailing({ datasetId: "nm000483" });
+    const off = await dispatchApproval(
+      {
+        override_publication_review: { review_id: failing.reviewId, reasons: ["question_failed"] },
+      },
+      { dataset: "nm000483", bindings: env({}, false) },
+    );
+    expect(off.status).toBe(202);
+    expect(reviewRow(failing.reviewId).override_by).toBeNull();
+    expect(other.requestId).not.toBe(requestId);
+  });
+
+  test("the website's cookie request from a NEMAR page records an override", async () => {
+    const { issueSession } = await import("../src/services/web-session");
+    const { requestId, reviewId } = seedFailing();
+    const { cookieIdRaw } = await issueSession(
+      env(),
+      adminA,
+      false,
+      "test-agent",
+      "127.0.0.1",
+      "orcid",
+    );
+    const res = await app.request(
+      `/admin/publish/${DATASET}/approve-dispatch`,
+      {
+        method: "POST",
+        headers: {
+          Cookie: `nemar_session=${cookieIdRaw}`,
+          Origin: "https://app.nemar.org",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          override_publication_review: { review_id: reviewId, reasons: ["question_failed"] },
+        }),
+      },
+      env(),
+    );
+    expect(res.status).toBe(202);
+    expect(reviewRow(reviewId).override_by).toBe(adminA);
+    expect(requestRow(requestId).approval_requested_by).toBe(adminA);
   });
 });

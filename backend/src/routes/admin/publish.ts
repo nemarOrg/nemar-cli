@@ -34,8 +34,14 @@ import {
 import {
   acknowledgeIdentifierScreenSchema,
   approveSchema,
+  publicationReviewOverrideSchema,
   runPublicationApproval,
 } from "../../services/publication-orchestrator";
+import {
+  type ReviewGateResult,
+  evaluateApprovalReviewGate,
+  recordApprovalOverride,
+} from "../../services/publication-review-gate";
 import { publicationReviewSummaries } from "../../services/publication-review-view";
 import { errorMessage } from "../../services/repo-metadata";
 import { applyObjectLockBatch } from "../../services/s3";
@@ -52,7 +58,10 @@ const APPROVAL_IN_PROGRESS = {
 
 /** The optional body of the approve-dispatch route. */
 const dispatchBodySchema = z
-  .object({ acknowledge_identifier_screen: acknowledgeIdentifierScreenSchema.optional() })
+  .object({
+    acknowledge_identifier_screen: acknowledgeIdentifierScreenSchema.optional(),
+    override_publication_review: publicationReviewOverrideSchema.optional(),
+  })
   .strict();
 
 export function registerPublishRoutes(admin: AdminRouter): void {
@@ -329,7 +338,12 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    *                         allow approval (epic #1610 phase 4): not run, not
    *                         reported, findings, a review with no reason, or a
    *                         verdict about a commit `main` has moved past
-   *   400 invalid_body      the optional body is not `{ acknowledge_identifier_screen }`
+   *   409 publication_review_not_clear  the publication review does not allow
+   *                         approval (ADR 0102): the gate refuses before the claim, with
+   *                         a `refusal` word and the review's words, and an override that
+   *                         is recorded is recorded after the head check (below)
+   *   400 invalid_body      the optional body is not `{ acknowledge_identifier_screen,
+   *                         override_publication_review }`
    *   502 dispatch_failed   GitHub answered 4xx, or a token could not be
    *                         minted: nothing was sent, the claim is released
    *   502 dispatch_unconfigured  the Worker has no GitHub credential; retrying
@@ -363,10 +377,12 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     const adminUser = c.get("user");
     const db = c.env.DB;
 
-    // The body is optional; it carries only an acknowledgment of the
-    // identifier screen (epic #1610 phase 4). No body, or none that parses as
-    // JSON, is the bodyless click every existing caller sends.
+    // The body is optional; it carries an acknowledgment of the identifier
+    // screen (epic #1610 phase 4) and the administrator's override of the
+    // publication review (ADR 0102). No body, or none that parses as JSON, is
+    // the bodyless click every existing caller sends.
     let acknowledgment: string | undefined;
+    let override: z.infer<typeof publicationReviewOverrideSchema> | undefined;
     const rawBody: unknown = await c.req.json().catch(() => undefined);
     if (rawBody !== undefined) {
       const parsed = dispatchBodySchema.safeParse(rawBody);
@@ -375,12 +391,13 @@ export function registerPublishRoutes(admin: AdminRouter): void {
           {
             error: "invalid_body",
             message:
-              "The only field this accepts is acknowledge_identifier_screen, a reason of 10 to 500 characters.",
+              "The only fields this accepts are acknowledge_identifier_screen, a reason of 10 to 500 characters, and override_publication_review, the review shown and the reasons shown.",
           },
           400,
         );
       }
       acknowledgment = parsed.data.acknowledge_identifier_screen;
+      override = parsed.data.override_publication_review;
     }
 
     const request = await db
@@ -429,6 +446,7 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     // The state half: no network and no claim, so a refused click changes
     // nothing. The head half needs a GitHub token and runs once one is in hand,
     // below. A reason recorded earlier counts only for the admin who gave it.
+    let review: ReviewGateResult = { ok: true, state: "off" };
     if (gated) {
       const stateGate = screenStateGate(
         datasetId,
@@ -437,6 +455,20 @@ export function registerPublishRoutes(admin: AdminRouter): void {
         adminUser.id,
       );
       if (!stateGate.ok) return c.json(stateGate.refusal, 409);
+      // The publication review's gate (ADR 0102) is asked next, still before the
+      // claim, so a refusal claims nothing and changes nothing. It reads no GitHub
+      // and writes nothing: an override it says to record waits for the head check
+      // below, as the screen's acknowledgment does. `requireRow`: the executor that
+      // follows reads the clicker's override off the review row, so an override
+      // with no row to hold it cannot be carried.
+      review = await evaluateApprovalReviewGate(c.env, {
+        requestId: request.id,
+        datasetId,
+        approverId: adminUser.id,
+        override,
+        requireRow: true,
+      });
+      if (!review.ok) return c.json(review.body, 409);
     }
 
     // One conditional UPDATE is the claim: D1 runs it atomically, so two
@@ -597,6 +629,26 @@ export function registerPublishRoutes(admin: AdminRouter): void {
             },
             409,
           );
+        }
+      }
+      // The override the review gate asked to record, now that the screened commit is
+      // still `main`: it attaches to content that is still the content being published.
+      // Still before the dispatch, so the executor's run finds it on the row. A row
+      // that moved since the gate read it refuses, and nothing has been sent.
+      if (review.ok && review.state === "enforced" && review.record !== null) {
+        const recorded = await recordApprovalOverride(c.env, {
+          requestId: request.id,
+          datasetId,
+          approverId: adminUser.id,
+          executedBy: null,
+          via: "approve-dispatch",
+          outcome: review.outcome,
+          headSha: review.headSha,
+          record: review.record,
+        });
+        if (!recorded.ok) {
+          await releaseClaim();
+          return c.json(recorded.body, 409);
         }
       }
     }
