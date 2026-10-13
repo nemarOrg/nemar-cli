@@ -29,7 +29,6 @@ import {
   parsePublicationReviewReport,
   reasonsOf,
 } from "../shared/publication-review";
-import type { PublicationReviewSummary, PublishRequestsResponse } from "../src/lib/api/publish";
 import {
   approveEvidenceLines,
   evidenceLine,
@@ -46,44 +45,10 @@ import {
   needsAdministrator,
   startAllCandidates,
 } from "../src/lib/publication-review-queue";
-
-type Row = PublishRequestsResponse["requests"][number];
+import { row, summary } from "./helpers/review-fixtures";
 
 /** The reasons that mean "wait for the platform"; nothing an administrator can do about them. */
 const WAITS: readonly ReasonCode[] = ["review_running", "identifier_screen_pending"];
-
-function summary(over: Partial<PublicationReviewSummary> = {}): PublicationReviewSummary {
-  return {
-    kind: "decided",
-    enabled: true,
-    gate: "enforced",
-    outcome: "action_required",
-    headline: "Publication review: action required",
-    tone: "warn",
-    reasons: ["review_not_started"],
-    start_offered: false,
-    review_id: null,
-    head_sha: null,
-    ...over,
-  };
-}
-
-function row(over: Partial<Row> = {}): Row {
-  return {
-    id: 1,
-    dataset_id: "nm000480",
-    status: "requested",
-    requested_at: "2026-10-12 09:14:03",
-    requested_by_username: "alice",
-    requested_by_email: "alice@example.org",
-    steps_completed: [],
-    current_step: null,
-    last_error: null,
-    approval_in_flight: false,
-    publication_review: summary(),
-    ...over,
-  };
-}
 
 describe("needsAdministrator", () => {
   test("a requested request is the administrator's, whatever the outcome", () => {

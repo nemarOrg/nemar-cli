@@ -15,15 +15,9 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { reasonViewsOf } from "../backend/src/services/publication-review-view";
-import type {
-  PublicationReviewDetail,
-  PublicationReviewGateState,
-  PublicationReviewRecord,
-} from "../shared/contract/publication-review-admin";
+import type { PublicationReviewDetail } from "../shared/contract/publication-review-admin";
 import {
   HARD_REASONS,
-  NOT_ASSESSED_LINE,
   OVERRIDE_REASONS,
   REASONS,
   REASON_CODES,
@@ -35,94 +29,11 @@ import { ApiError } from "../src/lib/api/errors";
 import {
   type ApproveDecision,
   type ApproveOptions,
-  type ReviewRead,
   decideApproval,
   parseReviewDetail,
   reasonViewLine,
 } from "../src/lib/publication-review-approve";
-
-const ID = "nm000460";
-
-interface Spec {
-  /** The reasons shown, as codes or `[code, detail]`, in the order given. */
-  reasons?: Array<ReasonCode | [ReasonCode, string]>;
-  status?: string;
-  gate?: PublicationReviewGateState;
-  startedPublishing?: boolean;
-  blockReason?: string | null;
-  acknowledged?: boolean;
-  /** `null`: no review row. A number: the id of the review in force. */
-  reviewId?: number | null;
-  override?: { by: number; at: string; reasons: ReasonCode[] } | null;
-}
-
-function recordOf(id: number, override: Spec["override"]): PublicationReviewRecord {
-  return {
-    id,
-    head_sha: "0123456789abcdef0123456789abcdef01234567",
-    anonymous: false,
-    state: "reported",
-    detail: null,
-    stored_verdict: "action_required",
-    model: "claude-haiku-5-5",
-    version: "1.0.0",
-    created_at: "2026-10-13 10:00:00",
-    decided_at: "2026-10-13 10:05:00",
-    started_by: null,
-    override: override ?? null,
-    questions: null,
-    fact_notes: [],
-    findings: [],
-    summary: null,
-    evidence: null,
-  };
-}
-
-function detailOf(spec: Spec = {}): PublicationReviewDetail {
-  const status = spec.status ?? "requested";
-  const reasons = reasonViewsOf(
-    (spec.reasons ?? []).map((r) =>
-      typeof r === "string" ? { code: r, detail: null } : { code: r[0], detail: r[1] },
-    ),
-    ID,
-    status === "requested",
-  );
-  const reviewId = spec.reviewId === undefined ? 11 : spec.reviewId;
-  return {
-    environment: "production",
-    enabled: (spec.gate ?? "enforced") !== "off",
-    dataset_id: ID,
-    request_id: 7,
-    request_status: status,
-    anonymous: false,
-    identifier_screen: {
-      state: "clean",
-      headline: "Identifier screen: clean",
-      tone: "ok",
-      lines: [],
-    },
-    screen_acknowledgment: spec.acknowledged ? { by: 3, at: "2026-10-13 09:00:00" } : null,
-    block_reason: spec.blockReason ?? null,
-    started_publishing: spec.startedPublishing ?? false,
-    total_files: null,
-    applies: (spec.gate ?? "enforced") !== "n/a",
-    gate: spec.gate ?? "enforced",
-    outcome: reasons.length === 0 ? "pass" : "action_required",
-    reasons,
-    description: {
-      headline: "Publication review: action required",
-      tone: "warn",
-      lines: [NOT_ASSESSED_LINE],
-      summary: null,
-      next: null,
-    },
-    review: reviewId === null ? null : recordOf(reviewId, spec.override),
-    history: [],
-    history_truncated: false,
-  };
-}
-
-const read = (spec?: Spec): ReviewRead => ({ kind: "detail", detail: detailOf(spec) });
+import { ID, type Spec, detailOf, read } from "./helpers/review-fixtures";
 
 /** The reasons of `detail` as a Worker that sends `line` sends them: the whole reason in the shared words. */
 function withLines(detail: PublicationReviewDetail): PublicationReviewDetail {
