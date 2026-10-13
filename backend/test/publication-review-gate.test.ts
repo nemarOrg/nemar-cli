@@ -949,6 +949,68 @@ describe("an override attaches to the result it was shown with, or to nothing", 
   });
 });
 
+describe("the override comes from an API key", () => {
+  // Every claim of the gate is about an administrator's own act; a session cookie rides on any
+  // cross-site request a browser can be made to send, so the website records an override through
+  // approve-dispatch, which asks for a NEMAR origin.
+  test("20. an override in the body of a cookie request is refused whatever the Origin, a bearer key's is accepted", async () => {
+    const { issueSession } = await import("../src/services/web-session");
+    const { reviewId } = seedFailing();
+    const { cookieIdRaw } = await issueSession(
+      env(),
+      adminA,
+      false,
+      "test-agent",
+      "127.0.0.1",
+      "orcid",
+    );
+    const withCookie = (origin?: string, withOverride = true) =>
+      app.request(
+        `/admin/publish/${DATASET}/approve`,
+        {
+          method: "POST",
+          headers: {
+            Cookie: `nemar_session=${cookieIdRaw}`,
+            "Content-Type": "application/json",
+            ...(origin ? { Origin: origin } : {}),
+          },
+          body: JSON.stringify({
+            resume: true,
+            ...(withOverride
+              ? {
+                  override_publication_review: {
+                    review_id: reviewId,
+                    reasons: ["question_failed"],
+                  },
+                }
+              : {}),
+          }),
+        },
+        env(),
+      );
+    for (const origin of [undefined, "https://app.nemar.org", "https://evil.example"]) {
+      const res = await withCookie(origin);
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as { error: string; message: string };
+      expect(body.error).toBe("origin_not_allowed");
+      expect(body.message).toContain("approve-dispatch");
+    }
+    expect(reviewRow(reviewId).override_by).toBeNull();
+    expect(auditRows("dataset_published")).toHaveLength(0);
+
+    // Without an override a cookie request is unchanged: it reaches the gate and is refused there.
+    expect((await refusalOf(await withCookie("https://app.nemar.org", false))).refusal).toBe(
+      "needs_override",
+    );
+
+    const bearer = await approve({
+      resume: true,
+      override_publication_review: { review_id: reviewId, reasons: ["question_failed"] },
+    });
+    expect(bearer.status).toBe(200);
+  });
+});
+
 describe("the override is shape-checked before anything is read", () => {
   test("a malformed override is a 400 before anything is read", async () => {
     const { requestId, reviewId } = seedFailing();

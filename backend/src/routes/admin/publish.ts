@@ -269,6 +269,22 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    * services/publication-orchestrator.ts (#904); this route is a thin adapter.
    */
   admin.post("/publish/:id/approve", zValidator("json", approveSchema), async (c) => {
+    const body = c.req.valid("json");
+    // An override of the publication review is an administrator's own act, and a session cookie
+    // rides along with any cross-site request a browser can be made to send, so it is accepted
+    // only with an API key (ADR 0102; the one slice of #1603 this phase needs). The website records
+    // one through approve-dispatch, which asks for a NEMAR origin. Phrased as "not a token", so an
+    // unset `authMethod` fails closed.
+    if (body.override_publication_review !== undefined && c.get("authMethod") !== "token") {
+      return c.json(
+        {
+          error: "origin_not_allowed",
+          message:
+            "An override of the publication review is accepted only with an API key; the website records one through approve-dispatch.",
+        },
+        403,
+      );
+    }
     const result = await runPublicationApproval({
       db: c.env.DB,
       env: c.env,
@@ -277,7 +293,7 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       waitUntil: (p) => c.executionCtx.waitUntil(p),
       datasetId: c.req.param("id"),
       adminUser: c.get("user"),
-      body: c.req.valid("json"),
+      body,
     });
     return c.json(result.body as never, (result.status ?? 200) as never);
   });
