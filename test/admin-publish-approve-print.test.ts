@@ -51,7 +51,7 @@ const DANGEROUS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
  * An escape sequence that rewrites the screen, a title sequence, a bell, a bidirectional override,
  * a zero-width space and a line separator, written as escapes so the fixture is readable in a diff.
  */
-const HOSTILE = `${ESC}[2J${ESC}]0;title\u0007x‮y​z w`;
+const HOSTILE = `${ESC}[2J${ESC}]0;title\u0007x\u202ey\u200bz\u2028w`;
 /** What the hostile text leaves once it is cleaned: its visible part, with nothing to act on. */
 const CLEANED = "[2J]0;titlexyzw";
 
