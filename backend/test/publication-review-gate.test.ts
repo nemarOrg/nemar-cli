@@ -807,6 +807,11 @@ describe("a review that is not a pass needs the administrator's override", () =>
       reasons: ["review_not_started"],
       via: "approve",
     });
+    // The audit row is the only record of this override, so the outcome it holds is the one the
+    // administrator was shown: the refusal's, which is the derived outcome of the review.
+    expect(refusal.outcome).toBe("action_required");
+    expect(audit[0].details.outcome).toBe(refusal.outcome);
+    expect(audit[0].details).not.toHaveProperty("executed_by");
   });
 
   test("15. an approving request whose screen was re-run to a new head has no review to attach to: same rule", async () => {

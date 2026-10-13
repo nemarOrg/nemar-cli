@@ -25,15 +25,15 @@ import { screenReportBodyFor } from "./helpers/publication-review";
 describe("the re-exports are the same functions, not copies", () => {
   test("identifier-screen.ts hands every importer the stored module's functions", () => {
     expect(screen.screenView).toBe(stored.screenView);
-    expect(screen.EXEMPT_SCREEN_DESCRIPTION).toBe(stored.EXEMPT_SCREEN_DESCRIPTION);
     expect(screen.isScreenExempt).toBe(stored.isScreenExempt);
     expect(screen.readStoredReport).toBe(stored.readStoredReport);
     expect(screen.readStoredState).toBe(stored.readStoredState);
   });
 
-  test("and the shared module's: whether an approval has started publishing, and the steps before it", () => {
+  test("and the shared module's: whether an approval has started publishing", () => {
+    // `PRE_PUBLICATION_STEPS` and `EXEMPT_SCREEN_DESCRIPTION` are read from their own modules
+    // (pinned below); nothing imports them through the screen, so it no longer re-exports them.
     expect(screen.hasStartedPublishing).toBe(steps.hasStartedPublishing);
-    expect(screen.PRE_PUBLICATION_STEPS).toBe(steps.PRE_PUBLICATION_STEPS);
   });
 
   test("the review's view imports the moved code from where it now lives, never from the screen", () => {

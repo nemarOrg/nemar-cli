@@ -121,7 +121,6 @@ export type ReviewGateResult =
       ok: true;
       state: "enforced";
       outcome: PublicationOutcome;
-      reviewId: number | null;
       headSha: string | null;
       /** Set when the caller's override was needed and is not already on the row as given. */
       record: OverrideToRecord | null;
@@ -256,7 +255,6 @@ function decide(args: ReviewGateArgs, d: DerivedPublicationReview): ReviewGateRe
     ok: true,
     state: "enforced",
     outcome: d.outcome ?? verdictOf(d.reasons),
-    reviewId: row?.id ?? null,
     headSha: row?.headSha ?? d.live.screen.head,
     record,
   });
@@ -305,6 +303,11 @@ function decide(args: ReviewGateArgs, d: DerivedPublicationReview): ReviewGateRe
  *
  * With a review row the audit row is best effort, as the screen acknowledgment's is: the override
  * is on the row, and losing the second record must not refuse an approval already decided.
+ *
+ * The audit row names no executor. An override is its sender's act and is recorded under the
+ * approver of record, and the approval route refuses an override from anyone but the approver
+ * (`override_inside_web_approval`) before the gate runs, so the sender and the approver are the
+ * same administrator whenever one is recorded.
  */
 export async function recordApprovalOverride(
   env: Bindings,
@@ -312,8 +315,6 @@ export async function recordApprovalOverride(
     requestId: number;
     datasetId: string;
     approverId: number;
-    /** The caller when it is not the approver (the executor's account), for the audit row. */
-    executedBy: number | null;
     via: "approve" | "approve-dispatch";
     outcome: PublicationOutcome;
     headSha: string | null;
@@ -361,7 +362,6 @@ export async function recordApprovalOverride(
         outcome: args.outcome,
         reasons: record.reasons,
         via: args.via,
-        ...(args.executedBy !== null ? { executed_by: args.executedBy } : {}),
       }),
     }).run();
   } catch (err) {

@@ -2625,7 +2625,6 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
         requestId: request.id,
         datasetId,
         approverId: c.approver.id,
-        executedBy: c.approver.id !== adminUser.id ? adminUser.id : null,
         via: "approve",
         outcome: review.outcome,
         headSha: review.headSha,

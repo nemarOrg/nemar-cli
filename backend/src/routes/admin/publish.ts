@@ -646,7 +646,6 @@ export function registerPublishRoutes(admin: AdminRouter): void {
           requestId: request.id,
           datasetId,
           approverId: adminUser.id,
-          executedBy: null,
           via: "approve-dispatch",
           outcome: review.outcome,
           headSha: review.headSha,
