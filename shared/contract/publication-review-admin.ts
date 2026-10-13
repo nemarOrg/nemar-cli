@@ -29,6 +29,7 @@ export type {
   PublicationDeclineDetail,
   PublicationOutcome,
   PublicationReviewDescription,
+  PublicationReviewEvidence,
   PublicationReviewState,
   PublicationRunError,
   Question,
@@ -59,7 +60,13 @@ export const PUBLICATION_REVIEW_VIEW_KINDS = [
 ] as const;
 export type PublicationReviewViewKind = (typeof PUBLICATION_REVIEW_VIEW_KINDS)[number];
 
-/** What the approval gate (Phase 2) does with this request: enforces the review, is off, or does not apply. */
+/**
+ * What the approval gate does with this request: `enforced` (the review is on and applies), `off`
+ * (the review is off, so a stored review is advice), or `n/a` (the review does not apply). This is
+ * the state the view DECLARES for the gate that Phase 2 builds. In Phase 1 nothing enforces it:
+ * no approval route reads the review, so `enforced` says what Phase 2 will do, not what happens
+ * today.
+ */
 export type PublicationReviewGateState = "enforced" | "off" | "n/a";
 
 /** One reason, with the shared words for it. */
@@ -134,13 +141,18 @@ export interface PublicationReviewRecord {
   evidence: PublicationReviewEvidence | null;
 }
 
-/** One past review of the request, newest first: never the outcome. */
+/**
+ * One review of the request, newest first: every row the request has, the review in force included
+ * when it is among the newest. An entry is a record of what a review concluded, never the
+ * request's outcome, which is derived from the review in force and the live facts.
+ */
 export interface PublicationReviewHistoryEntry {
   id: number;
   head_sha: string;
   anonymous: boolean;
   state: PublicationReviewState;
-  verdict: PublicationOutcome | null;
+  /** The verdict column as stored, named as the record names it. */
+  stored_verdict: PublicationOutcome | null;
   created_at: string;
   decided_at: string | null;
 }

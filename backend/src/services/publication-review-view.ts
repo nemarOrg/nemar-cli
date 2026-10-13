@@ -655,7 +655,7 @@ function historyEntryOf(row: PublicationReviewRow): PublicationReviewHistoryEntr
     head_sha: row.headSha,
     anonymous: row.anonymous,
     state,
-    verdict: isPublicationOutcome(row.verdict) ? row.verdict : null,
+    stored_verdict: isPublicationOutcome(row.verdict) ? row.verdict : null,
     created_at: row.createdAt,
     decided_at: row.decidedAt,
   };

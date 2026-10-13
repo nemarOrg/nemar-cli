@@ -1078,7 +1078,7 @@ describe("GET /admin/publish/:id/review", () => {
       ].sort(),
     );
     expect(Object.keys(d.history[0]).sort()).toEqual(
-      ["id", "head_sha", "anonymous", "state", "verdict", "created_at", "decided_at"].sort(),
+      ["id", "head_sha", "anonymous", "state", "stored_verdict", "created_at", "decided_at"].sort(),
     );
     expect(Object.keys(d.reasons[0]).sort()).toEqual(
       ["code", "class", "cleared_by", "detail", "sentence", "cure"].sort(),
@@ -1135,7 +1135,7 @@ describe("GET /admin/publish/:id/review", () => {
         head_sha: SCREENED_HEAD,
         anonymous: false,
         state: "reported",
-        verdict: "fail",
+        stored_verdict: "fail",
         created_at: expect.any(String),
         decided_at: expect.any(String),
       },
