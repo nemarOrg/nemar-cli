@@ -47,6 +47,11 @@ let server: Server;
 let counter = 0;
 /** How many databases the tests below need: one each, counted as they are declared. */
 let databasesNeeded = 0;
+/**
+ * Databases beyond one per test: a test retried under `bun test --retry` runs its body again and
+ * asks for another database, which would otherwise not exist.
+ */
+const SPARE_DATABASES = 4;
 
 async function seededD1(): Promise<D1Database> {
   counter += 1;
@@ -150,7 +155,10 @@ beforeAll(() => {
     script: "export default { fetch() { return new Response(null, { status: 204 }); } };",
     compatibilityDate: "2024-12-01",
     d1Databases: Object.fromEntries(
-      Array.from({ length: databasesNeeded }, (_, i) => [`DB${i + 1}`, `DB${i + 1}`]),
+      Array.from({ length: databasesNeeded + SPARE_DATABASES }, (_, i) => [
+        `DB${i + 1}`,
+        `DB${i + 1}`,
+      ]),
     ),
   });
 });
