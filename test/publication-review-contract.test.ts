@@ -57,6 +57,7 @@ import {
   REVIEW_DOCUMENTS,
   REVIEW_FORMATS,
   REVIEW_OVERDUE_VIEW_MINUTES,
+  REVIEW_UNREADABLE_HEADLINE,
   type Reason,
   type ReasonCode,
   type ReviewRowView,
@@ -65,6 +66,7 @@ import {
   WORKER_ONLY_RUN_ERRORS,
   answersOf,
   describePublicationReview,
+  describeUnreadableReview,
   effectiveVersionOf,
   isWithheld,
   parsePublicationCallbackOutcome,
@@ -1883,6 +1885,26 @@ describe("describePublicationReview", () => {
     expect(text).not.toContain("script");
     // The question's line names its finding by its closed label, not by the model's note.
     expect(text).toContain("Ethics statement inadequate");
+  });
+
+  test("a review that could not be read has its own fixed words, from this module, and is never a pass", () => {
+    expect(describeUnreadableReview("nm000123")).toEqual({
+      headline: "Publication review: could not be read",
+      tone: "warn",
+      lines: [
+        "The review's state could not be read just now, so it is not known. This is not a pass.",
+        NOT_ASSESSED_LINE,
+      ],
+      summary: null,
+      next: "nemar admin publish show nm000123",
+    });
+    expect(REVIEW_UNREADABLE_HEADLINE).toBe("Publication review: could not be read");
+    // No dataset id to show, or one that is not one: no command, and nothing is quoted.
+    for (const id of ["", `x ${SENTINEL}`, "nm00012"]) {
+      const d = describeUnreadableReview(id);
+      expect(d.next).toBeNull();
+      expect(JSON.stringify(d)).not.toContain("Zqxjvw");
+    }
   });
 
   test("the next command follows from the reasons, and a malformed dataset id is never quoted", () => {

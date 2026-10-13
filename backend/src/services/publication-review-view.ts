@@ -49,7 +49,6 @@ import type {
 import { type ScreenGate, screenGate } from "../../../shared/identifier-screen-report.js";
 import {
   type LiveFacts,
-  NOT_ASSESSED_LINE,
   PUBLICATION_REVIEW_DEADLINE_MINUTES,
   type PublicationDeclineDetail,
   type PublicationOutcome,
@@ -60,11 +59,13 @@ import {
   REASONS,
   REASON_CODES,
   REVIEW_OVERDUE_VIEW_MINUTES,
+  REVIEW_UNREADABLE_HEADLINE,
   type Reason,
   type ReasonCode,
   type ReviewRowView,
   answersOf,
   describePublicationReview,
+  describeUnreadableReview,
   effectiveVersionOf,
   factNotesOf,
   isPublicationDeclineDetail,
@@ -431,9 +432,6 @@ function viewKindOf(d: DerivedPublicationReview): PublicationReviewViewKind {
   return "decided";
 }
 
-/** What every surface says when it could not read the review: a fixed sentence, never a pass. */
-const UNREADABLE_HEADLINE = "Publication review: could not be read";
-
 /**
  * One row of `GET /admin/publish/requests`: the outcome, the headline and the reason codes. No
  * sentence of the model's, and no sentence a client could not take from the shared words.
@@ -463,7 +461,7 @@ function unreadableSummary(enabled: boolean): PublicationReviewSummary {
     enabled,
     gate: enabled ? "enforced" : "off",
     outcome: "action_required",
-    headline: UNREADABLE_HEADLINE,
+    headline: REVIEW_UNREADABLE_HEADLINE,
     tone: "warn",
     reasons: ["review_could_not_run"],
     review_id: null,
@@ -754,19 +752,6 @@ export function readFailureWords(err: unknown): string {
   return `${name}, ${kind}`;
 }
 
-/** What the mail says when the review could not be read: a fixed sentence, never a pass. */
-function unreadableSection(datasetId: string): PublicationReviewSection {
-  return {
-    headline: UNREADABLE_HEADLINE,
-    tone: "warn",
-    lines: [
-      "The review's state could not be read just now, so it is not known. This is not a pass.",
-      NOT_ASSESSED_LINE,
-    ],
-    next: isValidDatasetId(datasetId) ? `nemar admin publish show ${datasetId}` : undefined,
-  };
-}
-
 /**
  * The review's part of the publication-request email: the headline, each reason in its shared
  * words, the next command and the standing line. Never the model's summary, and never any text
@@ -826,6 +811,12 @@ export async function publicationReviewEmailSection(
     // be told a review "could not be read" that nothing was ever going to start. With it on, the
     // review is a gate, and not knowing its state is said so.
     if (!reviewEnabled(env)) return null;
-    return unreadableSection(datasetId);
+    const unreadable = describeUnreadableReview(datasetId);
+    return {
+      headline: unreadable.headline,
+      tone: unreadable.tone,
+      lines: unreadable.lines,
+      next: unreadable.next ?? undefined,
+    };
   }
 }

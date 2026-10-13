@@ -1697,6 +1697,30 @@ export function describePublicationReview(input: {
   };
 }
 
+/**
+ * What every surface says when the review could not be read just now (a fault of the Worker's own
+ * reads, not a state of the request): a fixed headline, never a pass. The sentences live here, with
+ * the others, so the email, the list and the detail say the same words.
+ */
+export const REVIEW_UNREADABLE_HEADLINE = "Publication review: could not be read";
+export const REVIEW_UNREADABLE_LINE =
+  "The review's state could not be read just now, so it is not known. This is not a pass.";
+
+/**
+ * The description of a review that could not be read. Not an outcome and not a reason: the cure for
+ * a read fault is not to start the review again, so it has no reason code, and its one command
+ * shows the request, which reads the review again.
+ */
+export function describeUnreadableReview(datasetId: string): PublicationReviewDescription {
+  return {
+    headline: REVIEW_UNREADABLE_HEADLINE,
+    tone: "warn",
+    lines: [REVIEW_UNREADABLE_LINE, NOT_ASSESSED_LINE],
+    summary: null,
+    next: DATASET_ID.test(datasetId) ? `nemar admin publish show ${datasetId}` : null,
+  };
+}
+
 // ---------------------------------------------------------------------------------------------
 // The callback body
 // ---------------------------------------------------------------------------------------------

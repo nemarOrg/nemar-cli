@@ -1226,11 +1226,12 @@ export interface PublicationScreenSection {
 }
 
 /**
- * The publication review's part of the same email (ADR 0102). Built ONLY from
- * `describePublicationReview` (shared/publication-review.ts): the headline, each reason in the
+ * The publication review's part of the same email (ADR 0102). Built ONLY from the shared
+ * description (shared/publication-review.ts: `describePublicationReview`, or
+ * `describeUnreadableReview` when the review could not be read): the headline, each reason in the
  * shared words, the next command and the standing line. It never carries the model's summary or
- * any other text the model wrote; the one place a sentence a depositor could influence would
- * reach an inbox unprompted is kept out by `publicationReviewEmailSection`.
+ * any other text the model wrote: the summary is a field of the description of its own, and the
+ * section is built from `lines` alone.
  */
 export interface PublicationReviewSection {
   /** `describePublicationReview`'s headline, e.g. "Publication review: action required". */

@@ -6,8 +6,9 @@
  *   POST /admin/publish/:id/review/start      start the review of the current screened commit
  *
  * Types and closed vocabularies only, so the Worker that answers and the CLI that prints read ONE
- * definition. Every sentence comes from `describePublicationReview` and the reasons table in
- * `shared/publication-review.ts`; a client renders the server's words and decides nothing itself.
+ * definition. Every sentence comes from `shared/publication-review.ts`: `describePublicationReview`,
+ * `describeUnreadableReview` and the reasons table; a client renders the server's words and decides
+ * nothing itself.
  * No shape here carries a nonce, a token, a path, a file name or a screen finding.
  */
 
