@@ -56,31 +56,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.3
-
-      - name: Install dependencies
-        run: bun install
-
-      - name: Build
-        run: bun run build
-
-      - name: Setup Node.js for npm publish
-        # Node 22 (was 20): `npm install -g npm@latest` below now requires
-        # Node ^22.22.2 || ^24.15.0 || >=26.0.0, so npm@latest EBADENGINE-fails
-        # on Node 20. Keep this at an npm@latest-compatible LTS.
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Upgrade npm for OIDC support
-        run: |
-          npm install -g npm@latest
-          npm --version
-
+      # Decided first: a branch with no open pull request publishes nothing, so it
+      # skips the install, build and npm upgrade below (203 of 543 branch runs had no
+      # pull request, 2026-09-15 to 2026-10-13). Needs only the checkout, jq and gh.
       - name: Determine version and tag
         id: version
         env:
@@ -145,6 +123,36 @@ jobs:
             echo "version=$VERSION" >> $GITHUB_OUTPUT
             echo "tag=$TAG" >> $GITHUB_OUTPUT
           fi
+
+      - name: Setup Bun
+        if: steps.version.outputs.skip_publish != 'true'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+
+      - name: Install dependencies
+        if: steps.version.outputs.skip_publish != 'true'
+        run: bun install
+
+      - name: Build
+        if: steps.version.outputs.skip_publish != 'true'
+        run: bun run build
+
+      - name: Setup Node.js for npm publish
+        if: steps.version.outputs.skip_publish != 'true'
+        # Node 22 (was 20): `npm install -g npm@latest` below now requires
+        # Node ^22.22.2 || ^24.15.0 || >=26.0.0, so npm@latest EBADENGINE-fails
+        # on Node 20. Keep this at an npm@latest-compatible LTS.
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Upgrade npm for OIDC support
+        if: steps.version.outputs.skip_publish != 'true'
+        run: |
+          npm install -g npm@latest
+          npm --version
 
       - name: Verify version matches (tag releases only)
         if: steps.version.outputs.is_tag == 'true'
