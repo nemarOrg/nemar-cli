@@ -33,6 +33,7 @@ import {
   PUBLICATION_REVIEW_NOT_CLEAR_CODE,
   type PublicationReviewGateRefusalBody,
   type PublicationReviewOverride,
+  type PublicationReviewReasonedRefusalBody,
   REQUEST_BLOCKED_CODE,
   type RequestBlockedRefusalBody,
 } from "../../../shared/contract/publication-review-admin.js";
@@ -134,16 +135,25 @@ type Refused = { ok: false; body: PublicationReviewGateRefusalBody };
 function unverified(datasetId: string, fact: "request" | "review"): Refused {
   return {
     ok: false,
-    body: bareRefusal("unverified", datasetId, REVIEW_UNREADABLE_HEADLINE, { fact }),
+    body: {
+      error: PUBLICATION_REVIEW_NOT_CLEAR_CODE,
+      refusal: "unverified",
+      headline: REVIEW_UNREADABLE_HEADLINE,
+      message: reviewGateRefusalText("unverified", datasetId),
+      outcome: null,
+      reasons: [],
+      uncovered: [],
+      review_id: null,
+      fact,
+    },
   };
 }
 
 function bareRefusal(
-  refusal: ReviewGateRefusal,
+  refusal: Exclude<ReviewGateRefusal, "unverified">,
   datasetId: string,
   headline: string,
-  extra: Pick<PublicationReviewGateRefusalBody, "fact"> = {},
-): PublicationReviewGateRefusalBody {
+): PublicationReviewReasonedRefusalBody {
   return {
     error: PUBLICATION_REVIEW_NOT_CLEAR_CODE,
     refusal,
@@ -153,7 +163,6 @@ function bareRefusal(
     reasons: [],
     uncovered: [],
     review_id: null,
-    ...extra,
   };
 }
 
@@ -163,7 +172,7 @@ function bareRefusal(
  * reason the message continues with the first one's sentence and its cure.
  */
 function refusal(
-  kind: ReviewGateRefusal,
+  kind: Exclude<ReviewGateRefusal, "unverified">,
   datasetId: string,
   d: DerivedPublicationReview,
   uncovered: ReasonCode[] = [],

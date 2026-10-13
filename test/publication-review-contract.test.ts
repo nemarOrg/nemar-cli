@@ -22,7 +22,10 @@ import {
   PUBLICATION_REVIEW_ERROR_CODES,
   PUBLICATION_REVIEW_NOT_CLEAR_CODE,
   PUBLICATION_REVIEW_VIEW_KINDS,
+  type PublicationReviewGateRefusalBody,
+  type PublicationReviewScreenView,
   REQUEST_BLOCKED_CODE,
+  type ReasonView,
   START_NOT_HANDED_OVER_REASONS,
   START_REASONS,
   START_REFUSED_REASONS,
@@ -3048,5 +3051,108 @@ describe("the wire vocabulary the approval refusals and the comment route share"
       "internal",
     ]);
     expect(PUBLICATION_COMMENT_MAX_LENGTH).toBe(2000);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Types. `test/publication-review-contract.test.ts` is covered by `bun run typecheck`, so the
+// `@ts-expect-error` lines below are checked there: one that stops being an error fails the
+// typecheck, which is how these pin a type's shape.
+// ---------------------------------------------------------------------------------------------
+
+describe("the gate refusal body is a union keyed on `refusal`", () => {
+  const view: ReasonView = {
+    code: "question_failed",
+    class: "fail",
+    cleared_by: "override",
+    detail: "meets_standards",
+    sentence: "A question failed.",
+    cure: "Read it.",
+  };
+  const unverified: PublicationReviewGateRefusalBody = {
+    error: PUBLICATION_REVIEW_NOT_CLEAR_CODE,
+    refusal: "unverified",
+    headline: REVIEW_UNREADABLE_HEADLINE,
+    message: "Could not be checked.",
+    outcome: null,
+    reasons: [],
+    uncovered: [],
+    review_id: null,
+    fact: "review",
+  };
+  const reasoned: PublicationReviewGateRefusalBody = {
+    error: PUBLICATION_REVIEW_NOT_CLEAR_CODE,
+    refusal: "needs_override",
+    headline: "Publication review: action required",
+    message: "Read it.",
+    outcome: "action_required",
+    reasons: [view],
+    uncovered: ["question_failed"],
+    review_id: 7,
+  };
+
+  /** What a client prints for a refusal: a switch over every word, which must stay exhaustive. */
+  function subject(body: PublicationReviewGateRefusalBody): string {
+    switch (body.refusal) {
+      case "unverified":
+        return `could not read the ${body.fact}`;
+      case "hard_reason":
+      case "needs_override":
+      case "override_not_covering":
+      case "review_changed":
+      case "no_review_row":
+        return `${body.reasons.length} reasons, review ${body.review_id}`;
+      default: {
+        const unreachable: never = body;
+        return unreachable;
+      }
+    }
+  }
+
+  test("a client switches on the word and reads each variant's own fields", () => {
+    expect(subject(unverified)).toBe("could not read the review");
+    expect(subject(reasoned)).toBe("1 reasons, review 7");
+    // Every word of the list is a case of the switch: the union and the list cannot drift apart.
+    for (const word of REVIEW_GATE_REFUSALS) {
+      const body: PublicationReviewGateRefusalBody =
+        word === "unverified" ? unverified : { ...reasoned, refusal: word };
+      expect(subject(body)).not.toBe("");
+    }
+  });
+
+  test("the types refuse what the wire never carries (checked by `bun run typecheck`)", () => {
+    const wrong: PublicationReviewGateRefusalBody[] = [
+      // @ts-expect-error a refusal of a review it read carries no `fact`
+      { ...reasoned, refusal: "hard_reason", fact: "request" },
+      // @ts-expect-error `unverified` carries no reasons
+      { ...unverified, reasons: [view] },
+      // @ts-expect-error `unverified` carries no outcome
+      { ...unverified, outcome: "pass" },
+      // @ts-expect-error `unverified` has no review id
+      { ...unverified, review_id: 3 },
+      // @ts-expect-error `unverified` without the check that failed
+      { ...unverified, fact: undefined },
+      // @ts-expect-error a word outside the closed list
+      { ...reasoned, refusal: "maybe" },
+    ];
+    // The values are only built here to be typed; nothing about them is asserted at run time.
+    expect(wrong).toHaveLength(6);
+  });
+
+  test("the screen's state is a stored state, `exempt` or null (checked by `bun run typecheck`)", () => {
+    const screen: PublicationReviewScreenView = {
+      state: "clean",
+      headline: "Identifier screen: clean",
+      tone: "ok",
+      lines: [],
+    };
+    for (const state of ["exempt", null, "pending", "error", "unreported"] as const) {
+      expect({ ...screen, state }.state).toBe(state);
+    }
+    const wrong: PublicationReviewScreenView[] = [
+      // @ts-expect-error a state is not any string
+      { ...screen, state: "whatever" },
+    ];
+    expect(wrong).toHaveLength(1);
   });
 });
