@@ -423,13 +423,26 @@ export interface PublicationCommentResponse {
   mailed: true;
 }
 
-/** Every error word the comment route answers with, in the body's `code`. */
+/**
+ * Every error word the comment route answers with, in the body's `code`. A send that failed is one
+ * of two, by what the Worker knows of the mail:
+ *
+ *  - `comment_not_sent`: it knows nothing was delivered (the provider refused the message with a
+ *    4xx, the environment's fence refused the recipient, the depositor has no address, or the
+ *    depositor could not be read), so it says so.
+ *  - `comment_not_confirmed`: it cannot know (a provider's server error, an unreachable host or a
+ *    lost answer), so the mail may also have arrived and the sentence tells the administrator to
+ *    check with the depositor before sending it again.
+ *
+ * Both are HTTP 502, and the audit row records the first as `not_sent` and the second as `unknown`.
+ */
 export const PUBLICATION_COMMENT_ERROR_CODES = [
   "bad_dataset",
   "not_found",
   "origin_not_allowed",
   "invalid_body",
   "comment_not_sent",
+  "comment_not_confirmed",
   "internal",
 ] as const;
 export type PublicationCommentErrorCode = (typeof PUBLICATION_COMMENT_ERROR_CODES)[number];

@@ -13,9 +13,12 @@
  * It mails a real person, so a session cookie is accepted only from a NEMAR page (the rule of
  * `review/start`), and the send goes through the environment's delivery fence: outside production
  * only a depositor on `DEV_EMAIL_ALLOWLIST` is mailed, and a refusal is a failed send like any
- * other. A failed send is 502 and says so; it is never answered as a success, and its sentence is
- * deliberately not "nothing was sent", because a Resend 5xx or a lost answer can leave the mail
- * accepted (the audit outcome `not_sent` records only that the route did not get a success).
+ * other. A failed send is 502 and is never answered as a success, and it is one of two kinds by
+ * what the Worker knows. A send that certainly delivered nothing (Resend's 4xx, the fence, a
+ * depositor with no address or one that could not be read) is `comment_not_sent`, "nothing was
+ * sent", audited `not_sent`. One that may have been accepted (a Resend 5xx, an unreachable host or
+ * a lost answer) is `comment_not_confirmed`, whose sentence is deliberately not "nothing was
+ * sent", audited `unknown`: an administrator who read that might send it twice.
  *
  * The audit row, `publication_request_commented`, is written whichever way the send went, with the
  * typed words (the denial's reason is stored on its request the same way), so what a depositor was
@@ -32,19 +35,27 @@ import {
 import { auditLogStatement } from "../../db/audit-log";
 import { ACTIVE_REQUEST_TAIL_SQL } from "../../services/approval-dispatch";
 import { isValidDatasetId } from "../../services/datasetId";
-import { resolveEmailConfig, sendPublicationCommentEmail } from "../../services/email";
+import {
+  isCertainNonDelivery,
+  resolveEmailConfig,
+  sendPublicationCommentEmail,
+} from "../../services/email";
 import { errorWords } from "../../services/publication-review-log";
 import { isAllowedOrigin } from "../../services/web-session";
 import type { Bindings } from "../../types/bindings";
 import type { AdminRouter } from "./shared";
 
-/** The fixed sentence of each refusal and fault, by the closed code that carries it. */
-const SENTENCES: Record<PublicationCommentErrorCode, string> = {
+/**
+ * The fixed sentence of each refusal and fault, by the closed code that carries it. Keyed by the
+ * contract's closed list, so a code added there without a sentence does not compile.
+ */
+export const PUBLICATION_COMMENT_SENTENCES: Record<PublicationCommentErrorCode, string> = {
   bad_dataset: "That is not a dataset id.",
   not_found: "That dataset has no active publication request.",
   origin_not_allowed: "This request did not come from a NEMAR page, so it was not accepted.",
   invalid_body: `The body must be a JSON object with one field, message, of 1 to ${PUBLICATION_COMMENT_MAX_LENGTH} characters.`,
-  comment_not_sent:
+  comment_not_sent: "The message could not be mailed, so nothing was sent to the depositor.",
+  comment_not_confirmed:
     "The mail may not have been sent, and it may also have arrived. Check with the depositor before sending it again.",
   internal: "The publication request could not be read, so nothing was sent. Try again.",
 };
@@ -55,7 +66,7 @@ function refuse(
   status: 400 | 403 | 404 | 500 | 502,
   code: PublicationCommentErrorCode,
 ) {
-  const body: PublicationCommentErrorBody = { error: SENTENCES[code], code };
+  const body: PublicationCommentErrorBody = { error: PUBLICATION_COMMENT_SENTENCES[code], code };
   return c.json(body, status);
 }
 
@@ -76,44 +87,64 @@ function typedMessage(raw: unknown): string | null {
 }
 
 /**
- * Mail the request's depositor the message, true when the mail went. Everything that keeps it from
- * going is false: a depositor with no address on record, the environment's fence refusing the
- * recipient, Resend refusing the message, a database or network fault. The log says which kind
- * by fixed words (`errorWords`), never by the error's own text, which names the recipient.
+ * What a comment's send came to, by what the Worker knows of the mail: `sent`, `not_sent` (it
+ * certainly delivered nothing) or `unknown` (it may have been accepted). The audit row records it.
+ */
+type CommentOutcome = "sent" | "not_sent" | "unknown";
+
+/**
+ * Mail the request's depositor the message. Everything that certainly keeps it from going is
+ * `not_sent`: a depositor with no address on record or one that could not be read (nothing was
+ * attempted), the environment's fence refusing the recipient, and Resend refusing the message with
+ * a 4xx. A send that ended without a definite answer (a 5xx, an unreachable host, a lost answer)
+ * is `unknown`, because the mail may have been accepted. The log says which kind by fixed words
+ * (`errorWords`), never by the error's own text, which names the recipient.
  */
 async function mailDepositor(
   env: Bindings,
   requestedBy: number,
   datasetId: string,
   message: string,
-): Promise<boolean> {
+): Promise<CommentOutcome> {
+  let to: string | undefined;
+  let username: string;
+  let config: ReturnType<typeof resolveEmailConfig>;
   try {
     const depositor = await env.DB.prepare("SELECT username, email FROM users WHERE id = ?")
       .bind(requestedBy)
       .first<{ username: string | null; email: string | null }>();
-    const to = depositor?.email?.trim();
-    if (!depositor || !to) {
-      console.error(`[admin/publish-comment] ${datasetId}: the depositor has no address on record`);
-      return false;
-    }
-    const { fromEmail, replyTo, isDev } = resolveEmailConfig(env);
+    to = depositor?.email?.trim();
+    username = depositor?.username ?? "there";
+    config = resolveEmailConfig(env);
+  } catch (err) {
+    console.error(
+      `[admin/publish-comment] ${datasetId}: the depositor could not be read (${errorWords(err)})`,
+    );
+    return "not_sent";
+  }
+  if (!to) {
+    console.error(`[admin/publish-comment] ${datasetId}: the depositor has no address on record`);
+    return "not_sent";
+  }
+  try {
     await sendPublicationCommentEmail(
       to,
-      depositor.username ?? "there",
+      username,
       datasetId,
       message,
       env.RESEND_API_KEY,
-      fromEmail,
-      replyTo,
-      isDev,
+      config.fromEmail,
+      config.replyTo,
+      config.isDev,
       env,
     );
-    return true;
+    return "sent";
   } catch (err) {
+    const certain = isCertainNonDelivery(err);
     console.error(
-      `[admin/publish-comment] ${datasetId}: the comment was not mailed (${errorWords(err)})`,
+      `[admin/publish-comment] ${datasetId}: the comment was ${certain ? "refused" : "not confirmed"} (${errorWords(err)})`,
     );
-    return false;
+    return certain ? "not_sent" : "unknown";
   }
 }
 
@@ -127,7 +158,7 @@ async function recordComment(
   userId: number,
   datasetId: string,
   requestId: number,
-  outcome: "sent" | "not_sent",
+  outcome: CommentOutcome,
   message: string,
 ): Promise<void> {
   try {
@@ -174,16 +205,10 @@ export function registerPublishCommentRoutes(admin: AdminRouter): void {
     }
     if (!request) return refuse(c, 404, "not_found");
 
-    const mailed = await mailDepositor(c.env, request.requested_by, datasetId, message);
-    await recordComment(
-      c.env.DB,
-      c.get("user").id,
-      datasetId,
-      request.id,
-      mailed ? "sent" : "not_sent",
-      message,
-    );
-    if (!mailed) return refuse(c, 502, "comment_not_sent");
+    const outcome = await mailDepositor(c.env, request.requested_by, datasetId, message);
+    await recordComment(c.env.DB, c.get("user").id, datasetId, request.id, outcome, message);
+    if (outcome === "not_sent") return refuse(c, 502, "comment_not_sent");
+    if (outcome === "unknown") return refuse(c, 502, "comment_not_confirmed");
 
     const body: PublicationCommentResponse = {
       dataset_id: datasetId,

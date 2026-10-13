@@ -2966,6 +2966,7 @@ describe("the wire vocabulary the approval refusals and the comment route share"
       "origin_not_allowed",
       "invalid_body",
       "comment_not_sent",
+      "comment_not_confirmed",
       "internal",
     ]);
     expect(PUBLICATION_COMMENT_MAX_LENGTH).toBe(2000);
