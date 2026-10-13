@@ -339,6 +339,28 @@ describe("what a test can change between a command's read and its write", () => 
     expect(r.stdout).not.toContain("Publication Requests");
   });
 
+  test("`rewrite` changes the JSON of the answers to a route, keeping the real route's status", async () => {
+    seedScreenedRequest(h.db, { datasetId: DATASET });
+    h.rewrite("GET /admin/publish/requests", (body) => {
+      for (const row of body.requests as Array<Record<string, unknown>>) {
+        row.requested_by_username = "renamed_by_the_test";
+      }
+    });
+
+    const rewritten = await h.cli(["admin", "publish", "list"]);
+    expect(rewritten.exitCode).toBe(0);
+    expect(rewritten.stdout).toContain("renamed_by_the_test");
+    expect(h.requests).toEqual([{ method: "GET", path: "/admin/publish/requests", status: 200 }]);
+
+    // A replacement is accepted too, and `reset()` clears the rewrite.
+    h.reset();
+    await h.admin("harnessadmin", ADMIN_KEY);
+    seedScreenedRequest(h.db, { datasetId: DATASET });
+    const plain = await h.cli(["admin", "publish", "list"]);
+    expect(plain.stdout).not.toContain("renamed_by_the_test");
+    expect(plain.stdout).toContain("depositor_nm000460");
+  });
+
   test("a screen the test marks clean again is the screen the gate reads", async () => {
     const requestId = seedGoldenRequest();
     markScreen(h.db, requestId, DATASET, { status: "review" });

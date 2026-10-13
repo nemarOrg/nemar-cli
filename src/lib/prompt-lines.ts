@@ -57,6 +57,15 @@ export class LineReader {
     return !this.ended;
   }
 
+  /**
+   * Whether a question asked now could still be answered: the input is open, or it has ended with
+   * lines it left behind (a piped script is read to its end at once, with every answer waiting). False
+   * after Ctrl+C, which clears them, and once the last of them was taken.
+   */
+  get canAnswer(): boolean {
+    return !this.wasInterrupted && (!this.ended || this.lines.length > 0);
+  }
+
   /** True once Ctrl+C ended the input, so the caller can say "interrupted" and not "input ended". */
   get interrupted(): boolean {
     return this.wasInterrupted;

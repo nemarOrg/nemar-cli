@@ -176,6 +176,13 @@ export interface PublishCli {
   after(match: string, hook: () => void): void;
   /** Wrap the API's database with `hookedD1`, e.g. to fail every read of a table. Cleared by `reset()`. */
   hookDb(hooks: D1Hooks): void;
+  /**
+   * Change the JSON body of every answer to `METHOD path` (e.g. `GET /admin/publish/nm000460/review`)
+   * with `change`, which edits it in place or returns a replacement; the status and headers are
+   * kept. For what a Worker of another version might send and this one never does: the answer is
+   * still the real route's, with one field gone or altered. Cleared by `reset()`.
+   */
+  rewrite(match: string, change: (body: Record<string, unknown>) => unknown): void;
   /** Wait for everything the Worker deferred after an answer. */
   settled(): Promise<void>;
   /** Stop both servers, remove the configuration directory and put the global back. */
@@ -223,6 +230,7 @@ export function startPublishCli(): PublishCli {
   let envOver: Partial<Bindings> = {};
   let d1Hooks: D1Hooks | null = null;
   let afterHooks: Array<{ match: string; hook: () => void }> = [];
+  let rewrites: Array<{ match: string; change: (body: Record<string, unknown>) => unknown }> = [];
   let active: string | null = null;
   let running = false;
   const keys = new Map<string, string>();
@@ -299,6 +307,16 @@ export function startPublishCli(): PublishCli {
       if (at >= 0) {
         const [{ hook }] = afterHooks.splice(at, 1);
         hook();
+      }
+      const rewrite = rewrites.find((r) => r.match === `${req.method} ${url.pathname}`);
+      if (rewrite) {
+        const body = (await res.clone().json()) as Record<string, unknown>;
+        const headers = new Headers(res.headers);
+        headers.delete("content-length");
+        return new Response(JSON.stringify(rewrite.change(body) ?? body), {
+          status: res.status,
+          headers,
+        });
       }
       return res;
     },
@@ -481,6 +499,7 @@ export function startPublishCli(): PublishCli {
       envOver = {};
       d1Hooks = null;
       afterHooks = [];
+      rewrites = [];
       active = null;
       keys.clear();
       mainHead.value = SCREENED_HEAD;
@@ -531,6 +550,9 @@ export function startPublishCli(): PublishCli {
     },
     hookDb(hooks) {
       d1Hooks = hooks;
+    },
+    rewrite(match, change) {
+      rewrites.push({ match, change });
     },
     settled: () => app.settled(),
     stop() {

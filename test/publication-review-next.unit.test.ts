@@ -663,3 +663,45 @@ describe("LineReader.open", () => {
     expect(piped.open).toBe(false);
   });
 });
+
+describe("LineReader.canAnswer and interrupt", () => {
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+  test("canAnswer: an input that ended still answers with the lines it left, then no longer", async () => {
+    // A piped script is read to its end at once: the input has ended while its answers are waiting.
+    const input = new PassThrough();
+    const reader = new LineReader(input, new PassThrough());
+    expect(reader.canAnswer).toBe(true);
+    input.write("y\nq\n");
+    input.end();
+    await tick();
+    expect(reader.open).toBe(false);
+    expect(reader.canAnswer).toBe(true);
+    expect(await reader.ask("? ")).toBe("y");
+    expect(reader.canAnswer).toBe(true);
+    expect(await reader.ask("? ")).toBe("q");
+    expect(reader.canAnswer).toBe(false);
+    expect(await reader.ask("? ")).toBeNull();
+  });
+
+  test("canAnswer: false once the reader was closed with nothing queued, true while it is open", () => {
+    const reader = new LineReader(new PassThrough(), new PassThrough());
+    expect(reader.canAnswer).toBe(true);
+    reader.close();
+    expect(reader.canAnswer).toBe(false);
+  });
+
+  test("interrupt: ends the input as Ctrl+C does, drops what was queued and says it was an interrupt", async () => {
+    const input = new PassThrough();
+    const reader = new LineReader(input, new PassThrough());
+    input.write("y\n");
+    await tick();
+
+    reader.interrupt();
+
+    expect(reader.interrupted).toBe(true);
+    expect(reader.open).toBe(false);
+    expect(reader.canAnswer).toBe(false);
+    expect(await reader.ask("? ")).toBeNull();
+  });
+});

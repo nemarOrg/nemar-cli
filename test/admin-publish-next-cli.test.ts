@@ -147,6 +147,26 @@ describe("y approves from the terminal", () => {
     expect(count(r.stdout, "y approve, ")).toBe(1);
   });
 
+  test("when the input ends during the approval, no second card is drawn and no review is read for it", async () => {
+    // `y` is the last line of the script: the pipe has ended by the time the approval returns, so a
+    // card for the next request could not be answered. It used to be drawn (and its review read)
+    // only for the walk to say that the input had ended.
+    seed(A);
+    seed(B);
+    requestedAt(A, "2026-10-10 09:00:00");
+    requestedAt(B, "2026-10-11 09:00:00");
+
+    const r = await next("y\n");
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(`[1 of 2] ${A}`);
+    expect(r.stdout).not.toContain(`[2 of 2] ${B}`);
+    expect(r.stdout).not.toContain(B);
+    expect(h.requests.filter((c) => c.path === `/admin/publish/${B}/review`)).toEqual([]);
+    expect(count(r.stdout, "Input ended; stopping.")).toBe(1);
+    expect(r.stdout).toContain("Done: 1 approved.");
+  });
+
   test("the run ends with the tally when the last request is decided, and says nothing is left", async () => {
     seed(A);
 
@@ -891,6 +911,44 @@ describe("what fails exits 1, and the walk goes on", () => {
     expect(promptsIn(r)).toBe(2);
   });
 
+  test("a review this version of the CLI cannot show is said so on d, and the card asks again", async () => {
+    // A detail that parses (the id and the override are there) but lacks what the rendering reads: a
+    // Worker of another version. `d` used to throw out of the walk, with no tally and the reader open.
+    seed(A, failingReport());
+    h.rewrite(`GET /admin/publish/${A}/review`, (body) => {
+      Reflect.deleteProperty(body.review as Record<string, unknown>, "questions");
+    });
+
+    const r = await next("d\nq\n");
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("cannot be shown by this version of the CLI");
+    expect(promptsIn(r)).toBe(2);
+    expect(r.stdout).toContain("Nothing was changed.");
+    expect(r.stderr).not.toContain("TypeError");
+  });
+
+  test("a card that cannot be built still closes the reader and prints the tally before the error", async () => {
+    // The second row lacks a field the walk reads: nothing in the walk catches that, so the tally
+    // and the reader's close are the `finally`'s. The first card was skipped and is in the tally.
+    seed(A);
+    seed(B);
+    requestedAt(A, "2026-10-10 09:00:00");
+    requestedAt(B, "2026-10-11 09:00:00");
+    h.rewrite("GET /admin/publish/requests", (body) => {
+      for (const row of body.requests as Array<Record<string, unknown>>) {
+        if (row.dataset_id === B) Reflect.deleteProperty(row, "steps_completed");
+      }
+    });
+
+    const r = await next("s\ns\n");
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain(`[1 of 2] ${A}`);
+    expect(r.stdout).toContain("Done: 1 skipped.");
+    expect(r.stderr).toContain("steps_completed");
+  });
+
   test("a failed read of the list is said, and the exit code is 1", async () => {
     seed(A);
     h.hookDb({
@@ -1074,6 +1132,8 @@ describe.skipIf(process.platform === "win32")("on a terminal", () => {
     expect(r.exitCode).toBe(0);
     expect(requestRow(a.requestId)?.status).toBe("published");
     expect(r.stdout).toContain("Done: 1 approved.");
+    // The input had ended, so the second request got no card.
+    expect(r.stdout).not.toContain("[2 of 2]");
   });
 
   test("Ctrl+C while an approval runs says which dataset was mid-approval, what to run, the tally, exits 130 and leaves the terminal as it found it", async () => {
