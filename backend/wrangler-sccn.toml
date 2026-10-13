@@ -572,6 +572,15 @@ PRESCREEN_ENABLED = "true"
 # the Worker's variables with the ones in this file (no keep_vars), so a dashboard-only value
 # is dropped by the next deploy.
 PR_REVIEW_ENABLED = "1"
+# Publication review (ADR 0101). On here for the soak: a stored identifier-screen result whose
+# gate is clear or needs an acknowledgment starts a model review of the screened commit, for the
+# datasets this Worker owns, and the pre-screen of ADR 0014 is not dispatched. Production is dark
+# by this file: the variable is not in [vars], and it must never be added there by a change that
+# is not reviewed for it. Turning production on is adding PUBLICATION_REVIEW_ENABLED = "1" to
+# [vars], after the approval gate and the approval page have shipped. The flag switches the model
+# review and its gate and nothing else; the mechanical refusals do not depend on it. It lives in
+# this file and not in the dashboard for the reason PR_REVIEW_ENABLED gives above.
+PUBLICATION_REVIEW_ENABLED = "1"
 
 # Daily maintenance cron for dev/staging (epic #923 Phase 7). Offset an hour
 # from prod's "0 3" so the two environments never contend. "0 4 * * *" does not
