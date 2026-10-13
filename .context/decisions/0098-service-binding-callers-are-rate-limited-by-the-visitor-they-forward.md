@@ -128,6 +128,8 @@ The Cloudflare account is the trust boundary, as in ADR 0078, and no secret head
   its responses carry `X-RateLimit-Caller: unattributed`.
   No such line, with the website working, means a binding call carries a `CF-Connecting-IP` after all:
   its requests are in `ip`, nothing has regressed and nothing has improved, and this ADR needs an amendment.
+  After the deploy that carries the stall breaker (amendment of 2026-10-12), watch the same tail for `[rate-limit] the cache keeps stalling`, and for the fault line with `error: "CacheSkippedError"`.
+  How often the production Cache API stalls is not known; the breaker's three constants (three stalls, a 60-second window, a 10-second cool-down) are the knob if that line shows it opening on blips or staying open.
 - **What an absent header means, and what it does not.**
   The `X-RateLimit-*` headers are set on the finished response, so a handler that builds its own `Response` keeps them.
   An answer without them was not announced as counted: the development Worker, a bypass, a cache fault (which is logged, once per window per bucket kind and again at the milestones described below), or an observe-only count.
@@ -150,7 +152,7 @@ The Cloudflare account is the trust boundary, as in ADR 0078, and no secret head
   The places fail independently, so a cache that hangs costs a request up to 500 ms in each place it uses (the admin flag and the counter for a token request, the counter and the miss budget for a data request), about a second, not 500 ms in all.
   The writes handed to `waitUntil` (the data plane's counter, the miss budget, the private-grant budget) are bounded and logged the same way and are not waited on.
   A latch that skipped a cache known to be stalled until the window's end would cut the cost to one stall (issue #1715).
-  It is built, as a breaker with a probe rather than a latch to the window's end: see the amendment of 2026-10-12 below.
+  That is now built as a breaker with a probe rather than a latch to the window's end: see the amendment of 2026-10-12 below.
 - Any Worker in the account that binds to the default entrypoint can name any visitor, so it can spend a visitor's `site:` allowances.
   It cannot touch a public caller's buckets, which is why the keyspaces are apart,
   and ADR 0078 rule 4 already makes deploy access to the account access to this surface.
@@ -239,7 +241,8 @@ A window of 60 seconds, so a stall that lasts is caught at a few requests a minu
 A cool-down of 10 seconds rather than the rest of the window, so counting resumes soon after a recovery while a stall that lasts costs one probe every 10 seconds.
 
 Receipts: `backend/test/rate-limit-cache-breaker.test.ts` drives the real limiter with the harness's cache made to stall.
-It fails when the breaker never opens, never closes, opens on one stall, keeps its state per caller key, keeps an unbounded list, lets a skipped call extend the cool-down, counts a fast failure as a stall, ignores the 60-second window, closes on a probe that stalls, lets more than one probe through, keeps the old stalls after recovering, guards the lookup but not the write, refuses instead of failing open, stops reporting a skipped call, or logs every opening.
+It fails when the breaker never opens, never closes, opens on one stall, keeps its state per caller key, keeps an unbounded list, lets a skipped call or a late stall extend the cool-down, holds it open for longer than one cool-down after the clock went backwards, counts a fast failure as a stall, ignores the 60-second window, closes on a probe that stalls or reopens without saying so, lets more than one probe through, keeps the old stalls after recovering, refuses instead of failing open, stops reporting a skipped call, or logs every opening;
+and it fails when any one of the limiter's cache calls is taken out from behind the breaker: the lookups, the record reads and the writes of the counter, the admin flag and the miss budget, the data plane's and the miss budget's writes handed to `waitUntil` and their no-`waitUntil` fallbacks.
 Nothing here was observed on the deployed Worker; no production stall has been recorded.
 
 ## Amendment 2026-10-12 (#1713): the observe-only line names its caller by a keyed pseudonym
@@ -259,9 +262,12 @@ An IPv4 address hashed that way is recovered by hashing all 2^32 of them, and a 
    An unkeyed hash in its place would be the reversible value this removes, under a name that suggests otherwise.
 4. **The field keeps its name, `ipHash`,** although the value is a pseudonym and the key can be `site:<address>`, so a log query written for it still finds it.
 
-Not changed here, and a decision of its own: `hashIp` (`backend/src/services/web-session.ts`) is still a plain SHA-256,
+Not changed here, and a decision of its own, tracked in issue #1733: `hashIp` (`backend/src/services/web-session.ts`) is still a plain SHA-256,
 and its other callers store that value with web, docs and private-site sessions and in the device sign-in audit details.
 Nothing reads those columns back to compare them, so moving them to a keyed value would break no lookup, but it changes what stored rows mean and is outside the limiter.
+Existing rows cannot be rekeyed, since the address is not stored; a label of its own (for example `nemar/session-ip/v1`) would reuse the same module.
+
+The construction is the convention for any further purpose-specific key taken from `ENCRYPTION_KEY`: HKDF-SHA-256 with a label of the form `nemar/<purpose>/v<n>`, one label per purpose, never reused.
 
 Receipts: `backend/test/rate-limit-log-pseudonym.test.ts` checks the logged value against values computed independently in Python's `hmac` and `hashlib`,
 and fails when the value is an unkeyed SHA-256, an HMAC under the bare secret, derived without the label, the raw key, present without a secret, or when a failed derivation is kept for the isolate's life.

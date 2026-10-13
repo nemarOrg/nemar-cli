@@ -58,7 +58,8 @@ earlier releases are described only by their generated notes.
   secret with HKDF, so it still tells one caller from another but a reader of the log cannot
   recover the address. A Worker without `ENCRYPTION_KEY` leaves the field out. The field keeps
   its name; its values change, so a pseudonym logged before this release does not match one
-  logged after. No new secret, no migration and no deploy coupling.
+  logged after. No new secret, no migration and no deploy coupling. The same unkeyed hash is
+  still stored with sessions and the device sign-in audit; that is tracked in #1733.
 
 ## 0.10.16 - 2026-10-11
 
