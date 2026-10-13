@@ -32,7 +32,7 @@ import {
   reviewErrorCode,
   startPublicationReview,
 } from "../lib/api/publish.js";
-import { YES_OPTION, confirm } from "../lib/confirm.js";
+import { type ConfirmResult, YES_OPTION, confirm } from "../lib/confirm.js";
 import { markReportedExit } from "../lib/debug-log.js";
 import {
   NON_PRODUCTION_NOTE,
@@ -116,7 +116,8 @@ Description:
   before spending (--yes skips that), and starts them one at a time. Each is one
   model call, and the platform allows ${PLATFORM_DAILY_CAP} in any 24 hours: when that is
   spent the run stops and says how many were not tried. A piped command with no
-  --yes is cancelled.
+  --yes is cancelled, and so is one with --json, which keeps standard output for
+  the one document.
 
 Exit status:
   0 when the review is going or already exists (a start, a review that is running
@@ -348,10 +349,21 @@ async function startAll(options: {
 
   if (!json) console.log();
   const n = candidates.length;
-  const go = await confirm(
-    `Start the automated review of ${n} request${n === 1 ? "" : "s"}? Each is one model call, and the platform allows ${PLATFORM_DAILY_CAP} in any 24 hours.`,
-    { yes: options.yes },
-  );
+  // `inquirer` writes its question to standard output, which `--json` keeps for the one document a
+  // pipe reads, so under `--json` the question is not asked, at a terminal or not: the same refusal
+  // as a command with no terminal to ask on.
+  let go: ConfirmResult;
+  if (json && !options.yes) {
+    console.error(
+      "--json cannot ask for a confirmation, which would be written to standard output; pass --yes, or --dry-run to see what would start.",
+    );
+    go = "cancelled";
+  } else {
+    go = await confirm(
+      `Start the automated review of ${n} request${n === 1 ? "" : "s"}? Each is one model call, and the platform allows ${PLATFORM_DAILY_CAP} in any 24 hours.`,
+      { yes: options.yes },
+    );
+  }
   if (go !== "confirmed") {
     // Nothing was started, and a script that asked for it has to be able to tell. Not on standard
     // output under --json, which is read as one document.

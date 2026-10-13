@@ -1170,6 +1170,50 @@ describe("start --all", () => {
     expect(r.stderr).toContain("Cancelled.");
   });
 
+  // `inquirer` writes its question to standard output, which `--json` keeps for the one document
+  // a pipe reads (`| jq`). So under --json the question is not asked at all, on a terminal too.
+  describe.skipIf(process.platform === "win32")(
+    "--json at a terminal, standard output piped",
+    () => {
+      test("without --yes it is refused: nothing is asked on standard output, nothing is started, exit 1", async () => {
+        seedFleet();
+
+        const r = await h.cli([...START, "--all", "--json"], {
+          terminal: async (t) => {
+            await t.waitFor("Cancelled.", { timeoutMs: 10_000 });
+          },
+          pipeStdout: true,
+        });
+
+        expect(r.exitCode).toBe(1);
+        // What a pipe reads: nothing, so no prompt text for `jq` to choke on.
+        expect(r.stdout).toBe("");
+        expect(r.stderr).toContain("--json cannot ask for a confirmation");
+        expect(r.stderr).toContain("--yes");
+        expect(r.stderr).toContain("Cancelled.");
+        expect(startPosts()).toEqual([]);
+        expect(dispatchedDatasets()).toEqual([]);
+      });
+
+      test("with --yes it runs and standard output is the one JSON document", async () => {
+        seedFleet();
+
+        const r = await h.cli([...START, "--all", "--yes", "--json"], {
+          terminal: async () => undefined,
+          pipeStdout: true,
+        });
+
+        expect(r.exitCode).toBe(0);
+        const done = JSON.parse(r.stdout) as {
+          started: number;
+          results: Array<{ outcome: string }>;
+        };
+        expect(done.started).toBe(4);
+        expect(dispatchedDatasets()).toEqual(CANDIDATES);
+      });
+    },
+  );
+
   test("--all with a dataset id is refused", async () => {
     const r = await h.cli([...START, "nm000480", "--all"]);
 
