@@ -778,6 +778,9 @@ describe("the command decides: a review that cannot be read is the Worker's to j
     expect(r.stdout).toContain(
       "The publication review could not be read (HTTP 500); the API still checks it.",
     );
+    // It says the flag was not sent, so the Worker's "approve over it with --force" is not a
+    // contradiction of what the administrator typed.
+    expect(r.stdout).toContain("--force was not sent: no review could be read to approve over.");
     // It went on to the Worker, which is the gate, and sent no override of its own making.
     expect(approveBodies().length).toBeGreaterThan(0);
     for (const body of approveBodies()) {
@@ -798,6 +801,13 @@ describe("the command decides: a review that cannot be read is the Worker's to j
     );
     expect(output(r)).toContain("No active publication request found");
     expect(h.requests.at(-1)?.status).toBe(404);
+    expect(r.stdout).not.toContain("--force was not sent");
+
+    const forced = await approve(["--resume", "--yes", "--force"]);
+    expect(forced.exitCode).toBe(1);
+    expect(forced.stdout).toContain(
+      "--force was not sent: no review could be read to approve over.",
+    );
   });
 });
 

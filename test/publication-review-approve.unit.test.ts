@@ -140,7 +140,7 @@ function proceeds(d: ApproveDecision) {
 
 describe("1. a review that could not be read is the Worker's to judge", () => {
   test("unreadable: proceed with no override, and say why", () => {
-    const d = proceeds(decideApproval(ID, { kind: "unreadable", why: "HTTP 500" }, FORCE));
+    const d = proceeds(decideApproval(ID, { kind: "unreadable", why: "HTTP 500" }, NO_FLAGS));
     expect(d.override).toBeNull();
     expect(d.notes).toEqual([
       "The publication review could not be read (HTTP 500); the API still checks it.",
@@ -166,6 +166,23 @@ describe("1. a review that could not be read is the Worker's to judge", () => {
       { kind: "absent", why: "no_request" },
     ] as const) {
       expect(proceeds(decideApproval(ID, r, FORCE)).override).toBeNull();
+    }
+  });
+
+  test("--force says it was not sent, for every read that gave nothing to override", () => {
+    // Otherwise the API's "approve over it with --force" reaches someone who just passed it.
+    const NOT_SENT = "--force was not sent: no review could be read to approve over.";
+    const reads = [
+      { kind: "unreadable", why: "HTTP 500" },
+      { kind: "absent", why: "no_route" },
+      { kind: "absent", why: "no_request" },
+    ] as const;
+    for (const r of reads) {
+      const withForce = proceeds(decideApproval(ID, r, FORCE));
+      expect(withForce.notes, r.kind + r.why).toHaveLength(2);
+      expect(withForce.notes[1]).toBe(NOT_SENT);
+      // ... and says nothing about it when it was not given.
+      expect(proceeds(decideApproval(ID, r, NO_FLAGS)).notes.join(" ")).not.toContain("--force");
     }
   });
 });
@@ -576,6 +593,25 @@ describe("parseReviewDetail: a review this CLI cannot read is not guessed at", (
   test("a reason code this CLI does not know (a newer server) is unreadable, not a crash", () => {
     const raw = good();
     raw.reasons[0].code = "a_reason_from_the_future";
+    expect(parseReviewDetail(raw)).toBeNull();
+  });
+
+  test("a reason the API classifies differently from this CLI's table is unreadable, so the API decides", () => {
+    // A newer API that moved a reason from "override" to "nothing" (or back) would otherwise leave
+    // this CLI refusing as hard what the API accepts, or sending an override for what it refuses.
+    for (const code of REASON_CODES) {
+      for (const other of ["nothing", "screen_acknowledgment", "override"] as const) {
+        const raw = JSON.parse(JSON.stringify(detailOf({ reasons: [code] })));
+        raw.reasons[0].cleared_by = other;
+        if (other === REASONS[code].clearedBy) {
+          expect(parseReviewDetail(raw), `${code} as ${other}`).not.toBeNull();
+        } else {
+          expect(parseReviewDetail(raw), `${code} as ${other}`).toBeNull();
+        }
+      }
+    }
+    const raw = good();
+    raw.reasons[0].cleared_by = "something_new";
     expect(parseReviewDetail(raw)).toBeNull();
   });
 

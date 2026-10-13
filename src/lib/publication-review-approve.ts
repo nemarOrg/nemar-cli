@@ -32,7 +32,9 @@ import type {
   ReasonView,
 } from "../../shared/contract/publication-review-admin.js";
 import {
+  REASONS,
   REASON_CODES,
+  type ReasonCode,
   hardReasonsOf,
   reasonLine,
   uncoveredByOverride,
@@ -76,6 +78,12 @@ const CODES: readonly string[] = REASON_CODES;
 const isObject = (x: unknown): x is Record<string, unknown> =>
   typeof x === "object" && x !== null && !Array.isArray(x);
 
+/**
+ * One reason this CLI can read and classify as the API does. `cleared_by` is what the API says
+ * clears it; the CLI decides from its own table (`REASONS`), so a reason the API classifies
+ * differently (a newer API that moved it) is unreadable here and the API decides, rather than this
+ * CLI refusing as hard what the API would accept, or sending an override for what it would refuse.
+ */
 function isReasonView(x: unknown): boolean {
   return (
     isObject(x) &&
@@ -84,7 +92,23 @@ function isReasonView(x: unknown): boolean {
     typeof x.sentence === "string" &&
     typeof x.cure === "string" &&
     (x.detail === null || typeof x.detail === "string") &&
-    typeof x.cleared_by === "string"
+    x.cleared_by === REASONS[x.code as ReasonCode].clearedBy
+  );
+}
+
+/** Whether `raw` carries a reason this CLI knows that the API classifies differently ({@link isReasonView}). */
+function classifiesDifferently(raw: unknown): boolean {
+  return (
+    isObject(raw) &&
+    Array.isArray(raw.reasons) &&
+    raw.reasons.some(
+      (r) =>
+        isObject(r) &&
+        typeof r.code === "string" &&
+        CODES.includes(r.code) &&
+        typeof r.cleared_by === "string" &&
+        r.cleared_by !== REASONS[r.code as ReasonCode].clearedBy,
+    )
   );
 }
 
@@ -129,13 +153,15 @@ export function parseReviewDetail(raw: unknown): PublicationReviewDetail | null 
 /** `GET /admin/publish/:id/review`, as a {@link ReviewRead}: never throws. */
 export async function readReview(datasetId: string): Promise<ReviewRead> {
   try {
-    const detail = parseReviewDetail(await getPublicationReview(datasetId));
-    return detail === null
-      ? {
-          kind: "unreadable",
-          why: "the NEMAR API sent a review this version of the CLI cannot read",
-        }
-      : { kind: "detail", detail };
+    const raw = await getPublicationReview(datasetId);
+    const detail = parseReviewDetail(raw);
+    if (detail !== null) return { kind: "detail", detail };
+    return {
+      kind: "unreadable",
+      why: classifiesDifferently(raw)
+        ? "this version of the CLI classifies a reason differently from the API"
+        : "the NEMAR API sent a review this version of the CLI cannot read",
+    };
   } catch (err) {
     if (err instanceof ApiError && err.statusCode === 404) {
       // The review route answers `not_found` for a dataset with no active request; a 404 without
@@ -193,6 +219,8 @@ export function decideApproval(
 ): ApproveDecision {
   // 1. Nothing was read: the Worker is the gate, and a client that cannot read cannot clear
   // anything, so nothing is overridden and the Worker's own refusal is what the administrator sees.
+  // A --force that was given says it was not sent, or the Worker's "approve over it with --force"
+  // would reach someone who just passed it.
   if (read.kind !== "detail") {
     const note =
       read.kind === "unreadable"
@@ -200,7 +228,10 @@ export function decideApproval(
         : read.why === "no_route"
           ? "This API has no publication review."
           : `No active publication request was found for ${datasetId}; the API decides.`;
-    return { kind: "proceed", override: null, notes: [note] };
+    const notes = options.force
+      ? [note, "--force was not sent: no review could be read to approve over."]
+      : [note];
+    return { kind: "proceed", override: null, notes };
   }
   const { detail } = read;
   const id = datasetId;

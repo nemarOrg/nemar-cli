@@ -571,6 +571,48 @@ describe("the wait between approval attempts", () => {
   });
 });
 
+describe("readReview and a review the CLI cannot classify as the API does", () => {
+  test("a reason with another cleared_by than this CLI's table is unreadable, and --force says it was not sent", async () => {
+    const { requestId } = seedScreenedRequest(h.db, { datasetId: PROD_DATASET });
+    seedPublicationReview(h.db, {
+      requestId,
+      datasetId: PROD_DATASET,
+      state: "reported",
+      report: failingReport(),
+    });
+    // The Worker's own detail, as a newer Worker that moved `question_failed` out of the override
+    // class would send it: the one word of the reason that decides what the CLI may do.
+    const live = await getPublicationReview(PROD_DATASET);
+    const skewed = JSON.parse(JSON.stringify(live));
+    expect(skewed.reasons[0].code).toBe("question_failed");
+    skewed.reasons[0].cleared_by = "nothing";
+    scripted = [{ status: 200, body: skewed }];
+
+    const read = await readReview(PROD_DATASET);
+
+    expect(read).toEqual({
+      kind: "unreadable",
+      why: "this version of the CLI classifies a reason differently from the API",
+    });
+    const decision = decideApproval(PROD_DATASET, read, {
+      force: true,
+      acknowledge: undefined,
+      resume: false,
+    });
+    expect(decision.kind).toBe("proceed");
+    if (decision.kind === "proceed") {
+      expect(decision.override).toBeNull();
+      expect(decision.notes).toEqual([
+        "The publication review could not be read (this version of the CLI classifies a reason differently from the API); the API still checks it.",
+        "--force was not sent: no review could be read to approve over.",
+      ]);
+    }
+    // The detail the Worker really sent is read as it always was.
+    scripted = [{ status: 200, body: live }];
+    expect((await readReview(PROD_DATASET)).kind).toBe("detail");
+  });
+});
+
 describe("readReview tells a backend with no review route from a request with no review", () => {
   test("a 404 without the review's word is no_route, and the approval goes on with its own sentence", async () => {
     // An older backend has no `/review` route: its 404 is a bare `{ error }` with no `code`.
