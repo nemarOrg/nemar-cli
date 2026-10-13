@@ -17,6 +17,7 @@ import {
   NEVER_REACHED_MODEL,
   PUBLICATION_RUN_ERRORS,
   WORKER_ONLY_RUN_ERRORS,
+  parsePublicationCallbackOutcome,
 } from "../../shared/publication-review";
 import { MINIMUM_FAILURES, minimumFailureSentence } from "../../shared/submission-minimums";
 import { sanitizeNote } from "../../shared/untrusted-text";
@@ -98,6 +99,18 @@ function dispatched(
   });
   return { requestId, reviewId, datasetId };
 }
+
+/** A report whose submission minimum failed at `head`, as a job would post it. */
+const failing = (head = SCREENED_HEAD, anonymous = false) =>
+  reportFor(head, anonymous, {
+    evidence: evidenceFor(head, anonymous, {
+      minimums: "failed",
+      minimum_failures: anonymous
+        ? ["authors_not_blinded", "ethics_statement_missing"]
+        : ["name_too_short", "ethics_statement_missing"],
+      name_length: 10,
+    }),
+  });
 
 const state = (id: number) => h.review(id);
 
@@ -502,7 +515,7 @@ describe("the claim", () => {
 
 describe("the result", () => {
   test("a passing report is stored, its verdict derived, the token spent", async () => {
-    const { reviewId } = dispatched();
+    const { reviewId } = dispatched({ claimed: true });
     const token = await h.tokenFor(reviewId);
     await h.claim(reviewId, token);
     const res = await h.result(
@@ -535,7 +548,7 @@ describe("the result", () => {
       [{ authors_and_license: "unknown" }, "action_required"],
     ];
     for (const [answers, verdict] of cases) {
-      const { reviewId } = dispatched({ dataset: ds(verdict === "fail" ? 40 : 41) });
+      const { reviewId } = dispatched({ claimed: true, dataset: ds(verdict === "fail" ? 40 : 41) });
       const questions = {
         complete_and_honest: "pass",
         meets_standards: "pass",
@@ -555,7 +568,7 @@ describe("the result", () => {
   });
 
   test("a steering attempt is a fail whatever the questions say", async () => {
-    const { reviewId } = dispatched();
+    const { reviewId } = dispatched({ claimed: true });
     await h.result(reviewId, {
       outcome: "reported",
       report: reportFor(SCREENED_HEAD, false, { steering: true }),
@@ -564,7 +577,7 @@ describe("the result", () => {
   });
 
   test("a verdict the job claims is not a field of the report: the report is refused", async () => {
-    const { reviewId } = dispatched();
+    const { reviewId } = dispatched({ claimed: true });
     const res = await h.result(reviewId, {
       outcome: "reported",
       report: { ...reportFor(SCREENED_HEAD, false), verdict: "pass" },
@@ -579,7 +592,7 @@ describe("the result", () => {
   });
 
   test("hostile free text is stored as plain words, never as markup", async () => {
-    const { reviewId } = dispatched();
+    const { reviewId } = dispatched({ claimed: true });
     const note =
       "<script>alert(1)</script> @everyone [click](http://evil.example) ![x](http://evil)";
     await h.result(reviewId, {
@@ -641,14 +654,14 @@ describe("the result", () => {
   });
 
   test("a report about another commit or another release kind is refused", async () => {
-    const wrongHead = dispatched();
+    const wrongHead = dispatched({ claimed: true });
     await h.result(wrongHead.reviewId, {
       outcome: "reported",
       report: reportFor(OTHER_HEAD, false),
     });
     expect(state(wrongHead.reviewId)).toMatchObject({ state: "errored", detail: "report_invalid" });
 
-    const wrongKind = dispatched({ dataset: "nm000481" });
+    const wrongKind = dispatched({ claimed: true, dataset: "nm000481" });
     await h.result(
       wrongKind.reviewId,
       { outcome: "reported", report: reportFor(SCREENED_HEAD, true) },
@@ -658,7 +671,7 @@ describe("the result", () => {
     );
     expect(state(wrongKind.reviewId)).toMatchObject({ state: "errored", detail: "report_invalid" });
 
-    const anonymous = dispatched({ dataset: "nm000482", anonymous: true });
+    const anonymous = dispatched({ claimed: true, dataset: "nm000482", anonymous: true });
     await h.result(
       anonymous.reviewId,
       { outcome: "reported", report: reportFor(SCREENED_HEAD, true) },
@@ -670,7 +683,7 @@ describe("the result", () => {
   });
 
   test("a run that was claimed is stored whatever the flag says now", async () => {
-    const { reviewId } = dispatched();
+    const { reviewId } = dispatched({ claimed: true });
     const token = await h.tokenFor(reviewId);
     await h.claim(reviewId, token);
     const off = h.env({ PUBLICATION_REVIEW_ENABLED: undefined });
@@ -684,8 +697,97 @@ describe("the result", () => {
     expect(state(reviewId)).toMatchObject({ state: "reported", verdict: "pass" });
   });
 
+  test("a report from a run that never took its claim is refused, as a row that is not waiting is", async () => {
+    // A report implies a model call, and a call is made only by a run that claimed. With the flag
+    // off the claim route refuses every new claim, so this is also what keeps a result from being
+    // stored for a run that was never allowed to spend.
+    for (const [i, flag] of ["1", undefined].entries()) {
+      const dataset = ds(60 + i);
+      const { requestId, reviewId } = dispatched({ dataset, claimed: false });
+      const token = await h.tokenFor(reviewId, dataset);
+      const nonce = h.nonceOf(reviewId);
+      const refused = await h.result(
+        reviewId,
+        { outcome: "reported", report: reportFor(SCREENED_HEAD, false) },
+        token,
+        h.env({ PUBLICATION_REVIEW_ENABLED: flag }),
+        dataset,
+      );
+      // The same bytes the route uses for a review that is not waiting.
+      const spent = dispatched({ dataset: ds(70 + i), claimed: true });
+      await h.result(
+        spent.reviewId,
+        { outcome: "error", error: "model_refused" },
+        undefined,
+        undefined,
+        spent.datasetId,
+      );
+      const notWaiting = await h.result(
+        spent.reviewId,
+        { outcome: "error", error: "model_refused" },
+        await signPublicationReviewCallbackToken(
+          { datasetId: spent.datasetId, reviewId: spent.reviewId, nonce: "spent" },
+          CALLBACK_SECRET,
+        ),
+        undefined,
+        spent.datasetId,
+      );
+      expect(refused).toEqual(notWaiting);
+      expect(refused.status).toBe(401);
+
+      // Nothing was stored, nothing re-blocked, and the token is not spent: the run may still claim.
+      expect(state(reviewId)).toMatchObject({ state: "dispatched", report: null, verdict: null });
+      expect(h.nonceOf(reviewId)).toBe(nonce);
+      expect(h.requestRow(requestId).status).toBe("requested");
+    }
+  });
+
+  test("a failing minimum in a report nobody claimed re-blocks nothing", async () => {
+    const { requestId, reviewId } = dispatched({ claimed: false });
+    const res = await h.result(reviewId, { outcome: "reported", report: failing() });
+    expect(res.status).toBe(401);
+    expect(h.requestRow(requestId)).toMatchObject({ status: "requested", block_reason: null });
+  });
+
+  test("the same report lands once the run has claimed", async () => {
+    const { reviewId } = dispatched({ claimed: false });
+    const token = await h.tokenFor(reviewId);
+    const body = { outcome: "reported", report: reportFor(SCREENED_HEAD, false) };
+    expect((await h.result(reviewId, body, token)).status).toBe(401);
+    expect((await h.claim(reviewId, token)).status).toBe(200);
+    expect(await h.result(reviewId, body, token)).toEqual({
+      status: 200,
+      body: { ok: true, dataset_id: PROD_DATASET },
+    });
+    expect(state(reviewId)).toMatchObject({ state: "reported", verdict: "pass" });
+  });
+
+  test("an error word is recorded whether or not the run took its claim", async () => {
+    // A failure before the claim (a payload the job could not validate, a fetch that failed) must
+    // still be recorded, or it could not be diagnosed.
+    for (const [i, claimed] of [false, true].entries()) {
+      for (const flag of ["1", undefined]) {
+        const dataset = ds(80 + i * 2 + (flag ? 0 : 1));
+        const { reviewId } = dispatched({ dataset, claimed });
+        const res = await h.result(
+          reviewId,
+          { outcome: "error", error: "evidence_unavailable" },
+          undefined,
+          h.env({ PUBLICATION_REVIEW_ENABLED: flag }),
+          dataset,
+        );
+        expect(res).toEqual({ status: 200, body: { ok: true, dataset_id: dataset } });
+        expect(state(reviewId)).toMatchObject({
+          state: "errored",
+          detail: "evidence_unavailable",
+          nonce: null,
+        });
+      }
+    }
+  });
+
   test("the stored report is the parsed one, not the callback body", async () => {
-    const { reviewId } = dispatched();
+    const { reviewId } = dispatched({ claimed: true });
     const body = reportFor(SCREENED_HEAD, false);
     await h.result(reviewId, { outcome: "reported", report: body });
     const stored = JSON.parse(state(reviewId).report as string);
@@ -695,7 +797,7 @@ describe("the result", () => {
   });
 
   test("a replayed result through the service stores nothing twice", async () => {
-    const { reviewId } = dispatched();
+    const { reviewId } = dispatched({ claimed: true });
     const nonce = h.nonceOf(reviewId) as string;
     const outcome = { kind: "error", error: "model_refused" } as const;
     const first = await storePublicationReviewResult(
@@ -716,19 +818,8 @@ describe("the result", () => {
 });
 
 describe("a failed submission minimum re-blocks the request", () => {
-  const failing = (head = SCREENED_HEAD, anonymous = false) =>
-    reportFor(head, anonymous, {
-      evidence: evidenceFor(head, anonymous, {
-        minimums: "failed",
-        minimum_failures: anonymous
-          ? ["authors_not_blinded", "ethics_statement_missing"]
-          : ["name_too_short", "ethics_statement_missing"],
-        name_length: 10,
-      }),
-    });
-
   test("requested becomes blocked/min_requirements_failed, with sentences that quote nothing", async () => {
-    const { requestId, reviewId } = dispatched();
+    const { requestId, reviewId } = dispatched({ claimed: true });
     await h.result(reviewId, { outcome: "reported", report: failing() });
     const req = h.requestRow(requestId);
     expect(req).toMatchObject({ status: "blocked", block_reason: "min_requirements_failed" });
@@ -741,7 +832,7 @@ describe("a failed submission minimum re-blocks the request", () => {
   });
 
   test("every failure word has a sentence, and an anonymous release's names no author", async () => {
-    const { requestId, reviewId } = dispatched({ anonymous: true });
+    const { requestId, reviewId } = dispatched({ claimed: true, anonymous: true });
     await h.result(reviewId, { outcome: "reported", report: failing(SCREENED_HEAD, true) });
     const reasons = JSON.parse(h.requestRow(requestId).min_requirements_reasons as string);
     expect(reasons).toEqual([
@@ -754,7 +845,7 @@ describe("a failed submission minimum re-blocks the request", () => {
   });
 
   test("a met minimum leaves the request alone", async () => {
-    const { requestId, reviewId } = dispatched();
+    const { requestId, reviewId } = dispatched({ claimed: true });
     await h.result(reviewId, { outcome: "reported", report: reportFor(SCREENED_HEAD, false) });
     expect(h.requestRow(requestId)).toMatchObject({ status: "requested", block_reason: null });
   });
@@ -786,7 +877,7 @@ describe("a failed submission minimum re-blocks the request", () => {
   });
 
   test("it does not re-block when the screened commit has moved since the review started", async () => {
-    const { requestId, reviewId } = dispatched();
+    const { requestId, reviewId } = dispatched({ claimed: true });
     h.db.run(
       "UPDATE publication_requests SET identifier_screen_report = json_set(identifier_screen_report, '$.head', ?) WHERE id = ?",
       [OTHER_HEAD, requestId],
@@ -797,14 +888,14 @@ describe("a failed submission minimum re-blocks the request", () => {
   });
 
   test("it does not re-block when the release kind has changed since", async () => {
-    const { requestId, reviewId } = dispatched();
+    const { requestId, reviewId } = dispatched({ claimed: true });
     h.db.run("UPDATE publication_requests SET anonymous = 1 WHERE id = ?", [requestId]);
     await h.result(reviewId, { outcome: "reported", report: failing() });
     expect(h.requestRow(requestId).status).toBe("requested");
   });
 
   test("it holds with the flag off: a mechanical refusal does not depend on the review being on", async () => {
-    const { requestId, reviewId } = dispatched();
+    const { requestId, reviewId } = dispatched({ claimed: true });
     const token = await h.tokenFor(reviewId);
     await h.claim(reviewId, token);
     await h.result(
@@ -819,10 +910,130 @@ describe("a failed submission minimum re-blocks the request", () => {
     });
   });
 
+  test("a fault on the re-block stores nothing and spends no token, so the job's retry lands", async () => {
+    // The result, the re-block and the mail re-arm are ONE unit. Run one after another, a fault
+    // on the re-block left the review stored with its nonce spent: the job's retry got 401, the
+    // request stayed `requested`, and nobody was ever told it had failed a minimum.
+    const { requestId, reviewId } = dispatched({ claimed: true });
+    const token = await h.tokenFor(reviewId);
+    const nonce = h.nonceOf(reviewId);
+    const faulty = hookedD1(realD1(h.db), {
+      statement: (sql) => {
+        if (sql.includes("SET status = 'blocked'")) throw new Error("D1_ERROR: transient");
+      },
+    });
+    const res = await h.result(
+      reviewId,
+      { outcome: "reported", report: failing() },
+      token,
+      h.env({ DB: faulty }),
+    );
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: "The result could not be stored; try again" });
+    expect(state(reviewId)).toMatchObject({
+      state: "dispatched",
+      verdict: null,
+      report: null,
+      decided_at: null,
+    });
+    expect(h.nonceOf(reviewId)).toBe(nonce);
+    expect(h.requestRow(requestId)).toMatchObject({ status: "requested", block_reason: null });
+
+    // The retry, with the same token, on a healthy database.
+    const retry = await h.result(reviewId, { outcome: "reported", report: failing() }, token);
+    expect(retry).toEqual({ status: 200, body: { ok: true, dataset_id: PROD_DATASET } });
+    expect(state(reviewId)).toMatchObject({ state: "reported", verdict: "fail", nonce: null });
+    expect(h.requestRow(requestId)).toMatchObject({
+      status: "blocked",
+      block_reason: "min_requirements_failed",
+    });
+  });
+
+  test("the store, the re-block and the mail re-arm go to the database as one batch", async () => {
+    const { reviewId } = dispatched({ claimed: true, minutesAgo: 45 });
+    await sweepPublicationReviews(h.env());
+    const alone: string[] = [];
+    const batches: string[][] = [];
+    const watching = hookedD1(realD1(h.db), {
+      statement: (sql, inBatch) => {
+        if (!inBatch && /UPDATE (publication_reviews|publication_requests)/.test(sql)) {
+          alone.push(sql);
+        }
+      },
+      batch: (sqls) => void batches.push(sqls),
+    });
+    await h.result(
+      reviewId,
+      { outcome: "reported", report: failing() },
+      undefined,
+      h.env({ DB: watching }),
+    );
+    expect(batches).toHaveLength(1);
+    expect(batches[0].some((q) => q.includes("SET status = 'blocked'"))).toBe(true);
+    expect(batches[0].some((q) => q.includes("SET identifier_screen_emailed_at = NULL"))).toBe(
+      true,
+    );
+    expect(batches[0].filter((q) => q.includes("SET state = ?, verdict = ?"))).toHaveLength(2);
+    // Nothing that changes a review or a request ran outside it (the mail lease is the mail's own).
+    expect(alone.filter((q) => !q.includes("identifier_screen_mail_claimed_at"))).toEqual([]);
+  });
+
+  test("a replayed or unmatched store never re-blocks, and a replayed late one never re-arms the mail", async () => {
+    const { requestId, reviewId } = dispatched({ claimed: true, minutesAgo: 45 });
+    const nonce = h.nonceOf(reviewId) as string;
+    await sweepPublicationReviews(h.env());
+    const outcome = parsePublicationCallbackOutcome({
+      outcome: "reported",
+      report: failing(),
+      error: undefined,
+    });
+
+    // A stranger's nonce finds nothing to store, and so nothing to re-block.
+    expect(
+      await storePublicationReviewResult(h.env(), reviewId, PROD_DATASET, "not-the-nonce", outcome),
+    ).toEqual({ stored: false, state: null });
+    expect(h.requestRow(requestId).status).toBe("requested");
+    expect(h.requestRow(requestId).identifier_screen_emailed_at).not.toBeNull();
+
+    const first = await storePublicationReviewResult(
+      h.env(),
+      reviewId,
+      PROD_DATASET,
+      nonce,
+      outcome,
+    );
+    expect(first).toEqual({ stored: true, state: "reported" });
+    expect(h.requestRow(requestId).status).toBe("blocked");
+
+    // The depositor fixed the name and asked again at the same commit: the request waits once
+    // more, with the mail already sent. A replay of the old callback must change neither.
+    h.db.run(
+      `UPDATE publication_requests SET status = 'requested', block_reason = NULL,
+              min_requirements_reasons = NULL, identifier_screen_emailed_at = datetime('now')
+        WHERE id = ?`,
+      [requestId],
+    );
+    const stamp = h.requestRow(requestId).identifier_screen_emailed_at;
+    const replay = await storePublicationReviewResult(
+      h.env(),
+      reviewId,
+      PROD_DATASET,
+      nonce,
+      outcome,
+    );
+    expect(replay).toEqual({ stored: false, state: null });
+    expect(h.requestRow(requestId)).toMatchObject({
+      status: "requested",
+      block_reason: null,
+      min_requirements_reasons: null,
+      identifier_screen_emailed_at: stamp,
+    });
+  });
+
   test("the depositor is not mailed about it", async () => {
     // Administrators only (ADR 0101, section 6); the depositor reads the block on the status view.
     seedAdmin();
-    const { reviewId, requestId } = dispatched({ mailed: false });
+    const { reviewId, requestId } = dispatched({ claimed: true, mailed: false });
     const depositor = h.db
       .query(
         "SELECT u.email FROM publication_requests pr JOIN users u ON u.id = pr.requested_by WHERE pr.id = ?",
@@ -914,7 +1125,7 @@ describe("the watchdog", () => {
 
   test("a late report still lands, re-arms the mail and mails again", async () => {
     seedAdmin();
-    const { requestId, reviewId } = dispatched({ minutesAgo: 45, mailed: false });
+    const { requestId, reviewId } = dispatched({ claimed: true, minutesAgo: 45, mailed: false });
     const token = await h.tokenFor(reviewId);
     await withFakeResend(async (calls) => {
       await sweepPublicationReviews(h.env());
@@ -934,7 +1145,7 @@ describe("the watchdog", () => {
   });
 
   test("a late report for a commit that is no longer the request's does not re-arm its mail", async () => {
-    const { requestId, reviewId } = dispatched({ minutesAgo: 45 });
+    const { requestId, reviewId } = dispatched({ claimed: true, minutesAgo: 45 });
     const token = await h.tokenFor(reviewId);
     await sweepPublicationReviews(h.env());
     h.db.run(
@@ -953,20 +1164,20 @@ describe("the watchdog", () => {
 
   test("a row the watchdog flips between the read and the write is still stored as late", async () => {
     // The route finds the row `dispatched`; the watchdog moves it to `unreported` before the
-    // write. The write must still be recognised as a late report and re-arm the mail: a single
-    // write that decided "late" from the earlier read would send nothing here.
+    // result is written. The write must still be recognised as a late report and re-arm the mail:
+    // a write that decided "late" from the earlier read would send nothing here.
     seedAdmin();
-    const { requestId, reviewId } = dispatched({ minutesAgo: 45, mailed: true });
+    const { requestId, reviewId } = dispatched({ claimed: true, minutesAgo: 45, mailed: true });
     const token = await h.tokenFor(reviewId);
     let flipped = false;
-    const racing = interceptingD1(realD1(h.db), (sql) => {
-      if (!flipped && sql.includes("SET state = ?, verdict = ?")) {
+    const racing = hookedD1(realD1(h.db), {
+      batch: () => {
         flipped = true;
         h.db.run(
           "UPDATE publication_reviews SET state = 'unreported', decided_at = datetime('now') WHERE id = ? AND state = 'dispatched'",
           [reviewId],
         );
-      }
+      },
     });
     await withFakeResend(async (calls) => {
       const res = await h.result(
@@ -1312,7 +1523,7 @@ describe("no secret reaches the Worker's logs", () => {
   }
 
   test("a wrong token, a claim, a refused report and a result print no token, nonce or secret", async () => {
-    const { reviewId } = dispatched();
+    const { reviewId } = dispatched({ claimed: true });
     const good = await h.tokenFor(reviewId);
     const nonce = h.nonceOf(reviewId) as string;
     const bad = `${good.slice(0, -4)}0000`;
@@ -1349,7 +1560,7 @@ describe("no secret reaches the Worker's logs", () => {
   });
 
   test("a hostile report's text is not logged when it is stored either", async () => {
-    const { reviewId } = dispatched();
+    const { reviewId } = dispatched({ claimed: true });
     const out = await captured(async () => {
       await h.result(reviewId, {
         outcome: "reported",

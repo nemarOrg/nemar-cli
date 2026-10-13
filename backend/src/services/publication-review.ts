@@ -98,7 +98,7 @@ function sqlWord(w: string): string {
  * What an error is called in a log line: a class or a status, never its message, which may carry
  * text from a service that echoed something it was sent.
  */
-function errClass(err: unknown): string {
+export function errClass(err: unknown): string {
   if (!(err instanceof Error)) return "unknown";
   if (err.name === "TimeoutError" || err.name === "AbortError") return "timeout";
   const status = /^Publication review dispatch rejected: HTTP (\d{3})$/.exec(err.message);
@@ -750,33 +750,62 @@ export async function claimPublicationReview(
 // ---------------------------------------------------------------------------------------------
 
 /**
+ * The row a result may be stored on: waiting under THIS nonce, in one of `states`, and, for a
+ * report, claimed. One predicate, spliced into the write of the result and into the guard of every
+ * statement that must fire only if that write will take effect.
+ */
+function waitingRow(states: readonly ("dispatched" | "unreported")[], claimed: boolean): string {
+  return `id = ? AND dataset_id = ? AND nonce = ? AND state IN (${states.map(sqlWord).join(", ")})${
+    claimed ? " AND claimed_at IS NOT NULL" : ""
+  }`;
+}
+
+/**
+ * The guard of a statement that follows a result: the review row is still waiting as `waitingRow`
+ * says. Evaluated BEFORE the write of the result in the same batch, so it is true exactly when
+ * that write will match: a batch is one transaction, and nothing can move the row between them.
+ */
+function whileWaiting(states: readonly ("dispatched" | "unreported")[], claimed: boolean): string {
+  return `EXISTS (SELECT 1 FROM publication_reviews WHERE ${waitingRow(states, claimed)})`;
+}
+
+/**
  * A request whose submission minimum failed at the reviewed commit goes back to `blocked`, the
  * transition the blocked-request sweep already makes, so the depositor can fix it and request
  * again. Only the request the review is the one in force for (still `requested`, same release
  * kind, same screened commit), so a result for a superseded commit changes nothing. The screen's
  * columns are facts about that commit and stay; the depositor's re-request resets them.
+ *
+ * Fires only while the claimed review it came from is still waiting under its nonce (the last
+ * three binds), so a replay, a stranger's nonce or a report nobody claimed re-blocks nothing.
  */
 export const REBLOCK_SQL = `UPDATE publication_requests
     SET status = 'blocked', block_reason = 'min_requirements_failed',
         min_requirements_reasons = ?, updated_at = datetime('now')
   WHERE id = ? AND status = 'requested' AND anonymous = ?
-    AND ${screenedHeadSql("publication_requests")} = ?`;
+    AND ${screenedHeadSql("publication_requests")} = ?
+    AND ${whileWaiting(["dispatched", "unreported"], true)}`;
 
 /**
  * A late report re-arms the request's mail: the mail already sent said the review did not report.
- * Only for the request whose review this is, as above.
+ * Only for the request whose review this is, as above, and only while the review waits as
+ * `unreported` (the last three binds), so a replay does not re-arm a mail that was since sent.
+ * `claimed` is whether the result being stored is a report, which needs a claim.
  */
-export const REARM_MAIL_SQL = `UPDATE publication_requests
+export function rearmMailSql(claimed: boolean): string {
+  return `UPDATE publication_requests
     SET identifier_screen_emailed_at = NULL, identifier_screen_mail_claimed_at = NULL
   WHERE id = ? AND status IN ('requested', 'blocked') AND anonymous = ?
-    AND ${screenedHeadSql("publication_requests")} = ?`;
+    AND ${screenedHeadSql("publication_requests")} = ?
+    AND ${whileWaiting(["unreported"], claimed)}`;
+}
 
 /** The write of a result, keyed on the nonce and on the state the row waits in. */
-function storeSql(from: "unreported" | "dispatched"): string {
+function storeSql(from: "unreported" | "dispatched", claimed: boolean): string {
   return `UPDATE publication_reviews
       SET state = ?, verdict = ?, detail = ?, report = ?, nonce = NULL,
           decided_at = datetime('now')
-    WHERE id = ? AND dataset_id = ? AND nonce = ? AND state = '${from}'`;
+    WHERE ${waitingRow([from], claimed)}`;
 }
 
 /**
@@ -790,12 +819,18 @@ function storeSql(from: "unreported" | "dispatched"): string {
  * whose echoed commit or release kind differs from the row's is refused as `report_invalid`: a
  * dispatch payload cannot change what a stored review claims to be about.
  *
- * Two conditional writes, so a watchdog that flips the row between the read and the write cannot
- * hide the late path: `dispatched` first, then `unreported` (a late report, which re-arms the
- * mail). The order matters: the state only moves from `dispatched` to `unreported`, so a flip
- * between the two writes is found by the second. The flag is not consulted: a result whose run
- * was already claimed is stored whatever the flag says, because the call was spent and the record
- * stays honest.
+ * ONE batch, which D1 runs as a transaction: the re-block (when the report says a minimum failed),
+ * the mail re-arm (when the row waits as `unreported`) and the two writes of the result, `dispatched`
+ * first and then `unreported`. Each follow-on is guarded by the very predicate its write uses and
+ * runs ahead of it, so it fires exactly when the write takes effect, and a fault on any of them
+ * leaves nothing stored and the token unspent, which is what lets the job's retry land. The
+ * state only moves from `dispatched` to `unreported`, so no gap lies between the two writes. The
+ * flag is not consulted: a result whose run was already claimed is stored whatever the flag says,
+ * because the call was spent and the record stays honest.
+ *
+ * A report (which implies a model call) needs a claim; an error word does not, so a failure before
+ * the claim (a payload the job could not validate, a fetch that failed) is still recorded.
+ * `refusal` says why nothing was stored when that is the reason.
  */
 export async function storePublicationReviewResult(
   env: Bindings,
@@ -803,7 +838,11 @@ export async function storePublicationReviewResult(
   datasetId: string,
   nonce: string,
   result: PublicationCallbackOutcome,
-): Promise<{ stored: boolean; state: PublicationReviewState | null }> {
+): Promise<{
+  stored: boolean;
+  state: PublicationReviewState | null;
+  refusal?: "unclaimed";
+}> {
   const db = env.DB;
   const row = await readReview(db, reviewId);
   if (!row || row.datasetId !== datasetId) return { stored: false, state: null };
@@ -829,41 +868,49 @@ export async function storePublicationReviewResult(
     datasetId,
     nonce,
   ];
+  const guard = [reviewId, datasetId, nonce];
+  const claimed = reported !== null;
+  const kind = row.anonymous ? 1 : 0;
 
-  // `dispatched` first: a row only ever moves from `dispatched` to `unreported`, never back, so a
-  // watchdog that lands between the two writes leaves the second one to find it. Tried the other
-  // way round, a flip between them makes BOTH match nothing and the report is lost.
-  let late = false;
-  let res = await db
-    .prepare(storeSql("dispatched"))
-    .bind(...binds)
-    .run();
-  if ((res.meta.changes ?? 0) !== 1) {
-    late = true;
-    res = await db
-      .prepare(storeSql("unreported"))
-      .bind(...binds)
-      .run();
-  }
-  if ((res.meta.changes ?? 0) !== 1) return { stored: false, state: null };
-
+  const statements: D1PreparedStatement[] = [];
   if (reported && reported.evidence.minimums === "failed") {
     const reasons = reported.evidence.minimum_failures.map(minimumFailureSentence);
-    const reblocked = await db
-      .prepare(REBLOCK_SQL)
-      .bind(JSON.stringify(reasons), row.requestId, row.anonymous ? 1 : 0, row.headSha)
-      .run();
-    if ((reblocked.meta.changes ?? 0) === 1) {
-      console.log(
-        `[publication-review] review ${reviewId} (${datasetId}): request ${row.requestId} blocked (min_requirements_failed)`,
-      );
-    }
+    statements.push(
+      db
+        .prepare(REBLOCK_SQL)
+        .bind(JSON.stringify(reasons), row.requestId, kind, row.headSha, ...guard),
+    );
   }
-  if (late) {
-    await db
-      .prepare(REARM_MAIL_SQL)
-      .bind(row.requestId, row.anonymous ? 1 : 0, row.headSha)
-      .run();
+  statements.push(
+    db.prepare(rearmMailSql(claimed)).bind(row.requestId, kind, row.headSha, ...guard),
+  );
+  statements.push(db.prepare(storeSql("dispatched", claimed)).bind(...binds));
+  statements.push(db.prepare(storeSql("unreported", claimed)).bind(...binds));
+
+  const results = await db.batch(statements);
+  const fromDispatched = (results[statements.length - 2]?.meta?.changes ?? 0) === 1;
+  const fromUnreported = (results[statements.length - 1]?.meta?.changes ?? 0) === 1;
+  if (!fromDispatched && !fromUnreported) {
+    // Nothing waited for this result: a duplicate, a restart that replaced the nonce, or a report
+    // nobody claimed (which the claim, and not this route, must precede).
+    const now = await readReview(db, reviewId);
+    const unclaimed =
+      claimed &&
+      now !== null &&
+      now.claimedAt === null &&
+      (now.state === "dispatched" || now.state === "unreported");
+    return unclaimed
+      ? { stored: false, state: null, refusal: "unclaimed" }
+      : { stored: false, state: null };
+  }
+  if (
+    reported &&
+    reported.evidence.minimums === "failed" &&
+    (results[0]?.meta?.changes ?? 0) === 1
+  ) {
+    console.log(
+      `[publication-review] review ${reviewId} (${datasetId}): request ${row.requestId} blocked (min_requirements_failed)`,
+    );
   }
   await tryMail(env, row.requestId);
   return { stored: true, state: reported ? "reported" : "errored" };

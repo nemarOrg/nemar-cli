@@ -82,6 +82,16 @@ export interface Harness {
   ): Promise<{ status: number; body: Record<string, unknown> }>;
 }
 
+/** A route's answer as an object: its JSON, or `{ raw }` for a body that is not JSON (a bare 500). */
+async function bodyOf(res: Response): Promise<Record<string, unknown>> {
+  const text = await res.text();
+  try {
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    return { raw: text };
+  }
+}
+
 export function createHarness(): Harness {
   let server: Server;
   let db: Database;
@@ -164,7 +174,7 @@ export function createHarness(): Harness {
         },
         o.bindings ?? h.env(),
       );
-      return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+      return { status: res.status, body: await bodyOf(res) };
     },
     rearmScreen(requestId) {
       db.run(
@@ -189,7 +199,7 @@ export function createHarness(): Harness {
         },
         bindings ?? h.env(),
       );
-      return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+      return { status: res.status, body: await bodyOf(res) };
     },
     async result(reviewId, body, token, bindings, datasetId = PROD_DATASET) {
       const res = await app.request(
@@ -204,7 +214,7 @@ export function createHarness(): Harness {
         },
         bindings ?? h.env(),
       );
-      return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+      return { status: res.status, body: await bodyOf(res) };
     },
   };
 
@@ -259,11 +269,11 @@ export function reportFor(
 /** What {@link hookedD1} runs, and when. */
 export interface D1Hooks {
   /**
-   * Before every statement, whether it runs alone or inside a batch. It is synchronous because a
-   * batched statement runs inside the transaction, which a hook cannot wait out. A hook that
-   * throws fails that statement (and so the whole batch, which D1 rolls back).
+   * Before every statement, whether it runs alone or inside a batch (`inBatch`). It is
+   * synchronous because a batched statement runs inside the transaction, which a hook cannot wait
+   * out. A hook that throws fails that statement (and so the whole batch, which D1 rolls back).
    */
-  statement?: (sql: string) => void;
+  statement?: (sql: string, inBatch: boolean) => void;
   /** Before a batch begins, with the SQL of every statement in it, ahead of its transaction. */
   batch?: (sqls: string[]) => void | Promise<void>;
 }
@@ -292,19 +302,19 @@ export function hookedD1(inner: D1Database, hooks: D1Hooks): D1Database {
           return api;
         },
         run() {
-          hooks.statement?.(sql);
+          hooks.statement?.(sql, false);
           return stmt.run();
         },
         first() {
-          hooks.statement?.(sql);
+          hooks.statement?.(sql, false);
           return stmt.first();
         },
         all() {
-          hooks.statement?.(sql);
+          hooks.statement?.(sql, false);
           return stmt.all();
         },
         __execForBatch() {
-          hooks.statement?.(sql);
+          hooks.statement?.(sql, true);
           return stmt.__execForBatch();
         },
       };

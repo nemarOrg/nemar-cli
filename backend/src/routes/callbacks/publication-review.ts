@@ -34,6 +34,7 @@ import { isValidDatasetId } from "../../services/datasetId.js";
 import { verifyPublicationReviewCallbackToken } from "../../services/github/callback-tokens.js";
 import {
   claimPublicationReview,
+  errClass,
   pendingPublicationReviewNonce,
   storePublicationReviewResult,
 } from "../../services/publication-review.js";
@@ -114,13 +115,25 @@ export function registerPublicationReviewRoutes(webhooks: WebhookRouter): void {
           `[publication-review-result] review ${v.reviewId} (${v.datasetId}): report refused (${code})`,
         ),
     );
-    const stored = await storePublicationReviewResult(
-      c.env,
-      v.reviewId,
-      v.datasetId,
-      v.nonce,
-      outcome,
-    );
+    let stored: Awaited<ReturnType<typeof storePublicationReviewResult>>;
+    try {
+      stored = await storePublicationReviewResult(c.env, v.reviewId, v.datasetId, v.nonce, outcome);
+    } catch (err) {
+      // Nothing was stored and the token is not spent (the store is one transaction), so the job
+      // may try again. The class of the error is logged, never its message.
+      console.error(
+        `[publication-review-result] review ${v.reviewId} (${v.datasetId}): store failed (${errClass(err)})`,
+      );
+      return c.json({ error: "The result could not be stored; try again" }, 500);
+    }
+    if (stored.refusal === "unclaimed") {
+      // A report implies a model call, and a call is only made by a run that took its claim.
+      // Answered as a row that is not waiting is, so the answer says nothing more than that.
+      console.warn(
+        `[publication-review-result] review ${v.reviewId} (${v.datasetId}): report refused (not_claimed)`,
+      );
+      return c.json(UNAUTHORIZED, 401);
+    }
     if (!stored.stored) {
       // Verified, but another writer (a duplicate callback) won the one conditional UPDATE
       // between the read and the write. Harmless.
