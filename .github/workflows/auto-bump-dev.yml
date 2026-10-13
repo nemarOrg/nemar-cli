@@ -38,6 +38,8 @@ jobs:
       && !startsWith(github.event.head_commit.message, 'chore: bump version to')
       && !contains(github.event.head_commit.message, '[skip-bump]')
     runs-on: ubuntu-latest
+    # p95 16 s (50 green runs to 2026-10-13); 10 is the floor.
+    timeout-minutes: 10
     steps:
       - name: Checkout dev
         uses: actions/checkout@v4

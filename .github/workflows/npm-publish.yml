@@ -31,6 +31,8 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # p95 0.5 min (50 green runs to 2026-10-13); 10 is the floor.
+    timeout-minutes: 10
     environment: npm
     permissions:
       contents: read

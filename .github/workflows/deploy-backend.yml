@@ -26,6 +26,8 @@ jobs:
   # Detect which environment to deploy to
   detect-environment:
     runs-on: ubuntu-latest
+    # p95 4 s (50 green runs to 2026-10-13); 10 is the floor.
+    timeout-minutes: 10
     outputs:
       environment: ${{ steps.detect.outputs.environment }}
     steps:
@@ -48,6 +50,8 @@ jobs:
     needs: detect-environment
     if: needs.detect-environment.outputs.environment != ''
     runs-on: ubuntu-latest
+    # p95 21.8 min (50 green runs to 2026-10-13), so twice that.
+    timeout-minutes: 44
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -62,7 +66,10 @@ jobs:
         with:
           deno-version: v2.x
 
+      # Under 30 s at p95, but the Ubuntu mirror can stall on this one package for minutes,
+      # and #1667 saw the same install hang for an hour.
       - name: Install git-annex
+        timeout-minutes: 10
         run: |
           sudo apt-get update
           sudo apt-get install -y git-annex
@@ -108,6 +115,10 @@ jobs:
     # would not block the deploy (the whole point of #897).
     if: needs.detect-environment.outputs.environment == 'dev' && needs.test-gate.result == 'success'
     runs-on: ubuntu-latest
+    # p95 0.9 min (42 green runs to 2026-10-13). 20, not the 10 floor: the two smoke
+    # loops below can take 7 minutes on their own, and a limit that cancels a D1
+    # migration midway is worse than a slow deploy (see the concurrency note above).
+    timeout-minutes: 20
     environment: development
     steps:
       - name: Checkout code
@@ -238,6 +249,8 @@ jobs:
     # on a red build.
     if: needs.detect-environment.outputs.environment == 'production' && needs.test-gate.result == 'success'
     runs-on: ubuntu-latest
+    # p95 0.7 min (8 green runs to 2026-10-13); 20 for the same reasons as deploy-dev.
+    timeout-minutes: 20
     environment: production
     steps:
       - name: Checkout code

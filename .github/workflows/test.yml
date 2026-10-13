@@ -40,6 +40,8 @@ jobs:
   # Check what files changed to determine which tests to run
   changes:
     runs-on: ubuntu-latest
+    # p95 10 s (50 green runs to 2026-10-13). Bounded so a hang costs minutes, not the 360-minute default.
+    timeout-minutes: 10
     outputs:
       cli: ${{ steps.filter.outputs.cli }}
       backend: ${{ steps.filter.outputs.backend }}
@@ -635,7 +637,8 @@ jobs:
   # when the suites were not due, which is what the single job did.
   scrub-tools:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # p95 7 s (12 green runs to 2026-10-13); 10 is the floor.
+    timeout-minutes: 10
     needs: [changes, scrub-tools-shard]
     if: always() && needs.changes.outputs.scrub_suites == 'true'
     steps:
@@ -698,6 +701,8 @@ jobs:
   # Type check and lint - always runs on code changes
   lint:
     runs-on: ubuntu-latest
+    # p95 0.5 min (44 green runs to 2026-10-13); 10 is the floor.
+    timeout-minutes: 10
     needs: changes
     # Kept identical to unit-pure's trigger so the two jobs run on the same changes.
     # (A job skipped by its `if:` reports Success and does not block a required check.
@@ -749,6 +754,9 @@ jobs:
   # into dev. See https://docs.nemar.org/admin/operations/access-policies/ for the tiering rationale.
   unit-pure:
     runs-on: ubuntu-latest
+    # p95 21.7 min (44 green runs to 2026-10-13), so twice that. #1667: this job once
+    # hung for an hour installing git-annex; that step has its own limit below.
+    timeout-minutes: 44
     needs: changes
     # `decisions` is here, not only on `lint`: test/adr-index.unit.test.ts is the
     # thing that checks an ADR against the index, and `unit-pure` is the only job
@@ -770,7 +778,10 @@ jobs:
         with:
           deno-version: v2.x
 
+      # Under 30 s at p95, but the Ubuntu mirror can stall on this one package for minutes
+      # (see scrub-tools-shard), and #1667 saw it hang for an hour.
       - name: Install git-annex
+        timeout-minutes: 10
         run: |
           sudo apt-get update
           sudo apt-get install -y git-annex
@@ -938,6 +949,8 @@ jobs:
   # required, and nightly-tests.yml provides scheduled hard coverage + issue.
   integration-dev:
     runs-on: ubuntu-latest
+    # p95 11.5 min (42 green runs to 2026-10-13), so twice that.
+    timeout-minutes: 24
     needs: changes
     if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.shared == 'true'
     env:
@@ -960,7 +973,10 @@ jobs:
         with:
           deno-version: v2.x
 
+      # Under 30 s at p95, but the Ubuntu mirror can stall on this one package for minutes
+      # (see scrub-tools-shard), and #1667 saw it hang for an hour.
       - name: Install git-annex
+        timeout-minutes: 10
         run: |
           sudo apt-get update
           sudo apt-get install -y git-annex
@@ -1005,6 +1021,8 @@ jobs:
   # API integration tests - uses dev environment (no rate limiting)
   api-test:
     runs-on: ubuntu-latest
+    # p95 0.9 min (42 green runs to 2026-10-13); 10 is the floor.
+    timeout-minutes: 10
     needs: changes
     if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.tests == 'true'
     steps:
@@ -1040,7 +1058,10 @@ jobs:
   # Runs on PRs to dev (basic) and main (comprehensive)
   e2e-sandbox:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # p95 5.7 min (21 green runs to 2026-10-13), so about twice that. The npm wait
+    # below gives up after 30 tries and falls back to `dev`; it has no step limit
+    # of its own, because cutting it short would turn that fallback into a failure.
+    timeout-minutes: 12
     needs: changes
     if: |
       github.event_name == 'pull_request' &&
@@ -1095,6 +1116,7 @@ jobs:
         run: bun install
 
       - name: Run E2E sandbox tests
+        timeout-minutes: 10
         env:
           TEST_API_URL: https://nemar-api-dev.sccn-org.workers.dev
           TEST_USER_API_KEY: ${{ secrets.TEST_USER_API_KEY }}
@@ -1140,7 +1162,9 @@ jobs:
         with:
           deno-version: v2.x
 
+      # Same mirror stall as git-annex elsewhere; inside this job's 10-minute limit.
       - name: Install DataLad and git-annex
+        timeout-minutes: 8
         run: |
           sudo apt-get update
           sudo apt-get install -y git-annex
@@ -1170,6 +1194,7 @@ jobs:
             --issue 1321
 
       - name: Run E2E upload tests against dev environment
+        timeout-minutes: 8
         env:
           TEST_API_URL: https://nemar-api-dev.sccn-org.workers.dev
           TEST_ADMIN_API_KEY: ${{ secrets.TEST_ADMIN_API_KEY }}
@@ -1182,6 +1207,8 @@ jobs:
   # Zenodo sandbox tests - verifies DOI creation workflows
   zenodo-sandbox-test:
     runs-on: ubuntu-latest
+    # p95 0.3 min (42 green runs to 2026-10-13); 10 is the floor.
+    timeout-minutes: 10
     needs: changes
     if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.tests == 'true'
     steps:
@@ -1223,6 +1250,8 @@ jobs:
   # a second backstop.
   passwordless-auth-test:
     runs-on: ubuntu-latest
+    # p95 0.5 min (2 green runs to 2026-10-13); 10 is the floor.
+    timeout-minutes: 10
     needs: changes
     if: |
       needs.changes.outputs.email == 'true' &&
