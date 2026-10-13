@@ -451,19 +451,48 @@ function summaryOf(d: DerivedPublicationReview): PublicationReviewSummary {
 }
 
 /**
- * The summary of a request whose review could not be read: not a pass, and not a reason to fail
- * the rest of a list. The fixed headline of the mail's unreadable section and the reason
- * `review_could_not_run`, so a client that renders the server's words says the same everywhere.
+ * The summary of a request whose review could not be read: not a reason to fail the rest of a list.
+ *
+ * With the review ON it is the `unreadable` kind: `action_required`, never a pass, in the shared
+ * words, with no reason (the cure of `review_could_not_run`, "start it again", is wrong advice for
+ * a read fault). With it OFF nothing is gated and nothing is assessed, so it is what a request with
+ * no review on record is while the review is off: the not-assessed `off` summary, with no outcome
+ * and no reason. That is also what the admin email does, so the list and the mail cannot disagree
+ * about a request whose rows cannot be read.
  */
-function unreadableSummary(enabled: boolean): PublicationReviewSummary {
+function unreadableSummary(enabled: boolean, datasetId: string): PublicationReviewSummary {
+  if (!enabled) {
+    const off = describePublicationReview({
+      datasetId,
+      applies: true,
+      enabled: false,
+      outcome: null,
+      reasons: [],
+      row: { kind: "none" },
+      model: null,
+      head: null,
+      version: null,
+    });
+    return {
+      kind: "off",
+      enabled: false,
+      gate: "off",
+      outcome: null,
+      headline: off.headline,
+      tone: off.tone,
+      reasons: [],
+      review_id: null,
+      head_sha: null,
+    };
+  }
   return {
-    kind: enabled ? "decided" : "off",
-    enabled,
-    gate: enabled ? "enforced" : "off",
+    kind: "unreadable",
+    enabled: true,
+    gate: "enforced",
     outcome: "action_required",
     headline: REVIEW_UNREADABLE_HEADLINE,
     tone: "warn",
-    reasons: ["review_could_not_run"],
+    reasons: [],
     review_id: null,
     head_sha: null,
   };
@@ -526,7 +555,7 @@ export async function publicationReviewSummaries(
       ...(await Promise.all(
         batch.map(async (item, offset) => {
           const index = start + offset;
-          if (unreadable.has(index)) return unreadableSummary(enabled);
+          if (unreadable.has(index)) return unreadableSummary(enabled, item.request.dataset_id);
           try {
             const key = keys[index];
             return summaryOf(
@@ -542,7 +571,7 @@ export async function publicationReviewSummaries(
             console.error(
               `[publication-review] could not read the review of request ${item.request.id} for the list (${readFailureWords(err)})`,
             );
-            return unreadableSummary(enabled);
+            return unreadableSummary(enabled, item.request.dataset_id);
           }
         }),
       )),

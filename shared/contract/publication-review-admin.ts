@@ -51,6 +51,12 @@ export type PublicationReviewEnvironment = "production" | "non-production";
  *  - `running`: the review in force was handed to GitHub and has not reported or aged out.
  *  - `decided`: the review in force reached a terminal state (reported, declined, errored or
  *    unreported); the outcome and its reasons say what that means.
+ *  - `unreadable`: the review is ON and the Worker could not read what it needed to say anything
+ *    about this request (a fault of its own reads, not a state of the request). The outcome is
+ *    `action_required`, never a pass, with no reason: the cure of `review_could_not_run`, "start
+ *    it again", is wrong advice for a read fault, so none of the reasons is reused. With the
+ *    review OFF a failed read is not this kind: nothing is gated, so the row reads as `off`, not
+ *    assessed, exactly as the admin email leaves it out.
  */
 export const PUBLICATION_REVIEW_VIEW_KINDS = [
   "not_applicable",
@@ -58,6 +64,7 @@ export const PUBLICATION_REVIEW_VIEW_KINDS = [
   "not_reviewed",
   "running",
   "decided",
+  "unreadable",
 ] as const;
 export type PublicationReviewViewKind = (typeof PUBLICATION_REVIEW_VIEW_KINDS)[number];
 
@@ -91,7 +98,8 @@ export interface PublicationReviewSummary {
    * Null when the request is not assessed: `not_applicable`, or no review is on record and none
    * gates the request (`off`, or a `not_reviewed` request that is over). Such a row has no reasons
    * either. An open request with the review on and no review on record is assessed, and reads
-   * `action_required` with `review_not_started`.
+   * `action_required` with `review_not_started`. The one assessed row with an outcome and no
+   * reason is `unreadable`.
    */
   outcome: PublicationOutcome | null;
   headline: string;

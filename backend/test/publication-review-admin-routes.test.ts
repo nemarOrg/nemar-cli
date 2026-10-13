@@ -25,6 +25,7 @@ import {
   REASONS,
   REASON_CODES,
   REVIEW_OVERDUE_VIEW_MINUTES,
+  REVIEW_UNREADABLE_HEADLINE,
   type ReasonCode,
 } from "../../shared/publication-review";
 import { adminRoutes } from "../src/routes/admin";
@@ -939,15 +940,16 @@ describe("the list's cost and isolation", () => {
         reasons: [],
       });
     }
-    // The poisoned row is not a pass, and says so in the fixed words.
+    // The poisoned row is not a pass, and says so in the fixed words. It has no reason: "start it
+    // again", the cure of review_could_not_run, is wrong advice for a fault of our own reads.
     expect(rows.find((r) => r.dataset_id === poisoned)?.publication_review).toEqual({
-      kind: "decided",
+      kind: "unreadable",
       enabled: true,
       gate: "enforced",
       outcome: "action_required",
-      headline: "Publication review: could not be read",
+      headline: REVIEW_UNREADABLE_HEADLINE,
       tone: "warn",
-      reasons: ["review_could_not_run"],
+      reasons: [],
       review_id: null,
       head_sha: null,
     });
@@ -979,9 +981,10 @@ describe("the list's cost and isolation", () => {
     });
     for (const id of [waiting, over]) {
       expect(rows.find((r) => r.dataset_id === id)?.publication_review).toMatchObject({
+        kind: "unreadable",
         outcome: "action_required",
-        headline: "Publication review: could not be read",
-        reasons: ["review_could_not_run"],
+        headline: REVIEW_UNREADABLE_HEADLINE,
+        reasons: [],
       });
     }
     // A mirror needs no review row, so there was nothing to fail to read.
@@ -989,6 +992,58 @@ describe("the list's cost and isolation", () => {
       "not_applicable",
     );
     expect(text).not.toContain("simulated");
+  });
+
+  test("with the review off, a read that fails leaves the row not assessed, as the mail does", async () => {
+    const waiting = listed("requested");
+    const over = listed("published");
+    const off = { PUBLICATION_REVIEW_ENABLED: undefined };
+    const unreadableRows = env({
+      ...off,
+      DB: interceptingD1(realD1(db), (sql) => {
+        if (/^\s*SELECT .*FROM publication_reviews/s.test(sql)) {
+          throw new Error("no such table: publication_reviews");
+        }
+      }),
+    });
+    const unreadableFacts = env({
+      ...off,
+      DB: interceptingD1(realD1(db), (sql) => {
+        if (/FROM dataset_versions/.test(sql)) throw new Error("D1_ERROR: simulated SQL text");
+      }),
+    });
+    // The row reads fail for both requests; the version lookup only for the one that could still
+    // be approved (a request that is over is shown from its stored review alone).
+    for (const [failing, affected] of [
+      [unreadableRows, [waiting, over]],
+      [unreadableFacts, [waiting]],
+    ] as const) {
+      let rows: ListRow[] = [];
+      await logged(async () => {
+        ({ rows } = await listBody(failing));
+      });
+      // Not "action required": a review that is off gates nothing, so a read that failed has
+      // nothing to be unknown about. No outcome and no reason, whichever read failed.
+      for (const id of affected) {
+        expect(rows.find((r) => r.dataset_id === id)?.publication_review).toEqual({
+          kind: "off",
+          enabled: false,
+          gate: "off",
+          outcome: null,
+          headline: "Publication review: not reviewed (the automated review is off)",
+          tone: "note",
+          reasons: [],
+          review_id: null,
+          head_sha: null,
+        });
+      }
+    }
+    // The same fault with the review on is the unreadable row, which is never a pass.
+    let on: ListRow[] = [];
+    await logged(async () => {
+      ({ rows: on } = await listBody(env({ DB: unreadableRows.DB })));
+    });
+    expect(on.find((r) => r.dataset_id === waiting)?.publication_review.kind).toBe("unreadable");
   });
 
   test("the rows that could still be approved are read a few at a time, never all at once", async () => {

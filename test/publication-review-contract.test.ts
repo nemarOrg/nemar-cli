@@ -517,6 +517,7 @@ describe("the closed lists are the ones ADR 0102 and the design note name", () =
       "not_reviewed",
       "running",
       "decided",
+      "unreadable",
     ]);
     expect([...START_REASONS]).toEqual([
       "dispatched",
