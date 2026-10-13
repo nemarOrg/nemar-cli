@@ -411,3 +411,92 @@ describe("input and isolation", () => {
     expect(h.env().ENVIRONMENT).toBe("test");
   });
 });
+
+describe.skipIf(process.platform === "win32")("a command run on a terminal", () => {
+  /** A terminal gets the CLI's colours; the lines are asserted without them. */
+  const ESC = String.fromCharCode(27);
+  const withoutColour = (text: string) => text.replace(new RegExp(`${ESC}\\[[0-9;]*m`, "g"), "");
+
+  /** Enough requests that `list` writes tens of kilobytes, which is what a late chunk needs. */
+  function seedMany(n: number): void {
+    for (let i = 0; i < n; i++) {
+      seedScreenedRequest(h.db, { datasetId: `nm${String(1000 + i).padStart(6, "0")}` });
+    }
+  }
+
+  test("the transcript read after the exit still holds the last line of a long output", async () => {
+    seedMany(250);
+
+    // The driver does nothing: the command writes everything and exits before it is looked at.
+    const r = await h.cli(["admin", "publish", "list"], { terminal: async () => undefined });
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("nm001249");
+    expect(withoutColour(r.stdout).trimEnd().endsWith("so no review gates an approval.")).toBe(
+      true,
+    );
+  });
+
+  test("waitFor still finds the last line of a command that has already exited", async () => {
+    seedMany(250);
+
+    const r = await h.cli(["admin", "publish", "list"], {
+      terminal: async (t) => {
+        await Bun.sleep(1_500);
+        await t.waitFor("so no review gates an approval.");
+      },
+    });
+
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("waitFor says the command ended when the text never comes, and shows what it wrote", async () => {
+    seedScreenedRequest(h.db, { datasetId: DATASET });
+
+    const run = h.cli(["admin", "publish", "list"], {
+      terminal: async (t) => {
+        await t.waitFor("a line the command never writes");
+      },
+    });
+
+    await expect(run).rejects.toThrow(/the command ended no "a line the command never writes"/);
+  });
+
+  test("standard output can be a pipe while standard input and standard error stay the terminal", async () => {
+    seedScreenedRequest(h.db, { datasetId: DATASET });
+
+    const ok = await h.cli(["admin", "publish", "list"], {
+      terminal: async () => undefined,
+      pipeStdout: true,
+    });
+    expect(ok.exitCode).toBe(0);
+    expect(ok.stdout).toContain(DATASET);
+    expect(ok.stderr).not.toContain(DATASET);
+
+    // An error under --json is written to standard error, which is the terminal here.
+    const failed = await h.cli(["admin", "publish", "list", "--json"], {
+      terminal: async () => undefined,
+      pipeStdout: true,
+      signedOut: true,
+    });
+    expect(failed.exitCode).toBe(1);
+    expect(failed.stdout).toBe("");
+    expect(failed.stderr).toContain("Not authenticated");
+  });
+
+  test("the GitHub stand-in waits as long as the test says, until the next reset", async () => {
+    const url = (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL;
+    const timed = async () => {
+      const start = Date.now();
+      await fetch(`${url}/repos/nemarDatasets/${DATASET}/git/ref/heads/main`);
+      return Date.now() - start;
+    };
+
+    h.githubDelayMs.value = 400;
+    expect(await timed()).toBeGreaterThanOrEqual(380);
+
+    h.reset();
+    expect(h.githubDelayMs.value).toBe(0);
+    expect(await timed()).toBeLessThan(380);
+  });
+});

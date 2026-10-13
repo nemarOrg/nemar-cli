@@ -33,7 +33,7 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
@@ -51,6 +51,12 @@ import {
 
 /** How long a command driven on a terminal may keep running once its driver has finished. */
 const EXIT_WAIT_MS = 20_000;
+/**
+ * How long after a command exits the terminal may take to deliver the rest of what it wrote: its
+ * end of file normally comes within a few milliseconds, so this only bounds a platform that never
+ * reports one.
+ */
+const DRAIN_WAIT_MS = 5_000;
 
 const CLI_ENTRY = join(import.meta.dir, "..", "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -113,6 +119,12 @@ export interface CliOptions {
   input?: string;
   /** Run on a terminal and drive it with this function instead of piping `input`. */
   terminal?: (session: TerminalSession) => Promise<void>;
+  /**
+   * With `terminal`: standard output is a pipe (read from a file, as `cmd --json | jq` does at a
+   * prompt) while standard input and standard error stay the terminal. The result's `stdout` is then
+   * what went down the pipe and its `stderr` is the terminal's transcript.
+   */
+  pipeStdout?: boolean;
   /** The username of a seeded account to run as. Default: the last account seeded. */
   as?: string;
   /** Run with no account signed in. */
@@ -132,6 +144,11 @@ export interface PublishCli {
   mainHead: { value: string };
   /** What the stand-in's BIDS validation workflow run concluded (`success` unless a test says). */
   bidsConclusion: { value: string };
+  /**
+   * How long the GitHub stand-in waits before it answers each call, in milliseconds (0 unless a
+   * test says): how a test makes an approval slow enough to interrupt. Reset to 0 by `reset()`.
+   */
+  githubDelayMs: { value: number };
   /** What the GitHub stand-in saw and what the Worker dispatched; cleared in place by `reset()`. */
   github: { seen: GitHubCall[]; dispatches: Dispatch[] };
   /** Every request the NEMAR API served for a command; cleared in place by `reset()`. */
@@ -212,6 +229,7 @@ export function startPublishCli(): PublishCli {
 
   const mainHead = { value: SCREENED_HEAD };
   const bidsConclusion = { value: "success" };
+  const githubDelayMs = { value: 0 };
   const github: PublishCli["github"] = { seen: [], dispatches: [] };
   const requests: ApiCall[] = [];
   const posted: PublishCli["posted"] = [];
@@ -232,6 +250,7 @@ export function startPublishCli(): PublishCli {
         token: auth ? auth.replace(/^\S+\s+/, "") : null,
         body,
       });
+      if (githubDelayMs.value > 0) await Bun.sleep(githubDelayMs.value);
       const ref = mainRefAnswer(req, mainHead.value);
       if (ref) return ref;
       if (req.method === "POST" && path === "/repos/nemarDatasets/.github/dispatches") {
@@ -298,19 +317,29 @@ export function startPublishCli(): PublishCli {
     args: string[],
     baseEnv: Record<string, string>,
     drive: (session: TerminalSession) => Promise<void>,
+    pipeStdout: boolean,
   ): Promise<CliResult> {
     // What a person's terminal has: a terminal type, and no CI variable, which turns the spinner
     // (and with it the spinner's handling of standard input) off.
-    const env = { ...baseEnv, TERM: "xterm-256color" };
+    const env: Record<string, string> = { ...baseEnv, TERM: "xterm-256color" };
     Reflect.deleteProperty(env, "CI");
+    // A command whose standard output is a pipe: the shell opens the file the way `> file` does,
+    // and `exec` hands its terminal (standard input and standard error) to the command.
+    const stdoutFile = join(configDir, `stdout-${process.pid}-${Date.now()}.txt`);
+    const cmd = [process.execPath, "run", CLI_ENTRY, ...args];
+    if (pipeStdout) env.NEMAR_TEST_STDOUT = stdoutFile;
     const decoder = new TextDecoder();
     let raw = "";
     // A terminal ends a line with CR LF; the transcript, and every offset in it, uses LF.
     const view = () => raw.replaceAll("\r\n", "\n");
     let wake: Array<() => void> = [];
     let exited = false;
+    let closeTerminal: () => void = () => undefined;
+    const terminalClosed = new Promise<void>((resolve) => {
+      closeTerminal = resolve;
+    });
     const proc = spawn({
-      cmd: [process.execPath, "run", CLI_ENTRY, ...args],
+      cmd: pipeStdout ? ["/bin/sh", "-c", 'exec "$0" "$@" > "$NEMAR_TEST_STDOUT"', ...cmd] : cmd,
       cwd: REPO_ROOT,
       env,
       terminal: {
@@ -320,8 +349,18 @@ export function startPublishCli(): PublishCli {
           raw += decoder.decode(chunk, { stream: true });
           for (const w of wake.splice(0)) w();
         },
+        // The terminal's end of file: nothing more can arrive after it.
+        exit() {
+          closeTerminal();
+        },
       },
     });
+    // The command has exited AND its terminal has delivered everything it wrote. The exit alone is
+    // not enough: the last chunk can still be on its way, and a transcript read at the exit loses
+    // its last line under load.
+    const drained = proc.exited.then(() =>
+      Promise.race([terminalClosed, Bun.sleep(DRAIN_WAIT_MS)]),
+    );
     void proc.exited.then(() => {
       exited = true;
       for (const w of wake.splice(0)) w();
@@ -334,9 +373,17 @@ export function startPublishCli(): PublishCli {
       async waitFor(text, o = {}) {
         const from = o.after ?? 0;
         const deadline = Date.now() + (o.timeoutMs ?? 20_000);
+        let drainedOnce = false;
         for (;;) {
           const at = view().indexOf(text, from);
           if (at >= 0) return at + text.length;
+          // The command ended without the text: what its terminal had not yet delivered is read
+          // once before the text is declared absent.
+          if (exited && !drainedOnce) {
+            drainedOnce = true;
+            await drained;
+            continue;
+          }
           const left = deadline - Date.now();
           if (exited || left <= 0) {
             proc.kill();
@@ -370,9 +417,17 @@ export function startPublishCli(): PublishCli {
     }, EXIT_WAIT_MS);
     const exitCode = await proc.exited;
     clearTimeout(hung);
+    await drained;
     wake = [];
+    let piped = "";
+    if (pipeStdout) {
+      piped = existsSync(stdoutFile) ? readFileSync(stdoutFile, "utf8") : "";
+      rmSync(stdoutFile, { force: true });
+    }
     if (failure !== undefined) throw failure;
-    return { stdout: view(), stderr: "", exitCode };
+    return pipeStdout
+      ? { stdout: piped, stderr: view(), exitCode }
+      : { stdout: view(), stderr: "", exitCode };
   }
 
   async function run(args: string[], opts: CliOptions): Promise<CliResult> {
@@ -390,7 +445,7 @@ export function startPublishCli(): PublishCli {
     };
     const clean: Record<string, string> = {};
     for (const [k, v] of Object.entries(childEnv)) if (v !== undefined) clean[k] = v;
-    if (opts.terminal) return runOnTerminal(args, clean, opts.terminal);
+    if (opts.terminal) return runOnTerminal(args, clean, opts.terminal, opts.pipeStdout === true);
     const proc = spawn({
       cmd: [process.execPath, "run", CLI_ENTRY, ...args],
       cwd: REPO_ROOT,
@@ -416,6 +471,7 @@ export function startPublishCli(): PublishCli {
     },
     mainHead,
     bidsConclusion,
+    githubDelayMs,
     github,
     requests,
     posted,
@@ -429,6 +485,7 @@ export function startPublishCli(): PublishCli {
       keys.clear();
       mainHead.value = SCREENED_HEAD;
       bidsConclusion.value = "success";
+      githubDelayMs.value = 0;
       github.seen.length = 0;
       github.dispatches.length = 0;
       requests.length = 0;
