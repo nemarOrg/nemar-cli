@@ -466,10 +466,26 @@ describe("how the client reads an approval refusal (the gate's bodies, which the
     expect(bare.blockReason).toBeUndefined();
   });
 
-  test("the two words are declared once, with the screen's, and do not collide with it", () => {
+  test("a 409 request_changed leads with the sentence, not the bare word", async () => {
+    const body = {
+      error: "request_changed",
+      message:
+        "The request changed while the approval was being checked (it was denied or blocked). Read it again before approving.",
+    };
+    scripted = [{ status: 409, body }];
+    const err = await thrown(() =>
+      request("/admin/publish/nm000480/approve", { method: "POST" }, true),
+    );
+    expect(err.statusCode).toBe(409);
+    expect(err.message).toBe(body.message);
+    expect(err.code).toBe("request_changed");
+  });
+
+  test("the words are declared once, with the screen's, and do not collide with it", () => {
     expect([...APPROVAL_REFUSAL_ERROR_CODES]).toEqual([
       PUBLICATION_REVIEW_NOT_CLEAR_CODE,
       REQUEST_BLOCKED_CODE,
+      "request_changed",
     ]);
     for (const code of APPROVAL_REFUSAL_ERROR_CODES) {
       expect(IDENTIFIER_SCREEN_ERROR_CODES).not.toContain(code);

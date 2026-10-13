@@ -2596,16 +2596,33 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     }
   }
 
-  // Mark as approving
-  await db
+  // Mark as approving. Only a request that is still one an approval can act on (`requested`, or
+  // `approving` for a resume): the gates above read it a moment ago, and a result that re-blocked
+  // it since (a failed submission minimum, ADR 0102) or a denial would be overwritten by an
+  // unconditional write, and the run would publish over it. Nothing has run yet, so a request
+  // that changed is refused and read again.
+  const marked = await db
     .prepare(
       // `last_error = NULL`: a new attempt begins, so the previous attempt's
       // error is history (the caller's own output has it), and the row reads as
       // running, not failed, from this moment (services/approval-dispatch.ts).
-      "UPDATE publication_requests SET status = 'approving', approved_by = ?, last_error = NULL, updated_at = datetime('now') WHERE id = ?",
+      "UPDATE publication_requests SET status = 'approving', approved_by = ?, last_error = NULL, updated_at = datetime('now') WHERE id = ? AND status IN ('requested', 'approving')",
     )
     .bind(c.approver.id, request.id)
     .run();
+  if ((marked.meta.changes ?? 0) !== 1) {
+    console.warn(
+      `[publish] ${datasetId}: approval refused, request ${request.id} changed while it was being checked`,
+    );
+    return c.json(
+      {
+        error: "request_changed",
+        message:
+          "The request changed while the approval was being checked (it was denied or blocked). Read it again before approving.",
+      },
+      409,
+    );
+  }
 
   // Get dataset info
   const dataset = await db

@@ -21,6 +21,7 @@ import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Server } from "bun";
 import { Hono } from "hono";
+import { APPROVAL_REFUSAL_ERROR_CODES } from "../../shared/contract/publication";
 import {
   OVERRIDE_FIELD,
   type PublicationReviewDetail,
@@ -1048,6 +1049,111 @@ describe("a run that stopped before it published is gated on the version and DOI
     expect(res.status).toBe(200);
     expect(requestRow(requestId).status).toBe("published");
     expect(overrideRows()).toHaveLength(0);
+  });
+});
+
+describe("the mark that starts an approval does not overwrite a change made while it was checked", () => {
+  /** The statement that marks the request `approving`: the first write of a run past the gates. */
+  const isMark = (sql: string) => /UPDATE publication_requests SET status = 'approving'/.test(sql);
+  const REQUEST_CHANGED_MESSAGE =
+    "The request changed while the approval was being checked (it was denied or blocked). Read it again before approving.";
+
+  test("21. a failed-minimum report that re-blocks the request between the gate and the mark is not undone by the approval", async () => {
+    // The administrator forces over a review that is still running; the override commits on the
+    // review row. Then the job's report lands with a failed submission minimum, and its batch moves
+    // the request to `blocked` (REBLOCK_SQL). The mark must not flip it back to `approving`.
+    const { requestId } = seed();
+    const reviewId = seedPublicationReview(db, {
+      requestId,
+      datasetId: DATASET,
+      state: "dispatched",
+      createdMinutesAgo: 5,
+      claimed: true,
+    });
+    const nonce = (
+      db.query("SELECT nonce FROM publication_reviews WHERE id = ?").get(reviewId) as {
+        nonce: string;
+      }
+    ).nonce;
+    const real = realD1(db);
+    const racing = interceptingD1(real, async (sql) => {
+      if (!isMark(sql)) return;
+      const stored = await storePublicationReviewResult(
+        env({ DB: real }),
+        reviewId,
+        DATASET,
+        nonce,
+        {
+          kind: "reported",
+          report: parsePublicationReviewReport(
+            goodPublicationReport({
+              evidence: evidenceFor(SCREENED_HEAD, false, {
+                minimums: "failed",
+                minimum_failures: ["name_too_short"],
+                name_length: 5,
+              }),
+            }),
+          ),
+        },
+      );
+      expect(stored.stored).toBe(true);
+    });
+    const res = await approve(
+      {
+        resume: true,
+        override_publication_review: { review_id: reviewId, reasons: ["review_running"] },
+      },
+      { bindings: env({ DB: racing }) },
+    );
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body).toEqual({ error: "request_changed", message: REQUEST_CHANGED_MESSAGE });
+    expect(APPROVAL_REFUSAL_ERROR_CODES).toContain(body.error);
+    const row = requestRow(requestId);
+    // As the report's batch left it: blocked, with its reason, and nothing of an approval on it.
+    expect(row.status).toBe("blocked");
+    expect(row.block_reason).toBe("min_requirements_failed");
+    expect(row.approved_by).toBeNull();
+    expect(JSON.parse(String(row.steps_completed))).toEqual([...DONE]);
+    expect(auditRows("dataset_published")).toHaveLength(0);
+    // The screen gate's read of `main` is the only call: no step ran.
+    expect(calls.filter((c) => !/\/git\/ref\//.test(c.path))).toEqual([]);
+  });
+
+  test("21. a denial that lands between the gate and the mark is not undone either", async () => {
+    const { requestId } = seed();
+    seedPublicationReview(db, { requestId, datasetId: DATASET, state: "reported" });
+    const real = realD1(db);
+    const racing = interceptingD1(real, (sql) => {
+      if (isMark(sql)) {
+        db.run("UPDATE publication_requests SET status = 'denied' WHERE id = ?", [requestId]);
+      }
+    });
+    const res = await approve({ resume: true }, { bindings: env({ DB: racing }) });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: "request_changed",
+      message: REQUEST_CHANGED_MESSAGE,
+    });
+    expect(requestRow(requestId).status).toBe("denied");
+    expect(requestRow(requestId).approved_by).toBeNull();
+    expect(auditRows("dataset_published")).toHaveLength(0);
+  });
+
+  test("21. a request that is still waiting, or already approving, is marked as before", async () => {
+    const waiting = seed();
+    seedPublicationReview(db, {
+      requestId: waiting.requestId,
+      datasetId: DATASET,
+      state: "reported",
+    });
+    expect((await approve()).status).toBe(200);
+    expect(requestRow(waiting.requestId).status).toBe("published");
+    expect(requestRow(waiting.requestId).approved_by).toBe(adminA);
+
+    const resumed = seed({ datasetId: "nm000484", requestStatus: "approving", steps: DONE });
+    expect((await approve({ resume: true }, { dataset: "nm000484" })).status).toBe(200);
+    expect(requestRow(resumed.requestId).status).toBe("published");
   });
 });
 
