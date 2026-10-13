@@ -16,6 +16,10 @@ import {
   type PublicationStep,
 } from "../../../shared/publication-steps.js";
 
+import {
+  OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE,
+  REQUEST_CHANGED_MESSAGE,
+} from "../../../shared/contract/publication.js";
 import { datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import { REASON_CODES } from "../../../shared/publication-review.js";
 import { auditLogStatement } from "../db/audit-log";
@@ -2509,8 +2513,7 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     return c.json(
       {
         error: "override_inside_web_approval",
-        message:
-          "A web approval of this request is in progress, so an override sent now would be recorded under the administrator who clicked. Wait for it to finish or stop, then approve again with --force.",
+        message: OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE,
       },
       409,
     );
@@ -2647,8 +2650,7 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     return c.json(
       {
         error: "request_changed",
-        message:
-          "The request changed while the approval was being checked (it was denied or blocked). Read it again before approving.",
+        message: REQUEST_CHANGED_MESSAGE,
       },
       409,
     );

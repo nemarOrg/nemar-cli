@@ -23,6 +23,8 @@ import type {
   PublicationReviewSummary,
 } from "../../shared/contract/publication-review-admin";
 import {
+  APPROVAL_PUBLISHING_LINE,
+  APPROVAL_STOPPED_HARD_LINE,
   NOT_ASSESSED_LINE,
   REASONS,
   REASON_CODES,
@@ -1800,9 +1802,7 @@ describe("the detail carries what approve and next show from one read", () => {
     expect(publishing.started_publishing).toBe(true);
     // No gate applies to a run that has started publishing: no --force, and the line says why.
     expect(publishing.description.next).toBe(`nemar admin publish approve ${datasetId} --resume`);
-    expect(publishing.description.lines).toContain(
-      "This approval has started publishing; it passed the gates when it started and is continued without them.",
-    );
+    expect(publishing.description.lines).toContain(APPROVAL_PUBLISHING_LINE);
     expect(publishing.description.lines.at(-1)).toBe(NOT_ASSESSED_LINE);
     // A request waiting for its decision is unchanged.
     const open = request();
@@ -1821,8 +1821,7 @@ describe("the detail carries what approve and next show from one read", () => {
     // A failed-minimum report that lands on an `approving` request leaves it approving (the store's
     // move to blocked takes only a `requested` one), so no move to blocked happens to it, as the
     // table's cure allows for; the way out is a denial, and the detail says so.
-    const STOPPED =
-      "This approval stopped before it started publishing, and a reason that nothing clears now stands, so it cannot be resumed.";
+    const stoppedLine = (id: string) => APPROVAL_STOPPED_HARD_LINE.replaceAll("<dataset>", id);
     const { requestId, datasetId } = request({ requestStatus: "approving" });
     seedPublicationReview(db, {
       requestId,
@@ -1841,12 +1840,10 @@ describe("the detail carries what approve and next show from one read", () => {
     expect(stopped.started_publishing).toBe(false);
     expect(stopped.reasons.map((r) => r.code)).toContain("submission_minimum_failed");
     const lines = stopped.description.lines;
-    const at = lines.findIndex((l) => l.startsWith(STOPPED));
+    const at = lines.indexOf(stoppedLine(datasetId));
     expect(at).toBeGreaterThanOrEqual(0);
-    expect(lines[at]).toBe(
-      `${STOPPED} Deny it with a reason (nemar admin publish deny ${datasetId}); the depositor can request again.`,
-    );
-    expect(lines.filter((l) => l.startsWith(STOPPED))).toHaveLength(1);
+    expect(lines[at]).toContain(`(nemar admin publish deny ${datasetId})`);
+    expect(lines.filter((l) => l === stoppedLine(datasetId))).toHaveLength(1);
     expect(lines.at(-1)).toBe(NOT_ASSESSED_LINE);
     expect(at).toBe(lines.length - 2);
 
@@ -1865,7 +1862,7 @@ describe("the detail carries what approve and next show from one read", () => {
       }),
     });
     const waiting = await detail(open.datasetId);
-    expect(waiting.description.lines.some((l) => l.startsWith(STOPPED))).toBe(false);
+    expect(waiting.description.lines).not.toContain(stoppedLine(open.datasetId));
 
     // Once it has started publishing, no gate applies and the line is the other one.
     db.run("UPDATE publication_requests SET steps_completed = ? WHERE id = ?", [
@@ -1873,10 +1870,8 @@ describe("the detail carries what approve and next show from one read", () => {
       requestId,
     ]);
     const publishing = await detail(datasetId);
-    expect(publishing.description.lines.some((l) => l.startsWith(STOPPED))).toBe(false);
-    expect(publishing.description.lines).toContain(
-      "This approval has started publishing; it passed the gates when it started and is continued without them.",
-    );
+    expect(publishing.description.lines).not.toContain(stoppedLine(datasetId));
+    expect(publishing.description.lines).toContain(APPROVAL_PUBLISHING_LINE);
   });
 
   test("total_files is the dataset's count, or null when it is not known", async () => {

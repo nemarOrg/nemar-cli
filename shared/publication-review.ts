@@ -1684,7 +1684,7 @@ export function startOffered(input: {
 export type ApprovalStanding = "none" | "stopped" | "publishing";
 
 /** What the description says about a run that has started publishing: why no gate applies to it. */
-const APPROVAL_PUBLISHING_LINE =
+export const APPROVAL_PUBLISHING_LINE =
   "This approval has started publishing; it passed the gates when it started and is continued without them.";
 
 /**
@@ -1693,7 +1693,7 @@ const APPROVAL_PUBLISHING_LINE =
  * cure for a failed minimum names takes only a request still waiting for its decision, so this one
  * stays `approving`. The way out is a denial. `<dataset>` is filled like a cure's.
  */
-const APPROVAL_STOPPED_HARD_LINE =
+export const APPROVAL_STOPPED_HARD_LINE =
   "This approval stopped before it started publishing, and a reason that nothing clears now stands, so it cannot be resumed. Deny it with a reason (nemar admin publish deny <dataset>); the depositor can request again.";
 
 /**

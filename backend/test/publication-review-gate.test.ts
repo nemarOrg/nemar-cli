@@ -21,7 +21,11 @@ import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Server } from "bun";
 import { Hono } from "hono";
-import { APPROVAL_REFUSAL_ERROR_CODES } from "../../shared/contract/publication";
+import {
+  APPROVAL_REFUSAL_ERROR_CODES,
+  OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE,
+  REQUEST_CHANGED_MESSAGE,
+} from "../../shared/contract/publication";
 import {
   OVERRIDE_FIELD,
   type PublicationReviewDetail,
@@ -871,8 +875,6 @@ describe("#1604 as it stands: an override is never recorded under another admini
         WHERE id = ?`,
       [adminA, requestId],
     );
-  const INSIDE_MESSAGE =
-    "A web approval of this request is in progress, so an override sent now would be recorded under the administrator who clicked. Wait for it to finish or stop, then approve again with --force.";
 
   test("23. an override sent by B inside A's live lease is refused, and recorded under nobody", async () => {
     const { requestId, reviewId } = seedFailing();
@@ -886,7 +888,10 @@ describe("#1604 as it stands: an override is never recorded under another admini
     );
     expect(res.status).toBe(409);
     const body = (await res.json()) as { error: string; message: string };
-    expect(body).toEqual({ error: "override_inside_web_approval", message: INSIDE_MESSAGE });
+    expect(body).toEqual({
+      error: "override_inside_web_approval",
+      message: OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE,
+    });
     expect(APPROVAL_REFUSAL_ERROR_CODES).toContain(body.error);
     // Nothing ran and nothing was recorded, under A or under B.
     expect(reviewRow(reviewId).override_by).toBeNull();
@@ -1189,8 +1194,6 @@ describe("a run that stopped before it published is gated on the version and DOI
 describe("the mark that starts an approval does not overwrite a change made while it was checked", () => {
   /** The statement that marks the request `approving`: the first write of a run past the gates. */
   const isMark = (sql: string) => /UPDATE publication_requests SET status = 'approving'/.test(sql);
-  const REQUEST_CHANGED_MESSAGE =
-    "The request changed while the approval was being checked (it was denied or blocked). Read it again before approving.";
 
   test("21. a failed-minimum report that re-blocks the request between the gate and the mark is not undone by the approval", async () => {
     // The administrator forces over a review that is still running; the override commits on the

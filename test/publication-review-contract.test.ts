@@ -13,7 +13,9 @@ import * as prompt from "../scripts/ci/pr-review-prompt";
 import {
   APPROVAL_REFUSAL_ERROR_CODES,
   IDENTIFIER_SCREEN_ERROR_CODES,
+  OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE,
   PUBLICATION_REFUSAL_ERROR_CODES,
+  REQUEST_CHANGED_MESSAGE,
 } from "../shared/contract/publication";
 import {
   OVERRIDE_FIELD,
@@ -2969,5 +2971,18 @@ describe("the wire vocabulary the approval refusals and the comment route share"
       "internal",
     ]);
     expect(PUBLICATION_COMMENT_MAX_LENGTH).toBe(2000);
+  });
+});
+
+describe("the sentences the Worker's tests import are pinned here, once", () => {
+  // The other suites import these constants and never copy them, so an edit to a sentence cannot
+  // pass them by also editing a hand-copied literal. These literals are the one oracle.
+  test("the two approval refusals the orchestrator words itself", () => {
+    expect(REQUEST_CHANGED_MESSAGE).toBe(
+      "The request changed while the approval was being checked (it was denied or blocked). Read it again before approving.",
+    );
+    expect(OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE).toBe(
+      "A web approval of this request is in progress, so an override sent now would be recorded under the administrator who clicked. Wait for it to finish or stop, then approve again with --force.",
+    );
   });
 });
