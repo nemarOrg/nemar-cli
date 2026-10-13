@@ -44,6 +44,7 @@ import { hashApiKey } from "../src/services/token";
 import type { Bindings } from "../src/types/bindings";
 import { interceptingD1, realD1 } from "./helpers/d1";
 import { SCREENED_HEAD } from "./helpers/identifier-screen";
+import { logged } from "./helpers/logs";
 import {
   evidenceFor,
   seedPublicationReview,
@@ -52,6 +53,7 @@ import {
 import {
   CALLBACK_SECRET,
   DEV_DATASET,
+  GITHUB_PAT,
   PROD_DATASET,
   answersWithin,
   createHarness,
@@ -1946,6 +1948,46 @@ describe("an administrator's start", () => {
       attempts: 1,
     });
     expect(h.dispatches()).toHaveLength(1);
+  });
+
+  test("the log says which of the two is missing, and the credential's error by its words", async () => {
+    // One word for the row (`dispatch_unconfigured`) is not enough for the person who has to fix
+    // the Worker: the secret and the credential are set in different places.
+    const cases: Array<[Partial<Bindings>, string[], string[]]> = [
+      [
+        { PRESCREEN_CALLBACK_SECRET: undefined },
+        ["dispatch_unconfigured (callback_secret unset)"],
+        ["github_credential"],
+      ],
+      [
+        { GITHUB_ADMIN_PAT: undefined },
+        ["dispatch_unconfigured (github_credential unusable: Error, other)"],
+        ["callback_secret", "No GitHub auth configured"],
+      ],
+      [
+        { PRESCREEN_CALLBACK_SECRET: undefined, GITHUB_ADMIN_PAT: undefined },
+        ["dispatch_unconfigured (callback_secret unset, github_credential unusable: Error, other)"],
+        ["No GitHub auth configured"],
+      ],
+    ];
+    for (const [i, [missing, expected, absent]] of cases.entries()) {
+      const dataset = ds(3000 + i);
+      const { requestId } = seedScreenedRequest(h.db, { datasetId: dataset });
+      const lines = await logged(async () => {
+        const out = await startPublicationReview(h.env(missing), {
+          requestId,
+          datasetId: dataset,
+          ...admin,
+        });
+        expect(out).toMatchObject({ started: false, reason: "dispatch_unconfigured" });
+      });
+      const log = lines.join("\n");
+      for (const words of expected) expect(log, words).toContain(words);
+      for (const words of absent) expect(log, words).not.toContain(words);
+      expect(log).toContain(`${dataset} request ${requestId}`);
+      expect(log).not.toContain(CALLBACK_SECRET);
+      expect(log).not.toContain(GITHUB_PAT);
+    }
   });
 
   const unconfigured: [string, Partial<Bindings>][] = [

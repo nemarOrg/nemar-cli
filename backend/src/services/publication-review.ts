@@ -387,7 +387,7 @@ export async function startPublicationReview(
   const anonymous = request.anonymous === 1;
 
   const secret = env.PRESCREEN_CALLBACK_SECRET;
-  const configured = Boolean(secret) && hasGithubCredential(env);
+  const missing = missingConfiguration(env);
 
   // A row may be moved by another writer between the read and the write (a second screen result,
   // an administrator, the watchdog, a report). Each lost race is re-read and planned again.
@@ -396,8 +396,17 @@ export async function startPublicationReview(
     const plan = planFor(existing, admin);
     if (plan.kind === "refuse") return answer(plan.reason, existing?.id ?? null);
 
-    if (!configured || !secret) {
-      return await recordUnconfigured(env, request, head, anonymous, plan, args.adminUserId, mail);
+    if (missing.length > 0 || !secret) {
+      return await recordUnconfigured(
+        env,
+        request,
+        head,
+        anonymous,
+        plan,
+        args.adminUserId,
+        mail,
+        missing,
+      );
     }
 
     const nonce = crypto.randomUUID();
@@ -479,14 +488,21 @@ export async function startPublicationReview(
   return answer(admin ? reasonForRow(latest) : "duplicate", latest?.id ?? null);
 }
 
-/** Whether a credential for the `nemarDatasets` org is configured at all. */
-function hasGithubCredential(env: Bindings): boolean {
+/**
+ * What the Worker lacks to hand a review over, as fixed words for a log line: the callback secret
+ * (`callback_secret unset`) and a credential for the `nemarDatasets` org (`github_credential
+ * unusable`, with the words of the error that said so, never its message). Empty when it can.
+ * Both are looked at, so a Worker missing both is told so once.
+ */
+function missingConfiguration(env: Bindings): string[] {
+  const missing: string[] = [];
+  if (!env.PRESCREEN_CALLBACK_SECRET) missing.push("callback_secret unset");
   try {
     getDatasetsAuth(env);
-    return true;
-  } catch {
-    return false;
+  } catch (err) {
+    missing.push(`github_credential unusable: ${errorWords(err)}`);
   }
+  return missing;
 }
 
 /**
@@ -503,6 +519,7 @@ async function recordUnconfigured(
   plan: Plan,
   adminUserId: number | undefined,
   mail: boolean,
+  missing: string[],
 ): Promise<StartOutcome> {
   const db = env.DB;
   let reviewId: number | null = null;
@@ -548,7 +565,7 @@ async function recordUnconfigured(
     }
   }
   console.warn(
-    `[publication-review] ${request.dataset_id} request ${request.id}: dispatch_unconfigured`,
+    `[publication-review] ${request.dataset_id} request ${request.id}: dispatch_unconfigured (${missing.join(", ")})`,
   );
   if (mail) await tryMail(env, request.id);
   return answer("dispatch_unconfigured", reviewId);
