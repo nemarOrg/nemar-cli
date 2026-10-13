@@ -1425,6 +1425,40 @@ describe("the mark that starts an approval does not overwrite a change made whil
     expect(auditRows("dataset_published")).toHaveLength(0);
   });
 
+  test("21. a request read as blocked for the owner's name, then re-blocked for another reason before the mark, is not marked", async () => {
+    // The run started publishing and the owner-name walk-back blocked it, so the approval skips
+    // the gates and carries on. Before the mark a depositor's re-request moves the row to a
+    // different reason: the mark's blocked branch is pinned to the owner-name reason, so it
+    // does not match and nothing runs.
+    const { requestId } = seed({
+      requestStatus: "blocked",
+      blockReason: "owner_name_missing",
+      steps: DONE,
+    });
+    const real = realD1(db);
+    const racing = interceptingD1(real, (sql) => {
+      if (isMark(sql)) {
+        db.run(
+          "UPDATE publication_requests SET block_reason = 'min_requirements_failed' WHERE id = ?",
+          [requestId],
+        );
+      }
+    });
+    const res = await approve({ resume: true }, { bindings: env({ DB: racing }) });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: "request_changed",
+      message: REQUEST_CHANGED_MESSAGE,
+    });
+    const row = requestRow(requestId);
+    expect(row.status).toBe("blocked");
+    expect(row.block_reason).toBe("min_requirements_failed");
+    expect(row.approved_by).toBeNull();
+    expect(JSON.parse(String(row.steps_completed))).toEqual([...DONE]);
+    expect(auditRows("dataset_published")).toHaveLength(0);
+    expect(calls.filter((c) => !/\/git\/ref\//.test(c.path))).toEqual([]);
+  });
+
   test("21. a request that is still waiting, or already approving, is marked as before", async () => {
     const waiting = seed();
     seedPublicationReview(db, {
