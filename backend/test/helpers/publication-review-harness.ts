@@ -255,3 +255,64 @@ export function reportFor(
 ): Record<string, unknown> {
   return goodPublicationReport({ evidence: evidenceFor(head, anonymous), ...over });
 }
+
+/** What {@link hookedD1} runs, and when. */
+export interface D1Hooks {
+  /**
+   * Before every statement, whether it runs alone or inside a batch. It is synchronous because a
+   * batched statement runs inside the transaction, which a hook cannot wait out. A hook that
+   * throws fails that statement (and so the whole batch, which D1 rolls back).
+   */
+  statement?: (sql: string) => void;
+  /** Before a batch begins, with the SQL of every statement in it, ahead of its transaction. */
+  batch?: (sqls: string[]) => void | Promise<void>;
+}
+
+/**
+ * A D1 that runs {@link D1Hooks} around the real database, so a test can land another writer
+ * exactly where the route is exposed to one (between its statements, or just before its batch) or
+ * make a named statement fail. The hooks write through the real database; nothing is canned.
+ * `interceptingD1` of `helpers/d1.ts` cannot do this for the statements of a batch, which are
+ * executed through `__execForBatch` and never through `run`.
+ */
+export function hookedD1(inner: D1Database, hooks: D1Hooks): D1Database {
+  return {
+    prepare(sql: string) {
+      const stmt = inner.prepare(sql) as unknown as {
+        bind(...p: unknown[]): unknown;
+        run(): Promise<unknown>;
+        first(): Promise<unknown>;
+        all(): Promise<unknown>;
+        __execForBatch(): unknown;
+      };
+      const api = {
+        sql,
+        bind(...p: unknown[]) {
+          stmt.bind(...p);
+          return api;
+        },
+        run() {
+          hooks.statement?.(sql);
+          return stmt.run();
+        },
+        first() {
+          hooks.statement?.(sql);
+          return stmt.first();
+        },
+        all() {
+          hooks.statement?.(sql);
+          return stmt.all();
+        },
+        __execForBatch() {
+          hooks.statement?.(sql);
+          return stmt.__execForBatch();
+        },
+      };
+      return api;
+    },
+    async batch(stmts: { sql: string }[]) {
+      await hooks.batch?.(stmts.map((s) => s.sql));
+      return (inner as unknown as { batch(s: unknown[]): Promise<unknown> }).batch(stmts);
+    },
+  } as unknown as D1Database;
+}

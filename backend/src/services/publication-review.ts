@@ -791,9 +791,11 @@ function storeSql(from: "unreported" | "dispatched"): string {
  * dispatch payload cannot change what a stored review claims to be about.
  *
  * Two conditional writes, so a watchdog that flips the row between the read and the write cannot
- * hide the late path: `unreported` first (a late report, which re-arms the mail), then
- * `dispatched`. The flag is not consulted: a result whose run was already claimed is stored
- * whatever the flag says, because the call was spent and the record stays honest.
+ * hide the late path: `dispatched` first, then `unreported` (a late report, which re-arms the
+ * mail). The order matters: the state only moves from `dispatched` to `unreported`, so a flip
+ * between the two writes is found by the second. The flag is not consulted: a result whose run
+ * was already claimed is stored whatever the flag says, because the call was spent and the record
+ * stays honest.
  */
 export async function storePublicationReviewResult(
   env: Bindings,
@@ -828,15 +830,18 @@ export async function storePublicationReviewResult(
     nonce,
   ];
 
-  let late = true;
+  // `dispatched` first: a row only ever moves from `dispatched` to `unreported`, never back, so a
+  // watchdog that lands between the two writes leaves the second one to find it. Tried the other
+  // way round, a flip between them makes BOTH match nothing and the report is lost.
+  let late = false;
   let res = await db
-    .prepare(storeSql("unreported"))
+    .prepare(storeSql("dispatched"))
     .bind(...binds)
     .run();
   if ((res.meta.changes ?? 0) !== 1) {
-    late = false;
+    late = true;
     res = await db
-      .prepare(storeSql("dispatched"))
+      .prepare(storeSql("unreported"))
       .bind(...binds)
       .run();
   }

@@ -49,6 +49,7 @@ import {
   DEV_DATASET,
   PROD_DATASET,
   createHarness,
+  hookedD1,
   reportFor,
 } from "./helpers/publication-review-harness";
 import { sendsTo, withFakeResend } from "./helpers/resend";
@@ -77,6 +78,8 @@ function dispatched(
     state?: "dispatched" | "unreported";
     minutesAgo?: number;
     mailed?: boolean;
+    /** The job took its claim, as every real run does before it reports. */
+    claimed?: boolean;
   } = {},
 ) {
   const datasetId = o.dataset ?? PROD_DATASET;
@@ -91,6 +94,7 @@ function dispatched(
     anonymous: o.anonymous,
     state: o.state ?? "dispatched",
     createdMinutesAgo: o.minutesAgo,
+    claimed: o.claimed,
   });
   return { requestId, reviewId, datasetId };
 }
@@ -978,6 +982,39 @@ describe("the watchdog", () => {
       // Re-armed and mailed: the screen's mail had already gone, so this send IS the late path.
       expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(1);
     });
+  });
+});
+
+describe("a result that arrives as the watchdog fires", () => {
+  const FLIP =
+    "UPDATE publication_reviews SET state = 'unreported', decided_at = datetime('now') WHERE id = ? AND state = 'dispatched'";
+
+  test("a watchdog that lands between the two result writes cannot drop the report", async () => {
+    // Two writes, one per state the row can wait in. The only move is `dispatched` to
+    // `unreported`, so the write for `dispatched` must come first: written the other way round, a
+    // flip between the two leaves BOTH matching nothing, the route says "duplicate", the job does
+    // not retry a 200, and the spent model call is lost.
+    const { reviewId } = dispatched({ minutesAgo: 45, claimed: true });
+    const token = await h.tokenFor(reviewId);
+    let writes = 0;
+    const racing = hookedD1(realD1(h.db), {
+      statement: (sql) => {
+        if (sql.includes("SET state = ?, verdict = ?")) {
+          writes++;
+          if (writes === 2) h.db.run(FLIP, [reviewId]);
+        }
+      },
+    });
+    const res = await h.result(
+      reviewId,
+      { outcome: "reported", report: reportFor(SCREENED_HEAD, false) },
+      token,
+      h.env({ DB: racing }),
+    );
+    // Stored, and answered as stored: not the harmless "duplicate" of a lost race.
+    expect(res).toEqual({ status: 200, body: { ok: true, dataset_id: PROD_DATASET } });
+    expect(state(reviewId)).toMatchObject({ state: "reported", verdict: "pass", nonce: null });
+    expect(state(reviewId).report).not.toBeNull();
   });
 });
 
