@@ -49,6 +49,7 @@ import {
   readReview,
   reasonViewLine,
 } from "../lib/publication-review-approve.js";
+import { approveEvidenceLines } from "../lib/publication-review-display.js";
 
 export function registerApproveCommand(group: Command): void {
   group
@@ -213,7 +214,7 @@ After Approval:
         // then the decision. Read once, shown, and decided from what was shown, so an override is
         // built from exactly this and never from a second read.
         const read = await readReview(datasetId);
-        if (read.kind === "detail") printReview(read.detail);
+        if (read.kind === "detail") printReview(read.detail, datasetId);
         const decision = decideApproval(datasetId, read, {
           force: !!options.force,
           acknowledge: ack,
@@ -303,11 +304,22 @@ After Approval:
     );
 }
 
-/** The screen and the review of the request, as the Worker worded them: colour and indentation only. */
-function printReview(detail: PublicationReviewDetail): void {
+/**
+ * The screen and the review of the request, as the Worker worded them (colour and indentation
+ * only), with the evidence behind the reasons from the same detail ({@link approveEvidenceLines}).
+ */
+function printReview(detail: PublicationReviewDetail, datasetId: string): void {
   for (const line of identifierScreenLines(detail.identifier_screen, 2)) console.log(line);
   const { headline, tone, lines } = detail.description;
-  const review = { state: null, headline, tone, lines: [`Gate: ${detail.gate}`, ...lines] };
+  // What the administrator needs to decide goes ahead of the standing line, which is last, as in
+  // `show`: what the model was shown and what was withheld, and where the whole review is.
+  const evidence = approveEvidenceLines(detail.review, datasetId);
+  const review = {
+    state: null,
+    headline,
+    tone,
+    lines: [`Gate: ${detail.gate}`, ...lines.slice(0, -1), ...evidence, ...lines.slice(-1)],
+  };
   for (const line of identifierScreenLines(review, 2)) console.log(line);
   console.log();
 }

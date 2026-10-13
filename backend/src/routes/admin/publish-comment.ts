@@ -45,7 +45,7 @@ const SENTENCES: Record<PublicationCommentErrorCode, string> = {
   origin_not_allowed: "This request did not come from a NEMAR page, so it was not accepted.",
   invalid_body: `The body must be a JSON object with one field, message, of 1 to ${PUBLICATION_COMMENT_MAX_LENGTH} characters.`,
   comment_not_sent:
-    "The message could not be mailed, and it may not have reached the depositor. Check with them before sending it again.",
+    "The mail may not have been sent, and it may also have arrived. Check with the depositor before sending it again.",
   internal: "The publication request could not be read, so nothing was sent. Try again.",
 };
 

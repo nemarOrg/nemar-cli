@@ -182,6 +182,27 @@ export function withheldLine(e: PublicationReviewEvidence): string | null {
   return `Withheld for findings: ${entries.map(([kind, n]) => `${plain(kind)} ${n}`).join(", ")}`;
 }
 
+/**
+ * What `approve` adds to the review it prints, so an administrator is not asked to `--force` over a
+ * reason such as `text_withheld` blind: what the model was shown, what was withheld for findings,
+ * and a pointer to `show` for the rest. The same two lines `show` prints, from the same helpers;
+ * the model's own summary and notes stay in `show`, under their labels. Empty for a request with no
+ * review in force, or one whose review has no evidence yet.
+ */
+export function approveEvidenceLines(
+  review: PublicationReviewRecord | null | undefined,
+  datasetId: string,
+): string[] {
+  const evidence = review?.evidence;
+  if (evidence === null || evidence === undefined) return [];
+  const withheld = withheldLine(evidence);
+  return [
+    shownLine(evidence),
+    ...(withheld === null ? [] : [withheld]),
+    `The whole review, with the model's questions and findings: nemar admin publish show ${plain(datasetId)}`,
+  ];
+}
+
 const ANSWER_COLOR: Record<string, (s: string) => string> = {
   pass: chalk.green,
   fail: chalk.red,
