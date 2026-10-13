@@ -1727,7 +1727,7 @@ describe("the detail carries what approve and next show from one read", () => {
     expect((await detail(bare.datasetId)).block_reason).toBeNull();
   });
 
-  test("started_publishing is true only for an approving or blocked request with a step outside the validation-only ones", async () => {
+  test("started_publishing is true only for an approving request, or one the owner-name walk-back blocked, with a step outside the validation-only ones", async () => {
     const stepsOf = (requestId: number, steps: unknown) =>
       db.run("UPDATE publication_requests SET steps_completed = ? WHERE id = ?", [
         typeof steps === "string" ? steps : JSON.stringify(steps),
@@ -1761,9 +1761,10 @@ describe("the detail carries what approve and next show from one read", () => {
     const waiting = request({ requestStatus: "requested" });
     stepsOf(waiting.requestId, ["ci_check", "s3_public_read", "publish_doi"]);
     expect((await detail(waiting.datasetId)).started_publishing).toBe(false);
-    // A blocked request is one only by the owner-name walk-back that runs on every approval call,
-    // so one with a step done is a run that stopped half published, and is told apart from one
-    // that never started (which the Worker refuses outright).
+    // A request blocked by the owner-name walk-back, which runs on every approval call, with a
+    // step done is a run that stopped half published, and is told apart from one that never
+    // started (which the Worker refuses outright). A blocked request with any other reason is no
+    // run, whatever its steps (pinned in its own test below).
     const blocked = request({ requestStatus: "blocked", blockReason: "owner_name_missing" });
     expect((await detail(blocked.datasetId)).started_publishing).toBe(false);
     stepsOf(blocked.requestId, QUIET);
