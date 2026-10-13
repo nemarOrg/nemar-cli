@@ -20,7 +20,7 @@ import chalk from "chalk";
 import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
-import { failWith, requireSignedIn } from "../lib/admin-command.js";
+import { checkedDatasetId, failMessage, failWith, requireSignedIn } from "../lib/admin-command.js";
 import { denyPublication, listPublishRequests, rerunIdentifierScreen } from "../lib/api/publish.js";
 import {
   type ConfirmOptions,
@@ -32,6 +32,7 @@ import {
 } from "../lib/confirm.js";
 import { markReportedExit } from "../lib/debug-log.js";
 import { identifierScreenLines } from "../lib/identifier-screen-display.js";
+import { LineReader } from "../lib/prompt-lines.js";
 import { reviewListLine } from "../lib/publication-review-display.js";
 import { needsAdministrator } from "../lib/publication-review-queue.js";
 import { plain } from "../lib/terminal-text.js";
@@ -190,6 +191,28 @@ Examples:
 
 registerReviewCommands(publishCommand);
 
+/**
+ * The reason for a denial when `--reason` was not given: asked for at a terminal, and read as the
+ * first line of standard input when that is a pipe (null when it holds none). Not asked through
+ * `inquirer` unless there is a terminal: on a stdin that has ended its prompt dies with an
+ * uncatchable ERR_USE_AFTER_CLOSE stack trace, which `confirm()` guards against in the same way.
+ */
+async function askReason(): Promise<string | null> {
+  if (process.stdin.isTTY) {
+    const { inputReason } = await inquirer.prompt([
+      { type: "input", name: "inputReason", message: "Reason for denial:" },
+    ]);
+    return typeof inputReason === "string" && inputReason.trim() !== "" ? inputReason : null;
+  }
+  const reader = new LineReader();
+  try {
+    const line = await reader.ask("");
+    return line !== null && line.trim() !== "" ? line.trim() : null;
+  } finally {
+    reader.close();
+  }
+}
+
 publishCommand
   .command("deny")
   .description("Deny a publication request")
@@ -208,7 +231,8 @@ Description:
   before resubmitting their publication request.
 
 Requirements:
-  - Must provide a reason for denial
+  - Must provide a reason for denial: --reason, a prompt at a terminal, or one
+    line piped in (nothing is asked when there is neither)
   - Reason will be sent to the user via email
   - User can fix issues and submit a new request
 
@@ -217,22 +241,23 @@ Examples:
   $ nemar admin publish deny nm000104 -r "Dataset incomplete - missing subjects"
   $ nemar admin publish deny nm000104    # Prompts for reason interactively`,
   )
-  .action(async (datasetId, options: ConfirmOptions & { reason?: string }) => {
+  .action(async (datasetArg: string, options: ConfirmOptions & { reason?: string }) => {
     if (!requireSignedIn()) return;
+    const datasetId = checkedDatasetId(datasetArg);
+    if (datasetId === null) return;
 
     let reason = options.reason;
     if (!reason) {
-      const { inputReason } = await inquirer.prompt([
-        { type: "input", name: "inputReason", message: "Reason for denial:" },
-      ]);
-      reason = inputReason;
-    }
-
-    if (!reason) {
-      console.log(chalk.red("Reason is required"));
-      process.exitCode = 1;
-      markReportedExit();
-      return;
+      reason = (await askReason()) ?? undefined;
+      if (!reason) {
+        failMessage("Reason is required", {
+          answered: true,
+          hint: process.stdin.isTTY
+            ? undefined
+            : `Pass --reason "<why>"; there is no terminal to ask on and nothing was piped in.`,
+        });
+        return;
+      }
     }
 
     const confirmResult = await confirm(`Deny publication of ${datasetId}?`, options);
@@ -275,8 +300,10 @@ Description:
 Examples:
   $ nemar admin publish screen nm000104`,
   )
-  .action(async (datasetId: string) => {
+  .action(async (datasetArg: string) => {
     if (!requireSignedIn()) return;
+    const datasetId = checkedDatasetId(datasetArg);
+    if (datasetId === null) return;
     const spinner = ora(`Re-running the identifier screen for ${datasetId}...`).start();
     try {
       const result = await rerunIdentifierScreen(datasetId);
