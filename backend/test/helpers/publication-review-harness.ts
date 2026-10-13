@@ -51,7 +51,10 @@ export interface Harness {
   calls: Recorded[];
   /** What the stand-in answers a dispatch with. Reset to 204 after every test. */
   dispatchStatus: number;
-  /** Runs inside the stand-in while it answers a dispatch, before it answers. */
+  /**
+   * Runs inside the stand-in while it answers a dispatch (whatever it answers it with), before it
+   * answers.
+   */
   duringDispatch: (() => Promise<void>) | null;
   /** Merged over the default bindings; reset after every test. */
   envOverrides: Partial<Bindings>;
@@ -287,7 +290,7 @@ export function createHarness(): Harness {
         const body = req.method === "GET" ? null : ((await req.json().catch(() => null)) as never);
         h.calls.push({ method: req.method, path: url.pathname, body });
         if (req.method === "POST" && url.pathname === "/repos/nemarDatasets/.github/dispatches") {
-          if (h.dispatchStatus >= 300 && h.duringDispatch) await h.duringDispatch();
+          if (h.duringDispatch) await h.duringDispatch();
           return new Response(h.dispatchStatus < 300 ? null : "{}", { status: h.dispatchStatus });
         }
         return readsAnswer(req, url.pathname) ?? new Response("not found", { status: 404 });
