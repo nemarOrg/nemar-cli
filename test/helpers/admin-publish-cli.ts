@@ -111,6 +111,8 @@ export interface PublishCli {
   github: { seen: GitHubCall[]; dispatches: Dispatch[] };
   /** Every request the NEMAR API served for a command; cleared in place by `reset()`. */
   requests: ApiCall[];
+  /** The JSON body of every write the NEMAR API received, in order; cleared in place by `reset()`. */
+  posted: Array<{ path: string; body: Record<string, unknown> | null }>;
   /** Every mail the Worker sent through Resend during a command; cleared in place by `reset()`. */
   mail: CapturedEmail[];
   /** A fresh database, no accounts, and every knob above back at its default. Call it before each test. */
@@ -187,6 +189,7 @@ export function startPublishCli(): PublishCli {
   const bidsConclusion = { value: "success" };
   const github: PublishCli["github"] = { seen: [], dispatches: [] };
   const requests: ApiCall[] = [];
+  const posted: PublishCli["posted"] = [];
   const mail: CapturedEmail[] = [];
 
   const githubServer = Bun.serve({
@@ -239,6 +242,13 @@ export function startPublishCli(): PublishCli {
       // what a test of the publication commands is about, so the harness answers them itself.
       if (url.pathname === "/notices") return Response.json({ notices: [] });
       if (url.pathname === "/datasets/facets") return Response.json({});
+      if (req.method !== "GET") {
+        const body = await req
+          .clone()
+          .json()
+          .catch(() => null);
+        posted.push({ path: url.pathname, body });
+      }
       const res = await app.handle(req, env());
       requests.push({ method: req.method, path: url.pathname, status: res.status });
       const at = afterHooks.findIndex((h) => h.match === `${req.method} ${url.pathname}`);
@@ -301,6 +311,7 @@ export function startPublishCli(): PublishCli {
     bidsConclusion,
     github,
     requests,
+    posted,
     mail,
     reset() {
       db = freshDb();
@@ -314,6 +325,7 @@ export function startPublishCli(): PublishCli {
       github.seen.length = 0;
       github.dispatches.length = 0;
       requests.length = 0;
+      posted.length = 0;
       mail.length = 0;
       writeConfig(null);
     },
