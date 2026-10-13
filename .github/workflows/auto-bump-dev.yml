@@ -22,17 +22,18 @@ name: Auto Bump Dev
 #     "chore: bump version to ..." prefix so this workflow self-filters
 #     on the next push event.
 #
-# THIS WORKFLOW ALSO OWNS THE DEV DEPLOY AND THE DEV PUBLISH. The `dispatch`
-# job runs after `bump` and dispatches deploy-backend.yml once, for the commit
-# dev ends at: the bump when there is one, else the pushed commit when it
-# touched backend/**, shared/** or deploy-backend.yml (the paths that used to
-# trigger a dev deploy directly). It dispatches npm-publish.yml once too, which
-# builds the head of dev; every push to dev used to publish itself. The bump's
-# own push dispatches nothing: the run that made it has. So one merge is one
-# dev deploy, at the bumped version, and one dev publish, where it used to be
-# two of each (see the notes in deploy-backend.yml and npm-publish.yml). Deciding here, after the bump, is what makes that
-# possible: when the merge commit's push arrives nothing yet knows whether a
-# bump will follow.
+# THIS WORKFLOW ALSO OWNS THE DEV DEPLOY AND THE DEV PUBLISH. After `bump`,
+# `plan` picks the commit dev ends at: the bump when there is one, else the
+# pushed commit. `deploy` runs deploy-backend.yml on it (a reusable-workflow
+# call) when there was a bump or the push touched backend/**, shared/** or
+# deploy-backend.yml (the paths that used to trigger a dev deploy directly).
+# `plan` also dispatches npm-publish.yml once, which builds the head of dev;
+# every push to dev used to publish itself. The bump's own push does neither:
+# the run that made it has. So one merge is one dev deploy, at the bumped
+# version, and one dev publish, where it used to be two of each (see the notes
+# in deploy-backend.yml and npm-publish.yml). Deciding here, after the bump, is
+# what makes that possible: when the merge commit's push arrives nothing yet
+# knows whether a bump will follow.
 #
 # The bump commit keeps no skip-ci marker on purpose. It is always the head of
 # dev, so it is the head of every release pull request (dev -> main), and a
@@ -132,10 +133,11 @@ jobs:
             echo "::warning::push to dev rejected (likely a concurrent push); skipping"
           fi
 
-  # The one dev deploy and dev publish for this push (see the note at the top). Runs whatever
-  # `bump` did: skipped (a bot or bump commit, [skip-bump]), no bump (no -devN
-  # suffix, push rejected) or failed; only a cancelled run deploys nothing.
-  dispatch:
+  # The one dev deploy and dev publish for this push (see the note at the top).
+  # Runs whatever `bump` did: skipped (a bot or bump commit, [skip-bump]), no
+  # bump (no -devN suffix, push rejected) or failed; only a cancelled run
+  # deploys and publishes nothing.
+  plan:
     needs: bump
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
@@ -144,6 +146,9 @@ jobs:
     permissions:
       actions: write # gh workflow run
       contents: read
+    outputs:
+      # The commit to deploy to the dev worker; empty for no deploy.
+      deploy_sha: ${{ steps.plan.outputs.deploy_sha }}
     steps:
       - name: Checkout code
         if: needs.bump.outputs.sha == ''
@@ -169,9 +174,9 @@ jobs:
             echo "dev deploy and publish: the bump $BUMP_SHA"
           elif [ "$AUTO_BUMP" = "true" ]; then
             # This push IS a bump this workflow made; the run that made it
-            # dispatched its deploy and its publish.
+            # deployed and published it.
             echo "publish=false" >> "$GITHUB_OUTPUT"
-            echo "dev deploy and publish: none, the run that pushed this bump dispatched both"
+            echo "dev deploy and publish: none, the run that pushed this bump did both"
           else
             # Every other push to dev published before, so it still does.
             echo "publish=true" >> "$GITHUB_OUTPUT"
@@ -183,25 +188,9 @@ jobs:
             fi
           fi
 
-      - name: Dispatch the dev deploy
-        if: steps.plan.outputs.deploy_sha != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          SHA: ${{ steps.plan.outputs.deploy_sha }}
-        run: |
-          for attempt in 1 2 3; do
-            if gh workflow run deploy-backend.yml --ref dev -f sha="$SHA"; then
-              echo "::notice::dispatched the dev deploy of $SHA"
-              exit 0
-            fi
-            echo "::warning::dispatch attempt $attempt failed"
-            sleep 10
-          done
-          echo "::error::could not dispatch the dev deploy of $SHA; run: gh workflow run deploy-backend.yml --ref dev -f sha=$SHA"
-          exit 1
-
-      # Builds the head of dev, like the push run it replaces.
+      # Builds the head of dev, like the push run it replaces. A dispatch, not a
+      # call: npm trusts this repository's npm-publish.yml as the publisher, and
+      # main's copy already accepts a dispatch.
       - name: Dispatch the dev publish
         if: steps.plan.outputs.publish == 'true'
         env:
@@ -218,3 +207,15 @@ jobs:
           done
           echo "::error::could not dispatch the dev publish; run: gh workflow run npm-publish.yml --ref dev"
           exit 1
+
+  # deploy-backend.yml's test-gate, then deploy-dev, on the planned commit.
+  deploy:
+    needs: plan
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.deploy_sha != '' }}
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/deploy-backend.yml
+    with:
+      sha: ${{ needs.plan.outputs.deploy_sha }}
+    secrets: inherit

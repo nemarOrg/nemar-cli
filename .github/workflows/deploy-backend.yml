@@ -9,18 +9,26 @@ on:
       - 'backend/**'
       - 'shared/**'
       - '.github/workflows/deploy-backend.yml'
-  # The dev worker: dispatched by auto-bump-dev.yml, ONCE per push to dev, after it
-  # has pushed the version bump, with the commit to deploy (the bump). Until
-  # 2026-10, a push to dev deployed itself here, so a merge touching backend/ or
-  # shared/ deployed twice: the merge commit at -devN, then 14 s later the bump at
-  # -devN+1, each behind its own 18-minute test-gate (152 of 235 deploy runs were
-  # bump commits, 2026-09-15 to 2026-10-13). The dev worker now ends at the same
-  # bumped version from one deploy. auto-bump-dev.yml still dispatches a deploy for
-  # a push it does not bump, when that push touched the paths above.
+  # The dev worker: called by auto-bump-dev.yml, ONCE per push to dev, after it has
+  # pushed the version bump, with the commit to deploy (the bump). Until 2026-10, a
+  # push to dev deployed itself here, so a merge touching backend/ or shared/
+  # deployed twice: the merge commit at -devN, then 14 s later the bump at -devN+1,
+  # each behind its own 18-minute test-gate (152 of 235 deploy runs were bump
+  # commits, 2026-09-15 to 2026-10-13). The dev worker now ends at the same bumped
+  # version from one deploy. auto-bump-dev.yml still deploys a push it does not
+  # bump, when that push touched the paths above.
   #
-  # A dispatch from any other ref deploys nothing (see detect-environment), so this
-  # adds no way to reach production. By hand, to redeploy dev:
-  #   gh workflow run deploy-backend.yml --ref dev [-f sha=<commit on dev>]
+  # A call, not a dispatch: a reusable workflow runs from the caller's own commit,
+  # so it does not depend on what main's copy of this file declares.
+  workflow_call:
+    inputs:
+      sha:
+        description: "Commit on dev to deploy"
+        type: string
+        required: true
+  # By hand, to redeploy dev: gh workflow run deploy-backend.yml --ref dev
+  # [-f sha=<commit on dev>]. A call or dispatch from any other ref deploys nothing
+  # (see detect-environment), so neither adds a way to reach production.
   workflow_dispatch:
     inputs:
       sha:
@@ -28,7 +36,8 @@ on:
         required: false
         default: ""
 
-# Serialize deploys per ref (#897); a dispatched dev deploy's ref is dev. The release pipeline pushes TWO commits to
+# Serialize deploys per ref (#897); a called or dispatched dev deploy's ref is
+# dev. The release pipeline pushes TWO commits to
 # main that both match backend/** (the dev->main merge commit writes
 # backend/package.json's version, and auto-tag.yml's strip commit rewrites it
 # again seconds later). Without this group both fired `wrangler d1 migrations
@@ -52,18 +61,19 @@ jobs:
     outputs:
       environment: ${{ steps.detect.outputs.environment }}
       # The commit every job below checks out: the pushed commit on main, the
-      # dispatched `sha` (or the head of dev) for the dev worker.
+      # given `sha` (or the head of dev) for the dev worker.
       sha: ${{ steps.detect.outputs.sha }}
       # 'true' when test-gate is skipped because the commit before passed it.
       gate_reused: ${{ steps.reuse.outputs.gate_reused }}
     steps:
+      # A called run carries its caller's event (a push to dev), hence the ref test.
       - name: Checkout code
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/checkout@v4
 
       - name: Classify the push
         id: push
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: scripts/ci/classify-push.sh >> "$GITHUB_OUTPUT"
 
       - name: Detect environment
@@ -75,10 +85,12 @@ jobs:
           REF: ${{ github.ref }}
           INPUT_SHA: ${{ inputs.sha }}
         run: |
-          if [[ "$EVENT" == "push" && "$REF" == "refs/heads/main" ]]; then
-            echo "environment=production" >> "$GITHUB_OUTPUT"
-            echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
-          elif [[ "$EVENT" == "workflow_dispatch" && "$REF" == "refs/heads/dev" ]]; then
+          # A call from auto-bump-dev.yml always passes `sha`; a dispatch may not.
+          if [[ -n "$INPUT_SHA" || "$EVENT" == "workflow_dispatch" ]]; then
+            if [[ "$REF" != "refs/heads/dev" ]]; then
+              echo "::notice::a deploy called or dispatched from $REF deploys nothing; only dev's is the dev worker"
+              exit 0
+            fi
             SHA="${INPUT_SHA:-$GITHUB_SHA}"
             if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
               echo "::error::sha '$SHA' is not a full commit id"
@@ -92,8 +104,11 @@ jobs:
             fi
             echo "environment=dev" >> "$GITHUB_OUTPUT"
             echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          elif [[ "$EVENT" == "push" && "$REF" == "refs/heads/main" ]]; then
+            echo "environment=production" >> "$GITHUB_OUTPUT"
+            echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
           else
-            echo "::notice::$EVENT on $REF deploys nothing: production deploys on a push to main, dev on a dispatch from dev"
+            echo "::notice::$EVENT on $REF deploys nothing: production deploys on a push to main, dev when auto-bump-dev.yml calls this"
           fi
 
       # THE RELEASE STRIP COMMIT REUSES THE RELEASE MERGE'S GATE. A release pushes
@@ -209,6 +224,12 @@ jobs:
     # loops below can take 7 minutes on their own, and a limit that cancels a D1
     # migration midway is worse than a slow deploy (see the concurrency note above).
     timeout-minutes: 20
+    # The workflow-level group above serializes this workflow's own runs. A call
+    # from auto-bump-dev.yml runs inside that workflow's run, so the dev migrate and
+    # deploy also take this job-level lock, with the same never-cancel-midway rule.
+    concurrency:
+      group: deploy-backend-dev-worker
+      cancel-in-progress: false
     environment: development
     steps:
       - name: Checkout code
