@@ -382,6 +382,38 @@ describe("participants.json: the whole object, under the same two rules", () => 
 });
 
 describe("nothing here fails open", () => {
+  test("a state this module does not know withholds the document, whatever text came with it", () => {
+    const odd = { name: "README.md", state: "weird", text: `fine text ${REAL_PATH}` } as never;
+    const clean = { name: "README.md", state: "weird", text: "fine text" } as never;
+    for (const readme of [odd, clean]) {
+      const r = presend(docs({ readme }));
+      expect(r.states.readme).toBe("withheld_unreadable");
+      expect(r.cleared.readme).toBeUndefined();
+    }
+  });
+
+  test("a document missing from the input is withheld, not thrown and not sent", () => {
+    const input = docs();
+    // biome-ignore lint/performance/noDelete: the property must be absent, not undefined
+    delete (input as Partial<typeof input>).changes;
+    const r = presend(input);
+    expect(r.states.changes).toBe("withheld_unreadable");
+    expect(r.cleared.changes).toBeUndefined();
+    expect(r.states.readme).toBe("sent");
+  });
+
+  test("whether a document was cut is judged on what is sent: a control character outside the BMP shortens it", () => {
+    const cap = DOCUMENT_CHAR_CAPS.readme;
+    // One character longer than the cap as read, exactly the cap once the two-unit tag character
+    // is replaced by one space: it is sent whole, with no cut mark, and says so.
+    const text = `${"a".repeat(cap - 2)}\u{E0001}b`;
+    expect(text.length).toBe(cap + 1);
+    const r = presend(docs({ readme: present(text) }));
+    expect(r.states.readme).toBe("sent");
+    expect((r.cleared.readme as string).length).toBe(cap);
+    expect(r.cleared.readme as string).not.toContain("[cut]");
+  });
+
   test("JSON nested so deeply that walking it fails is withheld, not thrown and not sent", () => {
     const depth = 300_000;
     const text = `{"participant_id":${"[".repeat(depth)}${"]".repeat(depth)}}`;

@@ -78,32 +78,38 @@ function isPlainObject(x: unknown): x is Record<string, unknown> {
   return typeof x === "object" && x !== null && !Array.isArray(x);
 }
 
+/**
+ * The string a document is sent as: control characters replaced, then cut to `cap` characters with
+ * a visible mark. Whether it was cut is judged on the cleaned text, because a control character
+ * outside the Basic Multilingual Plane is replaced by one space and so shortens the text.
+ */
+function toSent(text: string, cap: number): { sent: string; cut: boolean } {
+  const cleaned = tidy(text, Number.MAX_SAFE_INTEGER);
+  return cleaned.length > cap
+    ? { sent: tidy(cleaned, cap), cut: true }
+    : { sent: cleaned, cut: false };
+}
+
 /** Build the string a document would be sent as, or say why there is none. */
 function prepare(document: ReviewDocument, raw: RawDocument): Prepared {
   switch (raw.state) {
+    case "present":
+      break;
     case "absent":
       return { kind: "no-text", state: "absent" };
     case "annexed":
       return { kind: "no-text", state: "withheld_annexed" };
-    case "unreadable":
-      return { kind: "no-text", state: "withheld_unreadable" };
     case "not_utf8":
       return { kind: "no-text", state: "withheld_not_utf8" };
-    case "present":
-      break;
+    default:
+      // "unreadable", and any word this function does not know: nothing is sent on a guess.
+      return { kind: "no-text", state: "withheld_unreadable" };
   }
   if (typeof raw.text !== "string") return { kind: "no-text", state: "withheld_unreadable" };
   const cap = DOCUMENT_CHAR_CAPS[document];
 
   if (document !== "dataset_description" && document !== "participants_json") {
-    return {
-      kind: "text",
-      sent: tidy(raw.text, cap),
-      cut: raw.text.length > cap,
-      object: null,
-      keysShown: 0,
-      keysNotShown: 0,
-    };
+    return { kind: "text", ...toSent(raw.text, cap), object: null, keysShown: 0, keysNotShown: 0 };
   }
 
   let parsed: unknown;
@@ -128,11 +134,9 @@ function prepare(document: ReviewDocument, raw: RawDocument): Prepared {
     object = kept;
     keysNotShown = Object.keys(parsed).length - keysShown;
   }
-  const serialized = JSON.stringify(object, null, 2);
   return {
     kind: "text",
-    sent: tidy(serialized, cap),
-    cut: serialized.length > cap,
+    ...toSent(JSON.stringify(object, null, 2), cap),
     object,
     keysShown,
     keysNotShown,
@@ -177,6 +181,7 @@ export const presend: PreSend = (docs): PreSendResult => {
       keysNotShown += prepared.keysNotShown;
     } catch {
       // The examination itself failed: whatever this document is, it is not cleared.
+      delete cleared[document];
       states[document] = "withheld_unreadable";
     }
   }
