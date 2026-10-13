@@ -12,6 +12,7 @@ import chalk from "chalk";
 import type { Ora } from "ora";
 import { ApiError, errorDetail } from "./api/errors.js";
 import { isAuthenticated } from "./config.js";
+import { markReportedExit } from "./debug-log.js";
 
 /**
  * Hints keyed on a publication `block_reason`, which outrank the status-code
@@ -49,6 +50,10 @@ export function handleCommandError(
 /**
  * `handleCommandError`, then the exit code of a failure. The one way a command of a group that
  * exits non-zero reports an error, so no failure path can print without failing (#1581).
+ *
+ * When the Worker answered with a refusal or a not-found (a 4xx), exit 1 is the command's answer
+ * and not a crash, so the "attach the log to a new issue" hint is suppressed (`markReportedExit`).
+ * A 5xx, a network failure and anything that is not an `ApiError` may be a bug, and keep it.
  */
 export function failWith(
   error: unknown,
@@ -58,18 +63,22 @@ export function failWith(
 ): void {
   handleCommandError(error, spinner, defaultMsg, hints);
   process.exitCode = 1;
+  if (error instanceof ApiError && error.statusCode >= 400 && error.statusCode < 500) {
+    markReportedExit();
+  }
 }
 
 /**
  * Check authentication: when nobody is signed in, say so, set the exit code to 1 and return false
  * so the caller can `return`. A command that is not signed in has done nothing, and a script has to
- * be able to tell.
+ * be able to tell. The message already says what to do, so the bug-report hint is suppressed.
  */
 export function requireSignedIn(): boolean {
   if (!isAuthenticated()) {
     console.log(chalk.red("Error: Not authenticated"));
     console.log(chalk.dim("  Run 'nemar auth login' first"));
     process.exitCode = 1;
+    markReportedExit();
     return false;
   }
   return true;

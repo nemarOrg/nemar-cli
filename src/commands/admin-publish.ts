@@ -26,6 +26,7 @@ import {
   YES_OPTION,
   confirm,
 } from "../lib/confirm.js";
+import { markReportedExit } from "../lib/debug-log.js";
 import { identifierScreenLines } from "../lib/identifier-screen-display.js";
 import { registerApproveCommand } from "./admin-publish-approve.js";
 
@@ -162,14 +163,17 @@ Examples:
     if (!reason) {
       console.log(chalk.red("Reason is required"));
       process.exitCode = 1;
+      markReportedExit();
       return;
     }
 
     const confirmResult = await confirm(`Deny publication of ${datasetId}?`, options);
     if (confirmResult !== "confirmed") {
       console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
-      // Nothing was denied, and a script that asked for a denial has to be able to tell.
+      // Nothing was denied, and a script that asked for a denial has to be able to tell. The
+      // administrator's own answer is not a crash, so no bug-report hint.
       process.exitCode = 1;
+      markReportedExit();
       return;
     }
 

@@ -28,6 +28,7 @@ import {
   YES_OPTION,
   confirm,
 } from "../lib/confirm.js";
+import { markReportedExit } from "../lib/debug-log.js";
 
 export function registerApproveCommand(group: Command): void {
   group
@@ -133,6 +134,7 @@ After Approval:
             chalk.red("--acknowledge-identifier-screen needs a reason of 10 to 500 characters."),
           );
           process.exitCode = 1;
+          markReportedExit();
           return;
         }
 
@@ -221,7 +223,9 @@ After Approval:
         if (confirmResult !== "confirmed") {
           console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
           // Nothing was approved, and a script that asked for an approval has to be able to tell.
+          // The administrator's own answer is not a crash, so no bug-report hint.
           process.exitCode = 1;
+          markReportedExit();
           return;
         }
 

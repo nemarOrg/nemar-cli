@@ -12,8 +12,10 @@
  * request the backend saw, because "exits 1 and approved anyway" is the worse bug.
  *
  * Mutation checks (each turns a named group red): drop `process.exitCode = 1` from `failWith`
- * (the API-error, refusal and run-failure rows); from `requireAuth` (the signed-out rows); from
- * the declined branch of `deny` or `approve` (the declined rows).
+ * (the API-error, refusal and run-failure rows); from `requireSignedIn` (the signed-out rows); from
+ * the declined branch of `deny` or `approve` (the declined rows). Each `markReportedExit` call
+ * guards the rows that end in it, and widening the 4xx rule of `failWith` to 5xx turns the
+ * backend-500 rows red.
  *
  * CI TIER: integration, like the other CLI suites that start the binary against a local server.
  */
@@ -42,6 +44,14 @@ beforeEach(async () => {
 
 /** Everything the command printed. The spinner writes its verdict to standard error. */
 const output = (r: CliResult) => `${r.stdout}\n${r.stderr}`;
+
+/**
+ * The generic nudge the exit hook prints on a non-zero exit (src/index.ts). Where exit 1 is the
+ * command's answer (not signed in, a refusal, a declined prompt) it is noise, and
+ * `markReportedExit` suppresses it; where the Worker itself failed it stays, because that may be
+ * a bug worth a report.
+ */
+const BUG_HINT = "attach the log to a new issue";
 
 const posts = () => h.requests.filter((c) => c.method === "POST");
 
@@ -82,6 +92,7 @@ describe("not signed in", () => {
       seedGolden();
       const r = await h.cli(args, { signedOut: true });
       expect(r.exitCode).toBe(1);
+      expect(output(r)).not.toContain(BUG_HINT);
       expect(r.stdout).toContain("Error: Not authenticated");
       expect(r.stdout).toContain("nemar auth login");
       expect(h.requests).toEqual([]);
@@ -103,6 +114,7 @@ describe("an API error", () => {
       const args = COMMANDS.find((c) => c.name === name)?.args ?? [];
       const r = await h.cli(args);
       expect(r.exitCode).toBe(1);
+      expect(output(r)).not.toContain(BUG_HINT);
       expect(output(r)).toContain(says);
       expect(h.requests.at(-1)?.status).toBe(404);
     });
@@ -122,6 +134,8 @@ describe("an API error", () => {
       const r = await h.cli(args);
       expect(r.exitCode).toBe(1);
       expect(h.requests.at(-1)?.status).toBe(500);
+      // A fault of the Worker may be a bug, so the hint to file one stays.
+      expect(output(r)).toContain(BUG_HINT);
     });
   }
 });
@@ -133,6 +147,7 @@ describe("a key without the role (403)", () => {
       await h.user("exitmember", "member", MEMBER_KEY);
       const r = await h.cli(args);
       expect(r.exitCode).toBe(1);
+      expect(output(r)).not.toContain(BUG_HINT);
       expect(output(r)).toContain("This command requires admin privileges");
       expect(requestStatus(requestId)).toBe("requested");
       // Whatever the command sent was refused: no write got through.
@@ -151,6 +166,7 @@ describe("a call the Worker refuses", () => {
     const r = await h.cli(["admin", "publish", "approve", DATASET, "--resume", "--yes"]);
 
     expect(r.exitCode).toBe(1);
+    expect(output(r)).not.toContain(BUG_HINT);
     expect(output(r)).toContain("Identifier screen: DID NOT RUN");
     expect(requestStatus(requestId)).toBe("requested");
     expect(posts().map((c) => c.status)).toEqual([409]);
@@ -163,6 +179,7 @@ describe("a call the Worker refuses", () => {
     const r = await h.cli(["admin", "publish", "approve", DATASET, "--resume", "--yes"]);
 
     expect(r.exitCode).toBe(1);
+    expect(output(r)).not.toContain(BUG_HINT);
     expect(requestStatus(requestId)).toBe("requested");
   });
 
@@ -173,6 +190,7 @@ describe("a call the Worker refuses", () => {
     const r = await h.cli(["admin", "publish", "approve", DATASET, "--resume", "--yes"]);
 
     expect(r.exitCode).toBe(1);
+    expect(output(r)).not.toContain(BUG_HINT);
     expect(output(r)).toContain("main is now at fedcba987654");
     expect(requestStatus(requestId)).toBe("requested");
   });
@@ -186,6 +204,7 @@ describe("a call the Worker refuses", () => {
     const r = await h.cli(["admin", "publish", "approve", DATASET, "--yes"]);
 
     expect(r.exitCode).toBe(1);
+    expect(output(r)).not.toContain(BUG_HINT);
     expect(output(r)).toContain("Fix the CI issues and retry with --resume");
     expect(requestStatus(requestId)).toBe("approving");
   });
@@ -205,6 +224,7 @@ describe("a call the Worker refuses", () => {
     ]);
 
     expect(r.exitCode).toBe(1);
+    expect(output(r)).not.toContain(BUG_HINT);
     expect(r.stdout).toContain("--acknowledge-identifier-screen needs a reason of 10 to 500");
     expect(h.requests).toEqual([]);
   });
@@ -216,6 +236,7 @@ describe("a call the Worker refuses", () => {
     const r = await h.cli(["admin", "publish", "deny", DATASET, "--yes"], { input: "\n" });
 
     expect(r.exitCode).toBe(1);
+    expect(output(r)).not.toContain(BUG_HINT);
     expect(r.stdout).toContain("Reason is required");
     expect(posts()).toEqual([]);
     expect(requestStatus(requestId)).toBe("requested");
@@ -232,6 +253,7 @@ describe("a confirmation that is declined or cannot be asked", () => {
       const requestId = seedGolden();
       const r = await h.cli(args);
       expect(r.exitCode).toBe(1);
+      expect(output(r)).not.toContain(BUG_HINT);
       expect(r.stdout).toContain("Skipped");
       expect(posts()).toEqual([]);
       expect(requestStatus(requestId)).toBe("requested");
@@ -247,6 +269,7 @@ describe("a confirmation that is declined or cannot be asked", () => {
       const requestId = seedGolden();
       const r = await h.cli(args);
       expect(r.exitCode).toBe(1);
+      expect(output(r)).not.toContain(BUG_HINT);
       expect(r.stderr).toContain("Interactive prompt unavailable; use --yes or --no");
       expect(r.stdout).toContain("Cancelled");
       expect(posts()).toEqual([]);
