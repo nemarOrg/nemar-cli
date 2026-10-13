@@ -192,6 +192,12 @@ export interface SeedReview {
   nonce?: string | null;
   claimed?: boolean;
   attempts?: number;
+  /**
+   * An override recorded on the row, as the approval gate writes it: the administrator and the
+   * reason codes it was given for, stored as a JSON array. All three columns or none (the
+   * migration's CHECKs). Left out, the row has none.
+   */
+  override?: { by: number; reasons: readonly string[] };
 }
 
 const randomHex = (bytes: number) =>
@@ -228,13 +234,15 @@ export function seedPublicationReview(db: Database, r: SeedReview): number {
     .query<{ id: number }, (string | number | null)[]>(
       `INSERT INTO publication_reviews
          (request_id, dataset_id, head_sha, anonymous, requested_by, started_by, state, verdict,
-          detail, report, nonce, claimed_at, attempts, created_at, decided_at)
+          detail, report, nonce, claimed_at, attempts, created_at, decided_at,
+          override_by, override_at, override_reasons)
        VALUES (?, ?, ?, ?,
                COALESCE(?, (SELECT requested_by FROM publication_requests WHERE id = ?), 1),
                ?, ?, ?, ?, ?, ?,
                CASE WHEN ? = 1 THEN datetime('now', ?) END,
                ?, datetime('now', ?),
-               CASE WHEN ? = 'dispatched' THEN NULL ELSE datetime('now', ?) END)
+               CASE WHEN ? = 'dispatched' THEN NULL ELSE datetime('now', ?) END,
+               ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END, ?)
        RETURNING id`,
     )
     .get(
@@ -256,6 +264,9 @@ export function seedPublicationReview(db: Database, r: SeedReview): number {
       `-${minutes} minutes`,
       r.state,
       `-${minutes} minutes`,
+      r.override?.by ?? null,
+      r.override?.by ?? null,
+      r.override ? JSON.stringify(r.override.reasons) : null,
     );
   if (!row) throw new Error("seedPublicationReview inserted nothing");
   return row.id;

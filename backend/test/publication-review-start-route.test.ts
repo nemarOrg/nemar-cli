@@ -477,6 +477,58 @@ describe("starting again", () => {
     });
   }
 
+  // An override is given for what an attempt showed, by reason code. A restart is a new attempt,
+  // whose reasons nobody was shown (an override for `review_could_not_run` over a dispatch that
+  // failed would otherwise cover the next attempt's refusal by the model), so it takes the
+  // override back with the rest of the attempt (ADR 0102 section 9, the gate's binding).
+  test("a restart clears the recorded override: the new attempt is not the one it was given for", async () => {
+    const { requestId } = request();
+    const other = await seedUser(h.db, "startadmin2", "admin", `${ADMIN_KEY}2`);
+    const reviewId = seedPublicationReview(h.db, {
+      requestId,
+      datasetId: PROD_DATASET,
+      state: "errored",
+      detail: "dispatch_failed",
+      claimed: true,
+      override: { by: other, reasons: ["review_could_not_run"] },
+    });
+    expect(h.review(reviewId)).toMatchObject({
+      override_by: other,
+      override_reasons: JSON.stringify(["review_could_not_run"]),
+    });
+    expect((await start(PROD_DATASET)).status).toBe(202);
+    expect(h.review(reviewId)).toMatchObject({
+      state: "dispatched",
+      override_by: null,
+      override_at: null,
+      override_reasons: null,
+    });
+  });
+
+  test("a restart that cannot hand the review over clears the recorded override too", async () => {
+    const { requestId } = request();
+    const reviewId = seedPublicationReview(h.db, {
+      requestId,
+      datasetId: PROD_DATASET,
+      state: "errored",
+      detail: "dispatch_failed",
+      claimed: true,
+      override: { by: adminId, reasons: ["review_could_not_run"] },
+    });
+    const res = await start(PROD_DATASET, {
+      bindings: h.env({ PRESCREEN_CALLBACK_SECRET: undefined } as Partial<Bindings>),
+    });
+    expect(res.status).toBe(502);
+    expect(h.review(reviewId)).toMatchObject({
+      state: "errored",
+      detail: "dispatch_unconfigured",
+      override_by: null,
+      override_at: null,
+      override_reasons: null,
+    });
+    expect(h.dispatches()).toHaveLength(0);
+  });
+
   test("the second start of one commit is refused: the first one is running", async () => {
     request();
     expect((await start(PROD_DATASET)).status).toBe(202);
