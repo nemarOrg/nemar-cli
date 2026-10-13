@@ -14,6 +14,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import {
   closeSync,
   existsSync,
@@ -46,6 +47,7 @@ import { computeFilesToUpload, prepareUploadProgress } from "../src/lib/upload/p
 import {
   type OpenRemote,
   S3_REMOTE_NAME,
+  describePrimeSkip,
   ensureGitignoreHasNemar,
   uploadDataToS3,
 } from "../src/lib/upload/transfer";
@@ -433,11 +435,28 @@ describe("the priming can neither hide nor stage an edit", () => {
 
 describe("the filter process never stays out of the configuration", () => {
   const runner = join(import.meta.dir, "helpers", "prime-runner.ts");
-  const spawnRunner = (dir: string, signal: string, delayMs: number, paths: string[]) =>
-    Bun.spawn(["bun", "run", runner, dir, signal, String(delayMs), ...paths], {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+  const spawnRunner = (
+    dir: string,
+    signal: string,
+    delayMs: number,
+    paths: string[],
+    chunk = 0,
+    chunkPaths = 100,
+  ) =>
+    Bun.spawn(
+      [
+        "bun",
+        "run",
+        runner,
+        dir,
+        signal,
+        String(delayMs),
+        String(chunk),
+        String(chunkPaths),
+        ...paths,
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
 
   /**
    * A lock git takes for every config write. Creating it makes `git config` fail with
@@ -480,9 +499,13 @@ describe("the filter process never stays out of the configuration", () => {
 
   test("SIGKILL leaves git-annex's marker, and the next upload puts it back first", async () => {
     // Guards the restore at the start of runDataSteps. SIGKILL runs no handler, so what it
-    // leaves is exactly git-annex's own interrupted-restage state.
+    // leaves is exactly git-annex's own interrupted-restage state. The metered filter
+    // process is not git-annex's default, so the restore must put back the marker's value,
+    // not a value it assumes.
     const dir = await dataset("sigkill", { [A]: 300_000 });
+    await meterFilterProcess(dir);
     const configured = await filterConfig(dir);
+    expect(configured.process[0]).not.toBe("git-annex filter-process");
     expect((await gitAnnexAdd(dir, [A])).success).toBe(true);
     const child = spawnRunner(dir, "SIGKILL", 0, [A]);
     await child.exited;
@@ -575,10 +598,202 @@ describe("the filter process never stays out of the configuration", () => {
     expect(await statRecorded(dir, "a.edf")).toBe(false);
   });
 
+  /** Six annexed files: three chunks at two paths a chunk. */
+  const sixFiles = Object.fromEntries(
+    Array.from({ length: 6 }, (_, i) => [`sub-${i}/eeg/r.edf`, 120_000]),
+  );
+  const counts = () => ["SIGINT", "SIGTERM", "SIGHUP"].map((s) => process.listenerCount(s));
+
+  test("a prime over three chunks records every entry and leaves the configuration as it was", async () => {
+    const dir = await trackedRepo(scratch.root, "three-chunks", sixFiles);
+    const configured = await filterConfig(dir);
+    const before = counts();
+    const seen: number[] = [];
+
+    const res = await primeIndexStat(dir, Object.keys(sixFiles), {
+      chunkPaths: 2,
+      onSuspended: (chunk) => seen.push(chunk),
+    });
+
+    expect(res).toEqual({ status: "primed", primed: 6 });
+    expect(seen).toEqual([0, 1, 2]);
+    for (const path of Object.keys(sixFiles)) expect(await statRecorded(dir, path)).toBe(true);
+    expect(await filterConfig(dir)).toEqual(configured);
+    expect(counts()).toEqual(before);
+  });
+
+  test("SIGKILL inside the second chunk leaves the marker, and the restore puts the value back", async () => {
+    // Guards writing the marker in EVERY chunk: the first chunk's restore removes it, so a
+    // second chunk that did not write it again would leave the filter process gone for
+    // good, with nothing to restore it from.
+    const dir = await trackedRepo(scratch.root, "sigkill-chunk2", sixFiles);
+    const configured = await filterConfig(dir);
+    const child = spawnRunner(dir, "SIGKILL", 0, Object.keys(sixFiles), 1, 2);
+    await child.exited;
+    expect(child.signalCode).toBe("SIGKILL");
+    expect(await filterConfig(dir)).toEqual({ process: [], marker: configured.process });
+
+    expect(await restoreSuspendedFilterProcess(dir)).toEqual({ status: "restored" });
+    expect(await filterConfig(dir)).toEqual(configured);
+  });
+
+  test("SIGTERM inside the second chunk puts the value back and stops that chunk's refresh", async () => {
+    // Guards the handler staying armed across chunks: one disarmed after the first chunk
+    // leaves the second chunk's window without a restore and its refresh holding index.lock.
+    const files = Object.fromEntries(
+      Array.from({ length: 100 }, (_, i) => [`sub-${i}/eeg/r.edf`, 120_000]),
+    );
+    const dir = await trackedRepo(scratch.root, "sigterm-chunk2", files);
+    const configured = await filterConfig(dir);
+    const child = spawnRunner(dir, "SIGTERM", 300, Object.keys(files), 1, 50);
+    await child.exited;
+    expect(child.signalCode).toBe("SIGTERM");
+
+    const lock = join(dir, ".git", "index.lock");
+    for (let i = 0; i < 10 && existsSync(lock); i++) await Bun.sleep(50);
+    expect(existsSync(lock)).toBe(false);
+    expect(await filterConfig(dir)).toEqual(configured);
+  });
+
+  test("a restore that fails while an empty filter process is in effect says not to run git add", async () => {
+    // Guards the choice of failure text: the per-file fallback may only be claimed when
+    // it was checked. Here an empty value appears in the window (so the check fails) and
+    // the restore cannot write, so git may run no filter at all.
+    const dir = await trackedRepo(scratch.root, "fallback-prime", { "a.edf": 300_000 });
+    const included = join(
+      scratch.root,
+      `fallback-${Math.random().toString(36).slice(2)}.gitconfig`,
+    );
+    writeFileSync(included, "");
+    await run(["git", "config", "--local", "include.path", included], dir);
+    let res: Awaited<ReturnType<typeof primeIndexStat>>;
+    try {
+      res = await primeIndexStat(dir, ["a.edf"], {
+        onSuspended: () => {
+          writeFileSync(included, '[filter "annex"]\n\tprocess =\n');
+          writeFileSync(configLock(dir), "");
+        },
+      });
+    } finally {
+      rmSync(configLock(dir), { force: true });
+    }
+    expect(res.status).toBe("error");
+    const text = res.status === "error" ? res.error : "";
+    expect(text).toContain("do not run git add");
+    expect(text).not.toContain("per-file filters");
+  });
+
+  test("the recovery's failure text also says not to run git add when an empty value is in effect", async () => {
+    // Guards fallbackNow's scope check.
+    const dir = await trackedRepo(scratch.root, "fallback-restore", { "a.edf": 300_000 });
+    const configured = await filterConfig(dir);
+    const included = join(
+      scratch.root,
+      `fallback-${Math.random().toString(36).slice(2)}.gitconfig`,
+    );
+    writeFileSync(included, '[filter "annex"]\n\tprocess =\n');
+    await run(["git", "config", "--local", FILTER_PROCESS_MARKER, configured.process[0]], dir);
+    await run(["git", "config", "--local", "--unset-all", FILTER_PROCESS_KEY], dir);
+    await run(["git", "config", "--local", "include.path", included], dir);
+    writeFileSync(configLock(dir), "");
+    let res: Awaited<ReturnType<typeof restoreSuspendedFilterProcess>>;
+    try {
+      res = await restoreSuspendedFilterProcess(dir);
+    } finally {
+      rmSync(configLock(dir), { force: true });
+    }
+    expect(res.status).toBe("error");
+    const text = res.status === "error" ? res.error : "";
+    expect(text).toContain("do not run git add");
+    expect(text).not.toContain("per-file filters");
+  });
+
+  test("the recovery's failure text does not promise the per-file filters when the clean filter is not git-annex's", async () => {
+    // Guards fallbackNow's clean-filter check: with no filter process anywhere but a clean
+    // filter that is not git-annex's, files are not stored the same way.
+    const dir = await trackedRepo(scratch.root, "fallback-clean", { "a.edf": 300_000 });
+    const configured = await filterConfig(dir);
+    await run(["git", "config", "--local", FILTER_PROCESS_MARKER, configured.process[0]], dir);
+    await run(["git", "config", "--local", "--unset-all", FILTER_PROCESS_KEY], dir);
+    await run(["git", "config", "--local", "filter.annex.clean", "cat"], dir);
+    writeFileSync(configLock(dir), "");
+    let res: Awaited<ReturnType<typeof restoreSuspendedFilterProcess>>;
+    try {
+      res = await restoreSuspendedFilterProcess(dir);
+    } finally {
+      rmSync(configLock(dir), { force: true });
+    }
+    expect(res.status).toBe("error");
+    const text = res.status === "error" ? res.error : "";
+    expect(text).toContain("do not run git add");
+  });
+
+  test("a value changed between chunks stops the next chunk, survives, and the count says what was done", async () => {
+    const dir = await trackedRepo(scratch.root, "changed-between", {
+      "a.edf": 120_000,
+      "b.edf": 120_000,
+      "c.edf": 120_000,
+      "d.edf": 120_000,
+    });
+    const res = await primeIndexStat(dir, ["a.edf", "b.edf", "c.edf", "d.edf"], {
+      chunkPaths: 2,
+      onProgress: (done) => {
+        if (done === 2) {
+          spawnSync("git", ["config", "--local", FILTER_PROCESS_KEY, "someone-elses-filter"], {
+            cwd: dir,
+          });
+        }
+      },
+    });
+
+    expect(res.status).toBe("skipped");
+    expect(res.status === "skipped" && res.reason).toContain("changed while the priming ran");
+    expect(res.status === "skipped" && res.primed).toBe(2);
+    expect(await filterConfig(dir)).toEqual({ process: ["someone-elses-filter"], marker: [] });
+    expect(await statRecorded(dir, "a.edf")).toBe(true);
+    expect(await statRecorded(dir, "c.edf")).toBe(false);
+  });
+
+  test("a value someone sets while it is out is theirs: the restore leaves it", async () => {
+    const dir = await trackedRepo(scratch.root, "changed-in-window", { "a.edf": 300_000 });
+    const res = await primeIndexStat(dir, ["a.edf"], {
+      onSuspended: () => {
+        spawnSync("git", ["config", "--local", FILTER_PROCESS_KEY, "someone-elses-filter"], {
+          cwd: dir,
+        });
+      },
+    });
+    expect(res.status).toBe("skipped");
+    expect(await filterConfig(dir)).toEqual({ process: ["someone-elses-filter"], marker: [] });
+  });
+
+  test("a clean filter changed in the window stops the chunk before the refresh", async () => {
+    // Guards the clean-filter half of the check after the unset: the refresh relies on
+    // git-annex's per-file clean filter being the one git runs.
+    const dir = await trackedRepo(scratch.root, "clean-in-window", { "a.edf": 300_000 });
+    const configured = await filterConfig(dir);
+    const res = await primeIndexStat(dir, ["a.edf"], {
+      onSuspended: () => {
+        spawnSync("git", ["config", "--local", "filter.annex.clean", "cat"], { cwd: dir });
+      },
+    });
+    expect(res.status === "skipped" && res.reason).toContain("filter.annex.clean");
+    expect(await statRecorded(dir, "a.edf")).toBe(false);
+    expect(await filterConfig(dir)).toEqual(configured);
+  });
+
+  test("the warning for a priming that stopped early counts what it did record", () => {
+    expect(describePrimeSkip("why", 2)).toBe(
+      "Index stat data was recorded for 2 data files before it stopped; the other large data files will be re-read by git through git-annex filter-process (why)",
+    );
+    expect(describePrimeSkip("why")).toBe(
+      "Large data files will be re-read by git through git-annex filter-process (why)",
+    );
+  });
+
   test("the signal handler is disarmed however the call ends", async () => {
     // Guards disarm() in the finally. A handler left armed would rewrite the configuration
     // with a stale value on some later Ctrl-C, and pile up one listener per call.
-    const counts = () => ["SIGINT", "SIGTERM", "SIGHUP"].map((s) => process.listenerCount(s));
     const before = counts();
 
     const ok1 = await trackedRepo(scratch.root, "disarm-ok", { "a.edf": 300_000 });
@@ -739,10 +954,19 @@ describe("configurations the priming leaves alone", () => {
     const dir = await trackedRepo(scratch.root, "foreign-clean", { "a.edf": 300_000 });
     const configured = await filterConfig(dir);
     await run(["git", "config", "--local", "filter.annex.clean", "cat"], dir);
+    let suspended = false;
 
-    const res = await primeIndexStat(dir, ["a.edf"]);
+    const res = await primeIndexStat(dir, ["a.edf"], {
+      onSuspended: () => {
+        suspended = true;
+      },
+    });
 
-    expect(res.status === "skipped" && res.reason).toContain("filter.annex.clean");
+    // Refused before the configuration is touched, not by the check inside the window.
+    expect(res.status === "skipped" && res.reason).toBe(
+      "filter.annex.clean is not git-annex's clean filter",
+    );
+    expect(suspended).toBe(false);
     expect(await filterConfig(dir)).toEqual(configured);
   });
 

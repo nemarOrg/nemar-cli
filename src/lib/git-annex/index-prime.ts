@@ -62,9 +62,10 @@ export type PrimeResult =
   | { status: "primed"; primed: number }
   /**
    * Nothing more was primed, by choice or because a step failed in a way that cannot have
-   * changed anything but stat data. The caller says so: git will read those files the old way.
+   * changed anything but stat data. The caller says so: git will read the rest the old way.
+   * `primed` counts the paths earlier chunks handed to git before it stopped, when any did.
    */
-  | { status: "skipped"; reason: string }
+  | { status: "skipped"; reason: string; primed?: number }
   /**
    * The repository's configuration could not be read or put back. The caller must fail its
    * step: this says what is wrong and what to do.
@@ -129,17 +130,24 @@ async function gitConfig(path: string, args: string[]): Promise<string | undefin
 
 /**
  * Put `value` back as the repository's filter process and drop the marker, then read
- * both back. Returns git's complaint, or nothing when the configuration is as it was.
+ * both back. A value someone set in the repository while it was out is theirs and is left
+ * as it is; only the marker is removed. Returns git's complaint, or nothing when the
+ * configuration holds a filter process again and no marker.
  */
 async function restoreFilterProcess(path: string, value: string): Promise<string | undefined> {
-  const set = await gitConfig(path, [FILTER_PROCESS_KEY, value]);
-  if (set) return set;
+  const before = await readConfigValues(path, FILTER_PROCESS_KEY, "local");
+  if ("error" in before) return before.error;
+  if (before.values.length === 0) {
+    const set = await gitConfig(path, [FILTER_PROCESS_KEY, value]);
+    if (set) return set;
+  }
   const unset = await gitConfig(path, ["--unset-all", FILTER_PROCESS_MARKER]);
   if (unset) return unset;
   const now = await readConfigValues(path, FILTER_PROCESS_KEY, "local");
   if ("error" in now) return now.error;
-  if (now.values.length !== 1 || now.values[0] !== value) {
-    return `${FILTER_PROCESS_KEY} reads back as ${JSON.stringify(now.values)}, not ${JSON.stringify(value)}`;
+  const expected = before.values.length === 0 ? [value] : before.values;
+  if (JSON.stringify(now.values) !== JSON.stringify(expected)) {
+    return `${FILTER_PROCESS_KEY} reads back as ${JSON.stringify(now.values)}, not ${JSON.stringify(expected)}`;
   }
   const marker = await readConfigValues(path, FILTER_PROCESS_MARKER, "local");
   if ("error" in marker) return marker.error;
@@ -178,10 +186,17 @@ function describeRestoreFailure(
   return `Could not put git-annex's filter process back into ${displayName(path)}'s configuration (${displayName(error)}). ${meanwhile} ${manualRestore(path, value)}`;
 }
 
-/** Whether git, with the repository's own value out, would fall back to the per-file filters. */
+/**
+ * Whether git, with the repository's own value out, falls back to git-annex's per-file
+ * filters: no filter process in any scope, and git-annex's clean filter in effect.
+ */
 async function fallbackNow(path: string): Promise<Fallback> {
   const all = await readConfigValues(path, FILTER_PROCESS_KEY, "all");
-  return "values" in all && all.values.length === 0 ? "per-file" : "unchecked";
+  if (!("values" in all) || all.values.length > 0) return "unchecked";
+  const clean = await readConfigValues(path, "filter.annex.clean", "all");
+  if (!("values" in clean)) return "unchecked";
+  const effective = clean.values[clean.values.length - 1];
+  return effective !== undefined && isAnnexCleanFilter(effective) ? "per-file" : "unchecked";
 }
 
 /**
@@ -251,9 +266,14 @@ function restoreSync(path: string, value: string): string | undefined {
       stdio: ["ignore", "ignore", "pipe"],
       timeout: SIGNAL_RESTORE_TIMEOUT_MS,
     });
-  const set = run([FILTER_PROCESS_KEY, value]);
-  if (set.error) return set.error.message;
-  if (set.status !== 0) return set.stderr?.toString().trim() || `git config exited ${set.status}`;
+  // A value someone set while it was out is theirs (exit 0 means one is there).
+  const present = run(["--get-all", FILTER_PROCESS_KEY]);
+  if (present.error) return present.error.message;
+  if (present.status !== 0) {
+    const set = run([FILTER_PROCESS_KEY, value]);
+    if (set.error) return set.error.message;
+    if (set.status !== 0) return set.stderr?.toString().trim() || `git config exited ${set.status}`;
+  }
   const unset = run(["--unset-all", FILTER_PROCESS_MARKER]);
   if (unset.error) return unset.error.message;
   if (unset.status !== 0 && unset.status !== CONFIG_KEY_ABSENT) {
@@ -327,21 +347,23 @@ function isAnnexCleanFilter(value: string): boolean {
 }
 
 /**
- * Take the repository's filter process out for one chunk: record it under the marker,
- * unset it, and then require that no filter process is left in any scope. Returns the
- * reason it could not, or nothing when git will use the per-file filter for this chunk.
- * `onSuspended` runs between the unset and that check, so a test can act in the window.
+ * Take the repository's filter process out for one chunk (the marker is already written),
+ * and then require that no filter process is left in any scope and that git-annex's clean
+ * filter is still the one in effect. Returns the reason it could not, or nothing when git
+ * will use git-annex's per-file filter for this chunk. `onSuspended` runs between the
+ * unset and those checks, so a test can act in the window.
  */
 async function suspendForChunk(
   path: string,
   saved: string | undefined,
-  onSuspended: (() => void) | undefined,
+  chunk: number,
+  onSuspended: ((chunk: number) => void) | undefined,
 ): Promise<string | undefined> {
   if (saved !== undefined) {
     const unset = await gitConfig(path, ["--unset-all", FILTER_PROCESS_KEY]);
     if (unset) return `could not unset ${FILTER_PROCESS_KEY}: ${unset}`;
   }
-  onSuspended?.();
+  onSuspended?.(chunk);
   // Whatever the check before missed (an empty value it could not see, a value added
   // since), git must find no filter process at all before anything is refreshed: an
   // empty one left in another scope means no filter, and the refresh would hash raw content.
@@ -349,6 +371,12 @@ async function suspendForChunk(
   if ("error" in left) return `could not check ${FILTER_PROCESS_KEY}: ${left.error}`;
   if (left.values.length > 0) {
     return `${FILTER_PROCESS_KEY} is still set in another scope once this repository's value is out`;
+  }
+  const clean = await readConfigValues(path, "filter.annex.clean", "all");
+  if ("error" in clean) return `could not check filter.annex.clean: ${clean.error}`;
+  const effective = clean.values[clean.values.length - 1];
+  if (effective === undefined || !isAnnexCleanFilter(effective)) {
+    return "filter.annex.clean is no longer git-annex's clean filter";
   }
   return undefined;
 }
@@ -398,16 +426,22 @@ async function suspendForChunk(
  *    (`skipped`): neither can have changed more than stat data. A configuration that
  *    cannot be read or put back is an `error`.
  *
- * `onSuspended` runs once, in the first chunk's window, after the unset and before the
- * check of the other scopes; it exists so a test can act there. `onProgress` reports paths
- * handed to git so far.
+ * A value someone sets in the repository while the call runs is theirs: a restore leaves
+ * it in place, and a chunk that finds the value changed since the first read stops
+ * (`skipped`) instead of writing the old value back.
+ *
+ * `onSuspended` runs in every chunk's window, with the chunk's index, after the unset and
+ * before the checks of the other scopes; it exists so a test can act there. `onProgress`
+ * reports paths handed to git so far, after each chunk's value is back. `chunkPaths` is the
+ * chunk size, {@link REFRESH_CHUNK_PATHS} unless a test needs several chunks.
  */
 export async function primeIndexStat(
   path: string,
   paths: string[],
   options: {
-    onSuspended?: () => void;
+    onSuspended?: (chunk: number) => void;
     onProgress?: (done: number, total: number) => void;
+    chunkPaths?: number;
   } = {},
 ): Promise<PrimeResult> {
   if (paths.length === 0) return { status: "primed", primed: 0 };
@@ -444,10 +478,26 @@ export async function primeIndexStat(
   const disarm =
     saved === undefined ? () => {} : armRestoreOnInterrupt(path, saved, () => fallback);
   let primed = 0;
+  const partial = () => (primed > 0 ? { primed } : {});
   try {
-    let first = true;
-    for (const chunk of chunkAddTargets(listed.paths, REFRESH_CHUNK_PATHS)) {
+    const chunks = chunkAddTargets(listed.paths, options.chunkPaths ?? REFRESH_CHUNK_PATHS);
+    for (const [index, chunk] of chunks.entries()) {
       if (saved !== undefined) {
+        if (index > 0) {
+          // The value is back between chunks, and someone may have changed it since the
+          // first read; writing `saved` back after the next chunk would undo that.
+          const now = await readConfigValues(path, FILTER_PROCESS_KEY, "local");
+          if ("error" in now) {
+            return { status: "error", error: describeConfigReadFailure(now.error) };
+          }
+          if (now.values.length !== 1 || now.values[0] !== saved) {
+            return {
+              status: "skipped",
+              reason: `${FILTER_PROCESS_KEY} changed while the priming ran`,
+              ...partial(),
+            };
+          }
+        }
         const marked = await gitConfig(path, [FILTER_PROCESS_MARKER, saved]);
         if (marked) {
           // Nothing was unset, so nothing is out of the configuration; a marker git may
@@ -457,6 +507,7 @@ export async function primeIndexStat(
           return {
             status: "skipped",
             reason: `could not record ${FILTER_PROCESS_MARKER}: ${marked}.${stale}`,
+            ...partial(),
           };
         }
       }
@@ -465,12 +516,7 @@ export async function primeIndexStat(
       let refreshFailure: string | undefined;
       let restoreFailure: string | undefined;
       try {
-        suspendFailure = await suspendForChunk(
-          path,
-          saved,
-          first ? options.onSuspended : undefined,
-        );
-        first = false;
+        suspendFailure = await suspendForChunk(path, saved, index, options.onSuspended);
         if (!suspendFailure) {
           fallback = "per-file";
           const out = await runCommand(
@@ -493,9 +539,13 @@ export async function primeIndexStat(
           error: describeRestoreFailure(path, saved, restoreFailure, fallback),
         };
       }
-      if (suspendFailure) return { status: "skipped", reason: suspendFailure };
+      if (suspendFailure) return { status: "skipped", reason: suspendFailure, ...partial() };
       if (refreshFailure) {
-        return { status: "skipped", reason: `git add --refresh failed: ${refreshFailure}` };
+        return {
+          status: "skipped",
+          reason: `git add --refresh failed: ${refreshFailure}`,
+          ...partial(),
+        };
       }
       primed += chunk.length;
       options.onProgress?.(primed, listed.paths.length);

@@ -144,9 +144,7 @@ async function primeLargeDataFiles(
     return false;
   }
   if (result.status === "skipped") {
-    spinner.warn(
-      `Large data files will be re-read by git through git-annex filter-process (${result.reason})`,
-    );
+    spinner.warn(describePrimeSkip(result.reason, result.primed));
     return true;
   }
   if (result.primed === 0) {
@@ -161,6 +159,18 @@ async function primeLargeDataFiles(
       : `Checked ${countDataFiles(result.primed)} of ${describeBytes(minBytes)} or more against the index; git need not re-read the unchanged ones`,
   );
   return true;
+}
+
+/**
+ * The warning for a priming that stopped early: how many files it did record, when it got
+ * that far, and that git reads the rest the old way. Exported for unit tests.
+ */
+export function describePrimeSkip(reason: string, primed?: number): string {
+  const what =
+    primed && primed > 0
+      ? `Index stat data was recorded for ${countDataFiles(primed)} before it stopped; the other large data files`
+      : "Large data files";
+  return `${what} will be re-read by git through git-annex filter-process (${reason})`;
 }
 
 /** "1 GiB", "512 MiB": a power-of-two size as a threshold is spoken. */
