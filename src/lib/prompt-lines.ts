@@ -56,6 +56,11 @@ export class LineReader {
     });
   }
 
+  /** False once the input has ended (Ctrl+D, Ctrl+C, a closed pipe) or the reader was closed. */
+  get open(): boolean {
+    return !this.ended;
+  }
+
   /** True once Ctrl+C ended the input, so the caller can say "interrupted" and not "input ended". */
   get interrupted(): boolean {
     return this.wasInterrupted;

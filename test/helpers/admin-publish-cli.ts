@@ -49,6 +49,9 @@ import {
   withFakeResend,
 } from "../../backend/test/helpers/resend";
 
+/** How long a command driven on a terminal may keep running once its driver has finished. */
+const EXIT_WAIT_MS = 20_000;
+
 const CLI_ENTRY = join(import.meta.dir, "..", "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 
@@ -85,9 +88,31 @@ export interface CliResult {
   exitCode: number;
 }
 
+/**
+ * A command run on a real terminal (a pseudo-terminal, so `process.stdin.isTTY` is true and a
+ * person's type-ahead behaves as it does for a person). Standard output and standard error share
+ * the terminal, so the result's `stdout` is the whole transcript (line ends as `\n`) and `stderr`
+ * is empty.
+ */
+export interface TerminalSession {
+  /** Everything the command has written to its terminal so far. */
+  transcript(): string;
+  /** Type `text` as a person would; `\n` is the Enter key. */
+  type(text: string): void;
+  /**
+   * Wait until the transcript contains `text`, looking only at what was written after the first
+   * `after` characters, and return where the match ended. Rejects, killing the command, when it has
+   * not appeared in `timeoutMs` (default 20 seconds), so a command that stopped listening fails a
+   * test and does not hang it.
+   */
+  waitFor(text: string, opts?: { after?: number; timeoutMs?: number }): Promise<number>;
+}
+
 export interface CliOptions {
   /** Piped to the command's standard input. Without it the command has no input at all. */
   input?: string;
+  /** Run on a terminal and drive it with this function instead of piping `input`. */
+  terminal?: (session: TerminalSession) => Promise<void>;
   /** The username of a seeded account to run as. Default: the last account seeded. */
   as?: string;
   /** Run with no account signed in. */
@@ -269,6 +294,87 @@ export function startPublishCli(): PublishCli {
     );
   }
 
+  async function runOnTerminal(
+    args: string[],
+    baseEnv: Record<string, string>,
+    drive: (session: TerminalSession) => Promise<void>,
+  ): Promise<CliResult> {
+    // What a person's terminal has: a terminal type, and no CI variable, which turns the spinner
+    // (and with it the spinner's handling of standard input) off.
+    const env = { ...baseEnv, TERM: "xterm-256color" };
+    Reflect.deleteProperty(env, "CI");
+    const decoder = new TextDecoder();
+    let raw = "";
+    // A terminal ends a line with CR LF; the transcript, and every offset in it, uses LF.
+    const view = () => raw.replaceAll("\r\n", "\n");
+    let wake: Array<() => void> = [];
+    let exited = false;
+    const proc = spawn({
+      cmd: [process.execPath, "run", CLI_ENTRY, ...args],
+      cwd: REPO_ROOT,
+      env,
+      terminal: {
+        cols: 200,
+        rows: 50,
+        data(_terminal, chunk) {
+          raw += decoder.decode(chunk, { stream: true });
+          for (const w of wake.splice(0)) w();
+        },
+      },
+    });
+    void proc.exited.then(() => {
+      exited = true;
+      for (const w of wake.splice(0)) w();
+    });
+    const session: TerminalSession = {
+      transcript: view,
+      type: (text) => {
+        proc.terminal?.write(text);
+      },
+      async waitFor(text, o = {}) {
+        const from = o.after ?? 0;
+        const deadline = Date.now() + (o.timeoutMs ?? 20_000);
+        for (;;) {
+          const at = view().indexOf(text, from);
+          if (at >= 0) return at + text.length;
+          const left = deadline - Date.now();
+          if (exited || left <= 0) {
+            proc.kill();
+            throw new Error(
+              `the command ${exited ? "ended" : "wrote"} no ${JSON.stringify(text)}${exited ? "" : " in time"}; its terminal shows:\n${view()}`,
+            );
+          }
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, Math.min(left, 250));
+            wake.push(() => {
+              clearTimeout(timer);
+              resolve();
+            });
+          });
+        }
+      },
+    };
+    let failure: unknown;
+    const driven = drive(session).catch((error: unknown) => {
+      failure = error;
+      proc.kill();
+    });
+    // Once the driver is done the command has to finish by itself: one that stopped reading its
+    // terminal would otherwise hang the test.
+    await driven;
+    const hung = setTimeout(() => {
+      failure = new Error(
+        `the command was still running ${EXIT_WAIT_MS / 1000} seconds after its terminal was driven; it shows:\n${view()}`,
+      );
+      proc.kill();
+    }, EXIT_WAIT_MS);
+    const exitCode = await proc.exited;
+    clearTimeout(hung);
+    wake = [];
+    if (failure !== undefined) throw failure;
+    return { stdout: view(), stderr: "", exitCode };
+  }
+
   async function run(args: string[], opts: CliOptions): Promise<CliResult> {
     const childEnv: Record<string, string | undefined> = {
       ...process.env,
@@ -284,6 +390,7 @@ export function startPublishCli(): PublishCli {
     };
     const clean: Record<string, string> = {};
     for (const [k, v] of Object.entries(childEnv)) if (v !== undefined) clean[k] = v;
+    if (opts.terminal) return runOnTerminal(args, clean, opts.terminal);
     const proc = spawn({
       cmd: [process.execPath, "run", CLI_ENTRY, ...args],
       cwd: REPO_ROOT,
