@@ -381,6 +381,44 @@ describe("participants.json: the whole object, under the same two rules", () => 
   });
 });
 
+describe("a NUL byte means the bytes were not text, whatever decoder accepted them (#1728)", () => {
+  // UTF-16 text with no byte-order mark and only ASCII characters IS valid UTF-8, with a NUL
+  // between every letter. The cleaning replaces each NUL with a space, which would turn
+  // "/Users/jsmith" into "/ U s e r s / j s m i t h" and take it past the path rule.
+  const spaced = (text: string) =>
+    new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(text, "utf16le"));
+
+  test("the premise: UTF-16 ASCII without a byte-order mark decodes as UTF-8", () => {
+    expect(spaced("ab")).toBe("a\u0000b\u0000");
+  });
+
+  test.each([
+    ["readme", "README.md"],
+    ["changes", "CHANGES"],
+    ["license", "LICENSE"],
+    ["dataset_description", "dataset_description.json"],
+    ["participants_json", "participants.json"],
+  ] as const)(
+    "%s with a NUL is withheld as not UTF-8 and nothing of it is sent",
+    (document, name) => {
+      const text = spaced(`{"Name":"x","Description":"see ${REAL_PATH}"}`);
+      const r = presend(docs({ [document]: present(text, name) }));
+      expect(r.states[document]).toBe("withheld_not_utf8");
+      expect(r.cleared[document]).toBeUndefined();
+      // No byte of it anywhere, and the others are untouched.
+      expect(JSON.stringify(r)).not.toMatch(/jsmith|j s m i t h/);
+      for (const other of REVIEW_DOCUMENTS)
+        if (other !== document) expect(r.states[other]).toBe("sent");
+    },
+  );
+
+  test("a NUL anywhere in a long document is enough, even past the cut", () => {
+    const cap = DOCUMENT_CHAR_CAPS.readme;
+    const r = presend(docs({ readme: present(`${"a".repeat(cap + 100)}\u0000`) }));
+    expect(r.states.readme).toBe("withheld_not_utf8");
+  });
+});
+
 describe("nothing here fails open", () => {
   test("a state this module does not know withholds the document, whatever text came with it", () => {
     const odd = { name: "README.md", state: "weird", text: `fine text ${REAL_PATH}` } as never;

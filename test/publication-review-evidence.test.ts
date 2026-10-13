@@ -1741,3 +1741,56 @@ describe("the evidence block is the Worker's, built and parsed", () => {
     expect(docs.participants_json.name).toBe("participants.json");
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// The adversarial review of the job (issue #1728): documents built to get past the pre-send rules.
+// Each test builds a real repository, runs the real job and reads the exact request the stand-in
+// model server received.
+// ---------------------------------------------------------------------------------------------
+
+describe("a document with a NUL byte is withheld as not UTF-8, whatever decoder accepted it", () => {
+  const UTF16 = (text: string) => Buffer.from(text, "utf16le");
+
+  test("the premise: UTF-16 ASCII with no byte-order mark IS valid UTF-8", () => {
+    expect(() =>
+      new TextDecoder("utf-8", { fatal: true }).decode(UTF16("/Users/jsmith/data")),
+    ).not.toThrow();
+  });
+
+  test("the reader marks it not_utf8 and gives no text", async () => {
+    const ds = newDataset("nul-reader", { "README.md": UTF16("Data are in /Users/jsmith/data") });
+    const docs = readRootDocuments(ds.dir, await readTree(ds.dir, ds.head));
+    expect(docs.readme).toEqual({ name: "README.md", state: "not_utf8", text: null });
+  });
+
+  test("a UTF-16 README is withheld whole, and no letter of its path reaches the model", async () => {
+    const ds = newDataset("nul-readme", {
+      "README.md": UTF16("# Study\nScripts are in /Users/jsmith/projects/eeg\n"),
+    });
+    const report = await reviewOf(ds);
+    expect(report.evidence.documents.readme).toBe("withheld_not_utf8");
+    const { raw } = theRequest();
+    expect(raw).not.toMatch(/jsmith|j s m i t h|U s e r s/);
+    expect(raw).not.toContain("# Study");
+  });
+
+  test("the same holds for CHANGES and participants.json", async () => {
+    const ds = newDataset("nul-others", {
+      CHANGES: UTF16("1.0.0 data from /home/jsmith/raw\n"),
+      "participants.json": UTF16('{"age":{"Description":"/home/jsmith/forms"}}'),
+    });
+    const report = await reviewOf(ds);
+    expect(report.evidence.documents.changes).toBe("withheld_not_utf8");
+    expect(report.evidence.documents.participants_json).toBe("withheld_not_utf8");
+    expect(theRequest().raw).not.toMatch(/jsmith|j s m i t h/);
+  });
+
+  test("a description with a NUL is unreadable, so there is no review to run", async () => {
+    const ds = newDataset("nul-desc", {
+      "dataset_description.json": UTF16(JSON.stringify(DESCRIPTION)),
+    });
+    const res = await runPublicationReview(args(ds));
+    expect(res).toMatchObject({ outcome: "error", error: "evidence_unavailable" });
+    expect(modelRequests).toHaveLength(0);
+  });
+});

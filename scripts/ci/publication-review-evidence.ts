@@ -208,11 +208,19 @@ function readDocument(dir: string, name: string, entry: TreeEntry): RawDocument 
   ) {
     return { name, state: "annexed", text: null };
   }
+  let text: string;
   try {
-    return { name, state: "present", text: DECODER.decode(blob.bytes) };
+    text = DECODER.decode(blob.bytes);
   } catch {
     return { name, state: "not_utf8", text: null };
   }
+  // UTF-16 with no byte-order mark and only ASCII characters is valid UTF-8, with a NUL between
+  // every letter. It is not text a person wrote in UTF-8, and the cleaning that comes later would
+  // turn each NUL into a space and split every word the shared rules look for. No text document
+  // holds a NUL, so one makes the file `not_utf8`, for every document type, here and again in the
+  // pre-send module (which cannot assume its caller was this function).
+  if (text.includes("\u0000")) return { name, state: "not_utf8", text: null };
+  return { name, state: "present", text };
 }
 
 /**

@@ -106,6 +106,10 @@ function prepare(document: ReviewDocument, raw: RawDocument): Prepared {
       return { kind: "no-text", state: "withheld_unreadable" };
   }
   if (typeof raw.text !== "string") return { kind: "no-text", state: "withheld_unreadable" };
+  // A NUL means these bytes were not text (UTF-16 with no byte-order mark decodes as UTF-8 with a
+  // NUL between letters, and the cleaning below would turn each into a space). The reader says so
+  // already; this is the boundary's own check, for a caller that is not the reader.
+  if (raw.text.includes("\u0000")) return { kind: "no-text", state: "withheld_not_utf8" };
   const cap = DOCUMENT_CHAR_CAPS[document];
 
   if (document !== "dataset_description" && document !== "participants_json") {
