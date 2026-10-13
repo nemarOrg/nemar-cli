@@ -8,7 +8,10 @@
  * driver or script in the dataset can run. Every git call passes its arguments as an array (no
  * shell), after the commit id has been checked against a 40-hex shape, with `--literal-pathspecs`
  * and with the environment reduced to what git needs, so a path is only ever data and no token the
- * job holds reaches a child process.
+ * job holds reaches a child process. **Nothing here touches the network**: lazy fetching is off, so
+ * the blobs this module opens are exactly the ones the workflow's fetch step brought in
+ * ({@link blobsToRead}), and a blob that is not in the clone reads as unreadable instead of being
+ * requested.
  *
  * The output has two halves with different trust, as in the pull-request review:
  *
@@ -104,7 +107,11 @@ export class PublicationEvidenceError extends Error {
 // Reading git
 // ---------------------------------------------------------------------------------------------
 
-/** What a git child process gets: no token, no user or system config, no prompt. */
+/**
+ * What a git child process gets: no token, no user or system config, no prompt, and no lazy fetch.
+ * A blob the clone does not hold is reported missing and is never requested from the remote, so
+ * nothing this module reads can reach the network, with or without a credential.
+ */
 function gitEnv(): Record<string, string> {
   return {
     PATH: process.env.PATH ?? "/usr/bin:/bin",
@@ -113,6 +120,7 @@ function gitEnv(): Record<string, string> {
     GIT_TERMINAL_PROMPT: "0",
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_NO_LAZY_FETCH: "1",
   };
 }
 
@@ -140,9 +148,9 @@ type BlobRead = { ok: true; bytes: Buffer } | { ok: false; reason: "missing" | "
 /**
  * One blob's bytes, never more than `ceiling` of them. The size is asked first, so a blob that is
  * too large is never held in memory. The job's clone is blob-less, but the workflow's fetch step
- * already fetched every blob this module reads (the root documents and the sampled sidecars), and
- * the clone holds no credential: a blob that was not fetched would be requested from the remote
- * without one, which fails, and is `missing` here.
+ * already fetched every blob this module reads (the root documents and the sampled sidecars). Lazy
+ * fetching is off (see {@link gitEnv}), so a blob that was not fetched is not requested from the
+ * remote, with or without a credential: it is `missing` here, and the document reads as unreadable.
  */
 function readBlob(dir: string, oid: string, ceiling: number): BlobRead {
   if (!/^[0-9a-f]{40,64}$/.test(oid)) return { ok: false, reason: "missing" };

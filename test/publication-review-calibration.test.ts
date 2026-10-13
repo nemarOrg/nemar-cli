@@ -440,6 +440,13 @@ describe("the corpus builder reads public repositories through the job's own rea
     const [home] = [...homes] as [string];
     expect(home).not.toBe(process.env.HOME);
     expect(home).toMatch(/publication-review-corpus-[^/]+\/home$/);
+
+    // And the readers fetch nothing of their own: every read of the tree and of a blob ran with lazy
+    // fetching off, so a gap in the batch would have been a missing blob and not a hidden request.
+    const reads = calls.filter((c) => c.sub === "cat-file" || c.sub === "ls-tree");
+    expect(reads.some((c) => c.sub === "cat-file")).toBe(true);
+    expect(reads.some((c) => c.sub === "ls-tree")).toBe(true);
+    expect(reads.filter((c) => c.lazy !== "1")).toEqual([]);
   });
 
   test("a fetch that fails is a clone that failed, never a README read as unreadable", async () => {

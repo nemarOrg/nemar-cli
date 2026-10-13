@@ -39,6 +39,7 @@ import {
   PublicationEvidenceError,
   SIDECAR_SAMPLE,
   bidsState,
+  blobsToRead,
   buildPublicationEvidence,
   descriptionFacts,
   readRootDocuments,
@@ -52,6 +53,7 @@ import {
   PUBLICATION_OUTPUT_SCHEMA,
   PUBLICATION_REVIEW_MODEL,
 } from "../scripts/ci/publication-review-prompt";
+import type { Tree } from "../scripts/identifier-screen-ci-lib";
 import {
   DOCUMENT_BYTE_CEILING,
   DOCUMENT_CHAR_CAPS,
@@ -1288,16 +1290,17 @@ describe("runPublicationReview: the job around the model call", () => {
 });
 
 // ---------------------------------------------------------------------------------------------
-// Reading from the job's real clone: shallow, blob-less, blobs fetched when needed
+// Reading from the job's real clone: shallow, blob-less, and read with no network at all
 // ---------------------------------------------------------------------------------------------
 
-describe("the job's clone: shallow and blob-less, read through lazy fetches", () => {
-  test("the review reads its documents and sidecars from a clone that holds no blobs", async () => {
-    const origin = newDataset("lazy-origin");
-    git(origin.dir, "config", "uploadpack.allowFilter", "true");
-    git(origin.dir, "config", "uploadpack.allowAnySHA1InWant", "true");
-    // A commit before the head, so a depth-one fetch really is shallow.
-    const clone = join(root, "lazy-clone");
+describe("the job's clone: shallow and blob-less, read with no network", () => {
+  /**
+   * A clone made the way the workflow's fetch step makes one (init, a partial-clone remote, one
+   * shallow blob-less fetch of `main`), then given `blobs` in one batch, as that step fetches the
+   * blobs the review reads. The origin is a `file://` remote that stays reachable unless a test cuts it.
+   */
+  async function jobClone(name: string, origin: Dataset, blobs: (tree: Tree) => string[]) {
+    const clone = join(root, name);
     mkdirSync(clone, { recursive: true });
     git(clone, "init", "-q", "-b", "main");
     git(clone, "config", "core.hooksPath", "/dev/null");
@@ -1314,19 +1317,85 @@ describe("the job's clone: shallow and blob-less, read through lazy fetches", ()
       "+refs/heads/main:refs/remotes/origin/main",
     );
     expect(git(clone, "rev-parse", "refs/remotes/origin/main")).toBe(origin.head);
-    // Nothing was checked out, and the README blob is not here: it has to be fetched when read.
-    const readmeBlob = git(origin.dir, "rev-parse", "HEAD:README.md");
-    expect(() =>
-      execFileSync("git", ["-C", clone, "cat-file", "-e", readmeBlob], {
+    const wanted = blobs(await readTree(clone, origin.head));
+    if (wanted.length > 0) {
+      execFileSync(
+        "git",
+        [
+          "-C",
+          clone,
+          "-c",
+          "fetch.negotiationAlgorithm=noop",
+          "fetch",
+          "-q",
+          "--no-tags",
+          "--no-write-fetch-head",
+          "--filter=blob:none",
+          "--stdin",
+          "origin",
+        ],
+        { env: GIT_ENV, input: `${wanted.join("\n")}\n` },
+      );
+    }
+    return clone;
+  }
+
+  /** Whether the clone holds the blob, asked without any lazy fetch, so asking cannot fill the gap. */
+  function holds(clone: string, oid: string): boolean {
+    try {
+      execFileSync("git", ["-C", clone, "cat-file", "-e", oid], {
         env: { ...GIT_ENV, GIT_NO_LAZY_FETCH: "1" },
         stdio: "ignore",
-      }),
-    ).toThrow();
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  test("the blobs the fetch step brought in are read from a clone cut off from every remote", async () => {
+    const origin = newDataset("lazy-origin");
+    git(origin.dir, "config", "uploadpack.allowFilter", "true");
+    git(origin.dir, "config", "uploadpack.allowAnySHA1InWant", "true");
+    const clone = await jobClone("lazy-clone", origin, blobsToRead);
+    // Nothing was checked out, and the participants table, which no reader opens, is not here.
+    const table = git(origin.dir, "rev-parse", "HEAD:participants.tsv");
+    expect(holds(clone, table)).toBe(false);
+    git(clone, "config", "remote.origin.url", "file:///nonexistent/remote");
 
     const report = await reviewOf({ dir: clone, head: origin.head });
     expect(report.evidence.documents.readme).toBe("sent");
     expect(report.evidence.summary.sampling_rates_hz).toEqual([256]);
+    expect(report.evidence.summary.sidecars_read).toBe(1);
     expect(theRequest().user).toContain("Two volunteers recorded at rest");
+  });
+
+  test("a blob the fetch step did not bring in reads as unreadable, and reading it fetches nothing, though the remote is reachable", async () => {
+    const origin = newDataset("gap-origin");
+    git(origin.dir, "config", "uploadpack.allowFilter", "true");
+    git(origin.dir, "config", "uploadpack.allowAnySHA1InWant", "true");
+    const readme = git(origin.dir, "rev-parse", "HEAD:README.md");
+    const sidecar = git(origin.dir, "rev-parse", `HEAD:${EEG}.json`);
+    // Everything the review reads but the README and the sidecar: a gap in the batch.
+    const clone = await jobClone("gap-clone", origin, (tree) =>
+      blobsToRead(tree).filter((oid) => oid !== readme && oid !== sidecar),
+    );
+    expect(holds(clone, readme)).toBe(false);
+    expect(holds(clone, sidecar)).toBe(false);
+
+    const tree = await readTree(clone, origin.head);
+    expect(readRootDocuments(clone, tree).readme.state).toBe("unreadable");
+    expect(readRootDocuments(clone, tree).dataset_description.state).toBe("present");
+    const summary = structuralSummary(clone, tree);
+    expect(summary).toMatchObject({ sidecars_total: 1, sidecars_read: 0 });
+    // The remote could have answered. It was not asked: the gap is still a gap.
+    expect(holds(clone, readme)).toBe(false);
+    expect(holds(clone, sidecar)).toBe(false);
+
+    const report = await reviewOf({ dir: clone, head: origin.head });
+    expect(report.evidence.documents.readme).toBe("withheld_unreadable");
+    expect(holds(clone, readme)).toBe(false);
+    expect(theRequest().user).not.toContain("Two volunteers recorded at rest");
   });
 });
 
