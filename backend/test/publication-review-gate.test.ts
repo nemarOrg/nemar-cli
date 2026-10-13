@@ -824,9 +824,10 @@ describe("the gate runs on a resume that has not started publishing, and only on
 
   test("17. the CLI's own retry before publishing passes on an override for a review that was running", async () => {
     // The request is `approving` with no step done, and its review was dispatched ten minutes ago.
-    // The surfaces read a dispatched row of any request that is not `requested` as one that did not
-    // report; the gate reads it by time alone, as it was shown, or the first transient failure of a
-    // forced approval would be refused on its retry.
+    // Such a request is gated again when it resumes, so its review can still report: the detail
+    // reads the row by time alone, as running, and the gate reads it the same way, so the override
+    // the administrator was shown covers what the gate evaluates. Were they to read it differently
+    // the first transient failure of a forced approval would be refused on its retry.
     bidsConclusion = "failure";
     const { requestId } = seed({ requestStatus: "approving", steps: [] });
     const reviewId = seedPublicationReview(db, {
@@ -836,6 +837,8 @@ describe("the gate runs on a resume that has not started publishing, and only on
       createdMinutesAgo: 10,
       claimed: true,
     });
+    // The detail says running, by time alone.
+    expect((await detailOf()).reasons.map((r) => r.code)).toEqual(["review_running"]);
     // Gated: no override, no pass.
     const refused = await approve({ resume: true });
     const body = await refusalOf(refused);
@@ -855,6 +858,7 @@ describe("the gate runs on a resume that has not started publishing, and only on
   });
 
   test("17. a dispatched row past the time window is a review that did not report, which the override did not name", async () => {
+    // Time alone ages the row, for the detail and the gate alike: past the window it did not report.
     const { requestId } = seed({ requestStatus: "approving", steps: [] });
     const reviewId = seedPublicationReview(db, {
       requestId,
@@ -863,6 +867,7 @@ describe("the gate runs on a resume that has not started publishing, and only on
       createdMinutesAgo: 90,
       claimed: true,
     });
+    expect((await detailOf()).reasons.map((r) => r.code)).toEqual(["review_did_not_report"]);
     const res = await approve({
       resume: true,
       override_publication_review: { review_id: reviewId, reasons: ["review_running"] },

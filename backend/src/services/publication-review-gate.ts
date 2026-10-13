@@ -195,9 +195,7 @@ function sameCodes(a: readonly string[], b: readonly string[]): boolean {
  *  2. The request is read (the detail view's read). A read that fails, or no request, refuses
  *     `unverified`.
  *  3. A dataset the review does not apply to passes as `n/a`.
- *  4. The review is derived as the detail view derives it, except that a dispatched row ages by
- *     time alone (`dispatchedAgesByTime`): the CLI's own retry of a forced approval is an
- *     `approving` request that has not started publishing, and its review is still running.
+ *  4. The review is derived exactly as the detail view derives it.
  *  5. A hard reason refuses `hard_reason`, an override or not.
  *  6. With no override-class reason standing the approval passes (a pass, or only the screen's own
  *     reason, which the screen gate enforced). An override in the body is ignored.
@@ -232,7 +230,7 @@ export async function evaluateApprovalReviewGate(
   }
   if (!publicationReviewApplies(ctx.dataset ?? {})) return { ok: true, state: "n/a" };
   try {
-    const d = await derivePublicationReview({ env, nowMs, ...ctx, dispatchedAgesByTime: true });
+    const d = await derivePublicationReview({ env, nowMs, ...ctx });
     return decide(args, d);
   } catch (err) {
     console.error(
@@ -378,12 +376,7 @@ async function movedRefusal(
   try {
     const ctx = await readReviewContext(env, requestId);
     if (ctx !== null) {
-      const d = await derivePublicationReview({
-        env,
-        nowMs: nowMs ?? Date.now(),
-        ...ctx,
-        dispatchedAgesByTime: true,
-      });
+      const d = await derivePublicationReview({ env, nowMs: nowMs ?? Date.now(), ...ctx });
       return refusal("review_changed", datasetId, d);
     }
   } catch (err) {
