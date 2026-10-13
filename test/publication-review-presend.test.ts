@@ -13,7 +13,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { presend } from "../scripts/ci/publication-review-presend";
+import { presend, scanLocalPathForms } from "../scripts/ci/publication-review-presend";
 import { scanJsonKeys, scanTextForLocalPaths } from "../shared/identifier-scan";
 import {
   DESCRIPTION_KEYS_SHOWN,
@@ -559,6 +559,132 @@ describe("a JSON document is normalized first; every rule runs on what is sent (
   });
 });
 
+describe("a path in a JSON string is found as the person who reads the string would read it (#1728)", () => {
+  // The path rule runs over the sent text, where a newline or a tab inside a JSON string is the two
+  // characters backslash and n (or t), and the rule skips a path that follows a letter. Every string
+  // and every key is also examined on its own, as the parsed string the model reads.
+  const description = (extra: Record<string, unknown>) =>
+    JSON.stringify({ Name: "A descriptive dataset name that is long enough", ...extra });
+  const sendDescription = (extra: Record<string, unknown>) =>
+    presend(docs({ dataset_description: present(description(extra), "dataset_description.json") }));
+
+  const IN_A_VALUE: [string, Record<string, unknown>][] = [
+    ["after a newline", { HowToAcknowledge: "Data in:\n/home/jsmith/raw" }],
+    ["after a tab", { Funding: ["\t/Users/jsmith/grant.pdf"] }],
+    ["at the start of a value", { Acknowledgements: "/Users/jsmith/data" }],
+    ["after a carriage return", { Acknowledgements: "a\r/home/jsmith/x" }],
+    ["after a line separator", { Acknowledgements: "a\u2028/home/jsmith/x" }],
+    ["as a Windows profile path", { Acknowledgements: "C:\\Users\\jsmith\\data" }],
+    [
+      "in a nested array",
+      { GeneratedBy: [{ Name: "x", Description: ["a", "b\n/home/jsmith/c"] }] },
+    ],
+    ["as a file URL", { GeneratedBy: [{ Name: "x", CodeURL: "file:///home/jsmith/pipeline" }] }],
+    [
+      "as a file URL in capitals",
+      { GeneratedBy: [{ Name: "x", CodeURL: "FILE:///home/jsmith/p" }] },
+    ],
+    [
+      "as a file URL with one slash",
+      { GeneratedBy: [{ Name: "x", CodeURL: "file:/home/jsmith/p" }] },
+    ],
+    [
+      "as a file URL with a drive",
+      { GeneratedBy: [{ Name: "x", CodeURL: "file:C:/Users/jsmith/p" }] },
+    ],
+    [
+      "as a drive path with slashes",
+      { GeneratedBy: [{ Name: "x", CodeURL: "C:/Users/jsmith/pipeline" }] },
+    ],
+    ["as any drive path", { Acknowledgements: "D:\\lab\\raw" }],
+    ["as a lower-case drive path", { Acknowledgements: "c:/data" }],
+    ["after whitespace, a drive path", { Acknowledgements: "Raw data are on C:\\data" }],
+    ["after whitespace, a file URL", { Acknowledgements: "Code at file:///srv/code" }],
+    ["after a quote, a drive path", { Acknowledgements: 'see "C:\\data"' }],
+    ["as a UNC path", { Acknowledgements: "\\\\fileserver\\share\\sub" }],
+    ["after whitespace, a UNC path", { Acknowledgements: "Data on \\\\fileserver\\share" }],
+    ["after a newline, a UNC path", { Acknowledgements: "Data on:\n\\\\fileserver\\share" }],
+  ];
+
+  test.each(IN_A_VALUE)("in dataset_description.json, %s", (_where, extra) => {
+    const r = sendDescription(extra);
+    expect(r.states.dataset_description).toBe("withheld_finding");
+    expect(r.cleared.dataset_description).toBeUndefined();
+    // One finding for the document, of the path kind, and no value in the result.
+    expect(r.withheld_findings).toEqual({ "local-user-path": 1 });
+    expect(JSON.stringify(r)).not.toMatch(/jsmith|fileserver|lab.raw|srv|pipeline/);
+  });
+
+  test("a key that is a path is found too", () => {
+    for (const key of [
+      "/home/jsmith/x",
+      "file:///home/jsmith/x",
+      "C:/Users/jsmith",
+      "\\\\srv\\share",
+    ]) {
+      const r = sendDescription({ GeneratedBy: [{ Name: "x", [key]: "v" }] });
+      expect(r.states.dataset_description, key).toBe("withheld_finding");
+      expect(r.withheld_findings, key).toEqual({ "local-user-path": 1 });
+    }
+  });
+
+  test.each([
+    ["after a newline", { age: { Description: "Collected by\n/home/jsmith/forms" } }],
+    ["after a tab", { age: { Units: "\t/Users/jsmith/units" } }],
+    ["as a file URL", { age: { LongName: "file:///home/jsmith/age" } }],
+    ["as a drive path", { age: { Description: "C:/Users/jsmith/age.txt" } }],
+  ])("in participants.json, %s", (_where, object) => {
+    const r = presend(
+      docs({ participants_json: present(JSON.stringify(object), "participants.json") }),
+    );
+    expect(r.states.participants_json).toBe("withheld_finding");
+    expect(r.cleared.participants_json).toBeUndefined();
+    expect(r.withheld_findings).toEqual({ "local-user-path": 1 });
+  });
+
+  test.each([
+    ["a generic account", { Acknowledgements: "Run from\n/home/user/code or /Users/username/x" }],
+    ["a web address", { ReferencesAndLinks: ["https://example.org/a/b", "http://example.org/c"] }],
+    ["a doi", { DatasetDOI: "doi:10.18112/openneuro.ds000001.v1.0.0" }],
+    ["the word file", { Acknowledgements: "Open the file: README.md, or the profile: none" }],
+    ["a ratio and a time", { Acknowledgements: "Ratio 3:1 at 10:30, section A: results" }],
+    ["a slash after a word", { Acknowledgements: "and/or either/or" }],
+    ["a single backslash", { Acknowledgements: "a\\b c\\d" }],
+    ["a path in a key that is not shown", { Notes: "/Users/jsmith/x" }],
+  ])("a clean value is not withheld: %s", (_what, extra) => {
+    const r = sendDescription(extra);
+    expect(r.states.dataset_description).toBe("sent");
+    expect(r.withheld_findings).toEqual({});
+  });
+
+  test("the forms are a rule of their own: what scanLocalPathForms reads, by itself", () => {
+    for (const text of [
+      "file:///x",
+      "FILE:/x",
+      "x file:\\x",
+      "C:\\x",
+      "z:/x",
+      "q \\\\h\\s",
+      "\\\\h",
+    ]) {
+      expect(scanLocalPathForms(text), text).toHaveLength(1);
+      expect(scanLocalPathForms(text)[0]?.kind).toBe("local-user-path");
+    }
+    for (const text of [
+      "",
+      "file: x",
+      "profile:/x",
+      "https://a/b",
+      "a:b",
+      "3:/4",
+      "x\\y",
+      "dir/file",
+    ]) {
+      expect(scanLocalPathForms(text), text).toEqual([]);
+    }
+  });
+});
+
 describe("participants.json: the whole object, under the same two rules", () => {
   test("an identifier-named column key with content withholds it", () => {
     const text = JSON.stringify({
@@ -689,8 +815,21 @@ describe("the invariant: cleared text is text the shared rules found nothing in"
     "C:\\Users\\carol\\z",
     "/home/user/ok",
     "/Users/me/ok",
+    "file:///home/dave/x",
+    "C:/Users/erin/z",
+    "\\\\srv\\share",
   ];
-  const PADS = ["", "x", "x ".repeat(40), "\n\n", "\u200b", "\u0007"];
+  const PADS = ["", "x", "x ".repeat(40), "\n\n", "\u200b", "\u0007", "\t", "a\r\n", "word:\n"];
+
+  /** Every key and string of a parsed JSON value. */
+  const everyString = (value: unknown): string[] =>
+    typeof value === "string"
+      ? [value]
+      : Array.isArray(value)
+        ? value.flatMap(everyString)
+        : value !== null && typeof value === "object"
+          ? Object.entries(value).flatMap(([k, v]) => [k, ...everyString(v)])
+          : [];
 
   /** A spread of documents: a path at every position relative to the cap, among several paddings. */
   function corpus(): Record<ReviewDocument, RawDocument>[] {
@@ -737,7 +876,14 @@ describe("the invariant: cleared text is text the shared rules found nothing in"
           cleared++;
           expect(scanTextForLocalPaths(text), `${d} cleared with a finding`).toEqual([]);
           if (d === "dataset_description" || d === "participants_json") {
-            if (r.states[d] === "sent") expect(scanJsonKeys(JSON.parse(text))).toEqual([]);
+            if (r.states[d] === "sent") {
+              expect(scanJsonKeys(JSON.parse(text))).toEqual([]);
+              // Every string and key, ON ITS OWN, as the model reads it (not as escaped text).
+              for (const each of everyString(JSON.parse(text))) {
+                expect(scanTextForLocalPaths(each), `${d} string`).toEqual([]);
+                expect(scanLocalPathForms(each), `${d} string`).toEqual([]);
+              }
+            }
           }
         } else if (r.states[d] === "withheld_finding") {
           withheld++;

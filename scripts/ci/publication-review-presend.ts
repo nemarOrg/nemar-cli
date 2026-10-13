@@ -43,6 +43,7 @@ import {
   countByKind,
   scanJsonKeys,
   scanTextForLocalPaths,
+  shapeOf,
 } from "../../shared/identifier-scan";
 import {
   type ClearedDocuments,
@@ -79,6 +80,58 @@ type Prepared =
 
 function isPlainObject(x: unknown): x is Record<string, unknown> {
   return typeof x === "object" && x !== null && !Array.isArray(x);
+}
+
+/**
+ * Three ways to write a path on someone's machine that the shared rule does not read, because it
+ * knows `/Users/<name>`, `/home/<name>` and `C:\Users\<name>` only: a `file:` URL (the
+ * `GeneratedBy` entry's `CodeURL` is where one turns up), a Windows drive path in either slash
+ * (`D:/lab`, `C:/Users/<name>`), and a UNC path (`\\server\share`). None of them is a thing a
+ * published description needs to say.
+ *
+ * A form counts where it starts a string or follows anything but a letter or digit, so `profile:`
+ * and `https://` are not drive paths or file URLs. These rules run over the JSON strings and keys
+ * only; prose keeps the shared rule alone, which ADR 0101 describes as a consistency control.
+ */
+const LOCAL_PATH_FORMS: readonly RegExp[] = [
+  /(?<![A-Za-z0-9+.-])file:(?:[\\/]|[A-Za-z]:)/i,
+  /(?<![A-Za-z0-9])[A-Za-z]:[\\/]/,
+  /(?<![A-Za-z0-9\\])\\\\(?=[^\\\s])/,
+];
+
+/** One finding when the text holds one of {@link LOCAL_PATH_FORMS}, shaped from the match alone. */
+export function scanLocalPathForms(text: string): Finding[] {
+  for (const form of LOCAL_PATH_FORMS) {
+    const m = form.exec(text);
+    if (m !== null) {
+      return [{ kind: "local-user-path", severity: "review", field: "text", shape: shapeOf(m[0]) }];
+    }
+  }
+  return [];
+}
+
+/**
+ * Every string and every key of a normalized JSON value, each examined ON ITS OWN by the shared
+ * path rule and by {@link scanLocalPathForms}. Over the serialized text a newline or a tab inside a
+ * string is the two characters backslash and `n` or `t`, so the shared rule's lookbehind sees a
+ * letter before a path that, in the string the model reads, starts a line. At most one finding is
+ * returned: a document with a path in it is withheld, and one finding says so.
+ */
+function scanStructureForPaths(value: unknown): Finding[] {
+  if (typeof value === "string") {
+    const found = scanTextForLocalPaths(value);
+    return found.length > 0 ? found : scanLocalPathForms(value);
+  }
+  const children = Array.isArray(value)
+    ? value
+    : isPlainObject(value)
+      ? Object.entries(value).flat()
+      : [];
+  for (const child of children) {
+    const found = scanStructureForPaths(child);
+    if (found.length > 0) return found;
+  }
+  return [];
 }
 
 /**
@@ -197,7 +250,7 @@ function prepare(document: ReviewDocument, raw: RawDocument): Prepared {
   return {
     kind: "text",
     ...toSent(JSON.stringify(object, null, 2), cap),
-    findings: scanJsonKeys(object),
+    findings: [...scanJsonKeys(object), ...scanStructureForPaths(object)],
     keysShown,
     keysNotShown,
   };
@@ -222,7 +275,12 @@ export const presend: PreSend = (docs): PreSendResult => {
         states[document] = prepared.state;
         continue;
       }
-      const findings: Finding[] = [...scanTextForLocalPaths(prepared.sent), ...prepared.findings];
+      const findings: Finding[] = [...prepared.findings];
+      // The rule over the whole string that will be sent. For a JSON document the structure's own
+      // finding already says a path is there, and one finding per document is what is counted.
+      if (!findings.some((f) => f.kind === "local-user-path")) {
+        findings.push(...scanTextForLocalPaths(prepared.sent));
+      }
       if (findings.length > 0) {
         states[document] = "withheld_finding";
         for (const [kind, n] of Object.entries(countByKind(findings))) {

@@ -1902,3 +1902,81 @@ describe("a JSON document is cleaned before the rules look, so a key cannot be d
     expect(user).not.toMatch(/\\u00(07|1b)/i);
   });
 });
+
+describe("a local path inside a JSON string never reaches the model, however it is written", () => {
+  const FILES: [string, string, Record<string, string>][] = [
+    [
+      "a path after a newline in a description value",
+      "dataset_description",
+      {
+        "dataset_description.json": JSON.stringify({
+          ...DESCRIPTION,
+          HowToAcknowledge: "Data in:\n/home/jsmith/raw",
+        }),
+      },
+    ],
+    [
+      "a path after a tab in a description array",
+      "dataset_description",
+      {
+        "dataset_description.json": JSON.stringify({
+          ...DESCRIPTION,
+          Funding: ["\t/Users/jsmith/grant.pdf"],
+        }),
+      },
+    ],
+    [
+      "a file URL in GeneratedBy",
+      "dataset_description",
+      {
+        "dataset_description.json": JSON.stringify({
+          ...DESCRIPTION,
+          GeneratedBy: [{ Name: "x", CodeURL: "file:///home/jsmith/pipeline" }],
+        }),
+      },
+    ],
+    [
+      "a drive path in GeneratedBy",
+      "dataset_description",
+      {
+        "dataset_description.json": JSON.stringify({
+          ...DESCRIPTION,
+          GeneratedBy: [{ Name: "x", CodeURL: "C:/Users/jsmith/pipeline" }],
+        }),
+      },
+    ],
+    [
+      "a UNC path in the acknowledgements",
+      "dataset_description",
+      {
+        "dataset_description.json": JSON.stringify({
+          ...DESCRIPTION,
+          Acknowledgements: "Data on \\\\jsmithsrv\\share",
+        }),
+      },
+    ],
+    [
+      "a path after a newline in a participants.json column",
+      "participants_json",
+      {
+        "participants.json": JSON.stringify({
+          age: { Description: "Collected by\n/home/jsmith/forms" },
+        }),
+      },
+    ],
+  ];
+
+  test.each(FILES)("%s", async (what, document, files) => {
+    const ds = newDataset(`json-path-${what.replace(/\W+/g, "-")}`, files);
+    const report = await reviewOf(ds);
+    expect(report.evidence.documents[document as "dataset_description" | "participants_json"]).toBe(
+      "withheld_finding",
+    );
+    expect(report.evidence.withheld_findings).toEqual({ "local-user-path": 1 });
+    const { raw, user } = theRequest();
+    expect(raw).not.toMatch(/jsmith|jsmithsrv/);
+    // The model is told only that the document was withheld.
+    expect(user).not.toContain(`kind="${document}"`);
+    expect(user).toContain(`"${document}": "withheld"`);
+  });
+});
