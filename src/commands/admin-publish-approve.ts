@@ -3,17 +3,30 @@
  *
  * Its own file, registered on the `publish` group at the end of `admin-publish.ts`, so the work
  * that follows (the review, the override, `next`) edits this command without editing the group.
+ *
+ * The order is: read the request and its review, show them, decide (`decideApproval`), and only
+ * then ask. A refusal never asks and never posts. The Worker is the gate (ADR 0102); this
+ * explains, with the same words, and sends the override the Worker needs. `runApproval` is the
+ * loop that follows the question, exported because `next` runs it too.
  */
 
 import chalk from "chalk";
 import type { Command } from "commander";
 import ora from "ora";
 import {
+  PUBLICATION_REVIEW_NOT_CLEAR_CODE,
+  type PublicationReviewDetail,
+  type PublicationReviewOverride,
+  REQUEST_BLOCKED_CODE,
+} from "../../shared/contract/publication-review-admin.js";
+import { IDENTIFIER_SCREEN_ERROR_CODES } from "../../shared/contract/publication.js";
+import {
   PUBLICATION_STEPS,
   PUBLICATION_STEP_LABELS,
   stepsForRelease,
 } from "../../shared/publication-steps.js";
 import { failWith, requireSignedIn } from "../lib/admin-command.js";
+import { ApiError } from "../lib/api/errors.js";
 import {
   type PublishProgressInfo,
   type StepResult,
@@ -29,6 +42,13 @@ import {
   confirm,
 } from "../lib/confirm.js";
 import { markReportedExit } from "../lib/debug-log.js";
+import { identifierScreenLines } from "../lib/identifier-screen-display.js";
+import {
+  type ApproveDecision,
+  decideApproval,
+  readReview,
+  reasonViewLine,
+} from "../lib/publication-review-approve.js";
 
 export function registerApproveCommand(group: Command): void {
   group
@@ -41,6 +61,10 @@ export function registerApproveCommand(group: Command): void {
     .option(
       "--acknowledge-identifier-screen <reason>",
       "Approve over an identifier screen that needs review, recording why (10 to 500 characters)",
+    )
+    .option(
+      "--force",
+      "Approve over a publication review that is not a pass, recorded with your account",
     )
     .option(YES_OPTION, YES_DESCRIPTION)
     .option(NO_OPTION, NO_DESCRIPTION)
@@ -58,6 +82,23 @@ Description:
   requests again. A screen that did not run or did not report must be re-run
   with 'nemar admin publish screen <dataset-id>', and so must one whose commit
   is no longer the repository's main. 'nemar admin publish list' shows it.
+
+  The PUBLICATION REVIEW (ADR 0102) is read next and shown with the screen. A pass
+  approves. A reason nothing clears (a blocked request, a failed submission
+  minimum, direct identifiers, a screen that did not run or is stale, a version
+  kept after an anonymous release) refuses the approval and names who acts;
+  --force does not change that. Any other reason (a failed or unanswered
+  question, BIDS validation, the version, a review that did not run) needs
+  --force, which records an override with your account for the review and the
+  reasons shown. A run that has started publishing is continued with --resume
+  and is not gated again. The API is the gate: this explains it first.
+
+  --yes answers the confirmation and nothing else. It never stands in for
+  --force or for --acknowledge-identifier-screen.
+
+  --skip-ci-check skips the orchestrator's live CI check, and the approval's audit
+  row records that it was used. It never clears a review reason: a failed or
+  unconcluded BIDS validation at the reviewed commit needs --force.
 
   An ANONYMOUS RELEASE runs a smaller step set: the GitHub repository stays
   private, no identifier is published, and the depositor is not named. The
@@ -107,8 +148,9 @@ Resume Capability:
 Examples:
   $ nemar admin publish approve nm000104                    # Run full orchestrator
   $ nemar admin publish approve nm000104 --resume           # Resume from failed step
-  $ nemar admin publish approve nm000104 --skip-ci-check    # Override BIDS validation
-  $ nemar admin publish approve nm000104 --yes              # Skip confirmation
+  $ nemar admin publish approve nm000104 --skip-ci-check    # Skip the live CI check only
+  $ nemar admin publish approve nm000104 --force            # Approve over a review that is not a pass
+  $ nemar admin publish approve nm000104 --yes              # Skip confirmation (never a reason)
 
 After Approval:
   - User receives email with DOI and public dataset link
@@ -124,6 +166,7 @@ After Approval:
           sandbox?: boolean;
           skipCiCheck?: boolean;
           acknowledgeIdentifierScreen?: string;
+          force?: boolean;
         },
       ) => {
         if (!requireSignedIn()) return;
@@ -162,6 +205,23 @@ After Approval:
           // alike, which is three different next actions rendered as one.
           planUnknownReason = err instanceof Error ? err.message : String(err);
         }
+
+        // The review of the request (ADR 0102): the screen and the review, in the Worker's words,
+        // then the decision. Read once, shown, and decided from what was shown, so an override is
+        // built from exactly this and never from a second read.
+        const read = await readReview(datasetId);
+        if (read.kind === "detail") printReview(read.detail);
+        const decision = decideApproval(datasetId, read, {
+          force: !!options.force,
+          acknowledge: ack,
+          resume: !!options.resume,
+        });
+        if (decision.kind === "refuse") {
+          printRefusal(decision);
+          return;
+        }
+        for (const note of decision.notes) console.log(chalk.yellow(`  ${note}`));
+        if (decision.notes.length > 0) console.log();
 
         const steps = stepsForRelease(anonymousRelease);
         if (planUnknownReason === null) {
@@ -229,144 +289,247 @@ After Approval:
           return;
         }
 
-        const initialSpinnerText = "Running publication workflow (this may take a few minutes)...";
-        const spinner = ora(initialSpinnerText).start();
-
-        // Most recent step label rendered into the spinner; kept on the
-        // outer scope so onRetry can restore the same line after the
-        // retry notice instead of falling back to the generic text.
-        let currentSpinnerText = initialSpinnerText;
-
-        /**
-         * Render the spinner line for a progress event. Shows the step
-         * position and, for s3_lock, a running locked/total ratio so the
-         * admin can see thousands-of-objects datasets making progress
-         * instead of staring at a static spinner for minutes. See #284.
-         */
-        function renderProgress(info: PublishProgressInfo): string {
-          const stepLabel = info.step.replace(/_/g, " ");
-          const head = `Step ${info.stepIndex}/${info.stepTotal}: ${stepLabel}`;
-          if (
-            info.step === "s3_lock" &&
-            info.s3LockLocked !== undefined &&
-            info.s3LockTotal !== undefined &&
-            info.s3LockTotal > 0
-          ) {
-            const pct = ((info.s3LockLocked / info.s3LockTotal) * 100).toFixed(1);
-            const resumeSuffix = info.s3LockResumed ? " (resumed)" : "";
-            return `${head} | Locking S3 objects: ${info.s3LockLocked}/${info.s3LockTotal} (${pct}%)${resumeSuffix}`;
-          }
-          if (info.step === "s3_lock" && info.s3LockLocked !== undefined) {
-            // Total not yet known (rare; first response before server has
-            // counted). Show running count without the denominator so the
-            // line still advances.
-            const resumeSuffix = info.s3LockResumed ? " (resumed)" : "";
-            return `${head} | Locking S3 objects: ${info.s3LockLocked}${resumeSuffix}`;
-          }
-          return head;
-        }
-
-        try {
-          const result = await approvePublication(
-            datasetId,
-            !!options.resume,
-            !!options.sandbox,
-            !!options.skipCiCheck,
-            (info) => {
-              // Surface transient failures the CLI is about to retry. We pause
-              // the spinner so the message isn't overwritten, then resume it.
-              spinner.stop();
-              const stepLabel = info.step ? info.step.replace(/_/g, " ") : "step";
-              console.log(chalk.yellow(`  [!] ${stepLabel} failed: ${info.error}`));
-              console.log(
-                chalk.dim(
-                  `  Retrying in ${Math.round(info.delayMs / 1000)}s (attempt ${info.attempt + 1}/${info.maxAttempts})...`,
-                ),
-              );
-              spinner.start(currentSpinnerText);
-            },
-            (info) => {
-              currentSpinnerText = renderProgress(info);
-              spinner.text = currentSpinnerText;
-            },
-            ack,
-          );
-          spinner.succeed(result.message);
-
-          // Display step-by-step results if available
-          if (result.step_results && result.step_results.length > 0) {
-            console.log();
-            const allSteps = result.step_results;
-            const totalSteps = allSteps.length;
-            allSteps.forEach((sr: StepResult, idx: number) => {
-              const stepNum = `[${String(idx + 1).padStart(2, " ")}/${totalSteps}]`;
-              const stepName = sr.step.replace(/_/g, " ");
-              if (sr.status === "completed") {
-                const durationSec = (sr.duration_ms / 1000).toFixed(1);
-                const retryNote = sr.attempts > 1 ? ` (attempt ${sr.attempts})` : "";
-                console.log(
-                  `  ${chalk.green("[x]")} ${chalk.dim(stepNum)} ${stepName} ${chalk.dim(`(${durationSec}s${retryNote})`)}`,
-                );
-              } else if (sr.status === "failed") {
-                console.log(
-                  `  ${chalk.red("[!]")} ${chalk.dim(stepNum)} ${stepName}${sr.error ? `: ${chalk.red(sr.error)}` : ""}`,
-                );
-              } else {
-                console.log(
-                  `  ${chalk.dim("[-]")} ${chalk.dim(stepNum)} ${chalk.dim(stepName)} ${chalk.dim("(skipped)")}`,
-                );
-              }
-            });
-            console.log();
-          } else if (result.steps_completed) {
-            // Fallback for responses without step_results
-            console.log();
-            for (const step of result.steps_completed) {
-              console.log(`  ${chalk.green("[x]")} ${step.replace(/_/g, " ")}`);
-            }
-            console.log();
-          }
-
-          // Surface non-fatal orchestrator warnings (e.g. notify_user email
-          // failure) so operators know to follow up without re-running.
-          if (result.warning) {
-            console.log(chalk.yellow(`  Warning: ${result.warning}`));
-          }
-        } catch (error) {
-          failWith(error, spinner, "Failed to approve publication", {
-            422: "Fix the CI issues and retry with --resume",
-          });
-
-          // After all retries fail, surface the per-attempt step timeline the
-          // retry loop attached to the error so the admin sees which step
-          // failed when, instead of just the final 500 message.
-          const stepResults = (error as { stepResults?: StepResult[] }).stepResults;
-          if (stepResults && stepResults.length > 0) {
-            console.log();
-            console.log(chalk.dim("Step timeline (last attempt):"));
-            const totalSteps = stepResults.length;
-            stepResults.forEach((sr, idx) => {
-              const stepNum = `[${String(idx + 1).padStart(2, " ")}/${totalSteps}]`;
-              const stepName = sr.step.replace(/_/g, " ");
-              const durationSec = (sr.duration_ms / 1000).toFixed(1);
-              const retryNote = sr.attempts > 1 ? ` (attempt ${sr.attempts})` : "";
-              if (sr.status === "completed") {
-                console.log(
-                  `  ${chalk.green("[x]")} ${chalk.dim(stepNum)} ${stepName} ${chalk.dim(`(${durationSec}s${retryNote})`)}`,
-                );
-              } else if (sr.status === "failed") {
-                console.log(
-                  `  ${chalk.red("[!]")} ${chalk.dim(stepNum)} ${stepName}${sr.error ? `: ${chalk.red(sr.error)}` : ""}`,
-                );
-              } else {
-                console.log(
-                  `  ${chalk.dim("[-]")} ${chalk.dim(stepNum)} ${chalk.dim(stepName)} ${chalk.dim("(skipped)")}`,
-                );
-              }
-            });
-            console.log();
-          }
-        }
+        await runApproval(datasetId, {
+          resume: !!options.resume,
+          sandbox: !!options.sandbox,
+          skipCiCheck: !!options.skipCiCheck,
+          acknowledge: ack,
+          override: decision.override,
+        });
       },
     );
+}
+
+/** The screen and the review of the request, as the Worker worded them: colour and indentation only. */
+function printReview(detail: PublicationReviewDetail): void {
+  for (const line of identifierScreenLines(detail.identifier_screen, 2)) console.log(line);
+  const { headline, tone, lines } = detail.description;
+  const review = { state: null, headline, tone, lines: [`Gate: ${detail.gate}`, ...lines] };
+  for (const line of identifierScreenLines(review, 2)) console.log(line);
+  console.log();
+}
+
+/** A refusal before anything was asked or posted: the reasons, the cure, and exit 1. */
+function printRefusal(decision: Extract<ApproveDecision, { kind: "refuse" }>): void {
+  // What nothing clears reads as a stop; what the administrator can clear with a flag, as a note.
+  const colour = decision.why === "hard" || decision.why === "blocked" ? chalk.red : chalk.yellow;
+  console.log(colour("Not approved:"));
+  for (const line of decision.lines) console.log(colour(`  ${line}`));
+  console.log();
+  // The command declined to act; that is its answer, not a crash, so no bug-report hint.
+  process.exitCode = 1;
+  markReportedExit();
+}
+
+/** What an approval can be refused for, as the loop that follows the question reports it. */
+export type ApprovalRefusal = "review" | "screen" | "blocked" | "other";
+
+export type ApprovalRun = { ok: true } | { ok: false; refusal: ApprovalRefusal };
+
+export interface RunApprovalOptions {
+  resume: boolean;
+  sandbox: boolean;
+  skipCiCheck: boolean;
+  acknowledge?: string;
+  /** The review shown and the reasons shown, sent on every call of the run; null when none. */
+  override: PublicationReviewOverride | null;
+}
+
+/** Which kind of refusal the Worker answered with, from the closed word in the 409's `error`. */
+function refusalOf(error: unknown): ApprovalRefusal {
+  if (!(error instanceof ApiError) || error.statusCode !== 409) return "other";
+  const code = error.code ?? "";
+  if (code === PUBLICATION_REVIEW_NOT_CLEAR_CODE) return "review";
+  if (code === REQUEST_BLOCKED_CODE) return "blocked";
+  if (IDENTIFIER_SCREEN_ERROR_CODES.includes(code)) return "screen";
+  return "other";
+}
+
+/** The reasons a review refusal carries, one sentence and cure each; those it does not carry are left out. */
+function refusalReasons(error: unknown): string[] {
+  const body = error instanceof ApiError ? error.rawBody : undefined;
+  const reasons = (body as { reasons?: unknown } | undefined)?.reasons;
+  if (!Array.isArray(reasons)) return [];
+  return reasons
+    .filter(
+      (r): r is { sentence: string; cure: string; detail: string | null } =>
+        typeof r === "object" &&
+        r !== null &&
+        typeof (r as { sentence?: unknown }).sentence === "string" &&
+        typeof (r as { cure?: unknown }).cure === "string",
+    )
+    .map((r) =>
+      reasonViewLine({
+        sentence: r.sentence,
+        cure: r.cure,
+        detail: typeof r.detail === "string" ? r.detail : null,
+      }),
+    );
+}
+
+/**
+ * The approval loop of `approve` and of `y` in `next`: the spinner, the progress, the retries, the
+ * result lines and, for a refusal or a failure, the words and the exit code (1, always: #1581).
+ *
+ * The override is sent on every call of the run (`approvePublication`), so a retry that lands
+ * before the run is marked approving passes the gate again with the same override. A refusal the
+ * Worker answers with (the review gate, the screen, a blocked request) is printed in the shared
+ * words and returned as its kind, so a caller can tell a decision of the Worker's from a run that
+ * failed.
+ */
+export async function runApproval(
+  datasetId: string,
+  opts: RunApprovalOptions,
+): Promise<ApprovalRun> {
+  const initialSpinnerText = "Running publication workflow (this may take a few minutes)...";
+  const spinner = ora(initialSpinnerText).start();
+
+  // Most recent step label rendered into the spinner; kept on the
+  // outer scope so onRetry can restore the same line after the
+  // retry notice instead of falling back to the generic text.
+  let currentSpinnerText = initialSpinnerText;
+
+  /**
+   * Render the spinner line for a progress event. Shows the step
+   * position and, for s3_lock, a running locked/total ratio so the
+   * admin can see thousands-of-objects datasets making progress
+   * instead of staring at a static spinner for minutes. See #284.
+   */
+  function renderProgress(info: PublishProgressInfo): string {
+    const stepLabel = info.step.replace(/_/g, " ");
+    const head = `Step ${info.stepIndex}/${info.stepTotal}: ${stepLabel}`;
+    if (
+      info.step === "s3_lock" &&
+      info.s3LockLocked !== undefined &&
+      info.s3LockTotal !== undefined &&
+      info.s3LockTotal > 0
+    ) {
+      const pct = ((info.s3LockLocked / info.s3LockTotal) * 100).toFixed(1);
+      const resumeSuffix = info.s3LockResumed ? " (resumed)" : "";
+      return `${head} | Locking S3 objects: ${info.s3LockLocked}/${info.s3LockTotal} (${pct}%)${resumeSuffix}`;
+    }
+    if (info.step === "s3_lock" && info.s3LockLocked !== undefined) {
+      // Total not yet known (rare; first response before server has
+      // counted). Show running count without the denominator so the
+      // line still advances.
+      const resumeSuffix = info.s3LockResumed ? " (resumed)" : "";
+      return `${head} | Locking S3 objects: ${info.s3LockLocked}${resumeSuffix}`;
+    }
+    return head;
+  }
+
+  try {
+    const result = await approvePublication(
+      datasetId,
+      opts.resume,
+      opts.sandbox,
+      opts.skipCiCheck,
+      (info) => {
+        // Surface transient failures the CLI is about to retry. We pause
+        // the spinner so the message isn't overwritten, then resume it.
+        spinner.stop();
+        const stepLabel = info.step ? info.step.replace(/_/g, " ") : "step";
+        console.log(chalk.yellow(`  [!] ${stepLabel} failed: ${info.error}`));
+        console.log(
+          chalk.dim(
+            `  Retrying in ${Math.round(info.delayMs / 1000)}s (attempt ${info.attempt + 1}/${info.maxAttempts})...`,
+          ),
+        );
+        spinner.start(currentSpinnerText);
+      },
+      (info) => {
+        currentSpinnerText = renderProgress(info);
+        spinner.text = currentSpinnerText;
+      },
+      opts.acknowledge,
+      opts.override ?? undefined,
+    );
+    spinner.succeed(result.message);
+
+    // Display step-by-step results if available
+    if (result.step_results && result.step_results.length > 0) {
+      console.log();
+      const allSteps = result.step_results;
+      const totalSteps = allSteps.length;
+      allSteps.forEach((sr: StepResult, idx: number) => {
+        const stepNum = `[${String(idx + 1).padStart(2, " ")}/${totalSteps}]`;
+        const stepName = sr.step.replace(/_/g, " ");
+        if (sr.status === "completed") {
+          const durationSec = (sr.duration_ms / 1000).toFixed(1);
+          const retryNote = sr.attempts > 1 ? ` (attempt ${sr.attempts})` : "";
+          console.log(
+            `  ${chalk.green("[x]")} ${chalk.dim(stepNum)} ${stepName} ${chalk.dim(`(${durationSec}s${retryNote})`)}`,
+          );
+        } else if (sr.status === "failed") {
+          console.log(
+            `  ${chalk.red("[!]")} ${chalk.dim(stepNum)} ${stepName}${sr.error ? `: ${chalk.red(sr.error)}` : ""}`,
+          );
+        } else {
+          console.log(
+            `  ${chalk.dim("[-]")} ${chalk.dim(stepNum)} ${chalk.dim(stepName)} ${chalk.dim("(skipped)")}`,
+          );
+        }
+      });
+      console.log();
+    } else if (result.steps_completed) {
+      // Fallback for responses without step_results
+      console.log();
+      for (const step of result.steps_completed) {
+        console.log(`  ${chalk.green("[x]")} ${step.replace(/_/g, " ")}`);
+      }
+      console.log();
+    }
+
+    // Surface non-fatal orchestrator warnings (e.g. notify_user email
+    // failure) so operators know to follow up without re-running.
+    if (result.warning) {
+      console.log(chalk.yellow(`  Warning: ${result.warning}`));
+    }
+    return { ok: true };
+  } catch (error) {
+    failWith(error, spinner, "Failed to approve publication", {
+      422: "Fix the CI issues and retry with --resume",
+    });
+    const refusal = refusalOf(error);
+
+    // The review gate's refusal carries every live reason in the shared words: print each with
+    // its cure, then where to read the whole review. `unverified` carries none (the Worker could
+    // not read the review, and its sentence says to try again).
+    if (refusal === "review") {
+      const reasons = refusalReasons(error);
+      for (const line of reasons) console.log(chalk.dim(`  ${line}`));
+      if (reasons.length > 0) console.log(`  Next: nemar admin publish show ${datasetId}`);
+    }
+
+    // After all retries fail, surface the per-attempt step timeline the
+    // retry loop attached to the error so the admin sees which step
+    // failed when, instead of just the final 500 message.
+    const stepResults = (error as { stepResults?: StepResult[] }).stepResults;
+    if (stepResults && stepResults.length > 0) {
+      console.log();
+      console.log(chalk.dim("Step timeline (last attempt):"));
+      const totalSteps = stepResults.length;
+      stepResults.forEach((sr, idx) => {
+        const stepNum = `[${String(idx + 1).padStart(2, " ")}/${totalSteps}]`;
+        const stepName = sr.step.replace(/_/g, " ");
+        const durationSec = (sr.duration_ms / 1000).toFixed(1);
+        const retryNote = sr.attempts > 1 ? ` (attempt ${sr.attempts})` : "";
+        if (sr.status === "completed") {
+          console.log(
+            `  ${chalk.green("[x]")} ${chalk.dim(stepNum)} ${stepName} ${chalk.dim(`(${durationSec}s${retryNote})`)}`,
+          );
+        } else if (sr.status === "failed") {
+          console.log(
+            `  ${chalk.red("[!]")} ${chalk.dim(stepNum)} ${stepName}${sr.error ? `: ${chalk.red(sr.error)}` : ""}`,
+          );
+        } else {
+          console.log(
+            `  ${chalk.dim("[-]")} ${chalk.dim(stepNum)} ${chalk.dim(stepName)} ${chalk.dim("(skipped)")}`,
+          );
+        }
+      });
+      console.log();
+    }
+    return { ok: false, refusal };
+  }
 }

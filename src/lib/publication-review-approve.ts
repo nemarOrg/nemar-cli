@@ -163,7 +163,7 @@ export async function readReview(datasetId: string): Promise<ReviewRead> {
 // ---------------------------------------------------------------------------------------------
 
 /** One reason as one line: what is wrong, the closed word behind it, and what clears it. */
-export function reasonViewLine(view: ReasonView): string {
+export function reasonViewLine(view: Pick<ReasonView, "sentence" | "cure" | "detail">): string {
   const sentence =
     view.detail === null
       ? view.sentence
