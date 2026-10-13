@@ -394,6 +394,17 @@ describe("GET /admin/publish/requests: the review of each request", () => {
     expect((await review(datasetId)).reasons).toEqual(["doi_state_unexpected"]);
   });
 
+  test("a request is not its own predecessor: the first anonymous request's DOI is unexpected too", async () => {
+    // Only EARLIER requests count. The anonymous request itself reserved nothing yet.
+    const { requestId, datasetId } = request({ anonymous: true });
+    seedPublicationReview(db, { requestId, datasetId, anonymous: true, state: "reported" });
+    db.run(
+      "UPDATE datasets SET concept_doi = '10.82901/nm.concept', ezid_status = 'reserved' WHERE dataset_id = ?",
+      [datasetId],
+    );
+    expect((await review(datasetId)).reasons).toEqual(["doi_state_unexpected"]);
+  });
+
   test("a review of another commit, or of the other kind of release, is history and never the outcome", async () => {
     const { requestId, datasetId } = request();
     seedPublicationReview(db, { requestId, datasetId, head: OTHER_HEAD, state: "reported" });
@@ -677,6 +688,51 @@ describe("GET /admin/publish/:id/review", () => {
       gate: "enforced",
       outcome: "fail",
     });
+    // The contract's keys and no others, at every level: no row is ever spread onto the wire.
+    expect(Object.keys(d).sort()).toEqual(
+      [
+        "environment",
+        "enabled",
+        "dataset_id",
+        "request_id",
+        "request_status",
+        "anonymous",
+        "applies",
+        "gate",
+        "outcome",
+        "reasons",
+        "description",
+        "review",
+        "history",
+        "history_truncated",
+      ].sort(),
+    );
+    expect(Object.keys(d.review ?? {}).sort()).toEqual(
+      [
+        "id",
+        "head_sha",
+        "anonymous",
+        "state",
+        "detail",
+        "stored_verdict",
+        "model",
+        "version",
+        "created_at",
+        "decided_at",
+        "started_by",
+        "override",
+        "questions",
+        "findings",
+        "summary",
+        "evidence",
+      ].sort(),
+    );
+    expect(Object.keys(d.history[0]).sort()).toEqual(
+      ["id", "head_sha", "anonymous", "state", "verdict", "created_at", "decided_at"].sort(),
+    );
+    expect(Object.keys(d.reasons[0]).sort()).toEqual(
+      ["code", "class", "cleared_by", "detail", "sentence", "cure"].sort(),
+    );
     expect(d.reasons).toEqual([
       {
         code: "question_failed",
