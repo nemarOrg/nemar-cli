@@ -88,6 +88,7 @@ import {
   effectiveVersionOf,
   hardReasonsOf,
   isWithheld,
+  overrideClassReasonsOf,
   parsePublicationCallbackOutcome,
   parsePublicationReviewEvidence,
   parsePublicationReviewReport,
@@ -2434,6 +2435,43 @@ describe("what an administrator's override clears", () => {
     ]);
   });
 
+  test("overrideClassReasonsOf keeps exactly the override-class reasons, in the order given, as the objects given", () => {
+    expect(overrideClassReasonsOf([])).toEqual([]);
+    for (const code of REASON_CODES) {
+      const reason = { code, detail: "x", extra: 7 };
+      const got = overrideClassReasonsOf([reason]);
+      expect({ code, kept: got.length }).toEqual({
+        code,
+        kept: OVERRIDABLE.includes(code) ? 1 : 0,
+      });
+      if (got.length === 1) expect(got[0]).toBe(reason);
+    }
+    const mixed = [
+      R("request_blocked", "min_requirements_failed"),
+      R("text_withheld", "readme"),
+      R("identifier_screen_stale"),
+      R(ACK),
+      R("question_failed", "meets_standards"),
+      R("review_running"),
+      R("version_missing"),
+    ];
+    expect(overrideClassReasonsOf(mixed).map((r) => r.code)).toEqual([
+      "text_withheld",
+      "question_failed",
+      "review_running",
+      "version_missing",
+    ]);
+    // Every reason is exactly one of hard, the acknowledgment's or override-class.
+    for (const code of REASON_CODES) {
+      const reasons = [R(code)];
+      expect(
+        hardReasonsOf(reasons).length +
+          overrideClassReasonsOf(reasons).length +
+          (code === ACK ? 1 : 0),
+      ).toBe(1);
+    }
+  });
+
   test("uncoveredByOverride names the override-class reasons the override did not name, and never a hard or acknowledgment one", () => {
     for (const code of REASON_CODES) {
       const overridable = OVERRIDABLE.includes(code);
@@ -2769,6 +2807,46 @@ describe("where an approval stands (describePublicationReview's approval input)"
     for (const row of ROWS.map((r) => r.row)) {
       expect(describe_([R("review_not_started")], "publishing", row).next).toBe(resume);
     }
+  });
+
+  test("an approval that is not `none` is never startable: startable true changes nothing about the words or the command", () => {
+    // `startable` and `approval` both derive from the request's status (`requested`, or
+    // `approving`/`blocked`), so the pair `startable: true` with a stopped or publishing approval
+    // describes no request. It must not be read as one that a start can reach: that would offer
+    // `start`, with no `--resume`, to a request whose route refuses it.
+    const offers = [
+      [R("review_not_started")],
+      [R("review_could_not_run")],
+      [R("review_did_not_report")],
+      [R("review_limit_reached")],
+      [R("question_failed", "meets_standards"), R("review_not_started")],
+    ];
+    for (const approval of ["stopped", "publishing"] as const) {
+      for (const reasons of offers) {
+        for (const { row } of ROWS) {
+          const asked = describe_(reasons, approval, row, { startable: true });
+          const not = describe_(reasons, approval, row, { startable: false });
+          expect([approval, reasons.map((r) => r.code), row.kind, asked]).toEqual([
+            approval,
+            reasons.map((r) => r.code),
+            row.kind,
+            not,
+          ]);
+          expect(asked.next).not.toMatch(/ start /);
+        }
+      }
+    }
+    // The same pair with no approval is the one a start can reach, so it still is.
+    const fresh = describe_(
+      [R("review_not_started")],
+      "none",
+      { kind: "none" },
+      { startable: true },
+    );
+    expect(fresh.next).toBe("nemar admin publish start nm000123");
+    expect(
+      describe_([R("review_not_started")], "stopped", { kind: "none" }, { startable: true }).next,
+    ).toBe("nemar admin publish approve nm000123 --resume --force");
   });
 
   test("publishing says why no gate applies, once, ahead of the standing line", () => {

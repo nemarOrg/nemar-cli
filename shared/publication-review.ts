@@ -1243,6 +1243,15 @@ export function hardReasonsOf<T extends { code: ReasonCode }>(reasons: readonly 
 }
 
 /**
+ * The override-class reasons among `reasons` (`clearedBy: "override"`), as given and in their
+ * order: the reasons an administrator's override has to name. The one predicate behind
+ * {@link uncoveredByOverride}, `nextCommand`'s `--force` and the approval gate.
+ */
+export function overrideClassReasonsOf<T extends { code: ReasonCode }>(reasons: readonly T[]): T[] {
+  return reasons.filter((r) => REASONS[r.code].clearedBy === "override");
+}
+
+/**
  * The override-class codes among `reasons` that `given` does not name, each once, in
  * {@link REASON_CODES} order whatever the order of either argument. Hard and acknowledgment
  * reasons are never in the result: an override cannot clear them, so they are not its to cover
@@ -1255,9 +1264,7 @@ export function uncoveredByOverride(
   given: readonly string[],
 ): ReasonCode[] {
   const named = new Set<string>(given);
-  const needed = new Set<ReasonCode>(
-    reasons.filter((r) => REASONS[r.code].clearedBy === "override").map((r) => r.code),
-  );
+  const needed = new Set<ReasonCode>(overrideClassReasonsOf(reasons).map((r) => r.code));
   return REASON_CODES.filter((c) => needed.has(c) && !named.has(c));
 }
 
@@ -1730,7 +1737,7 @@ function nextCommand(
   const ack = codes.has("identifier_screen_needs_acknowledgment")
     ? ' --acknowledge-identifier-screen "<reason>"'
     : "";
-  const force = reasons.some((r) => REASONS[r.code].clearedBy === "override") ? " --force" : "";
+  const force = overrideClassReasonsOf(reasons).length > 0 ? " --force" : "";
   return `nemar admin publish approve ${id}${resume}${ack}${force}`;
 }
 
@@ -1759,7 +1766,8 @@ export function describePublicationReview(input: {
    * An administrator's `start` can reach this request: it is waiting for its decision
    * (`requested`). The route refuses any other status, so a request that is blocked or being
    * approved is never told to start a review, in a cure or in `next`. Required, so that a caller
-   * cannot forget it and offer a command that cannot work.
+   * cannot forget it and offer a command that cannot work. It counts as false whenever `approval`
+   * is not `none`, whatever is passed.
    */
   startable: boolean;
   /**
@@ -1775,8 +1783,12 @@ export function describePublicationReview(input: {
    */
   approval?: ApprovalStanding;
 }): PublicationReviewDescription {
-  const { applies, enabled, reasons, row, startable } = input;
+  const { applies, enabled, reasons, row } = input;
   const approval = input.approval ?? "none";
+  // Both inputs derive from the request's status (`requested`, or `approving` and `blocked`), so
+  // `startable` with an approval that is not `none` describes no request: the start route refuses
+  // one that is not `requested`, and `nextCommand` would offer a start with no `--resume`.
+  const startable = input.startable && approval === "none";
   const id = DATASET_ID.test(input.datasetId) ? input.datasetId : "<dataset>";
   if (!applies) {
     return {
