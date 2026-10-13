@@ -28,7 +28,7 @@ import {
 } from "../../shared/contract/publication-review-admin";
 import { issueSession } from "../src/services/web-session";
 import type { Bindings } from "../src/types/bindings";
-import { SCREENED_HEAD } from "./helpers/identifier-screen";
+import { realD1 } from "./helpers/d1";
 import {
   NOTE_SENTINEL,
   SUMMARY_SENTINEL,
@@ -39,7 +39,7 @@ import {
   seedUser,
   textOf,
 } from "./helpers/publication-review";
-import { PROD_DATASET, createHarness } from "./helpers/publication-review-harness";
+import { PROD_DATASET, createHarness, hookedD1 } from "./helpers/publication-review-harness";
 import { type CapturedEmail, asSend, withFakeResend } from "./helpers/resend";
 
 const ADMIN_KEY = "comment-admin-key-0123456789abcdef0123456789abcdef";
@@ -503,6 +503,38 @@ describe("a send that fails", () => {
     expect((json as PublicationCommentErrorBody).code).toBe("comment_not_sent");
     expectNothingMailed(calls);
     expect(JSON.parse(auditRows()[0].details as string).outcome).toBe("not_sent");
+  });
+});
+
+// ============================================================================
+
+describe("a database fault", () => {
+  test("a fault reading the request is 500 internal: nothing is mailed and nothing is audited", async () => {
+    request();
+    const DB = hookedD1(realD1(h.db), {
+      statement: (sql) => {
+        if (sql.includes("FROM publication_requests")) throw new Error("D1_ERROR: simulated fault");
+      },
+    });
+    const { res, calls, json } = await send(PROD_DATASET, { message: "Hello." }, { env: { DB } });
+    expect(res.status).toBe(500);
+    expect((json as PublicationCommentErrorBody).code).toBe("internal");
+    expectNothingMailed(calls);
+    expect(auditRows()).toHaveLength(0);
+  });
+
+  test("an audit row that cannot be written does not turn a sent message into an error", async () => {
+    request();
+    const DB = hookedD1(realD1(h.db), {
+      statement: (sql) => {
+        if (sql.includes("INSERT INTO audit_log")) throw new Error("D1_ERROR: simulated fault");
+      },
+    });
+    const { res, calls, json } = await send(PROD_DATASET, { message: "Hello." }, { env: { DB } });
+    expect(res.status).toBe(200);
+    expect((json as PublicationCommentResponse).mailed).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(auditRows()).toHaveLength(0);
   });
 });
 
