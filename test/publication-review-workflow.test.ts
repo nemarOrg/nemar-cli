@@ -9,9 +9,9 @@
  * the release that ships the script has happened (ADR 0101, "Before it is switched on"), so unlike
  * the pull-request review's, this check is not wired into CI's required job yet.
  *
- * Two checks that read the Worker's own files (the event type it dispatches and the callback routes
- * it registers) are added where the Worker side is built, not here: this file must pass with only
- * the shared contract and the script.
+ * Two checks read the Worker's own files: the event type it dispatches and the callback routes it
+ * registers (under "what triggers it"), the pair `test/pr-review-workflow.test.ts` makes for the
+ * pull-request review.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
@@ -93,6 +93,39 @@ describe("what triggers it", () => {
   test("only a repository_dispatch of run-publication-review, never a pull request or a manual run", () => {
     expect(Object.keys(wf.on)).toEqual(["repository_dispatch"]);
     expect(wf.on.repository_dispatch?.types).toEqual(["run-publication-review"]);
+  });
+
+  test("the event type matches what the Worker dispatches", () => {
+    const dispatch = readFileSync(
+      join(REPO_ROOT, "backend", "src", "services", "github", "dispatch.ts"),
+      "utf8",
+    );
+    expect(dispatch).toContain('event_type: "run-publication-review"');
+    // The workflow listens for that very word, and for no other event.
+    expect(wf.on.repository_dispatch?.types).toEqual(["run-publication-review"]);
+  });
+
+  test("the callback routes the workflow and the script post to are the ones the Worker registers", () => {
+    const routes = readFileSync(
+      join(REPO_ROOT, "backend", "src", "routes", "callbacks", "publication-review.ts"),
+      "utf8",
+    );
+    expect(routes).toContain('webhooks.post("/publication-review-claim"');
+    expect(routes).toContain('webhooks.post("/publication-review-result"');
+    // The claim is the workflow's own step, the result is the reporter's and the script's.
+    expect(step("Claim the review").run).toContain("$ORIGIN/webhooks/publication-review-claim");
+    expect(REPORTER).toContain("$ORIGIN/webhooks/publication-review-result");
+    const script = readFileSync(join(REPO_ROOT, "scripts", "ci", "publication-review.ts"), "utf8");
+    expect(script).toContain("/webhooks/publication-review-result");
+    // Every webhook path any of the three names is registered by the Worker: a route renamed on
+    // one side only would otherwise surface on a runner.
+    const named = new Set(
+      [step("Claim the review").run ?? "", REPORTER, script]
+        .flatMap((t) => [...t.matchAll(/\/webhooks\/(publication-review-[a-z]+)/g)])
+        .map((m) => m[1]),
+    );
+    expect([...named].sort()).toEqual(["publication-review-claim", "publication-review-result"]);
+    for (const name of named) expect(routes).toContain(`webhooks.post("/${name}"`);
   });
 
   test("each workflow execution has its own concurrency group", () => {
