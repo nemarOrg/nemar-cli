@@ -211,6 +211,16 @@ A token that is stale or expired is refused, never quietly downgraded.**
     - The step loop's own end has the same dead end after a warning, and it is not changed here.
       It marks the request `published` and then answers with the tail jobs' warnings, which still say to approve again, and that finds no active request (404).
       This is a known limit, and the follow-up is to leave the request `approving` there too, as the all-steps-done branch now does, or to change the warning text.
+    - A tail-job warning that approving again cannot clear leaves the request `approving` for good, and that is a known limit.
+      The trigger is a formerly anonymous dataset with more than ten versions recorded before its first publication (`MAX_CONCEALED_ERA_VERSION_DOIS`):
+      only the oldest ten are ever attempted, and the warning that says so recurs on every call, even after those ten are public.
+      The effect is that the request stays `approving`, because approving it again repeats the warning and never closes it.
+      It stays visible in the queue, so it is not silent.
+      It is accepted because this branch left the request `approving` before Phase 3 as well,
+      because the other tail-job warnings (no concept DOI, no repository) are cured by a repair and then by approving again, so `approving` is the right state for them,
+      and because closing the request on a warning would turn the remedy into a 404.
+      The cap is the only permanent warning today.
+      The follow-up is to classify a tail-job warning as retryable or final and close the request on a final one, or to raise or paginate the cap.
 13. **#1580 is deferred.**
     A resumed run restarts the lock listing at page 1, so objects added under `objects/` while the run was stopped are locked too, and `s3_lock` is never run again once complete.
     A saved continuation token would skip whatever was listed before it, which weakens a property the restart has today, and it would need a migration and a new resumability contract.
