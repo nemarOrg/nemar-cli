@@ -14,7 +14,7 @@
  * live web claim included, is recorded as itself. The code is fixed; what remains before production
  * is lit is the executor's workflow sending that token (the maintainer changes it) and the staging
  * audit query showing web approvals attributed to their clickers (ADR 0102, "Before it is switched
- * on", item 7; ADR 0104).
+ * on", item 7; ADR 0103).
  */
 
 import { describe, expect, test } from "bun:test";

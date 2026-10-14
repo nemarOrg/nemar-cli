@@ -516,7 +516,7 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   The review never calls `/approve` or `/deny`, and nothing is denied automatically.
   The only status a review changes is the mechanical `requested` to `blocked` of section 5, which ADR 0026 already makes.
   An executor never decides: it carries out a decision someone made.
-- **"Attributed to" is exact: a per-claim dispatch token proves that a run belongs to its click (Phase 3, ADR 0104).**
+- **"Attributed to" is exact: a per-claim dispatch token proves that a run belongs to its click (Phase 3, ADR 0103).**
   A web click's claim gets a token derived from the claim's own columns (the dataset, the request, the clicker and the instant of the claim),
   signed with the callback secret under its own domain tag; nothing is stored and there is no migration.
   The executor presents it in the header `X-Approval-Dispatch-Token` on every `/approve` call of that run, one per batch and retry, so it cannot be single-use,
@@ -531,7 +531,7 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   because `resolveApprover` re-checks the clicker's role and status at each use.
   The `request_id` precondition of #1579 is a field of its own in the body, and the token binds the request as well;
   the release endpoint of #1582 is authenticated by the token alone.
-  ADR 0104 records the change, because it partially supersedes ADR 0080's decision 5.
+  ADR 0103 records the change, because it partially supersedes ADR 0080's decision 5.
 
 ### 10. Relations to earlier decisions
 
@@ -554,7 +554,7 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
 - **ADR 0086 stands.**
   Its gate, acknowledgment, binding and mail lease are unchanged;
   the mail now also waits for the review, which ADR 0086 gains as an amendment on acceptance.
-- **ADR 0080 stands, except that its decision 5 (the fork on the lease) is partly superseded by ADR 0104** (section 9).
+- **ADR 0080 stands, except that its decision 5 (the fork on the lease) is partly superseded by ADR 0103** (section 9).
 - **ADR 0092 and ADR 0093 are the template**; section 7 lists where this departs from them.
 
 ### Failure modes, and what the administrator sees
@@ -606,7 +606,7 @@ and each has a closed word and a sentence in the shared module.
     A pass is a model's opinion that facts could not contradict, not a certification.
   - **Override fatigue.**
     A model that is often wrong teaches administrators to pass `--force`; the calibration and the soak measure it first.
-  - **The interim attribution gap** of section 9 is closed in code by Phase 3 (ADR 0104);
+  - **The interim attribution gap** of section 9 is closed in code by Phase 3 (ADR 0103);
     production stays dark until the executor's workflow sends the token and that is verified on staging ("Before it is switched on", item 7).
   - **The allow path is not exercised live before production.**
     The soak denies every request it makes, so the first live approval through the gate happens in production.
@@ -684,11 +684,11 @@ The maintainer decided all twelve on 2026-10-12, as recommended, and amended cal
    (ADR 0068 names `nm099997` as the next one; created only after step 3, and never approved under a name).
    A fix to the script found by the soak reaches the soak only through another production release.
 6. Add the review's statement to the policy pages, after the separate docs change that corrects them for current practice.
-7. Verify the attribution that Phase 3 fixed in code (#1604, ADR 0104), which production must not be lit without:
+7. Verify the attribution that Phase 3 fixed in code (#1604, ADR 0103), which production must not be lit without:
    the executor's workflow carries the maintainer's edit (it masks the dispatch token first, exports it only to the approve step, installs the CLI that matches the environment, and releases the claim on failure);
    the audit query on staging shows every web approval attributed to the administrator who clicked
    (the `approval_dispatched` audit rows joined to `publication_requests.approved_by` for published requests);
-   and the maintainer's decision on the open question of a clicker who is no longer an active administrator is recorded in ADR 0104
+   and the maintainer's decision on the open question of a clicker who is no longer an active administrator is recorded in ADR 0103
    (today it records the question and that it is undecided).
 8. Ship Phases 3 and 4, then add `PUBLICATION_REVIEW_ENABLED = "1"` to `[vars]`,
    delete the `PRESCREEN_ENABLED` secret and disable `run-prescreen.yml` (section 10),
@@ -900,7 +900,7 @@ Where the two differ, this is the later text.
 ## Amendment 2026-10-13 (#1730): Phase 3, what changed for the review
 
 Phase 3 made "attributed to" exact and guarded the approval path.
-[ADR 0104](0104-a-web-approval-is-attributed-by-a-per-claim-dispatch-token-and-a-terminal-approval-takes-the-claim-over.md) records the decisions;
+[ADR 0103](0103-a-web-approval-is-attributed-by-a-per-claim-dispatch-token-and-a-terminal-approval-takes-the-claim-over.md) records the decisions;
 this amendment says what they changed for the review.
 The text above was corrected in place where the built behavior made a sentence false
 (section 9's last bullet, section 10, the accepted risk about attribution, and "Before it is switched on", item 7);
@@ -954,4 +954,4 @@ Where the two differ, this is the later text.
 8. **"Before it is switched on", item 7, is a verification, and one question stays open.**
    The code is fixed.
    What remains is the executor's workflow sending the token, which only the maintainer can change, and the staging audit query showing web approvals attributed to their clickers.
-   A valid token whose clicker is no longer an active administrator falls back to the caller, as ADR 0080 decided, and the maintainer has not decided whether such a click should publish at all (ADR 0104).
+   A valid token whose clicker is no longer an active administrator falls back to the caller, as ADR 0080 decided, and the maintainer has not decided whether such a click should publish at all (ADR 0103).

@@ -11,7 +11,7 @@
 > The Phase 1 sections below keep the plan as written; where the build departed from it, the ADR states what was built
 > (the workflow's step order, the participants file, the normalization before the pre-send rules, the cap accounting,
 > the mail at the deadline).
-> The Phase 3 block and the attribution risk were rewritten as built on 2026-10-13 (ADR 0104).
+> The Phase 3 block and the attribution risk were rewritten as built on 2026-10-13 (ADR 0103).
 
 ## 1. What was read
 
@@ -446,7 +446,7 @@ Tests:
 Must not: let the Worker approve or deny anything; let `--yes` stand in for `--force` or for the screen's reason;
 change the orchestrator's steps; change ADR 0080's attribution (Phase 3's).
 
-### Phase 3 (#1730): approval robustness (as built; the verdict is ADR 0104)
+### Phase 3 (#1730): approval robustness (as built; the verdict is ADR 0103)
 
 Built: a per-claim dispatch token (#1604), a keyed hash of the dataset, the request, the clicker and the claim's own `approval_dispatched_at`,
 signed with the callback secret under its own domain tag, with no stored column and so no migration.
@@ -512,7 +512,7 @@ Must not: approve `nm099997` under a name; delete `PRESCREEN_CALLBACK_SECRET`.
 2. **Override fatigue.** A model that is often wrong teaches administrators to pass `--force`; the calibration measures it before the soak.
 3. **The mail is later.** Bounded by the screen's 50 minutes, the review's 30 and a tick.
 4. **Dev never ages a row.** Every surface must read a dispatched row past its deadline as not reported.
-5. **The interim attribution gap.** Closed in code by Phase 3 (a per-claim dispatch token, ADR 0104);
+5. **The interim attribution gap.** Closed in code by Phase 3 (a per-claim dispatch token, ADR 0103);
    what remains is the executor's workflow sending the token, and production stays dark until that is verified on staging.
 6. **The web page cannot pass the gate until Phase 4.** So the flag stays off in production until Phase 4 is promoted.
 7. **A script fix costs a release.** The workflow runs `main`'s script for every environment, so each fix to it found in the soak needs a `dev` to `main` release.

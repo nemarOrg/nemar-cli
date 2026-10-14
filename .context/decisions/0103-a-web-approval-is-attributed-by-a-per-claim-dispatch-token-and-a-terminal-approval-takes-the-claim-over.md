@@ -1,4 +1,4 @@
-# ADR 0104: A web approval is attributed by a per-claim dispatch token, and a terminal approval takes the claim over
+# ADR 0103: A web approval is attributed by a per-claim dispatch token, and a terminal approval takes the claim over
 
 **Status:** proposed
 **Date:** 2026-10-13
