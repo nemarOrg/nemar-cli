@@ -39,6 +39,7 @@ import { Hono } from "hono";
 import {
   APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE,
   APPROVAL_IN_FLIGHT_MESSAGE,
+  APPROVAL_REFUSAL_ERROR_CODES,
   DENY_AFTER_PUBLISHING_MESSAGE,
   REQUEST_MISMATCH_MESSAGE,
 } from "../../shared/contract/publication.js";
@@ -205,6 +206,16 @@ function raceBeforeDenyWrite(effect: () => void): Bindings {
   );
 }
 
+/**
+ * A refusal's body, read after checking that its word is one the contract declares
+ * (`APPROVAL_REFUSAL_ERROR_CODES`), so a word renamed here and in the route but not there fails.
+ */
+async function refusalBody(res: Response): Promise<{ error: string }> {
+  const body = (await res.json()) as { error: string };
+  expect(APPROVAL_REFUSAL_ERROR_CODES).toContain(body.error);
+  return body;
+}
+
 /** A denial that must be refused: its status, its body, an untouched row and no mail. */
 async function expectRefused(
   id: number,
@@ -215,7 +226,7 @@ async function expectRefused(
   await withFakeResend(async (calls) => {
     const res = await respond(calls);
     expect(res.status).toBe(expected.status);
-    expect(await res.json()).toEqual(expected.body);
+    expect(await refusalBody(res)).toEqual(expected.body);
     expect(calls).toHaveLength(0);
   });
   expect(row(id)).toEqual(before);
@@ -441,7 +452,7 @@ describe("a first mutation that did not finish is not a denial either", () => {
     await withFakeResend(async (calls) => {
       const res = await deny(undefined, bindings);
       expect(res.status).toBe(409);
-      expect(await res.json()).toEqual(AFTER_PUBLISHING);
+      expect(await refusalBody(res)).toEqual(AFTER_PUBLISHING);
       expect(calls).toHaveLength(0);
     });
     expect(row(id).status).toBe("approving");
@@ -495,7 +506,7 @@ describe("T4.8a request that moves between the read and the write is not overwri
     await withFakeResend(async (calls) => {
       const res = await deny(undefined, bindings);
       expect(res.status).toBe(409);
-      expect(await res.json()).toEqual(IN_FLIGHT);
+      expect(await refusalBody(res)).toEqual(IN_FLIGHT);
       expect(calls).toHaveLength(0);
     });
     expect(row(id).status).toBe("approving");
@@ -513,7 +524,7 @@ describe("T4.8a request that moves between the read and the write is not overwri
     await withFakeResend(async (calls) => {
       const res = await deny(undefined, bindings);
       expect(res.status).toBe(409);
-      expect(await res.json()).toEqual(AFTER_PUBLISHING);
+      expect(await refusalBody(res)).toEqual(AFTER_PUBLISHING);
       expect(calls).toHaveLength(0);
     });
     expect(row(id).status).toBe("approving");
@@ -530,7 +541,7 @@ describe("T4.8a request that moves between the read and the write is not overwri
     await withFakeResend(async (calls) => {
       const res = await deny(undefined, bindings);
       expect(res.status).toBe(409);
-      expect(await res.json()).toEqual(AFTER_PUBLISHING);
+      expect(await refusalBody(res)).toEqual(AFTER_PUBLISHING);
       expect(calls).toHaveLength(0);
     });
     expect(row(id).status).toBe("requested");
@@ -552,7 +563,7 @@ describe("T4.8a request that moves between the read and the write is not overwri
     await withFakeResend(async (calls) => {
       const res = await deny(undefined, bindings);
       expect(res.status).toBe(409);
-      expect(await res.json()).toEqual(IN_FLIGHT);
+      expect(await refusalBody(res)).toEqual(IN_FLIGHT);
       expect(calls).toHaveLength(0);
     });
     const after = row(id);
