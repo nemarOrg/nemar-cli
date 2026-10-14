@@ -18,7 +18,7 @@
  * No shape here carries a nonce, a token, a path, a file name or a screen finding.
  */
 
-import type { ScreenState } from "../identifier-screen-report.js";
+import type { ScreenGate, ScreenState } from "../identifier-screen-report.js";
 import type {
   Answer,
   PublicationDeclineDetail,
@@ -228,6 +228,22 @@ export interface PublicationReviewDetail {
   gate: PublicationReviewGateState;
   /** Null when the request is not assessed; see {@link PublicationReviewSummary.outcome}. */
   outcome: PublicationOutcome | null;
+  /**
+   * An administrator's start is offered for this request: the list row's `start_offered`, from
+   * the one rule behind both (`startOffered`), so the detail and the list cannot disagree. False
+   * unless the review is on and applies; see {@link PublicationReviewSummary.start_offered}.
+   */
+  start_offered: boolean;
+  /**
+   * What the approval does with the request's identifier screen, whether the review is on or off:
+   * `clear` (nothing to act on), `blocks` (a direct identifier; nothing acknowledges it),
+   * `acknowledge` (an administrator approves with a recorded reason), `rerun` (no verdict; the
+   * screen runs again), `wait` (a run is in flight), or `exempt` (a sandbox dataset is not
+   * screened). It is the `gate` of the 409 `identifier_screen_not_clear` that `approve-dispatch`
+   * answers for the same request when it refuses. `reasons` cannot say this: it is empty when the
+   * review is off and no row is on record, yet the screen's gate still applies to an approval.
+   */
+  screen_gate: ScreenGate | "exempt";
   reasons: ReasonView[];
   /** Headline, tone, lines (the standing line last) and the next command. */
   description: PublicationReviewDescription;

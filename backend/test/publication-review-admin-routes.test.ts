@@ -1134,6 +1134,8 @@ describe("GET /admin/publish/:id/review", () => {
         "applies",
         "gate",
         "outcome",
+        "start_offered",
+        "screen_gate",
         "reasons",
         "description",
         "review",
@@ -2352,4 +2354,158 @@ describe("the exports the approval gate reads through", () => {
     // No report: the cure does not depend on one.
     expect(reasonViewsOf(d.reasons, datasetId, false, null)[0].cure).not.toContain("publish start");
   });
+});
+
+// ============================================================================
+
+describe("the detail's start_offered is the list row's, one rule behind both", () => {
+  type Seed = Omit<SeedReview, "requestId" | "datasetId"> | null;
+  const matrix: Array<[string, Partial<SeedScreenedRequest>, Seed]> = [
+    ["no review yet", {}, null],
+    ["errored", {}, { state: "errored", detail: "model_refused" }],
+    ["declined by the platform's limit", {}, { state: "declined", detail: "platform_limit" }],
+    ["unreported", {}, { state: "unreported" }],
+    [
+      "overdue dispatch",
+      {},
+      { state: "dispatched", createdMinutesAgo: REVIEW_OVERDUE_VIEW_MINUTES + 1 },
+    ],
+    ["running", {}, { state: "dispatched", createdMinutesAgo: 5 }],
+    ["reported, passing", {}, { state: "reported" }],
+    ["reported, failing", {}, { state: "reported", report: failingReport() }],
+    ["screen needs an acknowledgment", { status: "review" }, null],
+    ["screen pending", { status: "pending" }, null],
+    ["screen errored", { status: "error" }, null],
+    ["screen found a direct identifier", { status: "direct-identifiers" }, null],
+    ["approving", { requestStatus: "approving" }, { state: "unreported" }],
+    ["blocked", { requestStatus: "blocked", blockReason: "min_requirements_failed" }, null],
+    ["a mirror", { source: "openneuro" }, null],
+    ["an exemplar", { isExemplar: 1 }, null],
+    ["a sandbox dataset", { datasetId: "xx000323" }, null],
+  ];
+
+  for (const flag of ["on", "off"] as const) {
+    test(`review ${flag}: the detail and the list agree for every request state, and next is the start exactly when it is offered`, async () => {
+      const bindings = env(flag === "off" ? { PUBLICATION_REVIEW_ENABLED: undefined } : {});
+      let offeredSeen = 0;
+      for (const [label, over, seed] of matrix) {
+        const { requestId, datasetId } = request(over);
+        if (seed) seedPublicationReview(db, { ...seed, requestId, datasetId });
+        const d = await detail(datasetId, bindings);
+        const row = await review(datasetId, bindings);
+        expect({ label, detail: d.start_offered }).toEqual({ label, detail: row.start_offered });
+        expect(typeof d.start_offered).toBe("boolean");
+        const startCommand = `nemar admin publish start ${datasetId}`;
+        // A start that is offered is always the detail's next command. The converse holds for
+        // every request but a sandbox dataset: `next` is derived from the reasons alone, which
+        // the route's own screen precondition (a screened commit) does not enter, and a sandbox
+        // dataset is never screened, so its `next` can name a start the route would refuse.
+        const next = d.description.next;
+        if (d.start_offered) {
+          offeredSeen += 1;
+          expect({ label, next }).toEqual({ label, next: startCommand });
+        } else if (!datasetId.startsWith("xx")) {
+          expect({ label, next }).not.toEqual({ label, next: startCommand });
+        }
+      }
+      // The matrix is not vacuous: the review's own flag decides whether anything is offered.
+      if (flag === "on") expect(offeredSeen).toBeGreaterThan(3);
+      else expect(offeredSeen).toBe(0);
+    });
+  }
+});
+
+// ============================================================================
+
+describe("the detail's screen_gate is the gate the approval applies to the screen", () => {
+  const states: Array<[string, Partial<SeedScreenedRequest>, string]> = [
+    ["clean", { status: "clean" }, "clear"],
+    ["dates-only", { status: "dates-only" }, "clear"],
+    ["no-recordings", { status: "no-recordings" }, "clear"],
+    ["review", { status: "review" }, "acknowledge"],
+    ["unchecked", { status: "unchecked" }, "acknowledge"],
+    ["not-screened", { status: "not-screened" }, "acknowledge"],
+    [
+      "clean-edf-only-others-unscreened",
+      { status: "clean-edf-only-others-unscreened" },
+      "acknowledge",
+    ],
+    ["direct-identifiers", { status: "direct-identifiers" }, "blocks"],
+    ["pending", { status: "pending" }, "wait"],
+    ["error", { status: "error" }, "rerun"],
+    ["unreported", { status: "unreported" }, "rerun"],
+  ];
+
+  function dispatchApproval(datasetId: string, bindings: Bindings) {
+    return app.request(
+      `/admin/publish/${datasetId}/approve-dispatch`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${ADMIN_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
+      bindings,
+    );
+  }
+
+  /** What approve-dispatch answers about the screen for a bare click, or null when it does not. */
+  async function screenRefusal(datasetId: string, bindings: Bindings): Promise<string | null> {
+    const res = await dispatchApproval(datasetId, bindings);
+    const body = (await res.json()) as { error?: string; gate?: string };
+    if (body.error !== "identifier_screen_not_clear") return null;
+    expect(res.status).toBe(409);
+    return body.gate ?? null;
+  }
+
+  for (const flag of ["on", "off"] as const) {
+    test(`review ${flag}: every stored screen state gives its gate, the same word approve-dispatch refuses with`, async () => {
+      const bindings = env(flag === "off" ? { PUBLICATION_REVIEW_ENABLED: undefined } : {});
+      const cases: Array<[string, Partial<SeedScreenedRequest>, string, boolean]> = states.map(
+        ([label, over, gate]) => [label, over, gate, false],
+      );
+      // A request that predates the screen has no stored state at all: it must be run.
+      cases.push(["no screen started", {}, "rerun", true]);
+      for (const [label, over, gate, unscreened] of cases) {
+        const { requestId, datasetId } = request(over);
+        if (unscreened) {
+          db.run(
+            `UPDATE publication_requests
+                SET identifier_screen_status = NULL, identifier_screen_report = NULL
+              WHERE id = ?`,
+            [requestId],
+          );
+        }
+        const d = await detail(datasetId, bindings);
+        expect({ label, screen_gate: d.screen_gate }).toEqual({ label, screen_gate: gate });
+        const refused = await screenRefusal(datasetId, bindings);
+        // A gate that refuses says the same word; a clear one is not refused for its screen.
+        expect({ label, refused }).toEqual({ label, refused: gate === "clear" ? null : gate });
+      }
+    });
+  }
+
+  test("a sandbox dataset is exempt from the screen, review on or off, and its approval is not refused for it", async () => {
+    for (const bindings of [env(), env({ PUBLICATION_REVIEW_ENABLED: undefined })]) {
+      const { datasetId } = request({ datasetId: nextExempt(), status: "pending" });
+      expect((await detail(datasetId, bindings)).screen_gate).toBe("exempt");
+      expect(await screenRefusal(datasetId, bindings)).toBeNull();
+    }
+  });
+
+  test("with the review off and no row on record the reasons are empty, and the gate still says what the approval needs", async () => {
+    const off = env({ PUBLICATION_REVIEW_ENABLED: undefined });
+    const { datasetId } = request({ status: "review" });
+    const d = await detail(datasetId, off);
+    expect(d.enabled).toBe(false);
+    expect(d.reasons).toEqual([]);
+    expect(d.review).toBeNull();
+    expect(d.screen_gate).toBe("acknowledge");
+    expect(await screenRefusal(datasetId, off)).toBe("acknowledge");
+  });
+
+  let exempt = 0;
+  function nextExempt(): string {
+    exempt += 1;
+    return `xx0004${String(exempt).padStart(2, "0")}`;
+  }
 });

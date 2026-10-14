@@ -890,6 +890,11 @@ export async function publicationReviewDetail(
     applies: d.applies,
     gate: d.gate,
     outcome: d.outcome,
+    // The list row's flag, from the same function, so the detail and the list cannot disagree.
+    start_offered: startOfferedFor(d),
+    // The screen's gate for an approval, review on or off: `reasons` is empty with the review off
+    // and no row, yet the approval is still refused or asked for a reason by the screen.
+    screen_gate: d.live.screen.gate,
     reasons: reasonViewsOf(d.reasons, ctx.request.dataset_id, d.startable, reportOf(d.rowView)),
     description: d.description,
     review: d.row === null ? null : recordOf(d.row, d.rowView),

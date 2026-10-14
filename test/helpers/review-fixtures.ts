@@ -94,6 +94,8 @@ export function detailOf(spec: Spec = {}): PublicationReviewDetail {
     applies: (spec.gate ?? "enforced") !== "n/a",
     gate: spec.gate ?? "enforced",
     outcome: reasons.length === 0 ? "pass" : "action_required",
+    start_offered: false,
+    screen_gate: "clear",
     reasons,
     description: {
       headline: spec.headline ?? "Publication review: action required",
