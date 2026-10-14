@@ -76,9 +76,9 @@ const APPROVAL_IN_PROGRESS = {
 
 /**
  * The optional body of the approve-dispatch route. `request_id` is the request the click was for
- * (#1579): the page names the one it showed, and the route refuses a click for a request that is
- * no longer the one in force. Optional, so the bodyless click every existing caller sends is
- * unchanged.
+ * (#1579, ADR 0103 decision 7): the page names the one it showed, and the route refuses a click
+ * for a request that is no longer the one in force. Optional, so the bodyless click every existing
+ * caller sends is unchanged.
  */
 const dispatchBodySchema = z
   .object({
@@ -276,13 +276,13 @@ export function registerPublishRoutes(admin: AdminRouter): void {
   });
 
   /**
-   * POST /admin/publish/:id/deny - Deny a publication request (#1603)
+   * POST /admin/publish/:id/deny - Deny a publication request (#1603; ADR 0103, decision 11)
    *
    * The newest active request is read, then refused by the shared words, in this order, before any
    * write (a denial that is refused changes nothing and mails nobody):
    *   404                       no active request (the body this route always had)
    *   409 request_mismatch      `request_id` names a request that is not that one: it was denied or
-   *                             filed again since the administrator read it (#1579)
+   *                             filed again since the administrator read it (#1579, decision 7)
    *   409 deny_after_publishing a step outside the validation-only ones is done
    *                             (`hasStartedPublishing`) or is the one the run was on when it
    *                             stopped (`current_step`), WHATEVER the status: a request filed again
@@ -412,20 +412,22 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    * reason, ADR 0086) and `override_publication_review` (the review shown and the reasons shown,
    * ADR 0102).
    *
-   * The body may name the request the run is for, `request_id` (#1579).
+   * The body may name the request the run is for, `request_id` (#1579; ADR 0103, decision 7).
    *
    * The header `X-Approval-Dispatch-Token` is the proof that a call belongs to a web click's claim
-   * (ADR 0080, #1604). A call that carries the token of the request's current claim, while that
-   * claim's lease is live, is recorded as the administrator who clicked (the caller is kept as
-   * `executed_by`); a call with no token (or a blank one) is its caller's own act whatever the
-   * lease says, and once it passes every gate its mark takes the claim over, so the executor the
-   * click dispatched is refused at its next call. A token that is stale or has lapsed is refused
-   * and changes nothing, never downgraded to the caller. A call that carries a valid token may not
-   * carry a decision of its own: the click recorded the override and the acknowledgment.
+   * (#1604; ADR 0103, decisions 3 to 6). A call that carries the token of the request's current
+   * claim, while that claim's lease is live, is recorded as the administrator who clicked (the
+   * caller is kept as `executed_by`); a call with no token (or a blank one) is its caller's own
+   * act whatever the lease says, and once it passes every gate its mark takes the claim over, so
+   * the executor the click dispatched is refused at its next call. A token that is stale or has
+   * lapsed is refused and changes nothing, never downgraded to the caller. A call that carries a
+   * valid token may not carry a decision (an override, an acknowledgment or `skip_ci_check: true`;
+   * an explicit `false` is no decision): the click recorded the override and the acknowledgment.
    *
    * Refusals, each with a stable code in `error` and a sentence in `message`:
    *   403 origin_not_allowed  an override sent with a session cookie: it is accepted only with
-   *                         an API key, and the website records one through approve-dispatch.
+   *                         an API key, and the website records one through approve-dispatch
+   *                         (ADR 0102, section 8; ADR 0103, decision 10 keeps this stricter rule).
    *                         (A cookie request with no NEMAR origin never gets this far: the
    *                         router's `cookieOriginGuard` answers it with the same code.)
    *   409 request_mismatch  `request_id` is not the newest active request: it was denied or filed
@@ -441,8 +443,9 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    *                         is not a token (also: the claim was replaced between the check and
    *                         the mark). Nothing was changed.
    *   409 dispatch_expired  the token is genuine, but its run sat idle past the 15 minute lease
-   *   409 decision_with_dispatch_token  a call that carries a valid token sent an override or an
-   *                         acknowledgment: nothing was recorded under anybody
+   *   409 decision_with_dispatch_token  a call that carries a valid token sent an override, an
+   *                         acknowledgment or a skipped CI check: nothing was recorded under
+   *                         anybody
    *   409 request_changed   the request was denied or blocked while the approval was checked:
    *                         nothing ran, and the request is read again
    *   409 approval_closed_during_run  the request was closed (denied, blocked again or filed
@@ -496,17 +499,17 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    * page cannot matter: the state lives in `publication_requests`.
    *
    * The executor calls `POST /publish/:id/approve` with its own service key and the claim's
-   * dispatch token (#1604): the token, a MAC over this claim's dataset, request, clicker and
-   * instant (`approval_dispatched_at`, as stored), is minted here and handed to the executor in
-   * the dispatch payload. The orchestrator records the admin who clicked, rather than the bot,
-   * for a call that presents it while the lease is live. `/approve` is the contract for every
-   * executor, a terminal included: it also takes the review's override in its body, and answers
-   * 403 origin_not_allowed for an override sent with a cookie, and the 409s `request_blocked`,
-   * `request_changed`, `approval_closed_during_run`, `dispatch_superseded`, `dispatch_expired`,
-   * `decision_with_dispatch_token` and `publication_review_not_clear`, besides the identifier
-   * screen's own (see its docblock). The executor sends no override: its run rides on the
-   * clicker's, recorded here before the dispatch. The token is never logged, audited, listed or
-   * answered.
+   * dispatch token (#1604; ADR 0103, decisions 1 to 3): the token, a MAC over this claim's
+   * dataset, request, clicker and instant (`approval_dispatched_at`, as stored), is minted here
+   * and handed to the executor in the dispatch payload. The orchestrator records the admin who
+   * clicked, rather than the bot, for a call that presents it while the lease is live. `/approve`
+   * is the contract for every executor, a terminal included: it also takes the review's override
+   * in its body, and answers 403 origin_not_allowed for an override sent with a cookie, and the
+   * 409s `request_blocked`, `request_changed`, `approval_closed_during_run`,
+   * `dispatch_superseded`, `dispatch_expired`, `decision_with_dispatch_token` and
+   * `publication_review_not_clear`, besides the identifier screen's own (see its docblock). The
+   * executor sends no override: its run rides on the clicker's, recorded here before the
+   * dispatch. The token is never logged, audited, listed or answered.
    *
    * A cookie request must come from a NEMAR origin and a bearer key is not asked: the admin
    * router's `cookieOriginGuard` decides that for every write, before this handler runs.
@@ -528,12 +531,12 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    *                         is recorded is recorded after the head check (below)
    *   400 invalid_dataset_id  the id is not one the executor's workflow accepts for this
    *                         environment (`APPROVAL_DISPATCH_ID_RE`); refused before the body is
-   *                         read and before anything is read or claimed (#1583)
+   *                         read and before anything is read or claimed (#1583, decision 8)
    *   400 invalid_body      the optional body is not `{ acknowledge_identifier_screen,
    *                         override_publication_review, request_id }`
    *   409 request_mismatch  the body's `request_id` is not the newest active request: it was
-   *                         denied or filed again since the page read it (#1579); refused before
-   *                         the gates and the claim, so nothing is recorded
+   *                         denied or filed again since the page read it (#1579, decision 7);
+   *                         refused before the gates and the claim, so nothing is recorded
    *   502 dispatch_failed   GitHub answered 4xx, or a GitHub token could not be minted, or the
    *                         dispatch token could not be signed: nothing was sent, the claim is
    *                         released
@@ -553,9 +556,10 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     const environment = approvalDispatchEnvironment(c.env);
 
     // The id is checked first, for this environment, before the body is read, before any read of
-    // the request and before the claim (#1583). The workflow this dispatches accepts only the ids
-    // of `APPROVAL_DISPATCH_ID_RE` and fails in its own validation for any other, which would
-    // leave the claim's lease held for fifteen minutes on a run that never started.
+    // the request and before the claim (#1583, ADR 0103 decision 8). The workflow this dispatches
+    // accepts only the ids of `APPROVAL_DISPATCH_ID_RE` and fails in its own validation for any
+    // other, which would leave the claim's lease held for fifteen minutes on a run that never
+    // started.
     if (!APPROVAL_DISPATCH_ID_RE[environment].test(datasetId)) {
       return c.json({ error: "invalid_dataset_id", message: INVALID_DATASET_ID_MESSAGE }, 400);
     }
@@ -778,9 +782,10 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     };
 
     // The token the executor presents on every `/approve` call of this run: a MAC over this
-    // claim's dataset, request, clicker and instant (#1604). It is handed to the dispatch and to
-    // nothing else: never logged, audited, listed or answered. A claim that cannot be signed (the
-    // signer refuses a field that holds a line break) was not sent, so it is released.
+    // claim's dataset, request, clicker and instant (#1604, ADR 0103 decision 1). It is handed to
+    // the dispatch and to nothing else: never logged, audited, listed or answered. A claim that
+    // cannot be signed (the signer refuses a field that holds a line break) was not sent, so it is
+    // released.
     let dispatchToken: string;
     try {
       dispatchToken = await signApprovalDispatchToken(

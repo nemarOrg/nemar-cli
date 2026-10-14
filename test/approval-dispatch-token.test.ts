@@ -1,5 +1,5 @@
 /**
- * The web approval's dispatch token (ADR 0080, Phase 3 of the publication review).
+ * The web approval's dispatch token (ADR 0103 decisions 1 and 4).
  *
  * A web click claims a request and dispatches an executor, which calls `/approve` under its own
  * key. The token is how that call proves it belongs to the claim: an HMAC over the claim's own
@@ -9,8 +9,8 @@
  * What these tests hold: the token binds every column it is derived from, it is a different
  * message from every other callback kind's (checked in BOTH directions against all six, because
  * one secret signs them all), a field that could pose as its neighbour is refused, and the check
- * that reads the token answers in the plan's order, so a token is never honored for a call that
- * cannot prove it belongs to the claim.
+ * that reads the token answers in the order decision 4 gives, so a token is never honored for a
+ * call that cannot prove it belongs to the claim.
  *
  * Real crypto.subtle round-trips over the real functions; no mocks per `.rules/testing.md`.
  *

@@ -1,5 +1,6 @@
 /**
- * `nemar admin publish approve` as the executor of a web approval (ADR 0080, #1604).
+ * `nemar admin publish approve` as the executor of a web approval (ADR 0103 decisions 3 to 5,
+ * #1604).
  *
  * A click on the website claims the request and dispatches a runner, which is handed the claim's
  * dispatch token in the environment variable `NEMAR_APPROVAL_DISPATCH_TOKEN` and runs
@@ -178,8 +179,9 @@ describe("the executor of a web approval", () => {
   });
 
   test("the same command with no token is the executor's own act: refused for the override it does not have, and the claim is intact", async () => {
-    // The flip of the Phase 2 pin: the clicker's recorded override covers the clicker's run, not
-    // whoever happens to call inside the claim. Without the proof the call is nobody else's.
+    // The flip of the earlier pin (ADR 0103 decision 4): the clicker's recorded override covers the
+    // clicker's run, not whoever happens to call inside the claim. Without the proof the call is
+    // nobody else's.
     const { requestId } = await click();
     const claim = requestRow(requestId);
 

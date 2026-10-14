@@ -59,8 +59,8 @@ import { approveEvidenceLines } from "../lib/publication-review-display.js";
 import { plain } from "../lib/terminal-text.js";
 
 /**
- * The environment variable a web approval's executor is handed its dispatch token in (#1604). Read
- * by `approve` and by nothing else; never printed, never logged.
+ * The environment variable a web approval's executor is handed its dispatch token in (#1604, ADR
+ * 0103 decision 3). Read by `approve` and by nothing else; never printed, never logged.
  */
 const DISPATCH_TOKEN_ENV = "NEMAR_APPROVAL_DISPATCH_TOKEN";
 

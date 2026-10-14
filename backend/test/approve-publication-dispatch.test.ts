@@ -1,6 +1,6 @@
 /**
- * `triggerApprovePublication` (ADR 0080): the dispatch that hands a web
- * approval to the central workflow.
+ * `triggerApprovePublication` (ADR 0080; ADR 0103 decision 3 for the token): the dispatch that
+ * hands a web approval to the central workflow.
  *
  * Real engine: driven against a `Bun.serve()` stand-in for api.github.com, the
  * same pattern as archive-generation-dispatch.test.ts. No mocks: the shape sent

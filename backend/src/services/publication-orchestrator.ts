@@ -317,8 +317,9 @@ export const approveSchema = z.object({
   // field the gate does not know cannot ride along, and it means nothing unless the review gate
   // is on and a reason stands that an override clears. `/approve` takes it from a bearer key only.
   override_publication_review: publicationReviewOverrideSchema.optional(),
-  // #1579: the request this run is for, so a run started for a request that was denied and filed
-  // again since is refused (409 `request_mismatch`) instead of approving the one that replaced it.
+  // #1579 (ADR 0103, decision 7): the request this run is for, so a run started for a request that
+  // was denied and filed again since is refused (409 `request_mismatch`) instead of approving the
+  // one that replaced it.
   // Optional: a caller that does not name one is the run it always was. The schema is not strict,
   // so a Worker that predates this field strips it and runs unprotected; a new CLI against it is
   // simply not protected, and nothing fails.
@@ -2122,8 +2123,9 @@ export interface ApproveRunArgs {
   body: ApproveBody;
   /**
    * The dispatch token the call presented (`X-Approval-Dispatch-Token`), as the route read it: the
-   * proof that this call belongs to a web click's claim (ADR 0080, #1604). Absent for a terminal
-   * and for an executor that predates the token; a blank one is the same as none.
+   * proof that this call belongs to a web click's claim (#1604; ADR 0103, decisions 3 and 4).
+   * Absent for a terminal and for an executor that predates the token; a blank one is the same as
+   * none.
    */
   dispatchToken?: string | null;
 }
@@ -2453,10 +2455,10 @@ async function concealedEraVersionWarning(
 /**
  * The sentences of the exits of {@link runPublicationApproval} that come AFTER the request was
  * marked `approving` and BEFORE its step loop, the ones that used to leave the row with no
- * `last_error`: four answers, and the throw of the GitHub token mint. Each is what
- * {@link recordPreLoopFailure} writes, and for the four answers also the answer's own words,
- * declared once so the two cannot drift and the answers stay byte-identical. A failure of the
- * database itself is the one exit left out: the write that records it would fail as well.
+ * `last_error` (ADR 0103, decision 9): four answers, and the throw of the GitHub token mint. Each
+ * is what {@link recordPreLoopFailure} writes, and for the four answers also the answer's own
+ * words, declared once so the two cannot drift and the answers stay byte-identical. A failure of
+ * the database itself is the one exit left out: the write that records it would fail as well.
  */
 const PRE_LOOP_FAILURE = {
   datasetMissing: "Dataset not found",
@@ -2475,13 +2477,13 @@ export const PRE_LOOP_FAILURE_SQL =
   "UPDATE publication_requests SET last_error = ? WHERE id = ? AND status = 'approving'";
 
 /**
- * Say why an approval stopped before its step loop (#1582). The request-start UPDATE has marked it
- * `approving` and refreshed `updated_at`, and these answers return before any step records
- * anything, so the row would read as a run in flight for the rest of the lease with nothing
- * running (`approvalInFlightSql`: no `last_error` means no failure grace). Writing the answer's
- * own sentence makes the row read as failed, and so as stalled once the grace has passed.
- * `updated_at` is left as the mark set it: the grace counts from this call, which is the run's
- * last sign of life.
+ * Say why an approval stopped before its step loop (#1582, ADR 0103 decision 9). The
+ * request-start UPDATE has marked it `approving` and refreshed `updated_at`, and these answers
+ * return before any step records anything, so the row would read as a run in flight for the rest
+ * of the lease with nothing running (`approvalInFlightSql`: no `last_error` means no failure
+ * grace). Writing the answer's own sentence makes the row read as failed, and so as stalled once
+ * the grace has passed. `updated_at` is left as the mark set it: the grace counts from this call,
+ * which is the run's last sign of life.
  *
  * Best-effort and never the answer: a failure here is logged by request id, with its cause, and the
  * caller returns the same body and status it always did.
@@ -2501,13 +2503,13 @@ async function recordPreLoopFailure(
 }
 
 /**
- * The write that ends an approval: the request becomes `published`, and ONLY if it is still
- * `approving`, the state the run marked it in and every step since has kept it in. A request
- * closed while the run ran (denied once its lease had lapsed, or blocked again by a result that
- * arrived mid-run) is not published over, and the status it was found in is returned. A request
- * that is already `published` was finished by a concurrent call of the same run (a retry that
- * overlapped), and counts as finished. The one statement of the run's ending, shared by the step
- * loop's last write and by a resumed run whose steps are all done.
+ * The write that ends an approval (ADR 0103, decision 12): the request becomes `published`, and
+ * ONLY if it is still `approving`, the state the run marked it in and every step since has kept it
+ * in. A request closed while the run ran (denied once its lease had lapsed, or blocked again by a
+ * result that arrived mid-run) is not published over, and the status it was found in is returned.
+ * A request that is already `published` was finished by a concurrent call of the same run (a retry
+ * that overlapped), and counts as finished. The one statement of the run's ending, shared by the
+ * step loop's last write and by a resumed run whose steps are all done.
  *
  * `changed` says whether THIS call made the request `published`, as against finding it already so:
  * the one call that changes the row is the one that records the publication, so a concurrent
@@ -2593,11 +2595,11 @@ async function recordPublicationAudit(
 }
 
 /**
- * The answer of an approval whose request is closed: 409 `approval_closed_during_run`. Its own
- * word, not `request_changed`, which means that nothing ran, whereas the steps of this run HAVE
- * run and cannot be taken back. It leaves one audit row of ids and words (the request, and the
- * status it was found in) so the trail shows a run that finished on a closed request, and it
- * never marks anything published or reports a publication.
+ * The answer of an approval whose request is closed: 409 `approval_closed_during_run` (ADR 0103,
+ * decision 12). Its own word, not `request_changed`, which means that nothing ran, whereas the
+ * steps of this run HAVE run and cannot be taken back. It leaves one audit row of ids and words
+ * (the request, and the status it was found in) so the trail shows a run that finished on a closed
+ * request, and it never marks anything published or reports a publication.
  */
 async function refuseApprovalOnClosedRequest(
   c: ApproveStepContext,
@@ -2631,7 +2633,10 @@ async function refuseApprovalOnClosedRequest(
   );
 }
 
-/** The 500 of a call whose mark changed nothing and whose follow-up read of the claim failed. */
+/**
+ * The 500 of a call whose mark changed nothing and whose follow-up read of the claim failed (ADR
+ * 0103, decision 6). It is retryable, which `dispatch_superseded` is not.
+ */
 const CLAIM_READ_FAILED_MESSAGE =
   "Could not confirm the state of the approval's request, so nothing was started. Try again.";
 
@@ -2710,10 +2715,11 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     return c.json({ error: "No active publication request found" }, 404);
   }
 
-  // The run names the request it is for, and it is not the one in force (#1579): the request was
-  // denied or filed again since the caller read it, and the lookup above found the one that
-  // replaced it. Refused here, before the blocked refusal, every gate, the approver's resolution
-  // and every write, so nothing is marked, recorded or acknowledged for a request nobody looked at.
+  // The run names the request it is for, and it is not the one in force (#1579, ADR 0103 decision
+  // 7): the request was denied or filed again since the caller read it, and the lookup above found
+  // the one that replaced it. Refused here, before the blocked refusal, every gate, the approver's
+  // resolution and every write, so nothing is marked, recorded or acknowledged for a request
+  // nobody looked at. The order of the refusals from here to the mark is ADR 0103 decision 4's.
   if (body.request_id !== undefined && body.request_id !== request.id) {
     console.warn(
       `[publish] ${datasetId}: approval refused, it was for request ${body.request_id} and the request in force is ${request.id}`,
@@ -2739,14 +2745,15 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     return c.json(requestBlockedRefusal(datasetId, request.block_reason), 409);
   }
 
-  // Attribution forks on proof (ADR 0080, #1604). A call that carries the dispatch token of a web
-  // click's claim is that click's run, and is recorded as the admin who clicked. A call with no
-  // token is its caller's own act, whatever claim is on the row and whatever its lease says: it is
-  // recorded as the caller and, once it passes every gate, takes the claim over (at the mark,
-  // below). A token that does not verify is neither of those, so it is refused here, before any
-  // write, and never quietly downgraded to the caller: a run that cannot prove it belongs to its
-  // claim is not recorded under the click's name, and it is not the caller's own act either, since
-  // it was started to carry out someone else's decision. `adminUser` stays the executor.
+  // Attribution forks on proof (ADR 0103, decision 4; #1604). A call that carries the dispatch
+  // token of a web click's claim is that click's run, and is recorded as the admin who clicked. A
+  // call with no token is its caller's own act, whatever claim is on the row and whatever its lease
+  // says: it is recorded as the caller and, once it passes every gate, takes the claim over (at the
+  // mark, below, decision 6). A token that does not verify is neither of those, so it is refused
+  // here, before any write, and never quietly downgraded to the caller: a run that cannot prove it
+  // belongs to its claim is not recorded under the click's name, and it is not the caller's own act
+  // either, since it was started to carry out someone else's decision. `adminUser` stays the
+  // executor.
   const tokenCheck = await checkApprovalDispatchToken(
     env,
     { ...request, dataset_id: datasetId },
@@ -2770,14 +2777,14 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     username: adminUser.username,
   });
 
-  // A run the web started carries the decision its click made: the override and the screen's
-  // acknowledgment were recorded at the click, under the clicker's id, and the gates below read
-  // them there. It may not send one of its own, because it would be recorded under the approver of
-  // record, who is the clicker and not the sender. A skipped CI check is a decision of the same
-  // kind (it waives a check, and is recorded under the approver), and the click has no such
-  // option, so a run that sends one is not the click's. An explicit `false` is no decision: the
-  // CLI sends it on every call. So an override, an acknowledgment or a skip is recorded only under
-  // the credential that sent it, or at the clicker's own dispatch.
+  // A run the web started carries the decision its click made (ADR 0103, decision 5): the override
+  // and the screen's acknowledgment were recorded at the click, under the clicker's id, and the
+  // gates below read them there. It may not send one of its own, because it would be recorded
+  // under the approver of record, who is the clicker and not the sender. A skipped CI check is a
+  // decision of the same kind (it waives a check, and is recorded under the approver), and the
+  // click has no such option, so a run that sends one is not the click's. An explicit `false` is
+  // no decision: the CLI sends it on every call. So an override, an acknowledgment or a skip is
+  // recorded only under the credential that sent it, or at the clicker's own dispatch.
   if (
     verifiedClaim !== null &&
     (body.override_publication_review !== undefined ||
@@ -2810,12 +2817,13 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   const stepsToRun = allSteps.filter((s) => !stepsCompleted.includes(s));
 
   if (stepsToRun.length === 0) {
-    // A request that is not `approving` is refused BEFORE the tail jobs below: they write (the
-    // Zarr stamp) and publish (reserved version identifiers, which cannot be taken back), and a
-    // refusal that reads as "this run published nothing" must not have done either. A `requested`
-    // request here carries the steps of an earlier life (follow-up #1766) and its data is already
-    // public; an owner-name `blocked` one was walked back mid-run. The closing write below stays
-    // the atomic guard, and its refusal stays the answer for a request that closed after this read.
+    // The order of this branch is ADR 0103 decision 12's. A request that is not `approving` is
+    // refused BEFORE the tail jobs below: they write (the Zarr stamp) and publish (reserved
+    // version identifiers, which cannot be taken back), and a refusal that reads as "this run
+    // published nothing" must not have done either. A `requested` request here carries the steps
+    // of an earlier life (follow-up #1766) and its data is already public; an owner-name `blocked`
+    // one was walked back mid-run. The closing write below stays the atomic guard, and its refusal
+    // stays the answer for a request that closed after this read.
     if (request.status !== "approving") {
       return refuseApprovalOnClosedRequest(c, request.id, request.status);
     }
@@ -2942,8 +2950,8 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // marked once it has become one, and the owner-name reason itself, so a row a re-request moved
   // to another reason since is refused as well.
   //
-  // The mark is also where the claim is settled (#1604), and it is the last write before any work
-  // is done, so a refused call has changed nothing:
+  // The mark is also where the claim is settled (#1604, ADR 0103 decision 6), and it is the last
+  // write before any work is done, so a refused call has changed nothing:
   //   - a call that proved its claim (a valid token) marks only while `approval_dispatched_at` is
   //     still the instant it verified. The token was checked a few statements ago, and a click
   //     that replaced the claim, a release, a takeover or a denial since would otherwise be run
@@ -3122,9 +3130,10 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
 
   // The token is minted after the mark, so a mint that throws (no App key, no PAT, GitHub
   // refusing) would leave the row `approving` with no `last_error`, and so in flight for the rest
-  // of the lease with nothing running. The sentence is written, then the throw goes on as it
-  // always did, so the status and the Worker's own error handling are unchanged. The claim is
-  // left standing, like the other exits above: the executor's release step ends it.
+  // of the lease with nothing running (ADR 0103, decision 9). The sentence is written, then the
+  // throw goes on as it always did, so the status and the Worker's own error handling are
+  // unchanged. The claim is left standing, like the other exits above: the executor's release step
+  // ends it.
   let pat: string;
   try {
     pat = await getDatasetsToken(c.env);

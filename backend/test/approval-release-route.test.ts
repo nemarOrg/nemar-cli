@@ -1,5 +1,5 @@
 /**
- * POST /webhooks/approval-release (#1582, Phase 3 of the publication review, ADR 0080).
+ * POST /webhooks/approval-release (#1582, ADR 0103 decision 9).
  *
  * A web click claims the request and dispatches an executor. When that executor fails in a way the
  * Worker cannot see (a missing secret, a failed install, a cancelled run), the claim would hold
@@ -8,7 +8,7 @@
  * as the request's `last_error`, and leaves `updated_at` alone so the failed-run grace reads from
  * the run's last real sign of life. The token is the only authentication.
  *
- * What is pinned: a valid token releases and records exactly what the plan says; every refusal is
+ * What is pinned: a valid token releases and records exactly what decision 9 says; every refusal is
  * the SAME 401 bytes with nothing changed, whether the request is unknown, closed, already
  * released or the token is wrong (an answer that differed would tell a caller which requests have
  * a claim); a specific failure already on the row is never overwritten by the generic sentence;

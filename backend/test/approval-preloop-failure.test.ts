@@ -1,6 +1,6 @@
 /**
- * The four answers of `/approve` that return before its step loop say why on the row (#1582,
- * Phase 3 of the publication review, ADR 0080).
+ * The four answers of `/approve` that return before its step loop say why on the row (#1582, ADR
+ * 0103 decision 9).
  *
  * `runPublicationApproval` marks the request `approving` and refreshes `updated_at`, then four
  * checks can still refuse it before any step records anything: the dataset is missing, it is a
@@ -9,7 +9,9 @@
  * no `last_error` as a run that has not failed, so a run that stopped there looked in flight for
  * the rest of the fifteen-minute lease and a second click was refused with nothing running. Each
  * now writes the sentence its answer carries; the answers themselves (status and body) are
- * unchanged, and a failure to write never changes them.
+ * unchanged, and a failure to write never changes them. A fifth exit, a failure to mint the GitHub
+ * token for the dataset repositories, throws after the same mark: it writes a fixed sentence and
+ * rethrows, so the status and the claim are as they were.
  *
  * Real engine only: bun:sqlite behind realD1 with every migration applied, the real routes and
  * the real auth middleware through Hono's `app.request()`. The run is seeded mid-flight (a step

@@ -16,10 +16,10 @@ export const PUBLICATION_DATASET_ID_RE = /^(nm|on|xx)\d{6}$/;
 
 /**
  * The id of a dataset a web approval may DISPATCH, by environment (`POST
- * /admin/publish/:id/approve-dispatch`, #1583). The executor workflow it dispatches
- * (`approve-publication.yml`, in the central workflow repository) accepts only `nm` or `on` plus
- * six digits, and on dev also `xx` plus six digits (the exemplar fleet); a dispatch for any other
- * id, or for an `xx` id on production, would claim the lease, dispatch, and fail in the
+ * /admin/publish/:id/approve-dispatch`, #1583; ADR 0103, decision 8). The executor workflow it
+ * dispatches (`approve-publication.yml`, in the central workflow repository) accepts only `nm` or
+ * `on` plus six digits, and on dev also `xx` plus six digits (the exemplar fleet); a dispatch for
+ * any other id, or for an `xx` id on production, would claim the lease, dispatch, and fail in the
  * workflow's validate step with the lease held for fifteen minutes. The route refuses it before
  * it claims anything.
  *

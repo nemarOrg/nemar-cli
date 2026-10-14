@@ -113,16 +113,16 @@ export const IDENTIFIER_SCREEN_ERROR_CODES: readonly string[] = [
 ];
 
 /**
- * The codes an approval refusal carries in `error` with the human sentence in `message` (ADR
- * 0102; ADR 0080 for the dispatch token, Phase 3): the review gate's 409, the
- * blocked request's, the request that changed while the approval was being checked, a run for a
- * request that is no longer the one in force, a dispatch token that was replaced or has lapsed, a
- * decision sent by a run the web started, the two refusals of a denial (a request that is running,
- * and one that has started publishing), a run whose request was closed while it ran (its steps
- * had run), and a web approval for an id the executor's workflow would not accept (a 400, before
- * anything is claimed). Declared
- * here, beside the screen's, so the CLI's client leads with the sentence and not the bare token.
- * The first two words are the `error` of the bodies in `publication-review-admin.ts`
+ * The codes an approval refusal carries in `error` with the human sentence in `message`. ADR 0102
+ * owns the review gate's 409, the blocked request's, and the request that changed while the
+ * approval was being checked. ADR 0103 owns the rest: a run for a request that is no longer the
+ * one in force (decision 7), a dispatch token that was replaced or has lapsed (decision 4), a
+ * decision sent by a run the web started (decision 5), a web approval for an id the executor's
+ * workflow would not accept, a 400 before anything is claimed (decision 8), the two refusals of a
+ * denial, a request that is running and one that has started publishing (decision 11), and a run
+ * whose request was closed while it ran, so its steps had run (decision 12). Declared here,
+ * beside the screen's, so the CLI's client leads with the sentence and not the bare token. The
+ * first two words are the `error` of the bodies in `publication-review-admin.ts`
  * (`PUBLICATION_REVIEW_NOT_CLEAR_CODE`, `REQUEST_BLOCKED_CODE`); this file stays free of every
  * dependency but zod, and a test holds the spellings together.
  */
@@ -136,7 +136,7 @@ export const APPROVAL_REFUSAL_ERROR_CODES: readonly string[] = [
   "dispatch_superseded",
   /** The token is genuine, but its run sat idle past the lease. */
   "dispatch_expired",
-  /** A run the web started sent an override or an acknowledgment of its own. */
+  /** A run the web started sent a decision (an override, an acknowledgment, a skipped CI check). */
   "decision_with_dispatch_token",
   /** A denial of a request an approval is running for (the deny route's word). */
   "approval_in_flight",
@@ -233,7 +233,7 @@ export const INVALID_DATASET_ID_MESSAGE =
   "This is not a dataset id an approval can be started for from the web: it is nm or on followed by six digits (a development environment also accepts xx). Nothing was claimed and nothing was sent.";
 
 /**
- * Why an approval executor releases the claim it was dispatched under (ADR 0080, Phase 3): the
+ * Why an approval executor releases the claim it was dispatched under (ADR 0103, decision 9): the
  * closed vocabulary of the `reason` a failing executor reports. The Worker stores the sentence of
  * the word (never the word, and never a string the executor wrote) as the request's `last_error`,
  * so a failure the Worker cannot see for itself shows on the page and the claim does not hold its
@@ -267,12 +267,13 @@ export const APPROVAL_RELEASE_REASON_TEXT: Record<ApprovalReleaseReason, string>
 };
 
 /**
- * The request header an approval executor presents its dispatch token in (ADR 0080, Phase 3 of
- * the publication review). The Worker reads it on `/approve` to decide whether the call belongs
- * to the web claim it was dispatched for, and the CLI sends it when the executor's workflow hands
- * it the token. Declared once so the two cannot spell it differently, and so the `--debug` log's
- * header redaction is held to the same spelling by a test: the token is a credential-shaped value
- * in a header, and that log is what users are told to attach to public issues.
+ * The request header an approval executor presents its dispatch token in (ADR 0103, decision 3).
+ * The Worker reads it on `/approve` to decide whether the call belongs to the web claim it was
+ * dispatched for (decision 4), and on the release route, where it is the only credential
+ * (decision 9). The CLI sends it when the executor's workflow hands it the token. Declared once
+ * so the two cannot spell it differently, and so the `--debug` log's header redaction is held to
+ * the same spelling by a test: the token is a credential-shaped value in a header, and that log is
+ * what users are told to attach to public issues.
  */
 export const APPROVAL_DISPATCH_TOKEN_HEADER = "X-Approval-Dispatch-Token";
 

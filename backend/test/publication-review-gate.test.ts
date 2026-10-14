@@ -1057,9 +1057,9 @@ describe("an override is its approver's, and it is recorded once", () => {
   });
 
   test("23. a terminal approval by B inside A's live web claim is B's own act: it does not ride on A's override, and A's claim is intact", async () => {
-    // The flip of the Phase 2 pin (#1604). Inside a live claim, with no dispatch token, B is not
-    // A's run: B is recorded as B, B needs B's own override, and a refusal changes nothing, so the
-    // run the click dispatched can still be carried out by its executor.
+    // The flip of the earlier pin (#1604, ADR 0103 decisions 4 and 6). Inside a live claim, with no
+    // dispatch token, B is not A's run: B is recorded as B, B needs B's own override, and a refusal
+    // changes nothing, so the run the click dispatched can still be carried out by its executor.
     const { requestId, reviewId } = seedFailing();
     setOverride(db, reviewId, adminA, ["question_failed"]);
     const token = await claim(requestId, adminA);
@@ -1204,10 +1204,10 @@ describe("an override is its approver's, and it is recorded once", () => {
 
 /**
  * An override is recorded only under the credential that sent it, or at the clicker's own
- * dispatch (#1604). This is the guarantee the Phase 2 refusal `override_inside_web_approval`
- * stood in for; it is now structural, and held here as a property: after every scenario, every
- * override on a review row and in the audit trail names `sender`, and when `sender` is null (the
- * call was refused, or sent none) there is none.
+ * dispatch (#1604, ADR 0103 decision 5). This is the guarantee the earlier refusal
+ * `override_inside_web_approval` stood in for; it is now structural, and held here as a property:
+ * after every scenario, every override on a review row and in the audit trail names `sender`, and
+ * when `sender` is null (the call was refused, or sent none) there is none.
  */
 function expectOverridesRecordedBy(sender: number | null): void {
   for (const r of reviewRows()) {
@@ -1239,7 +1239,7 @@ describe("#1604: a run the web started carries its click's decision and sends no
       message: DECISION_WITH_DISPATCH_TOKEN_MESSAGE,
     });
     expect(APPROVAL_REFUSAL_ERROR_CODES).toContain(body.error);
-    // The Phase 2 stop-gap is gone from the contract: its job is structural now.
+    // The earlier stop-gap is gone from the contract: its job is structural now (decision 5).
     expect(APPROVAL_REFUSAL_ERROR_CODES).not.toContain("override_inside_web_approval");
     // Nothing ran and nothing was recorded, under A or under B.
     expect(reviewRow(reviewId).override_by).toBeNull();
