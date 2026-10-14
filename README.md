@@ -331,6 +331,8 @@ nemar admin publish approve <dataset-id> --force
                                            # Approve over a review that is not a pass
 nemar admin publish approve <dataset-id> --acknowledge-identifier-screen "<reason>"
                                            # Approve over a screen that needs review
+nemar admin publish approve <dataset-id> --request-id <n>
+                                           # Approve only if request n is the one in force
 nemar admin publish deny <dataset-id>      # Deny publication request
 nemar admin publish screen <dataset-id>    # Re-run the identifier screen
 ```
@@ -343,6 +345,8 @@ Each request also gets an automated review of what the depositor submitted,
 which `admin publish list` and `admin publish show` state.
 An approval over a review that is not a pass needs `--force` and is recorded
 with your account.
+An approval is for the request it showed, and the API refuses it when that
+request was denied or filed again since (`--request-id` names it yourself).
 
 ### Admin Commands
 

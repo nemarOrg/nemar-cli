@@ -117,8 +117,9 @@ export const IDENTIFIER_SCREEN_ERROR_CODES: readonly string[] = [
  * 0102; ADR 0080 for the dispatch token, Phase 3): the review gate's 409, the
  * blocked request's, the request that changed while the approval was being checked, an override
  * sent inside a web approval, a run for a request that is no longer the one in force, a dispatch
- * token that was replaced or has lapsed, a decision sent by a run the web started, and the two
- * refusals of a denial (a request that is running, and one that has started publishing). Declared
+ * token that was replaced or has lapsed, a decision sent by a run the web started, the two
+ * refusals of a denial (a request that is running, and one that has started publishing), and a web
+ * approval for an id the executor's workflow would not accept (a 400, before anything is claimed). Declared
  * here, beside the screen's, so the CLI's client leads with the sentence and not the bare token.
  * The first two words are the `error` of the bodies in `publication-review-admin.ts`
  * (`PUBLICATION_REVIEW_NOT_CLEAR_CODE`, `REQUEST_BLOCKED_CODE`); this file stays free of every
@@ -141,6 +142,8 @@ export const APPROVAL_REFUSAL_ERROR_CODES: readonly string[] = [
   "approval_in_flight",
   /** A denial of a request that has started publishing (the deny route's word). */
   "deny_after_publishing",
+  /** A web approval for an id the executor workflow would refuse (the dispatch route's 400). */
+  "invalid_dataset_id",
 ];
 
 /**
@@ -212,6 +215,15 @@ export const APPROVAL_IN_FLIGHT_MESSAGE =
  */
 export const DENY_AFTER_PUBLISHING_MESSAGE =
   "An approval of this request has already started publishing, so the dataset may already be public and the request cannot be denied. Resume the approval to finish it.";
+
+/**
+ * The sentence of the dispatch route's 400 `invalid_dataset_id`: the id is not one the executor
+ * workflow accepts for this environment (`APPROVAL_DISPATCH_ID_RE` in `publication-limits.ts`), so
+ * the route refuses it before it reads or claims anything, and no lease is held for a run that
+ * could only fail in the workflow's own validation.
+ */
+export const INVALID_DATASET_ID_MESSAGE =
+  "This is not a dataset id an approval can be started for from the web: it is nm or on followed by six digits (a development environment also accepts xx). Nothing was claimed and nothing was sent.";
 
 /**
  * Why an approval executor releases the claim it was dispatched under (ADR 0080, Phase 3): the

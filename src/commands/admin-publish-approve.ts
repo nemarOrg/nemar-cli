@@ -77,6 +77,10 @@ export function registerApproveCommand(group: Command): void {
       "--force",
       "Approve over a publication review that is not a pass, recorded with your account",
     )
+    .option(
+      "--request-id <n>",
+      "The request this approval is for (default: the one shown); refused if it is not the request in force",
+    )
     .option(YES_OPTION, YES_DESCRIPTION)
     .option(NO_OPTION, NO_DESCRIPTION)
     .addHelpText(
@@ -106,6 +110,12 @@ Description:
 
   --yes answers the confirmation and nothing else. It never stands in for
   --force or for --acknowledge-identifier-screen.
+
+  The approval is for the request shown: its number is sent with every call of
+  the run, and the API refuses it when that request was denied or filed again
+  since, so a request nobody read is never approved in its place. --request-id
+  <n> names it yourself (for a script that read the request earlier); it is
+  refused here, before anything is sent, when it is not the request shown.
 
   --skip-ci-check skips the orchestrator's live CI check, and the approval's audit
   row records that it was used. It never clears a review reason: a failed or
@@ -162,6 +172,7 @@ Examples:
   $ nemar admin publish approve nm000104 --skip-ci-check    # Skip the live CI check only
   $ nemar admin publish approve nm000104 --force            # Approve over a review that is not a pass
   $ nemar admin publish approve nm000104 --yes              # Skip confirmation (never a reason)
+  $ nemar admin publish approve nm000104 --request-id 42    # Only if request 42 is the one in force
 
 After Approval:
   - User receives email with DOI and public dataset link
@@ -178,6 +189,7 @@ After Approval:
           skipCiCheck?: boolean;
           acknowledgeIdentifierScreen?: string;
           force?: boolean;
+          requestId?: string;
         },
       ) => {
         if (!requireSignedIn()) return;
@@ -206,6 +218,20 @@ After Approval:
           return;
         }
 
+        // The request number the administrator gave, checked before anything is read or sent.
+        const named =
+          options.requestId === undefined ? undefined : requestNumber(options.requestId);
+        if (options.requestId !== undefined && named === undefined) {
+          console.log(
+            chalk.red(
+              `--request-id needs a request number (a positive whole number); "${plain(options.requestId)}" is not one.`,
+            ),
+          );
+          process.exitCode = 1;
+          markReportedExit();
+          return;
+        }
+
         const action = options.resume
           ? `Resume publication of ${datasetId}`
           : `Approve and publish ${datasetId}`;
@@ -223,6 +249,21 @@ After Approval:
           failWith(printable(read.refused), ora(), "The publication review could not be read");
           return;
         }
+        // The request the run is for: the one the review just shown belongs to, unless the
+        // administrator named one. A name that is not the request shown is refused here, before the
+        // question and before anything is sent (the Worker would refuse it too, but later).
+        const shown = read.kind === "detail" ? requestNumber(read.detail.request_id) : undefined;
+        if (named !== undefined && shown !== undefined && named !== shown) {
+          console.log(
+            chalk.red(
+              `--request-id names request #${named}, but the request in force for ${plain(datasetId)} is #${shown}. Nothing was sent.`,
+            ),
+          );
+          process.exitCode = 1;
+          markReportedExit();
+          return;
+        }
+        const requestId = named ?? shown;
         if (read.kind === "detail") {
           for (const line of reviewLines(read.detail, datasetId)) console.log(line);
         }
@@ -337,9 +378,20 @@ After Approval:
           skipCiCheck: !!options.skipCiCheck,
           acknowledge: ack,
           override: decision.override,
+          requestId,
         });
       },
     );
+}
+
+/**
+ * `value` as a request number: a positive whole number, from the text of `--request-id` or from a
+ * field of the review (a number there, but the client does not check that it is). Undefined for
+ * anything else, so a Worker that sends none, or sends something else, names no request.
+ */
+function requestNumber(value: unknown): number | undefined {
+  const n = typeof value === "string" && /^[1-9]\d*$/.test(value) ? Number(value) : value;
+  return typeof n === "number" && Number.isSafeInteger(n) && n > 0 ? n : undefined;
 }
 
 /**
@@ -411,6 +463,8 @@ interface RunApprovalOptions {
   acknowledge?: string;
   /** The review shown and the reasons shown, sent on every call of the run; null when none. */
   override: PublicationReviewOverride | null;
+  /** The request the run is for, sent on every call of the run so the Worker can refuse a stale one (#1579). */
+  requestId?: number;
 }
 
 /**
@@ -534,8 +588,9 @@ export function timelineLines(stepResults: StepResult[] | undefined): string[] {
  * The approval loop of `approve` and of `y` in `next`: the spinner, the progress, the retries, the
  * result lines and, for a refusal or a failure, the words and the exit code (1, always: #1581).
  *
- * The override is sent on every call of the run (`approvePublication`), so a retry that lands
- * before the run is marked approving passes the gate again with the same override. A refusal the
+ * The override and the request number are sent on every call of the run (`approvePublication`), so
+ * a retry that lands before the run is marked approving passes the gate again with the same
+ * override, and a request denied and filed again while the run goes is refused (`request_mismatch`). A refusal the
  * Worker answers with (the review gate, the screen, a blocked request) is printed in the shared
  * words, and so is a failure; the result says only whether the run went through.
  */
@@ -601,6 +656,7 @@ export async function runApproval(
       },
       opts.acknowledge,
       opts.override ?? undefined,
+      { requestId: opts.requestId },
     );
     spinner.succeed(plain(result.message));
     for (const line of resultLines(result)) console.log(line);

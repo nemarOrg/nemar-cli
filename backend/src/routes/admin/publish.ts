@@ -11,12 +11,14 @@ import { z } from "zod";
 import {
   APPROVAL_IN_FLIGHT_MESSAGE,
   DENY_AFTER_PUBLISHING_MESSAGE,
+  INVALID_DATASET_ID_MESSAGE,
   REQUEST_MISMATCH_MESSAGE,
 } from "../../../../shared/contract/publication.js";
 import { screenGate } from "../../../../shared/identifier-screen-report.js";
 import {
   ACKNOWLEDGMENT_MAX_LENGTH,
   ACKNOWLEDGMENT_MIN_LENGTH,
+  APPROVAL_DISPATCH_ID_RE,
   DENIAL_REASON_MAX_LENGTH,
 } from "../../../../shared/publication-limits.js";
 import { publishingStanding } from "../../../../shared/publication-steps.js";
@@ -70,11 +72,17 @@ const APPROVAL_IN_PROGRESS = {
     "An approval of this request has already started publishing, and it passed the identifier screen when it started. Resume it rather than screening again.",
 };
 
-/** The optional body of the approve-dispatch route. */
+/**
+ * The optional body of the approve-dispatch route. `request_id` is the request the click was for
+ * (#1579): the page names the one it showed, and the route refuses a click for a request that is
+ * no longer the one in force. Optional, so the bodyless click every existing caller sends is
+ * unchanged.
+ */
 const dispatchBodySchema = z
   .object({
     acknowledge_identifier_screen: acknowledgeIdentifierScreenSchema.optional(),
     override_publication_review: publicationReviewOverrideSchema.optional(),
+    request_id: z.number().int().positive().optional(),
   })
   .strict();
 
@@ -384,11 +392,16 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    * reason, ADR 0086) and `override_publication_review` (the review shown and the reasons shown,
    * ADR 0102).
    *
+   * The body may name the request the run is for, `request_id` (#1579).
+   *
    * Refusals, each with a stable code in `error` and a sentence in `message`:
    *   403 origin_not_allowed  an override sent with a session cookie: it is accepted only with
    *                         an API key, and the website records one through approve-dispatch.
    *                         (A cookie request with no NEMAR origin never gets this far: the
    *                         router's `cookieOriginGuard` answers it with the same code.)
+   *   409 request_mismatch  `request_id` is not the newest active request: it was denied or filed
+   *                         again since the caller read it. Answered right after the 404 for no
+   *                         request and before everything below, so nothing is recorded.
    *   409 request_blocked   the request is `blocked` and is not a run that started publishing
    *                         (the owner-name walk-back); whatever the flag says
    *   409 identifier_screen_not_clear  the identifier screen does not allow it (ADR 0086)
@@ -469,8 +482,14 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    *                         approval (ADR 0102): the gate refuses before the claim, with
    *                         a `refusal` word and the review's words, and an override that
    *                         is recorded is recorded after the head check (below)
+   *   400 invalid_dataset_id  the id is not one the executor's workflow accepts for this
+   *                         environment (`APPROVAL_DISPATCH_ID_RE`); refused before the body is
+   *                         read and before anything is read or claimed (#1583)
    *   400 invalid_body      the optional body is not `{ acknowledge_identifier_screen,
-   *                         override_publication_review }`
+   *                         override_publication_review, request_id }`
+   *   409 request_mismatch  the body's `request_id` is not the newest active request: it was
+   *                         denied or filed again since the page read it (#1579); refused before
+   *                         the gates and the claim, so nothing is recorded
    *   502 dispatch_failed   GitHub answered 4xx, or a token could not be
    *                         minted: nothing was sent, the claim is released
    *   502 dispatch_unconfigured  the Worker has no GitHub credential; retrying
@@ -484,13 +503,24 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     const datasetId = c.req.param("id");
     const adminUser = c.get("user");
     const db = c.env.DB;
+    const environment = approvalDispatchEnvironment(c.env);
+
+    // The id is checked first, for this environment, before the body is read, before any read of
+    // the request and before the claim (#1583). The workflow this dispatches accepts only the ids
+    // of `APPROVAL_DISPATCH_ID_RE` and fails in its own validation for any other, which would
+    // leave the claim's lease held for fifteen minutes on a run that never started.
+    if (!APPROVAL_DISPATCH_ID_RE[environment].test(datasetId)) {
+      return c.json({ error: "invalid_dataset_id", message: INVALID_DATASET_ID_MESSAGE }, 400);
+    }
 
     // The body is optional; it carries an acknowledgment of the identifier
-    // screen (epic #1610 phase 4) and the administrator's override of the
-    // publication review (ADR 0102). No body, or none that parses as JSON, is
-    // the bodyless click every existing caller sends.
+    // screen (epic #1610 phase 4), the administrator's override of the
+    // publication review (ADR 0102) and the request the click was for (#1579). No
+    // body, or none that parses as JSON, is the bodyless click every existing
+    // caller sends.
     let acknowledgment: string | undefined;
     let override: z.infer<typeof publicationReviewOverrideSchema> | undefined;
+    let namedRequestId: number | undefined;
     const rawBody: unknown = await c.req.json().catch(() => undefined);
     if (rawBody !== undefined) {
       const parsed = dispatchBodySchema.safeParse(rawBody);
@@ -498,13 +528,14 @@ export function registerPublishRoutes(admin: AdminRouter): void {
         return c.json(
           {
             error: "invalid_body",
-            message: `The only fields this accepts are acknowledge_identifier_screen, a reason of ${ACKNOWLEDGMENT_MIN_LENGTH} to ${ACKNOWLEDGMENT_MAX_LENGTH} characters, and override_publication_review, the review shown and the reasons shown.`,
+            message: `The only fields this accepts are acknowledge_identifier_screen, a reason of ${ACKNOWLEDGMENT_MIN_LENGTH} to ${ACKNOWLEDGMENT_MAX_LENGTH} characters, override_publication_review, the review shown and the reasons shown, and request_id, the request this click is for.`,
           },
           400,
         );
       }
       acknowledgment = parsed.data.acknowledge_identifier_screen;
       override = parsed.data.override_publication_review;
+      namedRequestId = parsed.data.request_id;
     }
 
     const request = await db
@@ -528,6 +559,12 @@ export function registerPublishRoutes(admin: AdminRouter): void {
 
     if (!request) {
       return c.json({ error: "not_found", message: "No active publication request found" }, 404);
+    }
+    // The request the click named is not the one in force: it was denied, or filed again, since
+    // the page read it (#1579). Refused before the gates and the claim, so nothing the body
+    // carries (an acknowledgment, an override) is recorded against the request that replaced it.
+    if (namedRequestId !== undefined && namedRequestId !== request.id) {
+      return c.json({ error: "request_mismatch", message: REQUEST_MISMATCH_MESSAGE }, 409);
     }
     if (request.status === "blocked") {
       return c.json(
@@ -635,8 +672,6 @@ export function registerPublishRoutes(admin: AdminRouter): void {
         409,
       );
     }
-
-    const environment = approvalDispatchEnvironment(c.env);
 
     // Release the claim so the admin can try again at once rather than wait out
     // the lease. Only ever done for a failure that is DEFINITELY "not sent", so
