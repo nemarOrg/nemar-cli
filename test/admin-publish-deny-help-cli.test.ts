@@ -46,5 +46,5 @@ test("--help-all says that a running approval, and one that has published a step
   expect(text).toContain(`${advice[0].toLowerCase()}${advice.slice(1)}`);
   expect(text).not.toContain("can be finished by approving it again");
   // Nothing was asked of the API for a help screen.
-  expect(h.posted).toEqual([]);
+  expect(h.requests).toEqual([]);
 });
