@@ -224,6 +224,11 @@ import { checkDownloadPrerequisites } from "../lib/git-annex/prereq.js";
 import { getVersionCommit, listDatasetVersions } from "../lib/git-annex/repo-state.js";
 import { identifierScreenLines } from "../lib/identifier-screen-display.js";
 import {
+  type ListFilterOptions,
+  describeListScope,
+  resolveListStatuses,
+} from "../lib/publish-list-filter.js";
+import {
   type RecoverDatasetEntry,
   loadRecoverDatasets,
   resolveImportSources,
@@ -3103,42 +3108,68 @@ const publishCommand = new Command("publish").description("Publication workflow 
 
 publishCommand
   .command("list")
-  .description("List publication requests")
-  .option("-s, --status <status>", "Filter by status (requested, approving, published, denied)")
+  .description("List publication requests (active ones by default)")
+  .option("--all", "Show every request, whatever its state")
+  .option("--requested", "Show requests awaiting admin action")
+  .option("--approving", "Show requests being processed by the orchestrator")
+  .option("--blocked", "Show requests blocked on the depositor")
+  .option("--published", "Show published requests")
+  .option("--denied", "Show denied requests")
+  .option("-s, --search <text>", "Match dataset ID, requester username or dataset name")
   .addHelpText(
     "after",
     `
 Description:
-  List all publication requests from users, with optional filtering by status.
+  List publication requests from users. By default only the active ones are
+  shown (requested, approving and blocked); the state flags narrow the list to
+  one or more states, and --all shows every request.
   Shows dataset ID, status, requesting user, and current progress.
 
-Filter Options:
+States:
   requested  - Pending requests awaiting admin action
   approving  - Currently being processed by orchestrator
+  blocked    - Held until the depositor fixes something
   published  - Successfully published datasets
-  denied     - Denied requests with reasons
+  denied     - Denied requests, and requests the depositor withdrew
+
+Search:
+  -s/--search matches a case-insensitive substring of the dataset ID, the
+  requester's username or the dataset name, within the states being shown.
+  An exact dataset ID is listed first.
 
 Examples:
-  $ nemar admin publish list                # All requests
-  $ nemar admin publish list --status requested   # Pending only
-  $ nemar admin publish list --status approving   # In progress
-  $ nemar admin publish list --status denied      # View denied`,
+  $ nemar admin publish list                       # Active requests
+  $ nemar admin publish list --all                 # Every request
+  $ nemar admin publish list --denied              # Denied only
+  $ nemar admin publish list --published --denied  # Both states
+  $ nemar admin publish list -s nm000104 --all     # Look up one dataset, any state`,
   )
-  .action(async (options: { status?: string }) => {
+  .action(async (options: ListFilterOptions & { search?: string }) => {
     if (!requireAuth()) return;
 
     const spinner = ora("Fetching publication requests...").start();
 
     try {
-      const result = await listPublishRequests(options.status);
+      const result = await listPublishRequests({
+        statuses: resolveListStatuses(options),
+        search: options.search,
+      });
       spinner.stop();
 
       if (result.requests.length === 0) {
-        console.log(chalk.dim("\n  No publication requests found.\n"));
+        const scope = describeListScope(options);
+        const widen = options.all ? "" : " Use --all to include every state.";
+        console.log(
+          chalk.dim(
+            `\n  No ${scope} found${options.search ? ` matching "${options.search}"` : ""}.${widen}\n`,
+          ),
+        );
         return;
       }
 
-      console.log(`\n${chalk.cyan("Publication Requests")} (${result.count})\n`);
+      console.log(
+        `\n${chalk.cyan("Publication Requests")} (${result.count}, ${describeListScope(options)})\n`,
+      );
 
       for (const req of result.requests) {
         const statusColor =
@@ -3151,7 +3182,7 @@ Examples:
                 : chalk.white;
 
         console.log(
-          `  ${chalk.bold(req.dataset_id)}  ${statusColor(req.status)}  by ${req.requested_by_username}  ${chalk.dim(req.requested_at)}`,
+          `  ${chalk.bold(req.dataset_id)}  ${statusColor(req.status)}  by ${req.requested_by_username}  ${chalk.dim(req.requested_at)}${req.dataset_name ? `  ${chalk.dim(req.dataset_name)}` : ""}`,
         );
         // #1408: an anonymous release and a publication reach this list
         // looking identical, and approving the wrong one is not reversible in

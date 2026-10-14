@@ -62,6 +62,7 @@ export interface PublishRequestsResponse {
     requested_at: string;
     requested_by_username: string;
     requested_by_email: string;
+    dataset_name?: string | null;
     steps_completed: string[];
     current_step: string | null;
     last_error: string | null;
@@ -187,8 +188,14 @@ export async function resendPublishNotification(datasetId: string): Promise<{ me
 /**
  * List publication requests (admin)
  */
-export async function listPublishRequests(status?: string): Promise<PublishRequestsResponse> {
-  const query = status ? `?status=${status}` : "";
+export async function listPublishRequests(
+  filter: { statuses?: string[]; search?: string } = {},
+): Promise<PublishRequestsResponse> {
+  const params = new URLSearchParams();
+  if (filter.statuses && filter.statuses.length > 0)
+    params.set("status", filter.statuses.join(","));
+  if (filter.search) params.set("search", filter.search);
+  const query = params.size > 0 ? `?${params}` : "";
   return request<PublishRequestsResponse>(`/admin/publish/requests${query}`, {}, true);
 }
 
