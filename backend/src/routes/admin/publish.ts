@@ -305,11 +305,16 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    * reason, ADR 0086) and `override_publication_review` (the review shown and the reasons shown,
    * ADR 0102).
    *
+   * The body may name the request the run is for, `request_id` (#1579).
+   *
    * Refusals, each with a stable code in `error` and a sentence in `message`:
    *   403 origin_not_allowed  an override sent with a session cookie: it is accepted only with
    *                         an API key, and the website records one through approve-dispatch.
    *                         (A cookie request with no NEMAR origin never gets this far: the
    *                         router's `cookieOriginGuard` answers it with the same code.)
+   *   409 request_mismatch  `request_id` is not the newest active request: it was denied or filed
+   *                         again since the caller read it. Answered right after the 404 for no
+   *                         request and before everything below, so nothing is recorded.
    *   409 request_blocked   the request is `blocked` and is not a run that started publishing
    *                         (the owner-name walk-back); whatever the flag says
    *   409 identifier_screen_not_clear  the identifier screen does not allow it (ADR 0086)

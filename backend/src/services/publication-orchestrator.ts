@@ -21,6 +21,7 @@ import {
 import {
   OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE,
   REQUEST_CHANGED_MESSAGE,
+  REQUEST_MISMATCH_MESSAGE,
 } from "../../../shared/contract/publication.js";
 import { datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import {
@@ -311,6 +312,12 @@ export const approveSchema = z.object({
   // field the gate does not know cannot ride along, and it means nothing unless the review gate
   // is on and a reason stands that an override clears. `/approve` takes it from a bearer key only.
   override_publication_review: publicationReviewOverrideSchema.optional(),
+  // #1579: the request this run is for, so a run started for a request that was denied and filed
+  // again since is refused (409 `request_mismatch`) instead of approving the one that replaced it.
+  // Optional: a caller that does not name one is the run it always was. The schema is not strict,
+  // so a Worker that predates this field strips it and runs unprotected; a new CLI against it is
+  // simply not protected, and nothing fails.
+  request_id: z.number().int().positive().optional(),
 });
 
 export type ApproveBody = z.infer<typeof approveSchema>;
@@ -2495,6 +2502,17 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
 
   if (!request) {
     return c.json({ error: "No active publication request found" }, 404);
+  }
+
+  // The run names the request it is for, and it is not the one in force (#1579): the request was
+  // denied or filed again since the caller read it, and the lookup above found the one that
+  // replaced it. Refused here, before the blocked refusal, every gate, the approver's resolution
+  // and every write, so nothing is marked, recorded or acknowledged for a request nobody looked at.
+  if (body.request_id !== undefined && body.request_id !== request.id) {
+    console.warn(
+      `[publish] ${datasetId}: approval refused, it was for request ${body.request_id} and the request in force is ${request.id}`,
+    );
+    return c.json({ error: "request_mismatch", message: REQUEST_MISMATCH_MESSAGE }, 409);
   }
 
   // A blocked request is refused by the mechanical rules (ADR 0102): whatever the flag says, and
