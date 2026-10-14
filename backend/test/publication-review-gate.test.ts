@@ -2006,7 +2006,7 @@ describe("approve-dispatch runs the gate before it claims, and records after the
     expect(dispatchesSent()).toBe(0);
   });
 
-  test("13. a malformed override is a 400 invalid_body that names both fields", async () => {
+  test("13. a malformed override is a 400 invalid_body that names every field the body takes", async () => {
     const { requestId } = seedFailing();
     for (const bad of [
       { override_publication_review: { review_id: 1 } },
@@ -2020,9 +2020,10 @@ describe("approve-dispatch runs the gate before it claims, and records after the
       expect(body.error).toBe("invalid_body");
       expect(body.message).toContain("acknowledge_identifier_screen");
       expect(body.message).toContain("override_publication_review");
+      expect(body.message).toContain("request_id");
       // The limits in the message are the shared constants', numbers, spelled once here as the oracle.
       expect(body.message).toBe(
-        "The only fields this accepts are acknowledge_identifier_screen, a reason of 10 to 500 characters, and override_publication_review, the review shown and the reasons shown.",
+        "The only fields this accepts are acknowledge_identifier_screen, a reason of 10 to 500 characters, override_publication_review, the review shown and the reasons shown, and request_id, the request this click is for.",
       );
     }
     expect(requestRow(requestId).approval_requested_by).toBeNull();

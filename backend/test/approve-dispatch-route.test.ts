@@ -28,7 +28,10 @@ import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Server } from "bun";
 import { Hono } from "hono";
-import { INVALID_DATASET_ID_MESSAGE } from "../../shared/contract/publication";
+import {
+  INVALID_DATASET_ID_MESSAGE,
+  REQUEST_MISMATCH_MESSAGE,
+} from "../../shared/contract/publication";
 import { adminRoutes } from "../src/routes/admin";
 import { hashApiKey } from "../src/services/token";
 import { issueSession } from "../src/services/web-session";
@@ -1090,5 +1093,124 @@ describe("the dataset id is validated for the environment before the claim (#158
     const res = await dispatchWith(ADMIN_KEY, "nm000124");
     expect(res.status).toBe(404);
     expect((await errorBody(res)).error).toBe("not_found");
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// #1579: the optional request_id precondition
+// ---------------------------------------------------------------------------------------------
+
+describe("a request_id names the request the click was for (#1579)", () => {
+  test("the id of the active request is accepted: 202, claimed, dispatched", async () => {
+    const id = seedRequest();
+    const res = await dispatchBody(ADMIN_KEY, { request_id: id });
+    expect(res.status).toBe(202);
+    expect(((await res.json()) as { request_id: number }).request_id).toBe(id);
+    expect(row(id)?.approval_requested_by).toBe(adminId);
+    expect(dispatches).toHaveLength(1);
+    expect(dispatches[0].body.client_payload).toMatchObject({ request_id: id });
+  });
+
+  test("the body without it is what every existing caller sends, and is unchanged", async () => {
+    const id = seedRequest();
+    const res = await dispatchBody(ADMIN_KEY, {});
+    expect(res.status).toBe(202);
+    expect(row(id)?.approval_requested_by).toBe(adminId);
+  });
+
+  test("another request's id is 409 request_mismatch: nothing claimed, nothing dispatched, the row as it was", async () => {
+    const id = seedRequest({
+      status: "approving",
+      updatedAt: "-20 minutes",
+      lastError: "EZID 503",
+    });
+    const before = row(id);
+    const res = await dispatchBody(ADMIN_KEY, { request_id: id + 1 });
+    expect(res.status).toBe(409);
+    expect(await errorBody(res)).toEqual({
+      error: "request_mismatch",
+      message: REQUEST_MISMATCH_MESSAGE,
+    });
+    expect(row(id)).toEqual(before);
+    expect(dispatches).toHaveLength(0);
+  });
+
+  test("the page showed request 1, which was denied and filed again as request 2: refused, 2 untouched", async () => {
+    const denied = seedRequest({ status: "denied", requestedAt: "-5 hours" });
+    const filed = seedRequest({ requestedAt: "-1 hours" });
+    const res = await dispatchBody(ADMIN_KEY, { request_id: denied });
+    expect(res.status).toBe(409);
+    expect((await errorBody(res)).error).toBe("request_mismatch");
+    expect(row(filed)?.approval_requested_by).toBeNull();
+    expect(row(filed)?.approval_dispatched_at).toBeNull();
+    expect(row(denied)?.status).toBe("denied");
+    expect(dispatches).toHaveLength(0);
+    // The page that reads again and names the new request gets through.
+    const again = await dispatchBody(ADMIN_KEY, { request_id: filed });
+    expect(again.status).toBe(202);
+    expect(row(filed)?.approval_requested_by).toBe(adminId);
+  });
+
+  test("the mismatch comes before the gates: a request the screen would refuse answers request_mismatch", async () => {
+    const id = seedRequest();
+    // A screen that never ran: the gate refuses this click (identifier_screen_not_clear).
+    db.run(
+      "UPDATE publication_requests SET identifier_screen_status = NULL, identifier_screen_report = NULL WHERE id = ?",
+      [id],
+    );
+    const gated = await dispatchBody(ADMIN_KEY, { request_id: id });
+    expect(gated.status).toBe(409);
+    expect((await errorBody(gated)).error).toBe("identifier_screen_not_clear");
+
+    const res = await dispatchBody(ADMIN_KEY, {
+      request_id: id + 1,
+      acknowledge_identifier_screen: "Read every flagged file by hand, nothing to remove",
+    });
+    expect(res.status).toBe(409);
+    expect((await errorBody(res)).error).toBe("request_mismatch");
+    // Nothing the body carried was recorded.
+    expect(
+      db
+        .query(
+          "SELECT identifier_screen_ack_at, identifier_screen_ack_by FROM publication_requests WHERE id = ?",
+        )
+        .get(id),
+    ).toEqual({ identifier_screen_ack_at: null, identifier_screen_ack_by: null });
+    expect(row(id)?.approval_requested_by).toBeNull();
+  });
+
+  test("and before the blocked refusal, as it is in /approve", async () => {
+    const id = seedRequest({ status: "blocked" });
+    const res = await dispatchBody(ADMIN_KEY, { request_id: id + 1 });
+    expect(res.status).toBe(409);
+    expect((await errorBody(res)).error).toBe("request_mismatch");
+    const matching = await dispatchBody(ADMIN_KEY, { request_id: id });
+    expect(matching.status).toBe(409);
+    expect((await errorBody(matching)).error).toBe("not_dispatchable");
+  });
+
+  test("with no active request at all it is the 404, whatever id was named", async () => {
+    const res = await dispatchBody(ADMIN_KEY, { request_id: 7 });
+    expect(res.status).toBe(404);
+    expect((await errorBody(res)).error).toBe("not_found");
+  });
+
+  test.each([0, -1, 1.5, "7", null, true])(
+    "request_id %p is not a request id: 400 invalid_body, nothing claimed",
+    async (value) => {
+      const id = seedRequest();
+      const res = await dispatchBody(ADMIN_KEY, { request_id: value });
+      expect(res.status).toBe(400);
+      expect((await errorBody(res)).error).toBe("invalid_body");
+      expect(row(id)?.approval_requested_by).toBeNull();
+      expect(dispatches).toHaveLength(0);
+    },
+  );
+
+  test("a field the route does not know is still refused: the body stays strict", async () => {
+    const id = seedRequest();
+    const res = await dispatchBody(ADMIN_KEY, { request_id: id, dataset_id: DATASET });
+    expect(res.status).toBe(400);
+    expect((await errorBody(res)).error).toBe("invalid_body");
   });
 });
