@@ -81,7 +81,7 @@ import {
   type ReasonCode,
   type ReviewRowView,
   answersOf,
-  cureOf,
+  commandOf,
   describePublicationReview,
   describeUnreadableReview,
   effectiveVersionOf,
@@ -90,7 +90,9 @@ import {
   isPublicationOutcome,
   isPublicationReviewState,
   isPublicationRunError,
+  neutralCureOf,
   reasonLine,
+  reasonStatement,
   reasonsOf,
   shownBlockReason,
   startOffered,
@@ -711,10 +713,14 @@ export function overrideReasonsOf(raw: string | null): ReasonCode[] {
 }
 
 /**
- * The reasons in the shared words, each with its cure for this dataset and the whole reason as the
- * one line `description.lines` prints for it (`reasonLine`, which needs the report of the review in
- * force for a failed question's findings): the detail's `reasons`, and what the approval gate's
- * refusal carries, so the two say the same thing. The report is required so that a caller cannot
+ * The reasons in the shared words, each with the statement of it, its cure for this dataset
+ * without a command or a flag (`neutralCureOf`), the command the terminal's cure names
+ * (`commandOf`), and the whole reason as the one line `description.lines` prints for it
+ * (`reasonLine`, which needs the report of the review in force for a failed question's findings):
+ * the detail's `reasons`, and what the approval gate's refusal carries, so the two say the same
+ * thing. A web page prints `statement` and `cure`; `command` and `line` are the terminal's. Every
+ * reason carries `statement` and `command` always, because a page reads a missing `statement` as
+ * a Worker that predates it. The report is required so that a caller cannot
  * leave it out by accident: one that has no report passes `null`, and the line then lacks only
  * what the report adds.
  */
@@ -731,8 +737,10 @@ export function reasonViewsOf(
       class: rule.class,
       cleared_by: rule.clearedBy,
       detail: r.detail,
+      statement: reasonStatement(r, report),
       sentence: rule.sentence,
-      cure: cureOf(r.code, datasetId, startable),
+      cure: neutralCureOf(r.code, datasetId, startable),
+      command: commandOf(r.code, datasetId, startable),
       line: reasonLine(r, datasetId, report, startable),
     };
   });

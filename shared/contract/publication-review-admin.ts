@@ -14,7 +14,9 @@
  * Types and closed vocabularies only, so the Worker that answers and the CLI that prints read ONE
  * definition. Every sentence comes from `shared/publication-review.ts`: `describePublicationReview`,
  * `describeUnreadableReview` and the reasons table; a client renders the server's words and decides
- * nothing itself.
+ * nothing itself. The CLI prints `description.lines`, `description.next` and each reason's `line`
+ * and `command`, which are terminal text. A web page prints each reason's `statement` and its
+ * neutral `cure` and never those.
  * No shape here carries a nonce, a token, a path, a file name or a screen finding.
  */
 
@@ -91,15 +93,32 @@ export interface ReasonView {
   code: ReasonCode;
   class: "fail" | "unknown";
   cleared_by: "nothing" | "screen_acknowledgment" | "override";
-  /** The closed word or words behind the reason, or null. */
+  /** The closed word or words behind the reason, or null. Not words for a person: print `statement`. */
   detail: string | null;
+  /**
+   * The reason in words with its detail (`reasonStatement`): what `line` says before the cure,
+   * with no command in it, so a web page prints it and composes nothing from `detail`. Absent
+   * from a Worker that predates the field; a page then withholds the reasons rather than print
+   * `line`. The Worker always sends it.
+   */
+  statement?: string;
   sentence: string;
+  /**
+   * What clears the reason, in words a reader with no terminal can use: no command, flag or
+   * placeholder (`neutralCureOf`). A web page prints this. A Worker that predates the field
+   * answers the terminal's text here, which is why a page checks `statement` first.
+   */
   cure: string;
   /**
-   * The whole reason as one line in the shared words (`reasonLine`: the sentence, the detail in
-   * words and the cure), the line `description.lines` carries for it. A client prints this and
-   * composes nothing from `detail`, whose closed words are not words for a person. Absent from a
-   * Worker that predates the field; a client then falls back to the sentence and the cure.
+   * The command the CLI's line names for this cure (`commandOf`), the dataset id filled, or null
+   * when the cure in force names none. A terminal's: a web page never prints it. Absent from a
+   * Worker that predates the field; the Worker always sends it.
+   */
+  command?: string | null;
+  /**
+   * The whole reason as the CLI prints it (`reasonLine`: the sentence, the detail in words and
+   * the terminal's cure), the line `description.lines` carries for it. Never a page's. Absent
+   * from a Worker that predates the field; the CLI then falls back to the sentence and the cure.
    */
   line?: string;
 }
@@ -429,10 +448,17 @@ export interface PublicationReviewReasonedRefusalBody {
   refusal: Exclude<ReviewGateRefusal, "unverified">;
   /** The review's headline (`REVIEW_UNREADABLE_HEADLINE` on the bare `review_changed` fallback). */
   headline: string;
-  /** `reviewGateRefusalText`, then for `hard_reason` the first hard reason's sentence and cure. */
+  /**
+   * `reviewGateRefusalText`, then for `hard_reason` the first hard reason's sentence and the
+   * TERMINAL's cure (`cureOf`, with its command). Terminal text: a web page words the refusal
+   * from `refusal` and prints the reasons below instead.
+   */
   message: string;
   outcome: PublicationOutcome | null;
-  /** Every live reason in the shared words (`reasonViewsOf`). */
+  /**
+   * Every live reason in the shared words (`reasonViewsOf`), each with the `statement`, the
+   * neutral `cure` and the `command` the detail's reasons carry.
+   */
   reasons: ReasonView[];
   /**
    * The override-class codes the override did not name; empty unless the refusal is about them
