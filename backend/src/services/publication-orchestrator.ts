@@ -19,6 +19,7 @@ import {
 } from "../../../shared/publication-steps.js";
 
 import {
+  APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE,
   OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE,
   REQUEST_CHANGED_MESSAGE,
 } from "../../../shared/contract/publication.js";
@@ -2860,15 +2861,56 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     anonymousRelease,
   );
 
-  // Mark as published
-  await db
+  // Mark as published. Only a request that is still `approving`, the state this run marked it in
+  // and every step since has kept it in: a request closed while the run ran (denied once its lease
+  // had lapsed, or blocked again by a result that arrived mid-run) is not published over. The
+  // steps cannot be taken back, so the run says so loudly instead of recording a publication of
+  // a request somebody closed. A request that is already `published` was finished by a concurrent
+  // call of the same run (a retry that overlapped), and this one carries on exactly as before.
+  const published = await db
     .prepare(
       `UPDATE publication_requests
      SET status = 'published', approved_at = datetime('now'), current_step = NULL, last_error = NULL, updated_at = datetime('now')
-     WHERE id = ?`,
+     WHERE id = ? AND status = 'approving'`,
     )
     .bind(request.id)
     .run();
+  if ((published.meta.changes ?? 0) !== 1) {
+    const closed = await db
+      .prepare("SELECT status FROM publication_requests WHERE id = ?")
+      .bind(request.id)
+      .first<{ status: string }>();
+    if (closed?.status !== "published") {
+      console.error(
+        `[publish] ${datasetId}: request ${request.id} was ${closed?.status ?? "removed"} while the approval ran, so it was not marked published`,
+      );
+      try {
+        await auditLogStatement(db, {
+          userId: adminUser.id,
+          action: "approval_finished_on_closed_request",
+          resourceType: "dataset",
+          resourceId: datasetId,
+          // Ids and words only: which request, and the status it was found in.
+          details: JSON.stringify({
+            request_id: request.id,
+            request_status: closed?.status ?? null,
+          }),
+        }).run();
+      } catch (auditError) {
+        console.error(
+          `AUDIT LOG FAILURE: the approval of ${datasetId} finished on a closed request and was not logged:`,
+          auditError instanceof Error ? auditError.message : String(auditError),
+        );
+      }
+      return c.json(
+        {
+          error: "request_changed",
+          message: APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE,
+        },
+        409,
+      );
+    }
+  }
 
   // Neurobagel federation (epic #1586 phase 4, ADR 0084): the dataset is published.
   // A hook, never a step: it does nothing unless the writer is enabled (the default is
