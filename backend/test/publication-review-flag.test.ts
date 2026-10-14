@@ -11,8 +11,10 @@
  *
  * Attribution is exact (#1604, Phase 3): a run the web started presents the click's dispatch token
  * and is recorded as the administrator who clicked, and every other caller, a terminal inside a
- * live web claim included, is recorded as itself. Production is lit only once the executor's
- * workflow sends that token (ADR 0102, "Before it is switched on").
+ * live web claim included, is recorded as itself. The code is fixed; what remains before production
+ * is lit is the executor's workflow sending that token (the maintainer changes it) and the staging
+ * audit query showing web approvals attributed to their clickers (ADR 0102, "Before it is switched
+ * on", item 7; ADR 0104).
  */
 
 import { describe, expect, test } from "bun:test";

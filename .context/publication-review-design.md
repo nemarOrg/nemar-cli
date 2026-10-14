@@ -11,6 +11,7 @@
 > The Phase 1 sections below keep the plan as written; where the build departed from it, the ADR states what was built
 > (the workflow's step order, the participants file, the normalization before the pre-send rules, the cap accounting,
 > the mail at the deadline).
+> The Phase 3 block and the attribution risk were rewritten as built on 2026-10-13 (ADR 0104).
 
 ## 1. What was read
 
@@ -445,24 +446,26 @@ Tests:
 Must not: let the Worker approve or deny anything; let `--yes` stand in for `--force` or for the screen's reason;
 change the orchestrator's steps; change ADR 0080's attribution (Phase 3's).
 
-### Phase 3 (#1730): approval robustness
+### Phase 3 (#1730): approval robustness (as built; the verdict is ADR 0104)
 
-Order: #1583 (validate the id before the claim) and #1579 (a request id precondition) first, because the dispatch token builds on them;
-then #1604 (attribution by a per-claim, lease-bound dispatch token that carries the request id and the clicker),
-#1582 (a release endpoint authenticated by the same token),
-and #1603 (Origin on `/approve` and `/deny`, and `/deny` refused while an approval is in flight);
-triage #1580 (persist the lock continuation token) and #1584 (Origin for every cookie-authenticated admin write), closing or keeping each with its reason.
+Built: a per-claim dispatch token (#1604), a keyed hash of the dataset, the request, the clicker and the claim's own `approval_dispatched_at`,
+signed with the callback secret under its own domain tag, with no stored column and so no migration.
+The executor presents it in `X-Approval-Dispatch-Token` on every `/approve` call (the CLI reads `NEMAR_APPROVAL_DISPATCH_TOKEN`, only in `approve`).
+The clicker is the approver only for a valid token; a call with no token is recorded as its caller and its approval takes the claim over;
+a stale or expired token is refused (`dispatch_superseded`, `dispatch_expired`);
+and a call that carries a token may carry no override or acknowledgment (`decision_with_dispatch_token`), which replaces the Phase 2 refusal `override_inside_web_approval`.
 
-Files: a migration for the token's columns on `publication_requests`; `backend/src/services/approval-dispatch.ts`,
-`backend/src/routes/admin/publish.ts`, `backend/src/services/publication-orchestrator.ts`;
-a pull request to `nemarDatasets/.github` for `approve-publication.yml` (mask the token first, pass it and the request id,
-call the release endpoint on failure); a new ADR that partially supersedes ADR 0080's decision 5.
+Around it: an optional `request_id` on approve, approve-dispatch and deny (#1579); the dataset id rule per environment before the claim (#1583);
+a release endpoint that the token alone authenticates, and `last_error` on the four early refusals (#1582);
+one router-wide cookie Origin guard in place of four per-route copies (#1603, #1584);
+`/deny` gated by the lease and refused once a step beyond validation has run; and the final write guarded by the request's status.
+#1580 (persist the lock continuation token) is deferred: a restart at page 1 also locks objects added meanwhile, and the benefit is unmeasured.
 
-Tests: each issue's acceptance test, written to fail without the change;
-a terminal approval by another administrator inside a live web lease is recorded under that administrator and does not ride on the clicker's override;
-the token is accepted on every batch call of its run and refused once its lease has lapsed.
+The executor's workflow is in the central workflow repository and is changed by the maintainer: mask the token first, export it only to the approve step, install the CLI that matches the environment, release on failure.
+The rollout order, with the skew table, is in the ADR: the workflow edit before Phase 3 reaches `dev`, a staging check, then npm `latest` before the production Worker deploy.
+One question is left open: a valid token whose clicker is no longer an active administrator falls back to the caller.
 
-Must not: weaken the lease; let a dispatch token approve anything by itself.
+Must not (kept): weaken the lease; let a dispatch token approve anything by itself.
 
 ### Finalize the epic into `dev`
 
@@ -509,7 +512,8 @@ Must not: approve `nm099997` under a name; delete `PRESCREEN_CALLBACK_SECRET`.
 2. **Override fatigue.** A model that is often wrong teaches administrators to pass `--force`; the calibration measures it before the soak.
 3. **The mail is later.** Bounded by the screen's 50 minutes, the review's 30 and a tick.
 4. **Dev never ages a row.** Every surface must read a dispatched row past its deadline as not reported.
-5. **The interim attribution gap.** Until Phase 3, an override can ride on ADR 0080's lease-based attribution; production stays dark until Phase 3 ships.
+5. **The interim attribution gap.** Closed in code by Phase 3 (a per-claim dispatch token, ADR 0104);
+   what remains is the executor's workflow sending the token, and production stays dark until that is verified on staging.
 6. **The web page cannot pass the gate until Phase 4.** So the flag stays off in production until Phase 4 is promoted.
 7. **A script fix costs a release.** The workflow runs `main`'s script for every environment, so each fix to it found in the soak needs a `dev` to `main` release.
 8. **The allow path is not exercised live before production.** The soak denies everything it requests, so the first live approval through the gate is a production one;
