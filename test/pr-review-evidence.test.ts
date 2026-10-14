@@ -1456,13 +1456,27 @@ describe("cosmetic changes are proven from the blobs, never assumed", () => {
     });
   }
 
-  test("whitespace-only change to invalid JSON is the same tokens, so it is cosmetic", () => {
+  test("a whitespace-only change to a file that is not valid JSON is read, not assumed", () => {
     const dir = newBigDataset("n2-bad-json", 3);
     write(dir, sidecar(0), '{"a": 1,}');
     git(dir, "add", "-A");
     git(dir, "commit", "-q", "--allow-empty", "-m", "set up");
     const r = branch(dir, () => write(dir, sidecar(0), '{\n  "a": 1,\n}'));
-    expect(gatherGitFacts(r.dir, r.base, r.head).cosmeticOnlyFiles).toBe(1);
+    expect(gatherGitFacts(r.dir, r.base, r.head).cosmeticOnlyFiles).toBe(0);
+  });
+
+  test("bytes that are not valid UTF-8 are compared as bytes: caf\xe9 to caf\xe8 is a real change", () => {
+    const dir = newBigDataset("n2-latin1", 3);
+    const file = join(dir, "participants.tsv");
+    writeFileSync(file, Buffer.from("participant_id\tcity\nsub-000\tcaf\xe9\n", "latin1"));
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "latin1");
+    const r = branch(dir, () =>
+      writeFileSync(file, Buffer.from("participant_id\tcity\nsub-000\tcaf\xe8\n", "latin1")),
+    );
+    const facts = gatherGitFacts(r.dir, r.base, r.head);
+    expect(facts.cosmeticOnlyFiles).toBe(0);
+    expect(facts.patches.map((p) => p.path)).toContain("participants.tsv");
   });
 
   test("a mode change on an otherwise identical JSON file is not cosmetic", () => {
@@ -1593,7 +1607,9 @@ describe("the change log is a platform fact", () => {
     "## [1.0.1] - 2026-02-01",
     "v1.0.1",
     "Version 1.0.1",
-    "- 1.0.1:",
+    "### Version: 1.0.1",
+    "Release 1.0.1",
+    "1.0.1:",
   ]) {
     test(`added: the heading style ${JSON.stringify(heading)}`, () => {
       const f = entryOf(`log-style-${Math.abs(hash(heading))}`, (d) => {
@@ -1694,6 +1710,48 @@ describe("the change log is a platform fact", () => {
     expect(f.changelogEntry).toBe("no_file");
   });
 
+  test("not added: a bullet that starts with the number is not a heading", () => {
+    const f = entryOf("n2-log-bullet", (d) => {
+      bump(d);
+      write(d, "CHANGES", log("- 1.0.1 fixed the units\n"));
+    });
+    expect(f.changelogEntry).toBe("not_added");
+  });
+
+  test("added: an older 1.0.1-beta heading is not the number being added", () => {
+    const f = entryOf(
+      "n2-log-beta",
+      (d) => {
+        bump(d);
+        write(
+          d,
+          "CHANGES",
+          log("1.0.1 2026-02-01\n - Fixed units\n1.0.1-beta 2026-01-15\n - Trial\n"),
+        );
+      },
+      (d) => write(d, "CHANGES", log("1.0.1-beta 2026-01-15\n - Trial\n")),
+    );
+    expect(f.changelogEntry).toBe("added");
+  });
+
+  test("a hostile change log of 200,000 blank lines is read in linear time", () => {
+    const started = Date.now();
+    const f = entryOf("n2-log-redos", (d) => {
+      bump(d);
+      write(d, "CHANGES", `${"\n".repeat(200_000)}1.0.0 2026-01-01\n - Initial release\n`);
+    });
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(f.changelogEntry).toBe("not_added");
+  });
+
+  test("unknown version wins over no file: the platform never turns an unknown into a failure", () => {
+    const f = entryOf("n2-log-unknown-nofile", (d) => {
+      git(d, "rm", "-q", "CHANGES");
+      write(d, "dataset_description.json", JSON.stringify({ Name: "Resting EEG" }));
+    });
+    expect(f.changelogEntry).toBe("unknown_version");
+  });
+
   test("unknown version: a change log with no new version to look for", () => {
     const f = entryOf("log-noversion", (d) => {
       write(
@@ -1755,6 +1813,9 @@ describe("what the model is told, and where path text may and may not appear", (
 
   test("a hostile file name cannot forge a tag, a nonce, a row or a second facts block", () => {
     const user = messages();
+    // The names did reach the prompt, with the forged tags broken, so the counts below are a test.
+    expect(user).toContain("< facts");
+    expect(user).toContain("< untrusted-[nonce]");
     expect(user.match(/<facts>/g)).toHaveLength(1);
     expect(user.match(/<\/facts>/g)).toHaveLength(1);
     const open = user.match(/<untrusted-n0nce /g) ?? [];

@@ -186,13 +186,13 @@ export interface GitFacts {
 /**
  * What the change log says about the new version:
  *  - `added`: a heading for the new version is in the head's change log and was not in the merge
- *    base's (a heading is a line that starts with the version, after any `#`, `*`, `[`, `-`, `v`
- *    or `version`);
+ *    base's (a heading is a line that starts with the version, after any `#` or `[`, and an
+ *    optional `v`, `version` or `release`; a bullet is not a heading);
  *  - `not_added`: the head has a change log but no new heading for the new version, which includes
  *    a heading that was already there, a date-only heading, and a version only mentioned in prose;
  *  - `no_file`: the head has no change log file;
  *  - `unknown_version`: the new version is unknown (absent or not `X.Y.Z`), so the platform cannot
- *    tell what to look for.
+ *    tell what to look for. This is decided first, so it wins over `no_file`.
  */
 export type ChangelogEntry = "added" | "not_added" | "no_file" | "unknown_version";
 
@@ -237,6 +237,40 @@ function git(dir: string, args: string[]): string {
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+}
+
+/**
+ * The same call as {@link tryGit} but with the bytes kept: each byte becomes the one character with
+ * that code (latin1), so two blobs that differ only in bytes that are not valid UTF-8 (`caf\xe9`
+ * and `caf\xe8`) are still different strings. Decoding them as UTF-8 would turn both into the same
+ * replacement characters.
+ */
+function tryGitBytes(dir: string, args: string[]): string | null {
+  try {
+    return execFileSync(
+      "git",
+      [
+        "--literal-pathspecs",
+        "-C",
+        dir,
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "protocol.ext.allow=never",
+        ...args,
+      ],
+      {
+        encoding: "latin1",
+        maxBuffer: 256 * 1024 * 1024,
+        env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+  } catch {
+    return null;
+  }
 }
 
 function tryGit(dir: string, args: string[]): string | null {
@@ -304,6 +338,11 @@ function clip(text: string, max: number): { text: string; truncated: boolean } {
     : { text: text.slice(0, max), truncated: true };
 }
 
+/** An order that does not depend on the runtime's locale, so every machine reads files in the same order. */
+function codeUnitOrder(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 const STATUS_RANK: Record<ChangeStatus, number> = { removed: 0, modified: 1, added: 2 };
 
 /** The order a reviewer would open files in: removed, then modified, then added; within each, the files that describe the dataset first and recordings last. */
@@ -311,7 +350,7 @@ function byReviewOrder(a: RawChange, b: RawChange): number {
   return (
     STATUS_RANK[a.status] - STATUS_RANK[b.status] ||
     AREA_PRIORITY[classifyPath(a.path)] - AREA_PRIORITY[classifyPath(b.path)] ||
-    a.path.localeCompare(b.path)
+    codeUnitOrder(a.path, b.path)
   );
 }
 
@@ -368,11 +407,39 @@ export function stripJsonWhitespace(text: string): string {
   return out;
 }
 
-/** Whether `before` and `after` differ only cosmetically for the kind of file `path` is. */
+/** Whether `text` is valid JSON. The value is not used: a change that breaks the file is never cosmetic. */
+function parsesAsJson(text: string): boolean {
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether `before` and `after` differ only cosmetically for the kind of file `path` is. Both are
+ * the blobs' bytes as latin1 (see {@link tryGitBytes}), so a byte that is not valid UTF-8 is a
+ * difference like any other.
+ *  - `.json`: both parse, and they are the same once whitespace outside strings is removed. A
+ *    change that merges tokens (`[1 2]` to `[12]`) breaks the JSON and so is not cosmetic.
+ *  - `.tsv`: the same once spaces and carriage returns at the end of each line are removed, where
+ *    the run is not preceded by a tab: a trailing tab, and a cell holding only spaces, are data.
+ */
 export function isCosmeticChange(path: string, before: string, after: string): boolean {
-  if (path.endsWith(".json")) return stripJsonWhitespace(before) === stripJsonWhitespace(after);
+  if (path.endsWith(".json")) {
+    return (
+      parsesAsJson(before) &&
+      parsesAsJson(after) &&
+      stripJsonWhitespace(before) === stripJsonWhitespace(after)
+    );
+  }
   if (path.endsWith(".tsv")) {
-    const trim = (t: string) => t.replace(/[ \r]+$/gm, "");
+    const trim = (t: string) =>
+      t
+        .split("\n")
+        .map((line) => line.replace(/(?<!\t)[ \r]+$/, ""))
+        .join("\n");
     return trim(before) === trim(after);
   }
   return false;
@@ -401,12 +468,18 @@ function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** A heading for `version`: a line that starts with it, after any `#`, `*`, `[`, `-`, `v` or `version`. */
-function headingFor(version: string): RegExp {
-  return new RegExp(
-    `^[\\s#*\\[-]*(?:v|version\\s+)?${escapeRegExp(version)}(?![0-9]|\\.[0-9])`,
-    "im",
+/**
+ * A heading for `version`: a line that starts with it, after any spaces, `#` marks or `[`, and an
+ * optional `v`, `version` or `release` (with an optional `:`). A bullet that happens to start with
+ * the number is not a heading, and neither is `1.0.1-beta` or `1.0.10`. The text is tested one line
+ * at a time, so a hostile file of blank lines cannot make the match quadratic.
+ */
+function hasHeadingFor(text: string, version: string): boolean {
+  const re = new RegExp(
+    `^[ \\t#\\[]*(?:(?:v|version|release):?[ \\t]*)?${escapeRegExp(version)}(?![0-9A-Za-z_-]|\\.[0-9])`,
+    "i",
   );
+  return text.split("\n").some((line) => re.test(line));
 }
 
 function changelogEntryFor(
@@ -415,12 +488,15 @@ function changelogEntryFor(
   headSha: string,
   version: string | null,
 ): ChangelogEntry {
+  // With no version to look for the platform cannot tell, whatever the log holds: an unknown is
+  // never turned into a failure.
+  if (version === null) return "unknown_version";
   const after = changelogAt(dir, headSha);
   if (after === null) return "no_file";
-  if (version === null) return "unknown_version";
-  const heading = headingFor(version);
   const before = changelogAt(dir, mergeBase);
-  return heading.test(after) && !heading.test(before ?? "") ? "added" : "not_added";
+  return hasHeadingFor(after, version) && !hasHeadingFor(before ?? "", version)
+    ? "added"
+    : "not_added";
 }
 
 /**
@@ -472,8 +548,8 @@ export function gatherGitFacts(dir: string, baseSha: string, headSha: string): G
     if (!m || m.before !== m.after || !REGULAR_FILE_MODES.has(m.before)) continue;
     if (cosmeticChecks >= MAX_COSMETIC_CHECKS) continue;
     cosmeticChecks++;
-    const before = tryGit(dir, ["show", `${mergeBase}:${c.path}`]);
-    const after = tryGit(dir, ["show", `${headSha}:${c.path}`]);
+    const before = tryGitBytes(dir, ["show", `${mergeBase}:${c.path}`]);
+    const after = tryGitBytes(dir, ["show", `${headSha}:${c.path}`]);
     if (before !== null && after !== null && isCosmeticChange(c.path, before, after)) {
       cosmeticOnly.add(c.path);
     }
@@ -534,7 +610,7 @@ export function gatherGitFacts(dir: string, baseSha: string, headSha: string): G
     (a, b) =>
       STATUS_RANK[a.status] - STATUS_RANK[b.status] ||
       b.files - a.files ||
-      a.pattern.localeCompare(b.pattern),
+      codeUnitOrder(a.pattern, b.pattern),
   );
   const groups = ordered.slice(0, MAX_GROUPS);
   const groupsOmittedFiles = ordered.slice(MAX_GROUPS).reduce((n, g) => n + g.files, 0);
