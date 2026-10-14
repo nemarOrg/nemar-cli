@@ -310,7 +310,7 @@ describe("nothing of the review reaches the depositor", () => {
       NOTE_SENTINEL,
       detail.description.headline,
       ...detail.description.lines,
-      ...detail.reasons.flatMap((r) => [r.sentence, r.cure]),
+      ...detail.reasons.flatMap((r) => [r.sentence, r.cure, r.line ?? "", r.statement ?? ""]),
       ...(detail.review?.findings ?? []).map((f) => f.note),
       ...(detail.review?.fact_notes ?? []).map((f) => f.text),
     ].filter((w) => w.trim() !== "");
