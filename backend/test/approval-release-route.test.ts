@@ -35,6 +35,7 @@ import {
   APPROVAL_RELEASE_REASONS,
   APPROVAL_RELEASE_REASON_TEXT,
 } from "../../shared/contract/publication";
+import { AUDIT_LOG_INSERT_SQL } from "../src/db/audit-log";
 import { adminRoutes } from "../src/routes/admin";
 import { APPROVAL_RELEASE_SQL } from "../src/routes/callbacks/approval-release";
 import webhooks from "../src/routes/webhooks";
@@ -312,6 +313,32 @@ describe("a valid token releases the claim", () => {
     const everyAuditRow = JSON.stringify(db.query("SELECT * FROM audit_log").all());
     expect(everyAuditRow).not.toContain(s.token);
     expect(everyAuditRow).not.toMatch(/[0-9a-f]{64}/i);
+  });
+
+  test("a failed audit write is logged with its cause, and the release still answers 200", async () => {
+    const s = await seedClaim({ status: "approving", updatedAgo: "-2 minutes" });
+    const bindings = env({
+      DB: interceptingD1(realD1(db), (sql) => {
+        if (sql === AUDIT_LOG_INSERT_SQL) throw new Error("audit store unavailable");
+      }),
+    });
+    let res: Response | undefined;
+    const printed = await printedDuring(async () => {
+      res = await release(s.token, bodyOf(s), bindings);
+    });
+
+    // The release was one conditional write and it landed; a missing audit row does not undo it.
+    expect(res?.status).toBe(200);
+    expect(await res?.json()).toEqual({ ok: true, released: true });
+    const after = requestRow(s.requestId);
+    expect(after.approval_requested_by).toBeNull();
+    expect(after.approval_dispatched_at).toBeNull();
+    expect(after.last_error).toBe(GENERIC);
+    expect(releasedAudit()).toHaveLength(0);
+    // The log names the request and carries the cause, and the token is nowhere in it.
+    expect(printed).toContain(`request ${s.requestId} (${s.datasetId})`);
+    expect(printed).toContain("audit store unavailable");
+    expect(printed).not.toContain(s.token);
   });
 
   test("the token is spent by the release: a second call with it is the 401, and writes nothing more", async () => {

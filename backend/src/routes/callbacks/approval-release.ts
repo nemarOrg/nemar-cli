@@ -43,6 +43,7 @@ import { auditLogStatement } from "../../db/audit-log.js";
 import { APPROVAL_CLAIM_CLEAR_SQL } from "../../services/approval-dispatch.js";
 import { isValidDatasetId } from "../../services/datasetId.js";
 import { verifyApprovalDispatchToken } from "../../services/github.js";
+import { errorMessage } from "../../services/repo-metadata.js";
 import type { WebhookRouter } from "../webhooks/shared.js";
 import { readBoundedJsonObject } from "./bounded-json.js";
 
@@ -156,9 +157,9 @@ export function registerApprovalReleaseRoutes(webhooks: WebhookRouter): void {
         resourceId: datasetId,
         details: JSON.stringify({ request_id: requestId, reason }),
       }).run();
-    } catch {
+    } catch (auditError) {
       console.error(
-        `[approval-release] audit write failed for request ${requestId} (${datasetId})`,
+        `[approval-release] audit write failed for request ${requestId} (${datasetId}): ${errorMessage(auditError)}`,
       );
     }
 
