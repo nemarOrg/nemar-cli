@@ -69,6 +69,7 @@ import {
   getPublishStatus,
   requestPublication,
   resendPublishNotification,
+  withdrawPublishRequest,
 } from "../lib/api/publish.js";
 import { type DepositAttestation, resolveAttestation } from "../lib/attestation.js";
 import { isAwsCliAvailable } from "../lib/aws-cli.js";
@@ -91,7 +92,14 @@ import {
 } from "../lib/cli-output.js";
 import { triggerOpportunisticRefresh } from "../lib/completion/refresh.js";
 import { getConfig, isAuthenticated } from "../lib/config.js";
-import { NO_DESCRIPTION, YES_DESCRIPTION, YES_OPTION, confirm } from "../lib/confirm.js";
+import {
+  type ConfirmOptions,
+  NO_DESCRIPTION,
+  NO_OPTION,
+  YES_DESCRIPTION,
+  YES_OPTION,
+  confirm,
+} from "../lib/confirm.js";
 import {
   type LocalDatasetConfig,
   readLocalConfig,
@@ -4217,6 +4225,7 @@ Possible Statuses:
   approving  - Admin is running the publication process
   published  - Dataset is now public with DOI
   denied     - Request was denied (includes reason)
+  withdrawn  - You took the request back ('nemar dataset publish withdraw')
 
 Steps in Approval Process:
    1. CI check          - Verify BIDS validation passes
@@ -4253,9 +4262,12 @@ Examples:
         denied: chalk.red,
         approving: chalk.yellow,
       };
-      const statusColor = statusColors[result.status] || chalk.dim;
+      // A withdrawal is stored as a finished request, so older backends and
+      // clients read it as "denied"; this one says what it was.
+      const withdrawn = result.status === "denied" && result.withdrawn === true;
+      const statusColor = withdrawn ? chalk.yellow : statusColors[result.status] || chalk.dim;
 
-      console.log(`  Status: ${statusColor(result.status)}`);
+      console.log(`  Status: ${statusColor(withdrawn ? "withdrawn" : result.status)}`);
 
       // #1408: which of the two runs was recorded. Printed on both values,
       // because a depositor who typed --anonymous needs to see the word before
@@ -4278,7 +4290,13 @@ Examples:
         console.log(`  Requested by: ${chalk.dim(result.requested_by)}`);
       }
 
-      if (result.status === "denied" && result.denied_reason) {
+      if (withdrawn) {
+        console.log(
+          chalk.dim(
+            `\n  You withdrew this request. Request again with: nemar dataset publish request ${datasetId}`,
+          ),
+        );
+      } else if (result.status === "denied" && result.denied_reason) {
         console.log(`\n  ${chalk.red("Reason:")} ${result.denied_reason}`);
       }
 
@@ -4438,6 +4456,65 @@ Examples:
         }
       } else {
         spinner.fail("Failed to resend notification");
+        const msg = error instanceof Error ? error.message : String(error);
+        console.log(chalk.dim(`  Error details: ${msg}`));
+      }
+      process.exit(1);
+    }
+  });
+
+publishCommand
+  .command("withdraw")
+  .description("Withdraw your publication request (no admin approval needed)")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .addHelpText(
+    "after",
+    `
+Description:
+  Take back your own publication request. No administrator has to approve
+  the withdrawal, and nothing about the dataset changes: it stays as it was,
+  and you can request publication again whenever you are ready
+  ('nemar dataset publish request <dataset-id>', with or without --anonymous).
+
+  Only the dataset owner can withdraw. It works while the request is waiting
+  for review ("requested") or held on a fix ("blocked"). Once an administrator
+  has started publishing it ("approving"), it is too late: ask the
+  administrator to stop. A dataset that is already published stays published.
+
+Examples:
+  $ nemar dataset publish withdraw nm000104
+  $ nemar dataset publish withdraw nm000104 --yes`,
+  )
+  .action(async (datasetId: string, options: ConfirmOptions) => {
+    requireAuth();
+
+    const confirmResult = await confirm(
+      `Withdraw the publication request for ${datasetId}?`,
+      options,
+    );
+    if (confirmResult !== "confirmed") {
+      console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+      return;
+    }
+
+    const spinner = ora(`Withdrawing the publication request for ${datasetId}...`).start();
+
+    try {
+      await withdrawPublishRequest(datasetId);
+      spinner.succeed(`Publication request withdrawn for ${datasetId}`);
+      console.log(
+        chalk.dim(`  Request again any time: nemar dataset publish request ${datasetId}`),
+      );
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+        if (error.statusCode === 404) {
+          console.log(chalk.dim("  There is no active publication request for this dataset."));
+        }
+      } else {
+        spinner.fail("Failed to withdraw the publication request");
         const msg = error instanceof Error ? error.message : String(error);
         console.log(chalk.dim(`  Error details: ${msg}`));
       }

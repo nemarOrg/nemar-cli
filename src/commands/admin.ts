@@ -3150,8 +3150,11 @@ Examples:
                 ? chalk.yellow
                 : chalk.white;
 
+        // A request its depositor took back is stored as finished (denied),
+        // but an administrator should not read it as a refusal.
+        const withdrawn = req.status === "denied" && Boolean(req.withdrawn_at);
         console.log(
-          `  ${chalk.bold(req.dataset_id)}  ${statusColor(req.status)}  by ${req.requested_by_username}  ${chalk.dim(req.requested_at)}`,
+          `  ${chalk.bold(req.dataset_id)}  ${withdrawn ? chalk.yellow("withdrawn") : statusColor(req.status)}  by ${req.requested_by_username}  ${chalk.dim(req.requested_at)}`,
         );
         // #1408: an anonymous release and a publication reach this list
         // looking identical, and approving the wrong one is not reversible in

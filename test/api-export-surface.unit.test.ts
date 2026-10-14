@@ -94,6 +94,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "rerunIdentifierScreen",
     "resendPublishNotification",
     "stepIndexFor",
+    "withdrawPublishRequest",
   ],
   data: [
     "applyS3Lock",
@@ -364,6 +365,7 @@ const MONOLITH_EXPORTS = [
   "validateDataset",
   "verifyImport",
   "withdrawDataset",
+  "withdrawPublishRequest",
 ];
 
 describe("lib/api export surface", () => {
