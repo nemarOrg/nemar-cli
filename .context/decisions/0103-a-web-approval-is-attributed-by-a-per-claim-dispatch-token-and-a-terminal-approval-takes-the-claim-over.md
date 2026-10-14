@@ -7,6 +7,7 @@
 Epic #1726, Phase 3 (#1730).
 Partially supersedes decision 5 of Architecture Decision Record (ADR) 0080 (the web approval executor):
 its fork of the approver on the lease, and the acceptance of that fork's cost.
+Also corrects decisions 2, 3 and 6 of ADR 0080, whose text is amended to match.
 Amends ADR 0102 (the publication review) in its section 9, its section 10 and its "Before it is switched on" list;
 ADR 0102 carries the corrections in place and a dated amendment.
 Builds on ADR 0080 (the claim, the lease and the dispatch),
@@ -37,8 +38,9 @@ Five facts, each checked against the code on 2026-10-13, shape the answer.
   and a runner that starts after the lease has lapsed is recorded under its own key, not as the click it was started for.
 - **A shared secret and a derivable claim already exist.**
   The Worker holds one callback secret that signs its other callback tokens (the manifest's, the pre-screen's, the identifier screen's and its sweep's, and the two reviews'), each under its own domain tag.
-  The claim's own columns (the clicker, the instant) are written by the click and cleared by every statement that ends a claim,
-  so a token derived from them is revoked by exactly the events that end the claim.
+  The claim's own columns (the clicker, the instant) are written by the click and cleared by the statements that end a claim,
+  with one exception that the Consequences name,
+  so a token derived from them is revoked by the events that clear the claim.
 - **The executor is a workflow in the central workflow repository, which this repository does not hold.**
   Whatever the Worker comes to expect, the workflow must be changed to send it, and only the maintainer changes it, in a repository that every environment shares (ADR 0080 decision 3, ADR 0020).
   The change has a rollout, and the rollout has a window.
@@ -58,25 +60,31 @@ The clicker is the approver only for a call that presents a valid token, and eve
 A terminal approval takes any live claim over.
 A token that is stale or expired is refused, never quietly downgraded.**
 
-1. **The token is a keyed hash of the claim's own columns, and nothing is stored.**
-   It is a hash-based message authentication code (HMAC) with SHA-256, signed with the callback secret the Worker already holds (`PRESCREEN_CALLBACK_SECRET`).
+1. **The token is a keyed hash of the claim's own columns, and the Worker stores none of it.**
+   It is a hash-based message authentication code (HMAC) built on the Secure Hash Algorithm 256 (SHA-256) hash,
+   signed with the callback secret the Worker already holds (`PRESCREEN_CALLBACK_SECRET`).
    The signed message is five lines: the domain tag `approval-dispatch`, the dataset id, the request id, the clicker's id and the claim's own stored `approval_dispatched_at`.
    The tag keeps it from standing for any other kind of callback token, and no other kind's message can begin with it.
    A field that holds a line break is refused by the signer and fails the verifier, because the message is split by lines.
-   There is no stored nonce, no column and no migration: releasing, replacing, denying or taking over the claim changes or removes what the token is checked against, and that is its whole revocation.
+   There is no stored nonce, no column and no migration.
+   Releasing, replacing, denying or taking over the claim changes or removes what the token is checked against, and that is its whole revocation, apart from the one writer that the Consequences name.
    The claim is one conditional write that returns the instant it stored, and the token is signed over that value, never over a recomputed clock.
    A Worker with no secret to sign with answers 502 `dispatch_unconfigured` before it claims anything.
 2. **The token is a bearer credential for attribution, and for nothing else.**
    Any administrator key that presents it is recorded as the clicker, and rides on the clicker's recorded override and acknowledgment, for as long as the claim stands and its lease is live.
    It authorizes nothing by itself: the call must still authenticate as an administrator and pass every gate.
    It joins no revocation list, because `resolveApprover` re-checks the clicker's role and status at each use.
-   The Worker never logs, audits, lists or returns it: it is not stored, the dispatch error text has any copy of it removed,
-   the audit rows carry ids and words only, and the command-line interface (CLI) redacts its header in the `--debug` log.
+   The Worker never logs, stores, audits, lists or returns it:
+   the dispatch error text has any copy of it removed,
+   the audit rows carry ids and words only,
+   and the command-line interface (CLI) redacts its header in the `--debug` log.
+   The copies outside the Worker are the dispatch event that carries it to the executor and the event file of the run that receives it (decision 3).
 3. **It travels in the dispatch payload and in one header.**
    The click mints it and puts it in the payload as `dispatch_token`, which now has five keys: `dataset_id`, `request_id`, `resume`, `environment` and `dispatch_token`.
    The executor presents it as `X-Approval-Dispatch-Token` on every `/approve` call of the run, one per batch and one per retry, so it cannot be single-use.
    The CLI reads it only from the environment variable `NEMAR_APPROVAL_DISPATCH_TOKEN`, only in `approve` and never in `next`, so a token left in a person's shell cannot turn their walk into an executor's run.
-   With the variable set, `approve` refuses `--force` and `--acknowledge-identifier-screen` before it sends anything (decision 5), and says on standard error that the run presents a token.
+   With the variable set, `approve` refuses `--force`, `--acknowledge-identifier-screen` and `--skip-ci-check` before it sends anything (decision 5),
+   and says on standard error that the run presents a token.
 4. **The approver forks on the proof, in this order, in the prelude of `runPublicationApproval`.**
    A call that carries no token, or an empty or blank header, is its caller's own act whatever claim is on the row and whatever its lease says: the caller is the approver.
    A call whose token verifies, on a request that is `requested` or `approving` whose time-only lease is live (read in the same statement as the request, before this call's own heartbeat), is the click's run:
@@ -87,10 +95,13 @@ A token that is stale or expired is refused, never quietly downgraded.**
    The lease is asked only after the digest, so a stranger learns nothing about a lease.
    The checks of `/approve` run in this order: the outdated-client refusal, the request read (404), `request_mismatch`, `request_blocked`, the token, the approver, `decision_with_dispatch_token`, the identifier screen's gate, the review's gate, the recording of the override, and the conditional mark.
 5. **A call that carries a valid token carries no decision.**
-   An override of the review or a screen acknowledgment in the body of such a call is refused, 409 `decision_with_dispatch_token`, and nothing is recorded under anybody.
-   Both were recorded at the click, under the clicker's id, and the gates read them there.
+   An override of the review, an acknowledgment of the identifier screen or a skipped continuous integration (CI) check (`skip_ci_check`) in the body of such a call is refused, 409 `decision_with_dispatch_token`, and nothing is recorded under anybody.
+   The override and the acknowledgment were recorded at the click, under the clicker's id, and the gates read them there.
+   A skipped CI check was never part of the click: it is a decision of its own, and it would be recorded under the approver, which for a token call is the clicker, who skipped nothing.
+   The executor workflow sends none of the three, and the CLI refuses all three flags locally while the variable is set (decision 3).
    This retires the Phase 2 stop-gap `override_inside_web_approval`, which is removed from the contract.
-   Its guarantee is now structural, and stronger: an override or an acknowledgment is recorded only under the credential that sent it, or at the clicker's own dispatch.
+   Its guarantee is now structural, and stronger:
+   an override, an acknowledgment or a skipped CI check is recorded only under the credential that sent it, and the first two also at the clicker's own dispatch.
 6. **A terminal approval takes the claim over.**
    The mark that moves a request to `approving` clears `approval_requested_by` and `approval_dispatched_at` in the same statement, for a call that carried no token.
    It is the last write before any work, so a call that is refused earlier leaves the claim standing.
@@ -102,13 +113,18 @@ A token that is stale or expired is refused, never quietly downgraded.**
 7. **A run may name the request it is for.**
    `/approve`, `approve-dispatch` and `/deny` take an optional `request_id`, and answer 409 `request_mismatch` when it is not the newest active request,
    right after the request is read and before any gate, any approver resolution or any write, so nothing is recorded for a request nobody looked at (#1579).
-   The CLI sends the id of the detail it read on every `approve` call, `next`'s `y` included, and takes `--request-id` for a script, refusing locally when the two disagree.
+   The CLI sends, on every `approve` call, the id of the request the administrator was looking at:
+   `approve` sends the id of the detail it read, and `next`'s `y` sends the id of the list row it showed.
+   The second is the safer of the two, because it is the request the administrator chose from the list, and the Worker refuses the call if another request has become the newest since.
+   `--request-id` names it for a script, and the CLI refuses locally, before it sends any approval, when the two disagree.
    A call that carries a token binds the request by the token as well.
    The CLI's `deny` does not send it today, and the website's calls are Phase 4's (#1731).
 8. **The dispatch route checks the dataset id for its environment before it claims.**
    The ids are `nm` or `on` and six digits on production, and also `xx` anywhere else (`APPROVAL_DISPATCH_ID_RE` in `shared/publication-limits.ts`).
    Anything else is 400 `invalid_dataset_id`, before the body is read, before any read of the request and before the claim (#1583).
-   The workflow cannot import the constant: it states the same rule in its own validate step, and each side's comment says so, so the two are changed together by hand.
+   The workflow cannot import the constant, and it already states the same rule in its own validate step, as case patterns that were checked read-only against the public workflow on 2026-10-13 and match.
+   The shared constant's comment names the workflow.
+   The workflow's comment naming the constant is added by the workflow edit (Rollout), so the two are changed together by hand.
 9. **A failing executor releases its own claim.**
    `POST /webhooks/approval-release` takes `{ dataset_id, request_id, reason }` and the header, and the token alone authenticates (#1582).
    The reason is one of six closed words (`workflow_failed`, `workflow_cancelled`, `secret_missing`, `install_failed`, `input_rejected`, `preflight_failed`), and an unknown word reads as the first.
@@ -118,7 +134,10 @@ A token that is stale or expired is refused, never quietly downgraded.**
    It writes the audit row `approval_dispatch_released` (no user, the request id and the reason) and answers 200.
    Every refusal of the credential, whatever the cause, is one 401 with the same bytes, so an answer never tells a caller which requests have a live claim.
    The route does not check the lease: a token releases its own claim for as long as that claim stands.
-   The four answers of `/approve` that come after the request is marked and before its step loop (dataset not found, sandbox, no repository, invalid repository) now also write their own sentence to `last_error`, best effort, with their bodies and statuses unchanged.
+   The five exits of `/approve` that come after the request is marked and before its step loop now also record why in `last_error`, best effort:
+   dataset not found, sandbox, no repository, invalid repository, and a failure to mint the GitHub token for the dataset repositories.
+   The four answers write their own sentence, with their bodies and statuses unchanged.
+   The failed mint writes a fixed sentence and rethrows, so it answers as it always did, and the request stays `approving`.
 10. **One Origin rule covers every cookie write on the admin router.**
     `cookieOriginGuard` runs after authentication and the role check.
     A read passes (`GET`, `HEAD`, `OPTIONS`); any other method that is not authenticated by a bearer key needs a NEMAR `Origin`, or it is 403 `origin_not_allowed` (#1603, #1584).
@@ -127,20 +146,36 @@ A token that is stale or expired is refused, never quietly downgraded.**
     `/approve`'s own stricter rule, that an override is accepted only with an administrator key, stays.
 11. **`/deny` is gated by the lease and is one conditional write.**
     It reads the newest active request and refuses, in this order and before any write: 404 for none, 409 `request_mismatch`,
-    409 `deny_after_publishing` when the request's completed steps include any beyond the validation-only ones, and 409 `approval_in_flight` when an approval is running (the lease with its failed-run grace).
+    409 `deny_after_publishing` when publishing has started, and 409 `approval_in_flight` when an approval is running (the lease with its failed-run grace).
+    Publishing has started when a step beyond the validation-only ones (`ci_check` and `enrichment_check`) is among the request's completed steps or is marked as its current step.
+    The current step counts because a step is marked current before it runs and stays marked when it fails or is interrupted:
+    the first mutation, `s3_public_read`, may have applied the bucket policy without the Worker having recorded it, and the dataset may then be public.
+    So a request whose first mutation failed stays undeniable until it is retried to completion or repaired by hand,
+    and a request interrupted only in validation steps stays deniable.
     The `deny_after_publishing` refusal ignores the request's status on purpose:
     a request filed again keeps its `steps_completed` (follow-up #1766), a request's own completed steps are its own irreversible acts, and the dataset may already be public, so the depositor must not be told it was denied.
     The write is conditional on the lease and on the `updated_at` that was read, so a request that was published, claimed or touched in between is not overwritten.
     A lost write is read again and answered by the true reason.
     The write also clears a lapsed claim.
     The depositor's mail goes only after the write has changed a row.
-    A stalled run that has not started publishing can still be denied: nothing is public and nothing is writing.
-12. **The write that ends an approval requires that the request is still `approving`.**
+    A stalled run that has not started publishing, in the sense above, can still be denied: nothing is public and nothing is writing.
+12. **The write that ends an approval requires that the request is still `approving`, and a refusal comes before any write.**
     A request closed while its run ran (denied once its lease had lapsed, or blocked again by a late result) is not marked published.
     The run answers 409 `approval_closed_during_run`, a word of its own because `request_changed` means that nothing ran and here the steps have run and cannot be taken back,
     and writes one audit row, `approval_finished_on_closed_request`, of ids and words.
     A request that is already `published` was finished by a concurrent call of the same run, and counts as finished.
-    The branch for a resumed run whose steps are all done uses the same write, and refuses any other status where it used to answer `published` and write nothing.
+    The branch for a resumed run whose steps are all done follows the same rule, in this order.
+    - A request that is not `approving` is refused with `approval_closed_during_run` before any tail job runs.
+      The tail jobs write (the Zarr re-request stamp) and can publish a reserved version identifier, which cannot be taken back,
+      so a refusal that reads as "nothing happened" must not come after them.
+      This branch used to answer `published` and write nothing, whatever the status.
+      A `requested` or `blocked` request that carries the steps of an earlier life (follow-up #1766) is refused here too.
+    - The tail jobs run.
+      When one of them warns, the request is left `approving`, because the warning's remedy is to approve again, and a request already marked `published` would answer that with a 404.
+    - When none warned, the same call marks the request `published` with the guarded write.
+      Only when that write changed the row does it write the `dataset_published` audit row, once, with the caller as its user and the flag `finished_by_resume` in its details.
+      A concurrent finisher whose write changed nothing writes no second row.
+      The mark leaves `approved_by` as it was, so the audit row, not that column, names who finished the run.
 13. **#1580 is deferred.**
     A resumed run restarts the lock listing at page 1, so objects added under `objects/` while the run was stopped are locked too, and `s3_lock` is never run again once complete.
     A saved continuation token would skip whatever was listed before it, which weakens a property the restart has today, and it would need a migration and a new resumability contract.
@@ -164,26 +199,34 @@ The maintainer changes it, and a merge there takes effect for both environments 
 
 | Step | What | Why here |
 |---|---|---|
-| 0 | The callback secret is set on both Workers (checked before this was written: it is). | Without it, `approve-dispatch` answers 502 `dispatch_unconfigured` and no click can be dispatched. |
-| 1 | The maintainer applies the workflow edit before Phase 3 reaches `dev`. | Against today's Worker it does nothing: no token is in the payload, so nothing is exported and the release step is skipped. It must be there before the first click that carries a token. |
-| 2 | Merge to `dev`, then verify on staging that a web approval is recorded as the clicker, that an acknowledged screen is carried by the token, that a forced early failure is released, and that the audit query joins `approval_dispatched` audit rows to `publication_requests.approved_by`. | This is the verification of ADR 0102's "Before it is switched on", item 7. Any published request whose `approved_by` is not the user of its `approval_dispatched` row (matched on the request id in the row's details) is a web approval the token did not carry. |
+| 0 | The callback secret is set on both Workers (the names were checked read-only on 2026-10-13, and no values were read). | Without it, `approve-dispatch` answers 502 `dispatch_unconfigured` and no click can be dispatched. |
+| 1 | The maintainer applies the workflow edit before Phase 3 reaches `dev`. | Against today's Worker it does nothing: no token is in the payload, so nothing is exported and the release step does nothing. It must be there before the first click that carries a token. |
+| 2 | Merge to `dev`, then verify on staging that a web approval is recorded as the clicker, that an acknowledged screen is carried by the token, that a forced early failure is released, and that the audit query joins `approval_dispatched` audit rows to `publication_requests.approved_by`. | This is the verification of ADR 0102's "Before it is switched on", item 7. Any published request whose `approved_by` is not the user of its `approval_dispatched` row (matched on the request id in the row's details) is a candidate to read, not a violation: a deliberate terminal takeover and a re-dispatch by another administrator are meant to differ. |
 | 3 | Production release: the npm `latest` publication should precede the production Worker deploy. | The pipeline does not enforce the order. Hold the deploy until npm shows the version, or accept a window of a few minutes in which production attributes a web approval to the executor. |
 
 The edit the workflow needs:
 
-- A first step, with no `env:` block, masks the token read from the event file. The token must not go into the job-level environment, where the payload's fields land.
-- The approve step exports `NEMAR_APPROVAL_DISPATCH_TOKEN` only after the CLI install, the way it exports the administrator key.
-- The install matches the environment: `nemar-cli@dev` for the staging backend and `latest` for production. Dev builds are published under the `dev` tag and the runner installs unpinned, so without this a staging run would carry the older CLI, which ignores the variable.
-- A step that runs on failure or cancellation calls the release endpoint, reading the token from the event file. A 401 answer means there is nothing to release.
-- The token goes through the environment variable and nowhere else. The workflow never passes `--force` or `--acknowledge-identifier-screen`, which the CLI refuses with a token set. It needs no `--request-id`: the token binds the request, and its preflight already checks the newest request.
-- Its validate step carries the id rule of decision 8 by hand.
+- A first step, with no `env:` block, masks the token read from the event file.
+  The token must not go into the job-level environment, where the payload's fields land.
+- The approve step reads the token from the event file inside its own shell and exports `NEMAR_APPROVAL_DISPATCH_TOKEN` for the CLI process alone.
+  It does not write the token to `GITHUB_ENV`, which is where the workflow puts the administrator key for every later step, so the token is in the environment of the approve step's process and of no later step.
+- The install matches the environment: `nemar-cli@dev` for the staging backend and `latest` for production.
+  Dev builds are published under the `dev` tag and the runner installs unpinned, so without this a staging run would carry the older CLI, which ignores the variable.
+- A step that runs on failure or cancellation calls the release endpoint, reading the token from the event file.
+  It does nothing when the event carries no token, which is the case for a manual run and for an event sent by an older Worker.
+  A 401 answer means there is nothing to release.
+- The token goes through the environment variable and nowhere else.
+  The workflow never passes `--force`, `--acknowledge-identifier-screen` or `--skip-ci-check`, which the CLI refuses with a token set.
+  It needs no `--request-id`: the token binds the request, and its preflight already checks the newest request.
+- The workflow's validate step already carries the id rule of decision 8 as case patterns, so the edit to it is a comment only, with no logic.
+  The comment names `shared/publication-limits.ts` as the other side of the rule.
 
 What each combination does:
 
 | Worker | Workflow | CLI on the runner | Result |
 |---|---|---|---|
 | old | any | any | Today's behavior. No token is in the payload. |
-| new | old | any | No token is sent. The executor is recorded as itself and takes over its own claim. The clicker's recorded override and screen acknowledgment are not honored, so those approvals are refused when the review is lit. A failure is never released, and the lease lapses. |
+| new | old | any | No token is sent. The executor is recorded as itself and takes over its own claim. The clicker's recorded override and screen acknowledgment are not honored, so an approval that needed either is refused: the acknowledgment is read whatever the review's flag says, and the override only when the review is lit. A failure is never released, and the lease lapses. |
 | new | new | old | As the row above, except that the release step runs. The old CLI ignores the variable. |
 | new | new | new | The full design. |
 
@@ -193,9 +236,10 @@ Rolling back the Worker alone is safe in every combination.
 ## Consequences
 
 - **A transition window exists, and it is visible.**
-  Between the Worker shipping and the workflow sending the token, a web approval is recorded under the executor's account, which is what ADR 0080 exists to prevent.
-  Nothing is published wrongly, and nothing is lost: the approval is attributed to the wrong administrator, and the audit query of step 2 counts the cases.
-  Where the review is lit, the same window has the gate refuse an approval that needed the clicker's override or acknowledgment.
+  The workflow edit goes first (Rollout, step 1), so what remains is the lag of the npm `latest` publication behind the production Worker deploy:
+  until the runner can install a CLI that reads the token variable, a web approval is recorded under the executor's account, which is what ADR 0080 exists to prevent.
+  Nothing is published wrongly, and nothing is lost: the approval is attributed to the wrong administrator, and the audit query of step 2 lists the cases to read.
+  In the same window the gate refuses an approval that needed the clicker's recorded screen acknowledgment, and one that needed the clicker's override when the review is lit.
 - **The executor needs the workflow edit, and nothing in this repository can make it.**
   The Worker does not refuse a call that carries no token, because a person at a terminal carries none.
   An executor that never learns to send it is recorded as itself, and a run that needed the clicker's recorded decision is refused: attribution degrades, and nothing is published wrongly.
@@ -216,6 +260,7 @@ Rolling back the Worker alone is safe in every combination.
   What remains is an executor's own release followed within the second by the same administrator's click, and the consequence is two runs holding one valid token, which the takeover and the mark's condition already bound.
 - **A demoted clicker's click can still publish** where it needs none of their decisions, recorded as the executor (the open question above).
 - **A request that has started publishing can no longer be denied,** and a queued web approval cannot be cancelled by deny.
+  A request whose first mutation failed or was interrupted counts as started, because the bucket policy may have been applied without a record, so it stays undeniable until it is retried to completion or repaired by hand.
   A way to withdraw a half-published run, and an administrator's cancel of a queued web approval, are follow-ups.
 - **A resumed lock restarts at page 1** until #1580 is taken up with its measurement.
 - **Every cookie write on the admin router now needs a NEMAR `Origin`.**
@@ -224,7 +269,14 @@ Rolling back the Worker alone is safe in every combination.
 - **None of this is behind `PUBLICATION_REVIEW_ENABLED`.**
   The token, the takeover, `request_id`, the id rule, the release endpoint, the Origin guard, the deny rules and the guarded final write reach production with the first release after finalization, whatever the flag says.
   The release notes say so.
-- **ADR 0080 decision 5 holds in part.** The clicker's re-check, the time-only lease, the claim cleared by the owner-name walk-back and the rule for an unconfirmed dispatch stand.
+- **One writer of a blocked request does not clear a live claim, and that is a follow-up.**
+  The identifier screen's block of a `requested` row (`blockForFindings`, ADR 0086) moves it to `blocked` without clearing the claim,
+  so after the depositor files again, a token that verifies for that claim's columns verifies again until its lease lapses.
+  The effect needs a retained or leaked token and a re-request inside the lease, and the token carries attribution only (decision 2).
+  Clearing the claim in that statement is the follow-up.
+  It is not in this change because the writer belongs to the identifier screen, outside this phase's scope.
+- **ADR 0080 decision 5 holds in part, and decision 6 stands.**
+  The clicker's re-check, the time-only lease and the claim cleared by the owner-name walk-back (decision 5) stand, and so does the rule for an unconfirmed dispatch (decision 6).
 
 ## Alternatives considered
 
@@ -256,8 +308,8 @@ Rolling back the Worker alone is safe in every combination.
 - Epic #1726 and this phase, #1730.
   The approval issues #1579, #1580, #1582, #1583, #1584, #1603 and #1604.
   The earlier phases, pull requests #1735, #1762 and #1767.
-  Phase 3's own pull request was not open when this was written; its work packages are on the branch `feature/issue-1730-phase3-approval-robustness`.
-- ADR 0080 (decisions 2, 3 and 5 and its consequences, corrected in place with an amendment), ADR 0102 (sections 9 and 10, "Before it is switched on", and the Phase 2 amendment, with a Phase 3 amendment),
+  Phase 3's own pull request is #1772; its work packages are on the branch `feature/issue-1730-phase3-approval-robustness`.
+- ADR 0080 (decisions 2, 3, 5 and 6 and its consequences, corrected in place, with a note of partial supersession under its header and an amendment), ADR 0102 (sections 9 and 10, "Before it is switched on", and the Phase 2 amendment, with a Phase 3 amendment),
   ADR 0048 (account kinds), ADR 0020 (workflow edits reach every environment).
 - The token: `backend/src/services/github/callback-tokens.ts`, `backend/src/services/approval-dispatch.ts` (`checkApprovalDispatchToken`, `resolveApprover`),
   `backend/src/services/github/dispatch.ts`, `shared/contract/publication.ts`.
