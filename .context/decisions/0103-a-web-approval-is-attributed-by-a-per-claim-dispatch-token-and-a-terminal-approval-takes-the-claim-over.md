@@ -384,7 +384,7 @@ Rolling back the Worker alone is safe in every combination.
 - Epic #1726 and this phase, #1730.
   The approval issues #1579, #1580, #1582, #1583, #1584, #1603 and #1604.
   The earlier phases, pull requests #1735, #1762 and #1767.
-  Phase 3's own pull request is #1772; its work packages are on the branch `feature/issue-1730-phase3-approval-robustness`.
+  Phase 3's own pull request is #1772; its commits are on the branch `feature/issue-1730-phase3-approval-robustness`.
 - ADR 0080 (decisions 2, 3, 5 and 6 and its consequences, corrected in place, with a note of partial supersession under its header and an amendment), ADR 0102 (sections 9 and 10, "Before it is switched on", and the Phase 2 amendment, with a Phase 3 amendment),
   ADR 0048 (account kinds), ADR 0020 (workflow edits reach every environment).
 - The token: `backend/src/services/github/callback-tokens.ts`, `backend/src/services/approval-dispatch.ts` (`checkApprovalDispatchToken`, `resolveApprover`),
