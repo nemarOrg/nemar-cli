@@ -12,6 +12,7 @@
 > (the workflow's step order, the participants file, the normalization before the pre-send rules, the cap accounting,
 > the mail at the deadline).
 > The Phase 3 block and the attribution risk were rewritten as built on 2026-10-13 (ADR 0103).
+> The Phase 4 block was rewritten as built on 2026-10-14 (ADR 0102 Phase 4 amendment).
 
 ## 1. What was read
 
@@ -483,19 +484,35 @@ and the next `dev` to `main` release carries it to production dark.
 That release changes one thing in production with the flag off: a `blocked` request can no longer be approved from a terminal.
 Its release notes say so.
 
-### Phase 4 (#1731): the web page
+### Phase 4 (#1731): the web page (as built; the verdict is the ADR 0102 Phase 4 amendment)
 
-In `nemarOrg/website`, against nemar-cli `dev`, which now has the contract:
-render `publication_review` and `identifier_screen` from the list response; an acknowledgment field for the screen's reason;
-an explicit confirmation for a non-pass, sent as the review id and the reasons shown;
-`FRIENDLY` entries for `identifier_screen_not_clear`, `publication_review_not_clear` and `invalid_body`,
-and for the approval words Phase 3 added (`APPROVAL_REFUSAL_ERROR_CODES`);
-the Origin guard's `origin_not_allowed` is shown from `message`, not from `error`, which holds the word (ADR 0103, decision 10);
-the transcription of `shared/contract/publication-review-copy.ts` with a drift test that reads it from the sparse checkout of `dev`;
-the seventh block reason in `src/lib/publication-block.ts`.
-In this repository, a pull request into `dev`: a parity test that reads the website's copy through an environment variable or the sibling checkout.
+The page, in `nemarOrg/website`, fetches `GET /admin/publish/:id/review` for the request being decided and prints the Worker's words.
+It does not transcribe the reasons: the cures change with the request, and a transcription would be a second copy of the sentences and of the rules that compose them.
+The rule in one line: the page prints `sentence`, `statement` and `cure`, and never `command`, `line`, `description.lines`, `description.next` or a gate refusal's `message`.
 
-Must not: compute a verdict in the browser; offer Approve for a hard reason; send a body the route does not accept.
+The nemar-cli half:
+
+- **The cure split (Shape S).** `cureOf` and `REASONS[].cure` stay the terminal's text, byte for byte.
+  `neutralCureOf` is the cure without its command and without `(--force)`, `commandOf` is the command, `reasonStatement` is the reason in words.
+  On the wire `ReasonView.cure` is neutral, and `command` and `statement` are additive and optional in the type; `line` stays the CLI's.
+  The plan's literal naming (`cureOf` itself neutral) would have broken eleven pinned assertion sites that read the composed text, and the CLI's output must not move.
+- **Additive detail fields, no migration:** `start_offered`, `screen_gate`, the two reason fields, and `label` and `document_label` on the findings.
+  `screen_gate` is there because with the review off `reasons` is empty while the screen's gate still applies.
+  A Worker that predates the phase sends no `statement`; the page then withholds the reasons panel and never prints `line`.
+- **The page-owned words:** `shared/contract/publication-review-copy.ts`, 22 keys (the gate's six refusals, the screen's six, four approve states, three review words, three start successes),
+  with a parity test on each side on the pattern of the account copy.
+  The words the Worker sends that are web-safe are printed as they arrive and pinned by a web-safety test over the real producer, with one list of forbidden terminal words.
+  The Phase 3 codes that only the executor reaches have no key.
+- **What the page may do:** approve (the review id and the reasons shown, and a reason of 10 to 500 characters when the screen's gate is `acknowledge`), deny and start, each with `request_id`.
+  Staleness comes from the refusals (`gate: "stale"`, `review_changed`, `request_mismatch`), because the detail reads no GitHub.
+- **Left open:** a control to run the identifier screen again (the Worker has the route; an administrator uses the terminal), the `gate: "wait"` answer for an acknowledgment that lost a race,
+  mailing the depositor from the page, wiring the strict parity path into the continuous integration workflow once the website's file is on its `staging` branch,
+  a sentence in AGENTS.md about the new copy file, and the production promotion.
+
+Order: the nemar-cli half merges into the epic, then the executor workflow edit and the finalize into `dev`;
+the website pull request stays a draft until the epic is on `dev`, then Phase 5.
+
+Must not (kept): compute a verdict in the browser; offer Approve for a hard reason; send a body the route does not accept.
 
 ### Phase 5 (#1732): release dark, soak, switch on
 
