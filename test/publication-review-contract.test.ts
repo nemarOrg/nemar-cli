@@ -11,11 +11,20 @@ import { join } from "node:path";
 import { BIDS_DATATYPES } from "../backend/src/services/datacite";
 import * as prompt from "../scripts/ci/pr-review-prompt";
 import {
+  APPROVAL_DISPATCH_TOKEN_HEADER,
+  APPROVAL_IN_FLIGHT_MESSAGE,
   APPROVAL_REFUSAL_ERROR_CODES,
+  APPROVAL_RELEASE_REASONS,
+  APPROVAL_RELEASE_REASON_TEXT,
+  DECISION_WITH_DISPATCH_TOKEN_MESSAGE,
+  DENY_AFTER_PUBLISHING_MESSAGE,
+  DISPATCH_EXPIRED_MESSAGE,
+  DISPATCH_SUPERSEDED_MESSAGE,
   IDENTIFIER_SCREEN_ERROR_CODES,
   OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE,
   PUBLICATION_REFUSAL_ERROR_CODES,
   REQUEST_CHANGED_MESSAGE,
+  REQUEST_MISMATCH_MESSAGE,
 } from "../shared/contract/publication";
 import {
   OVERRIDE_FIELD,
@@ -3023,15 +3032,29 @@ describe("the wire vocabulary the approval refusals and the comment route share"
       "request_blocked",
       "request_changed",
       "override_inside_web_approval",
+      "request_mismatch",
+      "dispatch_superseded",
+      "dispatch_expired",
+      "decision_with_dispatch_token",
+      "approval_in_flight",
+      "deny_after_publishing",
     ]);
     // The first two words are the `error` of the two bodies in the review's contract; the others
-    // are the orchestrator's own refusals (a request that changed while it was checked, and an
-    // override sent inside a web approval).
+    // are the orchestrator's and the deny route's own refusals (a request that changed while it
+    // was checked, an override sent inside a web approval, a run for a request that is no longer
+    // the one in force, a dispatch token that was replaced or lapsed, a decision sent by a run
+    // the web started, and a denial of a request that is running or has started publishing).
     expect([...APPROVAL_REFUSAL_ERROR_CODES]).toEqual([
       PUBLICATION_REVIEW_NOT_CLEAR_CODE,
       REQUEST_BLOCKED_CODE,
       "request_changed",
       "override_inside_web_approval",
+      "request_mismatch",
+      "dispatch_superseded",
+      "dispatch_expired",
+      "decision_with_dispatch_token",
+      "approval_in_flight",
+      "deny_after_publishing",
     ]);
     // One word, one family: none of them is also another family's.
     for (const code of APPROVAL_REFUSAL_ERROR_CODES) {
@@ -3169,6 +3192,78 @@ describe("the sentences the Worker's tests import are pinned here, once", () => 
     expect(OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE).toBe(
       "A web approval of this request is in progress, so an override sent now would be recorded under the administrator who clicked. Wait for it to finish or stop, then approve again with --force.",
     );
+  });
+
+  test("the refusals of the dispatch token, the request precondition and the denial", () => {
+    expect(REQUEST_MISMATCH_MESSAGE).toBe(
+      "The request in force for this dataset is not the one this approval was for (it was denied or filed again since). Read the request again before approving.",
+    );
+    expect(DISPATCH_SUPERSEDED_MESSAGE).toBe(
+      "The web approval this run was started for is no longer current (it was replaced by a newer click, released, or taken over by an approval at a terminal), so this run was refused and changed nothing.",
+    );
+    expect(DISPATCH_EXPIRED_MESSAGE).toBe(
+      "The web approval this run was started for has expired: the run sat idle longer than its lease, so a click made then is not honored now. Nothing was changed. Click Approve again to start a fresh run.",
+    );
+    expect(DECISION_WITH_DISPATCH_TOKEN_MESSAGE).toBe(
+      "A run started by a web approval carries the decision made at the click and may not send its own: no override and no identifier-screen acknowledgment. Nothing was recorded.",
+    );
+    expect(APPROVAL_IN_FLIGHT_MESSAGE).toBe(
+      "An approval of this request is running, so it cannot be denied right now. Wait for it to finish or stall, then deny it.",
+    );
+    expect(DENY_AFTER_PUBLISHING_MESSAGE).toBe(
+      "An approval of this request has already started publishing, so the dataset may already be public and the request cannot be denied. Resume the approval to finish it.",
+    );
+  });
+
+  test("every approval refusal sentence is a plain sentence, and no two are the same", () => {
+    const sentences = [
+      REQUEST_CHANGED_MESSAGE,
+      OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE,
+      REQUEST_MISMATCH_MESSAGE,
+      DISPATCH_SUPERSEDED_MESSAGE,
+      DISPATCH_EXPIRED_MESSAGE,
+      DECISION_WITH_DISPATCH_TOKEN_MESSAGE,
+      APPROVAL_IN_FLIGHT_MESSAGE,
+      DENY_AFTER_PUBLISHING_MESSAGE,
+      ...Object.values(APPROVAL_RELEASE_REASON_TEXT),
+    ];
+    expect(new Set(sentences).size).toBe(sentences.length);
+    for (const sentence of sentences) {
+      expect(sentence).toMatch(/\.$/);
+      expect(sentence).not.toContain("\u2014");
+    }
+  });
+
+  test("the words an executor's release may give, each with its one fixed sentence", () => {
+    expect([...APPROVAL_RELEASE_REASONS]).toEqual([
+      "workflow_failed",
+      "workflow_cancelled",
+      "secret_missing",
+      "install_failed",
+      "input_rejected",
+      "preflight_failed",
+    ]);
+    expect(Object.keys(APPROVAL_RELEASE_REASON_TEXT).sort()).toEqual(
+      [...APPROVAL_RELEASE_REASONS].sort(),
+    );
+    expect(APPROVAL_RELEASE_REASON_TEXT).toEqual({
+      workflow_failed:
+        "The approval workflow failed before the approval finished. Click Approve again to resume it.",
+      workflow_cancelled:
+        "The approval workflow was cancelled before the approval finished. Click Approve again to resume it.",
+      secret_missing:
+        "The approval workflow could not start because a credential it needs is not configured. Tell the maintainers, then click Approve again.",
+      install_failed:
+        "The approval workflow could not install the command line tool it runs. Click Approve again to retry.",
+      input_rejected:
+        "The approval workflow refused the request it was given, so nothing was approved.",
+      preflight_failed:
+        "The approval workflow's own checks of the request failed before it began, so nothing was approved.",
+    });
+  });
+
+  test("the header an executor presents its dispatch token in", () => {
+    expect(APPROVAL_DISPATCH_TOKEN_HEADER).toBe("X-Approval-Dispatch-Token");
   });
 
   test("the refusal for a review the gate could not check covers a failed read and a failed record alike", () => {

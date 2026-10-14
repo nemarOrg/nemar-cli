@@ -1,5 +1,14 @@
-import { hasRole, parseRole } from "../types/bindings";
+import { APPROVAL_DISPATCH_TOKEN_HEADER } from "../../../shared/contract/publication";
+import { type Bindings, hasRole, parseRole } from "../types/bindings";
 import { isActiveAccountStatus } from "./account-tier";
+import { verifyApprovalDispatchToken } from "./github/callback-tokens";
+
+/**
+ * The header the executor presents its dispatch token in (see {@link checkApprovalDispatchToken}).
+ * Declared once in the shared contract so the Worker and the CLI cannot spell it two ways, and
+ * named here because this is where the Worker's attribution rules live.
+ */
+export { APPROVAL_DISPATCH_TOKEN_HEADER };
 
 /**
  * The lease behind a web-launched approval (ADR 0080).
@@ -102,6 +111,16 @@ export const ACTIVE_REQUEST_TAIL_SQL = `FROM publication_requests
    WHERE dataset_id = ? AND status IN ('requested', 'approving', 'blocked')
    ORDER BY requested_at DESC LIMIT 1`;
 
+/**
+ * The SET fragment that clears a web approval's claim (`approval_requested_by`,
+ * `approval_dispatched_at`). Every statement that ends a claim spells it from here, so the day a
+ * claim gains a column there is one place to add it and no statement that clears half of it.
+ * It carries no trailing comma: write `SET ${APPROVAL_CLAIM_CLEAR_SQL}, other = ?` or end the
+ * SET with it.
+ */
+export const APPROVAL_CLAIM_CLEAR_SQL =
+  "approval_requested_by = NULL, approval_dispatched_at = NULL";
+
 /** Who a publication is recorded as approved by. */
 export interface Approver {
   id: number;
@@ -144,14 +163,20 @@ export interface Approver {
  * has been deleted falls back to the caller rather than failing a publication
  * that is already underway; the dispatch left its own audit row naming the
  * clicker by id.
+ *
+ * `tokenValid` is whether this call proved it belongs to the claim: the answer of
+ * {@link checkApprovalDispatchToken} (#1604, Phase 3), which honors the clicker for a call that
+ * presents the claim's own token and for no other. Until the orchestrator reads the token, its
+ * call site still passes the time-only lease as that proof, which is the behavior the
+ * paragraphs above describe.
  */
 export async function resolveApprover(
   db: D1Database,
   approvalRequestedBy: number | null,
-  leaseLive: boolean,
+  tokenValid: boolean,
   caller: Approver,
 ): Promise<Approver> {
-  if (approvalRequestedBy === null || !leaseLive) return caller;
+  if (approvalRequestedBy === null || !tokenValid) return caller;
   const clicker = await db
     .prepare("SELECT id, username, email, role, status, deleted_at FROM users WHERE id = ?")
     .bind(approvalRequestedBy)
@@ -173,4 +198,78 @@ export async function resolveApprover(
   if (role === null || !hasRole(role, "admin")) return caller;
   // Web-only accounts may have no username yet; the address still names them.
   return { id: clicker.id, username: clicker.username || clicker.email };
+}
+
+/** Why a presented dispatch token was refused. */
+export type ApprovalDispatchRefusal = "dispatch_superseded" | "dispatch_expired";
+
+/** What {@link checkApprovalDispatchToken} found. */
+export type ApprovalDispatchTokenCheck =
+  | { kind: "absent" }
+  | { kind: "valid" }
+  | { kind: "refused"; code: ApprovalDispatchRefusal };
+
+/** The columns of a `publication_requests` row that a dispatch token is checked against. */
+export interface ApprovalClaimRow {
+  dataset_id: string;
+  id: number;
+  approval_requested_by: number | null;
+  approval_dispatched_at: string | null;
+  /**
+   * {@link approvalLeaseLiveSql} read in the SAME statement as the row, before the call's own
+   * heartbeat bump: 1 when the claim's lease is live by time alone. Compared with 1, so anything
+   * else (0, NULL from a missing column) is a lapsed lease.
+   */
+  approval_lease_live: number | null;
+}
+
+const SUPERSEDED: ApprovalDispatchTokenCheck = { kind: "refused", code: "dispatch_superseded" };
+const EXPIRED: ApprovalDispatchTokenCheck = { kind: "refused", code: "dispatch_expired" };
+
+/**
+ * Does this `/approve` call carry the token of the claim on the request it is about to act on?
+ *
+ * The token is derived from the claim's own columns (`signApprovalDispatchToken`), so presenting
+ * one that verifies means the call was dispatched by THIS click of THIS request. The rules, in
+ * this order, each deciding before the next is read:
+ *
+ *   1. No header, or an empty or blank one: `absent`. The caller is a person at a terminal (or an
+ *      executor that predates the token), and is recorded as itself.
+ *   2. No secret on the Worker, no claim on the row, or a MAC that does not match: `superseded`.
+ *      The claim is gone (released, taken over, or denied), was replaced by a newer click, belongs
+ *      to another request or clicker, or the token is not one. A Worker that cannot check a token
+ *      is never one that honors it.
+ *   3. A MAC that matches while the lease has lapsed: `expired`. The run sat quiet past its
+ *      lease, so a click made long ago is not honored for work that happens now; clicking again
+ *      claims afresh. Asked only AFTER the MAC, so a stranger learns nothing about a lease.
+ *   4. Otherwise `valid`.
+ *
+ * A `refused` call must change nothing: the caller answers 409 with the code before any write.
+ * The lease read is the time-only one (`approvalLeaseLiveSql`), not the failure-aware in-flight
+ * predicate, so the retry of a failed step stays attributed to the clicker.
+ */
+export async function checkApprovalDispatchToken(
+  env: Pick<Bindings, "PRESCREEN_CALLBACK_SECRET">,
+  row: ApprovalClaimRow,
+  token: string | null | undefined,
+): Promise<ApprovalDispatchTokenCheck> {
+  const presented = token?.trim();
+  if (!presented) return { kind: "absent" };
+  const secret = env.PRESCREEN_CALLBACK_SECRET;
+  if (!secret || row.approval_requested_by === null || row.approval_dispatched_at === null) {
+    return SUPERSEDED;
+  }
+  const matches = await verifyApprovalDispatchToken(
+    presented,
+    {
+      datasetId: row.dataset_id,
+      requestId: row.id,
+      clickerId: row.approval_requested_by,
+      claimedAt: row.approval_dispatched_at,
+    },
+    secret,
+  );
+  if (!matches) return SUPERSEDED;
+  if (row.approval_lease_live !== 1) return EXPIRED;
+  return { kind: "valid" };
 }
