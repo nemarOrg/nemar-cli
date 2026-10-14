@@ -159,8 +159,15 @@ export interface PublishCli {
   github: { seen: GitHubCall[]; dispatches: Dispatch[] };
   /** Every request the NEMAR API served for a command; cleared in place by `reset()`. */
   requests: ApiCall[];
-  /** The JSON body of every write the NEMAR API received, in order; cleared in place by `reset()`. */
-  posted: Array<{ path: string; body: Record<string, unknown> | null }>;
+  /**
+   * The JSON body of every write the NEMAR API received, in order; cleared in place by `reset()`.
+   * `dispatchToken` is whether the request carried the `X-Approval-Dispatch-Token` header (never its
+   * value: a test that needs the value has the dispatch payload), so a test can say which calls of a
+   * run presented the executor's proof.
+   */
+  posted: Array<{ path: string; body: Record<string, unknown> | null; dispatchToken: boolean }>;
+  /** The command's configuration directory, where `--debug` writes its `logs/` (a test reads them back). */
+  readonly configDir: string;
   /** Every mail the Worker sent through Resend during a command; cleared in place by `reset()`. */
   mail: CapturedEmail[];
   /** A fresh database, no accounts, and every knob above back at its default. Call it before each test. */
@@ -305,7 +312,11 @@ export function startPublishCli(): PublishCli {
           .clone()
           .json()
           .catch(() => null);
-        posted.push({ path: url.pathname, body });
+        posted.push({
+          path: url.pathname,
+          body,
+          dispatchToken: req.headers.has("x-approval-dispatch-token"),
+        });
       }
       const res = await app.handle(req, env());
       requests.push({ method: req.method, path: url.pathname, status: res.status });
@@ -490,6 +501,7 @@ export function startPublishCli(): PublishCli {
     get db() {
       return db;
     },
+    configDir,
     env,
     setEnv(over) {
       envOver = { ...envOver, ...over };

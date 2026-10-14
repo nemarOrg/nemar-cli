@@ -58,6 +58,12 @@ import {
 import { approveEvidenceLines } from "../lib/publication-review-display.js";
 import { plain } from "../lib/terminal-text.js";
 
+/**
+ * The environment variable a web approval's executor is handed its dispatch token in (#1604). Read
+ * by `approve` and by nothing else; never printed, never logged.
+ */
+export const DISPATCH_TOKEN_ENV = "NEMAR_APPROVAL_DISPATCH_TOKEN";
+
 export function registerApproveCommand(group: Command): void {
   group
     .command("approve")
@@ -71,11 +77,11 @@ export function registerApproveCommand(group: Command): void {
     )
     .option(
       "--acknowledge-identifier-screen <reason>",
-      `Approve over an identifier screen that needs review, recording why (${ACKNOWLEDGMENT_MIN_LENGTH} to ${ACKNOWLEDGMENT_MAX_LENGTH} characters)`,
+      `Approve over an identifier screen that needs review, recording why (${ACKNOWLEDGMENT_MIN_LENGTH} to ${ACKNOWLEDGMENT_MAX_LENGTH} characters; refused while ${DISPATCH_TOKEN_ENV} is set)`,
     )
     .option(
       "--force",
-      "Approve over a publication review that is not a pass, recorded with your account",
+      `Approve over a publication review that is not a pass, recorded with your account (refused while ${DISPATCH_TOKEN_ENV} is set)`,
     )
     .option(
       "--request-id <n>",
@@ -116,6 +122,15 @@ Description:
   since, so a request nobody read is never approved in its place. --request-id
   <n> names it yourself (for a script that read the request earlier); it is
   refused here, before anything is sent, when it is not the request shown.
+
+  A run the website started is handed a token, in the environment variable
+  ${DISPATCH_TOKEN_ENV}, and presents it on every call (as a header, never
+  printed or logged). With it the API records the administrator who clicked
+  Approve as the approver, and you are only the executor. Such a run carries the
+  decision its click made, so while the variable is set --force and
+  --acknowledge-identifier-screen are refused here, before anything is sent.
+  Without the variable the command is your own approval, recorded under your
+  account, whatever web approval is under way. 'next' never reads the variable.
 
   --skip-ci-check skips the orchestrator's live CI check, and the approval's audit
   row records that it was used. It never clears a review reason: a failed or
@@ -158,6 +173,11 @@ Orchestrator Steps (execution order; shared/publication-steps.ts):
   publishes an identifier or writes one into a file the data plane serves
   publicly. See ANONYMOUS_RELEASE_SKIPPED_STEPS in shared/publication-steps.ts,
   which states the reason for each.
+
+Environment:
+  ${DISPATCH_TOKEN_ENV}
+                  The dispatch token of a web approval, set for the run that
+                  executes it; leave it unset at a terminal.
 
 Resume Capability:
   If a step fails, the orchestrator saves progress. Use --resume to retry
@@ -230,6 +250,31 @@ After Approval:
           process.exitCode = 1;
           markReportedExit();
           return;
+        }
+
+        // The dispatch token of a web approval this command is executing (#1604), from the
+        // environment the workflow set it in, and only here: `next` is a person's walk and never
+        // reads it, so a token left in a shell cannot turn it into an executor. Blank is none. A
+        // run the web started carries the decision its click made, and the API refuses a call that
+        // carries the token and a decision of its own, so the two decision flags are refused here,
+        // before anything is read or sent.
+        const dispatchToken = process.env[DISPATCH_TOKEN_ENV]?.trim() || undefined;
+        if (dispatchToken !== undefined) {
+          const decision = options.force
+            ? "--force"
+            : ack !== undefined
+              ? "--acknowledge-identifier-screen"
+              : null;
+          if (decision !== null) {
+            console.log(
+              chalk.red(
+                `${decision} cannot be used while ${DISPATCH_TOKEN_ENV} is set: a run the website started carries the decision its click made, and the API refuses a run that sends one of its own. Unset ${DISPATCH_TOKEN_ENV} to approve as yourself. Nothing was sent.`,
+              ),
+            );
+            process.exitCode = 1;
+            markReportedExit();
+            return;
+          }
         }
 
         const action = options.resume
@@ -379,6 +424,7 @@ After Approval:
           acknowledge: ack,
           override: decision.override,
           requestId,
+          dispatchToken,
         });
       },
     );
@@ -465,6 +511,11 @@ interface RunApprovalOptions {
   override: PublicationReviewOverride | null;
   /** The request the run is for, sent on every call of the run so the Worker can refuse a stale one (#1579). */
   requestId?: number;
+  /**
+   * The dispatch token of the web approval this run executes, sent as a header on every call of
+   * it (#1604). Only `approve` sets it, from the environment; `next` never does.
+   */
+  dispatchToken?: string;
 }
 
 /**
@@ -588,9 +639,11 @@ export function timelineLines(stepResults: StepResult[] | undefined): string[] {
  * The approval loop of `approve` and of `y` in `next`: the spinner, the progress, the retries, the
  * result lines and, for a refusal or a failure, the words and the exit code (1, always: #1581).
  *
- * The override and the request number are sent on every call of the run (`approvePublication`), so
- * a retry that lands before the run is marked approving passes the gate again with the same
- * override, and a request denied and filed again while the run goes is refused (`request_mismatch`). A refusal the
+ * The override, the request number and the dispatch token (when the run executes a web approval)
+ * are sent on every call of the run (`approvePublication`), so a retry that lands before the run is
+ * marked approving passes the gate again with the same override, a request denied and filed again
+ * while the run goes is refused (`request_mismatch`), and every call proves it belongs to its
+ * click. A refusal the
  * Worker answers with (the review gate, the screen, a blocked request) is printed in the shared
  * words, and so is a failure; the result says only whether the run went through.
  */
@@ -656,7 +709,7 @@ export async function runApproval(
       },
       opts.acknowledge,
       opts.override ?? undefined,
-      { requestId: opts.requestId },
+      { requestId: opts.requestId, dispatchToken: opts.dispatchToken },
     );
     spinner.succeed(plain(result.message));
     for (const line of resultLines(result)) console.log(line);

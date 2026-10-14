@@ -74,6 +74,8 @@ interface Seen {
   path: string;
   contentType: string | null;
   body: string;
+  /** The value of the `X-Approval-Dispatch-Token` header, or null when the call carried none. */
+  dispatchToken: string | null;
 }
 
 let server: ReturnType<typeof Bun.serve>;
@@ -101,6 +103,7 @@ beforeAll(() => {
         path: url.pathname,
         contentType: req.headers.get("content-type"),
         body: req.method === "GET" ? "" : await req.clone().text(),
+        dispatchToken: req.headers.get("x-approval-dispatch-token"),
       });
       const next = scripted.shift();
       if (next) return Response.json(next.body, { status: next.status });
@@ -322,6 +325,8 @@ describe("commentOnPublication, against the real router", () => {
       path: `/admin/publish/${PROD_DATASET}/comment`,
       contentType: "application/json",
       body: JSON.stringify({ message: "Please add a license." }),
+      // A comment is not an approval: no dispatch token rides on it.
+      dispatchToken: null,
     });
   });
 
@@ -422,6 +427,100 @@ describe("approvePublication carries the override beside the acknowledgment", ()
     expect(OVERRIDE_FIELD in JSON.parse(seen[3].body)).toBe(false);
     await run(PROD_DATASET, true, false, false, undefined, undefined, undefined, undefined);
     expect(OVERRIDE_FIELD in JSON.parse(seen[4].body)).toBe(false);
+  });
+});
+
+describe("approvePublication presents the dispatch token of a run the web started (#1604)", () => {
+  const TOKEN = `${"c0ffee".repeat(10)}abcd`;
+  const IDENTITY = { requestId: 7, dispatchToken: TOKEN };
+  const finished = { message: "done", hasMore: false };
+
+  /** The wait between attempts, shortened to nothing (it can only shorten) for the length of `run`. */
+  async function withNoRetryWait<T>(run: () => Promise<T>): Promise<T> {
+    const previous = process.env.NEMAR_APPROVE_RETRY_DELAY_MS;
+    process.env.NEMAR_APPROVE_RETRY_DELAY_MS = "0";
+    try {
+      return await run();
+    } finally {
+      if (previous === undefined)
+        Reflect.deleteProperty(process.env, "NEMAR_APPROVE_RETRY_DELAY_MS");
+      else process.env.NEMAR_APPROVE_RETRY_DELAY_MS = previous;
+    }
+  }
+
+  test("the header is on every call of the run: the first, each lock batch and the retry after a server error", async () => {
+    scripted = [
+      { status: 200, body: { hasMore: true, s3_lock_continuation_token: "t1", step: "s3_lock" } },
+      { status: 500, body: { error: "boom", message: "EZID 503" } },
+      { status: 200, body: { hasMore: true, s3_lock_continuation_token: "t2", step: "s3_lock" } },
+      { status: 200, body: finished },
+    ];
+
+    await withNoRetryWait(() =>
+      approvePublication(
+        PROD_DATASET,
+        true,
+        false,
+        false,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        IDENTITY,
+      ),
+    );
+
+    expect(seen).toHaveLength(4);
+    for (const call of seen) {
+      expect(call.path).toBe(`/admin/publish/${PROD_DATASET}/approve`);
+      expect(call.dispatchToken).toBe(TOKEN);
+      // The request it is for rides with it, on the same calls.
+      expect(JSON.parse(call.body).request_id).toBe(7);
+    }
+  });
+
+  test("the token is a header and only a header: it is never in the body", async () => {
+    scripted = [{ status: 200, body: finished }];
+    await approvePublication(
+      PROD_DATASET,
+      true,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      IDENTITY,
+    );
+    expect(seen[0].dispatchToken).toBe(TOKEN);
+    expect(seen[0].body).not.toContain(TOKEN);
+  });
+
+  test("without one no header is sent, on any call of the run", async () => {
+    scripted = [
+      { status: 200, body: { hasMore: true, s3_lock_continuation_token: "t1", step: "s3_lock" } },
+      { status: 200, body: finished },
+    ];
+    await approvePublication(
+      PROD_DATASET,
+      true,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        requestId: 7,
+      },
+    );
+    expect(seen).toHaveLength(2);
+    for (const call of seen) expect(call.dispatchToken).toBeNull();
+    // And with no identity at all, as every existing caller calls it.
+    seen = [];
+    scripted = [{ status: 200, body: finished }];
+    await approvePublication(PROD_DATASET, true);
+    expect(seen[0].dispatchToken).toBeNull();
   });
 });
 
