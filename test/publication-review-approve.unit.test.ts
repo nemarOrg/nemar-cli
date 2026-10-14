@@ -22,6 +22,7 @@ import {
   REASONS,
   REASON_CODES,
   type ReasonCode,
+  cureOf,
   reasonLine,
   reviewGateRefusalText,
 } from "../shared/publication-review";
@@ -284,20 +285,29 @@ describe("5. a hard reason is refused, with the cure, even with --force", () => 
     expect(refusal(withLine).lines[1]).toBe(line);
     // An older Worker sends none: sentence and cure, and not the closed words behind the reason.
     // `detailOf` builds its reasons through the Worker's own `reasonViewsOf`, which now sends a
-    // `line`; drop it to stand for a Worker that predates the field.
+    // `line`, `statement` and `command`, and a neutral `cure`; an older Worker sent none of the
+    // three and the terminal's text as its `cure`, so rebuild the reasons that way.
     const old = detailOf(shown);
     const without = refusal(
       decideApproval(
         ID,
         {
           kind: "detail",
-          detail: { ...old, reasons: old.reasons.map(({ line: _line, ...r }) => r) },
+          detail: {
+            ...old,
+            reasons: old.reasons.map(
+              ({ line: _line, statement: _statement, command: _command, ...r }) => ({
+                ...r,
+                cure: cureOf(r.code, ID, true),
+              }),
+            ),
+          },
         },
         FORCE,
       ),
     );
     expect(without.lines[1]).toBe(
-      `${REASONS.submission_minimum_failed.sentence} ${REASONS.submission_minimum_failed.cure}`,
+      `${REASONS.submission_minimum_failed.sentence} ${cureOf("submission_minimum_failed", ID, true)}`,
     );
     expect(without.lines[1]).not.toContain("name_too_short");
   });
