@@ -1388,8 +1388,13 @@ export function registerUsersRoutes(admin: AdminRouter): void {
    * (`applyEmailVerification`), so the status and the flag move together and
    * the migration 0096 guard is satisfied. It grants nothing above the base
    * tier: `service_access` still has one writer, admin approval. Owner only,
-   * because it asserts an inbox the person did not prove; the audit row names
-   * the owner.
+   * because it asserts an inbox the person did not prove.
+   *
+   * Two audit rows, on purpose: `applyEmailVerification` writes the
+   * `email_verified` transition (actor = the verified user, `via` says
+   * `owner_override`), and the `email_verified_by_owner` row below is the only
+   * place the OWNER appears. No admin notification mail: the owner is acting
+   * directly, unlike the two flows where the person verified themselves.
    */
   admin.post("/users/by-id/:id/verify", ownerMiddleware, async (c) => {
     const db = c.env.DB;

@@ -34,7 +34,10 @@ async function seedActor(username: string, role: "owner" | "admin", apiKey: stri
   );
 }
 
+let orcidCounter = 0;
+
 function seedWeb(email: string, status: string, emailVerified = 0): number {
+  orcidCounter += 1;
   db.query(
     `INSERT INTO users (email, status, signup_source, email_verified, orcid, orcid_verified, service_access)
      VALUES (?, ?, 'web', ?, ?, 1, 0)`,
@@ -90,6 +93,20 @@ describe("POST /admin/users/by-id/:id/verify", () => {
       )
       .all();
     expect(audit).toEqual([{ user_id: owner?.id as number, resource_id: String(id) }]);
+    // The transition row records how it happened.
+    const transition = db
+      .query<{ details: string }, []>(
+        "SELECT details FROM audit_log WHERE action = 'email_verified'",
+      )
+      .all();
+    expect(transition.map((r) => JSON.parse(r.details).via)).toEqual(["owner_override"]);
+  });
+
+  test("a soft-deleted account is 404 and stays pending", async () => {
+    const id = seedWeb("gone@nemar.test", "pending");
+    db.run("UPDATE users SET deleted_at = datetime('now') WHERE id = ?", [id]);
+    expect((await verify(id, OWNER_KEY)).status).toBe(404);
+    expect(row(id)?.status).toBe("pending");
   });
 
   test("an admin who is not an owner gets 403 and nothing changes", async () => {
