@@ -23,7 +23,9 @@
  * rows); refuse a started-publishing run that has `--resume` (the resume rows); drop the override
  * from a retry call (the retry row, "a retry after a 5xx"); exit 0 when the run gives up (the
  * "keeps failing" row); ask the question after a refused read (the "definitive answer" rows);
- * read the banner's release kind from the status again (the "banner names the kind" rows).
+ * read the banner's release kind from the status again (the "banner names the kind" rows); send no
+ * request id by default, or drop it from a retry, or let `--request-id` disagree with the detail
+ * (the "run is for the request the command read" rows).
  *
  * CI TIER: unit-pure. Hermetic: an in-process backend over a local database, the CLI spawned
  * against it, stand-ins only at GitHub and Resend, no live network; it sets its own default
