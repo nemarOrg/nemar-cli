@@ -340,9 +340,16 @@ After Approval:
                 ? "--skip-ci-check"
                 : null;
           if (decision !== null) {
+            // The click recorded an override and an acknowledgment, and made no CI decision at all:
+            // it has no option for one, so a run the website started never skips the CI check.
+            // Each flag gets the reason that is true of it (ADR 0103, decision 5).
+            const why =
+              decision === "--skip-ci-check"
+                ? "a run the website started never skips the CI check (the click has no such option), and the API refuses a run that asks to"
+                : "a run the website started carries the decision its click made, and the API refuses a run that sends one of its own";
             console.log(
               chalk.red(
-                `${decision} cannot be used while ${DISPATCH_TOKEN_ENV} is set: a run the website started carries the decision its click made, and the API refuses a run that sends one of its own. Unset ${DISPATCH_TOKEN_ENV} to approve as yourself. Nothing was sent.`,
+                `${decision} cannot be used while ${DISPATCH_TOKEN_ENV} is set: ${why}. Unset ${DISPATCH_TOKEN_ENV} to approve as yourself. Nothing was sent.`,
               ),
             );
             process.exitCode = 1;

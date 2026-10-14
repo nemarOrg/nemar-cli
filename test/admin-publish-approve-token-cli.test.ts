@@ -395,6 +395,11 @@ describe("with a token in the environment, the administrator's own decisions are
     expect(r.exitCode).toBe(1);
     expect(output(r)).toContain("--skip-ci-check");
     expect(output(r)).toContain(TOKEN_ENV);
+    // The reason is the true one for this flag: the click made no CI decision (it has no such
+    // option), so the sentence of the two flags it did record does not apply.
+    expect(output(r)).toContain("never skips the CI check");
+    expect(output(r)).toContain("the click has no such option");
+    expect(output(r)).not.toContain("carries the decision its click made");
     expect(output(r)).not.toContain(token);
     expect(h.posted).toEqual([]);
     expect(h.requests).toEqual([]);
