@@ -1093,12 +1093,15 @@ describe("with the Worker's gate: what the Worker refuses is printed, and exits 
     expect(details.review_gate).toBe("enforced");
   });
 
-  test("the web executor's --yes run proceeds on the clicker's recorded override, sends none, and publishes", async () => {
+  test("a --yes run with no dispatch token does not ride on the clicker's recorded override: refused, and the click's claim is intact", async () => {
+    // The flip of the Phase 2 pin (#1604). The clicker's override covers the clicker's run, which
+    // is the one that carries the click's token (admin-publish-approve-token-cli.test.ts); the
+    // same command without it is its caller's own act, and the caller has no override.
     const requestId = seedGolden();
     const reviewId = seedReport(requestId, twoReasons());
-    const executorId = await h.admin("executor", EXECUTOR_KEY);
+    await h.admin("executor", EXECUTOR_KEY);
     // The clicker's confirmation, recorded through the real route (the page's body) before the
-    // executor runs; the claim it leaves is the live lease that makes the clicker the approver.
+    // executor runs; the claim it leaves is a live one, but only the token proves a call is its run.
     const dispatched = await direct(`/admin/publish/${DATASET}/approve-dispatch`, ADMIN_KEY, {
       override_publication_review: {
         review_id: reviewId,
@@ -1106,16 +1109,37 @@ describe("with the Worker's gate: what the Worker refuses is printed, and exits 
       },
     });
     expect(dispatched.status).toBe(202);
+    const claim = h.db
+      .query<
+        { approval_requested_by: number | null; approval_dispatched_at: string | null },
+        [number]
+      >(
+        "SELECT approval_requested_by, approval_dispatched_at FROM publication_requests WHERE id = ?",
+      )
+      .get(requestId);
 
     const r = await approve(["--resume", "--yes"], { as: "executor" });
 
     expect(r.stdout).toContain(`An override by administrator #${adminId}`);
-    expect(r.exitCode).toBe(0);
+    expect(r.exitCode).toBe(1);
+    expect(output(r)).toContain(REVIEW_GATE_REFUSAL_TEXT.needs_override.split(" Read it")[0]);
+    expect(h.requests.filter((c) => c.path === APPROVE_PATH).map((c) => c.status)).toEqual([409]);
     expect(approveBodies()).toHaveLength(1);
     expect(approveBodies()[0]).not.toHaveProperty("override_publication_review");
-    expect(requestRow(requestId)?.status).toBe("published");
-    expect(requestRow(requestId)?.approved_by).toBe(adminId);
-    expect(requestRow(requestId)?.approved_by).not.toBe(executorId);
+    expect(h.posted.filter((p) => p.path === APPROVE_PATH)[0]?.dispatchToken).toBe(false);
+    expect(requestRow(requestId)?.status).toBe("requested");
+    expect(requestRow(requestId)?.approved_by).toBeNull();
+    // Nothing was taken over: the executor the click dispatched can still carry out the click.
+    expect(
+      h.db
+        .query<
+          { approval_requested_by: number | null; approval_dispatched_at: string | null },
+          [number]
+        >(
+          "SELECT approval_requested_by, approval_dispatched_at FROM publication_requests WHERE id = ?",
+        )
+        .get(requestId),
+    ).toEqual(claim);
   });
 
   test("another administrator's recorded override covers nothing for this run: the Worker refuses and the command prints it", async () => {

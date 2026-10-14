@@ -33,11 +33,13 @@ import {
   REQUEST_MISMATCH_MESSAGE,
 } from "../../shared/contract/publication";
 import { adminRoutes } from "../src/routes/admin";
+import { verifyApprovalDispatchToken } from "../src/services/github/callback-tokens";
 import { hashApiKey } from "../src/services/token";
 import { issueSession } from "../src/services/web-session";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, interceptingD1, realD1, yieldingD1 } from "./helpers/d1";
 import { SCREENED_HEAD, mainRefAnswer, markScreen } from "./helpers/identifier-screen";
+import { WEB_CLAIM_SECRET, webClaim } from "./helpers/publication-review";
 
 const ADMIN_KEY = "dispatch-admin-key-0123456789abcdef0123456789abcdef";
 const SECOND_ADMIN_KEY = "dispatch-admin2-key-0123456789abcdef0123456789abcdef";
@@ -100,6 +102,7 @@ function env(): Bindings {
     DB: realD1(db),
     ENVIRONMENT: "test",
     GITHUB_ADMIN_PAT: "ghp_dispatch_test_token",
+    PRESCREEN_CALLBACK_SECRET: WEB_CLAIM_SECRET,
     ...envOverrides,
   } as Bindings;
 }
@@ -241,15 +244,16 @@ describe("a pending request", () => {
     expect(dispatches).toHaveLength(1);
     expect(dispatches[0].path).toBe("/repos/nemarDatasets/.github/dispatches");
     expect(dispatches[0].authorization).toBe("Bearer ghp_dispatch_test_token");
-    expect(dispatches[0].body).toEqual({
-      event_type: "approve-publication",
-      client_payload: {
-        dataset_id: DATASET,
-        request_id: id,
-        resume: false,
-        environment: "dev",
-      },
+    // Exactly the contract and the claim's token (see "the dispatch token" below for the token).
+    const { dispatch_token: token, ...contract } = dispatches[0].body.client_payload;
+    expect(dispatches[0].body.event_type).toBe("approve-publication");
+    expect(contract).toEqual({
+      dataset_id: DATASET,
+      request_id: id,
+      resume: false,
+      environment: "dev",
     });
+    expect(token).toMatch(/^[0-9a-f]{64}$/);
   });
 
   test("names production only when the Worker is the production Worker", async () => {
@@ -393,6 +397,35 @@ describe("releasing a claim", () => {
     expect(row(id)?.approval_dispatched_at).not.toBeNull();
   });
 
+  test("clears only ITS claim: the same administrator's newer claim is not undone by this click's failure", async () => {
+    // The release is bound to the instant it claimed (`approval_dispatched_at`), not only to the
+    // clicker: a newer click by the SAME administrator is another claim, with another token, and an
+    // older click's late failure must not release it.
+    const id = seedRequest();
+    githubStatus = 422;
+    let landed = false;
+    let newer = "";
+    const bindings = {
+      ...env(),
+      DB: interceptingD1(realD1(db), (sql) => {
+        if (!landed && sql.includes("SET approval_requested_by = NULL")) {
+          landed = true;
+          db.run(
+            "UPDATE publication_requests SET approval_dispatched_at = datetime('now', '+7 seconds') WHERE id = ?",
+            [id],
+          );
+          newer = row(id)?.approval_dispatched_at ?? "";
+        }
+      }),
+    } as Bindings;
+
+    const res = await dispatchWith(ADMIN_KEY, DATASET, bindings);
+    expect(res.status).toBe(502);
+    expect(landed).toBe(true);
+    expect(row(id)?.approval_requested_by).toBe(adminId);
+    expect(row(id)?.approval_dispatched_at).toBe(newer);
+  });
+
   test("restores the cleared error only while no run has begun since the claim", async () => {
     // The claim clears `last_error`; a not-sent release puts it back. But
     // `/approve` bumps `updated_at` as it starts, so a changed `updated_at`
@@ -423,6 +456,192 @@ describe("releasing a claim", () => {
     expect(row(id)?.approval_requested_by).toBeNull();
     expect(row(id)?.approval_dispatched_at).toBeNull();
     expect(row(id)?.last_error).toBeNull();
+  });
+});
+
+describe("the dispatch token (#1604)", () => {
+  /** What the executor would be handed: the one token in the click's payload. */
+  const tokenOf = (): string => dispatches[0].body.client_payload.dispatch_token as string;
+
+  test("the payload carries the request and a token that verifies against the claim as stored", async () => {
+    const id = seedRequest();
+    const res = await dispatchWith(ADMIN_KEY);
+    expect(res.status).toBe(202);
+
+    const payload = dispatches[0].body.client_payload;
+    expect(Object.keys(payload).sort()).toEqual([
+      "dataset_id",
+      "dispatch_token",
+      "environment",
+      "request_id",
+      "resume",
+    ]);
+    expect(payload.request_id).toBe(id);
+    expect(tokenOf()).toMatch(/^[0-9a-f]{64}$/);
+    // It is a MAC, not a secret: neither the Worker's signing secret nor the GitHub credential the
+    // dispatch authenticates with is in what the workflow is handed.
+    const sent = JSON.stringify(dispatches[0].body);
+    expect(sent).not.toContain(WEB_CLAIM_SECRET);
+    expect(sent).not.toContain("ghp_dispatch_test_token");
+    // Derived from the claim's own columns, exactly as stored: the production verifier, the row's values.
+    const claimed = row(id);
+    expect(
+      await verifyApprovalDispatchToken(
+        tokenOf(),
+        {
+          datasetId: DATASET,
+          requestId: id,
+          clickerId: adminId,
+          claimedAt: claimed?.approval_dispatched_at as string,
+        },
+        WEB_CLAIM_SECRET,
+      ),
+    ).toBe(true);
+  });
+
+  test("each click mints its own: a re-claim after the lease lapsed carries another token, and the first no longer fits", async () => {
+    const id = seedRequest();
+    // An earlier click's claim, 20 minutes old: its run never started and its lease has lapsed.
+    const first = await webClaim(db, {
+      requestId: id,
+      clickerId: secondAdminId,
+      dispatchedAt: "-20 minutes",
+    });
+    const res = await dispatchWith(ADMIN_KEY);
+    expect(res.status).toBe(202);
+
+    const second = tokenOf();
+    expect(second).not.toBe(first);
+    const claim = {
+      datasetId: DATASET,
+      requestId: id,
+      clickerId: adminId,
+      claimedAt: row(id)?.approval_dispatched_at as string,
+    };
+    expect(await verifyApprovalDispatchToken(second, claim, WEB_CLAIM_SECRET)).toBe(true);
+    // The older token is no longer the claim's: different clicker and instant.
+    expect(await verifyApprovalDispatchToken(first, claim, WEB_CLAIM_SECRET)).toBe(false);
+  });
+
+  test("the token is never answered, audited or listed", async () => {
+    seedRequest();
+    const res = await dispatchWith(ADMIN_KEY);
+    const answered = JSON.stringify(await res.json());
+    const token = tokenOf();
+    expect(answered).not.toContain(token);
+
+    // No audit row of any action holds it, nor any 64-hex value.
+    const audit = JSON.stringify(
+      db.query("SELECT action, resource_id, details FROM audit_log").all(),
+    );
+    expect(audit).not.toContain(token);
+    expect(audit).not.toMatch(/[0-9a-f]{64}/);
+
+    // Nor does the list the website and the CLI read, in any field of any request.
+    const list = await app.request(
+      "/admin/publish/requests",
+      { headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+      env(),
+    );
+    expect(list.status).toBe(200);
+    const listed = JSON.stringify(await list.json());
+    expect(listed).not.toContain(token);
+    expect(listed).not.toMatch(/[0-9a-f]{64}/);
+  });
+
+  test("the token is not written to the Worker's log either", async () => {
+    seedRequest();
+    const lines: string[] = [];
+    const realLog = console.log;
+    const realWarn = console.warn;
+    const realError = console.error;
+    const keep = (...args: unknown[]) => lines.push(args.map(String).join(" "));
+    console.log = keep;
+    console.warn = keep;
+    console.error = keep;
+    try {
+      githubStatus = 422;
+      await dispatchWith(ADMIN_KEY);
+      githubStatus = 204;
+      await dispatchWith(ADMIN_KEY);
+      githubStatus = 503;
+      await dispatchWith(SECOND_ADMIN_KEY, DATASET);
+    } finally {
+      console.log = realLog;
+      console.warn = realWarn;
+      console.error = realError;
+    }
+    const token = dispatches.map((d) => d.body.client_payload.dispatch_token as string);
+    expect(token.length).toBeGreaterThan(0);
+    for (const t of token) expect(lines.join("\n")).not.toContain(t);
+  });
+
+  test("a Worker with no signing secret refuses before it claims: 502 dispatch_unconfigured, nothing claimed, nothing sent", async () => {
+    const id = seedRequest();
+    const before = row(id);
+    envOverrides = { PRESCREEN_CALLBACK_SECRET: undefined };
+    const res = await dispatchWith(ADMIN_KEY);
+
+    expect(res.status).toBe(502);
+    const body = await errorBody(res);
+    expect(body.error).toBe("dispatch_unconfigured");
+    // Its own sentence, not the one for a missing GitHub credential, and still "do not retry".
+    expect(body.message).toContain("Retrying will not help");
+    expect(body.message).toContain("secret");
+    expect(body.message).not.toContain("GitHub credential");
+    expect(dispatches).toHaveLength(0);
+    expect(row(id)).toEqual(before);
+    // The same for an empty one: an unset binding and a blank one are both no secret.
+    envOverrides = { PRESCREEN_CALLBACK_SECRET: "" };
+    expect((await dispatchWith(ADMIN_KEY)).status).toBe(502);
+    expect(row(id)).toEqual(before);
+  });
+
+  test("a claim instant the signer refuses releases the claim and answers 502, sending nothing", async () => {
+    // A defense in depth: the claim's instant is signed as one line of the message, so one that
+    // holds a line break cannot be signed. The database never stores one, so the fault is put on
+    // the real row the way the claim would have written it: the claim's UPDATE runs, and then the
+    // instant stored (and answered) is one the signer refuses. The release is bound to THAT
+    // instant, so it clears this very claim and the administrator can click again.
+    const id = seedRequest();
+    const odd = "2026-10-13 17:00:00\n7";
+    const real = realD1(db);
+    const bindings = {
+      ...env(),
+      DB: {
+        prepare(sql: string) {
+          const stmt = real.prepare(sql);
+          if (!sql.includes("RETURNING approval_dispatched_at")) return stmt;
+          const api = {
+            bind(...p: unknown[]) {
+              stmt.bind(...p);
+              return api;
+            },
+            async first() {
+              await stmt.first();
+              db.run("UPDATE publication_requests SET approval_dispatched_at = ? WHERE id = ?", [
+                odd,
+                id,
+              ]);
+              return { claimed_at: odd };
+            },
+          };
+          return api;
+        },
+        batch: (stmts: unknown[]) =>
+          (real as unknown as { batch(s: unknown[]): unknown }).batch(stmts),
+      } as unknown as D1Database,
+    } as Bindings;
+
+    const res = await dispatchWith(ADMIN_KEY, DATASET, bindings);
+
+    expect(res.status).toBe(502);
+    expect((await errorBody(res)).error).toBe("dispatch_failed");
+    expect(dispatches).toHaveLength(0);
+    expect(row(id)?.approval_requested_by).toBeNull();
+    expect(row(id)?.approval_dispatched_at).toBeNull();
+    // Released, so the next click (with a sane clock) goes through.
+    expect((await dispatchWith(ADMIN_KEY)).status).toBe(202);
   });
 });
 

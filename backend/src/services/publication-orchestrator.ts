@@ -20,7 +20,9 @@ import {
 
 import {
   APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE,
-  OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE,
+  DECISION_WITH_DISPATCH_TOKEN_MESSAGE,
+  DISPATCH_EXPIRED_MESSAGE,
+  DISPATCH_SUPERSEDED_MESSAGE,
   REQUEST_CHANGED_MESSAGE,
   REQUEST_MISMATCH_MESSAGE,
 } from "../../../shared/contract/publication.js";
@@ -47,6 +49,7 @@ import {
   APPROVAL_CLAIM_CLEAR_SQL,
   type Approver,
   approvalLeaseLiveSql,
+  checkApprovalDispatchToken,
   resolveApprover,
 } from "./approval-dispatch";
 import {
@@ -2117,6 +2120,12 @@ export interface ApproveRunArgs {
   datasetId: string;
   adminUser: AuthUser;
   body: ApproveBody;
+  /**
+   * The dispatch token the call presented (`X-Approval-Dispatch-Token`), as the route read it: the
+   * proof that this call belongs to a web click's claim (ADR 0080, #1604). Absent for a terminal
+   * and for an executor that predates the token; a blank one is the same as none.
+   */
+  dispatchToken?: string | null;
 }
 
 /**
@@ -2489,7 +2498,7 @@ async function recordPreLoopFailure(
 }
 
 export async function runPublicationApproval(args: ApproveRunArgs): Promise<RespondOutcome> {
-  const { db, env, waitUntil, datasetId, adminUser, body } = args;
+  const { db, env, waitUntil, datasetId, adminUser, body, dispatchToken } = args;
   const { resume } = body;
 
   const c = {
@@ -2531,10 +2540,14 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   //
   // `approval_lease_live` is read HERE, with the row, because the request-start
   // UPDATE below bumps `updated_at`: asked afterwards, every call would find a
-  // fresh heartbeat and a stale click would always look live.
+  // fresh heartbeat and a stale click would always look live. The claim's own
+  // columns (`approval_requested_by`, `approval_dispatched_at`) come with it: they are what the
+  // dispatch token is checked against, and the mark below is made conditional on the same
+  // `approval_dispatched_at`, so the claim that was verified is the claim that is acted on.
   const request = await db
     .prepare(
       `SELECT id, status, block_reason, steps_completed, anonymous, approval_requested_by,
+              approval_dispatched_at,
               ${approvalLeaseLiveSql()} AS approval_lease_live ${ACTIVE_REQUEST_TAIL_SQL}`,
     )
     .bind(datasetId)
@@ -2545,6 +2558,7 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
       steps_completed: string;
       anonymous: number | null;
       approval_requested_by: number | null;
+      approval_dispatched_at: string | null;
       approval_lease_live: number;
     }>();
 
@@ -2581,29 +2595,57 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     return c.json(requestBlockedRefusal(datasetId, request.block_reason), 409);
   }
 
-  // Attribution forks (ADR 0080): a web click records the admin who clicked,
-  // a terminal approval records its own caller. `adminUser` stays the executor.
-  c.approver = await resolveApprover(
-    db,
-    request.approval_requested_by,
-    request.approval_lease_live === 1,
-    { id: adminUser.id, username: adminUser.username },
+  // Attribution forks on proof (ADR 0080, #1604). A call that carries the dispatch token of a web
+  // click's claim is that click's run, and is recorded as the admin who clicked. A call with no
+  // token is its caller's own act, whatever claim is on the row and whatever its lease says: it is
+  // recorded as the caller and, once it passes every gate, takes the claim over (at the mark,
+  // below). A token that does not verify is neither of those, so it is refused here, before any
+  // write, and never quietly downgraded to the caller: a run that cannot prove it belongs to its
+  // claim is not recorded under the click's name, and it is not the caller's own act either, since
+  // it was started to carry out someone else's decision. `adminUser` stays the executor.
+  const tokenCheck = await checkApprovalDispatchToken(
+    env,
+    { ...request, dataset_id: datasetId },
+    dispatchToken,
   );
-
-  // An override is the act of the administrator who sends it, and is recorded under the approver
-  // of record (ADR 0102, section 9). Inside a live web lease the approver is the administrator who
-  // clicked (ADR 0080), so another administrator's override would be recorded under the clicker's
-  // name, with the sender only as the executor. Refused until a dispatch token makes the
-  // attribution exact (#1604, Phase 3); this also means the executor's service account never
-  // records one (it sends none, and its run rides on the clicker's recorded override).
-  if (body.override_publication_review !== undefined && c.approver.id !== adminUser.id) {
+  if (tokenCheck.kind === "refused") {
     console.warn(
-      `[publish] ${datasetId}: override refused, a web approval of request ${request.id} is in progress`,
+      `[publish] ${datasetId}: approval refused for request ${request.id}, its dispatch token is ${tokenCheck.code === "dispatch_expired" ? "expired" : "no longer the claim's"}`,
     );
     return c.json(
       {
-        error: "override_inside_web_approval",
-        message: OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE,
+        error: tokenCheck.code,
+        message:
+          tokenCheck.code === "dispatch_expired"
+            ? DISPATCH_EXPIRED_MESSAGE
+            : DISPATCH_SUPERSEDED_MESSAGE,
+      },
+      409,
+    );
+  }
+  const tokenValid = tokenCheck.kind === "valid";
+  c.approver = await resolveApprover(db, request.approval_requested_by, tokenValid, {
+    id: adminUser.id,
+    username: adminUser.username,
+  });
+
+  // A run the web started carries the decision its click made: the override and the screen's
+  // acknowledgment were recorded at the click, under the clicker's id, and the gates below read
+  // them there. It may not send one of its own, because it would be recorded under the approver of
+  // record, who is the clicker and not the sender. So an override or an acknowledgment is recorded
+  // only under the credential that sent it, or at the clicker's own dispatch.
+  if (
+    tokenValid &&
+    (body.override_publication_review !== undefined ||
+      body.acknowledge_identifier_screen !== undefined)
+  ) {
+    console.warn(
+      `[publish] ${datasetId}: approval refused for request ${request.id}, a run carrying a dispatch token sent a decision of its own`,
+    );
+    return c.json(
+      {
+        error: "decision_with_dispatch_token",
+        message: DECISION_WITH_DISPATCH_TOKEN_MESSAGE,
       },
       409,
     );
@@ -2726,17 +2768,55 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // (1 only for such a request), so a request that was not blocked when it was read cannot be
   // marked once it has become one, and the owner-name reason itself, so a row a re-request moved
   // to another reason since is refused as well.
+  //
+  // The mark is also where the claim is settled (#1604), and it is the last write before any work
+  // is done, so a refused call has changed nothing:
+  //   - a call that proved its claim (a valid token) marks only while `approval_dispatched_at` is
+  //     still the instant it verified. The token was checked a few statements ago, and a click
+  //     that replaced the claim, a release, a takeover or a denial since would otherwise be run
+  //     under the old click's name. Zero changes is answered below by what changed.
+  //   - a call with no token is the caller's own act, and takes the claim over in the same
+  //     statement (`APPROVAL_CLAIM_CLEAR_SQL`), so the executor the click dispatched is refused at
+  //     its next call and two drivers never run one request. A request that has no claim is
+  //     unaffected: it clears nothing.
   const readAsBlocked = request.status === "blocked" ? 1 : 0;
   const marked = await db
     .prepare(
       // `last_error = NULL`: a new attempt begins, so the previous attempt's
       // error is history (the caller's own output has it), and the row reads as
       // running, not failed, from this moment (services/approval-dispatch.ts).
-      `UPDATE publication_requests SET status = 'approving', approved_by = ?, last_error = NULL, updated_at = datetime('now') WHERE id = ? AND (status IN ('requested', 'approving') OR (status = 'blocked' AND block_reason = '${OWNER_NAME_MISSING_REASON}' AND ? = 1))`,
+      `UPDATE publication_requests SET status = 'approving', approved_by = ?, last_error = NULL, updated_at = datetime('now')${
+        tokenValid ? "" : `, ${APPROVAL_CLAIM_CLEAR_SQL}`
+      } WHERE id = ? AND (status IN ('requested', 'approving') OR (status = 'blocked' AND block_reason = '${OWNER_NAME_MISSING_REASON}' AND ? = 1))${
+        tokenValid ? " AND approval_dispatched_at = ?" : ""
+      }`,
     )
-    .bind(c.approver.id, request.id, readAsBlocked)
+    .bind(
+      c.approver.id,
+      request.id,
+      readAsBlocked,
+      ...(tokenValid ? [request.approval_dispatched_at] : []),
+    )
     .run();
   if ((marked.meta.changes ?? 0) !== 1) {
+    // Under a token the claim is one of the two things that can have moved, and the answer must
+    // say which: a claim that is no longer the one verified is the click's run being refused
+    // (superseded); a claim that stands over a request that moved (a review re-blocked it, which
+    // leaves the claim as it was) is the request that changed, as for every other approval. A
+    // read that fails answers superseded: nothing proved the claim, and nothing was marked.
+    if (tokenValid) {
+      const now = await db
+        .prepare("SELECT approval_dispatched_at FROM publication_requests WHERE id = ?")
+        .bind(request.id)
+        .first<{ approval_dispatched_at: string | null }>()
+        .catch(() => null);
+      if (!now || now.approval_dispatched_at !== request.approval_dispatched_at) {
+        console.warn(
+          `[publish] ${datasetId}: approval refused, the claim on request ${request.id} was replaced while it was being checked`,
+        );
+        return c.json({ error: "dispatch_superseded", message: DISPATCH_SUPERSEDED_MESSAGE }, 409);
+      }
+    }
     console.warn(
       `[publish] ${datasetId}: approval refused, request ${request.id} changed while it was being checked`,
     );

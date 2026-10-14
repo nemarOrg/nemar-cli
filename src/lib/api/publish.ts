@@ -18,6 +18,7 @@ import {
   type StartPublicationReviewResponse,
   type StartedPublicationReview,
 } from "../../../shared/contract/publication-review-admin.js";
+import { APPROVAL_DISPATCH_TOKEN_HEADER } from "../../../shared/contract/publication.js";
 import { APPROVE_RETRY_DELAY_MS } from "../../../shared/publication-retry.js";
 import { PUBLICATION_STEPS } from "../../../shared/publication-steps.js";
 import type { IdentifierScreenView } from "../identifier-screen-display.js";
@@ -450,7 +451,11 @@ function retryDelayMs(): number {
  * retry), so a request that is denied and filed again while the run is going is refused by the
  * Worker (409 `request_mismatch`) and not approved in the old one's place (#1579). A Worker that
  * predates the field ignores it. `dispatchToken` is the per-claim token of a run a web click
- * started; it is not sent yet.
+ * started (#1604): it is sent as the `X-Approval-Dispatch-Token` header on EVERY call of the run,
+ * batches and retries included, because the Worker checks it at the top of each call and records
+ * the administrator who clicked only for a call that carries it. It is a header and never part of
+ * the body, and it is a secret: the debug log redacts it by name, and nothing prints it. A run with
+ * no token is its caller's own act.
  */
 export interface ApprovalIdentity {
   requestId?: number;
@@ -544,7 +549,14 @@ export async function approvePublication(
           `/admin/publish/${datasetId}/approve`,
           {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              // #1604: the proof that this run is the web click's, on every call of it (the
+              // first, each lock batch, each retry): the Worker reads it at the top of each one.
+              ...(identity?.dispatchToken
+                ? { [APPROVAL_DISPATCH_TOKEN_HEADER]: identity.dispatchToken }
+                : {}),
+            },
             body: JSON.stringify({
               resume: isFirstCall ? useResume : true,
               sandbox,

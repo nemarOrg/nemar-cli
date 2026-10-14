@@ -115,11 +115,11 @@ export const IDENTIFIER_SCREEN_ERROR_CODES: readonly string[] = [
 /**
  * The codes an approval refusal carries in `error` with the human sentence in `message` (ADR
  * 0102; ADR 0080 for the dispatch token, Phase 3): the review gate's 409, the
- * blocked request's, the request that changed while the approval was being checked, an override
- * sent inside a web approval, a run for a request that is no longer the one in force, a dispatch
- * token that was replaced or has lapsed, a decision sent by a run the web started, the two
- * refusals of a denial (a request that is running, and one that has started publishing), and a web
- * approval for an id the executor's workflow would not accept (a 400, before anything is claimed). Declared
+ * blocked request's, the request that changed while the approval was being checked, a run for a
+ * request that is no longer the one in force, a dispatch token that was replaced or has lapsed, a
+ * decision sent by a run the web started, the two refusals of a denial (a request that is running,
+ * and one that has started publishing), and a web approval for an id the executor's workflow
+ * would not accept (a 400, before anything is claimed). Declared
  * here, beside the screen's, so the CLI's client leads with the sentence and not the bare token.
  * The first two words are the `error` of the bodies in `publication-review-admin.ts`
  * (`PUBLICATION_REVIEW_NOT_CLEAR_CODE`, `REQUEST_BLOCKED_CODE`); this file stays free of every
@@ -129,7 +129,6 @@ export const APPROVAL_REFUSAL_ERROR_CODES: readonly string[] = [
   "publication_review_not_clear",
   "request_blocked",
   "request_changed",
-  "override_inside_web_approval",
   /** A run named a request that is not the newest active one: it was denied or filed again. */
   "request_mismatch",
   /** The claim a dispatch token was minted for was released, replaced or taken over. */
@@ -162,13 +161,6 @@ export const REQUEST_CHANGED_MESSAGE =
  */
 export const APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE =
   "The request was closed while this approval was running (it was denied, or blocked again), so the run did not mark it published. Its steps had already run: read the request and the dataset again before doing anything else.";
-
-/**
- * The sentence of the 409 `override_inside_web_approval`: an override sent while a web approval of
- * the request is in progress would be recorded under the administrator who clicked.
- */
-export const OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE =
-  "A web approval of this request is in progress, so an override sent now would be recorded under the administrator who clicked. Wait for it to finish or stop, then approve again with --force.";
 
 /**
  * The sentence of the 409 `request_mismatch`: the approval named a request (`request_id`) that is

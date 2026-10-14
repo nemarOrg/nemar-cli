@@ -9,6 +9,7 @@ import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 
 import {
+  APPROVAL_DISPATCH_TOKEN_HEADER,
   APPROVAL_IN_FLIGHT_MESSAGE,
   DENY_AFTER_PUBLISHING_MESSAGE,
   INVALID_DATASET_ID_MESSAGE,
@@ -30,6 +31,7 @@ import {
 } from "../../services/approval-dispatch";
 import { resolveEmailConfig, sendPublicationDeniedEmail } from "../../services/email";
 import { getDatasetsAuth } from "../../services/github-auth";
+import { signApprovalDispatchToken } from "../../services/github/callback-tokens";
 import {
   DispatchRejectedError,
   approvalDispatchEnvironment,
@@ -394,6 +396,15 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    *
    * The body may name the request the run is for, `request_id` (#1579).
    *
+   * The header `X-Approval-Dispatch-Token` is the proof that a call belongs to a web click's claim
+   * (ADR 0080, #1604). A call that carries the token of the request's current claim, while that
+   * claim's lease is live, is recorded as the administrator who clicked (the caller is kept as
+   * `executed_by`); a call with no token (or a blank one) is its caller's own act whatever the
+   * lease says, and once it passes every gate its mark takes the claim over, so the executor the
+   * click dispatched is refused at its next call. A token that is stale or has lapsed is refused
+   * and changes nothing, never downgraded to the caller. A call that carries a valid token may not
+   * carry a decision of its own: the click recorded the override and the acknowledgment.
+   *
    * Refusals, each with a stable code in `error` and a sentence in `message`:
    *   403 origin_not_allowed  an override sent with a session cookie: it is accepted only with
    *                         an API key, and the website records one through approve-dispatch.
@@ -407,8 +418,13 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    *   409 identifier_screen_not_clear  the identifier screen does not allow it (ADR 0086)
    *   409 publication_review_not_clear  the review does not allow it, with a `refusal` word and
    *                         the review's words (ADR 0102)
-   *   409 override_inside_web_approval  an override sent inside a live web approval of the
-   *                         request, which would be recorded under the administrator who clicked
+   *   409 dispatch_superseded  the token is not the request's current claim: it was replaced by
+   *                         a newer click, released, taken over by an approval at a terminal, or
+   *                         is not a token (also: the claim was replaced between the check and
+   *                         the mark). Nothing was changed.
+   *   409 dispatch_expired  the token is genuine, but its run sat idle past the 15 minute lease
+   *   409 decision_with_dispatch_token  a call that carries a valid token sent an override or an
+   *                         acknowledgment: nothing was recorded under anybody
    *   409 request_changed   the request was denied or blocked while the approval was checked
    */
   admin.post("/publish/:id/approve", zValidator("json", approveSchema), async (c) => {
@@ -437,6 +453,8 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       datasetId: c.req.param("id"),
       adminUser: c.get("user"),
       body,
+      // The proof that this call belongs to a web click's claim (#1604). Never logged or echoed.
+      dispatchToken: c.req.header(APPROVAL_DISPATCH_TOKEN_HEADER),
     });
     return c.json(result.body as never, (result.status ?? 200) as never);
   });
@@ -453,16 +471,18 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    * through `repository_dispatch`, then answers 202 straight away. Closing the
    * page cannot matter: the state lives in `publication_requests`.
    *
-   * The executor calls `POST /publish/:id/approve` with its own service key; the
-   * orchestrator reads `approval_requested_by` as the approver while the run is
-   * live, so the record names the admin who clicked rather than the bot.
-   * `/approve` is the contract for every executor, a terminal included: it also
-   * takes the review's override in its body, and answers 403 origin_not_allowed
-   * for an override sent with a cookie, and the 409s `request_blocked`,
-   * `request_changed`, `override_inside_web_approval` and
-   * `publication_review_not_clear`, besides the identifier screen's own
-   * (see its docblock). The executor sends no override: its run rides on the
-   * clicker's, recorded here before the dispatch.
+   * The executor calls `POST /publish/:id/approve` with its own service key and the claim's
+   * dispatch token (#1604): the token, a MAC over this claim's dataset, request, clicker and
+   * instant (`approval_dispatched_at`, as stored), is minted here and handed to the executor in
+   * the dispatch payload. The orchestrator records the admin who clicked, rather than the bot,
+   * for a call that presents it while the lease is live. `/approve` is the contract for every
+   * executor, a terminal included: it also takes the review's override in its body, and answers
+   * 403 origin_not_allowed for an override sent with a cookie, and the 409s `request_blocked`,
+   * `request_changed`, `dispatch_superseded`, `dispatch_expired`,
+   * `decision_with_dispatch_token` and `publication_review_not_clear`, besides the identifier
+   * screen's own (see its docblock). The executor sends no override: its run rides on the
+   * clicker's, recorded here before the dispatch. The token is never logged, audited, listed or
+   * answered.
    *
    * A cookie request must come from a NEMAR origin and a bearer key is not asked: the admin
    * router's `cookieOriginGuard` decides that for every write, before this handler runs.
@@ -490,10 +510,13 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    *   409 request_mismatch  the body's `request_id` is not the newest active request: it was
    *                         denied or filed again since the page read it (#1579); refused before
    *                         the gates and the claim, so nothing is recorded
-   *   502 dispatch_failed   GitHub answered 4xx, or a token could not be
-   *                         minted: nothing was sent, the claim is released
-   *   502 dispatch_unconfigured  the Worker has no GitHub credential; retrying
-   *                         cannot help; the claim is released
+   *   502 dispatch_failed   GitHub answered 4xx, or a GitHub token could not be minted, or the
+   *                         dispatch token could not be signed: nothing was sent, the claim is
+   *                         released
+   *   502 dispatch_unconfigured  the Worker has no GitHub credential, or no secret to sign the
+   *                         dispatch token with; retrying cannot help. A missing secret is
+   *                         answered before the claim (nothing is claimed or sent); a missing
+   *                         credential releases the claim
    *   502 dispatch_unconfirmed   the call to GitHub dropped, timed out or was
    *                         answered 5xx: it MAY have started, so the lease is
    *                         KEPT (a retry is a 409 until it lapses) and an
@@ -618,6 +641,24 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       if (!review.ok) return c.json(review.body, 409);
     }
 
+    // The claim's token is signed with the callback secret, and the claim is made only when there is
+    // one to sign with: a click that cannot be given a token would dispatch a run that is refused
+    // at its first call (a token that cannot be checked is never honored) or recorded as the
+    // executor's own act, which is exactly what the website's Approve button must not do. So the
+    // misconfiguration is answered here, before anything is claimed or sent, and says not to retry.
+    const signingSecret = c.env.PRESCREEN_CALLBACK_SECRET;
+    if (!signingSecret) {
+      console.error(`[approve-dispatch] no signing secret configured for ${datasetId}`);
+      return c.json(
+        {
+          error: "dispatch_unconfigured",
+          message:
+            "This server has no secret configured to sign web approvals, so an approval cannot be dispatched from the web. Retrying will not help. Approve from a terminal, and ask an administrator to fix the configuration.",
+        },
+        502,
+      );
+    }
+
     // One conditional UPDATE is the claim: D1 runs it atomically, so two
     // simultaneous clicks cannot both see the row idle. `updated_at` is left
     // alone on purpose. It is the orchestrator's progress heartbeat, and
@@ -630,17 +671,23 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     // between the claim and the executor's first call, and the predicate would
     // read the freshly dispatched run as failed and let a second click through.
     // The release below puts it back if nothing was sent.
-    const claim = await db
+    //
+    // `RETURNING` hands back the claim's instant exactly as the row now stores it
+    // (`datetime('now')`, a string at one second): the token is signed over THAT value, never a
+    // recomputed one, because the executor's calls and the release endpoint verify it against the
+    // stored column. No row back is a lost claim.
+    const claimed = await db
       .prepare(
         `UPDATE publication_requests
            SET approval_requested_by = ?, approval_dispatched_at = datetime('now'),
                last_error = NULL
-         WHERE id = ? AND status IN ('requested', 'approving') AND NOT ${approvalInFlightSql()}`,
+         WHERE id = ? AND status IN ('requested', 'approving') AND NOT ${approvalInFlightSql()}
+         RETURNING approval_dispatched_at AS claimed_at`,
       )
       .bind(adminUser.id, request.id)
-      .run();
+      .first<{ claimed_at: string }>();
 
-    if (claim.meta.changes !== 1) {
+    if (!claimed) {
       // The claim refuses for two different reasons, and the page must be told
       // the true one. A run may be live (the lease), or the request may have
       // stopped being one that can run in the moments since it was read here:
@@ -672,13 +719,16 @@ export function registerPublishRoutes(admin: AdminRouter): void {
         409,
       );
     }
+    const claimedAt = claimed.claimed_at;
 
     // Release the claim so the admin can try again at once rather than wait out
     // the lease. Only ever done for a failure that is DEFINITELY "not sent", so
-    // the row goes back to how it was. `AND approval_requested_by = ?` makes it
-    // clear only a claim this click made. The error the claim cleared is
-    // restored only while `updated_at` still holds the value read before the
-    // claim: `/approve` bumps it as it starts, so a changed `updated_at` means a
+    // the row goes back to how it was. `AND approval_requested_by = ?` and
+    // `AND approval_dispatched_at = ?` make it clear only THIS click's claim: a claim another
+    // click made in the meantime, even the same administrator's a moment later, has another
+    // instant and another token, and is never undone by this click's failure. The error the claim
+    // cleared is restored only while `updated_at` still holds the value read
+    // before the claim: `/approve` bumps it as it starts, so a changed `updated_at` means a
     // run began in the meantime (a person's terminal), and restoring the old
     // error over its fresh state would make that live run read as failed after
     // the grace window. If even the release fails the lease lapses by itself,
@@ -691,9 +741,9 @@ export function registerPublishRoutes(admin: AdminRouter): void {
                SET ${APPROVAL_CLAIM_CLEAR_SQL},
                    last_error = CASE WHEN updated_at = ? THEN COALESCE(last_error, ?)
                                      ELSE last_error END
-             WHERE id = ? AND approval_requested_by = ?`,
+             WHERE id = ? AND approval_requested_by = ? AND approval_dispatched_at = ?`,
           )
-          .bind(request.updated_at, request.last_error, request.id, adminUser.id)
+          .bind(request.updated_at, request.last_error, request.id, adminUser.id, claimedAt)
           .run();
       } catch (releaseErr) {
         console.error(
@@ -702,6 +752,31 @@ export function registerPublishRoutes(admin: AdminRouter): void {
         );
       }
     };
+
+    // The token the executor presents on every `/approve` call of this run: a MAC over this
+    // claim's dataset, request, clicker and instant (#1604). It is handed to the dispatch and to
+    // nothing else: never logged, audited, listed or answered. A claim that cannot be signed (the
+    // signer refuses a field that holds a line break) was not sent, so it is released.
+    let dispatchToken: string;
+    try {
+      dispatchToken = await signApprovalDispatchToken(
+        { datasetId, requestId: request.id, clickerId: adminUser.id, claimedAt },
+        signingSecret,
+      );
+    } catch (err) {
+      console.error(
+        `[approve-dispatch] could not sign the dispatch token for ${datasetId}:`,
+        errorMessage(err),
+      );
+      await releaseClaim();
+      return c.json(
+        {
+          error: "dispatch_failed",
+          message: "The approval could not be started. Nothing was changed; try again.",
+        },
+        502,
+      );
+    }
 
     // 1. A credential. Absent entirely is a configuration fault that retrying
     // cannot fix, so it has its own code; failing to MINT one (an App token
@@ -828,7 +903,14 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     // the audit row records that a run may exist that the lease alone would not
     // explain.
     try {
-      await triggerApprovePublication(datasetId, request.id, resume, environment, pat);
+      await triggerApprovePublication(
+        datasetId,
+        request.id,
+        resume,
+        environment,
+        pat,
+        dispatchToken,
+      );
     } catch (err) {
       console.error(`[approve-dispatch] dispatch failed for ${datasetId}:`, errorMessage(err));
       if (err instanceof DispatchRejectedError && err.definitelyNotSent) {

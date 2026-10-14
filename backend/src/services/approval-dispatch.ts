@@ -74,8 +74,9 @@ export const FAILED_RUN_GRACE_SECONDS = 60;
  * WHERE). The interpolated value is a module constant, never input.
  *
  * Used where "is anything still associated with this request" is the question
- * rather than "is it running right now": attribution, which must keep naming
- * the admin who clicked across a failed step's retries.
+ * rather than "is it running right now": the dispatch token's check
+ * ({@link checkApprovalDispatchToken}), which must keep naming the admin who
+ * clicked across a failed step's retries.
  */
 export function approvalLeaseLiveSql(columnPrefix = ""): string {
   const p = columnPrefix;
@@ -128,47 +129,29 @@ export interface Approver {
 }
 
 /**
- * The approver of a run: the admin who clicked Approve on the website while that
- * click's run is still live, otherwise the account calling `/approve`.
+ * The approver of a run: the admin who clicked Approve on the website when this call proves it
+ * belongs to that click, otherwise the account calling `/approve`.
  *
- * Attribution forks on purpose (ADR 0080). An executor authenticates with its
- * own service key, so without this the `approved_by` column and the
- * `dataset_published` audit row would name the bot for every web approval. A
- * terminal approval never sets `approval_requested_by`, so it falls through to
- * the caller and behaves exactly as it always has; the caller is the person.
+ * Attribution forks on purpose (ADR 0080). An executor authenticates with its own service key, so
+ * without this the `approved_by` column and the `dataset_published` audit row would name the bot for
+ * every web approval. A terminal approval carries no token, so it falls through to the caller and
+ * behaves exactly as it always has; the caller is the person.
  *
- * `approval_requested_by` is honored only while the lease is live
- * (`approvalLeaseLiveSql`, by time alone). The column is never cleared, so
- * without this a run that lapsed and was later resumed by a different admin at a
- * terminal would be recorded as the original clicker's approval, naming someone
- * who never saw that run finish. The caller evaluates `leaseLive` at the TOP of
- * `/approve`, before the request-start UPDATE bumps the heartbeat: every batch
- * call of a long web run arrives with a fresh `updated_at` and so still resolves
- * to the clicker, and so does the retry of a failed step (which is why this
- * reads the time-only lease and not the failure-aware in-flight predicate: a
- * failure must not strip the attribution from the retry that finishes the run).
+ * The proof is the dispatch token (#1604, Phase 3): `tokenValid` is the answer of
+ * {@link checkApprovalDispatchToken}, true only for a call that presented the token of THIS claim
+ * of THIS request while its lease is live. The fork is on the proof and not on the lease, so a
+ * person who runs `/approve` at a terminal inside a web run's live lease is recorded as themselves
+ * (and takes the claim over, at the mark), where the lease alone used to record them as the
+ * clicker. A call whose token does not verify never reaches here: the caller answers 409 first.
+ * The check is made at the TOP of `/approve`, before the request-start UPDATE bumps the heartbeat,
+ * and reads the time-only lease (`approvalLeaseLiveSql`), so every batch call of a long web run and
+ * the retry of a failed step still resolve to the clicker.
  *
- * The cost, stated in the ADR: a web run that sat quiet for longer than the
- * lease before its first `/approve` call is recorded under the executing key,
- * with `executed_by` still in the audit details.
- *
- * The fork is on the lease, not on who the caller is: a person who runs
- * `/approve` at a terminal inside a web run's live lease is recorded as that
- * run's clicker, with themselves kept as `executed_by` in the audit details
- * (ADR 0080 states this). Telling a service key from a person would need the
- * caller's account kind, and an executor whose key is not marked as a service
- * account would then lose web attribution entirely.
- *
- * A clicker whose account row is gone, who is no longer an active admin, or who
- * has been deleted falls back to the caller rather than failing a publication
- * that is already underway; the dispatch left its own audit row naming the
- * clicker by id.
- *
- * `tokenValid` is whether this call proved it belongs to the claim: the answer of
- * {@link checkApprovalDispatchToken} (#1604, Phase 3), which honors the clicker for a call that
- * presents the claim's own token and for no other. Until the orchestrator reads the token, its
- * call site still passes the time-only lease as that proof, which is the behavior the
- * paragraphs above describe.
+ * A clicker whose account row is gone, who is no longer an active admin, or who has been deleted
+ * falls back to the caller rather than failing a publication that is already underway; the dispatch
+ * left its own audit row naming the clicker by id. The token authorizes nothing and joins no
+ * revocation list for exactly this reason: this re-check, at each use, is what keeps a clicker's
+ * ended access from being recorded as an approval.
  */
 export async function resolveApprover(
   db: D1Database,
