@@ -106,7 +106,7 @@ describe("nemar admin verify", () => {
       const result = await runCli(["admin", "verify", "80", "-y"], server.url);
       // Like its siblings, handleCommandError reports the failure on the
       // spinner; the contract pinned here is that the refusal reaches the user.
-      expect(result.stdout + result.stderr).toContain("Failed to verify the account");
+      expect(result.stdout + result.stderr).toContain("User is not pending");
       expect(result.stdout + result.stderr).toContain("pending");
     } finally {
       server.stop();
