@@ -957,6 +957,7 @@ Where the two differ, this is the later text.
    A resumed run whose steps are all done follows the same rule, and refuses a request that is not `approving` before it runs any tail job, so a refusal never follows a write that cannot be taken back.
    When a tail job warns, that run leaves the request `approving`, so that approving again retries it.
    When none warns, it marks the request `published`, and only when that write changed the row it writes the `dataset_published` audit row, once, with the approver of record as its user (the clicker for a call under a token, with `executed_by` naming the caller) and the flag `finished_by_resume`.
+   The step loop's closing path writes its `dataset_published` row on the same terms, only when its own write changed the request, so a publication has one row whichever call finished it.
    The step loop's own end has the same "approve again" dead end after a warning, which Phase 3 does not change: it is a known limit with a follow-up (ADR 0103, decision 12).
 7. **None of this is behind the flag.**
    Item 3 of the Phase 2 amendment lists what production changes with `PUBLICATION_REVIEW_ENABLED` off.

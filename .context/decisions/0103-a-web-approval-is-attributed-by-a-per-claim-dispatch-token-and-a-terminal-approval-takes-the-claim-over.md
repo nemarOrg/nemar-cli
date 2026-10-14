@@ -185,6 +185,8 @@ A token that is stale or expired is refused, never quietly downgraded.**
     The run answers 409 `approval_closed_during_run`, a word of its own because `request_changed` means that nothing ran and here the steps have run and cannot be taken back,
     and writes one audit row, `approval_finished_on_closed_request`, of ids and words.
     A request that is already `published` was finished by a concurrent call of the same run, and counts as finished.
+    A call writes the `dataset_published` audit row only when its own write changed the row, so a publication has one row, whichever call finished it:
+    the step loop's closing path follows the same rule, so a terminal resume that finished the request leaves no second row when the executor's loop then finds it `published`.
     The branch for a resumed run whose steps are all done follows the same rule, in this order.
     - A request that is not `approving` is refused with `approval_closed_during_run` before any tail job runs.
       The tail jobs write (the Zarr re-request stamp) and can publish a reserved version identifier, which cannot be taken back,
