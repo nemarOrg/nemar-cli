@@ -53,7 +53,7 @@ The website (`nemarOrg/website`, local checkout, read only):
 `src/lib/account-copy.ts`, and the drift tests under `test/`.
 
 Repository rules: AGENTS.md's hard rules, `.rules/documentation.md`, `.memory/README.md`,
-and the notes on sentinels, tri-state fetches, make versus take, plan claims and the epic branch's CI.
+and the notes on sentinels, tri-state fetches, make versus take, plan claims and the epic branch's continuous integration (CI).
 
 Issues #1579, #1580, #1581, #1582, #1583, #1584, #1603, #1604, and the prerequisites #1736 and #1737.
 
