@@ -233,8 +233,8 @@ Description:
   A request cannot be denied while an approval of it is running, or once an
   approval has run a step that publishes (the dataset may be public): wait for
   the run to end. After a step has published, check the dataset: a blocked
-  request waits for its depositor to fix what blocked it, and any other can be
-  finished by approving it again, or repaired by hand.
+  request waits for its depositor to fix what blocked it; for any other, check
+  whether approving it again can finish it, or repair it by hand.
 
 Requirements:
   - Must provide a reason for denial: --reason or, with no --reason, one typed

@@ -216,12 +216,14 @@ export const APPROVAL_IN_FLIGHT_MESSAGE =
  * The sentence of the deny route's 409 `deny_after_publishing`: an approval has run a step that
  * changes something, or was cut off inside one, so the dataset may already be public and the
  * depositor must not be told it was denied. The request may be approving, requested again or
- * blocked, so the sentence does not tell the reader to finish an approval: a blocked request is
- * refused by `/approve` until its depositor has fixed what blocked it, and what stays for the rest
- * is the same by-hand repair the sentence of `approval_closed_during_run` names.
+ * blocked, so the sentence promises no finish: a blocked request is refused by `/approve` until its
+ * depositor has fixed what blocked it, a requested one that carries every step is refused too
+ * (`approval_closed_during_run`), and only an approving one is certain to take another approval.
+ * The reader is told to check whether approving again can finish it, and otherwise to repair it by
+ * hand, which is what the sentence of `approval_closed_during_run` names.
  */
 export const DENY_AFTER_PUBLISHING_MESSAGE =
-  "Steps of an approval of this request have already run, so the dataset may already be public and the request cannot be denied. Check the dataset first. A blocked request waits for its depositor to fix what blocked it; any other can be finished by approving it again, or repaired by hand.";
+  "Steps of an approval of this request have already run, so the dataset may already be public and the request cannot be denied. Check the dataset first. A blocked request waits for its depositor to fix what blocked it; for any other, check whether approving it again can finish it, or repair it by hand.";
 
 /**
  * The sentence of the dispatch route's 400 `invalid_dataset_id`: the id is not one the executor

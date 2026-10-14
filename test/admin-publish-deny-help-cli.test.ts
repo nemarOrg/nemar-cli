@@ -16,6 +16,7 @@
  */
 
 import { afterAll, beforeEach, expect, setDefaultTimeout, test } from "bun:test";
+import { DENY_AFTER_PUBLISHING_MESSAGE } from "../shared/contract/publication";
 import { startPublishCli } from "./helpers/admin-publish-cli";
 
 setDefaultTimeout(60_000);
@@ -35,10 +36,15 @@ test("--help-all says that a running approval, and one that has published a step
   const text = r.stdout.replace(/\s+/g, " ");
   expect(text).toContain("cannot be denied while an approval of it is running");
   expect(text).toContain("once an approval has run a step that publishes");
-  // What is left to do mirrors the Worker's sentence (`DENY_AFTER_PUBLISHING_MESSAGE`): a blocked
-  // request waits for its depositor, and any other is finished by approving it again or repaired.
-  expect(text).toContain("a blocked request waits for its depositor");
-  expect(text).toContain("any other can be finished by approving it again, or repaired by hand");
+  // What is left to do is the Worker's sentence (`DENY_AFTER_PUBLISHING_MESSAGE`) from "A blocked
+  // request" on, read from the constant so the two cannot drift: a blocked request waits for its
+  // depositor, and for any other the administrator checks whether approving again can finish it, or
+  // repairs it by hand. It promises no finish.
+  const start = DENY_AFTER_PUBLISHING_MESSAGE.indexOf("A blocked request");
+  expect(start).toBeGreaterThan(0);
+  const advice = DENY_AFTER_PUBLISHING_MESSAGE.slice(start);
+  expect(text).toContain(`${advice[0].toLowerCase()}${advice.slice(1)}`);
+  expect(text).not.toContain("can be finished by approving it again");
   // Nothing was asked of the API for a help screen.
   expect(h.posted).toEqual([]);
 });

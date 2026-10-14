@@ -3216,7 +3216,7 @@ describe("the sentences the Worker's tests import are pinned here, once", () => 
       "An approval of this request is running, so it cannot be denied right now. If the run stalls before it publishes anything, the request can be denied then.",
     );
     expect(DENY_AFTER_PUBLISHING_MESSAGE).toBe(
-      "Steps of an approval of this request have already run, so the dataset may already be public and the request cannot be denied. Check the dataset first. A blocked request waits for its depositor to fix what blocked it; any other can be finished by approving it again, or repaired by hand.",
+      "Steps of an approval of this request have already run, so the dataset may already be public and the request cannot be denied. Check the dataset first. A blocked request waits for its depositor to fix what blocked it; for any other, check whether approving it again can finish it, or repair it by hand.",
     );
     expect(INVALID_DATASET_ID_MESSAGE).toBe(
       "This is not a dataset id an approval can be started for from the web: it is nm or on followed by six digits (a development environment also accepts xx). Nothing was claimed and nothing was sent.",
