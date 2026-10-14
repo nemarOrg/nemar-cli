@@ -17,8 +17,8 @@
  *    run that has no token; `next` never reads the variable (a person's shell must not turn the
  *    walk into an executor);
  *  - with a token in the environment, a flag that is the administrator's own decision (`--force`,
- *    `--acknowledge-identifier-screen`) is refused locally before anything is sent, because the
- *    click already recorded the decision and the Worker would refuse the call;
+ *    `--acknowledge-identifier-screen`, `--skip-ci-check`) is refused locally before anything is
+ *    sent, because the click already recorded the decision and the Worker would refuse the call;
  *  - a value no header can carry (whitespace, a line break, a character outside printable ASCII)
  *    is refused locally in one line that never shows it, with no request sent, and is not
  *    retried as if it were a network failure;
@@ -29,11 +29,11 @@
  *
  * Mutation checks (each turns a named test red): send no header (the "every call" rows); read the
  * variable in `next` (the `next` row); send the header only on the first call (the retry row); let
- * `--force` through with a token (the refusal rows); print the token, or let the log keep it (the
- * secret rows); trim nothing (the blank variable row); drop the notice, or print it after the
- * first request (the notice rows); drop the hint, or print it for a refusal that is not about the
- * token (the hint rows); hand a malformed value to the request, or accept a wider character set
- * than printable ASCII (the "cannot be a token" rows).
+ * `--force` or `--skip-ci-check` through with a token (the refusal rows); print the token, or let
+ * the log keep it (the secret rows); trim nothing (the blank variable row); drop the notice, or
+ * print it after the first request (the notice rows); drop the hint, or print it for a refusal
+ * that is not about the token (the hint rows); hand a malformed value to the request, or accept a
+ * wider character set than printable ASCII (the "cannot be a token" rows).
  *
  * CI TIER: unit-pure. Hermetic: an in-process backend over a local database, the CLI spawned
  * against it, stand-ins only at GitHub and Resend, no live network; it sets its own default
@@ -382,6 +382,21 @@ describe("with a token in the environment, the administrator's own decisions are
     expect(requestRow(requestId)).toEqual(claim);
   });
 
+  test("--skip-ci-check: exit 1 with nothing sent, it is a decision the click did not make", async () => {
+    const { requestId, token } = await click();
+    const claim = requestRow(requestId);
+
+    const r = await executor(token, ["--skip-ci-check"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(output(r)).toContain("--skip-ci-check");
+    expect(output(r)).toContain(TOKEN_ENV);
+    expect(output(r)).not.toContain(token);
+    expect(h.posted).toEqual([]);
+    expect(h.requests).toEqual([]);
+    expect(requestRow(requestId)).toEqual(claim);
+  });
+
   test("the refusal does not touch a person's command: --force with no token (or a blank one) is the decision it always was", async () => {
     const requestId = seedGolden(h.db);
     const reviewId = seedReport(h.db, requestId, twoReasons());
@@ -397,6 +412,18 @@ describe("with a token in the environment, the administrator's own decisions are
       .get(reviewId);
     expect(override?.override_by).toBe(executorId);
     expect(approveCalls()[0]?.dispatchToken).toBe(false);
+  });
+
+  test("nor does it touch --skip-ci-check with a blank variable: sent as the person's own flag", async () => {
+    const requestId = seedGolden(h.db);
+    seedReport(h.db, requestId);
+
+    const r = await executor("  ", ["--skip-ci-check"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(approveCalls()[0]?.body?.skip_ci_check).toBe(true);
+    expect(approveCalls()[0]?.dispatchToken).toBe(false);
+    expect(requestRow(requestId)?.approved_by).toBe(executorId);
   });
 });
 
@@ -604,12 +631,15 @@ describe("the help says the variable and the rule", () => {
     // Both flags carry the rule where the option list shows it.
     expect(brief).toContain(`recorded with your account (refused while ${TOKEN_ENV} is set)`);
     expect(brief).toContain(`characters; refused while ${TOKEN_ENV} is set)`);
+    expect(brief).toContain(`clears no review reason; refused while ${TOKEN_ENV} is set)`);
 
     const all = await h.cli(["admin", "publish", "approve", "--help-all"]);
     expect(all.exitCode).toBe(0);
     const help = all.stdout.replace(/\s+/g, " ");
     expect(help).toContain(`${TOKEN_ENV}, and presents it on every call`);
-    expect(help).toContain("--force and --acknowledge-identifier-screen are refused here");
+    expect(help).toContain(
+      "--force, --acknowledge-identifier-screen and --skip-ci-check are refused here",
+    );
     expect(help).toContain("'next' never reads the variable");
     expect(help).toContain("Environment:");
   });

@@ -351,8 +351,9 @@ An approval is for the request it showed, and the API refuses it when that
 request was denied or filed again since (`--request-id` names it yourself).
 An approval started from the website is run by a workflow that is handed a
 token in `NEMAR_APPROVAL_DISPATCH_TOKEN`; with it the API records the
-administrator who clicked as the approver, and `--force` and
-`--acknowledge-identifier-screen` are refused while it is set.
+administrator who clicked as the approver, and `--force`,
+`--acknowledge-identifier-screen` and `--skip-ci-check` are refused while it is
+set.
 Without the variable the command is your own approval, recorded under your
 account, and `next` never reads it.
 

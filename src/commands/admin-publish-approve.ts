@@ -120,7 +120,7 @@ export function registerApproveCommand(group: Command): void {
     .option("--sandbox", "Use Zenodo sandbox for testing")
     .option(
       "--skip-ci-check",
-      "Skip the orchestrator's live BIDS validation check (recorded; clears no review reason)",
+      `Skip the orchestrator's live BIDS validation check (recorded; clears no review reason; refused while ${DISPATCH_TOKEN_ENV} is set)`,
     )
     .option(
       "--acknowledge-identifier-screen <reason>",
@@ -174,8 +174,9 @@ Description:
   ${DISPATCH_TOKEN_ENV}, and presents it on every call (as a header, never
   printed or logged). With it the API records the administrator who clicked
   Approve as the approver, and you are only the executor. Such a run carries the
-  decision its click made, so while the variable is set --force and
-  --acknowledge-identifier-screen are refused here, before anything is sent.
+  decision its click made, so while the variable is set --force,
+  --acknowledge-identifier-screen and --skip-ci-check are refused here, before
+  anything is sent.
   Without the variable the command is your own approval, recorded under your
   account, whatever web approval is under way. 'next' never reads the variable.
   A run that presents a token says so on standard error before it reads or sends
@@ -184,7 +185,8 @@ Description:
 
   --skip-ci-check skips the orchestrator's live CI check, and the approval's audit
   row records that it was used. It never clears a review reason: a failed or
-  unconcluded BIDS validation at the reviewed commit needs --force.
+  unconcluded BIDS validation at the reviewed commit needs --force. It is your
+  own decision, so a run that presents a dispatch token never uses it.
 
   An ANONYMOUS RELEASE runs a smaller step set: the GitHub repository stays
   private, no identifier is published, and the depositor is not named. The
@@ -307,8 +309,9 @@ After Approval:
         // reads it, so a token left in a shell cannot turn it into an executor. Blank is none, and
         // a value no header can carry is refused (`readDispatchToken`). A run the web started
         // carries the decision its click made, and the API refuses a call that carries the token
-        // and a decision of its own, so the two decision flags are refused here, before anything is
-        // read or sent.
+        // and a decision of its own, so the three decision flags (the override, the screen's
+        // acknowledgment and the skip of the CI check) are refused here, before anything is read or
+        // sent.
         const tokenInput = readDispatchToken(process.env[DISPATCH_TOKEN_ENV]);
         if (tokenInput.kind === "malformed") {
           console.log(
@@ -326,7 +329,9 @@ After Approval:
             ? "--force"
             : ack !== undefined
               ? "--acknowledge-identifier-screen"
-              : null;
+              : options.skipCiCheck
+                ? "--skip-ci-check"
+                : null;
           if (decision !== null) {
             console.log(
               chalk.red(
