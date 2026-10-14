@@ -19,25 +19,28 @@
  * 4. The website's file matches, string for string. Two modes, and the difference is deliberate:
  *      NEMAR_WEBSITE_REVIEW_COPY set   that path IS the contract. A file that is not there FAILS,
  *                                      naming the path and the variable.
- *      unset                           search the sibling checkouts a developer is likely to have;
- *                                      absent is a VISIBLE skip (`describe.skipIf`), never an
- *                                      early return, which would be reported as success.
+ *      unset                           search the sibling checkouts a developer is likely to have
+ *                                      (see `findWebsiteCopy`); none, or more than one, is a
+ *                                      VISIBLE skip (`describe.skipIf`), never an early return,
+ *                                      which would be reported as success.
  *    The comparison itself is proved on in-memory fixtures (always runs), so the failure modes of
  *    the strict path are exercised without the other repository.
  *
  * Wiring the strict path into the CI workflow is a follow-up that needs the website file on its
- * `staging` branch first; see the header of the copy file.
+ * `staging` branch first; it is recorded in ADR 0102, Phase 4 amendment, items 4 and 7.
  */
 
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
-import type { ScreenGateRefusal } from "../backend/src/services/identifier-screen.js";
+import { screenStateGate, verifyScreenHead } from "../backend/src/services/identifier-screen.js";
+import type { Bindings } from "../backend/src/types/bindings.js";
 import { START_STARTED_REASONS } from "../shared/contract/publication-review-admin.js";
 import {
   PUBLICATION_REVIEW_COPY,
   type PublicationReviewCopyKey,
 } from "../shared/contract/publication-review-copy.js";
+import { DATASET_STATUSES } from "../shared/identifier-screen-report.js";
 import {
   ACKNOWLEDGMENT_MAX_LENGTH,
   ACKNOWLEDGMENT_MIN_LENGTH,
@@ -57,15 +60,32 @@ import { terminalFlaws } from "./helpers/terminal-words.js";
 const REPO_ROOT = join(import.meta.dir, "..");
 const COPY_FILE = join(REPO_ROOT, "shared", "contract", "publication-review-copy.ts");
 
+const WEBSITE_FILE = ["src", "lib", "publication-review-copy.ts"] as const;
+
 /**
- * Where a website checkout is expected to sit relative to this one: one level up from the
- * repository root whatever the root is called, because this repository is often a worktree.
- * Only consulted when {@link WEBSITE_ENV_VAR} is unset.
+ * The copies of the website's table a developer machine is likely to have: a `website` checkout
+ * and each directory of a `website-worktrees` folder, beside this repository (its root is often a
+ * worktree, so the siblings sit one or two levels up). No name is guessed: every directory that
+ * is there is looked in, and only those that hold the file count. Only consulted when
+ * {@link WEBSITE_ENV_VAR} is unset.
  */
-const WEBSITE_CANDIDATES = [
-  join(REPO_ROOT, "..", "website", "src", "lib", "publication-review-copy.ts"),
-  join(REPO_ROOT, "..", "..", "website", "src", "lib", "publication-review-copy.ts"),
-];
+function findWebsiteCopy(root: string): string[] {
+  const found: string[] = [];
+  for (const base of [join(root, ".."), join(root, "..", "..")]) {
+    const checkouts = [join(base, "website")];
+    const worktrees = join(base, "website-worktrees");
+    if (existsSync(worktrees)) {
+      for (const entry of readdirSync(worktrees, { withFileTypes: true })) {
+        if (entry.isDirectory()) checkouts.push(join(worktrees, entry.name));
+      }
+    }
+    for (const checkout of checkouts) {
+      const file = join(checkout, ...WEBSITE_FILE);
+      if (existsSync(file) && !found.includes(file)) found.push(file);
+    }
+  }
+  return found;
+}
 
 /** Set by a CI job to the sparse checkout it made. A relative value resolves against the repo root. */
 const WEBSITE_ENV_VAR = "NEMAR_WEBSITE_REVIEW_COPY";
@@ -78,18 +98,54 @@ const DECLARED_PATH =
     : null;
 
 /**
+ * Remove every comment from TypeScript source, leaving what is not one untouched: a line comment
+ * (`//` to the end of the line, whether it starts the line or follows code) and a block comment.
+ * It walks the text and skips string and template literals, so a `//` inside a value (a URL) is
+ * not a comment. A comment becomes one space; a line comment keeps its newline.
+ */
+function stripComments(source: string): string {
+  let out = "";
+  let i = 0;
+  while (i < source.length) {
+    const c = source[i];
+    const next = source[i + 1];
+    if (c === "/" && next === "/") {
+      while (i < source.length && source[i] !== "\n") i++;
+      out += " ";
+    } else if (c === "/" && next === "*") {
+      const end = source.indexOf("*/", i + 2);
+      i = end === -1 ? source.length : end + 2;
+      out += " ";
+    } else if (c === '"' || c === "'" || c === "`") {
+      let j = i + 1;
+      while (j < source.length && source[j] !== c) j += source[j] === "\\" ? 2 : 1;
+      out += source.slice(i, j + 1);
+      i = j + 1;
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return out;
+}
+
+/**
  * Pull `"key": "value"` pairs out of a TypeScript source file.
  *
- * Byte for byte the extractor the website's drift test uses (its `test/copy-drift.ts`), so the two
- * halves of the mirror cannot disagree about what they compare. Comments are stripped first so a
- * key quoted in prose cannot become an entry; a value that is not a plain string literal is
- * invisible to it, which is why the literal-only rule is asserted below.
+ * The rule, written once for both repositories (the website's `test/copy-drift.ts` carries the
+ * same code, so the two halves of the mirror cannot disagree about what they compare):
+ * 1. every comment is removed first ({@link stripComments}), so a key quoted in prose or in a
+ *    comment after code cannot become an entry;
+ * 2. a key that matches twice THROWS, naming the key: a duplicate in a literal is a TypeScript
+ *    error, and without this the last match would win silently;
+ * 3. a value that is not a plain string literal is invisible to it, which is why the literal-only
+ *    rule is asserted below.
  */
 function extractCopy(source: string): Map<string, string> {
-  const withoutComments = source.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/^[ \t]*\/\/.*$/gm, " ");
   const entries = new Map<string, string>();
   const pattern = /"([A-Za-z0-9_.]+)"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
-  for (const match of withoutComments.matchAll(pattern)) {
+  for (const match of stripComments(source).matchAll(pattern)) {
+    if (entries.has(match[1])) throw new Error(`duplicate key in the copy table: ${match[1]}`);
     entries.set(match[1], match[2].replace(/\\(.)/g, "$1"));
   }
   return entries;
@@ -151,6 +207,29 @@ describe("the copy table's own rules", () => {
     expect(extractCopy(source).size).toBe(1);
   });
 
+  test("the extractor ignores a pair inside a comment that follows code on the same line", () => {
+    // The hole this closes: the commented pair matched, the last match won, and the real value
+    // was replaced by the commented one in the comparison.
+    const source = [
+      'const X = { "start.dispatched": "The review was begun.", // "start.dispatched": "Was started."',
+      '  "start.redispatched": "Again." /* "start.redispatched": "Never." */, };',
+    ].join("\n");
+    expect(Object.fromEntries(extractCopy(source))).toEqual({
+      "start.dispatched": "The review was begun.",
+      "start.redispatched": "Again.",
+    });
+  });
+
+  test("the extractor keeps a // that sits inside a value", () => {
+    const source = 'const X = { "a.b": "see http://example.org/x for it" }; // "a.b": "no"';
+    expect(extractCopy(source).get("a.b")).toBe("see http://example.org/x for it");
+  });
+
+  test("the extractor rejects a key that matches twice, naming it", () => {
+    const source = 'const X = { "a.b": "One.", "c.d": "Two.", "a.b": "Three." };';
+    expect(() => extractCopy(source)).toThrow("duplicate key in the copy table: a.b");
+  });
+
   test("the extractor invents nothing for a computed value", () => {
     const source = 'const X = { "a.b": `${MIN} to ${MAX}`, "c.d": "plain" };';
     expect(extractCopy(source).has("a.b")).toBe(false);
@@ -204,18 +283,34 @@ describe("the copy table covers exactly what it must", () => {
     expect(keysWithPrefix("gate").sort()).toEqual([...REVIEW_GATE_REFUSALS].sort());
   });
 
-  test("the screen_gate.* keys are exactly the six words the screen's refusal can carry", () => {
-    // `clear` is not a refusal. The type-level half of this line is the `satisfies`: a word the
-    // service adds to `ScreenGateRefusal["gate"]` fails the typecheck here until it is listed.
-    const SCREEN_REFUSALS = [
-      "blocks",
-      "acknowledge",
-      "rerun",
-      "wait",
-      "stale",
-      "unverified",
-    ] as const satisfies readonly Exclude<ScreenGateRefusal["gate"], "clear">[];
-    expect(keysWithPrefix("screen_gate").sort()).toEqual([...SCREEN_REFUSALS].sort());
+  test("the screen_gate.* keys are exactly the words the screen's gates refuse with", async () => {
+    // The words come from RUNNING the real gates, not from a list typed here: the state half
+    // (`screenStateGate`) over every stored state the column can hold, and the content half
+    // (`verifyScreenHead`) for the one refusal it makes without a network call. A state or a
+    // gate word the service adds shows up in the observed set and fails this until the table
+    // has its key. `clear` is not a refusal and never appears.
+    const row = (status: string | null) => ({
+      identifier_screen_status: status,
+      identifier_screen_report: null,
+      identifier_screen_ack_at: null,
+      identifier_screen_ack_by: null,
+    });
+    const states = [null, "pending", "error", "unreported", ...DATASET_STATUSES];
+    const observed = new Set<string>();
+    for (const state of states) {
+      const outcome = screenStateGate("nm000999", row(state), false, 1);
+      if (!outcome.ok) observed.add(outcome.refusal.gate);
+    }
+    // No stored report names a commit, so the head check refuses before it reads anything.
+    const noHead = await verifyScreenHead({} as Bindings, "nm000999", row("clean"));
+    expect(noHead.ok).toBe(false);
+    if (!noHead.ok) observed.add(noHead.refusal.gate);
+    // `stale` is the one word that exists only behind a lookup of the repository's `main`; the
+    // admin-routes tests and the identifier-screen tests exercise it with the GitHub stand-in.
+    observed.add("stale");
+    expect(observed.size).toBeGreaterThan(4);
+    expect(observed.has("clear")).toBe(false);
+    expect(keysWithPrefix("screen_gate").sort()).toEqual([...observed].sort());
   });
 
   test("the start.* keys are exactly the reasons a started review can carry", () => {
@@ -252,22 +347,15 @@ describe("the page and the CLI say the same where they must", () => {
     expect(unverified).toBe(REVIEW_GATE_REFUSAL_TEXT.unverified);
   });
 
-  test("the other four gate sentences are the page's own, because the Worker's name a terminal", () => {
-    // The reason `gate.*` exists: if the Worker's text ever stops naming a terminal, a key here
-    // would be a second copy of a sentence that no longer needs one, and this says so.
+  test("the other four gate sentences are the page's own, not the Worker's", () => {
+    // The reason `gate.*` exists: the Worker's text for these names a terminal (the web-safety
+    // tests pin that boundary), so the page words them itself and must not copy the Worker's.
     for (const refusal of [
       "needs_override",
       "override_not_covering",
       "review_changed",
       "no_review_row",
     ] as const) {
-      expect({
-        refusal,
-        terminalFlaws: terminalFlaws(REVIEW_GATE_REFUSAL_TEXT[refusal], 1).length > 0,
-      }).toEqual({
-        refusal,
-        terminalFlaws: true,
-      });
       expect(PUBLICATION_REVIEW_COPY[`gate.${refusal}`]).not.toBe(
         REVIEW_GATE_REFUSAL_TEXT[refusal],
       );
@@ -357,18 +445,25 @@ describe("the drift comparison, proved on fixtures", () => {
   });
 });
 
-/** Where the website's table is, or null when nobody has told us and no sibling checkout is
- *  present. A DECLARED path counts as found whether or not it exists: the existence check is a
- *  failing assertion, not a reason to skip. */
-const FOUND = DECLARED_PATH ?? WEBSITE_CANDIDATES.find((path) => existsSync(path)) ?? null;
+const CANDIDATES = DECLARED_PATH === null ? findWebsiteCopy(REPO_ROOT) : [];
+
+/** Where the website's table is, or null when nobody has told us and the siblings do not say.
+ *  A DECLARED path counts as found whether or not it exists: the existence check is a failing
+ *  assertion, not a reason to skip. Several sibling copies are ambiguous, because one of them can
+ *  be an older branch and a comparison against it would report drift that is not there. */
+const FOUND = DECLARED_PATH ?? (CANDIDATES.length === 1 ? CANDIDATES[0] : null);
 const NO_CHECKOUT = FOUND === null;
 
 if (NO_CHECKOUT) {
+  const why =
+    CANDIDATES.length === 0
+      ? "no website checkout beside this repository holds the file"
+      : `${CANDIDATES.length} website checkouts hold it (${CANDIDATES.join(", ")}) and none is chosen for you`;
   console.info(
     [
-      `[publication-review-copy parity] skipping: no website checkout at ${WEBSITE_CANDIDATES.join(" or ")},`,
-      `and ${WEBSITE_ENV_VAR} is unset. A CI job sets it once the website file is on its staging branch;`,
-      "this is the developer-machine path.",
+      `[publication-review-copy parity] skipping: ${why}, and ${WEBSITE_ENV_VAR} is unset.`,
+      `Set ${WEBSITE_ENV_VAR} to the website file to run it from a worktree or with several checkouts.`,
+      "A CI job sets it once the website file is on its staging branch.",
     ].join(" "),
   );
 }
