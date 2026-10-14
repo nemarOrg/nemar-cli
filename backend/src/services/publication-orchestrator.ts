@@ -2848,7 +2848,7 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     // request closed while the run ran. But only when no tail job warned: those warnings say
     // "approve the request again to retry", which finds only an active request, so closing it
     // here would turn the remedy into a 404. A run with a warning leaves the request `approving`
-    // and answers as it did before the request was marked here at all.
+    // and says so in its answer, below.
     const ended = retryWarnings.length === 0 ? await markRequestPublished(db, request.id) : null;
     if (ended && !ended.finished) {
       return refuseApprovalOnClosedRequest(c, request.id, ended.status);
@@ -2866,12 +2866,16 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
       ended?.finished && ended.changed
         ? await recordPublicationAudit(c, undefined, allSteps, true)
         : undefined;
+    // The answer is the step loop's in shape (ADR 0103 decision 12): the warnings under the one key
+    // the CLI prints, `warning`, joined as the loop joins its own, and a `status` that says what
+    // the row says. A call that left the request `approving` (a tail job warned) says so, so an
+    // answer that reads as a success never claims a publication the row does not have.
     const warnings = [...retryWarnings, auditWarning].filter(Boolean);
     return c.json({
       message: "All steps already completed",
       dataset_id: datasetId,
-      status: "published",
-      ...(warnings.length > 0 ? { warnings } : {}),
+      status: ended ? "published" : "approving",
+      ...(warnings.length > 0 ? { warning: warnings.join(" | ") } : {}),
     });
   }
 

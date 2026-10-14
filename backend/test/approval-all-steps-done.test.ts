@@ -162,10 +162,14 @@ describe("a tail job that warns leaves the request approving, so approving again
 
     const first = await approve();
     expect(first.status).toBe(200);
-    const body = (await first.json()) as { status: string; message: string; warnings?: string[] };
+    const body = (await first.json()) as Record<string, unknown>;
     expect(body.message).toBe("All steps already completed");
-    expect(body.warnings).toHaveLength(1);
-    expect(body.warnings?.[0]).toContain("Approve the request again to retry");
+    // The answer says what the row says: a request the call did not close is `approving`, and the
+    // warning is under the one key every other answer of this route and the CLI read, `warning`
+    // (ADR 0103 decision 12), never a plural one that nothing prints.
+    expect(body.status).toBe("approving");
+    expect(body).not.toHaveProperty("warnings");
+    expect(body.warning).toContain("Approve the request again to retry");
     expect(requestRow(id).status).toBe("approving");
     expect(requestRow(id).approved_at).toBeNull();
     expect(auditRows("dataset_published")).toHaveLength(0);
@@ -174,7 +178,9 @@ describe("a tail job that warns leaves the request approving, so approving again
     // would be a 404), runs the tail jobs again, and warns again while the cause stands.
     const again = await approve();
     expect(again.status).toBe(200);
-    expect(((await again.json()) as { warnings?: string[] }).warnings).toHaveLength(1);
+    const againBody = (await again.json()) as { status: string; warning?: string };
+    expect(againBody.status).toBe("approving");
+    expect(againBody.warning).toContain("Approve the request again to retry");
     expect(requestRow(id).status).toBe("approving");
 
     // Once the cause is repaired, the next approval has nothing to warn about and closes the request.
@@ -189,6 +195,27 @@ describe("a tail job that warns leaves the request approving, so approving again
     expect(requestRow(id).status).toBe("published");
     expect(requestRow(id).approved_at).not.toBeNull();
     expect(auditRows("dataset_published")).toHaveLength(1);
+  });
+
+  test("two tail jobs that warn in one call are joined with ' | ' under the one key, as the step loop joins its own", async () => {
+    const id = seedAllDone("approving");
+    seedConcealedEraWithWarning();
+    const failingStamp = env({
+      DB: interceptingD1(realD1(db), (sql) => {
+        if (/UPDATE datasets\s+SET sweep_stamps/.test(sql)) throw new Error("the stamp is refused");
+      }),
+    });
+
+    const res = await approve({ bindings: failingStamp });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { status: string; warning?: string };
+    expect(body.status).toBe("approving");
+    const parts = (body.warning ?? "").split(" | ");
+    expect(parts).toHaveLength(2);
+    expect(parts[0]).toContain("the stamp is refused");
+    expect(parts[1]).toContain("Approve the request again to retry");
+    expect(requestRow(id).status).toBe("approving");
   });
 });
 
@@ -300,10 +327,10 @@ describe("the call that closes an all-steps-done request writes the dataset_publ
     const res = await approve({ bindings: failing });
 
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { warnings?: string[] };
-    expect(body.warnings).toHaveLength(1);
-    expect(body.warnings?.[0]).toContain("Audit log write failed");
-    expect(body.warnings?.[0]).toContain("the audit table is unwritable");
+    const body = (await res.json()) as { status: string; warning?: string };
+    expect(body.status).toBe("published");
+    expect(body.warning).toContain("Audit log write failed");
+    expect(body.warning).toContain("the audit table is unwritable");
     expect(requestRow(id).status).toBe("published");
     expect(auditRows("dataset_published")).toHaveLength(0);
   });
