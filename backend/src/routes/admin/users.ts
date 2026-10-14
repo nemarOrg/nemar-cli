@@ -40,6 +40,7 @@ import {
   sendUploadAccessGrantedEmail,
   sendWebUploadAccessGrantedEmail,
 } from "../../services/email";
+import { applyEmailVerification } from "../../services/email-verification";
 import { decrypt } from "../../services/encryption";
 import { isNonProductionEnv } from "../../services/environment";
 import { removeCollaborator } from "../../services/github";
@@ -1376,6 +1377,67 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     }
 
     return finalizeApproval(c, user);
+  });
+
+  /**
+   * POST /admin/users/by-id/:id/verify - an owner marks a `pending` account's
+   * email as verified and moves it to `verified` (the base tier).
+   *
+   * The recovery for an account the inbox flow cannot reach, so an owner does
+   * not edit the database by hand. It is the SAME transition as the code flow
+   * (`applyEmailVerification`), so the status and the flag move together and
+   * the migration 0096 guard is satisfied. It grants nothing above the base
+   * tier: `service_access` still has one writer, admin approval. Owner only,
+   * because it asserts an inbox the person did not prove; the audit row names
+   * the owner.
+   */
+  admin.post("/users/by-id/:id/verify", ownerMiddleware, async (c) => {
+    const db = c.env.DB;
+    const owner = c.get("user");
+
+    const id = Number.parseInt(c.req.param("id"), 10);
+    if (!Number.isInteger(id) || id <= 0 || id === SYSTEM_USER_ID) {
+      return c.json({ error: "Invalid user id" }, 400);
+    }
+
+    const user = await db
+      .prepare("SELECT id, status FROM users WHERE id = ? AND deleted_at IS NULL")
+      .bind(id)
+      .first<{ id: number; status: string }>();
+    if (!user) {
+      return c.json({ error: "User not found" }, 404);
+    }
+    if (user.status !== "pending") {
+      return c.json(
+        {
+          error: "User is not pending",
+          status: user.status,
+          message:
+            "Only a pending account can be force-verified; approve or revoke handles the other tiers.",
+        },
+        409,
+      );
+    }
+
+    const { promoted } = await applyEmailVerification(db, id, "owner_override");
+    if (!promoted) {
+      // Lost a race with the owner's own verification or a revoke.
+      return c.json({ error: "User is not pending" }, 409);
+    }
+
+    try {
+      await auditLogStatement(db, {
+        userId: owner.id,
+        action: "email_verified_by_owner",
+        resourceType: "user",
+        resourceId: String(id),
+        details: JSON.stringify({ from: "pending", to: "verified" }),
+      }).run();
+    } catch (err) {
+      console.error(`AUDIT GAP: owner verification of id=${id} committed without its row:`, err);
+    }
+
+    return c.json({ message: `User id ${id} verified`, user: { id, status: "verified" } });
   });
 
   /**
