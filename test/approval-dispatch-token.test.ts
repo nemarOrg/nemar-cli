@@ -8,7 +8,9 @@
  *
  * What these tests hold: the token binds every column it is derived from, it is a different
  * message from every other callback kind's (checked in BOTH directions against all six, because
- * one secret signs them all), and a field that could pose as its neighbour is refused.
+ * one secret signs them all), a field that could pose as its neighbour is refused, and the check
+ * that reads the token answers in the plan's order, so a token is never honored for a call that
+ * cannot prove it belongs to the claim.
  *
  * Real crypto.subtle round-trips over the real functions; no mocks per `.rules/testing.md`.
  *
@@ -17,6 +19,10 @@
 
 import { describe, expect, test } from "bun:test";
 import "./setup";
+import {
+  APPROVAL_DISPATCH_TOKEN_HEADER,
+  checkApprovalDispatchToken,
+} from "../backend/src/services/approval-dispatch";
 import { isValidDatasetId } from "../backend/src/services/datasetId";
 import {
   signApprovalDispatchToken as signFromBarrel,
@@ -142,6 +148,10 @@ describe("signApprovalDispatchToken / verifyApprovalDispatchToken", () => {
     }
   });
 
+  test("the header it travels in is the one the executor and the Worker both name", () => {
+    expect(APPROVAL_DISPATCH_TOKEN_HEADER).toBe("X-Approval-Dispatch-Token");
+  });
+
   test("the services/github barrel re-exports the very functions", () => {
     expect(signFromBarrel).toBe(signApprovalDispatchToken);
     expect(verifyFromBarrel).toBe(verifyApprovalDispatchToken);
@@ -248,5 +258,115 @@ describe("domain separation from every other callback token (same secret)", () =
   test("the digest differs from every other kind's for the values they share", async () => {
     const mine = await signApprovalDispatchToken(PAYLOAD, SECRET);
     for (const token of await everyOtherKindsToken()) expect(token).not.toBe(mine);
+  });
+});
+
+describe("checkApprovalDispatchToken (the rules, in order)", () => {
+  /** A row as the orchestrator reads it: the claim's columns and the SQL-computed lease. */
+  const row = (over: Partial<Parameters<typeof checkApprovalDispatchToken>[1]> = {}) => ({
+    dataset_id: PAYLOAD.datasetId,
+    id: PAYLOAD.requestId,
+    approval_requested_by: PAYLOAD.clickerId as number | null,
+    approval_dispatched_at: PAYLOAD.claimedAt as string | null,
+    approval_lease_live: 1,
+    ...over,
+  });
+  const env = { PRESCREEN_CALLBACK_SECRET: SECRET };
+
+  test("a missing, empty or blank header is absent, whatever the row holds", async () => {
+    for (const token of [undefined, null, "", "   "]) {
+      expect(await checkApprovalDispatchToken(env, row(), token)).toEqual({ kind: "absent" });
+    }
+    // Absent is decided before anything about the claim is read.
+    expect(
+      await checkApprovalDispatchToken(
+        env,
+        row({ approval_requested_by: null, approval_dispatched_at: null, approval_lease_live: 0 }),
+        undefined,
+      ),
+    ).toEqual({ kind: "absent" });
+  });
+
+  test("a genuine token on a live claim is valid", async () => {
+    const token = await signApprovalDispatchToken(PAYLOAD, SECRET);
+    expect(await checkApprovalDispatchToken(env, row(), token)).toEqual({ kind: "valid" });
+    // The header's own padding is not part of the token.
+    expect(await checkApprovalDispatchToken(env, row(), ` ${token} `)).toEqual({ kind: "valid" });
+  });
+
+  test("no secret on the Worker is superseded, never valid: a token is not honored it cannot check", async () => {
+    const token = await signApprovalDispatchToken(PAYLOAD, SECRET);
+    for (const noSecret of [
+      {},
+      { PRESCREEN_CALLBACK_SECRET: undefined },
+      { PRESCREEN_CALLBACK_SECRET: "" },
+    ]) {
+      expect(await checkApprovalDispatchToken(noSecret, row(), token)).toEqual({
+        kind: "refused",
+        code: "dispatch_superseded",
+      });
+    }
+  });
+
+  test("a claim that is gone is superseded, so a released or taken-over claim refuses the executor", async () => {
+    const token = await signApprovalDispatchToken(PAYLOAD, SECRET);
+    for (const gone of [
+      { approval_requested_by: null },
+      { approval_dispatched_at: null },
+      { approval_requested_by: null, approval_dispatched_at: null },
+    ]) {
+      expect(await checkApprovalDispatchToken(env, row(gone), token)).toEqual({
+        kind: "refused",
+        code: "dispatch_superseded",
+      });
+    }
+  });
+
+  test("a MAC that does not match is superseded: another claim, request, clicker, dataset or key", async () => {
+    const token = await signApprovalDispatchToken(PAYLOAD, SECRET);
+    for (const other of [
+      { approval_dispatched_at: "2026-10-13 17:00:01" },
+      { id: PAYLOAD.requestId + 1 },
+      { approval_requested_by: PAYLOAD.clickerId + 1 },
+      { dataset_id: "nm000999" },
+    ]) {
+      expect(await checkApprovalDispatchToken(env, row(other), token)).toEqual({
+        kind: "refused",
+        code: "dispatch_superseded",
+      });
+    }
+    const flipped = `${token.slice(0, 63)}${token.endsWith("0") ? "1" : "0"}`;
+    expect(await checkApprovalDispatchToken(env, row(), flipped)).toEqual({
+      kind: "refused",
+      code: "dispatch_superseded",
+    });
+    expect(
+      await checkApprovalDispatchToken({ PRESCREEN_CALLBACK_SECRET: "rotated" }, row(), token),
+    ).toEqual({ kind: "refused", code: "dispatch_superseded" });
+  });
+
+  test("a MAC that matches on a lapsed lease is expired, and only then", async () => {
+    const token = await signApprovalDispatchToken(PAYLOAD, SECRET);
+    expect(await checkApprovalDispatchToken(env, row({ approval_lease_live: 0 }), token)).toEqual({
+      kind: "refused",
+      code: "dispatch_expired",
+    });
+    // The MAC is checked first: a stranger's token on a lapsed lease is superseded, not expired,
+    // so the answer does not say whether a lease lapsed to someone who cannot prove a claim.
+    expect(
+      await checkApprovalDispatchToken(env, row({ approval_lease_live: 0 }), "0".repeat(64)),
+    ).toEqual({ kind: "refused", code: "dispatch_superseded" });
+  });
+
+  test("only a lease the database reported live as exactly 1 counts", async () => {
+    const token = await signApprovalDispatchToken(PAYLOAD, SECRET);
+    for (const live of [0, 2, -1]) {
+      expect(
+        await checkApprovalDispatchToken(env, row({ approval_lease_live: live }), token),
+      ).toEqual({
+        kind: "refused",
+        code: "dispatch_expired",
+      });
+    }
   });
 });

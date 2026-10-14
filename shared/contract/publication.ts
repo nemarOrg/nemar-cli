@@ -144,6 +144,16 @@ export const OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE =
   "A web approval of this request is in progress, so an override sent now would be recorded under the administrator who clicked. Wait for it to finish or stop, then approve again with --force.";
 
 /**
+ * The request header an approval executor presents its dispatch token in (ADR 0080, Phase 3 of
+ * the publication review). The Worker reads it on `/approve` to decide whether the call belongs
+ * to the web claim it was dispatched for, and the CLI sends it when the executor's workflow hands
+ * it the token. Declared once so the two cannot spell it differently, and so the `--debug` log's
+ * header redaction is held to the same spelling by a test: the token is a credential-shaped value
+ * in a header, and that log is what users are told to attach to public issues.
+ */
+export const APPROVAL_DISPATCH_TOKEN_HEADER = "X-Approval-Dispatch-Token";
+
+/**
  * Per-user outcome of `POST /admin/users/backfill-names` (#1255).
  *
  * `no_public_name` and `lookup_failed` are deliberately distinct: the first is
