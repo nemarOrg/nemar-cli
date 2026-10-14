@@ -150,7 +150,42 @@ export interface GitFacts {
    * did not fit the file or character budget, its diff was cut, or reading it failed.
    */
   readIncomplete: boolean;
+  /**
+   * How many changed files differ only cosmetically, decided by the platform and not by the
+   * model: a text file that differs only in trailing whitespace or line endings, or a JSON file
+   * whose parsed value is unchanged by the reformatting. Such a file needs no reading to know
+   * that nothing was lost, so it never makes {@link readIncomplete} true.
+   */
+  cosmeticOnlyFiles: number;
+  /** Changed metadata files grouped by the shape of their path, so a bulk edit reads as one line. */
+  groups: PathGroup[];
+  /** A CHANGES or CHANGELOG file at the dataset root is among the changed files. */
+  changelogTouched: boolean;
+  /**
+   * The pull request adds the new version to the changelog. Null when there is no changelog file or no
+   * new version to look for, so "absent" and "present but silent" are not the same answer.
+   */
+  changelogMentionsVersion: boolean | null;
 }
+
+/** One shape of changed path: `sub-*` and `ses-*` and `run-*` stand for any value. */
+export interface PathGroup {
+  status: ChangeStatus;
+  pattern: string;
+  files: number;
+  /** How many of the group's files had their diff shown to the reviewer in full. */
+  shown: number;
+  /** How many of the group's files differ only cosmetically. */
+  cosmeticOnly: number;
+}
+
+/** The most path shapes reported; the rest are counted in no group rather than listed. */
+export const MAX_GROUPS = 12;
+
+/** Beyond this many changed files the JSON re-read is skipped: the answer is "not cosmetic". */
+const MAX_COSMETIC_CHECKS = 2_000;
+
+const CHANGELOG_NAME = /^(CHANGES|CHANGELOG)(\.(md|txt|rst))?$/i;
 
 function git(dir: string, args: string[]): string {
   return execFileSync(
@@ -252,6 +287,83 @@ function byReviewOrder(a: RawChange, b: RawChange): number {
   );
 }
 
+/** The shape of a path: subject, session and run labels replaced by `*`. */
+export function pathPattern(path: string): string {
+  return path
+    .replace(/(?<![A-Za-z0-9])sub-[^/_.]+/g, "sub-*")
+    .replace(/(?<![A-Za-z0-9])ses-[^/_.]+/g, "ses-*")
+    .replace(/(?<![A-Za-z0-9])run-[^/_.]+/g, "run-*");
+}
+
+/** The files `git` reports as different when trailing whitespace and CR line endings are ignored. */
+function filesWithRealTextChanges(
+  dir: string,
+  mergeBase: string,
+  headSha: string,
+): Set<string> | null {
+  const raw = tryGit(dir, [
+    "diff",
+    "--name-only",
+    "-z",
+    "--no-renames",
+    "--ignore-space-at-eol",
+    "--ignore-cr-at-eol",
+    mergeBase,
+    headSha,
+  ]);
+  return raw === null ? null : new Set(raw.split("\0").filter(Boolean));
+}
+
+/** Two JSON texts that parse to the same value, whatever their indentation or line endings. */
+function sameJson(a: string, b: string): boolean {
+  try {
+    return JSON.stringify(sortKeys(JSON.parse(a))) === JSON.stringify(sortKeys(JSON.parse(b)));
+  } catch {
+    return false;
+  }
+}
+
+function sortKeys(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(sortKeys);
+  if (v !== null && typeof v === "object") {
+    return Object.fromEntries(
+      Object.entries(v as Record<string, unknown>)
+        .sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0))
+        .map(([k, val]) => [k, sortKeys(val)]),
+    );
+  }
+  return v;
+}
+
+/** The text of the dataset's changelog (CHANGES or CHANGELOG at the root) at `rev`, or null. */
+function changelogAt(dir: string, rev: string): string | null {
+  const listing = tryGit(dir, ["ls-tree", "--name-only", rev]);
+  if (listing === null) throw new EvidenceError("tree_unreadable");
+  const name = listing.split("\n").find((n) => CHANGELOG_NAME.test(n));
+  if (name === undefined) return null;
+  const text = tryGit(dir, ["show", `${rev}:${name}`]);
+  if (text === null) throw new EvidenceError("description_unreadable");
+  return text;
+}
+
+/**
+ * Whether the pull request ADDS `version` to the dataset's changelog: it is in the changelog at
+ * the head and was not already in it at the merge base, so an old entry that happens to carry the
+ * same number does not count. Null when the head has no changelog file or there is no new version.
+ */
+function changelogAdds(
+  dir: string,
+  mergeBase: string,
+  headSha: string,
+  version: string | null,
+): boolean | null {
+  if (version === null) return null;
+  const after = changelogAt(dir, headSha);
+  if (after === null) return null;
+  const before = changelogAt(dir, mergeBase);
+  return after.includes(version) && !(before ?? "").includes(version);
+}
+
 /**
  * Read what `headSha` changes relative to the point it branched from `baseSha`.
  *
@@ -275,10 +387,29 @@ export function gatherGitFacts(dir: string, baseSha: string, headSha: string): G
     .filter((c) => READABLE_AREAS.has(classifyPath(c.path)))
     .sort(byReviewOrder);
 
+  // A modified file that differs only cosmetically needs no reading: nothing in it was lost.
+  const realText = filesWithRealTextChanges(dir, mergeBase, headSha);
+  let cosmeticChecks = 0;
+  const cosmeticOnly = new Set<string>();
+  for (const c of wanted) {
+    if (c.status !== "modified") continue;
+    if (realText !== null && !realText.has(c.path)) {
+      cosmeticOnly.add(c.path);
+      continue;
+    }
+    if (!c.path.endsWith(".json") || cosmeticChecks >= MAX_COSMETIC_CHECKS) continue;
+    cosmeticChecks++;
+    const before = tryGit(dir, ["show", `${mergeBase}:${c.path}`]);
+    const after = tryGit(dir, ["show", `${headSha}:${c.path}`]);
+    if (before !== null && after !== null && sameJson(before, after)) cosmeticOnly.add(c.path);
+  }
+
   const patches: Patch[] = [];
   const read = new Map<string, Patch>();
   let budget = MAX_PATCH_TOTAL_CHARS;
-  for (const c of wanted.slice(0, MAX_PATCH_FILES)) {
+  // The read budget goes to files that really changed.
+  const toRead = wanted.filter((c) => !cosmeticOnly.has(c.path));
+  for (const c of toRead.slice(0, MAX_PATCH_FILES)) {
     if (budget <= 0) break;
     const diff = tryGit(dir, [
       "diff",
@@ -301,9 +432,33 @@ export function gatherGitFacts(dir: string, baseSha: string, headSha: string): G
 
   const readIncomplete = wanted.some((c) => {
     if (c.status === "added") return false;
+    if (cosmeticOnly.has(c.path)) return false;
     const patch = read.get(c.path);
     return patch === undefined || patch.truncated;
   });
+
+  const groupMap = new Map<string, PathGroup>();
+  for (const c of wanted) {
+    const pattern = pathPattern(c.path);
+    const key = `${c.status}\t${pattern}`;
+    const g = groupMap.get(key) ?? {
+      status: c.status,
+      pattern,
+      files: 0,
+      shown: 0,
+      cosmeticOnly: 0,
+    };
+    g.files++;
+    const patch = read.get(c.path);
+    if (patch !== undefined && !patch.truncated) g.shown++;
+    if (cosmeticOnly.has(c.path)) g.cosmeticOnly++;
+    groupMap.set(key, g);
+  }
+  const groups = [...groupMap.values()].sort((a, b) => b.files - a.files).slice(0, MAX_GROUPS);
+
+  const changelogTouched = changes.some((c) => CHANGELOG_NAME.test(c.path));
+  const versionAfter = versionAt(dir, headSha);
+  const changelogMentionsVersion = changelogAdds(dir, mergeBase, headSha, versionAfter);
 
   // An empty list would read to the model as "no commits", so a failed read is an error.
   const log = tryGit(dir, ["log", "--format=%s", `-n${MAX_COMMITS}`, `${mergeBase}..${headSha}`]);
@@ -313,11 +468,15 @@ export function gatherGitFacts(dir: string, baseSha: string, headSha: string): G
     patches,
     commits: log.split("\n").filter(Boolean),
     versionBefore: versionAt(dir, mergeBase),
-    versionAfter: versionAt(dir, headSha),
+    versionAfter,
     subjectsBefore: subjectsAt(dir, mergeBase),
     subjectsAfter: subjectsAt(dir, headSha),
     listCut: changes.length > MAX_MODEL_FILES,
     readIncomplete,
+    cosmeticOnlyFiles: cosmeticOnly.size,
+    groups,
+    changelogTouched,
+    changelogMentionsVersion,
   };
 }
 

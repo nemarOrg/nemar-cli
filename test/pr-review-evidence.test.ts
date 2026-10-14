@@ -38,6 +38,7 @@ import {
   classifyPath,
   gatherGitFacts,
   parseNameStatus,
+  pathPattern,
 } from "../scripts/ci/pr-review-evidence";
 import {
   REVIEW_OUTPUT_SCHEMA,
@@ -1303,5 +1304,215 @@ describe("the callback goes only where the environment name says", () => {
       production: "https://api.nemar.org",
       dev: "https://api-test.nemar.org",
     });
+  });
+});
+
+describe("bulk edits, cosmetic changes and the change log are platform facts", () => {
+  test("reindenting 60 sidecars is cosmetic: it is counted, and it does not make the read incomplete", () => {
+    const dir = newBigDataset("reindent", 60);
+    const r = branch(dir, () => {
+      for (let i = 0; i < 60; i++) {
+        const s = `sub-${pad(i)}`;
+        write(
+          dir,
+          `${s}/eeg/${s}_task-rest_eeg.json`,
+          JSON.stringify({ TaskName: "rest", SamplingFrequency: 256 }, null, 4),
+        );
+      }
+      write(dir, "dataset_description.json", desc("1.0.1"));
+      write(
+        dir,
+        "CHANGES",
+        "1.0.1 2026-02-01\n - Reindented sidecars\n1.0.0 2026-01-01\n - Initial release\n",
+      );
+    });
+    const facts = gatherGitFacts(r.dir, r.base, r.head);
+    expect(facts.cosmeticOnlyFiles).toBe(60);
+    expect(facts.readIncomplete).toBe(false);
+  });
+
+  test("trailing whitespace and CRLF endings are cosmetic in a table too", () => {
+    const dir = newBigDataset("crlf", 50);
+    const r = branch(dir, () => {
+      for (let i = 0; i < 50; i++) {
+        const s = `sub-${pad(i)}`;
+        write(dir, `${s}/eeg/${s}_task-rest_channels.tsv`, "name\ttype  \r\nCz\tEEG\r\n");
+      }
+    });
+    const facts = gatherGitFacts(r.dir, r.base, r.head);
+    expect(facts.cosmeticOnlyFiles).toBe(50);
+    expect(facts.readIncomplete).toBe(false);
+  });
+
+  test("a tab turned into spaces is NOT cosmetic: it merges the columns", () => {
+    const dir = newBigDataset("tabs", 50);
+    const r = branch(dir, () => {
+      for (let i = 0; i < 50; i++) {
+        const s = `sub-${pad(i)}`;
+        write(dir, `${s}/eeg/${s}_task-rest_channels.tsv`, "name type\nCz EEG\n");
+      }
+    });
+    const facts = gatherGitFacts(r.dir, r.base, r.head);
+    expect(facts.cosmeticOnlyFiles).toBe(0);
+    expect(facts.readIncomplete).toBe(true);
+  });
+
+  test("a JSON value that changed is NOT cosmetic, even inside a reindent, and it is read", () => {
+    const dir = newBigDataset("json-value", 50);
+    const r = branch(dir, () => {
+      for (let i = 0; i < 50; i++) {
+        const s = `sub-${pad(i)}`;
+        write(
+          dir,
+          `${s}/eeg/${s}_task-rest_eeg.json`,
+          JSON.stringify({ TaskName: "rest", SamplingFrequency: i === 49 ? 512 : 256 }, null, 4),
+        );
+      }
+    });
+    const facts = gatherGitFacts(r.dir, r.base, r.head);
+    expect(facts.cosmeticOnlyFiles).toBe(49);
+    // The one real change gets the read budget that the cosmetic ones no longer use.
+    expect(facts.patches.map((p) => p.path)).toContain(
+      `sub-${pad(49)}/eeg/sub-${pad(49)}_task-rest_eeg.json`,
+    );
+    expect(facts.readIncomplete).toBe(false);
+  });
+
+  test("real changes beyond the read budget still make the read incomplete", () => {
+    const dir = newBigDataset("json-many-real", 60);
+    const r = branch(dir, () => {
+      for (let i = 0; i < 60; i++) {
+        const s = `sub-${pad(i)}`;
+        write(
+          dir,
+          `${s}/eeg/${s}_task-rest_eeg.json`,
+          JSON.stringify({ TaskName: "rest", SamplingFrequency: 512 }, null, 4),
+        );
+      }
+    });
+    const facts = gatherGitFacts(r.dir, r.base, r.head);
+    expect(facts.cosmeticOnlyFiles).toBe(0);
+    expect(facts.readIncomplete).toBe(true);
+  });
+
+  test("a JSON key that disappeared is NOT cosmetic", () => {
+    const dir = newBigDataset("json-key", 50);
+    const r = branch(dir, () => {
+      for (let i = 0; i < 50; i++) {
+        const s = `sub-${pad(i)}`;
+        write(
+          dir,
+          `${s}/eeg/${s}_task-rest_eeg.json`,
+          JSON.stringify({ TaskName: "rest" }, null, 2),
+        );
+      }
+    });
+    const facts = gatherGitFacts(r.dir, r.base, r.head);
+    expect(facts.cosmeticOnlyFiles).toBe(0);
+  });
+
+  test("a bulk edit reads as one group with how many were shown", () => {
+    const dir = newBigDataset("groups", 50);
+    const r = branch(dir, () => {
+      for (let i = 0; i < 50; i++) {
+        const s = `sub-${pad(i)}`;
+        write(dir, `${s}/eeg/${s}_task-rest_channels.tsv`, "name\ttype\nCz\tMISC\n");
+      }
+    });
+    const facts = gatherGitFacts(r.dir, r.base, r.head);
+    const g = facts.groups.find((x) => x.pattern === "sub-*/eeg/sub-*_task-rest_channels.tsv");
+    expect(g).toBeDefined();
+    expect(g?.files).toBe(50);
+    expect(g?.status).toBe("modified");
+    expect(g?.shown).toBeLessThan(50);
+    expect(g?.cosmeticOnly).toBe(0);
+  });
+
+  test("pathPattern replaces subject, session and run labels only", () => {
+    expect(pathPattern("sub-A04/ses-7/eeg/sub-A04_ses-7_task-x_run-03_events.tsv")).toBe(
+      "sub-*/ses-*/eeg/sub-*_ses-*_task-x_run-*_events.tsv",
+    );
+    expect(pathPattern("participants.tsv")).toBe("participants.tsv");
+  });
+
+  test("the change log: edited and naming the new version", () => {
+    const dir = newDataset("log-ok");
+    const r = branch(dir, () => {
+      write(dir, "dataset_description.json", desc("1.0.1"));
+      write(
+        dir,
+        "CHANGES",
+        "1.0.1 2026-02-01\n - Fixed units\n1.0.0 2026-01-01\n - Initial release\n",
+      );
+    });
+    const facts = gatherGitFacts(r.dir, r.base, r.head);
+    expect(facts.changelogTouched).toBe(true);
+    expect(facts.changelogMentionsVersion).toBe(true);
+  });
+
+  test("the change log: a log kept only in the README leaves CHANGES untouched and silent", () => {
+    const dir = newDataset("log-readme");
+    const r = branch(dir, () => {
+      write(dir, "dataset_description.json", desc("1.0.1"));
+      write(dir, "README.md", "# Resting EEG\n\n## Curation log 1.0.1\n- Fixed units\n");
+    });
+    const facts = gatherGitFacts(r.dir, r.base, r.head);
+    expect(facts.changelogTouched).toBe(false);
+    expect(facts.changelogMentionsVersion).toBe(false);
+  });
+
+  test("the change log: a heading with no version does not name the new version", () => {
+    const dir = newDataset("log-dated");
+    const r = branch(dir, () => {
+      write(dir, "dataset_description.json", desc("1.0.1"));
+      write(
+        dir,
+        "CHANGES",
+        "Metadata update 2026-10-08\n - Fixed units\n1.0.0 2026-01-01\n - Initial release\n",
+      );
+    });
+    const facts = gatherGitFacts(r.dir, r.base, r.head);
+    expect(facts.changelogTouched).toBe(true);
+    expect(facts.changelogMentionsVersion).toBe(false);
+  });
+
+  test("the change log: a version already in an old entry does not count as added", () => {
+    const dir = newDataset("log-old-entry");
+    write(
+      dir,
+      "CHANGES",
+      "1.0.1 2025-06-01\n - Imported from the source\n1.0.0 2026-01-01\n - Initial release\n",
+    );
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "old entry");
+    const r = branch(dir, () => {
+      write(dir, "dataset_description.json", desc("1.0.1"));
+      write(dir, "README.md", "# Resting EEG\n\nNotes on 1.0.1.\n");
+    });
+    const facts = gatherGitFacts(r.dir, r.base, r.head);
+    expect(facts.changelogTouched).toBe(false);
+    expect(facts.changelogMentionsVersion).toBe(false);
+  });
+
+  test("the change log: a CHANGELOG.md counts as well as CHANGES", () => {
+    const dir = newDataset("log-changelog");
+    const r = branch(dir, () => {
+      git(dir, "rm", "-q", "CHANGES");
+      write(dir, "dataset_description.json", desc("1.0.1"));
+      write(dir, "CHANGELOG.md", "## 1.0.1\n- Fixed units\n");
+    });
+    const facts = gatherGitFacts(r.dir, r.base, r.head);
+    expect(facts.changelogTouched).toBe(true);
+    expect(facts.changelogMentionsVersion).toBe(true);
+  });
+
+  test("the change log: no file at all is null, not false", () => {
+    const dir = newDataset("log-none");
+    const r = branch(dir, () => {
+      git(dir, "rm", "-q", "CHANGES");
+      write(dir, "dataset_description.json", desc("1.0.1"));
+    });
+    const facts = gatherGitFacts(r.dir, r.base, r.head);
+    expect(facts.changelogMentionsVersion).toBeNull();
   });
 });
