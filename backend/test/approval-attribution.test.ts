@@ -37,6 +37,7 @@ import {
 import { PUBLICATION_STEPS } from "../../shared/publication-steps.js";
 import { adminRoutes } from "../src/routes/admin";
 import { signApprovalDispatchToken } from "../src/services/github/callback-tokens";
+import { IDENTIFIER_SCREEN_BLOCK_REASON } from "../src/services/identifier-screen";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, interceptingD1, realD1 } from "./helpers/d1";
@@ -808,15 +809,18 @@ describe("the mark is conditional on the claim the call proved", () => {
   });
 
   test("a request that changed under an intact claim is request_changed, not a replaced claim", async () => {
-    // The claim is the click's still; it is the REQUEST that moved (a review blocked it between the
-    // check and the mark), so "your click was replaced" would be false and the sentence is the one
-    // every other approval gets for the same change.
+    // The claim is the click's still; it is the REQUEST that moved (the identifier screen blocked
+    // it between the check and the mark), so "your click was replaced" would be false and the
+    // sentence is the one every other approval gets for the same change. The statement is the shape
+    // of the screen's block (`blockForFindings`, services/identifier-screen.ts): the one writer that
+    // blocks a request and leaves a live claim standing. The publication review's re-block clears
+    // the claim, so a token call racing it is answered `dispatch_superseded` instead.
     const id = seedRequest();
     const token = await claim(id, clickerId);
     const bindings = raceBeforeMark(() => {
       db.run(
-        "UPDATE publication_requests SET status = 'blocked', block_reason = 'min_requirements_failed' WHERE id = ?",
-        [id],
+        "UPDATE publication_requests SET status = 'blocked', block_reason = ?, updated_at = datetime('now') WHERE id = ? AND status = 'requested'",
+        [IDENTIFIER_SCREEN_BLOCK_REASON, id],
       );
     });
 
@@ -833,6 +837,53 @@ describe("the mark is conditional on the claim the call proved", () => {
         .get(id)?.status,
     ).toBe("blocked");
     expect(claimOf(id).by).toBe(clickerId);
+  });
+
+  test("a read that fails after the mark changed nothing answers 500, which the caller retries, never a false dispatch_superseded", async () => {
+    // The mark changed nothing, and the read that tells a replaced claim from a changed request
+    // then fails. Nothing proved the claim was replaced, so the answer is the retryable one: the
+    // CLI does not retry a 409, and a false "your click was replaced" would end a live run for good.
+    const id = seedRequest();
+    const token = await claim(id, clickerId);
+    const claimBefore = claimOf(id);
+    let marked = false;
+    const bindings = {
+      ...env,
+      DB: interceptingD1(realD1(db), (sql) => {
+        if (!marked && sql.includes("SET status = 'approving'")) {
+          marked = true;
+          // A denial between the check and the mark, so the mark finds nothing to change.
+          db.run("UPDATE publication_requests SET status = 'denied' WHERE id = ?", [id]);
+        } else if (marked && /^SELECT approval_dispatched_at FROM publication_requests/.test(sql)) {
+          throw new Error("D1 read failed for the test");
+        }
+      }),
+    } as Bindings;
+
+    const lines: string[] = [];
+    const real = { warn: console.warn, error: console.error };
+    console.warn = (...a: unknown[]) => void lines.push(a.map(String).join(" "));
+    console.error = (...a: unknown[]) => void lines.push(a.map(String).join(" "));
+    let res: Response;
+    try {
+      res = await approveAs(EXECUTOR_KEY, token, bindings);
+    } finally {
+      console.warn = real.warn;
+      console.error = real.error;
+    }
+
+    expect(res.status).toBe(500);
+    expect(await res.text()).not.toContain("dispatch_superseded");
+    // The failure is on the record, by words and ids, with its cause and never the token.
+    const line = lines.find((l) => l.includes("could not tell"));
+    expect(line).toBeDefined();
+    expect(line).toContain(`request ${id}`);
+    expect(line).toContain("D1 read failed for the test");
+    expect(lines.join("\n")).not.toContain(token);
+    // Nothing was marked or recorded, and the click's claim is as it was.
+    expect(approvedBy(id)).toBeNull();
+    expect(publishedAudit()).toBeNull();
+    expect(claimOf(id)).toEqual(claimBefore);
   });
 
   test("a call with no token has no claim to prove, so the same race does not refuse it: it takes whatever claim is there", async () => {

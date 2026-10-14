@@ -2567,6 +2567,10 @@ async function refuseApprovalOnClosedRequest(
   );
 }
 
+/** The 500 of a call whose mark changed nothing and whose follow-up read of the claim failed. */
+const CLAIM_READ_FAILED_MESSAGE =
+  "Could not confirm the state of the approval's request, so nothing was started. Try again.";
+
 /** The sentence that answers each refusal of a dispatch token (the word is the answer's `error`). */
 const DISPATCH_REFUSAL_MESSAGE: Record<ApprovalDispatchRefusal, string> = {
   dispatch_superseded: DISPATCH_SUPERSEDED_MESSAGE,
@@ -2886,15 +2890,26 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   if ((marked.meta.changes ?? 0) !== 1) {
     // Under a token the claim is one of the two things that can have moved, and the answer must
     // say which: a claim that is no longer the one verified is the click's run being refused
-    // (superseded); a claim that stands over a request that moved (a review re-blocked it, which
-    // leaves the claim as it was) is the request that changed, as for every other approval. A
-    // read that fails answers superseded: nothing proved the claim, and nothing was marked.
+    // (superseded); a claim that stands over a request that moved (the identifier screen blocked
+    // it, which leaves the claim as it was; the publication review's re-block clears it, and is
+    // answered superseded) is the request that changed, as for every other approval. A request
+    // that is gone answers superseded too. A read that fails answers 500, which the caller
+    // retries: nothing was marked, and nothing proved the claim was replaced.
     if (verifiedClaim) {
-      const now = await db
-        .prepare("SELECT approval_dispatched_at FROM publication_requests WHERE id = ?")
-        .bind(request.id)
-        .first<{ approval_dispatched_at: string | null }>()
-        .catch(() => null);
+      let now: { approval_dispatched_at: string | null } | null;
+      try {
+        now = await db
+          .prepare("SELECT approval_dispatched_at FROM publication_requests WHERE id = ?")
+          .bind(request.id)
+          .first<{ approval_dispatched_at: string | null }>();
+      } catch (readError) {
+        // Nothing was marked, and nothing proved the claim was replaced: the retryable answer,
+        // not a 409 the caller would take as final.
+        console.error(
+          `[publish] ${datasetId}: could not tell why the mark of request ${request.id} changed nothing: ${errorMessage(readError)}`,
+        );
+        return c.json({ error: CLAIM_READ_FAILED_MESSAGE }, 500);
+      }
       if (!now || now.approval_dispatched_at !== verifiedClaim.claimedAt) {
         console.warn(
           `[publish] ${datasetId}: approval refused, the claim on request ${request.id} was replaced while it was being checked`,
