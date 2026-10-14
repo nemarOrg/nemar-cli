@@ -2452,16 +2452,19 @@ async function concealedEraVersionWarning(
 }
 
 /**
- * The sentences of the four answers of {@link runPublicationApproval} that come AFTER the request
- * was marked `approving` and BEFORE its step loop, the only exits that used to leave the row with
- * no `last_error`. Each is both the answer's own words and what {@link recordPreLoopFailure}
- * writes, declared once so the two cannot drift and the answers stay byte-identical.
+ * The sentences of the exits of {@link runPublicationApproval} that come AFTER the request was
+ * marked `approving` and BEFORE its step loop, the ones that used to leave the row with no
+ * `last_error`: four answers, and the throw of the GitHub token mint. Each is what
+ * {@link recordPreLoopFailure} writes, and for the four answers also the answer's own words,
+ * declared once so the two cannot drift and the answers stay byte-identical. A failure of the
+ * database itself is the one exit left out: the write that records it would fail as well.
  */
 const PRE_LOOP_FAILURE = {
   datasetMissing: "Dataset not found",
   sandbox: "Sandbox datasets (xx-prefix) are for testing only and cannot be published.",
   noRepository: "Dataset has no GitHub repository",
   invalidRepository: "Invalid repository format",
+  githubToken: "Could not get a GitHub token for the dataset repository",
 } as const;
 
 /**
@@ -2481,8 +2484,8 @@ export const PRE_LOOP_FAILURE_SQL =
  * `updated_at` is left as the mark set it: the grace counts from this call, which is the run's
  * last sign of life.
  *
- * Best-effort and never the answer: a failure here is logged by request id and the caller returns
- * the same body and status it always did.
+ * Best-effort and never the answer: a failure here is logged by request id, with its cause, and the
+ * caller returns the same body and status it always did.
  */
 async function recordPreLoopFailure(
   db: D1Database,
@@ -2491,9 +2494,9 @@ async function recordPreLoopFailure(
 ): Promise<void> {
   try {
     await db.prepare(PRE_LOOP_FAILURE_SQL).bind(message, requestId).run();
-  } catch {
+  } catch (err) {
     console.error(
-      `[publish] could not record the early refusal of request ${requestId} as its last error`,
+      `[publish] could not record the early refusal of request ${requestId} as its last error: ${errorMessage(err)}`,
     );
   }
 }
@@ -3036,7 +3039,18 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     return c.json({ error: PRE_LOOP_FAILURE.invalidRepository }, 500);
   }
 
-  const pat = await getDatasetsToken(c.env);
+  // The token is minted after the mark, so a mint that throws (no App key, no PAT, GitHub
+  // refusing) would leave the row `approving` with no `last_error`, and so in flight for the rest
+  // of the lease with nothing running. The sentence is written, then the throw goes on as it
+  // always did, so the status and the Worker's own error handling are unchanged. The claim is
+  // left standing, like the other exits above: the executor's release step ends it.
+  let pat: string;
+  try {
+    pat = await getDatasetsToken(c.env);
+  } catch (tokenError) {
+    await recordPreLoopFailure(db, request.id, PRE_LOOP_FAILURE.githubToken);
+    throw tokenError;
+  }
   const requestId = request.id;
 
   // Progress recorder: single writer of steps_completed/current_step/
