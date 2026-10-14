@@ -58,6 +58,9 @@ const EXIT_WAIT_MS = 20_000;
  */
 const DRAIN_WAIT_MS = 5_000;
 
+/** Variables of the runner's own environment that change what the command does, so no command inherits them. */
+const AMBIENT_NOT_INHERITED = ["NEMAR_APPROVAL_DISPATCH_TOKEN", "NEMAR_DEBUG"];
+
 const CLI_ENTRY = join(import.meta.dir, "..", "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 
@@ -466,8 +469,13 @@ export function startPublishCli(): PublishCli {
   }
 
   async function run(args: string[], opts: CliOptions): Promise<CliResult> {
+    // What the runner's own shell happens to hold is not what a test meant to run with: a stale
+    // dispatch token would turn a person's approval into an executor's, and a debug switch would
+    // write logs nobody asked for. A test that wants either passes it in `opts.env`.
+    const ambient: Record<string, string | undefined> = { ...process.env };
+    for (const name of AMBIENT_NOT_INHERITED) Reflect.deleteProperty(ambient, name);
     const childEnv: Record<string, string | undefined> = {
-      ...process.env,
+      ...ambient,
       ...opts.env,
       NEMAR_CONFIG_DIR: configDir,
       TEST_API_URL: `http://127.0.0.1:${apiServer.port}`,

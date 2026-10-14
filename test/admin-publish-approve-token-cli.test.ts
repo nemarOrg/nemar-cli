@@ -37,7 +37,7 @@
  */
 
 import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { webClaim } from "../backend/test/helpers/publication-review";
 import { makePublicationReviewApp } from "../backend/test/helpers/publication-review-app";
@@ -246,6 +246,67 @@ describe("the executor of a web approval", () => {
     expect(output(r)).toContain(UNSET_HINT);
     expect(h.requests.filter((c) => c.path === APPROVE_PATH).map((c) => c.status)).toEqual([409]);
     expect(requestRow(requestId)).toEqual(claim);
+  });
+});
+
+/** The `--debug` logs the command wrote so far: nothing when it has never written one. */
+const debugLogs = () => {
+  const logs = join(h.configDir, "logs");
+  return existsSync(logs) ? readdirSync(logs) : [];
+};
+
+/** Run `body` with `name` set in this process's own environment, which a spawned command would inherit. */
+async function withAmbient(name: string, value: string, body: () => Promise<void>): Promise<void> {
+  const before = process.env[name];
+  process.env[name] = value;
+  try {
+    await body();
+  } finally {
+    if (before === undefined) Reflect.deleteProperty(process.env, name);
+    else process.env[name] = before;
+  }
+}
+
+describe("the harness hands a command only the variables a test gave it", () => {
+  test("a stale NEMAR_APPROVAL_DISPATCH_TOKEN in the runner's shell is not the command's: no header, no notice, the runner's own act", async () => {
+    const requestId = seedGolden(h.db);
+    seedReport(h.db, requestId);
+
+    await withAmbient(TOKEN_ENV, "c".repeat(64), async () => {
+      const r = await executor(undefined);
+
+      expect(r.exitCode).toBe(0);
+      expect(approveCalls()).toHaveLength(1);
+      expect(approveCalls()[0]?.dispatchToken).toBe(false);
+      expect(output(r)).not.toContain(TOKEN_ENV);
+      expect(requestRow(requestId)?.approved_by).toBe(executorId);
+    });
+  });
+
+  test("NEMAR_DEBUG in the runner's shell turns no debug log on in the command", async () => {
+    const requestId = seedGolden(h.db);
+    seedReport(h.db, requestId);
+    const logsBefore = debugLogs();
+
+    await withAmbient("NEMAR_DEBUG", "1", async () => {
+      const r = await executor(undefined);
+
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).not.toContain("debug log");
+    });
+
+    expect(debugLogs()).toEqual(logsBefore);
+  });
+
+  test("a variable a test gives the command itself still reaches it", async () => {
+    const requestId = seedGolden(h.db);
+    seedReport(h.db, requestId);
+    const logsBefore = debugLogs();
+
+    const r = await executor(undefined, [], { NEMAR_DEBUG: "1" });
+
+    expect(r.exitCode).toBe(0);
+    expect(debugLogs()).toHaveLength(logsBefore.length + 1);
   });
 });
 
@@ -489,6 +550,7 @@ describe("the help says the variable and the rule", () => {
 describe("the token is a secret", () => {
   test("it reaches neither the console nor the --debug log, which still shows that a header was sent", async () => {
     const { requestId, token } = await click();
+    const logsBefore = debugLogs();
 
     const r = await h.cli(
       ["--debug", "admin", "publish", "approve", DATASET, "--resume", "--yes"],
@@ -499,8 +561,9 @@ describe("the token is a secret", () => {
     expect(requestRow(requestId)?.approved_by).toBe(clickerId);
     expect(output(r)).not.toContain(token);
 
+    // The log this command wrote: any an earlier test left in the directory are not its.
     const logs = join(h.configDir, "logs");
-    const files = readdirSync(logs);
+    const files = debugLogs().filter((name) => !logsBefore.includes(name));
     expect(files).toHaveLength(1);
     const log = readFileSync(join(logs, files[0] as string), "utf8");
     expect(log).not.toContain(token);
