@@ -205,18 +205,23 @@ export const DECISION_WITH_DISPATCH_TOKEN_MESSAGE =
 
 /**
  * The sentence of the deny route's 409 `approval_in_flight`: an approval of the request is
- * running, so a denial would overwrite a run that is still writing.
+ * running, so a denial would overwrite a run that is still writing. It promises a denial only for
+ * a run that stalls: a run that finishes leaves the request published, and a published request is
+ * no longer one a denial can find.
  */
 export const APPROVAL_IN_FLIGHT_MESSAGE =
-  "An approval of this request is running, so it cannot be denied right now. Wait for it to finish or stall, then deny it.";
+  "An approval of this request is running, so it cannot be denied right now. If the run stalls before it publishes anything, the request can be denied then.";
 
 /**
- * The sentence of the deny route's 409 `deny_after_publishing`: the approval has begun the
- * irreversible steps, so the dataset may already be public and the depositor must not be told it
- * was denied.
+ * The sentence of the deny route's 409 `deny_after_publishing`: an approval has run a step that
+ * changes something, or was cut off inside one, so the dataset may already be public and the
+ * depositor must not be told it was denied. The request may be approving, requested again or
+ * blocked, so the sentence does not tell the reader to finish an approval: a blocked request is
+ * refused by `/approve` until its depositor has fixed what blocked it, and what stays for the rest
+ * is the same by-hand repair the sentence of `approval_closed_during_run` names.
  */
 export const DENY_AFTER_PUBLISHING_MESSAGE =
-  "Steps of an approval of this request have already run, so the dataset may already be public and the request cannot be denied. Finish the approval instead, or have an administrator repair it.";
+  "Steps of an approval of this request have already run, so the dataset may already be public and the request cannot be denied. Check the dataset first. A blocked request waits for its depositor to fix what blocked it; any other can be finished by approving it again, or repaired by hand.";
 
 /**
  * The sentence of the dispatch route's 400 `invalid_dataset_id`: the id is not one the executor
@@ -256,9 +261,9 @@ export const APPROVAL_RELEASE_REASON_TEXT: Record<ApprovalReleaseReason, string>
   install_failed:
     "The approval workflow could not install the command line tool it runs. Click Approve again to retry.",
   input_rejected:
-    "The approval workflow refused the request it was given, so nothing was approved.",
+    "The approval workflow refused the request it was given, so the run did not start and changed nothing.",
   preflight_failed:
-    "The approval workflow's own checks of the request failed before it began, so nothing was approved.",
+    "The approval workflow's own checks of the request failed before it began, so the run did not start and changed nothing.",
 };
 
 /**
