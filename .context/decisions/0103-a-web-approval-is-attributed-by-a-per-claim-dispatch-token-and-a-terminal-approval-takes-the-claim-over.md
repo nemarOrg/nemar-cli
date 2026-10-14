@@ -183,6 +183,9 @@ A token that is stale or expired is refused, never quietly downgraded.**
     widening what a gate exempts from its checks would be the dangerous direction.
     The `deny_after_publishing` refusal ignores the request's status on purpose:
     a request filed again keeps its `steps_completed` (follow-up #1766), a request's own completed steps are its own irreversible acts, and the dataset may already be public, so the depositor must not be told it was denied.
+    The refusal's sentence tells the administrator to check the dataset first and promises no remedy:
+    a blocked request waits for its depositor to fix what blocked it, and for any other the administrator is to check whether approving it again can finish it, or repair it by hand.
+    No remedy is promised because `/approve` refuses a request that was filed again and carries every step as closed (`approval_closed_during_run`).
     The write is conditional on the lease and on the `updated_at` that was read, so a request that was published, claimed or touched in between is not overwritten.
     A lost write is read again and answered by the true reason.
     The write also clears a lapsed claim.

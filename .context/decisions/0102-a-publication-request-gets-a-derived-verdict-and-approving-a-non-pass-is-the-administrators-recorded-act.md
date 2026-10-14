@@ -946,7 +946,11 @@ Where the two differ, this is the later text.
    So a `requested` request, with a review in any state, can be denied unless it carries steps beyond validation from an earlier approval (follow-up #1766);
    an `approving` request that stalled before it started publishing can be denied,
    which keeps the cure that section 8 names for a hard reason on a stopped approval;
-   and a request that has started publishing, one the owner-name check walked back to `blocked` included, cannot be denied and is finished with `approve --resume`.
+   and a request that has started publishing cannot be denied.
+   An `approving` one, and one the owner-name check walked back to `blocked`, is finished with `approve --resume`.
+   A `requested` one may be finished by approving it, unless it carries every step: that is refused as closed (`approval_closed_during_run`) and repaired by hand.
+   A `blocked` one with another reason waits for its depositor to fix what blocked it (follow-up #1766).
+   The refusal's sentence promises none of these cures, and tells the administrator to check the dataset first.
    Started publishing means that a step beyond the validation-only ones has completed or is marked as the request's current step.
    The current step counts because a step is marked before it runs and stays marked when it fails or is interrupted, and the first mutation, `s3_public_read`, may have applied the bucket policy without a record.
    So a request whose first mutation failed stays undeniable until it is retried to completion or repaired by hand.
