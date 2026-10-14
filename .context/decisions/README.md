@@ -157,7 +157,7 @@ invisible one — which is why it is checked rather than trusted.
   the Worker is the gate in `/approve` and `approve-dispatch`; the approver is the administrator who passed the gate, made exact in Phase 3;
   mirrors and exemplars are not reviewed; the live advisory pre-screen of ADR 0014 retires when the review is switched on;
   `PUBLICATION_REVIEW_ENABLED` switches the model review and its gate, while the mechanical refusals are unconditional;
-  the web page fetches the detail and prints the Worker's neutral cure (the CLI's text is unchanged), and its own words are `shared/contract/publication-review-copy.ts`
+  the web page fetches the detail and prints each reason's `statement` and neutral `cure` (the CLI's text is unchanged), and its own words are `shared/contract/publication-review-copy.ts`
 - [ADR 0103](0103-a-web-approval-is-attributed-by-a-per-claim-dispatch-token-and-a-terminal-approval-takes-the-claim-over.md) - A web approval is attributed by a per-claim dispatch token (proposed, epic #1726 Phase 3 #1730, 2026-10-13), partially superseding ADR 0080 decision 5:
   the token is a hash-based message authentication code (HMAC) over the dataset, the request, the clicker and the claim's own stored instant, signed with the callback secret under its own domain tag, with no stored nonce and no migration,
   carried in the dispatch payload and presented in `X-Approval-Dispatch-Token` on every `/approve` call (the command-line tool reads `NEMAR_APPROVAL_DISPATCH_TOKEN`, only in `approve`);
