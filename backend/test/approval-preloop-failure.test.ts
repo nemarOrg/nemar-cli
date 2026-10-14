@@ -49,12 +49,18 @@ function env(over: Partial<Bindings> = {}): Bindings {
   } as Bindings;
 }
 
-function requestRow(id: number): { status: string; last_error: string | null } {
+interface Row {
+  status: string;
+  last_error: string | null;
+  updated_at: string;
+}
+
+function requestRow(id: number): Row {
   return db
-    .query<{ status: string; last_error: string | null }, [number]>(
-      "SELECT status, last_error FROM publication_requests WHERE id = ?",
+    .query<Row, [number]>(
+      "SELECT status, last_error, updated_at FROM publication_requests WHERE id = ?",
     )
-    .get(id) as { status: string; last_error: string | null };
+    .get(id) as Row;
 }
 
 async function inFlight(id: number): Promise<boolean> {
@@ -156,13 +162,24 @@ describe("an approval that stops before its step loop", () => {
       const { requestId } = await seedRun(c.dataset, c.shape);
       expect(await inFlight(requestId)).toBe(false);
 
-      const res = await approve(c.dataset, env({ ENVIRONMENT: "production" }));
+      // The heartbeat as the request-start UPDATE left it, read when the error is about to be
+      // written: the write must not move it, because the grace counts from it.
+      let heartbeat: string | null = null;
+      const watched = env({
+        ENVIRONMENT: "production",
+        DB: interceptingD1(realD1(db), (sql) => {
+          if (sql === PRE_LOOP_FAILURE_SQL) heartbeat = requestRow(requestId).updated_at;
+        }),
+      });
+      const res = await approve(c.dataset, watched);
       expect(res.status).toBe(c.status);
       expect(await res.json()).toEqual(c.body);
 
       const row = requestRow(requestId);
       expect(row.status).toBe("approving");
       expect(row.last_error).toBe(c.sentence);
+      expect(heartbeat).not.toBeNull();
+      expect(row.updated_at).toBe(heartbeat as unknown as string);
       // Inside the grace window the run still reads as running: a retry is about to start.
       expect(await inFlight(requestId)).toBe(true);
       // Past it, with the error on the row, it is stalled. Without the error it would read as in
