@@ -221,6 +221,13 @@ A token that is stale or expired is refused, never quietly downgraded.**
       and because closing the request on a warning would turn the remedy into a 404.
       The cap is the only permanent warning today.
       The follow-up is to classify a tail-job warning as retryable or final and close the request on a final one, or to raise or paginate the cap.
+    - The all-steps-done branch has no write that settles the claim, and that is a known limit.
+      A call without a token does not take a live claim over here, because there is no mark, and the closing write is bound to `status = 'approving'` and to nothing about the claim.
+      The trigger is a lease that lapses while the tail jobs run, so that another click replaces the claim, and then the first run closes the request.
+      The effect is that the `dataset_published` row names the first run's approver of record, the first click's administrator for a call under a token.
+      The second click's run then finds no active request and is answered 404.
+      It is accepted because every step is done and the data is already public, so closing is correct whichever run closes,
+      and because that administrator did click approve for this request.
 13. **#1580 is deferred.**
     A resumed run restarts the lock listing at page 1, so objects added under `objects/` while the run was stopped are locked too, and `s3_lock` is never run again once complete.
     A saved continuation token would skip whatever was listed before it, which weakens a property the restart has today, and it would need a migration and a new resumability contract.
