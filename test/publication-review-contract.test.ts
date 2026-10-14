@@ -12,6 +12,7 @@ import { BIDS_DATATYPES } from "../backend/src/services/datacite";
 import * as prompt from "../scripts/ci/pr-review-prompt";
 import {
   APPROVAL_DISPATCH_TOKEN_HEADER,
+  APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE,
   APPROVAL_IN_FLIGHT_MESSAGE,
   APPROVAL_REFUSAL_ERROR_CODES,
   APPROVAL_RELEASE_REASONS,
@@ -3213,6 +3214,16 @@ describe("the sentences the Worker's tests import are pinned here, once", () => 
     expect(DENY_AFTER_PUBLISHING_MESSAGE).toBe(
       "An approval of this request has already started publishing, so the dataset may already be public and the request cannot be denied. Resume the approval to finish it.",
     );
+  });
+
+  test("the sentence of a run that finds its request closed at its last write", () => {
+    expect(APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE).toBe(
+      "The request was closed while this approval was running (it was denied, or blocked again), so the run did not mark it published. Its steps had already run: read the request and the dataset again before doing anything else.",
+    );
+    // It answers under the same code as REQUEST_CHANGED_MESSAGE, so it must not be read as it.
+    expect(APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE).not.toBe(REQUEST_CHANGED_MESSAGE);
+    expect(APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE).toMatch(/\.$/);
+    expect(APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE).not.toContain("\u2014");
   });
 
   test("every approval refusal sentence is a plain sentence, and no two are the same", () => {
