@@ -139,8 +139,9 @@ A token that is stale or expired is refused, never quietly downgraded.**
    The ids are `nm` or `on` and six digits on production, and also `xx` anywhere else (`APPROVAL_DISPATCH_ID_RE` in `shared/publication-limits.ts`).
    Anything else is 400 `invalid_dataset_id`, before the body is read, before any read of the request and before the claim (#1583).
    The workflow cannot import the constant, and it already states the same rule in its own validate step, as case patterns that were checked read-only against the public workflow on 2026-10-13 and match.
-   The shared constant's comment names the workflow.
-   The workflow's comment naming the constant is added by the workflow edit (Rollout), so the two are changed together by hand.
+   The shared constant's comment names the workflow, and says that the executor mirrors these shapes and, once the edit of the Rollout is applied, cites the constant,
+   so that it does not go stale when the edit lands.
+   The workflow's comment citing the constant is added by that edit, so the two sides are changed together by hand.
 9. **A failing executor releases its own claim.**
    `POST /webhooks/approval-release` takes `{ dataset_id, request_id, reason }` and the header, and the token alone authenticates (#1582).
    The reason is one of six closed words (`workflow_failed`, `workflow_cancelled`, `secret_missing`, `install_failed`, `input_rejected`, `preflight_failed`), and an unknown word reads as the first.
@@ -285,7 +286,7 @@ The edit the workflow needs:
   The workflow never passes `--force`, `--acknowledge-identifier-screen` or `--skip-ci-check`, which the CLI refuses with a token set.
   It needs no `--request-id`: the token binds the request, and its preflight already checks the newest request.
 - The workflow's validate step already carries the id rule of decision 8 as case patterns, so the edit to it is a comment only, with no logic.
-  The comment names `shared/publication-limits.ts` as the other side of the rule.
+  The comment cites `APPROVAL_DISPATCH_ID_RE` in `shared/publication-limits.ts` as the other side of the rule.
 
 What each combination does:
 
