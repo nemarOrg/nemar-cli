@@ -561,6 +561,37 @@ describe("a refusal is always the same 401 and changes nothing", () => {
     expect(releasedAudit()).toHaveLength(0);
   });
 
+  test("a claim re-made at the same instant by another administrator is not released by the first one's token", async () => {
+    const s = await seedClaim();
+    const otherId = await seedUser(
+      db,
+      "releaseadmin2",
+      "admin",
+      "release-admin2-key-0123456789abcdef0123456789",
+    );
+    let raced = false;
+    const bindings = env({
+      DB: interceptingD1(realD1(db), (sql) => {
+        if (sql === APPROVAL_RELEASE_SQL && !raced) {
+          raced = true;
+          // Same `approval_dispatched_at`, another clicker: only the clicker column differs.
+          db.run("UPDATE publication_requests SET approval_requested_by = ? WHERE id = ?", [
+            otherId,
+            s.requestId,
+          ]);
+        }
+      }),
+    });
+    const res = await release(s.token, bodyOf(s), bindings);
+    expect(raced).toBe(true);
+    expect(res.status).toBe(401);
+    const after = requestRow(s.requestId);
+    expect(after.approval_requested_by).toBe(otherId);
+    expect(after.approval_dispatched_at).toBe(s.claimedAt);
+    expect(after.last_error).toBeNull();
+    expect(releasedAudit()).toHaveLength(0);
+  });
+
   test("a request that is published between the read and the write is not released either", async () => {
     const s = await seedClaim({ status: "approving", updatedAgo: "-2 minutes" });
     const bindings = env({
@@ -733,8 +764,12 @@ describe("the token never leaves", () => {
   test("it is in no log line, no answer and no stored row, on success and on refusal", async () => {
     const live = await seedClaim({ datasetId: "nm098773" });
     const stale = await seedClaim({ datasetId: "nm098774", status: "published" });
+    const other = await seedClaim({ datasetId: "nm098775" });
+    // A token one character off a live claim's: presented, refused, and not echoed anywhere.
+    const nearMiss = other.token.slice(0, -1) + (other.token.endsWith("0") ? "1" : "0");
     const answers: string[] = [];
     const printed = await printedDuring(async () => {
+      answers.push(await (await release(nearMiss, bodyOf(other))).text());
       answers.push(await (await release(live.token, bodyOf(live))).text());
       answers.push(await (await release(stale.token, bodyOf(stale))).text());
       answers.push(await (await release(live.token, bodyOf(live))).text());
@@ -744,7 +779,7 @@ describe("the token never leaves", () => {
         ).text(),
       );
     });
-    for (const t of [live.token, stale.token]) {
+    for (const t of [live.token, stale.token, other.token, nearMiss]) {
       expect(printed).not.toContain(t);
       for (const a of answers) expect(a).not.toContain(t);
       expect(JSON.stringify(db.query("SELECT * FROM publication_requests").all())).not.toContain(t);
@@ -753,6 +788,6 @@ describe("the token never leaves", () => {
     expect(printed).not.toMatch(/[0-9a-f]{64}/i);
     // Control: the checks above looked at real output (the release did log and answer).
     expect(printed.length).toBeGreaterThan(0);
-    expect(answers[0]).toContain("released");
+    expect(answers[1]).toContain("released");
   });
 });
