@@ -3199,7 +3199,7 @@ describe("the sentences the Worker's tests import are pinned here, once", () => 
 
   test("the refusals of the dispatch token, the request precondition and the denial", () => {
     expect(REQUEST_MISMATCH_MESSAGE).toBe(
-      "The request in force for this dataset is not the one this approval was for (it was denied or filed again since). Read the request again before approving.",
+      "The request in force for this dataset is not the one you meant (it was denied or filed again since). Read it again before going on.",
     );
     expect(DISPATCH_SUPERSEDED_MESSAGE).toBe(
       "The web approval this run was started for is no longer current (it was replaced by a newer click, released, or taken over by an approval at a terminal), so this run was refused and changed nothing.",
@@ -3214,7 +3214,7 @@ describe("the sentences the Worker's tests import are pinned here, once", () => 
       "An approval of this request is running, so it cannot be denied right now. Wait for it to finish or stall, then deny it.",
     );
     expect(DENY_AFTER_PUBLISHING_MESSAGE).toBe(
-      "An approval of this request has already started publishing, so the dataset may already be public and the request cannot be denied. Resume the approval to finish it.",
+      "Steps of an approval of this request have already run, so the dataset may already be public and the request cannot be denied. Finish the approval instead, or have an administrator repair it.",
     );
     expect(INVALID_DATASET_ID_MESSAGE).toBe(
       "This is not a dataset id an approval can be started for from the web: it is nm or on followed by six digits (a development environment also accepts xx). Nothing was claimed and nothing was sent.",

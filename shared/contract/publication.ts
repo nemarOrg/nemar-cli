@@ -178,7 +178,7 @@ export const APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE =
  * administrator read it. Nothing was recorded.
  */
 export const REQUEST_MISMATCH_MESSAGE =
-  "The request in force for this dataset is not the one this approval was for (it was denied or filed again since). Read the request again before approving.";
+  "The request in force for this dataset is not the one you meant (it was denied or filed again since). Read it again before going on.";
 
 /**
  * The sentence of the 409 `dispatch_superseded`: the dispatch token names a claim that is no
@@ -216,7 +216,7 @@ export const APPROVAL_IN_FLIGHT_MESSAGE =
  * was denied.
  */
 export const DENY_AFTER_PUBLISHING_MESSAGE =
-  "An approval of this request has already started publishing, so the dataset may already be public and the request cannot be denied. Resume the approval to finish it.";
+  "Steps of an approval of this request have already run, so the dataset may already be public and the request cannot be denied. Finish the approval instead, or have an administrator repair it.";
 
 /**
  * The sentence of the dispatch route's 400 `invalid_dataset_id`: the id is not one the executor
