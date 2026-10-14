@@ -173,6 +173,14 @@ A token that is stale or expired is refused, never quietly downgraded.**
     the first mutation, `s3_public_read`, may have applied the bucket policy without the Worker having recorded it, and the dataset may then be public.
     So a request whose first mutation failed stays undeniable until it is retried to completion or repaired by hand,
     and a request interrupted only in validation steps stays deniable.
+    The current-step rule rests on a best-effort write, and that is a known limit.
+    The write that marks a step current is allowed to fail without failing the run, so that a progress record cannot fail a publication.
+    The trigger is a failure of that write for the first mutation, followed by a cut-off before the step's own result is recorded:
+    two faults in the one step.
+    The effect is a request with no completed step and no current step beyond validation, which `/deny` then denies although the bucket policy may have been applied.
+    It is accepted because it needs both faults in the same step.
+    The approval gate's `publishingStanding` still reads the completed steps only, on purpose:
+    widening what a gate exempts from its checks would be the dangerous direction.
     The `deny_after_publishing` refusal ignores the request's status on purpose:
     a request filed again keeps its `steps_completed` (follow-up #1766), a request's own completed steps are its own irreversible acts, and the dataset may already be public, so the depositor must not be told it was denied.
     The write is conditional on the lease and on the `updated_at` that was read, so a request that was published, claimed or touched in between is not overwritten.
