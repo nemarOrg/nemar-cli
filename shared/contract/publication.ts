@@ -114,10 +114,13 @@ export const IDENTIFIER_SCREEN_ERROR_CODES: readonly string[] = [
 
 /**
  * The codes an approval refusal carries in `error` with the human sentence in `message` (ADR
- * 0102): the review gate's 409, the blocked request's, the request that changed while the
- * approval was being checked, and an override sent inside a web approval. Declared here, beside the
- * screen's, so the CLI's client leads with the sentence and not the bare token. The first two
- * words are the `error` of the bodies in `publication-review-admin.ts`
+ * 0102; ADR 0080 for the dispatch token, Phase 3): the review gate's 409, the
+ * blocked request's, the request that changed while the approval was being checked, an override
+ * sent inside a web approval, a run for a request that is no longer the one in force, a dispatch
+ * token that was replaced or has lapsed, a decision sent by a run the web started, and the two
+ * refusals of a denial (a request that is running, and one that has started publishing). Declared
+ * here, beside the screen's, so the CLI's client leads with the sentence and not the bare token.
+ * The first two words are the `error` of the bodies in `publication-review-admin.ts`
  * (`PUBLICATION_REVIEW_NOT_CLEAR_CODE`, `REQUEST_BLOCKED_CODE`); this file stays free of every
  * dependency but zod, and a test holds the spellings together.
  */
@@ -126,6 +129,18 @@ export const APPROVAL_REFUSAL_ERROR_CODES: readonly string[] = [
   "request_blocked",
   "request_changed",
   "override_inside_web_approval",
+  /** A run named a request that is not the newest active one: it was denied or filed again. */
+  "request_mismatch",
+  /** The claim a dispatch token was minted for was released, replaced or taken over. */
+  "dispatch_superseded",
+  /** The token is genuine, but its run sat idle past the lease. */
+  "dispatch_expired",
+  /** A run the web started sent an override or an acknowledgment of its own. */
+  "decision_with_dispatch_token",
+  /** A denial of a request an approval is running for (the deny route's word). */
+  "approval_in_flight",
+  /** A denial of a request that has started publishing (the deny route's word). */
+  "deny_after_publishing",
 ];
 
 /**
@@ -142,6 +157,86 @@ export const REQUEST_CHANGED_MESSAGE =
  */
 export const OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE =
   "A web approval of this request is in progress, so an override sent now would be recorded under the administrator who clicked. Wait for it to finish or stop, then approve again with --force.";
+
+/**
+ * The sentence of the 409 `request_mismatch`: the approval named a request (`request_id`) that is
+ * not the newest active request of the dataset, because it was denied or filed again since the
+ * administrator read it. Nothing was recorded.
+ */
+export const REQUEST_MISMATCH_MESSAGE =
+  "The request in force for this dataset is not the one this approval was for (it was denied or filed again since). Read the request again before approving.";
+
+/**
+ * The sentence of the 409 `dispatch_superseded`: the dispatch token names a claim that is no
+ * longer the request's (released, replaced by a newer click, or taken over by an approval at a
+ * terminal), or the Worker could not verify it. The refused call changed nothing.
+ */
+export const DISPATCH_SUPERSEDED_MESSAGE =
+  "The web approval this run was started for is no longer current (it was replaced by a newer click, released, or taken over by an approval at a terminal), so this run was refused and changed nothing.";
+
+/**
+ * The sentence of the 409 `dispatch_expired`: the token is genuine, but its run sat idle past the
+ * approval lease, so a click made then is not honored for work done now.
+ */
+export const DISPATCH_EXPIRED_MESSAGE =
+  "The web approval this run was started for has expired: the run sat idle longer than its lease, so a click made then is not honored now. Nothing was changed. Click Approve again to start a fresh run.";
+
+/**
+ * The sentence of the 409 `decision_with_dispatch_token`: a run the web started carries the
+ * decision made at the click (the override and the screen acknowledgment were recorded then) and
+ * may not send one of its own.
+ */
+export const DECISION_WITH_DISPATCH_TOKEN_MESSAGE =
+  "A run started by a web approval carries the decision made at the click and may not send its own: no override and no identifier-screen acknowledgment. Nothing was recorded.";
+
+/**
+ * The sentence of the deny route's 409 `approval_in_flight`: an approval of the request is
+ * running, so a denial would overwrite a run that is still writing.
+ */
+export const APPROVAL_IN_FLIGHT_MESSAGE =
+  "An approval of this request is running, so it cannot be denied right now. Wait for it to finish or stall, then deny it.";
+
+/**
+ * The sentence of the deny route's 409 `deny_after_publishing`: the approval has begun the
+ * irreversible steps, so the dataset may already be public and the depositor must not be told it
+ * was denied.
+ */
+export const DENY_AFTER_PUBLISHING_MESSAGE =
+  "An approval of this request has already started publishing, so the dataset may already be public and the request cannot be denied. Resume the approval to finish it.";
+
+/**
+ * Why an approval executor releases the claim it was dispatched under (ADR 0080, Phase 3): the
+ * closed vocabulary of the `reason` a failing executor reports. The Worker stores the sentence of
+ * the word (never the word, and never a string the executor wrote) as the request's `last_error`,
+ * so a failure the Worker cannot see for itself shows on the page and the claim does not hold its
+ * lease for fifteen minutes. A word outside this list is read as `workflow_failed`.
+ */
+export const APPROVAL_RELEASE_REASONS = [
+  "workflow_failed",
+  "workflow_cancelled",
+  "secret_missing",
+  "install_failed",
+  "input_rejected",
+  "preflight_failed",
+] as const;
+
+export type ApprovalReleaseReason = (typeof APPROVAL_RELEASE_REASONS)[number];
+
+/** The one fixed sentence of each {@link APPROVAL_RELEASE_REASONS} word. */
+export const APPROVAL_RELEASE_REASON_TEXT: Record<ApprovalReleaseReason, string> = {
+  workflow_failed:
+    "The approval workflow failed before the approval finished. Click Approve again to resume it.",
+  workflow_cancelled:
+    "The approval workflow was cancelled before the approval finished. Click Approve again to resume it.",
+  secret_missing:
+    "The approval workflow could not start because a credential it needs is not configured. Tell the maintainers, then click Approve again.",
+  install_failed:
+    "The approval workflow could not install the command line tool it runs. Click Approve again to retry.",
+  input_rejected:
+    "The approval workflow refused the request it was given, so nothing was approved.",
+  preflight_failed:
+    "The approval workflow's own checks of the request failed before it began, so nothing was approved.",
+};
 
 /**
  * The request header an approval executor presents its dispatch token in (ADR 0080, Phase 3 of

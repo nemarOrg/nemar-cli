@@ -28,8 +28,14 @@ import {
 import { PROD_DATASET, createHarness } from "../backend/test/helpers/publication-review-harness";
 import { asSend, withFakeResend } from "../backend/test/helpers/resend";
 import {
+  APPROVAL_IN_FLIGHT_MESSAGE,
   APPROVAL_REFUSAL_ERROR_CODES,
+  DECISION_WITH_DISPATCH_TOKEN_MESSAGE,
+  DENY_AFTER_PUBLISHING_MESSAGE,
+  DISPATCH_EXPIRED_MESSAGE,
+  DISPATCH_SUPERSEDED_MESSAGE,
   IDENTIFIER_SCREEN_ERROR_CODES,
+  REQUEST_MISMATCH_MESSAGE,
 } from "../shared/contract/publication";
 import {
   OVERRIDE_FIELD,
@@ -511,12 +517,38 @@ describe("how the client reads an approval refusal (the gate's bodies, scripted)
     expect(err.code).toBe("override_inside_web_approval");
   });
 
+  test("each refusal of the dispatch token, the request precondition and the denial leads with its sentence", async () => {
+    const refusals: [string, string][] = [
+      ["request_mismatch", REQUEST_MISMATCH_MESSAGE],
+      ["dispatch_superseded", DISPATCH_SUPERSEDED_MESSAGE],
+      ["dispatch_expired", DISPATCH_EXPIRED_MESSAGE],
+      ["decision_with_dispatch_token", DECISION_WITH_DISPATCH_TOKEN_MESSAGE],
+      ["approval_in_flight", APPROVAL_IN_FLIGHT_MESSAGE],
+      ["deny_after_publishing", DENY_AFTER_PUBLISHING_MESSAGE],
+    ];
+    for (const [code, message] of refusals) {
+      scripted = [{ status: 409, body: { error: code, message } }];
+      const err = await thrown(() =>
+        request("/admin/publish/nm000480/approve", { method: "POST" }, true),
+      );
+      expect(err.statusCode).toBe(409);
+      expect(err.message).toBe(message);
+      expect(err.code).toBe(code);
+    }
+  });
+
   test("the words are declared once, with the screen's, and do not collide with it", () => {
     expect([...APPROVAL_REFUSAL_ERROR_CODES]).toEqual([
       PUBLICATION_REVIEW_NOT_CLEAR_CODE,
       REQUEST_BLOCKED_CODE,
       "request_changed",
       "override_inside_web_approval",
+      "request_mismatch",
+      "dispatch_superseded",
+      "dispatch_expired",
+      "decision_with_dispatch_token",
+      "approval_in_flight",
+      "deny_after_publishing",
     ]);
     for (const code of APPROVAL_REFUSAL_ERROR_CODES) {
       expect(IDENTIFIER_SCREEN_ERROR_CODES).not.toContain(code);
