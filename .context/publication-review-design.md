@@ -453,13 +453,17 @@ signed with the callback secret under its own domain tag, with no stored column 
 The executor presents it in `X-Approval-Dispatch-Token` on every `/approve` call (the CLI reads `NEMAR_APPROVAL_DISPATCH_TOKEN`, only in `approve`).
 The clicker is the approver only for a valid token; a call with no token is recorded as its caller and its approval takes the claim over;
 a stale or expired token is refused (`dispatch_superseded`, `dispatch_expired`);
-and a call that carries a token may carry no override, no acknowledgment and no skipped CI check (`decision_with_dispatch_token`), which replaces the Phase 2 refusal `override_inside_web_approval`.
+and a call that carries a token may carry no override, no acknowledgment and no skipped CI check (`decision_with_dispatch_token`; only `skip_ci_check: true` counts), which replaces the Phase 2 refusal `override_inside_web_approval`.
 
 Around it: an optional `request_id` on approve, approve-dispatch and deny (#1579); the dataset id rule per environment before the claim (#1583);
 a release endpoint that the token alone authenticates, and `last_error` on the five early exits before the step loop (#1582);
-one router-wide cookie Origin guard in place of four per-route copies (#1603, #1584);
+one router-wide cookie Origin guard in place of four per-route copies (#1603, #1584),
+whose refusal body carries the word in `error` and `code` and the sentence in `message`;
 `/deny` gated by the lease and refused once a step beyond validation has run or is marked current (so a failed first mutation stays undeniable);
 and the final write guarded by the request's status, with a request closed during a run refused before any tail job writes.
+A resumed run whose steps are all done leaves the request `approving` when a tail job warned, because the warning's remedy is to approve again,
+and when it closes the request it writes a `dataset_published` row that names who finished it (`finished_by_resume`).
+The step loop's own end keeps the same dead end after a warning, a known limit with a follow-up (ADR 0103, decision 12).
 #1580 (persist the lock continuation token) is deferred: a restart at page 1 also locks objects added meanwhile, and the benefit is unmeasured.
 
 The executor's workflow is in the central workflow repository and is changed by the maintainer: mask the token first, export it for the approve step's process alone and never through `GITHUB_ENV`, install the CLI that matches the environment, release on failure.
@@ -480,7 +484,9 @@ Its release notes say so.
 In `nemarOrg/website`, against nemar-cli `dev`, which now has the contract:
 render `publication_review` and `identifier_screen` from the list response; an acknowledgment field for the screen's reason;
 an explicit confirmation for a non-pass, sent as the review id and the reasons shown;
-`FRIENDLY` entries for `identifier_screen_not_clear`, `publication_review_not_clear` and `invalid_body`;
+`FRIENDLY` entries for `identifier_screen_not_clear`, `publication_review_not_clear` and `invalid_body`,
+and for the approval words Phase 3 added (`APPROVAL_REFUSAL_ERROR_CODES`);
+the Origin guard's `origin_not_allowed` is shown from `message`, not from `error`, which holds the word (ADR 0103, decision 10);
 the transcription of `shared/contract/publication-review-copy.ts` with a drift test that reads it from the sparse checkout of `dev`;
 the seventh block reason in `src/lib/publication-block.ts`.
 In this repository, a pull request into `dev`: a parity test that reads the website's copy through an environment variable or the sibling checkout.

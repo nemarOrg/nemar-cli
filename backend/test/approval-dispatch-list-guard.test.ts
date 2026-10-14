@@ -1,6 +1,6 @@
 /**
- * `GET /admin/publish/requests` after a web click never carries the dispatch token (Phase 3 of
- * the publication review, ADR 0080).
+ * `GET /admin/publish/requests` after a web click never carries the dispatch token (ADR 0103
+ * decision 2).
  *
  * The list selects `pr.*`, so every column of `publication_requests` reaches the wire unless a
  * strip names it (the two callback nonces, the stored screen report). The dispatch token is a

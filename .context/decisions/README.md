@@ -161,12 +161,12 @@ invisible one — which is why it is checked rather than trusted.
   the token is a hash-based message authentication code (HMAC) over the dataset, the request, the clicker and the claim's own stored instant, signed with the callback secret under its own domain tag, with no stored nonce and no migration,
   carried in the dispatch payload and presented in `X-Approval-Dispatch-Token` on every `/approve` call (the command-line tool reads `NEMAR_APPROVAL_DISPATCH_TOKEN`, only in `approve`);
   a call with no token is its caller's own act and its mark takes the claim over, a valid token makes the clicker the approver (the caller if the clicker is no longer an administrator, left open), a stale or expired one is refused (`dispatch_superseded`, `dispatch_expired`),
-  and a call that carries a token may carry no override, no screen acknowledgment and no skipped CI check (`decision_with_dispatch_token`, replacing the Phase 2 stop-gap);
+  and a call that carries a token may carry no override, no screen acknowledgment and no skipped CI check (`decision_with_dispatch_token`, replacing the Phase 2 stop-gap; an explicit `false` skip is no decision), and the command-line tool refuses all three flags and a malformed token value locally;
   a bearer credential for attribution only, never stored by the Worker (it travels in the GitHub dispatch event) and never logged, audited, listed or returned, which a leaked copy can use to release its own claim and so cancel one run;
   an optional `request_id` on approve, approve-dispatch and deny (`request_mismatch`), the dispatch id checked per environment before the claim (`invalid_dataset_id`),
   a token-authenticated `POST /webhooks/approval-release` and `last_error` on the five early exits before the step loop,
-  one router-wide cookie Origin guard, `/deny` gated by the lease and refused once publishing has started, a failed first mutation included (`approval_in_flight`, `deny_after_publishing`),
-  the final write guarded by status, with the all-steps-done branch refusing a closed request before any tail job (`approval_closed_during_run`), and #1580 deferred;
+  one router-wide cookie Origin guard (its refusal carries the sentence in `message`), `/deny` gated by the lease and refused once publishing has started, a failed first mutation included (`approval_in_flight`, `deny_after_publishing`),
+  the final write guarded by status, with the all-steps-done branch refusing a closed request before any tail job and leaving the request `approving` when a tail job warned (`approval_closed_during_run`), and #1580 deferred;
   the executor's workflow edit and the rollout order are in the ADR
 
 ## Backfill note (2026-07-31)

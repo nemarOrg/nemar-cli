@@ -1,5 +1,6 @@
 /**
- * POST /admin/publish/:id/approve-dispatch (ADR 0080).
+ * POST /admin/publish/:id/approve-dispatch (ADR 0080; ADR 0103 for the dispatch token, the id
+ * rule and `request_id`).
  *
  * The website cannot drive an approval itself: after the irreversible DOI
  * publish, S3 Object Lock runs in batches the CALLER must keep requesting, and
@@ -460,7 +461,7 @@ describe("releasing a claim", () => {
   });
 });
 
-describe("the dispatch token (#1604)", () => {
+describe("the dispatch token (#1604, ADR 0103 decisions 1 to 3)", () => {
   /** What the executor would be handed: the one token in the click's payload. */
   const tokenOf = (): string => dispatches[0].body.client_payload.dispatch_token as string;
 
@@ -1202,10 +1203,10 @@ describe("who may dispatch", () => {
 });
 
 // ---------------------------------------------------------------------------------------------
-// #1583: the id is checked before anything is read or claimed
+// #1583 (ADR 0103 decision 8): the id is checked before anything is read or claimed
 // ---------------------------------------------------------------------------------------------
 
-describe("the dataset id is validated for the environment before the claim (#1583)", () => {
+describe("the dataset id is validated for the environment before the claim (#1583, decision 8)", () => {
   // The executor workflow accepts nm or on plus six digits, and on dev xx plus six digits. A
   // dispatch for any other id used to claim the lease, dispatch, and fail in the workflow's own
   // validation with the lease held for fifteen minutes. Each case seeds a request under the very
@@ -1343,10 +1344,10 @@ describe("the dataset id is validated for the environment before the claim (#158
 });
 
 // ---------------------------------------------------------------------------------------------
-// #1579: the optional request_id precondition
+// #1579 (ADR 0103 decision 7): the optional request_id precondition
 // ---------------------------------------------------------------------------------------------
 
-describe("a request_id names the request the click was for (#1579)", () => {
+describe("a request_id names the request the click was for (#1579, decision 7)", () => {
   test("the id of the active request is accepted: 202, claimed, dispatched", async () => {
     const id = seedRequest();
     const res = await dispatchBody(ADMIN_KEY, { request_id: id });

@@ -411,7 +411,7 @@ export async function verifyPublicationReviewCallbackToken(
 }
 
 // ============================================================================
-// Approval-dispatch HMAC tokens (ADR 0080, Phase 3 of the publication review)
+// Approval-dispatch HMAC tokens (ADR 0103, decisions 1 to 3)
 // ============================================================================
 //
 // A web click on Approve claims the request (`approval_requested_by`, `approval_dispatched_at`)

@@ -223,7 +223,7 @@ describe("--debug log content is redacted (real request, real failure)", () => {
   });
 });
 
-describe("--debug never writes the approval dispatch token (Phase 3 of the publication review)", () => {
+describe("--debug never writes the approval dispatch token (ADR 0103 decision 2)", () => {
   // The executor of a web approval hands the CLI a per-claim token (env var, then a header on
   // every `/approve` call). The token is not the API key, so the log's header redaction did not
   // know it, and the debug log is the file users are told to drag onto a public issue. This runs
@@ -250,7 +250,7 @@ describe("--debug never writes the approval dispatch token (Phase 3 of the publi
       enableDebug();
       await request("/admin/publish/nm000123/approve", {
         method: "POST",
-        headers: { "X-Approval-Dispatch-Token": process.env.TEST_TOKEN },
+        headers: { "X-Approval-Dispatch-Token": process.env.DEBUG_PROBE_TOKEN },
         body: JSON.stringify({ resume: true }),
       }, false);
       console.log(writeDebugLogSync(["admin", "publish", "approve", "nm000123"], 0));
@@ -262,7 +262,7 @@ describe("--debug never writes the approval dispatch token (Phase 3 of the publi
         ...process.env,
         NEMAR_CONFIG_DIR: configDir,
         TEST_API_URL: `http://localhost:${server.port}`,
-        TEST_TOKEN: token,
+        DEBUG_PROBE_TOKEN: token,
         NEMAR_NO_UPDATE_CHECK: "1",
         NO_COLOR: "1",
       },

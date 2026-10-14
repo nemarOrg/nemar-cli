@@ -1,6 +1,6 @@
 /**
- * `POST /admin/publish/:id/approve` takes an optional `request_id` (#1579, Phase 3 of the
- * publication review).
+ * `POST /admin/publish/:id/approve` takes an optional `request_id` (#1579, ADR 0103 decisions 4
+ * and 7).
  *
  * An approval is a run, and a run is for ONE request: the one an administrator read, or the one a
  * click was shown. Between that read and the run the request can be denied and filed again, and

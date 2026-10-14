@@ -59,8 +59,8 @@ import { approveEvidenceLines } from "../lib/publication-review-display.js";
 import { plain } from "../lib/terminal-text.js";
 
 /**
- * The environment variable a web approval's executor is handed its dispatch token in (#1604). Read
- * by `approve` and by nothing else; never printed, never logged.
+ * The environment variable a web approval's executor is handed its dispatch token in (#1604, ADR
+ * 0103 decision 3). Read by `approve` and by nothing else; never printed, never logged.
  */
 const DISPATCH_TOKEN_ENV = "NEMAR_APPROVAL_DISPATCH_TOKEN";
 
@@ -82,12 +82,13 @@ const DISPATCH_TOKEN_UNSET_HINT = `If you are not running a dispatched approval,
 /**
  * What the dispatch token variable holds, read the way `approve` uses it. Blank is none (an unset
  * variable, an empty one, or whitespace alone). Anything else must be what a header can carry:
- * printable ASCII with no whitespace, so a stray line break, a quote pasted with the value or a
- * character from another script is refused here with a sentence, not handed to the HTTP client,
- * which throws on it and reports a network failure that the command would retry for a while. The
- * Worker mints 64 lowercase hexadecimal characters; this does not insist on that, so a token of
- * another shape still reaches the Worker and is refused there with the Worker's own words. The
- * `problem` names what is wrong and never the value, which is a credential.
+ * printable ASCII with no whitespace, so a stray line break, a typographic quote pasted with the
+ * value or a character from another script is refused here with a sentence, not handed to the HTTP
+ * client, which throws on it and reports a network failure that the command would retry for a
+ * while. A straight quote is printable ASCII and is sent; the Worker refuses it. The Worker mints
+ * 64 lowercase hexadecimal characters; this does not insist on that, so a token of another shape
+ * still reaches the Worker and is refused there with the Worker's own words. The `problem` names
+ * what is wrong and never the value, which is a credential.
  */
 function readDispatchToken(
   raw: string | undefined,

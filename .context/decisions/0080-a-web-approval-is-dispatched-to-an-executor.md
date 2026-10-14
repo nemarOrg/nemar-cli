@@ -154,7 +154,9 @@ Harder, and honest about it:
   as is a fixed sentence when the GitHub token for the dataset repositories cannot be minted, an exit that is then rethrown;
   so the row reads as failed and the page offers a retry once the 60 second grace has passed,
   where before it read "running" for the lease although nothing was running.
-  Only the 426 outdated-client answer returns before the row is touched.
+  Every answer that comes ahead of the mark (the 426 outdated-client answer, the 404 for no request, a request that is not the one named, a blocked request, a refused token and the gates) leaves the row untouched.
+  A web run's claim stands through the early exits above, for the workflow's release step to end, except where the owner-name walk-back clears it;
+  a call with no token cleared the claim at the mark.
   The reason is also in the workflow's log.
 - **A workflow failure the backend cannot see is reported by the workflow.** A missing secret or an install
   failure means `/approve` is never called, so it writes nothing. Since ADR 0103 the workflow's failure step

@@ -83,6 +83,9 @@ A token that is stale or expired is refused, never quietly downgraded.**
    The click mints it and puts it in the payload as `dispatch_token`, which now has five keys: `dataset_id`, `request_id`, `resume`, `environment` and `dispatch_token`.
    The executor presents it as `X-Approval-Dispatch-Token` on every `/approve` call of the run, one per batch and one per retry, so it cannot be single-use.
    The CLI reads it only from the environment variable `NEMAR_APPROVAL_DISPATCH_TOKEN`, only in `approve` and never in `next`, so a token left in a person's shell cannot turn their walk into an executor's run.
+   A blank value is no token.
+   Any other value must be what a header can carry, printable American Standard Code for Information Interchange (ASCII) characters with no whitespace, or `approve` refuses it before it sends anything, with a sentence that names the problem and never the value.
+   Left to the client library, such a value throws, and the command would report a network failure and retry it for a while.
    With the variable set, `approve` refuses `--force`, `--acknowledge-identifier-screen` and `--skip-ci-check` before it sends anything (decision 5),
    and says on standard error that the run presents a token.
 4. **The approver forks on the proof, in this order, in the prelude of `runPublicationApproval`.**
@@ -98,6 +101,7 @@ A token that is stale or expired is refused, never quietly downgraded.**
    An override of the review, an acknowledgment of the identifier screen or a skipped continuous integration (CI) check (`skip_ci_check`) in the body of such a call is refused, 409 `decision_with_dispatch_token`, and nothing is recorded under anybody.
    The override and the acknowledgment were recorded at the click, under the clicker's id, and the gates read them there.
    A skipped CI check was never part of the click: it is a decision of its own, and it would be recorded under the approver, which for a token call is the clicker, who skipped nothing.
+   Only `skip_ci_check: true` is a decision: an explicit `false` is allowed, because the CLI sends it on every call.
    The executor workflow sends none of the three, and the CLI refuses all three flags locally while the variable is set (decision 3).
    This retires the Phase 2 stop-gap `override_inside_web_approval`, which is removed from the contract.
    Its guarantee is now structural, and stronger:
@@ -108,6 +112,8 @@ A token that is stale or expired is refused, never quietly downgraded.**
    The executor the click dispatched then finds no claim, and its next call is 409 `dispatch_superseded`.
    A call that carried a token marks only while `approval_dispatched_at` is still the instant it verified, which closes the gap between the check and the mark;
    zero changes are answered `dispatch_superseded` if the claim moved, and `request_changed` if the request moved under a claim that stands.
+   The read that tells the two apart can itself fail, and then the answer is a retryable 500 (`CLAIM_READ_FAILED_MESSAGE`), never `dispatch_superseded`:
+   nothing was marked and nothing proved that the claim was replaced, and the CLI does not retry a 409, so a transient database error must not end a live web run with a sentence that is false.
    A call already past its mark when the takeover lands finishes, which is the old hazard of two drivers narrowed to one call.
    An executor whose workflow sends no token takes over its own claim the same way.
 7. **A run may name the request it is for.**
@@ -131,18 +137,26 @@ A token that is stale or expired is refused, never quietly downgraded.**
    The sentence of the word is stored, never a string the workflow wrote.
    One conditional write, bound to the claim's instant and its clicker, clears the claim and sets `last_error` unless a specific one is already there.
    It leaves `updated_at` alone, because the failed-run grace counts from it.
-   It writes the audit row `approval_dispatch_released` (no user, the request id and the reason) and answers 200.
+   It writes the audit row `approval_dispatch_released` (no user, the request id and the reason) and answers 200;
+   a failure to write that row is logged with its cause and never turns the release into a failure.
    Every refusal of the credential, whatever the cause, is one 401 with the same bytes, so an answer never tells a caller which requests have a live claim.
    The route does not check the lease: a token releases its own claim for as long as that claim stands.
+   It reads a body of at most 1 KiB, which is three scalars: a longer one is 413 and one that cannot be read as an object is 400, both before the credential is looked at, because the door is open until then.
    The five exits of `/approve` that come after the request is marked and before its step loop now also record why in `last_error`, best effort:
    dataset not found, sandbox, no repository, invalid repository, and a failure to mint the GitHub token for the dataset repositories.
    The four answers write their own sentence, with their bodies and statuses unchanged.
    The failed mint writes a fixed sentence and rethrows, so it answers as it always did, and the request stays `approving`.
+   None of the five exits clears a claim.
+   A call without a token has already taken the claim over at the mark, and a web run's claim is left standing for the executor's release step to end.
 10. **One Origin rule covers every cookie write on the admin router.**
     `cookieOriginGuard` runs after authentication and the role check.
     A read passes (`GET`, `HEAD`, `OPTIONS`); any other method that is not authenticated by a bearer key needs a NEMAR `Origin`, or it is 403 `origin_not_allowed` (#1603, #1584).
     The rule is phrased as "not a key", so a request whose method of authentication nothing set fails closed.
     It replaces four per-route copies (the dispatch, the screen re-run, the review start and the comment).
+    Its refusal body is `{ error: "origin_not_allowed", code: "origin_not_allowed", message }`.
+    That is an exception to the rule of the comment and review-start routes, where `error` is the sentence and `code` the word:
+    here the word is in `error` as well, so a caller that reads an approval refusal from `error` finds it, and the sentence is in `message`.
+    The website's calls are Phase 4's (#1731), and it must show `message`, not `error`, for this one refusal.
     `/approve`'s own stricter rule, that an override is accepted only with an administrator key, stays.
 11. **`/deny` is gated by the lease and is one conditional write.**
     It reads the newest active request and refuses, in this order and before any write: 404 for none, 409 `request_mismatch`,
@@ -159,7 +173,7 @@ A token that is stale or expired is refused, never quietly downgraded.**
     The write also clears a lapsed claim.
     The depositor's mail goes only after the write has changed a row.
     A stalled run that has not started publishing, in the sense above, can still be denied: nothing is public and nothing is writing.
-12. **The write that ends an approval requires that the request is still `approving`, and a refusal comes before any write.**
+12. **The write that ends an approval requires that the request is still `approving`, and in the all-steps-done branch a refusal comes before any write.**
     A request closed while its run ran (denied once its lease had lapsed, or blocked again by a late result) is not marked published.
     The run answers 409 `approval_closed_during_run`, a word of its own because `request_changed` means that nothing ran and here the steps have run and cannot be taken back,
     and writes one audit row, `approval_finished_on_closed_request`, of ids and words.
@@ -173,9 +187,14 @@ A token that is stale or expired is refused, never quietly downgraded.**
     - The tail jobs run.
       When one of them warns, the request is left `approving`, because the warning's remedy is to approve again, and a request already marked `published` would answer that with a 404.
     - When none warned, the same call marks the request `published` with the guarded write.
-      Only when that write changed the row does it write the `dataset_published` audit row, once, with the caller as its user and the flag `finished_by_resume` in its details.
+      Only when that write changed the row does it write the `dataset_published` audit row, once, by the helper the step loop's last write uses, with the approver of record as its user and the flag `finished_by_resume` in its details.
+      The approver of record is the caller, or the clicker for a call under a token, with `executed_by` then naming the caller.
       A concurrent finisher whose write changed nothing writes no second row.
+      A failed audit write is a warning in the answer and changes nothing else.
       The mark leaves `approved_by` as it was, so the audit row, not that column, names who finished the run.
+    - The step loop's own end has the same dead end after a warning, and it is not changed here.
+      It marks the request `published` and then answers with the tail jobs' warnings, which still say to approve again, and that finds no active request (404).
+      This is a known limit, and the follow-up is to leave the request `approving` there too, as the all-steps-done branch now does, or to change the warning text.
 13. **#1580 is deferred.**
     A resumed run restarts the lock listing at page 1, so objects added under `objects/` while the run was stopped are locked too, and `s3_lock` is never run again once complete.
     A saved continuation token would skip whatever was listed before it, which weakens a property the restart has today, and it would need a migration and a new resumability contract.

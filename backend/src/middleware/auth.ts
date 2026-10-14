@@ -536,7 +536,8 @@ export const ORIGIN_NOT_ALLOWED_MESSAGE =
 const READ_ONLY_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 /**
- * Middleware: a write made with a session cookie must come from a NEMAR page (#1603, #1584).
+ * Middleware: a write made with a session cookie must come from a NEMAR page (#1603, #1584; ADR
+ * 0103, decision 10).
  *
  * A session cookie rides along with any cross-site request a browser can be tricked into making,
  * and a write on the admin router publishes datasets, mails real people and spends the platform's

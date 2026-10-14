@@ -1,6 +1,6 @@
 /**
  * `POST /admin/publish/:id/deny` is lease-gated and conditional, and the final publish write is
- * guarded by the status it expects (#1603, Phase 3 of the publication review, ADR 0080).
+ * guarded by the status it expects (#1603, ADR 0103 decisions 11 and 12).
  *
  * A denial used to be one unconditional UPDATE after a read, so it overwrote whatever the request
  * had become in between: a run still writing its steps, a request a run had just published, a
@@ -235,7 +235,7 @@ async function expectRefused(
 const IN_FLIGHT = { error: "approval_in_flight", message: APPROVAL_IN_FLIGHT_MESSAGE };
 const AFTER_PUBLISHING = { error: "deny_after_publishing", message: DENY_AFTER_PUBLISHING_MESSAGE };
 
-describe("T4.5 a request an approval is running for is not denied", () => {
+describe("a request an approval is running for is not denied", () => {
   test("a fresh terminal approval (approving, heartbeat a few seconds old)", async () => {
     const id = seedRequest({ status: "approving", updatedAt: "-5 seconds", steps: ["ci_check"] });
     await expectRefused(id, () => deny(), { status: 409, body: IN_FLIGHT });
@@ -257,7 +257,7 @@ describe("T4.5 a request an approval is running for is not denied", () => {
   });
 });
 
-describe("T4.6 a request nothing is running for is denied, and the depositor is told once", () => {
+describe("a request nothing is running for is denied, and the depositor is told once", () => {
   async function denied(id: number): Promise<void> {
     await withFakeResend(async (calls) => {
       const res = await deny({ reason: "The README does not describe the setup." });
@@ -328,7 +328,7 @@ describe("T4.6 a request nothing is running for is denied, and the depositor is 
   });
 });
 
-describe("T4.7 a request that has started publishing is never denied, whatever its status", () => {
+describe("a request that has started publishing is never denied, whatever its status", () => {
   test("a stalled approving request with a step done outside the validation-only ones", async () => {
     const id = seedRequest({ status: "approving", updatedAt: "-16 minutes", steps: STARTED });
     await expectRefused(id, () => deny(), { status: 409, body: AFTER_PUBLISHING });
@@ -460,7 +460,7 @@ describe("a first mutation that did not finish is not a denial either", () => {
   });
 });
 
-describe("T4.8a request that moves between the read and the write is not overwritten", () => {
+describe("a request that moves between the read and the write is not overwritten", () => {
   test("published in between: the answer is that no request is active, and it stays published", async () => {
     const id = seedRequest({ status: "approving", updatedAt: "-16 minutes", steps: ["ci_check"] });
     const bindings = raceBeforeDenyWrite(() =>
@@ -593,7 +593,7 @@ describe("T4.8a request that moves between the read and the write is not overwri
   });
 });
 
-describe("T4.9 which request a denial is for", () => {
+describe("which request a denial is for", () => {
   test("a denied request cannot be denied again, and the depositor is not mailed twice", async () => {
     seedRequest({ status: "requested" });
     await withFakeResend(async (calls) => {
@@ -651,7 +651,7 @@ describe("T4.9 which request a denial is for", () => {
   });
 });
 
-describe("T4.10 the final publish write is guarded by the status it expects", () => {
+describe("the final publish write is guarded by the status it expects", () => {
   function seedRun(): number {
     db.run(
       `INSERT INTO datasets (dataset_id, name, owner_user_id, github_repo, visibility)

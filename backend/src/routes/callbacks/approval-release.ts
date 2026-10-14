@@ -1,6 +1,6 @@
 /**
  * Approval-release callback: POST /approval-release, called by the executor's failure step
- * (#1582, Phase 3 of the publication review, ADR 0080).
+ * (#1582, ADR 0103 decision 9).
  *
  * A web click claims the request (`approval_requested_by`, `approval_dispatched_at`) and
  * dispatches an executor. A failure the Worker can see for itself (a step that failed, a gate that

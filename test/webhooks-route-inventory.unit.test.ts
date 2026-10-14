@@ -45,7 +45,7 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /publication-review-claim": 1,
   "POST /publication-review-result": 1,
 
-  // Web approval release (the dispatch token alone authenticates; ADR 0080, Phase 3)
+  // Web approval release (the dispatch token alone authenticates; ADR 0103, decision 9)
   "POST /approval-release": 1,
 
   // OpenNeuro import state callback (bearer token)

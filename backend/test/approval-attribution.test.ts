@@ -1,5 +1,5 @@
 /**
- * Who a publication is recorded as approved by (ADR 0080, and its Phase 3 amendment, #1604).
+ * Who a publication is recorded as approved by (ADR 0080, and ADR 0103 decisions 1 to 6, #1604).
  *
  * Attribution forks on whether the call proves it belongs to a web click. A terminal approval
  * records the account that called `/approve`, as it always has. A web approval is executed by a

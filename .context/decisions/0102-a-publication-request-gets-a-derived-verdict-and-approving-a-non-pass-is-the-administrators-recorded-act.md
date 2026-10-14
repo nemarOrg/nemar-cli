@@ -919,6 +919,7 @@ Where the two differ, this is the later text.
    A call that presents a valid token is recorded as the clicker, so the clicker's recorded override and acknowledgment count for it, as section 8 says of the executor's `--yes` run.
    Such a call may not carry a decision of its own: no override, no identifier screen acknowledgment and no skipped CI check.
    Any of the three is 409 `decision_with_dispatch_token`, and nothing is recorded.
+   Only `skip_ci_check: true` counts: an explicit `false` is allowed, because the CLI sends it on every call.
    A skipped CI check is one of them because it is recorded under the approver, which for a token call is the clicker, and the click did not skip it.
    The executor workflow sends none of the three.
    `nemar admin publish approve` refuses `--force`, `--acknowledge-identifier-screen` and `--skip-ci-check` while `NEMAR_APPROVAL_DISPATCH_TOKEN` is set, before it sends anything.
@@ -955,7 +956,8 @@ Where the two differ, this is the later text.
    A run whose request was denied once its lease had lapsed, or was blocked again, answers 409 `approval_closed_during_run` and leaves one audit row, `approval_finished_on_closed_request`.
    A resumed run whose steps are all done follows the same rule, and refuses a request that is not `approving` before it runs any tail job, so a refusal never follows a write that cannot be taken back.
    When a tail job warns, that run leaves the request `approving`, so that approving again retries it.
-   When none warns, it marks the request `published`, and only when that write changed the row it writes the `dataset_published` audit row, once, with the caller as its user and the flag `finished_by_resume`.
+   When none warns, it marks the request `published`, and only when that write changed the row it writes the `dataset_published` audit row, once, with the approver of record as its user (the clicker for a call under a token, with `executed_by` naming the caller) and the flag `finished_by_resume`.
+   The step loop's own end has the same "approve again" dead end after a warning, which Phase 3 does not change: it is a known limit with a follow-up (ADR 0103, decision 12).
 7. **None of this is behind the flag.**
    Item 3 of the Phase 2 amendment lists what production changes with `PUBLICATION_REVIEW_ENABLED` off.
    Phase 3 adds, also unconditionally: the dispatch token and the takeover, `request_id` on the three routes, the id rule of `approve-dispatch`,
