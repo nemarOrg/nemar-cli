@@ -230,6 +230,10 @@ Description:
   A clear, actionable reason helps users understand what to fix
   before resubmitting their publication request.
 
+  A request cannot be denied while an approval of it is running, or once an
+  approval has run a step that publishes (the dataset may be public): wait for
+  the run to end, or check the dataset and finish or repair the approval.
+
 Requirements:
   - Must provide a reason for denial: --reason or, with no --reason, one typed
     at a terminal or the first line of piped input (in a script, pass --reason)

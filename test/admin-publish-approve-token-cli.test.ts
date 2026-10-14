@@ -642,6 +642,9 @@ describe("the help says the variable and the rule", () => {
       "--force, --acknowledge-identifier-screen and --skip-ci-check are refused here",
     );
     expect(help).toContain("'next' never reads the variable");
+    // A terminal approval is the stronger act: it takes a live web approval over, and says so.
+    expect(help).toContain("it takes over any web approval that is under way");
+    expect(help).toContain("the run the website started is then refused and changes nothing");
     expect(help).toContain("Environment:");
   });
 
