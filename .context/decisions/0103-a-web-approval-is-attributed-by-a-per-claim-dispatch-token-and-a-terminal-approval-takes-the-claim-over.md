@@ -232,7 +232,7 @@ A token that is stale or expired is refused, never quietly downgraded.**
       The effect is that the request stays `approving`, because approving it again repeats the warning and never closes it.
       It stays visible in the queue, so it is not silent.
       It is accepted because this branch left the request `approving` before Phase 3 as well,
-      because the other tail-job warnings (no concept DOI, no repository) are cured by a repair and then by approving again, so `approving` is the right state for them,
+      because the other tail-job warnings (a missing concept identifier, a missing repository) are cured by a repair and then by approving again, so `approving` is the right state for them,
       and because closing the request on a warning would turn the remedy into a 404.
       The cap is the only permanent warning today.
       The follow-up is to classify a tail-job warning as retryable or final and close the request on a final one, or to raise or paginate the cap.
