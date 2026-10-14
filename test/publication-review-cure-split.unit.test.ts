@@ -144,3 +144,362 @@ describe("the terminal's cure is pinned for every reason code", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// The split: what a page prints (`neutralCureOf`), what a terminal runs (`commandOf`), and the
+// words of a reason without its cure (`reasonStatement`). Everything above this line is the
+// golden, captured before the split and not edited since.
+// ---------------------------------------------------------------------------------------------
+
+import { failingReport, goodPublicationReport } from "../backend/test/helpers/publication-review";
+import {
+  START_CURE_REASONS,
+  commandOf,
+  describePublicationReview,
+  neutralCureOf,
+  parsePublicationReviewReport,
+  reasonStatement,
+} from "../shared/publication-review";
+import { terminalFlaws } from "./helpers/terminal-words";
+
+const NEUTRAL_OVERRIDE = "An administrator may approve over it; the approval records the override.";
+const NEUTRAL_NOT_STARTABLE = `A review starts only for a request that is waiting for its decision. ${NEUTRAL_OVERRIDE}`;
+
+/** What a page prints for each cure, written out by hand; `notStartable` absent means the same. */
+const NEUTRAL: Record<string, { startable: string; notStartable?: string }> = {
+  request_blocked: {
+    startable: "The depositor fixes what blocked it and requests publication again.",
+  },
+  submission_minimum_failed: {
+    startable:
+      "The depositor fixes the dataset and requests publication again; a request still waiting for its decision is moved to blocked.",
+  },
+  identifier_screen_blocks: {
+    startable:
+      "The depositor removes it and requests publication again, which runs the screen again.",
+  },
+  identifier_screen_not_run: { startable: "An administrator runs the screen again." },
+  identifier_screen_pending: {
+    startable: "Wait for it to report; the review starts when it does.",
+  },
+  identifier_screen_stale: { startable: "An administrator runs the screen again." },
+  version_kept_after_anonymous_release: {
+    startable:
+      "The depositor raises Version in dataset_description.json and requests publication again.",
+  },
+  identifier_screen_needs_acknowledgment: {
+    startable:
+      "An administrator reads what the screen reported and approves with a recorded reason.",
+  },
+  question_failed: { startable: `Read any findings and the dataset's text. ${NEUTRAL_OVERRIDE}` },
+  steering_attempt: {
+    startable: `Read the dataset's text yourself; the review's answers cannot be relied on. ${NEUTRAL_OVERRIDE}`,
+  },
+  bids_failed_at_review: {
+    startable: `The depositor fixes the validation errors and requests publication again. ${NEUTRAL_OVERRIDE}`,
+  },
+  version_already_released: {
+    startable: `The depositor raises Version in dataset_description.json. ${NEUTRAL_OVERRIDE}`,
+  },
+  version_malformed: { startable: `The depositor corrects Version. ${NEUTRAL_OVERRIDE}` },
+  stored_verdict_fail: { startable: `Read the review's record. ${NEUTRAL_OVERRIDE}` },
+  review_not_started: {
+    startable: `Start it. ${NEUTRAL_OVERRIDE}`,
+    notStartable: NEUTRAL_NOT_STARTABLE,
+  },
+  review_running: {
+    startable: `Wait for it to report; it usually takes minutes. ${NEUTRAL_OVERRIDE}`,
+  },
+  review_did_not_report: {
+    startable: `Start it again. ${NEUTRAL_OVERRIDE}`,
+    notStartable: NEUTRAL_NOT_STARTABLE,
+  },
+  review_limit_reached: {
+    startable: `Start it later; an administrator's start is held by the platform's limit only. ${NEUTRAL_OVERRIDE}`,
+    notStartable: NEUTRAL_NOT_STARTABLE,
+  },
+  review_could_not_run: {
+    startable: `Once the cause is fixed, start it again. ${NEUTRAL_OVERRIDE}`,
+    notStartable: NEUTRAL_NOT_STARTABLE,
+  },
+  text_withheld: { startable: `Read the withheld documents yourself. ${NEUTRAL_OVERRIDE}` },
+  question_unknown: { startable: `Answer it yourself from the dataset. ${NEUTRAL_OVERRIDE}` },
+  bids_unconcluded_at_review: {
+    startable: `Check the validation run of that commit. ${NEUTRAL_OVERRIDE}`,
+  },
+  version_missing: {
+    startable: `Confirm that 1.0.0 is right, or have the depositor set Version. ${NEUTRAL_OVERRIDE}`,
+  },
+  doi_state_unexpected: { startable: `Check the DOI record before approving. ${NEUTRAL_OVERRIDE}` },
+};
+
+const SCREEN_CMD = "nemar admin publish screen nm000123";
+const START_CMD = "nemar admin publish start nm000123";
+const SHOW_CMD = "nemar admin publish show nm000123";
+const ACK_CMD = 'nemar admin publish approve nm000123 --acknowledge-identifier-screen "<reason>"';
+
+/** The command each terminal cure names; every other code names none. */
+const COMMANDS: Record<string, string> = {
+  identifier_screen_not_run: SCREEN_CMD,
+  identifier_screen_stale: SCREEN_CMD,
+  identifier_screen_needs_acknowledgment: ACK_CMD,
+  stored_verdict_fail: SHOW_CMD,
+  review_not_started: START_CMD,
+  review_did_not_report: START_CMD,
+  review_limit_reached: START_CMD,
+  review_could_not_run: START_CMD,
+};
+
+const neutralExpected = (code: string, startable: boolean): string => {
+  const g = NEUTRAL[code];
+  if (g === undefined) throw new Error(`no neutral golden entry for ${code}`);
+  return startable ? g.startable : (g.notStartable ?? g.startable);
+};
+
+describe("the neutral cure is what a page prints", () => {
+  test("the neutral golden names exactly the reason codes", () => {
+    expect(Object.keys(NEUTRAL)).toEqual([...REASON_CODES]);
+  });
+
+  test("neutralCureOf is the pinned text for every code, startable or not", () => {
+    let visited = 0;
+    for (const code of REASON_CODES) {
+      for (const startable of [true, false]) {
+        expect(neutralCureOf(code, ID, startable)).toBe(neutralExpected(code, startable));
+        visited++;
+      }
+    }
+    expect(visited).toBe(REASON_CODES.length * 2);
+  });
+
+  test("a malformed id leaves no placeholder and no echo of what was sent", () => {
+    for (const code of REASON_CODES) {
+      for (const bad of ["x y", "", "nm00012"]) {
+        for (const startable of [true, false]) {
+          const text = neutralCureOf(code, bad, startable);
+          expect(text).toBe(neutralExpected(code, startable));
+          expect(text).not.toContain("<dataset>");
+          if (bad !== "") expect(text).not.toContain(bad);
+        }
+      }
+    }
+  });
+
+  test("the neutral cure is shorter than the terminal's exactly where a command or the flag was removed", () => {
+    for (const code of REASON_CODES) {
+      const terminal = cureOf(code, ID, true);
+      const neutral = neutralCureOf(code, ID, true);
+      const named = commandOf(code, ID, true) !== null;
+      const flagged = REASONS[code].clearedBy === "override";
+      expect(neutral === terminal).toBe(!named && !flagged);
+    }
+  });
+});
+
+describe("the command is what a terminal runs", () => {
+  test("commandOf is the pinned command for the eight cures that name one, and null for the rest", () => {
+    let named = 0;
+    for (const code of REASON_CODES) {
+      const want = COMMANDS[code] ?? null;
+      expect(commandOf(code, ID, true)).toBe(want);
+      if (want !== null) named++;
+    }
+    expect(named).toBe(8);
+  });
+
+  test("the four start codes name no command for a request no start can reach", () => {
+    for (const code of START_CURE_REASONS) {
+      expect(commandOf(code, ID, false)).toBeNull();
+    }
+    // Every other code is the same whether or not a start can reach the request.
+    for (const code of REASON_CODES) {
+      if (START_CURE_REASONS.includes(code)) continue;
+      expect(commandOf(code, ID, false)).toBe(commandOf(code, ID, true));
+    }
+  });
+
+  test("a malformed id keeps the placeholder and is never quoted", () => {
+    for (const code of Object.keys(COMMANDS) as ReasonCode[]) {
+      for (const bad of ["x y", "", "nm00012"]) {
+        const text = commandOf(code, bad, true);
+        expect(text).toBe((COMMANDS[code] ?? "").replaceAll(ID, "<dataset>"));
+        if (bad !== "" && text !== null) expect(text).not.toContain(bad);
+      }
+    }
+  });
+});
+
+describe("the reasons table holds the split together", () => {
+  const codes = Object.keys(REASONS) as ReasonCode[];
+
+  test("I1: a command sits in the terminal cure as `: <command>`", () => {
+    for (const code of codes) {
+      const { command, cure } = REASONS[code];
+      if (command !== undefined) expect(cure).toContain(`: ${command}`);
+    }
+  });
+
+  test("I2: every command is an administrator's publish command", () => {
+    for (const code of codes) {
+      const { command } = REASONS[code];
+      if (command !== undefined) expect(command).toStartWith("nemar admin publish ");
+    }
+  });
+
+  test("I3: an override-class cure ends with the override sentence, and so does its alternative, which names no command", () => {
+    for (const code of codes) {
+      const rule = REASONS[code];
+      if (rule.clearedBy !== "override") continue;
+      expect(rule.cure).toEndWith(TERM_OVERRIDE);
+      if (rule.cureNotStartable !== undefined) {
+        expect(rule.cureNotStartable).toEndWith(TERM_OVERRIDE);
+        expect(terminalFlaws(rule.cureNotStartable.replace(TERM_OVERRIDE, ""), 1)).toEqual([]);
+      }
+    }
+  });
+
+  test("I4: a rule with no command names no command in its cure", () => {
+    for (const code of codes) {
+      const rule = REASONS[code];
+      if (rule.command !== undefined) continue;
+      expect(rule.cure.replace(TERM_OVERRIDE, "")).not.toContain("nemar ");
+    }
+  });
+
+  test("I5: the start codes are exactly the codes whose command is the start command", () => {
+    const byCommand = codes.filter(
+      (c) => REASONS[c].command === "nemar admin publish start <dataset>",
+    );
+    expect([...START_CURE_REASONS].sort()).toEqual([...byCommand].sort());
+    expect(START_CURE_REASONS.length).toBe(4);
+  });
+});
+
+describe("a reason's line is its statement and its terminal cure", () => {
+  const report = parsePublicationReviewReport(failingReport());
+  const reports = [null, report];
+  const reasonsFor = (code: ReasonCode) => [
+    { code, detail: null },
+    ...(code === "question_failed" ? [{ code, detail: "complete_and_honest" }] : []),
+    ...(code === "review_could_not_run" ? [{ code, detail: "model_refused" }] : []),
+  ];
+
+  test("for every code, detail, report and standing", () => {
+    let visited = 0;
+    for (const code of REASON_CODES) {
+      for (const reason of reasonsFor(code)) {
+        for (const r of reports) {
+          for (const startable of [true, false]) {
+            expect(reasonLine(reason, ID, r, startable)).toBe(
+              `${reasonStatement(reason, r)} ${cureOf(code, ID, startable)}`,
+            );
+            visited++;
+          }
+        }
+      }
+    }
+    expect(visited).toBeGreaterThan(REASON_CODES.length * 4);
+  });
+
+  test("a statement with a detail is the sentence without its period, then the detail in brackets", () => {
+    const statement = reasonStatement(
+      { code: "question_failed", detail: "complete_and_honest" },
+      report,
+    );
+    expect(statement).toBe(
+      "A question of the review failed (the README is complete and agrees with the dataset; findings: README does not match the dataset).",
+    );
+    expect(reasonStatement({ code: "question_failed", detail: "complete_and_honest" }, null)).toBe(
+      "A question of the review failed (the README is complete and agrees with the dataset).",
+    );
+    expect(reasonStatement({ code: "review_could_not_run", detail: "model_refused" }, null)).toBe(
+      "The review could not run (the reviewing model declined to review).",
+    );
+  });
+
+  test("a statement with no detail is the rule's sentence, unchanged", () => {
+    for (const code of REASON_CODES) {
+      const { detail } = { detail: null };
+      expect(reasonStatement({ code, detail }, null)).toBe(REASONS[code].sentence);
+    }
+    // A good report has nothing to add to a reason that has no detail.
+    const good = parsePublicationReviewReport(goodPublicationReport());
+    expect(reasonStatement({ code: "text_withheld", detail: null }, good)).toBe(
+      REASONS.text_withheld.sentence,
+    );
+  });
+});
+
+describe("a reason's command is the command `next` names", () => {
+  const common = {
+    datasetId: ID,
+    applies: true,
+    enabled: true,
+    outcome: null,
+    model: "claude-haiku-5-5",
+    head: "a".repeat(40),
+    version: "1.2.0",
+  } as const;
+  const nextOf = (code: ReasonCode) =>
+    describePublicationReview({
+      ...common,
+      reasons: [{ code, detail: null }],
+      row: { kind: "none" },
+      startable: true,
+    }).next;
+
+  test("for the screen's hard reasons, the start codes and the acknowledgment", () => {
+    const agreeing: ReasonCode[] = [
+      "identifier_screen_not_run",
+      "identifier_screen_stale",
+      "identifier_screen_needs_acknowledgment",
+      ...START_CURE_REASONS,
+    ];
+    expect(agreeing).toHaveLength(7);
+    for (const code of agreeing) {
+      const command = commandOf(code, ID, true);
+      expect(command).not.toBeNull();
+      expect(nextOf(code)).toBe(command);
+    }
+  });
+});
+
+describe("what a page prints names no terminal", () => {
+  test("every neutral cure and every sentence is free of a command, a flag, a placeholder and the words that point at a terminal", () => {
+    let visited = 0;
+    for (const code of REASON_CODES) {
+      expect(terminalFlaws(REASONS[code].sentence)).toEqual([]);
+      for (const startable of [true, false]) {
+        expect(terminalFlaws(neutralCureOf(code, ID, startable))).toEqual([]);
+        expect(terminalFlaws(neutralCureOf(code, "x y", startable))).toEqual([]);
+        visited++;
+      }
+    }
+    expect(visited).toBe(REASON_CODES.length * 2);
+  });
+
+  test("the checker bites, and leaves the platform's own name alone", () => {
+    for (const bad of [
+      "nemar admin publish start nm000123",
+      "(--force)",
+      '--acknowledge-identifier-screen "<reason>"',
+      "<dataset>",
+      "approve it from a terminal",
+      "Run the command",
+      "the CLI prints it",
+      "`x`",
+    ]) {
+      expect(terminalFlaws(bad)).not.toEqual([]);
+    }
+    expect(terminalFlaws("NEMAR has a release of it")).toEqual([]);
+    expect(terminalFlaws("the command line tool", 1)).toEqual([]);
+    expect(terminalFlaws("approve it from a terminal", 1)).toEqual([]);
+  });
+
+  test("the terminal cures do hold what the checker forbids, so the boundary is recorded", () => {
+    for (const code of Object.keys(COMMANDS)) {
+      expect(terminalFlaws(cureOf(code as ReasonCode, ID, true), 1)).not.toEqual([]);
+    }
+    expect(terminalFlaws(cureOf("question_failed", ID, true), 1)).toEqual(["a flag"]);
+  });
+});
