@@ -955,7 +955,9 @@ Where the two differ, this is the later text.
    The write that ends an approval requires that the request is still `approving`.
    A run whose request was denied once its lease had lapsed, or was blocked again, answers 409 `approval_closed_during_run` and leaves one audit row, `approval_finished_on_closed_request`.
    A resumed run whose steps are all done follows the same rule, and refuses a request that is not `approving` before it runs any tail job, so a refusal never follows a write that cannot be taken back.
-   When a tail job warns, that run leaves the request `approving`, so that approving again retries it.
+   When a tail job warns, that run leaves the request `approving`, so that approving again retries it,
+   and answers `status: "approving"` with the warnings joined in the singular `warning`, the key the CLI prints.
+   A missing `datasets` row, or a failed read of it, while the audit row is built is a warning and no row, never a guessed review gate.
    When none warns, it marks the request `published`, and only when that write changed the row it writes the `dataset_published` audit row, once, with the approver of record as its user (the clicker for a call under a token, with `executed_by` naming the caller) and the flag `finished_by_resume`.
    The step loop's closing path writes its `dataset_published` row on the same terms, only when its own write changed the request, so a publication has one row whichever call finished it.
    The step loop's own end has the same "approve again" dead end after a warning, which Phase 3 does not change: it is a known limit with a follow-up (ADR 0103, decision 12).

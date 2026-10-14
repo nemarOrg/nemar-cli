@@ -462,6 +462,7 @@ whose refusal body carries the word in `error` and `code` and the sentence in `m
 `/deny` gated by the lease and refused once a step beyond validation has run or is marked current (so a failed first mutation stays undeniable);
 and the final write guarded by the request's status, with a request closed during a run refused before any tail job writes.
 A resumed run whose steps are all done leaves the request `approving` when a tail job warned, because the warning's remedy is to approve again,
+and answers `status: "approving"` with the warnings joined in the singular `warning`, which the CLI prints,
 and when it closes the request it writes a `dataset_published` row that names who finished it (`finished_by_resume`);
 the step loop's closing path writes its row only when its own write changed the request, so a publication has one row.
 The step loop's own end keeps the same dead end after a warning, a known limit with a follow-up (ADR 0103, decision 12).

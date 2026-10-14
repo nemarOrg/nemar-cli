@@ -199,8 +199,15 @@ A token that is stale or expired is refused, never quietly downgraded.**
       Only when that write changed the row does it write the `dataset_published` audit row, once, by the helper the step loop's last write uses, with the approver of record as its user and the flag `finished_by_resume` in its details.
       The approver of record is the caller, or the clicker for a call under a token, with `executed_by` then naming the caller.
       A concurrent finisher whose write changed nothing writes no second row.
-      A failed audit write is a warning in the answer and changes nothing else.
       The mark leaves `approved_by` as it was, so the audit row, not that column, names who finished the run.
+    - The audit row records the review gate's state, which this branch has not read, so the helper reads the `datasets` row itself.
+      A read that fails, and a read that finds no row, are both a warning in the answer and no audit row, never a row with a guessed state.
+      A failed audit write is a warning in the answer and changes nothing else.
+    - The answer carries its warnings under the singular key `warning`, joined with ` | ` as the step loop's answer joins its own:
+      the tail jobs' warnings, then the audit warning.
+      Its `status` is `approving` when the request was left so, and `published` when this call or a concurrent one marked it.
+      The CLI reads only the singular key, and prints it, so the warning that tells an operator to approve again reaches them.
+      A plural key would never be read, and the CLI would report a success without the warning.
     - The step loop's own end has the same dead end after a warning, and it is not changed here.
       It marks the request `published` and then answers with the tail jobs' warnings, which still say to approve again, and that finds no active request (404).
       This is a known limit, and the follow-up is to leave the request `approving` there too, as the all-steps-done branch now does, or to change the warning text.
