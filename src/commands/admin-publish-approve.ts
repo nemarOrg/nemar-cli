@@ -184,9 +184,8 @@ Description:
   --acknowledge-identifier-screen and --skip-ci-check are refused here, before
   anything is sent.
   Without the variable the command is your own approval, recorded under your
-  account, and it takes over any web approval that is under way: the run the
-  website started is then refused and changes nothing. 'next' never reads the
-  variable.
+  account. Once it passes the gates it takes the claim over, and the website's
+  run is refused at its next call. 'next' never reads the variable.
   A run that presents a token says so on standard error before it reads or sends
   anything, and a refusal of that token is followed by how to unset the variable,
   for a person whose shell still holds a stale one.
