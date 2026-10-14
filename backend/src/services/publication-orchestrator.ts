@@ -2745,6 +2745,15 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   const stepsToRun = allSteps.filter((s) => !stepsCompleted.includes(s));
 
   if (stepsToRun.length === 0) {
+    // A request that is not `approving` is refused BEFORE the tail jobs below: they write (the
+    // Zarr stamp) and publish (reserved version identifiers, which cannot be taken back), and a
+    // refusal that reads as "this run published nothing" must not have done either. A `requested`
+    // request here carries the steps of an earlier life (follow-up #1766) and its data is already
+    // public; an owner-name `blocked` one was walked back mid-run. The closing write below stays
+    // the atomic guard, and its refusal stays the answer for a request that closed after this read.
+    if (request.status !== "approving") {
+      return refuseApprovalOnClosedRequest(c, request.id, request.status);
+    }
     // Re-request the Zarr rebuild on this path too, so the warning
     // `stampZarrRequeue` returns is actionable. Its one other caller is at the
     // END of the step loop, and a run that reaches here never gets there -- so
@@ -2763,15 +2772,15 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     const retryWarnings = [retryWarning, retryVersionWarning].filter(Boolean);
     // The run's ending, as at the end of the step loop: an `approving` request is marked
     // published by the same guarded write, and any other status is refused, with the answer of a
-    // request closed while the run ran. This branch used to answer 200 `published` and write
-    // nothing, so a request that was no longer `approving` (an owner-name `blocked` row resumed
-    // with every step done, or one a denial closed after the read) was reported published while
-    // it stayed as it was, and an `approving` one stayed `approving` for good. A request that is
-    // `requested` here carries the steps of an earlier life (follow-up #1766), and its data is
-    // already public: it is refused too, never marked published by a run that did no step.
-    const ended = await markRequestPublished(db, request.id);
-    if (!ended.finished) {
-      return refuseApprovalOnClosedRequest(c, request.id, ended.status);
+    // request closed while the run ran. But only when no tail job warned: those warnings say
+    // "approve the request again to retry", which finds only an active request, so closing it
+    // here would turn the remedy into a 404. A run with a warning leaves the request `approving`
+    // and answers as it did before the request was marked here at all.
+    if (retryWarnings.length === 0) {
+      const ended = await markRequestPublished(db, request.id);
+      if (!ended.finished) {
+        return refuseApprovalOnClosedRequest(c, request.id, ended.status);
+      }
     }
     // Neurobagel federation (epic #1586 phase 4, ADR 0084): a run whose steps are all
     // complete is still a publication that may not have been federated yet. A hook,
