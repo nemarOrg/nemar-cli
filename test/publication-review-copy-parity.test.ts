@@ -14,24 +14,68 @@
  *    and no word that points at a terminal, which is the reason the table exists.
  * 2. The table covers exactly what it must (always runs): one key for each refusal word the
  *    Worker words for a terminal, and no key without a reason to exist.
+ * 3. The words the page shares with the CLI are the CLI's own sentences (always runs), so the two
+ *    surfaces cannot disagree where they must not.
+ * 4. The website's file matches, string for string. Two modes, and the difference is deliberate:
+ *      NEMAR_WEBSITE_REVIEW_COPY set   that path IS the contract. A file that is not there FAILS,
+ *                                      naming the path and the variable.
+ *      unset                           search the sibling checkouts a developer is likely to have;
+ *                                      absent is a VISIBLE skip (`describe.skipIf`), never an
+ *                                      early return, which would be reported as success.
+ *    The comparison itself is proved on in-memory fixtures (always runs), so the failure modes of
+ *    the strict path are exercised without the other repository.
  *
- * The ties to the CLI's own sentences and the comparison with the website's file follow.
+ * Wiring the strict path into the CI workflow is a follow-up that needs the website file on its
+ * `staging` branch first; see the header of the copy file.
  */
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import type { ScreenGateRefusal } from "../backend/src/services/identifier-screen.js";
 import { START_STARTED_REASONS } from "../shared/contract/publication-review-admin.js";
 import {
   PUBLICATION_REVIEW_COPY,
   type PublicationReviewCopyKey,
 } from "../shared/contract/publication-review-copy.js";
-import { REVIEW_GATE_REFUSALS } from "../shared/publication-review.js";
+import {
+  ACKNOWLEDGMENT_MAX_LENGTH,
+  ACKNOWLEDGMENT_MIN_LENGTH,
+} from "../shared/publication-limits.js";
+import {
+  APPROVAL_PUBLISHING_LINE,
+  NOT_ASSESSED_LINE,
+  REVIEW_GATE_REFUSALS,
+  REVIEW_GATE_REFUSAL_TEXT,
+} from "../shared/publication-review.js";
+import {
+  MODEL_WRITTEN_FINDINGS,
+  MODEL_WRITTEN_SUMMARY,
+} from "../src/lib/publication-review-display.js";
 import { terminalFlaws } from "./helpers/terminal-words.js";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const COPY_FILE = join(REPO_ROOT, "shared", "contract", "publication-review-copy.ts");
+
+/**
+ * Where a website checkout is expected to sit relative to this one: one level up from the
+ * repository root whatever the root is called, because this repository is often a worktree.
+ * Only consulted when {@link WEBSITE_ENV_VAR} is unset.
+ */
+const WEBSITE_CANDIDATES = [
+  join(REPO_ROOT, "..", "website", "src", "lib", "publication-review-copy.ts"),
+  join(REPO_ROOT, "..", "..", "website", "src", "lib", "publication-review-copy.ts"),
+];
+
+/** Set by a CI job to the sparse checkout it made. A relative value resolves against the repo root. */
+const WEBSITE_ENV_VAR = "NEMAR_WEBSITE_REVIEW_COPY";
+const declaredRaw = process.env[WEBSITE_ENV_VAR];
+const DECLARED_PATH =
+  declaredRaw && declaredRaw.trim() !== ""
+    ? isAbsolute(declaredRaw)
+      ? declaredRaw
+      : join(REPO_ROOT, declaredRaw)
+    : null;
 
 /**
  * Pull `"key": "value"` pairs out of a TypeScript source file.
@@ -51,7 +95,31 @@ function extractCopy(source: string): Map<string, string> {
   return entries;
 }
 
+/** What differs between this table and another: a changed value, a key it lacks, a key we lack. */
+interface CopyDifference {
+  drifted: string[];
+  absent: string[];
+  unmirrored: string[];
+}
+
+function compare(
+  ours: ReadonlyMap<string, string>,
+  theirs: ReadonlyMap<string, string>,
+): CopyDifference {
+  const drifted: string[] = [];
+  const absent: string[] = [];
+  for (const [key, mine] of ours) {
+    const yours = theirs.get(key);
+    if (yours === undefined) absent.push(key);
+    else if (yours !== mine)
+      drifted.push(`${key}\n    nemar-cli: ${mine}\n    website:   ${yours}`);
+  }
+  const unmirrored = [...theirs.keys()].filter((key) => !ours.has(key));
+  return { drifted, absent, unmirrored };
+}
+
 const KEYS = Object.keys(PUBLICATION_REVIEW_COPY) as PublicationReviewCopyKey[];
+const OURS = new Map<string, string>(Object.entries(PUBLICATION_REVIEW_COPY));
 
 function keysWithPrefix(prefix: string): string[] {
   return KEYS.filter((key) => key.startsWith(`${prefix}.`)).map((key) =>
@@ -173,5 +241,171 @@ describe("the copy table covers exactly what it must", () => {
 
   test("the table holds twenty-two keys, and a count that moves is a decision", () => {
     expect(KEYS.length).toBe(22);
+  });
+});
+
+describe("the page and the CLI say the same where they must", () => {
+  test("the two gate sentences that name no terminal are the code's own", () => {
+    const hardReason: string = PUBLICATION_REVIEW_COPY["gate.hard_reason"];
+    const unverified: string = PUBLICATION_REVIEW_COPY["gate.unverified"];
+    expect(hardReason).toBe(REVIEW_GATE_REFUSAL_TEXT.hard_reason);
+    expect(unverified).toBe(REVIEW_GATE_REFUSAL_TEXT.unverified);
+  });
+
+  test("the other four gate sentences are the page's own, because the Worker's name a terminal", () => {
+    // The reason `gate.*` exists: if the Worker's text ever stops naming a terminal, a key here
+    // would be a second copy of a sentence that no longer needs one, and this says so.
+    for (const refusal of [
+      "needs_override",
+      "override_not_covering",
+      "review_changed",
+      "no_review_row",
+    ] as const) {
+      expect({
+        refusal,
+        terminalFlaws: terminalFlaws(REVIEW_GATE_REFUSAL_TEXT[refusal], 1).length > 0,
+      }).toEqual({
+        refusal,
+        terminalFlaws: true,
+      });
+      expect(PUBLICATION_REVIEW_COPY[`gate.${refusal}`]).not.toBe(
+        REVIEW_GATE_REFUSAL_TEXT[refusal],
+      );
+    }
+  });
+
+  test("the resumed approval's line is the description's", () => {
+    expect(PUBLICATION_REVIEW_COPY["approve.resume"]).toBe(APPROVAL_PUBLISHING_LINE);
+  });
+
+  test("the standing not-assessed line is the description's", () => {
+    expect(PUBLICATION_REVIEW_COPY["review.not_assessed"]).toBe(NOT_ASSESSED_LINE);
+  });
+
+  test("the labels on the model's text are the CLI's", () => {
+    expect(PUBLICATION_REVIEW_COPY["review.model_summary_label"]).toBe(MODEL_WRITTEN_SUMMARY);
+    expect(PUBLICATION_REVIEW_COPY["review.model_findings_label"]).toBe(MODEL_WRITTEN_FINDINGS);
+  });
+
+  test("the acknowledgment sentence's written-out bounds still match the constants", () => {
+    // Rule 1 forbids interpolating them, so this is what keeps the sentence honest when they move.
+    expect(PUBLICATION_REVIEW_COPY["screen_gate.acknowledge"]).toContain(
+      `${ACKNOWLEDGMENT_MIN_LENGTH} to ${ACKNOWLEDGMENT_MAX_LENGTH} characters`,
+    );
+  });
+});
+
+describe("the drift comparison, proved on fixtures", () => {
+  test("two identical tables differ in nothing", () => {
+    expect(compare(OURS, new Map(OURS))).toEqual({ drifted: [], absent: [], unmirrored: [] });
+  });
+
+  test("it reports a changed value, naming both sides", () => {
+    const theirs = new Map(OURS);
+    theirs.set("review.not_assessed", "Not assessed: whether the text names the depositor.");
+    const diff = compare(OURS, theirs);
+    expect(diff.absent).toEqual([]);
+    expect(diff.unmirrored).toEqual([]);
+    expect(diff.drifted).toHaveLength(1);
+    expect(diff.drifted[0]).toContain("review.not_assessed");
+    expect(diff.drifted[0]).toContain("names the depositors.");
+    expect(diff.drifted[0]).toContain("names the depositor.");
+  });
+
+  test("it reports a key the other side lacks", () => {
+    const theirs = new Map(OURS);
+    theirs.delete("gate.no_review_row");
+    expect(compare(OURS, theirs)).toEqual({
+      drifted: [],
+      absent: ["gate.no_review_row"],
+      unmirrored: [],
+    });
+  });
+
+  test("it reports a key only the other side has", () => {
+    const theirs = new Map(OURS);
+    theirs.set("gate.invented", "A sentence with no source of truth.");
+    expect(compare(OURS, theirs)).toEqual({
+      drifted: [],
+      absent: [],
+      unmirrored: ["gate.invented"],
+    });
+  });
+
+  test("it reports all three at once, so one run shows the whole disagreement", () => {
+    const theirs = new Map(OURS);
+    theirs.set("start.dispatched", "The review began.");
+    theirs.delete("approve.blocked");
+    theirs.set("start.extra", "Another.");
+    const diff = compare(OURS, theirs);
+    expect(diff.drifted).toHaveLength(1);
+    expect(diff.absent).toEqual(["approve.blocked"]);
+    expect(diff.unmirrored).toEqual(["start.extra"]);
+  });
+
+  test("a table extracted from this very file compares equal to the table", () => {
+    const extracted = extractCopy(readFileSync(COPY_FILE, "utf8"));
+    expect(compare(OURS, extracted)).toEqual({ drifted: [], absent: [], unmirrored: [] });
+  });
+});
+
+/** Where the website's table is, or null when nobody has told us and no sibling checkout is
+ *  present. A DECLARED path counts as found whether or not it exists: the existence check is a
+ *  failing assertion, not a reason to skip. */
+const FOUND = DECLARED_PATH ?? WEBSITE_CANDIDATES.find((path) => existsSync(path)) ?? null;
+const NO_CHECKOUT = FOUND === null;
+
+if (NO_CHECKOUT) {
+  console.info(
+    [
+      `[publication-review-copy parity] skipping: no website checkout at ${WEBSITE_CANDIDATES.join(" or ")},`,
+      `and ${WEBSITE_ENV_VAR} is unset. A CI job sets it once the website file is on its staging branch;`,
+      "this is the developer-machine path.",
+    ].join(" "),
+  );
+}
+
+/** The website's table, or a failure that says exactly what to fix. */
+function websiteCopy(): Map<string, string> {
+  if (FOUND === null) throw new Error("unreachable: the parity block is skipped without a file");
+  if (!existsSync(FOUND)) {
+    throw new Error(
+      [
+        `${WEBSITE_ENV_VAR}=${declaredRaw} resolves to ${FOUND}, which does not exist.`,
+        "That variable is the contract: the job that sets it points it at a checkout of",
+        "nemarOrg/website. If that step changed or was removed, fix the workflow;",
+        "do not unset the variable to make this pass.",
+      ].join(" "),
+    );
+  }
+  return extractCopy(readFileSync(FOUND, "utf8"));
+}
+
+describe.skipIf(NO_CHECKOUT)("website parity", () => {
+  const found = FOUND as string;
+
+  test("every key matches the website's string for string", () => {
+    const { drifted, absent } = compare(OURS, websiteCopy());
+    expect(
+      drifted,
+      `Copy drifted from ${found}. This contract is the source of truth; update the website.`,
+    ).toEqual([]);
+    expect(
+      absent,
+      `Keys absent from ${found}. Every key here is meant to be mirrored there.`,
+    ).toEqual([]);
+  });
+
+  test("nothing the website carries is missing here", () => {
+    // The direction this repository can fix: a key the website has and this table does not is a
+    // sentence with no source of truth.
+    const { unmirrored } = compare(OURS, websiteCopy());
+    expect(unmirrored, "Add these to shared/contract/publication-review-copy.ts.").toEqual([]);
+  });
+
+  test("the whole table is mirrored: it has no cli. keys for the website to ignore", () => {
+    expect(KEYS.filter((key) => key.startsWith("cli."))).toEqual([]);
+    const theirs = websiteCopy();
+    for (const key of KEYS) expect(theirs.has(key)).toBe(true);
   });
 });
