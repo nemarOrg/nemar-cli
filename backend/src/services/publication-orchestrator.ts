@@ -2509,11 +2509,15 @@ async function recordPreLoopFailure(
  * that is already `published` was finished by a concurrent call of the same run (a retry that
  * overlapped), and counts as finished. The one statement of the run's ending, shared by the step
  * loop's last write and by a resumed run whose steps are all done.
+ *
+ * `changed` says whether THIS call made the request `published`, as against finding it already so:
+ * the one call that changes the row is the one that records the publication, so a concurrent
+ * finisher does not write a second row.
  */
 async function markRequestPublished(
   db: D1Database,
   requestId: number,
-): Promise<{ finished: true } | { finished: false; status: string | null }> {
+): Promise<{ finished: true; changed: boolean } | { finished: false; status: string | null }> {
   const published = await db
     .prepare(
       `UPDATE publication_requests
@@ -2522,13 +2526,71 @@ async function markRequestPublished(
     )
     .bind(requestId)
     .run();
-  if ((published.meta.changes ?? 0) === 1) return { finished: true };
+  if ((published.meta.changes ?? 0) === 1) return { finished: true, changed: true };
   const closed = await db
     .prepare("SELECT status FROM publication_requests WHERE id = ?")
     .bind(requestId)
     .first<{ status: string }>();
-  if (closed?.status === "published") return { finished: true };
+  if (closed?.status === "published") return { finished: true, changed: false };
   return { finished: false, status: closed?.status ?? null };
+}
+
+/**
+ * The audit row of a publication, `dataset_published`, naming the approver of record (the
+ * clicker for a run the web started, otherwise the account that called) and, when the caller is
+ * someone else, the executing account. Best effort: a failure to write it is returned as the
+ * sentence the administrator is told, and never changes the run.
+ *
+ * `dataset` is the row the run already read; a run that never read it (every step was already done)
+ * passes none and the row is read here, inside the same best-effort block, so a failed read is a
+ * warning and no row, never a row with a guessed review gate. `finishedByResume` marks the row of a
+ * request that a resumed run with every step already done closed: the steps ran in an earlier
+ * call, so the row names who finished the request, and says so.
+ */
+async function recordPublicationAudit(
+  c: ApproveStepContext,
+  dataset: { source?: string | null; is_exemplar?: number | null } | undefined,
+  allSteps: readonly PublicationStep[],
+  finishedByResume = false,
+): Promise<string | undefined> {
+  try {
+    const row =
+      dataset ??
+      (await c.db
+        .prepare("SELECT source, is_exemplar FROM datasets WHERE dataset_id = ?")
+        .bind(c.datasetId)
+        .first<{ source: string | null; is_exemplar: number | null }>()) ??
+      {};
+    await auditLogStatement(c.db, {
+      userId: c.approver.id,
+      action: "dataset_published",
+      resourceType: "dataset",
+      resourceId: c.datasetId,
+      details: JSON.stringify({
+        approved_by: c.approver.username,
+        // Only when the executor is not the approver, so a terminal approval's
+        // row is byte-identical to what it always was.
+        ...(c.approver.id !== c.adminUser.id ? { executed_by: executorName(c.adminUser) } : {}),
+        steps: allSteps,
+        // The review gate's state for this environment and dataset when the row is written, and
+        // the flag of the call that finished the run. A skip is also its own row when it happens
+        // (`publication_ci_check_skipped`), which survives a resume with another flag.
+        review_gate: reviewGateStateOf(c.env, row),
+        skip_ci_check: c.body.skip_ci_check,
+        ...(finishedByResume ? { finished_by_resume: true } : {}),
+      }),
+    }).run();
+    return undefined;
+  } catch (auditError) {
+    const message = auditError instanceof Error ? auditError.message : String(auditError);
+    console.error(
+      "AUDIT LOG FAILURE: Dataset publication for",
+      c.datasetId,
+      "was not logged:",
+      message,
+    );
+    return `Audit log write failed: ${message}. Publication succeeded but was not logged for compliance.`;
+  }
 }
 
 /**
@@ -2776,22 +2838,29 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     // "approve the request again to retry", which finds only an active request, so closing it
     // here would turn the remedy into a 404. A run with a warning leaves the request `approving`
     // and answers as it did before the request was marked here at all.
-    if (retryWarnings.length === 0) {
-      const ended = await markRequestPublished(db, request.id);
-      if (!ended.finished) {
-        return refuseApprovalOnClosedRequest(c, request.id, ended.status);
-      }
+    const ended = retryWarnings.length === 0 ? await markRequestPublished(db, request.id) : null;
+    if (ended && !ended.finished) {
+      return refuseApprovalOnClosedRequest(c, request.id, ended.status);
     }
     // Neurobagel federation (epic #1586 phase 4, ADR 0084): a run whose steps are all
     // complete is still a publication that may not have been federated yet. A hook,
     // never a step: it does nothing unless the writer is enabled, runs in `waitUntil`,
     // and cannot fail or delay this response.
     scheduleNeurobagelSync(env, waitUntil, datasetId, "hook:publication");
+    // The publication is recorded by the call that changes the request, and only by it: the
+    // steps ran in an earlier call, which never reached the write that records it, so this one
+    // does, naming who finished the request. A concurrent finisher found the request already
+    // published and records nothing; a call that left the request `approving` records nothing yet.
+    const auditWarning =
+      ended?.finished && ended.changed
+        ? await recordPublicationAudit(c, undefined, allSteps, true)
+        : undefined;
+    const warnings = [...retryWarnings, auditWarning].filter(Boolean);
     return c.json({
       message: "All steps already completed",
       dataset_id: datasetId,
       status: "published",
-      ...(retryWarnings.length > 0 ? { warnings: retryWarnings } : {}),
+      ...(warnings.length > 0 ? { warnings } : {}),
     });
   }
 
@@ -3152,44 +3221,10 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   scheduleNeurobagelSync(env, waitUntil, datasetId, "hook:publication");
 
   // Audit log (non-fatal but warn user if fails)
-  let auditLogFailed = false;
-  let auditLogError: string | undefined;
-
-  try {
-    await auditLogStatement(db, {
-      userId: c.approver.id,
-      action: "dataset_published",
-      resourceType: "dataset",
-      resourceId: datasetId,
-      details: JSON.stringify({
-        approved_by: c.approver.username,
-        // Only when the executor is not the approver, so a terminal approval's
-        // row is byte-identical to what it always was.
-        ...(c.approver.id !== adminUser.id ? { executed_by: executorName(adminUser) } : {}),
-        steps: allSteps,
-        // The review gate's state for this environment and dataset when the row is written, and
-        // the flag of the call that finished the run. A skip is also its own row when it happens
-        // (`publication_ci_check_skipped`), which survives a resume with another flag.
-        review_gate: reviewGateStateOf(env, dataset),
-        skip_ci_check: body.skip_ci_check,
-      }),
-    }).run();
-  } catch (auditError) {
-    auditLogFailed = true;
-    auditLogError = auditError instanceof Error ? auditError.message : String(auditError);
-    console.error(
-      "AUDIT LOG FAILURE: Dataset publication for",
-      datasetId,
-      "was not logged:",
-      auditLogError,
-    );
-  }
+  const auditWarning = await recordPublicationAudit(c, dataset, allSteps);
 
   // Combine all non-fatal warnings into the response so operators can act
   // without tailing logs. Both warnings are optional and independent.
-  const auditWarning = auditLogFailed
-    ? `Audit log write failed: ${auditLogError}. Publication succeeded but was not logged for compliance.`
-    : undefined;
   const responseWarnings = [
     auditWarning,
     c.notifyUserWarning,

@@ -32,20 +32,32 @@ import { APPROVAL_CLOSED_DURING_RUN_MESSAGE } from "../../shared/contract/public
 import { OWNER_NAME_MISSING_REASON, PUBLICATION_STEPS } from "../../shared/publication-steps";
 import { adminRoutes } from "../src/routes/admin";
 import type { Bindings, Variables } from "../src/types/bindings";
-import { freshDb, realD1 } from "./helpers/d1";
-import { WEB_CLAIM_SECRET, seedScreenedRequest, seedUser } from "./helpers/publication-review";
+import { freshDb, interceptingD1, realD1 } from "./helpers/d1";
+import {
+  WEB_CLAIM_SECRET,
+  seedScreenedRequest,
+  seedUser,
+  webClaim,
+} from "./helpers/publication-review";
 
 const TERMINAL_KEY = "all-done-terminal-0123456789abcdef0123456789abcdef";
+const EXECUTOR_KEY = "all-done-executor-0123456789abcdef0123456789abcdef";
+const CLICKER_KEY = "all-done-clicker-0123456789abcdef0123456789abcdef";
 const DATASET = "nm098771";
 
 let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
+let terminalId: number;
+let executorId: number;
+let clickerId: number;
 
 beforeEach(async () => {
   db = freshDb();
   app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
   app.route("/admin", adminRoutes);
-  await seedUser(db, "allDoneTerminal", "admin", TERMINAL_KEY);
+  terminalId = await seedUser(db, "allDoneTerminal", "admin", TERMINAL_KEY);
+  executorId = await seedUser(db, "allDoneExecutor", "admin", EXECUTOR_KEY);
+  clickerId = await seedUser(db, "allDoneClicker", "admin", CLICKER_KEY);
 });
 
 function env(over: Partial<Bindings> = {}): Bindings {
@@ -58,7 +70,7 @@ function env(over: Partial<Bindings> = {}): Bindings {
   } as Bindings;
 }
 
-function approve(o: { key?: string; bindings?: Bindings } = {}): Promise<Response> {
+function approve(o: { key?: string; token?: string; bindings?: Bindings } = {}): Promise<Response> {
   return app.request(
     `/admin/publish/${DATASET}/approve`,
     {
@@ -66,6 +78,7 @@ function approve(o: { key?: string; bindings?: Bindings } = {}): Promise<Respons
       headers: {
         Authorization: `Bearer ${o.key ?? TERMINAL_KEY}`,
         "Content-Type": "application/json",
+        ...(o.token === undefined ? {} : { "X-Approval-Dispatch-Token": o.token }),
       },
       body: JSON.stringify({ resume: true }),
     },
@@ -172,6 +185,7 @@ describe("a tail job that warns leaves the request approving, so approving again
     });
     expect(requestRow(id).status).toBe("published");
     expect(requestRow(id).approved_at).not.toBeNull();
+    expect(auditRows("dataset_published")).toHaveLength(1);
   });
 });
 
@@ -219,5 +233,92 @@ describe("a closed request is refused before the tail jobs write anything", () =
     expect(res.status).toBe(200);
     expect(sweepStamps()).not.toBeNull();
     expect(auditRows("concealed_era_version_doi_incomplete")).toHaveLength(1);
+  });
+});
+
+describe("the call that closes an all-steps-done request writes the dataset_published row, once", () => {
+  test("a web run that died after its last step, resumed by a terminal administrator, is recorded under that administrator", async () => {
+    const id = seedAllDone("approving");
+    // The click's claim is still on the row, long lapsed: the run that held it is gone.
+    await webClaim(db, { requestId: id, clickerId, dispatchedAt: "-3 hours" });
+
+    const res = await approve({ key: TERMINAL_KEY });
+
+    expect(res.status).toBe(200);
+    expect(requestRow(id).status).toBe("published");
+    const rows = auditRows("dataset_published");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].user_id).toBe(terminalId);
+    expect(rows[0].details).toMatchObject({
+      approved_by: "allDoneTerminal",
+      steps: [...PUBLICATION_STEPS],
+      review_gate: "off",
+      skip_ci_check: false,
+      finished_by_resume: true,
+    });
+    expect(rows[0].details).not.toHaveProperty("executed_by");
+
+    // A second resume finds no active request, and writes nothing.
+    const second = await approve({ key: TERMINAL_KEY });
+    expect(second.status).toBe(404);
+    expect(auditRows("dataset_published")).toHaveLength(1);
+  });
+
+  test("an executor carrying the click's token finishes it as the clicker, with itself as the executor", async () => {
+    const id = seedAllDone("approving");
+    const token = await webClaim(db, { requestId: id, clickerId });
+
+    const res = await approve({ key: EXECUTOR_KEY, token });
+
+    expect(res.status).toBe(200);
+    const rows = auditRows("dataset_published");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].user_id).toBe(clickerId);
+    expect(rows[0].details).toMatchObject({
+      approved_by: "allDoneClicker",
+      executed_by: "allDoneExecutor",
+      finished_by_resume: true,
+    });
+    expect(executorId).not.toBe(clickerId);
+  });
+
+  test("a row that cannot be written is a warning in the answer, and the request is still closed", async () => {
+    const id = seedAllDone("approving");
+    const failing = env({
+      DB: interceptingD1(realD1(db), (sql, binds) => {
+        if (/INSERT INTO audit_log/.test(sql) && binds.includes("dataset_published")) {
+          throw new Error("the audit table is unwritable");
+        }
+      }),
+    });
+
+    const res = await approve({ bindings: failing });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { warnings?: string[] };
+    expect(body.warnings).toHaveLength(1);
+    expect(body.warnings?.[0]).toContain("Audit log write failed");
+    expect(body.warnings?.[0]).toContain("the audit table is unwritable");
+    expect(requestRow(id).status).toBe("published");
+    expect(auditRows("dataset_published")).toHaveLength(0);
+  });
+
+  test("a finisher that lost the race to a concurrent call writes no row of its own", async () => {
+    const id = seedAllDone("approving");
+    const racing = env({
+      DB: interceptingD1(realD1(db), (sql) => {
+        // The concurrent call of the same run closes the request between this call's read and its
+        // own closing write, which then finds the request already published.
+        if (/SET status = 'published'/.test(sql)) {
+          db.run("UPDATE publication_requests SET status = 'published' WHERE id = ?", [id]);
+        }
+      }),
+    });
+
+    const res = await approve({ bindings: racing });
+
+    expect(res.status).toBe(200);
+    expect(requestRow(id).status).toBe("published");
+    expect(auditRows("dataset_published")).toHaveLength(0);
   });
 });
