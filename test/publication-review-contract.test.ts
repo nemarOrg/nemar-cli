@@ -23,7 +23,6 @@ import {
   DISPATCH_SUPERSEDED_MESSAGE,
   IDENTIFIER_SCREEN_ERROR_CODES,
   INVALID_DATASET_ID_MESSAGE,
-  OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE,
   PUBLICATION_REFUSAL_ERROR_CODES,
   REQUEST_CHANGED_MESSAGE,
   REQUEST_MISMATCH_MESSAGE,
@@ -3033,7 +3032,6 @@ describe("the wire vocabulary the approval refusals and the comment route share"
       "publication_review_not_clear",
       "request_blocked",
       "request_changed",
-      "override_inside_web_approval",
       "request_mismatch",
       "dispatch_superseded",
       "dispatch_expired",
@@ -3044,15 +3042,16 @@ describe("the wire vocabulary the approval refusals and the comment route share"
     ]);
     // The first two words are the `error` of the two bodies in the review's contract; the others
     // are the orchestrator's and the deny route's own refusals (a request that changed while it
-    // was checked, an override sent inside a web approval, a run for a request that is no longer
-    // the one in force, a dispatch token that was replaced or lapsed, a decision sent by a run
-    // the web started, a denial of a request that is running or has started publishing, and a
-    // dispatch for an id the executor's workflow would not accept).
+    // was checked, a run for a request that is no longer the one in force, a dispatch token that
+    // was replaced or lapsed, a decision sent by a run the web started, a denial of a request
+    // that is running or has started publishing, and a dispatch for an id the executor's workflow
+    // would not accept). The stop-gap `override_inside_web_approval` of Phase 2 is gone: its
+    // guarantee is now structural (a run the web started carries no decision of its own).
+    expect([...APPROVAL_REFUSAL_ERROR_CODES]).not.toContain("override_inside_web_approval");
     expect([...APPROVAL_REFUSAL_ERROR_CODES]).toEqual([
       PUBLICATION_REVIEW_NOT_CLEAR_CODE,
       REQUEST_BLOCKED_CODE,
       "request_changed",
-      "override_inside_web_approval",
       "request_mismatch",
       "dispatch_superseded",
       "dispatch_expired",
@@ -3190,12 +3189,9 @@ describe("the gate refusal body is a union keyed on `refusal`", () => {
 describe("the sentences the Worker's tests import are pinned here, once", () => {
   // The other suites import these constants and never copy them, so an edit to a sentence cannot
   // pass them by also editing a hand-copied literal. These literals are the one oracle.
-  test("the two approval refusals the orchestrator words itself", () => {
+  test("the approval refusal the orchestrator words itself", () => {
     expect(REQUEST_CHANGED_MESSAGE).toBe(
       "The request changed while the approval was being checked (it was denied or blocked). Read it again before approving.",
-    );
-    expect(OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE).toBe(
-      "A web approval of this request is in progress, so an override sent now would be recorded under the administrator who clicked. Wait for it to finish or stop, then approve again with --force.",
     );
   });
 
@@ -3236,7 +3232,6 @@ describe("the sentences the Worker's tests import are pinned here, once", () => 
   test("every approval refusal sentence is a plain sentence, and no two are the same", () => {
     const sentences = [
       REQUEST_CHANGED_MESSAGE,
-      OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE,
       REQUEST_MISMATCH_MESSAGE,
       DISPATCH_SUPERSEDED_MESSAGE,
       DISPATCH_EXPIRED_MESSAGE,
