@@ -1237,33 +1237,33 @@ describe("the run is for the request the command read (#1579)", () => {
     expect(requestRow(requestId)?.status).toBe("published");
   });
 
-  test("--request-id names it when the review could not be read, and without it none is sent", async () => {
-    const requestId = seedGolden();
-    seedReport(requestId);
-    // A review this version of the command cannot read: no detail, so no request id of its own.
+  /** A review this version of the command cannot read: no detail, so no request id of its own. */
+  const unreadableReview = () =>
     h.rewrite(`GET /admin/publish/${DATASET}/review`, (body) => {
       body.gate = "something-newer";
     });
 
+  test("--request-id is not sent when the review could not be read and none was named", async () => {
+    seedReport(seedGolden());
+    unreadableReview();
+
     const without = await approve(["--resume", "--yes"]);
+
     expect(without.exitCode).toBe(0);
     expect(approveBodies()).toHaveLength(1);
     expect(approveBodies()[0]).not.toHaveProperty("request_id");
+  });
 
-    // The same again, for a request that is still open, with the id given by hand.
-    h.reset();
-    adminId = await h.admin("approveradmin", ADMIN_KEY);
-    h.setEnv({ PUBLICATION_REVIEW_ENABLED: "1" });
-    const second = seedGolden();
-    seedReport(second);
-    h.rewrite(`GET /admin/publish/${DATASET}/review`, (body) => {
-      body.gate = "something-newer";
-    });
+  test("--request-id names it when the review could not be read", async () => {
+    const requestId = seedGolden();
+    seedReport(requestId);
+    unreadableReview();
 
-    const named = await approve(["--resume", "--yes", "--request-id", String(second)]);
+    const named = await approve(["--resume", "--yes", "--request-id", String(requestId)]);
+
     expect(named.exitCode).toBe(0);
     expect(approveBodies()).toHaveLength(1);
-    expect(approveBodies()[0]?.request_id).toBe(second);
+    expect(approveBodies()[0]?.request_id).toBe(requestId);
   });
 
   test("--request-id that agrees with the detail it read is sent as it is", async () => {
@@ -1285,8 +1285,14 @@ describe("the run is for the request the command read (#1579)", () => {
     expect(r.exitCode).toBe(1);
     expect(r.stdout).toContain(`#${requestId + 5}`);
     expect(r.stdout).toContain(`#${requestId}`);
-    // It was refused before the banner and the question, and before any write.
+    // It was refused before the banner and the question, and before any write. The review was
+    // read (that is how the command knew the request in force), so the sentence says that no
+    // approval was sent, not that nothing was.
     expect(r.stdout).not.toContain("This will run the following");
+    expect(r.stdout).toContain("No approval was sent.");
+    expect(r.stdout).not.toContain("Nothing was sent");
+    expect(h.requests.length).toBeGreaterThan(0);
+    expect(h.requests.every((c) => c.method === "GET")).toBe(true);
     expect(h.posted).toEqual([]);
     expect(requestRow(requestId)?.status).toBe("requested");
   });

@@ -3,8 +3,8 @@
  *
  * A click on the website claims the request and dispatches a runner, which is handed the claim's
  * dispatch token in the environment variable `NEMAR_APPROVAL_DISPATCH_TOKEN` and runs
- * `nemar admin publish approve <id> --resume --yes`. The command presents the token on every call
- * of the run (a header the Worker checks against the claim), and the Worker records the
+ * `nemar admin publish approve <id> --resume --yes`. The command presents the token on every
+ * approval call of the run (a header the Worker checks against the claim), and the Worker records the
  * administrator who clicked as the approver. What these tests hold, against the real command and
  * the real backend app (`helpers/admin-publish-cli.ts`; the click is the real
  * `approve-dispatch` route, called in this process over the harness's database, and the token is
@@ -17,19 +17,23 @@
  *    run that has no token; `next` never reads the variable (a person's shell must not turn the
  *    walk into an executor);
  *  - with a token in the environment, a flag that is the administrator's own decision (`--force`,
- *    `--acknowledge-identifier-screen`) is refused locally before anything is sent, because the
- *    click already recorded the decision and the Worker would refuse the call;
+ *    `--acknowledge-identifier-screen`, `--skip-ci-check`) is refused locally before anything is
+ *    sent, because the click already recorded the decision and the Worker would refuse the call;
+ *  - a value no header can carry (whitespace, a line break, a character outside printable ASCII)
+ *    is refused locally in one line that never shows it, with no request sent, and is not
+ *    retried as if it were a network failure;
  *  - the token is a secret: it reaches neither the console nor the `--debug` log;
- *  - a stale variable in a person's shell is not a silent trap (the Opus review of Phase 3): a run
+ *  - a stale variable in a person's shell is not a silent trap (ADR 0103, decision 3): a run
  *    that presents a token says so on standard error before it sends anything, and a refusal of
  *    that token (`dispatch_superseded`, `dispatch_expired`) is followed by the hint to unset it.
  *
  * Mutation checks (each turns a named test red): send no header (the "every call" rows); read the
  * variable in `next` (the `next` row); send the header only on the first call (the retry row); let
- * `--force` through with a token (the refusal rows); print the token, or let the log keep it (the
- * secret rows); trim nothing (the blank variable row); drop the notice, or print it after the
- * first request (the notice rows); drop the hint, or print it for a refusal that is not about the
- * token (the hint rows).
+ * `--force` or `--skip-ci-check` through with a token (the refusal rows); print the token, or let
+ * the log keep it (the secret rows); trim nothing (the blank variable row); drop the notice, or
+ * print it after the first request (the notice rows); drop the hint, or print it for a refusal
+ * that is not about the token (the hint rows); hand a malformed value to the request, or accept a
+ * wider character set than printable ASCII (the "cannot be a token" rows).
  *
  * CI TIER: unit-pure. Hermetic: an in-process backend over a local database, the CLI spawned
  * against it, stand-ins only at GitHub and Resend, no live network; it sets its own default
@@ -37,7 +41,7 @@
  */
 
 import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { webClaim } from "../backend/test/helpers/publication-review";
 import { makePublicationReviewApp } from "../backend/test/helpers/publication-review-app";
@@ -249,6 +253,67 @@ describe("the executor of a web approval", () => {
   });
 });
 
+/** The `--debug` logs the command wrote so far: nothing when it has never written one. */
+const debugLogs = () => {
+  const logs = join(h.configDir, "logs");
+  return existsSync(logs) ? readdirSync(logs) : [];
+};
+
+/** Run `body` with `name` set in this process's own environment, which a spawned command would inherit. */
+async function withAmbient(name: string, value: string, body: () => Promise<void>): Promise<void> {
+  const before = process.env[name];
+  process.env[name] = value;
+  try {
+    await body();
+  } finally {
+    if (before === undefined) Reflect.deleteProperty(process.env, name);
+    else process.env[name] = before;
+  }
+}
+
+describe("the harness hands a command only the variables a test gave it", () => {
+  test("a stale NEMAR_APPROVAL_DISPATCH_TOKEN in the runner's shell is not the command's: no header, no notice, the runner's own act", async () => {
+    const requestId = seedGolden(h.db);
+    seedReport(h.db, requestId);
+
+    await withAmbient(TOKEN_ENV, "c".repeat(64), async () => {
+      const r = await executor(undefined);
+
+      expect(r.exitCode).toBe(0);
+      expect(approveCalls()).toHaveLength(1);
+      expect(approveCalls()[0]?.dispatchToken).toBe(false);
+      expect(output(r)).not.toContain(TOKEN_ENV);
+      expect(requestRow(requestId)?.approved_by).toBe(executorId);
+    });
+  });
+
+  test("NEMAR_DEBUG in the runner's shell turns no debug log on in the command", async () => {
+    const requestId = seedGolden(h.db);
+    seedReport(h.db, requestId);
+    const logsBefore = debugLogs();
+
+    await withAmbient("NEMAR_DEBUG", "1", async () => {
+      const r = await executor(undefined);
+
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).not.toContain("debug log");
+    });
+
+    expect(debugLogs()).toEqual(logsBefore);
+  });
+
+  test("a variable a test gives the command itself still reaches it", async () => {
+    const requestId = seedGolden(h.db);
+    seedReport(h.db, requestId);
+    const logsBefore = debugLogs();
+
+    const r = await executor(undefined, [], { NEMAR_DEBUG: "1" });
+
+    expect(r.exitCode).toBe(0);
+    expect(debugLogs()).toHaveLength(logsBefore.length + 1);
+  });
+});
+
 describe("a person's shell variable", () => {
   test("is never read by next: the walk's approval is the person's own act, with no header", async () => {
     // `next` is a person's walk. A token left in the shell must not turn it into an executor, which
@@ -317,6 +382,21 @@ describe("with a token in the environment, the administrator's own decisions are
     expect(requestRow(requestId)).toEqual(claim);
   });
 
+  test("--skip-ci-check: exit 1 with nothing sent, it is a decision the click did not make", async () => {
+    const { requestId, token } = await click();
+    const claim = requestRow(requestId);
+
+    const r = await executor(token, ["--skip-ci-check"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(output(r)).toContain("--skip-ci-check");
+    expect(output(r)).toContain(TOKEN_ENV);
+    expect(output(r)).not.toContain(token);
+    expect(h.posted).toEqual([]);
+    expect(h.requests).toEqual([]);
+    expect(requestRow(requestId)).toEqual(claim);
+  });
+
   test("the refusal does not touch a person's command: --force with no token (or a blank one) is the decision it always was", async () => {
     const requestId = seedGolden(h.db);
     const reviewId = seedReport(h.db, requestId, twoReasons());
@@ -332,6 +412,87 @@ describe("with a token in the environment, the administrator's own decisions are
       .get(reviewId);
     expect(override?.override_by).toBe(executorId);
     expect(approveCalls()[0]?.dispatchToken).toBe(false);
+  });
+
+  test("nor does it touch --skip-ci-check with a blank variable: sent as the person's own flag", async () => {
+    const requestId = seedGolden(h.db);
+    seedReport(h.db, requestId);
+
+    const r = await executor("  ", ["--skip-ci-check"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(approveCalls()[0]?.body?.skip_ci_check).toBe(true);
+    expect(approveCalls()[0]?.dispatchToken).toBe(false);
+    expect(requestRow(requestId)?.approved_by).toBe(executorId);
+  });
+});
+
+describe("a variable that cannot be a token is refused locally, before anything is sent", () => {
+  // The Worker mints 64 lowercase hexadecimal characters; the command checks only what a header can
+  // carry (printable ASCII, no whitespace), so a token of another shape still reaches the Worker
+  // and is refused there. A value with a line break or a non-Latin-1 character would otherwise
+  // make the HTTP client throw, which looks like a network failure and is retried for a while.
+  const STEM = "d".repeat(60);
+  const malformed: Array<[string, string, string]> = [
+    ["a line break inside", `${STEM}\nabcd`, "whitespace"],
+    ["a trailing line break", `${STEM}abcd\n`, "whitespace"],
+    ["a space inside", `${STEM} abc`, "whitespace"],
+    ["leading whitespace", ` ${STEM}abcd`, "whitespace"],
+    ["trailing whitespace", `${STEM}abcd `, "whitespace"],
+    ["a tab inside", `${STEM}\tabc`, "whitespace"],
+    ["a character outside Latin-1", `${STEM}\u65e5abc`, "printable ASCII"],
+    ["a Latin-1 character that is not ASCII", `${STEM}\u00e9abc`, "printable ASCII"],
+    ["a control character", `${STEM}\u0001abc`, "printable ASCII"],
+    ["the delete character", `${STEM}\u007fabc`, "printable ASCII"],
+  ];
+
+  test.each(malformed)(
+    "%s: exit 1, one line that names the variable and the problem and never the value, no request sent",
+    async (_label, value, problem) => {
+      const requestId = seedGolden(h.db);
+      seedReport(h.db, requestId);
+
+      const r = await executor(value, [], SHORT_RETRY);
+
+      expect(r.exitCode).toBe(1);
+      const lines = output(r)
+        .split("\n")
+        .filter((line) => line.includes(TOKEN_ENV));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain(problem);
+      expect(lines[0]).toContain("Nothing was sent.");
+      expect(output(r)).not.toContain(STEM);
+      // Nothing reached the Worker, the HTTP client's own error never surfaced, and no run began.
+      expect(h.requests).toEqual([]);
+      expect(h.posted).toEqual([]);
+      expect(output(r)).not.toContain("Retrying");
+      expect(output(r)).not.toContain("Resume publication");
+      expect(requestRow(requestId)?.status).toBe("requested");
+    },
+  );
+
+  test("a value of another shape that a header can carry is sent, and the Worker refuses it", async () => {
+    const { requestId } = await click();
+    const claim = requestRow(requestId);
+
+    const r = await executor("not-a-64-hex-token");
+
+    expect(r.exitCode).toBe(1);
+    expect(approveCalls()).toHaveLength(1);
+    expect(approveCalls()[0]?.dispatchToken).toBe(true);
+    expect(h.requests.filter((c) => c.path === APPROVE_PATH).map((c) => c.status)).toEqual([409]);
+    expect(requestRow(requestId)).toEqual(claim);
+  });
+
+  test("a person's command is untouched: no variable, or a blank one, sends no header and is not refused", async () => {
+    const requestId = seedGolden(h.db);
+    seedReport(h.db, requestId);
+
+    const r = await executor("\n  \t");
+
+    expect(r.exitCode).toBe(0);
+    expect(approveCalls()[0]?.dispatchToken).toBe(false);
+    expect(output(r)).not.toContain(TOKEN_ENV);
   });
 });
 
@@ -380,20 +541,20 @@ describe("a variable left in a person's shell is not a silent trap", () => {
     expect(r.stderr).toContain(NOTICE);
   });
 
-  test("no variable, and a blank one, print no notice", async () => {
-    const requestId = seedGolden(h.db);
-    seedReport(h.db, requestId);
+  test("no variable prints no notice", async () => {
+    seedReport(h.db, seedGolden(h.db));
 
     const none = await executor(undefined);
+
     expect(none.exitCode).toBe(0);
     expect(output(none)).not.toContain(TOKEN_ENV);
+  });
 
-    h.reset();
-    await h.admin("webexecutor", EXECUTOR_KEY);
-    h.setEnv({ PUBLICATION_REVIEW_ENABLED: "1" });
+  test("a blank variable prints no notice", async () => {
     seedReport(h.db, seedGolden(h.db));
 
     const blank = await executor("   ");
+
     expect(blank.exitCode).toBe(0);
     expect(output(blank)).not.toContain(TOKEN_ENV);
   });
@@ -427,6 +588,10 @@ describe("a variable left in a person's shell is not a silent trap", () => {
     const r = await executor(token);
 
     expect(r.exitCode).toBe(1);
+    // The refusal is the Worker's, for the request that is no longer there, and the call did carry
+    // the token: the hint is absent because the refusal is not about it.
+    expect(h.requests.filter((c) => c.path === APPROVE_PATH).map((c) => c.status)).toEqual([404]);
+    expect(approveCalls()[0]?.dispatchToken).toBe(true);
     expect(output(r)).not.toContain(UNSET_HINT);
     expect(output(r)).not.toContain(token);
   });
@@ -451,44 +616,78 @@ describe("a variable left in a person's shell is not a silent trap", () => {
     expect(output(r)).not.toContain(token);
   });
 
-  test("a refusal with no token carries no hint (the review's own refusal, as a person sees it)", async () => {
+  test("a call with no token is never told to unset the variable: not for the review's own refusal, and not for an answer that names a dispatch refusal", async () => {
     await click();
 
-    const r = await executor(undefined);
+    const refused = await executor(undefined);
 
-    expect(r.exitCode).toBe(1);
-    expect(output(r)).not.toContain(UNSET_HINT);
-    expect(output(r)).not.toContain(TOKEN_ENV);
+    expect(refused.exitCode).toBe(1);
+    expect(output(refused)).not.toContain(UNSET_HINT);
+    expect(output(refused)).not.toContain(TOKEN_ENV);
+
+    // This Worker never answers a call with no token with a dispatch refusal. One of another
+    // version might, and the hint is for a run that presented a token, so the command must not
+    // rest on the Worker for that: the answer is still the real route's, with its word changed.
+    h.rewrite(`POST ${APPROVE_PATH}`, (body) => {
+      body.error = "dispatch_superseded";
+    });
+    const reworded = await executor(undefined);
+
+    expect(reworded.exitCode).toBe(1);
+    expect(h.requests.filter((c) => c.path === APPROVE_PATH).map((c) => c.status)).toEqual([
+      409, 409,
+    ]);
+    expect(approveCalls().every((c) => !c.dispatchToken)).toBe(true);
+    expect(output(reworded)).not.toContain(UNSET_HINT);
+    expect(output(reworded)).not.toContain(TOKEN_ENV);
   });
 });
 
 describe("the help says the variable and the rule", () => {
-  test("--help names the variable on the two flags it refuses, and --help-all says what it is and what it does", async () => {
+  test("--help names the variable on the three flags it refuses, and --help-all says what it is and what it does", async () => {
     const concise = await h.cli(["admin", "publish", "approve", "--help"]);
     expect(concise.exitCode).toBe(0);
     const brief = concise.stdout.replace(/\s+/g, " ");
     // Both flags carry the rule where the option list shows it.
     expect(brief).toContain(`recorded with your account (refused while ${TOKEN_ENV} is set)`);
     expect(brief).toContain(`characters; refused while ${TOKEN_ENV} is set)`);
+    expect(brief).toContain(`clears no review reason; refused while ${TOKEN_ENV} is set)`);
 
     const all = await h.cli(["admin", "publish", "approve", "--help-all"]);
     expect(all.exitCode).toBe(0);
     const help = all.stdout.replace(/\s+/g, " ");
-    expect(help).toContain(`${TOKEN_ENV}, and presents it on every call`);
-    expect(help).toContain("--force and --acknowledge-identifier-screen are refused here");
+    expect(help).toContain(`${TOKEN_ENV}, and presents it on every approval call`);
+    expect(help).toContain("the reads of the review and the status carry none");
+    expect(help).toContain(
+      "--force, --acknowledge-identifier-screen and --skip-ci-check are refused here",
+    );
     expect(help).toContain("'next' never reads the variable");
-    expect(help).toContain("Environment:");
+    // A terminal approval is the stronger act: it takes a live web approval over, and says so.
+    expect(help).toContain("it takes over any web approval that is under way");
+    expect(help).toContain("the run the website started is then refused and changes nothing");
+    expect(help).toContain("Environment Variables:");
   });
 
-  test("the README's command lines name the variable", () => {
+  test("the README lists the variable among the environment variables, says who sets it, and never shows it on a command line", () => {
     const readme = readFileSync(join(import.meta.dir, "..", "README.md"), "utf8");
-    expect(readme).toContain(TOKEN_ENV);
+
+    const section = readme.slice(readme.indexOf("## Environment Variables"));
+    const entry = section.split("\n").find((line) => line.startsWith(TOKEN_ENV));
+    expect(entry).toBeDefined();
+    expect(entry).toContain("web approval executor");
+    expect(entry).toContain("never by a person");
+
+    // A credential on a command line lands in shell history: the README describes the mechanism
+    // and shows no line that sets the variable inline.
+    expect(readme).not.toContain(`${TOKEN_ENV}=`);
+    expect(readme).toContain(`\`${TOKEN_ENV}\``);
   });
 });
 
 describe("the token is a secret", () => {
   test("it reaches neither the console nor the --debug log, which still shows that a header was sent", async () => {
     const { requestId, token } = await click();
+    const logsBefore = debugLogs();
 
     const r = await h.cli(
       ["--debug", "admin", "publish", "approve", DATASET, "--resume", "--yes"],
@@ -499,8 +698,9 @@ describe("the token is a secret", () => {
     expect(requestRow(requestId)?.approved_by).toBe(clickerId);
     expect(output(r)).not.toContain(token);
 
+    // The log this command wrote: any an earlier test left in the directory are not its.
     const logs = join(h.configDir, "logs");
-    const files = readdirSync(logs);
+    const files = debugLogs().filter((name) => !logsBefore.includes(name));
     expect(files).toHaveLength(1);
     const log = readFileSync(join(logs, files[0] as string), "utf8");
     expect(log).not.toContain(token);
