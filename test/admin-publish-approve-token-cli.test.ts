@@ -19,6 +19,9 @@
  *  - with a token in the environment, a flag that is the administrator's own decision (`--force`,
  *    `--acknowledge-identifier-screen`) is refused locally before anything is sent, because the
  *    click already recorded the decision and the Worker would refuse the call;
+ *  - a value no header can carry (whitespace, a line break, a character outside printable ASCII)
+ *    is refused locally in one line that never shows it, with no request sent, and is not
+ *    retried as if it were a network failure;
  *  - the token is a secret: it reaches neither the console nor the `--debug` log;
  *  - a stale variable in a person's shell is not a silent trap (the Opus review of Phase 3): a run
  *    that presents a token says so on standard error before it sends anything, and a refusal of
@@ -29,7 +32,8 @@
  * `--force` through with a token (the refusal rows); print the token, or let the log keep it (the
  * secret rows); trim nothing (the blank variable row); drop the notice, or print it after the
  * first request (the notice rows); drop the hint, or print it for a refusal that is not about the
- * token (the hint rows).
+ * token (the hint rows); hand a malformed value to the request, or accept a wider character set
+ * than printable ASCII (the "cannot be a token" rows).
  *
  * CI TIER: unit-pure. Hermetic: an in-process backend over a local database, the CLI spawned
  * against it, stand-ins only at GitHub and Resend, no live network; it sets its own default
@@ -393,6 +397,75 @@ describe("with a token in the environment, the administrator's own decisions are
       .get(reviewId);
     expect(override?.override_by).toBe(executorId);
     expect(approveCalls()[0]?.dispatchToken).toBe(false);
+  });
+});
+
+describe("a variable that cannot be a token is refused locally, before anything is sent", () => {
+  // The Worker mints 64 lowercase hexadecimal characters; the command checks only what a header can
+  // carry (printable ASCII, no whitespace), so a token of another shape still reaches the Worker
+  // and is refused there. A value with a line break or a non-Latin-1 character would otherwise
+  // make the HTTP client throw, which looks like a network failure and is retried for a while.
+  const STEM = "d".repeat(60);
+  const malformed: Array<[string, string, string]> = [
+    ["a line break inside", `${STEM}\nabcd`, "whitespace"],
+    ["a trailing line break", `${STEM}abcd\n`, "whitespace"],
+    ["a space inside", `${STEM} abc`, "whitespace"],
+    ["leading whitespace", ` ${STEM}abcd`, "whitespace"],
+    ["trailing whitespace", `${STEM}abcd `, "whitespace"],
+    ["a tab inside", `${STEM}\tabc`, "whitespace"],
+    ["a character outside Latin-1", `${STEM}\u65e5abc`, "printable ASCII"],
+    ["a Latin-1 character that is not ASCII", `${STEM}\u00e9abc`, "printable ASCII"],
+    ["a control character", `${STEM}\u0001abc`, "printable ASCII"],
+    ["the delete character", `${STEM}\u007fabc`, "printable ASCII"],
+  ];
+
+  test.each(malformed)(
+    "%s: exit 1, one line that names the variable and the problem and never the value, no request sent",
+    async (_label, value, problem) => {
+      const requestId = seedGolden(h.db);
+      seedReport(h.db, requestId);
+
+      const r = await executor(value, [], SHORT_RETRY);
+
+      expect(r.exitCode).toBe(1);
+      const lines = output(r)
+        .split("\n")
+        .filter((line) => line.includes(TOKEN_ENV));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain(problem);
+      expect(lines[0]).toContain("Nothing was sent.");
+      expect(output(r)).not.toContain(STEM);
+      // Nothing reached the Worker, the HTTP client's own error never surfaced, and no run began.
+      expect(h.requests).toEqual([]);
+      expect(h.posted).toEqual([]);
+      expect(output(r)).not.toContain("Retrying");
+      expect(output(r)).not.toContain("Resume publication");
+      expect(requestRow(requestId)?.status).toBe("requested");
+    },
+  );
+
+  test("a value of another shape that a header can carry is sent, and the Worker refuses it", async () => {
+    const { requestId } = await click();
+    const claim = requestRow(requestId);
+
+    const r = await executor("not-a-64-hex-token");
+
+    expect(r.exitCode).toBe(1);
+    expect(approveCalls()).toHaveLength(1);
+    expect(approveCalls()[0]?.dispatchToken).toBe(true);
+    expect(h.requests.filter((c) => c.path === APPROVE_PATH).map((c) => c.status)).toEqual([409]);
+    expect(requestRow(requestId)).toEqual(claim);
+  });
+
+  test("a person's command is untouched: no variable, or a blank one, sends no header and is not refused", async () => {
+    const requestId = seedGolden(h.db);
+    seedReport(h.db, requestId);
+
+    const r = await executor("\n  \t");
+
+    expect(r.exitCode).toBe(0);
+    expect(approveCalls()[0]?.dispatchToken).toBe(false);
+    expect(output(r)).not.toContain(TOKEN_ENV);
   });
 });
 

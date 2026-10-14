@@ -79,6 +79,29 @@ const DISPATCH_TOKEN_NOTICE = `This run presents the dispatch token in ${DISPATC
  */
 const DISPATCH_TOKEN_UNSET_HINT = `If you are not running a dispatched approval, unset ${DISPATCH_TOKEN_ENV} and run it again.`;
 
+/**
+ * What the dispatch token variable holds, read the way `approve` uses it. Blank is none (an unset
+ * variable, an empty one, or whitespace alone). Anything else must be what a header can carry:
+ * printable ASCII with no whitespace, so a stray line break, a quote pasted with the value or a
+ * character from another script is refused here with a sentence, not handed to the HTTP client,
+ * which throws on it and reports a network failure that the command would retry for a while. The
+ * Worker mints 64 lowercase hexadecimal characters; this does not insist on that, so a token of
+ * another shape still reaches the Worker and is refused there with the Worker's own words. The
+ * `problem` names what is wrong and never the value, which is a credential.
+ */
+function readDispatchToken(
+  raw: string | undefined,
+): { kind: "none" } | { kind: "token"; value: string } | { kind: "malformed"; problem: string } {
+  if (raw === undefined || raw.trim() === "") return { kind: "none" };
+  if (/^[\x21-\x7e]+$/.test(raw)) return { kind: "token", value: raw };
+  return {
+    kind: "malformed",
+    problem: /\s/.test(raw)
+      ? "it contains whitespace"
+      : "it contains a character outside printable ASCII",
+  };
+}
+
 /** Whether `error` is the Worker refusing the dispatch token a call carried (it was replaced, or has lapsed). */
 function isDispatchTokenRefusal(error: unknown): boolean {
   return (
@@ -281,11 +304,23 @@ After Approval:
 
         // The dispatch token of a web approval this command is executing (#1604), from the
         // environment the workflow set it in, and only here: `next` is a person's walk and never
-        // reads it, so a token left in a shell cannot turn it into an executor. Blank is none. A
-        // run the web started carries the decision its click made, and the API refuses a call that
-        // carries the token and a decision of its own, so the two decision flags are refused here,
-        // before anything is read or sent.
-        const dispatchToken = process.env[DISPATCH_TOKEN_ENV]?.trim() || undefined;
+        // reads it, so a token left in a shell cannot turn it into an executor. Blank is none, and
+        // a value no header can carry is refused (`readDispatchToken`). A run the web started
+        // carries the decision its click made, and the API refuses a call that carries the token
+        // and a decision of its own, so the two decision flags are refused here, before anything is
+        // read or sent.
+        const tokenInput = readDispatchToken(process.env[DISPATCH_TOKEN_ENV]);
+        if (tokenInput.kind === "malformed") {
+          console.log(
+            chalk.red(
+              `${DISPATCH_TOKEN_ENV} is set to a value that cannot be a dispatch token (${tokenInput.problem}). Unset it to approve as yourself, or set it to the token the web approval handed this run. Nothing was sent.`,
+            ),
+          );
+          process.exitCode = 1;
+          markReportedExit();
+          return;
+        }
+        const dispatchToken = tokenInput.kind === "token" ? tokenInput.value : undefined;
         if (dispatchToken !== undefined) {
           const decision = options.force
             ? "--force"
