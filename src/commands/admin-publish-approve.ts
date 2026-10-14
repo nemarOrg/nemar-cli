@@ -64,6 +64,30 @@ import { plain } from "../lib/terminal-text.js";
  */
 export const DISPATCH_TOKEN_ENV = "NEMAR_APPROVAL_DISPATCH_TOKEN";
 
+/**
+ * What `approve` says on standard error, before it reads or sends anything, when the variable is
+ * set: a run that presents a token is an executor's run, and a stale variable in a person's shell
+ * would otherwise make their own approval fail with `dispatch_superseded` and a sentence that never
+ * names it. It carries the variable's name and never its value.
+ */
+const DISPATCH_TOKEN_NOTICE = `This run presents the dispatch token in ${DISPATCH_TOKEN_ENV} (an executor's run for a web approval); unset the variable to approve as yourself.`;
+
+/**
+ * Appended to the Worker's sentence when it refuses the token the run presented
+ * (`dispatch_superseded` or `dispatch_expired`). Said here, not in the Worker's shared sentences:
+ * the Worker cannot know whether the caller is an executor or a person with a stale variable.
+ */
+const DISPATCH_TOKEN_UNSET_HINT = `If you are not running a dispatched approval, unset ${DISPATCH_TOKEN_ENV} and run it again.`;
+
+/** Whether `error` is the Worker refusing the dispatch token a call carried (it was replaced, or has lapsed). */
+function isDispatchTokenRefusal(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.statusCode === 409 &&
+    (error.code === "dispatch_superseded" || error.code === "dispatch_expired")
+  );
+}
+
 export function registerApproveCommand(group: Command): void {
   group
     .command("approve")
@@ -131,6 +155,9 @@ Description:
   --acknowledge-identifier-screen are refused here, before anything is sent.
   Without the variable the command is your own approval, recorded under your
   account, whatever web approval is under way. 'next' never reads the variable.
+  A run that presents a token says so on standard error before it reads or sends
+  anything, and a refusal of that token is followed by how to unset the variable,
+  for a person whose shell still holds a stale one.
 
   --skip-ci-check skips the orchestrator's live CI check, and the approval's audit
   row records that it was used. It never clears a review reason: a failed or
@@ -275,6 +302,10 @@ After Approval:
             markReportedExit();
             return;
           }
+          // Said before anything is read or sent, on standard error so that standard output keeps
+          // what a script reads. A person whose shell still holds the variable learns here, and
+          // not from a refusal that does not name it, that this run is not their own approval.
+          console.error(chalk.yellow(DISPATCH_TOKEN_NOTICE));
         }
 
         const action = options.resume
@@ -715,9 +746,14 @@ export async function runApproval(
     for (const line of resultLines(result)) console.log(line);
     return { ok: true };
   } catch (error) {
-    failWith(printable(error), spinner, "Failed to approve publication", {
-      422: "Fix the CI issues and retry with --resume",
-    });
+    // A refusal of the token this run presented is followed by the way out for a person whose
+    // shell holds a stale one; a run that carried no token, or was refused for another reason,
+    // gets nothing added.
+    const hints: Record<number, string> = { 422: "Fix the CI issues and retry with --resume" };
+    if (opts.dispatchToken !== undefined && isDispatchTokenRefusal(error)) {
+      hints[409] = DISPATCH_TOKEN_UNSET_HINT;
+    }
+    failWith(printable(error), spinner, "Failed to approve publication", hints);
 
     // The review gate's refusal carries every live reason in the shared words: print each with
     // its cure, then where to read the whole review. `unverified` carries none (the Worker could
