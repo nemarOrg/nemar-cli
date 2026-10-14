@@ -26,18 +26,20 @@ import { adminRoutes } from "../src/routes/admin";
 import { PRE_LOOP_FAILURE_SQL } from "../src/services/publication-orchestrator";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, interceptingD1, realD1 } from "./helpers/d1";
-import { seedScreenedRequest, seedUser } from "./helpers/publication-review";
+import { seedScreenedRequest, seedUser, webClaim } from "./helpers/publication-review";
 
 const ADMIN_KEY = "preloop-admin-key-0123456789abcdef0123456789abcdef";
+const CALLBACK_SECRET = "preloop-callback-secret";
 
 let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
+let adminId: number;
 
 beforeEach(async () => {
   db = freshDb();
   app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
   app.route("/admin", adminRoutes);
-  await seedUser(db, "preloopadmin", "admin", ADMIN_KEY);
+  adminId = await seedUser(db, "preloopadmin", "admin", ADMIN_KEY);
 });
 
 function env(over: Partial<Bindings> = {}): Bindings {
@@ -45,6 +47,7 @@ function env(over: Partial<Bindings> = {}): Bindings {
     DB: realD1(db),
     ENVIRONMENT: "production",
     GITHUB_ADMIN_PAT: "ghp_preloop_test_token",
+    PRESCREEN_CALLBACK_SECRET: CALLBACK_SECRET,
     ...over,
   } as Bindings;
 }
@@ -94,16 +97,37 @@ describe("an approval that stops before its step loop", () => {
     return { datasetId, requestId };
   }
 
-  function approve(datasetId: string, bindings: Bindings): Promise<Response> {
+  function approve(datasetId: string, bindings: Bindings, token?: string): Promise<Response> {
     return app.request(
       `/admin/publish/${datasetId}/approve`,
       {
         method: "POST",
-        headers: { Authorization: `Bearer ${ADMIN_KEY}`, "Content-Type": "application/json" },
+        headers: {
+          Authorization: `Bearer ${ADMIN_KEY}`,
+          "Content-Type": "application/json",
+          ...(token === undefined ? {} : { "X-Approval-Dispatch-Token": token }),
+        },
         body: JSON.stringify({ resume: true }),
       },
       bindings,
     );
+  }
+
+  /** Run `act` with the console captured, so a test reads what the Worker logged. */
+  async function logged<T>(act: () => Promise<T>): Promise<{ result: T; lines: string[] }> {
+    const lines: string[] = [];
+    const real = { log: console.log, warn: console.warn, error: console.error };
+    const keep = (...args: unknown[]) => void lines.push(args.map(String).join(" "));
+    console.log = keep;
+    console.warn = keep;
+    console.error = keep;
+    try {
+      return { result: await act(), lines };
+    } finally {
+      console.log = real.log;
+      console.warn = real.warn;
+      console.error = real.error;
+    }
   }
 
   interface PreLoop {
@@ -231,5 +255,70 @@ describe("an approval that stops before its step loop", () => {
     const row = requestRow(requestId);
     expect(row.status).toBe("denied");
     expect(row.last_error).toBeNull();
+  });
+
+  test("a failure to record the error is logged with its cause and the request id", async () => {
+    const { requestId } = await seedRun("nm098786", (id) =>
+      db.run("UPDATE datasets SET github_repo = NULL WHERE dataset_id = ?", [id]),
+    );
+    const bindings = env({
+      DB: interceptingD1(realD1(db), (sql) => {
+        if (sql === PRE_LOOP_FAILURE_SQL) throw new Error("D1 is down for the write");
+      }),
+    });
+    const { result: res, lines } = await logged(() => approve("nm098786", bindings));
+    expect(res.status).toBe(400);
+    const line = lines.find((l) => l.includes("could not record the early refusal"));
+    expect(line).toBeDefined();
+    expect(line).toContain(`request ${requestId}`);
+    expect(line).toContain("D1 is down for the write");
+  });
+
+  describe("when the GitHub token cannot be minted", () => {
+    // Neither a GitHub App nor a PAT is configured: `getDatasetsToken` throws after the request
+    // was marked `approving` and before any step ran. The answer stays the Worker's own 500; the
+    // row says why, so it does not read as a run in flight for the rest of the lease.
+    const NO_GITHUB_AUTH = { GITHUB_ADMIN_PAT: undefined } as Partial<Bindings>;
+
+    test("the answer stays 500, the row says why, and the run reads as stalled once the grace has passed", async () => {
+      const { requestId } = await seedRun("nm098787", () => undefined);
+      const res = await approve("nm098787", env(NO_GITHUB_AUTH));
+      expect(res.status).toBe(500);
+
+      const row = requestRow(requestId);
+      expect(row.status).toBe("approving");
+      expect(row.last_error).toBe("Could not get a GitHub token for the dataset repository");
+      expect(await inFlight(requestId)).toBe(true);
+      db.run(
+        "UPDATE publication_requests SET updated_at = datetime('now', '-2 minutes') WHERE id = ?",
+        [requestId],
+      );
+      expect(await inFlight(requestId)).toBe(false);
+    });
+
+    test("a web run's claim is left standing for the release step", async () => {
+      const { requestId } = await seedRun("nm098788", () => undefined);
+      const token = await webClaim(db, {
+        requestId,
+        clickerId: adminId,
+        secret: CALLBACK_SECRET,
+      });
+      const claimOf = () =>
+        db
+          .query<{ by: number | null; at: string | null }, [number]>(
+            "SELECT approval_requested_by AS by, approval_dispatched_at AS at FROM publication_requests WHERE id = ?",
+          )
+          .get(requestId);
+      const before = claimOf();
+      expect(before?.by).toBe(adminId);
+
+      const res = await approve("nm098788", env(NO_GITHUB_AUTH), token);
+      expect(res.status).toBe(500);
+      expect(requestRow(requestId).last_error).toBe(
+        "Could not get a GitHub token for the dataset repository",
+      );
+      // The release step of the workflow ends the claim; a failure here does not.
+      expect(claimOf()).toEqual(before);
+    });
   });
 });

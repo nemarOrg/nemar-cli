@@ -19,7 +19,7 @@ import {
 } from "../../../shared/publication-steps.js";
 
 import {
-  APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE,
+  APPROVAL_CLOSED_DURING_RUN_MESSAGE,
   DECISION_WITH_DISPATCH_TOKEN_MESSAGE,
   DISPATCH_EXPIRED_MESSAGE,
   DISPATCH_SUPERSEDED_MESSAGE,
@@ -47,6 +47,7 @@ import {
 import {
   ACTIVE_REQUEST_TAIL_SQL,
   APPROVAL_CLAIM_CLEAR_SQL,
+  type ApprovalDispatchRefusal,
   type Approver,
   approvalLeaseLiveSql,
   checkApprovalDispatchToken,
@@ -526,10 +527,9 @@ async function stepCiCheck(c: ApproveStepContext): Promise<RespondOutcome | unde
           action: "publication_ci_check_skipped",
           resourceType: "dataset",
           resourceId: datasetId,
-          details: JSON.stringify({
-            request_id: c.requestId,
-            ...(c.approver.id !== adminUser.id ? { executed_by: executorName(adminUser) } : {}),
-          }),
+          // Never `executed_by`: a call that carries a dispatch token may not skip (refused before
+          // any write), so the approver here is always the caller.
+          details: JSON.stringify({ request_id: c.requestId }),
         }).run();
       } catch (auditError) {
         console.error(
@@ -2451,16 +2451,19 @@ async function concealedEraVersionWarning(
 }
 
 /**
- * The sentences of the four answers of {@link runPublicationApproval} that come AFTER the request
- * was marked `approving` and BEFORE its step loop, the only exits that used to leave the row with
- * no `last_error`. Each is both the answer's own words and what {@link recordPreLoopFailure}
- * writes, declared once so the two cannot drift and the answers stay byte-identical.
+ * The sentences of the exits of {@link runPublicationApproval} that come AFTER the request was
+ * marked `approving` and BEFORE its step loop, the ones that used to leave the row with no
+ * `last_error`: four answers, and the throw of the GitHub token mint. Each is what
+ * {@link recordPreLoopFailure} writes, and for the four answers also the answer's own words,
+ * declared once so the two cannot drift and the answers stay byte-identical. A failure of the
+ * database itself is the one exit left out: the write that records it would fail as well.
  */
 const PRE_LOOP_FAILURE = {
   datasetMissing: "Dataset not found",
   sandbox: "Sandbox datasets (xx-prefix) are for testing only and cannot be published.",
   noRepository: "Dataset has no GitHub repository",
   invalidRepository: "Invalid repository format",
+  githubToken: "Could not get a GitHub token for the dataset repository",
 } as const;
 
 /**
@@ -2480,8 +2483,8 @@ export const PRE_LOOP_FAILURE_SQL =
  * `updated_at` is left as the mark set it: the grace counts from this call, which is the run's
  * last sign of life.
  *
- * Best-effort and never the answer: a failure here is logged by request id and the caller returns
- * the same body and status it always did.
+ * Best-effort and never the answer: a failure here is logged by request id, with its cause, and the
+ * caller returns the same body and status it always did.
  */
 async function recordPreLoopFailure(
   db: D1Database,
@@ -2490,9 +2493,9 @@ async function recordPreLoopFailure(
 ): Promise<void> {
   try {
     await db.prepare(PRE_LOOP_FAILURE_SQL).bind(message, requestId).run();
-  } catch {
+  } catch (err) {
     console.error(
-      `[publish] could not record the early refusal of request ${requestId} as its last error`,
+      `[publish] could not record the early refusal of request ${requestId} as its last error: ${errorMessage(err)}`,
     );
   }
 }
@@ -2505,11 +2508,15 @@ async function recordPreLoopFailure(
  * that is already `published` was finished by a concurrent call of the same run (a retry that
  * overlapped), and counts as finished. The one statement of the run's ending, shared by the step
  * loop's last write and by a resumed run whose steps are all done.
+ *
+ * `changed` says whether THIS call made the request `published`, as against finding it already so:
+ * the one call that changes the row is the one that records the publication, so a concurrent
+ * finisher does not write a second row.
  */
 async function markRequestPublished(
   db: D1Database,
   requestId: number,
-): Promise<{ finished: true } | { finished: false; status: string | null }> {
+): Promise<{ finished: true; changed: boolean } | { finished: false; status: string | null }> {
   const published = await db
     .prepare(
       `UPDATE publication_requests
@@ -2518,13 +2525,71 @@ async function markRequestPublished(
     )
     .bind(requestId)
     .run();
-  if ((published.meta.changes ?? 0) === 1) return { finished: true };
+  if ((published.meta.changes ?? 0) === 1) return { finished: true, changed: true };
   const closed = await db
     .prepare("SELECT status FROM publication_requests WHERE id = ?")
     .bind(requestId)
     .first<{ status: string }>();
-  if (closed?.status === "published") return { finished: true };
+  if (closed?.status === "published") return { finished: true, changed: false };
   return { finished: false, status: closed?.status ?? null };
+}
+
+/**
+ * The audit row of a publication, `dataset_published`, naming the approver of record (the
+ * clicker for a run the web started, otherwise the account that called) and, when the caller is
+ * someone else, the executing account. Best effort: a failure to write it is returned as the
+ * sentence the administrator is told, and never changes the run.
+ *
+ * `dataset` is the row the run already read; a run that never read it (every step was already done)
+ * passes none and the row is read here, inside the same best-effort block, so a failed read is a
+ * warning and no row, never a row with a guessed review gate. `finishedByResume` marks the row of a
+ * request that a resumed run with every step already done closed: the steps ran in an earlier
+ * call, so the row names who finished the request, and says so.
+ */
+async function recordPublicationAudit(
+  c: ApproveStepContext,
+  dataset: { source?: string | null; is_exemplar?: number | null } | undefined,
+  allSteps: readonly PublicationStep[],
+  finishedByResume = false,
+): Promise<string | undefined> {
+  try {
+    const row =
+      dataset ??
+      (await c.db
+        .prepare("SELECT source, is_exemplar FROM datasets WHERE dataset_id = ?")
+        .bind(c.datasetId)
+        .first<{ source: string | null; is_exemplar: number | null }>()) ??
+      {};
+    await auditLogStatement(c.db, {
+      userId: c.approver.id,
+      action: "dataset_published",
+      resourceType: "dataset",
+      resourceId: c.datasetId,
+      details: JSON.stringify({
+        approved_by: c.approver.username,
+        // Only when the executor is not the approver, so a terminal approval's
+        // row is byte-identical to what it always was.
+        ...(c.approver.id !== c.adminUser.id ? { executed_by: executorName(c.adminUser) } : {}),
+        steps: allSteps,
+        // The review gate's state for this environment and dataset when the row is written, and
+        // the flag of the call that finished the run. A skip is also its own row when it happens
+        // (`publication_ci_check_skipped`), which survives a resume with another flag.
+        review_gate: reviewGateStateOf(c.env, row),
+        skip_ci_check: c.body.skip_ci_check,
+        ...(finishedByResume ? { finished_by_resume: true } : {}),
+      }),
+    }).run();
+    return undefined;
+  } catch (auditError) {
+    const message = auditError instanceof Error ? auditError.message : String(auditError);
+    console.error(
+      "AUDIT LOG FAILURE: Dataset publication for",
+      c.datasetId,
+      "was not logged:",
+      message,
+    );
+    return `Audit log write failed: ${message}. Publication succeeded but was not logged for compliance.`;
+  }
 }
 
 /**
@@ -2560,11 +2625,21 @@ async function refuseApprovalOnClosedRequest(
   return c.json(
     {
       error: "approval_closed_during_run",
-      message: APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE,
+      message: APPROVAL_CLOSED_DURING_RUN_MESSAGE,
     },
     409,
   );
 }
+
+/** The 500 of a call whose mark changed nothing and whose follow-up read of the claim failed. */
+const CLAIM_READ_FAILED_MESSAGE =
+  "Could not confirm the state of the approval's request, so nothing was started. Try again.";
+
+/** The sentence that answers each refusal of a dispatch token (the word is the answer's `error`). */
+const DISPATCH_REFUSAL_MESSAGE: Record<ApprovalDispatchRefusal, string> = {
+  dispatch_superseded: DISPATCH_SUPERSEDED_MESSAGE,
+  dispatch_expired: DISPATCH_EXPIRED_MESSAGE,
+};
 
 export async function runPublicationApproval(args: ApproveRunArgs): Promise<RespondOutcome> {
   const { db, env, waitUntil, datasetId, adminUser, body, dispatchToken } = args;
@@ -2679,21 +2754,18 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   );
   if (tokenCheck.kind === "refused") {
     console.warn(
-      `[publish] ${datasetId}: approval refused for request ${request.id}, its dispatch token is ${tokenCheck.code === "dispatch_expired" ? "expired" : "no longer the claim's"}`,
+      `[publish] ${datasetId}: approval refused for request ${request.id}, its dispatch token was refused as ${tokenCheck.code}`,
     );
     return c.json(
-      {
-        error: tokenCheck.code,
-        message:
-          tokenCheck.code === "dispatch_expired"
-            ? DISPATCH_EXPIRED_MESSAGE
-            : DISPATCH_SUPERSEDED_MESSAGE,
-      },
+      { error: tokenCheck.code, message: DISPATCH_REFUSAL_MESSAGE[tokenCheck.code] },
       409,
     );
   }
-  const tokenValid = tokenCheck.kind === "valid";
-  c.approver = await resolveApprover(db, request.approval_requested_by, tokenValid, {
+  // The claim a valid token was verified against (its clicker and the instant it was made), or
+  // null for a call that sent none: the approver and the mark below read it from here, never from
+  // the row again.
+  const verifiedClaim = tokenCheck.kind === "valid" ? tokenCheck : null;
+  c.approver = await resolveApprover(db, tokenCheck, {
     id: adminUser.id,
     username: adminUser.username,
   });
@@ -2701,12 +2773,16 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // A run the web started carries the decision its click made: the override and the screen's
   // acknowledgment were recorded at the click, under the clicker's id, and the gates below read
   // them there. It may not send one of its own, because it would be recorded under the approver of
-  // record, who is the clicker and not the sender. So an override or an acknowledgment is recorded
-  // only under the credential that sent it, or at the clicker's own dispatch.
+  // record, who is the clicker and not the sender. A skipped CI check is a decision of the same
+  // kind (it waives a check, and is recorded under the approver), and the click has no such
+  // option, so a run that sends one is not the click's. An explicit `false` is no decision: the
+  // CLI sends it on every call. So an override, an acknowledgment or a skip is recorded only under
+  // the credential that sent it, or at the clicker's own dispatch.
   if (
-    tokenValid &&
+    verifiedClaim !== null &&
     (body.override_publication_review !== undefined ||
-      body.acknowledge_identifier_screen !== undefined)
+      body.acknowledge_identifier_screen !== undefined ||
+      body.skip_ci_check === true)
   ) {
     console.warn(
       `[publish] ${datasetId}: approval refused for request ${request.id}, a run carrying a dispatch token sent a decision of its own`,
@@ -2734,6 +2810,15 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   const stepsToRun = allSteps.filter((s) => !stepsCompleted.includes(s));
 
   if (stepsToRun.length === 0) {
+    // A request that is not `approving` is refused BEFORE the tail jobs below: they write (the
+    // Zarr stamp) and publish (reserved version identifiers, which cannot be taken back), and a
+    // refusal that reads as "this run published nothing" must not have done either. A `requested`
+    // request here carries the steps of an earlier life (follow-up #1766) and its data is already
+    // public; an owner-name `blocked` one was walked back mid-run. The closing write below stays
+    // the atomic guard, and its refusal stays the answer for a request that closed after this read.
+    if (request.status !== "approving") {
+      return refuseApprovalOnClosedRequest(c, request.id, request.status);
+    }
     // Re-request the Zarr rebuild on this path too, so the warning
     // `stampZarrRequeue` returns is actionable. Its one other caller is at the
     // END of the step loop, and a run that reaches here never gets there -- so
@@ -2752,14 +2837,12 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     const retryWarnings = [retryWarning, retryVersionWarning].filter(Boolean);
     // The run's ending, as at the end of the step loop: an `approving` request is marked
     // published by the same guarded write, and any other status is refused, with the answer of a
-    // request closed while the run ran. This branch used to answer 200 `published` and write
-    // nothing, so a request that was no longer `approving` (an owner-name `blocked` row resumed
-    // with every step done, or one a denial closed after the read) was reported published while
-    // it stayed as it was, and an `approving` one stayed `approving` for good. A request that is
-    // `requested` here carries the steps of an earlier life (follow-up #1766), and its data is
-    // already public: it is refused too, never marked published by a run that did no step.
-    const ended = await markRequestPublished(db, request.id);
-    if (!ended.finished) {
+    // request closed while the run ran. But only when no tail job warned: those warnings say
+    // "approve the request again to retry", which finds only an active request, so closing it
+    // here would turn the remedy into a 404. A run with a warning leaves the request `approving`
+    // and answers as it did before the request was marked here at all.
+    const ended = retryWarnings.length === 0 ? await markRequestPublished(db, request.id) : null;
+    if (ended && !ended.finished) {
       return refuseApprovalOnClosedRequest(c, request.id, ended.status);
     }
     // Neurobagel federation (epic #1586 phase 4, ADR 0084): a run whose steps are all
@@ -2767,11 +2850,20 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     // never a step: it does nothing unless the writer is enabled, runs in `waitUntil`,
     // and cannot fail or delay this response.
     scheduleNeurobagelSync(env, waitUntil, datasetId, "hook:publication");
+    // The publication is recorded by the call that changes the request, and only by it: the
+    // steps ran in an earlier call, which never reached the write that records it, so this one
+    // does, naming who finished the request. A concurrent finisher found the request already
+    // published and records nothing; a call that left the request `approving` records nothing yet.
+    const auditWarning =
+      ended?.finished && ended.changed
+        ? await recordPublicationAudit(c, undefined, allSteps, true)
+        : undefined;
+    const warnings = [...retryWarnings, auditWarning].filter(Boolean);
     return c.json({
       message: "All steps already completed",
       dataset_id: datasetId,
       status: "published",
-      ...(retryWarnings.length > 0 ? { warnings: retryWarnings } : {}),
+      ...(warnings.length > 0 ? { warnings } : {}),
     });
   }
 
@@ -2867,31 +2959,42 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
       // error is history (the caller's own output has it), and the row reads as
       // running, not failed, from this moment (services/approval-dispatch.ts).
       `UPDATE publication_requests SET status = 'approving', approved_by = ?, last_error = NULL, updated_at = datetime('now')${
-        tokenValid ? "" : `, ${APPROVAL_CLAIM_CLEAR_SQL}`
+        verifiedClaim ? "" : `, ${APPROVAL_CLAIM_CLEAR_SQL}`
       } WHERE id = ? AND (status IN ('requested', 'approving') OR (status = 'blocked' AND block_reason = '${OWNER_NAME_MISSING_REASON}' AND ? = 1))${
-        tokenValid ? " AND approval_dispatched_at = ?" : ""
+        verifiedClaim ? " AND approval_dispatched_at = ?" : ""
       }`,
     )
     .bind(
       c.approver.id,
       request.id,
       readAsBlocked,
-      ...(tokenValid ? [request.approval_dispatched_at] : []),
+      ...(verifiedClaim ? [verifiedClaim.claimedAt] : []),
     )
     .run();
   if ((marked.meta.changes ?? 0) !== 1) {
     // Under a token the claim is one of the two things that can have moved, and the answer must
     // say which: a claim that is no longer the one verified is the click's run being refused
-    // (superseded); a claim that stands over a request that moved (a review re-blocked it, which
-    // leaves the claim as it was) is the request that changed, as for every other approval. A
-    // read that fails answers superseded: nothing proved the claim, and nothing was marked.
-    if (tokenValid) {
-      const now = await db
-        .prepare("SELECT approval_dispatched_at FROM publication_requests WHERE id = ?")
-        .bind(request.id)
-        .first<{ approval_dispatched_at: string | null }>()
-        .catch(() => null);
-      if (!now || now.approval_dispatched_at !== request.approval_dispatched_at) {
+    // (superseded); a claim that stands over a request that moved (the identifier screen blocked
+    // it, which leaves the claim as it was; the publication review's re-block clears it, and is
+    // answered superseded) is the request that changed, as for every other approval. A request
+    // that is gone answers superseded too. A read that fails answers 500, which the caller
+    // retries: nothing was marked, and nothing proved the claim was replaced.
+    if (verifiedClaim) {
+      let now: { approval_dispatched_at: string | null } | null;
+      try {
+        now = await db
+          .prepare("SELECT approval_dispatched_at FROM publication_requests WHERE id = ?")
+          .bind(request.id)
+          .first<{ approval_dispatched_at: string | null }>();
+      } catch (readError) {
+        // Nothing was marked, and nothing proved the claim was replaced: the retryable answer,
+        // not a 409 the caller would take as final.
+        console.error(
+          `[publish] ${datasetId}: could not tell why the mark of request ${request.id} changed nothing: ${errorMessage(readError)}`,
+        );
+        return c.json({ error: CLAIM_READ_FAILED_MESSAGE }, 500);
+      }
+      if (!now || now.approval_dispatched_at !== verifiedClaim.claimedAt) {
         console.warn(
           `[publish] ${datasetId}: approval refused, the claim on request ${request.id} was replaced while it was being checked`,
         );
@@ -3017,7 +3120,18 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     return c.json({ error: PRE_LOOP_FAILURE.invalidRepository }, 500);
   }
 
-  const pat = await getDatasetsToken(c.env);
+  // The token is minted after the mark, so a mint that throws (no App key, no PAT, GitHub
+  // refusing) would leave the row `approving` with no `last_error`, and so in flight for the rest
+  // of the lease with nothing running. The sentence is written, then the throw goes on as it
+  // always did, so the status and the Worker's own error handling are unchanged. The claim is
+  // left standing, like the other exits above: the executor's release step ends it.
+  let pat: string;
+  try {
+    pat = await getDatasetsToken(c.env);
+  } catch (tokenError) {
+    await recordPreLoopFailure(db, request.id, PRE_LOOP_FAILURE.githubToken);
+    throw tokenError;
+  }
   const requestId = request.id;
 
   // Progress recorder: single writer of steps_completed/current_step/
@@ -3110,44 +3224,10 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   scheduleNeurobagelSync(env, waitUntil, datasetId, "hook:publication");
 
   // Audit log (non-fatal but warn user if fails)
-  let auditLogFailed = false;
-  let auditLogError: string | undefined;
-
-  try {
-    await auditLogStatement(db, {
-      userId: c.approver.id,
-      action: "dataset_published",
-      resourceType: "dataset",
-      resourceId: datasetId,
-      details: JSON.stringify({
-        approved_by: c.approver.username,
-        // Only when the executor is not the approver, so a terminal approval's
-        // row is byte-identical to what it always was.
-        ...(c.approver.id !== adminUser.id ? { executed_by: executorName(adminUser) } : {}),
-        steps: allSteps,
-        // The review gate's state for this environment and dataset when the row is written, and
-        // the flag of the call that finished the run. A skip is also its own row when it happens
-        // (`publication_ci_check_skipped`), which survives a resume with another flag.
-        review_gate: reviewGateStateOf(env, dataset),
-        skip_ci_check: body.skip_ci_check,
-      }),
-    }).run();
-  } catch (auditError) {
-    auditLogFailed = true;
-    auditLogError = auditError instanceof Error ? auditError.message : String(auditError);
-    console.error(
-      "AUDIT LOG FAILURE: Dataset publication for",
-      datasetId,
-      "was not logged:",
-      auditLogError,
-    );
-  }
+  const auditWarning = await recordPublicationAudit(c, dataset, allSteps);
 
   // Combine all non-fatal warnings into the response so operators can act
   // without tailing logs. Both warnings are optional and independent.
-  const auditWarning = auditLogFailed
-    ? `Audit log write failed: ${auditLogError}. Publication succeeded but was not logged for compliance.`
-    : undefined;
   const responseWarnings = [
     auditWarning,
     c.notifyUserWarning,

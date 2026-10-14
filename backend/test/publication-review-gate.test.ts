@@ -508,26 +508,71 @@ describe("--skip-ci-check is recorded", () => {
   });
 });
 
-describe("the audit trail names the executor one way", () => {
-  test("19. a skip inside a web approval records executed_by as the same username the approval row does", async () => {
-    // The executor's service account (B) runs the clicker's (A's) approval, and proves it with the
-    // click's token. Both rows name B as the executor, and both as the username: one type for the
-    // field across the whole trail.
+describe("a skipped CI check is a decision, and a decision is recorded under the credential that sent it", () => {
+  test("19. a skip sent with a web run's token is refused as decision_with_dispatch_token, and nothing is recorded", async () => {
+    // The click made its decision; the executor carries it out and may not add one. A skip sent
+    // under the token would be recorded under the clicker, who never asked for it.
     const { requestId } = seed({
       requestStatus: "approving",
       steps: DONE.filter((s) => s !== "ci_check"),
     });
     seedPublicationReview(db, { requestId, datasetId: DATASET, state: "reported" });
     const token = await claim(requestId, adminA);
+    const claimBefore = claimOf(requestId);
+    const before = requestRow(requestId);
+
     const res = await approve({ resume: true, skip_ci_check: true }, { key: ADMIN_B_KEY, token });
+
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body).toEqual({
+      error: "decision_with_dispatch_token",
+      message: DECISION_WITH_DISPATCH_TOKEN_MESSAGE,
+    });
+    expect(APPROVAL_REFUSAL_ERROR_CODES).toContain(body.error);
+    expect(auditRows("publication_ci_check_skipped")).toHaveLength(0);
+    expect(auditRows("dataset_published")).toHaveLength(0);
+    expect(requestRow(requestId)).toEqual(before);
+    expect(claimOf(requestId)).toEqual(claimBefore);
+  });
+
+  test("19. the refusal is for the skip alone: an explicit false is no decision, and the run goes on under the click", async () => {
+    // The CLI sends `skip_ci_check: false` on every call, so a refusal on the field's presence
+    // would refuse every web run.
+    const { requestId } = seed({
+      requestStatus: "approving",
+      steps: DONE.filter((s) => s !== "ci_check"),
+    });
+    seedPublicationReview(db, { requestId, datasetId: DATASET, state: "reported" });
+    const token = await claim(requestId, adminA);
+
+    const res = await approve({ resume: true, skip_ci_check: false }, { key: ADMIN_B_KEY, token });
+
+    expect(res.status).toBe(200);
+    expect(requestRow(requestId).approved_by).toBe(adminA);
+    expect(auditRows("publication_ci_check_skipped")).toHaveLength(0);
+    expect(published().details).toMatchObject({ approved_by: "gateadmina", skip_ci_check: false });
+  });
+
+  test("19. without the token a skip is its sender's own, claim or no claim: B's skip inside A's live claim is B's, and B takes the claim over", async () => {
+    const { requestId } = seed({
+      requestStatus: "approving",
+      steps: DONE.filter((s) => s !== "ci_check"),
+    });
+    seedPublicationReview(db, { requestId, datasetId: DATASET, state: "reported" });
+    await claim(requestId, adminA);
+
+    const res = await approve({ resume: true, skip_ci_check: true }, { key: ADMIN_B_KEY });
+
     expect(res.status).toBe(200);
     const skipped = auditRows("publication_ci_check_skipped");
     expect(skipped).toHaveLength(1);
-    // Attributed to the clicker, executed by the service account.
-    expect(skipped[0].user_id).toBe(adminA);
-    expect(skipped[0].details).toEqual({ request_id: requestId, executed_by: "gateadminb" });
-    expect(skipped[0].details.executed_by).toBe(published().details.executed_by as string);
-    expect(typeof skipped[0].details.executed_by).toBe("string");
+    expect(skipped[0].user_id).toBe(adminB);
+    // B is the approver and the caller: there is no separate executor to name.
+    expect(skipped[0].details).toEqual({ request_id: requestId });
+    expect(published().user_id).toBe(adminB);
+    expect(published().details).toMatchObject({ skip_ci_check: true });
+    expect(claimOf(requestId)).toEqual({ by: null, at: null });
   });
 });
 
@@ -1095,6 +1140,64 @@ describe("an override is its approver's, and it is recorded once", () => {
     // Nothing about the request moved: B's approval is the one on record.
     expect(requestRow(requestId)).toEqual(afterB);
     expect(requestRow(requestId).approved_by).toBe(adminB);
+    expect(auditRows("dataset_published")).toHaveLength(0);
+  });
+
+  test("23. a token-bearing call that marks keeps the claim: the same token carries the retry after the run failed, recorded as the clicker", async () => {
+    // A web approval is many calls (every batch of the lock loop, every retry of a failed step)
+    // and each carries the one token of the click. Only a call WITHOUT the token ends the claim;
+    // a call that marks under the token must leave it standing, or every later call of the run
+    // is refused as superseded.
+    bidsConclusion = "failure";
+    const executorKey = "review-gate-executor-0123456789abcdef0123456789abcdef";
+    await seedUser(db, "gateexecutor", "admin", executorKey);
+    const { requestId } = seed({ steps: DONE.filter((s) => s !== "ci_check") });
+    seedPublicationReview(db, { requestId, datasetId: DATASET, state: "reported" });
+    const token = await claim(requestId, adminA);
+    const claimBefore = claimOf(requestId);
+
+    const first = await approve({ resume: true }, { key: executorKey, token });
+    // Marked, then stopped by the CI check.
+    expect(first.status).toBe(422);
+    expect(requestRow(requestId).status).toBe("approving");
+    expect(requestRow(requestId).approved_by).toBe(adminA);
+    expect(claimOf(requestId)).toEqual(claimBefore);
+
+    // The retry: the check passes now, and the same token is still the claim's.
+    bidsConclusion = "success";
+    const retry = await approve({ resume: true }, { key: executorKey, token });
+    expect(retry.status).toBe(200);
+    expect(requestRow(requestId).status).toBe("published");
+    expect(requestRow(requestId).approved_by).toBe(adminA);
+    expect(published().user_id).toBe(adminA);
+    expect(published().details).toMatchObject({
+      approved_by: "gateadmina",
+      executed_by: "gateexecutor",
+    });
+  });
+
+  test("23. the first call of a fresh web approval (resume false) marks under the token and leaves the claim for the next call", async () => {
+    // The executor's first call is not a resume. It marks the request and stops here at the CI
+    // check; the claim must stand, and the next call with the token is still the click's run.
+    bidsConclusion = "failure";
+    const executorKey = "review-gate-executor-0123456789abcdef0123456789abcdef";
+    await seedUser(db, "gateexecutor", "admin", executorKey);
+    const { requestId } = seed({ steps: [] });
+    seedPublicationReview(db, { requestId, datasetId: DATASET, state: "reported" });
+    const token = await claim(requestId, adminA);
+    const claimBefore = claimOf(requestId);
+
+    const first = await approve({ resume: false }, { key: executorKey, token });
+    expect(first.status).toBe(422);
+    expect(requestRow(requestId).status).toBe("approving");
+    expect(requestRow(requestId).approved_by).toBe(adminA);
+    expect(claimOf(requestId)).toEqual(claimBefore);
+
+    // The retry is a resume. It is not refused as superseded: it reaches the CI check again.
+    const retry = await approve({ resume: true }, { key: executorKey, token });
+    expect(retry.status).toBe(422);
+    expect(requestRow(requestId).approved_by).toBe(adminA);
+    expect(claimOf(requestId)).toEqual(claimBefore);
     expect(auditRows("dataset_published")).toHaveLength(0);
   });
 });

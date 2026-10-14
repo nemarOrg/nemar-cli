@@ -169,7 +169,7 @@ export const REQUEST_CHANGED_MESSAGE =
  * blocked one is refused), so the sentence says that the repair is by hand. The one command it
  * names is the listing of requests, which shows a request of any status.
  */
-export const APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE =
+export const APPROVAL_CLOSED_DURING_RUN_MESSAGE =
   "The request was closed while this approval was running (it was denied, blocked again or filed again), so the run did not mark it published. Its steps had already run, so the dataset may already be public. An approval cannot finish a closed request: check the dataset and the request (nemar admin publish list shows its status), then finish or repair it by hand.";
 
 /**
@@ -198,10 +198,10 @@ export const DISPATCH_EXPIRED_MESSAGE =
 /**
  * The sentence of the 409 `decision_with_dispatch_token`: a run the web started carries the
  * decision made at the click (the override and the screen acknowledgment were recorded then) and
- * may not send one of its own.
+ * may not send one of its own: an override, an acknowledgment or a skipped CI check.
  */
 export const DECISION_WITH_DISPATCH_TOKEN_MESSAGE =
-  "A run started by a web approval carries the decision made at the click and may not send its own: no override and no identifier-screen acknowledgment. Nothing was recorded.";
+  "A run started by a web approval carries the decision made at the click and may not send its own (an override, an identifier-screen acknowledgment or a skipped CI check). Nothing was recorded.";
 
 /**
  * The sentence of the deny route's 409 `approval_in_flight`: an approval of the request is

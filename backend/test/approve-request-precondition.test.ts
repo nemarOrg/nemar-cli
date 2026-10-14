@@ -27,7 +27,10 @@ import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Server } from "bun";
 import { Hono } from "hono";
-import { REQUEST_MISMATCH_MESSAGE } from "../../shared/contract/publication";
+import {
+  APPROVAL_REFUSAL_ERROR_CODES,
+  REQUEST_MISMATCH_MESSAGE,
+} from "../../shared/contract/publication";
 import { adminRoutes } from "../src/routes/admin";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -178,10 +181,12 @@ describe("a request_id that is not the request in force is 409 request_mismatch,
     const id = seed();
     const res = await approve({ resume: true, request_id: id + 1 });
     expect(res.status).toBe(409);
-    expect(await errorOf(res)).toEqual({
+    const refused = await errorOf(res);
+    expect(refused).toEqual({
       error: "request_mismatch",
       message: REQUEST_MISMATCH_MESSAGE,
     });
+    expect(APPROVAL_REFUSAL_ERROR_CODES).toContain(refused.error);
   });
 
   test("an `approving` request with an error of its own keeps it: no new mark, no cleared last_error", async () => {
