@@ -8,6 +8,11 @@
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 
+import {
+  APPROVAL_IN_FLIGHT_MESSAGE,
+  DENY_AFTER_PUBLISHING_MESSAGE,
+  REQUEST_MISMATCH_MESSAGE,
+} from "../../../../shared/contract/publication.js";
 import { screenGate } from "../../../../shared/identifier-screen-report.js";
 import {
   ACKNOWLEDGMENT_MAX_LENGTH,
@@ -72,6 +77,33 @@ const dispatchBodySchema = z
     override_publication_review: publicationReviewOverrideSchema.optional(),
   })
   .strict();
+
+/** The deny route's answer for a dataset with no active request, as it has always been. */
+const DENY_NOT_FOUND = { error: "No active publication request found" };
+
+/** The deny route's refusal of a request an approval is running for. */
+const DENY_IN_FLIGHT = { error: "approval_in_flight", message: APPROVAL_IN_FLIGHT_MESSAGE };
+
+/** The statuses of a request the deny route may still act on (`ACTIVE_REQUEST_TAIL_SQL`). */
+const DENIABLE_STATUSES: readonly string[] = ["requested", "approving", "blocked"];
+
+/**
+ * Why a request cannot be denied, or null when it can: the deny route's two refusals, in the one
+ * order it applies them (started publishing before in flight, so a live run that has gone past
+ * the validation steps is told what matters). Read on the first look at the request and again
+ * after a lost write, so both answer by the same rule.
+ */
+function denyRefusal(row: {
+  status: string;
+  block_reason: string | null;
+  steps_completed: string | null;
+  in_flight: number;
+}): { error: string; message: string } | null {
+  if (publishingStanding(row) === "publishing") {
+    return { error: "deny_after_publishing", message: DENY_AFTER_PUBLISHING_MESSAGE };
+  }
+  return row.in_flight === 1 ? DENY_IN_FLIGHT : null;
+}
 
 export function registerPublishRoutes(admin: AdminRouter): void {
   // ============================================================================
@@ -217,42 +249,100 @@ export function registerPublishRoutes(admin: AdminRouter): void {
   });
 
   /**
-   * POST /admin/publish/:id/deny - Deny a publication request
+   * POST /admin/publish/:id/deny - Deny a publication request (#1603)
+   *
+   * The newest active request is read, then refused by the shared words, in this order, before any
+   * write (a denial that is refused changes nothing and mails nobody):
+   *   404                       no active request (the body this route always had)
+   *   409 request_mismatch      `request_id` names a request that is not that one: it was denied or
+   *                             filed again since the administrator read it (#1579)
+   *   409 deny_after_publishing the run has started publishing (`publishingStanding`, which counts
+   *                             the owner-name walk-back that left it blocked): the dataset may
+   *                             already be public, and the depositor must not be told "denied"
+   *   409 approval_in_flight    an approval is running for it (`approvalInFlightSql`, the lease the
+   *                             dispatch claim reads): a denial would overwrite a run still writing
+   * A stalled run that has not started publishing (the lease lapsed, or a failed run past its
+   * grace) can be denied: nothing is public, and nothing is writing.
+   *
+   * Then ONE conditional write. Its terms are the lease predicate and the `updated_at` that was
+   * read, so a request that was published, denied, claimed, or touched by a run between the read
+   * and the write is refused rather than overwritten; a lost write is read again and answered with
+   * the true reason, by the same rule as the first read. The depositor's mail goes after the write
+   * has changed a row, never before. A denial also ends a lapsed web claim
+   * (`APPROVAL_CLAIM_CLEAR_SQL`) so a denied request holds none; the dispatch audit row still
+   * names the administrator who clicked.
    */
   const denySchema = z.object({
     reason: z
       .string()
       .min(1, "Reason is required")
       .max(DENIAL_REASON_MAX_LENGTH, "Reason too long"),
+    request_id: z.number().int().positive().optional(),
   });
 
   admin.post("/publish/:id/deny", zValidator("json", denySchema), async (c) => {
     const datasetId = c.req.param("id");
-    const { reason } = c.req.valid("json");
+    const { reason, request_id: requestId } = c.req.valid("json");
     const adminUser = c.get("user");
     const db = c.env.DB;
 
     const request = await db
       .prepare(
-        "SELECT id, status, requested_by FROM publication_requests WHERE dataset_id = ? AND status IN ('requested', 'approving', 'blocked') ORDER BY requested_at DESC LIMIT 1",
+        `SELECT id, status, requested_by, block_reason, steps_completed, updated_at,
+                ${approvalInFlightSql()} AS in_flight ${ACTIVE_REQUEST_TAIL_SQL}`,
       )
       .bind(datasetId)
-      .first<{ id: number; status: string; requested_by: number }>();
+      .first<{
+        id: number;
+        status: string;
+        requested_by: number;
+        block_reason: string | null;
+        steps_completed: string | null;
+        updated_at: string;
+        in_flight: number;
+      }>();
 
-    if (!request) {
-      return c.json({ error: "No active publication request found" }, 404);
+    if (!request) return c.json(DENY_NOT_FOUND, 404);
+    if (requestId !== undefined && requestId !== request.id) {
+      return c.json({ error: "request_mismatch", message: REQUEST_MISMATCH_MESSAGE }, 409);
     }
+    const refused = denyRefusal(request);
+    if (refused) return c.json(refused, 409);
 
-    await db
+    const denied = await db
       .prepare(
         `UPDATE publication_requests
-       SET status = 'denied', denied_at = datetime('now'), denied_by = ?, denied_reason = ?, updated_at = datetime('now')
-       WHERE id = ?`,
+       SET status = 'denied', denied_at = datetime('now'), denied_by = ?, denied_reason = ?,
+           ${APPROVAL_CLAIM_CLEAR_SQL}, updated_at = datetime('now')
+       WHERE id = ? AND status IN ('requested', 'approving', 'blocked')
+         AND NOT ${approvalInFlightSql()} AND updated_at = ?`,
       )
-      .bind(adminUser.id, reason, request.id)
+      .bind(adminUser.id, reason, request.id, request.updated_at)
       .run();
 
-    // Notify the requesting user
+    if ((denied.meta.changes ?? 0) !== 1) {
+      // The request moved after it was read here. Say why, as the dispatch route does for a lost
+      // claim: a request that is no longer active (published, denied) is "not found", and one that
+      // is still active is refused for the reason it has NOW. Anything else (it was only touched,
+      // and nothing is running) reads as a run that is writing to it: the sentence tells the
+      // administrator to wait and deny it again, which is what that case needs.
+      const now = await db
+        .prepare(
+          `SELECT status, block_reason, steps_completed, ${approvalInFlightSql()} AS in_flight
+             FROM publication_requests WHERE id = ?`,
+        )
+        .bind(request.id)
+        .first<{
+          status: string;
+          block_reason: string | null;
+          steps_completed: string | null;
+          in_flight: number;
+        }>();
+      if (!now || !DENIABLE_STATUSES.includes(now.status)) return c.json(DENY_NOT_FOUND, 404);
+      return c.json(denyRefusal(now) ?? DENY_IN_FLIGHT, 409);
+    }
+
+    // Notify the requesting user, only now that the denial is recorded
     try {
       const user = await db
         .prepare("SELECT username, email FROM users WHERE id = ?")

@@ -33,17 +33,27 @@ import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Server } from "bun";
 import { Hono } from "hono";
-import { APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE } from "../../shared/contract/publication.js";
-import { PUBLICATION_STEPS } from "../../shared/publication-steps.js";
+import {
+  APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE,
+  APPROVAL_IN_FLIGHT_MESSAGE,
+  DENY_AFTER_PUBLISHING_MESSAGE,
+  REQUEST_MISMATCH_MESSAGE,
+} from "../../shared/contract/publication.js";
+import { OWNER_NAME_MISSING_REASON, PUBLICATION_STEPS } from "../../shared/publication-steps.js";
 import { adminRoutes } from "../src/routes/admin";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, interceptingD1, realD1 } from "./helpers/d1";
 import { mainRefAnswer, markDatasetScreensClean } from "./helpers/identifier-screen";
+import { type CapturedEmail, sendsTo, withFakeResend } from "./helpers/resend";
 
 const ADMIN_KEY = "deny-admin-key-0123456789abcdef0123456789abcdef";
 const DATASET = "nm000491";
 const REQUESTER_EMAIL = "denyrequester@example.org";
+const NOT_FOUND = { error: "No active publication request found" };
+
+/** A step the run finished that changed something: it has started publishing. */
+const STARTED = ["ci_check", "enrichment_check", "s3_public_read", "repo_public"];
 
 // Everything done except the two logged no-op steps, so a resumed run reaches the final write
 // with no network beyond the one GitHub read of `main` the identifier-screen gate makes.
@@ -157,6 +167,337 @@ function row(id: number): Record<string, unknown> {
     unknown
   >;
 }
+
+function deny(
+  body: Record<string, unknown> = { reason: "Not ready for publication." },
+  bindings: Bindings = env(),
+): Promise<Response> {
+  return app.request(
+    `/admin/publish/${DATASET}/deny`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${ADMIN_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+    bindings,
+  );
+}
+
+/** What the depositor was mailed: every send to the requester, as the fence let it through. */
+const mailedTo = (calls: CapturedEmail[]) => sendsTo(calls, REQUESTER_EMAIL);
+
+/** An environment whose database lands `effect` once, just before the denial's own write. */
+function raceBeforeDenyWrite(effect: () => void): Bindings {
+  let fired = false;
+  return env(
+    interceptingD1(realD1(db), (sql) => {
+      if (!fired && sql.includes("SET status = 'denied'")) {
+        fired = true;
+        effect();
+      }
+    }),
+  );
+}
+
+/** A denial that must be refused: its status, its body, an untouched row and no mail. */
+async function expectRefused(
+  id: number,
+  respond: (calls: CapturedEmail[]) => Promise<Response>,
+  expected: { status: number; body: Record<string, unknown> },
+): Promise<void> {
+  const before = row(id);
+  await withFakeResend(async (calls) => {
+    const res = await respond(calls);
+    expect(res.status).toBe(expected.status);
+    expect(await res.json()).toEqual(expected.body);
+    expect(calls).toHaveLength(0);
+  });
+  expect(row(id)).toEqual(before);
+}
+
+const IN_FLIGHT = { error: "approval_in_flight", message: APPROVAL_IN_FLIGHT_MESSAGE };
+const AFTER_PUBLISHING = { error: "deny_after_publishing", message: DENY_AFTER_PUBLISHING_MESSAGE };
+
+describe("T4.5 a request an approval is running for is not denied", () => {
+  test("a fresh terminal approval (approving, heartbeat a few seconds old)", async () => {
+    const id = seedRequest({ status: "approving", updatedAt: "-5 seconds", steps: ["ci_check"] });
+    await expectRefused(id, () => deny(), { status: 409, body: IN_FLIGHT });
+  });
+
+  test("a dispatched claim inside the lease, before the executor's first call", async () => {
+    const id = seedRequest({ status: "requested", dispatchedAt: "-5 minutes" });
+    await expectRefused(id, () => deny(), { status: 409, body: IN_FLIGHT });
+  });
+
+  test("a failed run inside the 60 second grace, which the CLI's retry is about to resume", async () => {
+    const id = seedRequest({
+      status: "approving",
+      updatedAt: "-20 seconds",
+      lastError: "ci_check failed",
+      steps: ["ci_check"],
+    });
+    await expectRefused(id, () => deny(), { status: 409, body: IN_FLIGHT });
+  });
+});
+
+describe("T4.6 a request nothing is running for is denied, and the depositor is told once", () => {
+  async function denied(id: number): Promise<void> {
+    await withFakeResend(async (calls) => {
+      const res = await deny({ reason: "The README does not describe the setup." });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        message: "Publication request denied",
+        dataset_id: DATASET,
+        reason: "The README does not describe the setup.",
+      });
+      const sent = mailedTo(calls);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]?.subject).toBe(`Publication request denied: ${DATASET}`);
+      expect(sent[0]?.html).toContain("The README does not describe the setup.");
+      expect(calls).toHaveLength(1);
+    });
+    const after = row(id);
+    expect(after.status).toBe("denied");
+    expect(after.denied_by).toBe(adminId);
+    expect(after.denied_reason).toBe("The README does not describe the setup.");
+    expect(after.denied_at).not.toBeNull();
+  }
+
+  test("a stalled approving request that has not started publishing (the lease lapsed)", async () => {
+    const id = seedRequest({
+      status: "approving",
+      updatedAt: "-16 minutes",
+      dispatchedAt: "-2 hours",
+      steps: ["ci_check"],
+    });
+    await denied(id);
+    // Nothing is running for it, so the lapsed claim goes with the denial: a denied request keeps
+    // no claim that could be read as a run (the dispatch audit row still names the clicker).
+    expect(row(id).approval_requested_by).toBeNull();
+    expect(row(id).approval_dispatched_at).toBeNull();
+  });
+
+  test("a failed run past the 60 second grace", async () => {
+    const id = seedRequest({
+      status: "approving",
+      updatedAt: "-5 minutes",
+      lastError: "ci_check failed",
+      steps: ["ci_check"],
+    });
+    await denied(id);
+  });
+
+  test("a requested request", async () => {
+    await denied(seedRequest({ status: "requested" }));
+  });
+
+  test("a requested request whose dispatch lapsed unanswered", async () => {
+    await denied(seedRequest({ status: "requested", dispatchedAt: "-16 minutes" }));
+  });
+
+  test("a blocked request, even with the steps of an earlier life still listed", async () => {
+    // Nothing clears `steps_completed` when the depositor requests again, so a request blocked by
+    // the screen can carry the steps of a run that was walked back long ago. Only the owner-name
+    // walk-back is a run that is still half published.
+    await denied(
+      seedRequest({ status: "blocked", blockReason: "min_requirements_failed", steps: STARTED }),
+    );
+  });
+});
+
+describe("T4.7 a request that has started publishing is never denied", () => {
+  test("a stalled approving request with a step done outside the validation-only ones", async () => {
+    const id = seedRequest({ status: "approving", updatedAt: "-16 minutes", steps: STARTED });
+    await expectRefused(id, () => deny(), { status: 409, body: AFTER_PUBLISHING });
+  });
+
+  test("that refusal comes before the in-flight one: a live run that started publishing", async () => {
+    const id = seedRequest({ status: "approving", updatedAt: "-5 seconds", steps: STARTED });
+    await expectRefused(id, () => deny(), { status: 409, body: AFTER_PUBLISHING });
+  });
+
+  test("the owner-name walk-back: blocked with the steps of a half-published run", async () => {
+    const id = seedRequest({
+      status: "blocked",
+      blockReason: OWNER_NAME_MISSING_REASON,
+      steps: STARTED,
+    });
+    await expectRefused(id, () => deny(), { status: 409, body: AFTER_PUBLISHING });
+  });
+});
+
+describe("T4.8 a request that moves between the read and the write is not overwritten", () => {
+  test("published in between: the answer is that no request is active, and it stays published", async () => {
+    const id = seedRequest({ status: "approving", updatedAt: "-16 minutes", steps: ["ci_check"] });
+    const bindings = raceBeforeDenyWrite(() =>
+      db.run("UPDATE publication_requests SET status = 'published' WHERE id = ?", [id]),
+    );
+    await withFakeResend(async (calls) => {
+      const res = await deny(undefined, bindings);
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual(NOT_FOUND);
+      expect(calls).toHaveLength(0);
+    });
+    const after = row(id);
+    expect(after.status).toBe("published");
+    expect(after.denied_at).toBeNull();
+    expect(after.denied_by).toBeNull();
+    expect(after.denied_reason).toBeNull();
+  });
+
+  test("denied by another administrator in between: their denial stands, no second mail", async () => {
+    const id = seedRequest({ status: "requested" });
+    const bindings = raceBeforeDenyWrite(() =>
+      db.run(
+        `UPDATE publication_requests
+            SET status = 'denied', denied_by = ?, denied_reason = 'first', denied_at = datetime('now')
+          WHERE id = ?`,
+        [otherAdminId, id],
+      ),
+    );
+    await withFakeResend(async (calls) => {
+      const res = await deny(undefined, bindings);
+      expect(res.status).toBe(404);
+      expect(calls).toHaveLength(0);
+    });
+    expect(row(id).denied_by).toBe(otherAdminId);
+    expect(row(id).denied_reason).toBe("first");
+  });
+
+  test("a run marks the request approving in between: it is in flight, and not denied", async () => {
+    const id = seedRequest({ status: "approving", updatedAt: "-16 minutes", steps: ["ci_check"] });
+    const bindings = raceBeforeDenyWrite(() =>
+      db.run("UPDATE publication_requests SET updated_at = datetime('now') WHERE id = ?", [id]),
+    );
+    await withFakeResend(async (calls) => {
+      const res = await deny(undefined, bindings);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual(IN_FLIGHT);
+      expect(calls).toHaveLength(0);
+    });
+    expect(row(id).status).toBe("approving");
+    expect(row(id).denied_at).toBeNull();
+  });
+
+  test("a run starts publishing in between: the refusal that names it", async () => {
+    const id = seedRequest({ status: "approving", updatedAt: "-16 minutes", steps: ["ci_check"] });
+    const bindings = raceBeforeDenyWrite(() =>
+      db.run(
+        `UPDATE publication_requests SET steps_completed = ?, updated_at = datetime('now') WHERE id = ?`,
+        [JSON.stringify(STARTED), id],
+      ),
+    );
+    await withFakeResend(async (calls) => {
+      const res = await deny(undefined, bindings);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual(AFTER_PUBLISHING);
+      expect(calls).toHaveLength(0);
+    });
+    expect(row(id).status).toBe("approving");
+  });
+
+  test("a web click claims it in between (the claim leaves updated_at alone): in flight, claim intact", async () => {
+    // The dispatch route's claim does not touch `updated_at`, so the heartbeat term cannot see it:
+    // only the lease predicate inside the denial's own WHERE can.
+    const id = seedRequest({ status: "requested" });
+    const bindings = raceBeforeDenyWrite(() =>
+      db.run(
+        `UPDATE publication_requests
+            SET approval_requested_by = ?, approval_dispatched_at = datetime('now'), last_error = NULL
+          WHERE id = ?`,
+        [otherAdminId, id],
+      ),
+    );
+    await withFakeResend(async (calls) => {
+      const res = await deny(undefined, bindings);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual(IN_FLIGHT);
+      expect(calls).toHaveLength(0);
+    });
+    const after = row(id);
+    expect(after.status).toBe("requested");
+    expect(after.approval_requested_by).toBe(otherAdminId);
+    expect(after.approval_dispatched_at).not.toBeNull();
+    expect(after.denied_at).toBeNull();
+  });
+
+  test("the row moves in a way that leaves nothing running: refused, never denied on what was read", async () => {
+    // The heartbeat the denial read is part of its WHERE, so a request that was touched since
+    // (a callback landing while the administrator decided) is read again rather than overwritten.
+    const id = seedRequest({ status: "requested", updatedAt: "-3 hours" });
+    const bindings = raceBeforeDenyWrite(() =>
+      db.run(
+        "UPDATE publication_requests SET updated_at = datetime('now', '-2 hours') WHERE id = ?",
+        [id],
+      ),
+    );
+    await withFakeResend(async (calls) => {
+      const res = await deny(undefined, bindings);
+      expect(res.status).toBe(409);
+      expect(calls).toHaveLength(0);
+    });
+    expect(row(id).status).toBe("requested");
+    expect(row(id).denied_at).toBeNull();
+  });
+});
+
+describe("T4.9 which request a denial is for", () => {
+  test("a denied request cannot be denied again, and the depositor is not mailed twice", async () => {
+    seedRequest({ status: "requested" });
+    await withFakeResend(async (calls) => {
+      expect((await deny()).status).toBe(200);
+      const again = await deny();
+      expect(again.status).toBe(404);
+      expect(await again.json()).toEqual(NOT_FOUND);
+      expect(mailedTo(calls)).toHaveLength(1);
+    });
+  });
+
+  test("a request_id that is not the newest active request is refused: the request was filed again", async () => {
+    const old = seedRequest({ status: "denied" });
+    const current = seedRequest({ status: "requested" });
+    expect(current).not.toBe(old);
+    await expectRefused(current, () => deny({ reason: "No.", request_id: old }), {
+      status: 409,
+      body: { error: "request_mismatch", message: REQUEST_MISMATCH_MESSAGE },
+    });
+  });
+
+  test("the request_id of the newest active request denies it", async () => {
+    seedRequest({ status: "denied" });
+    const current = seedRequest({ status: "requested" });
+    await withFakeResend(async (calls) => {
+      const res = await deny({ reason: "No.", request_id: current });
+      expect(res.status).toBe(200);
+      expect(mailedTo(calls)).toHaveLength(1);
+    });
+    expect(row(current).status).toBe("denied");
+  });
+
+  test("no active request is 404 whatever request_id says, before any mismatch", async () => {
+    const old = seedRequest({ status: "denied" });
+    const res = await deny({ reason: "No.", request_id: old + 5 });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual(NOT_FOUND);
+  });
+
+  test("the in-flight refusal still comes after the mismatch: a stale id never learns about a run", async () => {
+    const id = seedRequest({ status: "approving", updatedAt: "-5 seconds", steps: ["ci_check"] });
+    await expectRefused(id, () => deny({ reason: "No.", request_id: id + 1 }), {
+      status: 409,
+      body: { error: "request_mismatch", message: REQUEST_MISMATCH_MESSAGE },
+    });
+  });
+
+  test("a request_id that is not a positive integer is a 400 and changes nothing", async () => {
+    const id = seedRequest({ status: "requested" });
+    for (const bad of [0, -1, 1.5, "7", null]) {
+      const res = await deny({ reason: "No.", request_id: bad });
+      expect(res.status).toBe(400);
+    }
+    expect(row(id).status).toBe("requested");
+  });
+});
 
 describe("T4.10 the final publish write is guarded by the status it expects", () => {
   function seedRun(): number {
