@@ -693,7 +693,7 @@ describe("a token that is not the claim's is refused, and never downgraded to th
   });
 
   const article = (word: string) => (/^[aeiou]/.test(word) ? "an" : "a");
-  // The order of the checks (ADR 0103, decision 3): the request the run names and the request's own
+  // The order of the checks (ADR 0103, decision 4): the request the run names and the request's own
   // block are decided BEFORE the token, so a call that is wrong about the request is told so even
   // when its token is stale too, and neither word depends on the claim.
   for (const [name, setup] of [

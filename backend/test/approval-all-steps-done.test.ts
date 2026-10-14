@@ -1,5 +1,5 @@
 /**
- * An approval whose steps are all complete (ADR 0103, decisions 12 and 13; issue #1730).
+ * An approval whose steps are all complete (ADR 0103, decision 12; issue #1730).
  *
  * `runPublicationApproval` has a branch for a run that has nothing left to do: a web run that died
  * after its last step and is resumed, or the retry its own warnings ask for. The branch runs the two
