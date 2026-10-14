@@ -6,9 +6,11 @@
  * same pattern as archive-generation-dispatch.test.ts. No mocks: the shape sent
  * is read straight off the request the stand-in received. What matters is the
  * contract the workflow reads (event type and the five payload keys, the last
- * being the claim's dispatch token), that no GitHub credential, Worker secret or
- * URL rides in the payload, that the token is never in an error this raises, and
- * that an environment is only ever a name.
+ * being the claim's dispatch token), that no GitHub credential or URL rides in the
+ * payload, that the token is never in an error this raises, and that an
+ * environment is only ever a name. The Worker's own secret is never handed to
+ * this function (it signs nothing), so that it stays out of every answer and log
+ * is held at the route, in approve-dispatch-route.test.ts.
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
@@ -34,8 +36,6 @@ let nextBody = "";
 
 /** A token shaped as the signer's (64 hex), standing for the claim's dispatch token. */
 const TOKEN = "ab".repeat(32);
-/** What the Worker signs with: it must never travel in the payload. */
-const WORKER_SECRET = "worker-callback-secret-not-in-the-payload";
 
 beforeAll(() => {
   server = Bun.serve({
@@ -94,7 +94,7 @@ describe("triggerApprovePublication", () => {
     });
   });
 
-  test("the payload is exactly five keys, and the token is neither the GitHub credential nor the Worker's secret", async () => {
+  test("the payload is exactly five keys, and neither the GitHub credential nor a URL rides in it", async () => {
     await triggerApprovePublication(
       "nm000288",
       833,
@@ -105,7 +105,6 @@ describe("triggerApprovePublication", () => {
     );
     const sent = JSON.stringify(received[0].body);
     expect(sent).not.toContain("ghp_secret_value");
-    expect(sent).not.toContain(WORKER_SECRET);
     expect(sent).not.toMatch(/https?:\/\//);
     expect(Object.keys(received[0].body.client_payload).sort()).toEqual([
       "dataset_id",
@@ -116,8 +115,6 @@ describe("triggerApprovePublication", () => {
     ]);
     // What the caller handed over is what is sent: the function signs nothing and invents nothing.
     expect(received[0].body.client_payload.dispatch_token).toBe(TOKEN);
-    expect(received[0].body.client_payload.dispatch_token).not.toBe("ghp_secret_value");
-    expect(received[0].body.client_payload.dispatch_token).not.toBe(WORKER_SECRET);
   });
 
   test("throws on a non-2xx, naming GitHub's status but never the token", async () => {
