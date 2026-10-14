@@ -164,16 +164,18 @@ Description:
   --yes answers the confirmation and nothing else. It never stands in for
   --force or for --acknowledge-identifier-screen.
 
-  The approval is for the request shown: its number is sent with every call of
-  the run, and the API refuses it when that request was denied or filed again
-  since, so a request nobody read is never approved in its place. --request-id
-  <n> names it yourself (for a script that read the request earlier); it is
-  refused here, before anything is sent, when it is not the request shown.
+  The approval is for the request shown: its number is sent with every approval
+  call of the run, and the API refuses it when that request was denied or filed
+  again since, so a request nobody read is never approved in its place.
+  --request-id <n> names it yourself (for a script that read the request
+  earlier); it is refused here, before any approval is sent, when it is not the
+  request shown.
 
   A run the website started is handed a token, in the environment variable
-  ${DISPATCH_TOKEN_ENV}, and presents it on every call (as a header, never
-  printed or logged). With it the API records the administrator who clicked
-  Approve as the approver, and you are only the executor. Such a run carries the
+  ${DISPATCH_TOKEN_ENV}, and presents it on every approval call (as a header,
+  never printed or logged; the reads of the review and the status carry none).
+  With it the API records the administrator who clicked Approve as the approver,
+  and you are only the executor. Such a run carries the
   decision its click made, so while the variable is set --force,
   --acknowledge-identifier-screen and --skip-ci-check are refused here, before
   anything is sent.
@@ -367,12 +369,13 @@ After Approval:
         }
         // The request the run is for: the one the review just shown belongs to, unless the
         // administrator named one. A name that is not the request shown is refused here, before the
-        // question and before anything is sent (the Worker would refuse it too, but later).
+        // question and before any approval is sent (the review was read, which is how the request
+        // in force is known; the Worker would refuse the approval too, but later).
         const shown = read.kind === "detail" ? requestNumber(read.detail.request_id) : undefined;
         if (named !== undefined && shown !== undefined && named !== shown) {
           console.log(
             chalk.red(
-              `--request-id names request #${named}, but the request in force for ${plain(datasetId)} is #${shown}. Nothing was sent.`,
+              `--request-id names request #${named}, but the request in force for ${plain(datasetId)} is #${shown}. No approval was sent.`,
             ),
           );
           process.exitCode = 1;
@@ -583,8 +586,9 @@ interface RunApprovalOptions {
   /** The request the run is for, sent on every call of the run so the Worker can refuse a stale one (#1579). */
   requestId?: number;
   /**
-   * The dispatch token of the web approval this run executes, sent as a header on every call of
-   * it (#1604). Only `approve` sets it, from the environment; `next` never does.
+   * The dispatch token of the web approval this run executes, sent as a header on every approval
+   * call of it and on no read (#1604). Only `approve` sets it, from the environment; `next` never
+   * does.
    */
   dispatchToken?: string;
 }

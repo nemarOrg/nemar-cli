@@ -3,8 +3,8 @@
  *
  * A click on the website claims the request and dispatches a runner, which is handed the claim's
  * dispatch token in the environment variable `NEMAR_APPROVAL_DISPATCH_TOKEN` and runs
- * `nemar admin publish approve <id> --resume --yes`. The command presents the token on every call
- * of the run (a header the Worker checks against the claim), and the Worker records the
+ * `nemar admin publish approve <id> --resume --yes`. The command presents the token on every
+ * approval call of the run (a header the Worker checks against the claim), and the Worker records the
  * administrator who clicked as the approver. What these tests hold, against the real command and
  * the real backend app (`helpers/admin-publish-cli.ts`; the click is the real
  * `approve-dispatch` route, called in this process over the harness's database, and the token is
@@ -624,7 +624,7 @@ describe("a variable left in a person's shell is not a silent trap", () => {
 });
 
 describe("the help says the variable and the rule", () => {
-  test("--help names the variable on the two flags it refuses, and --help-all says what it is and what it does", async () => {
+  test("--help names the variable on the three flags it refuses, and --help-all says what it is and what it does", async () => {
     const concise = await h.cli(["admin", "publish", "approve", "--help"]);
     expect(concise.exitCode).toBe(0);
     const brief = concise.stdout.replace(/\s+/g, " ");
@@ -636,7 +636,8 @@ describe("the help says the variable and the rule", () => {
     const all = await h.cli(["admin", "publish", "approve", "--help-all"]);
     expect(all.exitCode).toBe(0);
     const help = all.stdout.replace(/\s+/g, " ");
-    expect(help).toContain(`${TOKEN_ENV}, and presents it on every call`);
+    expect(help).toContain(`${TOKEN_ENV}, and presents it on every approval call`);
+    expect(help).toContain("the reads of the review and the status carry none");
     expect(help).toContain(
       "--force, --acknowledge-identifier-screen and --skip-ci-check are refused here",
     );

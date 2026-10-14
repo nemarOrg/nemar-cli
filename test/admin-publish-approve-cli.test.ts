@@ -1285,8 +1285,14 @@ describe("the run is for the request the command read (#1579)", () => {
     expect(r.exitCode).toBe(1);
     expect(r.stdout).toContain(`#${requestId + 5}`);
     expect(r.stdout).toContain(`#${requestId}`);
-    // It was refused before the banner and the question, and before any write.
+    // It was refused before the banner and the question, and before any write. The review was
+    // read (that is how the command knew the request in force), so the sentence says that no
+    // approval was sent, not that nothing was.
     expect(r.stdout).not.toContain("This will run the following");
+    expect(r.stdout).toContain("No approval was sent.");
+    expect(r.stdout).not.toContain("Nothing was sent");
+    expect(h.requests.length).toBeGreaterThan(0);
+    expect(h.requests.every((c) => c.method === "GET")).toBe(true);
     expect(h.posted).toEqual([]);
     expect(requestRow(requestId)?.status).toBe("requested");
   });
