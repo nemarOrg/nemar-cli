@@ -2543,10 +2543,10 @@ async function markRequestPublished(
  * sentence the administrator is told, and never changes the run.
  *
  * `dataset` is the row the run already read; a run that never read it (every step was already done)
- * passes none and the row is read here, inside the same best-effort block, so a failed read is a
- * warning and no row, never a row with a guessed review gate. `finishedByResume` marks the row of a
- * request that a resumed run with every step already done closed: the steps ran in an earlier
- * call, so the row names who finished the request, and says so.
+ * passes none and the row is read here, inside the same best-effort block, so a failed read, and a
+ * dataset whose row is gone, are a warning and no row, never a row with a guessed review gate.
+ * `finishedByResume` marks the row of a request that a resumed run with every step already done
+ * closed: the steps ran in an earlier call, so the row names who finished the request, and says so.
  */
 async function recordPublicationAudit(
   c: ApproveStepContext,
@@ -2560,8 +2560,10 @@ async function recordPublicationAudit(
       (await c.db
         .prepare("SELECT source, is_exemplar FROM datasets WHERE dataset_id = ?")
         .bind(c.datasetId)
-        .first<{ source: string | null; is_exemplar: number | null }>()) ??
-      {};
+        .first<{ source: string | null; is_exemplar: number | null }>());
+    // `first()` answers null for a row that is not there: that is no state to record, and an empty
+    // object would read as a dataset with no source.
+    if (!row) throw new Error("no dataset row to read the review gate's state from");
     await auditLogStatement(c.db, {
       userId: c.approver.id,
       action: "dataset_published",

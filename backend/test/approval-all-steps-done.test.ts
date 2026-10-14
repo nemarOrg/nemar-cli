@@ -333,6 +333,46 @@ describe("the call that closes an all-steps-done request writes the dataset_publ
     expect(auditRows("dataset_published")).toHaveLength(0);
   });
 
+  // The row records the review gate's state for the dataset, read from the dataset's row. A run
+  // that never read the row reads it here, and a row it cannot read (the read failed, or the
+  // dataset is gone) is a warning and no audit row, never a row with a gate state made up for it
+  // (ADR 0103 decision 12).
+  describe("the dataset row the audit row is built from cannot be read", () => {
+    const readFailing = () =>
+      env({
+        DB: interceptingD1(realD1(db), (sql) => {
+          if (/SELECT source, is_exemplar FROM datasets/.test(sql)) {
+            throw new Error("the dataset read is refused");
+          }
+        }),
+      });
+
+    for (const [name, arrange, bindings, cause] of [
+      ["the read fails", () => {}, readFailing, "the dataset read is refused"],
+      [
+        "the dataset row is gone",
+        () => db.run("DELETE FROM datasets WHERE dataset_id = ?", [DATASET]),
+        () => env(),
+        "no dataset row",
+      ],
+    ] as const) {
+      test(`${name}: a warning in the answer, no dataset_published row, and the request is still closed`, async () => {
+        const id = seedAllDone("approving");
+        arrange();
+
+        const res = await approve({ bindings: bindings() });
+
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as { status: string; warning?: string };
+        expect(body.status).toBe("published");
+        expect(body.warning).toContain("Audit log write failed");
+        expect(body.warning).toContain(cause);
+        expect(requestRow(id).status).toBe("published");
+        expect(auditRows("dataset_published")).toHaveLength(0);
+      });
+    }
+  });
+
   test("a finisher that lost the race to a concurrent call writes no row of its own", async () => {
     const id = seedAllDone("approving");
     const racing = env({
