@@ -2633,7 +2633,7 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // acknowledgment were recorded at the click, under the clicker's id, and the gates below read
   // them there. It may not send one of its own, because it would be recorded under the approver of
   // record, who is the clicker and not the sender. So an override or an acknowledgment is recorded
-  // only under the credential that sent it, or at the clicker's own dispatch, and never both.
+  // only under the credential that sent it, or at the clicker's own dispatch.
   if (
     tokenValid &&
     (body.override_publication_review !== undefined ||
@@ -2801,9 +2801,9 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   if ((marked.meta.changes ?? 0) !== 1) {
     // Under a token the claim is one of the two things that can have moved, and the answer must
     // say which: a claim that is no longer the one verified is the click's run being refused
-    // (superseded); a claim that stands over a request that moved (a review blocked it, an
-    // owner's name came out) is the request that changed, as for every other approval. A read that
-    // fails answers superseded: nothing proved the claim, and nothing was marked.
+    // (superseded); a claim that stands over a request that moved (a review re-blocked it, which
+    // leaves the claim as it was) is the request that changed, as for every other approval. A
+    // read that fails answers superseded: nothing proved the claim, and nothing was marked.
     if (tokenValid) {
       const now = await db
         .prepare("SELECT approval_dispatched_at FROM publication_requests WHERE id = ?")

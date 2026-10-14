@@ -696,6 +696,46 @@ describe("a token that is not the claim's is refused, and never downgraded to th
   });
 });
 
+describe("the token is a secret on /approve too", () => {
+  test("no answer and no log line of a valid, a stale or an expired call carries it", async () => {
+    const lines: string[] = [];
+    const real = { log: console.log, warn: console.warn, error: console.error };
+    const keep = (...args: unknown[]) => lines.push(args.map(String).join(" "));
+    const answers: string[] = [];
+    const tokens: string[] = [];
+    try {
+      console.log = keep;
+      console.warn = keep;
+      console.error = keep;
+
+      const live = seedRequest();
+      tokens.push(await claim(live, clickerId));
+      answers.push(await (await approveAs(EXECUTOR_KEY, tokens[0])).text());
+
+      db.run("DELETE FROM publication_requests");
+      const lapsed = seedRequest({ updatedAt: "-16 minutes" });
+      tokens.push(await claim(lapsed, clickerId, "-16 minutes"));
+      answers.push(await (await approveAs(EXECUTOR_KEY, tokens[1])).text());
+
+      db.run("DELETE FROM publication_requests");
+      const replaced = seedRequest();
+      tokens.push(await claim(replaced, clickerId, "-10 minutes"));
+      await claim(replaced, clickerId, "-1 minutes");
+      answers.push(await (await approveAs(EXECUTOR_KEY, tokens[2])).text());
+    } finally {
+      console.log = real.log;
+      console.warn = real.warn;
+      console.error = real.error;
+    }
+    expect(new Set(tokens).size).toBe(3);
+    for (const token of tokens) {
+      expect(lines.join("\n")).not.toContain(token);
+      for (const answer of answers) expect(answer).not.toContain(token);
+    }
+    expect(lines.length).toBeGreaterThan(0);
+  });
+});
+
 describe("the mark is conditional on the claim the call proved", () => {
   /** Run `act` once, just before the mark that starts the run: another writer, between the check and the mark. */
   function raceBeforeMark(act: () => void): Bindings {

@@ -1245,6 +1245,34 @@ describe("#1604: a run the web started carries its click's decision and sends no
     expectOverridesRecordedBy(adminA);
   });
 
+  test("23. the same for the screen's acknowledgment: the click records it, the token carries the run on it, and a call without the token has none", async () => {
+    // A screen that could not look at everything passes only with an administrator's recorded
+    // reason. The click records A's, and the executor's run, which carries the token, is A's and
+    // finds it; the same call made as B without the token is B's own, and B gave no reason.
+    const why = "Read the recording formats by hand, nothing to remove";
+    const { requestId } = seed({ status: "unchecked" });
+    seedPublicationReview(db, { requestId, datasetId: DATASET, state: "reported" });
+    const dispatched = await dispatchApproval({ acknowledge_identifier_screen: why });
+    expect(dispatched.status).toBe(202);
+    expect(requestRow(requestId).identifier_screen_ack_by).toBe(adminA);
+    const token = dispatchPayloads[0]?.dispatch_token as string;
+    const claimBefore = claimOf(requestId);
+
+    const bare = await approve({ resume: true }, { key: ADMIN_B_KEY });
+    expect(bare.status).toBe(409);
+    expect(((await bare.json()) as { error: string }).error).toBe("identifier_screen_not_clear");
+    expect(claimOf(requestId)).toEqual(claimBefore);
+    expect(requestRow(requestId).approved_by).toBeNull();
+
+    const run = await approve({ resume: true }, { key: ADMIN_B_KEY, token });
+    expect(run.status).toBe(200);
+    expect(requestRow(requestId).approved_by).toBe(adminA);
+    expect(published().details).toMatchObject({
+      approved_by: "gateadmina",
+      executed_by: "gateadminb",
+    });
+  });
+
   // The property, over every way an override can be sent from a terminal or an executor: whatever
   // the call's answer, an override is on record only under the account that sent it.
   const SCENARIOS: Array<{
