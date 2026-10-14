@@ -126,6 +126,7 @@ import {
   submissionMinimumFailures,
 } from "../shared/submission-minimums";
 import * as untrusted from "../shared/untrusted-text";
+import { adminCommand } from "../src/commands/admin";
 
 /** A value no fixture text contains by accident; finding it in an output means it was quoted. */
 const SENTINEL = "Zqxjvw Sentinelname";
@@ -3230,9 +3231,20 @@ describe("the sentences the Worker's tests import are pinned here, once", () => 
     expect(APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE).not.toBe(REQUEST_CHANGED_MESSAGE);
     expect(APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE).toMatch(/\.$/);
     expect(APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE).not.toContain("\u2014");
-    // It names the repair, and the one command it names is a real one of this CLI.
+    // It names the repair, and every command it names is one this CLI registers: read from the
+    // real command tree, so renaming or removing the subcommand turns this red.
     expect(APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE).toContain("by hand");
-    expect(APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE).toContain("nemar admin publish list");
+    const named = [
+      ...APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE.matchAll(
+        /nemar admin publish ([a-z][a-z-]*)/g,
+      ),
+    ].map((match) => match[1]);
+    expect(named.length).toBeGreaterThan(0);
+    const registered =
+      adminCommand.commands.find((c) => c.name() === "publish")?.commands.map((c) => c.name()) ??
+      [];
+    expect(registered.length).toBeGreaterThan(0);
+    for (const name of named) expect(registered).toContain(name);
   });
 
   test("every approval refusal sentence is a plain sentence, and no two are the same", () => {
