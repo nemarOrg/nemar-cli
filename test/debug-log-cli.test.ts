@@ -250,7 +250,7 @@ describe("--debug never writes the approval dispatch token (ADR 0103 decision 2)
       enableDebug();
       await request("/admin/publish/nm000123/approve", {
         method: "POST",
-        headers: { "X-Approval-Dispatch-Token": process.env.TEST_TOKEN },
+        headers: { "X-Approval-Dispatch-Token": process.env.DEBUG_PROBE_TOKEN },
         body: JSON.stringify({ resume: true }),
       }, false);
       console.log(writeDebugLogSync(["admin", "publish", "approve", "nm000123"], 0));
@@ -262,7 +262,7 @@ describe("--debug never writes the approval dispatch token (ADR 0103 decision 2)
         ...process.env,
         NEMAR_CONFIG_DIR: configDir,
         TEST_API_URL: `http://localhost:${server.port}`,
-        TEST_TOKEN: token,
+        DEBUG_PROBE_TOKEN: token,
         NEMAR_NO_UPDATE_CHECK: "1",
         NO_COLOR: "1",
       },
