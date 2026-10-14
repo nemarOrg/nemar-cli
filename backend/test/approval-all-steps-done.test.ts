@@ -51,7 +51,6 @@ const DATASET = "nm098771";
 let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
 let terminalId: number;
-let executorId: number;
 let clickerId: number;
 
 beforeEach(async () => {
@@ -59,7 +58,7 @@ beforeEach(async () => {
   app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
   app.route("/admin", adminRoutes);
   terminalId = await seedUser(db, "allDoneTerminal", "admin", TERMINAL_KEY);
-  executorId = await seedUser(db, "allDoneExecutor", "admin", EXECUTOR_KEY);
+  await seedUser(db, "allDoneExecutor", "admin", EXECUTOR_KEY);
   clickerId = await seedUser(db, "allDoneClicker", "admin", CLICKER_KEY);
 });
 
@@ -311,7 +310,6 @@ describe("the call that closes an all-steps-done request writes the dataset_publ
       executed_by: "allDoneExecutor",
       finished_by_resume: true,
     });
-    expect(executorId).not.toBe(clickerId);
   });
 
   test("a row that cannot be written is a warning in the answer, and the request is still closed", async () => {
