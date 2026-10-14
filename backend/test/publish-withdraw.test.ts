@@ -13,6 +13,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { adminRoutes } from "../src/routes/admin";
 import { datasetRoutes } from "../src/routes/datasets";
+import { MARK_APPROVING_SQL } from "../src/services/publication-orchestrator";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -249,5 +250,69 @@ describe("how a withdrawal reads afterwards", () => {
     expect(body.requests).toHaveLength(1);
     expect(body.requests[0]).toMatchObject({ dataset_id: DATASET, status: "denied" });
     expect(body.requests[0].withdrawn_at).toBeTruthy();
+  });
+});
+
+describe("a withdrawn request stays withdrawn", () => {
+  test("the orchestrator's mark-approving write leaves a withdrawn request alone", async () => {
+    const id = seedRequest("requested");
+    await withdraw();
+    const ran = db.query(MARK_APPROVING_SQL).run(ownerId, id);
+    expect(ran.changes).toBe(0);
+    expect(row(id)).toMatchObject({ status: "denied" });
+    expect(row(id).withdrawn_at).not.toBeNull();
+  });
+
+  test("the same write still starts an active request", async () => {
+    for (const status of ["requested", "blocked", "approving"]) {
+      const id = seedRequest(status);
+      expect(db.query(MARK_APPROVING_SQL).run(ownerId, id).changes).toBe(1);
+      expect(row(id).status).toBe("approving");
+    }
+  });
+
+  test("a web approval dispatched after the withdrawal finds nothing to approve", async () => {
+    seedRequest("requested");
+    await withdraw();
+    const res = await app.request(
+      `/admin/publish/${DATASET}/approve-dispatch`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${ADMIN_KEY}`, "X-CLI-Version": "99.0.0" },
+      },
+      env,
+    );
+    expect(res.status).toBe(404);
+  });
+
+  test("an administrator cannot deny a request that was withdrawn", async () => {
+    const id = seedRequest("requested");
+    await withdraw();
+    const res = await app.request(
+      `/admin/publish/${DATASET}/deny`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${ADMIN_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "too late" }),
+      },
+      env,
+    );
+    expect(res.status).toBe(404);
+    expect(row(id).denied_reason).toBeNull();
+  });
+
+  test("a live request that carries an old withdrawn_at is not reported as withdrawn", async () => {
+    // A re-request that revived the row (publication.ts) leaves the column set.
+    const id = seedRequest("requested");
+    db.run(`UPDATE publication_requests SET withdrawn_at = datetime('now') WHERE id = ${id}`);
+    const res = await app.request(
+      `/datasets/${DATASET}/publish/status`,
+      { headers: { Authorization: `Bearer ${OWNER_KEY}`, "X-CLI-Version": "99.0.0" } },
+      env,
+    );
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.status).toBe("requested");
+    expect(body.withdrawn).toBe(false);
+    expect(body.withdrawn_at).toBeNull();
   });
 });

@@ -4510,7 +4510,9 @@ Examples:
     } catch (error) {
       if (error instanceof ApiError) {
         spinner.fail(error.message);
-        if (error.statusCode === 404) {
+        // Only the backend's own "nothing to withdraw" 404 earns this line; a
+        // missing dataset, or a backend without the route, says its own thing.
+        if (error.statusCode === 404 && error.message === "No active publication request found") {
           console.log(chalk.dim("  There is no active publication request for this dataset."));
         }
       } else {

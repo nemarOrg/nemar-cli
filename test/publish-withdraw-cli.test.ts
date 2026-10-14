@@ -125,6 +125,20 @@ describe("nemar dataset publish withdraw", () => {
     }
   });
 
+  test("a missing dataset does not get the no-active-request hint", async () => {
+    const server = startServer({
+      [WITHDRAW]: { status: 404, body: { error: "Dataset not found" } },
+    });
+    try {
+      const r = await runCli(["dataset", "publish", "withdraw", "nm000104", "--yes"], server.url);
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout + r.stderr).toContain("Dataset not found");
+      expect(r.stdout + r.stderr).not.toContain("There is no active publication request");
+    } finally {
+      server.stop();
+    }
+  });
+
   test("no active request: says so and exits 1", async () => {
     const server = startServer({
       [WITHDRAW]: { status: 404, body: { error: "No active publication request found" } },

@@ -778,10 +778,10 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       approved_at: request.approved_at,
       denied_at: request.denied_at,
       denied_reason: request.denied_reason,
-      // The requester ended this one themselves (migration 0096). `status`
+      // The requester ended this one themselves (migration 0097). `status`
       // stays 'denied' so older clients still read a finished request.
-      withdrawn: request.withdrawn_at !== null,
-      withdrawn_at: request.withdrawn_at,
+      withdrawn: request.status === "denied" && request.withdrawn_at !== null,
+      withdrawn_at: request.status === "denied" ? request.withdrawn_at : null,
       block_reason: request.block_reason,
       // The explanation is gated on the STATUS only. It used to also require
       // a repo, which is right for the CI-shaped reasons that link to a
@@ -828,7 +828,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
    *
    * Recorded as a finished request with `withdrawn_at` set, so the dataset can
    * be requested again, and the other readers of `status = 'denied'` keep
-   * working (migration 0096).
+   * working (migration 0097).
    */
   datasetRoutes.post("/:id/publish/withdraw", authMiddleware, async (c) => {
     const datasetId = c.req.param("id");
