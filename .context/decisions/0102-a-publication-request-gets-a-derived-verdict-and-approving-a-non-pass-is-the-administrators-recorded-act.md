@@ -518,14 +518,14 @@ the authors half of its question is answered by the fact that ADR 0065's inverte
   An executor never decides: it carries out a decision someone made.
 - **"Attributed to" is exact: a per-claim dispatch token proves that a run belongs to its click (Phase 3, ADR 0103).**
   A web click's claim gets a token derived from the claim's own columns (the dataset, the request, the clicker and the instant of the claim),
-  signed with the callback secret under its own domain tag; nothing is stored and there is no migration.
+  signed with the callback secret under its own domain tag; the Worker stores none of it and there is no migration.
   The executor presents it in the header `X-Approval-Dispatch-Token` on every `/approve` call of that run, one per batch and retry, so it cannot be single-use,
   and `approve-publication.yml` masks it as its first step, as `run-pr-review.yml` masks its token.
   The clicker is the approver only for a call that presents a valid token while the claim's lease is live.
   A call with no token is recorded as its caller, whatever the lease says, and its approval takes the claim over.
   A stale or expired token is refused (409 `dispatch_superseded`, `dispatch_expired`) and never quietly downgraded to the caller.
-  A call that carries a token may carry no override and no screen acknowledgment (409 `decision_with_dispatch_token`),
-  because both were recorded at the click, under the clicker's id.
+  A call that carries a token may carry no override, no screen acknowledgment and no skipped CI check (409 `decision_with_dispatch_token`),
+  because the first two were recorded at the click, under the clicker's id, and the third is a decision the click never made.
   So an override is recorded only under the credential that sent it, or at the clicker's own dispatch, and the Phase 2 stop-gap refusal is gone.
   The token carries attribution and no authority, and joins no revocation list,
   because `resolveApprover` re-checks the clicker's role and status at each use.
@@ -685,9 +685,10 @@ The maintainer decided all twelve on 2026-10-12, as recommended, and amended cal
    A fix to the script found by the soak reaches the soak only through another production release.
 6. Add the review's statement to the policy pages, after the separate docs change that corrects them for current practice.
 7. Verify the attribution that Phase 3 fixed in code (#1604, ADR 0103), which production must not be lit without:
-   the executor's workflow carries the maintainer's edit (it masks the dispatch token first, exports it only to the approve step, installs the CLI that matches the environment, and releases the claim on failure);
+   the executor's workflow carries the maintainer's edit (it masks the dispatch token first, exports it for the approve step's process alone and never through `GITHUB_ENV`, installs the CLI that matches the environment, and releases the claim on failure);
    the audit query on staging shows every web approval attributed to the administrator who clicked
-   (the `approval_dispatched` audit rows joined to `publication_requests.approved_by` for published requests);
+   (the `approval_dispatched` audit rows joined to `publication_requests.approved_by` for published requests;
+   a mismatch is a candidate to read, not a violation, because a deliberate terminal takeover or a re-dispatch by another administrator also differs);
    and the maintainer's decision on the open question of a clicker who is no longer an active administrator is recorded in ADR 0103
    (today it records the question and that it is undecided).
 8. Ship Phases 3 and 4, then add `PUBLICATION_REVIEW_ENABLED = "1"` to `[vars]`,
@@ -916,8 +917,11 @@ Where the two differ, this is the later text.
    and once it has passed every gate it takes the claim over, so the executor the click dispatched is refused at its next call.
 2. **The executor sends no decision, and the review's override reaches the run through the token.**
    A call that presents a valid token is recorded as the clicker, so the clicker's recorded override and acknowledgment count for it, as section 8 says of the executor's `--yes` run.
-   Such a call may not carry an override or an acknowledgment of its own: 409 `decision_with_dispatch_token`, and nothing is recorded.
-   `nemar admin publish approve` refuses `--force` and `--acknowledge-identifier-screen` while `NEMAR_APPROVAL_DISPATCH_TOKEN` is set, before it sends anything.
+   Such a call may not carry a decision of its own: no override, no identifier screen acknowledgment and no skipped CI check.
+   Any of the three is 409 `decision_with_dispatch_token`, and nothing is recorded.
+   A skipped CI check is one of them because it is recorded under the approver, which for a token call is the clicker, and the click did not skip it.
+   The executor workflow sends none of the three.
+   `nemar admin publish approve` refuses `--force`, `--acknowledge-identifier-screen` and `--skip-ci-check` while `NEMAR_APPROVAL_DISPATCH_TOKEN` is set, before it sends anything.
    `next` never reads the variable.
 3. **The order of the checks changes.**
    In `/approve` it is now: the outdated-client refusal (426), the request read (404), `request_mismatch`, `request_blocked`,
@@ -935,21 +939,27 @@ Where the two differ, this is the later text.
 5. **Deny's rules touch the review's states.**
    `/deny` takes the optional `request_id` and is refused while an approval is in flight, by the lease the dispatch route claims with:
    a web dispatch inside its fifteen minutes, or an `approving` request with a heartbeat inside them, unless it failed more than a minute ago (409 `approval_in_flight`).
-   It is also refused once any step beyond the validation-only ones has completed, whatever the request's status or block reason (409 `deny_after_publishing`).
+   It is also refused once publishing has started, whatever the request's status or block reason (409 `deny_after_publishing`).
    That predicate is deliberately broader than the gate's `publishingStanding`, which will not trust the steps of a `requested` request or of a `blocked` one with another reason:
    the gate asks whether old steps may skip a check, and a denial asks whether anything irreversible has happened.
-   So a `requested` request, with a review in any state, can be denied; an `approving` request that stalled before it started publishing can be denied,
+   So a `requested` request, with a review in any state, can be denied unless it carries steps beyond validation from an earlier approval (follow-up #1766);
+   an `approving` request that stalled before it started publishing can be denied,
    which keeps the cure that section 8 names for a hard reason on a stopped approval;
    and a request that has started publishing, one the owner-name check walked back to `blocked` included, cannot be denied and is finished with `approve --resume`.
+   Started publishing means that a step beyond the validation-only ones has completed or is marked as the request's current step.
+   The current step counts because a step is marked before it runs and stays marked when it fails or is interrupted, and the first mutation, `s3_public_read`, may have applied the bucket policy without a record.
+   So a request whose first mutation failed stays undeniable until it is retried to completion or repaired by hand.
    The depositor's mail goes only after the denial is written.
 6. **The final write is guarded, and a closed request is not marked published.**
    The write that ends an approval requires that the request is still `approving`.
-   A run whose request was denied once its lease had lapsed, or was blocked again, answers 409 `approval_closed_during_run` and leaves one audit row,
-   `approval_finished_on_closed_request`; a resumed run whose steps are all done uses the same write and no longer answers `published` for a request it did not mark.
+   A run whose request was denied once its lease had lapsed, or was blocked again, answers 409 `approval_closed_during_run` and leaves one audit row, `approval_finished_on_closed_request`.
+   A resumed run whose steps are all done follows the same rule, and refuses a request that is not `approving` before it runs any tail job, so a refusal never follows a write that cannot be taken back.
+   When a tail job warns, that run leaves the request `approving`, so that approving again retries it.
+   When none warns, it marks the request `published`, and only when that write changed the row it writes the `dataset_published` audit row, once, with the caller as its user and the flag `finished_by_resume`.
 7. **None of this is behind the flag.**
    Item 3 of the Phase 2 amendment lists what production changes with `PUBLICATION_REVIEW_ENABLED` off.
    Phase 3 adds, also unconditionally: the dispatch token and the takeover, `request_id` on the three routes, the id rule of `approve-dispatch`,
-   the token-authenticated release endpoint and `last_error` on the four early refusals, the router-wide Origin guard, the deny rules and the guarded final write.
+   the token-authenticated release endpoint and `last_error` on the five early exits, the router-wide Origin guard, the deny rules and the guarded final write.
    The release notes say so.
 8. **"Before it is switched on", item 7, is a verification, and one question stays open.**
    The code is fixed.
