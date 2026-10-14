@@ -225,6 +225,7 @@ import { getVersionCommit, listDatasetVersions } from "../lib/git-annex/repo-sta
 import { identifierScreenLines } from "../lib/identifier-screen-display.js";
 import {
   type ListFilterOptions,
+  STATE_FLAGS,
   describeListScope,
   resolveListStatuses,
 } from "../lib/publish-list-filter.js";
@@ -3130,11 +3131,11 @@ States:
   approving  - Currently being processed by orchestrator
   blocked    - Held until the depositor fixes something
   published  - Successfully published datasets
-  denied     - Denied requests, and requests the depositor withdrew
+  denied     - Denied requests, with reasons
 
 Search:
-  -s/--search matches a case-insensitive substring of the dataset ID, the
-  requester's username or the dataset name, within the states being shown.
+  -s/--search matches a substring (case-insensitive for ASCII letters) of the
+  dataset ID, the requester's username or the dataset name, within the states being shown.
   An exact dataset ID is listed first.
 
 Examples:
@@ -3150,19 +3151,19 @@ Examples:
     const spinner = ora("Fetching publication requests...").start();
 
     try {
+      const search = options.search?.trim() || undefined;
       const result = await listPublishRequests({
         statuses: resolveListStatuses(options),
-        search: options.search,
+        search,
       });
       spinner.stop();
 
       if (result.requests.length === 0) {
         const scope = describeListScope(options);
-        const widen = options.all ? "" : " Use --all to include every state.";
+        const chose = options.all || STATE_FLAGS.some((flag) => options[flag]);
+        const widen = chose ? "" : " Use --all to include every state.";
         console.log(
-          chalk.dim(
-            `\n  No ${scope} found${options.search ? ` matching "${options.search}"` : ""}.${widen}\n`,
-          ),
+          chalk.dim(`\n  No ${scope} found${search ? ` matching "${search}"` : ""}.${widen}\n`),
         );
         return;
       }

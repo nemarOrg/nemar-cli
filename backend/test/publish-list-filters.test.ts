@@ -78,18 +78,19 @@ beforeEach(async () => {
   seed("nm000105", "blocked", aliceId, "100%_sure");
   seed("nm000106", "published", adminId, "Old data");
   seed("nm000107", "denied", aliceId);
+  seed("nm000108", "requested", adminId, "back\\slash");
 });
 
 describe("status filter", () => {
   test("no status lists every request", async () => {
     expect((await get("")).ids.sort()).toEqual(
-      ["nm000104", "nm0001041", "nm000105", "nm000106", "nm000107"].sort(),
+      ["nm000104", "nm0001041", "nm000105", "nm000106", "nm000107", "nm000108"].sort(),
     );
   });
 
   test("a comma-separated list is a union", async () => {
     const { ids } = await get("?status=requested,approving,blocked");
-    expect(ids.sort()).toEqual(["nm000104", "nm0001041", "nm000105"].sort());
+    expect(ids.sort()).toEqual(["nm000104", "nm0001041", "nm000105", "nm000108"].sort());
   });
 
   test("one status narrows to it", async () => {
@@ -133,8 +134,13 @@ describe("search", () => {
     expect((await get("?search=nm_00104")).ids).toEqual([]);
   });
 
-  test("a backslash and a quote are just text", async () => {
-    expect((await get("?search=%5C")).status).toBe(200);
+  test("a backslash matches itself, and does not escape the next character", async () => {
+    expect((await get("?search=%5C")).ids).toEqual(["nm000108"]);
+    // "\%" is a literal backslash then a literal percent: nothing has that.
+    expect((await get("?search=%5C%25")).ids).toEqual([]);
+  });
+
+  test("a quote is just text", async () => {
     expect((await get("?search='%20OR%201=1")).ids).toEqual([]);
   });
 
