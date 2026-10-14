@@ -527,10 +527,9 @@ async function stepCiCheck(c: ApproveStepContext): Promise<RespondOutcome | unde
           action: "publication_ci_check_skipped",
           resourceType: "dataset",
           resourceId: datasetId,
-          details: JSON.stringify({
-            request_id: c.requestId,
-            ...(c.approver.id !== adminUser.id ? { executed_by: executorName(adminUser) } : {}),
-          }),
+          // Never `executed_by`: a call that carries a dispatch token may not skip (refused before
+          // any write), so the approver here is always the caller.
+          details: JSON.stringify({ request_id: c.requestId }),
         }).run();
       } catch (auditError) {
         console.error(
@@ -2774,12 +2773,16 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // A run the web started carries the decision its click made: the override and the screen's
   // acknowledgment were recorded at the click, under the clicker's id, and the gates below read
   // them there. It may not send one of its own, because it would be recorded under the approver of
-  // record, who is the clicker and not the sender. So an override or an acknowledgment is recorded
-  // only under the credential that sent it, or at the clicker's own dispatch.
+  // record, who is the clicker and not the sender. A skipped CI check is a decision of the same
+  // kind (it waives a check, and is recorded under the approver), and the click has no such
+  // option, so a run that sends one is not the click's. An explicit `false` is no decision: the
+  // CLI sends it on every call. So an override, an acknowledgment or a skip is recorded only under
+  // the credential that sent it, or at the clicker's own dispatch.
   if (
     verifiedClaim !== null &&
     (body.override_publication_review !== undefined ||
-      body.acknowledge_identifier_screen !== undefined)
+      body.acknowledge_identifier_screen !== undefined ||
+      body.skip_ci_check === true)
   ) {
     console.warn(
       `[publish] ${datasetId}: approval refused for request ${request.id}, a run carrying a dispatch token sent a decision of its own`,

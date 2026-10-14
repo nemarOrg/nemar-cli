@@ -198,10 +198,10 @@ export const DISPATCH_EXPIRED_MESSAGE =
 /**
  * The sentence of the 409 `decision_with_dispatch_token`: a run the web started carries the
  * decision made at the click (the override and the screen acknowledgment were recorded then) and
- * may not send one of its own.
+ * may not send one of its own: an override, an acknowledgment or a skipped CI check.
  */
 export const DECISION_WITH_DISPATCH_TOKEN_MESSAGE =
-  "A run started by a web approval carries the decision made at the click and may not send its own: no override and no identifier-screen acknowledgment. Nothing was recorded.";
+  "A run started by a web approval carries the decision made at the click and may not send its own (an override, an identifier-screen acknowledgment or a skipped CI check). Nothing was recorded.";
 
 /**
  * The sentence of the deny route's 409 `approval_in_flight`: an approval of the request is
