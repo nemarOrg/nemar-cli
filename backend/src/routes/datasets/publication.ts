@@ -22,6 +22,7 @@ import {
   hasEverBeenPublished,
   isAnonymous,
 } from "../../services/anonymity";
+import { approvalInFlightSql } from "../../services/approval-dispatch";
 import { isValidDatasetId } from "../../services/datasetId";
 import { isExemplarPublishAllowed } from "../../services/exemplar";
 import {
@@ -707,6 +708,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         approved_at: string | null;
         denied_at: string | null;
         denied_reason: string | null;
+        withdrawn_at: string | null;
         block_reason: string | null;
         min_requirements_reasons: string | null;
         prescreen_status: string | null;
@@ -776,6 +778,10 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       approved_at: request.approved_at,
       denied_at: request.denied_at,
       denied_reason: request.denied_reason,
+      // The requester ended this one themselves (migration 0096). `status`
+      // stays 'denied' so older clients still read a finished request.
+      withdrawn: request.withdrawn_at !== null,
+      withdrawn_at: request.withdrawn_at,
       block_reason: request.block_reason,
       // The explanation is gated on the STATUS only. It used to also require
       // a repo, which is right for the CI-shaped reasons that link to a
@@ -808,6 +814,87 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       current_step: request.current_step,
       last_error: request.last_error,
       updated_at: request.updated_at,
+    });
+  });
+
+  /**
+   * POST /datasets/:id/publish/withdraw - The requester takes the request back
+   *
+   * No administrator is involved. It is allowed only while nothing has started
+   * acting on the request: `requested` or `blocked`, and no approval dispatched.
+   * The claim is ONE conditional UPDATE, so an approval that begins at the same
+   * moment either wins (this answers 409) or finds the request already ended
+   * (the orchestrator's own update is guarded the same way).
+   *
+   * Recorded as a finished request with `withdrawn_at` set, so the dataset can
+   * be requested again, and the other readers of `status = 'denied'` keep
+   * working (migration 0096).
+   */
+  datasetRoutes.post("/:id/publish/withdraw", authMiddleware, async (c) => {
+    const datasetId = c.req.param("id");
+    const currentUser = c.get("user");
+    const db = c.env.DB;
+
+    const dataset = await db
+      .prepare("SELECT id, owner_user_id FROM datasets WHERE dataset_id = ?")
+      .bind(datasetId)
+      .first<{ id: number; owner_user_id: number }>();
+
+    if (!dataset) {
+      return c.json({ error: "Dataset not found" }, 404);
+    }
+
+    if (dataset.owner_user_id !== currentUser.id) {
+      return c.json(
+        {
+          error:
+            "Only the dataset owner can withdraw a publication request. An administrator ends one with 'nemar admin publish deny'.",
+        },
+        403,
+      );
+    }
+
+    const request = await db
+      .prepare(
+        `SELECT id, status, ${approvalInFlightSql()} AS approval_in_flight
+         FROM publication_requests
+         WHERE dataset_id = ? AND status IN ('requested', 'approving', 'blocked')
+         ORDER BY requested_at DESC LIMIT 1`,
+      )
+      .bind(datasetId)
+      .first<{ id: number; status: string; approval_in_flight: number }>();
+
+    if (!request) {
+      return c.json({ error: "No active publication request found" }, 404);
+    }
+
+    // `error` carries the sentence, as the other routes do, so every client
+    // prints it without knowing the code; `code` is for a client that branches.
+    const tooLate = {
+      error:
+        "An administrator has already started publishing this dataset, so the request can no longer be withdrawn. Ask an administrator if it should be stopped.",
+      code: "withdraw_too_late",
+    };
+    if (request.status === "approving" || request.approval_in_flight === 1) {
+      return c.json(tooLate, 409);
+    }
+
+    const ended = await db
+      .prepare(
+        `UPDATE publication_requests
+         SET status = 'denied', withdrawn_at = datetime('now'), updated_at = datetime('now')
+         WHERE id = ? AND status IN ('requested', 'blocked') AND NOT ${approvalInFlightSql()}`,
+      )
+      .bind(request.id)
+      .run();
+
+    if ((ended.meta?.changes ?? 0) === 0) {
+      return c.json(tooLate, 409);
+    }
+
+    return c.json({
+      message: "Publication request withdrawn",
+      dataset_id: datasetId,
     });
   });
 
