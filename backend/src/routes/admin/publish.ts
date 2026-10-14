@@ -22,7 +22,7 @@ import {
   APPROVAL_DISPATCH_ID_RE,
   DENIAL_REASON_MAX_LENGTH,
 } from "../../../../shared/publication-limits.js";
-import { publishingStanding } from "../../../../shared/publication-steps.js";
+import { PRE_PUBLICATION_STEPS, publishingStanding } from "../../../../shared/publication-steps.js";
 import { auditLogStatement } from "../../db/audit-log";
 import {
   ACTIVE_REQUEST_TAIL_SQL,
@@ -112,12 +112,21 @@ const DENIABLE_STATUSES: readonly string[] = ["requested", "approving", "blocked
  * to a block of the screen's or the minimum's, with `steps_completed` kept; follow-up #1766
  * tracks that), and the data is still public. A request's completed steps are that request's own
  * acts, so one that has started publishing is never denied, whatever its status.
+ *
+ * The rule reads two columns, because a step is recorded as done only after it has run. The run
+ * sets `current_step` before each step and keeps it when the step fails or is cut off, so a run
+ * interrupted inside `s3_public_read` (the first step that changes anything: its bucket-policy
+ * write may have landed without being acknowledged) has only validation steps in `steps_completed`
+ * and `s3_public_read` in `current_step`. A step outside the validation-only ones in either column
+ * means the data may be public (ADR 0103, decision 11).
  */
 function denyRefusal(row: {
   steps_completed: string | null;
+  current_step: string | null;
   in_flight: number;
 }): { error: string; message: string } | null {
-  if (hasStartedPublishing(row.steps_completed)) {
+  const interrupted = !!row.current_step && !PRE_PUBLICATION_STEPS.includes(row.current_step);
+  if (hasStartedPublishing(row.steps_completed) || interrupted) {
     return { error: "deny_after_publishing", message: DENY_AFTER_PUBLISHING_MESSAGE };
   }
   return row.in_flight === 1 ? DENY_IN_FLIGHT : null;
@@ -275,7 +284,8 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    *   409 request_mismatch      `request_id` names a request that is not that one: it was denied or
    *                             filed again since the administrator read it (#1579)
    *   409 deny_after_publishing a step outside the validation-only ones is done
-   *                             (`hasStartedPublishing`), WHATEVER the status: a request filed again
+   *                             (`hasStartedPublishing`) or is the one the run was on when it
+   *                             stopped (`current_step`), WHATEVER the status: a request filed again
    *                             after the owner-name walk-back keeps its steps, and the dataset may
    *                             already be public, so the depositor must not be told "denied"
    *   409 approval_in_flight    an approval is running for it (`approvalInFlightSql`, the lease the
@@ -307,7 +317,7 @@ export function registerPublishRoutes(admin: AdminRouter): void {
 
     const request = await db
       .prepare(
-        `SELECT id, requested_by, steps_completed, updated_at,
+        `SELECT id, requested_by, steps_completed, current_step, updated_at,
                 ${approvalInFlightSql()} AS in_flight ${ACTIVE_REQUEST_TAIL_SQL}`,
       )
       .bind(datasetId)
@@ -315,6 +325,7 @@ export function registerPublishRoutes(admin: AdminRouter): void {
         id: number;
         requested_by: number;
         steps_completed: string | null;
+        current_step: string | null;
         updated_at: string;
         in_flight: number;
       }>();
@@ -345,13 +356,14 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       // administrator to wait and deny it again, which is what that case needs.
       const now = await db
         .prepare(
-          `SELECT status, steps_completed, ${approvalInFlightSql()} AS in_flight
+          `SELECT status, steps_completed, current_step, ${approvalInFlightSql()} AS in_flight
              FROM publication_requests WHERE id = ?`,
         )
         .bind(request.id)
         .first<{
           status: string;
           steps_completed: string | null;
+          current_step: string | null;
           in_flight: number;
         }>();
       if (!now || !DENIABLE_STATUSES.includes(now.status)) return c.json(DENY_NOT_FOUND, 404);
