@@ -28,7 +28,10 @@
 import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
-import { APPROVAL_CLOSED_DURING_RUN_MESSAGE } from "../../shared/contract/publication";
+import {
+  APPROVAL_CLOSED_DURING_RUN_MESSAGE,
+  APPROVAL_REFUSAL_ERROR_CODES,
+} from "../../shared/contract/publication";
 import { OWNER_NAME_MISSING_REASON, PUBLICATION_STEPS } from "../../shared/publication-steps";
 import { adminRoutes } from "../src/routes/admin";
 import type { Bindings, Variables } from "../src/types/bindings";
@@ -207,19 +210,21 @@ describe("a closed request is refused before the tail jobs write anything", () =
       const res = await approve();
 
       expect(res.status).toBe(409);
-      expect(await res.json()).toEqual({
+      const refused = (await res.json()) as { error: string };
+      expect(refused).toEqual({
         error: "approval_closed_during_run",
         message: APPROVAL_CLOSED_DURING_RUN_MESSAGE,
       });
+      expect(APPROVAL_REFUSAL_ERROR_CODES).toContain(refused.error);
       // The refusal reads as "nothing was published", and so nothing the tail jobs do was done.
       expect(sweepStamps()).toEqual(stampsBefore);
       expect(auditRows("concealed_era_version_doi_incomplete")).toHaveLength(0);
       expect(auditRows("zarr_requeue_request_failed")).toHaveLength(0);
       expect(auditRows("dataset_published")).toHaveLength(0);
       expect(requestRow(id)).toEqual(requestBefore);
-      const refused = auditRows("approval_finished_on_closed_request");
-      expect(refused).toHaveLength(1);
-      expect(refused[0].details).toEqual({ request_id: id, request_status: status });
+      const logged = auditRows("approval_finished_on_closed_request");
+      expect(logged).toHaveLength(1);
+      expect(logged[0].details).toEqual({ request_id: id, request_status: status });
     });
   }
 

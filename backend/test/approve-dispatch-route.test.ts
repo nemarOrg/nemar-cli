@@ -29,6 +29,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import type { Server } from "bun";
 import { Hono } from "hono";
 import {
+  APPROVAL_REFUSAL_ERROR_CODES,
   INVALID_DATASET_ID_MESSAGE,
   REQUEST_MISMATCH_MESSAGE,
 } from "../../shared/contract/publication";
@@ -1267,10 +1268,12 @@ describe("the dataset id is validated for the environment before the claim (#158
         dispatchWith(ADMIN_KEY, dataset, bindings),
       );
       expect(res.status).toBe(400);
-      expect(await errorBody(res)).toEqual({
+      const refused = await errorBody(res);
+      expect(refused).toEqual({
         error: "invalid_dataset_id",
         message: INVALID_DATASET_ID_MESSAGE,
       });
+      expect(APPROVAL_REFUSAL_ERROR_CODES).toContain(refused.error);
       expect(row(id)).toEqual(before);
       expect(dispatches).toHaveLength(0);
       // Before ANY read of the requests table, not only before the claim.
@@ -1370,10 +1373,12 @@ describe("a request_id names the request the click was for (#1579)", () => {
     const before = row(id);
     const res = await dispatchBody(ADMIN_KEY, { request_id: id + 1 });
     expect(res.status).toBe(409);
-    expect(await errorBody(res)).toEqual({
+    const refused = await errorBody(res);
+    expect(refused).toEqual({
       error: "request_mismatch",
       message: REQUEST_MISMATCH_MESSAGE,
     });
+    expect(APPROVAL_REFUSAL_ERROR_CODES).toContain(refused.error);
     expect(row(id)).toEqual(before);
     expect(dispatches).toHaveLength(0);
   });
