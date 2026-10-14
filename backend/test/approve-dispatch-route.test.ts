@@ -559,21 +559,45 @@ describe("the dispatch token (#1604)", () => {
     console.log = keep;
     console.warn = keep;
     console.error = keep;
+    const statuses: number[] = [];
     try {
+      // A 4xx from GitHub: nothing was sent, the claim is released.
       githubStatus = 422;
-      await dispatchWith(ADMIN_KEY);
+      statuses.push((await dispatchWith(ADMIN_KEY)).status);
+      // Accepted: the claim stands for the run.
       githubStatus = 204;
-      await dispatchWith(ADMIN_KEY);
+      statuses.push((await dispatchWith(ADMIN_KEY)).status);
+      // The lease lapses with nothing started, so a second administrator may claim afresh; GitHub
+      // then answers 503, which leaves it unknown whether the event was queued.
+      db.run(
+        "UPDATE publication_requests SET approval_requested_by = NULL, approval_dispatched_at = NULL",
+      );
       githubStatus = 503;
-      await dispatchWith(SECOND_ADMIN_KEY, DATASET);
+      statuses.push((await dispatchWith(SECOND_ADMIN_KEY, DATASET)).status);
     } finally {
       console.log = realLog;
       console.warn = realWarn;
       console.error = realError;
     }
+    // All three reached GitHub, and each answered as its own path does: the paths under test ran.
+    expect(statuses).toEqual([502, 202, 502]);
+    expect(dispatches).toHaveLength(3);
     const token = dispatches.map((d) => d.body.client_payload.dispatch_token as string);
-    expect(token.length).toBeGreaterThan(0);
+    // Two clickers, so at least two distinct tokens: the check below has something to look for.
+    expect(new Set(token).size).toBeGreaterThanOrEqual(2);
     for (const t of token) expect(lines.join("\n")).not.toContain(t);
+    // The unconfirmed path logs the dataset and GitHub's status, and never the token (checked
+    // above over every line); the audit row it leaves holds the status only, not GitHub's body.
+    const unconfirmed = lines.find((l) => l.includes("dispatch failed") && l.includes("503"));
+    expect(unconfirmed).toBeDefined();
+    expect(unconfirmed).toContain(DATASET);
+    const audit = db
+      .query<{ details: string }, []>(
+        "SELECT details FROM audit_log WHERE action = 'approval_dispatch_unconfirmed'",
+      )
+      .all();
+    expect(audit).toHaveLength(1);
+    expect(JSON.parse(audit[0].details)).toMatchObject({ reason: "http_503" });
   });
 
   test("a Worker with no signing secret refuses before it claims: 502 dispatch_unconfigured, nothing claimed, nothing sent", async () => {
