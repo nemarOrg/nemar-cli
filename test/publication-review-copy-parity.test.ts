@@ -274,6 +274,14 @@ describe("the page and the CLI say the same where they must", () => {
     }
   });
 
+  test("the unverified screen sentence keeps the Worker's remedy for a refusal that retrying cannot clear", () => {
+    // The Worker says "try again, or re-run the screen" for a stored report that names no commit;
+    // the page has no control to re-run it, so its sentence names the administrator who does.
+    expect(PUBLICATION_REVIEW_COPY["screen_gate.unverified"]).toBe(
+      "The identifier screen's result could not be checked against the current commit just now, so the approval is refused. Try again. If it keeps happening, an administrator runs the screen again.",
+    );
+  });
+
   test("the resumed approval's line is the description's", () => {
     expect(PUBLICATION_REVIEW_COPY["approve.resume"]).toBe(APPROVAL_PUBLISHING_LINE);
   });

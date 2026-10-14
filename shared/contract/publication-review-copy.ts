@@ -40,8 +40,9 @@
  *   would be a second place to drift.
  * - **Refusals only `/approve` answers.** The page calls `approve-dispatch`, never `/approve`, so
  *   a key for those would be dead copy.
- * - **The website's existing friendly messages** (`forbidden`, `not_found`, `not_dispatchable` and
- *   the like). They have no CLI counterpart to agree with.
+ * - **The website's existing friendly messages** (`forbidden`, `not_found`, `dispatch_unconfigured`
+ *   and the like). They have no CLI counterpart to agree with. A blocked request is not one of
+ *   them: the page prints the mirrored `approve.blocked`.
  *
  * The code needs no import from this file and this file imports nothing, so it can be lifted out
  * whole, as `account-copy.ts` can.
@@ -78,7 +79,7 @@ export const PUBLICATION_REVIEW_COPY = {
   "screen_gate.stale":
     "The identifier screen read a commit that is no longer the head of main, so its result is out of date. An administrator runs the screen again.",
   "screen_gate.unverified":
-    "The identifier screen's result could not be checked against the current commit just now, so the approval is refused. Try again.",
+    "The identifier screen's result could not be checked against the current commit just now, so the approval is refused. Try again. If it keeps happening, an administrator runs the screen again.",
 
   // The approve control.
   "approve.unavailable":
