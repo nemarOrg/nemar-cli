@@ -443,6 +443,21 @@ function retryDelayMs(): number {
 }
 
 /**
+ * Who an approval run is for, beyond the dataset: the request it was started for and, for a run
+ * the website started, the token that ties it to that click.
+ *
+ * `requestId` is sent in the body of EVERY call of the run (the first, each batch of the lock, each
+ * retry), so a request that is denied and filed again while the run is going is refused by the
+ * Worker (409 `request_mismatch`) and not approved in the old one's place (#1579). A Worker that
+ * predates the field ignores it. `dispatchToken` is the per-claim token of a run a web click
+ * started; it is not sent yet.
+ */
+export interface ApprovalIdentity {
+  requestId?: number;
+  dispatchToken?: string;
+}
+
+/**
  * Approve publication request (admin) - runs orchestrator with
  * retry-with-delay across Worker invocations.
  *
@@ -468,6 +483,7 @@ export async function approvePublication(
   onProgress?: (info: PublishProgressInfo) => void,
   acknowledgeIdentifierScreen?: string,
   overridePublicationReview?: PublicationReviewOverride,
+  identity?: ApprovalIdentity,
 ): Promise<PublishApproveResponse> {
   const MAX_ATTEMPTS = 5;
   const RETRY_DELAY_MS = retryDelayMs();
@@ -549,6 +565,10 @@ export async function approvePublication(
               ...(overridePublicationReview !== undefined
                 ? { [OVERRIDE_FIELD]: overridePublicationReview }
                 : {}),
+              // #1579: the request this run is for, on every call for the same reason as the
+              // override: each call finds the newest active request by itself, and one that was
+              // denied and filed again since must be refused and not approved in its place.
+              ...(identity?.requestId !== undefined ? { request_id: identity.requestId } : {}),
             }),
           },
           true,
