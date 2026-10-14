@@ -113,15 +113,15 @@ describe("signApprovalDispatchToken / verifyApprovalDispatchToken", () => {
   });
 
   test("signing refuses an empty secret, so a missing Worker secret cannot sign anything", async () => {
-    expect(signApprovalDispatchToken(PAYLOAD, "")).rejects.toThrow(/secret is required/);
+    await expect(signApprovalDispatchToken(PAYLOAD, "")).rejects.toThrow(/secret is required/);
   });
 
   test("a field that holds a line break is refused, so no field can pose as the next one", async () => {
     // The message is five lines. A dataset id of "nm000001\n7" with a clicker of 8 would
     // otherwise sign the same bytes as a dataset id of "nm000001" with a request of 7.
     const smuggled = { ...PAYLOAD, datasetId: `nm000001\n${PAYLOAD.requestId}` };
-    expect(signApprovalDispatchToken(smuggled, SECRET)).rejects.toThrow(/line break/);
-    expect(
+    await expect(signApprovalDispatchToken(smuggled, SECRET)).rejects.toThrow(/line break/);
+    await expect(
       signApprovalDispatchToken({ ...PAYLOAD, claimedAt: "2026-10-13\n17:00:00" }, SECRET),
     ).rejects.toThrow(/line break/);
     expect(await verifyApprovalDispatchToken("a".repeat(64), smuggled, SECRET)).toBe(false);
