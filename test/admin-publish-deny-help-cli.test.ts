@@ -8,7 +8,7 @@
  * a person meets them. The real command runs against the real backend app
  * (`helpers/admin-publish-cli.ts`); only the help text is read.
  *
- * Mutation check (turns the test red): drop either sentence from the help of `deny`.
+ * Mutation check (turns the test red): drop any of these sentences from the help of `deny`.
  *
  * CI TIER: unit-pure. Hermetic: an in-process backend over a local database, the CLI spawned
  * against it, stand-ins only at GitHub and Resend, no live network; it sets its own default
@@ -35,7 +35,10 @@ test("--help-all says that a running approval, and one that has published a step
   const text = r.stdout.replace(/\s+/g, " ");
   expect(text).toContain("cannot be denied while an approval of it is running");
   expect(text).toContain("once an approval has run a step that publishes");
-  expect(text).toContain("finish or repair the approval");
+  // What is left to do mirrors the Worker's sentence (`DENY_AFTER_PUBLISHING_MESSAGE`): a blocked
+  // request waits for its depositor, and any other is finished by approving it again or repaired.
+  expect(text).toContain("a blocked request waits for its depositor");
+  expect(text).toContain("any other can be finished by approving it again, or repaired by hand");
   // Nothing was asked of the API for a help screen.
   expect(h.posted).toEqual([]);
 });
