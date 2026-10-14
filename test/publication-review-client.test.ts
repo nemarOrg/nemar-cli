@@ -35,6 +35,7 @@ import {
   DISPATCH_EXPIRED_MESSAGE,
   DISPATCH_SUPERSEDED_MESSAGE,
   IDENTIFIER_SCREEN_ERROR_CODES,
+  INVALID_DATASET_ID_MESSAGE,
   REQUEST_MISMATCH_MESSAGE,
 } from "../shared/contract/publication";
 import {
@@ -525,6 +526,7 @@ describe("how the client reads an approval refusal (the gate's bodies, scripted)
       ["decision_with_dispatch_token", DECISION_WITH_DISPATCH_TOKEN_MESSAGE],
       ["approval_in_flight", APPROVAL_IN_FLIGHT_MESSAGE],
       ["deny_after_publishing", DENY_AFTER_PUBLISHING_MESSAGE],
+      ["invalid_dataset_id", INVALID_DATASET_ID_MESSAGE],
     ];
     for (const [code, message] of refusals) {
       scripted = [{ status: 409, body: { error: code, message } }];
@@ -549,6 +551,7 @@ describe("how the client reads an approval refusal (the gate's bodies, scripted)
       "decision_with_dispatch_token",
       "approval_in_flight",
       "deny_after_publishing",
+      "invalid_dataset_id",
     ]);
     for (const code of APPROVAL_REFUSAL_ERROR_CODES) {
       expect(IDENTIFIER_SCREEN_ERROR_CODES).not.toContain(code);

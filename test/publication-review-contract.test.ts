@@ -21,6 +21,7 @@ import {
   DISPATCH_EXPIRED_MESSAGE,
   DISPATCH_SUPERSEDED_MESSAGE,
   IDENTIFIER_SCREEN_ERROR_CODES,
+  INVALID_DATASET_ID_MESSAGE,
   OVERRIDE_INSIDE_WEB_APPROVAL_MESSAGE,
   PUBLICATION_REFUSAL_ERROR_CODES,
   REQUEST_CHANGED_MESSAGE,
@@ -3038,12 +3039,14 @@ describe("the wire vocabulary the approval refusals and the comment route share"
       "decision_with_dispatch_token",
       "approval_in_flight",
       "deny_after_publishing",
+      "invalid_dataset_id",
     ]);
     // The first two words are the `error` of the two bodies in the review's contract; the others
     // are the orchestrator's and the deny route's own refusals (a request that changed while it
     // was checked, an override sent inside a web approval, a run for a request that is no longer
     // the one in force, a dispatch token that was replaced or lapsed, a decision sent by a run
-    // the web started, and a denial of a request that is running or has started publishing).
+    // the web started, a denial of a request that is running or has started publishing, and a
+    // dispatch for an id the executor's workflow would not accept).
     expect([...APPROVAL_REFUSAL_ERROR_CODES]).toEqual([
       PUBLICATION_REVIEW_NOT_CLEAR_CODE,
       REQUEST_BLOCKED_CODE,
@@ -3055,6 +3058,7 @@ describe("the wire vocabulary the approval refusals and the comment route share"
       "decision_with_dispatch_token",
       "approval_in_flight",
       "deny_after_publishing",
+      "invalid_dataset_id",
     ]);
     // One word, one family: none of them is also another family's.
     for (const code of APPROVAL_REFUSAL_ERROR_CODES) {
@@ -3213,6 +3217,9 @@ describe("the sentences the Worker's tests import are pinned here, once", () => 
     expect(DENY_AFTER_PUBLISHING_MESSAGE).toBe(
       "An approval of this request has already started publishing, so the dataset may already be public and the request cannot be denied. Resume the approval to finish it.",
     );
+    expect(INVALID_DATASET_ID_MESSAGE).toBe(
+      "This is not a dataset id an approval can be started for from the web: it is nm or on followed by six digits (a development environment also accepts xx). Nothing was claimed and nothing was sent.",
+    );
   });
 
   test("every approval refusal sentence is a plain sentence, and no two are the same", () => {
@@ -3225,6 +3232,7 @@ describe("the sentences the Worker's tests import are pinned here, once", () => 
       DECISION_WITH_DISPATCH_TOKEN_MESSAGE,
       APPROVAL_IN_FLIGHT_MESSAGE,
       DENY_AFTER_PUBLISHING_MESSAGE,
+      INVALID_DATASET_ID_MESSAGE,
       ...Object.values(APPROVAL_RELEASE_REASON_TEXT),
     ];
     expect(new Set(sentences).size).toBe(sentences.length);
