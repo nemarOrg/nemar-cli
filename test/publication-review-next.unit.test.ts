@@ -459,10 +459,22 @@ describe("cardLines", () => {
   test("a Worker that sent no line is read as approve reads it: the sentence and the cure, never the closed words", () => {
     const r = read({ reasons: [["text_withheld", "readme,participants_json"]] });
     if (r.kind !== "detail") throw new Error("expected a detail");
+    // An old Worker sent neither `line`, `statement` nor `command`, and its `cure` was the
+    // terminal's text (`cureOf`, for a request `start` can reach), where the Worker now sends the
+    // neutral one.
     const old: ReviewRead = {
       kind: "detail",
-      detail: { ...r.detail, reasons: r.detail.reasons.map(({ line: _line, ...rest }) => rest) },
+      detail: {
+        ...r.detail,
+        reasons: r.detail.reasons.map(
+          ({ line: _line, statement: _statement, command: _command, ...rest }) => ({
+            ...rest,
+            cure: cureOf(rest.code, ID, true),
+          }),
+        ),
+      },
     };
+    expect(old.detail.reasons[0].cure).toContain("--force");
     const text = uncolored(
       cardLines({
         position: 1,
