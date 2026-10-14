@@ -84,7 +84,9 @@ A token that is stale or expired is refused, never quietly downgraded.**
    The executor presents it as `X-Approval-Dispatch-Token` on every `/approve` call of the run, one per batch and one per retry, so it cannot be single-use.
    The CLI reads it only from the environment variable `NEMAR_APPROVAL_DISPATCH_TOKEN`, only in `approve` and never in `next`, so a token left in a person's shell cannot turn their walk into an executor's run.
    A blank value is no token.
-   Any other value must be what a header can carry, printable American Standard Code for Information Interchange (ASCII) characters with no whitespace, or `approve` refuses it before it sends anything, with a sentence that names the problem and never the value.
+   The two ends of any other value are trimmed, as the Worker trims the header, so a token exported with a trailing line break still works.
+   What is left must be what a header can carry: printable American Standard Code for Information Interchange (ASCII) characters, with no whitespace inside it.
+   Otherwise `approve` refuses it before it sends anything, with a sentence that names the problem and never the value.
    Left to the client library, such a value throws, and the command would report a network failure and retry it for a while.
    With the variable set, `approve` refuses `--force`, `--acknowledge-identifier-screen` and `--skip-ci-check` before it sends anything (decision 5),
    and says on standard error that the run presents a token.
