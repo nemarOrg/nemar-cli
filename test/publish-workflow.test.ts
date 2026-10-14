@@ -282,7 +282,8 @@ describe("publish workflow - admin operations", () => {
     // Should show requests, empty state, or 404 if endpoint not yet deployed
     expect(
       stdout.includes("Publication Requests") ||
-        stdout.includes("No publication requests found") ||
+        stdout.includes("No active requests found") ||
+        stdout.includes("No requested requests found") ||
         stdout.includes("404"),
     ).toBe(true);
   });
@@ -341,10 +342,11 @@ describe("publish workflow - admin operations", () => {
       username: "test-admin",
     });
 
-    const { stdout } = await runCli(["admin", "publish", "list", "-s", "requested"], ctx);
+    const { stdout } = await runCli(["admin", "publish", "list", "--requested"], ctx);
     expect(
       stdout.includes("Publication Requests") ||
-        stdout.includes("No publication requests found") ||
+        stdout.includes("No active requests found") ||
+        stdout.includes("No requested requests found") ||
         stdout.includes("404"),
     ).toBe(true);
   });
