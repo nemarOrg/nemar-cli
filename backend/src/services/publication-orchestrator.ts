@@ -2957,7 +2957,9 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // to another reason since is refused as well.
   //
   // The mark is also where the claim is settled (#1604, ADR 0103 decision 6), and it is the last
-  // write before any work is done, so a refused call has changed nothing:
+  // write before any work is done, so a call it refuses has not touched the claim or the request
+  // row. The screen's acknowledgment and the review override were recorded before it, under the
+  // approver, and a call the mark refuses leaves those rows behind:
   //   - a call that proved its claim (a valid token) marks only while `approval_dispatched_at` is
   //     still the instant it verified. The token was checked a few statements ago, and a click
   //     that replaced the claim, a release, a takeover or a denial since would otherwise be run
