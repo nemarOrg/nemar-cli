@@ -307,15 +307,13 @@ export function registerPublishRoutes(admin: AdminRouter): void {
 
     const request = await db
       .prepare(
-        `SELECT id, status, requested_by, block_reason, steps_completed, updated_at,
+        `SELECT id, requested_by, steps_completed, updated_at,
                 ${approvalInFlightSql()} AS in_flight ${ACTIVE_REQUEST_TAIL_SQL}`,
       )
       .bind(datasetId)
       .first<{
         id: number;
-        status: string;
         requested_by: number;
-        block_reason: string | null;
         steps_completed: string | null;
         updated_at: string;
         in_flight: number;
@@ -347,13 +345,12 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       // administrator to wait and deny it again, which is what that case needs.
       const now = await db
         .prepare(
-          `SELECT status, block_reason, steps_completed, ${approvalInFlightSql()} AS in_flight
+          `SELECT status, steps_completed, ${approvalInFlightSql()} AS in_flight
              FROM publication_requests WHERE id = ?`,
         )
         .bind(request.id)
         .first<{
           status: string;
-          block_reason: string | null;
           steps_completed: string | null;
           in_flight: number;
         }>();
