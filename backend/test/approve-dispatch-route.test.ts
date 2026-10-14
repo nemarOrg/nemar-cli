@@ -28,6 +28,7 @@ import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Server } from "bun";
 import { Hono } from "hono";
+import { INVALID_DATASET_ID_MESSAGE } from "../../shared/contract/publication";
 import { adminRoutes } from "../src/routes/admin";
 import { hashApiKey } from "../src/services/token";
 import { issueSession } from "../src/services/web-session";
@@ -175,6 +176,28 @@ function dispatchWith(
     {
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "X-CLI-Version": "99.0.0" },
+    },
+    bindings,
+  );
+}
+
+/** A click that sends a JSON body, as the website's does when it names the request it was shown. */
+function dispatchBody(
+  key: string,
+  body: Record<string, unknown>,
+  dataset = DATASET,
+  bindings: Bindings = env(),
+): Promise<Response> {
+  return app.request(
+    `/admin/publish/${dataset}/approve-dispatch`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+        "X-CLI-Version": "99.0.0",
+      },
+      body: JSON.stringify(body),
     },
     bindings,
   );
@@ -929,4 +952,143 @@ describe("who may dispatch", () => {
       expect(list.status).toBe(401);
     });
   }
+});
+
+// ---------------------------------------------------------------------------------------------
+// #1583: the id is checked before anything is read or claimed
+// ---------------------------------------------------------------------------------------------
+
+describe("the dataset id is validated for the environment before the claim (#1583)", () => {
+  // The executor workflow accepts nm or on plus six digits, and on dev xx plus six digits. A
+  // dispatch for any other id used to claim the lease, dispatch, and fail in the workflow's own
+  // validation with the lease held for fifteen minutes. Each case seeds a request under the very
+  // id the route is asked about, so a route that skipped the check would claim and dispatch it.
+
+  /** The SQL of every statement the route ran against the requests table, in order. */
+  function requestStatementsOf(run: (bindings: Bindings) => Promise<Response>) {
+    const seen: string[] = [];
+    const bindings = {
+      ...env(),
+      DB: interceptingD1(realD1(db), (sql) => {
+        if (sql.includes("publication_requests")) seen.push(sql);
+      }),
+    } as Bindings;
+    return run(bindings).then((res) => ({ res, seen }));
+  }
+
+  /**
+   * A request that would be claimed and dispatched if the route asked nothing of the id. The
+   * screen's own parser refuses a report for an id that is not an id, so the request is seeded
+   * under a valid one and renamed, report included, which leaves the screen gate satisfied.
+   */
+  function seedRequestForAnyId(dataset: string, seed: Seed = {}): number {
+    const id = seedRequest(seed);
+    db.run(
+      `UPDATE publication_requests
+          SET dataset_id = ?, identifier_screen_report = json_set(identifier_screen_report, '$.scan.id', ?)
+        WHERE id = ?`,
+      [dataset, dataset, id],
+    );
+    return id;
+  }
+
+  const PRODUCTION_ACCEPTS = ["nm000123", "on000123"];
+  const PRODUCTION_REFUSES = ["xx000123", "nm00012", "NM000123", "nm0001234", "ds000123"];
+
+  test.each(PRODUCTION_ACCEPTS)(
+    "production accepts %s: claimed and dispatched",
+    async (dataset) => {
+      envOverrides = { ENVIRONMENT: "production" };
+      const id = seedRequest({ dataset });
+      const res = await dispatchWith(ADMIN_KEY, dataset);
+      expect(res.status).toBe(202);
+      expect(row(id)?.approval_requested_by).toBe(adminId);
+      expect(dispatches).toHaveLength(1);
+      expect(dispatches[0].body.client_payload).toMatchObject({
+        dataset_id: dataset,
+        environment: "production",
+      });
+    },
+  );
+
+  test.each(PRODUCTION_REFUSES)(
+    "production refuses %s: 400 invalid_dataset_id, no read, no claim, no dispatch, no audit",
+    async (dataset) => {
+      envOverrides = { ENVIRONMENT: "production" };
+      const id = seedRequestForAnyId(dataset, { lastError: "EZID 503", status: "approving" });
+      const before = row(id);
+      const { res, seen } = await requestStatementsOf((bindings) =>
+        dispatchWith(ADMIN_KEY, dataset, bindings),
+      );
+      expect(res.status).toBe(400);
+      expect(await errorBody(res)).toEqual({
+        error: "invalid_dataset_id",
+        message: INVALID_DATASET_ID_MESSAGE,
+      });
+      expect(row(id)).toEqual(before);
+      expect(dispatches).toHaveLength(0);
+      // Before ANY read of the requests table, not only before the claim.
+      expect(seen).toEqual([]);
+      const audits = db.query("SELECT COUNT(*) AS n FROM audit_log WHERE action LIKE 'approval_%'");
+      expect(audits.get()).toEqual({ n: 0 });
+    },
+  );
+
+  // Dev is `ENVIRONMENT` of anything but exactly "production": the failure direction is the
+  // harmless one (`approvalDispatchEnvironment`), so an unset or misspelled value is dev too.
+  for (const [what, environment] of [
+    ["development", "development"],
+    ["test", "test"],
+    ["unset", undefined],
+    ["a misspelling of production", "prod"],
+  ] as const) {
+    test(`a Worker whose ENVIRONMENT is ${what} accepts xx000123: claimed and dispatched as dev`, async () => {
+      envOverrides = { ENVIRONMENT: environment };
+      const id = seedRequest({ dataset: "xx000123" });
+      const res = await dispatchWith(ADMIN_KEY, "xx000123");
+      expect(res.status).toBe(202);
+      expect(row(id)?.approval_requested_by).toBe(adminId);
+      expect(dispatches[0].body.client_payload).toMatchObject({
+        dataset_id: "xx000123",
+        environment: "dev",
+      });
+    });
+  }
+
+  test.each(["nm00012", "NM000123", "nm0001234", "ds000123", "xx00012", "xx0001234"])(
+    "dev still refuses %s: the rule is nm, on or xx and six digits",
+    async (dataset) => {
+      const id = seedRequestForAnyId(dataset);
+      const res = await dispatchWith(ADMIN_KEY, dataset);
+      expect(res.status).toBe(400);
+      expect((await errorBody(res)).error).toBe("invalid_dataset_id");
+      expect(row(id)?.approval_requested_by).toBeNull();
+      expect(row(id)?.approval_dispatched_at).toBeNull();
+      expect(dispatches).toHaveLength(0);
+    },
+  );
+
+  test("the id is refused before the body is read: a malformed body does not change the answer", async () => {
+    envOverrides = { ENVIRONMENT: "production" };
+    const id = seedRequestForAnyId("xx000123");
+    const res = await dispatchBody(ADMIN_KEY, { bogus: true }, "xx000123");
+    expect(res.status).toBe(400);
+    expect((await errorBody(res)).error).toBe("invalid_dataset_id");
+    expect(row(id)?.approval_requested_by).toBeNull();
+    expect(dispatches).toHaveLength(0);
+  });
+
+  test("and before the 404: an invalid id with no request at all is the id's 400", async () => {
+    envOverrides = { ENVIRONMENT: "production" };
+    const res = await dispatchWith(ADMIN_KEY, "xx000123");
+    expect(res.status).toBe(400);
+    expect((await errorBody(res)).error).toBe("invalid_dataset_id");
+  });
+
+  test("a valid id whose request does not exist is still the 404", async () => {
+    envOverrides = { ENVIRONMENT: "production" };
+    const res = await dispatchWith(ADMIN_KEY, "nm000124");
+    expect(res.status).toBe(404);
+    expect((await errorBody(res)).error).toBe("not_found");
+  });
 });

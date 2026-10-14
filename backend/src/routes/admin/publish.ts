@@ -8,10 +8,12 @@
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 
+import { INVALID_DATASET_ID_MESSAGE } from "../../../../shared/contract/publication.js";
 import { screenGate } from "../../../../shared/identifier-screen-report.js";
 import {
   ACKNOWLEDGMENT_MAX_LENGTH,
   ACKNOWLEDGMENT_MIN_LENGTH,
+  APPROVAL_DISPATCH_ID_RE,
   DENIAL_REASON_MAX_LENGTH,
 } from "../../../../shared/publication-limits.js";
 import { publishingStanding } from "../../../../shared/publication-steps.js";
@@ -379,6 +381,9 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    *                         approval (ADR 0102): the gate refuses before the claim, with
    *                         a `refusal` word and the review's words, and an override that
    *                         is recorded is recorded after the head check (below)
+   *   400 invalid_dataset_id  the id is not one the executor's workflow accepts for this
+   *                         environment (`APPROVAL_DISPATCH_ID_RE`); refused before the body is
+   *                         read and before anything is read or claimed (#1583)
    *   400 invalid_body      the optional body is not `{ acknowledge_identifier_screen,
    *                         override_publication_review }`
    *   502 dispatch_failed   GitHub answered 4xx, or a token could not be
@@ -394,6 +399,15 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     const datasetId = c.req.param("id");
     const adminUser = c.get("user");
     const db = c.env.DB;
+    const environment = approvalDispatchEnvironment(c.env);
+
+    // The id is checked first, for this environment, before the body is read, before any read of
+    // the request and before the claim (#1583). The workflow this dispatches accepts only the ids
+    // of `APPROVAL_DISPATCH_ID_RE` and fails in its own validation for any other, which would
+    // leave the claim's lease held for fifteen minutes on a run that never started.
+    if (!APPROVAL_DISPATCH_ID_RE[environment].test(datasetId)) {
+      return c.json({ error: "invalid_dataset_id", message: INVALID_DATASET_ID_MESSAGE }, 400);
+    }
 
     // The body is optional; it carries an acknowledgment of the identifier
     // screen (epic #1610 phase 4) and the administrator's override of the
@@ -545,8 +559,6 @@ export function registerPublishRoutes(admin: AdminRouter): void {
         409,
       );
     }
-
-    const environment = approvalDispatchEnvironment(c.env);
 
     // Release the claim so the admin can try again at once rather than wait out
     // the lease. Only ever done for a failure that is DEFINITELY "not sent", so
