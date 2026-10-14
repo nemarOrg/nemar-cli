@@ -2497,6 +2497,75 @@ async function recordPreLoopFailure(
   }
 }
 
+/**
+ * The write that ends an approval: the request becomes `published`, and ONLY if it is still
+ * `approving`, the state the run marked it in and every step since has kept it in. A request
+ * closed while the run ran (denied once its lease had lapsed, or blocked again by a result that
+ * arrived mid-run) is not published over, and the status it was found in is returned. A request
+ * that is already `published` was finished by a concurrent call of the same run (a retry that
+ * overlapped), and counts as finished. The one statement of the run's ending, shared by the step
+ * loop's last write and by a resumed run whose steps are all done.
+ */
+async function markRequestPublished(
+  db: D1Database,
+  requestId: number,
+): Promise<{ finished: true } | { finished: false; status: string | null }> {
+  const published = await db
+    .prepare(
+      `UPDATE publication_requests
+     SET status = 'published', approved_at = datetime('now'), current_step = NULL, last_error = NULL, updated_at = datetime('now')
+     WHERE id = ? AND status = 'approving'`,
+    )
+    .bind(requestId)
+    .run();
+  if ((published.meta.changes ?? 0) === 1) return { finished: true };
+  const closed = await db
+    .prepare("SELECT status FROM publication_requests WHERE id = ?")
+    .bind(requestId)
+    .first<{ status: string }>();
+  if (closed?.status === "published") return { finished: true };
+  return { finished: false, status: closed?.status ?? null };
+}
+
+/**
+ * The answer of an approval whose request is closed: 409 `approval_closed_during_run`. Its own
+ * word, not `request_changed`, which means that nothing ran, whereas the steps of this run HAVE
+ * run and cannot be taken back. It leaves one audit row of ids and words (the request, and the
+ * status it was found in) so the trail shows a run that finished on a closed request, and it
+ * never marks anything published or reports a publication.
+ */
+async function refuseApprovalOnClosedRequest(
+  c: ApproveStepContext,
+  requestId: number,
+  foundStatus: string | null,
+): Promise<RespondOutcome> {
+  console.error(
+    `[publish] ${c.datasetId}: request ${requestId} was ${foundStatus ?? "removed"} while the approval ran, so it was not marked published`,
+  );
+  try {
+    await auditLogStatement(c.db, {
+      userId: c.adminUser.id,
+      action: "approval_finished_on_closed_request",
+      resourceType: "dataset",
+      resourceId: c.datasetId,
+      // Ids and words only: which request, and the status it was found in.
+      details: JSON.stringify({ request_id: requestId, request_status: foundStatus }),
+    }).run();
+  } catch (auditError) {
+    console.error(
+      `AUDIT LOG FAILURE: the approval of ${c.datasetId} finished on a closed request and was not logged:`,
+      auditError instanceof Error ? auditError.message : String(auditError),
+    );
+  }
+  return c.json(
+    {
+      error: "approval_closed_during_run",
+      message: APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE,
+    },
+    409,
+  );
+}
+
 export async function runPublicationApproval(args: ApproveRunArgs): Promise<RespondOutcome> {
   const { db, env, waitUntil, datasetId, adminUser, body, dispatchToken } = args;
   const { resume } = body;
@@ -2681,6 +2750,18 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
       anonymousRelease,
     );
     const retryWarnings = [retryWarning, retryVersionWarning].filter(Boolean);
+    // The run's ending, as at the end of the step loop: an `approving` request is marked
+    // published by the same guarded write, and any other status is refused, with the answer of a
+    // request closed while the run ran. This branch used to answer 200 `published` and write
+    // nothing, so a request that was no longer `approving` (an owner-name `blocked` row resumed
+    // with every step done, or one a denial closed after the read) was reported published while
+    // it stayed as it was, and an `approving` one stayed `approving` for good. A request that is
+    // `requested` here carries the steps of an earlier life (follow-up #1766), and its data is
+    // already public: it is refused too, never marked published by a run that did no step.
+    const ended = await markRequestPublished(db, request.id);
+    if (!ended.finished) {
+      return refuseApprovalOnClosedRequest(c, request.id, ended.status);
+    }
     // Neurobagel federation (epic #1586 phase 4, ADR 0084): a run whose steps are all
     // complete is still a publication that may not have been federated yet. A hook,
     // never a step: it does nothing unless the writer is enabled, runs in `waitUntil`,
@@ -3010,55 +3091,14 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     anonymousRelease,
   );
 
-  // Mark as published. Only a request that is still `approving`, the state this run marked it in
-  // and every step since has kept it in: a request closed while the run ran (denied once its lease
-  // had lapsed, or blocked again by a result that arrived mid-run) is not published over. The
-  // steps cannot be taken back, so the run says so loudly instead of recording a publication of
-  // a request somebody closed. A request that is already `published` was finished by a concurrent
-  // call of the same run (a retry that overlapped), and this one carries on exactly as before.
-  const published = await db
-    .prepare(
-      `UPDATE publication_requests
-     SET status = 'published', approved_at = datetime('now'), current_step = NULL, last_error = NULL, updated_at = datetime('now')
-     WHERE id = ? AND status = 'approving'`,
-    )
-    .bind(request.id)
-    .run();
-  if ((published.meta.changes ?? 0) !== 1) {
-    const closed = await db
-      .prepare("SELECT status FROM publication_requests WHERE id = ?")
-      .bind(request.id)
-      .first<{ status: string }>();
-    if (closed?.status !== "published") {
-      console.error(
-        `[publish] ${datasetId}: request ${request.id} was ${closed?.status ?? "removed"} while the approval ran, so it was not marked published`,
-      );
-      try {
-        await auditLogStatement(db, {
-          userId: adminUser.id,
-          action: "approval_finished_on_closed_request",
-          resourceType: "dataset",
-          resourceId: datasetId,
-          // Ids and words only: which request, and the status it was found in.
-          details: JSON.stringify({
-            request_id: request.id,
-            request_status: closed?.status ?? null,
-          }),
-        }).run();
-      } catch (auditError) {
-        console.error(
-          `AUDIT LOG FAILURE: the approval of ${datasetId} finished on a closed request and was not logged:`,
-          auditError instanceof Error ? auditError.message : String(auditError),
-        );
-      }
-      return c.json(
-        {
-          error: "request_changed",
-          message: APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE,
-        },
-        409,
-      );
-    }
+  // Mark as published, by the write that ends every approval (`markRequestPublished`): a request
+  // closed while the run ran is not published over. The steps cannot be taken back, so the run says
+  // so loudly instead of recording a publication of a request somebody closed. A request that is
+  // already `published` was finished by a concurrent call of the same run, and this one carries on
+  // exactly as before.
+  const ended = await markRequestPublished(db, request.id);
+  if (!ended.finished) {
+    return refuseApprovalOnClosedRequest(c, request.id, ended.status);
   }
 
   // Neurobagel federation (epic #1586 phase 4, ADR 0084): the dataset is published.

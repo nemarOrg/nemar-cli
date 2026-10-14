@@ -118,8 +118,9 @@ export const IDENTIFIER_SCREEN_ERROR_CODES: readonly string[] = [
  * blocked request's, the request that changed while the approval was being checked, a run for a
  * request that is no longer the one in force, a dispatch token that was replaced or has lapsed, a
  * decision sent by a run the web started, the two refusals of a denial (a request that is running,
- * and one that has started publishing), and a web approval for an id the executor's workflow
- * would not accept (a 400, before anything is claimed). Declared
+ * and one that has started publishing), a run whose request was closed while it ran (its steps
+ * had run), and a web approval for an id the executor's workflow would not accept (a 400, before
+ * anything is claimed). Declared
  * here, beside the screen's, so the CLI's client leads with the sentence and not the bare token.
  * The first two words are the `error` of the bodies in `publication-review-admin.ts`
  * (`PUBLICATION_REVIEW_NOT_CLEAR_CODE`, `REQUEST_BLOCKED_CODE`); this file stays free of every
@@ -143,6 +144,11 @@ export const APPROVAL_REFUSAL_ERROR_CODES: readonly string[] = [
   "deny_after_publishing",
   /** A web approval for an id the executor workflow would refuse (the dispatch route's 400). */
   "invalid_dataset_id",
+  /**
+   * A run's request was closed (denied, blocked or filed again) while the run ran, or by the time
+   * its steps were all done: it ran, so this is not `request_changed`, which means nothing ran.
+   */
+  "approval_closed_during_run",
 ];
 
 /**
@@ -154,13 +160,17 @@ export const REQUEST_CHANGED_MESSAGE =
   "The request changed while the approval was being checked (it was denied or blocked). Read it again before approving.";
 
 /**
- * The sentence of the 409 `request_changed` that an approval answers when its LAST write finds
- * the request closed: the steps had run, and then the request was denied (once its lease had
- * lapsed) or blocked again, so the run did not mark it published. The steps cannot be taken back,
- * so the sentence sends the reader to look at the request and the dataset before anything else.
+ * The sentence of the 409 `approval_closed_during_run`, which an approval answers when its LAST
+ * write finds the request closed, or when a resumed run whose steps are all done finds a request
+ * that is not `approving`: the steps had run, and the request was denied (once its lease had
+ * lapsed), blocked again or filed again, so the run did not mark it published. It is not
+ * `request_changed`, whose sentence above means that nothing ran. The steps cannot be taken
+ * back, and no approval can finish a closed request (a denied one is no longer active, and a
+ * blocked one is refused), so the sentence says that the repair is by hand. The one command it
+ * names is the listing of requests, which shows a request of any status.
  */
 export const APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE =
-  "The request was closed while this approval was running (it was denied, or blocked again), so the run did not mark it published. Its steps had already run: read the request and the dataset again before doing anything else.";
+  "The request was closed while this approval was running (it was denied, blocked again or filed again), so the run did not mark it published. Its steps had already run, so the dataset may already be public. An approval cannot finish a closed request: check the dataset and the request (nemar admin publish list shows its status), then finish or repair it by hand.";
 
 /**
  * The sentence of the 409 `request_mismatch`: the approval named a request (`request_id`) that is

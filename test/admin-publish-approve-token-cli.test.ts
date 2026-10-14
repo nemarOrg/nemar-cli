@@ -19,12 +19,17 @@
  *  - with a token in the environment, a flag that is the administrator's own decision (`--force`,
  *    `--acknowledge-identifier-screen`) is refused locally before anything is sent, because the
  *    click already recorded the decision and the Worker would refuse the call;
- *  - the token is a secret: it reaches neither the console nor the `--debug` log.
+ *  - the token is a secret: it reaches neither the console nor the `--debug` log;
+ *  - a stale variable in a person's shell is not a silent trap (the Opus review of Phase 3): a run
+ *    that presents a token says so on standard error before it sends anything, and a refusal of
+ *    that token (`dispatch_superseded`, `dispatch_expired`) is followed by the hint to unset it.
  *
  * Mutation checks (each turns a named test red): send no header (the "every call" rows); read the
  * variable in `next` (the `next` row); send the header only on the first call (the retry row); let
  * `--force` through with a token (the refusal rows); print the token, or let the log keep it (the
- * secret rows); trim nothing (the blank variable row).
+ * secret rows); trim nothing (the blank variable row); drop the notice, or print it after the
+ * first request (the notice rows); drop the hint, or print it for a refusal that is not about the
+ * token (the hint rows).
  *
  * CI TIER: unit-pure. Hermetic: an in-process backend over a local database, the CLI spawned
  * against it, stand-ins only at GitHub and Resend, no live network; it sets its own default
@@ -34,10 +39,17 @@
 import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { webClaim } from "../backend/test/helpers/publication-review";
 import { makePublicationReviewApp } from "../backend/test/helpers/publication-review-app";
 import { REVIEW_GATE_REFUSAL_TEXT } from "../shared/publication-review";
 import { type CliResult, startPublishCli } from "./helpers/admin-publish-cli";
-import { DATASET, seedGolden, seedReport, twoReasons } from "./helpers/approve-seeds";
+import {
+  DATASET,
+  seedGolden,
+  seedReport,
+  seedUnstarted,
+  twoReasons,
+} from "./helpers/approve-seeds";
 
 setDefaultTimeout(60_000);
 
@@ -46,6 +58,10 @@ const EXECUTOR_KEY = "token-executor-key-0123456789abcdef0123456789abcdef";
 const APPROVE_PATH = `/admin/publish/${DATASET}/approve`;
 const TOKEN_ENV = "NEMAR_APPROVAL_DISPATCH_TOKEN";
 const WHY_ACK = "Read the recording formats by hand, nothing to remove";
+/** What the command says on standard error when it runs with a token, before it sends anything. */
+const NOTICE = `This run presents the dispatch token in ${TOKEN_ENV} (an executor's run for a web approval); unset the variable to approve as yourself.`;
+/** What follows a refusal of the token the run presented. */
+const UNSET_HINT = `If you are not running a dispatched approval, unset ${TOKEN_ENV} and run it again.`;
 
 const h = startPublishCli();
 const api = makePublicationReviewApp();
@@ -227,6 +243,7 @@ describe("the executor of a web approval", () => {
 
     expect(r.exitCode).toBe(1);
     expect(output(r)).toContain("no longer current");
+    expect(output(r)).toContain(UNSET_HINT);
     expect(h.requests.filter((c) => c.path === APPROVE_PATH).map((c) => c.status)).toEqual([409]);
     expect(requestRow(requestId)).toEqual(claim);
   });
@@ -250,10 +267,13 @@ describe("a person's shell variable", () => {
     expect(approveCalls()).toHaveLength(1);
     expect(approveCalls()[0]?.dispatchToken).toBe(false);
     expect(requestRow(requestId)?.approved_by).toBe(executorId);
+    // It never reads the variable, so it never says that a token is in use, and never names it.
+    expect(output(r)).not.toContain(TOKEN_ENV);
+    expect(output(r)).not.toContain(stale);
   });
 
   test("is not read by anything else of the group: a command that is not an approval sends no header", async () => {
-    const requestId = seedGolden(h.db);
+    const requestId = seedUnstarted(h.db);
     seedReport(h.db, requestId);
     const r = await h.cli(
       ["admin", "publish", "deny", DATASET, "--reason", "Add the README", "--yes"],
@@ -312,6 +332,133 @@ describe("with a token in the environment, the administrator's own decisions are
       .get(reviewId);
     expect(override?.override_by).toBe(executorId);
     expect(approveCalls()[0]?.dispatchToken).toBe(false);
+  });
+});
+
+describe("a variable left in a person's shell is not a silent trap", () => {
+  test("a run that presents a token says so on standard error, names the variable and never the token", async () => {
+    const { requestId, token } = await click();
+
+    const r = await executor(token);
+
+    expect(r.exitCode).toBe(0);
+    expect(requestRow(requestId)?.approved_by).toBe(clickerId);
+    // One line, on standard error: a script reading standard output is not touched.
+    expect(r.stderr.split("\n").filter((line) => line.includes(TOKEN_ENV))).toEqual([NOTICE]);
+    expect(r.stdout).not.toContain(TOKEN_ENV);
+    expect(output(r)).not.toContain(token);
+    // A run that went through has nothing to hint at.
+    expect(output(r)).not.toContain(UNSET_HINT);
+  });
+
+  test("the notice comes before the first line the run prints for the approval, which comes before its first call", async () => {
+    const { token } = await click();
+
+    // On a terminal the two streams share one transcript, so the order they were written in is
+    // readable: the notice precedes the heading the command prints before it reads the request.
+    const r = await h.cli(["admin", "publish", "approve", DATASET, "--resume", "--yes"], {
+      as: "webexecutor",
+      env: { [TOKEN_ENV]: token },
+      terminal: async () => undefined,
+    });
+
+    expect(r.exitCode).toBe(0);
+    const notice = r.stdout.indexOf(TOKEN_ENV);
+    const heading = r.stdout.indexOf(`Resume publication of ${DATASET}`);
+    expect(notice).toBeGreaterThanOrEqual(0);
+    expect(heading).toBeGreaterThan(notice);
+    expect(r.stdout).not.toContain(token);
+  });
+
+  test("the notice is a refusal's company too: a token-bearing run stopped by the Worker still said it first", async () => {
+    const { token } = await click();
+    h.db.run("UPDATE publication_requests SET approval_dispatched_at = NULL");
+
+    const r = await executor(token);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain(NOTICE);
+  });
+
+  test("no variable, and a blank one, print no notice", async () => {
+    const requestId = seedGolden(h.db);
+    seedReport(h.db, requestId);
+
+    const none = await executor(undefined);
+    expect(none.exitCode).toBe(0);
+    expect(output(none)).not.toContain(TOKEN_ENV);
+
+    h.reset();
+    await h.admin("webexecutor", EXECUTOR_KEY);
+    h.setEnv({ PUBLICATION_REVIEW_ENABLED: "1" });
+    seedReport(h.db, seedGolden(h.db));
+
+    const blank = await executor("   ");
+    expect(blank.exitCode).toBe(0);
+    expect(output(blank)).not.toContain(TOKEN_ENV);
+  });
+
+  test("a token of a claim that lapsed (dispatch_expired) is followed by the hint", async () => {
+    const requestId = seedGolden(h.db);
+    seedReport(h.db, requestId);
+    // A genuine token of a click made past the 15 minute lease: the Worker refuses it as expired.
+    const token = await webClaim(h.db, {
+      requestId,
+      clickerId,
+      dispatchedAt: "-16 minutes",
+      secret: h.env().PRESCREEN_CALLBACK_SECRET,
+    });
+
+    const r = await executor(token);
+
+    expect(r.exitCode).toBe(1);
+    expect(output(r)).toContain("has expired");
+    expect(output(r)).toContain(UNSET_HINT);
+    expect(output(r)).not.toContain(token);
+    expect(h.requests.filter((c) => c.path === APPROVE_PATH).map((c) => c.status)).toEqual([409]);
+  });
+
+  test("a refusal that is not about the token carries no hint", async () => {
+    // The click's request was denied meanwhile: the Worker has no active request to run for, which
+    // says nothing about the variable, so it does not suggest unsetting it.
+    const { requestId, token } = await click();
+    h.db.run("UPDATE publication_requests SET status = 'denied' WHERE id = ?", [requestId]);
+
+    const r = await executor(token);
+
+    expect(r.exitCode).toBe(1);
+    expect(output(r)).not.toContain(UNSET_HINT);
+    expect(output(r)).not.toContain(token);
+  });
+
+  test("a 409 that is not about the token carries no hint either: the request was blocked after the command read it", async () => {
+    const { requestId, token } = await click();
+    // Between the command's read of the review and its approval the request is blocked again, so
+    // the Worker answers `request_blocked` (a 409, and nothing to do with the token it was sent).
+    h.after(`GET /admin/publish/${DATASET}/review`, () => {
+      h.db.run(
+        "UPDATE publication_requests SET status = 'blocked', block_reason = 'min_requirements_failed' WHERE id = ?",
+        [requestId],
+      );
+    });
+
+    const r = await executor(token);
+
+    expect(r.exitCode).toBe(1);
+    expect(h.requests.filter((c) => c.path === APPROVE_PATH).map((c) => c.status)).toEqual([409]);
+    expect(approveCalls()[0]?.dispatchToken).toBe(true);
+    expect(output(r)).not.toContain(UNSET_HINT);
+    expect(output(r)).not.toContain(token);
+  });
+
+  test("a refusal with no token carries no hint (the review's own refusal, as a person sees it)", async () => {
+    await click();
+
+    const r = await executor(undefined);
+
+    expect(r.exitCode).toBe(1);
+    expect(output(r)).not.toContain(UNSET_HINT);
+    expect(output(r)).not.toContain(TOKEN_ENV);
   });
 });
 

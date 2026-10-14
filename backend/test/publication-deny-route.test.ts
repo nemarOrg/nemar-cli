@@ -15,8 +15,11 @@
  * The other half is the end of a run: `runPublicationApproval` marks the request `published` last,
  * and that write is now `AND status = 'approving'`. A request closed while the run ran (denied
  * once its lease had lapsed, or blocked again) is not published over: the run answers 409
- * `request_changed` with its own sentence and leaves an audit row of ids and words; a request a
- * concurrent finisher already published is carried on as before.
+ * `approval_closed_during_run` (a word of its own, because `request_changed` means nothing ran)
+ * with its own sentence and leaves an audit row of ids and words; a request a concurrent finisher
+ * already published is carried on as before. A run whose steps are ALL done ends the same way
+ * (it used to answer 200 `published` and write nothing): an `approving` request is marked
+ * published by the same guarded write, and any other status is refused with the same answer.
  *
  * Real engine only: bun:sqlite behind realD1 with every migration applied, the real admin router
  * behind its real auth middleware, GitHub as a `Bun.serve()` stand-in for the one read of `main`
@@ -295,17 +298,23 @@ describe("T4.6 a request nothing is running for is denied, and the depositor is 
     await denied(seedRequest({ status: "requested", dispatchedAt: "-16 minutes" }));
   });
 
-  test("a blocked request, even with the steps of an earlier life still listed", async () => {
-    // Nothing clears `steps_completed` when the depositor requests again, so a request blocked by
-    // the screen can carry the steps of a run that was walked back long ago. Only the owner-name
-    // walk-back is a run that is still half published.
+  test("a requested request that has done only the validation-only steps", async () => {
+    // `ci_check` and `enrichment_check` change nothing: the request is still deniable.
+    await denied(seedRequest({ status: "requested", steps: ["ci_check", "enrichment_check"] }));
+  });
+
+  test("a blocked request that has done only the validation-only steps", async () => {
     await denied(
-      seedRequest({ status: "blocked", blockReason: "min_requirements_failed", steps: STARTED }),
+      seedRequest({
+        status: "blocked",
+        blockReason: "min_requirements_failed",
+        steps: ["ci_check", "enrichment_check"],
+      }),
     );
   });
 });
 
-describe("T4.7 a request that has started publishing is never denied", () => {
+describe("T4.7 a request that has started publishing is never denied, whatever its status", () => {
   test("a stalled approving request with a step done outside the validation-only ones", async () => {
     const id = seedRequest({ status: "approving", updatedAt: "-16 minutes", steps: STARTED });
     await expectRefused(id, () => deny(), { status: 409, body: AFTER_PUBLISHING });
@@ -324,9 +333,40 @@ describe("T4.7 a request that has started publishing is never denied", () => {
     });
     await expectRefused(id, () => deny(), { status: 409, body: AFTER_PUBLISHING });
   });
+
+  // The steps of a request are that request's own irreversible acts. The owner's re-request
+  // (`routes/datasets/publication.ts`) moves the row back to `requested`, or on to a block of the
+  // screen's or the minimum's, and KEEPS `steps_completed` (follow-up #1766 tracks that). The
+  // gate must not trust those steps (it would skip the gates for content that never passed them),
+  // but the denial asks another question: has anything irreversible happened? The S3 objects made
+  // public-read and the repository made public by the first life are still public, so the
+  // depositor must not be told "denied". Hence this refusal ignores the status and the reason.
+  test("a requested request whose steps are those of an owner-name run, filed again", async () => {
+    const id = seedRequest({ status: "requested", steps: STARTED });
+    await expectRefused(id, () => deny(), { status: 409, body: AFTER_PUBLISHING });
+  });
+
+  test("a blocked request (minimum failed) that carries the steps of an earlier life", async () => {
+    const id = seedRequest({
+      status: "blocked",
+      blockReason: "min_requirements_failed",
+      steps: STARTED,
+    });
+    await expectRefused(id, () => deny(), { status: 409, body: AFTER_PUBLISHING });
+  });
+
+  test("a blocked request with no reason at all that carries those steps", async () => {
+    const id = seedRequest({ status: "blocked", steps: STARTED });
+    await expectRefused(id, () => deny(), { status: 409, body: AFTER_PUBLISHING });
+  });
+
+  test("a requested request with a claim in flight and those steps: started publishing comes first", async () => {
+    const id = seedRequest({ status: "requested", dispatchedAt: "-5 minutes", steps: STARTED });
+    await expectRefused(id, () => deny(), { status: 409, body: AFTER_PUBLISHING });
+  });
 });
 
-describe("T4.8 a request that moves between the read and the write is not overwritten", () => {
+describe("T4.8a request that moves between the read and the write is not overwritten", () => {
   test("published in between: the answer is that no request is active, and it stays published", async () => {
     const id = seedRequest({ status: "approving", updatedAt: "-16 minutes", steps: ["ci_check"] });
     const bindings = raceBeforeDenyWrite(() =>
@@ -394,6 +434,24 @@ describe("T4.8 a request that moves between the read and the write is not overwr
       expect(calls).toHaveLength(0);
     });
     expect(row(id).status).toBe("approving");
+  });
+
+  test("a requested request gains started steps in between: the re-read refuses by the same rule", async () => {
+    const id = seedRequest({ status: "requested" });
+    const bindings = raceBeforeDenyWrite(() =>
+      db.run(
+        `UPDATE publication_requests SET steps_completed = ?, updated_at = datetime('now') WHERE id = ?`,
+        [JSON.stringify(STARTED), id],
+      ),
+    );
+    await withFakeResend(async (calls) => {
+      const res = await deny(undefined, bindings);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual(AFTER_PUBLISHING);
+      expect(calls).toHaveLength(0);
+    });
+    expect(row(id).status).toBe("requested");
+    expect(row(id).denied_at).toBeNull();
   });
 
   test("a web click claims it in between (the claim leaves updated_at alone): in flight, claim intact", async () => {
@@ -579,7 +637,7 @@ describe("T4.10 the final publish write is guarded by the status it expects", ()
 
       expect(res.status).toBe(409);
       expect(await res.json()).toEqual({
-        error: "request_changed",
+        error: "approval_closed_during_run",
         message: APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE,
       });
       const after = row(id);
@@ -629,5 +687,108 @@ describe("T4.10 the final publish write is guarded by the status it expects", ()
     expect(row(id).status).toBe("published");
     expect(row(id).approved_at).not.toBeNull();
     expect(auditRows("approval_finished_on_closed_request")).toHaveLength(0);
+  });
+
+  // A run whose steps are ALL done never reaches the step loop or the final write above: it
+  // answered 200 `published` and wrote nothing, so a `denied` row was invisible to it, an owner-name
+  // `blocked` row resumed into it and was told "published" while it stayed blocked, and an
+  // `approving` row whose last call died before its final write stayed `approving` for good.
+  describe("a resumed run whose steps are all done", () => {
+    function seedAllDone(seed: Seed): number {
+      db.run(
+        `INSERT INTO datasets (dataset_id, name, owner_user_id, github_repo, visibility)
+         VALUES (?, 'Deny Dataset', ?, ?, 'private')`,
+        [DATASET, ownerId, `nemarDatasets/${DATASET}`],
+      );
+      const id = seedRequest({ updatedAt: "-16 minutes", ...seed, steps: PUBLICATION_STEPS });
+      markDatasetScreensClean(db, DATASET);
+      return id;
+    }
+
+    const CLOSED = {
+      error: "approval_closed_during_run",
+      message: APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE,
+    };
+
+    /** The refusal, an untouched row and the one audit row that says which status it found. */
+    async function expectClosed(id: number, foundAs: string, res: Response): Promise<void> {
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual(CLOSED);
+      expect(row(id).status).toBe(foundAs);
+      expect(row(id).approved_at).toBeNull();
+      const audit = auditRows("approval_finished_on_closed_request");
+      expect(audit).toHaveLength(1);
+      expect(audit[0]?.resource_id).toBe(DATASET);
+      expect(audit[0]?.user_id).toBe(adminId);
+      expect(JSON.parse(audit[0]?.details ?? "null")).toEqual({
+        request_id: id,
+        request_status: foundAs,
+      });
+      // A closed request is never reported as a publication.
+      expect(auditRows("dataset_published")).toHaveLength(0);
+    }
+
+    test("an approving request is marked published by the guarded write, and the answer is as before", async () => {
+      const id = seedAllDone({ status: "approving" });
+      const res = await approve(env(realD1(db), "test"));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        message: "All steps already completed",
+        dataset_id: DATASET,
+        status: "published",
+      });
+      const after = row(id);
+      expect(after.status).toBe("published");
+      expect(after.approved_at).not.toBeNull();
+      expect(after.current_step).toBeNull();
+      expect(after.last_error).toBeNull();
+      expect(auditRows("approval_finished_on_closed_request")).toHaveLength(0);
+    });
+
+    test("an owner-name blocked request resumed with every step done is refused, not called published", async () => {
+      const id = seedAllDone({ status: "blocked", blockReason: OWNER_NAME_MISSING_REASON });
+      const res = await approve(env(realD1(db), "test"));
+      await expectClosed(id, "blocked", res);
+      expect(row(id).block_reason).toBe(OWNER_NAME_MISSING_REASON);
+    });
+
+    test("a requested request that carries every step is refused too", async () => {
+      const id = seedAllDone({ status: "requested" });
+      await expectClosed(id, "requested", await approve(env(realD1(db), "test")));
+    });
+
+    test("a request denied between the read and the write is not published over", async () => {
+      const id = seedAllDone({ status: "approving" });
+      const res = await approve(
+        raceBeforeFinalWrite(() =>
+          db.run(
+            `UPDATE publication_requests
+                SET status = 'denied', denied_by = ?, denied_reason = 'late', denied_at = datetime('now')
+              WHERE id = ?`,
+            [otherAdminId, id],
+          ),
+        ),
+      );
+      await expectClosed(id, "denied", res);
+      expect(row(id).denied_by).toBe(otherAdminId);
+    });
+
+    test("a concurrent finisher that already published it is carried on: 200, no closed audit row", async () => {
+      const id = seedAllDone({ status: "approving" });
+      const res = await approve(
+        raceBeforeFinalWrite(() =>
+          db.run(
+            `UPDATE publication_requests
+                SET status = 'published', approved_at = datetime('now'), approved_by = ?
+              WHERE id = ?`,
+            [otherAdminId, id],
+          ),
+        ),
+      );
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { status: string }).status).toBe("published");
+      expect(row(id).status).toBe("published");
+      expect(auditRows("approval_finished_on_closed_request")).toHaveLength(0);
+    });
   });
 });

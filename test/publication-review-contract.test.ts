@@ -3039,6 +3039,7 @@ describe("the wire vocabulary the approval refusals and the comment route share"
       "approval_in_flight",
       "deny_after_publishing",
       "invalid_dataset_id",
+      "approval_closed_during_run",
     ]);
     // The first two words are the `error` of the two bodies in the review's contract; the others
     // are the orchestrator's and the deny route's own refusals (a request that changed while it
@@ -3059,6 +3060,7 @@ describe("the wire vocabulary the approval refusals and the comment route share"
       "approval_in_flight",
       "deny_after_publishing",
       "invalid_dataset_id",
+      "approval_closed_during_run",
     ]);
     // One word, one family: none of them is also another family's.
     for (const code of APPROVAL_REFUSAL_ERROR_CODES) {
@@ -3219,14 +3221,18 @@ describe("the sentences the Worker's tests import are pinned here, once", () => 
     );
   });
 
-  test("the sentence of a run that finds its request closed at its last write", () => {
+  test("the sentence of a run that finds its request closed, under a word of its own", () => {
     expect(APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE).toBe(
-      "The request was closed while this approval was running (it was denied, or blocked again), so the run did not mark it published. Its steps had already run: read the request and the dataset again before doing anything else.",
+      "The request was closed while this approval was running (it was denied, blocked again or filed again), so the run did not mark it published. Its steps had already run, so the dataset may already be public. An approval cannot finish a closed request: check the dataset and the request (nemar admin publish list shows its status), then finish or repair it by hand.",
     );
-    // It answers under the same code as REQUEST_CHANGED_MESSAGE, so it must not be read as it.
+    // `request_changed` means that nothing ran, and this one says the steps did: not that word.
+    expect([...APPROVAL_REFUSAL_ERROR_CODES]).toContain("approval_closed_during_run");
     expect(APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE).not.toBe(REQUEST_CHANGED_MESSAGE);
     expect(APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE).toMatch(/\.$/);
     expect(APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE).not.toContain("\u2014");
+    // It names the repair, and the one command it names is a real one of this CLI.
+    expect(APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE).toContain("by hand");
+    expect(APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE).toContain("nemar admin publish list");
   });
 
   test("every approval refusal sentence is a plain sentence, and no two are the same", () => {
@@ -3239,6 +3245,7 @@ describe("the sentences the Worker's tests import are pinned here, once", () => 
       APPROVAL_IN_FLIGHT_MESSAGE,
       DENY_AFTER_PUBLISHING_MESSAGE,
       INVALID_DATASET_ID_MESSAGE,
+      APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE,
       ...Object.values(APPROVAL_RELEASE_REASON_TEXT),
     ];
     expect(new Set(sentences).size).toBe(sentences.length);
