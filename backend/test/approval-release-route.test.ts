@@ -341,6 +341,26 @@ describe("a valid token releases the claim", () => {
     expect(printed).not.toContain(s.token);
   });
 
+  // The route reads the claim's own columns and never the lease: a run reports its own failure
+  // late (a cancelled workflow is reported when GitHub says so), and a lapsed claim is exactly
+  // one that nothing else will clear (ADR 0103 decision 9).
+  for (const status of ["requested", "approving"] as const) {
+    test(`a claim 30 minutes old, past the lease, on a request that is ${status} is released all the same`, async () => {
+      const s = await seedClaim({
+        status,
+        dispatchedAgo: "-30 minutes",
+        updatedAgo: "-30 minutes",
+      });
+      const res = await release(s.token, bodyOf(s, { reason: "workflow_cancelled" }));
+      expect(res.status).toBe(200);
+      const after = requestRow(s.requestId);
+      expect(after.approval_requested_by).toBeNull();
+      expect(after.approval_dispatched_at).toBeNull();
+      expect(after.last_error).toBe(APPROVAL_RELEASE_REASON_TEXT.workflow_cancelled);
+      expect(releasedAudit()).toHaveLength(1);
+    });
+  }
+
   test("the token is spent by the release: a second call with it is the 401, and writes nothing more", async () => {
     const s = await seedClaim();
     expect((await release(s.token, bodyOf(s))).status).toBe(200);
