@@ -157,6 +157,17 @@ invisible one — which is why it is checked rather than trusted.
   the Worker is the gate in `/approve` and `approve-dispatch`; the approver is the administrator who passed the gate, made exact in Phase 3;
   mirrors and exemplars are not reviewed; the live advisory pre-screen of ADR 0014 retires when the review is switched on;
   `PUBLICATION_REVIEW_ENABLED` switches the model review and its gate, while the mechanical refusals are unconditional
+- [ADR 0104](0104-a-web-approval-is-attributed-by-a-per-claim-dispatch-token-and-a-terminal-approval-takes-the-claim-over.md) - A web approval is attributed by a per-claim dispatch token (proposed, epic #1726 Phase 3 #1730, 2026-10-13), partially superseding ADR 0080 decision 5:
+  the token is a hash-based message authentication code (HMAC) over the dataset, the request, the clicker and the claim's own stored instant, signed with the callback secret under its own domain tag, with no stored nonce and no migration,
+  carried in the dispatch payload and presented in `X-Approval-Dispatch-Token` on every `/approve` call (the command-line tool reads `NEMAR_APPROVAL_DISPATCH_TOKEN`, only in `approve`);
+  a call with no token is its caller's own act and its mark takes the claim over, a valid token makes the clicker the approver (the caller if the clicker is no longer an administrator, left open), a stale or expired one is refused (`dispatch_superseded`, `dispatch_expired`),
+  and a call that carries a token may carry no override or acknowledgment (`decision_with_dispatch_token`, replacing the Phase 2 stop-gap);
+  a bearer credential for attribution only, never stored, logged, audited, listed or returned, which a leaked copy can use to release its own claim and so cancel one run;
+  an optional `request_id` on approve, approve-dispatch and deny (`request_mismatch`), the dispatch id checked per environment before the claim (`invalid_dataset_id`),
+  a token-authenticated `POST /webhooks/approval-release` and `last_error` on the four pre-loop refusals,
+  one router-wide cookie Origin guard, `/deny` gated by the lease and refused once any step beyond validation has run (`approval_in_flight`, `deny_after_publishing`),
+  the final write guarded by status (`approval_closed_during_run`), and #1580 deferred;
+  the executor's workflow edit and the rollout order are in the ADR
 
 ## Backfill note (2026-07-31)
 
