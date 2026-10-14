@@ -722,7 +722,8 @@ export function overrideReasonsOf(raw: string | null): ReasonCode[] {
  * the detail's `reasons`, and what the approval gate's refusal carries, so the two say the same
  * thing. A web page prints `statement` and `cure`; `command` and `line` are the terminal's. Every
  * reason carries `statement` and `command` always, because a page reads a missing `statement` as
- * a Worker that predates it. The report is required so that a caller cannot
+ * a Worker that predates it. `cure` and `command` follow `startable`, not the detail's
+ * `start_offered`, by design (see `neutralCureOf`). The report is required so that a caller cannot
  * leave it out by accident: one that has no report passes `null`, and the line then lacks only
  * what the report adds.
  */
