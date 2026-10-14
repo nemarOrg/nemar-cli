@@ -1049,8 +1049,19 @@ export interface ReasonRule {
   clearedBy: "nothing" | "screen_acknowledgment" | "override";
   /** What is wrong, in fixed words. */
   sentence: string;
-  /** What clears it. May contain `<dataset>`, which {@link describePublicationReview} fills. */
+  /**
+   * What clears it, as a terminal prints it: the CLI's lines, the email and the gate's refusal
+   * message. A web page never prints this ({@link neutralCureOf} is its text). May contain
+   * `<dataset>`, which {@link describePublicationReview} fills.
+   */
   cure: string;
+  /**
+   * The command the cure names, `<dataset>` for the id; absent when it names none. It sits in
+   * `cure` as `: <command>` right after the first clause, and {@link neutralCureOf} removes exactly
+   * that. The `(--force)` of the override sentence is the other terminal-only part and needs no
+   * field: `clearedBy: "override"` says it.
+   */
+  command?: string;
   /**
    * What is true instead of `cure` when an administrator's `start` would be refused, because the
    * request is not waiting for its decision (`POST .../review/start` answers 409
@@ -1060,11 +1071,21 @@ export interface ReasonRule {
   cureNotStartable?: string;
 }
 
-const OVERRIDE =
-  "An administrator may approve over it; the approval records the override (--force).";
+const FORCE_FLAG = " (--force)";
+const OVERRIDE = `An administrator may approve over it; the approval records the override${FORCE_FLAG}.`;
+/** The override sentence for a reader with no terminal: the flag is a terminal's alone. */
+const OVERRIDE_NEUTRAL = OVERRIDE.replace(FORCE_FLAG, "");
 
 /** What a start cure says for a request no start can reach (see {@link ReasonRule.cureNotStartable}). */
 const NOT_STARTABLE = `A review starts only for a request that is waiting for its decision. ${OVERRIDE}`;
+
+// The commands the cures name. One spelling each, so a reason's `command`, its cure and `next`
+// (nextCommand) are the same string.
+const COMMAND_SCREEN = "nemar admin publish screen <dataset>";
+const COMMAND_START = "nemar admin publish start <dataset>";
+const COMMAND_SHOW = "nemar admin publish show <dataset>";
+const ACKNOWLEDGE_FLAG = '--acknowledge-identifier-screen "<reason>"';
+const COMMAND_ACKNOWLEDGE = `nemar admin publish approve <dataset> ${ACKNOWLEDGE_FLAG}`;
 
 /** The reasons table (ADR 0102, section 5). A `Record`, so a code without a rule fails the build. */
 export const REASONS: Record<ReasonCode, ReasonRule> = {
@@ -1090,7 +1111,8 @@ export const REASONS: Record<ReasonCode, ReasonRule> = {
     class: "unknown",
     clearedBy: "nothing",
     sentence: "The identifier screen has no verdict about the current commit.",
-    cure: "An administrator runs the screen again: nemar admin publish screen <dataset>.",
+    cure: `An administrator runs the screen again: ${COMMAND_SCREEN}.`,
+    command: COMMAND_SCREEN,
   },
   identifier_screen_pending: {
     class: "unknown",
@@ -1102,7 +1124,8 @@ export const REASONS: Record<ReasonCode, ReasonRule> = {
     class: "unknown",
     clearedBy: "nothing",
     sentence: "The identifier screen read a commit that is no longer the head of main.",
-    cure: "An administrator runs the screen again: nemar admin publish screen <dataset>.",
+    cure: `An administrator runs the screen again: ${COMMAND_SCREEN}.`,
+    command: COMMAND_SCREEN,
   },
   version_kept_after_anonymous_release: {
     class: "fail",
@@ -1116,7 +1139,8 @@ export const REASONS: Record<ReasonCode, ReasonRule> = {
     clearedBy: "screen_acknowledgment",
     sentence:
       "The identifier screen found something a person must look at, or could not read everything.",
-    cure: 'An administrator reads what the screen reported and approves with a recorded reason: nemar admin publish approve <dataset> --acknowledge-identifier-screen "<reason>".',
+    cure: `An administrator reads what the screen reported and approves with a recorded reason: ${COMMAND_ACKNOWLEDGE}.`,
+    command: COMMAND_ACKNOWLEDGE,
   },
   question_failed: {
     class: "fail",
@@ -1155,13 +1179,15 @@ export const REASONS: Record<ReasonCode, ReasonRule> = {
     class: "fail",
     clearedBy: "override",
     sentence: "The stored review concluded fail, and its report no longer shows why.",
-    cure: `Read the review's record: nemar admin publish show <dataset>. ${OVERRIDE}`,
+    cure: `Read the review's record: ${COMMAND_SHOW}. ${OVERRIDE}`,
+    command: COMMAND_SHOW,
   },
   review_not_started: {
     class: "unknown",
     clearedBy: "override",
     sentence: "No review of the screened commit has started.",
-    cure: `Start it: nemar admin publish start <dataset>. ${OVERRIDE}`,
+    cure: `Start it: ${COMMAND_START}. ${OVERRIDE}`,
+    command: COMMAND_START,
     cureNotStartable: NOT_STARTABLE,
   },
   review_running: {
@@ -1174,21 +1200,24 @@ export const REASONS: Record<ReasonCode, ReasonRule> = {
     class: "unknown",
     clearedBy: "override",
     sentence: "The review did not report in time.",
-    cure: `Start it again: nemar admin publish start <dataset>. ${OVERRIDE}`,
+    cure: `Start it again: ${COMMAND_START}. ${OVERRIDE}`,
+    command: COMMAND_START,
     cureNotStartable: NOT_STARTABLE,
   },
   review_limit_reached: {
     class: "unknown",
     clearedBy: "override",
     sentence: "The daily limit of automated reviews was reached.",
-    cure: `Start it later: nemar admin publish start <dataset>; an administrator's start is held by the platform's limit only. ${OVERRIDE}`,
+    cure: `Start it later: ${COMMAND_START}; an administrator's start is held by the platform's limit only. ${OVERRIDE}`,
+    command: COMMAND_START,
     cureNotStartable: NOT_STARTABLE,
   },
   review_could_not_run: {
     class: "unknown",
     clearedBy: "override",
     sentence: "The review could not run.",
-    cure: `Once the cause is fixed, start it again: nemar admin publish start <dataset>. ${OVERRIDE}`,
+    cure: `Once the cause is fixed, start it again: ${COMMAND_START}. ${OVERRIDE}`,
+    command: COMMAND_START,
     cureNotStartable: NOT_STARTABLE,
   },
   text_withheld: {
@@ -1275,16 +1304,56 @@ export const START_CURE_REASONS: readonly ReasonCode[] = REASON_CODES.filter(
 );
 
 /**
- * The cure of a reason for this dataset: `<dataset>` filled (a malformed id is never quoted), and,
- * when `startable` is false, what is true for a request no `start` can reach. One function for the
- * detail's `cure` field and the lines every surface prints, so they cannot differ.
+ * The cure template in force: what is true for a request no `start` can reach when `startable` is
+ * false and the rule has one, the rule's own cure otherwise. `alternative` says which.
+ */
+function cureTemplate(
+  rule: ReasonRule,
+  startable: boolean,
+): { text: string; alternative: boolean } {
+  const alternative = !startable && rule.cureNotStartable !== undefined;
+  return { text: alternative ? (rule.cureNotStartable as string) : rule.cure, alternative };
+}
+
+/** The id a cure quotes: a malformed id is never quoted, `<dataset>` stays. */
+function quotedId(datasetId: string): string {
+  return DATASET_ID.test(datasetId) ? datasetId : "<dataset>";
+}
+
+/**
+ * The cure of a reason for this dataset, as a terminal prints it: `<dataset>` filled (a malformed
+ * id is never quoted), and, when `startable` is false, what is true for a request no `start` can
+ * reach. One function for the lines every surface prints, so they cannot differ. A web page prints
+ * {@link neutralCureOf} instead.
  */
 export function cureOf(code: ReasonCode, datasetId: string, startable: boolean): string {
+  return cureTemplate(REASONS[code], startable).text.replaceAll("<dataset>", quotedId(datasetId));
+}
+
+/**
+ * The cure for a reader with no terminal: {@link cureOf} without its command and without the
+ * override flag. A complete sentence, or two.
+ */
+export function neutralCureOf(code: ReasonCode, datasetId: string, startable: boolean): string {
   const rule = REASONS[code];
-  const id = DATASET_ID.test(datasetId) ? datasetId : "<dataset>";
-  const text =
-    !startable && rule.cureNotStartable !== undefined ? rule.cureNotStartable : rule.cure;
-  return text.replaceAll("<dataset>", id);
+  const { text, alternative } = cureTemplate(rule, startable);
+  const withoutCommand =
+    !alternative && rule.command !== undefined ? text.replace(`: ${rule.command}`, "") : text;
+  return withoutCommand
+    .replace(OVERRIDE, OVERRIDE_NEUTRAL)
+    .replaceAll("<dataset>", quotedId(datasetId));
+}
+
+/**
+ * The command the terminal's cure names, the id filled; null when the cure in force names none
+ * (the alternative a start cannot reach names none).
+ */
+export function commandOf(code: ReasonCode, datasetId: string, startable: boolean): string | null {
+  const rule = REASONS[code];
+  if (rule.command === undefined || (!startable && rule.cureNotStartable !== undefined)) {
+    return null;
+  }
+  return rule.command.replaceAll("<dataset>", quotedId(datasetId));
 }
 
 export interface Reason {
@@ -1619,18 +1688,21 @@ function detailText(reason: Reason, report: PublicationReviewReport | null): str
   }
 }
 
-/** One line per reason: what is wrong, the detail, and what clears it. */
+/** What is wrong, with the detail in words: a reason without its cure, so a page can print it. */
+export function reasonStatement(reason: Reason, report: PublicationReviewReport | null): string {
+  const rule = REASONS[reason.code];
+  const detail = detailText(reason, report);
+  return detail === null ? rule.sentence : `${rule.sentence.replace(/\.$/, "")} (${detail}).`;
+}
+
+/** One line per reason, as a terminal prints it: what is wrong, the detail, and what clears it. */
 export function reasonLine(
   reason: Reason,
   datasetId: string,
   report: PublicationReviewReport | null,
   startable: boolean,
 ): string {
-  const rule = REASONS[reason.code];
-  const detail = detailText(reason, report);
-  const sentence =
-    detail === null ? rule.sentence : `${rule.sentence.replace(/\.$/, "")} (${detail}).`;
-  return `${sentence} ${cureOf(reason.code, datasetId, startable)}`;
+  return `${reasonStatement(reason, report)} ${cureOf(reason.code, datasetId, startable)}`;
 }
 
 export interface PublicationReviewDescription {
@@ -1730,14 +1802,12 @@ function nextCommand(
   if (hardReasonsOf(reasons).length > 0) {
     // Only the screen's own hard reasons are an administrator's to act on.
     return codes.has("identifier_screen_not_run") || codes.has("identifier_screen_stale")
-      ? `nemar admin publish screen ${id}`
+      ? COMMAND_SCREEN.replaceAll("<dataset>", id)
       : null;
   }
-  if (startOffered({ reasons, row, startable })) return `nemar admin publish start ${id}`;
-  if (codes.has("review_running")) return `nemar admin publish show ${id}`;
-  const ack = codes.has("identifier_screen_needs_acknowledgment")
-    ? ' --acknowledge-identifier-screen "<reason>"'
-    : "";
+  if (startOffered({ reasons, row, startable })) return COMMAND_START.replaceAll("<dataset>", id);
+  if (codes.has("review_running")) return COMMAND_SHOW.replaceAll("<dataset>", id);
+  const ack = codes.has("identifier_screen_needs_acknowledgment") ? ` ${ACKNOWLEDGE_FLAG}` : "";
   const force = overrideClassReasonsOf(reasons).length > 0 ? " --force" : "";
   return `nemar admin publish approve ${id}${resume}${ack}${force}`;
 }
@@ -1892,7 +1962,7 @@ export function describeUnreadableReview(datasetId: string): PublicationReviewDe
     tone: "warn",
     lines: [REVIEW_UNREADABLE_LINE, NOT_ASSESSED_LINE],
     summary: null,
-    next: DATASET_ID.test(datasetId) ? `nemar admin publish show ${datasetId}` : null,
+    next: DATASET_ID.test(datasetId) ? COMMAND_SHOW.replaceAll("<dataset>", datasetId) : null,
   };
 }
 
