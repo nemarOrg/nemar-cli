@@ -258,6 +258,15 @@ The revocation-cascade rule of AGENTS.md argues for refusing such a click unless
 The maintainer has not decided.
 Nothing in this ADR decides it, and the code keeps ADR 0080's behavior until it is decided.
 
+The same question has a second form, which this ADR settles as a deliberate exclusion from that rule.
+A clicker whose browser session or API key ends while the run is under way does not end the token:
+it stays valid until the claim is cleared or its lease lapses, fifteen minutes at most.
+There are four reasons.
+The token authorizes one request's one executor run, for at most the lease.
+It is not minted from a session or an API key: it is derived from the claim, which records the click, so ending a session or a key leaves nothing for it to be revoked with.
+A demotion or a deletion of the clicker does reach the run, because the approver's resolution re-checks the clicker's role and status at each call and falls back to the caller.
+And whether a click made by someone who is no longer entitled to make it should publish at all is the open decision above, which settles this case too.
+
 ## Rollout
 
 The Worker and the workflow are changed by different people in different repositories, so the order matters.
