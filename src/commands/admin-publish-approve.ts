@@ -62,7 +62,7 @@ import { plain } from "../lib/terminal-text.js";
  * The environment variable a web approval's executor is handed its dispatch token in (#1604). Read
  * by `approve` and by nothing else; never printed, never logged.
  */
-export const DISPATCH_TOKEN_ENV = "NEMAR_APPROVAL_DISPATCH_TOKEN";
+const DISPATCH_TOKEN_ENV = "NEMAR_APPROVAL_DISPATCH_TOKEN";
 
 /**
  * What `approve` says on standard error, before it reads or sends anything, when the variable is
@@ -230,7 +230,7 @@ Orchestrator Steps (execution order; shared/publication-steps.ts):
   publicly. See ANONYMOUS_RELEASE_SKIPPED_STEPS in shared/publication-steps.ts,
   which states the reason for each.
 
-Environment:
+Environment Variables:
   ${DISPATCH_TOKEN_ENV}
                   The dispatch token of a web approval, set for the run that
                   executes it; leave it unset at a terminal.
@@ -720,9 +720,9 @@ export function timelineLines(stepResults: StepResult[] | undefined): string[] {
  * are sent on every call of the run (`approvePublication`), so a retry that lands before the run is
  * marked approving passes the gate again with the same override, a request denied and filed again
  * while the run goes is refused (`request_mismatch`), and every call proves it belongs to its
- * click. A refusal the
- * Worker answers with (the review gate, the screen, a blocked request) is printed in the shared
- * words, and so is a failure; the result says only whether the run went through.
+ * click. A refusal the Worker answers with (the review gate, the screen, a blocked request) is
+ * printed in the shared words, and so is a failure; the result says only whether the run went
+ * through.
  */
 export async function runApproval(
   datasetId: string,

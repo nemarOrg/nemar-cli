@@ -23,7 +23,7 @@
  *    is refused locally in one line that never shows it, with no request sent, and is not
  *    retried as if it were a network failure;
  *  - the token is a secret: it reaches neither the console nor the `--debug` log;
- *  - a stale variable in a person's shell is not a silent trap (the Opus review of Phase 3): a run
+ *  - a stale variable in a person's shell is not a silent trap (ADR 0103, decision 3): a run
  *    that presents a token says so on standard error before it sends anything, and a refusal of
  *    that token (`dispatch_superseded`, `dispatch_expired`) is followed by the hint to unset it.
  *
@@ -665,7 +665,7 @@ describe("the help says the variable and the rule", () => {
     // A terminal approval is the stronger act: it takes a live web approval over, and says so.
     expect(help).toContain("it takes over any web approval that is under way");
     expect(help).toContain("the run the website started is then refused and changes nothing");
-    expect(help).toContain("Environment:");
+    expect(help).toContain("Environment Variables:");
   });
 
   test("the README lists the variable among the environment variables, says who sets it, and never shows it on a command line", () => {
