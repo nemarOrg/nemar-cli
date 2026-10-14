@@ -434,7 +434,13 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    *   409 dispatch_expired  the token is genuine, but its run sat idle past the 15 minute lease
    *   409 decision_with_dispatch_token  a call that carries a valid token sent an override or an
    *                         acknowledgment: nothing was recorded under anybody
-   *   409 request_changed   the request was denied or blocked while the approval was checked
+   *   409 request_changed   the request was denied or blocked while the approval was checked:
+   *                         nothing ran, and the request is read again
+   *   409 approval_closed_during_run  the request was closed (denied, blocked again or filed
+   *                         again) while the run ran, or when a resumed run whose steps are all
+   *                         done found a request that is not `approving`: the steps HAVE run, the
+   *                         request was not marked published, one audit row says so, and the
+   *                         repair is by hand (the sentence says how)
    */
   admin.post("/publish/:id/approve", zValidator("json", approveSchema), async (c) => {
     const body = c.req.valid("json");
@@ -487,7 +493,7 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    * for a call that presents it while the lease is live. `/approve` is the contract for every
    * executor, a terminal included: it also takes the review's override in its body, and answers
    * 403 origin_not_allowed for an override sent with a cookie, and the 409s `request_blocked`,
-   * `request_changed`, `dispatch_superseded`, `dispatch_expired`,
+   * `request_changed`, `approval_closed_during_run`, `dispatch_superseded`, `dispatch_expired`,
    * `decision_with_dispatch_token` and `publication_review_not_clear`, besides the identifier
    * screen's own (see its docblock). The executor sends no override: its run rides on the
    * clicker's, recorded here before the dispatch. The token is never logged, audited, listed or

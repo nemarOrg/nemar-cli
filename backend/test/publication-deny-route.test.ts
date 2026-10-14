@@ -15,8 +15,11 @@
  * The other half is the end of a run: `runPublicationApproval` marks the request `published` last,
  * and that write is now `AND status = 'approving'`. A request closed while the run ran (denied
  * once its lease had lapsed, or blocked again) is not published over: the run answers 409
- * `request_changed` with its own sentence and leaves an audit row of ids and words; a request a
- * concurrent finisher already published is carried on as before.
+ * `approval_closed_during_run` (a word of its own, because `request_changed` means nothing ran)
+ * with its own sentence and leaves an audit row of ids and words; a request a concurrent finisher
+ * already published is carried on as before. A run whose steps are ALL done ends the same way
+ * (it used to answer 200 `published` and write nothing): an `approving` request is marked
+ * published by the same guarded write, and any other status is refused with the same answer.
  *
  * Real engine only: bun:sqlite behind realD1 with every migration applied, the real admin router
  * behind its real auth middleware, GitHub as a `Bun.serve()` stand-in for the one read of `main`
@@ -634,7 +637,7 @@ describe("T4.10 the final publish write is guarded by the status it expects", ()
 
       expect(res.status).toBe(409);
       expect(await res.json()).toEqual({
-        error: "request_changed",
+        error: "approval_closed_during_run",
         message: APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE,
       });
       const after = row(id);
@@ -684,5 +687,108 @@ describe("T4.10 the final publish write is guarded by the status it expects", ()
     expect(row(id).status).toBe("published");
     expect(row(id).approved_at).not.toBeNull();
     expect(auditRows("approval_finished_on_closed_request")).toHaveLength(0);
+  });
+
+  // A run whose steps are ALL done never reaches the step loop or the final write above: it
+  // answered 200 `published` and wrote nothing, so a `denied` row was invisible to it, an owner-name
+  // `blocked` row resumed into it and was told "published" while it stayed blocked, and an
+  // `approving` row whose last call died before its final write stayed `approving` for good.
+  describe("a resumed run whose steps are all done", () => {
+    function seedAllDone(seed: Seed): number {
+      db.run(
+        `INSERT INTO datasets (dataset_id, name, owner_user_id, github_repo, visibility)
+         VALUES (?, 'Deny Dataset', ?, ?, 'private')`,
+        [DATASET, ownerId, `nemarDatasets/${DATASET}`],
+      );
+      const id = seedRequest({ updatedAt: "-16 minutes", ...seed, steps: PUBLICATION_STEPS });
+      markDatasetScreensClean(db, DATASET);
+      return id;
+    }
+
+    const CLOSED = {
+      error: "approval_closed_during_run",
+      message: APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE,
+    };
+
+    /** The refusal, an untouched row and the one audit row that says which status it found. */
+    async function expectClosed(id: number, foundAs: string, res: Response): Promise<void> {
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual(CLOSED);
+      expect(row(id).status).toBe(foundAs);
+      expect(row(id).approved_at).toBeNull();
+      const audit = auditRows("approval_finished_on_closed_request");
+      expect(audit).toHaveLength(1);
+      expect(audit[0]?.resource_id).toBe(DATASET);
+      expect(audit[0]?.user_id).toBe(adminId);
+      expect(JSON.parse(audit[0]?.details ?? "null")).toEqual({
+        request_id: id,
+        request_status: foundAs,
+      });
+      // A closed request is never reported as a publication.
+      expect(auditRows("dataset_published")).toHaveLength(0);
+    }
+
+    test("an approving request is marked published by the guarded write, and the answer is as before", async () => {
+      const id = seedAllDone({ status: "approving" });
+      const res = await approve(env(realD1(db), "test"));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        message: "All steps already completed",
+        dataset_id: DATASET,
+        status: "published",
+      });
+      const after = row(id);
+      expect(after.status).toBe("published");
+      expect(after.approved_at).not.toBeNull();
+      expect(after.current_step).toBeNull();
+      expect(after.last_error).toBeNull();
+      expect(auditRows("approval_finished_on_closed_request")).toHaveLength(0);
+    });
+
+    test("an owner-name blocked request resumed with every step done is refused, not called published", async () => {
+      const id = seedAllDone({ status: "blocked", blockReason: OWNER_NAME_MISSING_REASON });
+      const res = await approve(env(realD1(db), "test"));
+      await expectClosed(id, "blocked", res);
+      expect(row(id).block_reason).toBe(OWNER_NAME_MISSING_REASON);
+    });
+
+    test("a requested request that carries every step is refused too", async () => {
+      const id = seedAllDone({ status: "requested" });
+      await expectClosed(id, "requested", await approve(env(realD1(db), "test")));
+    });
+
+    test("a request denied between the read and the write is not published over", async () => {
+      const id = seedAllDone({ status: "approving" });
+      const res = await approve(
+        raceBeforeFinalWrite(() =>
+          db.run(
+            `UPDATE publication_requests
+                SET status = 'denied', denied_by = ?, denied_reason = 'late', denied_at = datetime('now')
+              WHERE id = ?`,
+            [otherAdminId, id],
+          ),
+        ),
+      );
+      await expectClosed(id, "denied", res);
+      expect(row(id).denied_by).toBe(otherAdminId);
+    });
+
+    test("a concurrent finisher that already published it is carried on: 200, no closed audit row", async () => {
+      const id = seedAllDone({ status: "approving" });
+      const res = await approve(
+        raceBeforeFinalWrite(() =>
+          db.run(
+            `UPDATE publication_requests
+                SET status = 'published', approved_at = datetime('now'), approved_by = ?
+              WHERE id = ?`,
+            [otherAdminId, id],
+          ),
+        ),
+      );
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { status: string }).status).toBe("published");
+      expect(row(id).status).toBe("published");
+      expect(auditRows("approval_finished_on_closed_request")).toHaveLength(0);
+    });
   });
 });
