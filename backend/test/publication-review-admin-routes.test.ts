@@ -1243,7 +1243,9 @@ describe("GET /admin/publish/:id/review", () => {
         question: "complete_and_honest",
         severity: "blocker",
         code: "readme_mismatch",
+        label: "README does not match the dataset",
         document: "readme",
+        document_label: "README",
         note: NOTE_SENTINEL,
       },
     ]);
@@ -1261,6 +1263,45 @@ describe("GET /admin/publish/:id/review", () => {
       },
     ]);
     expect(d.history_truncated).toBe(false);
+  });
+
+  test("every finding carries its label, and a finding about no document has no document label", async () => {
+    const { requestId, datasetId } = request();
+    seedPublicationReview(db, {
+      requestId,
+      datasetId,
+      state: "reported",
+      report: goodPublicationReport({
+        questions: {
+          complete_and_honest: "pass",
+          meets_standards: "pass",
+          authors_and_license: "fail",
+          name_adequate: "pass",
+        },
+        findings: [
+          {
+            question: "authors_and_license",
+            severity: "blocker",
+            code: "license_missing",
+            document: "license",
+            note: "n1",
+          },
+          {
+            question: "authors_and_license",
+            severity: "note",
+            code: "other",
+            document: null,
+            note: "n2",
+          },
+        ],
+        evidence: evidenceFor(SCREENED_HEAD),
+      }),
+    });
+    const findings = (await detail(datasetId)).review?.findings ?? [];
+    expect(findings.map((f) => [f.code, f.label, f.document, f.document_label] as const)).toEqual([
+      ["license_missing", "License missing", "license", "LICENSE"],
+      ["other", "Other", null, null],
+    ]);
   });
 
   test("a reason's cure names the dataset, and its detail is a closed word", async () => {

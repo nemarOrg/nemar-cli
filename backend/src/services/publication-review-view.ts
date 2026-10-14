@@ -65,7 +65,9 @@ import type {
 import { type ScreenGate, screenGate } from "../../../shared/identifier-screen-report.js";
 import {
   type ApprovalStanding,
+  DOCUMENT_LABEL,
   type LiveFacts,
+  PUBLICATION_FINDING_LABEL,
   PUBLICATION_REVIEW_DEADLINE_MINUTES,
   type PublicationDeclineDetail,
   type PublicationOutcome,
@@ -781,7 +783,9 @@ function recordOf(row: PublicationReviewRow, view: ReviewRowView): PublicationRe
       question: f.question,
       severity: f.severity,
       code: f.code,
+      label: PUBLICATION_FINDING_LABEL[f.code],
       document: f.document,
+      document_label: f.document === null ? null : DOCUMENT_LABEL[f.document],
       note: f.note,
     })),
     summary: report === null || report.summary === "" ? null : report.summary,

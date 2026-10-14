@@ -180,12 +180,19 @@ export interface PublicationReviewRecord {
    * an older client.
    */
   fact_notes: Array<{ question: Question; fact: string; result: "fail" | "unknown"; text: string }>;
-  /** Severity and code are plain strings so a newer server's word does not break an older client. */
+  /**
+   * Severity and code are plain strings so a newer server's word does not break an older client.
+   * `label` is the shared words for the code (`PUBLICATION_FINDING_LABEL`) and `document_label`
+   * those for the document, null for a finding about none (`DOCUMENT_LABEL`): what the CLI
+   * prints, so a page prints them and never the closed words. `note` is the model's.
+   */
   findings: Array<{
     question: Question;
     severity: string;
     code: string;
+    label: string;
     document: string | null;
+    document_label: string | null;
     note: string;
   }>;
   /** The model's summary, sanitized. */
