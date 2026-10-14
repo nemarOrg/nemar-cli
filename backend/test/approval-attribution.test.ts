@@ -33,6 +33,7 @@ import {
   DISPATCH_EXPIRED_MESSAGE,
   DISPATCH_SUPERSEDED_MESSAGE,
   REQUEST_CHANGED_MESSAGE,
+  REQUEST_MISMATCH_MESSAGE,
 } from "../../shared/contract/publication.js";
 import { PUBLICATION_STEPS } from "../../shared/publication-steps.js";
 import { adminRoutes } from "../src/routes/admin";
@@ -690,6 +691,61 @@ describe("a token that is not the claim's is refused, and never downgraded to th
     } as Bindings);
     await expectRefusedUntouched(res, id, "dispatch_superseded", before);
   });
+
+  const article = (word: string) => (/^[aeiou]/.test(word) ? "an" : "a");
+  // The order of the checks (ADR 0103, decision 3): the request the run names and the request's own
+  // block are decided BEFORE the token, so a call that is wrong about the request is told so even
+  // when its token is stale too, and neither word depends on the claim.
+  for (const [name, setup] of [
+    [
+      "superseded",
+      async (id: number) => {
+        const stale = await claim(id, clickerId, "-10 minutes");
+        await claim(id, clickerId, "-1 minutes");
+        return stale;
+      },
+    ],
+    [
+      "expired",
+      async (id: number) => {
+        db.run("UPDATE publication_requests SET updated_at = datetime('now', '-20 minutes')");
+        return claim(id, clickerId, "-20 minutes");
+      },
+    ],
+  ] as const) {
+    test(`${article(name)} ${name} token on a request the run did not name is request_mismatch, not the token's refusal`, async () => {
+      const id = seedRequest();
+      const stale = await setup(id);
+      const before = everything(id);
+
+      const res = await approveAs(EXECUTOR_KEY, stale, env, { resume: true, request_id: id + 100 });
+
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as { error: string; message: string };
+      expect(body).toEqual({ error: "request_mismatch", message: REQUEST_MISMATCH_MESSAGE });
+      expect(APPROVAL_REFUSAL_ERROR_CODES).toContain(body.error);
+      expect(everything(id)).toEqual(before);
+    });
+
+    test(`${article(name)} ${name} token on a blocked request is request_blocked, not the token's refusal`, async () => {
+      const id = seedRequest();
+      const stale = await setup(id);
+      db.run(
+        "UPDATE publication_requests SET status = 'blocked', block_reason = 'min_requirements_failed' WHERE id = ?",
+        [id],
+      );
+      const before = everything(id);
+
+      const res = await approveAs(EXECUTOR_KEY, stale);
+
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as { error: string; block_reason?: string };
+      expect(body.error).toBe("request_blocked");
+      expect(body.block_reason).toBe("min_requirements_failed");
+      expect(APPROVAL_REFUSAL_ERROR_CODES).toContain(body.error);
+      expect(everything(id)).toEqual(before);
+    });
+  }
 
   test("the refusals are in the contract the client leads with the sentence for", () => {
     expect(APPROVAL_REFUSAL_ERROR_CODES).toContain("dispatch_superseded");
