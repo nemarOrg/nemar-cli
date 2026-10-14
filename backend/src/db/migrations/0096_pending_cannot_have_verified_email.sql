@@ -7,7 +7,17 @@
 --
 -- Repair first: every live row in that state has proved its inbox, so it takes
 -- the base tier it was owed. `approved_at` and the upload grant are untouched;
--- upload access still has exactly one writer, admin approval.
+-- upload access still has exactly one writer, admin approval. Each repair leaves
+-- the same `email_verified` audit row the code flow writes, marked with the
+-- migration as its route.
+INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
+SELECT id, 'email_verified', 'user', CAST(id AS TEXT),
+       '{"via":"migration_0096","status":"verified"}'
+  FROM users
+ WHERE status = 'pending'
+   AND email_verified = 1
+   AND deleted_at IS NULL;
+
 UPDATE users
    SET status = 'verified',
        updated_at = datetime('now')

@@ -58,6 +58,17 @@ describe("0096 pending cannot have a verified email", () => {
       email_verified: 1,
       service_access: 0,
     });
+    // One audit row, for the repaired account only.
+    const audit = db
+      .query<{ resource_id: string; details: string }, []>(
+        "SELECT resource_id, details FROM audit_log WHERE action = 'email_verified'",
+      )
+      .all();
+    const strandedId = db
+      .query<{ id: number }, []>("SELECT id FROM users WHERE email = 'stranded@nemar.test'")
+      .get()?.id;
+    expect(audit.map((r) => r.resource_id)).toEqual([String(strandedId)]);
+    expect(JSON.parse(audit[0].details).via).toBe("migration_0096");
     expect(row(db, "unverified@nemar.test")?.status).toBe("pending");
     expect(row(db, "verified@nemar.test")?.status).toBe("verified");
     expect(row(db, "approved@nemar.test")?.status).toBe("approved");
