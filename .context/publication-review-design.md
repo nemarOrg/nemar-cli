@@ -462,13 +462,17 @@ whose refusal body carries the word in `error` and `code` and the sentence in `m
 `/deny` gated by the lease and refused once a step beyond validation has run or is marked current (so a failed first mutation stays undeniable);
 and the final write guarded by the request's status, with a request closed during a run refused before any tail job writes.
 A resumed run whose steps are all done leaves the request `approving` when a tail job warned, because the warning's remedy is to approve again,
-and when it closes the request it writes a `dataset_published` row that names who finished it (`finished_by_resume`).
+and answers `status: "approving"` with the warnings joined in the singular `warning`, which the CLI prints,
+and when it closes the request it writes a `dataset_published` row that names who finished it (`finished_by_resume`);
+the step loop's closing path writes its row only when its own write changed the request, so a publication has one row.
 The step loop's own end keeps the same dead end after a warning, a known limit with a follow-up (ADR 0103, decision 12).
+Two more limits of that branch (a tail-job warning that approving again cannot clear, and no write that settles the claim) and the deny rule's reliance on a best-effort current-step write are stated, each with its trigger and effect, in ADR 0103, decisions 11 and 12.
 #1580 (persist the lock continuation token) is deferred: a restart at page 1 also locks objects added meanwhile, and the benefit is unmeasured.
 
 The executor's workflow is in the central workflow repository and is changed by the maintainer: mask the token first, export it for the approve step's process alone and never through `GITHUB_ENV`, install the CLI that matches the environment, release on failure.
 The rollout order, with the skew table, is in the ADR: the workflow edit before Phase 3 reaches `dev`, a staging check, then npm `latest` before the production Worker deploy.
 One question is left open: a valid token whose clicker is no longer an active administrator falls back to the caller.
+A clicker whose session or API key ends mid-run does not end the token, which is a deliberate exclusion (ADR 0103, "Left open").
 
 Must not (kept): weaken the lease; let a dispatch token approve anything by itself.
 

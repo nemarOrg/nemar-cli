@@ -927,7 +927,8 @@ Where the two differ, this is the later text.
 3. **The order of the checks changes.**
    In `/approve` it is now: the outdated-client refusal (426), the request read (404), `request_mismatch`, `request_blocked`,
    the dispatch token (409 `dispatch_superseded`, `dispatch_expired`), the approver of record, `decision_with_dispatch_token`,
-   the identifier screen's gate, the review gate, the recording of the override, and the conditional mark.
+   then, for a run whose steps are all complete, the all-steps-done branch (item 6 below), which runs neither gate and records no override;
+   for any other run, the identifier screen's gate, the review gate, the recording of the override, and the conditional mark.
    For a call with no token, the mark also clears the claim; for a call with a token, it marks only while the claim is still the one verified.
    In `approve-dispatch` it is: the dataset id for the environment (400 `invalid_dataset_id`), the body, the request read, `request_mismatch`,
    `not_dispatchable` for a blocked request, the screen's state, the review gate, the signing secret (502 `dispatch_unconfigured`), and then the claim;
@@ -946,7 +947,11 @@ Where the two differ, this is the later text.
    So a `requested` request, with a review in any state, can be denied unless it carries steps beyond validation from an earlier approval (follow-up #1766);
    an `approving` request that stalled before it started publishing can be denied,
    which keeps the cure that section 8 names for a hard reason on a stopped approval;
-   and a request that has started publishing, one the owner-name check walked back to `blocked` included, cannot be denied and is finished with `approve --resume`.
+   and a request that has started publishing cannot be denied.
+   An `approving` one, and one the owner-name check walked back to `blocked`, is finished with `approve --resume`.
+   A `requested` one may be finished by approving it, unless it carries every step: that is refused as closed (`approval_closed_during_run`) and repaired by hand.
+   A `blocked` one with another reason waits for its depositor to fix what blocked it (follow-up #1766).
+   The refusal's sentence promises none of these cures, and tells the administrator to check the dataset first.
    Started publishing means that a step beyond the validation-only ones has completed or is marked as the request's current step.
    The current step counts because a step is marked before it runs and stays marked when it fails or is interrupted, and the first mutation, `s3_public_read`, may have applied the bucket policy without a record.
    So a request whose first mutation failed stays undeniable until it is retried to completion or repaired by hand.
@@ -955,8 +960,11 @@ Where the two differ, this is the later text.
    The write that ends an approval requires that the request is still `approving`.
    A run whose request was denied once its lease had lapsed, or was blocked again, answers 409 `approval_closed_during_run` and leaves one audit row, `approval_finished_on_closed_request`.
    A resumed run whose steps are all done follows the same rule, and refuses a request that is not `approving` before it runs any tail job, so a refusal never follows a write that cannot be taken back.
-   When a tail job warns, that run leaves the request `approving`, so that approving again retries it.
+   When a tail job warns, that run leaves the request `approving`, so that approving again retries it,
+   and answers `status: "approving"` with the warnings joined in the singular `warning`, the key the CLI prints.
+   A missing `datasets` row, or a failed read of it, while the audit row is built is a warning and no row, never a guessed review gate.
    When none warns, it marks the request `published`, and only when that write changed the row it writes the `dataset_published` audit row, once, with the approver of record as its user (the clicker for a call under a token, with `executed_by` naming the caller) and the flag `finished_by_resume`.
+   The step loop's closing path writes its `dataset_published` row on the same terms, only when its own write changed the request, so a publication has one row whichever call finished it.
    The step loop's own end has the same "approve again" dead end after a warning, which Phase 3 does not change: it is a known limit with a follow-up (ADR 0103, decision 12).
 7. **None of this is behind the flag.**
    Item 3 of the Phase 2 amendment lists what production changes with `PUBLICATION_REVIEW_ENABLED` off.
