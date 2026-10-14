@@ -102,14 +102,22 @@ const DENIABLE_STATUSES: readonly string[] = ["requested", "approving", "blocked
  * order it applies them (started publishing before in flight, so a live run that has gone past
  * the validation steps is told what matters). Read on the first look at the request and again
  * after a lost write, so both answer by the same rule.
+ *
+ * The first refusal ignores the status and the block reason on purpose, and so differs from the
+ * approval's gate (`publishingStanding`, which will not trust the steps of a `requested` row or of
+ * a `blocked` one with another reason, so that new content cannot skip the gates). The gate asks
+ * whether to trust old steps; a denial asks whether anything irreversible has happened. A run that
+ * made the S3 objects public-read and the repository public, and was then walked back for the
+ * owner's name, keeps those steps when the owner requests again (the row goes to `requested`, or
+ * to a block of the screen's or the minimum's, with `steps_completed` kept; follow-up #1766
+ * tracks that), and the data is still public. A request's completed steps are that request's own
+ * acts, so one that has started publishing is never denied, whatever its status.
  */
 function denyRefusal(row: {
-  status: string;
-  block_reason: string | null;
   steps_completed: string | null;
   in_flight: number;
 }): { error: string; message: string } | null {
-  if (publishingStanding(row) === "publishing") {
+  if (hasStartedPublishing(row.steps_completed)) {
     return { error: "deny_after_publishing", message: DENY_AFTER_PUBLISHING_MESSAGE };
   }
   return row.in_flight === 1 ? DENY_IN_FLIGHT : null;
@@ -266,9 +274,10 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    *   404                       no active request (the body this route always had)
    *   409 request_mismatch      `request_id` names a request that is not that one: it was denied or
    *                             filed again since the administrator read it (#1579)
-   *   409 deny_after_publishing the run has started publishing (`publishingStanding`, which counts
-   *                             the owner-name walk-back that left it blocked): the dataset may
-   *                             already be public, and the depositor must not be told "denied"
+   *   409 deny_after_publishing a step outside the validation-only ones is done
+   *                             (`hasStartedPublishing`), WHATEVER the status: a request filed again
+   *                             after the owner-name walk-back keeps its steps, and the dataset may
+   *                             already be public, so the depositor must not be told "denied"
    *   409 approval_in_flight    an approval is running for it (`approvalInFlightSql`, the lease the
    *                             dispatch claim reads): a denial would overwrite a run still writing
    * A stalled run that has not started publishing (the lease lapsed, or a failed run past its

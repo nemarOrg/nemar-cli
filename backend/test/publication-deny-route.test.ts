@@ -295,17 +295,23 @@ describe("T4.6 a request nothing is running for is denied, and the depositor is 
     await denied(seedRequest({ status: "requested", dispatchedAt: "-16 minutes" }));
   });
 
-  test("a blocked request, even with the steps of an earlier life still listed", async () => {
-    // Nothing clears `steps_completed` when the depositor requests again, so a request blocked by
-    // the screen can carry the steps of a run that was walked back long ago. Only the owner-name
-    // walk-back is a run that is still half published.
+  test("a requested request that has done only the validation-only steps", async () => {
+    // `ci_check` and `enrichment_check` change nothing: the request is still deniable.
+    await denied(seedRequest({ status: "requested", steps: ["ci_check", "enrichment_check"] }));
+  });
+
+  test("a blocked request that has done only the validation-only steps", async () => {
     await denied(
-      seedRequest({ status: "blocked", blockReason: "min_requirements_failed", steps: STARTED }),
+      seedRequest({
+        status: "blocked",
+        blockReason: "min_requirements_failed",
+        steps: ["ci_check", "enrichment_check"],
+      }),
     );
   });
 });
 
-describe("T4.7 a request that has started publishing is never denied", () => {
+describe("T4.7 a request that has started publishing is never denied, whatever its status", () => {
   test("a stalled approving request with a step done outside the validation-only ones", async () => {
     const id = seedRequest({ status: "approving", updatedAt: "-16 minutes", steps: STARTED });
     await expectRefused(id, () => deny(), { status: 409, body: AFTER_PUBLISHING });
@@ -324,9 +330,40 @@ describe("T4.7 a request that has started publishing is never denied", () => {
     });
     await expectRefused(id, () => deny(), { status: 409, body: AFTER_PUBLISHING });
   });
+
+  // The steps of a request are that request's own irreversible acts. The owner's re-request
+  // (`routes/datasets/publication.ts`) moves the row back to `requested`, or on to a block of the
+  // screen's or the minimum's, and KEEPS `steps_completed` (follow-up #1766 tracks that). The
+  // gate must not trust those steps (it would skip the gates for content that never passed them),
+  // but the denial asks another question: has anything irreversible happened? The S3 objects made
+  // public-read and the repository made public by the first life are still public, so the
+  // depositor must not be told "denied". Hence this refusal ignores the status and the reason.
+  test("a requested request whose steps are those of an owner-name run, filed again", async () => {
+    const id = seedRequest({ status: "requested", steps: STARTED });
+    await expectRefused(id, () => deny(), { status: 409, body: AFTER_PUBLISHING });
+  });
+
+  test("a blocked request (minimum failed) that carries the steps of an earlier life", async () => {
+    const id = seedRequest({
+      status: "blocked",
+      blockReason: "min_requirements_failed",
+      steps: STARTED,
+    });
+    await expectRefused(id, () => deny(), { status: 409, body: AFTER_PUBLISHING });
+  });
+
+  test("a blocked request with no reason at all that carries those steps", async () => {
+    const id = seedRequest({ status: "blocked", steps: STARTED });
+    await expectRefused(id, () => deny(), { status: 409, body: AFTER_PUBLISHING });
+  });
+
+  test("a requested request with a claim in flight and those steps: started publishing comes first", async () => {
+    const id = seedRequest({ status: "requested", dispatchedAt: "-5 minutes", steps: STARTED });
+    await expectRefused(id, () => deny(), { status: 409, body: AFTER_PUBLISHING });
+  });
 });
 
-describe("T4.8 a request that moves between the read and the write is not overwritten", () => {
+describe("T4.8a request that moves between the read and the write is not overwritten", () => {
   test("published in between: the answer is that no request is active, and it stays published", async () => {
     const id = seedRequest({ status: "approving", updatedAt: "-16 minutes", steps: ["ci_check"] });
     const bindings = raceBeforeDenyWrite(() =>
@@ -394,6 +431,24 @@ describe("T4.8 a request that moves between the read and the write is not overwr
       expect(calls).toHaveLength(0);
     });
     expect(row(id).status).toBe("approving");
+  });
+
+  test("a requested request gains started steps in between: the re-read refuses by the same rule", async () => {
+    const id = seedRequest({ status: "requested" });
+    const bindings = raceBeforeDenyWrite(() =>
+      db.run(
+        `UPDATE publication_requests SET steps_completed = ?, updated_at = datetime('now') WHERE id = ?`,
+        [JSON.stringify(STARTED), id],
+      ),
+    );
+    await withFakeResend(async (calls) => {
+      const res = await deny(undefined, bindings);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual(AFTER_PUBLISHING);
+      expect(calls).toHaveLength(0);
+    });
+    expect(row(id).status).toBe("requested");
+    expect(row(id).denied_at).toBeNull();
   });
 
   test("a web click claims it in between (the claim leaves updated_at alone): in flight, claim intact", async () => {
