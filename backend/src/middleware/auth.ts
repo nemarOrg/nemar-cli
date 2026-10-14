@@ -12,6 +12,7 @@
  */
 
 import type { Context, Next } from "hono";
+import type { OriginNotAllowedBody } from "../../../shared/contract/publication-review-admin.js";
 import type { AccountKind } from "../../../shared/contract/user.js";
 import {
   type ActiveAccountStatus,
@@ -559,14 +560,14 @@ export async function cookieOriginGuard(c: AuthContext, next: Next) {
     return;
   }
   if (c.get("authMethod") !== "token" && !isAllowedOrigin(c.req.header("Origin"))) {
-    return c.json(
-      {
-        error: "origin_not_allowed",
-        code: "origin_not_allowed",
-        message: ORIGIN_NOT_ALLOWED_MESSAGE,
-      },
-      403,
-    );
+    // Typed with the contract's body, so a field renamed here or there breaks the build and not
+    // only a test (ADR 0103, decision 10).
+    const refusal: OriginNotAllowedBody = {
+      error: "origin_not_allowed",
+      code: "origin_not_allowed",
+      message: ORIGIN_NOT_ALLOWED_MESSAGE,
+    };
+    return c.json(refusal, 403);
   }
   await next();
 }
