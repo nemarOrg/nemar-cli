@@ -1025,7 +1025,8 @@ A sentence is called web-safe here when it names no terminal command, flag or pl
    the approve control's four states (`approve.*`), the review's standing words and the labels on the model's text (`review.*`), and the three successes of a review start (`start.*`).
    A key exists only where the page cannot print the Worker's words, because the Worker words a refusal for a terminal.
    So the table does not repeat the words that are printed as they arrive and are pinned web-safe by the test of item 2;
-   the refusals the page's existing friendly-message map already words (a blocked request, an unconfigured dispatch) stay there.
+   the refusals the page's existing friendly-message map already words (an unconfigured dispatch, an approval already running) stay there.
+   A blocked request is not one of them: `not_dispatchable` is the mirrored key `approve.blocked`, and the map no longer carries it.
    Four Phase 3 codes have no key, `decision_with_dispatch_token`, `dispatch_superseded`, `dispatch_expired` and `approval_closed_during_run`:
    only `/approve` answers them and only the executor calls it, so a key would be copy with no reader.
    The values are complete sentences the page prints unchanged, with no placeholder and no template.
@@ -1038,10 +1039,34 @@ A sentence is called web-safe here when it names no terminal command, flag or pl
    Approve, with the same explicit confirmation as the terminal: the review id and the reasons shown, sent in the body of `approve-dispatch`,
    and, when the screen's gate is `acknowledge`, a reason of 10 to 500 characters that is recorded with the administrator's account.
    Deny, and start the review.
-   Every call carries `request_id`.
+   Approve and deny carry `request_id`, so a click is refused when the request it was for is no longer the active one.
+   The start does not, because its route reads no body and acts on the request that is active;
+   a start made after the request changed reviews the current request, which is harmless, and its own refusals cover a request that cannot be reviewed.
    The page offers no Approve for a hard reason, for a blocked request (even one walked back from a started run, because `approve-dispatch` refuses every blocked request),
    or when the screen's gate is `blocks`, `rerun` or `wait`.
    It never sends a body the route does not accept.
+
+   Five choices of the page follow from that rule, each a decision of the page and not of the Worker.
+   - **The acknowledgment is always asked for.**
+     Whenever `screen_gate` is `acknowledge`, the page asks for the acknowledgment reason, even when this administrator's own acknowledgment is already on the row.
+     The Worker would pass without it, and sending it again is accepted and recorded again;
+     the page chooses a fresh recorded reason over inferring from the row what the Worker would accept.
+   - **A stopped approval is offered as a fresh approve.**
+     An `approving` request that stopped before it published is offered the typed confirmation, with an override or an acknowledgment when the gates need one,
+     because the Worker gates a stopped run like a fresh one.
+     The row's own button keeps its "Resume approval" label; only an approval that has started publishing is continued without the gates.
+   - **No review row and no start: the page says so and offers no Approve.**
+     When an override-class reason stands, no review row is on record to attach the override to, and the Worker offers no start (an `approving` request that never started publishing),
+     the page prints its own line instead of the mirrored `gate.no_review_row`, which tells the reader to start a review.
+     The case is rare, and the cure is a command-line step.
+   - **A hard reason withholds Approve whatever the review's gate says.**
+     The page withholds Approve for a reason that no override or acknowledgment clears, also when the review's gate is `off` or `n/a`.
+     That is stricter than the Worker, which does not gate on an advice-only review.
+     A reason the page does not know counts as hard, and an approval that has started publishing is exempt, because it passes no gate.
+   - **There is no fallback to the old bodyless Approve.**
+     When the detail cannot be read, or the API is older than the page, the page withholds Approve and says which of the two it is;
+     it does not send the click the page sent before this phase.
+     So the API deploys before the page, as item 3 requires.
 
 6. **Staleness is learned from the refusals, not the detail.**
    The detail reads no GitHub, so it cannot say that the screen is stale;
@@ -1054,5 +1079,7 @@ A sentence is called web-safe here when it names no terminal command, flag or pl
    Mailing the depositor a comment from the page is not done.
    The strict parity path is not yet in the continuous integration workflow (two small edits to its unit-pure job, once the website file is on `staging`).
    The executor workflow edit of Phase 3 stays the maintainer's, as the Phase 3 amendment says.
+   `description.next` shows `nemar admin publish start <id>` for a clean sandbox (`xx`) request, although `start_offered` is false for it and the route refuses a start there.
+   That is CLI behavior from before this phase, tracked in #1773, and the page never prints `description.next`.
    A sentence in AGENTS.md about the new copy file, beside the one on the account copy, is the maintainer's to write.
    The website is promoted to production only after the Worker that carries this phase, as item 3 requires.

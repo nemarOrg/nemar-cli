@@ -503,7 +503,8 @@ The nemar-cli half:
   with a parity test on each side on the pattern of the account copy.
   The words the Worker sends that are web-safe are printed as they arrive and pinned by a web-safety test over the real producer, with one list of forbidden terminal words.
   The Phase 3 codes that only the executor reaches have no key.
-- **What the page may do:** approve (the review id and the reasons shown, and a reason of 10 to 500 characters when the screen's gate is `acknowledge`), deny and start, each with `request_id`.
+- **What the page may do:** approve (the review id and the reasons shown, and a reason of 10 to 500 characters when the screen's gate is `acknowledge`), deny and start.
+  Approve and deny carry `request_id`; the start does not, because its route reads no body and acts on the request that is active.
   Staleness comes from the refusals (`gate: "stale"`, `review_changed`, `request_mismatch`), because the detail reads no GitHub.
 - **Left open:** a control to run the identifier screen again (the Worker has the route; an administrator uses the terminal), the `gate: "wait"` answer for an acknowledgment that lost a race,
   mailing the depositor from the page, wiring the strict parity path into the continuous integration workflow once the website's file is on its `staging` branch,
