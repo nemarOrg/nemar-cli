@@ -21,7 +21,6 @@ import { describe, expect, test } from "bun:test";
 import "./setup";
 import {
   APPROVAL_CLAIM_CLEAR_SQL,
-  APPROVAL_DISPATCH_TOKEN_HEADER,
   checkApprovalDispatchToken,
 } from "../backend/src/services/approval-dispatch";
 import { isValidDatasetId } from "../backend/src/services/datasetId";
@@ -147,10 +146,6 @@ describe("signApprovalDispatchToken / verifyApprovalDispatchToken", () => {
     ]) {
       expect(other).not.toBe(APPROVAL_DISPATCH_TOKEN_DOMAIN);
     }
-  });
-
-  test("the header it travels in is the one the executor and the Worker both name", () => {
-    expect(APPROVAL_DISPATCH_TOKEN_HEADER).toBe("X-Approval-Dispatch-Token");
   });
 
   test("the services/github barrel re-exports the very functions", () => {

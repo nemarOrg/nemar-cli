@@ -1,14 +1,6 @@
-import { APPROVAL_DISPATCH_TOKEN_HEADER } from "../../../shared/contract/publication";
 import { type Bindings, hasRole, parseRole } from "../types/bindings";
 import { isActiveAccountStatus } from "./account-tier";
 import { verifyApprovalDispatchToken } from "./github/callback-tokens";
-
-/**
- * The header the executor presents its dispatch token in (see {@link checkApprovalDispatchToken}).
- * Declared once in the shared contract so the Worker and the CLI cannot spell it two ways, and
- * named here because this is where the Worker's attribution rules live.
- */
-export { APPROVAL_DISPATCH_TOKEN_HEADER };
 
 /**
  * The lease behind a web-launched approval (ADR 0080).
@@ -22,13 +14,15 @@ export { APPROVAL_DISPATCH_TOKEN_HEADER };
  * simply lapses once the signs stop, which is the only way a crashed or
  * cancelled executor can release it.
  *
- * ONE predicate, two readers. The dispatch route claims with it (a second click,
- * or a second admin, must not start a second run beside the first) and the list
+ * ONE predicate, three readers. The dispatch route claims with it (a second click,
+ * or a second admin, must not start a second run beside the first), the list
  * route reports it as `approval_in_flight`, so a page never offers a button the
- * route would refuse. Clients must not hard-code the minutes: they read the
- * boolean. That is why this is SQL rather than a function over a row: the claim
- * has to be one atomic conditional UPDATE, and a TypeScript copy for the list
- * would be a second statement of the same rule free to drift from the first.
+ * route would refuse, and the deny route refuses a request it says is in flight
+ * (a denial would overwrite a run that is still writing). Clients must not
+ * hard-code the minutes: they read the boolean. That is why this is SQL rather
+ * than a function over a row: the claim has to be one atomic conditional UPDATE,
+ * and a TypeScript copy for the list would be a second statement of the same
+ * rule free to drift from the first.
  *
  * Two clauses, because there are two ways to run an approval:
  *
