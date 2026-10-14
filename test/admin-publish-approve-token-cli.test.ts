@@ -541,20 +541,20 @@ describe("a variable left in a person's shell is not a silent trap", () => {
     expect(r.stderr).toContain(NOTICE);
   });
 
-  test("no variable, and a blank one, print no notice", async () => {
-    const requestId = seedGolden(h.db);
-    seedReport(h.db, requestId);
+  test("no variable prints no notice", async () => {
+    seedReport(h.db, seedGolden(h.db));
 
     const none = await executor(undefined);
+
     expect(none.exitCode).toBe(0);
     expect(output(none)).not.toContain(TOKEN_ENV);
+  });
 
-    h.reset();
-    await h.admin("webexecutor", EXECUTOR_KEY);
-    h.setEnv({ PUBLICATION_REVIEW_ENABLED: "1" });
+  test("a blank variable prints no notice", async () => {
     seedReport(h.db, seedGolden(h.db));
 
     const blank = await executor("   ");
+
     expect(blank.exitCode).toBe(0);
     expect(output(blank)).not.toContain(TOKEN_ENV);
   });
@@ -588,6 +588,10 @@ describe("a variable left in a person's shell is not a silent trap", () => {
     const r = await executor(token);
 
     expect(r.exitCode).toBe(1);
+    // The refusal is the Worker's, for the request that is no longer there, and the call did carry
+    // the token: the hint is absent because the refusal is not about it.
+    expect(h.requests.filter((c) => c.path === APPROVE_PATH).map((c) => c.status)).toEqual([404]);
+    expect(approveCalls()[0]?.dispatchToken).toBe(true);
     expect(output(r)).not.toContain(UNSET_HINT);
     expect(output(r)).not.toContain(token);
   });
@@ -612,14 +616,30 @@ describe("a variable left in a person's shell is not a silent trap", () => {
     expect(output(r)).not.toContain(token);
   });
 
-  test("a refusal with no token carries no hint (the review's own refusal, as a person sees it)", async () => {
+  test("a call with no token is never told to unset the variable: not for the review's own refusal, and not for an answer that names a dispatch refusal", async () => {
     await click();
 
-    const r = await executor(undefined);
+    const refused = await executor(undefined);
 
-    expect(r.exitCode).toBe(1);
-    expect(output(r)).not.toContain(UNSET_HINT);
-    expect(output(r)).not.toContain(TOKEN_ENV);
+    expect(refused.exitCode).toBe(1);
+    expect(output(refused)).not.toContain(UNSET_HINT);
+    expect(output(refused)).not.toContain(TOKEN_ENV);
+
+    // This Worker never answers a call with no token with a dispatch refusal. One of another
+    // version might, and the hint is for a run that presented a token, so the command must not
+    // rest on the Worker for that: the answer is still the real route's, with its word changed.
+    h.rewrite(`POST ${APPROVE_PATH}`, (body) => {
+      body.error = "dispatch_superseded";
+    });
+    const reworded = await executor(undefined);
+
+    expect(reworded.exitCode).toBe(1);
+    expect(h.requests.filter((c) => c.path === APPROVE_PATH).map((c) => c.status)).toEqual([
+      409, 409,
+    ]);
+    expect(approveCalls().every((c) => !c.dispatchToken)).toBe(true);
+    expect(output(reworded)).not.toContain(UNSET_HINT);
+    expect(output(reworded)).not.toContain(TOKEN_ENV);
   });
 });
 
