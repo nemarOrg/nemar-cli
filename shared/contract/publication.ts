@@ -152,6 +152,15 @@ export const REQUEST_CHANGED_MESSAGE =
   "The request changed while the approval was being checked (it was denied or blocked). Read it again before approving.";
 
 /**
+ * The sentence of the 409 `request_changed` that an approval answers when its LAST write finds
+ * the request closed: the steps had run, and then the request was denied (once its lease had
+ * lapsed) or blocked again, so the run did not mark it published. The steps cannot be taken back,
+ * so the sentence sends the reader to look at the request and the dataset before anything else.
+ */
+export const APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE =
+  "The request was closed while this approval was running (it was denied, or blocked again), so the run did not mark it published. Its steps had already run: read the request and the dataset again before doing anything else.";
+
+/**
  * The sentence of the 409 `override_inside_web_approval`: an override sent while a web approval of
  * the request is in progress would be recorded under the administrator who clicked.
  */
