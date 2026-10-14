@@ -453,6 +453,15 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    *                         done found a request that is not `approving`: the steps HAVE run, the
    *                         request was not marked published, one audit row says so, and the
    *                         repair is by hand (the sentence says how)
+   *
+   * One refusal is retryable, and is not in the list above because its body is not
+   * `{ error: <code>, message }`:
+   *   500                   a call that carries a token could not tell why its mark changed
+   *                         nothing, because the read that says (the claim's current instant)
+   *                         failed: the orchestrator's `CLAIM_READ_FAILED_MESSAGE`. Nothing was
+   *                         marked and nothing started, so the caller tries again. Its body is
+   *                         `{ error: <sentence> }`, like the other 500s of this route, with no
+   *                         code word (ADR 0103, decision 6).
    */
   admin.post("/publish/:id/approve", zValidator("json", approveSchema), async (c) => {
     const body = c.req.valid("json");

@@ -2543,10 +2543,10 @@ async function markRequestPublished(
  * sentence the administrator is told, and never changes the run.
  *
  * `dataset` is the row the run already read; a run that never read it (every step was already done)
- * passes none and the row is read here, inside the same best-effort block, so a failed read is a
- * warning and no row, never a row with a guessed review gate. `finishedByResume` marks the row of a
- * request that a resumed run with every step already done closed: the steps ran in an earlier
- * call, so the row names who finished the request, and says so.
+ * passes none and the row is read here, inside the same best-effort block, so a failed read, and a
+ * dataset whose row is gone, are a warning and no row, never a row with a guessed review gate.
+ * `finishedByResume` marks the row of a request that a resumed run with every step already done
+ * closed: the steps ran in an earlier call, so the row names who finished the request, and says so.
  */
 async function recordPublicationAudit(
   c: ApproveStepContext,
@@ -2560,8 +2560,10 @@ async function recordPublicationAudit(
       (await c.db
         .prepare("SELECT source, is_exemplar FROM datasets WHERE dataset_id = ?")
         .bind(c.datasetId)
-        .first<{ source: string | null; is_exemplar: number | null }>()) ??
-      {};
+        .first<{ source: string | null; is_exemplar: number | null }>());
+    // `first()` answers null for a row that is not there: that is no state to record, and an empty
+    // object would read as a dataset with no source.
+    if (!row) throw new Error("no dataset row to read the review gate's state from");
     await auditLogStatement(c.db, {
       userId: c.approver.id,
       action: "dataset_published",
@@ -2848,7 +2850,7 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     // request closed while the run ran. But only when no tail job warned: those warnings say
     // "approve the request again to retry", which finds only an active request, so closing it
     // here would turn the remedy into a 404. A run with a warning leaves the request `approving`
-    // and answers as it did before the request was marked here at all.
+    // and says so in its answer, below.
     const ended = retryWarnings.length === 0 ? await markRequestPublished(db, request.id) : null;
     if (ended && !ended.finished) {
       return refuseApprovalOnClosedRequest(c, request.id, ended.status);
@@ -2866,12 +2868,16 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
       ended?.finished && ended.changed
         ? await recordPublicationAudit(c, undefined, allSteps, true)
         : undefined;
+    // The answer is the step loop's in shape (ADR 0103 decision 12): the warnings under the one key
+    // the CLI prints, `warning`, joined as the loop joins its own, and a `status` that says what
+    // the row says. A call that left the request `approving` (a tail job warned) says so, so an
+    // answer that reads as a success never claims a publication the row does not have.
     const warnings = [...retryWarnings, auditWarning].filter(Boolean);
     return c.json({
       message: "All steps already completed",
       dataset_id: datasetId,
-      status: "published",
-      ...(warnings.length > 0 ? { warnings } : {}),
+      status: ended ? "published" : "approving",
+      ...(warnings.length > 0 ? { warning: warnings.join(" | ") } : {}),
     });
   }
 
@@ -2951,7 +2957,9 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // to another reason since is refused as well.
   //
   // The mark is also where the claim is settled (#1604, ADR 0103 decision 6), and it is the last
-  // write before any work is done, so a refused call has changed nothing:
+  // write before any work is done, so a call it refuses has not touched the claim or the request
+  // row. The screen's acknowledgment and the review override were recorded before it, under the
+  // approver, and a call the mark refuses leaves those rows behind:
   //   - a call that proved its claim (a valid token) marks only while `approval_dispatched_at` is
   //     still the instant it verified. The token was checked a few statements ago, and a click
   //     that replaced the claim, a release, a takeover or a denial since would otherwise be run
@@ -3217,8 +3225,10 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // Mark as published, by the write that ends every approval (`markRequestPublished`): a request
   // closed while the run ran is not published over. The steps cannot be taken back, so the run says
   // so loudly instead of recording a publication of a request somebody closed. A request that is
-  // already `published` was finished by a concurrent call of the same run, and this one carries on
-  // exactly as before.
+  // already `published` was finished by a concurrent call of the same run (a retry that overlapped,
+  // or a resume that found every step done), and this one carries on exactly as before, except
+  // that it records nothing: the call that changed the request records the publication (ADR 0103
+  // decision 12), so there is one `dataset_published` row per publication.
   const ended = await markRequestPublished(db, request.id);
   if (!ended.finished) {
     return refuseApprovalOnClosedRequest(c, request.id, ended.status);
@@ -3232,8 +3242,11 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // runs the same hook when it does.
   scheduleNeurobagelSync(env, waitUntil, datasetId, "hook:publication");
 
-  // Audit log (non-fatal but warn user if fails)
-  const auditWarning = await recordPublicationAudit(c, dataset, allSteps);
+  // Audit log (non-fatal but warn user if fails), written only by the call that made the request
+  // published: a concurrent finisher has recorded it, or is recording it.
+  const auditWarning = ended.changed
+    ? await recordPublicationAudit(c, dataset, allSteps)
+    : undefined;
 
   // Combine all non-fatal warnings into the response so operators can act
   // without tailing logs. Both warnings are optional and independent.

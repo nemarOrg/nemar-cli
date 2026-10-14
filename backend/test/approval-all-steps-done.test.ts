@@ -51,7 +51,6 @@ const DATASET = "nm098771";
 let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
 let terminalId: number;
-let executorId: number;
 let clickerId: number;
 
 beforeEach(async () => {
@@ -59,7 +58,7 @@ beforeEach(async () => {
   app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
   app.route("/admin", adminRoutes);
   terminalId = await seedUser(db, "allDoneTerminal", "admin", TERMINAL_KEY);
-  executorId = await seedUser(db, "allDoneExecutor", "admin", EXECUTOR_KEY);
+  await seedUser(db, "allDoneExecutor", "admin", EXECUTOR_KEY);
   clickerId = await seedUser(db, "allDoneClicker", "admin", CLICKER_KEY);
 });
 
@@ -162,10 +161,14 @@ describe("a tail job that warns leaves the request approving, so approving again
 
     const first = await approve();
     expect(first.status).toBe(200);
-    const body = (await first.json()) as { status: string; message: string; warnings?: string[] };
+    const body = (await first.json()) as Record<string, unknown>;
     expect(body.message).toBe("All steps already completed");
-    expect(body.warnings).toHaveLength(1);
-    expect(body.warnings?.[0]).toContain("Approve the request again to retry");
+    // The answer says what the row says: a request the call did not close is `approving`, and the
+    // warning is under the one key every other answer of this route and the CLI read, `warning`
+    // (ADR 0103 decision 12), never a plural one that nothing prints.
+    expect(body.status).toBe("approving");
+    expect(body).not.toHaveProperty("warnings");
+    expect(body.warning).toContain("Approve the request again to retry");
     expect(requestRow(id).status).toBe("approving");
     expect(requestRow(id).approved_at).toBeNull();
     expect(auditRows("dataset_published")).toHaveLength(0);
@@ -174,7 +177,9 @@ describe("a tail job that warns leaves the request approving, so approving again
     // would be a 404), runs the tail jobs again, and warns again while the cause stands.
     const again = await approve();
     expect(again.status).toBe(200);
-    expect(((await again.json()) as { warnings?: string[] }).warnings).toHaveLength(1);
+    const againBody = (await again.json()) as { status: string; warning?: string };
+    expect(againBody.status).toBe("approving");
+    expect(againBody.warning).toContain("Approve the request again to retry");
     expect(requestRow(id).status).toBe("approving");
 
     // Once the cause is repaired, the next approval has nothing to warn about and closes the request.
@@ -189,6 +194,27 @@ describe("a tail job that warns leaves the request approving, so approving again
     expect(requestRow(id).status).toBe("published");
     expect(requestRow(id).approved_at).not.toBeNull();
     expect(auditRows("dataset_published")).toHaveLength(1);
+  });
+
+  test("two tail jobs that warn in one call are joined with ' | ' under the one key, as the step loop joins its own", async () => {
+    const id = seedAllDone("approving");
+    seedConcealedEraWithWarning();
+    const failingStamp = env({
+      DB: interceptingD1(realD1(db), (sql) => {
+        if (/UPDATE datasets\s+SET sweep_stamps/.test(sql)) throw new Error("the stamp is refused");
+      }),
+    });
+
+    const res = await approve({ bindings: failingStamp });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { status: string; warning?: string };
+    expect(body.status).toBe("approving");
+    const parts = (body.warning ?? "").split(" | ");
+    expect(parts).toHaveLength(2);
+    expect(parts[0]).toContain("the stamp is refused");
+    expect(parts[1]).toContain("Approve the request again to retry");
+    expect(requestRow(id).status).toBe("approving");
   });
 });
 
@@ -284,7 +310,6 @@ describe("the call that closes an all-steps-done request writes the dataset_publ
       executed_by: "allDoneExecutor",
       finished_by_resume: true,
     });
-    expect(executorId).not.toBe(clickerId);
   });
 
   test("a row that cannot be written is a warning in the answer, and the request is still closed", async () => {
@@ -300,12 +325,52 @@ describe("the call that closes an all-steps-done request writes the dataset_publ
     const res = await approve({ bindings: failing });
 
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { warnings?: string[] };
-    expect(body.warnings).toHaveLength(1);
-    expect(body.warnings?.[0]).toContain("Audit log write failed");
-    expect(body.warnings?.[0]).toContain("the audit table is unwritable");
+    const body = (await res.json()) as { status: string; warning?: string };
+    expect(body.status).toBe("published");
+    expect(body.warning).toContain("Audit log write failed");
+    expect(body.warning).toContain("the audit table is unwritable");
     expect(requestRow(id).status).toBe("published");
     expect(auditRows("dataset_published")).toHaveLength(0);
+  });
+
+  // The row records the review gate's state for the dataset, read from the dataset's row. A run
+  // that never read the row reads it here, and a row it cannot read (the read failed, or the
+  // dataset is gone) is a warning and no audit row, never a row with a gate state made up for it
+  // (ADR 0103 decision 12).
+  describe("the dataset row the audit row is built from cannot be read", () => {
+    const readFailing = () =>
+      env({
+        DB: interceptingD1(realD1(db), (sql) => {
+          if (/SELECT source, is_exemplar FROM datasets/.test(sql)) {
+            throw new Error("the dataset read is refused");
+          }
+        }),
+      });
+
+    for (const [name, arrange, bindings, cause] of [
+      ["the read fails", () => {}, readFailing, "the dataset read is refused"],
+      [
+        "the dataset row is gone",
+        () => db.run("DELETE FROM datasets WHERE dataset_id = ?", [DATASET]),
+        () => env(),
+        "no dataset row",
+      ],
+    ] as const) {
+      test(`${name}: a warning in the answer, no dataset_published row, and the request is still closed`, async () => {
+        const id = seedAllDone("approving");
+        arrange();
+
+        const res = await approve({ bindings: bindings() });
+
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as { status: string; warning?: string };
+        expect(body.status).toBe("published");
+        expect(body.warning).toContain("Audit log write failed");
+        expect(body.warning).toContain(cause);
+        expect(requestRow(id).status).toBe("published");
+        expect(auditRows("dataset_published")).toHaveLength(0);
+      });
+    }
   });
 
   test("a finisher that lost the race to a concurrent call writes no row of its own", async () => {

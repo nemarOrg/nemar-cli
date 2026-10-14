@@ -80,24 +80,27 @@ const DISPATCH_TOKEN_NOTICE = `This run presents the dispatch token in ${DISPATC
 const DISPATCH_TOKEN_UNSET_HINT = `If you are not running a dispatched approval, unset ${DISPATCH_TOKEN_ENV} and run it again.`;
 
 /**
- * What the dispatch token variable holds, read the way `approve` uses it. Blank is none (an unset
- * variable, an empty one, or whitespace alone). Anything else must be what a header can carry:
- * printable ASCII with no whitespace, so a stray line break, a typographic quote pasted with the
- * value or a character from another script is refused here with a sentence, not handed to the HTTP
- * client, which throws on it and reports a network failure that the command would retry for a
- * while. A straight quote is printable ASCII and is sent; the Worker refuses it. The Worker mints
- * 64 lowercase hexadecimal characters; this does not insist on that, so a token of another shape
+ * What the dispatch token variable holds, read the way `approve` uses it. The two ends are trimmed,
+ * as the Worker trims the header, so a token exported with the newline a file ends with is the
+ * same token (ADR 0103, decision 3). What is left is none when it is empty (an unset variable, an
+ * empty one, or whitespace alone). Anything else must be what a header can carry: printable ASCII
+ * with no whitespace inside, so a stray line break, a typographic quote pasted with the value or a
+ * character from another script is refused here with a sentence, not handed to the HTTP client,
+ * which throws on it and reports a network failure that the command would retry for a while. A
+ * straight quote is printable ASCII and is sent; the Worker refuses it. The Worker mints 64
+ * lowercase hexadecimal characters; this does not insist on that, so a token of another shape
  * still reaches the Worker and is refused there with the Worker's own words. The `problem` names
  * what is wrong and never the value, which is a credential.
  */
 function readDispatchToken(
   raw: string | undefined,
 ): { kind: "none" } | { kind: "token"; value: string } | { kind: "malformed"; problem: string } {
-  if (raw === undefined || raw.trim() === "") return { kind: "none" };
-  if (/^[\x21-\x7e]+$/.test(raw)) return { kind: "token", value: raw };
+  const value = raw?.trim() ?? "";
+  if (value === "") return { kind: "none" };
+  if (/^[\x21-\x7e]+$/.test(value)) return { kind: "token", value };
   return {
     kind: "malformed",
-    problem: /\s/.test(raw)
+    problem: /\s/.test(value)
       ? "it contains whitespace"
       : "it contains a character outside printable ASCII",
   };
@@ -181,9 +184,8 @@ Description:
   --acknowledge-identifier-screen and --skip-ci-check are refused here, before
   anything is sent.
   Without the variable the command is your own approval, recorded under your
-  account, and it takes over any web approval that is under way: the run the
-  website started is then refused and changes nothing. 'next' never reads the
-  variable.
+  account. Once it passes the gates it takes the claim over, and the website's
+  run is refused at its next call. 'next' never reads the variable.
   A run that presents a token says so on standard error before it reads or sends
   anything, and a refusal of that token is followed by how to unset the variable,
   for a person whose shell still holds a stale one.
@@ -338,9 +340,16 @@ After Approval:
                 ? "--skip-ci-check"
                 : null;
           if (decision !== null) {
+            // The click recorded an override and an acknowledgment, and made no CI decision at all:
+            // it has no option for one, so a run the website started never skips the CI check.
+            // Each flag gets the reason that is true of it (ADR 0103, decision 5).
+            const why =
+              decision === "--skip-ci-check"
+                ? "a run the website started never skips the CI check (the click has no such option), and the API refuses a run that asks to"
+                : "a run the website started carries the decision its click made, and the API refuses a run that sends one of its own";
             console.log(
               chalk.red(
-                `${decision} cannot be used while ${DISPATCH_TOKEN_ENV} is set: a run the website started carries the decision its click made, and the API refuses a run that sends one of its own. Unset ${DISPATCH_TOKEN_ENV} to approve as yourself. Nothing was sent.`,
+                `${decision} cannot be used while ${DISPATCH_TOKEN_ENV} is set: ${why}. Unset ${DISPATCH_TOKEN_ENV} to approve as yourself. Nothing was sent.`,
               ),
             );
             process.exitCode = 1;
