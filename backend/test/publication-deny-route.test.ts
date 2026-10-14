@@ -668,13 +668,13 @@ describe("the final publish write is guarded by the status it expects", () => {
   }
 
   /** An environment whose database lands `effect` once, just before the run's final write. */
-  function raceBeforeFinalWrite(effect: () => void): Bindings {
+  function raceBeforeFinalWrite(effect: () => void | Promise<void>): Bindings {
     let fired = false;
     return env(
-      interceptingD1(realD1(db), (sql) => {
+      interceptingD1(realD1(db), async (sql) => {
         if (!fired && /UPDATE publication_requests\s+SET status = 'published'/.test(sql)) {
           fired = true;
-          effect();
+          await effect();
         }
       }),
       "test",
@@ -771,7 +771,29 @@ describe("the final publish write is guarded by the status it expects", () => {
     expect(body.dataset_id).toBe(DATASET);
     expect(row(id).status).toBe("published");
     expect(auditRows("approval_finished_on_closed_request")).toHaveLength(0);
-    expect(auditRows("dataset_published")).toHaveLength(1);
+    // One row per publication (ADR 0103 decision 12): the call that changes the request records
+    // it. This finisher is a bare statement that records nothing, and the run that found the
+    // request already published does not write a row of its own on top of it.
+    expect(auditRows("dataset_published")).toHaveLength(0);
+  });
+
+  test("a terminal resume that closes the request first leaves exactly one dataset_published row", async () => {
+    const id = seedRun();
+    // The resume finds every step done (the run has recorded the last of them), closes the
+    // request and records the publication, all before the run's own closing write.
+    const res = await approve(
+      raceBeforeFinalWrite(async () => {
+        const resumed = await approve(env(realD1(db), "test"));
+        expect(resumed.status).toBe(200);
+        expect(row(id).status).toBe("published");
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(row(id).status).toBe("published");
+    const rows = auditRows("dataset_published");
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0]?.details ?? "null")).toMatchObject({ finished_by_resume: true });
   });
 
   test("a run nothing interrupts still publishes, with the guard in place", async () => {

@@ -3217,8 +3217,10 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // Mark as published, by the write that ends every approval (`markRequestPublished`): a request
   // closed while the run ran is not published over. The steps cannot be taken back, so the run says
   // so loudly instead of recording a publication of a request somebody closed. A request that is
-  // already `published` was finished by a concurrent call of the same run, and this one carries on
-  // exactly as before.
+  // already `published` was finished by a concurrent call of the same run (a retry that overlapped,
+  // or a resume that found every step done), and this one carries on exactly as before, except
+  // that it records nothing: the call that changed the request records the publication (ADR 0103
+  // decision 12), so there is one `dataset_published` row per publication.
   const ended = await markRequestPublished(db, request.id);
   if (!ended.finished) {
     return refuseApprovalOnClosedRequest(c, request.id, ended.status);
@@ -3232,8 +3234,11 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // runs the same hook when it does.
   scheduleNeurobagelSync(env, waitUntil, datasetId, "hook:publication");
 
-  // Audit log (non-fatal but warn user if fails)
-  const auditWarning = await recordPublicationAudit(c, dataset, allSteps);
+  // Audit log (non-fatal but warn user if fails), written only by the call that made the request
+  // published: a concurrent finisher has recorded it, or is recording it.
+  const auditWarning = ended.changed
+    ? await recordPublicationAudit(c, dataset, allSteps)
+    : undefined;
 
   // Combine all non-fatal warnings into the response so operators can act
   // without tailing logs. Both warnings are optional and independent.
