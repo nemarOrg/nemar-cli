@@ -47,6 +47,7 @@ import {
 import {
   ACTIVE_REQUEST_TAIL_SQL,
   APPROVAL_CLAIM_CLEAR_SQL,
+  type ApprovalDispatchRefusal,
   type Approver,
   approvalLeaseLiveSql,
   checkApprovalDispatchToken,
@@ -2566,6 +2567,12 @@ async function refuseApprovalOnClosedRequest(
   );
 }
 
+/** The sentence that answers each refusal of a dispatch token (the word is the answer's `error`). */
+const DISPATCH_REFUSAL_MESSAGE: Record<ApprovalDispatchRefusal, string> = {
+  dispatch_superseded: DISPATCH_SUPERSEDED_MESSAGE,
+  dispatch_expired: DISPATCH_EXPIRED_MESSAGE,
+};
+
 export async function runPublicationApproval(args: ApproveRunArgs): Promise<RespondOutcome> {
   const { db, env, waitUntil, datasetId, adminUser, body, dispatchToken } = args;
   const { resume } = body;
@@ -2679,21 +2686,18 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   );
   if (tokenCheck.kind === "refused") {
     console.warn(
-      `[publish] ${datasetId}: approval refused for request ${request.id}, its dispatch token is ${tokenCheck.code === "dispatch_expired" ? "expired" : "no longer the claim's"}`,
+      `[publish] ${datasetId}: approval refused for request ${request.id}, its dispatch token was refused as ${tokenCheck.code}`,
     );
     return c.json(
-      {
-        error: tokenCheck.code,
-        message:
-          tokenCheck.code === "dispatch_expired"
-            ? DISPATCH_EXPIRED_MESSAGE
-            : DISPATCH_SUPERSEDED_MESSAGE,
-      },
+      { error: tokenCheck.code, message: DISPATCH_REFUSAL_MESSAGE[tokenCheck.code] },
       409,
     );
   }
-  const tokenValid = tokenCheck.kind === "valid";
-  c.approver = await resolveApprover(db, request.approval_requested_by, tokenValid, {
+  // The claim a valid token was verified against (its clicker and the instant it was made), or
+  // null for a call that sent none: the approver and the mark below read it from here, never from
+  // the row again.
+  const verifiedClaim = tokenCheck.kind === "valid" ? tokenCheck : null;
+  c.approver = await resolveApprover(db, tokenCheck, {
     id: adminUser.id,
     username: adminUser.username,
   });
@@ -2704,7 +2708,7 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // record, who is the clicker and not the sender. So an override or an acknowledgment is recorded
   // only under the credential that sent it, or at the clicker's own dispatch.
   if (
-    tokenValid &&
+    verifiedClaim !== null &&
     (body.override_publication_review !== undefined ||
       body.acknowledge_identifier_screen !== undefined)
   ) {
@@ -2867,16 +2871,16 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
       // error is history (the caller's own output has it), and the row reads as
       // running, not failed, from this moment (services/approval-dispatch.ts).
       `UPDATE publication_requests SET status = 'approving', approved_by = ?, last_error = NULL, updated_at = datetime('now')${
-        tokenValid ? "" : `, ${APPROVAL_CLAIM_CLEAR_SQL}`
+        verifiedClaim ? "" : `, ${APPROVAL_CLAIM_CLEAR_SQL}`
       } WHERE id = ? AND (status IN ('requested', 'approving') OR (status = 'blocked' AND block_reason = '${OWNER_NAME_MISSING_REASON}' AND ? = 1))${
-        tokenValid ? " AND approval_dispatched_at = ?" : ""
+        verifiedClaim ? " AND approval_dispatched_at = ?" : ""
       }`,
     )
     .bind(
       c.approver.id,
       request.id,
       readAsBlocked,
-      ...(tokenValid ? [request.approval_dispatched_at] : []),
+      ...(verifiedClaim ? [verifiedClaim.claimedAt] : []),
     )
     .run();
   if ((marked.meta.changes ?? 0) !== 1) {
@@ -2885,13 +2889,13 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     // (superseded); a claim that stands over a request that moved (a review re-blocked it, which
     // leaves the claim as it was) is the request that changed, as for every other approval. A
     // read that fails answers superseded: nothing proved the claim, and nothing was marked.
-    if (tokenValid) {
+    if (verifiedClaim) {
       const now = await db
         .prepare("SELECT approval_dispatched_at FROM publication_requests WHERE id = ?")
         .bind(request.id)
         .first<{ approval_dispatched_at: string | null }>()
         .catch(() => null);
-      if (!now || now.approval_dispatched_at !== request.approval_dispatched_at) {
+      if (!now || now.approval_dispatched_at !== verifiedClaim.claimedAt) {
         console.warn(
           `[publish] ${datasetId}: approval refused, the claim on request ${request.id} was replaced while it was being checked`,
         );

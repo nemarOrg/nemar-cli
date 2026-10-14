@@ -288,11 +288,12 @@ describe("checkApprovalDispatchToken (the rules, in order)", () => {
     ).toEqual({ kind: "absent" });
   });
 
-  test("a genuine token on a live claim is valid", async () => {
+  test("a genuine token on a live claim is valid, and carries the clicker and the instant it was verified against", async () => {
     const token = await signApprovalDispatchToken(PAYLOAD, SECRET);
-    expect(await checkApprovalDispatchToken(env, row(), token)).toEqual({ kind: "valid" });
+    const valid = { kind: "valid", clickerId: PAYLOAD.clickerId, claimedAt: PAYLOAD.claimedAt };
+    expect(await checkApprovalDispatchToken(env, row(), token)).toEqual(valid);
     // The header's own padding is not part of the token.
-    expect(await checkApprovalDispatchToken(env, row(), ` ${token} `)).toEqual({ kind: "valid" });
+    expect(await checkApprovalDispatchToken(env, row(), ` ${token} `)).toEqual(valid);
   });
 
   test("no secret on the Worker is superseded, never valid: a token is not honored it cannot check", async () => {

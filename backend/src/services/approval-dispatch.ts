@@ -137,9 +137,11 @@ export interface Approver {
  * every web approval. A terminal approval carries no token, so it falls through to the caller and
  * behaves exactly as it always has; the caller is the person.
  *
- * The proof is the dispatch token (#1604, Phase 3): `tokenValid` is the answer of
- * {@link checkApprovalDispatchToken}, true only for a call that presented the token of THIS claim
- * of THIS request while its lease is live. The fork is on the proof and not on the lease, so a
+ * The proof is the dispatch token (#1604, Phase 3): `proof` is the answer of
+ * {@link checkApprovalDispatchToken}, and only its `valid` variant, a call that presented the token
+ * of THIS claim of THIS request while its lease is live, carries the clicker (`clickerId`, read from
+ * the claim the token was verified against, so a valid proof with no clicker cannot be built). The
+ * fork is on the proof and not on the lease, so a
  * person who runs `/approve` at a terminal inside a web run's live lease is recorded as themselves
  * (and takes the claim over, at the mark), where the lease alone used to record them as the
  * clicker. A call whose token does not verify never reaches here: the caller answers 409 first.
@@ -155,14 +157,13 @@ export interface Approver {
  */
 export async function resolveApprover(
   db: D1Database,
-  approvalRequestedBy: number | null,
-  tokenValid: boolean,
+  proof: Exclude<ApprovalDispatchTokenCheck, { kind: "refused" }>,
   caller: Approver,
 ): Promise<Approver> {
-  if (approvalRequestedBy === null || !tokenValid) return caller;
+  if (proof.kind !== "valid") return caller;
   const clicker = await db
     .prepare("SELECT id, username, email, role, status, deleted_at FROM users WHERE id = ?")
-    .bind(approvalRequestedBy)
+    .bind(proof.clickerId)
     .first<{
       id: number;
       username: string | null;
@@ -189,7 +190,13 @@ export type ApprovalDispatchRefusal = "dispatch_superseded" | "dispatch_expired"
 /** What {@link checkApprovalDispatchToken} found. */
 export type ApprovalDispatchTokenCheck =
   | { kind: "absent" }
-  | { kind: "valid" }
+  /**
+   * The token is the claim's own. `clickerId` and `claimedAt` are the claim's columns the token
+   * was verified against: the administrator who clicked, and the instant that click claimed the
+   * request. The caller attributes the run to the first and binds its mark to the second, so
+   * there is no bare "valid" beside nullable columns to get out of step.
+   */
+  | { kind: "valid"; clickerId: number; claimedAt: string }
   | { kind: "refused"; code: ApprovalDispatchRefusal };
 
 /** The columns of a `publication_requests` row that a dispatch token is checked against. */
@@ -225,7 +232,8 @@ const EXPIRED: ApprovalDispatchTokenCheck = { kind: "refused", code: "dispatch_e
  *   3. A MAC that matches while the lease has lapsed: `expired`. The run sat quiet past its
  *      lease, so a click made long ago is not honored for work that happens now; clicking again
  *      claims afresh. Asked only AFTER the MAC, so a stranger learns nothing about a lease.
- *   4. Otherwise `valid`.
+ *   4. Otherwise `valid`, carrying the claim's clicker and instant: rule 2 has already refused a
+ *      claim with either column null, so a `valid` answer cannot lack them.
  *
  * A `refused` call must change nothing: the caller answers 409 with the code before any write.
  * The lease read is the time-only one (`approvalLeaseLiveSql`), not the failure-aware in-flight
@@ -254,5 +262,9 @@ export async function checkApprovalDispatchToken(
   );
   if (!matches) return SUPERSEDED;
   if (row.approval_lease_live !== 1) return EXPIRED;
-  return { kind: "valid" };
+  return {
+    kind: "valid",
+    clickerId: row.approval_requested_by,
+    claimedAt: row.approval_dispatched_at,
+  };
 }
