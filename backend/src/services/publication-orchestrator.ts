@@ -2434,6 +2434,53 @@ async function concealedEraVersionWarning(
   return `${datasetId} was de-anonymized but a version identifier minted during the blind may still be RESERVED: ${joined}. A reserved DOI does not resolve, and the dataset page now links it. Approve the request again to retry -- a run whose steps are all complete still retries this.`;
 }
 
+/**
+ * The sentences of the four answers of {@link runPublicationApproval} that come AFTER the request
+ * was marked `approving` and BEFORE its step loop, the only exits that used to leave the row with
+ * no `last_error`. Each is both the answer's own words and what {@link recordPreLoopFailure}
+ * writes, declared once so the two cannot drift and the answers stay byte-identical.
+ */
+const PRE_LOOP_FAILURE = {
+  datasetMissing: "Dataset not found",
+  sandbox: "Sandbox datasets (xx-prefix) are for testing only and cannot be published.",
+  noRepository: "Dataset has no GitHub repository",
+  invalidRepository: "Invalid repository format",
+} as const;
+
+/**
+ * The write behind {@link recordPreLoopFailure}, exported so a test can aim a fault at exactly
+ * this statement. Limited to a request that is still `approving`: the call marked it a moment
+ * ago, and one that was denied since is not given an error that would read as its own.
+ */
+export const PRE_LOOP_FAILURE_SQL =
+  "UPDATE publication_requests SET last_error = ? WHERE id = ? AND status = 'approving'";
+
+/**
+ * Say why an approval stopped before its step loop (#1582). The request-start UPDATE has marked it
+ * `approving` and refreshed `updated_at`, and these answers return before any step records
+ * anything, so the row would read as a run in flight for the rest of the lease with nothing
+ * running (`approvalInFlightSql`: no `last_error` means no failure grace). Writing the answer's
+ * own sentence makes the row read as failed, and so as stalled once the grace has passed.
+ * `updated_at` is left as the mark set it: the grace counts from this call, which is the run's
+ * last sign of life.
+ *
+ * Best-effort and never the answer: a failure here is logged by request id and the caller returns
+ * the same body and status it always did.
+ */
+async function recordPreLoopFailure(
+  db: D1Database,
+  requestId: number,
+  message: string,
+): Promise<void> {
+  try {
+    await db.prepare(PRE_LOOP_FAILURE_SQL).bind(message, requestId).run();
+  } catch {
+    console.error(
+      `[publish] could not record the early refusal of request ${requestId} as its last error`,
+    );
+  }
+}
+
 export async function runPublicationApproval(args: ApproveRunArgs): Promise<RespondOutcome> {
   const { db, env, waitUntil, datasetId, adminUser, body } = args;
   const { resume } = body;
@@ -2715,15 +2762,17 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     }>();
 
   if (!dataset) {
-    return c.json({ error: "Dataset not found" }, 404);
+    await recordPreLoopFailure(db, request.id, PRE_LOOP_FAILURE.datasetMissing);
+    return c.json({ error: PRE_LOOP_FAILURE.datasetMissing }, 404);
   }
 
   // Block publication of sandbox datasets, except staging exemplars (epic #923).
   if (dataset.dataset_id.startsWith("xx") && !isExemplarPublishAllowed(c.env, dataset)) {
+    await recordPreLoopFailure(db, request.id, PRE_LOOP_FAILURE.sandbox);
     return c.json(
       {
         error: "Cannot publish sandbox datasets",
-        message: "Sandbox datasets (xx-prefix) are for testing only and cannot be published.",
+        message: PRE_LOOP_FAILURE.sandbox,
         dataset_id: datasetId,
       },
       400,
@@ -2779,12 +2828,14 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   }
 
   if (!dataset.github_repo) {
-    return c.json({ error: "Dataset has no GitHub repository" }, 400);
+    await recordPreLoopFailure(db, request.id, PRE_LOOP_FAILURE.noRepository);
+    return c.json({ error: PRE_LOOP_FAILURE.noRepository }, 400);
   }
 
   const repoName = dataset.github_repo.split("/")[1];
   if (!repoName) {
-    return c.json({ error: "Invalid repository format" }, 500);
+    await recordPreLoopFailure(db, request.id, PRE_LOOP_FAILURE.invalidRepository);
+    return c.json({ error: PRE_LOOP_FAILURE.invalidRepository }, 500);
   }
 
   const pat = await getDatasetsToken(c.env);
