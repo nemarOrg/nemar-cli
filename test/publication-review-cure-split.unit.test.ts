@@ -332,10 +332,13 @@ describe("the command is what a terminal runs", () => {
 describe("the reasons table holds the split together", () => {
   const codes = Object.keys(REASONS) as ReasonCode[];
 
-  test("I1: a command sits in the terminal cure as `: <command>`", () => {
+  test("I1: a command sits in the terminal cure as `: <command>`, whole, closed by a period or a semicolon", () => {
     for (const code of codes) {
       const { command, cure } = REASONS[code];
-      if (command !== undefined) expect(cure).toContain(`: ${command}`);
+      if (command === undefined) continue;
+      const at = cure.indexOf(`: ${command}`);
+      expect(at).toBeGreaterThanOrEqual(0);
+      expect(cure.charAt(at + 2 + command.length)).toMatch(/^[.;]$/);
     }
   });
 
