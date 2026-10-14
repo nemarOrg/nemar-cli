@@ -26,7 +26,7 @@ import type { Database } from "bun:sqlite";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Server } from "bun";
 import { Hono } from "hono";
-import { APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE } from "../../shared/contract/publication.js";
+import { APPROVAL_CLOSED_DURING_RUN_MESSAGE } from "../../shared/contract/publication.js";
 import { PUBLICATION_STEPS } from "../../shared/publication-steps.js";
 import { adminRoutes } from "../src/routes/admin";
 import { hashApiKey } from "../src/services/token";
@@ -213,7 +213,7 @@ describe("POST /admin/publish/:id/approve (golden characterization)", () => {
     expect(res.status).toBe(409);
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.error).toBe("approval_closed_during_run");
-    expect(body.message).toBe(APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE);
+    expect(body.message).toBe(APPROVAL_CLOSED_DURING_RUN_MESSAGE);
 
     // The short-circuit still fires BEFORE the 'approving' transition, and it writes nothing to
     // the request: the row stays exactly as seeded, and is no longer reported as published (it

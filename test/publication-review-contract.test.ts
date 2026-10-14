@@ -11,8 +11,8 @@ import { join } from "node:path";
 import { BIDS_DATATYPES } from "../backend/src/services/datacite";
 import * as prompt from "../scripts/ci/pr-review-prompt";
 import {
+  APPROVAL_CLOSED_DURING_RUN_MESSAGE,
   APPROVAL_DISPATCH_TOKEN_HEADER,
-  APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE,
   APPROVAL_IN_FLIGHT_MESSAGE,
   APPROVAL_REFUSAL_ERROR_CODES,
   APPROVAL_RELEASE_REASONS,
@@ -3222,17 +3222,17 @@ describe("the sentences the Worker's tests import are pinned here, once", () => 
   });
 
   test("the sentence of a run that finds its request closed, under a word of its own", () => {
-    expect(APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE).toBe(
+    expect(APPROVAL_CLOSED_DURING_RUN_MESSAGE).toBe(
       "The request was closed while this approval was running (it was denied, blocked again or filed again), so the run did not mark it published. Its steps had already run, so the dataset may already be public. An approval cannot finish a closed request: check the dataset and the request (nemar admin publish list shows its status), then finish or repair it by hand.",
     );
     // `request_changed` means that nothing ran, and this one says the steps did: not that word.
     expect([...APPROVAL_REFUSAL_ERROR_CODES]).toContain("approval_closed_during_run");
-    expect(APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE).not.toBe(REQUEST_CHANGED_MESSAGE);
-    expect(APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE).toMatch(/\.$/);
-    expect(APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE).not.toContain("\u2014");
+    expect(APPROVAL_CLOSED_DURING_RUN_MESSAGE).not.toBe(REQUEST_CHANGED_MESSAGE);
+    expect(APPROVAL_CLOSED_DURING_RUN_MESSAGE).toMatch(/\.$/);
+    expect(APPROVAL_CLOSED_DURING_RUN_MESSAGE).not.toContain("\u2014");
     // It names the repair, and the one command it names is a real one of this CLI.
-    expect(APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE).toContain("by hand");
-    expect(APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE).toContain("nemar admin publish list");
+    expect(APPROVAL_CLOSED_DURING_RUN_MESSAGE).toContain("by hand");
+    expect(APPROVAL_CLOSED_DURING_RUN_MESSAGE).toContain("nemar admin publish list");
   });
 
   test("every approval refusal sentence is a plain sentence, and no two are the same", () => {
@@ -3245,7 +3245,7 @@ describe("the sentences the Worker's tests import are pinned here, once", () => 
       APPROVAL_IN_FLIGHT_MESSAGE,
       DENY_AFTER_PUBLISHING_MESSAGE,
       INVALID_DATASET_ID_MESSAGE,
-      APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE,
+      APPROVAL_CLOSED_DURING_RUN_MESSAGE,
       ...Object.values(APPROVAL_RELEASE_REASON_TEXT),
     ];
     expect(new Set(sentences).size).toBe(sentences.length);

@@ -28,7 +28,7 @@ import {
 import { PROD_DATASET, createHarness } from "../backend/test/helpers/publication-review-harness";
 import { asSend, withFakeResend } from "../backend/test/helpers/resend";
 import {
-  APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE,
+  APPROVAL_CLOSED_DURING_RUN_MESSAGE,
   APPROVAL_IN_FLIGHT_MESSAGE,
   APPROVAL_REFUSAL_ERROR_CODES,
   DECISION_WITH_DISPATCH_TOKEN_MESSAGE,
@@ -612,7 +612,7 @@ describe("how the client reads an approval refusal (the gate's bodies, scripted)
       ["approval_in_flight", APPROVAL_IN_FLIGHT_MESSAGE],
       ["deny_after_publishing", DENY_AFTER_PUBLISHING_MESSAGE],
       ["invalid_dataset_id", INVALID_DATASET_ID_MESSAGE],
-      ["approval_closed_during_run", APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE],
+      ["approval_closed_during_run", APPROVAL_CLOSED_DURING_RUN_MESSAGE],
     ];
     for (const [code, message] of refusals) {
       scripted = [{ status: 409, body: { error: code, message } }];

@@ -37,7 +37,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import type { Server } from "bun";
 import { Hono } from "hono";
 import {
-  APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE,
+  APPROVAL_CLOSED_DURING_RUN_MESSAGE,
   APPROVAL_IN_FLIGHT_MESSAGE,
   DENY_AFTER_PUBLISHING_MESSAGE,
   REQUEST_MISMATCH_MESSAGE,
@@ -638,7 +638,7 @@ describe("T4.10 the final publish write is guarded by the status it expects", ()
       expect(res.status).toBe(409);
       expect(await res.json()).toEqual({
         error: "approval_closed_during_run",
-        message: APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE,
+        message: APPROVAL_CLOSED_DURING_RUN_MESSAGE,
       });
       const after = row(id);
       expect(after.status).toBe(closedAs);
@@ -707,7 +707,7 @@ describe("T4.10 the final publish write is guarded by the status it expects", ()
 
     const CLOSED = {
       error: "approval_closed_during_run",
-      message: APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE,
+      message: APPROVAL_CLOSED_DURING_RUN_MESSAGE,
     };
 
     /** The refusal, an untouched row and the one audit row that says which status it found. */

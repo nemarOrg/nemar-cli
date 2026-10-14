@@ -169,7 +169,7 @@ export const REQUEST_CHANGED_MESSAGE =
  * blocked one is refused), so the sentence says that the repair is by hand. The one command it
  * names is the listing of requests, which shows a request of any status.
  */
-export const APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE =
+export const APPROVAL_CLOSED_DURING_RUN_MESSAGE =
   "The request was closed while this approval was running (it was denied, blocked again or filed again), so the run did not mark it published. Its steps had already run, so the dataset may already be public. An approval cannot finish a closed request: check the dataset and the request (nemar admin publish list shows its status), then finish or repair it by hand.";
 
 /**

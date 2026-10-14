@@ -19,7 +19,7 @@ import {
 } from "../../../shared/publication-steps.js";
 
 import {
-  APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE,
+  APPROVAL_CLOSED_DURING_RUN_MESSAGE,
   DECISION_WITH_DISPATCH_TOKEN_MESSAGE,
   DISPATCH_EXPIRED_MESSAGE,
   DISPATCH_SUPERSEDED_MESSAGE,
@@ -2564,7 +2564,7 @@ async function refuseApprovalOnClosedRequest(
   return c.json(
     {
       error: "approval_closed_during_run",
-      message: APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE,
+      message: APPROVAL_CLOSED_DURING_RUN_MESSAGE,
     },
     409,
   );
