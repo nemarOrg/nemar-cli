@@ -35,6 +35,7 @@ import {
   APPROVAL_RELEASE_REASONS,
   APPROVAL_RELEASE_REASON_TEXT,
 } from "../../shared/contract/publication";
+import { AUDIT_LOG_INSERT_SQL } from "../src/db/audit-log";
 import { adminRoutes } from "../src/routes/admin";
 import { APPROVAL_RELEASE_SQL } from "../src/routes/callbacks/approval-release";
 import webhooks from "../src/routes/webhooks";
@@ -313,6 +314,52 @@ describe("a valid token releases the claim", () => {
     expect(everyAuditRow).not.toContain(s.token);
     expect(everyAuditRow).not.toMatch(/[0-9a-f]{64}/i);
   });
+
+  test("a failed audit write is logged with its cause, and the release still answers 200", async () => {
+    const s = await seedClaim({ status: "approving", updatedAgo: "-2 minutes" });
+    const bindings = env({
+      DB: interceptingD1(realD1(db), (sql) => {
+        if (sql === AUDIT_LOG_INSERT_SQL) throw new Error("audit store unavailable");
+      }),
+    });
+    let res: Response | undefined;
+    const printed = await printedDuring(async () => {
+      res = await release(s.token, bodyOf(s), bindings);
+    });
+
+    // The release was one conditional write and it landed; a missing audit row does not undo it.
+    expect(res?.status).toBe(200);
+    expect(await res?.json()).toEqual({ ok: true, released: true });
+    const after = requestRow(s.requestId);
+    expect(after.approval_requested_by).toBeNull();
+    expect(after.approval_dispatched_at).toBeNull();
+    expect(after.last_error).toBe(GENERIC);
+    expect(releasedAudit()).toHaveLength(0);
+    // The log names the request and carries the cause, and the token is nowhere in it.
+    expect(printed).toContain(`request ${s.requestId} (${s.datasetId})`);
+    expect(printed).toContain("audit store unavailable");
+    expect(printed).not.toContain(s.token);
+  });
+
+  // The route reads the claim's own columns and never the lease: a run reports its own failure
+  // late (a cancelled workflow is reported when GitHub says so), and a lapsed claim is exactly
+  // one that nothing else will clear (ADR 0103 decision 9).
+  for (const status of ["requested", "approving"] as const) {
+    test(`a claim 30 minutes old, past the lease, on a request that is ${status} is released all the same`, async () => {
+      const s = await seedClaim({
+        status,
+        dispatchedAgo: "-30 minutes",
+        updatedAgo: "-30 minutes",
+      });
+      const res = await release(s.token, bodyOf(s, { reason: "workflow_cancelled" }));
+      expect(res.status).toBe(200);
+      const after = requestRow(s.requestId);
+      expect(after.approval_requested_by).toBeNull();
+      expect(after.approval_dispatched_at).toBeNull();
+      expect(after.last_error).toBe(APPROVAL_RELEASE_REASON_TEXT.workflow_cancelled);
+      expect(releasedAudit()).toHaveLength(1);
+    });
+  }
 
   test("the token is spent by the release: a second call with it is the 401, and writes nothing more", async () => {
     const s = await seedClaim();
@@ -681,17 +728,37 @@ describe("the body is bounded and shaped before the database is read", () => {
     };
   }
 
-  test("a body over 256 KB is refused by its real length, and by a declared length that lies low", async () => {
+  /** A release body of exactly `bytes` bytes: the real fields, padded with one extra field. */
+  function bodyOfSize(s: Seeded, bytes: number): string {
+    const bare = JSON.stringify({ ...bodyOf(s), pad: "" });
+    const raw = JSON.stringify({ ...bodyOf(s), pad: "x".repeat(bytes - bare.length) });
+    expect(new TextEncoder().encode(raw).length).toBe(bytes);
+    return raw;
+  }
+
+  test("a body over 1 KiB is refused by its real length, and by a declared length that lies low", async () => {
+    // The body is three scalars, so the bound is 1 KiB and not the 256 KiB a screen report needs.
     const s = await seedClaim();
-    const huge = JSON.stringify({ ...bodyOf(s), pad: "x".repeat(300 * 1024) });
+    const over = bodyOfSize(s, 1025);
     const a = recording();
-    expect((await release(s.token, huge, a.bindings)).status).toBe(413);
+    expect((await release(s.token, over, a.bindings)).status).toBe(413);
     const b = recording();
-    const lying = await release(s.token, huge, b.bindings, { "Content-Length": "100" });
+    const lying = await release(s.token, over, b.bindings, { "Content-Length": "100" });
     expect(lying.status).toBe(413);
     expect(a.statements).toEqual([]);
     expect(b.statements).toEqual([]);
     expect(requestRow(s.requestId).approval_dispatched_at).not.toBeNull();
+  });
+
+  test("a body of exactly 1 KiB, and an ordinary one, are read", async () => {
+    const edge = await seedClaim({ datasetId: "nm098776" });
+    expect((await release(edge.token, bodyOfSize(edge, 1024))).status).toBe(200);
+    expect(requestRow(edge.requestId).approval_dispatched_at).toBeNull();
+    const plain = await seedClaim({ datasetId: "nm098777" });
+    expect((await release(plain.token, bodyOf(plain, { reason: "secret_missing" }))).status).toBe(
+      200,
+    );
+    expect(requestRow(plain.requestId).approval_dispatched_at).toBeNull();
   });
 
   const bad: [string, string][] = [

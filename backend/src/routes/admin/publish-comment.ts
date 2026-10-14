@@ -4,21 +4,22 @@
  *   POST /admin/publish/:id/comment   mail the depositor a message the administrator typed, and
  *                                     leave the request open
  *
- * Admin-only through the router's `authMiddleware` and `adminMiddleware`. It decides nothing: the
- * request stays as it is (no status, no review, no approval changes), and nothing of the review
- * travels in the mail, which is a fixed frame around the typed words (`sendPublicationCommentEmail`).
- * It is not behind `PUBLICATION_REVIEW_ENABLED`, which switches the review and not a message an
- * administrator types.
+ * Admin-only through the router's `authMiddleware` and `adminMiddleware`, and a write made with a
+ * session cookie must come from a NEMAR page: the router's `cookieOriginGuard` refuses it before
+ * this route runs. The route decides nothing: the request stays as it is (no status, no review, no
+ * approval changes), and nothing of the review travels in the mail, which is a fixed frame around
+ * the typed words (`sendPublicationCommentEmail`). It is not behind `PUBLICATION_REVIEW_ENABLED`,
+ * which switches the review and not a message an administrator types.
  *
- * It mails a real person, so a session cookie is accepted only from a NEMAR page (the rule of
- * `review/start`), and the send goes through the environment's delivery fence: outside production
- * only a depositor on `DEV_EMAIL_ALLOWLIST` is mailed, and a refusal is a failed send like any
- * other. A failed send is 502 and is never answered as a success, and it is one of two kinds by
- * what the Worker knows. A send that certainly delivered nothing (Resend's 4xx, the fence, a
- * depositor with no address or one that could not be read) is `comment_not_sent`, "nothing was
- * sent", audited `not_sent`. One that may have been accepted (a Resend 5xx, an unreachable host or
- * a lost answer) is `comment_not_confirmed`, whose sentence is deliberately not "nothing was
- * sent", audited `unknown`: an administrator who read that might send it twice.
+ * It mails a real person, so the Origin rule above matters here, and the send goes through the
+ * environment's delivery fence: outside production only a depositor on `DEV_EMAIL_ALLOWLIST` is
+ * mailed, and a refusal is a failed send like any other. A failed send is 502 and is never
+ * answered as a success, and it is one of two kinds by what the Worker knows. A send that
+ * certainly delivered nothing (Resend's 4xx, the fence, a depositor with no address or one that
+ * could not be read) is `comment_not_sent`, "nothing was sent", audited `not_sent`. One that may
+ * have been accepted (a Resend 5xx, an unreachable host or a lost answer) is
+ * `comment_not_confirmed`, whose sentence is deliberately not "nothing was sent", audited
+ * `unknown`: an administrator who read that might send it twice.
  *
  * The audit row, `publication_request_commented`, is written whichever way the send went, with the
  * typed words (the denial's reason is stored on its request the same way), so what a depositor was
@@ -52,7 +53,8 @@ import type { AdminRouter } from "./shared";
 export const PUBLICATION_COMMENT_SENTENCES: Record<PublicationCommentErrorCode, string> = {
   bad_dataset: "That is not a dataset id.",
   not_found: "That dataset has no active publication request.",
-  // Sent by the admin router's cookie Origin guard, not by this route; the sentence is the guard's.
+  // Sent by the admin router's cookie Origin guard, not by this route. The guard answers with the
+  // word in `error` and `code` and this sentence in `message`, unlike the bodies built here.
   origin_not_allowed: ORIGIN_NOT_ALLOWED_MESSAGE,
   invalid_body: `The body must be a JSON object with one field, message, of 1 to ${PUBLICATION_COMMENT_MAX_LENGTH} characters.`,
   comment_not_sent: "The message could not be mailed, so nothing was sent to the depositor.",

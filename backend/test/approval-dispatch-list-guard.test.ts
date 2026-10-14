@@ -6,11 +6,10 @@
  * strip names it (the two callback nonces, the stored screen report). The dispatch token is a
  * credential-shaped value derived from the claim's own columns, and the list is read by every
  * administrator's page and printed by `nemar admin publish list`: a token in it would be the
- * clicker's attribution handed to whoever reads the queue. With the default design no column
- * holds the token, so nothing strips it today; this guard pins that NOTHING token-shaped leaves
- * the list, by value (the token minted for the claim, and the one the dispatch carries once the
- * route mints one) and by shape (no 64-hex string in any field, which is what an HMAC digest, a
- * stored nonce or a hash of one would look like).
+ * clicker's attribution handed to whoever reads the queue. No column holds the token, so nothing
+ * strips it; this guard pins that NOTHING token-shaped leaves the list, by value (the token minted
+ * for the claim, which is the one the dispatch carries) and by shape (no 64-hex string in any
+ * field, which is what an HMAC digest, a stored nonce or a hash of one would look like).
  *
  * Real engine: bun:sqlite behind realD1 with every migration applied, the real admin router, the
  * real auth middleware, and GitHub as a `Bun.serve()` stand-in whose dispatch the click sends.
@@ -111,7 +110,7 @@ describe("the admin list after a web click", () => {
     expect(claim?.approval_dispatched_at).toBeTruthy();
 
     // The token the claim derives, minted exactly as the dispatch route mints it from the row's
-    // own columns, and the one the dispatch carried when the route sends one.
+    // own columns, and the one the dispatch carried: the same 64 hex characters.
     const derived = await signApprovalDispatchToken(
       {
         datasetId: DATASET,
@@ -123,7 +122,8 @@ describe("the admin list after a web click", () => {
     );
     expect(derived).toMatch(/^[0-9a-f]{64}$/);
     const sent = dispatches[0].client_payload.dispatch_token;
-    const tokens = typeof sent === "string" ? [derived, sent] : [derived];
+    expect(sent).toMatch(/^[0-9a-f]{64}$/);
+    expect(sent).toBe(derived);
 
     const res = await app.request(
       "/admin/publish/requests",
@@ -142,7 +142,7 @@ describe("the admin list after a web click", () => {
     expect(listed.approval_dispatched_at).toBe(claim?.approval_dispatched_at);
     expect(listed.approval_in_flight).toBe(true);
 
-    for (const token of tokens) expect(text).not.toContain(token);
+    expect(text).not.toContain(derived);
     const strings = everyString(body);
     expect(strings.length).toBeGreaterThan(10);
     for (const s of strings) expect(s).not.toMatch(/[0-9a-f]{64}/i);

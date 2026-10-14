@@ -39,6 +39,7 @@ import { Hono } from "hono";
 import {
   APPROVAL_FINISHED_ON_CLOSED_REQUEST_MESSAGE,
   APPROVAL_IN_FLIGHT_MESSAGE,
+  APPROVAL_REFUSAL_ERROR_CODES,
   DENY_AFTER_PUBLISHING_MESSAGE,
   REQUEST_MISMATCH_MESSAGE,
 } from "../../shared/contract/publication.js";
@@ -138,6 +139,8 @@ interface Seed {
   dispatchedAt?: string;
   lastError?: string;
   blockReason?: string;
+  /** The step the run set before it ran one: it stays set when the step fails or is cut off. */
+  currentStep?: string;
 }
 
 /** A request made by `requesterId`; returns its id. */
@@ -146,9 +149,9 @@ function seedRequest(seed: Seed = {}): number {
   db.run(
     `INSERT INTO publication_requests
        (dataset_id, status, requested_by, requested_at, updated_at, steps_completed,
-        approval_requested_by, approval_dispatched_at, last_error, block_reason)
+        approval_requested_by, approval_dispatched_at, last_error, block_reason, current_step)
      VALUES (?, ?, ?, datetime('now', '-3 hours'), datetime('now', ?), ?,
-             ?, ${claimed ? `datetime('now', '${seed.dispatchedAt}')` : "NULL"}, ?, ?)`,
+             ?, ${claimed ? `datetime('now', '${seed.dispatchedAt}')` : "NULL"}, ?, ?, ?)`,
     [
       DATASET,
       seed.status ?? "requested",
@@ -158,6 +161,7 @@ function seedRequest(seed: Seed = {}): number {
       claimed ? adminId : null,
       seed.lastError ?? null,
       seed.blockReason ?? null,
+      seed.currentStep ?? null,
     ],
   );
   return db.query<{ id: number }, []>("SELECT MAX(id) AS id FROM publication_requests").get()
@@ -202,6 +206,16 @@ function raceBeforeDenyWrite(effect: () => void): Bindings {
   );
 }
 
+/**
+ * A refusal's body, read after checking that its word is one the contract declares
+ * (`APPROVAL_REFUSAL_ERROR_CODES`), so a word renamed here and in the route but not there fails.
+ */
+async function refusalBody(res: Response): Promise<{ error: string }> {
+  const body = (await res.json()) as { error: string };
+  expect(APPROVAL_REFUSAL_ERROR_CODES).toContain(body.error);
+  return body;
+}
+
 /** A denial that must be refused: its status, its body, an untouched row and no mail. */
 async function expectRefused(
   id: number,
@@ -212,7 +226,7 @@ async function expectRefused(
   await withFakeResend(async (calls) => {
     const res = await respond(calls);
     expect(res.status).toBe(expected.status);
-    expect(await res.json()).toEqual(expected.body);
+    expect(await refusalBody(res)).toEqual(expected.body);
     expect(calls).toHaveLength(0);
   });
   expect(row(id)).toEqual(before);
@@ -366,6 +380,86 @@ describe("T4.7 a request that has started publishing is never denied, whatever i
   });
 });
 
+describe("a first mutation that did not finish is not a denial either", () => {
+  // `s3_public_read` is the first step that changes anything, and it is the one whose write may
+  // have landed without being acknowledged: a run cut off inside it, or one that failed it, has
+  // only validation steps recorded and a `current_step` naming it, while the bucket policy may
+  // already make the data public. `steps_completed` alone cannot say so, so the refusal reads the
+  // step the run set as well (ADR 0103 decision 11).
+  test("a stalled run cut off inside s3_public_read: only validation steps are recorded", async () => {
+    const id = seedRequest({
+      status: "approving",
+      updatedAt: "-16 minutes",
+      steps: ["ci_check", "enrichment_check"],
+      currentStep: "s3_public_read",
+    });
+    await expectRefused(id, () => deny(), { status: 409, body: AFTER_PUBLISHING });
+  });
+
+  test("a run that failed s3_public_read, past the 60 second grace", async () => {
+    const id = seedRequest({
+      status: "approving",
+      updatedAt: "-5 minutes",
+      lastError: "s3_public_read failed",
+      steps: ["ci_check", "enrichment_check"],
+      currentStep: "s3_public_read",
+    });
+    await expectRefused(id, () => deny(), { status: 409, body: AFTER_PUBLISHING });
+  });
+
+  test("a step that comes after it is just as much a mutation", async () => {
+    const id = seedRequest({
+      status: "approving",
+      updatedAt: "-16 minutes",
+      steps: ["ci_check", "enrichment_check"],
+      currentStep: "repo_public",
+    });
+    await expectRefused(id, () => deny(), { status: 409, body: AFTER_PUBLISHING });
+  });
+
+  test("a run cut off inside a validation step is still deniable", async () => {
+    for (const step of ["ci_check", "enrichment_check"]) {
+      db.run("DELETE FROM publication_requests");
+      const id = seedRequest({
+        status: "approving",
+        updatedAt: "-16 minutes",
+        steps: [],
+        currentStep: step,
+      });
+      await withFakeResend(async (calls) => {
+        const res = await deny();
+        expect(res.status).toBe(200);
+        expect(mailedTo(calls)).toHaveLength(1);
+      });
+      expect(row(id).status).toBe("denied");
+    }
+  });
+
+  test("a run starts s3_public_read in between: the re-read refuses by the same rule", async () => {
+    const id = seedRequest({
+      status: "approving",
+      updatedAt: "-16 minutes",
+      steps: ["ci_check", "enrichment_check"],
+      currentStep: "enrichment_check",
+    });
+    const bindings = raceBeforeDenyWrite(() =>
+      db.run(
+        `UPDATE publication_requests SET current_step = 's3_public_read', updated_at = datetime('now')
+          WHERE id = ?`,
+        [id],
+      ),
+    );
+    await withFakeResend(async (calls) => {
+      const res = await deny(undefined, bindings);
+      expect(res.status).toBe(409);
+      expect(await refusalBody(res)).toEqual(AFTER_PUBLISHING);
+      expect(calls).toHaveLength(0);
+    });
+    expect(row(id).status).toBe("approving");
+    expect(row(id).denied_at).toBeNull();
+  });
+});
+
 describe("T4.8a request that moves between the read and the write is not overwritten", () => {
   test("published in between: the answer is that no request is active, and it stays published", async () => {
     const id = seedRequest({ status: "approving", updatedAt: "-16 minutes", steps: ["ci_check"] });
@@ -412,7 +506,7 @@ describe("T4.8a request that moves between the read and the write is not overwri
     await withFakeResend(async (calls) => {
       const res = await deny(undefined, bindings);
       expect(res.status).toBe(409);
-      expect(await res.json()).toEqual(IN_FLIGHT);
+      expect(await refusalBody(res)).toEqual(IN_FLIGHT);
       expect(calls).toHaveLength(0);
     });
     expect(row(id).status).toBe("approving");
@@ -430,7 +524,7 @@ describe("T4.8a request that moves between the read and the write is not overwri
     await withFakeResend(async (calls) => {
       const res = await deny(undefined, bindings);
       expect(res.status).toBe(409);
-      expect(await res.json()).toEqual(AFTER_PUBLISHING);
+      expect(await refusalBody(res)).toEqual(AFTER_PUBLISHING);
       expect(calls).toHaveLength(0);
     });
     expect(row(id).status).toBe("approving");
@@ -447,7 +541,7 @@ describe("T4.8a request that moves between the read and the write is not overwri
     await withFakeResend(async (calls) => {
       const res = await deny(undefined, bindings);
       expect(res.status).toBe(409);
-      expect(await res.json()).toEqual(AFTER_PUBLISHING);
+      expect(await refusalBody(res)).toEqual(AFTER_PUBLISHING);
       expect(calls).toHaveLength(0);
     });
     expect(row(id).status).toBe("requested");
@@ -469,7 +563,7 @@ describe("T4.8a request that moves between the read and the write is not overwri
     await withFakeResend(async (calls) => {
       const res = await deny(undefined, bindings);
       expect(res.status).toBe(409);
-      expect(await res.json()).toEqual(IN_FLIGHT);
+      expect(await refusalBody(res)).toEqual(IN_FLIGHT);
       expect(calls).toHaveLength(0);
     });
     const after = row(id);

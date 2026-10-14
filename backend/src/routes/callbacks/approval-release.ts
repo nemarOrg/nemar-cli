@@ -43,8 +43,12 @@ import { auditLogStatement } from "../../db/audit-log.js";
 import { APPROVAL_CLAIM_CLEAR_SQL } from "../../services/approval-dispatch.js";
 import { isValidDatasetId } from "../../services/datasetId.js";
 import { verifyApprovalDispatchToken } from "../../services/github.js";
+import { errorMessage } from "../../services/repo-metadata.js";
 import type { WebhookRouter } from "../webhooks/shared.js";
 import { readBoundedJsonObject } from "./bounded-json.js";
+
+/** The largest body a release reads: `dataset_id`, `request_id` and one closed-vocabulary word. */
+const MAX_RELEASE_BODY_BYTES = 1024;
 
 /** Every refusal of the credential says these bytes, whatever the reason. */
 const UNAUTHORIZED = { error: "Invalid or expired approval token" } as const;
@@ -76,8 +80,9 @@ export function registerApprovalReleaseRoutes(webhooks: WebhookRouter): void {
       return c.json(UNAUTHORIZED, 401);
     }
 
-    // Bounded before parsing: by the declared length, and by the bytes that actually arrived.
-    const read = await readBoundedJsonObject(c);
+    // Bounded before parsing: by the declared length, and by the bytes that actually arrived. The
+    // body is three scalars, so the bound is 1 KiB, not the 256 KiB a screen report is given.
+    const read = await readBoundedJsonObject(c, MAX_RELEASE_BODY_BYTES);
     if (!read.ok) return c.json({ error: read.error }, read.status);
     const b = read.body;
     if (typeof b.dataset_id !== "string" || !isValidDatasetId(b.dataset_id)) {
@@ -156,9 +161,9 @@ export function registerApprovalReleaseRoutes(webhooks: WebhookRouter): void {
         resourceId: datasetId,
         details: JSON.stringify({ request_id: requestId, reason }),
       }).run();
-    } catch {
+    } catch (auditError) {
       console.error(
-        `[approval-release] audit write failed for request ${requestId} (${datasetId})`,
+        `[approval-release] audit write failed for request ${requestId} (${datasetId}): ${errorMessage(auditError)}`,
       );
     }
 

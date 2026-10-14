@@ -3211,10 +3211,10 @@ describe("the sentences the Worker's tests import are pinned here, once", () => 
       "A run started by a web approval carries the decision made at the click and may not send its own: no override and no identifier-screen acknowledgment. Nothing was recorded.",
     );
     expect(APPROVAL_IN_FLIGHT_MESSAGE).toBe(
-      "An approval of this request is running, so it cannot be denied right now. Wait for it to finish or stall, then deny it.",
+      "An approval of this request is running, so it cannot be denied right now. If the run stalls before it publishes anything, the request can be denied then.",
     );
     expect(DENY_AFTER_PUBLISHING_MESSAGE).toBe(
-      "Steps of an approval of this request have already run, so the dataset may already be public and the request cannot be denied. Finish the approval instead, or have an administrator repair it.",
+      "Steps of an approval of this request have already run, so the dataset may already be public and the request cannot be denied. Check the dataset first. A blocked request waits for its depositor to fix what blocked it; any other can be finished by approving it again, or repaired by hand.",
     );
     expect(INVALID_DATASET_ID_MESSAGE).toBe(
       "This is not a dataset id an approval can be started for from the web: it is nm or on followed by six digits (a development environment also accepts xx). Nothing was claimed and nothing was sent.",
@@ -3277,9 +3277,9 @@ describe("the sentences the Worker's tests import are pinned here, once", () => 
       install_failed:
         "The approval workflow could not install the command line tool it runs. Click Approve again to retry.",
       input_rejected:
-        "The approval workflow refused the request it was given, so nothing was approved.",
+        "The approval workflow refused the request it was given, so the run did not start and changed nothing.",
       preflight_failed:
-        "The approval workflow's own checks of the request failed before it began, so nothing was approved.",
+        "The approval workflow's own checks of the request failed before it began, so the run did not start and changed nothing.",
     });
   });
 

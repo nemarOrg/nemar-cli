@@ -523,7 +523,12 @@ export async function adminMiddleware(c: AuthContext, next: Next) {
   await next();
 }
 
-/** The sentence of a refused cookie write, shared with the contract that lists the code. */
+/**
+ * The sentence of a refused cookie write. The contract (`publication-review-admin.ts`) lists the
+ * code `origin_not_allowed` and holds no sentence; this one is shared only with
+ * `PUBLICATION_COMMENT_SENTENCES.origin_not_allowed`, and the review route has no sentence table
+ * for it.
+ */
 export const ORIGIN_NOT_ALLOWED_MESSAGE =
   "This request did not come from a NEMAR page, so it was not accepted.";
 
