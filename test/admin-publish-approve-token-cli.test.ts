@@ -20,9 +20,10 @@
  *  - with a token in the environment, a flag that is the administrator's own decision (`--force`,
  *    `--acknowledge-identifier-screen`, `--skip-ci-check`) is refused locally before anything is
  *    sent, because the click already recorded the decision and the Worker would refuse the call;
- *  - a value no header can carry (whitespace, a line break, a character outside printable ASCII)
- *    is refused locally in one line that never shows it, with no request sent, and is not
- *    retried as if it were a network failure;
+ *  - whitespace at the two ends of the value is trimmed (as the Worker trims the header), and a
+ *    value no header can carry (whitespace inside, a line break inside, a character outside
+ *    printable ASCII) is refused locally in one line that never shows it, with no request sent,
+ *    and is not retried as if it were a network failure;
  *  - the token is a secret: it reaches neither the console nor the `--debug` log;
  *  - a stale variable in a person's shell is not a silent trap (ADR 0103, decision 3): a run
  *    that presents a token says so on standard error before it sends anything, and a refusal of
@@ -34,7 +35,8 @@
  * the log keep it (the secret rows); trim nothing (the blank variable row); drop the notice, or
  * print it after the first request (the notice rows); drop the hint, or print it for a refusal
  * that is not about the token (the hint rows); hand a malformed value to the request, or accept a
- * wider character set than printable ASCII (the "cannot be a token" rows).
+ * wider character set than printable ASCII (the "cannot be a token" rows); refuse whitespace at
+ * the ends again, or send it untrimmed (the "trimmed" rows).
  *
  * CI TIER: unit-pure. Hermetic: an in-process backend over a local database, the CLI spawned
  * against it, stand-ins only at GitHub and Resend, no live network; it sets its own default
@@ -431,16 +433,16 @@ describe("with a token in the environment, the administrator's own decisions are
 
 describe("a variable that cannot be a token is refused locally, before anything is sent", () => {
   // The Worker mints 64 lowercase hexadecimal characters; the command checks only what a header can
-  // carry (printable ASCII, no whitespace), so a token of another shape still reaches the Worker
-  // and is refused there. A value with a line break or a non-Latin-1 character would otherwise
-  // make the HTTP client throw, which looks like a network failure and is retried for a while.
+  // carry (printable ASCII, no whitespace inside), so a token of another shape still reaches the
+  // Worker and is refused there. Whitespace at the two ends is trimmed, as the Worker trims the
+  // header (see the next block). A value with a line break or a non-Latin-1 character would
+  // otherwise make the HTTP client throw, which looks like a network failure and is retried for a
+  // while.
   const STEM = "d".repeat(60);
   const malformed: Array<[string, string, string]> = [
     ["a line break inside", `${STEM}\nabcd`, "whitespace"],
-    ["a trailing line break", `${STEM}abcd\n`, "whitespace"],
     ["a space inside", `${STEM} abc`, "whitespace"],
-    ["leading whitespace", ` ${STEM}abcd`, "whitespace"],
-    ["trailing whitespace", `${STEM}abcd `, "whitespace"],
+    ["a line break inside, a trailing one as well", `${STEM}\nabcd\n`, "whitespace"],
     ["a tab inside", `${STEM}\tabc`, "whitespace"],
     ["a character outside Latin-1", `${STEM}\u65e5abc`, "printable ASCII"],
     ["a Latin-1 character that is not ASCII", `${STEM}\u00e9abc`, "printable ASCII"],
@@ -496,6 +498,34 @@ describe("a variable that cannot be a token is refused locally, before anything 
     expect(approveCalls()[0]?.dispatchToken).toBe(false);
     expect(output(r)).not.toContain(TOKEN_ENV);
   });
+});
+
+describe("whitespace at the two ends of the variable is trimmed", () => {
+  // A token exported with its trailing newline (the way a file's contents are read into a variable)
+  // is the same token: the command trims the two ends as the Worker trims the header, and refuses
+  // only whitespace inside the value.
+  test.each([
+    ["a trailing line break", (t: string) => `${t}\n`],
+    ["a trailing carriage return and line break", (t: string) => `${t}\r\n`],
+    ["leading whitespace", (t: string) => ` ${t}`],
+    ["trailing whitespace", (t: string) => `${t} `],
+    ["whitespace at both ends", (t: string) => `\t ${t} \n`],
+  ])(
+    "%s is trimmed, as the Worker trims the header: the run is the click's, and the API received the token alone",
+    async (_label, pad) => {
+      const { requestId, token } = await click();
+
+      const r = await executor(pad(token));
+
+      expect(r.exitCode).toBe(0);
+      expect(requestRow(requestId)?.approved_by).toBe(clickerId);
+      expect(approveCalls()).toHaveLength(1);
+      expect(h.dispatchTokenValues).toEqual([token]);
+      // Nothing was refused locally and nothing was retried.
+      expect(output(r)).not.toContain("cannot be a dispatch token");
+      expect(output(r)).not.toContain("Retrying");
+    },
+  );
 });
 
 describe("a variable left in a person's shell is not a silent trap", () => {

@@ -169,6 +169,13 @@ export interface PublishCli {
    * run presented the executor's proof.
    */
   posted: Array<{ path: string; body: Record<string, unknown> | null; dispatchToken: boolean }>;
+  /**
+   * The value of the `X-Approval-Dispatch-Token` header, as the API received it, of each write that
+   * carried one, in order; cleared in place by `reset()`. For a test of what the command did to a
+   * value before it sent it (a test-minted token, never a real credential), so one that only needs
+   * to know whether a call carried the proof reads `posted[].dispatchToken`.
+   */
+  dispatchTokenValues: string[];
   /** The command's configuration directory, where `--debug` writes its `logs/` (a test reads them back). */
   readonly configDir: string;
   /** Every mail the Worker sent through Resend during a command; cleared in place by `reset()`. */
@@ -257,6 +264,7 @@ export function startPublishCli(): PublishCli {
   const github: PublishCli["github"] = { seen: [], dispatches: [] };
   const requests: ApiCall[] = [];
   const posted: PublishCli["posted"] = [];
+  const dispatchTokenValues: string[] = [];
   const mail: CapturedEmail[] = [];
 
   const githubServer = Bun.serve({
@@ -320,6 +328,8 @@ export function startPublishCli(): PublishCli {
           body,
           dispatchToken: req.headers.has("x-approval-dispatch-token"),
         });
+        const proof = req.headers.get("x-approval-dispatch-token");
+        if (proof !== null) dispatchTokenValues.push(proof);
       }
       const res = await app.handle(req, env());
       requests.push({ method: req.method, path: url.pathname, status: res.status });
@@ -520,6 +530,7 @@ export function startPublishCli(): PublishCli {
     github,
     requests,
     posted,
+    dispatchTokenValues,
     mail,
     reset() {
       db = freshDb();
@@ -536,6 +547,7 @@ export function startPublishCli(): PublishCli {
       github.dispatches.length = 0;
       requests.length = 0;
       posted.length = 0;
+      dispatchTokenValues.length = 0;
       mail.length = 0;
       writeConfig(null);
     },
