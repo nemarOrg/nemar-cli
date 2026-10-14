@@ -21,6 +21,7 @@
 
 import { beforeEach, describe, expect, test } from "bun:test";
 import {
+  type OriginNotAllowedBody,
   PUBLICATION_COMMENT_ERROR_CODES,
   PUBLICATION_COMMENT_MAX_LENGTH,
   type PublicationCommentErrorBody,
@@ -381,7 +382,7 @@ describe("who may call it, and what it refuses", () => {
         error: "origin_not_allowed",
         code: "origin_not_allowed",
         message: PUBLICATION_COMMENT_SENTENCES.origin_not_allowed,
-      });
+      } satisfies OriginNotAllowedBody);
       expectNothingMailed(calls);
     }
     expect(auditRows()).toHaveLength(0);

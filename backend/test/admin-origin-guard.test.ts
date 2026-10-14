@@ -26,6 +26,7 @@
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
+import type { OriginNotAllowedBody } from "../../shared/contract/publication-review-admin";
 import { cookieOriginGuard } from "../src/middleware/auth";
 import { adminRoutes } from "../src/routes/admin";
 import { hashApiKey } from "../src/services/token";
@@ -234,7 +235,7 @@ describe("a session cookie on a write", () => {
       error: "origin_not_allowed",
       code: "origin_not_allowed",
       message: "This request did not come from a NEMAR page, so it was not accepted.",
-    });
+    } satisfies OriginNotAllowedBody);
   });
 });
 
