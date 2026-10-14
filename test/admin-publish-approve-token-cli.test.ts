@@ -37,7 +37,13 @@ import { join } from "node:path";
 import { makePublicationReviewApp } from "../backend/test/helpers/publication-review-app";
 import { REVIEW_GATE_REFUSAL_TEXT } from "../shared/publication-review";
 import { type CliResult, startPublishCli } from "./helpers/admin-publish-cli";
-import { DATASET, seedGolden, seedReport, twoReasons } from "./helpers/approve-seeds";
+import {
+  DATASET,
+  seedGolden,
+  seedReport,
+  seedUnstarted,
+  twoReasons,
+} from "./helpers/approve-seeds";
 
 setDefaultTimeout(60_000);
 
@@ -253,7 +259,7 @@ describe("a person's shell variable", () => {
   });
 
   test("is not read by anything else of the group: a command that is not an approval sends no header", async () => {
-    const requestId = seedGolden(h.db);
+    const requestId = seedUnstarted(h.db);
     seedReport(h.db, requestId);
     const r = await h.cli(
       ["admin", "publish", "deny", DATASET, "--reason", "Add the README", "--yes"],

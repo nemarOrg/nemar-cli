@@ -121,6 +121,15 @@ function seed(
   return { requestId, reviewId };
 }
 
+/**
+ * `requestId` as a request that has run no step. `seed` gives every request the steps of a golden
+ * resume (so an approval completes with no network), and a denial is refused for a request with a
+ * step done outside the validation-only ones, because its dataset may already be public: a test
+ * that denies a request makes it one that has not started.
+ */
+const notStarted = (requestId: number) =>
+  h.db.run("UPDATE publication_requests SET steps_completed = '[]' WHERE id = ?", [requestId]);
+
 const requestedAt = (datasetId: string, stamp: string) =>
   h.db.run("UPDATE publication_requests SET requested_at = ? WHERE dataset_id = ?", [
     stamp,
@@ -506,6 +515,7 @@ describe("the screen's acknowledgment is asked for, not assumed", () => {
 describe("n denies, with a reason the depositor is mailed", () => {
   test("a typed reason is posted as typed, denies the request and is mailed to the depositor", async () => {
     const { requestId } = seed(A);
+    notStarted(requestId);
 
     const r = await next("n\n  Please add a CHANGES entry.  \n");
 
@@ -925,7 +935,7 @@ describe("what fails exits 1, and the walk goes on", () => {
     // denial the Worker could not write (500 with no closed word), which may be a bug and must
     // bring the hint back; a mark that nothing can clear would leave it suppressed.
     seed(A, twoReasons());
-    seed(B);
+    notStarted(seed(B).requestId);
     requestedAt(A, "2026-10-10 09:00:00");
     requestedAt(B, "2026-10-11 09:00:00");
     h.after(`GET /admin/publish/${A}/review`, () => {
@@ -953,7 +963,7 @@ describe("what fails exits 1, and the walk goes on", () => {
     // Card 1: a denial the Worker could not write (500 with no closed word), which may be a bug.
     // Card 2: the Worker's refusal (409), an answer, which marks the exit as reported. A later
     // answer must not hide the earlier fault.
-    seed(A);
+    notStarted(seed(A).requestId);
     seed(B, twoReasons());
     requestedAt(A, "2026-10-10 09:00:00");
     requestedAt(B, "2026-10-11 09:00:00");
