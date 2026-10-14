@@ -105,6 +105,9 @@ A token that is stale or expired is refused, never quietly downgraded.**
    A skipped CI check was never part of the click: it is a decision of its own, and it would be recorded under the approver, which for a token call is the clicker, who skipped nothing.
    Only `skip_ci_check: true` is a decision: an explicit `false` is allowed, because the CLI sends it on every call.
    The executor workflow sends none of the three, and the CLI refuses all three flags locally while the variable is set (decision 3).
+   The CLI's refusal of `--skip-ci-check` has a sentence of its own:
+   a run the website started never skips the CI check, because the click has no such option,
+   where the other two flags are refused because the click already made that decision.
    This retires the Phase 2 stop-gap `override_inside_web_approval`, which is removed from the contract.
    Its guarantee is now structural, and stronger:
    an override, an acknowledgment or a skipped CI check is recorded only under the credential that sent it, and the first two also at the clicker's own dispatch.
@@ -117,6 +120,8 @@ A token that is stale or expired is refused, never quietly downgraded.**
    The read that tells the two apart can itself fail, and then the answer is a retryable 500 (`CLAIM_READ_FAILED_MESSAGE`), never `dispatch_superseded`:
    nothing was marked and nothing proved that the claim was replaced, and the CLI does not retry a 409, so a transient database error must not end a live web run with a sentence that is false.
    A call already past its mark when the takeover lands finishes, which is the old hazard of two drivers narrowed to one call.
+   The CLI's help says it in those terms: once a terminal approval has passed the gates it takes the claim over, and the website's run is refused at its next call.
+   It does not say that the run is refused at once, because a call refused at a gate leaves the claim standing and a web call already past its mark finishes.
    An executor whose workflow sends no token takes over its own claim the same way.
 7. **A run may name the request it is for.**
    `/approve`, `approve-dispatch` and `/deny` take an optional `request_id`, and answer 409 `request_mismatch` when it is not the newest active request,
