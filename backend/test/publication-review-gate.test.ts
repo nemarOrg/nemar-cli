@@ -1097,6 +1097,64 @@ describe("an override is its approver's, and it is recorded once", () => {
     expect(requestRow(requestId).approved_by).toBe(adminB);
     expect(auditRows("dataset_published")).toHaveLength(0);
   });
+
+  test("23. a token-bearing call that marks keeps the claim: the same token carries the retry after the run failed, recorded as the clicker", async () => {
+    // A web approval is many calls (every batch of the lock loop, every retry of a failed step)
+    // and each carries the one token of the click. Only a call WITHOUT the token ends the claim;
+    // a call that marks under the token must leave it standing, or every later call of the run
+    // is refused as superseded.
+    bidsConclusion = "failure";
+    const executorKey = "review-gate-executor-0123456789abcdef0123456789abcdef";
+    await seedUser(db, "gateexecutor", "admin", executorKey);
+    const { requestId } = seed({ steps: DONE.filter((s) => s !== "ci_check") });
+    seedPublicationReview(db, { requestId, datasetId: DATASET, state: "reported" });
+    const token = await claim(requestId, adminA);
+    const claimBefore = claimOf(requestId);
+
+    const first = await approve({ resume: true }, { key: executorKey, token });
+    // Marked, then stopped by the CI check.
+    expect(first.status).toBe(422);
+    expect(requestRow(requestId).status).toBe("approving");
+    expect(requestRow(requestId).approved_by).toBe(adminA);
+    expect(claimOf(requestId)).toEqual(claimBefore);
+
+    // The retry: the check passes now, and the same token is still the claim's.
+    bidsConclusion = "success";
+    const retry = await approve({ resume: true }, { key: executorKey, token });
+    expect(retry.status).toBe(200);
+    expect(requestRow(requestId).status).toBe("published");
+    expect(requestRow(requestId).approved_by).toBe(adminA);
+    expect(published().user_id).toBe(adminA);
+    expect(published().details).toMatchObject({
+      approved_by: "gateadmina",
+      executed_by: "gateexecutor",
+    });
+  });
+
+  test("23. the first call of a fresh web approval (resume false) marks under the token and leaves the claim for the next call", async () => {
+    // The executor's first call is not a resume. It marks the request and stops here at the CI
+    // check; the claim must stand, and the next call with the token is still the click's run.
+    bidsConclusion = "failure";
+    const executorKey = "review-gate-executor-0123456789abcdef0123456789abcdef";
+    await seedUser(db, "gateexecutor", "admin", executorKey);
+    const { requestId } = seed({ steps: [] });
+    seedPublicationReview(db, { requestId, datasetId: DATASET, state: "reported" });
+    const token = await claim(requestId, adminA);
+    const claimBefore = claimOf(requestId);
+
+    const first = await approve({ resume: false }, { key: executorKey, token });
+    expect(first.status).toBe(422);
+    expect(requestRow(requestId).status).toBe("approving");
+    expect(requestRow(requestId).approved_by).toBe(adminA);
+    expect(claimOf(requestId)).toEqual(claimBefore);
+
+    // The retry is a resume. It is not refused as superseded: it reaches the CI check again.
+    const retry = await approve({ resume: true }, { key: executorKey, token });
+    expect(retry.status).toBe(422);
+    expect(requestRow(requestId).approved_by).toBe(adminA);
+    expect(claimOf(requestId)).toEqual(claimBefore);
+    expect(auditRows("dataset_published")).toHaveLength(0);
+  });
 });
 
 /**
