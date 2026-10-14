@@ -927,7 +927,8 @@ Where the two differ, this is the later text.
 3. **The order of the checks changes.**
    In `/approve` it is now: the outdated-client refusal (426), the request read (404), `request_mismatch`, `request_blocked`,
    the dispatch token (409 `dispatch_superseded`, `dispatch_expired`), the approver of record, `decision_with_dispatch_token`,
-   the identifier screen's gate, the review gate, the recording of the override, and the conditional mark.
+   then, for a run whose steps are all complete, the all-steps-done branch (item 6 below), which runs neither gate and records no override;
+   for any other run, the identifier screen's gate, the review gate, the recording of the override, and the conditional mark.
    For a call with no token, the mark also clears the claim; for a call with a token, it marks only while the claim is still the one verified.
    In `approve-dispatch` it is: the dataset id for the environment (400 `invalid_dataset_id`), the body, the request read, `request_mismatch`,
    `not_dispatchable` for a blocked request, the screen's state, the review gate, the signing secret (502 `dispatch_unconfigured`), and then the claim;

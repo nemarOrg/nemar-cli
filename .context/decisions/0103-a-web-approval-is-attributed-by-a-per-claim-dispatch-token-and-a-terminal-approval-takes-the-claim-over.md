@@ -98,7 +98,10 @@ A token that is stale or expired is refused, never quietly downgraded.**
    409 `dispatch_superseded` when there is no claim, no secret, a mismatch, or a claim that was replaced, released or taken over,
    and 409 `dispatch_expired` when the token is genuine and the lease has lapsed, so a click made long ago is not honored for work done now.
    The lease is asked only after the digest, so a stranger learns nothing about a lease.
-   The checks of `/approve` run in this order: the outdated-client refusal, the request read (404), `request_mismatch`, `request_blocked`, the token, the approver, `decision_with_dispatch_token`, the identifier screen's gate, the review's gate, the recording of the override, and the conditional mark.
+   The checks of `/approve` run in this order:
+   the outdated-client refusal, the request read (404), `request_mismatch`, `request_blocked`, the token, the approver, `decision_with_dispatch_token`,
+   then, for a run whose steps are all complete, the all-steps-done branch of decision 12 (the closed-request refusal, the tail jobs and the closing write), which runs neither gate and records no override;
+   for any other run, the identifier screen's gate, the review's gate, the recording of the override, and the conditional mark.
 5. **A call that carries a valid token carries no decision.**
    An override of the review, an acknowledgment of the identifier screen or a skipped continuous integration (CI) check (`skip_ci_check`) in the body of such a call is refused, 409 `decision_with_dispatch_token`, and nothing is recorded under anybody.
    The override and the acknowledgment were recorded at the click, under the clicker's id, and the gates read them there.
