@@ -449,19 +449,20 @@ change the orchestrator's steps; change ADR 0080's attribution (Phase 3's).
 ### Phase 3 (#1730): approval robustness (as built; the verdict is ADR 0103)
 
 Built: a per-claim dispatch token (#1604), a keyed hash of the dataset, the request, the clicker and the claim's own `approval_dispatched_at`,
-signed with the callback secret under its own domain tag, with no stored column and so no migration.
+signed with the callback secret under its own domain tag, with no stored column and so no migration (the Worker stores none of it).
 The executor presents it in `X-Approval-Dispatch-Token` on every `/approve` call (the CLI reads `NEMAR_APPROVAL_DISPATCH_TOKEN`, only in `approve`).
 The clicker is the approver only for a valid token; a call with no token is recorded as its caller and its approval takes the claim over;
 a stale or expired token is refused (`dispatch_superseded`, `dispatch_expired`);
-and a call that carries a token may carry no override or acknowledgment (`decision_with_dispatch_token`), which replaces the Phase 2 refusal `override_inside_web_approval`.
+and a call that carries a token may carry no override, no acknowledgment and no skipped CI check (`decision_with_dispatch_token`), which replaces the Phase 2 refusal `override_inside_web_approval`.
 
 Around it: an optional `request_id` on approve, approve-dispatch and deny (#1579); the dataset id rule per environment before the claim (#1583);
-a release endpoint that the token alone authenticates, and `last_error` on the four early refusals (#1582);
+a release endpoint that the token alone authenticates, and `last_error` on the five early exits before the step loop (#1582);
 one router-wide cookie Origin guard in place of four per-route copies (#1603, #1584);
-`/deny` gated by the lease and refused once a step beyond validation has run; and the final write guarded by the request's status.
+`/deny` gated by the lease and refused once a step beyond validation has run or is marked current (so a failed first mutation stays undeniable);
+and the final write guarded by the request's status, with a request closed during a run refused before any tail job writes.
 #1580 (persist the lock continuation token) is deferred: a restart at page 1 also locks objects added meanwhile, and the benefit is unmeasured.
 
-The executor's workflow is in the central workflow repository and is changed by the maintainer: mask the token first, export it only to the approve step, install the CLI that matches the environment, release on failure.
+The executor's workflow is in the central workflow repository and is changed by the maintainer: mask the token first, export it for the approve step's process alone and never through `GITHUB_ENV`, install the CLI that matches the environment, release on failure.
 The rollout order, with the skew table, is in the ADR: the workflow edit before Phase 3 reaches `dev`, a staging check, then npm `latest` before the production Worker deploy.
 One question is left open: a valid token whose clicker is no longer an active administrator falls back to the caller.
 
