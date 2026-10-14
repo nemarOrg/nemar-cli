@@ -111,6 +111,16 @@ export const ACTIVE_REQUEST_TAIL_SQL = `FROM publication_requests
    WHERE dataset_id = ? AND status IN ('requested', 'approving', 'blocked')
    ORDER BY requested_at DESC LIMIT 1`;
 
+/**
+ * The SET fragment that clears a web approval's claim (`approval_requested_by`,
+ * `approval_dispatched_at`). Every statement that ends a claim spells it from here, so the day a
+ * claim gains a column there is one place to add it and no statement that clears half of it.
+ * It carries no trailing comma: write `SET ${APPROVAL_CLAIM_CLEAR_SQL}, other = ?` or end the
+ * SET with it.
+ */
+export const APPROVAL_CLAIM_CLEAR_SQL =
+  "approval_requested_by = NULL, approval_dispatched_at = NULL";
+
 /** Who a publication is recorded as approved by. */
 export interface Approver {
   id: number;

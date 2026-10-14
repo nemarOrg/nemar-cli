@@ -20,6 +20,7 @@
 import { describe, expect, test } from "bun:test";
 import "./setup";
 import {
+  APPROVAL_CLAIM_CLEAR_SQL,
   APPROVAL_DISPATCH_TOKEN_HEADER,
   checkApprovalDispatchToken,
 } from "../backend/src/services/approval-dispatch";
@@ -368,5 +369,13 @@ describe("checkApprovalDispatchToken (the rules, in order)", () => {
         code: "dispatch_expired",
       });
     }
+  });
+});
+
+describe("APPROVAL_CLAIM_CLEAR_SQL", () => {
+  test("clears both columns of the claim and nothing else, with no trailing comma", () => {
+    expect(APPROVAL_CLAIM_CLEAR_SQL).toBe(
+      "approval_requested_by = NULL, approval_dispatched_at = NULL",
+    );
   });
 });

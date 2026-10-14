@@ -16,7 +16,11 @@ import {
 } from "../../../../shared/publication-limits.js";
 import { publishingStanding } from "../../../../shared/publication-steps.js";
 import { auditLogStatement } from "../../db/audit-log";
-import { ACTIVE_REQUEST_TAIL_SQL, approvalInFlightSql } from "../../services/approval-dispatch";
+import {
+  ACTIVE_REQUEST_TAIL_SQL,
+  APPROVAL_CLAIM_CLEAR_SQL,
+  approvalInFlightSql,
+} from "../../services/approval-dispatch";
 import { resolveEmailConfig, sendPublicationDeniedEmail } from "../../services/email";
 import { getDatasetsAuth } from "../../services/github-auth";
 import {
@@ -576,7 +580,7 @@ export function registerPublishRoutes(admin: AdminRouter): void {
         await db
           .prepare(
             `UPDATE publication_requests
-               SET approval_requested_by = NULL, approval_dispatched_at = NULL,
+               SET ${APPROVAL_CLAIM_CLEAR_SQL},
                    last_error = CASE WHEN updated_at = ? THEN COALESCE(last_error, ?)
                                      ELSE last_error END
              WHERE id = ? AND approval_requested_by = ?`,

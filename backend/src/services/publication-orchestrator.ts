@@ -42,6 +42,7 @@ import {
 } from "./anonymity";
 import {
   ACTIVE_REQUEST_TAIL_SQL,
+  APPROVAL_CLAIM_CLEAR_SQL,
   type Approver,
   approvalLeaseLiveSql,
   resolveApprover,
@@ -2755,7 +2756,7 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     try {
       await db
         .prepare(
-          "UPDATE publication_requests SET status = 'blocked', block_reason = ?, approval_requested_by = NULL, approval_dispatched_at = NULL, updated_at = datetime('now') WHERE id = ?",
+          `UPDATE publication_requests SET status = 'blocked', block_reason = ?, ${APPROVAL_CLAIM_CLEAR_SQL}, updated_at = datetime('now') WHERE id = ?`,
         )
         .bind(OWNER_NAME_MISSING_REASON, request.id)
         .run();
