@@ -1781,7 +1781,10 @@ describe("the override comes from an API key", () => {
       expect(res.status).toBe(403);
       const body = (await res.json()) as { error: string; message: string };
       expect(body.error).toBe("origin_not_allowed");
-      expect(body.message).toContain("approve-dispatch");
+      // The router's cookie Origin guard answers a request with no NEMAR origin, in its own
+      // sentence; the route's stricter rule answers the one that has it.
+      if (origin === "https://app.nemar.org") expect(body.message).toContain("approve-dispatch");
+      else expect(body.message).not.toContain("approve-dispatch");
     }
     expect(reviewRow(reviewId).override_by).toBeNull();
     expect(auditRows("dataset_published")).toHaveLength(0);

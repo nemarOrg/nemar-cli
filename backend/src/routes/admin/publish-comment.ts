@@ -33,6 +33,7 @@ import {
   type PublicationCommentResponse,
 } from "../../../../shared/contract/publication-review-admin";
 import { auditLogStatement } from "../../db/audit-log";
+import { ORIGIN_NOT_ALLOWED_MESSAGE } from "../../middleware/auth";
 import { ACTIVE_REQUEST_TAIL_SQL } from "../../services/approval-dispatch";
 import { isValidDatasetId } from "../../services/datasetId";
 import {
@@ -41,7 +42,6 @@ import {
   sendPublicationCommentEmail,
 } from "../../services/email";
 import { errorWords } from "../../services/publication-review-log";
-import { isAllowedOrigin } from "../../services/web-session";
 import type { Bindings } from "../../types/bindings";
 import type { AdminRouter } from "./shared";
 
@@ -52,7 +52,8 @@ import type { AdminRouter } from "./shared";
 export const PUBLICATION_COMMENT_SENTENCES: Record<PublicationCommentErrorCode, string> = {
   bad_dataset: "That is not a dataset id.",
   not_found: "That dataset has no active publication request.",
-  origin_not_allowed: "This request did not come from a NEMAR page, so it was not accepted.",
+  // Sent by the admin router's cookie Origin guard, not by this route; the sentence is the guard's.
+  origin_not_allowed: ORIGIN_NOT_ALLOWED_MESSAGE,
   invalid_body: `The body must be a JSON object with one field, message, of 1 to ${PUBLICATION_COMMENT_MAX_LENGTH} characters.`,
   comment_not_sent: "The message could not be mailed, so nothing was sent to the depositor.",
   comment_not_confirmed:
@@ -61,11 +62,7 @@ export const PUBLICATION_COMMENT_SENTENCES: Record<PublicationCommentErrorCode, 
 };
 
 /** Answer with a fixed sentence and a code from the contract's closed list. */
-function refuse(
-  c: Context,
-  status: 400 | 403 | 404 | 500 | 502,
-  code: PublicationCommentErrorCode,
-) {
+function refuse(c: Context, status: 400 | 404 | 500 | 502, code: PublicationCommentErrorCode) {
   const body: PublicationCommentErrorBody = { error: PUBLICATION_COMMENT_SENTENCES[code], code };
   return c.json(body, status);
 }
@@ -178,14 +175,8 @@ async function recordComment(
 
 export function registerPublishCommentRoutes(admin: AdminRouter): void {
   admin.post("/publish/:id/comment", async (c) => {
-    // A session cookie rides along with any cross-site request a browser can be tricked into
-    // making, and this route mails a real person, so every path but a bearer key must come from a
-    // NEMAR origin (the rule of `review/start` and `approve-dispatch`). A bearer key cannot be
-    // forged cross-site and a terminal sends no Origin. Phrased as "not a token" so that an unset
-    // `authMethod` fails closed.
-    if (c.get("authMethod") !== "token" && !isAllowedOrigin(c.req.header("Origin"))) {
-      return refuse(c, 403, "origin_not_allowed");
-    }
+    // This route mails a real person; the router's `cookieOriginGuard` has already refused a cookie
+    // request that did not come from a NEMAR page.
     const datasetId = c.req.param("id");
     if (!isValidDatasetId(datasetId)) return refuse(c, 400, "bad_dataset");
     const message = typedMessage(await c.req.json().catch(() => undefined));

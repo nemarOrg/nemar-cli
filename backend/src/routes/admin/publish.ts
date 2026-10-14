@@ -51,7 +51,6 @@ import {
 import { publicationReviewSummaries } from "../../services/publication-review-view";
 import { errorMessage } from "../../services/repo-metadata";
 import { applyObjectLockBatch } from "../../services/s3";
-import { isAllowedOrigin } from "../../services/web-session";
 import { getS3Config } from "./shared";
 import type { AdminRouter } from "./shared";
 
@@ -293,7 +292,9 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    *
    * Refusals, each with a stable code in `error` and a sentence in `message`:
    *   403 origin_not_allowed  an override sent with a session cookie: it is accepted only with
-   *                         an API key, and the website records one through approve-dispatch
+   *                         an API key, and the website records one through approve-dispatch.
+   *                         (A cookie request with no NEMAR origin never gets this far: the
+   *                         router's `cookieOriginGuard` answers it with the same code.)
    *   409 request_blocked   the request is `blocked` and is not a run that started publishing
    *                         (the owner-name walk-back); whatever the flag says
    *   409 identifier_screen_not_clear  the identifier screen does not allow it (ADR 0086)
@@ -356,10 +357,11 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    * (see its docblock). The executor sends no override: its run rides on the
    * clicker's, recorded here before the dispatch.
    *
-   * A cookie request must come from a NEMAR origin; a bearer key is not asked.
+   * A cookie request must come from a NEMAR origin and a bearer key is not asked: the admin
+   * router's `cookieOriginGuard` decides that for every write, before this handler runs.
    *
    * Errors carry a stable code in `error` and a sentence in `message`:
-   *   403 origin_not_allowed  a cookie request from a non-NEMAR origin
+   *   403 origin_not_allowed  a cookie request from a non-NEMAR origin (the router's guard)
    *   404 not_found         no active request for the dataset, or it stopped
    *                         being one (published or denied) before the claim
    *   409 not_dispatchable  the newest active request is `blocked`
@@ -385,25 +387,6 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    *                         `approval_dispatch_unconfirmed` audit row is written
    */
   admin.post("/publish/:id/approve-dispatch", async (c) => {
-    // A session cookie rides along with any cross-site request a browser can be
-    // tricked into making, and this route launches an irreversible publication,
-    // so every path but a bearer key must come from a NEMAR origin. A bearer key
-    // cannot be forged cross-site and a terminal sends no Origin, so it is not
-    // asked for one. Phrased as "not a token" rather than "is a cookie" so that
-    // an unset `authMethod` fails closed. This is the cookie-only rule
-    // `resolveActingAccount` and `/auth/orcid/cli-start` apply; the admin router
-    // does not apply it to its routes in general, and this one should not wait
-    // for that to change.
-    if (c.get("authMethod") !== "token" && !isAllowedOrigin(c.req.header("Origin"))) {
-      return c.json(
-        {
-          error: "origin_not_allowed",
-          message: "This request did not come from a NEMAR page, so it was not accepted.",
-        },
-        403,
-      );
-    }
-
     const datasetId = c.req.param("id");
     const adminUser = c.get("user");
     const db = c.env.DB;
@@ -766,25 +749,13 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    *   202 { status: "pending" | "error", identifier_screen }
    *   400 identifier_screen_not_applicable  a sandbox (xx) dataset
    *   404 not_found             no active request
-   *   403 origin_not_allowed    a cookie request from a non-NEMAR origin
+   *   403 origin_not_allowed    a cookie request from a non-NEMAR origin (the router's guard)
    *   409 approval_in_progress  the request's approval has started publishing;
    *                             it passed the screen when it started
    *   409 identifier_screen_pending  a screen dispatched under
    *                             SCREEN_REPORT_DEADLINE_MINUTES ago has not reported
    */
   admin.post("/publish/:id/identifier-screen", async (c) => {
-    // The same origin rule approve-dispatch applies: a session cookie rides
-    // along with a cross-site request, so anything but a bearer key must come
-    // from a NEMAR page.
-    if (c.get("authMethod") !== "token" && !isAllowedOrigin(c.req.header("Origin"))) {
-      return c.json(
-        {
-          error: "origin_not_allowed",
-          message: "This request did not come from a NEMAR page, so it was not accepted.",
-        },
-        403,
-      );
-    }
     const datasetId = c.req.param("id");
     const adminUser = c.get("user");
     const db = c.env.DB;
