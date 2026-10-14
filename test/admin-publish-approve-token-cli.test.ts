@@ -648,9 +648,19 @@ describe("the help says the variable and the rule", () => {
     expect(help).toContain("Environment:");
   });
 
-  test("the README's command lines name the variable", () => {
+  test("the README lists the variable among the environment variables, says who sets it, and never shows it on a command line", () => {
     const readme = readFileSync(join(import.meta.dir, "..", "README.md"), "utf8");
-    expect(readme).toContain(TOKEN_ENV);
+
+    const section = readme.slice(readme.indexOf("## Environment Variables"));
+    const entry = section.split("\n").find((line) => line.startsWith(TOKEN_ENV));
+    expect(entry).toBeDefined();
+    expect(entry).toContain("web approval executor");
+    expect(entry).toContain("never by a person");
+
+    // A credential on a command line lands in shell history: the README describes the mechanism
+    // and shows no line that sets the variable inline.
+    expect(readme).not.toContain(`${TOKEN_ENV}=`);
+    expect(readme).toContain(`\`${TOKEN_ENV}\``);
   });
 });
 
