@@ -1376,6 +1376,10 @@ Moves a pending account to verified (the base tier) without the person
 redeeming an email code. It is the same transition the code flow makes, and the
 audit log records who did it.
 
+Find the numeric id with 'nemar admin users --pending'.
+No admin notification mail is sent: the owner is acting directly, unlike the
+self-verify flows where the person proved their own inbox.
+
 Rules:
   - Only owners; it asserts an inbox the person did not prove
   - Only pending accounts; use approve or revoke for the other tiers
