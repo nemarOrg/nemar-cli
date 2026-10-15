@@ -18,6 +18,7 @@ earlier releases are described only by their generated notes.
 A publication request now gets one derived verdict that is built by the Worker from the mechanical gates and a no-tools model review of the submission, and approving over anything that is not a clear pass is the administrator's recorded act (epic #1726, #1782; Architecture Decision Record (ADR) 0102 and ADR 0105).
 **The review ships switched off in production.**
 `PUBLICATION_REVIEW_ENABLED` is set in the dev environment's variables only and is absent from the production variables, so no review starts, no model is called and no approval waits for one until a later, reviewed change turns it on (see How to turn the review on).
+Before releasing, check read only that production has no secret or variable of that name (see Deploy coupling).
 What production does change with the flag off is the approval path around the review, and the list below says so item by item (see Production behavior changes): a web approval is attributed to the administrator who clicked by a per-claim token, a terminal approval takes a live web claim over, a denial is refused while an approval is running or once publishing has started, every cookie-authenticated write on the admin routes needs a NEMAR `Origin`, and the write that ends an approval no longer marks a closed request as published.
 The release also carries four independent changes: a depositor can withdraw their own publication request (#1778, ADR 0104), `nemar admin publish list` shows the active requests by default and can search (#1777), a pending account can no longer hold a verified email and an owner can force-verify one (#1769, #1770, ADR 0103), and an owner can attest an Open Researcher and Contributor ID (ORCID iD) on an account (#1788, ADR 0106).
 The dataset pull-request review was enabled in the production configuration on 2026-10-13 (#1768, merged to `main` after the 0.10.18 tag), and its prompt and evidence fixes from the first live run take effect with this release (#1771).
@@ -57,7 +58,8 @@ ADR 0102's Phase 2 amendment (item 3) and Phase 3 amendment (item 7) list these,
 - The write that ends an approval requires the request to be still `approving`.
   A run whose request was denied after its lease lapsed, or blocked again, answers 409 `approval_closed_during_run` and writes the audit row `approval_finished_on_closed_request`; it does not mark the request published.
   A resumed run whose steps are all done follows the same rule and refuses before it runs any tail job.
-  When a tail job warns, the request stays `approving` and the answer carries `status: "approving"` and the warning under the key `warning`, so approving again retries it.
+  When a tail job warns in that all-steps-done branch, the request stays `approving` and the answer carries `status: "approving"` and the warning under the key `warning`, so approving again retries it.
+  The step loop's own ending still marks the request `published` after such a warning (see Known limitations).
 - `nemar admin publish` exits non-zero on every failure (#1581), where `approve` used to exit 0 when an approval failed.
   A declined or cancelled confirmation of `approve`, `deny` and `start --all` exits 1 too, because nothing was done.
   `approve` also exits 1 when the Worker's answer is not `published`, `screen` exits 1 when the Worker answers 202 with status `error`, and `next` exits 130 after Ctrl+C and 1 when an approval was refused or failed or a denial or comment could not be sent.
@@ -67,6 +69,8 @@ ADR 0102's Phase 2 amendment (item 3) and Phase 3 amendment (item 7) list these,
 - An administrator can mail a depositor a typed message and leave the request open: `POST /admin/publish/:id/comment`, and `c` in `nemar admin publish next`.
   It is not behind the flag.
   The mail is a fixed frame around the administrator's escaped words and carries nothing of any review.
+  A failed send is never answered as a success: 502 `comment_not_sent` says that certainly nothing was delivered, and 502 `comment_not_confirmed` says that the mail may have been accepted and may also have arrived, so the administrator is to check with the depositor before sending it again.
+  Each reason in the review detail also carries an additive `line` field, the whole reason in the terminal's words; a client that meets a Worker without it falls back to the sentence and the cure.
 - The `publication_reviews` table, the review watchdog on the 30-minute tick (production only, and it reads no flag), the review's callback routes (`/webhooks/publication-review-claim` and `/webhooks/publication-review-result`) and the administrator's start and detail routes (`POST /admin/publish/:id/review/start`, `GET /admin/publish/:id/review`) exist in production.
   With the flag off the claim route refuses a new claim so that no model call is spent, and the start route refuses with `review_disabled`.
 - The fixture id `nm099997` is declared dev-owned, so production stops claiming pushes to a repository by that name before anyone creates it.
@@ -79,6 +83,7 @@ The Worker's approval gate reads nothing and passes (`off`), and any review a re
 - When the identifier screen reports for a commit and its gate is `clear` or `acknowledge`, the Worker starts one model review of that commit.
   The model is `claude-haiku-5-5` at high effort, with no tools and a schema-constrained answer.
   A depositor's requests may cost 5 model calls in 24 hours and the platform 50.
+  An administrator's `start` is held by the platform's cap only, but the call still counts toward the depositor's tally.
 - The model is sent the root README (the first of `README.md`, `README`, `README.rst` and `README.txt`), the keys of `dataset_description.json` that the Brain Imaging Data Structure (BIDS) defines, `CHANGES`, `LICENSE`, the column descriptions of `participants.json` and a structural summary of counts and closed words, after the shared mechanical rules have examined exactly the bytes being sent.
   It is never sent a table file, a recording, a signal header value, an identifier finding or the screen's result.
   For prose that pre-send check is a consistency control and not a privacy control: no rule recognizes a name, an email address or a date in prose, and the policy pages must say that a model reads this text before the flag is turned on.
@@ -104,12 +109,15 @@ The Worker's approval gate reads nothing and passes (`off`), and any review a re
 - **The administrator's approval page on the website shows the review (ADR 0102, Phase 4).**
   The page fetches the Worker's detail and prints the Worker's own words for each reason, and offers Approve with the same explicit confirmation as the terminal, Deny and Start review.
   The page's own words are declared once in `shared/contract/publication-review-copy.ts`, with a parity test against the website's copy that is strict in CI (#1787).
+  Once the website is promoted, the page withholds Approve for a blocked request and when the screen's gate is `blocks`, `rerun` or `wait`, and it always asks for an acknowledgment reason when the screen's gate is `acknowledge`, with the review flag off as well, because the screen's gate applies whatever the flag says; with the review on it also withholds Approve for a hard reason.
+  It offers no fallback to the old bodyless Approve: when the detail cannot be read or the API is older than the page, Approve is withheld.
   The website must be promoted to production only after the Worker that carries this release; see Deploy coupling.
 - **A per-claim dispatch token (ADR 0105).**
   A web click's claim gets a token that is a hash-based message authentication code (HMAC) over the claim's own columns, signed with the callback secret the Worker already holds.
   The Worker stores none of it.
   The executor presents it as `X-Approval-Dispatch-Token` on every `/approve` call of its run and the CLI reads it only from `NEMAR_APPROVAL_DISPATCH_TOKEN`, in `approve` and never in `next`.
   Releasing, replacing, denying or taking over the claim revokes it.
+  The CLI's `--debug` log redacts the `x-approval-dispatch-token` header, and the Worker never logs, stores or returns the token.
 - **A depositor can withdraw a publication request (#1778, ADR 0104).**
   `nemar dataset publish withdraw <dataset-id> [--yes|--no]`, backed by `POST /datasets/:id/publish/withdraw`, ends the request as a withdrawn one with no administrator step.
   Only the dataset owner may withdraw (403 for anyone else, including an administrator, who ends a request with `deny`).
@@ -160,7 +168,8 @@ The Worker's approval gate reads nothing and passes (`off`), and any review a re
   The Worker's request gate and the review job must not disagree about them, so both read one module and the Worker's file re-exports it.
   The checks and their sentences are unchanged, and the minimums remain hard blocks.
 - **The README forms come from one list.**
-  `shared/readme-candidates.ts` holds the four README names in BIDS order, and the submission gate, the anonymity sweep and the review read it.
+  `shared/readme-candidates.ts` holds the four README names in the order `README.md`, `README`, `README.rst`, `README.txt`, and the submission gate, the anonymity sweep and the review read it.
+  The submission gate used to try `README.txt` before `README.rst`; its ethics rule reads the first README present, so for a dataset that has both, the one it reads is now `README.rst`.
 - **Admin list and approval commands moved out of `src/commands/admin.ts`.**
   The `publish` group now lives in `src/commands/admin-publish.ts` and its siblings; the commands' names and flags are as described above.
 
@@ -170,6 +179,9 @@ The Worker's approval gate reads nothing and passes (`off`), and any review a re
   Redeeming an email-change code stamped `email_verified` but left a `pending` account at `pending`, so `/auth/email/verify` answered `already_verified` and nothing could promote it.
   The email-change write now goes through the one transition from `pending` to `verified`, in the same batch as the address update, and administrators are notified once on the transition.
   Migration 0096 repairs the accounts already in that state and refuses it from now on (see Migrations).
+- **The ORCID holder lookup no longer hides a different holder behind the account's own row (#1788).**
+  The lookup that tells whether another live account holds an ORCID iD used to drop the account's own row after `LIMIT 1`, so a different holder could be hidden behind it; the exclusion is now in the query.
+  It affects the conflict check of an ORCID link, a relink and the new attestation.
 - **`nemar completion bash` works on bash 3.2 (#1781).**
   The script used `mapfile`, which needs bash 4, and macOS ships bash 3.2: there it was `command not found`, the candidate list was never split, and TAB offered nothing, with the error hidden behind the prompt.
   The script now reads the lines with a `while read` loop.
@@ -207,9 +219,13 @@ All three apply on deploy, before the new Worker, and are additive or repairing;
   The dev fixture `nm099997`, which the soak uses, is created only after this release.
 - **No new Worker secret.**
   The review reuses the callback secret under its own domain tag, and the dispatch token is signed with the same secret; a Worker without it answers 502 `dispatch_unconfigured` before it claims anything.
+- **Release checklist item, read only: confirm production is dark.**
+  List the production Worker's secret names (never their values) and its variables, and confirm that nothing named `PUBLICATION_REVIEW_ENABLED` exists there.
+  Production's pre-screen was once lit by a secret that the configuration file does not record, so reading the file alone does not show what is on.
 - **New Worker variable: `PUBLICATION_REVIEW_ENABLED`, in the dev environment's variables only.**
   Do not add it to the production variables in a change that is not reviewed for it.
-- **A rollback of the Worker alone is safe** in every combination of Worker, workflow and CLI that ADR 0105 lists.
+- **A rollback of the Worker alone is safe for attribution** in every combination of Worker, workflow and CLI that ADR 0105 lists.
+  It does not undo the migrations: migration 0096's trigger `users_pending_email_verified_guard` stays, so the 0.10.18 Worker's email change on a pending account answers `email_change_incomplete` until the Worker is rolled forward again (ADR 0103).
 
 ### How to turn the review on
 
@@ -217,33 +233,35 @@ This is the record issue #1732 asks the release notes to keep.
 It happens after this release, in a reviewed change, and ADR 0102's "Before it is switched on" is the checklist.
 
 1. Read first: `nemar admin publish list` (the active requests, each with its screen), then `nemar admin publish start --all --dry-run`, which lists what would be started and starts nothing.
-   Where the flag is off the dry run refuses, saying the review is off, so it answers only on an environment that has the flag on.
+   `start --all`, the dry run included, refuses with "the automated review is off" when at least one request exists and every request reports the review off, and when no request can have its review started it prints "Nothing to start".
+   So the dry run shows what would start only on a Worker that has the flag on, and on production before the flag it cannot run.
 2. Create the review's own federation rule and service account and name them in the two organization variables `ANTHROPIC_PUBLICATION_REVIEW_FEDERATION_RULE_ID` and `ANTHROPIC_PUBLICATION_REVIEW_SERVICE_ACCOUNT_ID`.
 3. Soak on the dev Worker with a native, named, private fixture that dev owns (`nm099997`, created after this release): a request that passes, one the model holds, one the identifier screen holds, one with a failing BIDS check, and one whose commit changes after the review.
    Never approve the fixture under a name.
-4. Add the review's statement to the policy pages, so that they say a model reads the submission text.
+4. Make the separate docs change that corrects the policy pages for current practice, then add the review's statement to them, so that they say a model reads the submission text.
 5. Verify the attribution: the executor's workflow sends the token, and the staging audit query shows each web approval attributed to the administrator who clicked.
+   Record the maintainer's decision on a click whose clicker is no longer an active administrator, which ADR 0105 leaves open (see Known limitations).
 6. Add `PUBLICATION_REVIEW_ENABLED = "1"` to the production variables, delete the production secret `PRESCREEN_ENABLED`, disable `run-prescreen.yml` in the central workflow repository, and run `nemar admin publish start --all` once for the requests already open.
-   Removing the line from the configuration file alone would not turn the pre-screen off, because production is lit by the secret.
+   The configuration file does not record production's pre-screen switch, which is a Worker secret, so deleting the secret is what turns the pre-screen off and editing the file would not.
 
 ### Known limitations
 
 - A valid token whose clicker is no longer an active administrator falls back to the caller, as ADR 0080 decided, and the maintainer has not decided whether such a click should publish at all (ADR 0105).
-  A token also survives the end of the clicker's session or key for as long as its claim stands, fifteen minutes at most.
+  A token also survives the end of the clicker's session or key for as long as its claim stands and its lease is live, which is fifteen minutes after the run's last call, because every `/approve` call of an `approving` request renews the lease.
 - A leaked token can cancel one run through the release endpoint, which checks no lease; nothing is published or lost.
 - A request that has started publishing cannot be denied or withdrawn, and a queued web approval cannot be cancelled by `deny`; a way to stop a half-published run is a follow-up.
 - A request filed again keeps its `steps_completed` (#1766).
-- The review's pre-send check does not see a name, an email address or a date in prose, or a lookalike that Unicode compatibility folding does not map to ASCII; the review is not asked whether the text names the depositors.
-- The cure of a reason can say to start a review where the Start button is not offered (#1773).
+- The review's pre-send check does not see a name, an email address or a date in prose, a `file:` URL, a drive path or a network path in the README, `CHANGES` or `LICENSE` (those files are scanned only for local-user paths, so `C:/Users/x` passes), or a lookalike that Unicode compatibility folding does not map to ASCII; the review is not asked whether the text names the depositors.
+- The cure of a reason can say to start a review where the Start button is not offered (ADR 0102, Phase 4 amendment, item 7).
 - The step loop's own ending, after a tail job warns, still marks the request `published` and tells the administrator to approve again, which finds no active request; a formerly anonymous dataset with more than ten concealed-era versions leaves a request `approving` for good because the warning recurs.
 - The website's page has no control to run the identifier screen again; use `nemar admin publish screen`.
 - A resumed Object Lock step restarts its listing at page 1 (#1580).
-- `isAllowedOrigin` admits any NEMAR subdomain, so the Origin guard is defense in depth and not a boundary against a sibling subdomain.
+- `isAllowedOrigin` admits any NEMAR subdomain and local addresses (`localhost` and `127.0.0.1` on any port), so the Origin guard is defense in depth and not a boundary against a sibling subdomain.
 - The identifier screen's block of a `requested` request does not clear a live claim, so a retained token verifies again after a re-request until its lease lapses; it carries attribution only.
 
 ### Repository process
 
-No change to what the Worker does.
+Nothing here changes what the production Worker does, except that the owner-only delete route now calls a shared function for its masking and credential revocation (#1791).
 The publication-review decision record is ADR 0102, as the 0.10.18 entry anticipated when it said ADR 0101 would be renumbered.
 Two root-cause fixes to tests: the stringified-undefined environment values that polluted later test files are fixed at their sites and guarded by a static scan (#1783), and the flaky manifest memory, upload resume, email fence and EZID tests were each traced to a cause and fixed without loosening an assertion, including a loopback default for `Bun.serve()` so a macOS wildcard bind cannot be answered by an unrelated process (#1781).
 CI now checks the publication-review page copy strictly against the website's `staging` copy (#1787, which also moves two live tests to an id that never resolves) and compares the deployed review workflow with the authored one (#1790).
