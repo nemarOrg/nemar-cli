@@ -25,9 +25,14 @@ import type {
 import {
   APPROVAL_PUBLISHING_LINE,
   APPROVAL_STOPPED_HARD_LINE,
+  DOCUMENT_LABEL,
+  MAX_PUBLICATION_FINDINGS,
   NOT_ASSESSED_LINE,
+  PUBLICATION_FINDING_CODES,
+  PUBLICATION_FINDING_LABEL,
   REASONS,
   REASON_CODES,
+  REVIEW_DOCUMENTS,
   REVIEW_OVERDUE_VIEW_MINUTES,
   REVIEW_UNREADABLE_HEADLINE,
   type ReasonCode,
@@ -1302,6 +1307,47 @@ describe("GET /admin/publish/:id/review", () => {
       ["license_missing", "License missing", "license", "LICENSE"],
       ["other", "Other", null, null],
     ]);
+  });
+
+  test("every finding code and every document reaches the detail with the shared label", async () => {
+    const documents = [...REVIEW_DOCUMENTS, null] as const;
+    const all = PUBLICATION_FINDING_CODES.flatMap((code) =>
+      documents.map((document, i) => ({
+        question: "authors_and_license" as const,
+        severity: "note" as const,
+        code,
+        document,
+        note: `${code}-${i}`,
+      })),
+    );
+    // A report holds a bounded number of findings, so one request carries one slice of the pairs.
+    const got: NonNullable<PublicationReviewDetail["review"]>["findings"] = [];
+    for (let at = 0; at < all.length; at += MAX_PUBLICATION_FINDINGS) {
+      const { requestId, datasetId } = request();
+      seedPublicationReview(db, {
+        requestId,
+        datasetId,
+        state: "reported",
+        report: goodPublicationReport({
+          questions: {
+            complete_and_honest: "pass",
+            meets_standards: "pass",
+            authors_and_license: "fail",
+            name_adequate: "pass",
+          },
+          findings: all.slice(at, at + MAX_PUBLICATION_FINDINGS),
+          evidence: evidenceFor(SCREENED_HEAD),
+        }),
+      });
+      got.push(...((await detail(datasetId)).review?.findings ?? []));
+    }
+    expect(got.length).toBe(all.length);
+    for (const f of got) {
+      expect(f.label).toBe(PUBLICATION_FINDING_LABEL[f.code]);
+      expect(f.document_label).toBe(f.document === null ? null : DOCUMENT_LABEL[f.document]);
+    }
+    expect(new Set(got.map((f) => f.code))).toEqual(new Set(PUBLICATION_FINDING_CODES));
+    expect(new Set(got.map((f) => f.document))).toEqual(new Set(documents));
   });
 
   test("a reason's cure names the dataset, and its detail is a closed word", async () => {
