@@ -213,6 +213,13 @@ describe("E2E Sandbox Tests", () => {
     test.skipIf(shouldSkip)("nemar dataset list works", () => {
       const result = runCli(["dataset", "list"]);
       // Should succeed even if no datasets
+      if (result.exitCode !== 0) {
+        // Same report as `--mine` below: this test failed once in CI after 5.0 s with only
+        // "Expected: 0, Received: 1" in the log, which cannot tell a slow staging backend
+        // from a broken CLI (run 38490725411).
+        console.log("List failed with stdout:", result.stdout);
+        console.log("List failed with stderr:", result.stderr);
+      }
       expect(result.exitCode).toBe(0);
     });
 
