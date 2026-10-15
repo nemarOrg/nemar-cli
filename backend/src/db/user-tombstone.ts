@@ -5,7 +5,8 @@ import { PRIVATE_GRANTS_PURGE_SQL } from "../services/private-auth";
 // /admin/users/by-id/:id endpoint, the scheduled sweep of the live-test accounts
 // (services/test-account-sweep.ts) and their behavioral tests exercise the EXACT
 // same masking statement and credential cascade (no drift between the security
-// logic and its test, or between its two callers).
+// logic and its test, or between its two callers). Both callers go through
+// tombstoneUserCascade at the foot of this file.
 //
 // The mask is the load-bearing mechanism for three guarantees:
 //   1. PII erasure — email is replaced with a non-PII placeholder; username,
@@ -30,21 +31,33 @@ export function maskedDeletedEmail(id: number): string {
 }
 
 /**
- * Single-statement PII mask + tombstone. Bind order: [maskedEmail, id].
- * `AND deleted_at IS NULL` makes it idempotent (a re-delete matches 0 rows).
- * Sets status='revoked' so existing status-pinned queries also treat the row as
- * dead, and stamps `deleted_at` (the canonical soft-delete discriminator every
- * auth/list query filters on).
- */
-/**
  * The tombstone mask as a bound D1 statement. Wrapping it hides the positional
  * bind order (`[maskedEmail, id]`) so a caller can't accidentally reverse the
- * args and mask the wrong row (or 0 rows). This is the only way the endpoint
- * should issue the mask; the raw SQL constant stays exported for the behavioral
- * test (which runs it against bun:sqlite, a different driver API).
+ * args and mask the wrong row (or 0 rows). Callers outside this module should
+ * go through {@link tombstoneUserCascade}, which issues it with the credential
+ * revocations that must commit with it; the raw SQL constant stays exported for
+ * the behavioral tests (which run it against bun:sqlite, a different driver API).
+ *
+ * With `onlyIfEmail` the statement also requires the row to still carry that
+ * address (`AND email = ?`), so a caller that chose the row by its address
+ * cannot mask a row whose address changed since it looked.
+ *
+ * `AND deleted_at IS NULL` makes it idempotent (a re-delete matches 0 rows).
+ * It sets status='revoked' so existing status-pinned queries also treat the row
+ * as dead, and stamps `deleted_at` (the canonical soft-delete discriminator
+ * every auth/list query filters on).
  */
-export function tombstoneUserStatement(db: D1Database, id: number): D1PreparedStatement {
-  return db.prepare(USER_TOMBSTONE_MASK_SQL).bind(maskedDeletedEmail(id), id);
+export function tombstoneUserStatement(
+  db: D1Database,
+  id: number,
+  onlyIfEmail?: string,
+): D1PreparedStatement {
+  if (onlyIfEmail === undefined) {
+    return db.prepare(USER_TOMBSTONE_MASK_SQL).bind(maskedDeletedEmail(id), id);
+  }
+  return db
+    .prepare(`${USER_TOMBSTONE_MASK_SQL} AND email = ?`)
+    .bind(maskedDeletedEmail(id), id, onlyIfEmail);
 }
 
 export const USER_TOMBSTONE_MASK_SQL = `UPDATE users
@@ -87,9 +100,13 @@ export const USER_TOMBSTONE_MASK_SQL = `UPDATE users
        updated_at = datetime('now')
    WHERE id = ? AND deleted_at IS NULL`;
 
-/** What {@link tombstoneUserCascade} reports: how many live credentials it ended. */
+/** What {@link tombstoneUserCascade} reports. */
 export interface TombstoneCascadeResult {
+  /** True when the mask UPDATE changed a row. False means nothing was tombstoned. */
+  tombstoned: boolean;
+  /** Live keys ended. */
   tokensRevoked: number;
+  /** Live sessions (every scope) ended. */
   sessionsRevoked: number;
 }
 
@@ -103,6 +120,14 @@ export interface TombstoneCascadeResult {
  * `originalEmail` must be captured BEFORE the call (the mask rewrites it): it
  * is used only to expire the outstanding passwordless login codes, which are
  * keyed by the original address.
+ *
+ * `onlyIfEmail` is for a caller that selected the row by its address (the
+ * scheduled sweep of the live tests' accounts). The mask then also requires
+ * `email = onlyIfEmail`, and EVERY other statement is conditional on the mask
+ * having applied to this row, so a row whose address changed since it was read
+ * loses nothing: no key, session, grant or collaboration is touched, and the
+ * result says `tombstoned: false`. Without it (the owner-only route) the
+ * statements are exactly the unconditional ones they always were.
  *
  * What it does NOT do, because both are network calls with their own failure
  * modes and only the owner-only route wants them: remove GitHub collaborators
@@ -120,33 +145,42 @@ export async function tombstoneUserCascade(
   db: D1Database,
   id: number,
   originalEmail: string | null,
+  onlyIfEmail?: string,
 ): Promise<TombstoneCascadeResult> {
+  // True only once the mask above has run in this batch: the row now carries its
+  // masked address. (A row tombstoned earlier also satisfies it, and for such a
+  // row every statement below is a no-op anyway.)
+  const MASK_APPLIED = " AND EXISTS (SELECT 1 FROM users WHERE id = ? AND email = ?)";
+  const guarded = onlyIfEmail !== undefined;
+  const step = (sql: string, ...binds: unknown[]): D1PreparedStatement =>
+    guarded
+      ? db.prepare(sql + MASK_APPLIED).bind(...binds, id, maskedDeletedEmail(id))
+      : db.prepare(sql).bind(...binds);
+
   const batch = await db.batch([
-    tombstoneUserStatement(db, id),
-    db
-      .prepare(
-        "UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
-      )
-      .bind(id),
-    db
-      .prepare(
-        "UPDATE web_sessions SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
-      )
-      .bind(id),
-    db.prepare(DOCS_GRANTS_PURGE_SQL).bind(id),
-    db.prepare(PRIVATE_GRANTS_PURGE_SQL).bind(id),
-    db.prepare("DELETE FROM dataset_collaborators WHERE user_id = ?").bind(id),
-    db.prepare("DELETE FROM user_s3_permissions WHERE user_id = ?").bind(id),
+    tombstoneUserStatement(db, id, onlyIfEmail),
+    step(
+      "UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
+      id,
+    ),
+    step(
+      "UPDATE web_sessions SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
+      id,
+    ),
+    step(DOCS_GRANTS_PURGE_SQL, id),
+    step(PRIVATE_GRANTS_PURGE_SQL, id),
+    step("DELETE FROM dataset_collaborators WHERE user_id = ?", id),
+    step("DELETE FROM user_s3_permissions WHERE user_id = ?", id),
     // Expire any outstanding passwordless login codes for the original email so
     // a code issued just before deletion can't be submitted (it would otherwise
     // be consumed and then cleanly denied; this avoids even that round-trip).
-    db
-      .prepare(
-        "UPDATE auth_codes SET used_at = datetime('now') WHERE email = ? AND used_at IS NULL",
-      )
-      .bind(originalEmail),
+    step(
+      "UPDATE auth_codes SET used_at = datetime('now') WHERE email = ? AND used_at IS NULL",
+      originalEmail,
+    ),
   ]);
   return {
+    tombstoned: (batch[0]?.meta.changes ?? 0) > 0,
     tokensRevoked: batch[1]?.meta.changes ?? 0,
     sessionsRevoked: batch[2]?.meta.changes ?? 0,
   };
