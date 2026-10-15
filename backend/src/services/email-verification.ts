@@ -190,7 +190,8 @@ type BatchMeta = { meta?: { changes?: number } };
  *
  * `approved` and `revoked` rows are never re-tiered; they only ever gain the
  * `email_verified` stamp, which is a fact about the inbox and true regardless
- * of tier.
+ * of tier. The one exception is `owner_override`: it proves no inbox, so it
+ * omits the stamp statement and a row that is not `pending` is left untouched.
  *
  * THROWS if the batch fails, and then nothing landed — no promotion, no
  * session, no stamp. Callers that have already consumed a single-use code by
@@ -209,31 +210,38 @@ export async function applyEmailVerification(
   via: EmailVerificationRoute,
   alsoInTransaction: D1PreparedStatement[] = [],
 ): Promise<{ promoted: boolean; extra: BatchMeta[] }> {
-  const results = await db.batch([
-    db
-      .prepare(
-        `UPDATE users
+  const promote = db
+    .prepare(
+      `UPDATE users
             SET status = 'verified',
                 email_verified = 1,
                 updated_at = datetime('now')
           WHERE id = ? AND status = 'pending' AND deleted_at IS NULL`,
-      )
-      .bind(userId),
-    db
-      .prepare(
-        `UPDATE users
+    )
+    .bind(userId);
+  // The inbox-stamp statement is a fact about an inbox that was proved, so the
+  // owner override, which proves nothing, never runs it: losing a race to a
+  // revoke must leave the revoked row's flag alone. The promotion already sets
+  // the flag on the row it moves.
+  const stampStatements =
+    via === "owner_override"
+      ? []
+      : [
+          db
+            .prepare(
+              `UPDATE users
             SET email_verified = 1,
                 updated_at = datetime('now')
           WHERE id = ? AND email_verified = 0 AND deleted_at IS NULL`,
-      )
-      .bind(userId),
-    ...alsoInTransaction,
-  ]);
+            )
+            .bind(userId),
+        ];
+  const results = await db.batch([promote, ...stampStatements, ...alsoInTransaction]);
 
   // The caller's own statements, in the order it passed them, so it can read
   // `changes` off a conditional UPDATE it batched in here (#1268: the sign-in
   // path claims a username this way, and has to know whether it landed).
-  const extra = results.slice(2) as BatchMeta[];
+  const extra = results.slice(1 + stampStatements.length) as BatchMeta[];
   const promoted = ((results[0] as BatchMeta)?.meta?.changes ?? 0) > 0;
   if (!promoted) return { promoted: false, extra };
 

@@ -203,11 +203,10 @@ describe("POST /admin/users/by-id/:id/verify", () => {
 
     expect(res.status).toBe(409);
     expect(((await res.json()) as { error: string }).error).toBe("User is not pending");
-    // The tier did not move. email_verified is 1 because applyEmailVerification's
-    // second statement stamps the flag on any row past pending (documented
-    // there: "a fact about the inbox"); that is the service's existing contract
-    // and it also holds for this road, so it is pinned rather than hidden.
-    expect(row(id)).toEqual({ status: "revoked", email_verified: 1, service_access: 0 });
+    // Neither the tier nor the flag moved: an owner override proves no inbox,
+    // so losing the race must not leave `email_verified` stamped on a row the
+    // owner never managed to verify.
+    expect(row(id)).toEqual({ status: "revoked", email_verified: 0, service_access: 0 });
     expect(auditCount("email_verified_by_owner")).toBe(0);
     expect(auditCount("email_verified")).toBe(0);
   });
