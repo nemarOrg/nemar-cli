@@ -55,6 +55,7 @@ import {
   PUBLICATION_STEP_LABELS,
   stepsForRelease,
 } from "../../shared/publication-steps.js";
+import { searchLimitProblem } from "../../shared/publish-list-search.js";
 import {
   CLEAR_FLAGS,
   EDIT_FLAG_FIELDS,
@@ -3148,10 +3149,18 @@ Examples:
   .action(async (options: ListFilterOptions & { search?: string }) => {
     if (!requireAuth()) return;
 
+    // The server cannot run a longer pattern (D1's LIKE limit); say so here
+    // rather than after a round trip.
+    const search = options.search?.trim() || undefined;
+    const tooLong = search ? searchLimitProblem(search) : null;
+    if (tooLong) {
+      console.error(chalk.red(tooLong));
+      process.exit(1);
+    }
+
     const spinner = ora("Fetching publication requests...").start();
 
     try {
-      const search = options.search?.trim() || undefined;
       const result = await listPublishRequests({
         statuses: resolveListStatuses(options),
         search,

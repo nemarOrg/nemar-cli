@@ -164,6 +164,42 @@ describe("nemar admin publish list", () => {
     }
   });
 
+  test("a search over D1's pattern limit is refused before any request", async () => {
+    const server = startServer([ROW]);
+    try {
+      const r = await runCli(["admin", "publish", "list", "--search", "a".repeat(49)], server.url);
+      expect(r.exitCode).toBe(1);
+      expect(r.stderr).toContain("at most 50 bytes");
+      expect(server.seen).toEqual([]);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a search of exactly the limit is sent", async () => {
+    const server = startServer([ROW]);
+    try {
+      const r = await runCli(["admin", "publish", "list", "--search", "a".repeat(48)], server.url);
+      expect(r.exitCode).toBe(0);
+      expect(server.seen).toHaveLength(1);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("the limit counts escaped characters and UTF-8 bytes", async () => {
+    const server = startServer([ROW]);
+    try {
+      for (const text of ["_".repeat(25), "\u00e9".repeat(25)]) {
+        const r = await runCli(["admin", "publish", "list", "--search", text], server.url);
+        expect(r.exitCode).toBe(1);
+      }
+      expect(server.seen).toEqual([]);
+    } finally {
+      server.stop();
+    }
+  });
+
   test("the old --status flag is gone", async () => {
     const server = startServer([ROW]);
     try {
