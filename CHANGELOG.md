@@ -247,8 +247,7 @@ No change to what the Worker does.
 The publication-review decision record is ADR 0102, as the 0.10.18 entry anticipated when it said ADR 0101 would be renumbered.
 Two root-cause fixes to tests: the stringified-undefined environment values that polluted later test files are fixed at their sites and guarded by a static scan (#1783), and the flaky manifest memory, upload resume, email fence and EZID tests were each traced to a cause and fixed without loosening an assertion, including a loopback default for `Bun.serve()` so a macOS wildcard bind cannot be answered by an unrelated process (#1781).
 CI now checks the publication-review page copy strictly against the website's `staging` copy (#1787, which also moves two live tests to an id that never resolves) and compares the deployed review workflow with the authored one (#1790).
-<!-- TODO(#1791): confirm merged before the release PR -->
-A daily dev-only sweep tombstones the accounts the live integration tests leave in the development database (#1791, issue #1789): it matches only the generated test address shapes, tombstones at most 100 per run, and never runs in production; the owner-only delete route's masking and credential revocation move into one shared function that both callers use.
+A daily dev-only sweep tombstones the accounts the live integration tests leave in the development database (#1791, issue #1789): it matches only the generated test address shapes (the reserved test domain, plus one example.com shape), tombstones at most 100 per run, and never runs in production; the owner-only delete route's masking and credential revocation move into one shared function that both callers use.
 
 ## 0.10.18 - 2026-10-13
 
