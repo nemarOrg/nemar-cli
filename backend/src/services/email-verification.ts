@@ -157,9 +157,15 @@ export async function issueEmailVerificationCode(
   return { ok: true, devCode: echoOnly ? code : null, skipped: false };
 }
 
-/** How the inbox was proved, recorded in the audit row's details so the two
- *  roads to `verified` stay distinguishable after the fact. */
-export type EmailVerificationRoute = "verify_endpoint" | "code_signin" | "owner_override";
+/** How the account reached `verified`, recorded in the audit row's details so
+ *  the roads stay distinguishable after the fact. Three prove an inbox (the
+ *  link, the sign-in code, an email change) and `owner_override` proves
+ *  nothing: an owner asserted it. */
+export type EmailVerificationRoute =
+  | "verify_endpoint"
+  | "code_signin"
+  | "email_change"
+  | "owner_override";
 
 /** Just the half of a D1 batch result anyone here reads. D1's own types do not
  *  narrow `batch()` results per statement, so the cast is unavoidable; naming
