@@ -776,14 +776,58 @@ describe("ORCID attestation: owners only, marked verified, never replacing a pro
     expect(JSON.parse(entry?.details ?? "{}").orcid_attested).toBe(true);
   });
 
-  test("an iD already on the account but unverified is attested without changing the iD", async () => {
+  test("an iD already on the account but unverified is attested, reported, and audited with the iD", async () => {
     const id = seedTarget("attestsame", { orcid: IID, orcidVerified: 0 });
     const res = await patch(id, { orcid: IID });
     expect(res.status).toBe(200);
-    expect(res.body.changed).toEqual({});
+    expect(res.body.changed).toEqual({ orcid_verified: { from: "0", to: "1" } });
+    expect(res.body.message).toBe("Updated attestsame: orcid_verified");
     expect(row(id).orcid).toBe(IID);
     expect(row(id).orcid_verified).toBe(1);
-    expect(audits()).toHaveLength(1);
+
+    const [entry] = audits();
+    const details = JSON.parse(entry?.details ?? "{}");
+    expect(details.orcid_attested).toBe(true);
+    expect(details.orcid_attested_value).toBe(IID);
+    expect(details.changed).toEqual({ orcid_verified: { from: "0", to: "1" } });
+  });
+
+  test("the URL form of an unverified iD already on the account is attested the same way", async () => {
+    const id = seedTarget("attesturl", { orcid: IID, orcidVerified: 0 });
+    const res = await patch(id, { orcid: `https://orcid.org/${IID}` });
+    expect(res.status).toBe(200);
+    expect(row(id).orcid_verified).toBe(1);
+    expect(row(id).orcid).toBe(IID);
+  });
+
+  test("an iD an OAuth identity on another account holds is refused, naming that account", async () => {
+    const other = seedTarget("oauthholder", { orcid: null, orcidVerified: 0 });
+    db.query(
+      "INSERT INTO oauth_identities (user_id, provider, provider_subject) VALUES (?, 'orcid', ?)",
+    ).run(other, IID);
+    const id = seedTarget("attestoauthblocked", { orcid: null, orcidVerified: 0 });
+    const res = await patch(id, { orcid: IID });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("orcid_in_use");
+    expect(res.body.holder).toEqual({ id: other, username: "oauthholder" });
+    expect(row(id).orcid).toBeNull();
+  });
+
+  test("another account's holding of the iD is found even when the target's own row holds it first", async () => {
+    // The target is the LOWER id and carries the iD as a citation value; a
+    // higher-id account holds it through its identity row. A holder query that
+    // took the first match and then discarded it for being the target would
+    // report nobody here and let the attestation through.
+    const id = seedTarget("citedfirst", { orcid: IID, orcidVerified: 0 });
+    const other = seedTarget("provenlater", { orcid: null, orcidVerified: 0 });
+    db.query(
+      "INSERT INTO oauth_identities (user_id, provider, provider_subject) VALUES (?, 'orcid', ?)",
+    ).run(other, IID);
+    const res = await patch(id, { orcid: IID });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("orcid_in_use");
+    expect(res.body.holder).toEqual({ id: other, username: "provenlater" });
+    expect(row(id).orcid_verified).toBe(0);
   });
 
   test("re-attesting an iD that is already verified is a no-op with no audit row", async () => {
