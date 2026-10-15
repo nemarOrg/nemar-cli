@@ -2539,11 +2539,29 @@ describe("the detail's screen_gate is the gate the approval applies to the scree
     );
   }
 
-  /** What approve-dispatch answers about the screen for a bare click, or null when it does not. */
+  /** What approve-dispatch answers once the screen has passed: the review gate or the dispatch. */
+  const AFTER_THE_SCREEN = new Set([
+    "publication_review_not_clear",
+    "not_dispatchable",
+    "dispatch_unconfigured",
+  ]);
+
+  /**
+   * What approve-dispatch answers about the screen for a bare click: the gate word of a screen
+   * refusal, or null when the click got past the screen. Null is only returned for an answer the
+   * routes give AFTER the screen (a later gate or the dispatch), so a crash or an unrelated early
+   * refusal (a 500, `invalid_dataset_id`) fails here instead of reading as "not refused".
+   */
   async function screenRefusal(datasetId: string, bindings: Bindings): Promise<string | null> {
     const res = await dispatchApproval(datasetId, bindings);
     const body = (await res.json()) as { error?: string; gate?: string };
-    if (body.error !== "identifier_screen_not_clear") return null;
+    if (body.error !== "identifier_screen_not_clear") {
+      expect(
+        AFTER_THE_SCREEN.has(body.error ?? ""),
+        `${datasetId}: ${res.status} ${body.error}, not an answer from after the screen`,
+      ).toBe(true);
+      return null;
+    }
     expect(res.status).toBe(409);
     return body.gate ?? null;
   }
@@ -2576,7 +2594,13 @@ describe("the detail's screen_gate is the gate the approval applies to the scree
   }
 
   test("a sandbox dataset is exempt from the screen, review on or off, and its approval is not refused for it", async () => {
-    for (const bindings of [env(), env({ PUBLICATION_REVIEW_ENABLED: undefined })]) {
+    // Not production: the executor's workflow accepts an `xx` id only there
+    // (`APPROVAL_DISPATCH_ID_RE`), and production answers `invalid_dataset_id` before any gate.
+    const staging = { ENVIRONMENT: "staging" } as const;
+    for (const bindings of [
+      env(staging),
+      env({ ...staging, PUBLICATION_REVIEW_ENABLED: undefined }),
+    ]) {
       const { datasetId } = request({ datasetId: nextExempt(), status: "pending" });
       expect((await detail(datasetId, bindings)).screen_gate).toBe("exempt");
       expect(await screenRefusal(datasetId, bindings)).toBeNull();
