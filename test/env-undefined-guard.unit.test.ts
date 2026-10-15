@@ -24,7 +24,13 @@
  * `process . env` spaced out, `process["env"]`, or a local alias such as `const e = process.env`,
  * `const { env } = process` or `import { env } from "bun"`):
  *   - an assignment (`=`, `??=`, `||=`, `&&=`, with a trailing `!` allowed on the target) to a
- *     member, bracket or nested-bracket key whose right-hand side is `undefined` or `void 0`;
+ *     member, bracket or nested-bracket key whose right-hand side is `undefined` or `void 0`, or
+ *     a one-line expression with an undefined branch (`cond ? "a" : undefined`,
+ *     `cond ? undefined : "a"`, `x ?? undefined`, `x || undefined`);
+ *   - a restore from a variable that was captured from the same key (`const saved =
+ *     process.env.X; ... process.env.X = saved;`) when no `saved === undefined`, `!== undefined`,
+ *     `== null`, `??`, `?:`, `if (saved)` or `typeof saved` check appears in the four lines above
+ *     the assignment or earlier on its own line (a heuristic, see the limit below);
  *   - `Reflect.set(<env>, key, undefined)`;
  *   - `Object.assign(<env>, ...)` where any object literal source, anywhere in the argument list
  *     and however long, gives a property the value `undefined`.
@@ -33,8 +39,16 @@
  * (`const env = { ...process.env }; env.X = undefined`). Those are plain objects, not
  * `process.env`, and the spawn layer drops an undefined value rather than stringifying it.
  *
+ * WHAT A TEXT SCAN CANNOT SEE: a restore from a variable that MAY be undefined,
+ * `process.env.X = saved`, is the commonest way this bug is written and the scan has no types, so
+ * it only catches the narrow shape above (the variable captured from the same key in the same
+ * file, with no nearby check). The convention that makes it safe is a guard on the saved value:
+ * `if (saved === undefined) Reflect.deleteProperty(process.env, "X"); else process.env.X = saved;`
+ * (or the ternary form), and reviewers should insist on it for every restore. A value reaching the
+ * write through a map, a loop, a helper or another file's variable is not seen.
+ *
  * RESIDUAL GAPS, stated so nobody assumes more than is checked: the scan is text-level, not a
- * type-aware analysis. It cannot see `Object.defineProperty(process.env, "X", { value: undefined })`,
+ * type-aware analysis, and a multi-line ternary is judged only on its last line. It cannot see `Object.defineProperty(process.env, "X", { value: undefined })`,
  * an env object passed through a function parameter or returned from a call, `(process as any).env`,
  * an alias of `process` itself (`const p = process; p.env.X = undefined`), or a name that is an
  * alias in one function and a plain object in another within the same file.
@@ -298,6 +312,19 @@ function isUndefinedValue(expression: string): boolean {
   return /^(?:undefined|void\s+0)$/.test(e);
 }
 
+/**
+ * `isUndefinedValue`, plus the one-line shapes that evaluate to undefined on some path:
+ * a ternary with an undefined branch, or `x ?? undefined` / `x || undefined`.
+ */
+function mayBeUndefined(expression: string): boolean {
+  if (isUndefinedValue(expression)) return true;
+  const e = expression.trim();
+  const unset = "(?:undefined|void\\s+0)";
+  if (new RegExp(`\\?\\s*${unset}\\s*:`).test(e)) return true;
+  if (e.includes("?") && new RegExp(`:\\s*${unset}\\s*(?:as\\s[^:?]*)?$`).test(e)) return true;
+  return new RegExp(`(?:\\?\\?|\\|\\|)\\s*${unset}\\s*$`).test(e);
+}
+
 /** Every place `source` writes undefined into the environment object, as 1-based lines. */
 function findEnvUndefinedWrites(source: string): EnvUndefinedHit[] {
   if (!/env/.test(source)) return [];
@@ -322,29 +349,62 @@ function findEnvUndefinedWrites(source: string): EnvUndefinedHit[] {
   const isEnvObject = new RegExp(`^(?:${names})$`);
   const flagged = new Set<number>();
 
-  // `<env>.KEY = undefined`, `<env>[expr] = undefined` and the logical-assignment forms.
+  // Every `<env>.KEY` or `<env>[expr]` reference, with the key it names and where it ends.
+  const members: Array<{ index: number; key: string; end: number }> = [];
   for (const ref of code.matchAll(reference)) {
     let at = ref.index + ref[0].length;
     while (/\s/.test(code[at] ?? "")) at++;
+    let key: string;
     if (code[at] === ".") {
       at++;
       while (/\s/.test(code[at] ?? "")) at++;
-      const key = new RegExp(IDENT, "y");
-      key.lastIndex = at;
-      const named = key.exec(code);
+      const name = new RegExp(IDENT, "y");
+      name.lastIndex = at;
+      const named = name.exec(code);
       if (!named) continue;
+      key = named[0];
       at += named[0].length;
     } else if (code[at] === "[") {
       const close = matchingClose(code, at);
       if (close < 0) continue;
+      key = code.slice(at, close + 1).replace(/\s+/g, "");
       at = close + 1;
     } else {
       continue;
     }
+    members.push({ index: ref.index, key, end: at });
+  }
+
+  // Variables that captured a key's value: `const saved = process.env.X;`, `saved = process.env.X;`.
+  const captured = new Map<string, Set<string>>();
+  for (const member of members) {
+    if (!/^[ \t]*(?:;|\n|$)/.test(code.slice(member.end, member.end + 40))) continue;
+    const before = code.slice(Math.max(0, member.index - 200), member.index);
+    const binding = new RegExp(`(?<![\\w$.])(${IDENT})\\s*(?::[^=;]*)?=\\s*$`).exec(before);
+    if (!binding) continue;
+    const keys = captured.get(binding[1]) ?? new Set<string>();
+    keys.add(member.key);
+    captured.set(binding[1], keys);
+  }
+  /** A check on `name` in the four lines above the write, or earlier on its own line. */
+  const isChecked = (name: string, offset: number) => {
+    const window = code.slice(lineStarts[Math.max(0, lineAt(offset) - 5)], offset);
+    const id = escapeRegExp(name);
+    return [
+      `\\b${id}\\s*(?:===|!==|==|!=)\\s*(?:undefined|null)`,
+      `(?:undefined|null)\\s*(?:===|!==|==|!=)\\s*${id}\\b`,
+      `\\b${id}\\s*(?:\\?\\?|\\?|&&)`,
+      `\\bif\\s*\\(\\s*!?\\s*${id}\\s*\\)`,
+      `\\btypeof\\s+${id}\\b`,
+    ].some((pattern) => new RegExp(pattern).test(window));
+  };
+
+  // `<env>.KEY = undefined`, `<env>[expr] = undefined`, the logical-assignment forms, and the
+  // restore from a captured variable that nothing checked.
+  for (const member of members) {
     const operator = /\s*!?\s*(\?\?=|\|\|=|&&=|=(?![=>]))\s*/y;
-    operator.lastIndex = at;
-    const assignment = operator.exec(code);
-    if (!assignment) continue;
+    operator.lastIndex = member.end;
+    if (!operator.exec(code)) continue;
     let end = operator.lastIndex;
     let depth = 0;
     while (end < code.length) {
@@ -355,7 +415,12 @@ function findEnvUndefinedWrites(source: string): EnvUndefinedHit[] {
       } else if (depth === 0 && (c === ";" || c === "\n")) break;
       end++;
     }
-    if (isUndefinedValue(code.slice(operator.lastIndex, end))) flagged.add(lineAt(ref.index));
+    const value = code.slice(operator.lastIndex, end).trim();
+    const unchecked =
+      new RegExp(`^${IDENT}$`).test(value) &&
+      captured.get(value)?.has(member.key) === true &&
+      !isChecked(value, member.index);
+    if (mayBeUndefined(value) || unchecked) flagged.add(lineAt(member.index));
   }
 
   // `Reflect.set(<env>, key, undefined)` and `Object.assign(<env>, ...sources)`.
@@ -366,7 +431,7 @@ function findEnvUndefinedWrites(source: string): EnvUndefinedHit[] {
     const args = splitTopLevel(code, open + 1, close);
     if (args.length === 0 || !isEnvObject.test(args[0].text.trim())) continue;
     if (call[1].startsWith("Reflect")) {
-      if (args[2] && isUndefinedValue(args[2].text)) flagged.add(lineAt(args[2].at));
+      if (args[2] && mayBeUndefined(args[2].text)) flagged.add(lineAt(args[2].at));
       continue;
     }
     for (const source of args.slice(1)) {
@@ -375,7 +440,7 @@ function findEnvUndefinedWrites(source: string): EnvUndefinedHit[] {
       const from = source.at + source.text.indexOf("{") + 1;
       for (const property of splitTopLevel(code, from, from + literal.length - 2)) {
         const colon = property.text.search(/:/);
-        if (colon >= 0 && isUndefinedValue(property.text.slice(colon + 1))) {
+        if (colon >= 0 && mayBeUndefined(property.text.slice(colon + 1))) {
           flagged.add(
             lineAt(property.at + property.text.length - property.text.trimStart().length),
           );
@@ -438,6 +503,47 @@ describe("the scanner", () => {
       "an alias through Object.assign",
       ["const e = process.env;", "Object.assign(e, { A: undefined });"],
       [2],
+    ],
+    ["a ternary with an undefined second branch", ['process.env.A = cond ? "a" : undefined;'], [1]],
+    ["a ternary with an undefined first branch", ['process.env.A = cond ? void 0 : "a";'], [1]],
+    ["a fallback to undefined", ["process.env.A = maybe ?? undefined;"], [1]],
+    [
+      "Reflect.set with an undefined ternary branch",
+      ['Reflect.set(process.env, "A", c ? "a" : undefined);'],
+      [1],
+    ],
+    [
+      "Object.assign with an undefined ternary branch",
+      ['Object.assign(process.env, { A: c ? "a" : undefined });'],
+      [1],
+    ],
+    [
+      "a restore from a variable captured from the key, with no check",
+      ["const saved = process.env.A;", "run();", "process.env.A = saved;"],
+      [3],
+    ],
+    [
+      "a restore from a variable assigned from the key earlier",
+      ["let saved: string | undefined;", "saved = process.env.A;", "process.env.A = saved;"],
+      [3],
+    ],
+    [
+      "a restore of a bracket key",
+      ["const prev = process.env[name];", "process.env[name] = prev;"],
+      [2],
+    ],
+    [
+      "a restore whose only check is more than four lines up",
+      [
+        "const saved = process.env.A;",
+        "if (saved === undefined) run();",
+        "a();",
+        "b();",
+        "c();",
+        "d();",
+        "process.env.A = saved;",
+      ],
+      [7],
     ],
     ["Object.assign on one line", ["Object.assign(process.env, { A: undefined });"], [1]],
     [
@@ -510,6 +616,38 @@ describe("the scanner", () => {
         "`);",
       ],
     ],
+    [
+      "a ternary of two strings",
+      ['process.env.A = cond ? "a" : "b";', 'Object.assign(process.env, { B: c ? "a" : "b" });'],
+    ],
+    [
+      "a restore guarded on the same line",
+      ["const saved = process.env.A;", "if (saved !== undefined) process.env.A = saved;"],
+    ],
+    [
+      "a restore guarded on the line above",
+      [
+        "const saved = process.env.A;",
+        'if (saved === undefined) Reflect.deleteProperty(process.env, "A");',
+        "else process.env.A = saved;",
+      ],
+    ],
+    [
+      "a restore guarded by a ternary",
+      [
+        "const saved = process.env.A;",
+        'saved === undefined ? Reflect.deleteProperty(process.env, "A") : (process.env.A = saved);',
+      ],
+    ],
+    [
+      "a restore guarded by a truthiness check",
+      ["const saved = process.env.A;", "if (saved) process.env.A = saved;"],
+    ],
+    [
+      "a variable captured from a different key",
+      ["const saved = process.env.A;", "process.env.B = saved;"],
+    ],
+    ["a variable that was never read from the environment", ["process.env.A = fromElsewhere;"]],
     ["a regular expression literal", ["const re = /process\\.env\\.A = undefined/;"]],
     [
       "division, which is not a regular expression",
