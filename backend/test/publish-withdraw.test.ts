@@ -223,6 +223,45 @@ describe("a request an administrator has started on", () => {
     expect(row(id)).toMatchObject({ status: "requested", withdrawn_at: null });
   });
 
+  test("an approving request whose lease has lapsed is still refused", async () => {
+    // `approving` means a run claimed the request and may be between steps; the
+    // lease only says whether something is still driving it. A stalled run is for
+    // an administrator to re-run or deny, not for the depositor to close, so the
+    // status refuses it whatever the lease says.
+    const id = seedRequest("approving", { ageMinutes: 20 });
+    const res = await withdraw();
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { code: string }).code).toBe("withdraw_too_late");
+    expect(row(id)).toMatchObject({ status: "approving", withdrawn_at: null });
+  });
+
+  test("a dispatched run that failed more than the grace ago is stalled and may be withdrawn", async () => {
+    // The dispatch is inside the lease, but the run recorded an error and has
+    // been quiet for 2 minutes, past FAILED_RUN_GRACE_SECONDS (60): nothing is
+    // driving it, so it does not count as in flight.
+    const id = seedRequest("requested", {
+      dispatchedAt: "-5 minutes",
+      lastError: "ci_check failed",
+      ageMinutes: 2,
+    });
+    expect((await withdraw()).status).toBe(200);
+    expect(row(id).withdrawn_at).not.toBeNull();
+  });
+
+  test("a dispatched run that failed seconds ago is still in flight and is refused", async () => {
+    // Inside the grace the CLI's own retry may be about to start, so the failure
+    // does not yet release the lease (services/approval-dispatch.ts).
+    const id = seedRequest("requested", {
+      dispatchedAt: "-5 minutes",
+      lastError: "ci_check failed",
+    });
+    db.run(
+      `UPDATE publication_requests SET updated_at = datetime('now', '-10 seconds') WHERE id = ${id}`,
+    );
+    expect((await withdraw()).status).toBe(409);
+    expect(row(id)).toMatchObject({ status: "requested", withdrawn_at: null });
+  });
+
   test("a published request cannot be withdrawn", async () => {
     const id = seedRequest("published");
     expect((await withdraw()).status).toBe(404);
@@ -447,6 +486,9 @@ describe("a withdrawn request stays withdrawn", () => {
     expect(res.status).toBe(404);
   });
 
+  // This reaches the deny route's first look, which finds no active request (404).
+  // The guarded UPDATE, a withdrawal landing after that look, is in
+  // publish-withdraw-approve-race.test.ts.
   test("an administrator cannot deny a request that was withdrawn", async () => {
     const id = seedRequest("requested");
     await withdraw();
@@ -463,8 +505,12 @@ describe("a withdrawn request stays withdrawn", () => {
     expect(row(id).denied_reason).toBeNull();
   });
 
-  test("a live request that carries an old withdrawn_at is not reported as withdrawn", async () => {
-    // A re-request that revived the row (publication.ts) leaves the column set.
+  test("status reports withdrawn only for a denied row, whatever withdrawn_at holds", async () => {
+    // No writer today puts withdrawn_at on a live row: `publish request` matches
+    // only active statuses and inserts a NEW row after a withdrawal, so the old
+    // row stays withdrawn. The column is seeded directly to pin that the report
+    // keys on the status as well (ADR 0104, decision 2), so a future writer that
+    // revives a row is not read as a withdrawal.
     const id = seedRequest("requested");
     db.run(`UPDATE publication_requests SET withdrawn_at = datetime('now') WHERE id = ${id}`);
     const res = await app.request(
