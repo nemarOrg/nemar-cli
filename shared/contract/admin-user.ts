@@ -276,7 +276,9 @@ export type AdminUserFieldChange = z.infer<typeof adminUserFieldChangeSchema>;
  * `PATCH /admin/users/by-id/:id`. `changed` holds ONLY the fields that differ
  * from what the account held; re-sending a current value is not a change, and
  * a request that changes nothing answers 200 with `changed: {}` and writes no
- * audit row. `notes` are side effects and caveats the editor should read.
+ * audit row. The one key that is not an editable field is `orcid_verified`,
+ * reported when an ORCID attestation marks an iD verified (ADR 0106). `notes`
+ * are side effects and caveats the editor should read.
  */
 export const adminUserEditResponseSchema = z
   .object({
