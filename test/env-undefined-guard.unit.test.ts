@@ -16,7 +16,8 @@
  * for an originally-set one, assign the saved string back.
  *
  * HOW IT SCANS. Each file is first reduced to its code: comments, string contents, template
- * literal text and regular expression bodies are blanked (newlines kept, so line numbers hold),
+ * literal text and regular expression bodies are blanked (each UTF-16 unit becomes one space and
+ * newlines stay, so offsets and line numbers hold; the repo is LF, and CRLF is not handled),
  * then the code is searched for a write to the environment object. A line inside a multi-line
  * template literal, a fixture script a test writes to disk, a trailing `// ...` comment and a
  * string such as "process.env.X = undefined" therefore never flag. What it flags, however the
@@ -42,7 +43,9 @@
  * `src`, `backend/src`, `scripts`, `backend/scripts`, `shared` and `deploy`, listed with
  * `git ls-files` so an untracked scratch file cannot fail the guard locally and pass in CI (it
  * walks the directories instead when the tree is not a git checkout). The whole scan takes about
- * 0.4 seconds (the whole file, measured with bun test) on roughly 1,200 files.
+ * 0.4 seconds (the whole file, measured with bun test) on roughly 1,200 files. A file over 1 MB
+ * or with a line over 5,000 characters is named in the failure rather than scanned, because the
+ * scan is quadratic on one huge line.
  *
  * NOT FLAGGED, on purpose: an `env: { X: undefined }` option or a local object copy
  * (`const env = { ...process.env }; env.X = undefined`). Those are plain objects, not
@@ -56,16 +59,23 @@
  * (or the ternary form), and reviewers should insist on it for every restore. A value reaching the
  * write through a map, a loop, a helper or another file's variable is not seen.
  *
- * RESIDUAL GAPS, stated so nobody assumes more than is checked: the scan is text-level, not a
- * type-aware analysis. It does not read a parenthesised branch (`= cond ? "a" : (undefined)`,
- * `= (cond ? "a" : undefined)`), an angle-bracket cast (`<any>undefined`), `undefined satisfies T`,
- * or a wrapped fallback (`(saved ?? undefined)!`). It cannot see `Object.defineProperty(process.env, "X", { value: undefined })`,
- * an env object passed through a function parameter or returned from a call, `(process as any).env`,
- * an alias of `process` itself (`const p = process; p.env.X = undefined`), or an alias that is
- * not a one-line `name = process.env` (`const { env } = process`, `import { env } from "bun"`, a
- * type annotation on the alias). Those two are left out on purpose: finding them needs scope
- * analysis, and without it an unrelated local `const env = { ... }` in a file that also imports
- * `env` would be flagged. The alias that is found is matched by name for the whole file.
+ * RESIDUAL GAPS, stated so nobody assumes more than is checked. The scan is text-level, not a
+ * type-aware analysis, so it does not read:
+ *   - a parenthesised branch: `= cond ? "a" : (undefined)`, `= (cond ? "a" : undefined)`;
+ *   - an angle-bracket cast, `<any>undefined`, or `undefined satisfies T`;
+ *   - a wrapped fallback, `(saved ?? undefined)!`;
+ *   - `Object.defineProperty(process.env, "X", { value: undefined })`;
+ *   - an env object passed through a function parameter or returned from a call, or
+ *     `(process as any).env`;
+ *   - an alias of `process` itself, `const p = process; p.env.X = undefined`;
+ *   - an alias that is not a one-line `name = process.env`: `const { env } = process`,
+ *     `import { env } from "bun"` and a typed `const e: Env = process.env` are left out on
+ *     purpose, because finding them needs scope analysis and without it an unrelated local
+ *     `const env = { ... }` in a file that also imports `env` would be flagged. The alias that is
+ *     found is matched by name across the whole file;
+ *   - a regular expression after `i++ / 2`-style code: a `/` after a word, `)`, `]` or a quote
+ *     divides and after anything else starts a regex, so `i++ / 2` reads as a regex; the damage
+ *     is bounded to the rest of that line, because a regex body ends at the line's end.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -199,9 +209,9 @@ function blankNonCode(source: string): string {
         i += source[i] === "\\" ? 2 : 1;
       const content = source.slice(start, Math.min(i, length));
       const keep = content === "env";
-      for (const c of content) {
-        if (keep) out.push(c);
-        else blank(c);
+      for (let k = 0; k < content.length; k++) {
+        if (keep) out.push(content[k]);
+        else blank(content[k]);
       }
       if (source[i] === char) {
         out.push(char);
@@ -794,6 +804,11 @@ describe("the scanner", () => {
       expect(findEnvUndefinedWrites(lines.join("\n"))).toEqual([]);
     });
   }
+
+  test("blanking keeps every offset, astral characters and escapes included", () => {
+    const source = 'const s = "\u{1F600}\\"x"; const t = `a${b}\u{1F600}`; // \u{1F600}\nrun();';
+    expect(blankNonCode(source).length).toBe(source.length);
+  });
 
   test("reports the offending line number and the text of that line", () => {
     const [hit] = findEnvUndefinedWrites("x();\n  process.env.REPORTED = undefined;\n");
