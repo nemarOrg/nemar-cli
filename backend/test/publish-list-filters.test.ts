@@ -144,13 +144,74 @@ describe("search", () => {
     expect((await get("?search='%20OR%201=1")).ids).toEqual([]);
   });
 
-  test("an over-long search is a 400", async () => {
-    expect((await get(`?search=${"a".repeat(101)}`)).status).toBe(400);
+  test("a search whose pattern exceeds D1's limit is a 400 that says so", async () => {
+    const r = await get(`?search=${"a".repeat(49)}`);
+    expect(r.status).toBe(400);
+    expect(JSON.stringify(r.body)).toMatch(/at most 50 bytes/);
   });
 
   test("the response carries the dataset name", async () => {
     const r = await get("?search=nm000104");
     const first = (r.body as { requests: Array<{ dataset_name: string | null }> }).requests[0];
     expect(first.dataset_name).toBe("Motor imagery");
+  });
+});
+
+/**
+ * D1 refuses a LIKE pattern over 50 BYTES ("LIKE or GLOB pattern too complex:
+ * SQLITE_ERROR"), and bun:sqlite does not, so these boundaries cannot be found
+ * by running the query here: the route has to refuse them itself. The pattern
+ * is "%" + the escaped text + "%", an escaped "_", "%" or "\" is two bytes, and
+ * the engine counts UTF-8 bytes, not characters.
+ *
+ * The limit was measured against the real engine on 2026-10-14 with
+ * `wrangler d1 execute nemar-db -c wrangler-sccn.toml --local` (local D1 on
+ * workerd): a 50-byte pattern ran, a 51-byte one failed with the error above;
+ * 24 two-byte letters ran and 25 failed; 24 escaped underscores ran and 25
+ * failed.
+ */
+describe("search length is bounded by D1's LIKE pattern limit", () => {
+  const encoded = (text: string) => encodeURIComponent(text);
+
+  test("48 plain characters make a 50-byte pattern and work", async () => {
+    expect((await get(`?search=${"a".repeat(48)}`)).status).toBe(200);
+  });
+
+  test("49 plain characters make a 51-byte pattern and are refused", async () => {
+    expect((await get(`?search=${"a".repeat(49)}`)).status).toBe(400);
+  });
+
+  test("an escaped underscore counts twice", async () => {
+    expect((await get(`?search=${"_".repeat(24)}`)).status).toBe(200);
+    expect((await get(`?search=${"_".repeat(25)}`)).status).toBe(400);
+  });
+
+  test("an escaped percent counts twice", async () => {
+    expect((await get(`?search=${"%".repeat(24).replaceAll("%", "%25")}`)).status).toBe(200);
+    expect((await get(`?search=${"%25".repeat(25)}`)).status).toBe(400);
+  });
+
+  test("an escaped backslash counts twice", async () => {
+    expect((await get(`?search=${"%5C".repeat(24)}`)).status).toBe(200);
+    expect((await get(`?search=${"%5C".repeat(25)}`)).status).toBe(400);
+  });
+
+  test("a two-byte character counts two", async () => {
+    expect((await get(`?search=${encoded("\u00e9".repeat(24))}`)).status).toBe(200);
+    expect((await get(`?search=${encoded("\u00e9".repeat(25))}`)).status).toBe(400);
+  });
+
+  test("a three-byte character counts three", async () => {
+    expect((await get(`?search=${encoded("\u65e5".repeat(16))}`)).status).toBe(200);
+    expect((await get(`?search=${encoded("\u65e5".repeat(17))}`)).status).toBe(400);
+  });
+
+  test("a four-byte character counts four", async () => {
+    expect((await get(`?search=${encoded("\u{1F9E0}".repeat(12))}`)).status).toBe(200);
+    expect((await get(`?search=${encoded("\u{1F9E0}".repeat(13))}`)).status).toBe(400);
+  });
+
+  test("surrounding whitespace is not part of the pattern", async () => {
+    expect((await get(`?search=%20%20${"a".repeat(48)}%20`)).status).toBe(200);
   });
 });

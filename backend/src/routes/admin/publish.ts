@@ -9,6 +9,10 @@ import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 
 import { screenGate } from "../../../../shared/identifier-screen-report.js";
+import {
+  searchLimitProblem,
+  substringLikePattern,
+} from "../../../../shared/publish-list-search.js";
 import { auditLogStatement } from "../../db/audit-log";
 import { ACTIVE_REQUEST_TAIL_SQL, approvalInFlightSql } from "../../services/approval-dispatch";
 import { resolveEmailConfig, sendPublicationDeniedEmail } from "../../services/email";
@@ -55,7 +59,6 @@ const dispatchBodySchema = z
   .strict();
 
 const REQUEST_STATUSES = ["requested", "approving", "blocked", "published", "denied"] as const;
-const MAX_SEARCH_LENGTH = 100;
 
 /**
  * The list route's filters. `status` is one status or a comma-separated list
@@ -77,9 +80,10 @@ function parseListFilters(
     };
   }
   const search = (rawSearch ?? "").trim();
-  if (search.length > MAX_SEARCH_LENGTH) {
-    return { error: `search is too long (at most ${MAX_SEARCH_LENGTH} characters)` };
-  }
+  // D1 refuses a LIKE pattern over 50 bytes with a 500, which bun:sqlite does not
+  // reproduce, so the bound is enforced here (shared/publish-list-search.ts).
+  const tooLong = searchLimitProblem(search);
+  if (tooLong) return { error: tooLong };
   return { statuses: [...new Set(statuses)], search };
 }
 
@@ -121,7 +125,7 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     // Bound parameters, with the pattern characters escaped, so the text is a
     // literal substring and never a pattern (#1775).
     if (search) {
-      const like = `%${search.replace(/[\\%_]/g, "\\$&")}%`;
+      const like = substringLikePattern(search);
       where.push(
         "(pr.dataset_id LIKE ? ESCAPE '\\' OR u.username LIKE ? ESCAPE '\\' OR d.name LIKE ? ESCAPE '\\')",
       );
