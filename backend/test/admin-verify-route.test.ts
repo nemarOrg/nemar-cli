@@ -167,6 +167,19 @@ describe("POST /admin/users/by-id/:id/verify", () => {
     expect(row(id)?.status).toBe("pending");
   });
 
+  test("a failed owner audit write is logged, not propagated: the verification stands", async () => {
+    const id = seedWeb("auditgap@nemar.test", "pending");
+    const failing = interceptingD1(realD1(db), (sql) => {
+      if (sql.includes("INSERT INTO audit_log")) throw new Error("audit write refused");
+    });
+
+    const res = await verify(id, OWNER_KEY, failing);
+
+    expect(res.status).toBe(200);
+    expect(row(id)).toEqual({ status: "verified", email_verified: 1, service_access: 0 });
+    expect(auditCount("email_verified_by_owner")).toBe(0);
+  });
+
   test("losing the race to a concurrent revoke is 409, with no promotion and no audit rows", async () => {
     const id = seedWeb("raced@nemar.test", "pending");
     // A second writer revokes the account after the route has read it as
