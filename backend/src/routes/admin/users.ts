@@ -1430,6 +1430,13 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       return c.json({ error: "User is not pending" }, 409);
     }
 
+    // Written AFTER the promotion committed, so the failure is logged and never
+    // propagated: the same shape as finalizeApproval's user_approved row. A 500
+    // here would tell the owner their completed action failed and send them
+    // into a retry that now 409s. What a failure costs: the account IS verified
+    // and its `email_verified` row (via `owner_override`) still stands, but
+    // nothing records WHICH owner did it, which is why the log line carries the
+    // owner id for the operator to reconcile by hand.
     try {
       await auditLogStatement(db, {
         userId: owner.id,
@@ -1439,7 +1446,10 @@ export function registerUsersRoutes(admin: AdminRouter): void {
         details: JSON.stringify({ from: "pending", to: "verified" }),
       }).run();
     } catch (err) {
-      console.error(`AUDIT GAP: owner verification of id=${id} committed without its row:`, err);
+      console.error(
+        `AUDIT GAP: email_verified_by_owner row not written for id=${id} by owner id=${owner.id} (the verification DID commit):`,
+        err,
+      );
     }
 
     return c.json({ message: `User id ${id} verified`, user: { id, status: "verified" } });
