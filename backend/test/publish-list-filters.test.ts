@@ -120,7 +120,17 @@ describe("search", () => {
   });
 
   test("an exact dataset id is listed before longer ids that contain it", async () => {
+    // The longer id is the NEWER request, so the default newest-first order
+    // alone would list it first; only the exact-match term puts nm000104 ahead.
+    db.run(
+      "UPDATE publication_requests SET requested_at = '2026-10-01 00:00:00' WHERE dataset_id = 'nm000104'",
+    );
+    db.run(
+      "UPDATE publication_requests SET requested_at = '2026-10-02 00:00:00' WHERE dataset_id = 'nm0001041'",
+    );
     expect((await get("?search=nm000104")).ids).toEqual(["nm000104", "nm0001041"]);
+    // The match is case-insensitive, like the search itself.
+    expect((await get("?search=NM000104")).ids).toEqual(["nm000104", "nm0001041"]);
   });
 
   test("composes with the status filter", async () => {
