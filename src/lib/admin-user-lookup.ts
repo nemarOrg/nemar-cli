@@ -193,7 +193,15 @@ export function planEdit(current: AdminUserDetail, body: AdminUserEditBody): Pla
     const to = body[field];
     if (to === undefined) continue;
     const from = current[field] ?? null;
-    if ((from ?? "") === to) continue;
+    if ((from ?? "") === to) {
+      // The same iD is still a change while it is unverified: an owner's
+      // attestation marks it verified (ADR 0106), and the server would do that,
+      // so the preview must not call the command a no-op.
+      if (field === "orcid" && !current.orcid_verified) {
+        plan.push({ field, from: `${to} (unverified)`, to: `${to} (verified, attested)` });
+      }
+      continue;
+    }
     plan.push({ field, from, to });
   }
   return plan;
