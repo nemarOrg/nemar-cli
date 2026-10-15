@@ -1079,13 +1079,24 @@ const OVERRIDE_NEUTRAL = OVERRIDE.replace(FORCE_FLAG, "");
 /** What a start cure says for a request no start can reach (see {@link ReasonRule.cureNotStartable}). */
 const NOT_STARTABLE = `A review starts only for a request that is waiting for its decision. ${OVERRIDE}`;
 
-// The commands the cures name. One spelling each, so a reason's `command`, its cure and `next`
-// (nextCommand) are the same string.
+// The commands the cures, the gate's refusal sentences, the stopped-approval line and `next`
+// (nextCommand) name. One spelling each, `<dataset>` for the id, filled by `fill`. What stays
+// spelled where it is used: the `--resume` and `--force` that `nextCommand` appends because the
+// state asks for them, and the `--force` of the gate's own sentences, which are prose about a flag
+// rather than a command to run. `COMMAND_ACKNOWLEDGE` is `next` only when neither of those two is
+// appended, so the one is not a prefix check of the other.
 const COMMAND_SCREEN = "nemar admin publish screen <dataset>";
 const COMMAND_START = "nemar admin publish start <dataset>";
 const COMMAND_SHOW = "nemar admin publish show <dataset>";
+const COMMAND_APPROVE = "nemar admin publish approve <dataset>";
+const COMMAND_DENY = "nemar admin publish deny <dataset>";
 const ACKNOWLEDGE_FLAG = '--acknowledge-identifier-screen "<reason>"';
-const COMMAND_ACKNOWLEDGE = `nemar admin publish approve <dataset> ${ACKNOWLEDGE_FLAG}`;
+const COMMAND_ACKNOWLEDGE = `${COMMAND_APPROVE} ${ACKNOWLEDGE_FLAG}`;
+
+/** A command or sentence with its `<dataset>` filled; the caller passes an id already validated. */
+function fill(template: string, datasetId: string): string {
+  return template.replaceAll("<dataset>", datasetId);
+}
 
 /** The reasons table (ADR 0102, section 5). A `Record`, so a code without a rule fails the build. */
 export const REASONS: Record<ReasonCode, ReasonRule> = {
@@ -1327,33 +1338,37 @@ function quotedId(datasetId: string): string {
  * {@link neutralCureOf} instead.
  */
 export function cureOf(code: ReasonCode, datasetId: string, startable: boolean): string {
-  return cureTemplate(REASONS[code], startable).text.replaceAll("<dataset>", quotedId(datasetId));
+  return fill(cureTemplate(REASONS[code], startable).text, quotedId(datasetId));
 }
 
 /**
  * The cure for a reader with no terminal: {@link cureOf} without its command and without the
  * override flag. A complete sentence, or two.
+ *
+ * The choice of "start it" is made from `startable` alone, the request waiting for its decision,
+ * never from the detail's `start_offered`. That is intended: the cure is a pure function of the
+ * reason and the request's standing, and `start_offered` (which also needs a restartable row and a
+ * screen that is clear or acknowledged with a head) is the one authoritative answer a page uses to
+ * draw the Start control. So a detail can say "start it" while `start_offered` is false, for a
+ * request whose stored report no longer parses, a sandbox request, or a screen with no head.
  */
 export function neutralCureOf(code: ReasonCode, datasetId: string, startable: boolean): string {
   const rule = REASONS[code];
   const { text, alternative } = cureTemplate(rule, startable);
   const withoutCommand =
     !alternative && rule.command !== undefined ? text.replace(`: ${rule.command}`, "") : text;
-  return withoutCommand
-    .replace(OVERRIDE, OVERRIDE_NEUTRAL)
-    .replaceAll("<dataset>", quotedId(datasetId));
+  return fill(withoutCommand.replace(OVERRIDE, OVERRIDE_NEUTRAL), quotedId(datasetId));
 }
 
 /**
  * The command the terminal's cure names, the id filled; null when the cure in force names none
  * (the alternative a start cannot reach names none).
+ * Like {@link neutralCureOf}, it decides from `startable` alone (see there).
  */
 export function commandOf(code: ReasonCode, datasetId: string, startable: boolean): string | null {
   const rule = REASONS[code];
-  if (rule.command === undefined || (!startable && rule.cureNotStartable !== undefined)) {
-    return null;
-  }
-  return rule.command.replaceAll("<dataset>", quotedId(datasetId));
+  if (rule.command === undefined || cureTemplate(rule, startable).alternative) return null;
+  return fill(rule.command, quotedId(datasetId));
 }
 
 export interface Reason {
@@ -1773,8 +1788,7 @@ export const APPROVAL_PUBLISHING_LINE =
  * cure for a failed minimum names takes only a request still waiting for its decision, so this one
  * stays `approving`. The way out is a denial. `<dataset>` is filled like a cure's.
  */
-export const APPROVAL_STOPPED_HARD_LINE =
-  "This approval stopped before it started publishing, and a reason that nothing clears now stands, so it cannot be resumed. Deny it with a reason (nemar admin publish deny <dataset>); the depositor can request again.";
+export const APPROVAL_STOPPED_HARD_LINE = `This approval stopped before it started publishing, and a reason that nothing clears now stands, so it cannot be resumed. Deny it with a reason (${COMMAND_DENY}); the depositor can request again.`;
 
 /**
  * The hard reasons an administrator's own `screen` (or the wait for it) clears. They are left out of
@@ -1795,21 +1809,21 @@ function nextCommand(
 ): string | null {
   const codes = new Set(reasons.map((r) => r.code));
   // A run that has started publishing is continued, not gated again, whatever the reasons say.
-  if (approval === "publishing") return `nemar admin publish approve ${id} --resume`;
+  if (approval === "publishing") return `${fill(COMMAND_APPROVE, id)} --resume`;
   // A stopped run that has not started publishing is gated like a fresh one when it resumes.
   const resume = approval === "stopped" ? " --resume" : "";
-  if (reasons.length === 0) return `nemar admin publish approve ${id}${resume}`;
+  if (reasons.length === 0) return `${fill(COMMAND_APPROVE, id)}${resume}`;
   if (hardReasonsOf(reasons).length > 0) {
     // Only the screen's own hard reasons are an administrator's to act on.
     return codes.has("identifier_screen_not_run") || codes.has("identifier_screen_stale")
-      ? COMMAND_SCREEN.replaceAll("<dataset>", id)
+      ? fill(COMMAND_SCREEN, id)
       : null;
   }
-  if (startOffered({ reasons, row, startable })) return COMMAND_START.replaceAll("<dataset>", id);
-  if (codes.has("review_running")) return COMMAND_SHOW.replaceAll("<dataset>", id);
+  if (startOffered({ reasons, row, startable })) return fill(COMMAND_START, id);
+  if (codes.has("review_running")) return fill(COMMAND_SHOW, id);
   const ack = codes.has("identifier_screen_needs_acknowledgment") ? ` ${ACKNOWLEDGE_FLAG}` : "";
   const force = overrideClassReasonsOf(reasons).length > 0 ? " --force" : "";
-  return `nemar admin publish approve ${id}${resume}${ack}${force}`;
+  return `${fill(COMMAND_APPROVE, id)}${resume}${ack}${force}`;
 }
 
 /**
@@ -1860,7 +1874,7 @@ export function describePublicationReview(input: {
   // `startable` with an approval that is not `none` describes no request: the start route refuses
   // one that is not `requested`, and `nextCommand` would offer a start with no `--resume`.
   const startable = input.startable && approval === "none";
-  const id = DATASET_ID.test(input.datasetId) ? input.datasetId : "<dataset>";
+  const id = quotedId(input.datasetId);
   if (!applies) {
     return {
       headline: "Publication review: not applicable",
@@ -1930,7 +1944,7 @@ export function describePublicationReview(input: {
     approval === "stopped" &&
     hardReasonsOf(reasons).some((r) => !SCREEN_GAP_REASONS.includes(r.code))
   ) {
-    lines.push(APPROVAL_STOPPED_HARD_LINE.replaceAll("<dataset>", id));
+    lines.push(fill(APPROVAL_STOPPED_HARD_LINE, id));
   }
   lines.push(NOT_ASSESSED_LINE);
   return {
@@ -1962,7 +1976,7 @@ export function describeUnreadableReview(datasetId: string): PublicationReviewDe
     tone: "warn",
     lines: [REVIEW_UNREADABLE_LINE, NOT_ASSESSED_LINE],
     summary: null,
-    next: DATASET_ID.test(datasetId) ? COMMAND_SHOW.replaceAll("<dataset>", datasetId) : null,
+    next: DATASET_ID.test(datasetId) ? fill(COMMAND_SHOW, datasetId) : null,
   };
 }
 
@@ -2004,14 +2018,10 @@ export type ReviewGateRefusal = (typeof REVIEW_GATE_REFUSALS)[number];
 export const REVIEW_GATE_REFUSAL_TEXT: Record<ReviewGateRefusal, string> = {
   hard_reason:
     "The publication review gives a reason that no override clears, so the approval is refused.",
-  needs_override:
-    "The publication review is not a pass. Read it (nemar admin publish show <dataset>), then approve over it with --force, which records the override with your account.",
-  override_not_covering:
-    "The review now gives a reason the override was not given for. Read it again (nemar admin publish show <dataset>) before approving.",
-  review_changed:
-    "The review the override was given for is no longer the review of this request, or it changed while the approval was being checked. Read it again (nemar admin publish show <dataset>) before approving.",
-  no_review_row:
-    "No review of this commit is on record to attach the override to. Start it (nemar admin publish start <dataset>), or approve from a terminal with --force.",
+  needs_override: `The publication review is not a pass. Read it (${COMMAND_SHOW}), then approve over it with --force, which records the override with your account.`,
+  override_not_covering: `The review now gives a reason the override was not given for. Read it again (${COMMAND_SHOW}) before approving.`,
+  review_changed: `The review the override was given for is no longer the review of this request, or it changed while the approval was being checked. Read it again (${COMMAND_SHOW}) before approving.`,
+  no_review_row: `No review of this commit is on record to attach the override to. Start it (${COMMAND_START}), or approve from a terminal with --force.`,
   unverified:
     "The publication review could not be checked just now, so the approval is refused. Try again.",
 };
@@ -2021,8 +2031,7 @@ export const REVIEW_GATE_REFUSAL_TEXT: Record<ReviewGateRefusal, string> = {
  * (as {@link cureOf} does), so the one place the gate speaks cannot echo what a caller sent.
  */
 export function reviewGateRefusalText(refusal: ReviewGateRefusal, datasetId: string): string {
-  const id = DATASET_ID.test(datasetId) ? datasetId : "<dataset>";
-  return REVIEW_GATE_REFUSAL_TEXT[refusal].replaceAll("<dataset>", id);
+  return fill(REVIEW_GATE_REFUSAL_TEXT[refusal], quotedId(datasetId));
 }
 
 // ---------------------------------------------------------------------------------------------

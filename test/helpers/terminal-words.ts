@@ -3,15 +3,19 @@
  * at one (ADR 0102, section 8; Phase 4 of epic #1726). One list, so the tests that pin the
  * Worker's sentences and the page's own copy hold the same line.
  *
- * `nemar ` is case-sensitive and needs a lowercase letter after it: the platform is written NEMAR
- * in a reason's sentence and in the identifier screen's date warning, and neither names a command.
+ * `nemar` is case-sensitive: the platform is written NEMAR in a reason's sentence and in the
+ * identifier screen's date warning, and neither names a command. The lowercase word is the
+ * command's name whatever follows it ("nemar admin", "Run nemar.", "the nemar-cli tool"), so only
+ * a domain (`nemar.org`) and a longer word are spared.
  */
 
 /** Tier 1: what only a terminal can act on. Applies to every string a page prints. */
 const TIER1: ReadonlyArray<[string, RegExp]> = [
-  ["a nemar command", /(^|[^A-Za-z])nemar [a-z]/],
-  ["a flag", /--[a-z]/],
-  ["a placeholder", /<[a-z_]+>/],
+  ["a nemar command", /(?<![A-Za-z0-9@./-])nemar(?![A-Za-z0-9]|\.[a-z])/],
+  // A long flag anywhere, or a short one that starts a token ("pass -f to it", "(-v)").
+  ["a flag", /--[A-Za-z]|(^|[\s(])-[A-Za-z]\b/],
+  // Any `<name>`: a placeholder is a lowercase word, a hyphenated one, a capitalized one, a phrase.
+  ["a placeholder", /<[A-Za-z][\w -]*>/],
   ["a backtick", /`/],
 ];
 
@@ -21,7 +25,8 @@ const TIER1: ReadonlyArray<[string, RegExp]> = [
  * line tool", which describes it and tells nobody to type anything.
  */
 const TIER2: ReadonlyArray<[string, RegExp]> = [
-  ["the word terminal", /\bterminal\b/i],
+  ["the word terminal", /\bterminals?\b/i],
+  ["the word shell", /\bshell\b/i],
   ["the word command", /\bcommand\b/i],
   ["the word CLI", /\bCLI\b/],
 ];

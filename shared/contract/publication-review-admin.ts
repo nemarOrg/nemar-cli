@@ -93,11 +93,17 @@ export interface ReasonView {
   code: ReasonCode;
   class: "fail" | "unknown";
   cleared_by: "nothing" | "screen_acknowledgment" | "override";
-  /** The closed word or words behind the reason, or null. Not words for a person: print `statement`. */
+  /**
+   * The closed word or words behind the reason, or null. Not words for a person: print `statement`,
+   * which words the detail where a table of words exists for it. Where none does (a block reason,
+   * a failed minimum, an unknown word) `statement` prints the closed word itself, as the CLI's
+   * `line` does; it is a snake-case word, never a command.
+   */
   detail: string | null;
   /**
    * The reason in words with its detail (`reasonStatement`): what `line` says before the cure,
-   * with no command in it, so a web page prints it and composes nothing from `detail`. Absent
+   * with no command in it, so a web page prints it and composes nothing from `detail`. Held on the
+   * Worker side by `backend/test/publication-review-admin-routes.test.ts`, not by the type. Absent
    * from a Worker that predates the field; a page then withholds the reasons rather than print
    * `line`. The Worker always sends it.
    */
@@ -142,10 +148,12 @@ export interface PublicationReviewSummary {
   reasons: ReasonCode[];
   /**
    * An administrator's `start` is offered for this request: the one rule `describePublicationReview`
-   * uses for its next command (`startOffered`), and the route's own screen precondition. False
-   * unless the review is on and applies. A start the platform's allowance or the Worker's
-   * ownership refuses is still offered here, and answers 409; a client that starts many stops on
-   * `platform_limit`.
+   * uses for its next command (`startOffered`), and the route's own screen precondition. True only
+   * when the review is on and applies, the request is `requested`, the review row is one a start
+   * can create or restart, a reason whose cure is "start it" stands with no hard reason, and the
+   * screen's gate is `clear` or `acknowledge` with a commit. A start the platform's allowance or
+   * the Worker's ownership refuses is still offered here, and answers 409; a client that starts
+   * many stops on `platform_limit`.
    */
   start_offered: boolean;
   /** The review in force, when there is one. */
@@ -256,8 +264,8 @@ export interface PublicationReviewDetail {
   outcome: PublicationOutcome | null;
   /**
    * An administrator's start is offered for this request: the list row's `start_offered`, from
-   * the one rule behind both (`startOffered`), so the detail and the list cannot disagree. False
-   * unless the review is on and applies; see {@link PublicationReviewSummary.start_offered}.
+   * the one rule behind both (`startOffered`), so the detail and the list cannot disagree. The
+   * conditions are listed on {@link PublicationReviewSummary.start_offered}.
    */
   start_offered: boolean;
   /**
@@ -265,9 +273,12 @@ export interface PublicationReviewDetail {
    * `clear` (nothing to act on), `blocks` (a direct identifier; nothing acknowledges it),
    * `acknowledge` (an administrator approves with a recorded reason), `rerun` (no verdict; the
    * screen runs again), `wait` (a run is in flight), or `exempt` (a sandbox dataset is not
-   * screened). It is the `gate` of the 409 `identifier_screen_not_clear` that `approve-dispatch`
-   * answers for the same request when it refuses. `reasons` cannot say this: it is empty when the
-   * review is off and no row is on record, yet the screen's gate still applies to an approval.
+   * screened). It is the screen's gate for an approval of this request. The 409
+   * `identifier_screen_not_clear` that `approve-dispatch` answers reports the same `gate` for the
+   * cases that refuse, and adds `stale` and `unverified`, which this field cannot say; `clear` and
+   * `exempt` never refuse, and an `acknowledge` passes when this approver's own acknowledgment is
+   * already on the row. `reasons` cannot say this: it is empty when the review is off and no row
+   * is on record, yet the screen's gate still applies to an approval.
    */
   screen_gate: ScreenGate | "exempt";
   reasons: ReasonView[];

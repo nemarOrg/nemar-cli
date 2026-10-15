@@ -25,9 +25,14 @@ import type {
 import {
   APPROVAL_PUBLISHING_LINE,
   APPROVAL_STOPPED_HARD_LINE,
+  DOCUMENT_LABEL,
+  MAX_PUBLICATION_FINDINGS,
   NOT_ASSESSED_LINE,
+  PUBLICATION_FINDING_CODES,
+  PUBLICATION_FINDING_LABEL,
   REASONS,
   REASON_CODES,
+  REVIEW_DOCUMENTS,
   REVIEW_OVERDUE_VIEW_MINUTES,
   REVIEW_UNREADABLE_HEADLINE,
   type ReasonCode,
@@ -1304,6 +1309,47 @@ describe("GET /admin/publish/:id/review", () => {
     ]);
   });
 
+  test("every finding code and every document reaches the detail with the shared label", async () => {
+    const documents = [...REVIEW_DOCUMENTS, null] as const;
+    const all = PUBLICATION_FINDING_CODES.flatMap((code) =>
+      documents.map((document, i) => ({
+        question: "authors_and_license" as const,
+        severity: "note" as const,
+        code,
+        document,
+        note: `${code}-${i}`,
+      })),
+    );
+    // A report holds a bounded number of findings, so one request carries one slice of the pairs.
+    const got: NonNullable<PublicationReviewDetail["review"]>["findings"] = [];
+    for (let at = 0; at < all.length; at += MAX_PUBLICATION_FINDINGS) {
+      const { requestId, datasetId } = request();
+      seedPublicationReview(db, {
+        requestId,
+        datasetId,
+        state: "reported",
+        report: goodPublicationReport({
+          questions: {
+            complete_and_honest: "pass",
+            meets_standards: "pass",
+            authors_and_license: "fail",
+            name_adequate: "pass",
+          },
+          findings: all.slice(at, at + MAX_PUBLICATION_FINDINGS),
+          evidence: evidenceFor(SCREENED_HEAD),
+        }),
+      });
+      got.push(...((await detail(datasetId)).review?.findings ?? []));
+    }
+    expect(got.length).toBe(all.length);
+    for (const f of got) {
+      expect(f.label).toBe(PUBLICATION_FINDING_LABEL[f.code]);
+      expect(f.document_label).toBe(f.document === null ? null : DOCUMENT_LABEL[f.document]);
+    }
+    expect(new Set(got.map((f) => f.code))).toEqual(new Set(PUBLICATION_FINDING_CODES));
+    expect(new Set(got.map((f) => f.document))).toEqual(new Set(documents));
+  });
+
   test("a reason's cure names the dataset, and its detail is a closed word", async () => {
     const { requestId, datasetId } = request();
     seedPublicationReview(db, { requestId, datasetId, state: "unreported" });
@@ -2539,11 +2585,29 @@ describe("the detail's screen_gate is the gate the approval applies to the scree
     );
   }
 
-  /** What approve-dispatch answers about the screen for a bare click, or null when it does not. */
+  /** What approve-dispatch answers once the screen has passed: the review gate or the dispatch. */
+  const AFTER_THE_SCREEN = new Set([
+    "publication_review_not_clear",
+    "not_dispatchable",
+    "dispatch_unconfigured",
+  ]);
+
+  /**
+   * What approve-dispatch answers about the screen for a bare click: the gate word of a screen
+   * refusal, or null when the click got past the screen. Null is only returned for an answer the
+   * routes give AFTER the screen (a later gate or the dispatch), so a crash or an unrelated early
+   * refusal (a 500, `invalid_dataset_id`) fails here instead of reading as "not refused".
+   */
   async function screenRefusal(datasetId: string, bindings: Bindings): Promise<string | null> {
     const res = await dispatchApproval(datasetId, bindings);
     const body = (await res.json()) as { error?: string; gate?: string };
-    if (body.error !== "identifier_screen_not_clear") return null;
+    if (body.error !== "identifier_screen_not_clear") {
+      expect(
+        AFTER_THE_SCREEN.has(body.error ?? ""),
+        `${datasetId}: ${res.status} ${body.error}, not an answer from after the screen`,
+      ).toBe(true);
+      return null;
+    }
     expect(res.status).toBe(409);
     return body.gate ?? null;
   }
@@ -2576,7 +2640,13 @@ describe("the detail's screen_gate is the gate the approval applies to the scree
   }
 
   test("a sandbox dataset is exempt from the screen, review on or off, and its approval is not refused for it", async () => {
-    for (const bindings of [env(), env({ PUBLICATION_REVIEW_ENABLED: undefined })]) {
+    // Not production: the executor's workflow accepts an `xx` id only there
+    // (`APPROVAL_DISPATCH_ID_RE`), and production answers `invalid_dataset_id` before any gate.
+    const staging = { ENVIRONMENT: "staging" } as const;
+    for (const bindings of [
+      env(staging),
+      env({ ...staging, PUBLICATION_REVIEW_ENABLED: undefined }),
+    ]) {
       const { datasetId } = request({ datasetId: nextExempt(), status: "pending" });
       expect((await detail(datasetId, bindings)).screen_gate).toBe("exempt");
       expect(await screenRefusal(datasetId, bindings)).toBeNull();

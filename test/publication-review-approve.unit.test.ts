@@ -286,8 +286,10 @@ describe("5. a hard reason is refused, with the cure, even with --force", () => 
     // An older Worker sends none: sentence and cure, and not the closed words behind the reason.
     // `detailOf` builds its reasons through the Worker's own `reasonViewsOf`, which now sends a
     // `line`, `statement` and `command`, and a neutral `cure`; an older Worker sent none of the
-    // three and the terminal's text as its `cure`, so rebuild the reasons that way.
-    const old = detailOf(shown);
+    // three, nor `start_offered` and `screen_gate`, and the terminal's text as its `cure`, so
+    // rebuild the detail that way.
+    const { start_offered: _offered, screen_gate: _gate, ...oldDetail } = detailOf(shown);
+    const old = oldDetail as ReturnType<typeof detailOf>;
     const without = refusal(
       decideApproval(
         ID,

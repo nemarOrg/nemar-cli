@@ -24,8 +24,10 @@
  *    value would be invisible to them. Where a sentence embeds a number that lives somewhere else
  *    (`screen_gate.acknowledge` and the 10 to 500 character bounds of the acknowledgment), the
  *    literal is written out and the parity test asserts it still agrees with the constants.
- * 2. *Every value is a complete sentence the page prints as it is.* There are no placeholders and
- *    no accessor function: the CLI never reads this file, and the website has its own reader.
+ * 2. *Every value is a complete sentence the page prints as it is*, except
+ *    `review.model_summary_label` and `review.model_findings_label`, which are phrases the page
+ *    prints in parentheses after a heading. There are no placeholders and no accessor function:
+ *    the CLI never reads this file, and the website has its own reader.
  * 3. *Keys are stable and dotted.* They are the mirroring contract; renaming one is a change on
  *    both sides. Every key is mirrored (there is no `cli.` prefix here, unlike `account-copy.ts`).
  * 4. *No value names a terminal.* No command, flag, placeholder or backtick, and none of the words
