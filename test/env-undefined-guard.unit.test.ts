@@ -21,8 +21,8 @@
  * template literal, a fixture script a test writes to disk, a trailing `// ...` comment and a
  * string such as "process.env.X = undefined" therefore never flag. What it flags, however the
  * object is reached (`process.env`, `Bun.env`, `import.meta.env`, `globalThis.process.env`, a
- * `process . env` spaced out, `process["env"]`, or a local alias such as `const e = process.env`,
- * `const { env } = process` or `import { env } from "bun"`):
+ * `process . env` spaced out, `process["env"]`, or a name bound straight to it on one line,
+ * `const e = process.env;`):
  *   - an assignment (`=`, `??=`, `||=`, `&&=`, with a trailing `!` allowed on the target) to a
  *     member, bracket or nested-bracket key whose right-hand side is `undefined` or `void 0`, or
  *     a one-line expression with an undefined branch (`cond ? "a" : undefined`,
@@ -56,8 +56,11 @@
  * RESIDUAL GAPS, stated so nobody assumes more than is checked: the scan is text-level, not a
  * type-aware analysis, and a multi-line ternary is judged only on its last line. It cannot see `Object.defineProperty(process.env, "X", { value: undefined })`,
  * an env object passed through a function parameter or returned from a call, `(process as any).env`,
- * an alias of `process` itself (`const p = process; p.env.X = undefined`), or a name that is an
- * alias in one function and a plain object in another within the same file.
+ * an alias of `process` itself (`const p = process; p.env.X = undefined`), or an alias that is
+ * not a one-line `name = process.env` (`const { env } = process`, `import { env } from "bun"`, a
+ * type annotation on the alias). Those two are left out on purpose: finding them needs scope
+ * analysis, and without it an unrelated local `const env = { ... }` in a file that also imports
+ * `env` would be flagged. The alias that is found is matched by name for the whole file.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -115,9 +118,8 @@ const WORD_CHAR = /[\w$]/;
  * `source` with comments, string contents, template-literal text and regular-expression bodies
  * replaced by spaces. Newlines and every other character keep their offsets, so a match in the
  * result has the same line number in the original. `${ ... }` inside a template is code and is
- * kept. Two string contents survive on purpose: the bare word `env` (so `process["env"]` can be
- * read) and a module specifier after `from` (so `import { env } from "bun"` can be read); neither
- * can spell an assignment.
+ * kept. One string content survives on purpose: the bare word `env`, so `process["env"]` can be
+ * read; it cannot spell an assignment.
  */
 function blankNonCode(source: string): string {
   const out: string[] = [];
@@ -175,14 +177,13 @@ function blankNonCode(source: string): string {
       continue;
     }
     if (char === '"' || char === "'") {
-      const { word } = previousToken();
       out.push(char);
       i++;
       const start = i;
       while (i < length && source[i] !== char && source[i] !== "\n")
         i += source[i] === "\\" ? 2 : 1;
       const content = source.slice(start, Math.min(i, length));
-      const keep = content === "env" || word === "from";
+      const keep = content === "env";
       for (const c of content) {
         if (keep) out.push(c);
         else blank(c);
@@ -261,32 +262,10 @@ const ENV_OBJECT =
 const IDENT = "[A-Za-z_$][\\w$]*";
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** Names this file binds to the environment object: `const e = process.env`, `const { env } = process`. */
+/** Names this file binds directly to the environment object: `const e = process.env;`. */
 function envAliases(code: string): string[] {
-  const aliases = new Set<string>();
-  const bound = new RegExp(
-    `(?<![\\w$.])(${IDENT})\\s*(?::[^=;]*)?=\\s*${ENV_OBJECT}\\s*(?:;|,|\\n|$)`,
-    "g",
-  );
-  for (const m of code.matchAll(bound)) aliases.add(m[1]);
-
-  const destructured =
-    /\{([^{}]*)\}\s*=\s*(?:(?:globalThis|global)\s*\.\s*)?(?:process|Bun|import\s*\.\s*meta)\s*(?:;|\n|$)/g;
-  const imported = /import\s*\{([^{}]*)\}\s*from\s*["'](?:bun|node:process|process)["']/g;
-  for (const [pattern, rename] of [
-    [destructured, ":"],
-    [imported, "as"],
-  ] as const) {
-    for (const m of code.matchAll(pattern)) {
-      for (const item of m[1].split(",")) {
-        const pair = rename === ":" ? item.split(":") : item.split(/\s+as\s+/);
-        if (pair[0].trim().split("=")[0].trim() !== "env") continue;
-        const name = (pair[1] ?? pair[0]).trim().split("=")[0].trim();
-        if (new RegExp(`^${IDENT}$`).test(name)) aliases.add(name);
-      }
-    }
-  }
-  return [...aliases];
+  const bound = new RegExp(`(?<![\\w$.])(${IDENT})\\s*=\\s*${ENV_OBJECT}\\s*(?:;|,|\\n|$)`, "g");
+  return [...new Set([...code.matchAll(bound)].map((m) => m[1]))];
 }
 
 /** Index of the bracket that closes the one at `open`, or -1. */
@@ -549,9 +528,6 @@ describe("the scanner", () => {
     ["Reflect.set", ['Reflect.set(process.env, "A", undefined);'], [1]],
     ["Reflect.set with a call in the key", ["Reflect.set(process.env, key(), void 0);"], [1]],
     ["an alias const", ["const e = process.env;", "e.A = undefined;"], [2]],
-    ["an alias by destructuring", ["const { env } = process;", "env.A = undefined;"], [2]],
-    ["a renamed destructured alias", ["const { env: e } = Bun;", "e.A = undefined;"], [2]],
-    ["an imported alias", ['import { env } from "bun";', "env.A = undefined;"], [2]],
     [
       "an alias through Object.assign",
       ["const e = process.env;", "Object.assign(e, { A: undefined });"],
@@ -639,6 +615,16 @@ describe("the scanner", () => {
     [
       "a local copy of the environment",
       ['const env = { ...process.env, KEPT: "1" };', "env.DROPPED = undefined;"],
+    ],
+    [
+      "an unrelated local named env in a file that also imports env",
+      [
+        'import { env } from "bun";',
+        "function f() {",
+        '  const env = { A: "1" };',
+        "  env.A = undefined;",
+        "}",
+      ],
     ],
     ["a spawn env option", ["spawn(cmd, { env: { DROPPED: undefined } });"]],
     ["a PATH built in a template", ['process.env.PATH = `${dir}:${process.env.PATH ?? ""}`;']],
