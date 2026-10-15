@@ -181,6 +181,25 @@ describe("nemar admin publish list", () => {
     }
   });
 
+  test("a depositor-controlled name and username cannot carry terminal escapes", async () => {
+    const hostile = {
+      ...ROW,
+      dataset_name: "Clean\u001b[2J\u001b]0;pwned\u0007 name\u009b31m\r\nspoofed line",
+      requested_by_username: "al\u001b[31mice",
+    };
+    const server = startServer([hostile]);
+    try {
+      const r = await runCli(["admin", "publish", "list"], server.url);
+      expect(r.exitCode).toBe(0);
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: detecting control chars is the point
+      expect(r.stdout).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
+      expect(r.stdout).toContain("Clean");
+      expect(r.stdout).toContain("spoofed line");
+    } finally {
+      server.stop();
+    }
+  });
+
   test("an empty default list says how to widen it", async () => {
     const server = startServer([]);
     try {

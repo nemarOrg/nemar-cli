@@ -3195,8 +3195,11 @@ Examples:
                 ? chalk.yellow
                 : chalk.white;
 
+        // The dataset name and the username are typed by the depositor: an
+        // escape sequence in either would run in this administrator's terminal.
+        const name = safeText(req.dataset_name ?? "");
         console.log(
-          `  ${chalk.bold(req.dataset_id)}  ${statusColor(req.status)}  by ${req.requested_by_username}  ${chalk.dim(req.requested_at)}${req.dataset_name ? `  ${chalk.dim(req.dataset_name)}` : ""}`,
+          `  ${chalk.bold(req.dataset_id)}  ${statusColor(req.status)}  by ${safeText(req.requested_by_username)}  ${chalk.dim(req.requested_at)}${name ? `  ${chalk.dim(name)}` : ""}`,
         );
         // #1408: an anonymous release and a publication reach this list
         // looking identical, and approving the wrong one is not reversible in
