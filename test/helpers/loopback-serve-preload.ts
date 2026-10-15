@@ -19,9 +19,14 @@
  * what it asked for.
  */
 
-const serve = Bun.serve.bind(Bun) as (options: Record<string, unknown>) => unknown;
+const serve = Bun.serve.bind(Bun) as (...args: unknown[]) => unknown;
 
-(Bun as { serve: unknown }).serve = (options: Record<string, unknown>) =>
-  serve(
-    "hostname" in options || "unix" in options ? options : { ...options, hostname: "127.0.0.1" },
-  );
+// `hostname: undefined` names nothing, so it gets the loopback default too. A call with no
+// options at all is passed through untouched, so Bun's own error is what the caller sees.
+(Bun as { serve: unknown }).serve = (...args: unknown[]) => {
+  const options = args[0];
+  if (typeof options !== "object" || options === null) return serve(...args);
+  const given = options as Record<string, unknown>;
+  if (given.hostname !== undefined || given.unix !== undefined) return serve(...args);
+  return serve({ ...given, hostname: "127.0.0.1" }, ...args.slice(1));
+};

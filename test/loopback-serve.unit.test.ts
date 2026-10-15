@@ -36,6 +36,16 @@ describe("Bun.serve() under bun test", () => {
     expect(() => serveAt({ port: stranger.port })).toThrow();
   });
 
+  test("an explicit hostname: undefined names nothing, so it is loopback too", () => {
+    const server = Bun.serve({ port: 0, hostname: undefined, fetch: () => new Response("ours") });
+    stoppers.push(() => server.stop(true));
+    expect(server.hostname).toBe("127.0.0.1");
+  });
+
+  test("no argument at all reaches Bun's own error, not a TypeError from the wrapper", () => {
+    expect(() => (Bun.serve as () => unknown)()).toThrow(/fetch|routes|serve/i);
+  });
+
   test("a caller that names its interface keeps it", () => {
     expect(serveAt({ port: 0, hostname: "0.0.0.0" }).hostname).toBe("0.0.0.0");
   });
