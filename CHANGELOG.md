@@ -246,6 +246,7 @@ It happens after this release, in a reviewed change, and ADR 0102's "Before it i
 
 ### Known limitations
 
+- The importer (`src/lib/import-publication.ts`) reports an approval as published when the Worker left the request `approving` after a tail job warned (#1773); the request is retried by approving again.
 - A valid token whose clicker is no longer an active administrator falls back to the caller, as ADR 0080 decided, and the maintainer has not decided whether such a click should publish at all (ADR 0105).
   A token also survives the end of the clicker's session or key for as long as its claim stands and its lease is live, which is fifteen minutes after the run's last call, because every `/approve` call of an `approving` request renews the lease.
 - A leaked token can cancel one run through the release endpoint, which checks no lease; nothing is published or lost.
