@@ -111,6 +111,7 @@ export const EDIT_FLAG_FIELDS = [
   ["username", "username"],
   ["github", "github_username"],
   ["email", "email"],
+  ["orcid", "orcid"],
 ] as const;
 
 /** Compile-time proof that every editable field has a flag. (That the flags are
