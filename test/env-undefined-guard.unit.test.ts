@@ -24,13 +24,16 @@
  * `process . env` spaced out, `process["env"]`, or a name bound straight to it on one line,
  * `const e = process.env;`):
  *   - an assignment (`=`, `??=`, `||=`, `&&=`, with a trailing `!` allowed on the target) to a
- *     member, bracket or nested-bracket key whose right-hand side is `undefined` or `void 0`, or
- *     a one-line expression with an undefined branch (`cond ? "a" : undefined`,
- *     `cond ? undefined : "a"`, `x ?? undefined`, `x || undefined`);
+ *     member, bracket or nested-bracket key whose right-hand side is `undefined`, `void 0` or
+ *     `null` (Bun stores the string "null" as well), or an expression, on one line or spread over
+ *     several, with such a branch (`cond ? "a" : undefined`, `cond ? undefined : "a"`,
+ *     `x ?? undefined`, `x || undefined`);
  *   - a restore from a variable that was captured from the same key (`const saved =
- *     process.env.X; ... process.env.X = saved;`) when no `saved === undefined`, `!== undefined`,
- *     `== null`, `??`, `?:`, `if (saved)` or `typeof saved` check appears in the four lines above
- *     the assignment or earlier on its own line (a heuristic, see the limit below);
+ *     process.env.X; ... process.env.X = saved;`) and never assigned again in the file, when no
+ *     `saved === undefined`, `!== undefined`, `== null`, `??`, `?:`, `&&`, `if (saved)` or
+ *     `typeof saved` check appears in the eight lines above the assignment or earlier on its own
+ *     line (a heuristic, see the limit below; `if (saved)` is deliberately lenient and any one
+ *     within the window counts);
  *   - `Reflect.set(<env>, key, undefined)`;
  *   - `Object.assign(<env>, ...)` where any object literal source, anywhere in the argument list
  *     and however long, gives a property the value `undefined`.
@@ -54,7 +57,9 @@
  * write through a map, a loop, a helper or another file's variable is not seen.
  *
  * RESIDUAL GAPS, stated so nobody assumes more than is checked: the scan is text-level, not a
- * type-aware analysis, and a multi-line ternary is judged only on its last line. It cannot see `Object.defineProperty(process.env, "X", { value: undefined })`,
+ * type-aware analysis. It does not read a parenthesised branch (`= cond ? "a" : (undefined)`,
+ * `= (cond ? "a" : undefined)`), an angle-bracket cast (`<any>undefined`), `undefined satisfies T`,
+ * or a wrapped fallback (`(saved ?? undefined)!`). It cannot see `Object.defineProperty(process.env, "X", { value: undefined })`,
  * an env object passed through a function parameter or returned from a call, `(process as any).env`,
  * an alias of `process` itself (`const p = process; p.env.X = undefined`), or an alias that is
  * not a one-line `name = process.env` (`const { env } = process`, `import { env } from "bun"`, a
@@ -90,7 +95,17 @@ const SCANNED_ROOTS = [
 const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".mjs", ".cjs", ".mts", ".cts"]);
 const SKIPPED_DIRECTORIES = new Set(["node_modules", ".git", "dist", "coverage"]);
 
-type EnvUndefinedHit = { line: number; text: string };
+const FIX_HINT = [
+  'Bun stores the STRING "undefined" or "null" for these writes. Rules:',
+  "  unset-value        the value is undefined or null: delete the key instead,",
+  '                     Reflect.deleteProperty(process.env, "NAME").',
+  "  unchecked-restore  a saved value is written back with no undefined check nearby: use",
+  '                     if (saved === undefined) Reflect.deleteProperty(process.env, "NAME");',
+  "                     else process.env.NAME = saved;",
+].join("\n");
+
+type Rule = "unset-value" | "unchecked-restore";
+type EnvUndefinedHit = { line: number; text: string; rule: Rule };
 
 // ---------------------------------------------------------------------------------------------
 // Step 1: reduce a source file to its code.
@@ -282,7 +297,7 @@ function matchingClose(code: string, open: number): number {
   return -1;
 }
 
-/** `text` split at top-level commas, each piece with its offset in the code. */
+/** The code between `from` and `to` split at top-level commas: trimmed pieces and their offsets. */
 function splitTopLevel(
   code: string,
   from: number,
@@ -296,36 +311,58 @@ function splitTopLevel(
     if (c === "(" || c === "[" || c === "{") depth++;
     else if (c === ")" || c === "]" || c === "}") depth--;
     else if (c === "," && depth === 0) {
-      if (code.slice(start, i).trim() !== "")
-        pieces.push({ text: code.slice(start, i), at: start });
+      const raw = code.slice(start, i);
+      if (raw.trim() !== "")
+        pieces.push({ text: raw.trim(), at: start + raw.length - raw.trimStart().length });
       start = i + 1;
     }
   }
   return pieces;
 }
 
-/** Whether an expression is the literal `undefined` or `void 0`, however parenthesised or cast. */
-function isUndefinedValue(expression: string): boolean {
-  let e = expression.trim();
+const UNSET = "(?:undefined|null|void\\s+0)";
+
+/**
+ * Whether an expression is `undefined`, `void 0` or `null` (Bun stores the string "null" too),
+ * however parenthesised or cast, or is a ternary with such a branch, or ends `?? undefined` or
+ * `|| undefined`. Line breaks inside the expression do not matter.
+ */
+function isUnsetValue(expression: string): boolean {
+  let e = expression.replace(/\s+/g, " ").trim();
   while (e.startsWith("(") && e.endsWith(")")) e = e.slice(1, -1).trim();
   e = e
-    .replace(/\s+as\s[\s\S]*$/, "")
+    .replace(/ as .*$/, "")
     .replace(/!$/, "")
     .trim();
-  return /^(?:undefined|void\s+0)$/.test(e);
+  if (new RegExp(`^${UNSET}$`).test(e)) return true;
+  if (new RegExp(`\\? ?${UNSET} ?:`).test(e)) return true;
+  if (e.includes("?") && new RegExp(`: ?${UNSET}(?: as [^:?]*)?$`).test(e)) return true;
+  return new RegExp(`(?:\\?\\?|\\|\\|) ?${UNSET}$`).test(e);
 }
 
 /**
- * `isUndefinedValue`, plus the one-line shapes that evaluate to undefined on some path:
- * a ternary with an undefined branch, or `x ?? undefined` / `x || undefined`.
+ * Where the right-hand side that starts at `from` ends: at `;`, at a closing bracket that is not
+ * ours, or at a line break unless the expression visibly goes on (the next line starts with `?`,
+ * `:`, `|` or `&`, or this one ends with `?`, `:`, `|`, `&`, `+`, `,` or `=`). A blank line ends it.
  */
-function mayBeUndefined(expression: string): boolean {
-  if (isUndefinedValue(expression)) return true;
-  const e = expression.trim();
-  const unset = "(?:undefined|void\\s+0)";
-  if (new RegExp(`\\?\\s*${unset}\\s*:`).test(e)) return true;
-  if (e.includes("?") && new RegExp(`:\\s*${unset}\\s*(?:as\\s[^:?]*)?$`).test(e)) return true;
-  return new RegExp(`(?:\\?\\?|\\|\\|)\\s*${unset}\\s*$`).test(e);
+function valueEnd(code: string, from: number): number {
+  let depth = 0;
+  for (let end = from; end < code.length; end++) {
+    const c = code[end];
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") {
+      if (--depth < 0) return end;
+    } else if (depth === 0 && c === ";") return end;
+    else if (depth === 0 && c === "\n") {
+      let before = end - 1;
+      while (before > from && /[ \t\r]/.test(code[before])) before--;
+      let after = end + 1;
+      while (after < code.length && /[ \t\r]/.test(code[after])) after++;
+      const goesOn = "?:|&".includes(code[after] ?? "\n") || "?:|&+,=".includes(code[before]);
+      if (code[after] === "\n" || !goesOn) return end;
+    }
+  }
+  return code.length;
 }
 
 /** Every place `source` writes undefined into the environment object, as 1-based lines. */
@@ -350,7 +387,7 @@ function findEnvUndefinedWrites(source: string): EnvUndefinedHit[] {
   const names = [ENV_OBJECT, ...aliases.map(escapeRegExp)].join("|");
   const reference = new RegExp(`(?<![\\w$.])(?:${names})`, "g");
   const isEnvObject = new RegExp(`^(?:${names})$`);
-  const flagged = new Set<number>();
+  const flagged = new Map<number, Rule>();
 
   // Every `<env>.KEY` or `<env>[expr]` reference, with the key it names and where it ends.
   const members: Array<{ index: number; key: string; end: number }> = [];
@@ -379,19 +416,28 @@ function findEnvUndefinedWrites(source: string): EnvUndefinedHit[] {
   }
 
   // Variables that captured a key's value: `const saved = process.env.X;`, `saved = process.env.X;`.
-  const captured = new Map<string, Set<string>>();
+  const captured = new Map<string, { keys: Set<string>; bindings: number }>();
   for (const member of members) {
     if (!/^[ \t]*(?:;|\n|$)/.test(code.slice(member.end, member.end + 40))) continue;
     const before = code.slice(Math.max(0, member.index - 200), member.index);
     const binding = new RegExp(`(?<![\\w$.])(${IDENT})\\s*(?::[^=;]*)?=\\s*$`).exec(before);
     if (!binding) continue;
-    const keys = captured.get(binding[1]) ?? new Set<string>();
-    keys.add(member.key);
-    captured.set(binding[1], keys);
+    const entry = captured.get(binding[1]) ?? { keys: new Set<string>(), bindings: 0 };
+    entry.keys.add(member.key);
+    entry.bindings++;
+    captured.set(binding[1], entry);
   }
-  /** A check on `name` in the four lines above the write, or earlier on its own line. */
+  // A variable assigned anywhere else in the file may no longer hold what the key held.
+  for (const [name, entry] of captured) {
+    const assignment = new RegExp(
+      `(?<![\\w$.])${escapeRegExp(name)}\\s*(?::[^=;\\n]*)?(?:\\?\\?|\\|\\||&&|[-+*/])?=(?![=>])`,
+      "g",
+    );
+    if ([...code.matchAll(assignment)].length > entry.bindings) captured.delete(name);
+  }
+  /** A check on `name` in the eight lines above the write, or earlier on its own line. */
   const isChecked = (name: string, offset: number) => {
-    const window = code.slice(lineStarts[Math.max(0, lineAt(offset) - 5)], offset);
+    const window = code.slice(lineStarts[Math.max(0, lineAt(offset) - 9)], offset);
     const id = escapeRegExp(name);
     return [
       `\\b${id}\\s*(?:===|!==|==|!=)\\s*(?:undefined|null)`,
@@ -408,22 +454,16 @@ function findEnvUndefinedWrites(source: string): EnvUndefinedHit[] {
     const operator = /\s*!?\s*(\?\?=|\|\|=|&&=|=(?![=>]))\s*/y;
     operator.lastIndex = member.end;
     if (!operator.exec(code)) continue;
-    let end = operator.lastIndex;
-    let depth = 0;
-    while (end < code.length) {
-      const c = code[end];
-      if (c === "(" || c === "[" || c === "{") depth++;
-      else if (c === ")" || c === "]" || c === "}") {
-        if (--depth < 0) break;
-      } else if (depth === 0 && (c === ";" || c === "\n")) break;
-      end++;
-    }
-    const value = code.slice(operator.lastIndex, end).trim();
-    const unchecked =
+    const value = code.slice(operator.lastIndex, valueEnd(code, operator.lastIndex)).trim();
+    if (isUnsetValue(value)) {
+      flagged.set(lineAt(member.index), "unset-value");
+    } else if (
       new RegExp(`^${IDENT}$`).test(value) &&
-      captured.get(value)?.has(member.key) === true &&
-      !isChecked(value, member.index);
-    if (mayBeUndefined(value) || unchecked) flagged.add(lineAt(member.index));
+      captured.get(value)?.keys.has(member.key) &&
+      !isChecked(value, member.index)
+    ) {
+      flagged.set(lineAt(member.index), "unchecked-restore");
+    }
   }
 
   // `Reflect.set(<env>, key, undefined)` and `Object.assign(<env>, ...sources)`.
@@ -434,27 +474,24 @@ function findEnvUndefinedWrites(source: string): EnvUndefinedHit[] {
     const args = splitTopLevel(code, open + 1, close);
     if (args.length === 0 || !isEnvObject.test(args[0].text.trim())) continue;
     if (call[1].startsWith("Reflect")) {
-      if (args[2] && mayBeUndefined(args[2].text)) flagged.add(lineAt(args[2].at));
+      if (args[2] && isUnsetValue(args[2].text)) flagged.set(lineAt(args[2].at), "unset-value");
       continue;
     }
     for (const source of args.slice(1)) {
-      const literal = source.text.trim();
-      if (!literal.startsWith("{") || !literal.endsWith("}")) continue;
-      const from = source.at + source.text.indexOf("{") + 1;
-      for (const property of splitTopLevel(code, from, from + literal.length - 2)) {
-        const colon = property.text.search(/:/);
-        if (colon >= 0 && mayBeUndefined(property.text.slice(colon + 1))) {
-          flagged.add(
-            lineAt(property.at + property.text.length - property.text.trimStart().length),
-          );
+      if (!source.text.startsWith("{") || !source.text.endsWith("}")) continue;
+      const from = source.at + 1;
+      for (const property of splitTopLevel(code, from, from + source.text.length - 2)) {
+        const colon = property.text.indexOf(":");
+        if (colon >= 0 && isUnsetValue(property.text.slice(colon + 1))) {
+          flagged.set(lineAt(property.at), "unset-value");
         }
       }
     }
   }
 
   return [...flagged]
-    .sort((a, b) => a - b)
-    .map((line) => ({ line, text: (lines[line - 1] ?? "").trim() }));
+    .sort((a, b) => a[0] - b[0])
+    .map(([line, rule]) => ({ line, text: (lines[line - 1] ?? "").trim(), rule }));
 }
 
 /** Every source file under `roots` by walking the directories (used when git cannot answer). */
@@ -562,17 +599,42 @@ describe("the scanner", () => {
       [2],
     ],
     [
-      "a restore whose only check is more than four lines up",
+      "a restore whose only check is more than eight lines up",
       [
         "const saved = process.env.A;",
         "if (saved === undefined) run();",
-        "a();",
-        "b();",
-        "c();",
-        "d();",
+        ...Array.from({ length: 8 }, () => "step();"),
         "process.env.A = saved;",
       ],
-      [7],
+      [11],
+    ],
+    [
+      "a restore from a variable that was never reassigned",
+      ["let saved = process.env.A;", "step();", "process.env.A = saved;"],
+      [3],
+    ],
+    ["null", ["process.env.A = null;"], [1]],
+    ["a null fallback", ["process.env.A = maybe ?? null;"], [1]],
+    ["Object.assign with a null value", ["Object.assign(process.env, { A: null });"], [1]],
+    [
+      "a multi-line ternary in Biome's layout",
+      ["process.env.A = cond", '  ? "a"', "  : undefined;"],
+      [1],
+    ],
+    [
+      "a multi-line ternary with the operators at line ends",
+      ["process.env.A = cond ?", '  "a" :', "  undefined;"],
+      [1],
+    ],
+    [
+      "a multi-line ternary with an undefined first branch",
+      ["process.env.A = cond", "  ? undefined", '  : "a";'],
+      [1],
+    ],
+    [
+      "Reflect.set over several lines, reported at the value",
+      ["Reflect.set(", "  process.env,", '  "A",', "  undefined,", ");"],
+      [4],
     ],
     ["Object.assign on one line", ["Object.assign(process.env, { A: undefined });"], [1]],
     [
@@ -656,6 +718,23 @@ describe("the scanner", () => {
       ],
     ],
     [
+      "a multi-line ternary of two strings",
+      ["process.env.A = cond", '  ? "a"', '  : "b";', "step();"],
+    ],
+    [
+      "a restore from a variable reassigned before the write",
+      ["let saved = process.env.A;", 'saved = "foo";', "process.env.A = saved;"],
+    ],
+    [
+      "a restore whose check is eight lines up",
+      [
+        "const saved = process.env.A;",
+        "if (saved === undefined) run();",
+        ...Array.from({ length: 7 }, () => "step();"),
+        "process.env.A = saved;",
+      ],
+    ],
+    [
       "a ternary of two strings",
       ['process.env.A = cond ? "a" : "b";', 'Object.assign(process.env, { B: c ? "a" : "b" });'],
     ],
@@ -702,7 +781,15 @@ describe("the scanner", () => {
 
   test("reports the offending line number and the text of that line", () => {
     const [hit] = findEnvUndefinedWrites("x();\n  process.env.REPORTED = undefined;\n");
-    expect(hit).toEqual({ line: 2, text: "process.env.REPORTED = undefined;" });
+    expect(hit).toEqual({
+      line: 2,
+      text: "process.env.REPORTED = undefined;",
+      rule: "unset-value",
+    });
+    const [restore] = findEnvUndefinedWrites(
+      "const saved = process.env.R;\nrun();\nprocess.env.R = saved;\n",
+    );
+    expect(restore.rule).toBe("unchecked-restore");
   });
 });
 
@@ -747,13 +834,13 @@ describe("the repository", () => {
     const files = listSourceFiles(REPO_ROOT, SCANNED_ROOTS);
     for (const file of files) {
       for (const hit of findEnvUndefinedWrites(readFileSync(file, "utf8"))) {
-        offenders.push(`${relative(REPO_ROOT, file)}:${hit.line}: ${hit.text}`);
+        offenders.push(`${relative(REPO_ROOT, file)}:${hit.line}: ${hit.text}  [${hit.rule}]`);
       }
     }
     // A scan that read nothing would pass vacuously.
     expect(files.length).toBeGreaterThan(100);
     // Joined so a failure prints file:line for every hit. Restore an originally-unset variable
     // with Reflect.deleteProperty(process.env, "NAME"), or assign the saved string back.
-    expect(offenders.join("\n")).toBe("");
+    expect(offenders.length === 0 ? "" : [...offenders, "", FIX_HINT].join("\n")).toBe("");
   });
 });
