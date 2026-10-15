@@ -901,10 +901,11 @@ jobs:
           sparse-checkout-cone-mode: false
           ref: staging
 
-      # The deployed copies of onboard-openneuro.yml and run-pr-review.yml, for the
-      # same reason and with the same shape (#1309). Both are authored in this repo
-      # beside the code they invoke, then deployed by copying them whole into
-      # nemarDatasets/.github -- and the first pair had already drifted by one merged
+      # The deployed copies of onboard-openneuro.yml, run-pr-review.yml and
+      # run-publication-review.yml, for the same reason and with the same shape
+      # (#1309). All three are authored in this repo beside the code they invoke,
+      # then deployed by copying them whole into nemarDatasets/.github -- and the
+      # first pair (onboard-openneuro.yml and run-pr-review.yml) had already drifted by one merged
       # PR before anyone noticed, because nothing compared them. `main`, not a
       # pre-release branch: that repo has no release train, so what is on main is
       # what runs.
