@@ -366,8 +366,7 @@ describe("what is not editable here", () => {
     ["status", "approved", "nemar admin approve"],
     ["service_access", 1, "nemar admin approve"],
     ["account_kind", "service", "nemar admin kind"],
-    ["orcid", "0000-0002-1825-0097", "never typed in"],
-    ["orcid_verified", 1, "ORCID sign-in flow"],
+    ["orcid_verified", 1, "linking it with ORCID sign-in"],
     ["identity_conflict", 0, "duplicates --clear"],
     ["email_verified", 1, "resets it for you"],
     ["description", "x", "the person's own statement"],
@@ -757,5 +756,122 @@ describe("documented edit invariants", () => {
     expect(g.status).toBe(409);
     expect(g.body.error).toBe("github_in_use");
     expect(g.body.holder).toEqual({ id: ghHolder, username: "ghholder" });
+  });
+});
+
+describe("ORCID attestation: owners only, marked verified, never replacing a proven iD (ADR 0106)", () => {
+  const IID = "0000-0001-5258-2995";
+
+  test("an owner attests an iD the account has none of: stored, verified, and audited as attested", async () => {
+    const id = seedTarget("attestnone", { orcid: null, orcidVerified: 0 });
+    const res = await patch(id, { orcid: `https://orcid.org/${IID}` });
+    expect(res.status).toBe(200);
+    expect(res.body.changed.orcid).toEqual({ from: null, to: IID });
+    expect(res.body.notes.join(" ")).toContain("admin-attested");
+    expect(row(id).orcid).toBe(IID);
+    expect(row(id).orcid_verified).toBe(1);
+
+    const [entry] = audits();
+    expect(entry?.user_id).toBe(idOf("editowner"));
+    expect(JSON.parse(entry?.details ?? "{}").orcid_attested).toBe(true);
+  });
+
+  test("an iD already on the account but unverified is attested without changing the iD", async () => {
+    const id = seedTarget("attestsame", { orcid: IID, orcidVerified: 0 });
+    const res = await patch(id, { orcid: IID });
+    expect(res.status).toBe(200);
+    expect(res.body.changed).toEqual({});
+    expect(row(id).orcid).toBe(IID);
+    expect(row(id).orcid_verified).toBe(1);
+    expect(audits()).toHaveLength(1);
+  });
+
+  test("re-attesting an iD that is already verified is a no-op with no audit row", async () => {
+    const id = seedTarget("attestdone", { orcid: IID, orcidVerified: 1 });
+    const res = await patch(id, { orcid: IID });
+    expect(res.status).toBe(200);
+    expect(res.body.message).toBe("No changes: every value already matches");
+    expect(audits()).toHaveLength(0);
+  });
+
+  test("an iD another live account holds is refused, naming the holder, and nothing is written", async () => {
+    const holder = seedTarget("iidholder", { orcid: IID, orcidVerified: 1 });
+    const id = seedTarget("attestblocked", { orcid: null, orcidVerified: 0 });
+    const res = await patch(id, { orcid: IID });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("orcid_in_use");
+    expect(res.body.holder).toEqual({ id: holder, username: "iidholder" });
+    expect(row(id).orcid).toBeNull();
+    expect(row(id).orcid_verified).toBe(0);
+  });
+
+  test("an iD only a tombstoned account holds does not block the attestation", async () => {
+    seedTarget("gonewithiid", { orcid: IID, orcidVerified: 1, deleted: true });
+    const id = seedTarget("attestafter", { orcid: null, orcidVerified: 0 });
+    expect((await patch(id, { orcid: IID })).status).toBe(200);
+    expect(row(id).orcid_verified).toBe(1);
+  });
+
+  test("an account whose person proved an iD by signing in keeps it: the attestation is refused", async () => {
+    const proven = "0000-0002-1825-0097";
+    const id = seedTarget("provenalready", { orcid: proven, orcidVerified: 1 });
+    db.query(
+      "INSERT INTO oauth_identities (user_id, provider, provider_subject) VALUES (?, 'orcid', ?)",
+    ).run(id, proven);
+    const res = await patch(id, { orcid: IID });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("orcid_already_proven");
+    expect(row(id).orcid).toBe(proven);
+    expect(audits()).toHaveLength(0);
+  });
+
+  test("an attested iD can be replaced by a later attestation, which stays verified", async () => {
+    const id = seedTarget("attestswap", { orcid: "0000-0002-1825-0097", orcidVerified: 1 });
+    expect((await patch(id, { orcid: IID })).status).toBe(200);
+    expect(row(id).orcid).toBe(IID);
+    expect(row(id).orcid_verified).toBe(1);
+  });
+
+  test("an admin who is not an owner is refused, and nothing changes", async () => {
+    const id = seedTarget("attestadmin", { orcid: null, orcidVerified: 0 });
+    const res = await patch(id, { orcid: IID }, ADMIN_KEY);
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("owner_only_field");
+    expect(row(id).orcid).toBeNull();
+  });
+
+  test("an owner account is not attested here, and an owner cannot attest their own", async () => {
+    const otherOwner = seedTarget("otherowner", { orcid: null, orcidVerified: 0 });
+    db.query("UPDATE users SET role = 'owner' WHERE id = ?").run(otherOwner);
+    const refused = await patch(otherOwner, { orcid: IID });
+    expect(refused.status).toBe(403);
+    expect(refused.body.error).toBe("owner_account");
+
+    const own = await patch(idOf("editowner"), { orcid: IID });
+    expect(own.status).toBe(400);
+    expect(own.body.error).toBe("edit_own_account");
+  });
+
+  test("a name in the same request as an attestation is refused, since the iD would own it", async () => {
+    const id = seedTarget("attestname", { orcid: null, orcidVerified: 0 });
+    const res = await patch(id, { given_name: "Changed", orcid: IID });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("name_is_orcid_canonical");
+    expect(row(id).orcid).toBeNull();
+  });
+
+  test("a value that is not an ORCID iD is refused by rule, with a sentence", async () => {
+    const id = seedTarget("attestbad", { orcid: null, orcidVerified: 0 });
+    const res = await patch(id, { orcid: "not-an-orcid" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("invalid_edit");
+    expect(res.body.message).toContain("orcid");
+    expect(row(id).orcid).toBeNull();
+  });
+
+  test("a lowercase check digit is stored in capitals, the form the unique index compares", async () => {
+    const id = seedTarget("attestcase", { orcid: null, orcidVerified: 0 });
+    expect((await patch(id, { orcid: "0000-0001-5258-299x" })).status).toBe(200);
+    expect(row(id).orcid).toBe("0000-0001-5258-299X");
   });
 });
