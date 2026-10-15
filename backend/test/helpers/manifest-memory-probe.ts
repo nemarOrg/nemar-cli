@@ -90,20 +90,35 @@ async function runProbe(request: ProbeRequest): Promise<ProbeResult> {
   return { answer: sampling.finish(result.header), samples };
 }
 
-/** Run `request` in a fresh bun process and return what it measured. */
+/** Longest a child may run before it is killed; a scan takes a few seconds. */
+const PROBE_DEADLINE_MS = 60_000;
+
+/**
+ * Run `request` in a fresh bun process and return what it measured. The child is killed
+ * when this returns or throws, and after {@link PROBE_DEADLINE_MS}, so a test that times out
+ * does not leave a scan running in the background.
+ */
 export async function measureScan(request: ProbeRequest): Promise<ProbeResult> {
   const child = Bun.spawn([process.execPath, import.meta.path, JSON.stringify(request)], {
     stdout: "pipe",
     stderr: "pipe",
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  if (exitCode !== 0) throw new Error(`memory probe exited ${exitCode}: ${stderr}`);
-  const line = stdout.trim().split("\n").pop() ?? "";
-  return JSON.parse(line) as ProbeResult;
+  const deadline = setTimeout(() => child.kill(), PROBE_DEADLINE_MS);
+  try {
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    if (exitCode !== 0) {
+      throw new Error(`memory probe exited ${exitCode} (signal ${child.signalCode}): ${stderr}`);
+    }
+    const line = stdout.trim().split("\n").pop() ?? "";
+    return JSON.parse(line) as ProbeResult;
+  } finally {
+    clearTimeout(deadline);
+    child.kill();
+  }
 }
 
 if (import.meta.main) {

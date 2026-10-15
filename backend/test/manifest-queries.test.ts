@@ -390,7 +390,11 @@ const LARGE: LargeManifestOptions = { subjects: 374, runsPerSession: 50 };
 const LARGE_ENTRIES = largeManifestEntryCount(LARGE);
 
 /** The most live memory any sample held above the scan's start. */
-const peakOf = (samples: number[]) => Math.max(...samples);
+const peakOf = (samples: number[]) => {
+  // Math.max of nothing is -Infinity, which is under every bound: no samples is no evidence.
+  expect(samples.length).toBeGreaterThan(0);
+  return Math.max(...samples);
+};
 
 /** Every memory check below must stay under this: one decoded chunk and the answer. */
 const FLAT_BOUND = 8 * 1024 * 1024;
