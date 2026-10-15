@@ -32,6 +32,29 @@ describe("resolveListStatuses", () => {
     expect(resolveListStatuses({ published: true, denied: true })).toEqual(["published", "denied"]);
   });
 
+  test("--status is one exact status, as it was before the state flags", () => {
+    expect(resolveListStatuses({ status: "denied" })).toEqual(["denied"]);
+  });
+
+  test("--status takes a comma-separated list and ignores spacing", () => {
+    expect(resolveListStatuses({ status: "published, denied" })).toEqual(["published", "denied"]);
+  });
+
+  test("--status and the state flags give their union without repeats", () => {
+    expect(resolveListStatuses({ status: "denied", denied: true, published: true })).toEqual([
+      "published",
+      "denied",
+    ]);
+  });
+
+  test("--all wins over --status", () => {
+    expect(resolveListStatuses({ all: true, status: "denied" })).toBeUndefined();
+  });
+
+  test("an empty --status is not a choice", () => {
+    expect(resolveListStatuses({ status: "" })).toEqual(["requested", "approving", "blocked"]);
+  });
+
   test("a false flag is not a choice", () => {
     expect(resolveListStatuses({ denied: false })).toEqual(["requested", "approving", "blocked"]);
   });
@@ -144,7 +167,7 @@ describe("nemar admin publish list", () => {
     const server = startServer([ROW]);
     try {
       await runCli(
-        ["admin", "publish", "list", "--published", "--denied", "-s", "nm0001"],
+        ["admin", "publish", "list", "--published", "--denied", "--search", "nm0001"],
         server.url,
       );
       expect(server.seen).toEqual(["?status=published%2Cdenied&search=nm0001"]);
@@ -200,12 +223,51 @@ describe("nemar admin publish list", () => {
     }
   });
 
-  test("the old --status flag is gone", async () => {
+  test("--status keeps its old meaning: one exact status", async () => {
     const server = startServer([ROW]);
     try {
       const r = await runCli(["admin", "publish", "list", "--status", "denied"], server.url);
-      expect(r.exitCode).not.toBe(0);
-      expect(server.seen).toEqual([]);
+      expect(r.exitCode).toBe(0);
+      expect(server.seen).toEqual(["?status=denied"]);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("-s is still --status, not the search", async () => {
+    const server = startServer([ROW]);
+    try {
+      const r = await runCli(["admin", "publish", "list", "-s", "denied"], server.url);
+      expect(r.exitCode).toBe(0);
+      expect(server.seen).toEqual(["?status=denied"]);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("--status combines with --search and the state flags", async () => {
+    const server = startServer([ROW]);
+    try {
+      await runCli(
+        ["admin", "publish", "list", "-s", "published", "--denied", "--search", "alice"],
+        server.url,
+      );
+      expect(server.seen).toEqual(["?status=published%2Cdenied&search=alice"]);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("--search has no short form", async () => {
+    const server = startServer([ROW]);
+    try {
+      const r = await runCli(["admin", "publish", "list", "--search", "nm000104"], server.url);
+      expect(r.exitCode).toBe(0);
+      expect(server.seen).toEqual(["?status=requested%2Capproving%2Cblocked&search=nm000104"]);
+      const help = await runCli(["admin", "publish", "list", "--help"], server.url);
+      expect(help.stdout).toContain("-s, --status <status>");
+      expect(help.stdout).toContain("--search <text>");
+      expect(help.stdout).not.toContain("-s, --search");
     } finally {
       server.stop();
     }

@@ -226,7 +226,7 @@ import { getVersionCommit, listDatasetVersions } from "../lib/git-annex/repo-sta
 import { identifierScreenLines } from "../lib/identifier-screen-display.js";
 import {
   type ListFilterOptions,
-  STATE_FLAGS,
+  choseListScope,
   describeListScope,
   resolveListStatuses,
 } from "../lib/publish-list-filter.js";
@@ -3117,14 +3117,18 @@ publishCommand
   .option("--blocked", "Show requests blocked on the depositor")
   .option("--published", "Show published requests")
   .option("--denied", "Show denied requests")
-  .option("-s, --search <text>", "Match dataset ID, requester username or dataset name")
+  .option(
+    "-s, --status <status>",
+    "Show one exact status (requested, approving, blocked, published, denied)",
+  )
+  .option("--search <text>", "Match dataset ID, requester username or dataset name")
   .addHelpText(
     "after",
     `
 Description:
   List publication requests from users. By default only the active ones are
-  shown (requested, approving and blocked); the state flags narrow the list to
-  one or more states, and --all shows every request.
+  shown (requested, approving and blocked); the state flags, or -s/--status with
+  one status, narrow the list to those states, and --all shows every request.
   Shows dataset ID, status, requesting user, and current progress.
 
 States:
@@ -3135,7 +3139,7 @@ States:
   denied     - Denied requests, with reasons
 
 Search:
-  -s/--search matches a substring (case-insensitive for ASCII letters) of the
+  --search matches a substring (case-insensitive for ASCII letters) of the
   dataset ID, the requester's username or the dataset name, within the states being shown.
   An exact dataset ID is listed first.
 
@@ -3143,8 +3147,9 @@ Examples:
   $ nemar admin publish list                       # Active requests
   $ nemar admin publish list --all                 # Every request
   $ nemar admin publish list --denied              # Denied only
+  $ nemar admin publish list -s denied             # Same as --denied
   $ nemar admin publish list --published --denied  # Both states
-  $ nemar admin publish list -s nm000104 --all     # Look up one dataset, any state`,
+  $ nemar admin publish list --search nm000104 --all   # Look up one dataset, any state`,
   )
   .action(async (options: ListFilterOptions & { search?: string }) => {
     if (!requireAuth()) return;
@@ -3169,8 +3174,7 @@ Examples:
 
       if (result.requests.length === 0) {
         const scope = describeListScope(options);
-        const chose = options.all || STATE_FLAGS.some((flag) => options[flag]);
-        const widen = chose ? "" : " Use --all to include every state.";
+        const widen = choseListScope(options) ? "" : " Use --all to include every state.";
         console.log(
           chalk.dim(`\n  No ${scope} found${search ? ` matching "${search}"` : ""}.${widen}\n`),
         );
