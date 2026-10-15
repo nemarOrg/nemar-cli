@@ -321,8 +321,12 @@ nemar dataset publish resend <dataset-id>  # Resend admin notification
 nemar dataset publish withdraw <dataset-id> # Take back your request (a withdrawn request; no admin step)
 
 # Admin: Manage publication requests
-nemar admin publish list                   # List all publication requests
-nemar admin publish list --pending         # List pending requests only
+nemar admin publish list                   # List active publication requests
+nemar admin publish list --all             # Every request, whatever its state
+nemar admin publish list --denied          # One state (also --published, --requested, ...)
+nemar admin publish list -s denied         # Same as --denied (--status, as before)
+nemar admin publish list --search nm000104 --all
+                                           # Look up a dataset by ID, user or name
 nemar admin publish approve <dataset-id>   # Approve and publish dataset
 nemar admin publish approve <dataset-id> --acknowledge-identifier-screen "<reason>"
                                            # Approve over a screen that needs review

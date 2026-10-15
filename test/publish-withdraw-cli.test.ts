@@ -28,6 +28,7 @@ interface Route {
 
 function startServer(routes: Record<string, Route>) {
   const seen: string[] = [];
+  const queries: string[] = [];
   const server = Bun.serve({
     port: 0,
     fetch(req) {
@@ -35,12 +36,13 @@ function startServer(routes: Record<string, Route>) {
       if (url.pathname === "/notices") return Response.json({ notices: [] });
       if (url.pathname === "/datasets/facets") return Response.json({});
       seen.push(`${req.method} ${url.pathname}`);
+      queries.push(url.search);
       const route = routes[`${req.method} ${url.pathname}`];
       if (!route) return Response.json({ error: "not found" }, { status: 404 });
       return Response.json(route.body, { status: route.status ?? 200 });
     },
   });
-  return { url: `http://localhost:${server.port}`, seen, stop: () => server.stop(true) };
+  return { url: `http://localhost:${server.port}`, seen, queries, stop: () => server.stop(true) };
 }
 
 let configDir: string;
@@ -265,44 +267,76 @@ describe("how a withdrawal reads", () => {
     }
   });
 
-  test("admin publish list shows a withdrawn request as withdrawn", async () => {
-    const server = startServer({
-      "GET /admin/publish/requests": {
-        body: {
-          count: 2,
-          requests: [
-            {
-              id: 1,
-              dataset_id: "nm000104",
-              status: "denied",
-              withdrawn_at: "2026-10-14 18:00:00",
-              requested_at: "2026-10-14 12:00:00",
-              requested_by_username: "alice",
-              requested_by_email: "alice@example.org",
-              steps_completed: [],
-              current_step: null,
-              last_error: null,
-            },
-            {
-              id: 2,
-              dataset_id: "nm000105",
-              status: "denied",
-              withdrawn_at: null,
-              requested_at: "2026-10-14 12:00:00",
-              requested_by_username: "bob",
-              requested_by_email: "bob@example.org",
-              steps_completed: [],
-              current_step: null,
-              last_error: null,
-            },
-          ],
-        },
+  const LIST_BODY = {
+    count: 2,
+    requests: [
+      {
+        id: 1,
+        dataset_id: "nm000104",
+        dataset_name: "Motor imagery",
+        status: "denied",
+        withdrawn_at: "2026-10-14 18:00:00",
+        requested_at: "2026-10-14 12:00:00",
+        requested_by_username: "alice",
+        requested_by_email: "alice@example.org",
+        steps_completed: [],
+        current_step: null,
+        last_error: null,
       },
+      {
+        id: 2,
+        dataset_id: "nm000105",
+        dataset_name: "Sleep study",
+        status: "denied",
+        withdrawn_at: null,
+        requested_at: "2026-10-14 12:00:00",
+        requested_by_username: "bob",
+        requested_by_email: "bob@example.org",
+        steps_completed: [],
+        current_step: null,
+        last_error: null,
+      },
+    ],
+  };
+
+  // A withdrawn request is stored as `denied`, so it is listed wherever `denied`
+  // is in scope and nowhere else: the default (active) list never asks for it,
+  // and `withdrawn` is not a status the server accepts. What the CLI owes is to
+  // send the right filter and to label the row.
+  for (const [name, args, query] of [
+    ["--denied", ["--denied"], "?status=denied"],
+    ["-s denied", ["-s", "denied"], "?status=denied"],
+    ["--published --denied", ["--published", "--denied"], "?status=published%2Cdenied"],
+    ["--all", ["--all"], ""],
+    [
+      "--search with --denied",
+      ["--denied", "--search", "nm00010"],
+      "?status=denied&search=nm00010",
+    ],
+  ] as const) {
+    test(`admin publish list ${name} labels a withdrawn request as withdrawn and a denial as denied`, async () => {
+      const server = startServer({ "GET /admin/publish/requests": { body: LIST_BODY } });
+      try {
+        const r = await runCli(["admin", "publish", "list", ...args], server.url);
+        expect(r.exitCode).toBe(0);
+        expect(server.queries).toEqual([query]);
+        expect(r.stdout).toMatch(/nm000104\s+withdrawn\s+by alice\s+\S+ \S+\s+Motor imagery/);
+        expect(r.stdout).toMatch(/nm000105\s+denied\s+by bob\s+\S+ \S+\s+Sleep study/);
+      } finally {
+        server.stop();
+      }
+    });
+  }
+
+  test("admin publish list by default asks only for the active states, so no withdrawn row is requested", async () => {
+    const server = startServer({
+      "GET /admin/publish/requests": { body: { count: 0, requests: [] } },
     });
     try {
       const r = await runCli(["admin", "publish", "list"], server.url);
-      expect(r.stdout).toMatch(/nm000104\s+withdrawn/);
-      expect(r.stdout).toMatch(/nm000105\s+denied/);
+      expect(r.exitCode).toBe(0);
+      expect(server.queries).toEqual(["?status=requested%2Capproving%2Cblocked"]);
+      expect(r.stdout).toContain("Use --all to include every state");
     } finally {
       server.stop();
     }
