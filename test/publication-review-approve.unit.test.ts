@@ -252,6 +252,27 @@ describe("4. a gate that is off or does not apply is not enforced", () => {
   });
 });
 
+describe("the review fixture's start_offered follows the Worker's gate", () => {
+  test("a start is offered only while the review is enforced", () => {
+    const reasons = ["review_not_started" as const];
+    expect(detailOf({ gate: "enforced", reasons }).start_offered).toBe(true);
+    expect(detailOf({ gate: "off", reasons }).start_offered).toBe(false);
+    expect(detailOf({ gate: "n/a", reasons }).start_offered).toBe(false);
+  });
+
+  test("a screen that is not clear or acknowledgeable offers none, and a named answer wins", () => {
+    const reasons = ["review_not_started" as const];
+    expect(detailOf({ reasons, screenGate: "wait" }).start_offered).toBe(false);
+    expect(detailOf({ reasons, screenGate: "exempt" }).start_offered).toBe(false);
+    expect(detailOf({ gate: "off", reasons, startOffered: true }).start_offered).toBe(true);
+  });
+
+  test("the screen gate is derived from the screen reasons and is never exempt unasked", () => {
+    expect(detailOf({}).screen_gate).toBe("clear");
+    expect(detailOf({ reasons: ["identifier_screen_pending"] }).screen_gate).toBe("wait");
+  });
+});
+
 describe("5. a hard reason is refused, with the cure, even with --force", () => {
   test("the refusal's own sentence is the gate's, then one line per hard reason, from the Worker's own words", () => {
     const spec = {
