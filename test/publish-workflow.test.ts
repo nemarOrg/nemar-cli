@@ -324,7 +324,10 @@ describe("publish workflow - admin operations", () => {
       username: "test-admin",
     });
 
-    const { stdout, stderr } = await runCli(["admin", "publish", "approve", ABSENT_DATASET_ID, "-y"], ctx);
+    const { stdout, stderr } = await runCli(
+      ["admin", "publish", "approve", ABSENT_DATASET_ID, "-y"],
+      ctx,
+    );
     // Error message appears in stderr (via ora spinner.fail) or stdout
     const output = stdout + stderr;
     expect(
