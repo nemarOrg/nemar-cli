@@ -35,6 +35,12 @@
  *   - `Object.assign(<env>, ...)` where any object literal source, anywhere in the argument list
  *     and however long, gives a property the value `undefined`.
  *
+ * WHAT IT SCANS: the git-tracked TypeScript and JavaScript files under `test`, `backend/test`,
+ * `src`, `backend/src`, `scripts`, `backend/scripts`, `shared` and `deploy`, listed with
+ * `git ls-files` so an untracked scratch file cannot fail the guard locally and pass in CI (it
+ * walks the directories instead when the tree is not a git checkout). The whole scan takes about
+ * 0.4 seconds (the whole file, measured with bun test) on roughly 1,200 files.
+ *
  * NOT FLAGGED, on purpose: an `env: { X: undefined }` option or a local object copy
  * (`const env = { ...process.env }; env.X = undefined`). Those are plain objects, not
  * `process.env`, and the spawn layer drops an undefined value rather than stringifying it.
@@ -55,11 +61,29 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync, readdirSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { extname, join, relative } from "node:path";
 
 const REPO_ROOT = join(import.meta.dir, "..");
-const SCANNED_ROOTS = ["test", "backend/test", "src", "backend/src", "scripts"];
+const SCANNED_ROOTS = [
+  "test",
+  "backend/test",
+  "src",
+  "backend/src",
+  "scripts",
+  "backend/scripts",
+  "shared",
+  "deploy",
+];
 const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".mjs", ".cjs", ".mts", ".cts"]);
 const SKIPPED_DIRECTORIES = new Set(["node_modules", ".git", "dist", "coverage"]);
 
@@ -454,18 +478,47 @@ function findEnvUndefinedWrites(source: string): EnvUndefinedHit[] {
     .map((line) => ({ line, text: (lines[line - 1] ?? "").trim() }));
 }
 
-function sourceFiles(directory: string): string[] {
+/** Every source file under `roots` by walking the directories (used when git cannot answer). */
+function walkSourceFiles(base: string, roots: string[]): string[] {
   const found: string[] = [];
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    if (entry.isDirectory()) {
-      if (!SKIPPED_DIRECTORIES.has(entry.name)) {
-        found.push(...sourceFiles(join(directory, entry.name)));
+  const walk = (directory: string) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (!SKIPPED_DIRECTORIES.has(entry.name)) walk(join(directory, entry.name));
+      } else if (SOURCE_EXTENSIONS.has(extname(entry.name))) {
+        found.push(join(directory, entry.name));
       }
-    } else if (SOURCE_EXTENSIONS.has(extname(entry.name))) {
-      found.push(join(directory, entry.name));
     }
-  }
+  };
+  for (const root of roots) if (existsSync(join(base, root))) walk(join(base, root));
   return found;
+}
+
+/**
+ * The source files under `roots` that git tracks, so a scratch file that is not committed cannot
+ * fail the guard on one machine and pass in CI. Falls back to walking the directories when `base`
+ * is not a git checkout (a source tarball) or git is not installed.
+ */
+function listSourceFiles(base: string, roots: string[]): string[] {
+  try {
+    const listed = Bun.spawnSync(["git", "ls-files", "-z", "--", ...roots], {
+      cwd: base,
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    if (listed.exitCode === 0) {
+      const tracked = listed.stdout
+        .toString()
+        .split("\0")
+        .filter((file) => file !== "" && SOURCE_EXTENSIONS.has(extname(file)))
+        .map((file) => join(base, file))
+        .filter((file) => existsSync(file));
+      if (tracked.length > 0) return tracked;
+    }
+  } catch {
+    // git is not installed: walk instead.
+  }
+  return walkSourceFiles(base, roots);
 }
 
 describe("the scanner", () => {
@@ -667,20 +720,52 @@ describe("the scanner", () => {
   });
 });
 
+describe("the file listing", () => {
+  const EXEC = { stdout: "ignore", stderr: "ignore" } as const;
+
+  test("lists tracked files only inside a git checkout, and walks outside one", () => {
+    const base = mkdtempSync(join(tmpdir(), "env-guard-list-"));
+    try {
+      mkdirSync(join(base, "test"));
+      writeFileSync(join(base, "test", "committed.ts"), "export {};\n");
+      expect(Bun.spawnSync(["git", "init", "-q"], { cwd: base, ...EXEC }).exitCode).toBe(0);
+      expect(
+        Bun.spawnSync(["git", "add", "test/committed.ts"], { cwd: base, ...EXEC }).exitCode,
+      ).toBe(0);
+      writeFileSync(join(base, "test", "scratch.ts"), "export {};\n");
+
+      const inCheckout = listSourceFiles(base, ["test", "shared"]).map((f) => relative(base, f));
+      expect(inCheckout).toEqual(["test/committed.ts"]);
+
+      rmSync(join(base, ".git"), { recursive: true, force: true });
+      const walked = listSourceFiles(base, ["test", "shared"]).map((f) => relative(base, f));
+      expect(walked.sort()).toEqual(["test/committed.ts", "test/scratch.ts"]);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  test("covers every directory the repository keeps TypeScript in", () => {
+    const listed = new Set(
+      listSourceFiles(REPO_ROOT, SCANNED_ROOTS).map((f) => relative(REPO_ROOT, f)),
+    );
+    for (const root of SCANNED_ROOTS) {
+      expect([...listed].some((file) => file.startsWith(`${root}/`))).toBe(true);
+    }
+  });
+});
+
 describe("the repository", () => {
   test("no test, script or source file writes undefined into process.env", () => {
     const offenders: string[] = [];
-    let scanned = 0;
-    for (const root of SCANNED_ROOTS) {
-      for (const file of sourceFiles(join(REPO_ROOT, root))) {
-        scanned++;
-        for (const hit of findEnvUndefinedWrites(readFileSync(file, "utf8"))) {
-          offenders.push(`${relative(REPO_ROOT, file)}:${hit.line}: ${hit.text}`);
-        }
+    const files = listSourceFiles(REPO_ROOT, SCANNED_ROOTS);
+    for (const file of files) {
+      for (const hit of findEnvUndefinedWrites(readFileSync(file, "utf8"))) {
+        offenders.push(`${relative(REPO_ROOT, file)}:${hit.line}: ${hit.text}`);
       }
     }
     // A scan that read nothing would pass vacuously.
-    expect(scanned).toBeGreaterThan(100);
+    expect(files.length).toBeGreaterThan(100);
     // Joined so a failure prints file:line for every hit. Restore an originally-unset variable
     // with Reflect.deleteProperty(process.env, "NAME"), or assign the saved string back.
     expect(offenders.join("\n")).toBe("");
