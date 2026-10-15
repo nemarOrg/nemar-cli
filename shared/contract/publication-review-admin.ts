@@ -275,10 +275,12 @@ export interface PublicationReviewDetail {
    * screen runs again), `wait` (a run is in flight), or `exempt` (a sandbox dataset is not
    * screened). It is the screen's gate for an approval of this request. The 409
    * `identifier_screen_not_clear` that `approve-dispatch` answers reports the same `gate` for the
-   * cases that refuse, and adds `stale` and `unverified`, which this field cannot say; `clear` and
-   * `exempt` never refuse, and an `acknowledge` passes when this approver's own acknowledgment is
-   * already on the row. `reasons` cannot say this: it is empty when the review is off and no row
-   * is on record, yet the screen's gate still applies to an approval.
+   * cases that refuse, and adds `stale` and `unverified`, which this field cannot say (the detail
+   * reads no GitHub): `exempt` never refuses, but `clear` can still refuse as `stale` or
+   * `unverified` when the screened head is no longer `main`. An `acknowledge` passes when this
+   * approver's own acknowledgment is already on the row. `reasons` cannot say this: it is empty
+   * when the review is off and no row is on record, yet the screen's gate still applies to an
+   * approval.
    */
   screen_gate: ScreenGate | "exempt";
   reasons: ReasonView[];

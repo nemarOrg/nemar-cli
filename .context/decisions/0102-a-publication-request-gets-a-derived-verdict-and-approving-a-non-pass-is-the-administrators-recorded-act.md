@@ -1097,8 +1097,8 @@ A sentence is called web-safe here when it names no terminal command, flag or pl
    The executor workflow edit of Phase 3 stays the maintainer's, as the Phase 3 amendment says.
    `description.next` shows `nemar admin publish start <id>` for a clean sandbox (`xx`) request, although `start_offered` is false for it and the route refuses a start there.
    That is CLI behavior from before this phase, tracked in #1773, and the page never prints `description.next`.
-   The neutral cure of a reason whose cure is "start it" has the same limit, because the cure and `command` decide from whether the request is `requested` alone, while `start_offered` also needs a restartable row and a screen with a clear or acknowledgeable result and a head.
-   So the cure can say to start the review while `start_offered` is false: for a report that no longer parses (`review_could_not_run`, whose stored review is no longer restartable), for a sandbox request, and for a screen with no head.
+   The neutral cure of a reason whose cure is "start it" has the same limit, because the cure and `command` decide from whether the request is `requested` alone, while `start_offered` also needs a restartable row, no hard reason standing, and a screen with a clear or acknowledgeable result and a head.
+   So the cure can say to start the review while `start_offered` is false: beside any standing hard reason (the commonest case: `review_not_started` beside `submission_minimum_failed` or `identifier_screen_pending`), for a report that no longer parses (`review_could_not_run`, whose stored review is no longer restartable), for a sandbox request, and for a screen with no head.
    The page's Start button follows `start_offered` only, so it can print that cure beside no button.
    That is an intentional design choice: a code fix would give the neutral path its own input and leave `cureOf` byte for byte, a change this phase did not take on; it is also tracked in #1773.
    A sentence in AGENTS.md about the new copy file, beside the one on the account copy, is the maintainer's to write.

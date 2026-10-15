@@ -1347,9 +1347,11 @@ export function cureOf(code: ReasonCode, datasetId: string, startable: boolean):
  *
  * The choice of "start it" is made from `startable` alone, the request waiting for its decision,
  * never from the detail's `start_offered`. That is intended: the cure is a pure function of the
- * reason and the request's standing, and `start_offered` (which also needs a restartable row and a
- * screen that is clear or acknowledged with a head) is the one authoritative answer a page uses to
- * draw the Start control. So a detail can say "start it" while `start_offered` is false, for a
+ * reason and the request's standing, and `start_offered` (which also needs a restartable row, no
+ * hard reason standing, and a screen that is clear or acknowledged with a head) is the one
+ * authoritative answer a page uses to draw the Start control. So a detail can say "start it" while
+ * `start_offered` is false: beside any standing hard reason (the commonest case, for example
+ * `review_not_started` beside `submission_minimum_failed` or `identifier_screen_pending`), for a
  * request whose stored report no longer parses, a sandbox request, or a screen with no head.
  */
 export function neutralCureOf(code: ReasonCode, datasetId: string, startable: boolean): string {

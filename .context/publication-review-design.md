@@ -511,7 +511,7 @@ The nemar-cli half:
 - **Left open:** a control to run the identifier screen again (the Worker has the route; an administrator uses the terminal), the `gate: "wait"` answer for an acknowledgment that lost a race,
   mailing the depositor from the page, wiring the strict parity path into the continuous integration workflow once the website's file is on its `staging` branch,
   a sentence in AGENTS.md about the new copy file, and the production promotion.
-  Also left open (#1773): a neutral cure that says to start the review can stand while `start_offered` is false (a report that no longer parses, a sandbox request, a screen with no head);
+  Also left open (#1773): a neutral cure that says to start the review can stand while `start_offered` is false (any standing hard reason, the commonest case; a report that no longer parses, a sandbox request, a screen with no head);
   the page's Start button follows `start_offered` only, which is intended.
 
 Order: the nemar-cli half merges into the epic, then the executor workflow edit and the finalize into `dev`;
