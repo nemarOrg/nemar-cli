@@ -125,6 +125,12 @@ const SWEEP_WIRING: Record<
   // the review off does not strand a request whose mail waits on a review already in flight.
   sweepPublicationReviews: "tick-prod-only",
   sweepBlockedBidsValidationRequests: "all-envs",
+  // #1789: tombstones the live integration tests' accounts. It is driven from
+  // scheduledCleanup, which runs in every environment, and is the one sweep that runs ONLY
+  // outside production: the call site and the function each refuse in production (see the
+  // dedicated block at the foot of this file). "all-envs" is the closest declared kind; the
+  // placement assertions it gets here are only "called at least once".
+  sweepCiTestAccounts: "all-envs",
   // Epic #1610 phase 4: the identifier-screen watchdog. Its deadline is 50
   // minutes, so it rides the 30-minute tick; it mails admins, so it is
   // production-only there and absent from DEV_CRON_ALLOWLIST.
@@ -650,3 +656,43 @@ function waitUntilBody(code: string, call: string): string {
   }
   throw new Error(`unbalanced parentheses after ${call}`);
 }
+
+/**
+ * `sweepCiTestAccounts` (#1789) is the inverse of every prod-only sweep above: it must run
+ * ONLY outside production. It tombstones accounts, which on the production database could only
+ * ever be a real person's, so a call site without a guard is the failure to pin. Two guards
+ * are required and checked from both sides: the call site in `scheduledCleanup` and the
+ * function's own first statement. The behavioural half (production does nothing, however
+ * `ENVIRONMENT` is spelled) lives in `test-account-sweep.test.ts`.
+ */
+describe("sweepCiTestAccounts is wired non-production only", () => {
+  const NAME = "sweepCiTestAccounts";
+
+  test("is called from scheduledCleanup, outside the prod-only block", () => {
+    expect(callCount(allCode, NAME)).toBe(1);
+    expect(callCount(prodOnlyCode, NAME)).toBe(0);
+  });
+
+  test("the call site sits directly under an isNonProductionEnv guard", () => {
+    const idx = allCode.indexOf(`${NAME}(env`);
+    expect(idx).toBeGreaterThanOrEqual(0);
+    const before = allCode.slice(Math.max(0, idx - 200), idx);
+    expect(before).toContain("if (isNonProductionEnv(env)) {");
+    expect(before).not.toContain("if (!isNonProductionEnv(env)) {");
+  });
+
+  test("the function refuses in production before it reads or writes anything", () => {
+    const code = serviceFileCodeLinesDefining(NAME)?.join("\n") ?? "";
+    const guard = code.indexOf("if (!isNonProductionEnv(env)) return");
+    expect(guard).toBeGreaterThanOrEqual(0);
+    const body = code.indexOf(`export async function ${NAME}(`);
+    expect(guard).toBeGreaterThan(body);
+    expect(guard).toBeLessThan(code.indexOf(".prepare(", body));
+    expect(guard).toBeLessThan(code.indexOf("tombstoneUserCascade(db", body));
+  });
+
+  test("it is not in the daily-job allowlist, which names jobs driven directly", () => {
+    const allowlist = /DEV_CRON_ALLOWLIST[^;]*;/s.exec(allCode)?.[0] ?? "";
+    expect(allowlist).not.toContain(NAME);
+  });
+});
