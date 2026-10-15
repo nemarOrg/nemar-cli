@@ -65,5 +65,5 @@ export function describeListScope(options: ListFilterOptions): string {
   const statuses = resolveListStatuses(options);
   if (!statuses) return "all requests";
   if (!choseListScope(options)) return "active requests";
-  return `${statuses.join(" or ")} requests`;
+  return `requests with status ${statuses.join(" or ")}`;
 }

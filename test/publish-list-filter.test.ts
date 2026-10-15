@@ -65,8 +65,13 @@ describe("describeListScope", () => {
     expect(describeListScope({})).toBe("active requests");
     expect(describeListScope({ all: true })).toBe("all requests");
     expect(describeListScope({ published: true, denied: true })).toBe(
-      "published or denied requests",
+      "requests with status published or denied",
     );
+  });
+
+  test("a single state reads as a status, not as 'requested requests'", () => {
+    expect(describeListScope({ requested: true })).toBe("requests with status requested");
+    expect(describeListScope({ status: "denied" })).toBe("requests with status denied");
   });
 });
 
@@ -268,6 +273,29 @@ describe("nemar admin publish list", () => {
       expect(help.stdout).toContain("-s, --status <status>");
       expect(help.stdout).toContain("--search <text>");
       expect(help.stdout).not.toContain("-s, --search");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("an empty --requested list does not say 'requested requests'", async () => {
+    const server = startServer([]);
+    try {
+      const r = await runCli(["admin", "publish", "list", "--requested"], server.url);
+      expect(r.stdout).toContain("No requests with status requested found.");
+      expect(r.stdout).not.toContain("requested requests");
+      expect(r.stdout).not.toContain("--all");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("an empty --status list is not told to widen either", async () => {
+    const server = startServer([]);
+    try {
+      const r = await runCli(["admin", "publish", "list", "-s", "denied"], server.url);
+      expect(r.stdout).toContain("No requests with status denied found.");
+      expect(r.stdout).not.toContain("--all");
     } finally {
       server.stop();
     }

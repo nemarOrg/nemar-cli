@@ -283,7 +283,6 @@ describe("publish workflow - admin operations", () => {
     expect(
       stdout.includes("Publication Requests") ||
         stdout.includes("No active requests found") ||
-        stdout.includes("No requested requests found") ||
         stdout.includes("404"),
     ).toBe(true);
   });
@@ -345,8 +344,7 @@ describe("publish workflow - admin operations", () => {
     const { stdout } = await runCli(["admin", "publish", "list", "--requested"], ctx);
     expect(
       stdout.includes("Publication Requests") ||
-        stdout.includes("No active requests found") ||
-        stdout.includes("No requested requests found") ||
+        stdout.includes("No requests with status requested found") ||
         stdout.includes("404"),
     ).toBe(true);
   });
