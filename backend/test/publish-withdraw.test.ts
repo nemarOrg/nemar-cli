@@ -61,14 +61,23 @@ beforeEach(async () => {
 
 function seedRequest(
   status: string,
-  extra: { dispatchedAt?: string; ageMinutes?: number } = {},
+  extra: {
+    dispatchedAt?: string;
+    ageMinutes?: number;
+    steps?: string[];
+    currentStep?: string;
+    lastError?: string;
+  } = {},
 ): number {
   db.run(
     `INSERT INTO publication_requests
-       (dataset_id, status, requested_by, requested_at, updated_at, approval_dispatched_at)
+       (dataset_id, status, requested_by, requested_at, updated_at, approval_dispatched_at,
+        steps_completed, current_step, last_error)
      VALUES ('${DATASET}', '${status}', ${ownerId}, datetime('now', '-3 hours'),
              datetime('now', '-${extra.ageMinutes ?? 180} minutes'),
-             ${extra.dispatchedAt ? `datetime('now', '${extra.dispatchedAt}')` : "NULL"})`,
+             ${extra.dispatchedAt ? `datetime('now', '${extra.dispatchedAt}')` : "NULL"},
+             ?, ?, ?)`,
+    [JSON.stringify(extra.steps ?? []), extra.currentStep ?? null, extra.lastError ?? null],
   );
   return db.query<{ id: number }, []>("SELECT MAX(id) AS id FROM publication_requests").get()
     ?.id as number;
@@ -93,6 +102,59 @@ function row(id: number) {
     denied_by: number | null;
     denied_reason: string | null;
   };
+}
+
+/**
+ * A real D1 whose first `batch()` waits for `before()` first: the route's SELECT
+ * has been read, its conditional write is about to run, and `before` lands
+ * another writer in that gap. `realD1` runs each statement synchronously, so
+ * without this gap a lost race cannot be built. Statements still run on the real
+ * engine; nothing is faked.
+ */
+function racingBatchD1(d1: D1Database, before: () => void | Promise<void>): D1Database {
+  let fired = false;
+  return {
+    prepare: (sql: string) => d1.prepare(sql),
+    async batch(stmts: unknown[]) {
+      if (!fired) {
+        fired = true;
+        await before();
+      }
+      return (d1 as unknown as { batch(s: unknown[]): Promise<unknown> }).batch(stmts);
+    },
+  } as unknown as D1Database;
+}
+
+function withdrawRacing(before: () => void | Promise<void>): Promise<Response> {
+  return app.request(
+    `/datasets/${DATASET}/publish/withdraw`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${OWNER_KEY}`, "X-CLI-Version": "99.0.0" },
+    },
+    { ...env, DB: racingBatchD1(env.DB, before) } as Bindings,
+  );
+}
+
+/** The steps a run records before it changes anything, and the first ones after. */
+const VALIDATION_ONLY = ["ci_check", "enrichment_check"];
+const PUBLIC_STEPS = ["ci_check", "enrichment_check", "s3_public_read", "repo_public"];
+
+function auditRows() {
+  return db
+    .query<
+      {
+        user_id: number | null;
+        action: string;
+        resource_type: string | null;
+        resource_id: string | null;
+        details: string | null;
+      },
+      []
+    >(
+      "SELECT user_id, action, resource_type, resource_id, details FROM audit_log WHERE action = 'publication_request_withdrawn'",
+    )
+    .all();
 }
 
 function withdraw(key = OWNER_KEY, dataset = DATASET): Promise<Response> {
@@ -165,6 +227,106 @@ describe("a request an administrator has started on", () => {
     const id = seedRequest("published");
     expect((await withdraw()).status).toBe(404);
     expect(row(id)).toMatchObject({ status: "published", withdrawn_at: null });
+  });
+});
+
+describe("a request whose publishing has started, whatever its status", () => {
+  // A run that made the data public (s3_public_read, repo_public) and was then
+  // walked back to `blocked` (the owner's name was cleared) keeps those steps,
+  // and the data is still public. Withdrawing would close the request as
+  // withdrawn over a public dataset. Nothing in `status` says so; the steps do.
+  for (const status of ["blocked", "requested"]) {
+    test(`a ${status} request with public steps recorded is refused with 409`, async () => {
+      const id = seedRequest(status, { steps: PUBLIC_STEPS });
+      const res = await withdraw();
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as { error: string; code: string };
+      expect(body.code).toBe("withdraw_too_late");
+      expect(body.error).toContain("already started");
+      expect(row(id)).toMatchObject({ status, withdrawn_at: null });
+    });
+  }
+
+  test("a run cut off inside its first public step (current_step only) is refused", async () => {
+    // A step is recorded as done only after it ran. The bucket-policy write of
+    // s3_public_read may have landed unacknowledged, with only validation steps
+    // in steps_completed and the step itself in current_step.
+    const id = seedRequest("blocked", { steps: VALIDATION_ONLY, currentStep: "s3_public_read" });
+    expect((await withdraw()).status).toBe(409);
+    expect(row(id)).toMatchObject({ status: "blocked", withdrawn_at: null });
+  });
+
+  test("validation-only progress does not block: nothing is public yet", async () => {
+    const id = seedRequest("blocked", { steps: VALIDATION_ONLY, currentStep: "enrichment_check" });
+    expect((await withdraw()).status).toBe(200);
+    expect(row(id).withdrawn_at).not.toBeNull();
+  });
+
+  test("steps_completed that is not JSON does not break the write", async () => {
+    const id = seedRequest("requested");
+    db.run(`UPDATE publication_requests SET steps_completed = 'not json' WHERE id = ${id}`);
+    expect((await withdraw()).status).toBe(200);
+    expect(row(id).withdrawn_at).not.toBeNull();
+  });
+
+  // The guard terms of the write itself, one at a time, with a writer landing
+  // between the route's read and its write. updated_at is NOT touched in the
+  // first two, because datetime('now') has one-second resolution: a step
+  // recorded in the same second as the read leaves updated_at equal, and only the
+  // column terms can see it.
+  test("public steps recorded after the read (same second) refuse the write", async () => {
+    const id = seedRequest("blocked", { ageMinutes: 0 });
+    const res = await withdrawRacing(() => {
+      db.run("UPDATE publication_requests SET steps_completed = ? WHERE id = ?", [
+        JSON.stringify(PUBLIC_STEPS),
+        id,
+      ]);
+    });
+    expect(res.status).toBe(409);
+    expect(row(id)).toMatchObject({ status: "blocked", withdrawn_at: null });
+    expect(auditRows()).toHaveLength(0);
+  });
+
+  test("a public step begun after the read (same second) refuses the write", async () => {
+    const id = seedRequest("blocked", { ageMinutes: 0 });
+    const res = await withdrawRacing(() => {
+      db.run("UPDATE publication_requests SET current_step = 's3_public_read' WHERE id = ?", [id]);
+    });
+    expect(res.status).toBe(409);
+    expect(row(id)).toMatchObject({ status: "blocked", withdrawn_at: null });
+  });
+
+  test("any other write to the row after the read refuses the write (updated_at guard)", async () => {
+    // A touch that changes no column the other terms read: only updated_at moves.
+    const id = seedRequest("requested");
+    const res = await withdrawRacing(() => {
+      db.run("UPDATE publication_requests SET updated_at = datetime('now') WHERE id = ?", [id]);
+    });
+    expect(res.status).toBe(409);
+    expect(row(id)).toMatchObject({ status: "requested", withdrawn_at: null });
+    expect(auditRows()).toHaveLength(0);
+  });
+});
+
+describe("the audit row", () => {
+  test("a withdrawal records who, which request and which dataset", async () => {
+    const id = seedRequest("requested");
+    expect((await withdraw()).status).toBe(200);
+    const rows = auditRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      user_id: ownerId,
+      resource_type: "dataset",
+      resource_id: DATASET,
+    });
+    expect(JSON.parse(rows[0].details as string)).toEqual({ request_id: id });
+  });
+
+  test("a refused withdrawal writes none", async () => {
+    seedRequest("approving", { ageMinutes: 1 });
+    expect((await withdraw()).status).toBe(409);
+    expect((await withdraw(OTHER_KEY)).status).toBe(403);
+    expect(auditRows()).toHaveLength(0);
   });
 });
 
