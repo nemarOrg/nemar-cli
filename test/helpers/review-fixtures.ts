@@ -14,7 +14,8 @@ import type {
   PublicationReviewGateState,
   PublicationReviewRecord,
 } from "../../shared/contract/publication-review-admin";
-import { NOT_ASSESSED_LINE, type ReasonCode } from "../../shared/publication-review";
+import type { ScreenGate } from "../../shared/identifier-screen-report";
+import { NOT_ASSESSED_LINE, type ReasonCode, startOffered } from "../../shared/publication-review";
 import type { PublicationReviewSummary, PublishRequestsResponse } from "../../src/lib/api/publish";
 import type { ReviewRead } from "../../src/lib/publication-review-approve";
 
@@ -38,6 +39,21 @@ export interface Spec {
   totalFiles?: number | null;
   evidence?: PublicationReviewRecord["evidence"];
   headline?: string;
+  /** Overrides the derived `start_offered` (see {@link detailOf}). */
+  startOffered?: boolean;
+  /** Overrides the derived `screen_gate` (see {@link detailOf}). */
+  screenGate?: PublicationReviewDetail["screen_gate"];
+}
+
+/** The screen gate the Worker reports for the screen reasons a spec lists, `clear` for none. */
+function screenGateOf(codes: readonly ReasonCode[]): ScreenGate {
+  if (codes.includes("identifier_screen_blocks")) return "blocks";
+  if (codes.includes("identifier_screen_needs_acknowledgment")) return "acknowledge";
+  if (codes.includes("identifier_screen_pending")) return "wait";
+  if (codes.includes("identifier_screen_not_run") || codes.includes("identifier_screen_stale")) {
+    return "rerun";
+  }
+  return "clear";
 }
 
 export function recordOf(id: number, spec: Spec): PublicationReviewRecord {
@@ -62,6 +78,12 @@ export function recordOf(id: number, spec: Spec): PublicationReviewRecord {
   };
 }
 
+/**
+ * The detail as the Worker words it. `start_offered` and `screen_gate` are derived the way the
+ * Worker derives them from the same reasons (the shared `startOffered` for a request with no
+ * review row, and the gate of the screen reasons), so a fixture never claims a start the reasons
+ * do not offer; a test that needs another answer names it in the spec.
+ */
 export function detailOf(spec: Spec = {}): PublicationReviewDetail {
   const status = spec.status ?? "requested";
   const reasons = reasonViewsOf(
@@ -94,8 +116,14 @@ export function detailOf(spec: Spec = {}): PublicationReviewDetail {
     applies: (spec.gate ?? "enforced") !== "n/a",
     gate: spec.gate ?? "enforced",
     outcome: reasons.length === 0 ? "pass" : "action_required",
-    start_offered: false,
-    screen_gate: "clear",
+    start_offered:
+      spec.startOffered ??
+      startOffered({
+        reasons: reasons.map((r) => ({ code: r.code, detail: r.detail })),
+        row: { kind: "none" },
+        startable: status === "requested",
+      }),
+    screen_gate: spec.screenGate ?? screenGateOf(reasons.map((r) => r.code)),
     reasons,
     description: {
       headline: spec.headline ?? "Publication review: action required",
