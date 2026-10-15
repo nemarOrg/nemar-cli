@@ -1,6 +1,11 @@
+import { DOCS_GRANTS_PURGE_SQL } from "../services/docs-auth";
+import { PRIVATE_GRANTS_PURGE_SQL } from "../services/private-auth";
+
 // Shared SQL for the user tombstone (soft delete), so the DELETE
-// /admin/users/by-id/:id endpoint and its behavioral test exercise the EXACT
-// same masking statement (no drift between the security logic and its test).
+// /admin/users/by-id/:id endpoint, the scheduled sweep of the live-test accounts
+// (services/test-account-sweep.ts) and their behavioral tests exercise the EXACT
+// same masking statement and credential cascade (no drift between the security
+// logic and its test, or between its two callers).
 //
 // The mask is the load-bearing mechanism for three guarantees:
 //   1. PII erasure — email is replaced with a non-PII placeholder; username,
@@ -81,3 +86,68 @@ export const USER_TOMBSTONE_MASK_SQL = `UPDATE users
        deleted_at = datetime('now'),
        updated_at = datetime('now')
    WHERE id = ? AND deleted_at IS NULL`;
+
+/** What {@link tombstoneUserCascade} reports: how many live credentials it ended. */
+export interface TombstoneCascadeResult {
+  tokensRevoked: number;
+  sessionsRevoked: number;
+}
+
+/**
+ * The PII mask, the `deleted_at` stamp and every credential revocation of a
+ * tombstone, in ONE `db.batch()`. The batch is the guarantee: D1 runs it as a
+ * single transaction, so the mask and the stamp can never half-apply and leave
+ * an auth-resolvable row. It rejects (and rolls back) on any failure; the
+ * caller decides how to report that.
+ *
+ * `originalEmail` must be captured BEFORE the call (the mask rewrites it): it
+ * is used only to expire the outstanding passwordless login codes, which are
+ * keyed by the original address.
+ *
+ * What it does NOT do, because both are network calls with their own failure
+ * modes and only the owner-only route wants them: remove GitHub collaborators
+ * and revoke legacy IAM keys. A caller that skips those must have established
+ * that there are none to remove (the sweep's predicate does).
+ *
+ * web_sessions are revoked explicitly because a soft delete does NOT trigger
+ * their ON DELETE CASCADE; the collaborator and S3-permission rows likewise.
+ * The session revoke covers every scope (no `scope` predicate, on purpose), but
+ * a docs or private GRANT is a separate row and a separate 60-second licence to
+ * mint a new session, and `docs_grants.user_id` / `private_grants.user_id`
+ * cascade on DELETE, which a tombstone is not, so nothing else reaches them.
+ */
+export async function tombstoneUserCascade(
+  db: D1Database,
+  id: number,
+  originalEmail: string | null,
+): Promise<TombstoneCascadeResult> {
+  const batch = await db.batch([
+    tombstoneUserStatement(db, id),
+    db
+      .prepare(
+        "UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
+      )
+      .bind(id),
+    db
+      .prepare(
+        "UPDATE web_sessions SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
+      )
+      .bind(id),
+    db.prepare(DOCS_GRANTS_PURGE_SQL).bind(id),
+    db.prepare(PRIVATE_GRANTS_PURGE_SQL).bind(id),
+    db.prepare("DELETE FROM dataset_collaborators WHERE user_id = ?").bind(id),
+    db.prepare("DELETE FROM user_s3_permissions WHERE user_id = ?").bind(id),
+    // Expire any outstanding passwordless login codes for the original email so
+    // a code issued just before deletion can't be submitted (it would otherwise
+    // be consumed and then cleanly denied; this avoids even that round-trip).
+    db
+      .prepare(
+        "UPDATE auth_codes SET used_at = datetime('now') WHERE email = ? AND used_at IS NULL",
+      )
+      .bind(originalEmail),
+  ]);
+  return {
+    tokensRevoked: batch[1]?.meta.changes ?? 0,
+    sessionsRevoked: batch[2]?.meta.changes ?? 0,
+  };
+}

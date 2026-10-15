@@ -183,8 +183,9 @@ export const PRIVATE_REVOKE_ALL_SQL = `UPDATE web_sessions
  * THREE CALLERS, and the count is the point: every path that ends this
  * account's credentials runs this statement -- `/auth/logout`,
  * `finalizeRevocation` (admin revoke, by username and by id) and the
- * owner-only soft delete. The foreign key's `ON DELETE CASCADE` covers none of
- * them, because none of them deletes the `users` row. A fourth path that ends
+ * tombstone cascade (`tombstoneUserCascade`, run by the owner-only soft delete
+ * and by the scheduled sweep of live-test accounts, so one caller). The
+ * foreign key's `ON DELETE CASCADE` covers none of them, because none of them deletes the `users` row. A fourth path that ends
  * a credential needs this line too. Role demotion and API key revocation are
  * outside the set on purpose; see {@link PRIVATE_REVOKE_ALL_SQL}.
  */

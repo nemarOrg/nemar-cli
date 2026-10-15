@@ -254,7 +254,9 @@ export const DOCS_REVOKE_ALL_SQL = `UPDATE web_sessions
  *
  * FIVE CALLERS, and the count is the point: every path that ends or downgrades
  * this credential runs this statement -- `/auth/logout`, `finalizeRevocation`, a
- * role demotion, the owner-only soft delete, and {@link revokeDocsCredentials}
+ * role demotion, the tombstone cascade (`tombstoneUserCascade`, which the
+ * owner-only soft delete and the scheduled sweep of live-test accounts both
+ * run, so it is one caller), and {@link revokeDocsCredentials}
  * (every route that revokes keys without ending every session; it lists them).
  * The FK's `ON DELETE CASCADE` covers none of them, because none of them
  * deletes the `users` row. A sixth path that ends a credential needs this line
