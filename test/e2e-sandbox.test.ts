@@ -54,10 +54,20 @@ function runCli(
     });
     return { stdout: result, stderr: "", exitCode: 0 };
   } catch (error: unknown) {
-    const execError = error as { stdout?: string; stderr?: string; status?: number };
+    const execError = error as {
+      stdout?: string;
+      stderr?: string;
+      status?: number | null;
+      signal?: string | null;
+      message?: string;
+    };
+    // A spawn error, a timeout or a kill by signal leaves stdout and stderr empty, so what
+    // the caller prints would be nothing at all. Say what execSync reported.
+    const stderr = execError.stderr || "";
+    const reason = `[execSync failed: ${execError.message ?? "no message"}; status ${execError.status ?? "none"}; signal ${execError.signal ?? "none"}]`;
     return {
       stdout: execError.stdout || "",
-      stderr: execError.stderr || "",
+      stderr: stderr ? `${stderr}\n${reason}` : reason,
       exitCode: execError.status || 1,
     };
   }
