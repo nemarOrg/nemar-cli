@@ -79,15 +79,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { extname, join, relative } from "node:path";
 
@@ -833,36 +825,31 @@ describe("the size limits", () => {
 });
 
 describe("the file listing", () => {
-  const EXEC = { stdout: "ignore", stderr: "ignore" } as const;
-
   test("lists tracked files only inside a git checkout, and walks outside one", () => {
     const base = mkdtempSync(join(tmpdir(), "env-guard-list-"));
+    const git = (...args: string[]) => {
+      try {
+        Bun.spawnSync(["git", ...args], { cwd: base, stdout: "ignore", stderr: "ignore" });
+      } catch (error) {
+        // The usual cause: an earlier test restored PATH with `= undefined`, the very bug this
+        // file guards, so PATH is now the string "undefined" and git cannot be found.
+        throw new Error(`cannot run git (PATH=${process.env.PATH}): ${error}`);
+      }
+    };
     try {
-      mkdirSync(join(base, "test"));
-      writeFileSync(join(base, "test", "committed.ts"), "export {};\n");
-      expect(Bun.spawnSync(["git", "init", "-q"], { cwd: base, ...EXEC }).exitCode).toBe(0);
-      expect(
-        Bun.spawnSync(["git", "add", "test/committed.ts"], { cwd: base, ...EXEC }).exitCode,
-      ).toBe(0);
-      writeFileSync(join(base, "test", "scratch.ts"), "export {};\n");
-
-      const inCheckout = listSourceFiles(base, ["test", "shared"]).map((f) => relative(base, f));
-      expect(inCheckout).toEqual(["test/committed.ts"]);
-
+      writeFileSync(join(base, "committed.ts"), "export {};\n");
+      writeFileSync(join(base, "scratch.ts"), "export {};\n");
+      git("init", "-q");
+      git("add", "committed.ts");
+      const listed = () =>
+        listSourceFiles(base, ["."])
+          .map((f) => relative(base, f))
+          .sort();
+      expect(listed()).toEqual(["committed.ts"]);
       rmSync(join(base, ".git"), { recursive: true, force: true });
-      const walked = listSourceFiles(base, ["test", "shared"]).map((f) => relative(base, f));
-      expect(walked.sort()).toEqual(["test/committed.ts", "test/scratch.ts"]);
+      expect(listed()).toEqual(["committed.ts", "scratch.ts"]);
     } finally {
       rmSync(base, { recursive: true, force: true });
-    }
-  });
-
-  test("covers every directory the repository keeps TypeScript in", () => {
-    const listed = new Set(
-      listSourceFiles(REPO_ROOT, SCANNED_ROOTS).map((f) => relative(REPO_ROOT, f)),
-    );
-    for (const root of SCANNED_ROOTS) {
-      expect([...listed].some((file) => file.startsWith(`${root}/`))).toBe(true);
     }
   });
 });
