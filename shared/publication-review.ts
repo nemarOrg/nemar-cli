@@ -2018,14 +2018,10 @@ export type ReviewGateRefusal = (typeof REVIEW_GATE_REFUSALS)[number];
 export const REVIEW_GATE_REFUSAL_TEXT: Record<ReviewGateRefusal, string> = {
   hard_reason:
     "The publication review gives a reason that no override clears, so the approval is refused.",
-  needs_override:
-    `The publication review is not a pass. Read it (${COMMAND_SHOW}), then approve over it with --force, which records the override with your account.`,
-  override_not_covering:
-    `The review now gives a reason the override was not given for. Read it again (${COMMAND_SHOW}) before approving.`,
-  review_changed:
-    `The review the override was given for is no longer the review of this request, or it changed while the approval was being checked. Read it again (${COMMAND_SHOW}) before approving.`,
-  no_review_row:
-    `No review of this commit is on record to attach the override to. Start it (${COMMAND_START}), or approve from a terminal with --force.`,
+  needs_override: `The publication review is not a pass. Read it (${COMMAND_SHOW}), then approve over it with --force, which records the override with your account.`,
+  override_not_covering: `The review now gives a reason the override was not given for. Read it again (${COMMAND_SHOW}) before approving.`,
+  review_changed: `The review the override was given for is no longer the review of this request, or it changed while the approval was being checked. Read it again (${COMMAND_SHOW}) before approving.`,
+  no_review_row: `No review of this commit is on record to attach the override to. Start it (${COMMAND_START}), or approve from a terminal with --force.`,
   unverified:
     "The publication review could not be checked just now, so the approval is refused. Try again.",
 };
