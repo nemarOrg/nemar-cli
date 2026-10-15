@@ -7,10 +7,11 @@
 import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
+import { SYSTEM_USER_ID } from "../src/lib/constants";
 import { adminRoutes } from "../src/routes/admin";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
-import { freshDb, realD1 } from "./helpers/d1";
+import { freshDb, interceptingD1, realD1 } from "./helpers/d1";
 
 const OWNER_KEY = "verify-route-owner-key-0123456789abcdef012345";
 const ADMIN_KEY = "verify-route-admin-key-0123456789abcdef012345";
@@ -38,15 +39,13 @@ let orcidCounter = 0;
 
 function seedWeb(email: string, status: string, emailVerified = 0): number {
   orcidCounter += 1;
+  // One ORCID per seeded row: the unique constraint (ADR 0043) makes a
+  // collision here a failed seed, so the suffix comes from a counter, not luck.
+  const orcid = `0000-0002-7777-${String(1000 + orcidCounter)}`;
   db.query(
     `INSERT INTO users (email, status, signup_source, email_verified, orcid, orcid_verified, service_access)
      VALUES (?, ?, 'web', ?, ?, 1, 0)`,
-  ).run(
-    email,
-    status,
-    emailVerified,
-    `0000-0002-7777-${String(Math.floor(Math.random() * 9000) + 1000)}`,
-  );
+  ).run(email, status, emailVerified, orcid);
   const row = db.query<{ id: number }, [string]>("SELECT id FROM users WHERE email = ?").get(email);
   if (!row) throw new Error("seed failed");
   return row.id;
@@ -60,11 +59,23 @@ function row(id: number) {
     .get(id);
 }
 
-function verify(id: string | number, apiKey: string): Promise<Response> {
+function verify(
+  id: string | number,
+  apiKey: string | null,
+  d1: D1Database = realD1(db),
+): Promise<Response> {
   return app.request(
     `/admin/users/by-id/${id}/verify`,
-    { method: "POST", headers: { Authorization: `Bearer ${apiKey}` } },
-    { DB: realD1(db), ENVIRONMENT: "test" } as Bindings,
+    { method: "POST", headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {} },
+    { DB: d1, ENVIRONMENT: "test" } as Bindings,
+  );
+}
+
+function auditCount(action: string): number {
+  return (
+    db
+      .query<{ n: number }, [string]>("SELECT COUNT(*) AS n FROM audit_log WHERE action = ?")
+      .get(action)?.n ?? 0
   );
 }
 
@@ -115,17 +126,76 @@ describe("POST /admin/users/by-id/:id/verify", () => {
     expect(row(id)?.status).toBe("pending");
   });
 
-  test("only pending accounts: verified and approved answer 409", async () => {
+  test("only pending accounts: verified, approved and revoked answer 409 and are left alone", async () => {
     const verified = seedWeb("v@nemar.test", "verified", 1);
     const approved = seedWeb("a@nemar.test", "approved", 1);
-    expect((await verify(verified, OWNER_KEY)).status).toBe(409);
-    expect((await verify(approved, OWNER_KEY)).status).toBe(409);
-    expect(row(approved)?.status).toBe("approved");
+    const revoked = seedWeb("r@nemar.test", "revoked", 1);
+    for (const [id, status] of [
+      [verified, "verified"],
+      [approved, "approved"],
+      [revoked, "revoked"],
+    ] as const) {
+      const res = await verify(id, OWNER_KEY);
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { status: string }).status).toBe(status);
+      expect(row(id)?.status).toBe(status);
+    }
+    expect(auditCount("email_verified_by_owner")).toBe(0);
+    expect(auditCount("email_verified")).toBe(0);
   });
 
-  test("unknown id is 404, malformed or system id is 400", async () => {
+  test("unknown id is 404, malformed or negative id is 400", async () => {
     expect((await verify(99999, OWNER_KEY)).status).toBe(404);
     expect((await verify("abc", OWNER_KEY)).status).toBe(400);
-    expect((await verify(-1, OWNER_KEY)).status).toBe(400);
+    expect((await verify(-5, OWNER_KEY)).status).toBe(400);
+    expect((await verify(0, OWNER_KEY)).status).toBe(400);
+  });
+
+  test("the system user id is 400 even though its row exists and is not pending", async () => {
+    expect(
+      db.query<{ id: number }, [number]>("SELECT id FROM users WHERE id = ?").get(SYSTEM_USER_ID),
+    ).not.toBeNull();
+    const res = await verify(SYSTEM_USER_ID, OWNER_KEY);
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("Invalid user id");
+  });
+
+  test("no credentials is 401 and nothing changes", async () => {
+    const id = seedWeb("stuck3@nemar.test", "pending");
+    expect((await verify(id, null)).status).toBe(401);
+    expect((await verify(id, "not-a-real-key-0123456789abcdef0123456789")).status).toBe(401);
+    expect(row(id)?.status).toBe("pending");
+  });
+
+  test("losing the race to a concurrent revoke is 409, with no promotion and no audit rows", async () => {
+    const id = seedWeb("raced@nemar.test", "pending");
+    // A second writer revokes the account after the route has read it as
+    // pending and before its promoting batch runs. The write goes through the
+    // real database, so the conditional UPDATE inside applyEmailVerification
+    // matches nothing for real; only the interleaving is arranged.
+    let readAsPending = false;
+    const racing = interceptingD1(realD1(db), (sql) => {
+      if (sql.includes("SELECT id, status FROM users")) readAsPending = true;
+    });
+    const batch = racing.batch.bind(racing);
+    racing.batch = ((stmts: Parameters<typeof batch>[0]) => {
+      if (readAsPending) {
+        readAsPending = false;
+        db.run("UPDATE users SET status = 'revoked' WHERE id = ?", [id]);
+      }
+      return batch(stmts);
+    }) as typeof racing.batch;
+
+    const res = await verify(id, OWNER_KEY, racing);
+
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe("User is not pending");
+    // The tier did not move. email_verified is 1 because applyEmailVerification's
+    // second statement stamps the flag on any row past pending (documented
+    // there: "a fact about the inbox"); that is the service's existing contract
+    // and it also holds for this road, so it is pinned rather than hidden.
+    expect(row(id)).toEqual({ status: "revoked", email_verified: 1, service_access: 0 });
+    expect(auditCount("email_verified_by_owner")).toBe(0);
+    expect(auditCount("email_verified")).toBe(0);
   });
 });
