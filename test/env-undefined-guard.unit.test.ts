@@ -365,6 +365,22 @@ function valueEnd(code: string, from: number): number {
   return code.length;
 }
 
+const MAX_FILE_CHARS = 1_000_000;
+const MAX_LINE_CHARS = 5_000;
+
+/**
+ * Why `source` is too big to scan, or null. The scan is linear on ordinary code but quadratic on
+ * a single very long line (a minified bundle took over a minute at 800 KB), so such a file must
+ * be seen and decided on rather than hang the suite. The largest source file in the tree today
+ * is about 420 KB.
+ */
+function scanLimitProblem(source: string): string | null {
+  if (source.length > MAX_FILE_CHARS) return `larger than ${MAX_FILE_CHARS} characters`;
+  let longest = 0;
+  for (const line of source.split("\n")) longest = Math.max(longest, line.length);
+  return longest > MAX_LINE_CHARS ? `has a line of ${longest} characters` : null;
+}
+
 /** Every place `source` writes undefined into the environment object, as 1-based lines. */
 function findEnvUndefinedWrites(source: string): EnvUndefinedHit[] {
   if (!/env/.test(source)) return [];
@@ -793,6 +809,14 @@ describe("the scanner", () => {
   });
 });
 
+describe("the size limits", () => {
+  test("name a minified-looking line and an oversized file, and accept ordinary code", () => {
+    expect(scanLimitProblem("a();\n".repeat(50))).toBeNull();
+    expect(scanLimitProblem(`a();\n${"x".repeat(5_001)}\n`)).toBe("has a line of 5001 characters");
+    expect(scanLimitProblem("a();\n".repeat(200_001))).toContain("larger than");
+  });
+});
+
 describe("the file listing", () => {
   const EXEC = { stdout: "ignore", stderr: "ignore" } as const;
 
@@ -832,11 +856,20 @@ describe("the repository", () => {
   test("no test, script or source file writes undefined into process.env", () => {
     const offenders: string[] = [];
     const files = listSourceFiles(REPO_ROOT, SCANNED_ROOTS);
+    const unscannable: string[] = [];
     for (const file of files) {
-      for (const hit of findEnvUndefinedWrites(readFileSync(file, "utf8"))) {
+      const source = readFileSync(file, "utf8");
+      const problem = scanLimitProblem(source);
+      if (problem) {
+        unscannable.push(`${relative(REPO_ROOT, file)} ${problem}`);
+        continue;
+      }
+      for (const hit of findEnvUndefinedWrites(source)) {
         offenders.push(`${relative(REPO_ROOT, file)}:${hit.line}: ${hit.text}  [${hit.rule}]`);
       }
     }
+    // A file the scan refused is named, never skipped silently: shrink it or raise the limit.
+    expect(unscannable.join("\n")).toBe("");
     // A scan that read nothing would pass vacuously.
     expect(files.length).toBeGreaterThan(100);
     // Joined so a failure prints file:line for every hit. Restore an originally-unset variable
