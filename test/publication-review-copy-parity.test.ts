@@ -132,8 +132,9 @@ function stripComments(source: string): string {
 /**
  * Pull `"key": "value"` pairs out of a TypeScript source file.
  *
- * The rule, written once for both repositories (the website's `test/copy-drift.ts` carries the
- * same code, so the two halves of the mirror cannot disagree about what they compare):
+ * The same rule as the website's `test/copy-drift.ts`, written independently on each side (the
+ * two are not the same code: the website's walk also ends a plain string at a raw newline, and it
+ * words its duplicate error differently). The three points of the rule are:
  * 1. every comment is removed first ({@link stripComments}), so a key quoted in prose or in a
  *    comment after code cannot become an entry;
  * 2. a key that matches twice THROWS, naming the key: a duplicate in a literal is a TypeScript
