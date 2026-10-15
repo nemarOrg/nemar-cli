@@ -147,9 +147,10 @@ export async function tombstoneUserCascade(
   originalEmail: string | null,
   onlyIfEmail?: string,
 ): Promise<TombstoneCascadeResult> {
-  // True only once the mask above has run in this batch: the row now carries its
-  // masked address. (A row tombstoned earlier also satisfies it, and for such a
-  // row every statement below is a no-op anyway.)
+  // True once the row carries its masked address: the mask above has just applied to
+  // it, or an earlier tombstone did. For the latter every statement keyed by user_id
+  // is a no-op (nothing live is left to end), and the one keyed by ADDRESS, the login
+  // code expiry, has its own extra condition below.
   const MASK_APPLIED = " AND EXISTS (SELECT 1 FROM users WHERE id = ? AND email = ?)";
   const guarded = onlyIfEmail !== undefined;
   const step = (sql: string, ...binds: unknown[]): D1PreparedStatement =>
@@ -174,10 +175,22 @@ export async function tombstoneUserCascade(
     // Expire any outstanding passwordless login codes for the original email so
     // a code issued just before deletion can't be submitted (it would otherwise
     // be consumed and then cleanly denied; this avoids even that round-trip).
-    step(
-      "UPDATE auth_codes SET used_at = datetime('now') WHERE email = ? AND used_at IS NULL",
-      originalEmail,
-    ),
+    //
+    // Guarded callers add one more condition: no OTHER user holds that address now. If an
+    // earlier tombstone masked this row and the address was then registered again, the
+    // outstanding codes belong to the new holder, and expiring them would be this
+    // call's only effect on a row it did not tombstone.
+    guarded
+      ? db
+          .prepare(
+            `UPDATE auth_codes SET used_at = datetime('now') WHERE email = ? AND used_at IS NULL${MASK_APPLIED}
+               AND NOT EXISTS (SELECT 1 FROM users WHERE email = ? AND id <> ?)`,
+          )
+          .bind(originalEmail, id, maskedDeletedEmail(id), originalEmail, id)
+      : step(
+          "UPDATE auth_codes SET used_at = datetime('now') WHERE email = ? AND used_at IS NULL",
+          originalEmail,
+        ),
   ]);
   return {
     tombstoned: (batch[0]?.meta.changes ?? 0) > 0,

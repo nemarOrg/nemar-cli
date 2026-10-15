@@ -404,6 +404,10 @@ describe("the predicate itself", () => {
       "df-gate-1760000000001-abcdef@example.com",
       "x-pl-gate-1760000000001-abcdef@example.com",
       "pl-gate-17600000000-abcdef@example.com",
+      "pl-gate-176000000000-abcdef@example.com",
+      "pl-gate-17600000000000-abcdef@example.com",
+      "pl-gate-1760000000001-abcdef@example.com\n",
+      "\npl-gate-1760000000001-abcdef@example.com",
       "mask-1760000000001@example.test",
       "ec-real-mfx1abcd@example.com",
       "ab-full-loop-1760000000001-abcdef@nemar.test",
@@ -756,6 +760,23 @@ describe("tombstoneUserCascade", () => {
     expect(
       count("SELECT COUNT(*) AS n FROM tokens WHERE user_id = ? AND revoked_at IS NULL", id),
     ).toBe(1);
+  });
+
+  test("a guarded call on an already-masked row leaves the address's new holder's login codes alone", async () => {
+    const address = "reused@example.org";
+    const old = seedUser(address);
+    // An earlier tombstone masked the row, and the address was registered again.
+    await tombstoneUserCascade(realD1(db), old, address);
+    seedUser(address);
+    db.run(
+      "INSERT INTO auth_codes (email, code_hash, expires_at) VALUES (?, 'c', datetime('now', '+1 hour'))",
+      [address],
+    );
+
+    const done = await tombstoneUserCascade(realD1(db), old, address, address);
+
+    expect(done.tombstoned).toBe(false);
+    expect(count("SELECT COUNT(*) AS n FROM auth_codes WHERE used_at IS NOT NULL")).toBe(0);
   });
 
   test("the owner-only route removes collaborations through the same function", async () => {
