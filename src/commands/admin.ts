@@ -1413,6 +1413,9 @@ Examples:
         404: "User not found",
         409: "Only a pending account can be force-verified",
       });
+      // handleCommandError only reports. A refused force verify must not exit 0,
+      // or a script that checks the status code reads a refusal as a success.
+      process.exitCode = 1;
     }
   });
 

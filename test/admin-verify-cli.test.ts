@@ -100,14 +100,27 @@ describe("nemar admin verify", () => {
     }
   });
 
-  test("a 409 is reported as a failure", async () => {
+  test("a 409 refusal is reported with its hint and exits 1", async () => {
     const server = startServer({ error: "User is not pending" }, 409);
     try {
       const result = await runCli(["admin", "verify", "80", "-y"], server.url);
-      // Like its siblings, handleCommandError reports the failure on the
-      // spinner; the contract pinned here is that the refusal reaches the user.
-      expect(result.stdout + result.stderr).toContain("User is not pending");
-      expect(result.stdout + result.stderr).toContain("pending");
+      const output = result.stdout + result.stderr;
+      expect(output).toContain("User is not pending");
+      expect(output).toContain("Only a pending account can be force-verified");
+      expect(output).not.toContain("User id 80 verified");
+      // A script driving this command must be able to tell a refusal from a success.
+      expect(result.exitCode).toBe(1);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a 403 refusal exits 1 too", async () => {
+    const server = startServer({ error: "Owner access required" }, 403);
+    try {
+      const result = await runCli(["admin", "verify", "80", "-y"], server.url);
+      expect(result.stdout + result.stderr).toContain("Owner access required");
+      expect(result.exitCode).toBe(1);
     } finally {
       server.stop();
     }
