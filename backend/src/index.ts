@@ -100,7 +100,11 @@ import {
   deletionDate,
   warningStageForDaysLeft,
 } from "./services/staleness";
-import { sweepCiTestAccounts } from "./services/test-account-sweep";
+import {
+  TEST_ACCOUNT_SWEEP_NOT_RUN,
+  type TestAccountSweepResult,
+  cleanUpLiveTestAccounts,
+} from "./services/test-account-sweep";
 import { publishZarrCatalog } from "./services/zarr-catalog";
 import { runZarrFidelitySweep } from "./services/zarr-fidelity-sweep";
 import type { Bindings, Variables } from "./types/bindings";
@@ -855,20 +859,15 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
   }
 
   // 6. Tombstone the accounts the live integration tests leave in the dev/staging database
-  //    (#1789): addresses of exactly the three generated shapes at @nemar.test, older than a
-  //    week, owning nothing, at most one bounded batch per run. NON-PRODUCTION ONLY, and
-  //    sweepCiTestAccounts refuses outside a recognized non-production environment on its own
-  //    too; the guard is repeated here so this call site reads as what it is. The tally rides
-  //    the audit row below, like the blocked-publication sweep's.
-  let testAccountSweep = { ran: false, examined: 0, tombstoned: 0, skipped: 0, errors: 0 };
+  //    (#1789): addresses of exactly the generated shapes, older than a week, owning
+  //    nothing, at most one bounded batch per run. NON-PRODUCTION ONLY, and
+  //    cleanUpLiveTestAccounts / sweepCiTestAccounts each refuse outside a recognized
+  //    non-production environment on their own too; the guard is repeated here so this call
+  //    site reads as what it is. The tally rides the audit row below, like the
+  //    blocked-publication sweep's. It never throws, so a failure is a tally with errors set.
+  let testAccountSweep: TestAccountSweepResult = { ...TEST_ACCOUNT_SWEEP_NOT_RUN };
   if (isNonProductionEnv(env)) {
-    try {
-      testAccountSweep = await sweepCiTestAccounts(env);
-    } catch (err) {
-      console.error("Scheduled cleanup: test-account sweep failed:", err);
-      // Left at its zeros it would read as a sweep that ran and found nothing (ADR 0054).
-      testAccountSweep = { ...testAccountSweep, ran: true, errors: 1 };
-    }
+    testAccountSweep = await cleanUpLiveTestAccounts(env);
   }
 
   // Log summary to audit_log. `deleted`/`failed` cover only sandbox (xx)
@@ -1090,13 +1089,14 @@ export default {
     // which is the one section that runs ONLY outside production. Its staleness-email and
     // import-recovery sections are production-only (guards inside).
     //
-    // sweepCiTestAccounts (services/test-account-sweep.ts) is safe here for the reason this
-    // allowlist exists: it tombstones only addresses of exactly the three generated shapes at
-    // the reserved @nemar.test domain (an anchored, case-sensitive pattern, re-checked in code
-    // on every row), none of which can be a real person among the ~609 this database shares;
-    // it sends no mail, makes no network call (so nothing reaches the shared nemarDatasets
-    // org, a DOI or the prod bucket) and refuses an account with a dataset, a collaboration, a
-    // request or upload access. Bounded to one batch per run.
+    // The live-test sweep (services/test-account-sweep.ts) is safe here for the reason this
+    // allowlist exists: it tombstones only addresses of exactly the generated shapes, at
+    // two domains the IANA reserves (an anchored, case-sensitive pattern, re-checked in code
+    // on every row and again by the conditional write), none of which can be a real person
+    // among the ~609 this database shares; it sends no mail, makes no network call (so
+    // nothing reaches the shared nemarDatasets org, a DOI or the prod bucket) and refuses an
+    // account with a dataset, a collaboration, a request or upload access. Bounded to one
+    // batch per run.
     ctx.waitUntil(scheduledCleanup(env));
     // #646 Phase 4: drain stale vectors (embedding_dirty=1) — the backstop for
     // changes that don't go through the inline enrich/reindex re-embed.

@@ -16,19 +16,23 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Hono } from "hono";
-import { maskedDeletedEmail } from "../src/db/user-tombstone";
+import { maskedDeletedEmail, tombstoneUserCascade } from "../src/db/user-tombstone";
 import { adminRoutes } from "../src/routes/admin";
 import { NONPROD_TEST_ACCOUNT } from "../src/services/auth-code";
 import {
   GENERATED_TEST_ACCOUNT_EMAIL,
   TEST_ACCOUNT_SWEEP_BATCH,
+  TEST_ACCOUNT_SWEEP_CANDIDATES_SQL,
   TEST_ACCOUNT_SWEEP_MIN_AGE_DAYS,
+  TEST_ACCOUNT_SWEEP_NOT_RUN,
+  TEST_ACCOUNT_SWEEP_SCAN_CAP,
+  cleanUpLiveTestAccounts,
   sweepCiTestAccounts,
 } from "../src/services/test-account-sweep";
 import { hashApiKey } from "../src/services/token";
 import { issueSession } from "../src/services/web-session";
 import type { Bindings, Variables } from "../src/types/bindings";
-import { freshDb, realD1 } from "./helpers/d1";
+import { freshDb, interceptingD1, realD1 } from "./helpers/d1";
 
 const SEED_SQL = join(import.meta.dir, "../../scripts/seed-dev-db.sql");
 const OWNER_KEY = "sweep-owner-key-0123456789abcdef0123456789abcdef";
@@ -49,6 +53,12 @@ function env(...given: [string | undefined] | []): Pick<Bindings, "DB" | "ENVIRO
 function generated(prefix: "dcli" | "df" | "pl", label = "full-loop"): string {
   counter++;
   return `${prefix}-${label}-${1_760_000_000_000 + counter}-ab${String(counter).padStart(4, "0")}@nemar.test`;
+}
+
+/** The passwordless suite's `pl-gate-<clock>-<random>@example.com` seed. */
+function generatedGate(): string {
+  counter++;
+  return `pl-gate-${1_760_000_000_000 + counter}-gt${String(counter).padStart(4, "0")}@example.com`;
 }
 
 interface SeedOpts {
@@ -114,6 +124,7 @@ describe("what the sweep tombstones", () => {
     const dcli = seedUser(generated("dcli", "full-loop"));
     const df = seedUser(generated("df", "pending-confirm"));
     const pl = seedUser(generated("pl", "cookie572-bearerwins"));
+    const gate = seedUser(generatedGate());
     const target = seedUser(generated("pl", "happy"));
     const email = db
       .query<{ email: string }, [number]>("SELECT email FROM users WHERE id = ?")
@@ -143,8 +154,8 @@ describe("what the sweep tombstones", () => {
 
     const result = await sweepCiTestAccounts(env());
 
-    expect(result).toEqual({ ran: true, examined: 4, tombstoned: 4, skipped: 0, errors: 0 });
-    for (const id of [dcli, df, pl, target]) {
+    expect(result).toEqual({ ran: true, examined: 5, tombstoned: 5, skipped: 0, errors: 0 });
+    for (const id of [dcli, df, pl, gate, target]) {
       const row = db
         .query<{ email: string; status: string; deleted_at: string | null }, [number]>(
           "SELECT email, status, deleted_at FROM users WHERE id = ?",
@@ -264,6 +275,26 @@ describe("what the sweep must never touch", () => {
     untouched("an account younger than the age floor", () =>
       seedUser(generated("pl"), { ageDays: 1 }),
     ),
+    untouched("a pl-gate shape at a real mail domain", () =>
+      seedUser("pl-gate-1760000000010-abcdef@gmail.com"),
+    ),
+    untouched("a pl-gate shape at a lookalike of the reserved domain", () =>
+      seedUser("pl-gate-1760000000011-abcdef@example.com.evil.org"),
+    ),
+    untouched("a pl-gate shape at another example domain", () =>
+      seedUser("pl-gate-1760000000012-abcdef@example.org"),
+    ),
+    untouched("the pl-gate label with another prefix at the example domain", () =>
+      seedUser("df-gate-1760000000013-abcdef@example.com"),
+    ),
+    untouched("a real-looking address at the example domain", () =>
+      seedUser("jane.doe@example.com"),
+    ),
+    untouched("an account holding only an encrypted AWS access key id", () => {
+      const id = seedUser(generated("pl"));
+      db.run("UPDATE users SET aws_access_key_id_encrypted = 'enc' WHERE id = ?", [id]);
+      return id;
+    }),
     untouched("an account with legacy IAM credentials", () =>
       seedUser(generated("pl"), { iam: "legacy-iam-user" }),
     ),
@@ -364,7 +395,17 @@ describe("the predicate itself", () => {
       expect(GENERATED_TEST_ACCOUNT_EMAIL.test(generated(p, "a"))).toBe(true);
       expect(GENERATED_TEST_ACCOUNT_EMAIL.test(generated(p, "cookie572-bearerwins"))).toBe(true);
     }
+    expect(GENERATED_TEST_ACCOUNT_EMAIL.test(generatedGate())).toBe(true);
     for (const bad of [
+      "pl-gate-1760000000001-abcdef@example.org",
+      "pl-gate-1760000000001-abcdef@example.com.evil.org",
+      "pl-gate-1760000000001-abcdef@sub.example.com",
+      "pl-gate-1760000000001-abcdef@EXAMPLE.COM",
+      "df-gate-1760000000001-abcdef@example.com",
+      "x-pl-gate-1760000000001-abcdef@example.com",
+      "pl-gate-17600000000-abcdef@example.com",
+      "mask-1760000000001@example.test",
+      "ec-real-mfx1abcd@example.com",
       "ab-full-loop-1760000000001-abcdef@nemar.test",
       "dcli--1760000000001-abcdef@nemar.test",
       "dcli-full-loop-1760000000001-@nemar.test",
@@ -489,5 +530,258 @@ describe("the owner-only delete route shares the tombstone", () => {
     };
     expect(shape(viaSweep)).toBe(shape(viaRoute));
     expect(JSON.parse(shape(viaRoute)).masked).toBe(true);
+  });
+});
+
+/** A real trigger that makes the tombstone of one id fail, as a constraint violation would. */
+function failTombstoneOf(id: number): void {
+  db.exec(
+    `CREATE TRIGGER fail_tombstone_${id} BEFORE UPDATE ON users
+     WHEN OLD.id = ${id} AND NEW.deleted_at IS NOT NULL
+     BEGIN SELECT RAISE(ABORT, 'forced failure'); END`,
+  );
+}
+
+describe("failures", () => {
+  test("a failed tombstone leaves the row whole, the loop goes on, and it counts toward the batch", async () => {
+    const ids: number[] = [];
+    for (let i = 0; i < TEST_ACCOUNT_SWEEP_BATCH + 10; i++)
+      ids.push(seedUser(generated("pl", "bulk")));
+    const failing = ids.slice(0, 3);
+    const failingBefore = failing.map(snapshot);
+    for (const id of failing) failTombstoneOf(id);
+    // A live key on a failing row: the batch is one transaction, so it must survive too.
+    await db
+      .query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)")
+      .run(failing[0], await hashApiKey("f".repeat(40)), "ffffffff");
+
+    const result = await sweepCiTestAccounts(env());
+
+    expect(result.errors).toBe(3);
+    expect(result.tombstoned).toBe(TEST_ACCOUNT_SWEEP_BATCH - 3);
+    expect(failing.map(snapshot)).toEqual(failingBefore);
+    expect(
+      count(
+        "SELECT COUNT(*) AS n FROM tokens WHERE user_id = ? AND revoked_at IS NULL",
+        failing[0],
+      ),
+    ).toBe(1);
+    // The loop went past the failures, and the bound counted them: 97 done, 3 failed, 10 untouched.
+    expect(ids.slice(3, TEST_ACCOUNT_SWEEP_BATCH).every(isTombstoned)).toBe(true);
+    expect(ids.slice(TEST_ACCOUNT_SWEEP_BATCH).some(isTombstoned)).toBe(false);
+  });
+
+  test("a candidate read that fails after some work keeps the tally and reports the error", async () => {
+    // Three real candidates, then enough look-alikes to fill the first page, so a second read
+    // is needed and is the one that fails.
+    for (let i = 0; i < 3; i++) seedUser(generated("df", "early"));
+    for (let i = 0; i < TEST_ACCOUNT_SWEEP_BATCH - 3; i++) {
+      seedUser(`pl-UPPER${i}-${1_760_000_200_000 + i}-abcdef@nemar.test`);
+    }
+    let reads = 0;
+    const flaky = interceptingD1(realD1(db), (sql) => {
+      if (sql === TEST_ACCOUNT_SWEEP_CANDIDATES_SQL && ++reads === 2) {
+        throw new Error("candidate read failed");
+      }
+    });
+
+    const result = await sweepCiTestAccounts({ DB: flaky, ENVIRONMENT: "test" });
+
+    expect(reads).toBe(2);
+    expect(result).toEqual({
+      ran: true,
+      examined: TEST_ACCOUNT_SWEEP_BATCH,
+      tombstoned: 3,
+      skipped: TEST_ACCOUNT_SWEEP_BATCH - 3,
+      errors: 1,
+    });
+  });
+
+  test("more look-alikes than the scan cap: the run still ends, reading at most the cap", async () => {
+    for (let i = 0; i < TEST_ACCOUNT_SWEEP_SCAN_CAP + 20; i++) {
+      seedUser(`pl-UPPER${i}-${1_760_000_300_000 + i}-abcdef@nemar.test`, { ageDays: 90 });
+    }
+    const behind = seedUser(generated("pl"), { ageDays: 10 });
+
+    const result = await sweepCiTestAccounts(env());
+
+    expect(result.examined).toBe(TEST_ACCOUNT_SWEEP_SCAN_CAP);
+    expect(result.skipped).toBe(TEST_ACCOUNT_SWEEP_SCAN_CAP);
+    // The documented ceiling: the real candidate sits behind the window, and the audit row shows it
+    // (examined at the cap, tombstoned at zero).
+    expect(result.tombstoned).toBe(0);
+    expect(isTombstoned(behind)).toBe(false);
+  });
+
+  test("a row whose address changed between the read and the write is left whole", async () => {
+    const id = seedUser(generated("pl", "racy"));
+    await db
+      .query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)")
+      .run(id, await hashApiKey("r".repeat(40)), "rrrrrrrr");
+    db.run(
+      "INSERT INTO auth_codes (email, code_hash, expires_at) SELECT email, 'c', datetime('now', '+1 hour') FROM users WHERE id = ?",
+      [id],
+    );
+    const real = realD1(db);
+    // Another writer lands between the sweep's read and its write, through the real database.
+    const racing = {
+      ...real,
+      batch: async (stmts: unknown[]) => {
+        db.run("UPDATE users SET email = 'someone.real@example.org' WHERE id = ?", [id]);
+        return (real as unknown as { batch(s: unknown[]): Promise<unknown> }).batch(stmts);
+      },
+    } as unknown as D1Database;
+
+    const result = await sweepCiTestAccounts({ DB: racing, ENVIRONMENT: "test" });
+
+    expect(result).toEqual({ ran: true, examined: 1, tombstoned: 0, skipped: 1, errors: 0 });
+    const row = db
+      .query<{ email: string; status: string; deleted_at: string | null }, [number]>(
+        "SELECT email, status, deleted_at FROM users WHERE id = ?",
+      )
+      .get(id);
+    expect(row).toEqual({
+      email: "someone.real@example.org",
+      status: "verified",
+      deleted_at: null,
+    });
+    expect(
+      count("SELECT COUNT(*) AS n FROM tokens WHERE user_id = ? AND revoked_at IS NULL", id),
+    ).toBe(1);
+    expect(count("SELECT COUNT(*) AS n FROM auth_codes WHERE used_at IS NOT NULL")).toBe(0);
+  });
+});
+
+describe("the cleanup section the audit row is built from", () => {
+  test("success: the sweep's tally, in exactly the audit row's shape", async () => {
+    seedUser(generated("dcli"));
+    seedUser(generatedGate());
+    const tally = await cleanUpLiveTestAccounts(env());
+    expect(tally).toEqual({ ran: true, examined: 2, tombstoned: 2, skipped: 0, errors: 0 });
+    expect(Object.keys(tally).sort()).toEqual(Object.keys(TEST_ACCOUNT_SWEEP_NOT_RUN).sort());
+  });
+
+  test("failure: the error is in the tally, and the run still returns", async () => {
+    const bad = seedUser(generated("df"));
+    const good = seedUser(generated("df"));
+    failTombstoneOf(bad);
+    const tally = await cleanUpLiveTestAccounts(env());
+    expect(tally).toEqual({ ran: true, examined: 2, tombstoned: 1, skipped: 0, errors: 1 });
+    expect(isTombstoned(bad)).toBe(false);
+    expect(isTombstoned(good)).toBe(true);
+  });
+
+  for (const environment of ["production", "", undefined]) {
+    test(`ENVIRONMENT ${JSON.stringify(environment)}: did not run, nothing touched`, async () => {
+      const id = seedUser(generated("pl"));
+      const before = snapshot(id);
+      expect(await cleanUpLiveTestAccounts(env(environment))).toEqual(TEST_ACCOUNT_SWEEP_NOT_RUN);
+      expect(snapshot(id)).toBe(before);
+    });
+  }
+
+  test("the not-run tally is frozen, so a caller cannot corrupt the shared constant", () => {
+    expect(Object.isFrozen(TEST_ACCOUNT_SWEEP_NOT_RUN)).toBe(true);
+  });
+});
+
+describe("tombstoneUserCascade", () => {
+  function seedCollaboration(userId: number, datasetId: string): void {
+    const owner = seedUser(`owner-${datasetId}@example.org`, { ageDays: 1 });
+    db.run(
+      "INSERT INTO datasets (dataset_id, name, owner_user_id, status) VALUES (?, 't', ?, 'active')",
+      [datasetId, owner],
+    );
+    db.run(
+      "INSERT INTO dataset_collaborators (dataset_id, user_id, access_type) SELECT id, ?, 'invited' FROM datasets WHERE dataset_id = ?",
+      [userId, datasetId],
+    );
+  }
+
+  const collaborations = (id: number) =>
+    count("SELECT COUNT(*) AS n FROM dataset_collaborators WHERE user_id = ?", id);
+
+  test("removes the user's collaborations, called directly with and without the address guard", async () => {
+    const plain = seedUser("plain@example.org");
+    const guarded = seedUser("guarded@example.org");
+    seedCollaboration(plain, "xx090201");
+    seedCollaboration(guarded, "xx090202");
+
+    expect((await tombstoneUserCascade(realD1(db), plain, "plain@example.org")).tombstoned).toBe(
+      true,
+    );
+    expect(
+      (
+        await tombstoneUserCascade(
+          realD1(db),
+          guarded,
+          "guarded@example.org",
+          "guarded@example.org",
+        )
+      ).tombstoned,
+    ).toBe(true);
+
+    expect(collaborations(plain)).toBe(0);
+    expect(collaborations(guarded)).toBe(0);
+  });
+
+  test("the address guard protects every statement, not only the mask", async () => {
+    const id = seedUser("guarded2@example.org");
+    seedCollaboration(id, "xx090203");
+    await db
+      .query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)")
+      .run(id, await hashApiKey("g".repeat(40)), "gggggggg");
+    db.run(
+      "INSERT INTO docs_grants (code_hash, user_id, expires_at) VALUES ('gg', ?, datetime('now', '+1 hour'))",
+      [id],
+    );
+    db.run(
+      "INSERT INTO user_s3_permissions (user_id, s3_prefix, permission) VALUES (?, 'p/', 'read')",
+      [id],
+    );
+    const before = snapshot(id);
+
+    const done = await tombstoneUserCascade(
+      realD1(db),
+      id,
+      "guarded2@example.org",
+      "other@example.org",
+    );
+
+    expect(done).toEqual({ tombstoned: false, tokensRevoked: 0, sessionsRevoked: 0 });
+    expect(snapshot(id)).toBe(before);
+    expect(collaborations(id)).toBe(1);
+    expect(count("SELECT COUNT(*) AS n FROM docs_grants WHERE user_id = ?", id)).toBe(1);
+    expect(count("SELECT COUNT(*) AS n FROM user_s3_permissions WHERE user_id = ?", id)).toBe(1);
+    expect(
+      count("SELECT COUNT(*) AS n FROM tokens WHERE user_id = ? AND revoked_at IS NULL", id),
+    ).toBe(1);
+  });
+
+  test("the owner-only route removes collaborations through the same function", async () => {
+    const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+    app.route("/admin", adminRoutes);
+    db.run(
+      `INSERT INTO users (username, email, status, role, email_verified, account_kind)
+       VALUES ('collabowner', 'collabowner@nemar.test', 'approved', 'owner', 1, 'service')`,
+    );
+    const ownerId = db
+      .query<{ id: number }, []>("SELECT id FROM users WHERE username = 'collabowner'")
+      .get()?.id as number;
+    await db
+      .query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)")
+      .run(ownerId, await hashApiKey(OWNER_KEY), OWNER_KEY.slice(0, 8));
+    const target = seedUser("route-target@example.org");
+    seedCollaboration(target, "xx090204");
+    expect(collaborations(target)).toBe(1);
+
+    const res = await app.request(
+      `/admin/users/by-id/${target}`,
+      { method: "DELETE", headers: { Authorization: `Bearer ${OWNER_KEY}` } },
+      { DB: realD1(db), ENVIRONMENT: "test", RESEND_API_KEY: "" } as unknown as Bindings,
+    );
+
+    expect(res.status).toBe(200);
+    expect(collaborations(target)).toBe(0);
   });
 });
