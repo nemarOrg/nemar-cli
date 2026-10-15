@@ -1,12 +1,16 @@
 /**
- * `nemar dataset publish withdraw`, and how a withdrawal reads in
+ * `nemar dataset publish withdraw`, and how a withdrawn request reads in
  * `publish status` and `admin publish list`, through the real CLI entry point.
  *
- * Same harness as test/identifier-screen-cli.test.ts: a real subprocess pointed
- * at a local HTTP server that answers with the backend's response shape. The
- * backend's own rules (who may withdraw, when it is too late) are tested
- * against the real route in backend/test/publish-withdraw.test.ts; what is
- * asserted here is what the CLI sends and what a person reads.
+ * The HTTP server here is a stand-in that answers with the backend's response
+ * shape. .rules/testing.md discourages stub services; this follows the sibling
+ * precedent of test/identifier-screen-cli.test.ts and test/publish-anonymous-cli.test.ts,
+ * where the CLI's own behaviour (what it sends, what a person reads) is the
+ * subject and a real Worker plus D1 cannot be started from a `bun test`
+ * subprocess. The backend's own rules (who may withdraw, when it is too late)
+ * are tested against the REAL route and database in
+ * backend/test/publish-withdraw.test.ts, which also pins the exact error bodies
+ * the stand-in below reproduces, so the two cannot drift apart unseen.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -106,12 +110,13 @@ describe("nemar dataset publish withdraw", () => {
     }
   });
 
-  test("too late: the backend's words reach the terminal and the exit code is 1", async () => {
+  test("too late: the backend's words reach the terminal, with a plain line, and the exit code is 1", async () => {
     const server = startServer({
       [WITHDRAW]: {
         status: 409,
         body: {
-          error: "An administrator has already started publishing this dataset.",
+          error:
+            "Publishing this dataset has already started, so the request can no longer be withdrawn.",
           code: "withdraw_too_late",
         },
       },
@@ -119,7 +124,22 @@ describe("nemar dataset publish withdraw", () => {
     try {
       const r = await runCli(["dataset", "publish", "withdraw", "nm000104", "--yes"], server.url);
       expect(r.exitCode).toBe(1);
-      expect(r.stdout + r.stderr).toContain("already started publishing");
+      expect(r.stdout + r.stderr).toContain("already started");
+      expect(r.stdout + r.stderr).toContain("Your request was left as it was");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a 409 without the too-late code gets no too-late line", async () => {
+    const server = startServer({
+      [WITHDRAW]: { status: 409, body: { error: "Something else is wrong" } },
+    });
+    try {
+      const r = await runCli(["dataset", "publish", "withdraw", "nm000104", "--yes"], server.url);
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout + r.stderr).toContain("Something else is wrong");
+      expect(r.stdout + r.stderr).not.toContain("left as it was");
     } finally {
       server.stop();
     }
@@ -141,7 +161,10 @@ describe("nemar dataset publish withdraw", () => {
 
   test("no active request: says so and exits 1", async () => {
     const server = startServer({
-      [WITHDRAW]: { status: 404, body: { error: "No active publication request found" } },
+      [WITHDRAW]: {
+        status: 404,
+        body: { error: "No active publication request found", code: "no_active_request" },
+      },
     });
     try {
       const r = await runCli(["dataset", "publish", "withdraw", "nm000104", "--yes"], server.url);
@@ -150,6 +173,45 @@ describe("nemar dataset publish withdraw", () => {
     } finally {
       server.stop();
     }
+  });
+
+  test("the no-request line follows the code, not the wording", async () => {
+    // The same sentence without the code (an older or different backend) gets no
+    // hint; the sentence itself is still printed.
+    const server = startServer({
+      [WITHDRAW]: { status: 404, body: { error: "No active publication request found" } },
+    });
+    try {
+      const r = await runCli(["dataset", "publish", "withdraw", "nm000104", "--yes"], server.url);
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout + r.stderr).toContain("No active publication request found");
+      expect(r.stdout + r.stderr).not.toContain("There is no active publication request for this");
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("the help text", () => {
+  test("withdraw says whose command it is and that it is not the dataset-level one", async () => {
+    const r = await runCli(["dataset", "publish", "withdraw", "--help-all"], "http://localhost:1");
+    expect(r.exitCode).toBe(0);
+    const out = r.stdout.replace(/\s+/g, " ");
+    expect(out).toContain("withdrawn request");
+    expect(out).toContain("Only the dataset owner can withdraw the request");
+    expect(out).toContain(
+      "an administrator may file a publication request on someone else's dataset",
+    );
+    expect(out).toContain("nemar admin publish deny");
+    expect(out).toContain("not 'nemar admin withdraw'");
+  });
+
+  test("status lists denied, and says a withdrawn request is stored as denied", async () => {
+    const r = await runCli(["dataset", "publish", "status", "--help-all"], "http://localhost:1");
+    expect(r.exitCode).toBe(0);
+    // No line offers `withdrawn` as a status value of its own.
+    expect(r.stdout).not.toMatch(/^\s+withdrawn\s+-/m);
+    expect(r.stdout.replace(/\s+/g, " ")).toContain("is stored as denied too");
   });
 });
 

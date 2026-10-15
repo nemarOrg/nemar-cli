@@ -4225,7 +4225,8 @@ Possible Statuses:
   approving  - Admin is running the publication process
   published  - Dataset is now public with DOI
   denied     - Request was denied (includes reason)
-  withdrawn  - You took the request back ('nemar dataset publish withdraw')
+               A request you took back with 'nemar dataset publish withdraw' is
+               stored as denied too; this command shows it as "withdrawn".
 
 Steps in Approval Process:
    1. CI check          - Verify BIDS validation passes
@@ -4463,9 +4464,19 @@ Examples:
     }
   });
 
+/** The backend's own `code` of an error body (`error` itself is the sentence for these routes). */
+function withdrawErrorCode(error: ApiError): string | undefined {
+  const body = error.rawBody;
+  if (typeof body === "object" && body !== null && "code" in body) {
+    const code = (body as { code: unknown }).code;
+    return typeof code === "string" ? code : undefined;
+  }
+  return undefined;
+}
+
 publishCommand
   .command("withdraw")
-  .description("Withdraw your publication request (no admin approval needed)")
+  .description("Take back your publication request (it ends as a withdrawn request; no admin step)")
   .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
@@ -4473,14 +4484,23 @@ publishCommand
     "after",
     `
 Description:
-  Take back your own publication request. No administrator has to approve
-  the withdrawal, and nothing about the dataset changes: it stays as it was,
-  and you can request publication again whenever you are ready
-  ('nemar dataset publish request <dataset-id>', with or without --anonymous).
+  Take back your own publication request. It ends as a "withdrawn request":
+  no administrator has to approve that, and nothing about the dataset changes.
+  The dataset stays as it was, and you can request publication again whenever
+  you are ready ('nemar dataset publish request <dataset-id>', with or without
+  --anonymous).
 
-  Only the dataset owner can withdraw. It works while the request is waiting
-  for review ("requested") or held on a fix ("blocked"). Once an administrator
-  has started publishing it ("approving"), it is too late: ask the
+  This is not 'nemar admin withdraw', which takes a broken published dataset
+  out of the catalog.
+
+  Only the dataset owner can withdraw the request, even though an administrator
+  may file a publication request on someone else's dataset. An administrator
+  ends a request with 'nemar admin publish deny'.
+
+  It works while the request is waiting for review ("requested") or held on a
+  fix ("blocked"), as long as publishing has not started. Once an administrator
+  has started publishing it ("approving"), or an earlier run already changed
+  something (even if the request was later held again), it is too late: ask the
   administrator to stop. A dataset that is already published stays published.
 
 Examples:
@@ -4510,10 +4530,15 @@ Examples:
     } catch (error) {
       if (error instanceof ApiError) {
         spinner.fail(error.message);
-        // Only the backend's own "nothing to withdraw" 404 earns this line; a
-        // missing dataset, or a backend without the route, says its own thing.
-        if (error.statusCode === 404 && error.message === "No active publication request found") {
+        // Keyed on the backend's own code, never on its wording: a missing
+        // dataset, or a backend without the route, carries no such code.
+        const code = withdrawErrorCode(error);
+        if (code === "no_active_request") {
           console.log(chalk.dim("  There is no active publication request for this dataset."));
+        } else if (code === "withdraw_too_late") {
+          console.log(
+            chalk.dim("  Your request was left as it was. Ask an administrator if it should stop."),
+          );
         }
       } else {
         spinner.fail("Failed to withdraw the publication request");

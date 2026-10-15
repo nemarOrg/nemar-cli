@@ -280,6 +280,7 @@ describe("a request whose publishing has started, whatever its status", () => {
       const res = await withdraw();
       expect(res.status).toBe(409);
       const body = (await res.json()) as { error: string; code: string };
+      expect(Object.keys(body).sort()).toEqual(["code", "error"]);
       expect(body.code).toBe("withdraw_too_late");
       expect(body.error).toContain("already started");
       expect(row(id)).toMatchObject({ status, withdrawn_at: null });
@@ -394,8 +395,15 @@ describe("who may withdraw", () => {
     expect(res.status).toBe(401);
   });
 
-  test("a dataset with no request at all is a 404", async () => {
-    expect((await withdraw()).status).toBe(404);
+  test("a dataset with no request at all is a 404 with its own code", async () => {
+    const res = await withdraw();
+    expect(res.status).toBe(404);
+    // The CLI keys its hint on `code` and keeps the sentence; its test
+    // (test/publish-withdraw-cli.test.ts) stands in for exactly this body.
+    expect(await res.json()).toEqual({
+      error: "No active publication request found",
+      code: "no_active_request",
+    });
   });
 });
 
