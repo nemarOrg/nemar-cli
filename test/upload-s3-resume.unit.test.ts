@@ -172,7 +172,7 @@ beforeAll(async () => {
 
 afterAll(() => {
   // Guarded restore (#1175): never assign `undefined` directly.
-  if (previousTestApiUrl === undefined) delete process.env.TEST_API_URL;
+  if (previousTestApiUrl === undefined) Reflect.deleteProperty(process.env, "TEST_API_URL");
   else process.env.TEST_API_URL = previousTestApiUrl;
 
   if (existsSync(TMP_DIR)) {
