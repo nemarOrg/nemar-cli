@@ -416,6 +416,14 @@ describe("nothing from the pull request runs", () => {
     for (const other of ["staging", "main", "devel", "dev-1", "", undefined]) {
       expect(checkoutRefFor(ref, other), String(other)).toBe("main");
     }
+    // GitHub's expressions reference says "GitHub ignores case when comparing strings", so `DEV`
+    // reaches the dev branch here. Only the validate step keeps it out (see its test below), and
+    // this line is what makes the model above say so: without it, removing the case folding from
+    // `checkoutRefFor` would change no result.
+    expect(checkoutRefFor(ref, "DEV")).toBe("dev");
+    // The validate step checks the job's ENVIRONMENT, so the ref has to read the same payload
+    // field. If they ever differed, a value could pass validation and be read differently here.
+    expect(job.env.ENVIRONMENT).toBe("${{ github.event.client_payload.environment }}");
   });
 });
 
@@ -603,7 +611,13 @@ describe("the shell steps, run for real", () => {
     const accepted: string[] = [];
     for (const environment of probes) {
       const r = await runStepScript("Validate the dispatch", { ...GOOD, ENVIRONMENT: environment });
-      if (r.status === 0) accepted.push(environment);
+      if (r.status === 0) {
+        accepted.push(environment);
+      } else {
+        // Refused by the guard that names the environment, not by a later line that happens to
+        // fail: a script that stops on an unbound variable would also exit non-zero.
+        expect(r.stdout, JSON.stringify(environment)).toContain("::error::malformed environment");
+      }
     }
     expect(accepted).toEqual(["production", "dev"]);
     const ref = step("Check out the review script").with?.ref ?? "";
