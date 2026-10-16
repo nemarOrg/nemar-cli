@@ -16695,8 +16695,10 @@ class TestStreamingRefusalCanary(unittest.TestCase):
 
     `test_stream_to_zarr_still_raises_a_bare_oserror_for_a_cut_fallback_file` is
     the same measurement for the tolerant fallback's own truncation errors
-    (`_BIOSIGIO_TRUNCATION_RES`), which biosigio#149 does not name: when it
-    fails, delete that half of rule 4 and the case."""
+    (`_BIOSIGIO_TRUNCATION_RES`). biosigio PR #150 (closes #149) wraps the
+    streaming fallback in `classify_read_error`, so it fails on biosigio 1.2.12;
+    the pinned 1.2.11 still raises them bare. At that release, delete the
+    fallback text match and this case."""
 
     @classmethod
     def setUpClass(cls):
@@ -16752,8 +16754,8 @@ class TestStreamingRefusalCanary(unittest.TestCase):
                 self.assertIs(
                     type(exc), OSError,
                     f"biosigIO now raises {type(exc).__name__} for a streamed fallback "
-                    "truncation: delete _BIOSIGIO_TRUNCATION_RES from failure_verdict "
-                    "rule 4 and this case",
+                    "truncation (biosigio 1.2.12 ships PR #150): delete "
+                    "_BIOSIGIO_TRUNCATION_RES from failure_verdict rule 4 and this case",
                 )
                 self.assertIsNone(exc.errno)
                 self.assertTrue(

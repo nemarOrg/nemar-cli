@@ -2089,16 +2089,18 @@ def failure_verdict(
        signal header cut short, an impossible signal count, a file shorter than
        its header implies): `corrupt_or_truncated`, as its in-memory path types
        the same file. TEMPORARY, like its canary
-       (`TestStreamingRefusalCanary`): biosigio#149 types the streaming refusal,
-       and the pull request that raises the biosigIO cap past that fix deletes
-       the pyedflib half of this rule and its canary case. The fallback's four
-       truncation errors are a separate raise that #149 does not name, so that
-       half stays until its own canary case fails. The guard is exact on
-       purpose: an `OSError` that carries an errno (EIO, ENOSPC, EACCES) or is
-       a subclass (`PermissionError`) is the HOST saying no, a condition that
-       must keep its retry. And it is `exc`, never a link behind it: biosigIO recovers some
-       refusals inside the `except` block that caught them, so a host error
-       raised during that recovery carries the bare refusal as its
+       (`TestStreamingRefusalCanary`), until biosigio 1.2.12 ships PR #150
+       (closes #149), which types the streaming refusal and wraps the streaming
+       fallback's errors in `classify_read_error`. The pinned 1.2.11 still
+       leaves both bare, so the fallback text match
+       (`_BIOSIGIO_TRUNCATION_RES`) is still needed; at that release it is
+       deleted with its canary case, and so is the rest of this rule. The guard
+       is exact on purpose: an `OSError` that carries an errno (EIO, ENOSPC,
+       EACCES) or is a subclass (`PermissionError`) is the HOST saying no, a
+       condition that must keep its retry. And it is `exc`, never a link behind
+       it: biosigIO recovers some refusals inside the `except` block that
+       caught them, so a host error raised during that recovery carries the
+       bare refusal as its
        `__context__`, and reading the chain would type the host's error as the
        file's. Rules 1 to 3 do read causes, but only explicit ones, for the
        same reason.
