@@ -54,8 +54,7 @@ And the review only ever sees a pull request's text and metadata, so a count of 
   It applies to a push, a reopening and a marking as ready alike: anyone with write access can push to an owner's branch, close and reopen the pull request, or take a draft out of draft, and what they put in front of the review must not pass because the pull request carries another name.
   A delivery that names no usable sender is reviewed.
   An administrator's start has no sender (its payload is GitHub's own record of the pull request, built by the Worker) and is judged on the author alone.
-  The owner confirmed this check for a push.
-  Applying it to every action is an extension made while building, accepted by the epic's coordinator and recorded here for the owner to confirm or narrow.
+  The owner confirmed this check for a push, and on 2026-10-16 confirmed applying it to every action.
 - **An exempt pull request gets one completed `skipped` check and no review.**
   The title says the review is not required for an owner or administrator, and the text says skipped is not a pass.
   No row is stored, no model is called, no allowance is spent, nothing is dispatched, and no comment is made.
