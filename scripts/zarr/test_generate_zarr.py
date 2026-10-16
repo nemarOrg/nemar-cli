@@ -11396,15 +11396,18 @@ class TestConvertOneFifSidecarOvercount(unittest.TestCase):
         # other way the header count goes missing, a FIF MNE cannot parse:
         # with a sidecar over-declaring it, it must be refused before any
         # store exists, never reach the gate's "header unknown" path and publish.
+        # biosigIO 1.2.13 types a FIF cut short in its data `corrupt_or_truncated`
+        # through `Recording.from_file`; the other two cases keep the probe's codes.
+        header_codes = ("maxshield_probe_failed", "file_read_error")
         cases = {
-            "garbage header": lambda data: b"not a fif header at all",
-            "header cut short": lambda data: data[:600],
-            "data cut short": lambda data: data[: len(data) // 2],
+            "garbage header": (lambda data: b"not a fif header at all", header_codes),
+            "header cut short": (lambda data: data[:600], header_codes),
+            "data cut short": (lambda data: data[: len(data) // 2], ("corrupt_or_truncated",)),
         }
         path = os.path.join(self.repo, self.PRIMARY)
         with open(path, "rb") as fh:
             original = fh.read()
-        for name, corrupt in cases.items():
+        for name, (corrupt, codes) in cases.items():
             with self.subTest(name):
                 with open(path, "wb") as fh:
                     fh.write(corrupt(original))
@@ -11412,12 +11415,7 @@ class TestConvertOneFifSidecarOvercount(unittest.TestCase):
                 with contextlib.redirect_stdout(out):
                     result = self.convert(len(FIF_CHANNELS) + 9)
                 self.assertFalse(result["ok"])
-                # `corrupt_or_truncated` since biosigIO 1.2.13 types a FIF cut
-                # short in its data; the other two cases keep the older codes.
-                self.assertIn(
-                    result["code"],
-                    ("maxshield_probe_failed", "file_read_error", "corrupt_or_truncated"),
-                )
+                self.assertIn(result["code"], codes)
                 self.assertNotIn("entry", result)
                 self.assertFalse(self.synced())
 
