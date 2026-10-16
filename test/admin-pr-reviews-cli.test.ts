@@ -2019,6 +2019,7 @@ describe("nemar admin pr-reviews next", () => {
       truncated: true,
       skipped: { not_a_dataset: 0, not_owned_here: 0, unreadable: 0 },
       filters: { verdicts: [], dataset: null, author: null, needs_me: true },
+      volume: null,
     };
     apiOverride = (req) =>
       new URL(req.url).pathname === "/admin/pr-reviews" ? Response.json(queue) : null;
@@ -2365,6 +2366,7 @@ describe("nemar admin pr-reviews next", () => {
       truncated: true,
       skipped: { not_a_dataset: 0, not_owned_here: 0, unreadable: 0 },
       filters: { verdicts: [], dataset: null, author: null, needs_me: true },
+      volume: null,
     };
     apiOverride = (req) =>
       new URL(req.url).pathname === "/admin/pr-reviews" ? Response.json(queue) : null;

@@ -628,6 +628,40 @@ describe("what an administrator's start is held to", () => {
     expect(dispatches()).toHaveLength(1);
   });
 
+  test("no count holds a restart back either: 400 reviews today and an errored review of this commit", async () => {
+    for (let i = 0; i < 400; i++) {
+      seedReview(db, {
+        ds: DATASET,
+        n: 1000 + i,
+        sha: `${i}`.padStart(40, "b"),
+        authorId: 20_000 + i,
+        state: "reported",
+        verdict: "pass",
+        createdAt: now(),
+      });
+    }
+    seedReview(db, {
+      ds: DATASET,
+      n: 7,
+      sha: SHA_A,
+      authorId: 700,
+      login: "stranger",
+      state: "errored",
+      detail: "model_refused",
+      createdAt: now(),
+    });
+    pulls[`${DATASET}#7`] = restPull({ userId: 700, login: "stranger", assoc: "NONE" });
+
+    const r = await start(DATASET, 7);
+
+    expect(r.body).toMatchObject({ dispatched: true, reason: "redispatched" });
+    expect(rows().find((x) => x.pr_number === 7)).toMatchObject({
+      state: "dispatched",
+      attempts: 2,
+    });
+    expect(dispatches()).toHaveLength(1);
+  });
+
   test("an administrator's start is not an approval or a merge", async () => {
     pulls[`${DATASET}#7`] = restPull({});
     await start(DATASET, 7);
@@ -856,6 +890,10 @@ describe("a restart adds a model call to the row only when the earlier attempt s
       detail: "contributor_paused",
       attempts: 1,
     });
+    // The administrator's volume agrees: a decline is a record and no model call.
+    const volume = await readVolume(realD1(db));
+    expect(volume.last_24_hours).toMatchObject({ reviews: 1, model_calls: 0 });
+    expect(volume.last_24_hours.declines.contributor_paused).toBe(1);
   });
 
   test.each([
@@ -946,6 +984,33 @@ describe("a redelivery of a failed dispatch is held to the block like a new deli
     expect(r).toMatchObject({ dispatched: false, reason: "contributor_paused" });
     expect(rows()[0]).toMatchObject({ state: "declined", detail: "contributor_paused" });
     expect(dispatches()).toHaveLength(0);
+  });
+
+  test("a spent day does not hold a redelivery back: 400 reviews today change nothing", async () => {
+    seedReview(db, {
+      ds: DATASET,
+      n: 7,
+      sha: SHA_A,
+      authorId: 501,
+      state: "errored",
+      detail: "dispatch_failed",
+    });
+    for (let i = 0; i < 400; i++) {
+      seedReview(db, {
+        ds: DATASET,
+        n: 2000 + i,
+        sha: `${i}`.padStart(40, "c"),
+        authorId: 30_000 + i,
+        state: "reported",
+        verdict: "pass",
+        createdAt: now(),
+      });
+    }
+
+    const r = await redeliver();
+
+    expect(r).toMatchObject({ dispatched: true, reason: "redispatched" });
+    expect(dispatches()).toHaveLength(1);
   });
 
   test("an ordinary redelivery of a failed dispatch still runs it", async () => {

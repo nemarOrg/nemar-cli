@@ -677,35 +677,82 @@ describe("owners and administrators are not reviewed (ADR 0107)", () => {
     expect(rows()).toHaveLength(2);
   });
 
-  test("the sender rule holds for every action: an exempt sender passes the delivery and one who is not exempt does not", async () => {
+  test("the rule holds for every action: a delivery is exempt only when its author and whoever caused it are both exempt", async () => {
     seedAccount({ github: "admin-gh", role: "admin" });
     seedAccount({ github: "owner-gh", role: "owner" });
     seedAccount({ github: "member-gh", role: "member" });
     const actions = ["opened", "synchronize", "reopened", "ready_for_review"];
-    for (const [i, action] of actions.entries()) {
-      const base = { action, login: "admin-gh", userId: 602 };
-      // Another exempt account caused it: the author's pull request is exempt, as the author's own.
-      const byOwner = await deliver(
-        prEvent({ ...base, number: 10 + i, sha: `${i + 1}`.repeat(40), sender: "owner-gh" }),
-      );
-      expect(byOwner.body, `${action} by an owner`).toMatchObject({
-        dispatched: false,
-        reason: "exempt_author",
-      });
-      // An account that is not exempt caused it: reviewed, whatever the author is. The author
-      // alone is never enough.
-      const byMember = await deliver(
-        prEvent({ ...base, number: 20 + i, sha: `${i + 5}`.repeat(40), sender: "member-gh" }),
-      );
-      expect(byMember.body, `${action} by a member`).toMatchObject({
-        dispatched: true,
-        reason: "dispatched",
-      });
+    // The four cells of author exempt or not and sender exempt or not: only the first is exempt,
+    // so neither half alone is enough.
+    const cells = [
+      ["admin-gh", "owner-gh", false],
+      ["admin-gh", "member-gh", true],
+      ["member-gh", "admin-gh", true],
+      ["member-gh", "member-gh", true],
+    ] as const;
+    let n = 0;
+    for (const action of actions) {
+      for (const [author, sender, reviewed] of cells) {
+        n++;
+        const r = await deliver(
+          prEvent({
+            action,
+            login: author,
+            userId: author === "admin-gh" ? 602 : 603,
+            number: 100 + n,
+            sha: n.toString(16).padStart(40, "e"),
+            sender,
+          }),
+        );
+        expect(r.body, `${action}: ${author}, caused by ${sender}`).toMatchObject(
+          reviewed
+            ? { dispatched: true, reason: "dispatched" }
+            : { dispatched: false, reason: "exempt_author" },
+        );
+      }
     }
-    // One review for each delivery a member caused, and none for the ones an owner caused.
-    expect(rows()).toHaveLength(actions.length);
-    expect(rows().every((r) => r.author_login === "admin-gh")).toBe(true);
-    expect(dispatchesMade()).toHaveLength(actions.length);
+    // One review for each delivery that was not exempt, and none for the four that were.
+    expect(rows()).toHaveLength(actions.length * 3);
+    expect(dispatchesMade()).toHaveLength(actions.length * 3);
+  });
+
+  test("an exempt author's redelivery of a commit whose dispatch failed is started again, never skipped", async () => {
+    seedAccount({ github: "admin-gh", role: "admin" });
+    seedAccount({ github: "member-gh", role: "member" });
+    // A collaborator pushed to the administrator's branch, and handing the review to GitHub failed.
+    dispatchStatus = 500;
+    const pushed = await deliver(
+      prEvent({
+        login: "admin-gh",
+        userId: 602,
+        number: 7,
+        sha: SHA_A,
+        action: "synchronize",
+        sender: "member-gh",
+      }),
+    );
+    expect(pushed.body).toMatchObject({ dispatched: false, reason: "dispatch_failed" });
+    expect(rows()[0]).toMatchObject({ state: "errored", detail: "dispatch_failed" });
+    dispatchStatus = 204;
+    calls = [];
+
+    // The administrator's own event for the same commit: it has a row, so it is the row's to restart.
+    const again = await deliver(
+      prEvent({
+        login: "admin-gh",
+        userId: 602,
+        number: 7,
+        sha: SHA_A,
+        action: "synchronize",
+        sender: "admin-gh",
+      }),
+    );
+
+    expect(again.body).toMatchObject({ dispatched: true, reason: "redispatched" });
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]).toMatchObject({ state: "dispatched", detail: null });
+    expect(dispatchesMade()).toHaveLength(1);
+    expect(JSON.stringify(calls)).not.toContain("skipped");
   });
 
   /** A collaborator pushes to the administrator's branch and the review finds the change wanting. */
@@ -1289,7 +1336,7 @@ describe("who is reviewed: only an administrator's block holds anyone back (ADR 
     expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "action_required" });
     expect(lastCheck().output?.summary).toContain("by hand");
 
-    // Someone else, with the same history, is reviewed.
+    // Someone else is reviewed.
     const other = await deliver(prEvent({ userId: 501, number: 9, sha: SHA_A }));
     expect(other.body).toMatchObject({ dispatched: true });
   });
@@ -1629,6 +1676,38 @@ describe("no count of reviews decides whether one is spent (ADR 0107)", () => {
     expect(dispatchesMade()).toHaveLength(30);
     expect(lastCheck()).toMatchObject({ status: "in_progress" });
   });
+
+  test.each(["FIRST_TIME_CONTRIBUTOR", "CONTRIBUTOR", "COLLABORATOR", "MEMBER", "OWNER"])(
+    "the 30th pull request in an hour is reviewed for an author GitHub calls %s too",
+    async (assoc) => {
+      // The old rule gave these tiers 20 an hour (or 3, for the first two). None of it applies now.
+      for (let n = 1; n <= 30; n++) {
+        const r = await deliver(
+          prEvent({ userId: 888, assoc, number: n, sha: n.toString(16).padStart(40, "f") }),
+        );
+        expect(r.body, `pull request ${n}`).toMatchObject({ dispatched: true });
+      }
+      expect(rows().filter((x) => x.state === "dispatched")).toHaveLength(30);
+    },
+  );
+
+  test.each(["NONE", "COLLABORATOR"])(
+    "an author GitHub calls %s with 120 reviews today is reviewed again",
+    async (assoc) => {
+      // The old daily allowance was 6 for a stranger and 100 for the trusted tiers.
+      for (let i = 0; i < 120; i++) {
+        seedRow({
+          pr: 300 + i,
+          sha: i.toString(16).padStart(40, "c"),
+          author: 888,
+          assoc,
+          ago: "-5 hours",
+        });
+      }
+      const r = await deliver(prEvent({ userId: 888, assoc, number: 999, sha: "9".repeat(40) }));
+      expect(r.body).toMatchObject({ dispatched: true, reason: "dispatched" });
+    },
+  );
 
   test("pull requests opened at once by one stranger are all reviewed, whatever order the database answers in", async () => {
     // A rank counted after the insert used to make a burst race for three places. Nothing is

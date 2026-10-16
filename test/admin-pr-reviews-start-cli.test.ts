@@ -522,6 +522,8 @@ describe("nemar admin pr-reviews start --all", () => {
     expect(r.exitCode).toBe(0);
     const out = JSON.parse(r.stdout);
     expect(out.results).toHaveLength(3);
+    // The pool stop is gone, and so is the count of what it left untried.
+    expect(out).not.toHaveProperty("not_tried");
     expect(out.results.every((x: { dispatched: boolean }) => x.dispatched)).toBe(true);
     expect(out.results.map((x: { reason: string }) => x.reason).sort()).toEqual([
       "dispatched",
