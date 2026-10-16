@@ -17084,6 +17084,8 @@ class TestLateOnsetThroughConvertOne(ConvertOneLocalCase):
     # annotations on purpose: `apply_events_tsv` replaces events, and a store that
     # still held the annotations (a no-op apply) would otherwise pass.
     TSV_EVENTS = ([2.0, 3.25], ["go", "stop"])
+    # The store writer `convert_recording` hands to `write_store` on each path.
+    WRITER = {"in-memory": "to_zarr", "streaming": "stream_to_zarr"}
 
     def late_onset_formats(self):
         import pyedflib
@@ -17125,9 +17127,23 @@ class TestLateOnsetThroughConvertOne(ConvertOneLocalCase):
                 with self.subTest(label, path=path_name):
                     StreamEdfThreshold.use(self, threshold)
                     shutil.rmtree(self.synced_dir, ignore_errors=True)
-                    results = {rel: self.convert(rel, {rel}) for rel in (late, twin)}
+                    with StreamEdfThreshold.watching_writers() as writers:
+                        results = {rel: self.convert(rel, {rel}) for rel in (late, twin)}
+                    # The exporter that ran, for the late file and its twin alike.
+                    self.assertEqual(writers, [self.WRITER[path_name]] * 2)
                     for rel, result in results.items():
                         self.assertTrue(result["ok"], (rel, result.get("error")))
+                    # The controls: only the late file went through the tolerant read.
+                    self.assertIs(
+                        self.published_recording_metadata(results[late]["entry"]).get(
+                            "edf_tolerant_read"
+                        ),
+                        True,
+                    )
+                    self.assertNotIn(
+                        "edf_tolerant_read",
+                        self.published_recording_metadata(results[twin]["entry"]),
+                    )
 
                     published = self.published_samples(results[late]["entry"])
                     twin_published = self.published_samples(results[twin]["entry"])
@@ -17172,7 +17188,9 @@ class TestLateOnsetThroughConvertOne(ConvertOneLocalCase):
                 with self.subTest(label, path=path_name):
                     StreamEdfThreshold.use(self, threshold)
                     shutil.rmtree(self.synced_dir, ignore_errors=True)
-                    result = self.convert(primary, {primary, tsv})
+                    with StreamEdfThreshold.watching_writers() as writers:
+                        result = self.convert(primary, {primary, tsv})
+                    self.assertEqual(writers, [self.WRITER[path_name]])
                     self.assertTrue(result["ok"], result.get("error"))
                     self.assertEqual(self.published_events(result["entry"]), self.TSV_EVENTS)
                     self.assertEqual(result["entry"]["n_events"], 2)
