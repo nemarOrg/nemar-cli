@@ -293,6 +293,28 @@ describe("findTextProblem", () => {
     expect(performance.now() - started).toBeLessThan(2_000);
   });
 
+  test("an unclosed instruction bracket and a long run of blanks is judged in linear time", () => {
+    // `\s+` and the characters after it overlap on blanks, so an unclosed `[your` or `<insert`
+    // followed by tens of thousands of them was tried as every split of the run: 64,000 took
+    // eleven seconds. A description is only trimmed, so its whitespace reaches the rule.
+    const started = performance.now();
+    for (const opener of ["[your", "<insert", "[fill in"]) {
+      for (const blank of [" ", " \t", "\n"]) {
+        const hostile = `Adds data.\n\n${opener}${blank.repeat(64_000 / blank.length)}x`;
+        expect(findTextProblem("description", hostile)).toBeNull();
+      }
+    }
+    expect(performance.now() - started).toBeLessThan(2_000);
+  });
+
+  test("a bracket that is closed after blanks is still a template", () => {
+    expect(findTextProblem("description", `[your${" ".repeat(50_000)}title]`)?.code).toBe(
+      "template_field",
+    );
+    // No words inside, so nothing is asked of the reader: not a template.
+    expect(findTextProblem("description", "Adds data. [your   ]")).toBeNull();
+  });
+
   test("a placeholder is refused as a description too, and says which text it saw", () => {
     const problem = findTextProblem("description", "Save changes");
     expect(problem?.code).toBe("placeholder");

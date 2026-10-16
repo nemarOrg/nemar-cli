@@ -92,11 +92,15 @@ const STAND_IN_TEXT: readonly RegExp[] = [
  * the text of a Markdown link. `<your title here>` and `[describe the change]` are refused;
  * `<Enter>`, `[Replace]`, `[Write-up](url)`, `[your lab](url)` and
  * `sub-<label>_task-<label>_eeg.edf` stay ordinary text.
+ *
+ * The lookahead after the whitespace is not decoration: without it `\s+` and the characters after
+ * it overlap on blanks, and an unclosed `[your` followed by a long run of them is tried as every
+ * split of the run, which is quadratic. With it the run has one way to match.
  */
 const TEMPLATE_FIELDS: readonly RegExp[] = [
   /\{\{[^{}]*\}\}/, // {{title}}
   /\$\{[^{}]*\}/, // ${TITLE}
-  /[<[]\s*(?:your|insert|enter|describe|write|fill in|replace)\s+[^<>[\]]+[>\]](?![([])/i, // <your title>
+  /[<[]\s*(?:your|insert|enter|describe|write|fill in|replace)\s+(?=[^\s<>[\]])[^<>[\]]*[>\]](?![([])/i, // <your title>
   /\b(?:FirstAuthorSurname|paperDOI)\b/,
 ];
 
