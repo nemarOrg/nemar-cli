@@ -7710,6 +7710,31 @@ def _eeglab_names_an_fdt(path: str) -> bool:
     return fields.get("data") == "fdt"
 
 
+def _eeglab_v73_epoch_count(path: str) -> int:
+    """`trials` from a MATLAB v7.3 `.set`, read the way biosigIO's `_load_v73`
+    reads it (the field as a float, rounded, zero read as one), through h5py's
+    metadata alone. 1 for a classic file, and for anything that cannot be read
+    or has no such field: this only ever LETS a file past `require_companions`,
+    so an unknown count must not."""
+    try:
+        with open(path, "rb") as fh:
+            if fh.read(len(_MATLAB_V73_MAGIC)) != _MATLAB_V73_MAGIC:
+                return 1
+        import h5py  # type: ignore[import-not-found]  # biosigIO's [hdf5] extra
+        import numpy as np
+
+        with h5py.File(path, "r") as f:
+            group = f["EEG"] if "EEG" in f else f
+            if "trials" not in group:
+                return 1
+            value = np.asarray(group["trials"][()], dtype=float).reshape(-1)
+            return (int(round(float(value[0]))) or 1) if value.size else 1
+    except MemoryError:
+        raise
+    except Exception:  # noqa: BLE001 - an unreadable header is the reader's to refuse
+        return 1
+
+
 def _eeglab_fdt_reference(path: str) -> str | None:
     """The `.fdt` file name an EEGLAB `.set` stores in `EEG.data`, or None when
     it cannot be read. Only called for a `.set` that `_eeglab_names_an_fdt` says
@@ -7755,6 +7780,8 @@ def require_companions(
       (`fdt_declared`; `stage_declared_fdt` verifies those and refuses them
       typed itself). biosigIO reads the same-stem file first and the embedded
       name second, so a tracked file of that name beside the `.set` also counts.
+      A MATLAB v7.3 file with more than one epoch is left to the reader too,
+      which refuses it `not_continuous` before it asks for the `.fdt`.
 
     Anything the rule cannot read it leaves alone: an unreadable header is the
     reader's to refuse. Messages name the missing file by its BIDS path and the
@@ -7775,6 +7802,11 @@ def require_companions(
     if ext == ".set":
         sibling = os.path.splitext(primary)[0] + ".fdt"
         if fdt_declared or sibling in head_files or not _eeglab_names_an_fdt(primary_local):
+            return
+        # biosigIO's v7.3 reader refuses an epoched file (`not_continuous`) BEFORE
+        # it looks for the `.fdt`, and that verdict is the one on record for such
+        # a file; an absent `.fdt` is not a better description of it.
+        if _eeglab_v73_epoch_count(primary_local) > 1:
             return
         embedded = _eeglab_fdt_reference(primary_local)
         beside = os.path.join(directory, os.path.basename(embedded)) if embedded else None

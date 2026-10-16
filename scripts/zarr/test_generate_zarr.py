@@ -15537,6 +15537,33 @@ class TestRequireCompanionsSet(unittest.TestCase):
                 with self.assertRaises(generate_zarr.CompanionMissing):
                     self.check({"sub-01/eeg/other_name_eeg.fdt"})
 
+    def test_an_epoched_v73_set_is_left_to_the_reader(self):
+        # biosigIO's v7.3 reader refuses a file with more than one epoch
+        # (`not_continuous`) before it asks for the .fdt, and that is the verdict
+        # on record for the file; this rule would otherwise pre-empt it.
+        for wrapped in (True, False):
+            with self.subTest(wrapped=wrapped):
+                try:
+                    build_eeglab_set(self.local, 4, v73=True, fdt=True, wrapped=wrapped, trials=4)
+                except ImportError as exc:
+                    self.skipTest(f"{exc.name} not installed (the fast tier); the full tier runs this")
+                self.check(set())
+                # The control: the same file with ONE epoch is refused, so the
+                # exemption is the epochs and nothing wider.
+                build_eeglab_set(self.local, 4, v73=True, fdt=True, wrapped=wrapped, trials=1)
+                with self.assertRaises(generate_zarr.CompanionMissing):
+                    self.check(set())
+
+    def test_a_classic_epoched_set_is_not_exempt(self):
+        # A classic file with several epochs and a .fdt converts (the epochs are
+        # flattened), so a missing .fdt is its problem like any other's.
+        try:
+            build_eeglab_set(self.local, 4, fdt=True, trials=4)
+        except ImportError as exc:
+            self.skipTest(f"{exc.name} not installed (the fast tier); the full tier runs this")
+        with self.assertRaises(generate_zarr.CompanionMissing):
+            self.check(set())
+
     def test_other_formats_are_untouched(self):
         generate_zarr.require_companions(
             "sub-01/eeg/sub-01_task-rest_eeg.edf", "/no/such/file", set(), self.HEAD, False
@@ -15784,6 +15811,36 @@ class TestCompanionMissingThroughConvertOne(ConvertOneLocalCase):
         # untracked, so only the same-stem clause lets it through.
         self.write_set(self.SET_FDT, embedded="pre_rename.fdt")
         self.assert_converted(self.convert(self.SET, {self.SET, self.SET_FDT}))
+
+    def build_v73(self, trials: int) -> None:
+        os.makedirs(os.path.join(self.repo, os.path.dirname(self.SET)), exist_ok=True)
+        try:
+            build_eeglab_set(
+                os.path.join(self.repo, self.SET), 3, trials=trials, fdt=True, v73=True
+            )
+        except ImportError as exc:
+            self.skipTest(f"{exc.name} not installed")
+
+    def test_an_epoched_v73_set_without_its_fdt_keeps_the_epoched_verdict(self):
+        # biosigIO's v7.3 reader refuses an epoched file before it asks for the
+        # .fdt, so the verdict on record for this file is `not_continuous`. The
+        # absent .fdt is also true; it is not the better description, and the
+        # recording stays as typed as it was.
+        self.build_v73(trials=4)
+        os.remove(os.path.join(self.repo, self.SET_FDT))
+        result = self.convert(self.SET, {self.SET})
+        self.assert_refused_as_data(result, "not_continuous")
+        self.assertIn("4 epochs", result["detail"])
+
+    def test_an_epoched_v73_set_with_its_fdt_is_not_continuous_too(self):
+        self.build_v73(trials=4)
+        self.assert_refused_as_data(self.convert(self.SET, {self.SET, self.SET_FDT}), "not_continuous")
+
+    def test_a_continuous_v73_set_without_its_fdt_is_companion_missing(self):
+        # The control for the two above: the exemption is the epochs.
+        self.build_v73(trials=1)
+        os.remove(os.path.join(self.repo, self.SET_FDT))
+        self.assert_refused_as_data(self.convert(self.SET, {self.SET}), "companion_missing")
 
     def test_a_brainvision_header_without_its_data_file_is_companion_missing(self):
         write_brainvision(self.vhdr_path(), ["Fz", "Cz", "Pz", "Oz"])
