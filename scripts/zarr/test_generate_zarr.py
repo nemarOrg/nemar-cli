@@ -15023,10 +15023,11 @@ class TestMainAnnexMissingVerdict(unittest.TestCase):
         keys = {}
         for i, (rec, how) in enumerate(stored.items()):
             if how == "refused_bdf":
-                # A real BDF+ whose time-keeping onsets start at +40: pyedflib
-                # refuses it ("format errors", no errno), stored plain with a key
-                # that vouches for exactly these bytes.
-                content = build_onset_shifted_bdfplus(
+                # A real BDF+ cut to half its length: pyedflib refuses it
+                # ("Filesize"), and biosigIO's tolerant read cannot recover it
+                # (unlike a late first onset). Stored plain with a key that
+                # vouches for exactly these bytes.
+                content = build_truncated_bdfplus(
                     os.path.join(self.dir, os.path.basename(rec))
                 )
                 ext = ".bdf"
@@ -16582,8 +16583,8 @@ class TestStreamedEdfRefusalThroughConvertOne(ConvertOneLocalCase):
         "truncated EDF+ (Filesize)": (
             "sub-01/eeg/sub-01_task-rest_eeg.edf", build_truncated_edfplus,
         ),
-        "onset-shifted BDF+ (format errors)": (
-            "sub-01/eeg/sub-01_task-rest_eeg.bdf", build_onset_shifted_bdfplus,
+        "truncated BDF+ (Filesize)": (
+            "sub-01/eeg/sub-01_task-rest_eeg.bdf", build_truncated_bdfplus,
         ),
     }
 
