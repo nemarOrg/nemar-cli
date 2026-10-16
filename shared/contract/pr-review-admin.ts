@@ -18,10 +18,10 @@ import type {
   AuthorTally,
   DeclineReason,
   OverrideMode,
-  ReviewOutcome,
   ReviewState,
   RunError,
   Standing,
+  StoredOutcome,
 } from "../pr-review.js";
 
 // The review's own vocabulary (ADR 0092) is declared once, in `shared/pr-review.ts`.
@@ -54,6 +54,13 @@ export const QUEUE_VERDICTS = [
   "exempt",
 ] as const;
 export type QueueVerdict = (typeof QUEUE_VERDICTS)[number];
+
+/**
+ * A verdict a STORED review can have: every word but `exempt`, which is about a pull request with
+ * no review of its current commit and is never what a row says. The queue and the detail view may
+ * say `exempt`; a review record and a history item may not.
+ */
+export type StoredVerdict = Exclude<QueueVerdict, "exempt">;
 
 /** A verdict that means the review READ a commit and concluded something about it. */
 export type ReadVerdict = "pass" | "fail" | "uncertain";
@@ -176,7 +183,7 @@ export interface ReviewHistoryItem {
   id: number;
   head_sha: string;
   state: ReviewState;
-  verdict: QueueVerdict;
+  verdict: StoredVerdict;
   created_at: string;
   decided_at: string | null;
 }
@@ -185,7 +192,7 @@ export interface ReviewRecord {
   id: number;
   head_sha: string;
   /** What this review concluded of ITS OWN commit, re-derived from the stored report. */
-  verdict: QueueVerdict;
+  verdict: StoredVerdict;
   detail: VerdictDetail | null;
   author_login: string;
   author_id: number;
@@ -193,7 +200,7 @@ export interface ReviewRecord {
   created_at: string;
   decided_at: string | null;
   /** The stored outcome, re-validated on the way out; null while the review is in progress. */
-  outcome: ReviewOutcome | null;
+  outcome: StoredOutcome | null;
 }
 
 /** What GitHub says about the pull request right now. Best effort: null when GitHub could not be read. */

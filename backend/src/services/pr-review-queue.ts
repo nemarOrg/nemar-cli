@@ -21,8 +21,10 @@
  *   stores no row, so without a word of its own it would read `not_reviewed` for ever and be offered
  *   to an administrator to review by hand. The word is given only while the current commit has no
  *   review of its own: a push by someone who is not exempt IS reviewed, and that review's verdict
- *   stands. Which authors are exempt is `isReviewExempt`'s to say, asked once per dataset and login
- *   for the length of one request and never kept.
+ *   stands. It is inferred from who opened the pull request, not read from GitHub: nothing here
+ *   checks that the review check was posted as `skipped`. Which authors are exempt is
+ *   `isReviewExempt`'s to say, asked once per dataset and login for the length of one request, a
+ *   few at a time and within a time budget, and never kept.
  * - **Overrides are keyed by GitHub's numeric id**, because a login can be renamed and reused.
  */
 
@@ -44,6 +46,7 @@ import {
   type ReviewHistoryItem,
   type ReviewRecord,
   type SetOverrideResponse,
+  type StoredVerdict,
   type VerdictDetail,
 } from "../../../shared/contract/pr-review-admin.js";
 import {
@@ -51,8 +54,8 @@ import {
   REJECTION_COUNT,
   REJECTION_PERCENT,
   REVIEW_STATES,
-  type ReviewOutcome,
   type ReviewState,
+  type StoredOutcome,
   isDeclineReason,
   isRunError,
   sanitizeNote,
@@ -630,7 +633,7 @@ export function meaningOf(
   row: Pick<ReviewRow, "state" | "verdict" | "detail"> & { created_at?: string },
   now: number = Date.now(),
 ): {
-  verdict: QueueVerdict;
+  verdict: StoredVerdict;
   detail: VerdictDetail | null;
 } {
   switch (row.state) {
@@ -847,22 +850,74 @@ export function ownedHere(env: Bindings, datasetId: string): boolean {
 }
 
 /**
+ * How many exemption lookups run at once while a list is built. Each may ask GitHub whether a login
+ * holds admin on a repository, and an administrator who has pull requests open in dozens of
+ * datasets would otherwise cost that many questions one after another.
+ */
+const EXEMPT_LOOKUP_CONCURRENCY = 6;
+
+/**
+ * The longest a list waits for its exemption lookups, in all. A lookup not started by then is
+ * skipped and its pull request reads as not exempt (what the list said before there was an
+ * exemption), so a GitHub that is slow or refusing makes the list less informative and never
+ * slower than this plus one lookup.
+ */
+let exemptLookupBudgetMs = 20_000;
+
+export function __setExemptLookupBudgetForTests(ms: number | null): void {
+  exemptLookupBudgetMs = ms ?? 20_000;
+}
+
+/**
  * `isReviewExempt`, asked once per (dataset, login) for the length of ONE request and never kept
  * beyond it: an author with several open pull requests costs one lookup, and a role that changes
  * is seen by the next request. The dataset is part of the key because the answer is about a
- * repository, not only a person.
+ * repository, not only a person. `warm` runs a known set of lookups a few at a time within the
+ * budget, so that the list can then read what finished from memory with `known` (a lookup that
+ * never ran reads as not exempt); `ask` is for the one lookup of a detail view.
  */
-function exemptionLookup(env: Bindings): (datasetId: string, login: string) => Promise<boolean> {
+function exemptionLookup(env: Bindings) {
   const answers = new Map<string, Promise<boolean>>();
-  return (datasetId, login) => {
-    const key = `${datasetId}#${login.toLowerCase()}`;
+  const finished = new Map<string, boolean>();
+  const keyOf = (datasetId: string, login: string) => `${datasetId}#${login.toLowerCase()}`;
+  const ask = (datasetId: string, login: string): Promise<boolean> => {
+    const key = keyOf(datasetId, login);
     let answer = answers.get(key);
     if (answer === undefined) {
-      answer = isReviewExempt(env, { login, repo: datasetId });
+      answer = isReviewExempt(env, { login, repo: datasetId }).then((exempt) => {
+        finished.set(key, exempt);
+        return exempt;
+      });
       answers.set(key, answer);
     }
     return answer;
   };
+  const warm = async (
+    wanted: ReadonlyArray<{ datasetId: string; login: string }>,
+  ): Promise<void> => {
+    const pending = [...wanted];
+    const deadline = Date.now() + exemptLookupBudgetMs;
+    let outOfTime = false;
+    const worker = async (): Promise<void> => {
+      for (let next = pending.shift(); next !== undefined; next = pending.shift()) {
+        if (Date.now() >= deadline) {
+          if (!outOfTime) {
+            outOfTime = true;
+            console.warn(
+              "[pr-queue] exemption lookups ran out of time; the rest are listed as not exempt",
+            );
+          }
+          return;
+        }
+        await ask(next.datasetId, next.login);
+      }
+    };
+    const workers = Math.min(EXEMPT_LOOKUP_CONCURRENCY, pending.length);
+    await Promise.all(Array.from({ length: workers }, worker));
+  };
+  const known = (datasetId: string, login: string): boolean =>
+    finished.get(keyOf(datasetId, login)) ?? false;
+  return { ask, warm, known };
 }
 
 export async function buildQueue(env: Bindings, filters: QueueFilters): Promise<QueueResponse> {
@@ -878,26 +933,33 @@ export async function buildQueue(env: Bindings, filters: QueueFilters): Promise<
     return owned;
   });
   const reviews = await loadReviews(env.DB, [...new Set(mine.map((pr) => pr.datasetId))]);
-  const isExempt = exemptionLookup(env);
+  const exempt = exemptionLookup(env);
 
-  const all: QueueEntry[] = [];
-  for (const pr of mine) {
+  const staged = mine.map((pr) => {
     // The review of the current commit if there is one; else the newest, which `classify` will
     // show as another commit's.
     const row =
       reviews.byHead.get(headKey(pr.datasetId, pr.prNumber, pr.headSha)) ??
       reviews.newest.get(`${pr.datasetId}#${pr.prNumber}`) ??
       null;
-    let classified = classify(row, pr.headSha);
+    const base = classify(row, pr.headSha);
     // An exempt pull request has no review of its current commit, by design. A bot or a ghost
     // (no GitHub user id) is never an owner or administrator.
-    if (
-      classified.review_current !== true &&
-      pr.authorId !== null &&
-      (await isExempt(pr.datasetId, pr.authorLogin))
-    ) {
-      classified = { ...classified, verdict: "exempt", detail: null };
-    }
+    const mayBeExempt = base.review_current !== true && pr.authorId !== null;
+    return { pr, base, mayBeExempt };
+  });
+  await exempt.warm(
+    staged
+      .filter((s) => s.mayBeExempt)
+      .map((s) => ({ datasetId: s.pr.datasetId, login: s.pr.authorLogin })),
+  );
+
+  const all: QueueEntry[] = [];
+  for (const { pr, base, mayBeExempt } of staged) {
+    const classified: Classified =
+      mayBeExempt && exempt.known(pr.datasetId, pr.authorLogin)
+        ? { ...base, verdict: "exempt", detail: null }
+        : base;
     const verdictAndDraft = { verdict: classified.verdict, draft: pr.draft };
     all.push({
       dataset_id: pr.datasetId,
@@ -1011,7 +1073,7 @@ export async function fetchLivePullRequest(
  * What a stored row stands for, by the review's own rules (`outcomeOfRow`, which also logs a report
  * that no longer parses and says why). Null for a review still waiting for its report.
  */
-function outcomeOf(row: ReviewRow & { report: string | null }): ReviewOutcome | null {
+function outcomeOf(row: ReviewRow & { report: string | null }): StoredOutcome | null {
   return outcomeOfRow({
     id: row.id,
     datasetId: row.dataset_id,
@@ -1102,7 +1164,7 @@ export async function readPrReviewDetail(
   let derived: Pick<ReviewRow, "state" | "verdict" | "detail"> | null = row;
   if (row && row.state === "reported") {
     const stored = isReadVerdict(row.verdict) ? row.verdict : null;
-    let verdict: QueueVerdict;
+    let verdict: StoredVerdict;
     if (outcome?.kind === "reported") {
       const fromReport = verdictOf(outcome.report);
       if (stored !== null && stored !== fromReport) {
@@ -1140,7 +1202,7 @@ export async function readPrReviewDetail(
     effective.review_current !== true &&
     livePr !== null &&
     livePr.author_id !== null &&
-    (await exemptionLookup(env)(datasetId, livePr.author_login))
+    (await exemptionLookup(env).ask(datasetId, livePr.author_login))
   ) {
     effective = { ...effective, verdict: "exempt", detail: null };
   }

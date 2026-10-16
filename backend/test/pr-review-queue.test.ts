@@ -28,6 +28,7 @@ import {
 import { handlePullRequestEvent } from "../src/services/pr-review";
 import { REVIEW_EXEMPT_SQL } from "../src/services/pr-review-exemption";
 import {
+  __setExemptLookupBudgetForTests,
   __setGraphqlTimeoutForTests,
   checkStateOf,
   classify,
@@ -38,7 +39,11 @@ import {
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1, wrapD1 } from "./helpers/d1";
-import { type PermissionAnswer, permissionResponse } from "./helpers/github-permission";
+import {
+  type PermissionAnswer,
+  isPermissionPath,
+  permissionResponse,
+} from "./helpers/github-permission";
 import { projectOnto } from "./helpers/graphql-select";
 import {
   type PrSpec,
@@ -81,6 +86,9 @@ let usersById: Record<string, { id: number; login: string; type: string } | numb
 let pulls: Record<string, Record<string, unknown> | number> = {};
 /** What GitHub says each login holds on a repository (see helpers/github-permission.ts). */
 let permissions: Record<string, PermissionAnswer> = {};
+/** How many permission questions were being answered at once, now and at most. */
+let permissionInFlight = 0;
+let permissionMaxInFlight = 0;
 
 /** A failing answer that tells the retry transport not to wait, so a test of a failure is not slow. */
 function failing(status: number): Response {
@@ -137,8 +145,17 @@ beforeAll(() => {
         if (typeof hit === "number") return failing(hit);
         return hit ? Response.json(hit) : new Response("{}", { status: 404 });
       }
-      const permission = req.method === "GET" ? await permissionResponse(url, permissions) : null;
-      if (permission) return permission;
+      if (req.method === "GET" && isPermissionPath(url.pathname)) {
+        permissionInFlight++;
+        permissionMaxInFlight = Math.max(permissionMaxInFlight, permissionInFlight);
+        try {
+          return (
+            (await permissionResponse(url, permissions)) ?? new Response("{}", { status: 404 })
+          );
+        } finally {
+          permissionInFlight--;
+        }
+      }
       return new Response("not found", { status: 404 });
     },
   });
@@ -205,6 +222,9 @@ afterEach(() => {
   usersById = {};
   pulls = {};
   permissions = {};
+  permissionInFlight = 0;
+  permissionMaxInFlight = 0;
+  __setExemptLookupBudgetForTests(null);
   envOverrides = {};
   __resetRateLimitStateForTests();
 });
@@ -2022,6 +2042,46 @@ describe("an owner's or administrator's pull request is exempt (ADR 0107)", () =
 
     pulls["nm000201#7"] = livePull({ user: { login: ADMIN_GH, id: 4001, type: "User" } });
     expect((await detail("nm000201", 7)).body.verdict).toBe("not_reviewed");
+  });
+
+  /** Twenty pull requests opened by one administrator, in twenty datasets. */
+  const twentyDatasets = () =>
+    Array.from({ length: 20 }, (_, i) => ({
+      ds: `nm0002${String(i).padStart(2, "0")}`,
+      n: i + 1,
+      author: ADMIN_GH,
+      authorId: 4001,
+    }));
+
+  test("the lookups run a few at a time: not one after another, and not all at once", async () => {
+    permissions = { [ADMIN_GH]: { delayMs: 60 } };
+    nodes(...twentyDatasets());
+    const { body } = await queue();
+    expect(body.entries).toHaveLength(20);
+    expect(body.entries.every((e) => e.verdict === "exempt")).toBe(true);
+    expect(calls.filter((c) => isPermissionPath(c.path))).toHaveLength(20);
+    expect(permissionMaxInFlight).toBeGreaterThanOrEqual(4);
+    expect(permissionMaxInFlight).toBeLessThanOrEqual(6);
+  });
+
+  test("a list never waits longer than its budget for lookups: the rest read as not exempt", async () => {
+    // Each answer takes 150 ms and the whole list may wait 100: the first few lookups start, then
+    // no more do, and the list is still answered.
+    __setExemptLookupBudgetForTests(100);
+    permissions = { [ADMIN_GH]: { delayMs: 150 } };
+    nodes(...twentyDatasets());
+    const started = Date.now();
+    const { status, body } = await queue();
+    expect(status).toBe(200);
+    expect(body.entries).toHaveLength(20);
+    const exempt = body.entries.filter((e) => e.verdict === "exempt").length;
+    const unasked = body.entries.filter((e) => e.verdict === "not_reviewed").length;
+    expect(exempt).toBeGreaterThan(0);
+    expect(unasked).toBeGreaterThan(0);
+    expect(exempt + unasked).toBe(20);
+    // Far fewer than twenty questions were asked, and the list did not take their sum.
+    expect(calls.filter((c) => isPermissionPath(c.path)).length).toBeLessThan(20);
+    expect(Date.now() - started).toBeLessThan(1500);
   });
 
   test("a GitHub that cannot say is not exempt, and the list is still answered", async () => {
