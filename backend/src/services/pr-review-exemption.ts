@@ -28,9 +28,9 @@ import type { Bindings, UserRole } from "../types/bindings.js";
 export const REVIEW_EXEMPT_ROLES = ["owner", "admin"] as const satisfies readonly UserRole[];
 
 /**
- * The account kinds that can be exempt. `test` is not one of them (ADR 0048): the shared test
- * personas hold elevated roles so that role-gated routes can be exercised, and that must never
- * double as a way to skip the review.
+ * The account kinds that can be exempt. `test` is not one of them (ADR 0048): a test persona is a
+ * person's secondary account and not a real identity, so no role it is given makes its pull
+ * requests skip the review.
  */
 export const REVIEW_EXEMPT_KINDS = ["person", "service"] as const satisfies readonly AccountKind[];
 
