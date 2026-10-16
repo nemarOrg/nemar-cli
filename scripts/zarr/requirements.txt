@@ -183,7 +183,7 @@
 # #149, fixed by #150) instead of pyedflib's bare `OSError`, and the tolerant
 # read recovers an EDF+C or BDF+C recording whose first time-keeping onset is
 # late (#145, fixed by #152). 1.2.12 types the streamed refusals, which is why
-# rule 4 of `failure_verdict` (the text match for the bare errors) was removed.
+# the former bare-OSError text match in `failure_verdict` was removed.
 # ZARR_ENGINE_VERSION is NOT bumped here (ADR 0033): a bump is a separate,
 # owner-approved step.
 # <1.2.13 is a CAP, not a floor, raised deliberately per release: a biosigIO

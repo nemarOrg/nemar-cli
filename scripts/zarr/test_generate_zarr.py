@@ -16113,9 +16113,10 @@ class TestFailureVerdict(unittest.TestCase):
 
     # -- a bare OSError is the host's, whatever its words --------------------
     #
-    # Rule 4 used to type pyedflib's streaming refusal and biosigIO's tolerant
-    # fallback's truncation errors by their text. biosigIO 1.2.12 types both
-    # itself (`CorruptFileError`), so nothing reads an `OSError`'s words now.
+    # The former bare-OSError text match typed pyedflib's streaming refusal and
+    # biosigIO's tolerant fallback's truncation errors by their words. biosigIO
+    # 1.2.12 types both itself (`CorruptFileError`), so nothing reads an
+    # `OSError`'s words now.
 
     def test_a_bare_oserror_is_not_typed_by_its_text(self):
         # The words biosigIO's streaming source used to leave in a bare,
@@ -16764,12 +16765,14 @@ class TestHostErrorWhileRecoveringARefusedEdf(ConvertOneLocalCase):
 
     The tolerant fallback reads the file a second time inside the `except`
     block that caught pyedflib's refusal, so an `OSError(EIO)` raised by the
-    second read has the refusal as its `__context__`. Reading the chain would
-    make it `corrupt_or_truncated`, a terminal verdict for what a retry on a
-    healthy disk would convert. The EIO is injected at `mne.io.read_raw`, the
-    fallback's one read of the samples: no portable file permission reaches it,
-    since pyedflib's own open fails first on an unreadable file and raises the
-    host error before any fallback."""
+    second read has the refusal as its `__context__`. biosigIO leaves that EIO
+    uncoded (it re-raises a host condition instead of typing it), and the
+    converter must not read the context behind it: the failure stays a
+    `pending` retry, never a terminal `corrupt_or_truncated` verdict for what a
+    retry on a healthy disk would convert. The EIO is injected at
+    `mne.io.read_raw`, the fallback's one read of the samples: no portable file
+    permission reaches it, since pyedflib's own open fails first on an
+    unreadable file and raises the host error before any fallback."""
 
     REQUIRES = ("zarr", "pyedflib", "biosigio", "mne")
     PRIMARY = "sub-01/eeg/sub-01_task-rest_eeg.edf"
