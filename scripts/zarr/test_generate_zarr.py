@@ -17179,6 +17179,43 @@ class TestLateOnsetThroughConvertOne(ConvertOneLocalCase):
                     self.assertEqual(result["entry"]["trial_types"], {"go": 1, "stop": 1})
 
 
+class TestCutShortBrainVisionThroughConvertOne(ConvertOneLocalCase):
+    """A BrainVision data file cut short is a terminal `corrupt_or_truncated`.
+
+    Before biosigIO 1.2.13 the reader dropped the partial trailing frame, and any
+    marker in it, without a word, and the converter published a store for a
+    recording that was missing its end. The header here declares no `DataPoints`
+    count, so a size that is not a whole number of frames (channels times bytes
+    per sample) is the evidence. The files are a real BrainVision triplet written
+    by `write_brainvision`, converted through the real `convert_one`."""
+
+    REQUIRES = ("zarr", "mne", "biosigio")
+    PRIMARY = "sub-01/eeg/sub-01_task-rest_eeg.vhdr"
+
+    def test_a_data_file_cut_by_one_byte_is_terminal_corrupt_or_truncated(self):
+        os.makedirs(os.path.join(self.repo, "sub-01/eeg"))
+        paths = write_brainvision(
+            os.path.join(self.repo, self.PRIMARY), ["Fp1", "Fp2", "Cz", "Pz"]
+        )
+        head_files = {os.path.relpath(path, self.repo) for path in paths}
+        data = paths[2]
+        self.assertEqual(os.path.splitext(data)[1], ".eeg")
+
+        # The control: the complete triplet converts, so the refusal below is the
+        # missing byte and not the fixture.
+        self.assertEqual(os.path.getsize(data) % (4 * 2), 0)
+        complete = self.convert(self.PRIMARY, head_files)
+        self.assertTrue(complete["ok"], complete.get("error"))
+
+        with open(data, "r+b") as fh:
+            fh.truncate(os.path.getsize(data) - 1)
+        result = self.convert(self.PRIMARY, head_files)
+
+        self.assert_refused_as_data(result, "corrupt_or_truncated")
+        self.assertIn(os.path.basename(data), result["detail"])
+        self.assertNotIn("entry", result)
+
+
 class TestReaderRefusalsThroughConvertOne(ConvertOneLocalCase):
     """The readers' refusals that `failure_verdict` types, each reached by giving
     the real reader a real broken file, and the controls that keep the rules
