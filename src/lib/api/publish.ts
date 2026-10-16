@@ -275,7 +275,7 @@ export async function listPublishRequests(
     // a few small reads, only when the list is empty, and the result is the same.
     // One after the other: three small reads, in the order the caller named the statuses.
     const each: PublishRequestsResponse[] = [];
-    for (const status of statuses) each.push(await fetchPublishRequests([status], search));
+    for (const status of new Set(statuses)) each.push(await fetchPublishRequests([status], search));
     const requests = each.flatMap((one) => one.requests).sort(newestFirst);
     answer = { ...first, requests, count: requests.length };
   }

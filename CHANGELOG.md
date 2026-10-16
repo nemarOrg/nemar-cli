@@ -215,7 +215,7 @@ All three apply on deploy, before the new Worker, and are additive or repairing;
   The review workflow `run-publication-review.yml` (that repository's #137) is on its `main` too, and CI now compares the deployed copy with the authored one byte for byte (#1790).
 - **The package publish and the Worker deploy are separate workflows, within minutes of each other, in either order.**
   Nothing enforces which comes first, so for a few minutes a new CLI can meet the old Worker.
-  The new CLI is correct against either Worker for `list`, `show`, `approve`, `start`, `withdraw` and `verify`, and what the 0.10.18 Worker cannot do is this:
+  The new CLI behaves sensibly against either Worker for `list`, `show`, `approve`, `start`, `withdraw` and `verify`, and what the 0.10.18 Worker cannot do is this:
   - `list` shows the active requests, which that Worker cannot filter by a comma-separated status: when the union comes back empty the CLI asks once per status and merges the rows, newest first.
     That Worker never read `--search`, so the CLI drops the rows that do not match and lists an exact dataset id first.
     That Worker sent no dataset name and no review, so a search that matches only a dataset's name finds nothing on it, and no row shows a review line.
@@ -256,7 +256,7 @@ It happens after this release, in a reviewed change, and ADR 0102's "Before it i
 4. Make the separate docs change that corrects the policy pages for current practice, then add the review's statement to them, so that they say a model reads the submission text.
 5. Verify the attribution: the executor's workflow sends the token, and the staging audit query shows each web approval attributed to the administrator who clicked.
    Record the maintainer's decision on a click whose clicker is no longer an active administrator, which ADR 0105 leaves open (see Known limitations).
-6. Add `PUBLICATION_REVIEW_ENABLED = "1"` to the production variables, delete the production pre-screen switch (a Worker secret that the configuration file does not record, so find it by listing the production secret names, read only), disable `run-prescreen.yml` in the central workflow repository, and run `nemar admin publish start --all` once for the requests already open.
+6. Add `PUBLICATION_REVIEW_ENABLED = "1"` to the production variables, delete the production pre-screen switch (find it by listing the production secret names, read only), disable `run-prescreen.yml` in the central workflow repository, and run `nemar admin publish start --all` once for the requests already open.
    The configuration file does not record production's pre-screen switch, which is a Worker secret, so deleting the secret is what turns the pre-screen off and editing the file would not.
 
 ### Known limitations
