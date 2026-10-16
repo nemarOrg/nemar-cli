@@ -15683,6 +15683,186 @@ class TestGitTreeNamesAreNotQuoted(unittest.TestCase):
         )
 
 
+class TestGitListingsAreByteExact(unittest.TestCase):
+    """`git_ls_files`, `git_diff_name_status` and `compute_worklist` over a REAL
+    repository whose tree holds names a text pipeline mangles: a space, a tab, a
+    newline, a quote, a backslash, leading and trailing whitespace, a byte
+    sequence that is not UTF-8, and a valid non-ASCII name.
+
+    What the listings promise is the bytes of every name, once each, and nothing
+    else: `-z` output ends in a NUL, and splitting on it leaves an empty last
+    field that is not a file. These tests fail if that empty field is kept, if a
+    name is stripped, split on whitespace or decoded lossily, if `-z` goes, or if
+    `--no-renames` goes (a rename then carries two paths and the pairs shift).
+
+    The tree is written with git's plumbing, never through a working tree: a file
+    system may refuse some of these names (APFS refuses a byte sequence that is
+    not UTF-8), and git does not care."""
+
+    DIR = b"sub-01/eeg/"
+    # Name tails; each ends `_eeg.edf` (a recording) unless the test says otherwise.
+    SPACE = b"sub-01_task-with space_eeg.edf"
+    TAB = b"sub-01_task-tab\there_eeg.edf"
+    NEWLINE = b"sub-01_task-new\nline_eeg.edf"
+    QUOTE = b'sub-01_task-say "hi"_eeg.edf'
+    BACKSLASH = b"sub-01_task-back\\slash_eeg.edf"
+    NOT_UTF8 = b"sub-01_task-\xff\xfe_eeg.edf"
+    RENAMED_NOT_UTF8 = b"sub-01_task-\xfe\xff_eeg.edf"
+    NON_ASCII = "sub-01_task-M\u00fcller_eeg.edf".encode()
+    EDGES = b" edges \n"  # not a recording: leading and trailing whitespace, a newline
+    ADDED = b"sub-01_task-added\ttab_eeg.edf"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = self._tmp.name
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "t@example.org")
+        self.git("config", "user.name", "t")
+        self.git("config", "core.quotePath", "true")
+        self.git("config", "diff.renames", "true")  # the default `git diff` would detect them
+        self.first = self.commit(
+            [(self.DIR + name, b"100644", name) for name in (
+                self.SPACE, self.TAB, self.NEWLINE, self.QUOTE, self.BACKSLASH,
+                self.NOT_UTF8, self.NON_ASCII, self.EDGES,
+            )]
+        )
+
+    def git(self, *args: str, stdin: bytes | None = None) -> bytes:
+        return subprocess.run(
+            ["git", "-C", self.repo, *args], check=True, capture_output=True, input=stdin
+        ).stdout
+
+    def commit(self, entries: list[tuple[bytes, bytes, bytes | None]]) -> str:
+        """Apply `(path, mode, content)` entries to the index and commit it on
+        `main`; `content` None removes the path."""
+        info = b""
+        for path, mode, content in entries:
+            if content is None:
+                info += b"0 " + b"0" * 40 + b"\t" + path + b"\0"
+            else:
+                blob = self.git("hash-object", "-w", "--stdin", stdin=content).strip()
+                info += mode + b" " + blob + b"\t" + path + b"\0"
+        self.git("update-index", "-z", "--index-info", stdin=info)
+        tree = self.git("write-tree").decode().strip()
+        parents = []
+        head = subprocess.run(
+            ["git", "-C", self.repo, "rev-parse", "-q", "--verify", "HEAD"],
+            capture_output=True, text=True, check=False,
+        )
+        if head.returncode == 0:
+            parents = ["-p", head.stdout.strip()]
+        commit = self.git("commit-tree", *parents, "-m", "x", tree).decode().strip()
+        self.git("update-ref", "HEAD", commit)
+        return commit
+
+    def paths(self, *tails: bytes) -> set[bytes]:
+        return {self.DIR + tail for tail in tails}
+
+    @staticmethod
+    def as_bytes(listing) -> list[bytes]:
+        return [os.fsencode(name) for name in listing]
+
+    def test_the_tree_listing_is_every_name_once_byte_for_byte(self):
+        listing = generate_zarr.git_ls_files(self.repo, "HEAD")
+        # The control: this really is the tree, so equality is not vacuous.
+        self.assertEqual(len(listing), 8)
+        self.assertNotIn("", listing, "the field after the last NUL is not a file")
+        self.assertEqual(
+            sorted(self.as_bytes(listing)),
+            sorted(self.paths(
+                self.SPACE, self.TAB, self.NEWLINE, self.QUOTE, self.BACKSLASH,
+                self.NOT_UTF8, self.NON_ASCII, self.EDGES,
+            )),
+        )
+        # The listing stays a path the file system can be asked for.
+        self.assertIn(os.fsdecode(self.DIR + self.NOT_UTF8), listing)
+
+    def test_discovery_finds_every_recording_among_those_names(self):
+        found = generate_zarr.discover_primaries(sorted(generate_zarr.git_ls_files(self.repo, "HEAD")))
+        self.assertEqual(
+            sorted(self.as_bytes(found)),
+            sorted(self.paths(
+                self.SPACE, self.TAB, self.NEWLINE, self.QUOTE, self.BACKSLASH,
+                self.NOT_UTF8, self.NON_ASCII,
+            )),
+        )
+
+    def second_commit(self) -> None:
+        """One of each status git reports with renames off, plus a rename."""
+        self.commit([
+            (self.DIR + self.ADDED, b"100644", b"added"),            # A
+            (self.DIR + self.NEWLINE, b"100644", None),               # D
+            (self.DIR + self.SPACE, b"100644", b"changed"),           # M
+            (self.DIR + self.QUOTE, b"120000", b"elsewhere"),         # T: file to symlink
+            (self.DIR + self.NOT_UTF8, b"100644", None),              # a rename ...
+            # ... with the content `setUp` gave the old name (its own name), so git
+            # sees a rename when asked to look for one
+            (self.DIR + self.RENAMED_NOT_UTF8, b"100644", self.NOT_UTF8),
+        ])
+
+    def test_the_diff_keeps_every_status_and_every_name(self):
+        self.second_commit()
+        diff = generate_zarr.git_diff_name_status(self.repo, self.first, "HEAD")
+        self.assertEqual(
+            sorted((status, os.fsencode(path)) for status, path in diff),
+            sorted([
+                ("A", self.DIR + self.ADDED),
+                ("D", self.DIR + self.NEWLINE),
+                ("M", self.DIR + self.SPACE),
+                ("T", self.DIR + self.QUOTE),
+                # `--no-renames`: a rename is a deletion and an addition, each with
+                # one path, not an `R100` entry carrying two.
+                ("D", self.DIR + self.NOT_UTF8),
+                ("A", self.DIR + self.RENAMED_NOT_UTF8),
+            ]),
+        )
+
+    def test_the_control_for_no_renames_git_would_detect_the_rename(self):
+        self.second_commit()
+        raw = self.git("diff", "--name-status", "-z", f"{self.first}..HEAD")
+        self.assertTrue(
+            any(field.startswith(b"R") for field in raw.split(b"\0")),
+            "without --no-renames git reports the rename as one entry with two paths",
+        )
+
+    def test_deleted_names_reach_remove_and_changed_ones_reach_convert(self):
+        self.second_commit()
+        tree = generate_zarr.git_ls_files(self.repo, "HEAD")
+        diff = generate_zarr.git_diff_name_status(self.repo, self.first, "HEAD")
+        convert, remove = generate_zarr.compute_worklist(sorted(tree), diff, False)
+        self.assertEqual(
+            sorted(self.as_bytes(convert)),
+            sorted(self.paths(self.ADDED, self.SPACE, self.QUOTE, self.RENAMED_NOT_UTF8)),
+        )
+        self.assertEqual(
+            sorted(self.as_bytes(remove)),
+            sorted(
+                os.fsencode(store_rel_for(os.fsdecode(self.DIR + tail)))
+                for tail in (self.NEWLINE, self.NOT_UTF8)
+            ),
+        )
+
+
+class TestNameStatusPairs(unittest.TestCase):
+    """`git diff --name-status -z` is `<status> NUL <path> NUL` per entry. Pairing
+    is by position, so a field list that does not pair up is an error: zipping it
+    would drop the tail silently and an incremental run would skip a change."""
+
+    def test_pairs_status_with_path_and_keeps_the_status_letter(self):
+        self.assertEqual(
+            generate_zarr._name_status_pairs(["A", "a.edf", "D", "b c.edf", "T", "d.edf"]),
+            [("A", "a.edf"), ("D", "b c.edf"), ("T", "d.edf")],
+        )
+        self.assertEqual(generate_zarr._name_status_pairs([]), [])
+
+    def test_an_odd_number_of_fields_is_an_error_not_a_shorter_list(self):
+        for fields in (["A"], ["A", "a.edf", "D"], ["R100", "old.edf", "new.edf"]):
+            with self.subTest(fields), self.assertRaises(RuntimeError) as cm:
+                generate_zarr._name_status_pairs(fields)
+            self.assertIn(str(len(fields)), str(cm.exception))
+
+
 class ConvertOneLocalCase(unittest.TestCase):
     """Shared harness for the full-tier cases below: `convert_one` in LOCAL mode
     (the Hallu path) over real files in a throwaway repository, up to the upload,

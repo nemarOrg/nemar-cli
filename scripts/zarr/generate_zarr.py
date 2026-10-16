@@ -5990,13 +5990,28 @@ def git_ls_files(repo_dir: str, ref: str) -> list[str]:
     return _run_z(["git", "-C", repo_dir, "ls-tree", "-r", "-z", "--name-only", ref])
 
 
+def _name_status_pairs(fields: list[str]) -> list[tuple[str, str]]:
+    """`(status, path)` pairs from the fields of `git diff --name-status -z`: each
+    entry is `<status> NUL <path> NUL`, one path since `--no-renames` leaves no
+    copy or rename to carry two. An odd number of fields means an entry lost its
+    path (or one carries two): pairing the rest would silently drop or mispair
+    the tail, and an incremental run would then miss a changed recording, so it
+    is an error instead."""
+    statuses, paths = fields[0::2], fields[1::2]
+    if len(statuses) != len(paths):
+        raise RuntimeError(
+            f"git diff --name-status -z gave {len(fields)} fields, which do not pair "
+            f"up as status and path ({len(statuses)} statuses, {len(paths)} paths)"
+        )
+    return [(status[:1], path) for status, path in zip(statuses, paths, strict=True)]
+
+
 def git_diff_name_status(repo_dir: str, base: str, head: str) -> list[tuple[str, str]]:
-    # `-z` prints each entry as `<status> NUL <path> NUL` (one path, since
-    # `--no-renames` leaves no copy or rename to carry two).
-    fields = _run_z(
-        ["git", "-C", repo_dir, "diff", "--no-renames", "--name-status", "-z", f"{base}..{head}"]
+    return _name_status_pairs(
+        _run_z(
+            ["git", "-C", repo_dir, "diff", "--no-renames", "--name-status", "-z", f"{base}..{head}"]
+        )
     )
-    return [(status[:1], path) for status, path in zip(fields[0::2], fields[1::2])]
 
 
 def is_ancestor(repo_dir: str, maybe_ancestor: str, head: str) -> bool:
