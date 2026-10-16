@@ -3,10 +3,10 @@
  *
  * `nemar dataset update` and `nemar dataset push --pr` used to write the title and the body
  * themselves when given none: "Update from branch X", an empty body, and a file list that lost the
- * first letter of its first path. The automated pull request review (ADR 0092) now reads that text
- * and fails a pull request whose title or description says nothing, so the CLI stops producing it.
- * The author supplies both. This module refuses what a person could not read as a description of a
- * change, and builds the text the CLI adds around the author's own.
+ * first letter of its first path. The automated pull request review (ADR 0092) is shown that text
+ * and checks it against what the files change, and so is the person who merges, so the CLI stops
+ * producing text nobody wrote. The author supplies both. This module refuses what a person could
+ * not read as a description of a change, and builds the text the CLI adds around the author's own.
  *
  * **Readable text, and nothing heavier.** There is no hash, signature or approval step. The checks
  * are few and each is exact: an ordinary sentence is never refused, and whether a sentence is TRUE
@@ -358,7 +358,10 @@ export function buildUpdateBody(input: UpdateBodyInput): string {
 /** The names the review recognizes as a change log (scripts/ci/pr-review-evidence.ts). */
 const CHANGELOG_FILE = /^(CHANGES|CHANGELOG)(\.(md|txt|rst))?$/i;
 
-/** What may stand before a version at the start of a heading line: spaces, `#`, `[`, `v`, `version`. */
+/**
+ * What may stand before a version at the start of a heading line: spaces or tabs, `#` marks, `[`,
+ * and an optional `v`, `version` or `release` with an optional colon.
+ */
 const HEADING_LEAD = String.raw`^[ \t#\[]*(?:(?:v|version|release):?[ \t]*)?`;
 const ANY_VERSION_HEADING = new RegExp(`${HEADING_LEAD}\\d+\\.\\d+\\.\\d+`, "i");
 

@@ -15,8 +15,9 @@
  *     repository with a local bare remote. Only the two boundaries are stood in: the GitHub CLI (a
  *     script that records the arguments of `pr create` and prints a URL) and the NEMAR API (a local
  *     `Bun.serve` answering the reads `update` makes). The CLI runs with a clean environment, no
- *     GitHub token and an empty `gh` configuration directory, so neither stand-in can be bypassed
- *     into a real repository, and the repository the stand-in API names is one that cannot exist.
+ *     GitHub token, an empty `gh` configuration directory and the stand-in `gh` first on its PATH,
+ *     so a mistake in a test cannot reach a real repository; the repository the stand-in API names
+ *     is not there either.
  *
  * CI TIER: unit-pure. Everything is local and offline.
  */
