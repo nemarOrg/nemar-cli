@@ -12573,10 +12573,15 @@ class TestMainRetryPendingRound(unittest.TestCase):
     index and the exit status all run for real.
 
     Recording B is committed the way git-annex commits it, as a symlink into
-    `.git/annex/objects`. Its content is absent on the first run, so B fails and
-    is listed as pending while A converts; the tests then decide whether the
-    content is there for the retry. HEAD never moves, which is exactly the
-    situation a retry round is in.
+    `.git/annex/objects`. Its object exists but this user cannot read it on the
+    first run (mode 0): the host's condition and not the file's, which no reader
+    types, so B fails uncoded and is listed as pending while A converts. The
+    tests then decide whether the content is readable for the retry. HEAD never
+    moves, which is exactly the situation a retry round is in.
+
+    An ABSENT object would not do. Since biosigIO 1.2.12 its streaming source
+    types a missing file `file_read_error`, as its in-memory path always did
+    (`TestAbsentAnnexObjectThroughConvertOne`).
     """
 
     A = "sub-01/eeg/sub-01_task-rest_eeg.edf"
@@ -12610,8 +12615,13 @@ class TestMainRetryPendingRound(unittest.TestCase):
             json.dump({"Name": "retry fixture", "BIDSVersion": "1.8.0"}, fh)
         build_real_edf(os.path.join(self.repo, "sub-01", "eeg"), "sub-01_task-rest_eeg", seconds=10)
         # B as git-annex leaves it before `get`: a committed symlink to an object
-        # that is not there.
+        # this user cannot read yet.
         self.b_object = os.path.join(self.repo, ".git", "annex", "objects", "B.edf")
+        os.makedirs(os.path.dirname(self.b_object))
+        build_real_edf(os.path.dirname(self.b_object), "B", seconds=10)
+        os.chmod(self.b_object, 0)
+        if os.access(self.b_object, os.R_OK):
+            self.skipTest("file modes do not bind this user (root), so B would convert")
         os.symlink(
             os.path.relpath(self.b_object, os.path.join(self.repo, "sub-02", "eeg")),
             os.path.join(self.repo, self.B),
@@ -12668,9 +12678,8 @@ class TestMainRetryPendingRound(unittest.TestCase):
         return f"http://127.0.0.1:{server.server_port}"
 
     def materialize_b(self):
-        """`git annex get` for B: the content appears, HEAD does not move."""
-        os.makedirs(os.path.dirname(self.b_object), exist_ok=True)
-        build_real_edf(os.path.dirname(self.b_object), "B", seconds=10)
+        """`git annex get` for B: the content becomes readable, HEAD does not move."""
+        os.chmod(self.b_object, 0o644)
 
     def run_main(self, *extra, clean: bool = True) -> tuple[int, str, dict]:
         argv = [
@@ -16881,6 +16890,38 @@ class TestFallbackTruncationThroughConvertOne(ConvertOneLocalCase):
                 self.assertIn("invalid number of signals in header (-1)", result["detail"])
                 codes[path_name] = result["code"]
         self.assertEqual(codes.get("in-memory"), codes.get("streaming"))
+
+
+class TestAbsentAnnexObjectThroughConvertOne(ConvertOneLocalCase):
+    """A git-annex pointer whose content was never fetched, in LOCAL mode.
+
+    The working tree holds a symlink to an object that is not there, so the
+    converter cannot stat the file, forces streaming, and a reader is asked to
+    open a path that does not exist. biosigIO 1.2.12 types that
+    `file_read_error` on the streaming source, as its in-memory source always
+    did; before, the streaming source raised a bare `FileNotFoundError`, which
+    reached `failure_verdict` uncoded and was retried as `pending`. Remote
+    mode never gets here: it types a missing object `annex_object_missing`
+    before any reader runs.
+
+    This pins what the pin does, so the change is visible; it is not a
+    statement that a typed, never-retried failure is the right verdict for
+    content that is merely unfetched."""
+
+    REQUIRES = ("zarr", "pyedflib", "biosigio")
+    PRIMARY = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+
+    def test_an_unfetched_object_is_a_typed_read_failure(self):
+        link = os.path.join(self.repo, self.PRIMARY)
+        os.makedirs(os.path.dirname(link))
+        absent = os.path.join(self.repo, ".git", "annex", "objects", "absent.edf")
+        os.symlink(os.path.relpath(absent, os.path.dirname(link)), link)
+        self.assertFalse(os.path.exists(link), "the control: the link dangles")
+
+        result = self.convert(self.PRIMARY, {self.PRIMARY})
+
+        self.assert_refused_as_data(result, "file_read_error")
+        self.assertIn("no such file or directory", result["detail"])
 
 
 class TestReaderRefusalsThroughConvertOne(ConvertOneLocalCase):
