@@ -2084,6 +2084,27 @@ describe("an owner's or administrator's pull request is exempt (ADR 0107)", () =
     expect(Date.now() - started).toBeLessThan(1500);
   });
 
+  test("a database failure on a lookup fails the list and stops the lookups that were still to start", async () => {
+    nodes(...twentyDatasets());
+    let lookups = 0;
+    const failing = wrapD1(realD1(db), (sql) => {
+      if (sql !== REVIEW_EXEMPT_SQL) return;
+      lookups++;
+      if (lookups === 1) throw new Error("D1 unavailable");
+    });
+    const res = await app.request(
+      "/admin/pr-reviews",
+      { headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+      { ...env(), DB: failing } as Bindings,
+    );
+    expect(res.status).toBe(500);
+    expect(((await res.json()) as { code?: string }).code).toBe("internal");
+    // The workers that were already running may still finish; none starts another lookup for a
+    // list that has already failed. Give a worker that would keep going time to show it.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(lookups).toBeLessThanOrEqual(6);
+  });
+
   test("a GitHub that cannot say is not exempt, and the list is still answered", async () => {
     permissions = { [ADMIN_GH]: 500 };
     nodes({ ds: "nm000201", n: 1, author: ADMIN_GH, authorId: 4001 });

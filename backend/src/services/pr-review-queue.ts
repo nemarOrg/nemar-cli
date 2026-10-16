@@ -899,17 +899,23 @@ function exemptionLookup(env: Bindings) {
     const deadline = Date.now() + exemptLookupBudgetMs;
     let outOfTime = false;
     const worker = async (): Promise<void> => {
-      for (let next = pending.shift(); next !== undefined; next = pending.shift()) {
-        if (Date.now() >= deadline) {
-          if (!outOfTime) {
-            outOfTime = true;
-            console.warn(
-              "[pr-queue] exemption lookups ran out of time; the rest are listed as not exempt",
-            );
+      try {
+        for (let next = pending.shift(); next !== undefined; next = pending.shift()) {
+          if (Date.now() >= deadline) {
+            if (!outOfTime) {
+              outOfTime = true;
+              console.warn(
+                "[pr-queue] exemption lookups ran out of time; the rest are listed as not exempt",
+              );
+            }
+            return;
           }
-          return;
+          await ask(next.datasetId, next.login);
         }
-        await ask(next.datasetId, next.login);
+      } catch (err) {
+        // A lookup failed (the database), which fails the whole list: no more are started for it.
+        pending.length = 0;
+        throw err;
       }
     };
     const workers = Math.min(EXEMPT_LOOKUP_CONCURRENCY, pending.length);
