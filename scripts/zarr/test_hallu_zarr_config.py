@@ -2398,7 +2398,7 @@ def test_a_count_that_is_not_a_plain_decimal_stops_the_script(
     assert tree_entries(zarr_base) == []
 
 
-def test_the_slots_are_started_with_the_bash_that_started_the_tick() -> None:
+def test_the_slot_command_names_the_bash_that_started_the_tick() -> None:
     # `bash` from PATH could be an older one that fails the version check in every
     # child; the running interpreter is known to pass it.
     assert '"${BASH:-bash}" "$SCRIPT_PATH"' in SCRIPT.read_text()
