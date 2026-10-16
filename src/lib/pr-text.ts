@@ -107,10 +107,12 @@ function isJsonDocument(text: string): boolean {
 }
 
 function bareForm(text: string): string {
-  return text
-    .replace(/\s+/g, " ")
-    .replace(/[\s.!:;,]+$/, "")
-    .toLowerCase();
+  const flat = text.replace(/\s+/g, " ").toLowerCase();
+  // A loop, not `/[\s.!:;,]+$/`: that expression is quadratic on a long run of these characters
+  // followed by anything else, and the text is whatever was pasted.
+  let end = flat.length;
+  while (end > 0 && " .!:;,".includes(flat.charAt(end - 1))) end--;
+  return flat.slice(0, end);
 }
 
 function quoted(text: string): string {

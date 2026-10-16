@@ -221,6 +221,16 @@ describe("findTextProblem", () => {
     expect(findTextProblem("description", "Adds new recordings. ".repeat(500))).toBeNull();
   });
 
+  test("a very long run of punctuation is judged in linear time", () => {
+    // Trimming it with `/[\s.!:;,]+$/` took ten seconds on 160,000 characters: the run is tried
+    // again from every start. The text is whatever was pasted, so a hang is a defect.
+    const hostile = `${".".repeat(200_000)}a`;
+    const started = performance.now();
+    expect(findTextProblem("description", hostile)?.code).toBe("no_words");
+    expect(findTextProblem("title", hostile)?.code).toBe("no_words");
+    expect(performance.now() - started).toBeLessThan(2_000);
+  });
+
   test("a placeholder is refused as a description too, and says which text it saw", () => {
     const problem = findTextProblem("description", "Save changes");
     expect(problem?.code).toBe("placeholder");
