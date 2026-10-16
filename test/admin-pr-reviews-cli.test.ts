@@ -509,6 +509,19 @@ function livePull(
   gh.pulls["nm000201#7"] = { sha, author: "alice", ...over };
 }
 
+describe("nemar admin pr-reviews allow and block say an owner or administrator is exempt", () => {
+  test("in their detailed help, so a block is not read as holding one back", async () => {
+    for (const verb of ["allow", "block"]) {
+      // The detailed help: `--help` itself keeps to the options and points at `--help-all`.
+      const r = await cli([...PR, verb, "--help-all"]);
+      expect(r.exitCode, verb).toBe(0);
+      expect(r.stdout.replace(/\s+/g, " "), verb).toContain(
+        "A NEMAR owner or administrator is exempt from the review whatever is decided here",
+      );
+    }
+  });
+});
+
 describe("nemar admin pr-reviews show", () => {
   test("prints the stored report in the words of the pull-request comment", async () => {
     livePull();
@@ -548,9 +561,14 @@ describe("nemar admin pr-reviews show", () => {
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("Review:    exempt (owner or admin)");
     expect(r.stdout).toContain("no automated review is required");
-    expect(r.stdout).toContain("Its check reads skipped, which is not a pass.");
+    expect(r.stdout).toContain("is posted as skipped, which is not a pass");
+    expect(r.stdout).toContain("this view does not verify that it was");
     expect(r.stdout).not.toContain("not reviewed");
     expect(r.stdout).not.toContain("No automated review has been recorded");
+    // The author's record is not shown beside it: an exempt pull request is not held to it, and
+    // "not paused: reviewed automatically" would be the opposite of what happens.
+    expect(r.stdout).not.toContain("Standing:");
+    expect(r.stdout).not.toContain("decided pull request");
   });
 
   test("an earlier commit's review is named as that commit's, not shown as this one's report", async () => {
@@ -567,7 +585,7 @@ describe("nemar admin pr-reviews show", () => {
     const r = await cli([...PR, "show", "nm000201", "7"]);
     expect(r.stdout).toContain("Review:    exempt (owner or admin)");
     expect(r.stdout).toContain("An earlier commit (aaaaaaa) was reviewed and read fail");
-    expect(r.stdout).toContain("that does not apply to this one");
+    expect(r.stdout).toContain("this commit was not reviewed");
     // The old report is not printed as if it were about this commit.
     expect(r.stdout).not.toContain("Needs changes");
     expect(r.stdout).not.toContain("a DIFFERENT commit");
@@ -1618,6 +1636,20 @@ describe("nemar admin pr-reviews next", () => {
     nodes({ ds: "nm000201", n: 7, author: "alice", authorId: 42 });
     const r = await next("d\nq\n");
     expect(r.stdout).toContain("This commit has not been reviewed.");
+  });
+
+  test("d on an exempt pull request says it is not reviewed, and not that a report could not be read", async () => {
+    // The queue's own administrator opened it, so it is exempt; --all shows what needs nobody.
+    gh.pulls["nm000201#7"] = { sha: SHA_A, author: "queueadmin-gh", authorId: 4001 };
+    nodes({ ds: "nm000201", n: 7, author: "queueadmin-gh", authorId: 4001 });
+    const r = await next("d\nq\n", ["--all"]);
+    expect(r.stdout).toContain("exempt (owner or admin)");
+    expect(r.stdout).toContain(
+      "A NEMAR owner or administrator opened this pull request, so it is not reviewed.",
+    );
+    expect(r.stdout).not.toContain("could not be read");
+    expect(r.stdout).not.toContain("has not been reviewed");
+    expect(writes()).toHaveLength(0);
   });
 
   test("a version that did not go up is said so in red words, and the version check agrees or not", async () => {

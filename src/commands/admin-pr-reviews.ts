@@ -325,6 +325,11 @@ export function standingLines(s: ContributorStanding): string[] {
         .join(", ")}`,
     );
   }
+  out.push(
+    chalk.dim(
+      "  Exempt:    a NEMAR owner or administrator is not reviewed whatever is decided here.",
+    ),
+  );
   return out;
 }
 
@@ -426,8 +431,9 @@ REVIEW column (the automated review of the pull request's CURRENT commit):
   in progress       the review is running
   could not decide  the review ended without a verdict (an error, or it never reported)
   exempt (owner or admin)
-                    a NEMAR owner or administrator opened it, so it is not reviewed and its check
-                    reads skipped; nothing waits for you, and a push by anyone else IS reviewed
+                    a NEMAR owner or administrator opened it, so it is not reviewed (its review
+                    check is posted as skipped, which this list does not verify); nothing waits
+                    for you, and a push by anyone else IS reviewed
 A verdict is never carried over to a commit it did not read. '*' marks the pull requests you can
 act on now: a pass to approve, or one nobody has decided for you (drafts are never marked).
 
@@ -642,11 +648,15 @@ prReviewsCommand
           "             A NEMAR owner or administrator opened this pull request, so no automated review is required.",
         ),
       );
-      console.log(chalk.dim("             Its check reads skipped, which is not a pass."));
+      console.log(
+        chalk.dim(
+          "             The review check on an exempt pull request is posted as skipped, which is not a pass; this view does not verify that it was.",
+        ),
+      );
       if (d.review) {
         console.log(
           chalk.dim(
-            `             An earlier commit (${short(d.review.head_sha)}) was reviewed and read ${verdictWord(d.review.verdict)}; that does not apply to this one.`,
+            `             An earlier commit (${short(d.review.head_sha)}) was reviewed and read ${verdictWord(d.review.verdict)}; this commit was not reviewed.`,
           ),
         );
       }
@@ -696,7 +706,8 @@ prReviewsCommand
       }
     }
 
-    if (d.author) {
+    // An exempt pull request is not held to the author's record, so the record is not shown beside it.
+    if (d.author && d.verdict !== "exempt") {
       console.log();
       for (const l of standingLines(d.author)) console.log(l);
     }
@@ -947,7 +958,7 @@ prReviewsCommand
   )
   .option(
     "--all",
-    "Every open pull request whose current commit has no review, or one that was declined or ended without a verdict",
+    "Every open pull request whose current commit has no review, or one that was declined or ended without a verdict (not one an owner or administrator opened: it is exempt)",
   )
   .option("--dry-run", "With --all: list what would be started and start nothing")
   .option("-y, --yes", "With --all: do not ask before starting")
@@ -1897,6 +1908,13 @@ function overrideCommand(mode: "allow" | "block"): void {
     )
     .option("--reason <text>", "Why, in plain words (up to 200 characters; kept with the decision)")
     .option("--json", "Output the raw JSON")
+    .addHelpText(
+      "after",
+      `
+A NEMAR owner or administrator is exempt from the review whatever is decided here: their pull
+requests are not reviewed, so a block does not hold them back and an allow changes nothing.
+`,
+    )
     .action(async (loginArg: string, options: { reason?: string; json?: boolean }) => {
       if (!requireAuth(options.json)) process.exit(1);
       const login = checkLogin(loginArg, options.json);

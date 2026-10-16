@@ -253,6 +253,23 @@ describe("standingLines", () => {
     expect(text).toContain("not paused: reviewed automatically, within the rate limits");
   });
 
+  test("says an owner or administrator is exempt whatever is decided, so a block or an allow is not misread", () => {
+    for (const s of [
+      standing(),
+      standing({
+        override: { mode: "block", reason: null, set_at: "2026-10-01", set_by: "queueadmin" },
+        standing: { paused: true, because: "maintainer" },
+      }),
+    ]) {
+      const text = standingLines(s)
+        .map((l) => l.replace(ANSI, ""))
+        .join("\n");
+      expect(text).toContain(
+        "a NEMAR owner or administrator is not reviewed whatever is decided here",
+      );
+    }
+  });
+
   test("says where an identity came from when GitHub was not asked", () => {
     const text = standingLines(standing({ resolved_from: "history" })).join("\n");
     expect(text).toContain("from the Worker's records");
