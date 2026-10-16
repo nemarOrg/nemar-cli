@@ -5095,9 +5095,9 @@ def merge_index(
 
     `failures` is this run's typed data failures ({path, zarr, code, reason,
     detail}) -- recordings that will not convert without a change to the data or
-    the converter. They are merged like stores: prior failures carry over, a path
-    that converted (or whose store was removed) this run drops out, and this run's
-    failures overlay.
+    the converter, except content that is not yet fetched locally. They are merged
+    like stores: prior failures carry over, a path that converted (or whose store
+    was removed) this run drops out, and this run's failures overlay.
 
     `pending` is this run's INFRA failures ({path, zarr, reason, last_error,
     last_attempt_utc}) -- recordings that have no store yet but are still expected
