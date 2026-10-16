@@ -3303,6 +3303,15 @@ const UPDATE_TEXT_FLAGS: PrTextFlags = {
     'nemar dataset update -m "Add twelve subjects" --description "Adds sub-21 to sub-32, each with a resting-state recording."',
 };
 
+const PUSH_TEXT_FLAGS: PrTextFlags = {
+  command: "nemar dataset push --pr",
+  title: "--title",
+  description: "--body",
+  hasYes: false,
+  example:
+    'nemar dataset push --pr -t "Add the second session" -b "Adds ses-02 for sub-01 to sub-05."',
+};
+
 const PR_TEXT_QUESTIONS: Record<TextKind, string> = {
   title: "Title (one line saying what changed):",
   description: "Description (what changed and why):",
@@ -3389,6 +3398,19 @@ async function askForPrText(given: PrTextGiven): Promise<Required<PrTextGiven>> 
   const title = given.title ?? (await promptForPrText("title"));
   const description = given.description ?? (await promptForPrText("description"));
   return { title, description };
+}
+
+/** The title and body for `push --pr`: given, asked for at a terminal, or refused. */
+async function settlePushPrText(options: {
+  title?: string;
+  body?: string;
+}): Promise<Required<PrTextGiven>> {
+  const given = requirePrText(
+    { title: options.title, description: options.body },
+    PUSH_TEXT_FLAGS,
+    process.stdin.isTTY === true,
+  );
+  return askForPrText(given);
 }
 
 // Update command - push data/metadata changes via PR
@@ -5190,8 +5212,14 @@ datasetCommand
   .option("-j, --jobs <number>", "Parallel upload streams for S3", "4")
   .option("--no-s3", "Skip pushing data to S3 remote")
   .option("--pr", "Create a pull request after pushing")
-  .option("-t, --title <title>", "Pull request title (with --pr)")
-  .option("-b, --body <body>", "Pull request body (with --pr)")
+  .option(
+    "-t, --title <title>",
+    "Pull request title (with --pr; required, asked for at a terminal)",
+  )
+  .option(
+    "-b, --body <body>",
+    "Pull request body, what changed and why (with --pr; required, asked for at a terminal)",
+  )
   .addHelpText(
     "after",
     `
@@ -5200,6 +5228,11 @@ Description:
   copy annexed data to the S3 remote.
 
   With --pr, creates a pull request after pushing the current branch.
+  The title (-t) and the body (-b) are required: a reviewer reads them, and
+  so does NEMAR's automated review, so say in plain words what changed and
+  why. Placeholder text, an empty value and a pasted hash or JSON are
+  refused. At a terminal the command asks for what you leave out; without
+  one it refuses, before anything is pushed.
 
   S3 push uses temporary credentials from the NEMAR API. Falls back to
   environment AWS credentials if not logged in.
@@ -5213,7 +5246,7 @@ Examples:
   $ nemar dataset push
   $ nemar dataset push --no-s3      # Git only, skip S3
   $ nemar dataset push -j 8         # More parallel S3 streams
-  $ nemar dataset push --pr -t "Add new recordings"`,
+  $ nemar dataset push --pr -t "Add new recordings" -b "Adds the second session for sub-01 to sub-05."`,
   )
   .action(async (options) => {
     const cwd = process.cwd();
@@ -5231,6 +5264,19 @@ Examples:
       currentBranchName === "main" ||
       currentBranchName === "master" ||
       (currentBranchName?.startsWith("adjusted/main") ?? false);
+
+    // With --pr the title and the body are settled before anything is pushed: a data push can
+    // take hours, and it must not end in "now say what this pull request is". Only a branch that
+    // will get a pull request needs them; on main the pull request is skipped below.
+    let prText: Required<PrTextGiven> | undefined;
+    if (
+      options.pr &&
+      currentBranchName &&
+      currentBranchName !== "main" &&
+      currentBranchName !== "master"
+    ) {
+      prText = await settlePushPrText(options);
+    }
     if (isOnMain && !options.pr) {
       const pushDatasetIdCheck = await getDatasetIdFromRemote(cwd);
       if (pushDatasetIdCheck && isAuthenticated()) {
@@ -5425,18 +5471,11 @@ Examples:
       if (branch === "main" || branch === "master") {
         console.log(chalk.yellow("  Skipping PR: already on main branch"));
       } else {
+        // Settled before the push. Asked for here only if the branch changed in between, so a
+        // missing value can never fall back to a title or a body the CLI made up.
+        const { title, description } = prText ?? (await settlePushPrText(options));
         spinner = ora("Creating pull request...").start();
-        const prArgs = ["gh", "pr", "create"];
-        if (options.title) {
-          prArgs.push("--title", options.title);
-        } else {
-          prArgs.push("--title", `Update from branch ${branch}`);
-        }
-        if (options.body) {
-          prArgs.push("--body", options.body);
-        } else {
-          prArgs.push("--body", "");
-        }
+        const prArgs = ["gh", "pr", "create", "--title", title, "--body", description];
 
         try {
           const proc = spawn({

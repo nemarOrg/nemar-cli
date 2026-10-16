@@ -1117,6 +1117,108 @@ describe("nemar dataset update opens a pull request a person can read", () => {
   });
 });
 
+/** A git-annex clone on a feature branch with one commit nobody has pushed, and an empty remote. */
+function newAnnexFeatureClone(): { work: string; remote: string } {
+  const base = fresh("annex");
+  const remote = join(base, "remote");
+  const work = join(base, "work");
+  mkdirSync(remote, { recursive: true });
+  mkdirSync(work, { recursive: true });
+  git(remote, "init", "-q", "--bare", "-b", "main");
+  git(work, "init", "-q", "-b", "main");
+  git(work, "annex", "init", "test-repo");
+  write(work, "README.md", "# Resting EEG\n");
+  git(work, "add", "-A");
+  git(work, "commit", "-q", "-m", "initial");
+  git(work, "remote", "add", "origin", remote);
+  git(work, "checkout", "-q", "-b", "feature/new-recordings");
+  write(work, "participants.tsv", "participant_id\nsub-01\n");
+  git(work, "add", "-A");
+  git(work, "commit", "-q", "-m", "add participants");
+  return { work, remote };
+}
+
+describe("nemar dataset push shows the new options", () => {
+  test("--help names the title and the body as required with --pr", async () => {
+    const { stdout, exitCode } = await runNemar(["dataset", "push", "--help"], REPO_ROOT);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("-t, --title <title>");
+    expect(stdout).toContain("-b, --body <body>");
+    expect(stdout).toContain("required");
+  });
+});
+
+describe("nemar dataset push --pr settles the text before it pushes", () => {
+  const said = (r: Run) => r.stdout + r.stderr;
+  const pushed = (remote: string) => git(remote, "for-each-ref", "refs/heads");
+
+  test("refuses without a title and a body, and pushes nothing", async () => {
+    const { work, remote } = newAnnexFeatureClone();
+    const r = await runNemar(["dataset", "push", "--pr", "--no-s3"], work);
+    expect(r.exitCode).toBe(1);
+    expect(said(r)).toContain(
+      "nemar dataset push --pr needs a pull request title and description; missing --title and --body.",
+    );
+    expect(said(r)).toContain("Without a terminal nothing can ask for them.");
+    expect(pushed(remote)).toBe("");
+    expect(ghArgs()).toBeNull();
+  });
+
+  test("refuses the placeholder title this command used to write", async () => {
+    const { work, remote } = newAnnexFeatureClone();
+    const r = await runNemar(
+      [
+        "dataset",
+        "push",
+        "--pr",
+        "--no-s3",
+        "-t",
+        "Update from branch feature/new-recordings",
+        "-b",
+        GOOD_DESCRIPTION,
+      ],
+      work,
+    );
+    expect(r.exitCode).toBe(1);
+    expect(said(r)).toContain("The title (--title) is placeholder text");
+    expect(pushed(remote)).toBe("");
+    expect(ghArgs()).toBeNull();
+  });
+
+  test("an empty body is refused, not sent", async () => {
+    const { work, remote } = newAnnexFeatureClone();
+    const r = await runNemar(
+      ["dataset", "push", "--pr", "--no-s3", "-t", GOOD_TITLE, "-b", ""],
+      work,
+    );
+    expect(r.exitCode).toBe(1);
+    expect(said(r)).toContain("The description (--body) is empty");
+    expect(pushed(remote)).toBe("");
+  });
+
+  test("opens the pull request with exactly the text it was given", async () => {
+    const { work, remote } = newAnnexFeatureClone();
+    const r = await runNemar(
+      ["dataset", "push", "--pr", "--no-s3", "-t", GOOD_TITLE, "-b", GOOD_DESCRIPTION],
+      work,
+    );
+    expect(r.exitCode).toBe(0);
+    expect(pushed(remote)).toContain("refs/heads/feature/new-recordings");
+    expect(ghArgs()).toEqual(["pr", "create", "--title", GOOD_TITLE, "--body", GOOD_DESCRIPTION]);
+    expect(ghArgs()?.join(" ")).not.toContain("Update from branch");
+  });
+
+  test("on main there is no pull request to describe, so no text is asked for", async () => {
+    const { work, remote } = newAnnexFeatureClone();
+    git(work, "checkout", "-q", "main");
+    const r = await runNemar(["dataset", "push", "--pr", "--no-s3"], work);
+    expect(r.exitCode).toBe(0);
+    expect(said(r)).toContain("Skipping PR: already on main branch");
+    expect(pushed(remote)).toContain("refs/heads/main");
+    expect(ghArgs()).toBeNull();
+  });
+});
+
 // ---------------------------------------------------------------------------------------------
 // At a terminal, the command asks
 // ---------------------------------------------------------------------------------------------
@@ -1225,5 +1327,24 @@ describe("nemar dataset update at a terminal asks for what the command line left
     expect(await term.exited).toBe(1);
     expect(term.seen()).toContain("missing --message and --description.");
     expect(term.seen()).not.toContain("Title (one line saying what changed):");
+  });
+});
+
+describe("nemar dataset push --pr at a terminal asks before anything is pushed", () => {
+  test("the prompts come first and nothing has left the machine until they are answered", async () => {
+    const { work, remote } = newAnnexFeatureClone();
+    const term = onTerminal(["dataset", "push", "--pr", "--no-s3"], work);
+    await term.until("Title (one line saying what changed):");
+    // The prompt is on screen and nothing has left the machine.
+    expect(git(remote, "for-each-ref", "refs/heads")).toBe("");
+    term.type(`${GOOD_TITLE}\r`);
+    await term.until("Description (what changed and why):");
+    expect(git(remote, "for-each-ref", "refs/heads")).toBe("");
+    term.type(`${GOOD_DESCRIPTION}\r`);
+    expect(await term.exited, term.seen()).toBe(0);
+    expect(git(remote, "for-each-ref", "refs/heads")).toContain(
+      "refs/heads/feature/new-recordings",
+    );
+    expect(ghArgs()).toEqual(["pr", "create", "--title", GOOD_TITLE, "--body", GOOD_DESCRIPTION]);
   });
 });
