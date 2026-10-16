@@ -902,6 +902,21 @@ describe("owners and administrators are not reviewed (ADR 0107)", () => {
     expect(calls).toHaveLength(0);
   });
 
+  test("an exempt check is logged with the dataset, the pull request and the commit, and with no login", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    const lines: string[] = [];
+    const original = console.info;
+    console.info = (...args: unknown[]) => void lines.push(args.map(String).join(" "));
+    try {
+      await deliver(prEvent({ login: "owner-gh", userId: 601, number: 7, sha: SHA_A }));
+    } finally {
+      console.info = original;
+    }
+    const ours = lines.filter((l) => l.startsWith("[pr-review]") && l.includes("exempt"));
+    expect(ours).toEqual([`[pr-review] ${DATASET}#7: exempt, skipped check posted for aaaaaaa`]);
+    expect(lines.join("\n").toLowerCase()).not.toContain("owner-gh");
+  });
+
   test("a demoted administrator is reviewed from the next delivery on: the role is read every time", async () => {
     seedAccount({ github: "admin-gh", role: "admin" });
     const first = await deliver(
