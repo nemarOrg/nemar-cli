@@ -11,8 +11,8 @@ The Worker as the gate, the per-commit row, the one-shot claim, the derived verd
 Follows ADR 0048 (account kinds), ADR 0053 and ADR 0086 (unknown is never clear), ADR 0020 (a workflow edit reaches ~785 repositories at once).
 
 This ADR records the decisions of epic #1813.
-The first phase (#1814) builds the exemption, which is the only part of this ADR the code does so far.
-The rest is decided here and built by the later phases; until they ship, the caps and the three-question review of ADR 0092 are what runs.
+The first phase (#1814) builds the exemption, the `exempt` queue verdict and their CLI wording, which is the only part of this ADR the code does so far.
+The rest is decided here and built by the later phases; until they ship, the caps, the tally pause and the three-question review of ADR 0092 are what runs.
 
 ## Context
 
@@ -54,10 +54,16 @@ And the review only ever sees a pull request's text and metadata, so a count of 
   It applies to a push, a reopening and a marking as ready alike: anyone with write access can push to an owner's branch, close and reopen the pull request, or take a draft out of draft, and what they put in front of the review must not pass because the pull request carries another name.
   A delivery that names no usable sender is reviewed.
   An administrator's start has no sender (its payload is GitHub's own record of the pull request, built by the Worker) and is judged on the author alone.
+  The owner confirmed this check for a push.
+  Applying it to every action is an extension made while building, accepted by the epic's coordinator and recorded here for the owner to confirm or narrow.
 - **An exempt pull request gets one completed `skipped` check and no review.**
   The title says the review is not required for an owner or administrator, and the text says skipped is not a pass.
-  No row is stored, no model is called, no allowance is spent, and nothing is dispatched.
-  If the same head already has a review, its check run is reused so the commit carries one current result, and the pull request's one review comment is edited to say the same; no comment is created.
+  No row is stored, no model is called, no allowance is spent, nothing is dispatched, and no comment is made.
+- **That applies only to a commit no review has touched.**
+  A commit that has a row keeps what its review said, whoever acts on it next: the author reopening the pull request, a force-push back to it, or an administrator's start.
+  A row means someone put the commit through review (a stranger's push to an owner's branch, or an author who was not exempt yet), `skipped` counts as passing for a required check, and writing it over a failed or undecided review would erase a verdict nobody exempt gave.
+  An exempt author who wants such a commit through pushes a new commit, which is exempt in its own right.
+  An administrator's start of such a commit is handled like anyone's: a review is started again if its review ended without a verdict.
 - **`skipped` does not break "unknown is never green" (ADR 0092, ADR 0053, ADR 0086).**
   GitHub counts `skipped` as passing for a required check, which is why ADR 0092 kept it out of `conclusionOf`.
   It is now the conclusion of exactly one outcome, `exempt`, and of no other, and a test pins that.
@@ -71,8 +77,9 @@ And the review only ever sees a pull request's text and metadata, so a count of 
   The historical words `rate_limited` and `daily_limit` stay readable in stored rows and are never produced again; no migration.
 - **An administrator's explicit `block` still declines, and `allow` only clears a block.**
   The tally stays as information in `standing` and in the queue.
+  A delivery is judged in this order: exempt, then a block, then the review, so a block on an owner's or administrator's account changes nothing.
 - **The automatic tally pause (more than 5 rejected and more than 10 percent) is removed.**
-  This one has not been confirmed by the owner yet; the code keeps the pause until it is.
+  The owner confirmed this; the code keeps the pause until phase P2 removes it.
 
 ### 3. Two model calls, at the highest effort Haiku 5.5 offers
 
@@ -90,12 +97,12 @@ And the review only ever sees a pull request's text and metadata, so a count of 
   An incomplete or slightly inaccurate description passes with a note, and a misleading one is a blocker the author fixes by editing it.
 - Editing the title, the body or the base re-runs the review and supersedes a running one.
 - An empty description is a blocker decided by a git-free fact, not by the model, and `nemar dataset update` requires a title and a description and writes the CHANGES entry for the version it creates.
-  These two have not been confirmed by the owner yet.
+  The owner confirmed both.
 
 ### 5. The review check is required on reviewable datasets, through its own ruleset
 
 - **A separate ruleset, "NEMAR PR review required", requires the `NEMAR PR Review` check from the NEMAR App.**
-  It is not a third rule in "NEMAR branch protection": that ruleset is gated on BIDS validation, is missing on most public repositories, and adding the repository-admin role to its bypass would also bypass the BIDS and version checks.
+  It is not a third required check inside "NEMAR branch protection": that ruleset is gated on BIDS validation, is missing on most public repositories, and adding the repository-admin role to its bypass would also bypass the BIDS and version checks.
 - **The bypass is the NEMAR App (the enrichment workflow pushes to `main` with its token), organization administrators, and the repository `admin` role.**
   Maintainers and outside collaborators get none.
   The `dataset-admin` team is the GitHub side of "admin"; org owners manage it and NEMAR code does not.
@@ -105,19 +112,27 @@ And the review only ever sees a pull request's text and metadata, so a count of 
 
 ### 6. Rollout is its own gated step
 
-- The script reference per environment and the workflow mirror in `nemarDatasets/.github` land first, because the parity test makes any edit a two-repository change and a dev dispatch must be able to run the dev script.
-- Then: the epic into `dev`, a staging soak on a published exemplar, a calibration gate with thresholds the owner sets (no false pass on a blocking problem, a bounded false-fail rate, no stage-1 reject of a legitimate pull request), a release with its own review, a canary dataset, batches of 50, and the live datasets last, one at a time, only with the owner's explicit go-ahead.
-- A dev-signed dispatch runs `nemar-cli`'s `dev` script and a production one runs `main`'s, under the same federated identity (the workflow checked out `main` for both).
+- The workflow's timeout, wording and install order (after the token is minted, with `--ignore-scripts`, as the publication review's workflow does) change first and are mirrored to `nemarDatasets/.github`, because the parity test makes any edit a two-repository change.
+  Every dispatch, staging included, runs `main`'s script, so the new reviewer cannot run on staging before a release.
+- There is therefore no staging soak.
+  After the release the new review runs in an advisory shadow mode on production pull requests, and the check is made required only after the shadow run and the calibration gate.
+- The calibration gate, approved by the owner: no false pass on a blocking problem; at most 10 percent false fails among the pull requests labeled pass; no stage-1 reject of a legitimate pull request; no steering flag on a legitimate pull request.
+- The production canary is a data author's account named in the epic, and its pull requests exercise the gate first.
+  No dataset is special-cased (more than 900 are live): every reviewable dataset is in scope, applied in batches, with a dry run as the default and an explicit apply flag.
+- The workspace spend limit is $175 a month.
+  Setting it is the owner's action in the Anthropic Console, and no phase assumes it is set without checking.
 
 ## What this supersedes
 
-- **ADR 0092, the second Decision bullet:** the hourly, daily and platform caps and the tally pause. The per-commit row and the administrator's block stay.
-- **ADR 0092, the reviewer bullet and "The model has no tools and writes little":** effort `high`, and a model that "answers three questions". Now two calls, five questions, effort `max`.
+- **ADR 0092, the second Decision bullet:** the hourly, daily and platform caps and the tally pause.
+  The per-commit row and the administrator's block stay.
+- **ADR 0092, the reviewer bullet and "The model has no tools and writes little":** effort `high`, and a model that "answers three questions".
+  Now two calls, five questions, effort `max`.
 - **ADR 0092, "Green and red are real; everything else needs a person":** plus `skipped`, for an exempt pull request alone.
 - **ADR 0092, "The check is not required by any ruleset yet", and the Consequences that lean on it** ("acceptable only because the check is not required", "This is why the check is not required", "only matter once the check is required"): the check is required on reviewable datasets, and the risk that a model's false green lets a maintainer merge is accepted, bounded by facts, calibration and re-review on edit.
 - **ADR 0092, the accepted risks "Many new accounts" and "Padding the tally":** replaced by the stage-1 cost bound and the workspace spend limit.
 - **ADR 0092, the amendment of 2026-10-10:** the allowances and the pool (and so `start --all` stopping when the daily pool is spent), and "A new delivery of the same commit still restarts nothing but a dispatch GitHub did not run", which now has one more exception, an edit.
-- **ADR 0093:** `allow` lifting the tally's pause (it now only clears a block); the queue verdicts gain `exempt`; the two required checks it reads are joined by the review where its ruleset exists; and the `blocked` refusal, whose rule is unchanged, names the review.
+- **ADR 0093:** `allow` lifting the tally's pause (it will only clear a block); the queue verdicts gain `exempt` (built in phase P1); the two required checks it reads are joined by the review where its ruleset exists; and the `blocked` refusal, whose rule is unchanged, names the review.
 
 ## Consequences
 
@@ -126,17 +141,28 @@ And the review only ever sees a pull request's text and metadata, so a count of 
 - **An exempt pull request has no row.**
   There is no history to show and nothing for the watchdog to publish again.
   A check that cannot be published is thrown and the webhook answers 500, so the delivery shows as failed in the App's delivery log and can be redelivered.
-  A redelivery of an exempt commit with no earlier review posts a second `skipped` check of the same name, which is harmless.
+  A redelivery of an exempt commit posts a second `skipped` check of the same name, which is harmless.
+  The only record that a commit was exempted is that check and a fixed-word log line (dataset, pull request, commit; no login).
 - **A commit an owner pushes on top of a stranger's is the owner's.**
   The exemption judges who caused each delivery, not who wrote each commit, so an exempt account that pushes over someone else's earlier commits vouches for them.
-  The earlier push was reviewed when it was made.
+  Those earlier commits may not have been reviewed at all: commits already on the branch when the owner opened the pull request, pushes made while it was a draft, and pushes whose review declined or errored.
+  The same holds for an exempt author who marks a draft ready, and for an administrator's start of a pull request whose current commit has no review.
+- **A demotion or a revocation does not retract a `skipped` check already posted.**
+  It stays valid for its commit until the commit changes, and the next delivery reads the role afresh.
+- **An exempt push stores no row, so it does not supersede a review of the previous commit that is still running.**
+  That review's late result can rewrite the pull request's review comment, which names the commit it is about; the check on the new commit is unaffected.
+- **The `exempt` label is inferred from who opened the pull request, not read from GitHub.**
+  It does not prove the check was posted: a publish that fails answers 500 and shows in the App's delivery log, and the queue says nothing about a check it does not read.
 - **GitHub's `author_association` is not a reason to exempt or to reject anyone.**
   It reads `CONTRIBUTOR` for a private organization member, so neither the exemption nor the screen uses it.
-- **The cross-check costs one GitHub call per role-matched account on a delivery** (two when someone other than the author caused it), bounded to a few seconds, and one per exempt author and dataset for an admin queue request.
+- **The cross-check costs one GitHub call per role-matched account on a delivery** (two when someone other than the author caused it; one delivery asks about each account once), each bounded to a few seconds.
+  An admin queue request asks once per exempt author and dataset, a few at a time and within 20 seconds, and a pull request whose lookup did not run in time is listed as not exempt.
 - **Without caps, cost is bounded by the screen and the spend limit.**
-  One account pushing every minute to a pull request that passes stage 1 could cost up to about $70 a day at $0.10 and $0.50 per million input and output tokens (the planning pass's estimate), and spam that fails stage 1 costs under one cent a pull request.
-  The workspace spend limit is what makes that a bound and not an estimate, and when it trips the checks read "Could not decide" and required repositories wait for an administrator.
-- **Staging canaries need a non-exempt GitHub account**, because the operational admin accounts there are exempt.
+  One account pushing every minute to a pull request that passes stage 1 could cost up to about $70 a day at $0.10 and $0.50 per million input and output tokens (the planning pass's estimate, which assumes prompts under 100,000 tokens: above that the price is five times higher, and the review's input caps keep it below).
+  Spam that fails stage 1 costs under one cent a pull request.
+  The workspace spend limit ($175 a month, the owner's Console action) is what makes that a bound and not an estimate, and when it trips the checks read "Could not decide" and required repositories wait for an administrator.
+- **The production canary exercises the gate because it is not exempt.**
+  An exempt account cannot, so the canary is a data author whose pull requests are reviewed.
 - **A wrong identity match would exempt the wrong person.**
   The tests cover every combination of role, kind, status and deletion, the cross-check closes the unregistered-login hole, and the role is never cached.
 
@@ -145,6 +171,7 @@ And the review only ever sees a pull request's text and metadata, so a count of 
 - **Exempt by `author_association` (`OWNER`, `MEMBER`).** A private organization member reads `CONTRIBUTOR`, which is the failure this ADR starts from.
 - **A list of exempt logins in code or configuration.** It drifts from the accounts, and the dev Worker shares production's users, so a name in code would exempt that name everywhere.
 - **Check the sender only on a push.** A reopening keeps the head commit and a draft takes pushes unreviewed, so someone else's commit could be passed by closing and reopening an owner's pull request.
+- **Let an exempt author's event turn a reviewed commit's check into `skipped`.** It was the first design, so that a commit reviewed before its author became exempt would carry one current result. A collaborator's push to an owner's branch is reviewed too, and the owner reopening the pull request (or an administrator's start) would then erase its failed review.
 - **Store a row for an exempt pull request.** It would put a pull request nobody reviewed into the tally, the queue and the platform's counts, for the one benefit of a watchdog retry.
 - **`neutral` for an exempt pull request.** A required check accepts it too, and `skipped` is the truer word: the review did not run.
 - **Keep the caps and raise the trusted tier.** It keeps a count deciding whether a person is reviewed, and the count was wrong about who is trusted.
@@ -155,4 +182,4 @@ And the review only ever sees a pull request's text and metadata, so a count of 
 - Epic #1813 and its first phase #1814.
 - Exemption: `backend/src/services/pr-review-exemption.ts`, `backend/src/services/pr-review.ts` (`isExemptDelivery`, `publishExempt`), `shared/pr-review.ts` (`exempt`, `skipped`).
 - Queue and labels: `backend/src/services/pr-review-queue.ts`, `shared/contract/pr-review-admin.ts`, `src/commands/admin-pr-reviews.ts`.
-- Tests: `backend/test/pr-review-exemption.test.ts`, `backend/test/pr-review-flow.test.ts`, `backend/test/pr-review-queue.test.ts`, `backend/test/pr-review-start.test.ts`, `test/pr-review.test.ts`.
+- Tests: `backend/test/pr-review-exemption.test.ts`, `backend/test/pr-review-flow.test.ts`, `backend/test/pr-review-queue.test.ts`, `backend/test/pr-review-start.test.ts`, `test/pr-review.test.ts`, `test/admin-pr-reviews-cli.test.ts`.
