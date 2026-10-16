@@ -65,6 +65,14 @@ const step = (name: string): Step => {
   return s;
 };
 
+/**
+ * Whether a step is handed the dataset token, which is the output of the mint step. Any mention of
+ * the mint step's id counts, so `steps['app-token'].outputs.token` is caught as well as the dotted
+ * form; the mint step itself produces the token and does not hold it.
+ */
+const holdsDatasetToken = (s: Step): boolean =>
+  s.id !== "app-token" && JSON.stringify(s).includes("app-token");
+
 /** The reporter script the validate step writes, as it will exist on the runner. */
 const REPORTER = (() => {
   const run = (job.steps.find((x) => x.name === "Validate the dispatch")?.run ?? "").split("\n");
@@ -243,9 +251,7 @@ describe("what it is allowed to hold", () => {
   });
 
   test("the GitHub token reaches only the steps that read the repository, never the model step", () => {
-    const withToken = job.steps
-      .filter((s) => JSON.stringify(s).includes("steps.app-token.outputs.token"))
-      .map((s) => s.name);
+    const withToken = job.steps.filter(holdsDatasetToken).map((s) => s.name);
     expect(withToken.sort()).toEqual(
       ["Fetch the pull request as git data", "Read the pull request from the API"].sort(),
     );
@@ -283,7 +289,7 @@ describe("what it is allowed to hold", () => {
 describe("what runs after the mint is not install-time code", () => {
   // `create-github-app-token` is the one step given the GitHub App's private key, and the runner
   // passes the same inputs to the action's post step at the end of the job. The order and the flag
-  // below are what the workflow's header says closes three things: hooks planted before the mint,
+  // below are what the workflow's header says closes three things: code planted before the mint,
   // install-time scripts, and a token in a configuration file that the install could read. The
   // checkout, Bun and the install run after the mint and before the fetch step writes the dataset
   // token to the clone's configuration, and the install runs no lifecycle script.
@@ -339,10 +345,8 @@ describe("what runs after the mint is not install-time code", () => {
     const writers = job.steps.filter((s) => /\bgit config\b[^\n]*extraheader/.test(s.run ?? ""));
     expect(writers.map((s) => s.name)).toEqual([FETCH]);
     expect(at(INSTALL)).toBeLessThan(at(FETCH));
-    for (const s of job.steps) {
-      if (JSON.stringify(s).includes("steps.app-token.outputs.token")) {
-        expect(at(s.name ?? ""), s.name).toBeGreaterThan(at(INSTALL));
-      }
+    for (const s of job.steps.filter(holdsDatasetToken)) {
+      expect(at(s.name ?? ""), s.name).toBeGreaterThan(at(INSTALL));
     }
     // And no step before the mint holds anything of the repository's: no tool directory, no Bun,
     // no checkout.
@@ -509,7 +513,8 @@ describe("nothing from the pull request runs", () => {
     expect(inputsFor("dev")).toEqual(inputsFor("production"));
     // No `ref` input anywhere in the job is anything but main, and no step names a dev branch in
     // another form (a refspec, an `origin/dev`, an `@dev` on an action). The only `dev` left in the
-    // job is the environment value the validate step accepts and the origin table keyed by it.
+    // job is the environment value the validate step accepts, the origin table keyed by it, and
+    // /dev/null.
     const refInputs = job.steps.flatMap((s) =>
       s.with && "ref" in s.with ? [String(s.with.ref)] : [],
     );
@@ -517,6 +522,16 @@ describe("nothing from the pull request runs", () => {
     expect(JSON.stringify(job)).not.toMatch(
       /refs\/heads\/dev\b|\borigin\/dev\b|@dev\b|\bref["']?\s*[:=]\s*["']?dev\b/,
     );
+    // A shell step could name the branch on a git command line (`git checkout dev`, `git fetch
+    // origin dev`), which the patterns above do not see. A continued command is read as one line,
+    // and a `dev` inside a path, as in /dev/null, is not a branch name.
+    for (const s of job.steps) {
+      for (const line of (s.run ?? "").replace(/\\\n\s*/g, " ").split("\n")) {
+        if (/\bgit\b/.test(line)) {
+          expect(line, s.name).not.toMatch(/(?<![\w/.-])dev(?![\w/.-])/);
+        }
+      }
+    }
   });
 });
 
@@ -694,6 +709,8 @@ describe("the shell steps, run for real", () => {
       "dev",
       "DEV",
       "Production",
+      "production ",
+      "production\n",
       "dev ",
       " dev",
       "dev\n",
@@ -708,8 +725,11 @@ describe("the shell steps, run for real", () => {
         accepted.push(environment);
       } else {
         // Refused by the guard that names the environment, not by a later line that happens to
-        // fail: a script that stops on an unbound variable would also exit non-zero.
+        // fail: a script that stops on an unbound variable would also exit non-zero. The guard
+        // says why on stdout and stops there, so a refusal that reached the unbound variable
+        // would also leave a message on stderr.
         expect(r.stdout, JSON.stringify(environment)).toContain("::error::malformed environment");
+        expect(r.stderr, JSON.stringify(environment)).toBe("");
       }
     }
     expect(accepted).toEqual(["production", "dev"]);
