@@ -23,7 +23,6 @@ import {
   PR_REVIEW_COMMENT_MARKER,
   type PrReviewReport,
   PrReviewReportError,
-  REJECTION_COUNT,
   REVIEW_OUTCOME_KINDS,
   REVIEW_STATES,
   RUN_ERRORS,
@@ -661,42 +660,17 @@ describe("the pull-request comment", () => {
   });
 });
 
-describe("the contributor tally: more than 5 rejections AND more than 10 percent, the later of the two", () => {
-  test("a newcomer's first failure never pauses anyone", () => {
-    expect(standingOf({ rejected: 1, decided: 1 }, null).paused).toBe(false);
+describe("a contributor's standing: only an administrator's block pauses anyone (ADR 0107)", () => {
+  test("with no decision a contributor is not paused", () => {
+    expect(standingOf(null)).toEqual({ paused: false });
   });
 
-  test("exactly the threshold count is not enough; one more is, when the rate also holds", () => {
-    expect(standingOf({ rejected: REJECTION_COUNT, decided: 10 }, null).paused).toBe(false);
-    expect(standingOf({ rejected: REJECTION_COUNT + 1, decided: 10 }, null)).toEqual({
-      paused: true,
-      because: "tally",
-    });
+  test("a block pauses, and says an administrator did it", () => {
+    expect(standingOf("block")).toEqual({ paused: true, because: "maintainer" });
   });
 
-  test("a prolific contributor with a few failures among many accepted is not paused", () => {
-    // 6 rejected of 100 is 6 percent: past the count, short of the rate.
-    expect(standingOf({ rejected: 6, decided: 100 }, null).paused).toBe(false);
-    // 11 of 100 is 11 percent and past the count: paused.
-    expect(standingOf({ rejected: 11, decided: 100 }, null).paused).toBe(true);
-  });
-
-  test("exactly ten percent is not more than ten percent", () => {
-    expect(standingOf({ rejected: 10, decided: 100 }, null).paused).toBe(false);
-    expect(standingOf({ rejected: 11, decided: 110 }, null).paused).toBe(false);
-    expect(standingOf({ rejected: 12, decided: 110 }, null).paused).toBe(true);
-  });
-
-  test("no decided pull requests is never a pause", () => {
-    expect(standingOf({ rejected: 0, decided: 0 }, null).paused).toBe(false);
-  });
-
-  test("a maintainer's decision wins in both directions", () => {
-    expect(standingOf({ rejected: 50, decided: 50 }, "allow").paused).toBe(false);
-    expect(standingOf({ rejected: 0, decided: 0 }, "block")).toEqual({
-      paused: true,
-      because: "maintainer",
-    });
+  test("an allow only lifts a block: it is the standing of someone with no decision", () => {
+    expect(standingOf("allow")).toEqual(standingOf(null));
   });
 });
 

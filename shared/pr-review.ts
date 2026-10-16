@@ -1,7 +1,7 @@
 /**
  * The dataset pull-request review's contract (ADR 0092): the report a review run posts, the
- * verdict derived from it, the check-run words shown to people, and the rule that stops
- * reviewing a contributor whose pull requests keep being rejected.
+ * verdict derived from it, the check-run words shown to people, and the one standing decision
+ * about a contributor, an administrator's block.
  *
  * One module, three readers. The workflow script builds a report with it, the Worker parses
  * what comes back with it before storing a byte, and the check-run is rendered from it, so
@@ -536,14 +536,17 @@ export function verdictOf(report: PrReviewReport): Verdict {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Why the Worker declines a pull request: its contributor is paused. Nothing else is a reason, and
- * in particular no count of reviews, per contributor or per day, is one any more (ADR 0107).
+ * Why the Worker declines a pull request: an administrator has blocked its contributor. Nothing
+ * else is a reason, and in particular no count of reviews, per contributor or per day, and no
+ * count of rejections is one any more (ADR 0107).
  */
 export const PRODUCED_DECLINE_REASONS = ["contributor_paused"] as const;
 
 /**
  * Words rows written before the counts were removed still hold. They are never produced again and
  * there is no migration: such a row keeps its word, and it parses and renders as "Not reviewed".
+ * (`contributor_paused` is not among them: a block still writes it, though rows from before the
+ * automatic pause was removed hold it too.)
  */
 export const HISTORICAL_DECLINE_REASONS = ["rate_limited", "daily_limit"] as const;
 
@@ -647,8 +650,8 @@ const RESULT_WORD: Record<CriterionResult, string> = {
 
 /**
  * What a declined pull request is told. `contributor_paused` does not say who paused the
- * contributor: rows written before the automatic pause was removed hold the same word, and they are
- * shown again whenever a stored result is re-stated. The two historical words are about a limit that
+ * contributor: rows written while a rejection record paused people automatically hold the same
+ * word, and they are shown again whenever a stored result is re-stated. The two historical words are about a limit that
  * no longer exists, so they say so and say what to do now, which is the same for both.
  */
 const DECLINE_COPY: Record<DeclineReason, string> = {
@@ -906,19 +909,15 @@ export function renderComment(outcome: ReviewOutcome, headSha: string): string {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Who gets reviewed: the contributor tally.
+// Who gets reviewed: an administrator's block, and the record shown beside it.
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Automated review is paused for a contributor once MORE THAN this many of their pull requests
- * were rejected AND those rejections are MORE THAN {@link REJECTION_PERCENT} percent of the pull
- * requests that got a decision. Both must hold, so the harder one to reach decides: a newcomer's
- * first failure never pauses anyone, and a prolific contributor with a few failures among hundreds
- * of accepted pull requests is not paused either.
+ * What a contributor's pull requests have come to, shown to the administrator who reads it. It is
+ * information and nothing else: no rejection record, however bad, pauses anyone's reviews any more
+ * (ADR 0107), because with the check required a contributor who could not be reviewed could never
+ * merge. Only an administrator's block does.
  */
-export const REJECTION_COUNT = 5;
-export const REJECTION_PERCENT = 10;
-
 export interface AuthorTally {
   /** Distinct pull requests whose latest decided review was a fail. */
   rejected: number;
@@ -926,23 +925,16 @@ export interface AuthorTally {
   decided: number;
 }
 
-/** A maintainer's standing decision about one contributor, or none. Wins over the tally in both directions. */
+/**
+ * An administrator's standing decision about one contributor, or none. `block` pauses their reviews;
+ * `allow` is only the word for lifting a block, since nothing else pauses anyone.
+ */
 export type AuthorOverride = OverrideMode | null;
 
-export type Standing = { paused: false } | { paused: true; because: "maintainer" | "tally" };
+export type Standing = { paused: false } | { paused: true; because: "maintainer" };
 
-export function standingOf(tally: AuthorTally, override: AuthorOverride): Standing {
-  if (override === "allow") return { paused: false };
-  if (override === "block") return { paused: true, because: "maintainer" };
-  // Integer arithmetic: rejected / decided > 10 / 100  <=>  rejected * 100 > decided * 10.
-  if (
-    tally.decided > 0 &&
-    tally.rejected > REJECTION_COUNT &&
-    tally.rejected * 100 > tally.decided * REJECTION_PERCENT
-  ) {
-    return { paused: true, because: "tally" };
-  }
-  return { paused: false };
+export function standingOf(override: AuthorOverride): Standing {
+  return override === "block" ? { paused: true, because: "maintainer" } : { paused: false };
 }
 
 // ---------------------------------------------------------------------------------------------

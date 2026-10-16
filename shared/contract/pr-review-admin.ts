@@ -3,9 +3,9 @@
  *
  *   GET    /admin/pr-reviews                      every open pull request to `main`, with its review
  *   GET    /admin/pr-reviews/:dataset/:pr         one pull request: the stored report, its history
- *   GET    /admin/pr-review-authors/:login        a contributor's tally, override and standing
- *   PUT    /admin/pr-review-authors/:login        allow or block a contributor
- *   DELETE /admin/pr-review-authors/:login        remove that decision, so the tally decides again
+ *   GET    /admin/pr-review-authors/:login        a contributor's record, override and standing
+ *   PUT    /admin/pr-review-authors/:login        block a contributor, or lift a block (allow)
+ *   DELETE /admin/pr-review-authors/:login        remove that decision
  *   POST   /admin/pr-reviews/:dataset/:pr/start   review a pull request that is already open
  *
  * Types, the closed vocabularies, and nothing else, so the Worker that answers and the CLI that
@@ -221,6 +221,7 @@ export interface LivePullRequest {
 export interface ContributorStanding {
   login: string;
   author_id: number;
+  /** The record of rejected pull requests: information, and never a reason to pause anyone. */
   tally: AuthorTally;
   override: null | {
     mode: OverrideMode;
@@ -228,12 +229,8 @@ export interface ContributorStanding {
     set_at: string;
     set_by: string | null;
   };
-  /** The standing the review gate applies today: the override if there is one, else the record. */
+  /** The standing the review gate applies today. Only a block pauses a contributor; the tally never does. */
   standing: Standing;
-  /** The standing the RECORD alone would give, ignoring any override. */
-  by_record: Standing;
-  /** The tally rule, so a reader can see how far from a pause a contributor is. */
-  thresholds: { rejected_more_than: number; percent_more_than: number };
   /** The latest decided review of each of the contributor's most recent pull requests. */
   recent: Array<{
     dataset_id: string;

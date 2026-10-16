@@ -51,8 +51,6 @@ import {
 } from "../../../shared/contract/pr-review-admin.js";
 import {
   type AuthorOverride,
-  REJECTION_COUNT,
-  REJECTION_PERCENT,
   REVIEW_STATES,
   type ReviewState,
   type StoredOutcome,
@@ -1266,7 +1264,10 @@ const RECENT_SQL = `
   SELECT dataset_id, pr_number, head_sha, verdict, decided_at
     FROM latest WHERE rn = 1 ORDER BY seen_at DESC, id DESC LIMIT 10`;
 
-/** The tally, override and standing of one contributor, as the review gate would see them now. */
+/**
+ * The tally, override and standing of one contributor, as the review gate would see them now. The
+ * tally is the record beside the decision, not an input to it: only a block pauses anyone.
+ */
 export async function standingFor(
   db: D1Database,
   login: string,
@@ -1304,9 +1305,7 @@ export async function standingFor(
             set_by: row.set_by ? plainRef(row.set_by, 60) : null,
           }
         : null,
-    standing: standingOf(tally, mode),
-    by_record: standingOf(tally, null),
-    thresholds: { rejected_more_than: REJECTION_COUNT, percent_more_than: REJECTION_PERCENT },
+    standing: standingOf(mode),
     recent: recent.results,
     resolved_from: resolvedFrom,
   };

@@ -14,11 +14,12 @@
  * delivery GitHub signs; no workflow in a dataset repository takes part, so no collaborator can
  * edit the review or reach the credentials it uses by editing a branch. It is also the only place
  * that knows who opened a pull request and whether an administrator has blocked them.
- * {@link gateDecision} is that decision, made once per delivery: exempt, then paused, then
- * reviewed. **No count of reviews decides it** (ADR 0107): not how many a contributor or the
- * platform started this hour or day. What bounds the cost is decided in that ADR (a content screen
- * first, and the workspace's spend limit), and the claim step is what makes a forged
- * `repository_dispatch` buy nothing, since anyone holding a dataset repository's workflow
+ * {@link gateDecision} is that decision, made once per delivery: exempt, then blocked, then
+ * reviewed. **No count decides it** (ADR 0107): not how many reviews a contributor or the platform
+ * started this hour or day, and not how many of a contributor's pull requests were rejected. Only
+ * an administrator's block holds a contributor back. What bounds the cost is decided in that ADR
+ * (a content screen first, and the workspace's spend limit), and the claim step is what makes a
+ * forged `repository_dispatch` buy nothing, since anyone holding a dataset repository's workflow
  * credentials can send one.
  *
  * **Owners and administrators are not reviewed** (ADR 0107). A pull request opened by a NEMAR
@@ -259,7 +260,8 @@ export function readPullRequestEvent(payload: unknown): IntakeResult {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * The tally for one contributor, counted from the reviews themselves.
+ * The tally for one contributor, counted from the reviews themselves. It is shown to
+ * administrators and decides nothing (see `AuthorTally`).
  *
  * `decided` is the number of distinct pull requests with at least one decided (pass or fail)
  * review; `rejected` is how many of those were most recently decided as a fail. Counting the
@@ -636,11 +638,12 @@ type Gate = "exempt" | "blocked" | "review";
  *     author AND whoever caused it, never the author alone). Asked only for a commit with no row
  *     (`commit` is `"new"`): a commit a review has touched keeps what that review said, so there
  *     `skipped` can never be the answer.
- *  2. **blocked**: the author is paused (their record, or an administrator's decision). It holds
- *     back a restart of a commit already on record (`"on_record"`) as it does a new commit, and it
- *     never reaches an exempt delivery, because exempt is asked first.
- *  3. **review**: everything else. No count of reviews decides it: not how many the author or the
- *     platform started lately. That is what the earlier hourly, daily and platform caps did, and
+ *  2. **blocked**: an administrator has blocked the author. It holds back a restart of a commit
+ *     already on record (`"on_record"`) as it does a new commit, and it never reaches an exempt
+ *     delivery, because exempt is asked first.
+ *  3. **review**: everything else. No count decides it: not how many reviews the author or the
+ *     platform started lately, and not how many of the author's pull requests were rejected.
+ *     That is what the earlier hourly, daily and platform caps and the automatic pause did, and
  *     ADR 0107 removed them.
  *
  * A database error throws, like every read of the intake.
@@ -652,10 +655,7 @@ async function gateDecision(
   commit: "new" | "on_record",
 ): Promise<Gate> {
   if (commit === "new" && (await isExemptDelivery(env, pr, options))) return "exempt";
-  const standing = standingOf(
-    await readAuthorTally(env.DB, pr.authorId),
-    await readAuthorOverride(env.DB, pr.authorId),
-  );
+  const standing = standingOf(await readAuthorOverride(env.DB, pr.authorId));
   return standing.paused ? "blocked" : "review";
 }
 

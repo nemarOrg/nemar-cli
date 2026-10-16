@@ -1214,7 +1214,7 @@ describe("the callback is one-shot and domain-separated", () => {
   });
 });
 
-describe("who is reviewed: the contributor tally and the overrides", () => {
+describe("who is reviewed: only an administrator's block holds anyone back (ADR 0107)", () => {
   /** Give an author `decided` decided pull requests, `rejected` of them ending in a fail. */
   function seedHistory(authorId: number, decided: number, rejected: number) {
     for (let i = 0; i < decided; i++) {
@@ -1234,24 +1234,29 @@ describe("who is reviewed: the contributor tally and the overrides", () => {
     }
   }
 
-  test("more than 5 rejections and more than 10 percent pauses the contributor", async () => {
-    seedHistory(501, 8, 6);
+  test("a contributor with ten rejections in ten is reviewed: the record pauses nobody", async () => {
+    // The old rule paused at more than 5 rejected and more than 10 percent. This is 100 percent.
+    seedHistory(501, 10, 10);
+    expect(await readAuthorTally(realD1(db), 501)).toEqual({ decided: 10, rejected: 10 });
+
     const r = await deliver(prEvent());
-    expect(r.body).toMatchObject({ dispatched: false, reason: "contributor_paused" });
-    expect(dispatchesMade()).toHaveLength(0);
-    expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "action_required" });
-    expect(lastCheck().output?.summary).toContain("by hand");
-    expect(rows().filter((x) => x.state === "declined")).toHaveLength(1);
+
+    expect(r.body).toMatchObject({ dispatched: true, reason: "dispatched" });
+    expect(rows().filter((x) => x.state === "declined")).toEqual([]);
+    expect(dispatchesMade()).toHaveLength(1);
+    expect(lastCheck()).toMatchObject({ status: "in_progress" });
   });
 
-  test("exactly 5 rejections is not enough", async () => {
-    seedHistory(501, 8, 5);
-    expect((await deliver(prEvent())).body).toMatchObject({ dispatched: true });
-  });
-
-  test("many rejections among many accepted pull requests is under the rate and not paused", async () => {
-    seedHistory(501, 100, 6);
-    expect((await deliver(prEvent())).body).toMatchObject({ dispatched: true });
+  test("however many pull requests were rejected, the next commit is reviewed and the record is only counted", async () => {
+    seedHistory(501, 60, 60);
+    for (const [n, sha] of [
+      [1, SHA_A],
+      [2, SHA_B],
+    ] as const) {
+      const r = await deliver(prEvent({ number: n, sha }));
+      expect(r.body, `pull request ${n}`).toMatchObject({ dispatched: true });
+    }
+    expect(await readAuthorTally(realD1(db), 501)).toEqual({ decided: 60, rejected: 60 });
   });
 
   test("five pushes to one rejected pull request are one rejection, and fixing it clears it", async () => {
@@ -1271,17 +1276,38 @@ describe("who is reviewed: the contributor tally and the overrides", () => {
     expect(tally).toEqual({ decided: 1, rejected: 0 });
   });
 
-  test("a maintainer's allow keeps a paused contributor reviewed; a block pauses a clean one", async () => {
-    seedHistory(501, 8, 6);
-    db.run(
-      "INSERT INTO pr_review_overrides (author_id, author_login, mode) VALUES (501, 'c', 'allow')",
-    );
-    expect((await deliver(prEvent())).body).toMatchObject({ dispatched: true });
+  test("an administrator's explicit block declines, and only that contributor", async () => {
     db.run(
       "INSERT INTO pr_review_overrides (author_id, author_login, mode) VALUES (900, 'n', 'block')",
     );
-    const r = await deliver(prEvent({ userId: 900, number: 8, sha: SHA_B }));
-    expect(r.body).toMatchObject({ dispatched: false, reason: "contributor_paused" });
+
+    const blocked = await deliver(prEvent({ userId: 900, number: 8, sha: SHA_B }));
+    expect(blocked.body).toMatchObject({ dispatched: false, reason: "contributor_paused" });
+    expect(rows()[0]).toMatchObject({ state: "declined", detail: "contributor_paused" });
+    expect(dispatchesMade()).toHaveLength(0);
+    // The pull request's author is told on the pull request itself.
+    expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "action_required" });
+    expect(lastCheck().output?.summary).toContain("by hand");
+
+    // Someone else, with the same history, is reviewed.
+    const other = await deliver(prEvent({ userId: 501, number: 9, sha: SHA_A }));
+    expect(other.body).toMatchObject({ dispatched: true });
+  });
+
+  test("an allow lifts a block, and so does removing it", async () => {
+    db.run(
+      "INSERT INTO pr_review_overrides (author_id, author_login, mode) VALUES (900, 'n', 'block')",
+    );
+    const at = (n: number) => prEvent({ userId: 900, number: n, sha: n.toString(16).repeat(40) });
+    expect((await deliver(at(1))).body).toMatchObject({ reason: "contributor_paused" });
+
+    db.run("UPDATE pr_review_overrides SET mode = 'allow' WHERE author_id = 900");
+    expect((await deliver(at(2))).body).toMatchObject({ dispatched: true });
+
+    db.run("UPDATE pr_review_overrides SET mode = 'block' WHERE author_id = 900");
+    expect((await deliver(at(3))).body).toMatchObject({ reason: "contributor_paused" });
+    db.run("DELETE FROM pr_review_overrides WHERE author_id = 900");
+    expect((await deliver(at(4))).body).toMatchObject({ dispatched: true });
   });
 });
 
@@ -1732,7 +1758,7 @@ describe("a row written while the limits existed still renders as not reviewed (
 });
 
 describe("the tally is scoped to one author and to the latest DECIDED review of each pull request", () => {
-  test("another author's rejections do not pause me", async () => {
+  test("another author's rejections are theirs alone, and pause nobody", async () => {
     for (let i = 0; i < 8; i++) {
       seedRow({
         pr: 100 + i,
@@ -1745,9 +1771,9 @@ describe("the tally is scoped to one author and to the latest DECIDED review of 
     expect((await deliver(prEvent({ userId: 501 }))).body).toMatchObject({ dispatched: true });
     expect(
       (await deliver(prEvent({ userId: 900, number: 9, sha: "7".repeat(40) }))).body,
-    ).toMatchObject({
-      reason: "contributor_paused",
-    });
+    ).toMatchObject({ dispatched: true });
+    expect(await readAuthorTally(realD1(db), 501)).toEqual({ decided: 0, rejected: 0 });
+    expect(await readAuthorTally(realD1(db), 900)).toEqual({ decided: 8, rejected: 7 });
   });
 
   test("the same pull request number in two datasets is two pull requests", async () => {
@@ -1965,15 +1991,9 @@ describe("the check-run and comment lifecycle", () => {
   });
 
   test("a paused contributor is told on the pull request, not only in the checks tab", async () => {
-    for (let i = 0; i < 8; i++) {
-      seedRow({
-        pr: 100 + i,
-        sha: `${i}`.padStart(40, "9"),
-        author: 501,
-        verdict: i < 7 ? "fail" : "pass",
-        ago: "-3 days",
-      });
-    }
+    db.run(
+      "INSERT INTO pr_review_overrides (author_id, author_login, mode) VALUES (501, 'c', 'block')",
+    );
     await deliver(prEvent());
     const comment = posts("/issues/7/comments")[0];
     expect(String(comment.body?.body)).toContain("NEEDS A PERSON");

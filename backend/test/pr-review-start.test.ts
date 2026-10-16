@@ -587,6 +587,26 @@ describe("what an administrator's start is held to", () => {
     expect(dispatches()).toHaveLength(0);
   });
 
+  test("a record of rejected pull requests holds nothing back: the start is dispatched", async () => {
+    for (let i = 0; i < 7; i++) {
+      seedReview(db, {
+        ds: DATASET,
+        n: 200 + i,
+        sha: `${i}`.repeat(40),
+        authorId: 900,
+        login: "n",
+        state: "reported",
+        verdict: "fail",
+      });
+    }
+    pulls[`${DATASET}#7`] = restPull({ userId: 900, login: "n" });
+
+    const r = await start(DATASET, 7);
+
+    expect(r.body).toMatchObject({ dispatched: true, reason: "dispatched" });
+    expect(dispatches()).toHaveLength(1);
+  });
+
   test("no count holds a start back: 400 reviews today, thirty of them the author's", async () => {
     for (let i = 0; i < 400; i++) {
       seedReview(db, {
@@ -1102,18 +1122,10 @@ describe("the restart's bookkeeping and who can trigger it", () => {
     expect([a.reason, b.reason].sort()).toEqual(["duplicate", "redispatched"]);
   });
 
-  test("a contributor paused by their record, not by a decision, is declined on a restart, and the decline is published", async () => {
-    for (let i = 0; i < 7; i++) {
-      seedReview(db, {
-        ds: DATASET,
-        n: 200 + i,
-        sha: `${i}`.repeat(40),
-        authorId: 900,
-        login: "n",
-        state: "reported",
-        verdict: "fail",
-      });
-    }
+  test("a contributor an administrator blocked is declined on a restart, and the decline is published", async () => {
+    db.run(
+      "INSERT INTO pr_review_overrides (author_id, author_login, mode) VALUES (900, 'n', 'block')",
+    );
     seedReview(db, {
       ds: DATASET,
       n: 7,

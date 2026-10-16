@@ -708,25 +708,28 @@ describe("who is reviewed", () => {
     }
   }
 
-  test("standing shows the record, the rule, and what it means", async () => {
+  test("standing shows the record as information, and says nothing pauses on it", async () => {
     gh.users.alice = { id: 77, login: "alice", type: "User" };
     seedRecord(6, 4);
     const r = await cli([...PR, "standing", "alice"]);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("6 of 10 decided pull requests rejected (60.0%)");
-    expect(r.stdout).toContain("MORE than 5 are rejected AND more than 10%");
-    expect(r.stdout).toContain("paused by the record");
-    expect(r.stdout).toContain("Decision:  none, the record decides");
+    expect(r.stdout).toContain("does not pause anyone's reviews, only a block does");
+    expect(r.stdout).toContain("not paused: reviewed automatically");
+    expect(r.stdout).toContain("Decision:  none");
+    // The rule that used to pause on this record is not described any more.
+    expect(r.stdout).not.toContain("MORE than");
+    expect(r.stdout).not.toContain("paused by the record");
   });
 
-  test("allow lifts a pause, says that the record alone would pause them, and clear hands it back", async () => {
+  test("allow lifts a block and says so, and clear removes the decision", async () => {
     gh.users.alice = { id: 77, login: "alice", type: "User" };
     seedRecord(6, 4);
+    expect((await cli([...PR, "block", "alice"])).exitCode).toBe(0);
     const allow = await cli([...PR, "allow", "alice", "--reason", "Vetted by hand"]);
     expect(allow.exitCode).toBe(0);
     expect(allow.stdout).toContain("Allowed alice");
     expect(allow.stdout).toContain("reviewed automatically");
-    expect(allow.stdout).toContain("the record alone would pause them; the decision wins");
     expect(allow.stdout).toContain("by queueadmin");
     expect(allow.stdout).toContain("Vetted by hand");
     expect(allow.stdout).toContain("not re-reviewed until their next push");
@@ -736,19 +739,19 @@ describe("who is reviewed", () => {
 
     const clear = await cli([...PR, "clear", "alice"]);
     expect(clear.stdout).toContain("Removed the allow for alice");
-    expect(clear.stdout).toContain("paused by the record");
+    expect(clear.stdout).toContain("reviewed automatically");
     expect(db.query("SELECT COUNT(*) AS n FROM pr_review_overrides").get()).toEqual({ n: 0 });
 
     const again = await cli([...PR, "clear", "alice"]);
     expect(again.stdout).toContain("had no allow or block");
   });
 
-  test("block pauses a contributor the record would not", async () => {
+  test("block pauses a contributor, and says an administrator did", async () => {
     gh.users.dave = { id: 88, login: "dave", type: "User" };
     const r = await cli([...PR, "block", "@dave", "--reason", "Spam"]);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("Blocked dave");
-    expect(r.stdout).toContain("paused by a maintainer");
+    expect(r.stdout).toContain("paused by an administrator's block");
     // "Not re-reviewed" means nothing for a contributor who is not reviewed at all.
     expect(r.stdout).not.toContain("re-reviewed");
     expect(db.query("SELECT mode, author_id FROM pr_review_overrides").get()).toEqual({
@@ -1203,7 +1206,7 @@ describe("nemar admin pr-reviews approve", () => {
     const r = await approve();
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("not reviewed (contributor paused)");
-    expect(r.stdout).toContain("not reviewed automatically (paused by a maintainer)");
+    expect(r.stdout).toContain("not reviewed automatically (paused by an administrator's block)");
   });
 
   describe("merging", () => {

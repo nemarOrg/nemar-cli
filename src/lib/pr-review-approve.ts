@@ -338,7 +338,7 @@ export type ReviewForApproval =
       detail: string | null;
       staleVerdict: ReadVerdict | null;
       reviewCurrent: boolean | null;
-      /** Set when the contributor's reviews are paused, in words, so the approver sees why. */
+      /** Set when an administrator has paused the contributor's reviews, in words, so the approver sees why. */
       contributorNote: string | null;
       /**
        * The stored report of the review of THIS commit, for display; null when there is none, it
@@ -380,11 +380,10 @@ export function reviewForApproval(d: unknown, head: string): ReviewForApproval {
   if (current !== null && typeof current !== "boolean") {
     return { ok: false, why: "the NEMAR API sent a review this version of the CLI cannot read" };
   }
-  const standing = (r.author as { standing?: { paused?: unknown; because?: unknown } } | null)
-    ?.standing;
+  const standing = (r.author as { standing?: { paused?: unknown } } | null)?.standing;
   const contributorNote =
     standing?.paused === true
-      ? `The contributor's pull requests are not reviewed automatically (paused ${standing.because === "maintainer" ? "by a maintainer" : "by their record"}).`
+      ? "The contributor's pull requests are not reviewed automatically (paused by an administrator's block)."
       : null;
   return {
     ok: true,

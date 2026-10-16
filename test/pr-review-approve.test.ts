@@ -321,7 +321,7 @@ describe("reading the review the API sent", () => {
       SHA_A,
     );
     expect(r).toMatchObject({ ok: true, detail: "contributor_paused" });
-    if (r.ok) expect(r.contributorNote).toContain("paused by a maintainer");
+    if (r.ok) expect(r.contributorNote).toContain("paused by an administrator's block");
   });
 
   test("anything that cannot be read as an answer about THIS commit is unread, which needs --force", () => {

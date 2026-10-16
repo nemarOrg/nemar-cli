@@ -206,7 +206,7 @@ describe("nemar admin pr-reviews start <dataset> <pr>", () => {
     expect(dispatches()).toHaveLength(1);
   });
 
-  test("a paused contributor is named, with the command that lifts the pause", async () => {
+  test("a blocked contributor is named, with the command that lifts the block", async () => {
     db.run(
       "INSERT INTO pr_review_overrides (author_id, author_login, mode) VALUES (42, 'alice', 'block')",
     );
@@ -215,9 +215,9 @@ describe("nemar admin pr-reviews start <dataset> <pr>", () => {
     const r = await cli([...START, "nm000201", "12"]);
 
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).toContain("not started");
-    expect(r.stdout).toContain("paused");
-    expect(r.stdout).toContain("nemar admin pr-reviews allow alice");
+    expect(r.stdout).toContain(
+      "not started: the contributor is blocked by an administrator (lift it with: nemar admin pr-reviews allow alice)",
+    );
     expect(dispatches()).toHaveLength(0);
   });
 
@@ -358,7 +358,7 @@ describe("nemar admin pr-reviews start --all", () => {
     expect(dispatches()).toHaveLength(0);
   });
 
-  test("a paused contributor is asked about and declined by the Worker, with the way out", async () => {
+  test("a blocked contributor is asked about and declined by the Worker, with the way out", async () => {
     queue();
     db.run(
       "INSERT INTO pr_review_overrides (author_id, author_login, mode) VALUES (42, 'alice', 'block')",
@@ -368,7 +368,7 @@ describe("nemar admin pr-reviews start --all", () => {
 
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("nm000201 #1");
-    expect(r.stdout).toContain("not started: the contributor is paused");
+    expect(r.stdout).toContain("not started: the contributor is blocked by an administrator");
     expect(r.stdout).toContain("nemar admin pr-reviews allow alice");
     expect(dispatches()).toHaveLength(2);
     expect(rows().find((x) => x.pr_number === 1)).toMatchObject({
@@ -377,7 +377,7 @@ describe("nemar admin pr-reviews start --all", () => {
     });
   });
 
-  test("after the pause is lifted, the stored decline is started by --all", async () => {
+  test("after the block is lifted, the stored decline is started by --all", async () => {
     queue();
     seedReview(db, {
       ds: "nm000201",

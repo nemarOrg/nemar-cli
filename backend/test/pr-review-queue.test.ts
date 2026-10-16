@@ -971,7 +971,7 @@ const standing = async (login: string) => {
 };
 
 describe("contributor standing", () => {
-  test("shows the tally, the rule, and who is counted", async () => {
+  test("shows the record and the standing, and a bad record pauses nobody", async () => {
     usersById.alice = { id: 77, login: "Alice", type: "User" };
     seedHistory(77, "alice", 6, 4);
     const { status, body } = await standing("alice");
@@ -980,18 +980,32 @@ describe("contributor standing", () => {
       login: "Alice",
       author_id: 77,
       tally: { rejected: 6, decided: 10 },
-      standing: { paused: true, because: "tally" },
-      thresholds: { rejected_more_than: 5, percent_more_than: 10 },
+      standing: { paused: false },
       resolved_from: "github",
     });
     expect(body.override).toBeNull();
     expect(body.recent).toHaveLength(10);
+    // The rule that used to turn the record into a pause is gone from the answer, not just unused.
+    expect(Object.keys(body).sort()).toEqual([
+      "author_id",
+      "login",
+      "override",
+      "recent",
+      "resolved_from",
+      "standing",
+      "tally",
+    ]);
   });
 
-  test("a newcomer's first failure pauses nobody", async () => {
+  test("a contributor whose every pull request was rejected is reviewed at the real gate", async () => {
     usersById.carol = { id: 78, login: "carol", type: "User" };
-    seedHistory(78, "carol", 1, 0);
+    seedHistory(78, "carol", 12, 0);
+    seedDataset("nm000301");
     expect((await standing("carol")).body.standing).toEqual({ paused: false });
+    expect(await openPullRequest(78, "carol", 1, SHA_A)).toMatchObject({
+      dispatched: true,
+      reason: "dispatched",
+    });
   });
 
   test("falls back to the review history when GitHub cannot say, and says so", async () => {
@@ -1063,19 +1077,19 @@ describe("PUT and DELETE /admin/pr-review-authors/:login", () => {
     });
   });
 
-  test("allow lifts a pause the tally would impose, and a second call replaces the first", async () => {
+  test("allow lifts a block, and a second call replaces the first", async () => {
     usersById.alice = { id: 77, login: "alice", type: "User" };
-    seedHistory(77, "alice", 6, 4);
-    expect((await standing("alice")).body.standing.paused).toBe(true);
-
     seedDataset("nm000301");
-    // Paused by the record alone: the gate declines a new pull request.
+    await send("PUT", "/admin/pr-review-authors/alice", { mode: "block" });
+    expect((await standing("alice")).body.standing.paused).toBe(true);
+    // Blocked: the gate declines a new pull request.
     expect(await openPullRequest(77, "alice", 1, SHA_A)).toMatchObject({
       dispatched: false,
       reason: "contributor_paused",
     });
 
     const allowed = await send("PUT", "/admin/pr-review-authors/alice", { mode: "allow" });
+    expect((allowed.body as unknown as SetOverrideResponse).previous).toBe("block");
     expect((allowed.body as unknown as SetOverrideResponse).standing.standing).toEqual({
       paused: false,
     });
@@ -1087,22 +1101,28 @@ describe("PUT and DELETE /admin/pr-review-authors/:login", () => {
     expect(db.query("SELECT COUNT(*) AS n FROM pr_review_overrides").get()).toEqual({ n: 1 });
   });
 
-  test("clearing hands the decision back to the tally", async () => {
+  test("an allow changes nothing for someone with a bad record: it is only the word for lifting a block", async () => {
     usersById.alice = { id: 77, login: "alice", type: "User" };
     seedHistory(77, "alice", 6, 4);
     seedDataset("nm000301");
+    const before = await openPullRequest(77, "alice", 1, SHA_A);
     await send("PUT", "/admin/pr-review-authors/alice", { mode: "allow" });
+    const after = await openPullRequest(77, "alice", 2, SHA_B);
+    expect([before.dispatched, after.dispatched]).toEqual([true, true]);
+  });
+
+  test("clearing a block brings the contributor back to review", async () => {
+    usersById.alice = { id: 77, login: "alice", type: "User" };
+    seedDataset("nm000301");
+    await send("PUT", "/admin/pr-review-authors/alice", { mode: "block" });
     const cleared = await send("DELETE", "/admin/pr-review-authors/alice");
     expect(cleared.status).toBe(200);
     const body = cleared.body as unknown as ClearOverrideResponse;
-    expect(body.removed).toBe("allow");
-    expect(body.standing.standing).toEqual({ paused: true, because: "tally" });
+    expect(body.removed).toBe("block");
+    expect(body.standing.standing).toEqual({ paused: false });
     expect(db.query("SELECT COUNT(*) AS n FROM pr_review_overrides").get()).toEqual({ n: 0 });
-    // The real gate pauses them again, not only the standing that is reported.
-    expect(await openPullRequest(77, "alice", 31, sha(31))).toMatchObject({
-      dispatched: false,
-      reason: "contributor_paused",
-    });
+    // The real gate reviews them again, not only the standing that is reported.
+    expect(await openPullRequest(77, "alice", 31, sha(31))).toMatchObject({ dispatched: true });
     expect(
       db
         .query("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'pr_review_override_clear'")
@@ -1623,16 +1643,6 @@ describe("contributor decisions, in detail", () => {
     expect(body.recent).toHaveLength(10);
     expect(body.recent[0]).toMatchObject({ pr_number: 100, verdict: "pass", head_sha: SHA_B });
     expect(new Set(body.recent.map((r) => r.pr_number)).size).toBe(10);
-    expect(body.by_record).toEqual({ paused: false });
-  });
-
-  test("the standing by the record alone is reported beside the one the gate applies", async () => {
-    usersById.alice = { id: 77, login: "alice", type: "User" };
-    seedHistory(77, "alice", 6, 4);
-    await send("PUT", "/admin/pr-review-authors/alice", { mode: "allow" });
-    const { body } = await standing("alice");
-    expect(body.standing).toEqual({ paused: false });
-    expect(body.by_record).toEqual({ paused: true, because: "tally" });
   });
 });
 

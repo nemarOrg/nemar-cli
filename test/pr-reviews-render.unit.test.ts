@@ -59,8 +59,6 @@ function standing(over: Partial<ContributorStanding> = {}): ContributorStanding 
     tally: { rejected: 0, decided: 0 },
     override: null,
     standing: { paused: false },
-    by_record: { paused: false },
-    thresholds: { rejected_more_than: 5, percent_more_than: 10 },
     recent: [],
     resolved_from: "github",
     ...over,
@@ -223,7 +221,6 @@ describe("standingLines", () => {
           set_by: HOSTILE,
         },
         standing: { paused: true, because: "maintainer" },
-        by_record: { paused: true, because: "tally" },
         recent: [
           {
             dataset_id: HOSTILE,
@@ -240,18 +237,40 @@ describe("standingLines", () => {
     expect(lines.join("\n")).toContain("6 of 59 decided pull requests rejected (10.2%)");
   });
 
-  test("says what the record alone would do beside an allow, from the server's own answer", () => {
-    const text = standingLines(
+  test("a record of rejections is information, and a block is the only thing that pauses", () => {
+    const record = standingLines(standing({ tally: { rejected: 9, decided: 10 } }))
+      .map((l) => l.replace(ANSI, ""))
+      .join("\n");
+    expect(record).toContain("9 of 10 decided pull requests rejected (90.0%)");
+    expect(record).toContain("does not pause anyone's reviews, only a block does");
+    expect(record).toContain("not paused: reviewed automatically");
+    expect(record).toContain("Decision:  none");
+    // The rule that used to pause on this record is not described, and the limits are not mentioned.
+    expect(record).not.toContain("MORE than");
+    expect(record).not.toContain("rate limit");
+
+    const blocked = standingLines(
       standing({
-        override: { mode: "allow", reason: null, set_at: "2026-10-01", set_by: "queueadmin" },
-        by_record: { paused: true, because: "tally" },
+        override: { mode: "block", reason: null, set_at: "2026-10-01", set_by: "queueadmin" },
+        standing: { paused: true, because: "maintainer" },
       }),
     )
       .map((l) => l.replace(ANSI, ""))
       .join("\n");
-    expect(text).toContain("the record alone would pause them; the decision wins");
-    expect(text).toContain("not paused: reviewed automatically");
-    expect(text).not.toContain("rate limit");
+    expect(blocked).toContain("blocked by queueadmin on 2026-10-01");
+    expect(blocked).toContain(
+      "paused by an administrator's block: their pull requests need a person",
+    );
+
+    const allowed = standingLines(
+      standing({
+        override: { mode: "allow", reason: null, set_at: "2026-10-01", set_by: "queueadmin" },
+      }),
+    )
+      .map((l) => l.replace(ANSI, ""))
+      .join("\n");
+    expect(allowed).toContain("allowed by queueadmin on 2026-10-01");
+    expect(allowed).toContain("not paused: reviewed automatically");
   });
 
   test("says an owner or administrator is exempt whatever is decided, so a block or an allow is not misread", () => {

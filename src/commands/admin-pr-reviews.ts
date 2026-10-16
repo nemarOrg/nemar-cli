@@ -291,7 +291,7 @@ export function standingLines(s: ContributorStanding): string[] {
   );
   out.push(
     chalk.dim(
-      `             reviews pause when MORE than ${s.thresholds.rejected_more_than} are rejected AND more than ${s.thresholds.percent_more_than}% of the decided ones`,
+      "             shown for information: a record of rejections does not pause anyone's reviews, only a block does",
     ),
   );
   if (s.override) {
@@ -299,20 +299,13 @@ export function standingLines(s: ContributorStanding): string[] {
     out.push(
       `  Decision:  ${s.override.mode === "allow" ? chalk.green("allowed") : chalk.red("blocked")}${by} on ${plain(s.override.set_at)}${s.override.reason ? `: ${plain(s.override.reason)}` : ""}`,
     );
-    if (s.override.mode === "allow" && s.by_record.paused) {
-      out.push(chalk.dim("             the record alone would pause them; the decision wins"));
-    }
   } else {
-    out.push("  Decision:  none, the record decides");
+    out.push("  Decision:  none");
   }
   out.push(
     `  Standing:  ${
       s.standing.paused
-        ? chalk.red(
-            s.standing.because === "maintainer"
-              ? "paused by a maintainer: their pull requests need a person"
-              : "paused by the record: their pull requests need a person",
-          )
+        ? chalk.red("paused by an administrator's block: their pull requests need a person")
         : chalk.green("not paused: reviewed automatically")
     }`,
   );
@@ -426,10 +419,10 @@ REVIEW column (the automated review of the pull request's CURRENT commit):
   pass              nothing lost, the revision advances, the dataset is materially better
   fail              the review found a problem; the author needs to change something
   uncertain         the review could not decide whether it is a good change
-  not reviewed      no review of this commit is on record: the review is off, the contributor is
-                    paused, or the review on record is of another commit (shown as "other
-                    commit"). A row from before the limits on reviews were removed can say rate
-                    limited or daily limit
+  not reviewed      no review of this commit is on record: the review is off, an administrator
+                    blocked the contributor ("contributor paused"), or the review on record is of
+                    another commit (shown as "other commit"). A row from before the limits on
+                    reviews were removed can say rate limited or daily limit
   in progress       the review is running
   could not decide  the review ended without a verdict (an error, or it never reported)
   exempt (owner or admin)
@@ -916,7 +909,7 @@ function stopFor(assessed: { stop: Stop }): never {
 /** Why a start did not start one, in the words an administrator reads. Keys are the gate's fixed words. */
 const NOT_STARTED: Record<string, string> = {
   duplicate: "this commit already has a review (running or finished)",
-  contributor_paused: "the contributor is paused",
+  contributor_paused: "the contributor is blocked by an administrator",
   exempt_author: "its author is a NEMAR owner or administrator, so it is not reviewed",
   draft: "it is a draft",
   not_open: "it is not open any more",
@@ -970,9 +963,10 @@ prReviewsCommand
 The automated review runs when GitHub tells the NEMAR API a pull request was opened or pushed to. A
 pull request that was already open when the review was switched on produced no such event, so it has
 no review until its author pushes again. This asks for one by name. The API reads the pull request
-from GitHub itself and runs it through the same gate as any other: the contributor pause still
-applies, and a pull request opened by a NEMAR owner or administrator is not reviewed (its check is
-posted as skipped and nothing is started). No count of reviews holds a start back. A commit whose
+from GitHub itself and runs it through the same gate as any other: an administrator's block on the
+contributor still applies, and a pull request opened by a NEMAR owner or administrator is not
+reviewed (its check is posted as skipped and nothing is started). No count of reviews, and no
+record of rejected pull requests, holds a start back. A commit whose
 review was declined, ended in an error or never reported is started again, and so is one handed to
 GitHub more than 30 minutes ago that never came back; one that is running or has a result is not
 started again. A start that restarts a review that already cost a model call costs a second one.
@@ -981,7 +975,7 @@ started again. A start that restarts a review that already cost a model call cos
   nemar admin pr-reviews start --all --dry-run
   nemar admin pr-reviews start --all --yes
 
-Each review is one model call. A paused contributor is asked about like any other and declined by the
+Each review is one model call. A blocked contributor is asked about like any other and declined by the
 Worker, which says so; after 'allow', the same command starts it. --all leaves drafts out and asks
 before spending (--yes skips that).
 `,
@@ -1886,7 +1880,7 @@ function overrideCommand(mode: "allow" | "block"): void {
     .command(`${mode} <login>`)
     .description(
       mode === "allow"
-        ? "Review this contributor's pull requests even when their record would pause them"
+        ? "Lift a block: review this contributor's pull requests again (nothing else pauses anyone)"
         : "Never review this contributor's pull requests automatically; each needs a person",
     )
     .option("--reason <text>", "Why, in plain words (up to 200 characters; kept with the decision)")
@@ -1920,7 +1914,7 @@ commit a review is already on record for is handled as before, a block included.
         console.log(
           mode === "allow"
             ? chalk.green(
-                `Allowed ${plain(r.standing.login)}: their pull requests are reviewed even when their record would pause them.`,
+                `Allowed ${plain(r.standing.login)}: their pull requests are reviewed automatically.`,
               )
             : chalk.red(
                 `Blocked ${plain(r.standing.login)}: none of their pull requests is reviewed automatically; each needs a person.`,
@@ -1947,7 +1941,7 @@ overrideCommand("block");
 
 prReviewsCommand
   .command("clear <login>")
-  .description("Remove an allow or block, so the contributor's record decides again")
+  .description("Remove an allow or block (a contributor with neither is reviewed automatically)")
   .option("--json", "Output the raw JSON")
   .action(async (loginArg: string, options: { json?: boolean }) => {
     if (!requireAuth(options.json)) process.exit(1);
@@ -1963,7 +1957,7 @@ prReviewsCommand
       console.log(
         r.removed
           ? chalk.green(
-              `Removed the ${r.removed} for ${plain(r.standing.login)}. Their record decides again.`,
+              `Removed the ${r.removed} for ${plain(r.standing.login)}. Their pull requests are reviewed automatically.`,
             )
           : r.standing.resolved_from === "history"
             ? chalk.yellow(
@@ -1982,7 +1976,7 @@ prReviewsCommand
 prReviewsCommand
   .command("standing <login>")
   .description(
-    "A contributor's rejected-pull-request record, any allow or block, and what it means",
+    "A contributor's record of rejected pull requests (information only), and any allow or block",
   )
   .option("--json", "Output the raw JSON")
   .action(async (loginArg: string, options: { json?: boolean }) => {
