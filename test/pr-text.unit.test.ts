@@ -50,6 +50,7 @@ import {
   cleanPrText,
   describeChangelogWrite,
   describeTextProblem,
+  describeUnopenedPullRequest,
   findTextProblem,
   hasChangelogHeading,
   inspectChangelog,
@@ -560,6 +561,17 @@ describe("the changed-file summary", () => {
 });
 
 describe("the pull request title and body of an update", () => {
+  test("the text of a pull request that could not be opened is shown indented, blank lines kept", () => {
+    expect(describeUnopenedPullRequest("Add x (v1.0.1)", "First.\r\n\r\nSecond.")).toEqual([
+      "  The pull request text, to paste into the GitHub page or `gh pr create`:",
+      "  Title: Add x (v1.0.1)",
+      "  Body:",
+      "    First.",
+      "",
+      "    Second.",
+    ]);
+  });
+
   test("the title is the author's, then the version", () => {
     expect(buildUpdateTitle("Add twelve subjects", "1.0.1")).toBe("Add twelve subjects (v1.0.1)");
   });
@@ -890,6 +902,7 @@ const GH_STANDIN = `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "gh version 0.0.0 (stand-in)"; exit 0; fi
 if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
   printf '%s\\0' "$@" > "$STANDIN_GH_RECORD"
+  if [ -n "$STANDIN_GH_FAIL" ]; then echo "stand-in gh: the pull request was refused" >&2; exit 1; fi
   echo "https://github.invalid/standin/pull/1"
   exit 0
 fi
@@ -960,7 +973,11 @@ function zoneOfThisProcess(): string {
 }
 
 /** What the CLI is run with: nothing inherited that could point it at a real service or account. */
-function cleanEnv(config: string, term = "dumb"): Record<string, string> {
+function cleanEnv(
+  config: string,
+  term = "dumb",
+  extra: Record<string, string> = {},
+): Record<string, string> {
   return {
     PATH: `${binDir}:${process.env.PATH ?? ""}`,
     HOME: process.env.HOME ?? root,
@@ -982,6 +999,7 @@ function cleanEnv(config: string, term = "dumb"): Record<string, string> {
     GH_TOKEN: "",
     GITHUB_TOKEN: "",
     STANDIN_GH_RECORD: ghRecord,
+    ...extra,
   };
 }
 
@@ -992,13 +1010,18 @@ interface Run {
 }
 
 /** The CLI, with no terminal on stdin, as a script or CI runs it. */
-async function runNemar(args: string[], cwd: string, config = configDir(true)): Promise<Run> {
+async function runNemar(
+  args: string[],
+  cwd: string,
+  config = configDir(true),
+  extraEnv: Record<string, string> = {},
+): Promise<Run> {
   rmSync(ghRecord, { force: true });
   apiPaths = [];
   const proc = spawn({
     cmd: [process.execPath, "run", CLI_ENTRY, ...args],
     cwd,
-    env: cleanEnv(config),
+    env: cleanEnv(config, "dumb", extraEnv),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -1357,6 +1380,41 @@ describe("nemar dataset update looks at the change log before it changes anythin
       write(w, "CHANGES", "\uFEFF1.0.0 2026-01-01\n  - Initial release\n"),
     );
     await refusedWithNothingChanged(work, remote, "CHANGES starts with a byte order mark");
+  });
+});
+
+describe("when the pull request cannot be opened, the text is not lost", () => {
+  const said = (r: Run) => r.stdout + r.stderr;
+  const refused = { STANDIN_GH_FAIL: "1" };
+
+  test("update shows the title and the body it could not send", async () => {
+    const { work } = newClone();
+    write(work, "sub-03/eeg/sub-03_task-rest_eeg.json", '{"TaskName": "rest"}\n');
+    const r = await runNemar(
+      ["dataset", "update", "--yes", "-m", GOOD_TITLE, "--description", GOOD_DESCRIPTION],
+      work,
+      undefined,
+      refused,
+    );
+    expect(said(r)).toContain("Failed to create PR");
+    expect(said(r)).toContain("Create the PR manually.");
+    expect(said(r)).toContain(`  Title: ${GOOD_TITLE} (v1.0.1)`);
+    expect(said(r)).toContain(`    ${GOOD_DESCRIPTION}`);
+    expect(said(r)).toContain("    ### Changed files");
+  });
+
+  test("push --pr shows the title and the body it could not send, and exits non-zero", async () => {
+    const { work } = newAnnexFeatureClone();
+    const r = await runNemar(
+      ["dataset", "push", "--pr", "--no-s3", "-t", GOOD_TITLE, "-b", GOOD_DESCRIPTION],
+      work,
+      undefined,
+      refused,
+    );
+    expect(r.exitCode, said(r)).toBe(1);
+    expect(said(r)).toContain("Failed to create pull request");
+    expect(said(r)).toContain(`  Title: ${GOOD_TITLE}`);
+    expect(said(r)).toContain(`    ${GOOD_DESCRIPTION}`);
   });
 });
 

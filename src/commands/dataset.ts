@@ -202,6 +202,7 @@ import {
   cleanPrText,
   describeChangelogWrite,
   describeTextProblem,
+  describeUnopenedPullRequest,
   findTextProblem,
   inspectChangelog,
   localIsoDate,
@@ -3838,16 +3839,15 @@ Examples:
       // Create PR via gh CLI
       let prCreated = false;
       const prSpinner = ora("Creating pull request...").start();
+      const prTitle = buildUpdateTitle(title, newVersion);
+      const prBody = buildUpdateBody({
+        description,
+        datasetId,
+        fromVersion: currentVersion,
+        toVersion: newVersion,
+        files: changedFiles,
+      });
       try {
-        const prTitle = buildUpdateTitle(title, newVersion);
-        const prBody = buildUpdateBody({
-          description,
-          datasetId,
-          fromVersion: currentVersion,
-          toVersion: newVersion,
-          files: changedFiles,
-        });
-
         const prProc = spawn({
           cmd: [
             "gh",
@@ -3884,6 +3884,9 @@ Examples:
         const errorMsg = prError instanceof Error ? prError.message : String(prError);
         console.log(chalk.red(`  ${errorMsg}`));
         console.log(chalk.dim(`  Branch ${branchName} has been pushed. Create the PR manually.`));
+        for (const line of describeUnopenedPullRequest(prTitle, prBody)) {
+          console.log(chalk.dim(line));
+        }
       }
 
       // Monitor mode (only if PR was created successfully)
@@ -5492,6 +5495,16 @@ Examples:
         const { title, description } = prText ?? (await settlePushPrText(options));
         spinner = ora("Creating pull request...").start();
         const prArgs = ["gh", "pr", "create", "--title", title, "--body", description];
+        // One way out for every failure, so the text that was typed, which exists nowhere else, is
+        // always shown beside the reason.
+        const failWith = (...reason: string[]): never => {
+          spinner.fail("Failed to create pull request");
+          for (const line of reason) console.log(line);
+          for (const line of describeUnopenedPullRequest(title, description)) {
+            console.log(chalk.dim(line));
+          }
+          process.exit(1);
+        };
 
         try {
           const proc = spawn({
@@ -5505,25 +5518,20 @@ Examples:
           const prStderr = await new Response(proc.stderr).text();
           const prExit = await proc.exited;
 
-          if (prExit !== 0) {
-            spinner.fail("Failed to create pull request");
-            console.log(chalk.red(`  ${prStderr.trim() || prStdout.trim()}`));
-            process.exit(1);
-          }
+          if (prExit !== 0) failWith(chalk.red(`  ${prStderr.trim() || prStdout.trim()}`));
 
           const prUrl = prStdout.trim();
           spinner.succeed("Pull request created");
           console.log(`  ${chalk.cyan(prUrl)}`);
         } catch (spawnError) {
-          spinner.fail("Failed to create pull request");
           const msg = spawnError instanceof Error ? spawnError.message : String(spawnError);
           if (msg.includes("ENOENT") || msg.includes("not found")) {
-            console.log(chalk.red("  'gh' CLI is not installed or not in PATH"));
-            console.log(chalk.dim("  Install it: https://cli.github.com/"));
-          } else {
-            console.log(chalk.red(`  ${msg}`));
+            failWith(
+              chalk.red("  'gh' CLI is not installed or not in PATH"),
+              chalk.dim("  Install it: https://cli.github.com/"),
+            );
           }
-          process.exit(1);
+          failWith(chalk.red(`  ${msg}`));
         }
       }
     }

@@ -320,6 +320,19 @@ export function buildUpdateTitle(title: string, version: string): string {
   return `${title} (v${version})`;
 }
 
+/**
+ * The lines that keep the pull request text when the pull request could not be opened. Text typed
+ * at a prompt lives nowhere else, and the author is told to create the pull request by hand.
+ */
+export function describeUnopenedPullRequest(title: string, body: string): string[] {
+  return [
+    "  The pull request text, to paste into the GitHub page or `gh pr create`:",
+    `  Title: ${title}`,
+    "  Body:",
+    ...body.split(/\r?\n/).map((line) => (line === "" ? "" : `    ${line}`)),
+  ];
+}
+
 export interface UpdateBodyInput {
   /** The author's description, already checked. */
   description: string;
