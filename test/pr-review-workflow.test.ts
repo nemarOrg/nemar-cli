@@ -278,6 +278,26 @@ describe("what it is allowed to hold", () => {
       .map((s) => s.name);
     expect(users).toEqual(["Mint a read-only token for the dataset repository"]);
   });
+
+  test("no script from the checked-out tree runs before the step that is given the App's key", () => {
+    const names = job.steps.map((s) => s.name);
+    const mint = names.indexOf("Mint a read-only token for the dataset repository");
+    const install = names.indexOf("Install the review script's dependencies");
+    expect(mint).toBeGreaterThan(-1);
+    expect(install).toBeGreaterThan(mint);
+    // Nothing before the mint runs inside the checked-out tree (./tool), where the install and the
+    // review script run.
+    for (const s of job.steps.slice(0, mint)) {
+      expect(s["working-directory"], s.name).not.toBe("tool");
+      expect(s.run ?? "", s.name).not.toMatch(/\btool\//);
+    }
+    // The install runs no lifecycle script: neither the root package's own `prepare` and
+    // `postinstall` nor a dependency's. It is the only install, and it keeps the frozen lockfile.
+    const run = step("Install the review script's dependencies").run ?? "";
+    expect(run).toMatch(/^bun install --frozen-lockfile --ignore-scripts$/m);
+    expect(step("Install the review script's dependencies")["working-directory"]).toBe("tool");
+    expect(job.steps.filter((s) => /\bbun install\b/.test(s.run ?? ""))).toHaveLength(1);
+  });
 });
 
 describe("the dispatch payload is untrusted", () => {

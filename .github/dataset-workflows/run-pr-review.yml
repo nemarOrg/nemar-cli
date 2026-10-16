@@ -27,10 +27,14 @@
 # read the repository, and the fetch step also leaves it in the repository's git config, because
 # the model step's git reads fetch blobs lazily (the clone is blob-less) and need it. So the model
 # step can USE the read-only token through git; it cannot print it, send it anywhere, or write with
-# it, and nothing from the pull request runs. Apart from the one-shot callback token, which can
-# post one report for this review and nothing else, the job has no credential that can write to
-# GitHub or to NEMAR. `id-token: write` puts the OIDC request variables in every step's
-# environment, which the federation rule's conditions (this repository, this workflow, main) bound.
+# it, and nothing from the pull request runs. The install of the review script's dependencies runs
+# after the step that is given the App's private key, and with --ignore-scripts, so no script from
+# the checked-out tree (its own prepare and postinstall, or a dependency's) runs before that step;
+# run-publication-review.yml says what this order closes and what it does not. Apart from the
+# one-shot callback token, which can post one report for this review and nothing else, the job has
+# no credential that can write to GitHub or to NEMAR. `id-token: write` puts the OIDC request
+# variables in every step's environment, which the federation rule's conditions (this repository,
+# this workflow, main) bound.
 #
 # THE CALLBACK TOKEN IS MASKED BEFORE ANYTHING CAN PRINT IT. This repository's logs are public and
 # Actions prints a step's `env:` in its header, so the token is never in job-level env, the first
@@ -203,11 +207,6 @@ jobs:
         with:
           bun-version: 1.4.3
 
-      - name: Install the review script's dependencies
-        if: steps.claim.outputs.claimed == 'true'
-        working-directory: tool
-        run: bun install --frozen-lockfile
-
       # Fail early and say why, rather than let the SDK fail to find a credential. The Worker turns
       # this into a check that says the review service could not sign in.
       - name: Check the federation configuration
@@ -272,6 +271,14 @@ jobs:
         run: |
           set -euo pipefail
           gh api "repos/nemarDatasets/${DATASET_ID}/pulls/${PR_NUMBER}" > "$RUNNER_TEMP/pr.json"
+
+      # After the mint, with no lifecycle script run (see the header): the review script needs no
+      # build step. Not --production: the Anthropic SDK it imports is a development dependency of
+      # this repository.
+      - name: Install the review script's dependencies
+        if: steps.claim.outputs.claimed == 'true'
+        working-directory: tool
+        run: bun install --frozen-lockfile --ignore-scripts
 
       # Minted last, so it has not aged when the script exchanges it. The audience is the one the
       # federation rule expects.
