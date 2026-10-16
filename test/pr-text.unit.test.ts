@@ -541,6 +541,18 @@ describe("the changed-file summary", () => {
     expect(summary).toContain("- and 5 more files at the dataset root");
   });
 
+  test("a change of a hundred thousand files in one folder is summarized in linear time", () => {
+    // Copying the folder's array on every file took six seconds here, after the branch was pushed
+    // and while the pull request spinner showed.
+    const paths = Array.from({ length: 100_000 }, (_, i) => `sub-01/eeg/run-${i}_eeg.json`);
+    const started = performance.now();
+    const summary = summarizeChangedFiles(filesNamed("added", paths));
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(summary).toBe(
+      "100000 files changed: 100000 added.\n\n- `sub-01/`: 100000 files (100000 added)",
+    );
+  });
+
   test("a path cannot break out of its code span or its line", () => {
     const summary = summarizeChangedFiles([{ status: "added", path: "odd`name\nsecond line.tsv" }]);
     expect(summary).toBe("- `odd?name?second line.tsv` (added)");

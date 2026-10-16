@@ -291,7 +291,9 @@ export function summarizeChangedFiles(files: readonly ChangedFile[]): string {
     const slash = f.path.indexOf("/");
     if (slash < 0) continue;
     const folder = f.path.slice(0, slash);
-    folders.set(folder, [...(folders.get(folder) ?? []), f]);
+    const inside = folders.get(folder);
+    if (inside) inside.push(f);
+    else folders.set(folder, [f]);
   }
   const ranked = [...folders.entries()].sort(
     ([nameA, a], [nameB, b]) => b.length - a.length || (nameA < nameB ? -1 : nameA > nameB ? 1 : 0),
