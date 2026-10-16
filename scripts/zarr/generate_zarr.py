@@ -1988,6 +1988,104 @@ def reason_for_code(code: str | None) -> str:
     return _FALLBACK_REASONS.get(code, _GENERIC_REASON)
 
 
+# --- Reading a reader's refusal (#1801) ---------------------------------------
+#
+# A reader says that a file failed, and often not why: a generic `file_read_error`,
+# MNE's refusal re-labeled `maxshield_probe_failed` by the probe, pyedflib's bare
+# `OSError` out of the streaming exporter (no code at all, so it was retried as if
+# the node were at fault). `failure_verdict` is the ONE place those are read.
+#
+# Which codes it looks behind: the four a reader or the probe reports without
+# saying why. Any other code is already a statement of cause (a memory budget,
+# a missing annex object, a declared `.fdt` that did not verify, ...) and passes
+# through untouched, so no rule here can overrule a more specific verdict.
+_REFINABLE_CODES = frozenset(
+    {None, "file_read_error", "corrupt_or_truncated", "maxshield_probe_failed"}
+)
+# How far down a `__cause__`/`__context__` chain to read: the exception itself and
+# five links. The refusals below sit one to three links down (biosigIO's typed
+# error `from` MNE's, the probe's `from` MNE's); the bound keeps a pathological
+# chain from costing anything.
+_VERDICT_CHAIN_LINKS = 5
+# MNE's refusal to read the head of a split series whose next file is not beside
+# it. It quotes the file by the path it looked at, which is a scratch path here.
+_MNE_SPLIT_RE = re.compile(r"Split raw file detected but next file (.+?) does not exist")
+
+
+def _exception_chain(exc: BaseException) -> list[BaseException]:
+    """`exc` and up to `_VERDICT_CHAIN_LINKS` of its causes, nearest first. An
+    explicit `__cause__` is followed in preference to the implicit `__context__`
+    (a `raise ... from None` only hides the context from a traceback). Stops at a
+    cycle."""
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen and len(chain) <= _VERDICT_CHAIN_LINKS:
+        chain.append(current)
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return chain
+
+
+def failure_verdict(
+    exc: BaseException, primary: str, head_files: set[str] | frozenset[str]
+) -> tuple[str | None, str | None]:
+    """`(code, detail)` for a recording whose conversion raised `exc`.
+
+    `code` is the exception's own, refined where one of the rules below can say
+    what a generic one could not. `detail` is the text to publish when a rule
+    has a better one than the exception's (it names the file by its BIDS path,
+    never a scratch path); None means `failure_detail(exc)`.
+
+    Reads `exc` and five `__cause__`/`__context__` links, and only for the codes
+    in `_REFINABLE_CODES`. The first rule that matches wins:
+
+    1. MNE's "Split raw file detected but next file X does not exist":
+       `split_part_missing`, naming `dirname(primary)/basename(X)`, when the TREE
+       lacks that file. When the tree lists it the part is merely absent from
+       the working tree or unfetched, a gap in this run, and no rule relabels it.
+    2. An EEGLAB `.set` the reader refuses with "Must pass 2-d input" (a
+       three-dimensional array, epoched data): `epoched_recording`. It goes dead
+       when biosigio#142 reads epoched files, and #1214 then sets the policy.
+    3. "float32 samples but the .set header implies": the `.fdt` is not the size
+       its `.set` header says, `corrupt_or_truncated`. DEFENSE until biosigIO
+       types the mismatch itself.
+    4. Exactly `OSError`, with no errno, saying "not EDF(+) or BDF(+) compliant":
+       pyedflib's refusal, re-raised bare by biosigIO's streaming EDF/BDF source,
+       `corrupt_or_truncated`, as its in-memory path types the same file.
+       TEMPORARY, like its canary (`TestStreamingRefusalCanary`): biosigio#149
+       types the streaming refusal, and the pull request that raises the biosigIO
+       cap past that fix deletes this rule and the canary together. The guard is
+       exact on purpose: an `OSError` that carries an errno (EIO, ENOSPC, EACCES)
+       or is a subclass (`PermissionError`) is the HOST saying no, a condition
+       that must keep its retry.
+    5. Otherwise the exception's own code, which may be None.
+    """
+    code = getattr(exc, "code", None)
+    if code not in _REFINABLE_CODES:
+        return code, None
+    chain = _exception_chain(exc)
+    messages = [str(link) for link in chain]
+    for message in messages:
+        match = _MNE_SPLIT_RE.search(message)
+        if match:
+            part = os.path.join(os.path.dirname(primary), os.path.basename(match.group(1)))
+            if part not in head_files:
+                return SPLIT_PART_MISSING, f"next split part {part} is not in the dataset tree"
+    if lower_ext(primary) == ".set" and any("Must pass 2-d input" in m for m in messages):
+        return EPOCHED_RECORDING, None
+    if any("float32 samples but the .set header implies" in m for m in messages):
+        return "corrupt_or_truncated", None
+    if any(
+        type(link) is OSError
+        and link.errno is None
+        and "not EDF(+) or BDF(+) compliant" in str(link)
+        for link in chain
+    ):
+        return "corrupt_or_truncated", None
+    return code, None
+
+
 # The serving group + rate are driven by the recording's BIDS datatype SUFFIX, not
 # by per-channel type guessing. A `*_eeg.set` is EEG (250 Hz cap) even when a few
 # EOG/REF/trigger channels ride along; biosigIO's EEGLAB importer can only see an
@@ -9084,7 +9182,14 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         # MaxShield cause unexplained across 396 recordings. Coded failures are
         # already self-explaining and stay quiet, or every derivative in the
         # archive would print a stack.
-        if getattr(exc, "code", None) is None:
+        #
+        # The code is the exception's own, read through `failure_verdict`: a
+        # reader that refuses a file without saying why (a generic read error,
+        # the MaxShield probe's relabel of MNE, pyedflib's bare OSError out of
+        # the streaming exporter) is typed here, by the refusal it reported, and
+        # `named` is the better detail it can publish (#1801).
+        code, named = failure_verdict(exc, primary, c.get("head_files") or frozenset())
+        if code is None:
             import traceback
 
             print(
@@ -9096,11 +9201,11 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             "ok": False,
             "primary": primary,
             "error": str(exc),
-            "code": getattr(exc, "code", None),
+            "code": code,
             # Published on the entry (typed) or as `last_error` (pending), which
             # is the only way an uncoded failure says anything at all from
             # outside the conversion node. #1197
-            "detail": failure_detail(exc),
+            "detail": failure_detail(named or exc),
             # The object storage lacks, so the driver can name it (see
             # `annex_missing_summary`).
             "annex_key": exc.key if isinstance(exc, AnnexObjectMissing) else None,

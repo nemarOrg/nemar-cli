@@ -31,6 +31,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar, cast
 
@@ -15021,20 +15022,30 @@ class TestMainAnnexMissingVerdict(unittest.TestCase):
         git("config", "user.name", "t")
         keys = {}
         for i, (rec, how) in enumerate(stored.items()):
-            # Distinct labels per recording: identical files would share one
-            # annex key, and storing one would store the other.
-            content = build_labeled_edf(os.path.join(self.dir, os.path.basename(rec)),
-                                        [f"R{i}C{n}" for n in (1, 2, 3)])
+            if how == "refused_bdf":
+                # A real BDF+ whose time-keeping onsets start at +40: pyedflib
+                # refuses it ("format errors", no errno), stored plain with a key
+                # that vouches for exactly these bytes.
+                content = build_onset_shifted_bdfplus(
+                    os.path.join(self.dir, os.path.basename(rec))
+                )
+                ext = ".bdf"
+            else:
+                # Distinct labels per recording: identical files would share one
+                # annex key, and storing one would store the other.
+                content = build_labeled_edf(os.path.join(self.dir, os.path.basename(rec)),
+                                            [f"R{i}C{n}" for n in (1, 2, 3)])
+                ext = ".edf"
             with open(content, "rb") as fh:
                 data = fh.read()
             if how == "truncated":
                 # Same length, garbage after the fixed header: a file the key
                 # vouches for and no reader can decode.
                 data = data[:256] + b"\xff" * (len(data) - 256)
-            key = sha256e(data, ".edf")
+            key = sha256e(data, ext)
             if how == "chunked":
                 self.s3.put_chunked(key, data, self.CHUNK)
-            elif how == "truncated":
+            elif how in ("truncated", "refused_bdf"):
                 self.s3.put_plain(key, data)
             link = os.path.join(self.repo, rec)
             os.makedirs(os.path.dirname(link), exist_ok=True)
@@ -15108,6 +15119,38 @@ class TestMainAnnexMissingVerdict(unittest.TestCase):
         self.assertEqual([e["path"] for e in index["stores"]], [self.RECS[0]])
         (failure,) = index["failures"]
         self.assertEqual((failure["path"], failure["code"]), (self.RECS[1], "annex_object_missing"))
+        self.assertEqual(index["pending"], [], "typed, so not pending")
+
+    BDF = "sub-02/ieeg/sub-02_task-rest_ieeg.bdf"
+
+    def test_a_streamed_refusal_is_a_data_failure_and_never_pending(self):
+        # The recording pyedflib refuses, through the STREAMING exporter: it used
+        # to reach the callback as an uncoded failure, so the run was not
+        # `deterministic`, the recording was `pending`, and it was retried five
+        # times before the index called it `retry_exhausted`.
+        self.build({self.BDF: "refused_bdf"})
+        StreamEdfThreshold.use(self, 1)
+        rc, log, cb = self.run_main()
+        self.assertEqual(rc, 1, log)
+        self.assertEqual(cb["status"], "failed")
+        (entry,) = cb["data_failures"]
+        self.assertEqual((entry["path"], entry["code"]), (self.BDF, "corrupt_or_truncated"))
+        self.assertTrue(cb["deterministic"], log)
+        self.assertEqual(cb["pending_count"], 0, "typed, so not pending")
+        self.assertIsNone(self.published_index(), "a total failure publishes nothing")
+
+    def test_a_streamed_refusal_beside_a_converting_recording_is_listed_as_a_failure(self):
+        self.build({self.RECS[0]: "chunked", self.BDF: "refused_bdf"})
+        StreamEdfThreshold.use(self, 1)
+        rc, log, cb = self.run_main()
+        self.assertEqual(rc, 0, log)
+        self.assertEqual(cb["status"], "ready")
+        self.assertEqual(cb["converted"], [store_rel_for(self.RECS[0])])
+        index = self.published_index()
+        if index is None:
+            self.fail("a partial run publishes its index")
+        (failure,) = index["failures"]
+        self.assertEqual((failure["path"], failure["code"]), (self.BDF, "corrupt_or_truncated"))
         self.assertEqual(index["pending"], [], "typed, so not pending")
 
 
@@ -15639,6 +15682,472 @@ class TestCompanionMissingThroughConvertOne(ConvertOneLocalCase):
         path = os.path.join(self.repo, self.VHDR)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         return path
+
+
+class Refusal(Exception):
+    """A stand-in for a reader's refusal, carrying a `.code` the way biosigIO's
+    typed errors do. For the pure `failure_verdict` tests only: every other test
+    here reaches a refusal by giving a real reader a real file."""
+
+    def __init__(self, message: str, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def chained(outer: BaseException, inner: BaseException) -> BaseException:
+    """`outer` raised `from` `inner`, without raising either."""
+    outer.__cause__ = inner
+    return outer
+
+
+EDF_REFUSAL = "the file is not EDF(+) or BDF(+) compliant"
+MNE_SPLIT_REFUSAL = (
+    "Split raw file detected but next file {path} does not exist. Ensure all files "
+    "were transferred properly and that split and original files were not manually "
+    "renamed on disk (split files should be recursively loaded)."
+)
+
+
+class TestFailureVerdict(unittest.TestCase):
+    """`failure_verdict(exc, primary, head_files) -> (code, detail)`: the one place
+    a reader's refusal becomes a code. Pure. The exceptions here are constructed
+    to prove refusals: a host condition is not one, nor is a typed failure of
+    another kind, nor is the same words from a different exception."""
+
+    SPLIT_HEAD = "sub-01/meg/sub-01_task-rest_split-01_meg.fif"
+    SPLIT_NEXT = "sub-01/meg/sub-01_task-rest_split-02_meg.fif"
+    SET = "sub-01/eeg/sub-01_task-x_eeg.set"
+
+    def verdict(self, exc, primary="sub-01/eeg/sub-01_task-x_eeg.edf", tracked=()):
+        return generate_zarr.failure_verdict(exc, primary, set(tracked) | {primary})
+
+    def probe_failure(self, path="/scratch/work/sub-01_task-rest_split-02_meg.fif"):
+        """MNE's split refusal as `is_maxshield_fif` surfaces it."""
+        return chained(
+            MaxShieldProbeFailed(
+                "could not read the FIF header to test for Internal Active Shielding: "
+                "ValueError: " + MNE_SPLIT_REFUSAL.format(path=path)
+            ),
+            ValueError(MNE_SPLIT_REFUSAL.format(path=path)),
+        )
+
+    # -- rule 4: the streaming EDF/BDF refusal ------------------------------
+
+    def test_a_bare_oserror_with_the_edf_refusal_is_corrupt_or_truncated(self):
+        for reason in ("(it contains format errors)", "(Filesize)", "(Recordingfield)"):
+            with self.subTest(reason):
+                exc = OSError(f"/scratch/work/x.bdf: {EDF_REFUSAL} {reason}")
+                self.assertEqual(self.verdict(exc), ("corrupt_or_truncated", None))
+
+    def test_a_host_condition_is_not_a_refusal(self):
+        # An OSError that carries an errno is the HOST saying no (a failing
+        # disk, a permission, a full volume), and it keeps its retry. Dropping
+        # the errno guard from the rule turns every one of these into a
+        # permanent data verdict.
+        for exc in (
+            OSError(errno.EIO, f"x.bdf: {EDF_REFUSAL} (Filesize)"),
+            OSError(errno.ENOSPC, f"x.bdf: {EDF_REFUSAL} (Filesize)"),
+            PermissionError(errno.EACCES, f"x.bdf: {EDF_REFUSAL} (Filesize)"),
+            FileNotFoundError(errno.ENOENT, f"x.bdf: {EDF_REFUSAL} (Filesize)"),
+        ):
+            with self.subTest(type(exc).__name__, errno=exc.errno):
+                self.assertEqual(self.verdict(exc), (None, None))
+
+    def test_the_same_words_from_another_exception_are_not_a_refusal(self):
+        for exc in (
+            RuntimeError(f"x.bdf: {EDF_REFUSAL} (Filesize)"),
+            ValueError(f"x.bdf: {EDF_REFUSAL} (Filesize)"),
+            Refusal(f"x.bdf: {EDF_REFUSAL} (Filesize)"),
+            # Subclasses of OSError built without an errno: the rule is for
+            # exactly pyedflib's bare OSError, not for the family.
+            PermissionError(f"x.bdf: {EDF_REFUSAL} (Filesize)"),
+            FileNotFoundError(f"x.bdf: {EDF_REFUSAL} (Filesize)"),
+        ):
+            with self.subTest(type(exc).__name__):
+                self.assertEqual(self.verdict(exc), (None, None))
+
+    def test_an_oserror_with_other_words_is_still_uncoded(self):
+        self.assertEqual(self.verdict(OSError("download failed after 4 attempts")), (None, None))
+
+    # -- a code that is not generic passes through -------------------------
+
+    def test_a_specific_code_is_never_refined(self):
+        edf = OSError(f"x.bdf: {EDF_REFUSAL} (Filesize)")
+        split = ValueError(MNE_SPLIT_REFUSAL.format(path="/w/sub-01_task-rest_split-02_meg.fif"))
+        for exc, code in (
+            (chained(RecordingMemoryExceeded("out of memory"), edf), "recording_memory_exceeded"),
+            (chained(generate_zarr.AnnexObjectMissing("KEY", "chunk C2 is absent"), split),
+             "annex_object_missing"),
+            (chained(MaxShieldUncalibrated("no pair"), split), "maxshield_uncalibrated"),
+            (chained(generate_zarr.CompanionMissing("no fdt"), split), "companion_missing"),
+            (chained(Refusal("x", "channel_count_mismatch"), edf), "channel_count_mismatch"),
+            (chained(Refusal("x", "not_continuous"), edf), "not_continuous"),
+        ):
+            with self.subTest(code):
+                self.assertEqual(
+                    self.verdict(exc, primary=self.SPLIT_HEAD, tracked=()), (code, None)
+                )
+
+    def test_only_the_generic_codes_are_refined(self):
+        # The four a reader (or the probe) reports without saying why.
+        split = ValueError(MNE_SPLIT_REFUSAL.format(path="/w/sub-01_task-rest_split-02_meg.fif"))
+        for code in (None, "file_read_error", "corrupt_or_truncated", "maxshield_probe_failed"):
+            with self.subTest(code):
+                self.assertEqual(
+                    self.verdict(chained(Refusal("read failed", code), split), self.SPLIT_HEAD)[0],
+                    "split_part_missing",
+                )
+
+    # -- rule 1: a split chain missing its next part -----------------------
+
+    def test_a_missing_split_part_is_named_by_its_tree_path(self):
+        code, detail = self.verdict(self.probe_failure(), self.SPLIT_HEAD)
+        self.assertEqual(code, "split_part_missing")
+        self.assertIn(self.SPLIT_NEXT, detail or "")
+        # The scratch directory MNE quoted is nowhere in what is published.
+        self.assertNotIn("/scratch", detail or "")
+        self.assertIn(self.SPLIT_NEXT, failure_detail(detail) or "")
+
+    def test_the_split_message_alone_is_enough(self):
+        # biosigIO's typed error carries MNE's sentence in its own message.
+        exc = Refusal(
+            "Truncated, incomplete, or corrupt file (/w/x.fif): "
+            + MNE_SPLIT_REFUSAL.format(path="/w/sub-01_task-rest_split-02_meg.fif"),
+            "corrupt_or_truncated",
+        )
+        self.assertEqual(self.verdict(exc, self.SPLIT_HEAD)[0], "split_part_missing")
+
+    def test_a_tracked_next_part_is_not_relabeled(self):
+        # The tree HAS the part: the file is missing from the working tree or was
+        # not fetched, which is a fetch gap, not a property of the dataset.
+        for code_source in (self.probe_failure(),
+                            Refusal("corrupt", "corrupt_or_truncated"),
+                            Refusal("unreadable", "file_read_error")):
+            exc = chained(code_source, ValueError(
+                MNE_SPLIT_REFUSAL.format(path="/w/sub-01_task-rest_split-02_meg.fif")))
+            with self.subTest(exc.code):
+                self.assertEqual(
+                    self.verdict(exc, self.SPLIT_HEAD, tracked={self.SPLIT_NEXT}),
+                    (exc.code, None),
+                )
+
+    def test_the_part_is_judged_in_the_primarys_directory_by_basename(self):
+        # MNE quotes wherever the file was materialized; the tree path is the
+        # primary's directory plus that file's name.
+        elsewhere = "sub-01/meg/other/sub-01_task-rest_split-02_meg.fif"
+        _, detail = self.verdict(self.probe_failure("/deep/ly/nested/" + os.path.basename(self.SPLIT_NEXT)),
+                                 self.SPLIT_HEAD, tracked={elsewhere})
+        self.assertIn(self.SPLIT_NEXT, detail or "")
+
+    # -- rule 2: epoched EEGLAB ---------------------------------------------
+
+    def test_a_three_dimensional_set_is_an_epoched_recording(self):
+        exc = Refusal(
+            "Could not read recording (/w/x.set): Must pass 2-d input. shape=(4, 500, 3)",
+            "file_read_error",
+        )
+        self.assertEqual(self.verdict(exc, self.SET), ("epoched_recording", None))
+        self.assertEqual(self.verdict(exc, self.SET.replace(".set", ".SET"))[0], "epoched_recording")
+        # Through a cause, too.
+        wrapped = chained(Refusal("Could not read recording", "file_read_error"),
+                          ValueError("Must pass 2-d input. shape=(4, 500, 3)"))
+        self.assertEqual(self.verdict(wrapped, self.SET)[0], "epoched_recording")
+
+    def test_the_epoched_rule_is_for_eeglab_sets_only(self):
+        exc = Refusal("Could not read recording: Must pass 2-d input. shape=(4, 500, 3)", "file_read_error")
+        for primary in ("sub-01/eeg/x_eeg.edf", "sub-01/eeg/x_eeg.vhdr", "sub-01/meg/x_meg.fif"):
+            with self.subTest(primary):
+                self.assertEqual(self.verdict(exc, primary), ("file_read_error", None))
+
+    # -- rule 3: a .fdt whose size disagrees with the header ---------------
+
+    def test_a_fdt_that_disagrees_with_its_header_is_corrupt_or_truncated(self):
+        message = (
+            "/w/x.fdt holds 3999 float32 samples but the .set header implies 4000 "
+            "(nbchan 4 x pnts 1000 x trials 1)"
+        )
+        exc = Refusal(f"Could not read recording (/w/x.set): {message}", "file_read_error")
+        self.assertEqual(self.verdict(exc, self.SET), ("corrupt_or_truncated", None))
+        self.assertEqual(
+            self.verdict(chained(Refusal("unreadable", "file_read_error"), ValueError(message)),
+                         self.SET),
+            ("corrupt_or_truncated", None),
+        )
+
+    # -- the walk ------------------------------------------------------------
+
+    def wrapper_chain(self, leaf: BaseException, depth: int) -> BaseException:
+        """An uncoded exception whose `__cause__` chain reaches `leaf` after
+        `depth` links."""
+        links = [RuntimeError(f"wrapper {i}") for i in range(depth)]
+        for outer, inner in zip(links, [*links[1:], leaf]):
+            outer.__cause__ = inner
+        return links[0] if links else leaf
+
+    def test_the_walk_follows_exactly_exc_plus_five_links(self):
+        leaf = OSError(f"x.bdf: {EDF_REFUSAL} (Filesize)")
+        # exc is link 0; the leaf is link `depth`. Five links is the last one read.
+        self.assertEqual(self.verdict(self.wrapper_chain(leaf, 5)), ("corrupt_or_truncated", None))
+        self.assertEqual(self.verdict(self.wrapper_chain(leaf, 6)), (None, None))
+
+    def test_the_walk_follows_the_implicit_context_too(self):
+        try:
+            try:
+                raise OSError(f"x.bdf: {EDF_REFUSAL} (Filesize)")
+            except OSError:
+                raise RuntimeError("while handling that") from None
+        except RuntimeError as exc:
+            # `from None` suppresses DISPLAY of the context; the link is still there.
+            self.assertIsNotNone(exc.__context__)
+            self.assertEqual(self.verdict(exc), ("corrupt_or_truncated", None))
+
+    def test_a_cause_cycle_terminates(self):
+        a, b = RuntimeError("a"), RuntimeError("b")
+        a.__cause__, b.__cause__ = b, a
+        self.assertEqual(self.verdict(a), (None, None))
+
+    def test_an_unmatched_generic_code_is_returned_as_it_was(self):
+        for code in (None, "file_read_error", "corrupt_or_truncated", "maxshield_probe_failed"):
+            with self.subTest(code):
+                self.assertEqual(self.verdict(Refusal("something else entirely", code)), (code, None))
+
+
+def build_truncated_edfplus(path: str) -> str:
+    """A REAL EDF+ written by pyedflib and cut to half its length: the reader's
+    own "(Filesize)" refusal, not a hand-made file."""
+    directory, name = os.path.split(path)
+    written = build_real_edf(directory, os.path.splitext(name)[0], seconds=10)
+    with open(written, "rb") as fh:
+        data = fh.read()
+    with open(written, "wb") as fh:
+        fh.write(data[: len(data) // 2])
+    return written
+
+
+def build_onset_shifted_bdfplus(path: str, first_onset: int = 40) -> str:
+    """A REAL BDF+ written by pyedflib whose time-keeping annotation onsets
+    start at +`first_onset` instead of +0: nm000284's shape, a session cut out of
+    the middle with its session-relative onsets kept. pyedflib refuses it with
+    "(it contains format errors)" and no errno. About 2 KB; only the onsets are
+    rewritten, in place, so every length in the header still holds."""
+    import pyedflib
+
+    build_edf_family(path, [("Fz", 64), ("Cz", 64)], pyedflib.FILETYPE_BDFPLUS, seconds=2)
+    with open(path, "rb") as fh:
+        raw = bytearray(fh.read())
+    n_signals = int(raw[252:256].decode().strip())
+    per_signal = 16 + 80 + 8 + 8 + 8 + 8 + 8 + 80  # label ... prefiltering, per signal
+    first_count = 256 + n_signals * per_signal
+    samples = [
+        int(raw[first_count + 8 * i: first_count + 8 * (i + 1)].decode().strip())
+        for i in range(n_signals)
+    ]
+    header_bytes = 256 * (n_signals + 1)
+    record_bytes = 3 * sum(samples)
+    annotation_bytes = 3 * samples[-1]  # the annotation signal is last
+    for record in range((len(raw) - header_bytes) // record_bytes):
+        start = header_bytes + record * record_bytes + (record_bytes - annotation_bytes)
+        new = f"+{first_onset + record}".encode() + b"\x14\x14\x00"
+        raw[start:start + len(new)] = new
+    with open(path, "wb") as fh:
+        fh.write(raw)
+    return path
+
+
+class StreamEdfThreshold:
+    """Lower (or restore) `STREAM_EDF_MIN_BYTES` for one test: 1 sends every EDF
+    and BDF down the streaming exporter, the existing pattern for reaching it
+    with a file small enough to build in a test."""
+
+    @staticmethod
+    def use(test: unittest.TestCase, threshold: int | None) -> None:
+        saved = generate_zarr.STREAM_EDF_MIN_BYTES
+        test.addCleanup(setattr, generate_zarr, "STREAM_EDF_MIN_BYTES", saved)
+        if threshold is not None:
+            generate_zarr.STREAM_EDF_MIN_BYTES = threshold
+
+
+class TestStreamedEdfRefusalThroughConvertOne(ConvertOneLocalCase):
+    """A file pyedflib refuses is `corrupt_or_truncated` on BOTH exporters.
+
+    In memory, biosigIO types the refusal itself. Streaming, it re-raises
+    pyedflib's bare `OSError`, which `convert_one` took for infrastructure and
+    retried until `retry_exhausted` (361 published rows). Real files, the real
+    exporters, the real `convert_one`."""
+
+    REQUIRES = ("zarr", "pyedflib", "biosigio")
+
+    REFUSED: ClassVar[dict[str, tuple[str, Callable[[str], str]]]] = {
+        "truncated EDF+ (Filesize)": (
+            "sub-01/eeg/sub-01_task-rest_eeg.edf", build_truncated_edfplus,
+        ),
+        "onset-shifted BDF+ (format errors)": (
+            "sub-01/eeg/sub-01_task-rest_eeg.bdf", build_onset_shifted_bdfplus,
+        ),
+    }
+
+    def test_both_exporters_type_the_refusal_alike(self):
+        for label, (primary, build) in self.REFUSED.items():
+            os.makedirs(os.path.join(self.repo, os.path.dirname(primary)), exist_ok=True)
+            build(os.path.join(self.repo, primary))
+            codes = {}
+            for path_name, threshold in (("in-memory", None), ("streaming", 1)):
+                with self.subTest(label, path=path_name):
+                    StreamEdfThreshold.use(self, threshold)
+                    result = self.convert(primary, {primary})
+                    self.assert_refused_as_data(result, "corrupt_or_truncated")
+                    self.assertNotIn("entry", result, "nothing is published for a refusal")
+                    self.assertIn("not EDF(+) or BDF(+) compliant", result["detail"])
+                    codes[path_name] = result["code"]
+            self.assertEqual(codes.get("in-memory"), codes.get("streaming"), label)
+
+    def test_a_streamed_file_that_pyedflib_reads_still_converts(self):
+        # The inverse: the rule keys on the refusal, not on the exporter.
+        import pyedflib
+
+        primary = "sub-01/eeg/sub-01_task-rest_eeg.bdf"
+        os.makedirs(os.path.join(self.repo, "sub-01/eeg"))
+        build_edf_family(
+            os.path.join(self.repo, primary), [("Fz", 64), ("Cz", 64)],
+            pyedflib.FILETYPE_BDFPLUS, seconds=2,
+        )
+        StreamEdfThreshold.use(self, 1)
+        result = self.convert(primary, {primary})
+        self.assertTrue(result["ok"], result.get("error"))
+
+
+class TestStreamingRefusalCanary(unittest.TestCase):
+    """TEMPORARY, with `failure_verdict` rule 4 (the bare-OSError rule).
+
+    Rule 4 exists only because biosigIO's streaming EDF/BDF source re-raises
+    pyedflib's refusal as a bare `OSError` (errno None) where its in-memory path
+    types it `corrupt_or_truncated`. biosigio#149 types the streaming refusal.
+    This canary asserts the defect is still there on the pinned biosigIO. The day
+    the cap in requirements.txt is raised past biosigio#149 it FAILS, and that
+    pull request deletes rule 4 and this class together: from then on biosigIO
+    says what the converter had to infer. Until then, removing either one leaves
+    361 published rows retried five times each.
+
+    The onset-shifted fixture converts once biosigio#145 lands (Phase 7 of the
+    epic); the truncated one stays a refusal for good."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+            from biosigio import stream_to_zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def test_stream_to_zarr_still_raises_a_bare_oserror(self):
+        from biosigio import stream_to_zarr
+
+        for label, build in (
+            ("truncated EDF+", lambda p: build_truncated_edfplus(p)),
+            ("onset-shifted BDF+", lambda p: build_onset_shifted_bdfplus(p)),
+        ):
+            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
+                ext = ".bdf" if "BDF" in label else ".edf"
+                src = build(os.path.join(tmp, f"sub-01_task-rest_eeg{ext}"))
+                try:
+                    stream_to_zarr(src, os.path.join(tmp, "out.zarr"), bids_channels="off")
+                except Exception as exc:  # noqa: BLE001 - the exception IS the measurement
+                    raised = exc
+                else:
+                    self.fail(
+                        "biosigIO now streams this file (biosigio#145 reads a late first "
+                        "onset): the converter has no refusal to type for it; update the "
+                        "fixtures that expect one, and see biosigio#149 for the rest"
+                    )
+                exc = raised
+                self.assertIs(
+                    type(exc), OSError,
+                    f"biosigIO now raises {type(exc).__name__} for a streamed refusal "
+                    "(biosigio#149): delete failure_verdict rule 4 and this canary",
+                )
+                self.assertIsNone(exc.errno)
+                self.assertIn("not EDF(+) or BDF(+) compliant", str(exc))
+
+
+class TestReaderRefusalsThroughConvertOne(ConvertOneLocalCase):
+    """The readers' refusals that `failure_verdict` types, each reached by giving
+    the real reader a real broken file, and the controls that keep the rules
+    from turning a conversion that works into a failure."""
+
+    REQUIRES = ("zarr", "scipy.io", "mne", "biosigio")
+
+    SET = "sub-01/eeg/sub-01_task-x_eeg.set"
+    FDT = "sub-01/eeg/sub-01_task-x_eeg.fdt"
+    SPLITS = tuple(f"sub-01/meg/sub-01_task-rest_split-0{n}_meg.fif" for n in (1, 2, 3))
+
+    def write_fdt_set(self, **kwargs) -> None:
+        write_eeglab_set(
+            os.path.join(self.repo, self.SET), os.path.join(self.repo, self.FDT),
+            embedded="sub-01_task-x_eeg.fdt", **kwargs,
+        )
+
+    def test_a_fdt_of_the_wrong_size_is_corrupt_or_truncated(self):
+        self.write_fdt_set()
+        with open(os.path.join(self.repo, self.FDT), "r+b") as fh:
+            fh.truncate(4 * 1000 * 4 - 4)
+        result = self.convert(self.SET, {self.SET, self.FDT})
+        self.assert_refused_as_data(result, "corrupt_or_truncated")
+        self.assertIn("float32 samples but the .set header implies", result["detail"])
+
+    def test_a_fdt_of_the_right_size_converts(self):
+        self.write_fdt_set()
+        result = self.convert(self.SET, {self.SET, self.FDT})
+        self.assertTrue(result["ok"], result.get("error"))
+
+    def test_an_embedded_epoched_set_is_an_epoched_recording(self):
+        build_eeglab_set(os.path.join(self.repo, self.SET), 3, trials=4)
+        result = self.convert(self.SET, {self.SET})
+        self.assert_refused_as_data(result, "epoched_recording")
+        self.assertIn("Must pass 2-d input", result["detail"])
+
+    def test_an_epoched_set_with_a_fdt_still_converts(self):
+        # Measured: the reader flattens its four epochs into one run. This is why
+        # the rule keys on the reader's refusal and not on `trials > 1`.
+        os.makedirs(os.path.join(self.repo, "sub-01/eeg"))
+        build_eeglab_set(os.path.join(self.repo, self.SET), 3, trials=4, fdt=True)
+        result = self.convert(self.SET, {self.SET, self.FDT})
+        self.assertTrue(result["ok"], result.get("error"))
+        (group,) = result["entry"]["groups"]
+        self.assertEqual((group["n_channels"], group["n_samples"]), (3, 500 * 4))
+
+    def build_split_chain(self) -> None:
+        os.makedirs(os.path.join(self.repo, "sub-01/meg"))
+        build_real_fif(
+            os.path.join(self.repo, "sub-01/meg/sub-01_task-rest_meg.fif"),
+            rate=1000.0, seconds=120, split_size="2MB", split_naming="bids",
+        )
+        for part in self.SPLITS:
+            self.assertTrue(os.path.exists(os.path.join(self.repo, part)), part)
+
+    def test_a_split_chain_without_its_next_part_is_split_part_missing(self):
+        self.build_split_chain()
+        os.remove(os.path.join(self.repo, self.SPLITS[1]))
+        result = self.convert(self.SPLITS[0], {self.SPLITS[0], self.SPLITS[2]})
+        self.assert_refused_as_data(result, "split_part_missing")
+        self.assertIn(self.SPLITS[1], result["detail"])
+        self.assertNotIn(self.repo, result["detail"])
+        # And it is not the MaxShield verdict it used to be reported as.
+        self.assertNotEqual(result["code"], "maxshield_probe_failed")
+
+    def test_a_tracked_next_part_that_is_absent_keeps_the_probe_failure(self):
+        # The tree lists split-02, the working tree lacks it: not a property of
+        # the dataset, so no relabel.
+        self.build_split_chain()
+        os.remove(os.path.join(self.repo, self.SPLITS[1]))
+        result = self.convert(self.SPLITS[0], set(self.SPLITS))
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "maxshield_probe_failed")
+
+    def test_the_whole_split_chain_converts(self):
+        self.build_split_chain()
+        result = self.convert(self.SPLITS[0], set(self.SPLITS))
+        self.assertTrue(result["ok"], result.get("error"))
 
 
 # --- Subject information never reaches a store (#1626) -------------------------
