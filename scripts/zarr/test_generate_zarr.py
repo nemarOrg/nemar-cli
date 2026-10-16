@@ -16480,6 +16480,21 @@ def build_truncated_edfplus(path: str) -> str:
     return written
 
 
+def build_truncated_bdfplus(path: str) -> str:
+    """A REAL BDF+ written by pyedflib and cut to half its length: the same
+    "(Filesize)" refusal as `build_truncated_edfplus`, for a `.bdf`."""
+    import pyedflib
+
+    build_edf_family(
+        path, [("Fz", 64), ("Cz", 64)], pyedflib.FILETYPE_BDFPLUS, annotations=True, seconds=10
+    )
+    with open(path, "rb") as fh:
+        data = fh.read()
+    with open(path, "wb") as fh:
+        fh.write(data[: len(data) // 2])
+    return path
+
+
 def build_onset_shifted_bdfplus(path: str, first_onset: int = 40) -> str:
     """A REAL BDF+ written by pyedflib whose time-keeping annotation onsets
     start at +`first_onset` instead of +0: nm000284's shape, a session cut out of
@@ -16608,27 +16623,21 @@ class TestStreamedEdfRefusalThroughConvertOne(ConvertOneLocalCase):
         self.assertTrue(result["ok"], result.get("error"))
 
 
-class TestStreamingRefusalCanary(unittest.TestCase):
-    """TEMPORARY, with `failure_verdict` rule 4 (the bare-OSError rule).
+class TestPinnedStreamingRefusal(unittest.TestCase):
+    """The pinned biosigIO types a streamed EDF/BDF refusal itself.
 
-    Rule 4 exists only because biosigIO's streaming EDF/BDF source re-raises
-    pyedflib's refusal as a bare `OSError` (errno None) where its in-memory path
-    types it `corrupt_or_truncated`. biosigio#149 types the streaming refusal.
-    This canary asserts the defect is still there on the pinned biosigIO. The day
-    the cap in requirements.txt is raised past biosigio#149 it FAILS, and that
-    pull request deletes rule 4 and this class together: from then on biosigIO
-    says what the converter had to infer. Until then, removing either one leaves
-    361 published rows retried five times each.
+    `stream_to_zarr` used to re-raise pyedflib's refusal, and the tolerant
+    fallback's truncation errors, as a bare `OSError` (errno None), where the
+    in-memory path raised a typed `corrupt_or_truncated`. The converter read
+    those by their text. biosigio#149 (fixed by #150, released in 1.2.12) types
+    them at the source, so the converter has nothing to infer, and this class
+    is the canary for that contract on the converter's own call
+    (`write_store(stream_to_zarr, ...)`). The day a release raises a bare
+    `OSError` again, or a different type, it FAILS, and the cap in
+    requirements.txt is not raised until a person has read why.
 
-    The onset-shifted fixture converts once biosigio#145 lands (Phase 7 of the
-    epic); the truncated one stays a refusal for good.
-
-    `test_stream_to_zarr_still_raises_a_bare_oserror_for_a_cut_fallback_file` is
-    the same measurement for the tolerant fallback's own truncation errors
-    (`_BIOSIGIO_TRUNCATION_RES`). biosigio PR #150 (closes #149) wraps the
-    streaming fallback in `classify_read_error`, so it fails on biosigio 1.2.12;
-    the pinned 1.2.11 still raises them bare. At that release, delete the
-    fallback text match and this case."""
+    A bare `OSError` out of the streaming exporter is still read as the host's:
+    it carries no code, so it is retried (`TestFailureVerdict`)."""
 
     @classmethod
     def setUpClass(cls):
@@ -16639,59 +16648,58 @@ class TestStreamingRefusalCanary(unittest.TestCase):
         except Exception as exc:
             raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
 
-    def test_stream_to_zarr_still_raises_a_bare_oserror(self):
+    def streamed_error(self, build, name: str) -> BaseException:
+        """What the converter's streaming write raises for the file `build` makes."""
         from biosigio import stream_to_zarr
 
-        for label, build in (
-            ("truncated EDF+", lambda p: build_truncated_edfplus(p)),
-            ("onset-shifted BDF+", lambda p: build_onset_shifted_bdfplus(p)),
-        ):
-            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
-                ext = ".bdf" if "BDF" in label else ".edf"
-                src = build(os.path.join(tmp, f"sub-01_task-rest_eeg{ext}"))
-                try:
-                    stream_to_zarr(src, os.path.join(tmp, "out.zarr"), bids_channels="off")
-                except Exception as exc:  # noqa: BLE001 - the exception IS the measurement
-                    raised = exc
-                else:
-                    self.fail(
-                        "biosigIO now streams this file (biosigio#145 reads a late first "
-                        "onset): the converter has no refusal to type for it; update the "
-                        "fixtures that expect one, and see biosigio#149 for the rest"
-                    )
-                exc = raised
-                self.assertIs(
-                    type(exc), OSError,
-                    f"biosigIO now raises {type(exc).__name__} for a streamed refusal "
-                    "(biosigio#149): delete failure_verdict rule 4 and this canary",
+        with tempfile.TemporaryDirectory() as tmp:
+            src = build(os.path.join(tmp, name))
+            store = os.path.join(tmp, "out.zarr")
+            with self.assertRaises(Exception) as raised:  # the exception IS the measurement
+                generate_zarr.write_store(
+                    stream_to_zarr, src, store, expected_path=store, bids_channels="off"
                 )
-                self.assertIsNone(exc.errno)
-                self.assertIn("not EDF(+) or BDF(+) compliant", str(exc))
+        return raised.exception
 
-    def test_stream_to_zarr_still_raises_a_bare_oserror_for_a_cut_fallback_file(self):
-        # The fallback's own truncation errors, the other half of rule 4.
-        from biosigio import stream_to_zarr
+    def assert_typed(self, exc: BaseException, expected: type, code: str, text: str) -> None:
+        self.assertIs(
+            type(exc), expected,
+            f"biosigIO raised {type(exc).__name__} for a streamed refusal, not "
+            f"{expected.__name__}: {exc}",
+        )
+        self.assertNotIsInstance(exc, OSError)
+        self.assertEqual(exc.code, code)
+        self.assertIn(text, str(exc))
 
-        for label, build in (
-            ("cut", build_cut_degenerate_range_edf),
-            ("impossible signal count", build_negative_signal_count_edf),
+    def test_a_streamed_pyedflib_refusal_is_a_corrupt_file_error(self):
+        from biosigio.exceptions import CorruptFileError
+
+        for label, build, name in (
+            ("truncated EDF+", build_truncated_edfplus, "sub-01_task-rest_eeg.edf"),
+            ("truncated BDF+", build_truncated_bdfplus, "sub-01_task-rest_eeg.bdf"),
         ):
-            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
-                src = build(os.path.join(tmp, "sub-01_task-rest_eeg.edf"))
-                with self.assertRaises(Exception) as raised:  # the exception IS the measurement
-                    stream_to_zarr(src, os.path.join(tmp, "out.zarr"), bids_channels="off")
-                exc = raised.exception
-                self.assertIs(
-                    type(exc), OSError,
-                    f"biosigIO now raises {type(exc).__name__} for a streamed fallback "
-                    "truncation (biosigio 1.2.12 ships PR #150): delete "
-                    "_BIOSIGIO_TRUNCATION_RES from failure_verdict rule 4 and this case",
+            with self.subTest(label):
+                exc = self.streamed_error(build, name)
+                self.assert_typed(
+                    exc, CorruptFileError, "corrupt_or_truncated",
+                    "not EDF(+) or BDF(+) compliant",
                 )
-                self.assertIsNone(exc.errno)
-                self.assertTrue(
-                    any(p.search(str(exc)) for p in generate_zarr._BIOSIGIO_TRUNCATION_RES),
-                    f"biosigIO's fallback now words this differently: {exc}",
-                )
+
+    def test_a_streamed_fallback_truncation_is_a_corrupt_file_error(self):
+        from biosigio.exceptions import CorruptFileError
+
+        exc = self.streamed_error(build_cut_degenerate_range_edf, "sub-01_task-rest_eeg.edf")
+        self.assert_typed(exc, CorruptFileError, "corrupt_or_truncated", "file is truncated")
+
+    def test_a_streamed_impossible_signal_count_is_a_file_read_error(self):
+        # The fallback's header probe. biosigIO types it generically, not as
+        # `corrupt_or_truncated`; the converter publishes the code it is given.
+        from biosigio.exceptions import FileReadError
+
+        exc = self.streamed_error(build_negative_signal_count_edf, "sub-01_task-rest_eeg.edf")
+        self.assert_typed(
+            exc, FileReadError, "file_read_error", "invalid number of signals in header (-1)"
+        )
 
 
 def build_degenerate_range_edf(path: str) -> str:
