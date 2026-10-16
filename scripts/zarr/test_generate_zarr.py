@@ -15769,6 +15769,55 @@ class TestFailureVerdict(unittest.TestCase):
     def test_an_oserror_with_other_words_is_still_uncoded(self):
         self.assertEqual(self.verdict(OSError("download failed after 4 attempts")), (None, None))
 
+    @staticmethod
+    def raised_while_handling(refusal: BaseException, make_next: Callable[[], BaseException]):
+        """The exception `make_next` builds, RAISED inside the `except` block that
+        caught `refusal`: Python links the refusal as its `__context__`, which is
+        how biosigIO's tolerant EDF read ends up holding a host error beside
+        pyedflib's refusal. Raised, not assembled by hand, so the link is the
+        interpreter's own."""
+        try:
+            try:
+                raise refusal
+            except OSError:
+                raise make_next()
+        except Exception as raised:  # noqa: BLE001 - the exception is the product
+            return raised
+        raise AssertionError("make_next() was not raised")
+
+    def test_a_host_error_raised_while_recovering_from_a_refusal_keeps_its_retry(self):
+        # biosigIO recovers three kinds of header pyedflib refuses by reading the
+        # file again INSIDE the `except` block that caught the refusal. A host
+        # error raised by that second read (a failing disk, a full volume, a
+        # permission) therefore carries the bare refusal as its `__context__`.
+        # It is the host saying no, and keeps its retry: the refusal behind it is
+        # not what this exception is.
+        for label, make in (
+            ("EIO", lambda: OSError(errno.EIO, "Input/output error")),
+            ("ENOSPC", lambda: OSError(errno.ENOSPC, "No space left on device")),
+            ("EACCES", lambda: PermissionError(errno.EACCES, "Permission denied")),
+            ("no errno, other words", lambda: OSError("fallback read failed")),
+        ):
+            with self.subTest(label):
+                exc = self.raised_while_handling(
+                    OSError(f"x.bdf: {EDF_REFUSAL} (Filesize)"), make
+                )
+                # The control: the refusal really is the context, so a verdict
+                # of (None, None) is the rule declining to read it.
+                self.assertIn(EDF_REFUSAL, str(exc.__context__))
+                self.assertEqual(self.verdict(exc), (None, None))
+
+    def test_a_refusal_behind_another_exception_is_not_the_refusal(self):
+        # Only the exception itself is read. An explicit cause is a link behind
+        # it just as an implicit context is.
+        refusal = OSError(f"x.bdf: {EDF_REFUSAL} (Filesize)")
+        host = OSError(errno.EIO, "Input/output error")
+        host.__cause__ = refusal
+        self.assertEqual(self.verdict(host), (None, None))
+        for depth in range(1, 6):
+            with self.subTest(depth=depth):
+                self.assertEqual(self.verdict(self.wrapper_chain(refusal, depth)), (None, None))
+
     # -- a code that is not generic passes through -------------------------
 
     def test_a_specific_code_is_never_refined(self):
@@ -15884,22 +15933,45 @@ class TestFailureVerdict(unittest.TestCase):
             outer.__cause__ = inner
         return links[0] if links else leaf
 
+    FDT_MISMATCH = (
+        "/w/x.fdt holds 3999 float32 samples but the .set header implies 4000 "
+        "(nbchan 4 x pnts 1000 x trials 1)"
+    )
+
     def test_the_walk_follows_exactly_exc_plus_five_links(self):
-        leaf = OSError(f"x.bdf: {EDF_REFUSAL} (Filesize)")
-        # exc is link 0; the leaf is link `depth`. Five links is the last one read.
-        self.assertEqual(self.verdict(self.wrapper_chain(leaf, 5)), ("corrupt_or_truncated", None))
-        self.assertEqual(self.verdict(self.wrapper_chain(leaf, 6)), (None, None))
+        # exc is link 0; the leaf is link `depth`. Five links is the last one
+        # read, by the rules that read the chain (1 to 3).
+        leaf = ValueError(self.FDT_MISMATCH)
+        self.assertEqual(
+            self.verdict(self.wrapper_chain(leaf, 5), self.SET), ("corrupt_or_truncated", None)
+        )
+        self.assertEqual(self.verdict(self.wrapper_chain(leaf, 6), self.SET), (None, None))
+        # Rule 4 does not ride the walk: the same chain around the EDF refusal,
+        # at any depth, is not the refusal.
+        refusal = OSError(f"x.bdf: {EDF_REFUSAL} (Filesize)")
+        for depth in range(1, 6):
+            with self.subTest(refusal_at=depth):
+                self.assertEqual(self.verdict(self.wrapper_chain(refusal, depth)), (None, None))
 
     def test_the_walk_follows_the_implicit_context_too(self):
         try:
             try:
-                raise OSError(f"x.bdf: {EDF_REFUSAL} (Filesize)")
-            except OSError:
+                raise ValueError(self.FDT_MISMATCH)
+            except ValueError:
                 raise RuntimeError("while handling that") from None
         except RuntimeError as exc:
             # `from None` suppresses DISPLAY of the context; the link is still there.
             self.assertIsNotNone(exc.__context__)
-            self.assertEqual(self.verdict(exc), ("corrupt_or_truncated", None))
+            self.assertEqual(self.verdict(exc, self.SET), ("corrupt_or_truncated", None))
+        # What it must NOT carry to a data verdict is a host error: raised while
+        # handling pyedflib's refusal, it holds the refusal as its context and is
+        # still the host's.
+        host = self.raised_while_handling(
+            OSError(f"x.bdf: {EDF_REFUSAL} (Filesize)"),
+            lambda: OSError(errno.EIO, "Input/output error"),
+        )
+        self.assertIsNotNone(host.__context__)
+        self.assertEqual(self.verdict(host), (None, None))
 
     def test_a_cause_cycle_terminates(self):
         a, b = RuntimeError("a"), RuntimeError("b")
@@ -16104,6 +16176,99 @@ class TestStreamingRefusalCanary(unittest.TestCase):
                 )
                 self.assertIsNone(exc.errno)
                 self.assertIn("not EDF(+) or BDF(+) compliant", str(exc))
+
+
+def build_degenerate_range_edf(path: str) -> str:
+    """A REAL EDF written by pyedflib whose first channel has
+    `physical_max == physical_min`, rewritten in place in the header. pyedflib
+    refuses to open it ("not EDF(+) or BDF(+) compliant") and biosigIO's tolerant
+    fallback reads it anyway (biosigio#109, #116): the one shape where the
+    refusal is caught and a SECOND read of the file follows inside the `except`
+    block that caught it."""
+    directory, name = os.path.split(path)
+    written = build_real_edf(directory, os.path.splitext(name)[0], n_channels=2, rate=100, seconds=4)
+    with open(written, "rb") as fh:
+        raw = bytearray(fh.read())
+    n_signals = int(raw[252:256].decode().strip())
+    physical_min = 256 + n_signals * (16 + 80 + 8)  # label, transducer, dimension
+    physical_max = physical_min + n_signals * 8
+    raw[physical_max:physical_max + 8] = raw[physical_min:physical_min + 8]
+    with open(written, "wb") as fh:
+        fh.write(raw)
+    return written
+
+
+class TestHostErrorWhileRecoveringARefusedEdf(ConvertOneLocalCase):
+    """A host error is the host's, also when it is raised while biosigIO is
+    recovering from pyedflib's refusal.
+
+    `failure_verdict` rule 4 types pyedflib's bare refusal a file failure. The
+    tolerant fallback reads the file a second time inside the `except` block
+    that caught that refusal, so an `OSError(EIO)` raised by the second read has
+    the refusal as its `__context__`. Reading the chain made it
+    `corrupt_or_truncated`, a terminal verdict for what a retry on a healthy
+    disk would convert. The EIO is injected at `mne.io.read_raw`, the
+    fallback's one read of the samples: no portable file permission reaches it,
+    since pyedflib's own open fails first on an unreadable file and raises the
+    host error before any fallback."""
+
+    REQUIRES = ("zarr", "pyedflib", "biosigio", "mne")
+    PRIMARY = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+
+    def setUp(self):
+        super().setUp()
+        os.makedirs(os.path.join(self.repo, os.path.dirname(self.PRIMARY)))
+        build_degenerate_range_edf(os.path.join(self.repo, self.PRIMARY))
+
+    @contextlib.contextmanager
+    def failing_disk(self):
+        """`mne.io.read_raw` raises `OSError(EIO)`; yields the list of calls."""
+        import mne.io
+
+        calls: list[str] = []
+        real = mne.io.read_raw
+
+        def read_raw(path, *args, **kwargs):
+            calls.append(os.path.basename(str(path)))
+            raise OSError(errno.EIO, "Input/output error", str(path))
+
+        mne.io.read_raw = read_raw
+        try:
+            yield calls
+        finally:
+            mne.io.read_raw = real
+
+    def test_the_fixture_is_refused_by_pyedflib_and_recovered_by_biosigio(self):
+        # The control for everything below: this file takes the fallback.
+        import pyedflib
+
+        with self.assertRaises(OSError) as refusal:
+            pyedflib.EdfReader(os.path.join(self.repo, self.PRIMARY))
+        self.assertIn("not EDF(+) or BDF(+) compliant", str(refusal.exception))
+        for path_name, threshold in (("in-memory", None), ("streaming", 1)):
+            with self.subTest(path_name):
+                StreamEdfThreshold.use(self, threshold)
+                with StreamEdfThreshold.watching_writers() as writers:
+                    result = self.convert(self.PRIMARY, {self.PRIMARY})
+                self.assertTrue(result["ok"], result.get("error"))
+                self.assertEqual("stream_to_zarr" in writers, path_name == "streaming", writers)
+
+    def test_a_host_error_during_the_fallback_read_keeps_its_retry(self):
+        for path_name, threshold in (("in-memory", None), ("streaming", 1)):
+            with self.subTest(path_name):
+                StreamEdfThreshold.use(self, threshold)
+                with StreamEdfThreshold.watching_writers() as writers, self.failing_disk() as calls:
+                    result = self.convert(self.PRIMARY, {self.PRIMARY})
+                # The fallback ran (the injected read was reached) on the
+                # exporter this subtest asked for.
+                self.assertEqual(calls, [os.path.basename(self.PRIMARY)] * len(calls))
+                self.assertTrue(calls, "the fallback read was never reached")
+                self.assertEqual("stream_to_zarr" in writers, path_name == "streaming", writers)
+                # Not a data verdict. Uncoded is how a host condition reaches the
+                # driver: it becomes a `pending` retry, never a `failures` entry.
+                self.assertFalse(result["ok"], result)
+                self.assertIsNone(result["code"], result.get("detail"))
+                self.assertIn("Input/output error", result["detail"])
 
 
 class TestReaderRefusalsThroughConvertOne(ConvertOneLocalCase):

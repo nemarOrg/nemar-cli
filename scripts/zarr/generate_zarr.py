@@ -2037,8 +2037,9 @@ def failure_verdict(
     has a better one than the exception's (it names the file by its BIDS path,
     never a scratch path); None means `failure_detail(exc)`.
 
-    Reads `exc` and five `__cause__`/`__context__` links, and only for the codes
-    in `_REFINABLE_CODES`. The first rule that matches wins:
+    Reads `exc` and five `__cause__`/`__context__` links (rule 4 reads `exc`
+    alone), and only for the codes in `_REFINABLE_CODES`. The first rule that
+    matches wins:
 
     1. MNE's "Split raw file detected but next file X does not exist":
        `split_part_missing`, naming `dirname(primary)/basename(X)`, when the TREE
@@ -2050,15 +2051,20 @@ def failure_verdict(
     3. "float32 samples but the .set header implies": the `.fdt` is not the size
        its `.set` header says, `corrupt_or_truncated`. DEFENSE until biosigIO
        types the mismatch itself.
-    4. Exactly `OSError`, with no errno, saying "not EDF(+) or BDF(+) compliant":
-       pyedflib's refusal, re-raised bare by biosigIO's streaming EDF/BDF source,
-       `corrupt_or_truncated`, as its in-memory path types the same file.
-       TEMPORARY, like its canary (`TestStreamingRefusalCanary`): biosigio#149
-       types the streaming refusal, and the pull request that raises the biosigIO
-       cap past that fix deletes this rule and the canary together. The guard is
-       exact on purpose: an `OSError` that carries an errno (EIO, ENOSPC, EACCES)
-       or is a subclass (`PermissionError`) is the HOST saying no, a condition
-       that must keep its retry.
+    4. `exc` ITSELF is exactly `OSError`, with no errno, saying "not EDF(+) or
+       BDF(+) compliant": pyedflib's refusal, re-raised bare by biosigIO's
+       streaming EDF/BDF source, `corrupt_or_truncated`, as its in-memory path
+       types the same file. TEMPORARY, like its canary
+       (`TestStreamingRefusalCanary`): biosigio#149 types the streaming refusal,
+       and the pull request that raises the biosigIO cap past that fix deletes
+       this rule and the canary together. The guard is exact on purpose: an
+       `OSError` that carries an errno (EIO, ENOSPC, EACCES) or is a subclass
+       (`PermissionError`) is the HOST saying no, a condition that must keep its
+       retry. And it is `exc`, never a link behind it: biosigIO recovers some
+       refusals inside the `except` block that caught them, so a host error
+       raised during that recovery carries the bare refusal as its
+       `__context__`, and reading the chain would type the host's error as the
+       file's.
     5. Otherwise the exception's own code, which may be None.
     """
     code = getattr(exc, "code", None)
@@ -2076,11 +2082,10 @@ def failure_verdict(
         return EPOCHED_RECORDING, None
     if any("float32 samples but the .set header implies" in m for m in messages):
         return "corrupt_or_truncated", None
-    if any(
-        type(link) is OSError
-        and link.errno is None
-        and "not EDF(+) or BDF(+) compliant" in str(link)
-        for link in chain
+    if (
+        type(exc) is OSError
+        and exc.errno is None
+        and "not EDF(+) or BDF(+) compliant" in str(exc)
     ):
         return "corrupt_or_truncated", None
     return code, None
