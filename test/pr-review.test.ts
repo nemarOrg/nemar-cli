@@ -593,6 +593,16 @@ describe("conclusions: only a clear pass is green, nothing unknown ever satisfie
     },
   );
 
+  test.each([...DECLINE_REASONS])(
+    "the sentence for %s is about the moment the commit arrived, because it is shown again long after",
+    (reason) => {
+      const { summary } = renderCheck({ kind: "declined", reason });
+      expect(summary).toContain("when this commit arrived");
+      // Never the present tense about a state that may have ended.
+      expect(summary).not.toMatch(/\b(is paused|is rate limited|is reached)\b/);
+    },
+  );
+
   test("every finding code has a label", () => {
     for (const code of FINDING_CODES) {
       const r = parsed({

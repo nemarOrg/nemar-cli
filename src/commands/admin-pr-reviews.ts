@@ -494,10 +494,12 @@ REVIEW column (the automated review of the pull request's CURRENT commit):
   pass              nothing lost, the revision advances, the dataset is materially better
   fail              the review found a problem; the author needs to change something
   uncertain         the review could not decide whether it is a good change
-  not reviewed      no review of this commit is on record: the review is off, an administrator
-                    blocked the contributor ("contributor paused"), or the review on record is of
-                    another commit (shown as "other commit"). A row from before the limits on
-                    reviews were removed can say rate limited or daily limit
+  not reviewed      no review of this commit is on record: the review is off, the contributor was
+                    paused ("contributor paused": an administrator's block, or, on a row from
+                    before the automatic pause was removed, the contributor's record), or the
+                    review on record is of another commit (shown as "other commit"). A row from
+                    before the limits on reviews were removed can also say rate limited or daily
+                    limit
   in progress       the review is running
   could not decide  the review ended without a verdict (an error, or it never reported)
   exempt (owner or admin)

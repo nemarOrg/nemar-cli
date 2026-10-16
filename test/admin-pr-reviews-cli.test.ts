@@ -719,7 +719,9 @@ describe("nemar admin pr-reviews show", () => {
     });
     const r = await cli([...PR, "show", "nm000201", "7"]);
     expect(r.stdout).toContain("Not reviewed");
-    expect(r.stdout).toContain("Automated review is paused for this contributor");
+    expect(r.stdout).toContain(
+      "Automated review was paused for this contributor when this commit arrived",
+    );
   });
 
   test("--json is the raw detail", async () => {

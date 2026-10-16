@@ -649,15 +649,16 @@ const RESULT_WORD: Record<CriterionResult, string> = {
 };
 
 /**
- * What a declined pull request is told. `contributor_paused` does not say who paused the
- * contributor: rows written while a rejection record paused people automatically hold the same
- * word, and they are shown again whenever a stored result is re-stated. The two historical words
- * are about a limit that no longer exists, so they say so and say what to do now, which is the
- * same for both.
+ * What a declined pull request is told. A stored row is shown again whenever its result is
+ * re-stated, long after the decision, so each sentence is about the moment the commit arrived and
+ * not about now. `contributor_paused` does not say who paused the contributor: rows written while
+ * a rejection record paused people automatically hold the same word as a block does. The two
+ * historical words are about a limit that no longer exists, so they say so and say what to do now,
+ * which is the same for both.
  */
 const DECLINE_COPY: Record<DeclineReason, string> = {
   contributor_paused:
-    "Automated review is paused for this contributor. A maintainer needs to review this one by hand.",
+    "Automated review was paused for this contributor when this commit arrived. A maintainer needs to review this one by hand.",
   rate_limited:
     "Automated review was rate limited for this contributor when this commit arrived. That limit has since been removed. Push a new commit, or ask a NEMAR administrator to start the review.",
   daily_limit:
