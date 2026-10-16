@@ -20,6 +20,7 @@
 import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { seedScreenedRequest } from "../backend/test/helpers/publication-review";
 import { type CliResult, startPublishCli } from "./helpers/admin-publish-cli";
+import { seedGolden } from "./helpers/approve-seeds";
 import { type OldWorker, startOldWorker } from "./helpers/old-worker";
 
 setDefaultTimeout(60_000);
@@ -103,6 +104,46 @@ describe("the 0.10.18 Worker: a route it does not have says so, and is an answer
     expect(output(r)).toContain("This NEMAR backend does not support this command yet.");
     expect(output(r)).not.toContain("User not found");
     expect(output(r)).not.toContain(BUG_HINT);
+  });
+});
+
+describe("the 0.10.18 Worker: `approve` reads no review and asks the Worker to decide", () => {
+  test("it says there is no review, sends no identity and no override, and the approval runs", async () => {
+    seedGolden(h.db);
+
+    const r = await h.cli(["admin", "publish", "approve", "nm000460", "--resume", "--yes"], {
+      apiUrl: old.url,
+    });
+
+    expect(r.exitCode).toBe(0);
+    expect(output(r)).toContain("This API has no publication review.");
+    // The review was asked for, answered 404 for the route, and the approval went on without it.
+    const calls = old.calls
+      .map((c) => `${c.method} ${c.path}`)
+      .filter((c) => c !== "GET /notices" && !c.includes("/publish/status"));
+    expect(calls).toEqual([
+      "GET /admin/publish/nm000460/review",
+      "POST /admin/publish/nm000460/approve",
+    ]);
+    // Nothing the old Worker's schema does not know is sent: the request the administrator looked
+    // at is unknown to the CLI (the review was where it came from), so there is no `request_id`
+    // for the old Worker to ignore, and no override.
+    const [body] = h.posted.map((p) => p.body ?? {});
+    expect(Object.keys(body)).not.toContain("request_id");
+    expect(Object.keys(body)).not.toContain("publication_review_override");
+  });
+
+  test("--force is not sent, and the command says so", async () => {
+    seedGolden(h.db);
+
+    const r = await h.cli(
+      ["admin", "publish", "approve", "nm000460", "--resume", "--yes", "--force"],
+      { apiUrl: old.url },
+    );
+
+    expect(output(r)).toContain("--force was not sent: no review could be read to approve over.");
+    const [body] = h.posted.map((p) => p.body ?? {});
+    expect(Object.keys(body)).not.toContain("publication_review_override");
   });
 });
 
