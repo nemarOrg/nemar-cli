@@ -16101,19 +16101,33 @@ class TestFailureVerdict(unittest.TestCase):
             ValueError(MNE_SPLIT_REFUSAL.format(path=path)),
         )
 
-    # -- rule 4: the streaming EDF/BDF refusal ------------------------------
+    # -- a bare OSError is the host's, whatever its words --------------------
+    #
+    # Rule 4 used to type pyedflib's streaming refusal and biosigIO's tolerant
+    # fallback's truncation errors by their text. biosigIO 1.2.12 types both
+    # itself (`CorruptFileError`), so nothing reads an `OSError`'s words now.
 
-    def test_a_bare_oserror_with_the_edf_refusal_is_corrupt_or_truncated(self):
-        for reason in ("(it contains format errors)", "(Filesize)", "(Recordingfield)"):
-            with self.subTest(reason):
-                exc = OSError(f"/scratch/work/x.bdf: {EDF_REFUSAL} {reason}")
-                self.assertEqual(self.verdict(exc), ("corrupt_or_truncated", None))
+    def test_a_bare_oserror_is_not_typed_by_its_text(self):
+        # The words biosigIO's streaming source used to leave in a bare,
+        # errno-less OSError: pyedflib's refusal, and the tolerant fallback's
+        # truncation errors with the scratch path in front.
+        for message in (
+            f"/scratch/work/x.bdf: {EDF_REFUSAL} (Filesize)",
+            "/scratch/work/x.edf: EDF/BDF header is truncated (<256 bytes)",
+            "/scratch/work/x.edf: invalid number of signals in header (-1)",
+            "/scratch/work/x.edf: signal header is truncated",
+            (
+                "/scratch/work/x.edf: file is truncated (expected at least 3080 bytes "
+                "for 4 data record(s), found 1850)"
+            ),
+        ):
+            with self.subTest(message):
+                self.assertEqual(self.verdict(OSError(message)), (None, None))
 
     def test_a_host_condition_is_not_a_refusal(self):
         # An OSError that carries an errno is the HOST saying no (a failing
-        # disk, a permission, a full volume), and it keeps its retry. Dropping
-        # the errno guard from the rule turns every one of these into a
-        # permanent data verdict.
+        # disk, a permission, a full volume), and it keeps its retry, also when
+        # its words are a reader's refusal.
         for exc in (
             OSError(errno.EIO, f"x.bdf: {EDF_REFUSAL} (Filesize)"),
             OSError(errno.ENOSPC, f"x.bdf: {EDF_REFUSAL} (Filesize)"),
@@ -16128,8 +16142,7 @@ class TestFailureVerdict(unittest.TestCase):
             RuntimeError(f"x.bdf: {EDF_REFUSAL} (Filesize)"),
             ValueError(f"x.bdf: {EDF_REFUSAL} (Filesize)"),
             Refusal(f"x.bdf: {EDF_REFUSAL} (Filesize)"),
-            # Subclasses of OSError built without an errno: the rule is for
-            # exactly pyedflib's bare OSError, not for the family.
+            # Subclasses of OSError built without an errno.
             PermissionError(f"x.bdf: {EDF_REFUSAL} (Filesize)"),
             FileNotFoundError(f"x.bdf: {EDF_REFUSAL} (Filesize)"),
         ):
@@ -16138,89 +16151,6 @@ class TestFailureVerdict(unittest.TestCase):
 
     def test_an_oserror_with_other_words_is_still_uncoded(self):
         self.assertEqual(self.verdict(OSError("download failed after 4 attempts")), (None, None))
-
-    # The four bare errors biosigIO's tolerant fallback raises for a file it can
-    # read no further (importers/_edf_tolerant.py, one per `raise`), as they read
-    # with the scratch path in front.
-    FALLBACK_TRUNCATIONS: ClassVar[tuple[str, ...]] = (
-        "/scratch/work/x.edf: EDF/BDF header is truncated (<256 bytes)",
-        "/scratch/work/x.edf: invalid number of signals in header (-1)",
-        "/scratch/work/x.edf: signal header is truncated",
-        (
-            "/scratch/work/x.edf: file is truncated (expected at least 3080 bytes "
-            "for 4 data record(s), found 1850)"
-        ),
-    )
-
-    def test_a_bare_oserror_with_a_fallback_truncation_is_corrupt_or_truncated(self):
-        # The in-memory path types the same file; streaming used to leave it
-        # uncoded, and an uncoded failure is retried until `retry_exhausted`.
-        for message in self.FALLBACK_TRUNCATIONS:
-            with self.subTest(message):
-                self.assertEqual(self.verdict(OSError(message)), ("corrupt_or_truncated", None))
-
-    def test_a_host_condition_is_not_a_fallback_truncation(self):
-        for message in self.FALLBACK_TRUNCATIONS:
-            for exc in (
-                OSError(errno.EIO, message),
-                OSError(errno.ENOSPC, message),
-                PermissionError(errno.EACCES, message),
-                FileNotFoundError(errno.ENOENT, message),
-                # Subclasses built without an errno, and other exception types:
-                # the rule is for exactly the fallback's own bare OSError.
-                PermissionError(message),
-                FileNotFoundError(message),
-                RuntimeError(message),
-                ValueError(message),
-                Refusal(message),
-            ):
-                with self.subTest(type(exc).__name__, errno=getattr(exc, "errno", None), message=message):
-                    self.assertEqual(self.verdict(exc), (None, None))
-
-    def test_only_the_exact_fallback_text_is_a_truncation(self):
-        # The same words in another sentence, a different number of bytes in the
-        # header, a non-number where a number goes, trailing text, or no path in
-        # front: none of them is what the fallback raises.
-        for message in (
-            "download is truncated",
-            "/scratch/work/x.edf: file is truncated",
-            (
-                "/scratch/work/x.edf: file is truncated (expected at least 3080 bytes "
-                "for 4 data record(s), found 1850) on retry 2"
-            ),
-            (
-                "/scratch/work/x.edf: file is truncated (expected at least many bytes "
-                "for 4 data record(s), found 1850)"
-            ),
-            "/scratch/work/x.edf: signal header is truncated by the proxy",
-            "signal header is truncated",
-            "/scratch/work/x.edf: EDF/BDF header is truncated (<512 bytes)",
-            "/scratch/work/x.edf: invalid number of signals in header (abc)",
-            "/scratch/work/x.edf: invalid number of signals in header (-1)\nretrying",
-            "",
-        ):
-            with self.subTest(message):
-                self.assertEqual(self.verdict(OSError(message)), (None, None))
-
-    def test_a_fallback_truncation_behind_another_exception_is_not_the_truncation(self):
-        # Top level only, like the pyedflib refusal beside it: biosigIO's
-        # fallback runs inside the `except` block that caught that refusal, so a
-        # host error it raises carries the refusal as its context, and a cause
-        # is a link behind the exception just as a context is.
-        for message in self.FALLBACK_TRUNCATIONS:
-            truncation = OSError(message)
-            with self.subTest(message):
-                host = self.raised_while_handling(
-                    truncation, lambda: OSError(errno.EIO, "Input/output error")
-                )
-                self.assertIs(host.__context__, truncation)
-                self.assertEqual(self.verdict(host), (None, None))
-                self.assertEqual(
-                    self.verdict(chained(OSError(errno.EIO, "Input/output error"), truncation)),
-                    (None, None),
-                )
-                for depth in range(1, 6):
-                    self.assertEqual(self.verdict(self.wrapper_chain(truncation, depth)), (None, None))
 
     @staticmethod
     def raised_while_handling(refusal: BaseException, make_next: Callable[[], BaseException]):
@@ -16242,9 +16172,9 @@ class TestFailureVerdict(unittest.TestCase):
         # biosigIO recovers three kinds of header pyedflib refuses by reading the
         # file again INSIDE the `except` block that caught the refusal. A host
         # error raised by that second read (a failing disk, a full volume, a
-        # permission) therefore carries the bare refusal as its `__context__`.
-        # It is the host saying no, and keeps its retry: the refusal behind it is
-        # not what this exception is.
+        # permission) therefore carries the refusal as its `__context__`. It is
+        # the host saying no, and keeps its retry: the refusal behind it is not
+        # what this exception is.
         for label, make in (
             ("EIO", lambda: OSError(errno.EIO, "Input/output error")),
             ("ENOSPC", lambda: OSError(errno.ENOSPC, "No space left on device")),
@@ -16261,8 +16191,8 @@ class TestFailureVerdict(unittest.TestCase):
                 self.assertEqual(self.verdict(exc), (None, None))
 
     def test_a_refusal_behind_another_exception_is_not_the_refusal(self):
-        # Only the exception itself is read. An explicit cause is a link behind
-        # it just as an implicit context is.
+        # A refusal text behind the exception is not a verdict: no rule reads an
+        # `OSError`'s words, at the top or down a chain.
         refusal = OSError(f"x.bdf: {EDF_REFUSAL} (Filesize)")
         host = OSError(errno.EIO, "Input/output error")
         host.__cause__ = refusal
@@ -16399,8 +16329,8 @@ class TestFailureVerdict(unittest.TestCase):
             self.verdict(self.wrapper_chain(leaf, 5), self.SET), ("corrupt_or_truncated", None)
         )
         self.assertEqual(self.verdict(self.wrapper_chain(leaf, 6), self.SET), (None, None))
-        # Rule 4 does not ride the walk: the same chain around the EDF refusal,
-        # at any depth, is not the refusal.
+        # The walk reads only what the rules above look for: the same chain
+        # around the EDF refusal, at any depth, is not a verdict.
         refusal = OSError(f"x.bdf: {EDF_REFUSAL} (Filesize)")
         for depth in range(1, 6):
             with self.subTest(refusal_at=depth):
@@ -16626,10 +16556,10 @@ class StreamEdfThreshold:
 class TestStreamedEdfRefusalThroughConvertOne(ConvertOneLocalCase):
     """A file pyedflib refuses is `corrupt_or_truncated` on BOTH exporters.
 
-    In memory, biosigIO types the refusal itself. Streaming, it re-raises
-    pyedflib's bare `OSError`, which `convert_one` took for infrastructure and
-    retried until `retry_exhausted` (361 published rows). Real files, the real
-    exporters, the real `convert_one`."""
+    biosigIO types the refusal itself on both (`CorruptFileError`, since 1.2.12).
+    Streaming used to re-raise pyedflib's bare `OSError`, which `convert_one`
+    took for infrastructure and retried until `retry_exhausted`. Real files, the
+    real exporters, the real `convert_one`."""
 
     REQUIRES = ("zarr", "pyedflib", "biosigio")
 
@@ -16813,12 +16743,11 @@ class TestHostErrorWhileRecoveringARefusedEdf(ConvertOneLocalCase):
     """A host error is the host's, also when it is raised while biosigIO is
     recovering from pyedflib's refusal.
 
-    `failure_verdict` rule 4 types pyedflib's bare refusal a file failure. The
-    tolerant fallback reads the file a second time inside the `except` block
-    that caught that refusal, so an `OSError(EIO)` raised by the second read has
-    the refusal as its `__context__`. Reading the chain made it
-    `corrupt_or_truncated`, a terminal verdict for what a retry on a healthy
-    disk would convert. The EIO is injected at `mne.io.read_raw`, the
+    The tolerant fallback reads the file a second time inside the `except`
+    block that caught pyedflib's refusal, so an `OSError(EIO)` raised by the
+    second read has the refusal as its `__context__`. Reading the chain would
+    make it `corrupt_or_truncated`, a terminal verdict for what a retry on a
+    healthy disk would convert. The EIO is injected at `mne.io.read_raw`, the
     fallback's one read of the samples: no portable file permission reaches it,
     since pyedflib's own open fails first on an unreadable file and raises the
     host error before any fallback."""
@@ -16887,10 +16816,11 @@ class TestFallbackTruncationThroughConvertOne(ConvertOneLocalCase):
     on BOTH exporters.
 
     The fallback is for files pyedflib refuses and MNE can read, and it raises
-    its own bare, errno-less `OSError` when it finds the file shorter than its
-    header says. In memory biosigIO types that; streaming it reached
-    `failure_verdict` uncoded and was retried until `retry_exhausted`. Real
-    files, the real exporters, the real `convert_one`."""
+    an error when it finds the file shorter than its header says. biosigIO
+    types it on both exporters (`CorruptFileError`, since 1.2.12); streaming
+    used to raise it as a bare `OSError`, which reached `failure_verdict`
+    uncoded and was retried until `retry_exhausted`. Real files, the real
+    exporters, the real `convert_one`."""
 
     REQUIRES = ("zarr", "pyedflib", "biosigio", "mne")
     PRIMARY = "sub-01/eeg/sub-01_task-rest_eeg.edf"
@@ -16927,14 +16857,21 @@ class TestFallbackTruncationThroughConvertOne(ConvertOneLocalCase):
                 codes[path_name] = result["code"]
         self.assertEqual(codes.get("in-memory"), codes.get("streaming"))
 
-    def test_an_impossible_signal_count_is_corrupt_or_truncated_streamed(self):
-        # The fallback's header probe. Streamed only: biosigIO's in-memory path
-        # reports this file as a generic `file_read_error`, which is its call to
-        # make; the streaming path's bare `OSError` is what this rule reads.
+    def test_an_impossible_signal_count_is_a_generic_data_failure_on_both_exporters(self):
+        # The fallback's header probe. biosigIO calls this one a generic
+        # `file_read_error` on both exporters, which is its call to make, and the
+        # converter publishes the code it is given: a typed failure that is
+        # never retried, where the bare `OSError` used to be typed
+        # `corrupt_or_truncated` here by its text.
         self.build(build_negative_signal_count_edf)
-        result = self.convert_on("streaming", 1)
-        self.assert_refused_as_data(result, "corrupt_or_truncated")
-        self.assertIn("invalid number of signals in header (-1)", result["detail"])
+        codes = {}
+        for path_name, threshold in (("in-memory", None), ("streaming", 1)):
+            with self.subTest(path_name):
+                result = self.convert_on(path_name, threshold)
+                self.assert_refused_as_data(result, "file_read_error")
+                self.assertIn("invalid number of signals in header (-1)", result["detail"])
+                codes[path_name] = result["code"]
+        self.assertEqual(codes.get("in-memory"), codes.get("streaming"))
 
 
 class TestReaderRefusalsThroughConvertOne(ConvertOneLocalCase):
