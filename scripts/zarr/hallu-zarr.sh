@@ -303,8 +303,8 @@ VENV_DIR="${ZARR_VENV_DIR:-${STATE_DIR}/.zarr-venv}"
 # `1.2.10rc1` and `1.2.10.dev0` as pre-releases, which a bare tuple of leading
 # digits would read as 1.2.10 and accept. Anything the fallback cannot parse fails
 # closed.
-BIOSIGIO_FLOOR="1.2.11"
-BIOSIGIO_CAP="1.2.12"
+BIOSIGIO_FLOOR="1.2.12"
+BIOSIGIO_CAP="1.2.13"
 BIOSIGIO_FLOOR_PROBE='
 import re
 import sys
@@ -382,15 +382,18 @@ sys.exit(code)
 # (`units_report.matched_case_only`), and the join texts in the schema, zod and
 # MCP mirrors were reworded with this bump, and 1.2.11 lets a store be written
 # without subject information (`exclude_subject_info`, #1626), which the
-# converter passes on every write and refuses to convert without. The engine
-# stamp did not move for any of them (see requirements.txt).
-# The `<1.2.12` half is a CAP, not a floor, raised deliberately per release; raise
+# converter passes on every write and refuses to convert without, and 1.2.12
+# types a streamed EDF/BDF refusal (`CorruptFileError`, biosigio#149) and reads
+# an EDF+C or BDF+C recording whose first time-keeping onset is late
+# (biosigio#145). The engine stamp did not move for any of them, and this pin
+# does not move it (see requirements.txt).
+# The `<1.2.13` half is a CAP, not a floor, raised deliberately per release; raise
 # it in all three places at once (requirements.txt, this default and
 # BIOSIGIO_FLOOR/BIOSIGIO_CAP, test_hallu_zarr_config.py).
 # Extras are not optional here: [mef3] carries pymef and [hdf5] carries h5py, and
 # without either the matching recordings raise ImportError at convert time even
 # though discovery finds them.
-BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg,mef3,hdf5]>=1.2.11,<1.2.12}"
+BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg,mef3,hdf5]>=1.2.12,<1.2.13}"
 API_BASE="${API_BASE:-https://api.nemar.org}"
 # The STABLE base published in each index as `contract_base` and in each store's
 # `nemar.contract_url` (#1059/#1064). Distinct from S3_BUCKET/AWS_REGION, which
