@@ -107,7 +107,7 @@ import {
   updateLastUpload,
   writeLocalConfig,
 } from "../lib/dataset-config.js";
-import { markReportedExit } from "../lib/debug-log.js";
+import { markReportedExit, markUsageExit } from "../lib/debug-log.js";
 import {
   FacetEnumCliError,
   RANGE_FORMS_HELP,
@@ -194,6 +194,20 @@ import {
   listOpenNeuroObjects,
   openNeuroDatasetExists,
 } from "../lib/openneuro.js";
+import {
+  type ChangedFile,
+  type TextKind,
+  buildUpdateBody,
+  buildUpdateTitle,
+  describeChangelogWrite,
+  describeTextProblem,
+  findTextProblem,
+  localIsoDate,
+  normalizeTitle,
+  parsePorcelainPaths,
+  parseStagedChanges,
+  writeChangelogEntry,
+} from "../lib/pr-text.js";
 import { checkPrerequisitesForCommand } from "../lib/prerequisites.js";
 import { DownloadProgressTracker } from "../lib/progress.js";
 import { promptForProvenance } from "../lib/provenance.js";
@@ -3257,6 +3271,126 @@ Examples:
     },
   );
 
+// ---------------------------------------------------------------------------
+// Pull request text: the author's own words, refused when nobody could read them
+// ---------------------------------------------------------------------------
+
+/** How a command spells the two pieces of pull request text, for what it tells the author. */
+interface PrTextFlags {
+  /** The command, as the first sentence of a refusal names it. */
+  command: string;
+  /** The title option as the author types it, e.g. "--message". */
+  title: string;
+  /** The description option as the author types it. */
+  description: string;
+  /** Whether the command has `--yes`, which the refusal must say does not stand in for words. */
+  hasYes: boolean;
+  /** A complete command that would have worked. */
+  example: string;
+}
+
+interface PrTextGiven {
+  title?: string;
+  description?: string;
+}
+
+const UPDATE_TEXT_FLAGS: PrTextFlags = {
+  command: "nemar dataset update",
+  title: "--message",
+  description: "--description",
+  hasYes: true,
+  example:
+    'nemar dataset update -m "Add twelve subjects" --description "Adds sub-21 to sub-32, each with a resting-state recording."',
+};
+
+const PR_TEXT_QUESTIONS: Record<TextKind, string> = {
+  title: "Title (one line saying what changed):",
+  description: "Description (what changed and why):",
+};
+
+const PR_TEXT_SUBJECT: Record<TextKind, string> = {
+  title: "The title",
+  description: "The description",
+};
+
+/**
+ * Settle the pull request text the author put on the command line, before the command touches the
+ * network or the repository. Text a person could not read is refused. Missing text is refused too,
+ * unless `interactive` (a terminal is attached and there is no `--yes`), where {@link askForPrText}
+ * asks for it once there is a change to describe. `--yes` stands in for a confirmation, never for
+ * the words.
+ *
+ * An empty value is text the author gave and got wrong, not text they left out: `-m ""` from an
+ * unset shell variable must not fall through to a prompt, or to nothing.
+ */
+function requirePrText(given: PrTextGiven, flags: PrTextFlags, interactive: boolean): PrTextGiven {
+  const settled: PrTextGiven = {};
+  const refusals: string[] = [];
+  const missing: string[] = [];
+  for (const [kind, raw, flag] of [
+    ["title", given.title, flags.title],
+    ["description", given.description, flags.description],
+  ] as const) {
+    if (raw === undefined) {
+      missing.push(flag);
+      continue;
+    }
+    const problem = findTextProblem(kind, raw);
+    if (problem) {
+      refusals.push(describeTextProblem(`${PR_TEXT_SUBJECT[kind]} (${flag})`, problem));
+    } else {
+      settled[kind] = kind === "title" ? normalizeTitle(raw) : raw.trim();
+    }
+  }
+  if (refusals.length === 0 && (missing.length === 0 || interactive)) return settled;
+
+  for (const refusal of refusals) console.log(chalk.red(`Error: ${refusal}`));
+  if (missing.length > 0 && !interactive) {
+    console.log(
+      chalk.red(
+        `Error: ${flags.command} needs a pull request title and description; missing ${missing.join(" and ")}.`,
+      ),
+    );
+    console.log(
+      "  They are written into the pull request for a person to read, so say in plain words what changed.",
+    );
+    console.log(
+      flags.hasYes
+        ? "  --yes does not stand in for them, and without a terminal nothing can ask for them."
+        : "  Without a terminal nothing can ask for them.",
+    );
+    console.log(chalk.dim(`  Example: ${flags.example}`));
+  }
+  // A refusal of what was typed, not a failure worth a bug report (see the exit hook in index.ts).
+  markUsageExit();
+  process.exit(1);
+}
+
+/**
+ * Ask until the text is one a person can read. A refusal asks again on a fresh line rather than
+ * validating in place: inquirer writes the refused text back onto the line to be edited, and under
+ * `TERM=dumb` (an Emacs shell, some wrappers) no editing key works, so the person could never
+ * remove it. Measured with inquirer 9 under Bun: backspace and Ctrl-U edit under `xterm`, and do
+ * nothing under `dumb`.
+ */
+async function promptForPrText(kind: TextKind): Promise<string> {
+  for (;;) {
+    const { value } = await inquirer.prompt<{ value: string }>([
+      { type: "input", name: "value", message: PR_TEXT_QUESTIONS[kind] },
+    ]);
+    const problem = findTextProblem(kind, value);
+    if (!problem) return kind === "title" ? normalizeTitle(value) : value.trim();
+    console.log(chalk.red(`  ${describeTextProblem("That", problem)}`));
+  }
+}
+
+/** At a terminal, ask for the pieces of pull request text the command line did not carry. */
+async function askForPrText(given: PrTextGiven): Promise<Required<PrTextGiven>> {
+  const title = given.title ?? (await promptForPrText("title"));
+  const description = given.description ?? (await promptForPrText("description"));
+  return { title, description };
+}
+
 // Update command - push data/metadata changes via PR
 datasetCommand
   .command("update")
@@ -3264,7 +3398,14 @@ datasetCommand
   .argument("[path]", "Path to local dataset clone (default: current directory)")
   .option("--bump <type>", "Version bump type: patch, minor, or major", "patch")
   .option("--branch <name>", "Custom branch name")
-  .option("-m, --message <msg>", "Commit message")
+  .option(
+    "-m, --message <title>",
+    "Title of the update: the pull request title and the CHANGES entry (required)",
+  )
+  .option(
+    "--description <text>",
+    "What changed and why, in plain words: the pull request body (required)",
+  )
   .option("--monitor", "Watch CI checks and offer to merge")
   .option(YES_OPTION, YES_DESCRIPTION)
   .addHelpText(
@@ -3272,10 +3413,21 @@ datasetCommand
     `
 Description:
   Push local changes (metadata or data files) to a dataset via a pull
-  request. Automatically bumps the version, commits, pushes, and creates
-  a PR. For data files (annexed), copies them to S3 via git-annex.
+  request. Automatically bumps the version, writes the CHANGES entry for
+  it, commits, pushes, and creates a PR. For data files (annexed), copies
+  them to S3 via git-annex.
 
   Run this from inside a dataset clone, or pass the path as an argument.
+
+Title and description (both required):
+  A reviewer reads the title (-m) and the description (--description),
+  and so does NEMAR's automated review, so say in plain words what changed
+  and why. The title is also the new version's entry in CHANGES (created if
+  the dataset has none), and reads there as you wrote it.
+  An empty value, placeholder text such as "Save changes", an unfilled
+  template field, text with no words in it, and a pasted hash or JSON are
+  refused. At a terminal the command asks for what you leave out; with
+  --yes, or without a terminal, it refuses instead.
 
 Note:
   This is the recommended way to update public datasets. It creates a
@@ -3283,9 +3435,12 @@ Note:
   can also use 'nemar dataset push' for direct updates.
 
 Examples:
-  $ cd nm000104 && nemar dataset update
-  $ nemar dataset update ./nm000104 --bump minor -m "Add new subjects"
-  $ nemar dataset update --branch fix/metadata -m "Fix participant ages"`,
+  $ cd nm000104 && nemar dataset update -m "Add twelve subjects" \\
+      --description "Adds sub-21 to sub-32, each with a resting-state recording."
+  $ nemar dataset update ./nm000104 --bump minor -m "Add new subjects" \\
+      --description "Second cohort, recorded in 2026."
+  $ nemar dataset update --branch fix/metadata -m "Fix participant ages" \\
+      --description "Ages in participants.tsv were in months; they are now in years."`,
   )
   .action(
     async (
@@ -3294,10 +3449,20 @@ Examples:
         bump: string;
         branch?: string;
         message?: string;
+        description?: string;
         monitor?: boolean;
         yes?: boolean;
       },
     ) => {
+      // The pull request text comes first: a missing or unreadable title or description is a
+      // usage error, refused before auth, the network or the repository is touched. A terminal is
+      // asked for what it left out only once there is a change to describe (askForPrText below).
+      const givenText = requirePrText(
+        { title: options.message, description: options.description },
+        UPDATE_TEXT_FLAGS,
+        !options.yes && process.stdin.isTTY === true,
+      );
+
       requireAuth();
 
       await checkPrerequisitesForCommand("update");
@@ -3332,31 +3497,31 @@ Examples:
         }
       }
 
-      // Check for changes
+      // Check for changes. `-z` keeps every path whole: the plain output was trimmed as a block,
+      // which took the leading space of a work tree change (" M path") off the first line only
+      // and left its path one letter short.
       const statusProc = spawn({
-        cmd: ["git", "status", "--porcelain"],
+        cmd: ["git", "status", "--porcelain", "-z"],
         cwd: workDir,
         stdout: "pipe",
         stderr: "pipe",
       });
-      const statusOutput = (await new Response(statusProc.stdout).text()).trim();
+      const changedPaths = parsePorcelainPaths(await new Response(statusProc.stdout).text());
       if ((await statusProc.exited) !== 0) {
         console.log(chalk.red("Error: Failed to check git status"));
         process.exit(1);
       }
 
-      if (!statusOutput) {
+      if (changedPaths.length === 0) {
         console.log(chalk.yellow("No changes detected."));
         console.log("  Make changes to the dataset files, then run this command again.");
         return;
       }
 
       // Categorize changes
-      const lines = statusOutput.split("\n");
       const dataFiles: string[] = [];
       const metadataFiles: string[] = [];
-      for (const line of lines) {
-        const filePath = line.substring(3).trim();
+      for (const filePath of changedPaths) {
         // Common neuroimaging data file extensions (typically git-annex managed)
         if (/\.(edf|bdf|set|fdt|nwb|eeg|vhdr|vmrk|cnt|mff|gz)$/i.test(filePath)) {
           dataFiles.push(filePath);
@@ -3441,6 +3606,10 @@ Examples:
         `  ${chalk.bold("Version bump:")} ${currentVersion} -> ${chalk.green(newVersion)}`,
       );
 
+      // At a terminal, ask for whatever the command line left out; every other path already
+      // holds both (requirePrText refused the run above otherwise).
+      const { title, description } = await askForPrText(givenText);
+
       // Confirm
       const confirmResult = await confirm(`Create update PR for ${datasetId}?`, {
         yes: options.yes,
@@ -3484,6 +3653,16 @@ Examples:
       descContent.Version = newVersion;
       writeFileSync(descPath, `${JSON.stringify(descContent, null, 2)}\n`);
 
+      // The change log gets the entry the review looks for: a heading for the new version, with
+      // the author's own title under it. Before the commit, so it is part of it.
+      try {
+        const entry = writeChangelogEntry(workDir, newVersion, title, localIsoDate(new Date()));
+        console.log(chalk.dim(`  ${describeChangelogWrite(entry, newVersion)}`));
+      } catch (error) {
+        console.log(chalk.red(`Error: Could not update the change log: ${errorDetail(error)}`));
+        process.exit(1);
+      }
+
       // Stage all changes and commit
       const commitSpinner = ora("Committing changes...").start();
       const addProc = spawn({
@@ -3498,9 +3677,24 @@ Examples:
         process.exit(1);
       }
 
-      const commitMsg = options.message || `Update ${datasetId} to ${newVersion}`;
+      // What the commit will contain, as git will record it: the pull request body lists it.
+      const stagedProc = spawn({
+        cmd: ["git", "diff", "--cached", "--name-status", "-z", "--no-renames"],
+        cwd: workDir,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const changedFiles: ChangedFile[] = parseStagedChanges(
+        await new Response(stagedProc.stdout).text(),
+      );
+      if ((await stagedProc.exited) !== 0) {
+        const stderr = await new Response(stagedProc.stderr).text();
+        commitSpinner.fail(`Failed to read the staged changes: ${stderr.trim()}`);
+        process.exit(1);
+      }
+
       const commitProc = spawn({
-        cmd: ["git", "commit", "-m", commitMsg],
+        cmd: ["git", "commit", "-m", title],
         cwd: workDir,
         stdout: "pipe",
         stderr: "pipe",
@@ -3607,11 +3801,14 @@ Examples:
       let prCreated = false;
       const prSpinner = ora("Creating pull request...").start();
       try {
-        const prTitle = options.message
-          ? `${options.message} (v${newVersion})`
-          : `Update ${datasetId} to v${newVersion}`;
-        const fileList = [...metadataFiles, ...dataFiles].slice(0, 10).join("\n- ");
-        const prBody = `## Dataset Update\n\nBumps ${datasetId} from ${currentVersion} to ${newVersion}.\n\n### Changed files\n- ${fileList}${lines.length > 10 ? `\n- ... and ${lines.length - 10} more` : ""}`;
+        const prTitle = buildUpdateTitle(title, newVersion);
+        const prBody = buildUpdateBody({
+          description,
+          datasetId,
+          fromVersion: currentVersion,
+          toVersion: newVersion,
+          files: changedFiles,
+        });
 
         const prProc = spawn({
           cmd: [

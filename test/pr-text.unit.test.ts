@@ -24,6 +24,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -34,6 +35,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { spawn } from "bun";
 import { gatherGitFacts } from "../scripts/ci/pr-review-evidence";
 import {
   type ChangedFile,
@@ -59,6 +61,9 @@ import {
 
 // Each command test starts the CLI (a transpile) and git, and the interactive ones wait on prompts.
 setDefaultTimeout(60_000);
+
+const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
+const REPO_ROOT = join(import.meta.dir, "..");
 
 // ---------------------------------------------------------------------------------------------
 // 1. The text checks
@@ -727,5 +732,498 @@ describe("the review's own reader on a pull request update would open", () => {
         expected,
       );
     }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// 3. The commands, through the real entry point
+// ---------------------------------------------------------------------------------------------
+
+const DATASET_ID = "xx000000"; // two letters and six digits, and in no band a dataset is given
+const STANDIN_REPO = "nemar-pr-text-standin/xx000000"; // a repository that is not there
+
+let binDir: string;
+let ghRecord: string;
+let api: ReturnType<typeof Bun.serve>;
+let apiPaths: string[] = [];
+
+const GH_STANDIN = `#!/bin/sh
+# Stands in for the GitHub CLI: answers the version probe, records \`pr create\`, prints a URL.
+if [ "$1" = "--version" ]; then echo "gh version 0.0.0 (stand-in)"; exit 0; fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  printf '%s\\0' "$@" > "$STANDIN_GH_RECORD"
+  echo "https://github.invalid/standin/pull/1"
+  exit 0
+fi
+echo "stand-in gh: unexpected arguments: $*" >&2
+exit 2
+`;
+
+beforeAll(() => {
+  binDir = join(root, "bin");
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(join(binDir, "gh"), GH_STANDIN);
+  chmodSync(join(binDir, "gh"), 0o755);
+  ghRecord = join(root, "gh-record");
+
+  api = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const path = new URL(req.url).pathname;
+      apiPaths.push(path);
+      if (path === "/notices") return Response.json({ notices: [] });
+      if (path === `/datasets/${DATASET_ID}`) {
+        return Response.json({
+          dataset: {
+            id: 1,
+            dataset_id: DATASET_ID,
+            name: "A dataset the stand-in API describes",
+            description: null,
+            owner_username: "standin",
+            status: "active",
+            visibility: "public",
+            github_repo: STANDIN_REPO,
+            concept_doi: null,
+            created_at: "2026-01-01",
+          },
+        });
+      }
+      return Response.json({ error: "not found" }, { status: 404 });
+    },
+  });
+});
+
+afterAll(() => {
+  api.stop(true);
+});
+
+function apiUrl(): string {
+  return api.url.toString().replace(/\/$/, "");
+}
+
+/** A configuration directory: signed in as a stand-in account, or pointing at the stand-in API only. */
+function configDir(signedIn: boolean): string {
+  const dir = fresh("config");
+  mkdirSync(dir, { recursive: true });
+  const account = signedIn
+    ? { apiKey: "standin-key-0123456789abcdef", apiUrl: apiUrl() }
+    : { apiUrl: apiUrl() };
+  writeFileSync(
+    join(dir, "config.json"),
+    JSON.stringify({ activeAccount: "standin", accounts: { standin: account } }),
+  );
+  return dir;
+}
+
+/** What the CLI is run with: nothing inherited that could point it at a real service or account. */
+function cleanEnv(config: string, term = "dumb"): Record<string, string> {
+  return {
+    PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    HOME: process.env.HOME ?? root,
+    TMPDIR: process.env.TMPDIR ?? tmpdir(),
+    NEMAR_CONFIG_DIR: config,
+    NEMAR_NO_UPDATE_CHECK: "1",
+    NO_COLOR: "1",
+    TERM: term,
+    GIT_AUTHOR_NAME: "t",
+    GIT_AUTHOR_EMAIL: "t@example.org",
+    GIT_COMMITTER_NAME: "t",
+    GIT_COMMITTER_EMAIL: "t@example.org",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GH_CONFIG_DIR: join(root, "gh-config"),
+    GH_TOKEN: "",
+    GITHUB_TOKEN: "",
+    STANDIN_GH_RECORD: ghRecord,
+  };
+}
+
+interface Run {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}
+
+/** The CLI, with no terminal on stdin, as a script or CI runs it. */
+async function runNemar(args: string[], cwd: string, config = configDir(true)): Promise<Run> {
+  rmSync(ghRecord, { force: true });
+  apiPaths = [];
+  const proc = spawn({
+    cmd: [process.execPath, "run", CLI_ENTRY, ...args],
+    cwd,
+    env: cleanEnv(config),
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { stdout, stderr, exitCode };
+}
+
+/** The arguments the stand-in `gh` was run with for `pr create`, or null if it never was. */
+function ghArgs(): string[] | null {
+  if (!existsSync(ghRecord)) return null;
+  return readFileSync(ghRecord, "utf8").split("\0").slice(0, -1);
+}
+
+function valueAfter(args: string[], flag: string): string | undefined {
+  const at = args.indexOf(flag);
+  return at < 0 ? undefined : args[at + 1];
+}
+
+/** A dataset clone on `main` at 1.0.0, with a local bare remote named like a dataset repository. */
+function newClone(): { work: string; remote: string } {
+  const base = fresh("clone");
+  const remote = join(base, "remote", `${DATASET_ID}.git`);
+  const work = join(base, "work");
+  mkdirSync(remote, { recursive: true });
+  mkdirSync(work, { recursive: true });
+  git(remote, "init", "-q", "--bare", "-b", "main");
+  git(work, "init", "-q", "-b", "main");
+  write(work, "dataset_description.json", desc("1.0.0"));
+  write(work, "README.md", "# Resting EEG\n");
+  write(work, "participants.tsv", "participant_id\nsub-01\nsub-02\n");
+  git(work, "add", "-A");
+  git(work, "commit", "-q", "-m", "initial");
+  git(work, "remote", "add", "origin", remote);
+  git(work, "push", "-q", "-u", "origin", "main");
+  return { work, remote };
+}
+
+const GOOD_TITLE = "Add subject 03 and rename the dataset";
+const GOOD_DESCRIPTION =
+  "Adds sub-03 with a resting-state recording and gives the dataset its final name.";
+
+describe("nemar dataset update shows the new options", () => {
+  test("--help names the title and the description as required", async () => {
+    const { stdout, exitCode } = await runNemar(["dataset", "update", "--help"], REPO_ROOT);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("-m, --message <title>");
+    expect(stdout).toContain("--description <text>");
+    expect(stdout).toContain("(required)");
+  });
+});
+
+describe("nemar dataset update refuses before it does anything", () => {
+  const signedOut = () => configDir(false);
+
+  /** Output as a person would see it: stdout and stderr together. */
+  const said = (r: Run) => r.stdout + r.stderr;
+
+  test("refuses to run under --yes without a description", async () => {
+    const cwd = fresh("empty");
+    mkdirSync(cwd, { recursive: true });
+    const r = await runNemar(["dataset", "update", "--yes", "-m", GOOD_TITLE], cwd, signedOut());
+    expect(r.exitCode).toBe(1);
+    expect(said(r)).toContain("needs a pull request title and description; missing --description.");
+    expect(said(r)).toContain("--yes does not stand in for them");
+    expect(said(r)).toContain('Example: nemar dataset update -m "');
+    // Refused first: not "Not authenticated", not a repository error, and no request but the notice.
+    expect(said(r)).not.toContain("Not authenticated");
+    expect(said(r)).not.toContain("Not a git repository");
+    expect(apiPaths.filter((p) => p !== "/notices")).toEqual([]);
+    // A refusal of what was typed is not a bug, so no invitation to file one.
+    expect(r.stderr).not.toContain("attach the log");
+  });
+
+  test("refuses under --yes without a title", async () => {
+    const cwd = fresh("empty");
+    mkdirSync(cwd, { recursive: true });
+    const r = await runNemar(
+      ["dataset", "update", "--yes", "--description", GOOD_DESCRIPTION],
+      cwd,
+      signedOut(),
+    );
+    expect(r.exitCode).toBe(1);
+    expect(said(r)).toContain("missing --message.");
+  });
+
+  test("names both when both are missing", async () => {
+    const cwd = fresh("empty");
+    mkdirSync(cwd, { recursive: true });
+    const r = await runNemar(["dataset", "update", "--yes"], cwd, signedOut());
+    expect(r.exitCode).toBe(1);
+    expect(said(r)).toContain("missing --message and --description.");
+  });
+
+  test("refuses without a terminal even when --yes is not given", async () => {
+    const cwd = fresh("empty");
+    mkdirSync(cwd, { recursive: true });
+    const r = await runNemar(["dataset", "update"], cwd, signedOut());
+    expect(r.exitCode).toBe(1);
+    expect(said(r)).toContain("missing --message and --description.");
+    expect(said(r)).toContain("without a terminal nothing can ask for them");
+  });
+
+  test("refuses the CLI's own placeholder, and says so", async () => {
+    const cwd = fresh("empty");
+    mkdirSync(cwd, { recursive: true });
+    const r = await runNemar(
+      ["dataset", "update", "--yes", "-m", "Save changes", "--description", GOOD_DESCRIPTION],
+      cwd,
+      signedOut(),
+    );
+    expect(r.exitCode).toBe(1);
+    expect(said(r)).toContain(
+      'The title (--message) is placeholder text ("Save changes"); say what actually changed.',
+    );
+    expect(said(r)).not.toContain("The description");
+  });
+
+  test("refuses the title of nm000456 pull request 1", async () => {
+    const cwd = fresh("empty");
+    mkdirSync(cwd, { recursive: true });
+    const r = await runNemar(
+      ["dataset", "update", "--yes", "-m", NM000456_TITLE, "--description", GOOD_DESCRIPTION],
+      cwd,
+      signedOut(),
+    );
+    expect(r.exitCode).toBe(1);
+    expect(said(r)).toContain('still has an unfilled template field ("FirstAuthorSurname")');
+  });
+
+  test("an empty description is text that was given and got wrong, not text left out", async () => {
+    const cwd = fresh("empty");
+    mkdirSync(cwd, { recursive: true });
+    const r = await runNemar(
+      ["dataset", "update", "--yes", "-m", GOOD_TITLE, "--description", ""],
+      cwd,
+      signedOut(),
+    );
+    expect(r.exitCode).toBe(1);
+    expect(said(r)).toContain("The description (--description) is empty");
+    expect(said(r)).not.toContain("missing");
+  });
+
+  test("control: readable text gets past the check and meets the next one, sign-in", async () => {
+    const cwd = fresh("empty");
+    mkdirSync(cwd, { recursive: true });
+    const r = await runNemar(
+      ["dataset", "update", "--yes", "-m", GOOD_TITLE, "--description", GOOD_DESCRIPTION],
+      cwd,
+      signedOut(),
+    );
+    expect(r.exitCode).toBe(1);
+    expect(said(r)).toContain("Not authenticated");
+    expect(said(r)).not.toContain("pull request title and description");
+  });
+});
+
+describe("nemar dataset update opens a pull request a person can read", () => {
+  test("title, CHANGES entry, commit and body all carry the author's words", async () => {
+    const { work, remote } = newClone();
+    // A change in the work tree only comes first in git's list: the case that lost a letter.
+    write(work, "dataset_description.json", desc("1.0.0", { Name: "Resting EEG, final name" }));
+    write(work, "sub-03/eeg/sub-03_task-rest_eeg.json", '{"TaskName": "rest"}\n');
+
+    const before = localIsoDate(new Date());
+    const r = await runNemar(
+      [
+        "dataset",
+        "update",
+        "--yes",
+        "--branch",
+        "update/pr-text-test",
+        "-m",
+        GOOD_TITLE,
+        "--description",
+        GOOD_DESCRIPTION,
+      ],
+      work,
+    );
+    const after = localIsoDate(new Date());
+    expect(r.exitCode, r.stdout + r.stderr).toBe(0);
+
+    // The file list the person sees before confirming has every path whole.
+    expect(r.stdout).toMatch(/^ {4}dataset_description\.json$/m);
+    expect(r.stdout).not.toMatch(/^ {4}ataset_description\.json$/m);
+    expect(r.stdout).toContain("Created CHANGES with an entry for 1.0.1");
+    expect(r.stdout).toContain("https://github.invalid/standin/pull/1");
+
+    // The pull request, as the GitHub CLI was asked to open it.
+    const args = ghArgs();
+    expect(args?.slice(0, 2)).toEqual(["pr", "create"]);
+    expect(valueAfter(args ?? [], "--repo")).toBe(STANDIN_REPO);
+    expect(valueAfter(args ?? [], "--head")).toBe("update/pr-text-test");
+    expect(valueAfter(args ?? [], "--base")).toBe("main");
+    expect(valueAfter(args ?? [], "--title")).toBe(`${GOOD_TITLE} (v1.0.1)`);
+    expect(valueAfter(args ?? [], "--body")).toBe(
+      [
+        GOOD_DESCRIPTION,
+        "",
+        `Bumps ${DATASET_ID} from 1.0.0 to 1.0.1.`,
+        "",
+        "### Changed files",
+        "",
+        "- `CHANGES` (added)",
+        "- `dataset_description.json` (modified)",
+        "- `sub-03/eeg/sub-03_task-rest_eeg.json` (added)",
+      ].join("\n"),
+    );
+
+    // The branch is on the remote, with the author's title as the commit and the entry in CHANGES.
+    expect(git(remote, "rev-parse", "--verify", "refs/heads/update/pr-text-test")).toMatch(
+      /^[0-9a-f]{40}$/,
+    );
+    expect(git(work, "log", "-1", "--format=%s", "update/pr-text-test")).toBe(GOOD_TITLE);
+    const changes = git(work, "show", "update/pr-text-test:CHANGES");
+    const dated = changes.match(/^1\.0\.1 (\d{4}-\d{2}-\d{2})\n\n {2}- (.*)$/);
+    expect(dated?.[2]).toBe(GOOD_TITLE);
+    // The author's calendar day, which may roll over between `before` and `after` at midnight.
+    expect([before, after].includes(dated?.[1] ?? "")).toBe(true);
+    const written = JSON.parse(git(work, "show", "update/pr-text-test:dataset_description.json"));
+    expect(written.Version).toBe("1.0.1");
+    expect(written.Name).toBe("Resting EEG, final name");
+
+    // And the review's own reader finds the entry.
+    const facts = gatherGitFacts(
+      work,
+      git(work, "rev-parse", "main"),
+      git(work, "rev-parse", "update/pr-text-test"),
+    );
+    expect(facts.changelogEntry).toBe("added");
+  });
+
+  test("a bulk change is summarized by folder, not dumped as paths", async () => {
+    const { work } = newClone();
+    for (let i = 0; i < 25; i++) {
+      write(work, `sub-04/eeg/sub-04_run-${i}_eeg.json`, "{}\n");
+    }
+    const r = await runNemar(
+      [
+        "dataset",
+        "update",
+        "--yes",
+        "--branch",
+        "update/pr-text-bulk",
+        "-m",
+        "Add subject 04",
+        "--description",
+        "Adds the 25 runs of sub-04.",
+      ],
+      work,
+    );
+    expect(r.exitCode).toBe(0);
+    const body = valueAfter(ghArgs() ?? [], "--body") ?? "";
+    expect(body).toContain("27 files changed: 26 added, 1 modified.");
+    expect(body).toContain("- `CHANGES` (added)");
+    expect(body).toContain("- `dataset_description.json` (modified)");
+    expect(body).toContain("- `sub-04/`: 25 files (25 added)");
+    expect(body).not.toContain("run-");
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// At a terminal, the command asks
+// ---------------------------------------------------------------------------------------------
+
+interface Terminal {
+  /** What the person would see so far, with control sequences removed. */
+  seen(): string;
+  type(text: string): void;
+  /** Wait until `needle` appears after everything already waited for. */
+  until(needle: string): Promise<void>;
+  exited: Promise<number>;
+}
+
+// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping terminal control sequences
+const CONTROL_SEQUENCES = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b[=>]|\r/g;
+
+/** The CLI on a pseudo-terminal, so `process.stdin.isTTY` is true and its prompts are real. */
+function onTerminal(args: string[], cwd: string, config = configDir(true)): Terminal {
+  rmSync(ghRecord, { force: true });
+  apiPaths = [];
+  let raw = "";
+  const proc = Bun.spawn([process.execPath, "run", CLI_ENTRY, ...args], {
+    cwd,
+    env: cleanEnv(config, "xterm-256color"),
+    terminal: {
+      cols: 120,
+      rows: 40,
+      data(_terminal: unknown, chunk: Uint8Array) {
+        raw += new TextDecoder().decode(chunk);
+      },
+    },
+  } as never) as unknown as {
+    terminal: { write(text: string): void };
+    exited: Promise<number>;
+    kill(): void;
+  };
+  const seen = () => raw.replace(CONTROL_SEQUENCES, "");
+  let from = 0;
+  const giveUp = setTimeout(() => proc.kill(), 50_000);
+  return {
+    seen,
+    type: (text) => proc.terminal.write(text),
+    async until(needle) {
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline) {
+        const at = seen().indexOf(needle, from);
+        if (at >= 0) {
+          from = at + needle.length;
+          return;
+        }
+        await Bun.sleep(25);
+      }
+      throw new Error(`Timed out waiting for ${JSON.stringify(needle)}. Seen so far:\n${seen()}`);
+    },
+    exited: proc.exited.finally(() => clearTimeout(giveUp)),
+  };
+}
+
+describe("nemar dataset update at a terminal asks for what the command line left out", () => {
+  test("asks for a title and a description, and asks again after a refusal", async () => {
+    const { work } = newClone();
+    write(work, "sub-03/eeg/sub-03_task-rest_eeg.json", '{"TaskName": "rest"}\n');
+
+    const term = onTerminal(["dataset", "update", "--branch", "update/pr-text-pty"], work);
+    await term.until("Title (one line saying what changed):");
+    term.type("Save changes\r");
+    await term.until('That is placeholder text ("Save changes"); say what actually changed.');
+    // Asked again on a fresh line, so the person is never left to delete what was refused.
+    await term.until("Title (one line saying what changed):");
+    term.type(`${GOOD_TITLE}\r`);
+    await term.until("Description (what changed and why):");
+    term.type("\r");
+    await term.until("That is empty; say in plain words what changed.");
+    await term.until("Description (what changed and why):");
+    term.type(`${GOOD_DESCRIPTION}\r`);
+    await term.until("Create update PR for xx000000?");
+    term.type("y\r");
+    const exitCode = await term.exited;
+    expect(exitCode, term.seen()).toBe(0);
+
+    const args = ghArgs() ?? [];
+    expect(valueAfter(args, "--title")).toBe(`${GOOD_TITLE} (v1.0.1)`);
+    expect(valueAfter(args, "--body")?.startsWith(`${GOOD_DESCRIPTION}\n\nBumps`)).toBe(true);
+    expect(git(work, "show", "update/pr-text-pty:CHANGES")).toContain(`  - ${GOOD_TITLE}`);
+  });
+
+  test("does not ask what the command line already said", async () => {
+    const { work } = newClone();
+    write(work, "sub-03/eeg/sub-03_task-rest_eeg.json", '{"TaskName": "rest"}\n');
+    const term = onTerminal(
+      ["dataset", "update", "--branch", "update/pr-text-pty2", "-m", GOOD_TITLE],
+      work,
+    );
+    await term.until("Description (what changed and why):");
+    term.type(`${GOOD_DESCRIPTION}\r`);
+    await term.until("Create update PR for xx000000?");
+    term.type("y\r");
+    expect(await term.exited, term.seen()).toBe(0);
+    expect(term.seen()).not.toContain("Title (one line saying what changed):");
+  });
+
+  test("--yes at a terminal still refuses: it stands in for a confirmation, not for words", async () => {
+    const { work } = newClone();
+    write(work, "sub-03/eeg/sub-03_task-rest_eeg.json", '{"TaskName": "rest"}\n');
+    const term = onTerminal(["dataset", "update", "--yes"], work);
+    expect(await term.exited).toBe(1);
+    expect(term.seen()).toContain("missing --message and --description.");
+    expect(term.seen()).not.toContain("Title (one line saying what changed):");
   });
 });
