@@ -278,25 +278,90 @@ describe("what it is allowed to hold", () => {
       .map((s) => s.name);
     expect(users).toEqual(["Mint a read-only token for the dataset repository"]);
   });
+});
 
-  test("no script from the checked-out tree runs before the step that is given the App's key", () => {
-    const names = job.steps.map((s) => s.name);
-    const mint = names.indexOf("Mint a read-only token for the dataset repository");
-    const install = names.indexOf("Install the review script's dependencies");
-    expect(mint).toBeGreaterThan(-1);
-    expect(install).toBeGreaterThan(mint);
-    // Nothing before the mint runs inside the checked-out tree (./tool), where the install and the
-    // review script run.
-    for (const s of job.steps.slice(0, mint)) {
-      expect(s["working-directory"], s.name).not.toBe("tool");
-      expect(s.run ?? "", s.name).not.toMatch(/\btool\//);
+describe("what runs after the mint is not install-time code", () => {
+  // `create-github-app-token` is the one step given the GitHub App's private key, and the runner
+  // passes the same inputs to the action's post step at the end of the job. The order and the flag
+  // below close hooks planted before the mint and install-time code; the workflow's header says
+  // which of run-publication-review.yml's closures that is. The assertions follow that file's.
+  const MINT = "Mint a read-only token for the dataset repository";
+  const FETCH = "Fetch the pull request as git data";
+  const READ = "Read the pull request from the API";
+  const OIDC = "Fetch the GitHub OIDC token for Anthropic";
+  const CHECKOUT = "Check out the review script";
+  const INSTALL = "Install the review script's dependencies";
+  const names = job.steps.map((s) => s.name);
+  const at = (n: string) => names.indexOf(n);
+
+  test("the steps are in the order that keeps code from the tool checkout away from the mint", () => {
+    expect(names).toEqual([
+      "Mask the callback token",
+      "Validate the dispatch",
+      "Claim the review",
+      "Check the federation configuration",
+      MINT,
+      FETCH,
+      READ,
+      CHECKOUT,
+      "Set up Bun",
+      INSTALL,
+      OIDC,
+      "Review",
+      "Report that the job failed",
+    ]);
+  });
+
+  test("before the mint, only the masking action and plain shell run, and nothing from the tool checkout", () => {
+    for (const s of job.steps.slice(0, at(MINT))) {
+      if (s.name === "Mask the callback token") {
+        expect(s.uses, s.name).toMatch(/^actions\/github-script@/);
+        continue;
+      }
+      expect(s.uses, s.name).toBeUndefined();
+      expect(s.run ?? "", s.name).not.toMatch(/\b(bun|node|npm|npx|yarn|pnpm)\b/);
+      expect(s["working-directory"], s.name).toBeUndefined();
     }
-    // The install runs no lifecycle script: neither the root package's own `prepare` and
-    // `postinstall` nor a dependency's. It is the only install, and it keeps the frozen lockfile.
-    const run = step("Install the review script's dependencies").run ?? "";
-    expect(run).toMatch(/^bun install --frozen-lockfile --ignore-scripts$/m);
-    expect(step("Install the review script's dependencies")["working-directory"]).toBe("tool");
-    expect(job.steps.filter((s) => /\bbun install\b/.test(s.run ?? ""))).toHaveLength(1);
+    // A default at workflow or job level could put a step inside the tool directory without a
+    // `working-directory` of its own, so the file declares none.
+    expect(JSON.stringify(wf)).not.toContain('"defaults"');
+  });
+
+  test("the mint and the two repository reads come before the checkout, Bun, the install and any `bun run`", () => {
+    for (const later of [CHECKOUT, "Set up Bun", INSTALL, OIDC, "Review"]) {
+      expect(at(later), later).toBeGreaterThan(at(MINT));
+      expect(at(later), later).toBeGreaterThan(at(FETCH));
+      expect(at(later), later).toBeGreaterThan(at(READ));
+    }
+    // And no step before the mint holds anything of the repository's: no tool directory, no Bun,
+    // no checkout.
+    const before = JSON.stringify(job.steps.slice(0, at(MINT)));
+    expect(before).not.toMatch(
+      /oven-sh|setup-bun|working-directory|\btool\b|bun (install|run)|actions\/checkout/,
+    );
+  });
+
+  test("the install runs after the checkout and the setup that provides Bun, and the script runs after the install", () => {
+    expect(at(CHECKOUT)).toBeLessThan(at(INSTALL));
+    expect(at("Set up Bun")).toBeLessThan(at(INSTALL));
+    expect(at(INSTALL)).toBeLessThan(at("Review"));
+  });
+
+  test("the install runs no lifecycle script: not the repository's, and not a dependency's, trusted or not", () => {
+    const install = step(INSTALL);
+    expect(install.run?.trim()).toBe("bun install --frozen-lockfile --ignore-scripts");
+    expect(install["working-directory"]).toBe("tool");
+    // Every install in the file carries the flag, so a second one cannot reintroduce the scripts.
+    for (const s of job.steps) {
+      for (const line of (s.run ?? "").split("\n")) {
+        if (/\bbun (install|add|i)\b/.test(line)) {
+          expect(line, s.name).toContain("--ignore-scripts");
+        }
+      }
+    }
+    // Not `--production`: the review script imports the Anthropic SDK, which this repository lists
+    // as a development dependency, so a production install could not run it.
+    expect(SRC).not.toMatch(/bun install[^\n]*--production/);
   });
 });
 
@@ -409,15 +474,28 @@ describe("nothing from the pull request runs", () => {
   });
 
   test("a dev dispatch and a production dispatch both check out main", () => {
-    // The ref is a plain branch name, never an expression over the payload, so no dispatch, the
-    // dev Worker's included, can choose which branch of nemar-cli its script comes from: a change
-    // to the script reaches a review only through a release to main. run-publication-review.yml
-    // holds to the same rule. Both dispatch environments pass the validate step, so both reach
-    // this checkout, and a literal gives each of them the same ref.
-    const checkout = step("Check out the review script");
-    expect(checkout.with?.ref).toBe("main");
-    expect(JSON.stringify(checkout.with)).not.toContain("${{");
-    expect(JSON.stringify(checkout)).not.toMatch(/client_payload|ENVIRONMENT/);
+    // The script is the only thing the job checks out, and its inputs are plain text: nothing the
+    // dispatch carries, its environment included, can reach them, so no dispatch (the dev
+    // Worker's too) chooses which branch of nemar-cli the script comes from, and a change to it
+    // reaches a review only through a release to main. run-publication-review.yml holds to the
+    // same rule. Both environments pass the validate step, so both reach this checkout; the two
+    // forms in which a step could read the environment are substituted for each, and the inputs
+    // must come out the same, with the ref main.
+    const checkouts = job.steps.filter((s) => s.uses?.startsWith("actions/checkout@"));
+    expect(checkouts.map((s) => s.name)).toEqual(["Check out the review script"]);
+    const inputsFor = (environment: string) =>
+      JSON.parse(
+        JSON.stringify(checkouts[0].with)
+          .replaceAll("${{ github.event.client_payload.environment }}", environment)
+          .replaceAll("${{ env.ENVIRONMENT }}", environment),
+      ) as Record<string, unknown>;
+    for (const environment of ["dev", "production"]) {
+      const inputs = inputsFor(environment);
+      expect(inputs.repository, environment).toBe("nemarOrg/nemar-cli");
+      expect(inputs.ref, environment).toBe("main");
+      expect(JSON.stringify(inputs), environment).not.toContain("${{");
+    }
+    expect(inputsFor("dev")).toEqual(inputsFor("production"));
   });
 });
 
