@@ -1044,6 +1044,33 @@ class MaxShieldProbeFailed(Exception):
     code = "maxshield_probe_failed"
 
 
+class CompanionMissing(Exception):
+    """A recording's header says its samples live in a companion file, and the
+    dataset tree at the pinned commit does not hold that file (#1801).
+
+    Judged against the git tree, not against the reader's error: a companion the
+    tree tracks but storage lacks fails earlier as `annex_object_missing`, which
+    stays the storage-state code. Here the tree itself has no such file, so the
+    only repair is a new commit, and retrying the same commit cannot change the
+    answer. NOT in `RETRYABLE_CODES`, and not in `STORAGE_STATE_CODES` either: a
+    run that converts nothing and fails only with this is a property of the
+    DATASET, so it is terminal like `corrupt_or_truncated`. The message names the
+    missing file by its BIDS path, which `failure_detail` leaves alone."""
+
+    code = "companion_missing"
+
+
+# The other two codes #1801 adds are only ever chosen by `failure_verdict`, which
+# reads a reader's refusal; neither has an exception class of its own. Same
+# standing as `CompanionMissing`: data failures, outside both code sets below.
+# A FIF whose next split part is not in the tree (MNE's refusal had been reported
+# as `maxshield_probe_failed`, which it is not):
+SPLIT_PART_MISSING = "split_part_missing"
+# An EEGLAB `.set` that stores trials, not one continuous recording (#1214). Not
+# `not_continuous`, whose reason calls the file a derivative:
+EPOCHED_RECORDING = "epoched_recording"
+
+
 # Coded failures that are nevertheless NOT a permanent property of the data, so a
 # run consisting entirely of them must stay retryable. See `deterministic` in main().
 # `maxshield_uncalibrated` is deliberately absent: the calibration pair is either
@@ -1802,6 +1829,25 @@ _FALLBACK_REASONS = {
     "annex_object_missing": (
         "A data file this recording needs is missing or incomplete in the "
         "archive's storage, so the viewer could not be generated."
+    ),
+    # NEMAR-side (not a biosigIO code): the recording's header points to a data
+    # file the dataset's tree does not hold at all (#1801). Distinct from
+    # `annex_object_missing`, where the tree lists the file and storage lacks it.
+    "companion_missing": (
+        "A data file this recording's header points to is not in the dataset, so "
+        "no viewer copy can be generated until it is added."
+    ),
+    # NEMAR-side (not a biosigIO code): a FIF recording split across files, and a
+    # later part of the series is not in the dataset's tree (#1801).
+    "split_part_missing": (
+        "This recording is stored as a series of split files, and a later part of "
+        "the series is not in the dataset, so no viewer copy can be generated."
+    ),
+    # NEMAR-side (not a biosigIO code): an EEGLAB `.set` that stores epoched data,
+    # a set of trials, rather than one continuous recording (#1214, #1801).
+    "epoched_recording": (
+        "This file stores epoched data, a set of trials, rather than one "
+        "continuous recording, so the time-series viewer is not available for it."
     ),
     # NEMAR-side (not a biosigIO code): the producer gave up retrying. A recording
     # that fails for an INFRA reason is listed in the index's `pending` with an

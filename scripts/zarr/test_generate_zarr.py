@@ -15100,6 +15100,77 @@ class TestMainAnnexMissingVerdict(unittest.TestCase):
         self.assertEqual(index["pending"], [], "typed, so not pending")
 
 
+# --- Typed verdicts for missing companion data (#1801) --------------------------
+
+
+class TestTypedVerdictCodes(unittest.TestCase):
+    """The three NEMAR-side codes #1801 adds, and where they sit in the retry
+    rules. Pure: no library is read."""
+
+    NEW = ("companion_missing", "split_part_missing", "epoched_recording")
+
+    @staticmethod
+    def verdict(*codes: str | None) -> bool:
+        paths = [f"sub-{i:02d}/eeg/r.edf" for i in range(len(codes))]
+        entries = [_failure_entry(p, c, f"{c} detail") for p, c in zip(paths, codes) if c]
+        return generate_zarr.dataset_failure_is_deterministic(paths, entries)
+
+    def test_the_constants_spell_the_published_codes(self):
+        self.assertEqual(
+            {
+                generate_zarr.CompanionMissing.code,
+                generate_zarr.SPLIT_PART_MISSING,
+                generate_zarr.EPOCHED_RECORDING,
+            },
+            set(self.NEW),
+        )
+
+    def test_each_new_code_has_its_own_reason(self):
+        generic = reason_for_code(None)
+        reasons = {code: reason_for_code(code) for code in self.NEW}
+        for code, reason in reasons.items():
+            with self.subTest(code):
+                self.assertNotEqual(reason, generic)
+        self.assertEqual(len(set(reasons.values())), len(self.NEW), "one sentence per code")
+        # And the sentence says the thing: the viewer shows it to a person.
+        self.assertIn("not in the dataset", reasons["companion_missing"])
+        self.assertIn("split", reasons["split_part_missing"])
+        self.assertIn("epoched", reasons["epoched_recording"])
+        # `not_continuous` calls its file a derivative; this code does not.
+        self.assertNotIn("derivative", reasons["epoched_recording"])
+
+    def test_the_schema_description_lists_each_new_code(self):
+        with open(INDEX_SCHEMA_PATH, encoding="utf-8") as fh:
+            schema = json.load(fh)
+        description = schema["$defs"]["failure"]["properties"]["code"]["description"]
+        for code in self.NEW:
+            with self.subTest(code):
+                self.assertIn(code, description)
+
+    def test_a_run_of_only_new_codes_is_deterministic(self):
+        # They are data failures, so a run that converts nothing and fails only
+        # with them is terminal, exactly as for corrupt_or_truncated.
+        for code in self.NEW:
+            with self.subTest(code):
+                self.assertTrue(self.verdict(code))
+                self.assertTrue(self.verdict(code, code))
+                # Alongside a storage-state code the run is still deterministic,
+                # because the new code is the genuine data failure in the mix.
+                self.assertTrue(self.verdict("annex_object_missing", code))
+                # An infrastructure failure (uncoded) keeps the run retryable.
+                self.assertFalse(self.verdict(code, None))
+
+    def test_the_new_codes_join_neither_code_set(self):
+        # Both sets are pinned: a new code added to either would change what a
+        # whole dataset's verdict means.
+        self.assertEqual(RETRYABLE_CODES, frozenset({"recording_memory_exceeded"}))
+        self.assertEqual(generate_zarr.STORAGE_STATE_CODES, frozenset({"annex_object_missing"}))
+        for code in self.NEW:
+            with self.subTest(code):
+                self.assertNotIn(code, RETRYABLE_CODES)
+                self.assertNotIn(code, generate_zarr.STORAGE_STATE_CODES)
+
+
 # --- Subject information never reaches a store (#1626) -------------------------
 #
 # A store holds the data, the events, channel names, types and units, and
