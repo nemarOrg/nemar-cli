@@ -38,6 +38,7 @@ import {
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1, wrapD1 } from "./helpers/d1";
+import { type PermissionAnswer, permissionResponse } from "./helpers/github-permission";
 import { projectOnto } from "./helpers/graphql-select";
 import {
   type PrSpec,
@@ -78,6 +79,8 @@ let graphqlResponder: ((attempt: number) => Response | null | Promise<Response |
 let graphqlAttempts = 0;
 let usersById: Record<string, { id: number; login: string; type: string } | number> = {};
 let pulls: Record<string, Record<string, unknown> | number> = {};
+/** What GitHub says each login holds on a repository (see helpers/github-permission.ts). */
+let permissions: Record<string, PermissionAnswer> = {};
 
 /** A failing answer that tells the retry transport not to wait, so a test of a failure is not slow. */
 function failing(status: number): Response {
@@ -134,6 +137,8 @@ beforeAll(() => {
         if (typeof hit === "number") return failing(hit);
         return hit ? Response.json(hit) : new Response("{}", { status: 404 });
       }
+      const permission = req.method === "GET" ? await permissionResponse(url, permissions) : null;
+      if (permission) return permission;
       return new Response("not found", { status: 404 });
     },
   });
@@ -199,6 +204,7 @@ afterEach(() => {
   graphqlAttempts = 0;
   usersById = {};
   pulls = {};
+  permissions = {};
   envOverrides = {};
   __resetRateLimitStateForTests();
 });
@@ -2002,6 +2008,28 @@ describe("an owner's or administrator's pull request is exempt (ADR 0107)", () =
     );
     const { body } = await queue();
     expect(body.entries.map((e) => e.verdict)).toEqual(["not_reviewed", "not_reviewed"]);
+  });
+
+  test("an account whose GitHub role is not admin on the dataset is not exempt, in the list or the detail", async () => {
+    permissions = { "nm000201#queueadmin-gh": "write" };
+    nodes(
+      { ds: "nm000201", n: 1, author: ADMIN_GH, authorId: 4001 },
+      { ds: "nm000202", n: 2, author: ADMIN_GH, authorId: 4001 },
+    );
+    const { body } = await queue();
+    const by = Object.fromEntries(body.entries.map((e) => [e.dataset_id, e.verdict]));
+    expect(by).toEqual({ nm000201: "not_reviewed", nm000202: "exempt" });
+
+    pulls["nm000201#7"] = livePull({ user: { login: ADMIN_GH, id: 4001, type: "User" } });
+    expect((await detail("nm000201", 7)).body.verdict).toBe("not_reviewed");
+  });
+
+  test("a GitHub that cannot say is not exempt, and the list is still answered", async () => {
+    permissions = { [ADMIN_GH]: 500 };
+    nodes({ ds: "nm000201", n: 1, author: ADMIN_GH, authorId: 4001 });
+    const { status, body } = await queue();
+    expect(status).toBe(200);
+    expect(body.entries[0]).toMatchObject({ verdict: "not_reviewed", needs_you: true });
   });
 
   test("the verdict can be asked for, and --needs-me leaves it out", async () => {

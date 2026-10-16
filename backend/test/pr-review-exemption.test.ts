@@ -1,37 +1,77 @@
 /**
  * Who is exempt from the dataset pull-request review (ADR 0107).
  *
- * `isReviewExempt` is asked about a GitHub login and answers from the `users` table alone, so the
- * tests seed real accounts into the real schema (bun:sqlite behind realD1, every migration applied)
- * and ask. The callers that act on the answer (the webhook, the allowance check, the admin queue)
- * are exercised through their own entry points in `pr-review-flow.test.ts` and
- * `pr-review-queue.test.ts`.
+ * `isReviewExempt` is asked about a GitHub login. The accounts answer first, so the tests seed real
+ * accounts into the real schema (bun:sqlite behind realD1, every migration applied) and ask; GitHub
+ * answers second, as a `Bun.serve()` stand-in for api.github.com. The callers that act on the
+ * answer (the webhook, the allowance check, the admin queue) are exercised through their own entry
+ * points in `pr-review-flow.test.ts` and `pr-review-queue.test.ts`.
  */
 
 import type { Database } from "bun:sqlite";
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import type { Server } from "bun";
 import { ACCOUNT_KIND_VALUES } from "../../shared/contract/user";
 import {
   REVIEW_EXEMPT_KINDS,
   REVIEW_EXEMPT_ROLES,
   REVIEW_EXEMPT_SQL,
+  __setPermissionTimeoutForTests,
   isReviewExempt,
 } from "../src/services/pr-review-exemption";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
+import { type PermissionAnswer, permissionResponse } from "./helpers/github-permission";
 
 const REPO = "nm000460";
+const TOKEN = "ghp_exemption_test_token";
+
+interface Asked {
+  path: string;
+  auth: string | null;
+}
+
+let server: Server;
+let asked: Asked[] = [];
+/** What GitHub says each login holds on a repository (see helpers/github-permission.ts). */
+let permissions: Record<string, PermissionAnswer> = {};
+
+beforeAll(() => {
+  server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const url = new URL(req.url);
+      asked.push({ path: url.pathname, auth: req.headers.get("authorization") });
+      return (await permissionResponse(url, permissions)) ?? new Response("{}", { status: 404 });
+    },
+  });
+  (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL =
+    `http://127.0.0.1:${server.port}`;
+});
+
+afterAll(() => {
+  (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = undefined;
+  server.stop(true);
+});
 
 let db: Database;
+let envOverrides: Partial<Bindings> = {};
 
 beforeEach(() => {
   db = freshDb();
 });
 
+afterEach(() => {
+  asked = [];
+  permissions = {};
+  envOverrides = {};
+  __setPermissionTimeoutForTests(null);
+});
+
 function env(): Bindings {
-  return { DB: realD1(db) } as Bindings;
+  return { DB: realD1(db), GITHUB_ADMIN_PAT: TOKEN, ...envOverrides } as Bindings;
 }
 
 let nextId = 100;
@@ -159,6 +199,88 @@ describe("who is exempt from the review", () => {
     }
     expect(cases.filter((c) => c.expected)).toHaveLength(4);
     for (const c of cases) expect(await exempt(c.login), c.login).toBe(c.expected);
+  });
+});
+
+describe("GitHub has to agree", () => {
+  const admin = () => seedAccount({ github: "Admin-GH", role: "admin" });
+
+  test("an account that matched is exempt when GitHub reports admin, and the question is about this repository and this login", async () => {
+    admin();
+    expect(await exempt("Admin-GH")).toBe(true);
+    expect(asked).toEqual([
+      {
+        path: `/repos/nemarDatasets/${REPO}/collaborators/Admin-GH/permission`,
+        auth: `Bearer ${TOKEN}`,
+      },
+    ]);
+  });
+
+  test("an account that matched but holds a lesser role on the repository is not exempt", async () => {
+    admin();
+    for (const held of ["maintain", "write", "triage", "read", "none"] as const) {
+      permissions = { "admin-gh": held };
+      expect(await exempt("Admin-GH"), held).toBe(false);
+    }
+  });
+
+  test("the answer is about one repository: admin elsewhere is not admin here", async () => {
+    admin();
+    permissions = { [`${REPO}#admin-gh`]: "write", "nm000461#admin-gh": "admin" };
+    expect(await isReviewExempt(env(), { login: "Admin-GH", repo: REPO })).toBe(false);
+    expect(await isReviewExempt(env(), { login: "Admin-GH", repo: "nm000461" })).toBe(true);
+  });
+
+  test("every way GitHub can fail to say is not exempt", async () => {
+    admin();
+    const failures: [string, PermissionAnswer][] = [
+      ["a login GitHub does not have", 404],
+      ["a refusal", 403],
+      ["a throttle", 429],
+      ["a server error", 500],
+      ["a gateway error", 502],
+      ["a body that is not JSON", "garbage"],
+      ["a body with no role_name", "no_role_name"],
+    ];
+    for (const [why, answer] of failures) {
+      permissions = { "admin-gh": answer };
+      expect(await exempt("Admin-GH"), why).toBe(false);
+    }
+  });
+
+  test("a GitHub that does not answer in time is not exempt", async () => {
+    admin();
+    __setPermissionTimeoutForTests(100);
+    permissions = { "admin-gh": { delayMs: 6000 } };
+    const started = Date.now();
+    expect(await exempt("Admin-GH")).toBe(false);
+    // It gave up at the timeout (and one retry's pause), not when GitHub finally answered.
+    expect(Date.now() - started).toBeLessThan(3500);
+  });
+
+  test("no GitHub credential is not exempt, and nothing is asked", async () => {
+    admin();
+    envOverrides = { GITHUB_ADMIN_PAT: undefined };
+    expect(await exempt("Admin-GH")).toBe(false);
+    expect(asked).toEqual([]);
+  });
+
+  test("GitHub is asked only after an account has matched", async () => {
+    seedAccount({ github: "member-gh", role: "member" });
+    seedAccount({ github: "persona-gh", role: "admin", kind: "test" });
+    seedAccount({ github: "revoked-gh", role: "admin", status: "revoked" });
+    seedAccount({ github: "deleted-gh", role: "admin", deleted: true });
+    for (const login of [
+      "member-gh",
+      "persona-gh",
+      "revoked-gh",
+      "deleted-gh",
+      "stranger-gh",
+      "x[bot]",
+    ]) {
+      expect(await exempt(login), login).toBe(false);
+    }
+    expect(asked).toEqual([]);
   });
 });
 

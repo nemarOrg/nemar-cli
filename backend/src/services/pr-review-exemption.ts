@@ -14,15 +14,25 @@
  * into this code, so adding or removing an owner or administrator changes who is exempt and nothing
  * else has to.
  *
+ * **GitHub has to agree.** A NEMAR account can name a GitHub login nobody holds, or one its person
+ * has since renamed, and the role match alone would then exempt whoever registers that name. So a
+ * login that matches an account is also asked about at GitHub: it must hold the repository `admin`
+ * role on THIS repository (an organization owner, or a member of a team with admin). The question is
+ * asked only after a role match, and every way it can fail (no token, an error, a timeout, an answer
+ * that is not the one expected) means not exempt, so the review runs, which is the safe side.
+ *
  * **Nothing stores the answer.** No column holds it, and every call reads `users` again, so a
  * demotion, a revocation or a deleted account ends the exemption on the very next pull request.
  *
  * A database failure throws, like every read in the review's intake: the webhook answers 500 and
- * the delivery can be redelivered.
+ * the delivery can be redelivered. A GitHub failure never throws here; it answers not exempt.
  */
 
 import type { AccountKind } from "../../../shared/contract/user.js";
 import type { Bindings, UserRole } from "../types/bindings.js";
+import { getDatasetsTokenWithRefresher } from "./github-auth.js";
+import { GITHUB_API, ORG_NAME, ghHeaders } from "./github/shared.js";
+import { githubFetchWithRetry } from "./github/transport.js";
 
 /** The NEMAR roles whose pull requests are not reviewed. */
 export const REVIEW_EXEMPT_ROLES = ["owner", "admin"] as const satisfies readonly UserRole[];
@@ -65,11 +75,66 @@ export interface ReviewExemptSubject {
 }
 
 /**
- * Whether this GitHub login is exempt from the review on this dataset. A login that is not shaped
- * like one is never exempt and is not looked up.
+ * The longest the question to GitHub may take, in all, before it is abandoned and the answer is
+ * "not exempt". It runs inside the webhook's own request, which GitHub gives ten seconds, and a
+ * pusher other than the author is a second question.
+ */
+let permissionTimeoutMs = 4_000;
+
+export function __setPermissionTimeoutForTests(ms: number | null): void {
+  permissionTimeoutMs = ms ?? 4_000;
+}
+
+/** The repository role GitHub reports for a login: `role_name`, which is finer than `permission`. */
+const ADMIN_ROLE = "admin";
+
+/**
+ * Whether GitHub says this login holds the `admin` role on this repository. Never throws: a login
+ * GitHub does not know (404), a refusal, a throttle, a timeout, no token to ask with, and a body
+ * that is not an object with `role_name: "admin"` are all `false`. `role_name`, not the legacy
+ * `permission` field: `permission` folds `maintain` into `write` and cannot tell a role apart.
+ *
+ * The endpoint answers `read` for ANY login on a public repository, so only an explicit `admin`
+ * means anything here.
+ */
+async function holdsRepositoryAdmin(env: Bindings, who: ReviewExemptSubject): Promise<boolean> {
+  try {
+    const { token, refresh } = await getDatasetsTokenWithRefresher(env);
+    const res = await githubFetchWithRetry(
+      `${GITHUB_API()}/repos/${ORG_NAME}/${encodeURIComponent(who.repo)}/collaborators/${encodeURIComponent(who.login)}/permission`,
+      { headers: ghHeaders(token), signal: AbortSignal.timeout(permissionTimeoutMs) },
+      { kind: "interactive", maxAttempts: 2, maxThrottleMs: 2_000, refreshTokenOn401: refresh },
+    );
+    if (!res.ok) {
+      console.warn(
+        `[pr-review-exempt] ${who.repo}: GitHub answered HTTP ${res.status} to the permission check; not exempt`,
+      );
+      return false;
+    }
+    const body: unknown = await res.json().catch(() => null);
+    const role =
+      typeof body === "object" && body !== null && !Array.isArray(body)
+        ? (body as Record<string, unknown>).role_name
+        : undefined;
+    return role === ADMIN_ROLE;
+  } catch (err) {
+    // Fixed words and the error's own message (a status or a timeout), never a token or a login.
+    console.warn(
+      `[pr-review-exempt] ${who.repo}: the permission check failed (${err instanceof Error ? err.message.slice(0, 120) : "unknown"}); not exempt`,
+    );
+    return false;
+  }
+}
+
+/**
+ * Whether this GitHub login is exempt from the review on this dataset: a live, approved owner or
+ * administrator account holds it (the query), and GitHub agrees that it holds `admin` on the
+ * repository. A login that is not shaped like one is never exempt and is not looked up, and
+ * GitHub is asked only after the accounts have said yes.
  */
 export async function isReviewExempt(env: Bindings, who: ReviewExemptSubject): Promise<boolean> {
   if (!GITHUB_LOGIN.test(who.login)) return false;
   const row = await env.DB.prepare(REVIEW_EXEMPT_SQL).bind(who.login).first<{ exempt: number }>();
-  return row !== null;
+  if (row === null) return false;
+  return await holdsRepositoryAdmin(env, who);
 }

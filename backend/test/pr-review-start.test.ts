@@ -27,6 +27,7 @@ import { handlePullRequestEvent } from "../src/services/pr-review";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1, wrapD1 } from "./helpers/d1";
+import { type PermissionAnswer, permissionResponse } from "./helpers/github-permission";
 import { SHA_A, SHA_B, seedReview } from "./helpers/pr-queue-fixtures";
 
 const ADMIN_KEY = "start-admin-key-0123456789abcdef0123456789abcdef";
@@ -46,6 +47,8 @@ let calls: Recorded[] = [];
 /** What GitHub answers for `GET /repos/nemarDatasets/<ds>/pulls/<n>`: a pull request, or a status. */
 let pulls: Record<string, Record<string, unknown> | number> = {};
 let dispatchStatus = 204;
+/** What GitHub says each login holds on a repository (see helpers/github-permission.ts). */
+let permissions: Record<string, PermissionAnswer> = {};
 let nextId = 9000;
 
 beforeAll(() => {
@@ -69,6 +72,8 @@ beforeAll(() => {
       if (/\/issues\/(comments\/\d+|\d+\/comments)$/.test(url.pathname)) {
         return Response.json({ id: ++nextId }, { status: req.method === "POST" ? 201 : 200 });
       }
+      const permission = req.method === "GET" ? await permissionResponse(url, permissions) : null;
+      if (permission) return permission;
       const pull = url.pathname.match(/^\/repos\/nemarDatasets\/([^/]+)\/pulls\/(\d+)$/);
       if (req.method === "GET" && pull) {
         const hit = pulls[`${pull[1]}#${pull[2]}`];
@@ -156,6 +161,7 @@ afterEach(() => {
   calls = [];
   pulls = {};
   dispatchStatus = 204;
+  permissions = {};
   envOverrides = {};
   __resetRateLimitStateForTests();
 });
@@ -676,6 +682,19 @@ describe("an owner's or administrator's pull request is not started (ADR 0107)",
     });
     expect(checkWrites()[0].body).toMatchObject({ conclusion: "skipped" });
     expect(rows()).toEqual(before);
+  });
+
+  test("an administrator that GitHub does not report as admin on the repository is started like anyone", async () => {
+    permissions = { "startadmin-gh": "write" };
+    pulls[`${DATASET}#7`] = restPull({ number: 7, userId: 4001, login: "startadmin-gh" });
+
+    const r = await start(DATASET, 7);
+
+    expect(r.body).toMatchObject({ dispatched: true, reason: "dispatched" });
+    expect(rows()).toHaveLength(1);
+    expect(
+      checkWrites().every((c) => (c.body as { conclusion?: string }).conclusion !== "skipped"),
+    ).toBe(true);
   });
 
   test("a pull request by an account that is not exempt is started as before", async () => {

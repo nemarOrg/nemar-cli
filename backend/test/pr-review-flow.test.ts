@@ -41,6 +41,7 @@ import {
 } from "../src/services/pr-review";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, interceptingD1, realD1, wrapD1, yieldingD1 } from "./helpers/d1";
+import { type PermissionAnswer, permissionResponse } from "./helpers/github-permission";
 
 const WEBHOOK_SECRET = "pr-review-webhook-secret";
 const CALLBACK_SECRET = "pr-review-callback-secret";
@@ -63,6 +64,8 @@ let checkStatus = 200;
 let claimDuringDispatchFailure = false;
 /** Which GitHub objects answer 404 to an update, as one deleted by hand would. */
 let patchNotFound = new Set<string>();
+/** What GitHub says each login holds on a repository (see helpers/github-permission.ts). */
+let permissions: Record<string, PermissionAnswer> = {};
 let nextId = 9000;
 
 let db: Database;
@@ -98,6 +101,8 @@ beforeAll(() => {
         if (commentStatus >= 300) return new Response("{}", { status: commentStatus });
         return Response.json({ id: ++nextId }, { status: req.method === "POST" ? 201 : 200 });
       }
+      const permission = req.method === "GET" ? await permissionResponse(url, permissions) : null;
+      if (permission) return permission;
       return new Response("not found", { status: 404 });
     },
   });
@@ -117,6 +122,7 @@ afterEach(() => {
   commentStatus = 201;
   checkStatus = 200;
   patchNotFound = new Set();
+  permissions = {};
   envOverrides = {};
 });
 
@@ -570,6 +576,7 @@ describe("owners and administrators are not reviewed (ADR 0107)", () => {
     // Nothing the pull request wrote travelled anywhere, and the only calls are the check's.
     expect(JSON.stringify(calls)).not.toContain(LEAK);
     expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      `GET /repos/nemarDatasets/${DATASET}/collaborators/owner-gh/permission`,
       `POST /repos/nemarDatasets/${DATASET}/check-runs`,
     ]);
   });
@@ -823,6 +830,84 @@ describe("owners and administrators are not reviewed (ADR 0107)", () => {
     const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
     expect(r.body).toMatchObject({ dispatched: false, reason: "dataset_not_reviewable" });
     expect(calls).toHaveLength(0);
+  });
+
+  const permissionAsks = () =>
+    calls.filter((c) => /\/collaborators\/[^/]+\/permission$/.test(c.path));
+
+  test("an admin that GitHub does not report as admin on the repository is reviewed", async () => {
+    seedAccount({ github: "admin-gh", role: "admin" });
+    for (const [i, held] of (["write", "maintain", "triage", "read", "none"] as const).entries()) {
+      permissions = { [`${DATASET}#admin-gh`]: held };
+      const r = await deliver(
+        prEvent({
+          login: "admin-gh",
+          userId: 602,
+          number: 30 + i,
+          sha: `${i + 1}`.repeat(40),
+        }),
+      );
+      expect(r.body, held).toMatchObject({ dispatched: true, reason: "dispatched" });
+    }
+    expect(rows()).toHaveLength(5);
+    expect(lastCheck()).toMatchObject({ status: "in_progress" });
+  });
+
+  test("the repository matters: admin on another dataset is not admin here", async () => {
+    seedDataset("nm000461");
+    seedAccount({ github: "admin-gh", role: "admin" });
+    permissions = { [`${DATASET}#admin-gh`]: "write", "nm000461#admin-gh": "admin" };
+    const here = await deliver(prEvent({ login: "admin-gh", userId: 602 }));
+    const there = await deliver(prEvent({ repo: "nm000461", login: "admin-gh", userId: 602 }));
+    expect(here.body).toMatchObject({ dispatched: true });
+    expect(there.body).toMatchObject({ dispatched: false, reason: "exempt_author" });
+  });
+
+  test("a GitHub that cannot say fails closed: the pull request is reviewed", async () => {
+    seedAccount({ github: "admin-gh", role: "admin" });
+    const failures: [string, PermissionAnswer][] = [
+      ["not found", 404],
+      ["refused", 403],
+      ["an error", 500],
+      ["not json", "garbage"],
+      ["no role name", "no_role_name"],
+    ];
+    for (const [i, [why, answer]] of failures.entries()) {
+      permissions = { "admin-gh": answer };
+      const r = await deliver(
+        prEvent({ login: "admin-gh", userId: 602, number: 40 + i, sha: `${i + 1}`.repeat(40) }),
+      );
+      expect(r.body, why).toMatchObject({ dispatched: true, reason: "dispatched" });
+    }
+    expect(rows()).toHaveLength(failures.length);
+  });
+
+  test("a pusher who is exempt by role but not admin on the repository does not carry the pull request", async () => {
+    seedAccount({ github: "admin-gh", role: "admin" });
+    seedAccount({ github: "owner-gh", role: "owner" });
+    permissions = { [`${DATASET}#owner-gh`]: "write" };
+    const r = await deliver(
+      prEvent({ login: "admin-gh", userId: 602, action: "synchronize", sender: "owner-gh" }),
+    );
+    expect(r.body).toMatchObject({ dispatched: true, reason: "dispatched" });
+    // The author was asked first and was fine, then the pusher, who was not. The allowance check
+    // asks about the author once more, because a role can change between the two reads.
+    expect(permissionAsks().map((c) => c.path.split("/")[5])).toEqual([
+      "admin-gh",
+      "owner-gh",
+      "admin-gh",
+    ]);
+  });
+
+  test("GitHub is asked only about accounts that matched, once for an author who is also the pusher", async () => {
+    seedAccount({ github: "member-gh", role: "member" });
+    seedAccount({ github: "admin-gh", role: "admin" });
+    await deliver(prEvent({ login: "member-gh", userId: 603, number: 1, sha: SHA_A }));
+    expect(permissionAsks()).toHaveLength(0);
+    await deliver(
+      prEvent({ login: "admin-gh", userId: 602, number: 2, sha: SHA_B, action: "synchronize" }),
+    );
+    expect(permissionAsks()).toHaveLength(1);
   });
 
   test("it is off with the rest of the review", async () => {
