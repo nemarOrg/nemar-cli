@@ -15955,16 +15955,46 @@ def build_onset_shifted_bdfplus(path: str, first_onset: int = 40) -> str:
 
 
 class StreamEdfThreshold:
-    """Lower (or restore) `STREAM_EDF_MIN_BYTES` for one test: 1 sends every EDF
-    and BDF down the streaming exporter, the existing pattern for reaching it
-    with a file small enough to build in a test."""
+    """Choose the exporter for the EDF and BDF files of one test, and see which
+    one ran. 1 sends every file down the streaming exporter, the existing
+    pattern for reaching it with a file small enough to build in a test; None
+    puts the threshold back to what production runs with."""
+
+    # Read at import, before any test lowers it. `use(test, None)` means THIS
+    # value, not "leave the current one alone": a test that streams one file
+    # and then asks for the in-memory exporter for the next must get it, and
+    # the value in force at that moment is the 1 the first file left behind.
+    DEFAULT: ClassVar[int] = generate_zarr.STREAM_EDF_MIN_BYTES
 
     @staticmethod
     def use(test: unittest.TestCase, threshold: int | None) -> None:
         saved = generate_zarr.STREAM_EDF_MIN_BYTES
         test.addCleanup(setattr, generate_zarr, "STREAM_EDF_MIN_BYTES", saved)
-        if threshold is not None:
-            generate_zarr.STREAM_EDF_MIN_BYTES = threshold
+        generate_zarr.STREAM_EDF_MIN_BYTES = (
+            StreamEdfThreshold.DEFAULT if threshold is None else threshold
+        )
+
+    @staticmethod
+    @contextlib.contextmanager
+    def watching_writers():
+        """Yield the names of the store writers `convert_recording` hands to
+        `write_store`, in call order, collected as they are called. The real
+        function still runs; this only watches, and puts it back on exit. A
+        refusal in memory never reaches a writer (the importer refuses first),
+        so an empty list means the in-memory exporter, and `stream_to_zarr` the
+        streaming one."""
+        seen: list[str] = []
+        real = generate_zarr.write_store
+
+        def watch(writer, *args, **kwargs):
+            seen.append(getattr(writer, "__name__", repr(writer)))
+            return real(writer, *args, **kwargs)
+
+        generate_zarr.write_store = watch
+        try:
+            yield seen
+        finally:
+            generate_zarr.write_store = real
 
 
 class TestStreamedEdfRefusalThroughConvertOne(ConvertOneLocalCase):
@@ -15994,7 +16024,13 @@ class TestStreamedEdfRefusalThroughConvertOne(ConvertOneLocalCase):
             for path_name, threshold in (("in-memory", None), ("streaming", 1)):
                 with self.subTest(label, path=path_name):
                     StreamEdfThreshold.use(self, threshold)
-                    result = self.convert(primary, {primary})
+                    with StreamEdfThreshold.watching_writers() as writers:
+                        result = self.convert(primary, {primary})
+                    # Which exporter ran, from what it was handed to write with:
+                    # the second fixture used to stream in both halves.
+                    self.assertEqual(
+                        "stream_to_zarr" in writers, path_name == "streaming", writers
+                    )
                     self.assert_refused_as_data(result, "corrupt_or_truncated")
                     self.assertNotIn("entry", result, "nothing is published for a refusal")
                     self.assertIn("not EDF(+) or BDF(+) compliant", result["detail"])
