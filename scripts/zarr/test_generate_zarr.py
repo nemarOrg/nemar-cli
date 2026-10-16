@@ -15446,6 +15446,18 @@ class TestRequireCompanionsSet(unittest.TestCase):
         # No file at all: the tree already answers, so the header is not opened.
         self.check({self.SIBLING})
 
+    def test_a_tracked_same_stem_fdt_passes_though_the_header_names_another(self):
+        # The common BIDS-rename shape: the .fdt was renamed with the .set, and
+        # the name inside the .set is the stale pre-rename one. The case above
+        # cannot see the same-stem clause (no file, so the header is unreadable
+        # and the rule returns anyway); this header IS readable, names a file
+        # the tree lacks, and only the tracked <stem>.fdt satisfies the rule.
+        write_fdt_backed_set(self.local, embedded="pre_rename.fdt")
+        self.check({self.SIBLING})
+        # The control: without that sibling the same header is refused.
+        with self.assertRaises(generate_zarr.CompanionMissing):
+            self.check(set())
+
     def test_an_untracked_fdt_is_refused_by_its_tree_path(self):
         write_fdt_backed_set(self.local, embedded="sub-01_task-rest_eeg.fdt")
         with self.assertRaises(generate_zarr.CompanionMissing) as cm:
@@ -15764,6 +15776,14 @@ class TestCompanionMissingThroughConvertOne(ConvertOneLocalCase):
         fdt = "sub-01/eeg/orig_name.fdt"
         self.write_set(fdt, embedded="orig_name.fdt")
         self.assert_converted(self.convert(self.SET, {self.SET, fdt}))
+
+    def test_a_stale_embedded_fdt_name_with_a_tracked_same_stem_fdt_converts(self):
+        # BIDS renamed the .fdt with the .set and not the name inside it. biosigIO
+        # reads <set stem>.fdt first, so this converts on the base branch (the
+        # case this rule must not turn into a failure); the embedded name is
+        # untracked, so only the same-stem clause lets it through.
+        self.write_set(self.SET_FDT, embedded="pre_rename.fdt")
+        self.assert_converted(self.convert(self.SET, {self.SET, self.SET_FDT}))
 
     def test_a_brainvision_header_without_its_data_file_is_companion_missing(self):
         write_brainvision(self.vhdr_path(), ["Fz", "Cz", "Pz", "Oz"])
