@@ -39,7 +39,9 @@
 # NOTHING FROM THE PULL REQUEST IS EXECUTED. The repository is fetched with init and fetch, never
 # checkout, so it has no working tree and no hook, filter or script in the pull request can run; a
 # fork's commits are read through the pull ref on the BASE repository exactly like a branch's. The
-# only code that runs is checked out of nemarOrg/nemar-cli main into ./tool.
+# only code that runs is checked out of nemarOrg/nemar-cli into ./tool: main for a production
+# dispatch, dev for a dev one. That step comes after the claim, so dev's code runs only for a
+# dispatch the dev Worker signed.
 #
 # THE DISPATCH PAYLOAD IS UNTRUSTED. The shims in the dataset repositories hold the credentials to
 # send any dispatch, so every field is validated here, reaches the shell only through env, and is
@@ -182,12 +184,15 @@ jobs:
               ;;
           esac
 
+      # dev for a dev dispatch, main for a production one, so a change to the review script can be
+      # tried on staging before a release. The expression can only yield those two branch names,
+      # and the environment was checked above to be exactly dev or production.
       - name: Check out the review script
         if: steps.claim.outputs.claimed == 'true'
         uses: actions/checkout@v4
         with:
           repository: nemarOrg/nemar-cli
-          ref: main
+          ref: ${{ github.event.client_payload.environment == 'dev' && 'dev' || 'main' }}
           path: tool
           persist-credentials: false
 
