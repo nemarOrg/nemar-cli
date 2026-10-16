@@ -16505,15 +16505,16 @@ def build_truncated_bdfplus(path: str) -> str:
     return path
 
 
-def build_onset_shifted_bdfplus(path: str, first_onset: int = 40) -> str:
-    """A REAL BDF+ written by pyedflib whose time-keeping annotation onsets
-    start at +`first_onset` instead of +0: nm000284's shape, a session cut out of
-    the middle with its session-relative onsets kept. pyedflib refuses it with
-    "(it contains format errors)" and no errno. About 2 KB; only the onsets are
-    rewritten, in place, so every length in the header still holds."""
+def build_onset_shifted_edf_family(path: str, file_type: int, first_onset: int = 40) -> str:
+    """A REAL EDF+ or BDF+ written by pyedflib whose time-keeping annotation
+    onsets start at +`first_onset` instead of +0: a session cut out of the middle
+    with its session-relative onsets kept. pyedflib refuses it with "(it contains
+    format errors)" and no errno. About 2 KB; only the onsets are rewritten, in
+    place, so every length in the header still holds."""
     import pyedflib
 
-    build_edf_family(path, [("Fz", 64), ("Cz", 64)], pyedflib.FILETYPE_BDFPLUS, seconds=2)
+    build_edf_family(path, [("Fz", 64), ("Cz", 64)], file_type, seconds=2)
+    width = 3 if file_type in (pyedflib.FILETYPE_BDF, pyedflib.FILETYPE_BDFPLUS) else 2
     with open(path, "rb") as fh:
         raw = bytearray(fh.read())
     n_signals = int(raw[252:256].decode().strip())
@@ -16524,8 +16525,8 @@ def build_onset_shifted_bdfplus(path: str, first_onset: int = 40) -> str:
         for i in range(n_signals)
     ]
     header_bytes = 256 * (n_signals + 1)
-    record_bytes = 3 * sum(samples)
-    annotation_bytes = 3 * samples[-1]  # the annotation signal is last
+    record_bytes = width * sum(samples)
+    annotation_bytes = width * samples[-1]  # the annotation signal is last
     for record in range((len(raw) - header_bytes) // record_bytes):
         start = header_bytes + record * record_bytes + (record_bytes - annotation_bytes)
         new = f"+{first_onset + record}".encode() + b"\x14\x14\x00"
@@ -16922,6 +16923,69 @@ class TestAbsentAnnexObjectThroughConvertOne(ConvertOneLocalCase):
 
         self.assert_refused_as_data(result, "file_read_error")
         self.assertIn("no such file or directory", result["detail"])
+
+
+class TestLateOnsetThroughConvertOne(ConvertOneLocalCase):
+    """An EDF+C or BDF+C recording whose first time-keeping onset is late
+    converts on BOTH exporters (biosigio#145, fixed by #152, in 1.2.12).
+
+    pyedflib refuses such a file ("it contains format errors"); biosigIO's
+    tolerant read recovers it and says so in the store's recording metadata
+    (`edf_tolerant_read`). The fixture is a small real file this test writes,
+    with its onsets rewritten in place."""
+
+    REQUIRES = ("zarr", "pyedflib", "biosigio")
+
+    def setUp(self):
+        super().setUp()
+        # `ConvertOneLocalCase`'s `aws` absorbs the upload; this one keeps the store.
+        self.synced_dir = os.path.join(self._tmp.name, "synced")
+        with open(os.path.join(self._tmp.name, "bin", "aws"), "w") as fh:
+            fh.write(
+                "#!/bin/sh\n"
+                'if [ "$1" = s3 ] && [ "$2" = sync ]; then\n'
+                f'  mkdir -p "{self.synced_dir}" && cp -R "$3" "{self.synced_dir}/"\n'
+                "fi\nexit 0\n"
+            )
+
+    def published_recording_metadata(self, entry: dict) -> dict:
+        with open(
+            os.path.join(self.synced_dir, os.path.basename(entry["zarr"]), "zarr.json"),
+            encoding="utf-8",
+        ) as fh:
+            return json.load(fh)["attributes"]["recording_metadata"]
+
+    def test_a_late_first_onset_converts_in_memory_and_streamed(self):
+        import pyedflib
+
+        for label, primary, file_type in (
+            ("EDF+C", "sub-01/eeg/sub-01_task-rest_eeg.edf", pyedflib.FILETYPE_EDFPLUS),
+            ("BDF+C", "sub-01/eeg/sub-01_task-rest_eeg.bdf", pyedflib.FILETYPE_BDFPLUS),
+        ):
+            path = os.path.join(self.repo, primary)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            build_onset_shifted_edf_family(path, file_type, first_onset=40)
+            with self.subTest(label, check="the fixture is the shape pyedflib refuses"):
+                with self.assertRaises(OSError) as refusal:
+                    pyedflib.EdfReader(path)
+                self.assertIn("not EDF(+) or BDF(+) compliant", str(refusal.exception))
+            for path_name, threshold in (("in-memory", None), ("streaming", 1)):
+                with self.subTest(label, path=path_name):
+                    shutil.rmtree(self.synced_dir, ignore_errors=True)
+                    StreamEdfThreshold.use(self, threshold)
+                    with StreamEdfThreshold.watching_writers() as writers:
+                        result = self.convert(primary, {primary})
+                    self.assertEqual(
+                        "stream_to_zarr" in writers, path_name == "streaming", writers
+                    )
+                    self.assertTrue(result["ok"], result.get("error"))
+                    (group,) = result["entry"]["groups"]
+                    self.assertEqual((group["n_channels"], group["n_samples"]), (2, 128))
+                    metadata = self.published_recording_metadata(result["entry"])
+                    self.assertIs(metadata.get("edf_tolerant_read"), True, metadata)
+                    self.assertEqual(
+                        metadata.get("edf_tolerant_read_reason"), "late_timekeeping_onset"
+                    )
 
 
 class TestReaderRefusalsThroughConvertOne(ConvertOneLocalCase):
