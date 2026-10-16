@@ -52,6 +52,7 @@ import {
   describeChangelogWrite,
   describeTextProblem,
   describeUnopenedPullRequest,
+  findAuthorYearPrefix,
   findTextProblem,
   hasChangelogHeading,
   inspectChangelog,
@@ -180,6 +181,50 @@ const CASES: Record<TextProblemCode, { refused: [TextKind, string][]; passes: st
       "See [your lab][1] for the protocol.",
     ],
   },
+  author_year: {
+    refused: [
+      // The three shapes the rule was written for.
+      ["title", "Lee2019 EEG dataset"],
+      ["title", "Lee-2019-EEG"],
+      ["title", "Smith2020"],
+      // An underscore may join the name and the year, and what follows the year does not matter.
+      ["title", "Lee_2019_EEG"],
+      ["title", "Lee2019EEG dataset"],
+      ["title", "Lee2019a"],
+      // An apostrophe or a hyphen inside the name, and a capital after the first letter.
+      ["title", "O'Brien2019 recordings"],
+      ["title", "O\u{2019}Brien-2019 recordings"],
+      ["title", "Smith-Jones2019 EEG"],
+      ["title", "Smith-Jones-2019-EEG"],
+      ["title", "McDonald2019 EEG"],
+      // Letters that are not ASCII: an umlaut whole and as a mark after the u, as a capital, and
+      // a name in another script, which has capitals and lower case of its own.
+      ["title", "M\u{fc}ller2021 EEG"],
+      ["title", "Mu\u{308}ller2021 EEG"],
+      ["title", "\u{d6}zt\u{fc}rk2019 EEG"],
+      ["title", "\u{418}\u{432}\u{430}\u{43d}\u{43e}\u{432}2019 EEG"],
+      // Judged as the one trimmed line the title becomes.
+      ["title", "  Lee2019 EEG dataset  "],
+      ["title", "\nLee-2019-EEG"],
+    ],
+    passes: [
+      // A year, or a name, in an ordinary sentence. A space ends the first word.
+      "Add 2019 recordings",
+      "2019 release notes",
+      "Release 2019",
+      "Update Lee dataset",
+      "Save changes to the channel locations",
+      "Add three EEG recordings",
+      // Acronym-led dataset names are not a surname and a year.
+      "BNCI2014_001 recordings",
+      "MOVING2024 release",
+      // Only the start of a title is looked at: later on, a name and a year are part of a sentence.
+      "Add the Lee2019 recordings",
+      "Rename the dataset to Lee-2019-EEG",
+      // A digit inside the first word means it is not a name: a study number, not an author.
+      "Study2-2019 recordings added",
+    ],
+  },
   no_words: {
     refused: [
       ["title", "..."],
@@ -255,6 +300,7 @@ describe("findTextProblem", () => {
         "  \n  ",
         "Update from branch\n main ",
         "  {{title}}  ",
+        "  Lee2019\n EEG dataset ",
         "\tFixed typo.\n",
         `  ${SHA256}  `,
       ];
@@ -327,6 +373,95 @@ describe("findTextProblem", () => {
   test("the nm000456 title names the field it left unfilled", () => {
     const problem = findTextProblem("title", NM000456_TITLE);
     expect(problem?.reason).toContain('"FirstAuthorSurname"');
+  });
+
+  describe("a title that opens with an author and a year", () => {
+    test("is refused as a title and left alone in a description", () => {
+      for (const text of ["Lee2019 EEG dataset", "Lee-2019-EEG", "Smith2020"]) {
+        expect(findTextProblem("title", text)?.code).toBe("author_year");
+        expect(findTextProblem("description", text)).toBeNull();
+      }
+      // A description may cite a paper the way the paper is cited.
+      expect(
+        findTextProblem("description", "Lee2019 recorded these sessions with a 64-channel cap."),
+      ).toBeNull();
+    });
+
+    test("says what it found and what to write instead", () => {
+      const problem = findTextProblem("title", "Lee-2019-EEG");
+      expect(problem?.code).toBe("author_year");
+      if (!problem) throw new Error("expected a problem");
+      expect(describeTextProblem("The title (--message)", problem)).toBe(
+        'The title (--message) starts with an author name and a year ("Lee-2019"); describe the change in plain words, such as "Add three EEG recordings".',
+      );
+      // The title it offers is one that is accepted.
+      expect(findTextProblem("title", "Add three EEG recordings")).toBeNull();
+    });
+
+    test("the name is written as a name: an acronym or a word in lower case is not one", () => {
+      // A surname has a capital first letter and a lower-case letter after it. These have not:
+      // acronym-led dataset names (BNCI2014_001, MOVING2024), all capitals, a single capital, and
+      // a lower-case start such as the BIDS label ses-2019. None of them is refused.
+      const notNames = [
+        "BNCI2003_IVa recordings",
+        "BNCI2014_001",
+        "MOVING2024",
+        "LEE2019 EEG dataset",
+        "H2020 funding added",
+        "R2019b exports",
+        "lee2019 eeg",
+        "ses-2019 sidecars fixed",
+      ];
+      for (const title of notNames) {
+        expect(findAuthorYearPrefix(title), title).toBeNull();
+        expect(findTextProblem("title", title), title).toBeNull();
+      }
+      // One lower-case letter after the capital is enough to make it a name.
+      expect(findAuthorYearPrefix("Ab2019 EEG")).toBe("Ab2019");
+      expect(findAuthorYearPrefix("A2019 EEG")).toBeNull();
+    });
+
+    test("the year is four digits from 1900 to 2099 and not the start of a longer number", () => {
+      const refused = (title: string) => findTextProblem("title", title)?.code === "author_year";
+      // Each range end, from the inside and from the outside.
+      expect(refused("Lee1900 EEG")).toBe(true);
+      expect(refused("Lee1899 EEG")).toBe(false);
+      expect(refused("Lee2099 EEG")).toBe(true);
+      expect(refused("Lee2100 EEG")).toBe(false);
+      expect(refused("Lee201 EEG")).toBe(false); // three digits
+      expect(refused("Lee20195 EEG")).toBe(false); // five digits: a number, not a year
+    });
+
+    test("findAuthorYearPrefix gives what the title opens with, as typed, or null", () => {
+      expect(findAuthorYearPrefix("Lee2019 EEG dataset")).toBe("Lee2019");
+      expect(findAuthorYearPrefix("Lee-2019-EEG")).toBe("Lee-2019");
+      expect(findAuthorYearPrefix("Smith-Jones_2020 EEG")).toBe("Smith-Jones_2020");
+      // Blanks before the title are skipped, as normalizeTitle skips them.
+      expect(findAuthorYearPrefix("  \n O'Brien2019")).toBe("O'Brien2019");
+      expect(findAuthorYearPrefix("Add 2019 recordings")).toBeNull();
+      expect(findAuthorYearPrefix("BNCI2014_001 recordings")).toBeNull();
+      expect(findAuthorYearPrefix("MOVING2024 release")).toBeNull();
+      expect(findAuthorYearPrefix("")).toBeNull();
+    });
+
+    test("a very long first word is judged in linear time", () => {
+      // The name takes hyphens and apostrophes inside it, so a long run of letters and those, with
+      // a year that never completes, is the input that exposes a pattern that backtracks. The text
+      // is whatever was pasted, so a hang is a defect. Each word starts with a capital and a
+      // lower-case letter, as a name does, so it cannot be set aside at its first character.
+      const started = performance.now();
+      for (const unit of ["a", "a-", "a'", "ab-c'"]) {
+        for (const tail of ["20", "-20", "x"]) {
+          expect(findAuthorYearPrefix(`Le${unit.repeat(100_000)}${tail}`)).toBeNull();
+        }
+      }
+      // A long word in capitals is read to its end, and is then not taken for a name.
+      expect(findAuthorYearPrefix(`${"A".repeat(200_000)}2019 EEG`)).toBeNull();
+      expect(performance.now() - started).toBeLessThan(2_000);
+      // Control: the same long word, with a year that does complete, is found whole.
+      const name = "a-".repeat(100_000);
+      expect(findAuthorYearPrefix(`Le${name}2019 EEG`)).toBe(`Le${name}2019`);
+    });
   });
 });
 
@@ -1184,6 +1319,52 @@ describe("nemar dataset update refuses before it does anything", () => {
     expect(said(r)).toContain('still has an unfilled template field ("FirstAuthorSurname")');
   });
 
+  test("refuses a title that starts with an author and a year, and says what to write", async () => {
+    const cwd = fresh("empty");
+    mkdirSync(cwd, { recursive: true });
+    const r = await runNemar(
+      [
+        "dataset",
+        "update",
+        "--yes",
+        "-m",
+        "Lee2019 EEG dataset",
+        "--description",
+        GOOD_DESCRIPTION,
+      ],
+      cwd,
+      signedOut(),
+    );
+    expect(r.exitCode).toBe(1);
+    expect(said(r)).toContain(
+      'The title (--message) starts with an author name and a year ("Lee2019"); describe the change in plain words, such as "Add three EEG recordings".',
+    );
+    expect(said(r)).not.toContain("The description");
+    // Refused before sign-in, like every other refusal of the text.
+    expect(said(r)).not.toContain("Not authenticated");
+  });
+
+  test("control: an acronym-led title is not an author and a year, so it meets sign-in", async () => {
+    const cwd = fresh("empty");
+    mkdirSync(cwd, { recursive: true });
+    const r = await runNemar(
+      [
+        "dataset",
+        "update",
+        "--yes",
+        "-m",
+        "BNCI2014_001 recordings",
+        "--description",
+        GOOD_DESCRIPTION,
+      ],
+      cwd,
+      signedOut(),
+    );
+    expect(r.exitCode).toBe(1);
+    expect(said(r)).toContain("Not authenticated");
+    expect(said(r)).not.toContain("starts with an author name");
+  });
+
   test("an empty description is text that was given and got wrong, not text left out", async () => {
     const cwd = fresh("empty");
     mkdirSync(cwd, { recursive: true });
@@ -1509,6 +1690,20 @@ describe("nemar dataset push --pr settles the text before it pushes", () => {
     expect(ghArgs()).toBeNull();
   });
 
+  test("refuses a title that starts with an author and a year, and pushes nothing", async () => {
+    const { work, remote } = newAnnexFeatureClone();
+    const r = await runNemar(
+      ["dataset", "push", "--pr", "--no-s3", "-t", "Lee-2019-EEG", "-b", GOOD_DESCRIPTION],
+      work,
+    );
+    expect(r.exitCode).toBe(1);
+    expect(said(r)).toContain(
+      'The title (--title) starts with an author name and a year ("Lee-2019"); describe the change in plain words, such as "Add three EEG recordings".',
+    );
+    expect(pushed(remote)).toBe("");
+    expect(ghArgs()).toBeNull();
+  });
+
   test("an empty body is refused, not sent", async () => {
     const { work, remote } = newAnnexFeatureClone();
     const r = await runNemar(
@@ -1621,6 +1816,12 @@ describe("nemar dataset update at a terminal asks for what the command line left
     term.type("Save changes\r");
     await term.until('That is placeholder text ("Save changes"); say what actually changed.');
     // Asked again on a fresh line, so the person is never left to delete what was refused.
+    await term.until("Title (one line saying what changed):");
+    // An author and a year is refused the same way, with what to write instead.
+    term.type("Lee2019 EEG dataset\r");
+    await term.until(
+      'That starts with an author name and a year ("Lee2019"); describe the change in plain words, such as "Add three EEG recordings".',
+    );
     await term.until("Title (one line saying what changed):");
     // Typed with padding and doubled spaces: the stored title is the one-line form of it.
     term.type("  Add  subject 03 and   rename the dataset  \r");

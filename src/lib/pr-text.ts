@@ -33,6 +33,7 @@ export const TEXT_PROBLEMS = [
   "machine_output",
   "placeholder",
   "template_field",
+  "author_year",
   "no_words",
   "too_long",
 ] as const;
@@ -104,6 +105,48 @@ const TEMPLATE_FIELDS: readonly RegExp[] = [
   /\b(?:FirstAuthorSurname|paperDOI)\b/,
 ];
 
+/**
+ * A word of letters with an apostrophe (straight or curly) or a hyphen allowed inside it, then one
+ * optional hyphen or underscore, then a year from 1900 to 2099 that is not the start of a longer
+ * number. The word is captured so that {@link findAuthorYearPrefix} can judge how it is written.
+ * Each repeated part is set off by a character the part before it cannot match, so a long first
+ * word is judged in linear time.
+ */
+const AUTHOR_YEAR_PREFIX =
+  /^([\p{L}\p{M}]+(?:[-'\u{2019}][\p{L}\p{M}]+)*)[-_]?(?:19|20)\d{2}(?!\d)/u;
+/** A name begins with a capital letter, in any script that has them. */
+const STARTS_WITH_CAPITAL = /^\p{Lu}/u;
+/** A name has a lower-case letter somewhere after it: all capitals is an acronym. */
+const HAS_LOWER_CASE = /\p{Ll}/u;
+
+/**
+ * What `title` opens with when that is an author's name and a year, as it was typed (`Lee-2019` for
+ * `Lee-2019-EEG`), or null. That is how a dataset is named under the atlas naming rule
+ * (FirstAuthorSurname-year-keyword-paperDOI), and a pull request title says what the change does,
+ * not what the dataset is called: `Lee2019 EEG dataset`, `Lee-2019-EEG` and `O'Brien_2020` are
+ * refused. It is exported so the pull request review can ask the same question of a title it was
+ * handed.
+ *
+ * The name is one word of letters with an apostrophe or a hyphen allowed inside it (`O'Brien`,
+ * `Smith-Jones`), written as a name is: a capital first letter and at least one lower-case letter.
+ * An acronym is all capitals, so dataset names such as `BNCI2014_001` and `MOVING2024`, and `H2020`,
+ * are not names, and neither is a word that begins in lower case, such as the BIDS label
+ * `ses-2019`. The year is four digits from 1900 to 2099 that are not the start of a longer number,
+ * and it follows the name directly or after one hyphen or underscore; whatever comes after the year
+ * does not matter. A space ends the word, so `Release 2019` and `Add 2019 recordings` are ordinary
+ * sentences, and a title that begins with the year (`2019 release notes`) has no name before it.
+ * Only the start of the title is looked at: `Rename the dataset to Lee-2019-EEG` is a sentence.
+ *
+ * Blanks before the title are skipped, so the answer is the same before and after
+ * {@link normalizeTitle}.
+ */
+export function findAuthorYearPrefix(title: string): string | null {
+  const found = title.trimStart().match(AUTHOR_YEAR_PREFIX);
+  if (found === null) return null;
+  const [prefix, name = ""] = found;
+  return STARTS_WITH_CAPITAL.test(name) && HAS_LOWER_CASE.test(name) ? prefix : null;
+}
+
 /** Seven to 64 hex digits holding at least one digit and one letter: a git or checksum digest. */
 const DIGEST =
   /^(?:(?:sha\d*|md5|git|commit)[:\s-]*)?(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,64}$/i;
@@ -162,6 +205,14 @@ export function findTextProblem(kind: TextKind, raw: string | undefined): TextPr
         reason: `still has an unfilled template field (${quoted(field)}); put the real value in its place`,
       };
     }
+  }
+  // A title only: a description may cite a paper the way the paper is cited.
+  const authorYear = kind === "title" ? findAuthorYearPrefix(text) : null;
+  if (authorYear !== null) {
+    return {
+      code: "author_year",
+      reason: `starts with an author name and a year (${quoted(authorYear)}); describe the change in plain words, such as "Add three EEG recordings"`,
+    };
   }
   if (!/\p{L}{2,}/u.test(text)) {
     return {
