@@ -16964,18 +16964,26 @@ class TestAbsentAnnexObjectThroughConvertOne(ConvertOneLocalCase):
 
     REQUIRES = ("zarr", "pyedflib", "biosigio")
     PRIMARY = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+    PRIMARY_BDF = "sub-01/eeg/sub-01_task-rest_eeg.bdf"
 
-    def test_an_unfetched_object_is_a_typed_read_failure(self):
-        link = os.path.join(self.repo, self.PRIMARY)
+    def assert_unfetched_is_a_typed_read_failure(self, primary: str) -> None:
+        link = os.path.join(self.repo, primary)
         os.makedirs(os.path.dirname(link))
-        absent = os.path.join(self.repo, ".git", "annex", "objects", "absent.edf")
+        extension = os.path.splitext(primary)[1]
+        absent = os.path.join(self.repo, ".git", "annex", "objects", f"absent{extension}")
         os.symlink(os.path.relpath(absent, os.path.dirname(link)), link)
         self.assertFalse(os.path.exists(link), "the control: the link dangles")
 
-        result = self.convert(self.PRIMARY, {self.PRIMARY})
+        result = self.convert(primary, {primary})
 
         self.assert_refused_as_data(result, "file_read_error")
         self.assertIn("no such file or directory", result["detail"])
+
+    def test_an_unfetched_object_is_a_typed_read_failure(self):
+        self.assert_unfetched_is_a_typed_read_failure(self.PRIMARY)
+
+    def test_an_unfetched_bdf_object_is_a_typed_read_failure(self):
+        self.assert_unfetched_is_a_typed_read_failure(self.PRIMARY_BDF)
 
 
 class TestLateOnsetThroughConvertOne(ConvertOneLocalCase):
