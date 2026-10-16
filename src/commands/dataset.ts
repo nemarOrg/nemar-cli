@@ -3420,6 +3420,13 @@ async function settlePushPrText(options: {
   return askForPrText(given);
 }
 
+/**
+ * The branches `push --pr` never opens a pull request from: the dataset's own main line. One test
+ * for the two places that must agree, the one that settles the text before the push and the one
+ * that skips the pull request after it; if they differed, a prompt could appear after the push.
+ */
+const isTrunkBranch = (name: string): boolean => name === "main" || name === "master";
+
 // Update command - push data/metadata changes via PR
 datasetCommand
   .command("update")
@@ -5288,12 +5295,7 @@ Examples:
     // take hours, and it must not end in "now say what this pull request is". Only a branch that
     // will get a pull request needs them; on main the pull request is skipped below.
     let prText: Required<PrTextGiven> | undefined;
-    if (
-      options.pr &&
-      currentBranchName &&
-      currentBranchName !== "main" &&
-      currentBranchName !== "master"
-    ) {
+    if (options.pr && currentBranchName && !isTrunkBranch(currentBranchName)) {
       prText = await settlePushPrText(options);
     }
     if (isOnMain && !options.pr) {
@@ -5487,7 +5489,7 @@ Examples:
         console.log(chalk.dim("  Ensure you are inside a valid git repository."));
         process.exit(1);
       }
-      if (branch === "main" || branch === "master") {
+      if (isTrunkBranch(branch)) {
         console.log(chalk.yellow("  Skipping PR: already on main branch"));
       } else {
         // Settled before the push. Asked for here only if the branch changed in between, so a
