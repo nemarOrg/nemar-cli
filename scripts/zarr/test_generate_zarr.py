@@ -15531,6 +15531,119 @@ class TestRequireCompanionsSet(unittest.TestCase):
         )
 
 
+class TestGitTreeNamesAreNotQuoted(unittest.TestCase):
+    """Everything the converter judges by a recording's name (discovery, the
+    incremental worklist, `require_companions`) is read from `git ls-tree` and
+    `git diff`. Asked without `-z`, git wraps a name holding a byte above 0x7f in
+    double quotes and escapes the bytes, so `Müller_01.eeg` is listed as
+    `"M\\303\\274ller_01.eeg"`: a string no file has and no extension test matches.
+    Over a REAL repository, with the quoting pinned on in its config so the
+    result does not depend on the machine's global git settings."""
+
+    HEADER = "sub-01/eeg/sub-01_task-rest_eeg.vhdr"
+    DATA = "sub-01/eeg/Müller_01.eeg"
+    NAMED_RECORDING = "sub-01/eeg/sub-01_task-Müller_eeg.edf"
+    PLAIN_RECORDING = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+    ADDED = "sub-01/eeg/sub-01_task-Ärger_eeg.edf"
+    HEAD = "0123456789abcdef" * 2 + "01234567"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = self._tmp.name
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "t@example.org")
+        self.git("config", "user.name", "t")
+        self.git("config", "core.quotePath", "true")
+        os.makedirs(os.path.join(self.repo, "sub-01/eeg"))
+        write_brainvision(
+            os.path.join(self.repo, self.HEADER), ["Fz", "Cz"], rate=10, seconds=1
+        )
+        os.replace(
+            os.path.join(self.repo, "sub-01/eeg/sub-01_task-rest_eeg.eeg"),
+            os.path.join(self.repo, self.DATA),
+        )
+        with open(os.path.join(self.repo, self.HEADER), encoding="utf-8") as fh:
+            header = fh.read().replace(
+                "DataFile=sub-01_task-rest_eeg.eeg", "DataFile=Müller_01.eeg"
+            )
+        with open(os.path.join(self.repo, self.HEADER), "w", encoding="utf-8") as fh:
+            fh.write(header)
+        for name in (self.NAMED_RECORDING, self.PLAIN_RECORDING):
+            with open(os.path.join(self.repo, name), "wb") as fh:
+                fh.write(b"x")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "one")
+        self.first = self.git("rev-parse", "HEAD").strip()
+
+    def git(self, *args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", self.repo, *args], check=True, capture_output=True, text=True
+        ).stdout
+
+    def tree(self) -> set[str]:
+        return set(generate_zarr.git_ls_files(self.repo, "HEAD"))
+
+    def test_the_listing_holds_the_real_names(self):
+        tree = self.tree()
+        for name in (self.DATA, self.NAMED_RECORDING, self.PLAIN_RECORDING, self.HEADER):
+            with self.subTest(name):
+                self.assertIn(name, tree)
+        self.assertFalse([n for n in tree if n.startswith('"') or "\\" in n], tree)
+        # The control: git does quote them when asked the way the converter used to.
+        quoted = self.git("ls-tree", "-r", "--name-only", "HEAD")
+        self.assertIn('"sub-01/eeg/M\\303\\274ller_01.eeg"', quoted)
+
+    def test_discovery_finds_a_recording_with_a_non_ascii_name(self):
+        found = generate_zarr.discover_primaries(sorted(self.tree()))
+        self.assertIn(self.NAMED_RECORDING, found)
+        self.assertIn(self.PLAIN_RECORDING, found)
+
+    def test_the_incremental_worklist_sees_a_non_ascii_name_added_or_removed(self):
+        with open(os.path.join(self.repo, self.ADDED), "wb") as fh:
+            fh.write(b"x")
+        self.git("rm", "-q", self.NAMED_RECORDING)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "two")
+        diff = generate_zarr.git_diff_name_status(self.repo, self.first, "HEAD")
+        self.assertEqual(sorted(diff), sorted([("A", self.ADDED), ("D", self.NAMED_RECORDING)]))
+        convert, remove = generate_zarr.compute_worklist(sorted(self.tree()), diff, False)
+        self.assertEqual(convert, [self.ADDED])
+        self.assertEqual(remove, [store_rel_for(self.NAMED_RECORDING)])
+
+    def test_a_header_naming_a_tracked_non_ascii_data_file_is_not_refused(self):
+        # Not the recording's own stem, so only the name the header gives can
+        # satisfy the rule. It converted before the rule existed.
+        generate_zarr.require_companions(
+            self.HEADER, os.path.join(self.repo, self.HEADER), self.tree(), self.HEAD, False
+        )
+
+    def test_a_non_ascii_data_file_the_tree_lacks_is_refused_by_its_real_name(self):
+        self.git("rm", "-q", self.DATA)
+        self.git("commit", "-q", "-m", "drop the data file")
+        with self.assertRaises(generate_zarr.CompanionMissing) as cm:
+            generate_zarr.require_companions(
+                self.HEADER, os.path.join(self.repo, self.HEADER), self.tree(), self.HEAD, False
+            )
+        self.assertIn(self.DATA, str(cm.exception))
+
+    def test_an_eeglab_fdt_with_a_non_ascii_name_beside_the_set_is_a_companion(self):
+        # The `.set` embeds a non-ASCII `.fdt` name and the `.fdt` sits beside it
+        # under that name, with no same-stem `.fdt`. (Skips without scipy, like
+        # the writer: the fast tier runs the cases above.)
+        primary = "sub-01/eeg/sub-01_task-x_eeg.set"
+        write_eeglab_set(
+            os.path.join(self.repo, primary),
+            os.path.join(self.repo, "sub-01/eeg/Müller_01.fdt"),
+            embedded="Müller_01.fdt",
+        )
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "a set and its fdt")
+        generate_zarr.require_companions(
+            primary, os.path.join(self.repo, primary), self.tree(), self.HEAD, False
+        )
+
+
 class ConvertOneLocalCase(unittest.TestCase):
     """Shared harness for the full-tier cases below: `convert_one` in LOCAL mode
     (the Hallu path) over real files in a throwaway repository, up to the upload,

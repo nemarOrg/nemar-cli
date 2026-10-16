@@ -5935,23 +5935,28 @@ def _run(cmd: list[str], cwd: str | None = None) -> str:
     return subprocess.check_output(cmd, cwd=cwd, text=True)
 
 
+def _run_z(cmd: list[str]) -> list[str]:
+    """The NUL-separated fields of a `git ... -z` command's output, as file system
+    names. Without `-z` git wraps any name with a byte above 0x7f (or a quote, a
+    backslash, a control character) in double quotes and escapes it, so
+    `Müller_01.eeg` comes back as `"M\\303\\274ller_01.eeg"`: a string no file has
+    and no extension test matches. Decoded as the file system decodes names, so a
+    name that is not valid UTF-8 survives the round trip to `open`."""
+    out = subprocess.check_output(cmd)
+    return [os.fsdecode(field) for field in out.split(b"\0") if field]
+
+
 def git_ls_files(repo_dir: str, ref: str) -> list[str]:
-    out = _run(["git", "-C", repo_dir, "ls-tree", "-r", "--name-only", ref])
-    return [line for line in out.splitlines() if line]
+    return _run_z(["git", "-C", repo_dir, "ls-tree", "-r", "-z", "--name-only", ref])
 
 
 def git_diff_name_status(repo_dir: str, base: str, head: str) -> list[tuple[str, str]]:
-    out = _run(
-        ["git", "-C", repo_dir, "diff", "--no-renames", "--name-status", f"{base}..{head}"]
+    # `-z` prints each entry as `<status> NUL <path> NUL` (one path, since
+    # `--no-renames` leaves no copy or rename to carry two).
+    fields = _run_z(
+        ["git", "-C", repo_dir, "diff", "--no-renames", "--name-status", "-z", f"{base}..{head}"]
     )
-    entries: list[tuple[str, str]] = []
-    for line in out.splitlines():
-        if not line.strip():
-            continue
-        parts = line.split("\t")
-        if len(parts) >= 2:
-            entries.append((parts[0].strip()[:1], parts[-1].strip()))
-    return entries
+    return [(status[:1], path) for status, path in zip(fields[0::2], fields[1::2])]
 
 
 def is_ancestor(repo_dir: str, maybe_ancestor: str, head: str) -> bool:
