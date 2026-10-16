@@ -197,8 +197,8 @@
 # bumped here either (ADR 0033).
 # <1.2.14 is a CAP, not a floor, raised deliberately per release: a biosigIO
 # patch release has changed what a store contains or which recordings convert
-# five times in a row (1.2.9, 1.2.10, 1.2.11, 1.2.12, 1.2.13), so the next one is read
-# before the converter takes it. Raise it in three places at once: here,
+# five times in a row (1.2.9 through 1.2.13), so the next one is read before the
+# converter takes it. Raise it in three places at once: here,
 # `BIOSIGIO_SPEC`, `BIOSIGIO_FLOOR` and `BIOSIGIO_CAP` in hallu-zarr.sh
 # (setup() refuses an installed biosigIO outside [floor, cap) after install,
 # and any pre-release), and test_hallu_zarr_config.py.

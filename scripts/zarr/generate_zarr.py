@@ -8385,8 +8385,11 @@ def _recording_size_bytes(primary_local: str) -> int:
 # (`CorruptFileError`), and `failure_verdict` no longer reads a bare `OSError`'s
 # text, so a 1.2.11 run would take every streamed refusal for the node's fault and
 # retry it until `retry_exhausted`. 1.2.13 is the pin's floor: it refuses a
-# BrainVision data file cut short, where 1.2.12 read it with the tail dropped, so
-# the converter takes no older release.
+# BrainVision data file whose header shows it was cut short, where 1.2.12 read it
+# with the tail dropped, so the converter takes no older release
+# (TestCutShortBrainVisionThroughConvertOne). A cut exactly at a frame boundary of
+# a file with no positive `DataPoints` count is not detected: it reads as a
+# shorter recording.
 SUBJECT_INFO_FLOOR = "1.2.13"
 SUBJECT_INFO_OPTION = "exclude_subject_info"
 SUBJECT_INFO_EXCLUDED_ATTR = "subject_info_excluded"

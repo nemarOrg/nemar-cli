@@ -289,8 +289,9 @@ VENV_DIR="${ZARR_VENV_DIR:-${STATE_DIR}/.zarr-venv}"
 # check is TWO-SIDED: the installed biosigIO must be a final release in
 # [BIOSIGIO_FLOOR, BIOSIGIO_CAP). Below the floor is a failed upgrade; at or above
 # the cap is a release nobody has read yet (the cap exists because a biosigIO
-# patch release changed what a store contains three times in a row), which an install
-# that went wrong can also leave behind; a pre-release or dev build satisfies
+# patch release changed what a store contains or which recordings convert five
+# times in a row, 1.2.9 through 1.2.13), which an install that went wrong can also
+# leave behind; a pre-release or dev build satisfies
 # neither pin. None of them may convert.
 #
 # The probe prints the installed version and exits 0 when it is in range, 3 when
