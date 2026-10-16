@@ -1167,6 +1167,10 @@ describe("PUT and DELETE /admin/pr-review-authors/:login", () => {
     const r = await send("PUT", "/admin/pr-review-authors/acme", { mode: "block" });
     expect(r.status).toBe(422);
     expect(r.body.code).toBe("not_a_user");
+    // The sentence says what applies to whom, and no longer talks of reviews counted per person.
+    expect(String(r.body.error)).toContain("acme is a GitHub Organization, not a person.");
+    expect(String(r.body.error)).toContain("A block or an allow applies to a person's account.");
+    expect(String(r.body.error)).not.toContain("counted");
     expect(db.query("SELECT COUNT(*) AS n FROM pr_review_overrides").get()).toEqual({ n: 0 });
     usersById.helper = { id: 901, login: "helper", type: "Bot" };
     const bot = await send("PUT", "/admin/pr-review-authors/helper", { mode: "block" });

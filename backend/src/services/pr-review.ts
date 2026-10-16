@@ -143,6 +143,11 @@ export interface PrIntake {
   headSha: string;
   authorId: number;
   authorLogin: string;
+  /**
+   * GitHub's relationship label for the author, stored with the review for people to read. Nothing
+   * in the gate reads it: it says CONTRIBUTOR for a private organization member, so it is no reason
+   * to exempt or to reject anyone (ADR 0107).
+   */
   authorAssociation: string | null;
   fromFork: boolean;
   /**
@@ -591,8 +596,8 @@ export interface PrReviewOptions {
   /**
    * An administrator asked for this review by name (`startPullRequestReview`). The payload was built
    * from GitHub's own record of the pull request. It lets a commit whose review ended without a
-   * verdict be started again, which a new delivery of the commit never does. It names no sender, so
-   * whether the pull request is exempt is judged on its author alone.
+   * verdict be started again, which a new delivery of the commit does only for a dispatch GitHub did
+   * not run. It names no sender, so whether the pull request is exempt is judged on its author alone.
    */
   adminStart?: boolean;
 }
@@ -812,7 +817,11 @@ async function markDispatchFailed(db: Db, reviewId: number): Promise<void> {
 /**
  * Everything after the insert: publish a decline for a blocked contributor, or start the review.
  * `secondCall` is set when this attempt restarts a row whose earlier attempt already cost a model
- * call, so the row's `attempts` says how many it has cost.
+ * call, and adds one to the row's `attempts`, which the administrator's volume sums. That is the
+ * best record there is and not an exact one: the count is made before the hand-over, so a
+ * hand-over GitHub refuses leaves the row one call over until a later run, and a restart a block
+ * declined has overwritten the state this rule reads, so the call after it can read one short.
+ * Nothing decides on it.
  */
 async function decideInserted(
   env: Bindings,

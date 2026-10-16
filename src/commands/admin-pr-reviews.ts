@@ -367,7 +367,7 @@ export function briefLines(outcome: unknown): string[] {
 // Contributor standing
 // ---------------------------------------------------------------------------------------------
 
-/** One decimal, so 10.2% is not shown as the "10%" it is said to exceed. */
+/** One decimal, so a rate just above a round number (10.2%) is not shown as the round number. */
 function percent(rejected: number, decided: number): string {
   return decided > 0 ? `${((rejected / decided) * 100).toFixed(1)}%` : "0%";
 }

@@ -1454,7 +1454,7 @@ async function resolveAtGitHub(
       throw new QueueError(
         422,
         "not_a_user",
-        `${u.login} is a GitHub ${sanitizeNote(u.type, 20) || "account"}, not a person. Reviews are counted per person.`,
+        `${u.login} is a GitHub ${sanitizeNote(u.type, 20) || "account"}, not a person. A block or an allow applies to a person's account.`,
       );
     }
     return { id: u.id, login: u.login, from: "github" };

@@ -238,7 +238,7 @@ describe("standingLines", () => {
       }),
     ).map((l) => l.replace(ANSI, ""));
     for (const l of lines) expect(DANGEROUS.test(l)).toBe(false);
-    // 6 of 59 is 10.17%: "10%" would sit beside "more than 10%" and read as not exceeding it.
+    // 6 of 59 is 10.17%: shown as "10%" it would read as a round number it is not.
     expect(lines.join("\n")).toContain("6 of 59 decided pull requests rejected (10.2%)");
   });
 
