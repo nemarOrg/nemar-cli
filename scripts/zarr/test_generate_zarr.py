@@ -11412,7 +11412,12 @@ class TestConvertOneFifSidecarOvercount(unittest.TestCase):
                 with contextlib.redirect_stdout(out):
                     result = self.convert(len(FIF_CHANNELS) + 9)
                 self.assertFalse(result["ok"])
-                self.assertIn(result["code"], ("maxshield_probe_failed", "file_read_error"))
+                # `corrupt_or_truncated` since biosigIO 1.2.13 types a FIF cut
+                # short in its data; the other two cases keep the older codes.
+                self.assertIn(
+                    result["code"],
+                    ("maxshield_probe_failed", "file_read_error", "corrupt_or_truncated"),
+                )
                 self.assertNotIn("entry", result)
                 self.assertFalse(self.synced())
 
@@ -17200,7 +17205,7 @@ class TestSubjectInfoProblems(unittest.TestCase):
     writers that do or do not name the option. This tests the check itself:
     no conversion logic is replaced."""
 
-    def problems(self, installed="1.2.12", imported="1.2.12", strip=_strip_nothing, **writers):
+    def problems(self, installed="1.2.13", imported="1.2.13", strip=_strip_nothing, **writers):
         return generate_zarr.subject_info_problems(
             installed_version=installed, imported_version=imported,
             writers={**CAPABLE_WRITERS, **writers}, strip=strip,
@@ -17208,38 +17213,38 @@ class TestSubjectInfoProblems(unittest.TestCase):
 
     def test_a_capable_biosigio_passes(self):
         # "1.10.0" is the case a string comparison gets wrong: as strings it
-        # sorts below "1.2.12".
-        for version in ("1.2.12", "1.2.12.0", "1.2.12.post1", "1.2.12+local.1",
-                        "1.2.13", "1.3", "1.10.0", "2.0.0"):
+        # sorts below "1.2.13".
+        for version in ("1.2.13", "1.2.13.0", "1.2.13.post1", "1.2.13+local.1",
+                        "1.2.14", "1.3", "1.10.0", "2.0.0"):
             with self.subTest(version):
                 self.assertEqual(self.problems(version, version), [])
 
     def test_a_release_below_the_floor_is_refused(self):
-        for version in ("1.2.11", "1.2.11.post1", "1.2.10", "1.2.10.post1", "1.2.9", "1.1.99",
-                        "0.9.9"):
+        for version in ("1.2.12", "1.2.12.post1", "1.2.11", "1.2.11.post1", "1.2.10",
+                        "1.2.10.post1", "1.2.9", "1.1.99", "0.9.9"):
             with self.subTest(version):
                 problems = self.problems(version, version)
                 self.assertEqual(problems, [
-                    f"the installed biosigIO is {version}, below 1.2.12",
-                    f"the imported biosigIO is {version}, below 1.2.12",
+                    f"the installed biosigIO is {version}, below 1.2.13",
+                    f"the imported biosigIO is {version}, below 1.2.13",
                 ])
 
     def test_a_pre_release_or_unreadable_version_is_refused(self):
-        # `1.2.12rc1` sorts BELOW 1.2.12; read by its leading digits it would pass.
-        for version in ("1.2.12rc1", "1.2.12.dev0", "1.2.12a1", "1.2.13.dev0",
-                        "1.2.12.post1.dev0", "not-a-version", "", None):
+        # `1.2.13rc1` sorts BELOW 1.2.13; read by its leading digits it would pass.
+        for version in ("1.2.13rc1", "1.2.13.dev0", "1.2.13a1", "1.2.14.dev0",
+                        "1.2.13.post1.dev0", "not-a-version", "", None):
             with self.subTest(version):
                 self.assertEqual(len(self.problems(version, version)), 2)
 
     def test_an_import_older_than_the_installed_release_is_refused(self):
         # An older copy shadowing the installed one, or imported before an
-        # upgrade: the distribution says 1.2.12, the code that runs is 1.2.11.
-        self.assertEqual(self.problems("1.2.12", "1.2.11"),
-                         ["the imported biosigIO is 1.2.11, below 1.2.12"])
+        # upgrade: the distribution says 1.2.13, the code that runs is 1.2.12.
+        self.assertEqual(self.problems("1.2.13", "1.2.12"),
+                         ["the imported biosigIO is 1.2.12, below 1.2.13"])
 
     def test_an_installed_release_older_than_the_import_is_refused(self):
-        self.assertEqual(self.problems("1.2.11", "1.2.12"),
-                         ["the installed biosigIO is 1.2.11, below 1.2.12"])
+        self.assertEqual(self.problems("1.2.12", "1.2.13"),
+                         ["the installed biosigIO is 1.2.12, below 1.2.13"])
 
     def test_every_writer_must_name_the_option(self):
         for name in generate_zarr.BIOSIGIO_STORE_WRITERS:
@@ -17265,8 +17270,8 @@ class TestSubjectInfoProblems(unittest.TestCase):
         self.assertFalse(generate_zarr.names_keyword(_writer_without_option, "exclude_subject_info"))
         self.assertFalse(generate_zarr.names_keyword(None, "exclude_subject_info"))
 
-    def test_the_floor_is_the_release_that_types_streamed_refusals(self):
-        self.assertEqual(generate_zarr.final_release(generate_zarr.SUBJECT_INFO_FLOOR), (1, 2, 12))
+    def test_the_floor_is_the_pinned_release(self):
+        self.assertEqual(generate_zarr.final_release(generate_zarr.SUBJECT_INFO_FLOOR), (1, 2, 13))
 
     def test_the_refusal_exit_is_ex_config(self):
         self.assertEqual(generate_zarr.EXIT_SUBJECT_INFO_UNAVAILABLE, 78)
@@ -18165,7 +18170,7 @@ class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
         git("add", "-A")
         git("commit", "-q", "-m", "init")
 
-    def standin(self, version: str = "1.2.12", dist_version: str | None = None,
+    def standin(self, version: str = "1.2.13", dist_version: str | None = None,
                 lacking: str | None = None, exporter_imports: bool = True,
                 mode: str = "read_nothing") -> str:
         """Write the stand-in package; `lacking` names the one writer that does
@@ -18265,21 +18270,21 @@ class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
 
     def test_a_release_below_the_floor_is_refused(self):
         self.commit(with_recording=True)
-        rc, log = self.run_main(self.standin(version="1.2.11"), "--wipe")
-        self.assert_refused(rc, log, "the installed biosigIO is 1.2.11, below 1.2.12")
+        rc, log = self.run_main(self.standin(version="1.2.12"), "--wipe")
+        self.assert_refused(rc, log, "the installed biosigIO is 1.2.12, below 1.2.13")
 
     def test_a_stale_import_is_refused_although_the_installed_release_is_current(self):
-        # The distribution record says 1.2.12; the module imported says 1.2.11.
+        # The distribution record says 1.2.13; the module imported says 1.2.12.
         self.commit(with_recording=True)
-        rc, log = self.run_main(self.standin(version="1.2.11", dist_version="1.2.12"), "--wipe")
-        self.assert_refused(rc, log, "the imported biosigIO is 1.2.11, below 1.2.12")
+        rc, log = self.run_main(self.standin(version="1.2.12", dist_version="1.2.13"), "--wipe")
+        self.assert_refused(rc, log, "the imported biosigIO is 1.2.12, below 1.2.13")
 
     def test_an_installed_release_older_than_the_import_is_refused(self):
-        # The other way round: the module says 1.2.12, but what the environment
-        # records as installed is 1.2.11.
+        # The other way round: the module says 1.2.13, but what the environment
+        # records as installed is 1.2.12.
         self.commit(with_recording=True)
-        rc, log = self.run_main(self.standin(version="1.2.12", dist_version="1.2.11"), "--wipe")
-        self.assert_refused(rc, log, "the installed biosigIO is 1.2.11, below 1.2.12")
+        rc, log = self.run_main(self.standin(version="1.2.13", dist_version="1.2.12"), "--wipe")
+        self.assert_refused(rc, log, "the installed biosigIO is 1.2.12, below 1.2.13")
 
     def test_a_biosigio_whose_exporter_cannot_be_imported_is_refused(self):
         # Fail closed: a check that cannot look must refuse, not wave through.

@@ -186,14 +186,20 @@
 # the former bare-OSError text match in `failure_verdict` was removed.
 # ZARR_ENGINE_VERSION is NOT bumped here (ADR 0033): a bump is a separate,
 # owner-approved step.
-# <1.2.13 is a CAP, not a floor, raised deliberately per release: a biosigIO
+# >=1.2.13: a BrainVision data file whose header shows it was cut short is a typed
+# `CorruptFileError` on both the in-memory and the streaming path instead of a
+# silent read with the tail dropped, and a FIF file truncated in its data is typed
+# corrupt through `Recording.from_file`. A refusal is `corrupt_or_truncated`, which
+# `failure_verdict` already never retries. ZARR_ENGINE_VERSION is NOT bumped here
+# either (ADR 0033).
+# <1.2.14 is a CAP, not a floor, raised deliberately per release: a biosigIO
 # patch release has changed what a store contains or which recordings convert
-# four times in a row (1.2.9, 1.2.10, 1.2.11, 1.2.12), so the next one is read
+# five times in a row (1.2.9, 1.2.10, 1.2.11, 1.2.12, 1.2.13), so the next one is read
 # before the converter takes it. Raise it in three places at once: here,
 # `BIOSIGIO_SPEC`, `BIOSIGIO_FLOOR` and `BIOSIGIO_CAP` in hallu-zarr.sh
 # (setup() refuses an installed biosigIO outside [floor, cap) after install,
 # and any pre-release), and test_hallu_zarr_config.py.
-biosigio[zarr,meg,mef3,hdf5]>=1.2.12,<1.2.13
+biosigio[zarr,meg,mef3,hdf5]>=1.2.13,<1.2.14
 
 # Draft 2020-12 validator for the converter's own pre-upload self-check: the index
 # it is about to publish is validated against `shared/zarr-index.schema.json` (and

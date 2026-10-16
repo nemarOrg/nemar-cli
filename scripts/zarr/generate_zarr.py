@@ -18,7 +18,7 @@ A store holds the data, the events, channel names, types and units, and
 technical recording metadata, and never the subject (#1626). Every store is
 written through ``write_store``, which has biosigIO leave subject and operator
 information out (``exclude_subject_info``, added in biosigio 1.2.11), and ``main``
-refuses to convert on a biosigIO below ``SUBJECT_INFO_FLOOR`` (1.2.12) or one that
+refuses to convert on a biosigIO below ``SUBJECT_INFO_FLOOR`` (1.2.13) or one that
 cannot. Subject information stays at
 dataset scope, in ``participants.tsv``.
 
@@ -8374,7 +8374,7 @@ def _recording_size_bytes(primary_local: str) -> int:
 #     writer is referenced anywhere else.
 #   * `sync_store`, the one upload, runs the same read-back on the bytes it is
 #     about to upload, after every later rewrite of the root.
-#   * hallu-zarr.sh's setup() refuses an installed biosigIO below 1.2.12.
+#   * hallu-zarr.sh's setup() refuses an installed biosigIO below 1.2.13.
 #
 # `fix_source_file_attr` still rewrites `source_file` afterwards: biosigIO now
 # leaves the scratch file's name there instead of its whole path, and the
@@ -8384,8 +8384,10 @@ def _recording_size_bytes(primary_local: str) -> int:
 # is where the name comes from. 1.2.12 types a streamed EDF/BDF refusal itself
 # (`CorruptFileError`), and `failure_verdict` no longer reads a bare `OSError`'s
 # text, so a 1.2.11 run would take every streamed refusal for the node's fault and
-# retry it until `retry_exhausted`.
-SUBJECT_INFO_FLOOR = "1.2.12"
+# retry it until `retry_exhausted`. 1.2.13 is the pin's floor: it refuses a
+# BrainVision data file cut short, where 1.2.12 read it with the tail dropped, so
+# the converter takes no older release.
+SUBJECT_INFO_FLOOR = "1.2.13"
 SUBJECT_INFO_OPTION = "exclude_subject_info"
 SUBJECT_INFO_EXCLUDED_ATTR = "subject_info_excluded"
 # The writers that put a store on disk, by the names `biosigio_subject_info_problems`
