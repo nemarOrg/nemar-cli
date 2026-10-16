@@ -16542,6 +16542,51 @@ def build_onset_shifted_edf_family(path: str, file_type: int, first_onset: int =
     return path
 
 
+def build_late_onset_pair(compliant: str, late: str, file_type: int, first_onset: int = 40) -> None:
+    """A REAL compliant EDF+C or BDF+C with events (`compliant`) and its late-onset
+    twin (`late`): the same bytes with every time-stamped annotation list (TAL)
+    moved by `first_onset` seconds, the time-keeping ones and the events alike.
+    That is a session cut out of the middle with its onsets kept, and it is what
+    pyedflib refuses ("it contains format errors"). Only TAL bytes differ between
+    the two, so the samples are identical by construction, and the compliant file
+    is the reference both are read against."""
+    from decimal import Decimal
+
+    import pyedflib
+
+    # Events at 1.0 s ("stimulus", no duration) and 4.5 s ("response", 0.5 s) in a
+    # six-second file of one-second data records.
+    build_edf_family(compliant, [("Fz", 64), ("Cz", 64)], file_type, annotations=True, seconds=6)
+    width = 3 if file_type in (pyedflib.FILETYPE_BDF, pyedflib.FILETYPE_BDFPLUS) else 2
+    with open(compliant, "rb") as fh:
+        raw = bytearray(fh.read())
+    n_signals = int(raw[252:256].decode().strip())
+    per_signal = 16 + 80 + 8 + 8 + 8 + 8 + 8 + 80  # label ... prefiltering, per signal
+    first_count = 256 + n_signals * per_signal
+    samples = [
+        int(raw[first_count + 8 * i : first_count + 8 * (i + 1)].decode().strip())
+        for i in range(n_signals)
+    ]
+    header_bytes = 256 * (n_signals + 1)
+    record_bytes = width * sum(samples)
+    block_bytes = width * samples[-1]  # the annotation signal is last
+    for record in range((len(raw) - header_bytes) // record_bytes):
+        start = header_bytes + record * record_bytes + (record_bytes - block_bytes)
+        shifted = bytearray()
+        for tal in re.findall(rb"[^\x00]+", bytes(raw[start : start + block_bytes])):
+            onset = re.match(rb"([+-])(\d+(?:\.\d+)?)(.*)", tal, re.DOTALL)
+            assert onset is not None, tal
+            fraction = onset.group(2).partition(b".")[2]
+            value = Decimal(onset.group(2).decode()) * (-1 if onset.group(1) == b"-" else 1)
+            value += first_onset
+            sign = "-" if value < 0 else "+"
+            shifted += f"{sign}{abs(value):.{len(fraction)}f}".encode() + onset.group(3) + b"\x00"
+        assert len(shifted) <= block_bytes, "the shifted TALs no longer fit the block"
+        raw[start : start + block_bytes] = bytes(shifted).ljust(block_bytes, b"\x00")
+    with open(late, "wb") as fh:
+        fh.write(raw)
+
+
 class StreamEdfThreshold:
     """Choose the exporter for the EDF and BDF files of one test, and see which
     one ran. 1 sends every file down the streaming exporter, the existing
@@ -16994,6 +17039,126 @@ class TestLateOnsetThroughConvertOne(ConvertOneLocalCase):
                     self.assertEqual(
                         metadata.get("edf_tolerant_read_reason"), "late_timekeeping_onset"
                     )
+
+    def published_group(self, entry: dict):
+        import zarr
+
+        return zarr.open_group(
+            os.path.join(self.synced_dir, os.path.basename(entry["zarr"])), mode="r"
+        )
+
+    def published_samples(self, entry: dict) -> list[tuple[Any, float]]:
+        """Each channel's samples as the store serves them, decoded by the
+        channel's own `scale` and `offset`, with that scale: the serving copy is
+        int16, so the scale is one quantization step."""
+        import numpy as np
+
+        root = self.published_group(entry)
+        (name,) = root.attrs["channel_groups"]
+        group = root[name]
+        level0 = np.asarray(group["0"][:, :], dtype=np.float64)
+        return [
+            (level0[ch["row_index"]] * ch["scale"] + ch["offset"], ch["scale"])
+            for ch in group.attrs["channels"]
+        ]
+
+    def published_events(self, entry: dict) -> tuple[list[float], list[str]]:
+        """The store's events as (onsets in seconds, descriptions)."""
+        events = self.published_group(entry)["events"]
+        if events.attrs["n_events"] == 0:
+            return [], []
+        labels = events.attrs["label_map"]
+        return (
+            [float(v) for v in events["onset"][:]],
+            [labels[str(int(code))] for code in events["code"][:]],
+        )
+
+    EVENTS = ([1.0, 4.5], ["stimulus", "response"])
+
+    def late_onset_formats(self):
+        import pyedflib
+
+        return (
+            ("EDF+C", "edf", pyedflib.FILETYPE_EDFPLUS),
+            ("BDF+C", "bdf", pyedflib.FILETYPE_BDFPLUS),
+        )
+
+    def test_a_late_first_onset_keeps_the_samples_and_the_in_file_events(self):
+        """The late recording's store holds the samples its compliant twin holds,
+        read by pyedflib (the reference reader), and the in-file events at the
+        times the compliant file states, not shifted by the late onset. The
+        streaming exporter carries no in-file annotations at all, on a compliant
+        recording as on this one, so there the twin is the oracle: both stores
+        must publish the same events, whatever that is."""
+        import numpy as np
+        import pyedflib
+
+        for label, ext, file_type in self.late_onset_formats():
+            late = f"sub-01/eeg/sub-01_task-rest_eeg.{ext}"
+            twin = f"sub-02/eeg/sub-02_task-rest_eeg.{ext}"
+            compliant = os.path.join(self._tmp.name, f"compliant.{ext}")
+            for rel in (late, twin):
+                os.makedirs(os.path.dirname(os.path.join(self.repo, rel)), exist_ok=True)
+            build_late_onset_pair(compliant, os.path.join(self.repo, late), file_type)
+            shutil.copy(compliant, os.path.join(self.repo, twin))
+
+            reader = pyedflib.EdfReader(compliant)
+            try:
+                reference = [reader.readSignal(i) for i in range(reader.signals_in_file)]
+                onsets, _durations, descriptions = reader.readAnnotations()
+            finally:
+                reader.close()
+            with self.subTest(label, check="the reference reads what the fixture wrote"):
+                self.assertEqual((list(onsets), list(descriptions)), self.EVENTS)
+                self.assertEqual(len(reference), 2)
+
+            for path_name, threshold in (("in-memory", None), ("streaming", 1)):
+                with self.subTest(label, path=path_name):
+                    StreamEdfThreshold.use(self, threshold)
+                    shutil.rmtree(self.synced_dir, ignore_errors=True)
+                    results = {rel: self.convert(rel, {rel}) for rel in (late, twin)}
+                    for rel, result in results.items():
+                        self.assertTrue(result["ok"], (rel, result.get("error")))
+
+                    published = self.published_samples(results[late]["entry"])
+                    twin_published = self.published_samples(results[twin]["entry"])
+                    self.assertEqual(len(published), len(reference))
+                    for (decoded, step), (twin_decoded, _), source in zip(
+                        published, twin_published, reference, strict=True
+                    ):
+                        self.assertEqual(decoded.shape, source.shape)
+                        np.testing.assert_array_equal(decoded, twin_decoded)
+                        self.assertLessEqual(float(np.abs(decoded - source).max()), step)
+
+                    events = self.published_events(results[late]["entry"])
+                    self.assertEqual(events, self.published_events(results[twin]["entry"]))
+                    if path_name == "in-memory":
+                        self.assertEqual(events, self.EVENTS)
+
+    def test_events_tsv_events_reach_the_store_of_a_late_first_onset_recording(self):
+        """On the streaming path the events come from the BIDS `events.tsv`, so
+        that is where a late recording's events are checked against expected
+        values on both exporters."""
+        tsv = "sub-01/eeg/sub-01_task-rest_events.tsv"
+        os.makedirs(os.path.join(self.repo, "sub-01/eeg"), exist_ok=True)
+        with open(os.path.join(self.repo, tsv), "w", encoding="utf-8") as fh:
+            fh.write("onset\tduration\ttrial_type\n1.0\t0\tstimulus\n4.5\t0.5\tresponse\n")
+
+        for label, ext, file_type in self.late_onset_formats():
+            primary = f"sub-01/eeg/sub-01_task-rest_eeg.{ext}"
+            build_late_onset_pair(
+                os.path.join(self._tmp.name, f"compliant.{ext}"),
+                os.path.join(self.repo, primary),
+                file_type,
+            )
+            for path_name, threshold in (("in-memory", None), ("streaming", 1)):
+                with self.subTest(label, path=path_name):
+                    StreamEdfThreshold.use(self, threshold)
+                    shutil.rmtree(self.synced_dir, ignore_errors=True)
+                    result = self.convert(primary, {primary, tsv})
+                    self.assertTrue(result["ok"], result.get("error"))
+                    self.assertEqual(self.published_events(result["entry"]), self.EVENTS)
+                    self.assertEqual(result["entry"]["n_events"], 2)
 
 
 class TestReaderRefusalsThroughConvertOne(ConvertOneLocalCase):
