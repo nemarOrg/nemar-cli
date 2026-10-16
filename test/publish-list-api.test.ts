@@ -68,7 +68,14 @@ describe("listPublishRequests", () => {
 
   test("the options object carries statuses and search", async () => {
     await listPublishRequests({ statuses: ["published", "denied"], search: "nm0001" });
-    expect(seen).toEqual(["?status=published%2Cdenied&search=nm0001"]);
+    // The server here answers nothing, so the union is followed by one question per status (an
+    // empty union is how a Worker that cannot take a comma list answers; test/admin-publish-
+    // list-skew-cli.test.ts runs that case end to end).
+    expect(seen).toEqual([
+      "?status=published%2Cdenied&search=nm0001",
+      "?status=published&search=nm0001",
+      "?status=denied&search=nm0001",
+    ]);
   });
 
   test("an options object without statuses sends no status", async () => {
