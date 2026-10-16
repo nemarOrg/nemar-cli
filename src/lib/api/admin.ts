@@ -2300,7 +2300,7 @@ export async function getPrReviewAuthor(login: string): Promise<ContributorStand
   );
 }
 
-/** Allow or block a contributor; the tally no longer decides the pause until it is cleared (rate limits still apply). */
+/** Allow or block a contributor; the tally no longer decides the pause until it is cleared. */
 export async function setPrReviewAuthor(
   login: string,
   mode: "allow" | "block",

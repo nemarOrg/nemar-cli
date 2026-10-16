@@ -253,13 +253,7 @@ const queue = async (qs = "") => {
 };
 
 /** What the webhook would hand the review for an opened pull request. */
-function openPullRequest(
-  authorId: number,
-  login: string,
-  number: number,
-  headSha: string,
-  association = "COLLABORATOR",
-) {
+function openPullRequest(authorId: number, login: string, number: number, headSha: string) {
   return handlePullRequestEvent(
     { ...env(), PRESCREEN_CALLBACK_SECRET: "queue-test-callback-secret" } as Bindings,
     {
@@ -275,7 +269,7 @@ function openPullRequest(
         state: "open",
         draft: false,
         merged: false,
-        author_association: association,
+        author_association: "COLLABORATOR",
         user: { id: authorId, login, type: "User" },
         base: { ref: "main" },
         head: { sha: headSha, repo: { full_name: "nemarDatasets/nm000301" } },
@@ -1091,31 +1085,6 @@ describe("PUT and DELETE /admin/pr-review-authors/:login", () => {
     const blocked = await send("PUT", "/admin/pr-review-authors/alice", { mode: "block" });
     expect((blocked.body as unknown as SetOverrideResponse).previous).toBe("allow");
     expect(db.query("SELECT COUNT(*) AS n FROM pr_review_overrides").get()).toEqual({ n: 1 });
-  });
-
-  test("allow lifts the pause and nothing else: a stranger's hourly allowance still applies", async () => {
-    usersById.alice = { id: 77, login: "alice", type: "User" };
-    seedHistory(77, "alice", 6, 4);
-    seedDataset("nm000301");
-    await send("PUT", "/admin/pr-review-authors/alice", { mode: "allow" });
-    const shas = [1, 2, 3, 4].map((n) => sha(900 + n));
-    const outcomes = [];
-    for (const [i, s] of shas.entries()) {
-      outcomes.push(await openPullRequest(77, "alice", i + 1, s, "NONE"));
-    }
-    expect(outcomes.map((o) => o.dispatched)).toEqual([true, true, true, false]);
-    expect(outcomes[3]).toMatchObject({ reason: "rate_limited" });
-
-    // The queue says so for the fourth, from the row the real gate wrote.
-    pulls["nm000301#4"] = livePull({
-      head: {
-        sha: shas[3],
-        ref: "x",
-        repo: { full_name: "nemarDatasets/nm000301", owner: { login: "nemarDatasets" } },
-      },
-    });
-    const { body } = await detail("nm000301", 4);
-    expect(body).toMatchObject({ verdict: "not_reviewed", detail: "rate_limited" });
   });
 
   test("clearing hands the decision back to the tally", async () => {

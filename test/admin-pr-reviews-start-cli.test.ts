@@ -31,7 +31,6 @@ import type { Bindings } from "../backend/src/types/bindings";
 import { freshDb, realD1 } from "../backend/test/helpers/d1";
 import { makePrQueueApp } from "../backend/test/helpers/pr-queue-app";
 import { type PrSpec, SHA_A, prNode, seedReview } from "../backend/test/helpers/pr-queue-fixtures";
-import { DAILY_REVIEW_CAP } from "../shared/pr-review";
 import { type GitHubStandin, WORKER_TOKEN, startGitHubStandin } from "./helpers/github-standin";
 
 setDefaultTimeout(30_000);
@@ -401,7 +400,7 @@ describe("nemar admin pr-reviews start --all", () => {
     expect(rows().find((x) => x.pr_number === 1)).toMatchObject({ state: "dispatched" });
   });
 
-  test("a contributor held back by an allowance is started: the administrator chose it", async () => {
+  test("a decline from a limit that no longer exists is started", async () => {
     for (let i = 0; i < 3; i++) {
       seedReview(db, {
         ds: "nm000203",
@@ -430,9 +429,9 @@ describe("nemar admin pr-reviews start --all", () => {
     expect(rows().find((x) => x.pr_number === 1)).toMatchObject({ state: "dispatched" });
   });
 
-  test("stops when the platform's daily pool is spent", async () => {
+  test("does not stop for the old daily pool: 400 reviews today change nothing", async () => {
     queue();
-    for (let i = 0; i < DAILY_REVIEW_CAP; i++) {
+    for (let i = 0; i < 400; i++) {
       seedReview(db, {
         ds: "nm000203",
         n: 1000 + i,
@@ -440,20 +439,19 @@ describe("nemar admin pr-reviews start --all", () => {
         authorId: 20_000 + i,
         state: "reported",
         verdict: "pass",
-        // Inside the day the pool is counted over (a result seeded without a date is old).
+        // Inside the day the pool used to be counted over (a result seeded without a date is old).
         createdAt: new Date().toISOString().slice(0, 19).replace("T", " "),
       });
     }
 
     const r = await cli([...START, "--all", "--yes"]);
 
-    // Some were not reviewed, so the exit code says so (`next` does the same when it stops).
-    expect(r.exitCode).toBe(1);
-    expect(r.stdout).toContain("daily");
-    expect(r.stdout).toMatch(/2 were not tried/);
-    expect(dispatches()).toHaveLength(0);
-    // The first decline says the pool is spent; the rest are not tried.
-    expect(gh.seen.filter((s) => s.method === "GET" && s.path.includes("/pulls/"))).toHaveLength(1);
+    // Every one of the three is started, and nothing says some were not tried.
+    expect(r.exitCode).toBe(0);
+    expect(dispatches()).toHaveLength(3);
+    expect(r.stdout).toMatch(/3 started/);
+    expect(r.stdout).not.toContain("not tried");
+    expect(r.stdout).not.toContain("daily");
   });
 
   test("a pull request that cannot be read is counted and the run goes on", async () => {
@@ -524,7 +522,6 @@ describe("nemar admin pr-reviews start --all", () => {
     expect(r.exitCode).toBe(0);
     const out = JSON.parse(r.stdout);
     expect(out.results).toHaveLength(3);
-    expect(out.not_tried).toBe(0);
     expect(out.results.every((x: { dispatched: boolean }) => x.dispatched)).toBe(true);
     expect(out.results.map((x: { reason: string }) => x.reason).sort()).toEqual([
       "dispatched",
@@ -687,25 +684,5 @@ describe("what must not start anything, and what a refused dispatch is", () => {
     expect(overdue.stdout).toMatch(/1 started/);
     expect(overdue.stdout).not.toContain("already has a review");
     expect(dispatches()).toHaveLength(1);
-  });
-
-  test("the daily stop says how many were not tried", async () => {
-    queue();
-    for (let i = 0; i < DAILY_REVIEW_CAP; i++) {
-      seedReview(db, {
-        ds: "nm000203",
-        n: 1000 + i,
-        sha: `${i}`.padStart(40, "b"),
-        authorId: 20_000 + i,
-        state: "reported",
-        verdict: "pass",
-        createdAt: new Date().toISOString().slice(0, 19).replace("T", " "),
-      });
-    }
-
-    const r = await cli([...START, "--all", "--yes"]);
-
-    expect(r.exitCode).toBe(1);
-    expect(r.stdout).toMatch(/Stopped: .*2 were not tried/);
   });
 });

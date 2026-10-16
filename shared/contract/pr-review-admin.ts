@@ -32,9 +32,10 @@ export type { OverrideMode, ReviewState };
  *
  *  - `pass`, `fail`, `uncertain`: the derived verdict of a review OF THE CURRENT COMMIT.
  *  - `not_reviewed`: no review of the current commit is on record. That is also the answer when the
- *    review is off, when the contributor was paused or rate limited (`detail` says which), and when
- *    the review on record is of another commit (`review_current` is false and `stale_verdict` says
- *    what that one concluded). A verdict is never carried over to a commit it did not read.
+ *    review is off, when the contributor was paused (`detail` says so; a row from before the
+ *    limits were removed may say rate limited or daily limit), and when the review on record is of
+ *    another commit (`review_current` is false and `stale_verdict` says what that one concluded). A
+ *    verdict is never carried over to a commit it did not read.
  *  - `in_progress`: the review was handed to GitHub and has not reported.
  *  - `could_not_decide`: the review ran and ended without a verdict (an error, or it never
  *    reported). `detail` says why.
@@ -165,8 +166,8 @@ export interface QueueResponse {
  * What starting the review of one open pull request came to. `reason` is one of the review's own
  * fixed words (ADR 0092): `dispatched`, `redispatched` (a commit started again) or `dispatch_claimed`
  * (GitHub's answer was lost but the workflow had already claimed it) when it was handed to GitHub,
- * otherwise why not (`duplicate`, `contributor_paused`, `daily_limit`, `exempt_author` (its author is
- * an owner or administrator, so it is not reviewed and its check was posted as skipped), `draft`,
+ * otherwise why not (`duplicate`, `contributor_paused`, `exempt_author` (its author is an owner or
+ * administrator, so it is not reviewed and its check was posted as skipped), `draft`,
  * `not_open`, `not_main`, `bot_author`, `dataset_not_reviewable`, `pr_review_disabled`, ...).
  * `review_id` is null when no review row exists for it.
  */

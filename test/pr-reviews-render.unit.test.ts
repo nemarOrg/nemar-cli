@@ -250,7 +250,8 @@ describe("standingLines", () => {
       .map((l) => l.replace(ANSI, ""))
       .join("\n");
     expect(text).toContain("the record alone would pause them; the decision wins");
-    expect(text).toContain("not paused: reviewed automatically, within the rate limits");
+    expect(text).toContain("not paused: reviewed automatically");
+    expect(text).not.toContain("rate limit");
   });
 
   test("says an owner or administrator is exempt whatever is decided, so a block or an allow is not misread", () => {

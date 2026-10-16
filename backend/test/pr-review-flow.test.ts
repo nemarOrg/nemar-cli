@@ -18,8 +18,8 @@ import { join } from "node:path";
 import type { Server } from "bun";
 import { Hono } from "hono";
 import {
-  DAILY_REVIEW_CAP,
   DECLINE_REASONS,
+  HISTORICAL_DECLINE_REASONS,
   OVERRIDE_MODES,
   REVIEW_STATES,
   RUN_ERRORS,
@@ -41,7 +41,7 @@ import {
 } from "../src/services/pr-review";
 import { REVIEW_EXEMPT_SQL } from "../src/services/pr-review-exemption";
 import type { Bindings, Variables } from "../src/types/bindings";
-import { freshDb, interceptingD1, realD1, wrapD1, yieldingD1 } from "./helpers/d1";
+import { freshDb, realD1, wrapD1, yieldingD1 } from "./helpers/d1";
 import { type PermissionAnswer, permissionResponse } from "./helpers/github-permission";
 
 const WEBHOOK_SECRET = "pr-review-webhook-secret";
@@ -677,83 +677,35 @@ describe("owners and administrators are not reviewed (ADR 0107)", () => {
     expect(rows()).toHaveLength(2);
   });
 
-  test("an exempt author is never rate limited past the hourly cap", async () => {
-    const adminId = seedAccount({ github: "admin-gh", role: "admin" });
+  test("the sender rule holds for every action: an exempt sender passes the delivery and one who is not exempt does not", async () => {
+    seedAccount({ github: "admin-gh", role: "admin" });
+    seedAccount({ github: "owner-gh", role: "owner" });
     seedAccount({ github: "member-gh", role: "member" });
-    // Past the most a collaborator is allowed in an hour, and past the platform's pool as well.
-    for (const author of [adminId + 1000, 777]) {
-      for (let i = 0; i < 21; i++) {
-        seedRow({
-          pr: 300 + i,
-          sha: `${author}${i}`.padEnd(40, "e"),
-          author,
-          assoc: "COLLABORATOR",
-          ago: "-10 minutes",
-        });
-      }
-    }
-    // The control: the same history stops a member.
-    const over = await deliver(
-      prEvent({ login: "member-gh", userId: 777, assoc: "COLLABORATOR", number: 99 }),
-    );
-    expect(over.body).toMatchObject({ dispatched: false, reason: "rate_limited" });
-
-    const before = rows().length;
-    for (let n = 0; n < 3; n++) {
-      const r = await deliver(
-        prEvent({
-          login: "admin-gh",
-          userId: adminId + 1000,
-          assoc: "COLLABORATOR",
-          number: 200 + n,
-          sha: `${n + 1}`.repeat(40),
-          action: n === 0 ? "opened" : "synchronize",
-        }),
+    const actions = ["opened", "synchronize", "reopened", "ready_for_review"];
+    for (const [i, action] of actions.entries()) {
+      const base = { action, login: "admin-gh", userId: 602 };
+      // Another exempt account caused it: the author's pull request is exempt, as the author's own.
+      const byOwner = await deliver(
+        prEvent({ ...base, number: 10 + i, sha: `${i + 1}`.repeat(40), sender: "owner-gh" }),
       );
-      expect(r.body).toMatchObject({ dispatched: false, reason: "exempt_author" });
-    }
-    // Nothing was declined, nothing was stored: the history above is all there is.
-    expect(rows()).toHaveLength(before);
-    expect(rows().filter((r) => r.author_id === adminId + 1000 && r.state === "declined")).toEqual(
-      [],
-    );
-  });
-
-  test("a role granted between intake and the cap check lifts the caps", async () => {
-    // Three reviews inside the hour use up a stranger's allowance, and the fourth would be declined.
-    for (let i = 0; i < 3; i++) {
-      seedRow({
-        pr: 70 + i,
-        sha: `${i}`.padStart(40, "d"),
-        author: 777,
-        assoc: "NONE",
-        ago: "-20 minutes",
+      expect(byOwner.body, `${action} by an owner`).toMatchObject({
+        dispatched: false,
+        reason: "exempt_author",
+      });
+      // An account that is not exempt caused it: reviewed, whatever the author is. The author
+      // alone is never enough.
+      const byMember = await deliver(
+        prEvent({ ...base, number: 20 + i, sha: `${i + 5}`.repeat(40), sender: "member-gh" }),
+      );
+      expect(byMember.body, `${action} by a member`).toMatchObject({
+        dispatched: true,
+        reason: "dispatched",
       });
     }
-    seedAccount({ github: "late-gh", role: "member" });
-    const fourth = (number: number, sha: string) =>
-      prEvent({ login: "late-gh", userId: 777, assoc: "NONE", number, sha });
-
-    // Without the grant, the cap holds.
-    expect((await deliver(fourth(80, "7".repeat(40)))).body).toMatchObject({
-      reason: "rate_limited",
-    });
-
-    // The role is granted by someone else after the intake looked and before the row is ranked:
-    // the allowance is asked about an account that is exempt now, and does not decline it.
-    let granted = false;
-    const racing = interceptingD1(realD1(db), (sql) => {
-      if (!granted && /INSERT INTO pr_reviews/.test(sql)) {
-        granted = true;
-        db.run("UPDATE users SET role = 'admin' WHERE github_username = 'late-gh'");
-      }
-    });
-    const r = await deliver(fourth(81, "8".repeat(40)), "pull_request", {
-      ...env(),
-      DB: racing,
-    } as Bindings);
-    expect(granted).toBe(true);
-    expect(r.body).toMatchObject({ dispatched: true, reason: "dispatched" });
+    // One review for each delivery a member caused, and none for the ones an owner caused.
+    expect(rows()).toHaveLength(actions.length);
+    expect(rows().every((r) => r.author_login === "admin-gh")).toBe(true);
+    expect(dispatchesMade()).toHaveLength(actions.length);
   });
 
   /** A collaborator pushes to the administrator's branch and the review finds the change wanting. */
@@ -853,13 +805,13 @@ describe("owners and administrators are not reviewed (ADR 0107)", () => {
     expect(JSON.stringify(calls)).not.toContain("skipped");
   });
 
-  test("a review an outsider causes on an owner's pull request is held to the allowances like any other", async () => {
+  test("a review an outsider causes on an owner's pull request is held to a block on the author, and the owner's own push is not", async () => {
     seedAccount({ github: "admin-gh", role: "admin" });
     seedAccount({ github: "member-gh", role: "member" });
-    // The platform's pool for the day is spent.
-    for (let i = 0; i < DAILY_REVIEW_CAP; i++) {
-      seedRow({ pr: 1000 + i, sha: `${i}`.padStart(40, "b"), author: 20_000 + i, ago: "-3 hours" });
-    }
+    // An administrator has blocked this account, which does not make its owner less of an owner.
+    db.run(
+      "INSERT INTO pr_review_overrides (author_id, author_login, mode) VALUES (602, 'admin-gh', 'block')",
+    );
     const outsider = await deliver(
       prEvent({
         login: "admin-gh",
@@ -870,10 +822,10 @@ describe("owners and administrators are not reviewed (ADR 0107)", () => {
         sender: "member-gh",
       }),
     );
-    expect(outsider.body).toMatchObject({ dispatched: false, reason: "daily_limit" });
+    expect(outsider.body).toMatchObject({ dispatched: false, reason: "contributor_paused" });
     expect(dispatchesMade()).toHaveLength(0);
 
-    // The owner's own push is exempt before any allowance is asked, whatever the pool says.
+    // The owner's own push is exempt before the block is asked about: exempt, then a block.
     const own = await deliver(
       prEvent({
         login: "admin-gh",
@@ -1014,9 +966,7 @@ describe("owners and administrators are not reviewed (ADR 0107)", () => {
       prEvent({ login: "admin-gh", userId: 602, action: "synchronize", sender: "owner-gh" }),
     );
     expect(r.body).toMatchObject({ dispatched: true, reason: "dispatched" });
-    // The author was asked first and was fine, then the pusher, who was not. The allowance check
-    // reads the accounts again (a role can change between the two reads) but does not ask GitHub
-    // about the author a second time: one delivery's answers are remembered.
+    // The author was asked first and was fine, then the pusher, who was not: one question each.
     expect(permissionAsks().map((c) => c.path.split("/")[5])).toEqual(["admin-gh", "owner-gh"]);
   });
 
@@ -1264,7 +1214,7 @@ describe("the callback is one-shot and domain-separated", () => {
   });
 });
 
-describe("who is reviewed: the contributor tally, the overrides and the caps", () => {
+describe("who is reviewed: the contributor tally and the overrides", () => {
   /** Give an author `decided` decided pull requests, `rejected` of them ending in a fail. */
   function seedHistory(authorId: number, decided: number, rejected: number) {
     for (let i = 0; i < decided; i++) {
@@ -1333,51 +1283,6 @@ describe("who is reviewed: the contributor tally, the overrides and the caps", (
     const r = await deliver(prEvent({ userId: 900, number: 8, sha: SHA_B }));
     expect(r.body).toMatchObject({ dispatched: false, reason: "contributor_paused" });
   });
-
-  test("a stranger gets 3 reviews an hour and a collaborator 20", async () => {
-    for (let n = 1; n <= 3; n++) {
-      const r = await deliver(
-        prEvent({ userId: 777, assoc: "NONE", number: n, sha: `${n}`.padStart(40, "f") }),
-      );
-      expect(r.body).toMatchObject({ dispatched: true });
-    }
-    const fourth = await deliver(
-      prEvent({ userId: 777, assoc: "NONE", number: 4, sha: "9".repeat(40) }),
-    );
-    expect(fourth.body).toMatchObject({ dispatched: false, reason: "rate_limited" });
-    expect(lastCheck()).toMatchObject({ conclusion: "action_required" });
-
-    for (let n = 1; n <= 4; n++) {
-      const r = await deliver(
-        prEvent({
-          userId: 888,
-          assoc: "COLLABORATOR",
-          number: 10 + n,
-          sha: `${n}`.padStart(40, "1"),
-        }),
-      );
-      expect(r.body).toMatchObject({ dispatched: true });
-    }
-  });
-
-  test("declined rows do not use up the allowance that declined them", async () => {
-    // Three declines in the last hour, none of which reached the model. If they counted, a
-    // stranger declined once would stay declined for ever.
-    for (let i = 0; i < 3; i++) {
-      seedRow({
-        pr: 40 + i,
-        sha: `${i}`.padStart(40, "e"),
-        author: 777,
-        assoc: "NONE",
-        state: "declined",
-        ago: "-10 minutes",
-      });
-    }
-    const r = await deliver(
-      prEvent({ userId: 777, assoc: "NONE", number: 60, sha: "6".repeat(40) }),
-    );
-    expect(r.body).toMatchObject({ dispatched: true });
-  });
 });
 
 describe("the watchdog", () => {
@@ -1423,7 +1328,7 @@ describe("the watchdog", () => {
 });
 
 // ---------------------------------------------------------------------------------------------
-// Claim, allowances and republish
+// Claim, gate and republish
 // ---------------------------------------------------------------------------------------------
 
 const OTHER_DATASET = "nm000461";
@@ -1445,7 +1350,7 @@ function seedRow(o: {
   const detail =
     o.detail === undefined
       ? state === "declined"
-        ? "rate_limited"
+        ? "contributor_paused"
         : state === "errored"
           ? "workflow_failed"
           : null
@@ -1680,9 +1585,28 @@ describe("the claim: a dispatch buys nothing until the Worker accepts it", () =>
   });
 });
 
-describe("the allowances: scoped, windowed, and not raceable", () => {
-  test("twelve pull requests opened at once by a stranger get exactly three reviews", async () => {
-    // The caps are ranked after the insert, so a burst cannot all pass the same check.
+describe("no count of reviews decides whether one is spent (ADR 0107)", () => {
+  test("a stranger's 30th pull request in an hour is reviewed", async () => {
+    // The tightest tier the old rule had was three an hour for anyone GitHub does not mark as a
+    // member; thirty real deliveries from one such author are all dispatched.
+    const results = [];
+    for (let n = 1; n <= 30; n++) {
+      results.push(
+        await deliver(
+          prEvent({ userId: 777, assoc: "NONE", number: n, sha: n.toString(16).padStart(40, "f") }),
+        ),
+      );
+    }
+    expect(results.map((r) => r.body.reason)).toEqual(Array(30).fill("dispatched"));
+    expect(rows()).toHaveLength(30);
+    expect(rows().every((r) => r.state === "dispatched")).toBe(true);
+    expect(dispatchesMade()).toHaveLength(30);
+    expect(lastCheck()).toMatchObject({ status: "in_progress" });
+  });
+
+  test("pull requests opened at once by one stranger are all reviewed, whatever order the database answers in", async () => {
+    // A rank counted after the insert used to make a burst race for three places. Nothing is
+    // counted now, so no interleaving can decline one.
     const racing = { ...env(), DB: yieldingD1(realD1(db)) } as Bindings;
     const results = await Promise.all(
       Array.from({ length: 12 }, (_, i) =>
@@ -1698,144 +1622,112 @@ describe("the allowances: scoped, windowed, and not raceable", () => {
         ),
       ),
     );
-    const reviewed = rows().filter((r) => r.state === "dispatched");
-    const declined = rows().filter((r) => r.state === "declined");
-    expect(reviewed).toHaveLength(3);
-    expect(declined).toHaveLength(9);
-    expect(declined.every((r) => r.detail === "rate_limited")).toBe(true);
-    expect(results.filter((r) => r.body.dispatched === true)).toHaveLength(3);
-    expect(dispatchesMade()).toHaveLength(3);
+    expect(results.filter((r) => r.body.dispatched === true)).toHaveLength(12);
+    expect(rows().filter((r) => r.state === "dispatched")).toHaveLength(12);
+    expect(rows().filter((r) => r.state === "declined")).toEqual([]);
+    expect(dispatchesMade()).toHaveLength(12);
   });
 
-  test("the hourly allowance belongs to one author: another author is unaffected", async () => {
-    for (let n = 1; n <= 3; n++) {
-      await deliver(
-        prEvent({ userId: 777, assoc: "NONE", number: n, sha: `${n}`.padStart(40, "f") }),
-      );
-    }
-    const capped = await deliver(
-      prEvent({ userId: 777, assoc: "NONE", number: 4, sha: "9".repeat(40) }),
-    );
-    expect(capped.body).toMatchObject({ reason: "rate_limited" });
-    const other = await deliver(
-      prEvent({ userId: 778, assoc: "NONE", number: 5, sha: "8".repeat(40) }),
-    );
-    expect(other.body).toMatchObject({ dispatched: true });
-  });
-
-  test("reviews older than an hour do not count against the hour", async () => {
-    for (let i = 0; i < 3; i++) {
-      seedRow({
-        pr: 70 + i,
-        sha: `${i}`.padStart(40, "d"),
-        author: 777,
-        assoc: "NONE",
-        ago: "-2 hours",
-      });
-    }
-    const r = await deliver(
-      prEvent({ userId: 777, assoc: "NONE", number: 80, sha: "7".repeat(40) }),
-    );
-    expect(r.body).toMatchObject({ dispatched: true });
-  });
-
-  test("three reviews inside the hour use it up", async () => {
-    for (let i = 0; i < 3; i++) {
-      seedRow({
-        pr: 70 + i,
-        sha: `${i}`.padStart(40, "d"),
-        author: 777,
-        assoc: "NONE",
-        ago: "-20 minutes",
-      });
-    }
-    const r = await deliver(
-      prEvent({ userId: 777, assoc: "NONE", number: 80, sha: "7".repeat(40) }),
-    );
-    expect(r.body).toMatchObject({ reason: "rate_limited" });
-  });
-
-  test("a collaborator gets twenty an hour and not twenty-one", async () => {
-    for (let n = 1; n <= 20; n++) {
-      const r = await deliver(
-        prEvent({ userId: 888, assoc: "COLLABORATOR", number: n, sha: `${n}`.padStart(40, "2") }),
-      );
-      expect(r.body, `review ${n}`).toMatchObject({ dispatched: true });
-    }
-    const over = await deliver(
-      prEvent({ userId: 888, assoc: "COLLABORATOR", number: 21, sha: "3".repeat(40) }),
-    );
-    expect(over.body).toMatchObject({ reason: "rate_limited" });
-  });
-
-  test("a stranger has a daily allowance of six as well, spent outside the hour", async () => {
-    for (let i = 0; i < 6; i++) {
-      seedRow({
-        pr: 50 + i,
-        sha: `${i}`.padStart(40, "c"),
-        author: 777,
-        assoc: "NONE",
-        ago: "-5 hours",
-      });
-    }
-    const r = await deliver(
-      prEvent({ userId: 777, assoc: "NONE", number: 90, sha: "5".repeat(40) }),
-    );
-    expect(r.body).toMatchObject({ reason: "rate_limited" });
-  });
-
-  test("the platform has a daily ceiling that no single author reaches", async () => {
-    for (let i = 0; i < DAILY_REVIEW_CAP; i++) {
+  test("the platform's 401st review in a day is dispatched", async () => {
+    // 400 reviews already started today, by 400 different authors: the old pool was full.
+    for (let i = 0; i < 400; i++) {
       seedRow({ pr: 1000 + i, sha: `${i}`.padStart(40, "b"), author: 20_000 + i, ago: "-3 hours" });
     }
-    const r = await deliver(
+    const r401 = await deliver(
       prEvent({ userId: 901, assoc: "COLLABORATOR", number: 5, sha: "4".repeat(40) }),
     );
-    expect(r.body).toMatchObject({ dispatched: false, reason: "daily_limit" });
-    expect(lastCheck().output?.summary).toContain("daily limit");
-    expect(lastCheck()).toMatchObject({ conclusion: "action_required" });
-  });
-
-  test("a review that never reached the model does not use up an allowance", async () => {
-    for (let i = 0; i < 3; i++) {
-      seedRow({
-        pr: 30 + i,
-        sha: `${i}`.padStart(40, "a"),
-        author: 777,
-        assoc: "NONE",
-        state: "errored",
-        detail: i === 0 ? "stale_head" : "dispatch_failed",
-        ago: "-10 minutes",
-      });
-    }
-    const r = await deliver(
-      prEvent({ userId: 777, assoc: "NONE", number: 99, sha: "1".repeat(40) }),
+    const r402 = await deliver(
+      prEvent({ userId: 902, assoc: "NONE", number: 6, sha: "3".repeat(40) }),
     );
-    expect(r.body).toMatchObject({ dispatched: true });
+    expect(r401.body).toMatchObject({ dispatched: true, reason: "dispatched" });
+    expect(r402.body).toMatchObject({ dispatched: true, reason: "dispatched" });
+    expect(rows().filter((x) => x.state === "declined")).toEqual([]);
+    expect(dispatchesMade()).toHaveLength(2);
   });
 
-  test("a stranger who pushes thirty times costs GitHub one decline message, not thirty", async () => {
-    for (let n = 1; n <= 3; n++) {
+  test("a contributor blocked by an administrator who pushes thirty times costs GitHub one decline message, not thirty", async () => {
+    db.run(
+      "INSERT INTO pr_review_overrides (author_id, author_login, mode) VALUES (777, 'n', 'block')",
+    );
+    for (let n = 1; n <= 33; n++) {
+      const sha = n.toString(16).padStart(8, "0").repeat(5);
       await deliver(
         prEvent({
           userId: 777,
           assoc: "NONE",
           number: 7,
-          sha: `${n}`.repeat(40),
+          sha,
           action: n === 1 ? "opened" : "synchronize",
         }),
       );
     }
-    const before = checks().filter((c) => c.method === "POST").length;
-    for (let n = 4; n <= 33; n++) {
-      const sha = n.toString(16).padStart(8, "0").repeat(5);
-      await deliver(prEvent({ userId: 777, assoc: "NONE", number: 7, sha, action: "synchronize" }));
-    }
-    const declinedPublishes = checks().filter((c) => c.method === "POST").length - before;
-    expect(declinedPublishes).toBeLessThanOrEqual(1);
-    expect(rows().filter((r) => r.state === "declined")).toHaveLength(30);
+    const created = checks().filter((c) => c.method === "POST").length;
+    expect(created).toBe(1);
+    expect(dispatchesMade()).toHaveLength(0);
+    expect(rows().filter((r) => r.state === "declined")).toHaveLength(33);
     // Every decline is recorded as handled, so the watchdog does not retry the unpublished ones.
     expect(rows().filter((r) => r.state === "declined" && r.published_at === null)).toHaveLength(0);
+  });
+
+  test("a decline on one pull request does not silence the decline on another", async () => {
+    db.run(
+      "INSERT INTO pr_review_overrides (author_id, author_login, mode) VALUES (777, 'n', 'block')",
+    );
+    const posted = () => checks().filter((c) => c.method === "POST").length;
+    const blocked = (number: number, sha: string) =>
+      deliver(prEvent({ userId: 777, assoc: "NONE", number, sha }));
+    await blocked(70, "a1".repeat(20));
+    const afterFirst = posted();
+    expect(afterFirst).toBe(1);
+    await blocked(71, "a2".repeat(20));
+    expect(posted()).toBe(afterFirst + 1);
+  });
+});
+
+describe("a row written while the limits existed still renders as not reviewed (ADR 0107)", () => {
+  // A declined row keeps its word for ever, and nothing writes these two words any more.
+  test.each([...HISTORICAL_DECLINE_REASONS])(
+    "a %s row is re-stated on the pull request when its commit is delivered again",
+    async (word) => {
+      seedRow({ pr: 7, sha: SHA_A, author: 501, state: "declined", detail: word, ago: "-2 days" });
+
+      const again = await deliver(prEvent({ sha: SHA_A }));
+
+      // A redelivery restarts nothing: it re-states what the row says, in the words of today.
+      expect(again.body).toMatchObject({ dispatched: false, reason: "duplicate" });
+      expect(dispatchesMade()).toHaveLength(0);
+      expect(checks()).toEqual([]);
+      const comment = String(comments()[0].body?.body);
+      expect(comment).toContain("NEEDS A PERSON");
+      expect(comment).toContain("**Not reviewed**");
+      expect(comment).toContain("has since been removed");
+    },
+  );
+
+  test.each([...HISTORICAL_DECLINE_REASONS])(
+    "the watchdog publishes a %s row as a check that says not reviewed and needs a person",
+    async (word) => {
+      seedRow({ pr: 7, sha: SHA_A, author: 501, state: "declined", detail: word, ago: "-2 days" });
+
+      expect(await sweepStalePrReviews(env())).toMatchObject({ republished: 1, errors: 0 });
+
+      expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "action_required" });
+      expect(lastCheck().output?.title).toBe("Not reviewed");
+      expect(lastCheck().output?.summary).toContain("has since been removed");
+    },
+  );
+
+  test("a new commit from the same contributor is reviewed: the old decline binds that commit only", async () => {
+    seedRow({
+      pr: 7,
+      sha: SHA_A,
+      author: 501,
+      state: "declined",
+      detail: "rate_limited",
+      ago: "-2 hours",
+    });
+    const next = await deliver(prEvent({ action: "synchronize", sha: SHA_B }));
+    expect(next.body).toMatchObject({ dispatched: true, reason: "dispatched" });
   });
 });
 
@@ -1977,13 +1869,13 @@ describe("a failure after the row exists", () => {
   }
 
   test("is recorded as a dispatch that did not happen, and a redelivery runs the review", async () => {
+    // The statement that reads the row back after the insert, before anything is handed over.
     const res = await deliverBroken(
-      (sql) => sql.includes("COUNT(*) AS n FROM pr_reviews"),
+      (sql) => sql.includes("FROM pr_reviews WHERE id = ?"),
       "d-late",
     );
     expect(res.status).toBe(500);
-    // Not left 'dispatched' with a live nonce, counting against the caps and waiting to be
-    // called late.
+    // Not left 'dispatched' with a live nonce and waiting to be called late.
     expect(rows()).toHaveLength(1);
     expect(rows()[0]).toMatchObject({ state: "errored", detail: "dispatch_failed", nonce: null });
     expect(dispatchesMade()).toHaveLength(0);
@@ -1999,7 +1891,7 @@ describe("a failure after the row exists", () => {
     // Everything after the insert fails, including the recording itself.
     const res = await deliverBroken(
       (sql) =>
-        sql.includes("COUNT(*) AS n FROM pr_reviews") || sql.includes("SET state = 'errored'"),
+        sql.includes("FROM pr_reviews WHERE id = ?") || sql.includes("SET state = 'errored'"),
       "d-late-2",
     );
     expect(res.status).toBe(500);
@@ -2447,76 +2339,6 @@ describe("the watchdog's deadline is the declared one", () => {
   });
 });
 
-describe("the allowances at their exact edges", () => {
-  const seedStranger = (n: number, over: Record<string, unknown> = {}) => {
-    for (let i = 0; i < n; i++) {
-      seedRow({
-        pr: 50 + i,
-        sha: `${i}`.padStart(40, "c"),
-        author: 777,
-        assoc: "NONE",
-        ago: "-5 hours",
-        ...over,
-      });
-    }
-  };
-  const stranger = (number: number, sha: string) =>
-    deliver(prEvent({ userId: 777, assoc: "NONE", number, sha }));
-
-  test("a stranger with five earlier today gets the sixth and not the seventh", async () => {
-    seedStranger(5);
-    expect((await stranger(90, "5".repeat(40))).body).toMatchObject({ dispatched: true });
-    expect((await stranger(91, "6".repeat(40))).body).toMatchObject({ reason: "rate_limited" });
-  });
-
-  test("a collaborator has one hundred a day and not one hundred and one", async () => {
-    for (let i = 0; i < 99; i++) {
-      seedRow({
-        pr: 200 + i,
-        sha: i.toString(16).padStart(8, "0").repeat(5),
-        author: 888,
-        assoc: "COLLABORATOR",
-        ago: "-5 hours",
-      });
-    }
-    const collab = (number: number, sha: string) =>
-      deliver(prEvent({ userId: 888, assoc: "COLLABORATOR", number, sha }));
-    expect((await collab(500, "7".repeat(40))).body).toMatchObject({ dispatched: true });
-    expect((await collab(501, "8".repeat(40))).body).toMatchObject({ reason: "rate_limited" });
-  });
-
-  test("the platform's four hundredth review of the day goes ahead and the next does not", async () => {
-    for (let i = 0; i < DAILY_REVIEW_CAP - 1; i++) {
-      seedRow({ pr: 1000 + i, sha: `${i}`.padStart(40, "b"), author: 20_000 + i, ago: "-3 hours" });
-    }
-    const next = (number: number, sha: string) =>
-      deliver(prEvent({ userId: 901, assoc: "COLLABORATOR", number, sha }));
-    expect((await next(5, "4".repeat(40))).body).toMatchObject({ dispatched: true });
-    expect((await next(6, "3".repeat(40))).body).toMatchObject({ reason: "daily_limit" });
-  });
-
-  test("a superseded commit does not use up an hourly allowance", async () => {
-    seedStranger(3, { state: "errored", detail: "stale_head", ago: "-10 minutes" });
-    expect((await stranger(99, "1".repeat(40))).body).toMatchObject({ dispatched: true });
-  });
-
-  test("a dispatch GitHub never ran does not use up an hourly allowance", async () => {
-    seedStranger(3, { state: "errored", detail: "dispatch_failed", ago: "-10 minutes" });
-    expect((await stranger(99, "1".repeat(40))).body).toMatchObject({ dispatched: true });
-  });
-
-  test("a decline on one pull request does not silence the decline on another", async () => {
-    seedStranger(3, { ago: "-10 minutes" });
-    const posted = () => checks().filter((c) => c.method === "POST").length;
-    const first = posted();
-    await stranger(70, "a1".repeat(20));
-    const afterFirst = posted();
-    expect(afterFirst).toBe(first + 1);
-    await stranger(71, "a2".repeat(20));
-    expect(posted()).toBe(afterFirst + 1);
-  });
-});
-
 describe("the Worker holds the datasets token and never approves or merges (ADR 0093)", () => {
   test("every GitHub call across a pass, a fail, a decline and a failed run is a dispatch, a check or a comment", async () => {
     const SHA_C = "c".repeat(40);
@@ -2530,8 +2352,11 @@ describe("the Worker holds the datasets token and never approves or merges (ADR 
     const errored = (await deliver(prEvent({ action: "synchronize", sha: SHA_C }))).body
       .review_id as number;
     await callback(errored, { outcome: "error", error: "workflow_failed" });
-    // A decline: a stranger over the hourly allowance.
-    for (let i = 0; i < 4; i++) {
+    // A decline: a contributor an administrator has blocked.
+    db.run(
+      "INSERT INTO pr_review_overrides (author_id, author_login, mode) VALUES (777, 'n', 'block')",
+    );
+    for (let i = 0; i < 2; i++) {
       await deliver(
         prEvent({ userId: 777, assoc: "NONE", number: 80 + i, sha: `${i + 1}`.repeat(40) }),
       );

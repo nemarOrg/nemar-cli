@@ -535,8 +535,26 @@ export function verdictOf(report: PrReviewReport): Verdict {
 // Outcome -> check-run
 // ---------------------------------------------------------------------------------------------
 
-/** Why a pull request was not sent to the model. */
-export const DECLINE_REASONS = ["contributor_paused", "rate_limited", "daily_limit"] as const;
+/**
+ * Why the Worker declines a pull request: its contributor is paused. Nothing else is a reason, and
+ * in particular no count of reviews, per contributor or per day, is one any more (ADR 0107).
+ */
+export const PRODUCED_DECLINE_REASONS = ["contributor_paused"] as const;
+
+/**
+ * Words rows written before the counts were removed still hold. They are never produced again and
+ * there is no migration: such a row keeps its word, and it parses and renders as "Not reviewed".
+ */
+export const HISTORICAL_DECLINE_REASONS = ["rate_limited", "daily_limit"] as const;
+
+/**
+ * Every word a stored declined row can hold: the migration's CHECK list, kept equal to it by a test.
+ * Only {@link PRODUCED_DECLINE_REASONS} is written by new code.
+ */
+export const DECLINE_REASONS = [
+  ...PRODUCED_DECLINE_REASONS,
+  ...HISTORICAL_DECLINE_REASONS,
+] as const;
 export type DeclineReason = (typeof DECLINE_REASONS)[number];
 
 /** Why a review ended without a report. Some are the Worker's own words (see the callback). */
@@ -627,13 +645,19 @@ const RESULT_WORD: Record<CriterionResult, string> = {
   unknown: "Could not tell",
 };
 
+/**
+ * What a declined pull request is told. `contributor_paused` does not say who paused the
+ * contributor: rows written before the automatic pause was removed hold the same word, and they are
+ * shown again whenever a stored result is re-stated. The two historical words are about a limit that
+ * no longer exists, so they say so and say what to do now, which is the same for both.
+ */
 const DECLINE_COPY: Record<DeclineReason, string> = {
   contributor_paused:
     "Automated review is paused for this contributor. A maintainer needs to review this one by hand.",
   rate_limited:
-    "Automated review is rate limited for this contributor right now. Push again later, or ask a maintainer to review it by hand.",
+    "Automated review was rate limited for this contributor when this commit arrived. That limit has since been removed. Push a new commit, or ask a NEMAR administrator to start the review.",
   daily_limit:
-    "The daily limit of automated reviews was reached. A maintainer needs to review this one by hand.",
+    "The daily limit of automated reviews had been reached when this commit arrived. That limit has since been removed. Push a new commit, or ask a NEMAR administrator to start the review.",
 };
 
 /**
@@ -882,7 +906,7 @@ export function renderComment(outcome: ReviewOutcome, headSha: string): string {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Who gets reviewed: the contributor tally and the rate caps.
+// Who gets reviewed: the contributor tally.
 // ---------------------------------------------------------------------------------------------
 
 /**
@@ -921,40 +945,6 @@ export function standingOf(tally: AuthorTally, override: AuthorOverride): Standi
   return { paused: false };
 }
 
-/** GitHub's `author_association` values that mark someone with a standing relationship to the repository. */
-const TRUSTED_ASSOCIATIONS: ReadonlySet<string> = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
-
-/**
- * Reviews one contributor may start per hour. Anyone GitHub does not mark as the repository's
- * owner, a member or a collaborator (a fork's author, or a past contributor) gets the small
- * allowance: any GitHub user can open a pull request on a public dataset, and each review costs
- * money.
- */
-export const HOURLY_REVIEW_CAP = { trusted: 20, other: 3 } as const;
-
-/** Reviews one contributor may start per day, so a few accounts cannot drain the platform's pool. */
-export const DAILY_AUTHOR_CAP = { trusted: 100, other: 6 } as const;
-
-/**
- * Reviews the whole platform starts per day, a ceiling on spend whatever else is true of the
- * reviews that are started. A delivery an owner or administrator is behind is not held to it
- * (ADR 0107): it is answered without a review, or, for a commit a review has already touched,
- * handled as for anyone and not held back by this.
- */
-export const DAILY_REVIEW_CAP = 400;
-
-export function hourlyCapFor(authorAssociation: string | null | undefined): number {
-  return authorAssociation && TRUSTED_ASSOCIATIONS.has(authorAssociation)
-    ? HOURLY_REVIEW_CAP.trusted
-    : HOURLY_REVIEW_CAP.other;
-}
-
-export function dailyAuthorCapFor(authorAssociation: string | null | undefined): number {
-  return authorAssociation && TRUSTED_ASSOCIATIONS.has(authorAssociation)
-    ? DAILY_AUTHOR_CAP.trusted
-    : DAILY_AUTHOR_CAP.other;
-}
-
 // ---------------------------------------------------------------------------------------------
 // The callback body
 // ---------------------------------------------------------------------------------------------
@@ -987,7 +977,7 @@ export function parseCallbackOutcome(
     }
   }
   // `dispatch_failed` is the Worker's own word for "GitHub never ran the workflow" and is retried
-  // on redelivery and refunded from the caps: a job must not be able to say it.
+  // on redelivery and not counted as a model call: a job must not be able to say it.
   return {
     kind: "error",
     error:

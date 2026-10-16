@@ -96,6 +96,7 @@ const LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 
 const DETAIL_WORDS: Record<string, string> = {
   contributor_paused: "contributor paused",
+  // The limits no longer exist; a row written while they did still says so.
   rate_limited: "rate limited",
   daily_limit: "daily limit",
   unreported: "never reported",
@@ -312,7 +313,7 @@ export function standingLines(s: ContributorStanding): string[] {
               ? "paused by a maintainer: their pull requests need a person"
               : "paused by the record: their pull requests need a person",
           )
-        : chalk.green("not paused: reviewed automatically, within the rate limits")
+        : chalk.green("not paused: reviewed automatically")
     }`,
   );
   if (s.recent.length > 0) {
@@ -426,8 +427,9 @@ REVIEW column (the automated review of the pull request's CURRENT commit):
   fail              the review found a problem; the author needs to change something
   uncertain         the review could not decide whether it is a good change
   not reviewed      no review of this commit is on record: the review is off, the contributor is
-                    paused or rate limited, or the review on record is of another commit (shown
-                    as "other commit")
+                    paused, or the review on record is of another commit (shown as "other
+                    commit"). A row from before the limits on reviews were removed can say rate
+                    limited or daily limit
   in progress       the review is running
   could not decide  the review ended without a verdict (an error, or it never reported)
   exempt (owner or admin)
@@ -915,7 +917,6 @@ function stopFor(assessed: { stop: Stop }): never {
 const NOT_STARTED: Record<string, string> = {
   duplicate: "this commit already has a review (running or finished)",
   contributor_paused: "the contributor is paused",
-  daily_limit: "the platform's daily pool of reviews is spent",
   exempt_author: "its author is a NEMAR owner or administrator, so it is not reviewed",
   draft: "it is a draft",
   not_open: "it is not open any more",
@@ -969,23 +970,20 @@ prReviewsCommand
 The automated review runs when GitHub tells the NEMAR API a pull request was opened or pushed to. A
 pull request that was already open when the review was switched on produced no such event, so it has
 no review until its author pushes again. This asks for one by name. The API reads the pull request
-from GitHub itself and runs it through the same gate as any other: the contributor pause and the
-platform's daily pool still apply, and a pull request opened by a NEMAR owner or administrator is
-not reviewed (its check is posted as skipped and nothing is started). What a start lifts is the
-per-contributor hourly and daily allowance, because you chose this one. A commit whose review was
-declined, ended in an error or never reported is started again, and so is one handed to GitHub more
-than 30 minutes ago that never came back; one that is running or has a result is not started again.
-A start that restarts a review that already cost a model call costs a second one, and counts as one
-against the daily pool.
+from GitHub itself and runs it through the same gate as any other: the contributor pause still
+applies, and a pull request opened by a NEMAR owner or administrator is not reviewed (its check is
+posted as skipped and nothing is started). No count of reviews holds a start back. A commit whose
+review was declined, ended in an error or never reported is started again, and so is one handed to
+GitHub more than 30 minutes ago that never came back; one that is running or has a result is not
+started again. A start that restarts a review that already cost a model call costs a second one.
 
   nemar admin pr-reviews start nm000108 12
   nemar admin pr-reviews start --all --dry-run
   nemar admin pr-reviews start --all --yes
 
 Each review is one model call. A paused contributor is asked about like any other and declined by the
-Worker, which says so; after 'allow', the same command starts it. --all leaves drafts out, asks
-before spending (--yes skips that), and stops when the daily pool is spent, exiting 1 so a script
-knows some were not tried.
+Worker, which says so; after 'allow', the same command starts it. --all leaves drafts out and asks
+before spending (--yes skips that).
 `,
   )
   .action(
@@ -1116,8 +1114,7 @@ async function startAll(options: {
     }
   }
   if (todo.length === 0) {
-    if (json)
-      console.log(JSON.stringify({ ...common, results: [], failed: 0, not_tried: 0 }, null, 2));
+    if (json) console.log(JSON.stringify({ ...common, results: [], failed: 0 }, null, 2));
     return;
   }
   if (options.dryRun) {
@@ -1146,9 +1143,7 @@ async function startAll(options: {
 
   const results: StartResult[] = [];
   let failed = 0;
-  let notTried = 0;
-  for (let i = 0; i < todo.length; i++) {
-    const e = todo[i];
+  for (const e of todo) {
     const label = `${e.dataset_id} #${e.pr_number}`;
     try {
       const r = await startPrReview(e.dataset_id, e.pr_number);
@@ -1157,11 +1152,6 @@ async function startAll(options: {
         console.log(
           `  ${label}  ${r.dispatched ? chalk.green(startedWord(r)) : chalk.yellow(notStartedText(r))}`,
         );
-      }
-      if (r.reason === "daily_limit") {
-        // The pool is the platform's, so the rest would be declined the same way.
-        notTried = todo.length - (i + 1);
-        break;
       }
     } catch (err) {
       failed++;
@@ -1178,7 +1168,7 @@ async function startAll(options: {
   }
 
   if (json) {
-    console.log(JSON.stringify({ ...common, results, failed, not_tried: notTried }, null, 2));
+    console.log(JSON.stringify({ ...common, results, failed }, null, 2));
   } else {
     const answered = results.filter(
       (r): r is StartReviewResponse & { dataset_id: string; pr_number: number } => "reason" in r,
@@ -1190,17 +1180,10 @@ async function startAll(options: {
     console.log(
       `${started} started, ${had} already had a review, ${other} not started, ${failed} failed`,
     );
-    if (notTried > 0) {
-      console.log(
-        chalk.yellow(
-          `Stopped: the platform's daily pool is spent, so ${notTried} were not tried. It counts the last 24 hours; run this again once reviews from then have aged out.`,
-        ),
-      );
-    }
     envNote(q.environment);
   }
   const faulted = results.some((r) => "reason" in r && !r.dispatched && START_FAULTS.has(r.reason));
-  if (failed > 0 || faulted || notTried > 0) process.exit(1);
+  if (failed > 0 || faulted) process.exit(1);
 }
 
 // -- approve ------------------------------------------------------------------------------------
@@ -1903,7 +1886,7 @@ function overrideCommand(mode: "allow" | "block"): void {
     .command(`${mode} <login>`)
     .description(
       mode === "allow"
-        ? "Review this contributor's pull requests even when their record would pause them (rate limits still apply)"
+        ? "Review this contributor's pull requests even when their record would pause them"
         : "Never review this contributor's pull requests automatically; each needs a person",
     )
     .option("--reason <text>", "Why, in plain words (up to 200 characters; kept with the decision)")
@@ -1937,7 +1920,7 @@ commit a review is already on record for is handled as before, a block included.
         console.log(
           mode === "allow"
             ? chalk.green(
-                `Allowed ${plain(r.standing.login)}: their pull requests are reviewed even when their record would pause them (rate limits still apply).`,
+                `Allowed ${plain(r.standing.login)}: their pull requests are reviewed even when their record would pause them.`,
               )
             : chalk.red(
                 `Blocked ${plain(r.standing.login)}: none of their pull requests is reviewed automatically; each needs a person.`,
