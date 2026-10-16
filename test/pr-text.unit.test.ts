@@ -52,6 +52,7 @@ import {
   describeTextProblem,
   findTextProblem,
   hasChangelogHeading,
+  inspectChangelog,
   localIsoDate,
   normalizeTitle,
   parsePorcelainPaths,
@@ -684,7 +685,8 @@ describe("writeChangelogEntry", () => {
 
   test("an entry in any change log counts, as the review reads them all as one", () => {
     const dir = dirWith({ CHANGES: "1.0.0 2026-01-01\n", "CHANGELOG.md": "## 1.0.1\n- Done.\n" });
-    expect(entry(dir).outcome).toBe("present");
+    // The line the author reads names the file that HAS the entry, not the one that would be written.
+    expect(entry(dir)).toEqual({ file: "CHANGELOG.md", outcome: "present" });
     expect(readFileSync(join(dir, "CHANGES"), "utf8")).toBe("1.0.0 2026-01-01\n");
   });
 
@@ -698,6 +700,51 @@ describe("writeChangelogEntry", () => {
     symlinkSync(join(dir, "target.txt"), join(dir, "CHANGES"));
     expect(() => entry(dir)).toThrow("CHANGES exists but is not a regular file");
     expect(readFileSync(join(dir, "target.txt"), "utf8")).toBe("1.0.0 2026-01-01\n");
+  });
+
+  test("a directory beside a regular change log is ignored, as the review ignores it", () => {
+    const dir = dirWith({ CHANGES: "1.0.0 2026-01-01\n", "CHANGELOG/keep.txt": "x\n" });
+    expect(entry(dir)).toEqual({ file: "CHANGES", outcome: "added" });
+  });
+
+  test("refuses a change log that is not valid UTF-8, and leaves its bytes alone", () => {
+    const dir = dirWith({});
+    const latin1 = Buffer.from("1.0.0 2026-01-01\n  - Caf\xe9 data by Ren\xe9\n", "latin1");
+    writeFileSync(join(dir, "CHANGES"), latin1);
+    expect(() => entry(dir)).toThrow("CHANGES is not valid UTF-8");
+    expect(readFileSync(join(dir, "CHANGES")).equals(latin1)).toBe(true);
+  });
+
+  test("refuses a change log that starts with a byte order mark, and leaves it alone", () => {
+    // The review reads a heading behind the mark as plain text, so an entry written above the
+    // old headings would not count, and one written below them would sit under the wrong release.
+    const withMark = "\uFEFF1.0.0 2026-01-01\n  - Initial release\n\n0.9.0 2025-01-01\n  - Older\n";
+    const dir = dirWith({ CHANGES: withMark });
+    expect(() => entry(dir)).toThrow("CHANGES starts with a byte order mark");
+    expect(readFileSync(join(dir, "CHANGES"), "utf8")).toBe(withMark);
+  });
+
+  test("an encoding it would not write into is no reason to refuse when the entry is there", () => {
+    const dir = dirWith({
+      CHANGES: "\uFEFF1.0.0 2026-01-01\n",
+      "CHANGELOG.md": "## 1.0.1\n- Done.\n",
+    });
+    expect(entry(dir)).toEqual({ file: "CHANGELOG.md", outcome: "present" });
+  });
+
+  test("inspectChangelog reads the state and writes nothing", () => {
+    const dir = dirWith({ CHANGES: "1.0.0 2026-01-01\n", "CHANGES.md": "## 1.0.1\n" });
+    expect(inspectChangelog(dir, "1.0.1")).toEqual({
+      file: "CHANGES",
+      text: "1.0.0 2026-01-01\n",
+      presentIn: "CHANGES.md",
+    });
+    expect(inspectChangelog(dir, "1.0.2").presentIn).toBeNull();
+    expect(readFileSync(join(dir, "CHANGES"), "utf8")).toBe("1.0.0 2026-01-01\n");
+
+    const none = dirWith({ "README.md": "# x\n" });
+    expect(inspectChangelog(none, "1.0.1")).toEqual({ file: null, text: null, presentIn: null });
+    expect(existsSync(join(none, "CHANGES"))).toBe(false);
   });
 
   test("says in a line what it did", () => {
@@ -1197,6 +1244,74 @@ describe("nemar dataset update opens a pull request a person can read", () => {
     expect(body).toContain("- `dataset_description.json` (modified)");
     expect(body).toContain("- `sub-04/`: 25 files (25 added)");
     expect(body).not.toContain("run-");
+  });
+});
+
+describe("nemar dataset update looks at the change log before it changes anything", () => {
+  const said = (r: Run) => r.stdout + r.stderr;
+
+  /** A clone whose change log is made by `make`, with a README edit for `update` to describe. */
+  function cloneWithChangelog(make: (work: string) => void): { work: string; remote: string } {
+    const clone = newClone();
+    make(clone.work);
+    git(clone.work, "add", "-A");
+    git(clone.work, "commit", "-q", "-m", "add the change log");
+    git(clone.work, "push", "-q", "origin", "main");
+    write(clone.work, "README.md", "# Resting EEG, revised\n");
+    return clone;
+  }
+
+  async function refusedWithNothingChanged(work: string, remote: string, why: string) {
+    const r = await runNemar(
+      [
+        "dataset",
+        "update",
+        "--yes",
+        "--branch",
+        "update/pr-text-changelog",
+        "-m",
+        GOOD_TITLE,
+        "--description",
+        GOOD_DESCRIPTION,
+      ],
+      work,
+    );
+    expect(r.exitCode, said(r)).toBe(1);
+    expect(said(r)).toContain(why);
+    expect(said(r)).toContain("Nothing was changed.");
+    // The work tree is as the author left it: no branch, no version bump, no push, no pull request.
+    expect(git(work, "branch", "--show-current")).toBe("main");
+    const written = JSON.parse(readFileSync(join(work, "dataset_description.json"), "utf8"));
+    expect(written.Version).toBe("1.0.0");
+    expect(gitRaw(work, "status", "--porcelain")).toBe(" M README.md\n");
+    expect(git(remote, "for-each-ref", "--format=%(refname)", "refs/heads")).toBe(
+      "refs/heads/main",
+    );
+    expect(ghArgs()).toBeNull();
+    // A verdict about the dataset, not a bug in the CLI: no invitation to file one.
+    expect(r.stderr).not.toContain("attach the log");
+  }
+
+  test("a change log that is a link stops the command before it branches or bumps", async () => {
+    const { work, remote } = cloneWithChangelog((w) => {
+      write(w, "target.txt", "1.0.0 2026-01-01\n");
+      symlinkSync("target.txt", join(w, "CHANGES"));
+    });
+    await refusedWithNothingChanged(work, remote, "CHANGES exists but is not a regular file");
+  });
+
+  test("a change log in another encoding stops the command, and its bytes stay as they were", async () => {
+    const latin1 = Buffer.from("1.0.0 2026-01-01\n  - Caf\xe9 data by Ren\xe9\n", "latin1");
+    const { work, remote } = cloneWithChangelog((w) => writeFileSync(join(w, "CHANGES"), latin1));
+    await refusedWithNothingChanged(work, remote, "CHANGES is not valid UTF-8");
+    expect(readFileSync(join(work, "CHANGES")).equals(latin1)).toBe(true);
+  });
+
+  test("a change log that starts with a byte order mark stops the command", async () => {
+    const { work, remote } = cloneWithChangelog((w) =>
+      write(w, "CHANGES", "\uFEFF1.0.0 2026-01-01\n  - Initial release\n"),
+    );
+    await refusedWithNothingChanged(work, remote, "CHANGES starts with a byte order mark");
   });
 });
 

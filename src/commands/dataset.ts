@@ -203,6 +203,7 @@ import {
   describeChangelogWrite,
   describeTextProblem,
   findTextProblem,
+  inspectChangelog,
   localIsoDate,
   parsePorcelainPaths,
   parseStagedChanges,
@@ -3628,6 +3629,19 @@ Examples:
         `  ${chalk.bold("Version bump:")} ${currentVersion} -> ${chalk.green(newVersion)}`,
       );
 
+      // A change log the entry cannot safely go into is found now, before the prompts and before
+      // anything is changed. Once the branch exists and the version is bumped, a refusal would
+      // leave the work tree half changed, and a second run would bump the version again.
+      try {
+        inspectChangelog(workDir, newVersion);
+      } catch (error) {
+        console.log(chalk.red(`Error: Cannot update the change log: ${errorDetail(error)}`));
+        console.log(chalk.dim("  Nothing was changed."));
+        // The state of the dataset, not a bug in the CLI: no invitation to file one.
+        markReportedExit();
+        process.exit(1);
+      }
+
       // At a terminal, ask for whatever the command line left out; every other path already
       // holds both (requirePrText refused the run above otherwise).
       const { title, description } = await askForPrText(givenText);
@@ -3676,14 +3690,11 @@ Examples:
       writeFileSync(descPath, `${JSON.stringify(descContent, null, 2)}\n`);
 
       // The change log gets the entry the review looks for: a heading for the new version, with
-      // the author's own title under it. Before the commit, so it is part of it.
-      try {
-        const entry = writeChangelogEntry(workDir, newVersion, title, localIsoDate(new Date()));
-        console.log(chalk.dim(`  ${describeChangelogWrite(entry, newVersion)}`));
-      } catch (error) {
-        console.log(chalk.red(`Error: Could not update the change log: ${errorDetail(error)}`));
-        process.exit(1);
-      }
+      // the author's own title under it. Before the commit, so it is part of it. Everything that
+      // can be refused was refused by inspectChangelog above; an error from the write itself is an
+      // unexpected I/O failure and is reported as one by the top-level handler.
+      const entry = writeChangelogEntry(workDir, newVersion, title, localIsoDate(new Date()));
+      console.log(chalk.dim(`  ${describeChangelogWrite(entry, newVersion)}`));
 
       // Stage all changes and commit
       const commitSpinner = ora("Committing changes...").start();

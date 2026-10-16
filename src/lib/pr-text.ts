@@ -397,7 +397,7 @@ export function addChangelogEntry(
 export type ChangelogOutcome = "created" | "added" | "present";
 
 export interface ChangelogWrite {
-  /** The change log's name at the dataset root. */
+  /** The change log the outcome is about: the one written to, or the one that has the entry. */
   file: string;
   outcome: ChangelogOutcome;
 }
@@ -418,11 +418,80 @@ function changelogRank(name: string): [number, number, string] {
   return [/^changes/i.test(name) ? 0 : 1, name.includes(".") ? 1 : 0, name];
 }
 
+function byChangelogPreference(a: string, b: string): number {
+  const [ra, rb] = [changelogRank(a), changelogRank(b)];
+  return ra[0] - rb[0] || ra[1] - rb[1] || (ra[2] < rb[2] ? -1 : ra[2] > rb[2] ? 1 : 0);
+}
+
+/** What the dataset's change logs say, read the way the review reads them. */
+export interface ChangelogState {
+  /** The change log an entry would be added to, or null when the dataset has none. */
+  file: string | null;
+  /** That file's text as the review reads it (a byte order mark stays a character), or null. */
+  text: string | null;
+  /** The first change log that already has a heading for the version, or null. */
+  presentIn: string | null;
+}
+
+function refuseUnsafeEncoding(name: string, bytes: Uint8Array): void {
+  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    throw new Error(
+      `${name} starts with a byte order mark, which the review cannot read past; save it as UTF-8 without one and run this again`,
+    );
+  }
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error(
+      `${name} is not valid UTF-8, so adding the entry would damage it; convert it to UTF-8 and run this again`,
+    );
+  }
+}
+
+/**
+ * Read the dataset's change logs without changing anything, and refuse what an entry cannot safely
+ * be added to. A command calls this before it creates a branch or touches a file, so a refusal
+ * costs the author nothing; {@link writeChangelogEntry} calls it again before it writes.
+ *
+ * It throws when
+ *  - the only change log names at the root are not regular files (a directory, or a link such as a
+ *    locked annexed file): the review ignores them, and a second change log beside one the author
+ *    put there on purpose is not this command's call;
+ *  - the change log the entry would go into is not valid UTF-8: rewriting it would damage its text;
+ *  - or that change log starts with a byte order mark: the review reads a heading after one as
+ *    plain text, so the new heading would not count.
+ * A directory or a link BESIDE a regular change log is ignored, as the review ignores it. A change
+ * log set that already has the version's heading is left alone, whatever its encoding.
+ */
+export function inspectChangelog(dir: string, version: string): ChangelogState {
+  const candidates = readdirSync(dir).filter((name) => CHANGELOG_FILE.test(name));
+  const regular = candidates
+    .filter((name) => lstatSync(join(dir, name)).isFile())
+    .sort(byChangelogPreference);
+  const blocked = candidates.find((name) => !regular.includes(name));
+  if (regular.length === 0 && blocked !== undefined) {
+    throw new Error(
+      `${blocked} exists but is not a regular file (a link or a directory), so the entry cannot be added; replace it with a regular file and run this again`,
+    );
+  }
+
+  const files = regular.map((name) => ({ name, bytes: readFileSync(join(dir, name)) }));
+  const texts = files.map(({ bytes }) => bytes.toString("utf8"));
+  // The review reads every change log at the root as one text, so a heading in any of them counts.
+  const at = texts.findIndex((text) => hasChangelogHeading(text, version));
+  const primary = files[0];
+  if (primary !== undefined && at < 0) refuseUnsafeEncoding(primary.name, primary.bytes);
+  return {
+    file: primary?.name ?? null,
+    text: texts[0] ?? null,
+    presentIn: at < 0 ? null : (regular[at] ?? null),
+  };
+}
+
 /**
  * Write the entry for `version` into the dataset's change log: `CHANGES`, `CHANGES.md` and the like
- * if there is one, a new `CHANGES` (the BIDS name) if there is none. Throws when a name the review
- * would read as a change log is there but is not a regular file (a directory, a symbolic link into
- * the annex): writing through it, or beside it, would leave the review reading something else.
+ * if there is one, a new `CHANGES` (the BIDS name) if there is none. An entry the author wrote
+ * first is left alone. Throws what {@link inspectChangelog} throws, before writing anything.
  */
 export function writeChangelogEntry(
   dir: string,
@@ -430,27 +499,11 @@ export function writeChangelogEntry(
   item: string,
   isoDate: string,
 ): ChangelogWrite {
-  const candidates = readdirSync(dir).filter((name) => CHANGELOG_FILE.test(name));
-  const regular = candidates
-    .filter((name) => lstatSync(join(dir, name)).isFile())
-    .sort((a, b) => {
-      const [ra, rb] = [changelogRank(a), changelogRank(b)];
-      return ra[0] - rb[0] || ra[1] - rb[1] || (ra[2] < rb[2] ? -1 : ra[2] > rb[2] ? 1 : 0);
-    });
-  const blocked = candidates.find((name) => !regular.includes(name));
-  if (regular.length === 0 && blocked !== undefined) {
-    throw new Error(`${blocked} exists but is not a regular file, so the entry cannot be added`);
-  }
-
-  const texts = regular.map((name) => readFileSync(join(dir, name), "utf8"));
-  const primary = regular[0];
-  // The review reads every change log at the root as one text, so an entry in any of them counts.
-  if (primary !== undefined && texts.some((text) => hasChangelogHeading(text, version))) {
-    return { file: primary, outcome: "present" };
-  }
-  const file = primary ?? "CHANGES";
-  writeFileSync(join(dir, file), addChangelogEntry(texts[0] ?? null, version, item, isoDate));
-  return { file, outcome: primary === undefined ? "created" : "added" };
+  const state = inspectChangelog(dir, version);
+  if (state.presentIn !== null) return { file: state.presentIn, outcome: "present" };
+  const file = state.file ?? "CHANGES";
+  writeFileSync(join(dir, file), addChangelogEntry(state.text, version, item, isoDate));
+  return { file, outcome: state.file === null ? "created" : "added" };
 }
 
 /** Today as `YYYY-MM-DD` on the author's own calendar. */
