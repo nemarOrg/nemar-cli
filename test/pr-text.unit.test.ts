@@ -117,6 +117,26 @@ const CASES: Record<TextProblemCode, { refused: [TextKind, string][]; passes: st
       ["description", "n/a"],
       ["description", "Lorem ipsum dolor sit amet"],
       ["title", "title"],
+      // Each word that stands in for text has a case of its own.
+      ["title", "todo"],
+      ["title", "FIXME"],
+      ["title", "tba"],
+      ["description", "N/A"],
+      ["title", "na"],
+      ["title", "none"],
+      ["title", "null"],
+      ["title", "undefined"],
+      ["title", "untitled"],
+      ["description", "placeholder"],
+      ["description", "description"],
+      ["title", "message"],
+      ["description", "summary"],
+      ["description", "text"],
+      ["title", "test"],
+      ["title", "testing"],
+      ["title", "asdf"],
+      ["title", "XXXX"],
+      ["title", "Update from branch"],
     ],
     passes: [
       "Save changes to the channel locations after re-digitizing",
@@ -137,6 +157,7 @@ const CASES: Record<TextProblemCode, { refused: [TextKind, string][]; passes: st
       ["title", "<insert title>"],
       ["description", "FirstAuthorSurname"],
       ["title", "Rename it to year-keyword-paperDOI"],
+      ["description", "paperDOI"],
     ],
     passes: [
       // BIDS field and label names are CamelCase by specification: the vocabulary of an update.
@@ -920,6 +941,12 @@ function configDir(signedIn: boolean): string {
   return dir;
 }
 
+/** The zone this process computes dates in, which a child must share to agree on the day. */
+function zoneOfThisProcess(): string {
+  const set = process.env.TZ;
+  return set && set !== "undefined" ? set : Intl.DateTimeFormat().resolvedOptions().timeZone;
+}
+
 /** What the CLI is run with: nothing inherited that could point it at a real service or account. */
 function cleanEnv(config: string, term = "dumb"): Record<string, string> {
   return {
@@ -930,6 +957,9 @@ function cleanEnv(config: string, term = "dumb"): Record<string, string> {
     NEMAR_NO_UPDATE_CHECK: "1",
     NO_COLOR: "1",
     TERM: term,
+    // The CHANGES date is the author's calendar day. Other suites in a shared `bun test` process
+    // change this process's zone, so the child is given the zone the test computes its dates in.
+    TZ: zoneOfThisProcess(),
     GIT_AUTHOR_NAME: "t",
     GIT_AUTHOR_EMAIL: "t@example.org",
     GIT_COMMITTER_NAME: "t",
