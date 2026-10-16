@@ -17100,8 +17100,7 @@ class TestLateOnsetThroughConvertOne(ConvertOneLocalCase):
         read by pyedflib (the reference reader), and the in-file events at the
         times the compliant file states, not shifted by the late onset. The
         streaming exporter carries no in-file annotations at all, on a compliant
-        recording as on this one, so there the twin is the oracle: both stores
-        must publish the same events, whatever that is."""
+        recording as on this one, so there both stores must publish none."""
         import numpy as np
         import pyedflib
 
@@ -17146,6 +17145,12 @@ class TestLateOnsetThroughConvertOne(ConvertOneLocalCase):
                     self.assertEqual(events, self.published_events(results[twin]["entry"]))
                     if path_name == "in-memory":
                         self.assertEqual(events, self.EVENTS)
+                    else:
+                        # The streaming exporter writes only the events table it is
+                        # handed (from events.tsv), never a file's own annotations,
+                        # so the compliant file and the late one both publish none
+                        # here. The events.tsv test below covers streamed events.
+                        self.assertEqual(events, ([], []))
 
     def test_events_tsv_events_reach_the_store_of_a_late_first_onset_recording(self):
         """On the streaming path the events come from the BIDS `events.tsv`, so
