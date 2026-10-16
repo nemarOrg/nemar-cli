@@ -1547,14 +1547,12 @@ def test_both_probe_paths_reach_the_same_verdict(
 
 @pytest.mark.parametrize("version", sorted(PROBE_VERDICTS))
 def test_the_driver_floor_agrees_with_the_setup_probe(version: str) -> None:
-    """setup()'s probe and generate_zarr.py's `final_release` read a version
-    twice, in two languages' worth of code. Wherever the probe lets a version
-    through the floor (in range, or above the cap), the driver must accept it
-    too, and wherever the probe refuses it as unreadable or a pre-release, the
-    driver must refuse it as well. They differ on exactly one band: the node's
-    floor sits above the driver's (the driver needs only what 1.2.11 added),
-    so a final release in [driver floor, node floor) is refused by setup() and
-    would be taken by the driver."""
+    """setup()'s probe in hallu-zarr.sh (which enforces [1.2.12, 1.2.13)) and
+    generate_zarr.py's `final_release` read a version twice, in two languages'
+    worth of code. Wherever the probe lets a version through the floor (in
+    range, or above the cap), the driver must accept it too, and wherever the
+    probe refuses it as below the floor, unreadable or a pre-release, the driver
+    must refuse it as well."""
     sys.path.insert(0, str(SCRIPT.parent))
     try:
         import generate_zarr  # type: ignore[import-not-found]
@@ -1563,13 +1561,10 @@ def test_the_driver_floor_agrees_with_the_setup_probe(version: str) -> None:
     release = generate_zarr.final_release(version)
     floor = generate_zarr.final_release(generate_zarr.SUBJECT_INFO_FLOOR)
     driver_accepts = release is not None and floor is not None and release >= floor
+    assert driver_accepts == (PROBE_VERDICTS[version] in (0, 4)), version
     # And the node's floor never admits a biosigIO the driver then refuses.
     node_floor = generate_zarr.final_release(_script_assignment("BIOSIGIO_FLOOR"))
     assert node_floor is not None and floor is not None and node_floor >= floor
-    in_gap = release is not None and floor <= release < node_floor
-    if in_gap:
-        assert PROBE_VERDICTS[version] == 3, f"{version} is below the node floor"
-    assert driver_accepts == (PROBE_VERDICTS[version] in (0, 4) or in_gap), version
 
 
 def _calls_for(qpy_calls, subcommand: str) -> list[str]:

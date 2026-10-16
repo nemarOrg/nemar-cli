@@ -17,8 +17,9 @@ detection, annex-content materialization, S3 sync, and the index.
 A store holds the data, the events, channel names, types and units, and
 technical recording metadata, and never the subject (#1626). Every store is
 written through ``write_store``, which has biosigIO leave subject and operator
-information out (``exclude_subject_info``, biosigio>=1.2.11), and ``main``
-refuses to convert on a biosigIO that cannot. Subject information stays at
+information out (``exclude_subject_info``, added in biosigio 1.2.11), and ``main``
+refuses to convert on a biosigIO below ``SUBJECT_INFO_FLOOR`` (1.2.12) or one that
+cannot. Subject information stays at
 dataset scope, in ``participants.tsv``.
 
 Design notes
@@ -8373,12 +8374,18 @@ def _recording_size_bytes(primary_local: str) -> int:
 #     writer is referenced anywhere else.
 #   * `sync_store`, the one upload, runs the same read-back on the bytes it is
 #     about to upload, after every later rewrite of the root.
-#   * hallu-zarr.sh's setup() refuses an installed biosigIO below 1.2.11.
+#   * hallu-zarr.sh's setup() refuses an installed biosigIO below 1.2.12.
 #
 # `fix_source_file_attr` still rewrites `source_file` afterwards: biosigIO now
 # leaves the scratch file's name there instead of its whole path, and the
 # converter replaces it with the BIDS path the index keys the store by.
-SUBJECT_INFO_FLOOR = "1.2.11"
+# The converter's biosigIO floor, equal to hallu-zarr.sh's BIOSIGIO_FLOOR
+# (test_hallu_zarr_config.py compares them). 1.2.11 added the option above, which
+# is where the name comes from. 1.2.12 types a streamed EDF/BDF refusal itself
+# (`CorruptFileError`), and `failure_verdict` no longer reads a bare `OSError`'s
+# text, so a 1.2.11 run would take every streamed refusal for the node's fault and
+# retry it until `retry_exhausted`.
+SUBJECT_INFO_FLOOR = "1.2.12"
 SUBJECT_INFO_OPTION = "exclude_subject_info"
 SUBJECT_INFO_EXCLUDED_ATTR = "subject_info_excluded"
 # The writers that put a store on disk, by the names `biosigio_subject_info_problems`
