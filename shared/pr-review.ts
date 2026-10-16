@@ -541,6 +541,7 @@ export function verdictOf(report: PrReviewReport): Verdict {
  * count of rejections is one any more (ADR 0107).
  */
 export const PRODUCED_DECLINE_REASONS = ["contributor_paused"] as const;
+export type ProducedDeclineReason = (typeof PRODUCED_DECLINE_REASONS)[number];
 
 /**
  * Words rows written before the counts were removed still hold. They are never produced again and

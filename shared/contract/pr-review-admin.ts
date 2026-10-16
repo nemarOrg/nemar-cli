@@ -64,15 +64,10 @@ export type QueueVerdict = (typeof QUEUE_VERDICTS)[number];
  */
 export type StoredVerdict = Exclude<QueueVerdict, "exempt">;
 
-/** Every {@link StoredVerdict}, in the order a person reads them: what was decided, then what was not. */
-export const STORED_VERDICTS: readonly StoredVerdict[] = [
-  "pass",
-  "fail",
-  "uncertain",
-  "could_not_decide",
-  "in_progress",
-  "not_reviewed",
-];
+/** Every {@link StoredVerdict}: the queue's own words but `exempt`, so a word added there is counted too. */
+export const STORED_VERDICTS: readonly StoredVerdict[] = QUEUE_VERDICTS.filter(
+  (v): v is StoredVerdict => v !== "exempt",
+);
 
 /** A verdict that means the review READ a commit and concluded something about it. */
 export type ReadVerdict = "pass" | "fail" | "uncertain";

@@ -51,8 +51,8 @@ import {
   type AuthorOverride,
   type AuthorTally,
   type CallbackOutcome,
-  type DeclineReason,
   PrReviewReportError,
+  type ProducedDeclineReason,
   type ReviewOutcome,
   type ReviewState,
   type StoredOutcome,
@@ -547,7 +547,11 @@ export async function publishOutcome(
  * message that never changes. A decline is published the first time; the same decline for the
  * same pull request within the hour is recorded without being published again.
  */
-async function publishDecline(env: Bindings, row: ReviewRow, reason: DeclineReason): Promise<void> {
+async function publishDecline(
+  env: Bindings,
+  row: ReviewRow,
+  reason: ProducedDeclineReason,
+): Promise<void> {
   const repeat = await env.DB.prepare(
     `SELECT 1 AS ok FROM pr_reviews
       WHERE dataset_id = ? AND pr_number = ? AND state = 'declined' AND detail = ?
