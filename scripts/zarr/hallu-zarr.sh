@@ -873,6 +873,10 @@ setup() {
   # store serves the importer's unit where the sidecar declares another. On 1.2.10
   # no writer can leave subject information out of a store; generate_zarr.py
   # would refuse every dataset with exit 78, so stop here once instead (#1626).
+  # On 1.2.11 a streamed EDF/BDF refusal is a bare OSError, which the converter
+  # no longer reads by its text (the former bare-OSError text match is gone), so
+  # it becomes an uncoded retry as if the node were at fault, until
+  # `retry_exhausted`.
   # And it must be BELOW the cap, and a final release: see BIOSIGIO_FLOOR_PROBE.
   local installed probe_rc=0
   installed="$(VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" -c "$BIOSIGIO_FLOOR_PROBE" "$BIOSIGIO_FLOOR" "$BIOSIGIO_CAP" 2>&1)" || probe_rc=$?
