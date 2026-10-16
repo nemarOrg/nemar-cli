@@ -283,8 +283,10 @@ describe("what it is allowed to hold", () => {
 describe("what runs after the mint is not install-time code", () => {
   // `create-github-app-token` is the one step given the GitHub App's private key, and the runner
   // passes the same inputs to the action's post step at the end of the job. The order and the flag
-  // below close hooks planted before the mint and install-time code; the workflow's header says
-  // which of run-publication-review.yml's closures that is. The assertions follow that file's.
+  // below are what the workflow's header says closes three things: hooks planted before the mint,
+  // install-time scripts, and a token in a configuration file that the install could read. The
+  // checkout, Bun and the install run after the mint and before the fetch step writes the dataset
+  // token to the clone's configuration, and the install runs no lifecycle script.
   const MINT = "Mint a read-only token for the dataset repository";
   const FETCH = "Fetch the pull request as git data";
   const READ = "Read the pull request from the API";
@@ -294,18 +296,18 @@ describe("what runs after the mint is not install-time code", () => {
   const names = job.steps.map((s) => s.name);
   const at = (n: string) => names.indexOf(n);
 
-  test("the steps are in the order that keeps code from the tool checkout away from the mint", () => {
+  test("the steps are in the order that puts the tool checkout after the mint and the install before the fetch", () => {
     expect(names).toEqual([
       "Mask the callback token",
       "Validate the dispatch",
       "Claim the review",
       "Check the federation configuration",
       MINT,
-      FETCH,
-      READ,
       CHECKOUT,
       "Set up Bun",
       INSTALL,
+      FETCH,
+      READ,
       OIDC,
       "Review",
       "Report that the job failed",
@@ -327,11 +329,20 @@ describe("what runs after the mint is not install-time code", () => {
     expect(JSON.stringify(wf)).not.toContain('"defaults"');
   });
 
-  test("the mint and the two repository reads come before the checkout, Bun, the install and any `bun run`", () => {
-    for (const later of [CHECKOUT, "Set up Bun", INSTALL, OIDC, "Review"]) {
+  test("the mint comes before the checkout, Bun and the install, and the install comes before the fetch", () => {
+    for (const later of [CHECKOUT, "Set up Bun", INSTALL, FETCH, READ, OIDC, "Review"]) {
       expect(at(later), later).toBeGreaterThan(at(MINT));
-      expect(at(later), later).toBeGreaterThan(at(FETCH));
-      expect(at(later), later).toBeGreaterThan(at(READ));
+    }
+    // The fetch step is the one that writes the dataset token to the clone's configuration, so the
+    // install is over before the token is on disk, and no step that is handed the token comes
+    // before the install.
+    const writers = job.steps.filter((s) => /\bgit config\b[^\n]*extraheader/.test(s.run ?? ""));
+    expect(writers.map((s) => s.name)).toEqual([FETCH]);
+    expect(at(INSTALL)).toBeLessThan(at(FETCH));
+    for (const s of job.steps) {
+      if (JSON.stringify(s).includes("steps.app-token.outputs.token")) {
+        expect(at(s.name ?? ""), s.name).toBeGreaterThan(at(INSTALL));
+      }
     }
     // And no step before the mint holds anything of the repository's: no tool directory, no Bun,
     // no checkout.
@@ -496,6 +507,16 @@ describe("nothing from the pull request runs", () => {
       expect(JSON.stringify(inputs), environment).not.toContain("${{");
     }
     expect(inputsFor("dev")).toEqual(inputsFor("production"));
+    // No `ref` input anywhere in the job is anything but main, and no step names a dev branch in
+    // another form (a refspec, an `origin/dev`, an `@dev` on an action). The only `dev` left in the
+    // job is the environment value the validate step accepts and the origin table keyed by it.
+    const refInputs = job.steps.flatMap((s) =>
+      s.with && "ref" in s.with ? [String(s.with.ref)] : [],
+    );
+    expect(refInputs).toEqual(["main"]);
+    expect(JSON.stringify(job)).not.toMatch(
+      /refs\/heads\/dev\b|\borigin\/dev\b|@dev\b|\bref["']?\s*[:=]\s*["']?dev\b/,
+    );
   });
 });
 
@@ -662,6 +683,36 @@ describe("the shell steps, run for real", () => {
     expect(r.status).not.toBe(0);
     expect(r.envFile).toBe("");
     expect(existsSync(join(r.dir, "pwned"))).toBe(false);
+  });
+
+  test("validate: exactly production and dev get past it", async () => {
+    // The guard is an exact allowlist of the two names the origin table is keyed by. The probes are
+    // the near misses a looser comparison would let through (case, padding, a trailing newline)
+    // and plain wrong values.
+    const probes = [
+      "production",
+      "dev",
+      "DEV",
+      "Production",
+      "dev ",
+      " dev",
+      "dev\n",
+      "staging",
+      "main",
+      "",
+    ];
+    const accepted: string[] = [];
+    for (const environment of probes) {
+      const r = await runStepScript("Validate the dispatch", { ...GOOD, ENVIRONMENT: environment });
+      if (r.status === 0) {
+        accepted.push(environment);
+      } else {
+        // Refused by the guard that names the environment, not by a later line that happens to
+        // fail: a script that stops on an unbound variable would also exit non-zero.
+        expect(r.stdout, JSON.stringify(environment)).toContain("::error::malformed environment");
+      }
+    }
+    expect(accepted).toEqual(["production", "dev"]);
   });
 
   /** Validate, then hand the claim step the stand-in's origin as the real job would see it. */
