@@ -387,9 +387,11 @@ sys.exit(code)
 # an EDF+C or BDF+C recording whose first time-keeping onset is late
 # (biosigio#145), and 1.2.13 refuses a BrainVision data file whose header shows it
 # was cut short, with a typed `CorruptFileError`, where it used to read with the
-# tail dropped, and types a FIF file truncated in its data the same way. The
-# engine stamp did not move for any of them, and this pin does not move it (see
-# requirements.txt).
+# tail dropped. It types a FIF file truncated in its data the same way only
+# through `Recording.from_file`; the streaming export still raises a bare
+# `ValueError` for it (biosigio#161), so a streamed truncated FIF still ends in
+# `retry_exhausted`. The engine stamp did not move for any of them, and this pin
+# does not move it (see requirements.txt).
 # The `<1.2.14` half is a CAP, not a floor, raised deliberately per release; raise
 # it in all three places at once (requirements.txt, this default and
 # BIOSIGIO_FLOOR/BIOSIGIO_CAP, test_hallu_zarr_config.py).

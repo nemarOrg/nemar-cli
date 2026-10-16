@@ -187,11 +187,14 @@
 # ZARR_ENGINE_VERSION is NOT bumped here (ADR 0033): a bump is a separate,
 # owner-approved step.
 # >=1.2.13: a BrainVision data file whose header shows it was cut short is a typed
-# `CorruptFileError` on both the in-memory and the streaming path instead of a
-# silent read with the tail dropped, and a FIF file truncated in its data is typed
-# corrupt through `Recording.from_file`. A refusal is `corrupt_or_truncated`, which
-# `failure_verdict` already never retries. ZARR_ENGINE_VERSION is NOT bumped here
-# either (ADR 0033).
+# `CorruptFileError` (`corrupt_or_truncated`) on both the in-memory and the
+# streaming path, where it used to read with the tail dropped. Through
+# `Recording.from_file` a FIF file truncated in its data is typed
+# `corrupt_or_truncated` too, but the streaming export still raises a bare
+# `ValueError` for it (biosigio#161), which the converter reads as uncoded, so a
+# streamed truncated FIF is still retried until `retry_exhausted`. Which codes are
+# retried is `RETRYABLE_CODES` in generate_zarr.py. ZARR_ENGINE_VERSION is NOT
+# bumped here either (ADR 0033).
 # <1.2.14 is a CAP, not a floor, raised deliberately per release: a biosigIO
 # patch release has changed what a store contains or which recordings convert
 # five times in a row (1.2.9, 1.2.10, 1.2.11, 1.2.12, 1.2.13), so the next one is read
