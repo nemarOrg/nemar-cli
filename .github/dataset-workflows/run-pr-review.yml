@@ -79,7 +79,9 @@ jobs:
   review:
     name: Review
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Ends before the Worker's own deadline for a review (PR_REVIEW_DEADLINE_MINUTES in the
+    # backend); a test keeps the two in order.
+    timeout-minutes: 28
     permissions:
       contents: read
       id-token: write
