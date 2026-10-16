@@ -7,7 +7,11 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import type { ContributorStanding, QueueEntry } from "../shared/contract/pr-review-admin";
+import type {
+  ContributorStanding,
+  QueueEntry,
+  VolumeWindow,
+} from "../shared/contract/pr-review-admin";
 import {
   ageOf,
   plain,
@@ -16,6 +20,7 @@ import {
   standingLines,
   terminalize,
   verdictText,
+  volumeLines,
 } from "../src/commands/admin-pr-reviews";
 
 const ESC = String.fromCharCode(27);
@@ -293,6 +298,107 @@ describe("standingLines", () => {
   test("says where an identity came from when GitHub was not asked", () => {
     const text = standingLines(standing({ resolved_from: "history" })).join("\n");
     expect(text).toContain("from the Worker's records");
+  });
+});
+
+describe("volumeLines", () => {
+  const window = (over: Partial<VolumeWindow> = {}): VolumeWindow => ({
+    reviews: 14,
+    model_calls: 9,
+    by_verdict: {
+      pass: 5,
+      fail: 4,
+      uncertain: 0,
+      could_not_decide: 1,
+      in_progress: 0,
+      not_reviewed: 4,
+    },
+    declines: { contributor_paused: 1, rate_limited: 1, daily_limit: 2 },
+    ...over,
+  });
+  const text = (lines: string[]) => lines.map((l) => l.replace(ANSI, ""));
+
+  test("says in a sentence for each window what was recorded, what it cost and what it came to", () => {
+    const lines = text(
+      volumeLines({
+        last_24_hours: window({
+          reviews: 1,
+          model_calls: 1,
+          by_verdict: {
+            ...window().by_verdict,
+            pass: 1,
+            fail: 0,
+            could_not_decide: 0,
+            not_reviewed: 0,
+          },
+          declines: { contributor_paused: 0, rate_limited: 0, daily_limit: 0 },
+        }),
+        last_7_days: window(),
+      }),
+    );
+    expect(lines).toEqual([
+      "Review volume, for information only (no count limits reviews):",
+      "  Last 24 hours: 1 review recorded, 1 model call; 1 pass.",
+      "  Last 7 days:   14 reviews recorded, 9 model calls; 5 pass, 4 fail, 1 could not decide, 4 not reviewed (1 contributor paused, 1 rate limited, 2 daily limit).",
+    ]);
+  });
+
+  test("a window with nothing in it says so, and a count of zero is not left out of a real one", () => {
+    const quiet = window({
+      reviews: 0,
+      model_calls: 0,
+      by_verdict: {
+        pass: 0,
+        fail: 0,
+        uncertain: 0,
+        could_not_decide: 0,
+        in_progress: 0,
+        not_reviewed: 0,
+      },
+      declines: { contributor_paused: 0, rate_limited: 0, daily_limit: 0 },
+    });
+    const lines = text(volumeLines({ last_24_hours: quiet, last_7_days: window() }));
+    expect(lines[1]).toBe("  Last 24 hours: no reviews recorded.");
+    expect(lines[2]).toContain("14 reviews recorded");
+  });
+
+  test("a volume that could not be read is said, and an older server that sent none is not made to look empty", () => {
+    expect(text(volumeLines(null))).toEqual(["The review volume could not be read this time."]);
+    expect(volumeLines(undefined)).toEqual([]);
+  });
+
+  test("a count that is not a whole number is a question mark and never a zero", () => {
+    const broken = window({
+      by_verdict: { ...window().by_verdict, pass: Number.NaN, fail: -3 },
+    });
+    const lines = text(
+      volumeLines({ last_24_hours: broken, last_7_days: window({ reviews: 1.5 }) }),
+    );
+    expect(lines[1]).toContain("? pass, ? fail");
+    // A window whose own totals cannot be read is not guessed at.
+    expect(lines[2]).toBe("  Last 7 days:   could not be read.");
+  });
+
+  test("a word a newer server adds is shown as itself, cleaned, after the ones this version knows", () => {
+    const lines = text(
+      volumeLines({
+        last_24_hours: window({
+          by_verdict: { ...window().by_verdict, [`brilliant${HOSTILE}`]: 2 } as never,
+          declines: { ...window().declines, [`odd_reason${HOSTILE}`]: 1 } as never,
+        }),
+        last_7_days: window(),
+      }),
+    );
+    for (const l of lines) expect(DANGEROUS.test(l)).toBe(false);
+    expect(lines[1]).toContain("4 not reviewed (");
+    expect(lines[1]).toMatch(/, 2 brilliant\[2J\]0;titlexyzw$|, 2 brilliant\[2J\]0;titlexyzw\.$/);
+  });
+
+  test("no line is JSON, a hash or an escaped string: only counts, the list's own words and punctuation", () => {
+    const lines = text(volumeLines({ last_24_hours: window(), last_7_days: window() }));
+    for (const l of lines) {
+      expect(l).not.toMatch(/[{}"\\]|\b[0-9a-f]{12,}\b|\\u|_/);
+    }
   });
 });
 

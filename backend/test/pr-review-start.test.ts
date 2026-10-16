@@ -23,6 +23,7 @@ import { adminRoutes } from "../src/routes/admin";
 import webhooks from "../src/routes/webhooks";
 import { __resetRateLimitStateForTests } from "../src/services/github/transport";
 import { handlePullRequestEvent } from "../src/services/pr-review";
+import { readVolume } from "../src/services/pr-review-queue";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1, wrapD1 } from "./helpers/d1";
@@ -811,6 +812,24 @@ describe("a restart adds a model call to the row only when the earlier attempt s
     );
     expect((await start(DATASET, 7)).body).toMatchObject({ reason: "redispatched" });
     expect(rows().find((x) => x.pr_number === 7)).toMatchObject({ attempts: 3 });
+  });
+
+  test("the administrator's volume counts the second call: one record, two model calls", async () => {
+    seedReview(db, {
+      ds: DATASET,
+      n: 7,
+      sha: SHA_A,
+      state: "errored",
+      detail: "model_refused",
+      createdAt: now(),
+    });
+    pulls[`${DATASET}#7`] = restPull({});
+
+    await start(DATASET, 7);
+
+    const volume = await readVolume(realD1(db));
+    expect(volume.last_24_hours).toMatchObject({ reviews: 1, model_calls: 2 });
+    expect(volume.last_24_hours.by_verdict.in_progress).toBe(1);
   });
 
   test("a restart that the gate declines costs no call, and is not counted", async () => {

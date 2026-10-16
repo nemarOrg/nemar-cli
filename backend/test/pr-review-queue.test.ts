@@ -18,6 +18,7 @@ import type {
   PrReviewDetail,
   QueueResponse,
   SetOverrideResponse,
+  VolumeWindow,
 } from "../../shared/contract/pr-review-admin";
 import { renderCheck } from "../../shared/pr-review";
 import { adminRoutes } from "../src/routes/admin";
@@ -34,6 +35,7 @@ import {
   classify,
   filterQueue,
   readCheckContext,
+  readVolume,
   sortQueue,
 } from "../src/services/pr-review-queue";
 import { hashApiKey } from "../src/services/token";
@@ -1901,6 +1903,137 @@ describe("the detail view says why it has no live pull request", () => {
       live: null,
       live_status: "unreadable",
     });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The volume line (ADR 0107)
+// ---------------------------------------------------------------------------------------------
+
+describe("the volume of reviews in the list: information, never a gate", () => {
+  /** A stored timestamp `hours` ago, as D1 writes them. */
+  const ago = (hours: number) =>
+    new Date(Date.now() - hours * 3_600_000).toISOString().slice(0, 19).replace("T", " ");
+  const withAttempts = (n: number, attempts: number) =>
+    db.run("UPDATE pr_reviews SET attempts = ? WHERE dataset_id = 'nm000201' AND pr_number = ?", [
+      attempts,
+      n,
+    ]);
+  const seedAt = (
+    n: number,
+    hours: number,
+    r: Omit<Parameters<typeof seedReview>[0], "ds" | "n" | "createdAt">,
+  ) => seedReview({ ...r, ds: "nm000201", n, createdAt: ago(hours) });
+
+  function seedWeek() {
+    // The last 24 hours: ten records.
+    seedAt(1, 2, { state: "reported", verdict: "pass" });
+    seedAt(2, 2, { state: "reported", verdict: "fail" });
+    withAttempts(2, 2); // restarted once: two model calls
+    seedAt(3, 2, { state: "reported", verdict: "uncertain" });
+    seedAt(4, 2, { state: "declined", detail: "contributor_paused" });
+    seedAt(5, 2, { state: "errored", detail: "model_unavailable" });
+    seedAt(6, 2, { state: "errored", detail: "stale_head" });
+    seedAt(7, 2, { state: "errored", detail: "dispatch_failed" });
+    seedAt(8, 0, { state: "dispatched" });
+    seedAt(9, 2, { state: "unreported" });
+    // Handed over three hours ago and never reported: the list reads it as could not decide.
+    seedAt(10, 3, { state: "dispatched" });
+    // Just over a day ago, and three days ago: inside the week, outside the day.
+    seedAt(16, 30, { state: "reported", verdict: "fail" });
+    seedAt(11, 72, { state: "reported", verdict: "pass" });
+    seedAt(12, 72, { state: "declined", detail: "rate_limited" });
+    seedAt(13, 72, { state: "declined", detail: "daily_limit" });
+    seedAt(14, 72, { state: "declined", detail: "daily_limit" });
+    // A week and a half ago: just outside the week.
+    seedAt(15, 180, { state: "reported", verdict: "pass" });
+  }
+
+  const day: VolumeWindow = {
+    reviews: 10,
+    // pass 1 + fail 2 + uncertain 1 + model_unavailable 1 + running 1 + unreported 1 + overdue 1:
+    // a decline and the two runs that never reached the model cost none.
+    model_calls: 8,
+    by_verdict: {
+      pass: 1,
+      fail: 1,
+      uncertain: 1,
+      could_not_decide: 5,
+      in_progress: 1,
+      not_reviewed: 1,
+    },
+    declines: { contributor_paused: 1, rate_limited: 0, daily_limit: 0 },
+  };
+  const week: VolumeWindow = {
+    reviews: 15,
+    model_calls: 10,
+    by_verdict: {
+      pass: 2,
+      fail: 2,
+      uncertain: 1,
+      could_not_decide: 5,
+      in_progress: 1,
+      not_reviewed: 4,
+    },
+    declines: { contributor_paused: 1, rate_limited: 1, daily_limit: 2 },
+  };
+
+  test("the list carries the records and model calls of the last day and week, with verdicts and declines", async () => {
+    seedWeek();
+    const { status, body } = await queue();
+    expect(status).toBe(200);
+    expect(body.volume).toEqual({ last_24_hours: day, last_7_days: week });
+  });
+
+  test("it is the platform's, whatever the list is filtered to, and it is there when the list is empty", async () => {
+    seedWeek();
+    const filtered = await queue("?author=nobody&verdict=pass");
+    expect(filtered.body.entries).toEqual([]);
+    expect(filtered.body.volume).toEqual({ last_24_hours: day, last_7_days: week });
+  });
+
+  test("an empty history is zeros, which is a count, and not an unread volume", async () => {
+    const { body } = await queue();
+    expect(body.volume?.last_24_hours.reviews).toBe(0);
+    expect(body.volume?.last_7_days.model_calls).toBe(0);
+    expect(Object.values(body.volume?.last_7_days.by_verdict ?? {})).toEqual([0, 0, 0, 0, 0, 0]);
+    expect(Object.values(body.volume?.last_7_days.declines ?? {})).toEqual([0, 0, 0]);
+  });
+
+  test("a restart that spent a second call is counted as two calls and one record", async () => {
+    seedAt(2, 1, { state: "reported", verdict: "fail" });
+    withAttempts(2, 3);
+    const volume = await readVolume(realD1(db));
+    expect(volume.last_24_hours).toMatchObject({ reviews: 1, model_calls: 3 });
+  });
+
+  test("it never holds up the list: when it cannot be read the list is answered and says null, not zero", async () => {
+    seedWeek();
+    nodes({ ds: "nm000201", n: 1 });
+    envOverrides = {
+      DB: wrapD1(realD1(db), (sql) => {
+        if (sql.includes("AS in_day")) throw new Error("D1 is unavailable");
+      }),
+    };
+    const quiet = console.error;
+    const logged: string[] = [];
+    console.error = (...a: unknown[]) => void logged.push(a.map(String).join(" "));
+    try {
+      const { status, body } = await queue();
+      expect(status).toBe(200);
+      expect(body.entries).toHaveLength(1);
+      expect(body.volume).toBeNull();
+    } finally {
+      console.error = quiet;
+    }
+    expect(logged.join("\n")).toContain("[pr-queue] the volume could not be read");
+  });
+
+  test("the answer carries no author, title or text: counts and the fixed words only", async () => {
+    seedWeek();
+    const { body } = await queue();
+    expect(JSON.stringify(body.volume)).not.toMatch(/contributor"|alice|github\.com|nm0002/);
+    expect(Object.keys(body.volume ?? {}).sort()).toEqual(["last_24_hours", "last_7_days"]);
   });
 });
 

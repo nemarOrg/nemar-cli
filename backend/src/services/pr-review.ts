@@ -907,8 +907,12 @@ async function isRestartable(db: Db, row: ReviewRow, options: PrReviewOptions): 
   return overdue !== null;
 }
 
-/** Whether a row's attempt may have cost a model call: the complement of a decline or an attempt GitHub never ran. */
-function spentACall(row: ReviewRow): boolean {
+/**
+ * Whether a row's attempt may have cost a model call: the complement of a decline or an attempt
+ * GitHub never ran. A restart of a row that did adds a second call to its `attempts`, and the
+ * administrator's volume count sums `attempts` over the rows that did.
+ */
+export function spentACall(row: { state: string; detail: string | null }): boolean {
   if (row.state === "declined") return false;
   return !(
     row.state === "errored" &&

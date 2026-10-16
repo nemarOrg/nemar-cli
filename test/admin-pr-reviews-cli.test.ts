@@ -460,6 +460,7 @@ describe("nemar admin pr-reviews (list)", () => {
       truncated: true,
       skipped: { not_a_dataset: 0, not_owned_here: 0, unreadable: 2 },
       filters: { verdicts: [], dataset: null, author: null, needs_me: false },
+      volume: null,
     };
     apiOverride = (req) =>
       new URL(req.url).pathname === "/admin/pr-reviews" ? Response.json(queue) : null;
@@ -475,6 +476,77 @@ describe("nemar admin pr-reviews (list)", () => {
     expect(r.exitCode).toBe(1);
     expect(r.stdout).toBe("");
     expect(r.stderr).toContain("Not authenticated");
+  });
+
+  describe("the review volume", () => {
+    const hoursAgo = (h: number) =>
+      new Date(Date.now() - h * 3_600_000).toISOString().slice(0, 19).replace("T", " ");
+
+    /** Four records in the last day (one a decline) and one three days ago. */
+    function seedVolume() {
+      nodes({ ds: "nm000203", n: 4, author: "carol", authorId: 44 });
+      const at = (n: number, hours: number, r: Omit<Parameters<typeof seed>[0], "ds" | "n">) =>
+        seed({ ds: "nm000301", n, authorId: 42, login: "alice", createdAt: hoursAgo(hours), ...r });
+      at(1, 1, { state: "reported", verdict: "pass" });
+      at(2, 1, { state: "reported", verdict: "pass" });
+      at(3, 1, { state: "reported", verdict: "fail" });
+      at(4, 1, { state: "declined", detail: "contributor_paused" });
+      at(5, 72, { state: "reported", verdict: "pass" });
+    }
+
+    test("is printed after the list, in sentences, and says it is only information", async () => {
+      seedVolume();
+      const r = await cli(PR);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain(
+        [
+          "Review volume, for information only (no count limits reviews):",
+          "  Last 24 hours: 4 reviews recorded, 3 model calls; 2 pass, 1 fail, 1 not reviewed (1 contributor paused).",
+          "  Last 7 days:   5 reviews recorded, 4 model calls; 3 pass, 1 fail, 1 not reviewed (1 contributor paused).",
+        ].join("\n"),
+      );
+      // Sentences, not a dump: no JSON, no quoted keys, no underscored words.
+      const block = r.stdout.slice(r.stdout.indexOf("Review volume"));
+      expect(block).not.toMatch(/[{}"]|_/);
+    });
+
+    test("is in the --json answer as counts, and the list still prints without it being asked", async () => {
+      seedVolume();
+      const q = JSON.parse((await cli([...PR, "--json"])).stdout) as QueueResponse;
+      expect(q.volume?.last_24_hours).toMatchObject({
+        reviews: 4,
+        model_calls: 3,
+        by_verdict: { pass: 2, fail: 1, not_reviewed: 1 },
+        declines: { contributor_paused: 1, rate_limited: 0, daily_limit: 0 },
+      });
+      expect(q.volume?.last_7_days.reviews).toBe(5);
+    });
+
+    test("says when the Worker could not read it, and prints nothing for a server that sends none", async () => {
+      const base: QueueResponse = {
+        environment: "production",
+        review_enabled: true,
+        entries: [],
+        total_open: 0,
+        truncated: false,
+        skipped: { not_a_dataset: 0, not_owned_here: 0, unreadable: 0 },
+        filters: { verdicts: [], dataset: null, author: null, needs_me: false },
+        volume: null,
+      };
+      apiOverride = (req) =>
+        new URL(req.url).pathname === "/admin/pr-reviews" ? Response.json(base) : null;
+      const unread = await cli(PR);
+      expect(unread.exitCode).toBe(0);
+      expect(unread.stdout).toContain("The review volume could not be read this time.");
+
+      const { volume: _unsent, ...older } = base;
+      apiOverride = (req) =>
+        new URL(req.url).pathname === "/admin/pr-reviews" ? Response.json(older) : null;
+      const none = await cli(PR);
+      expect(none.exitCode).toBe(0);
+      expect(none.stdout).not.toContain("Review volume");
+      expect(none.stdout).not.toContain("could not be read this time");
+    });
   });
 
   test("a hostile title, branch or login cannot put a control sequence on the terminal", async () => {

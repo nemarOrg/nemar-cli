@@ -1,7 +1,8 @@
 /**
  * The wire shapes of the pull-request review queue's admin routes (ADR 0093, following ADR 0092):
  *
- *   GET    /admin/pr-reviews                      every open pull request to `main`, with its review
+ *   GET    /admin/pr-reviews                      every open pull request to `main`, with its review,
+ *                                                 and the volume of reviews over the last day and week
  *   GET    /admin/pr-reviews/:dataset/:pr         one pull request: the stored report, its history
  *   GET    /admin/pr-review-authors/:login        a contributor's record, override and standing
  *   PUT    /admin/pr-review-authors/:login        block a contributor, or lift a block (allow)
@@ -62,6 +63,16 @@ export type QueueVerdict = (typeof QUEUE_VERDICTS)[number];
  * say `exempt`; a review record and a history item may not.
  */
 export type StoredVerdict = Exclude<QueueVerdict, "exempt">;
+
+/** Every {@link StoredVerdict}, in the order a person reads them: what was decided, then what was not. */
+export const STORED_VERDICTS: readonly StoredVerdict[] = [
+  "pass",
+  "fail",
+  "uncertain",
+  "could_not_decide",
+  "in_progress",
+  "not_reviewed",
+];
 
 /** A verdict that means the review READ a commit and concluded something about it. */
 export type ReadVerdict = "pass" | "fail" | "uncertain";
@@ -148,6 +159,32 @@ export interface QueueFilters {
   needs_me: boolean;
 }
 
+/**
+ * What the review did over one window of time. Information for the administrator who reads the
+ * list, and never an input to a decision: no count here, or anywhere, decides whether a pull
+ * request is reviewed (ADR 0107).
+ */
+export interface VolumeWindow {
+  /** Review records created in the window. A commit started again counts as a new record. */
+  reviews: number;
+  /**
+   * Model calls those records cost, or may yet cost: the sum of their attempts, leaving out a
+   * decline and a run that never reached the model (a dispatch GitHub did not run, a commit a newer
+   * one superseded).
+   */
+  model_calls: number;
+  /** The records by what they came to, in the words the list uses. Every word is there, zero if unseen. */
+  by_verdict: Record<StoredVerdict, number>;
+  /** The declined records by their reason word. Every stored word is there, zero if unseen. */
+  declines: Record<DeclineReason, number>;
+}
+
+/** The volume of the last day and of the last week, counted from when each record was created. */
+export interface QueueVolume {
+  last_24_hours: VolumeWindow;
+  last_7_days: VolumeWindow;
+}
+
 export interface QueueResponse {
   environment: QueueEnvironment;
   /** The review itself is switched on in this environment (`PR_REVIEW_ENABLED`). */
@@ -160,6 +197,12 @@ export interface QueueResponse {
   truncated: boolean;
   skipped: QueueSkipped;
   filters: QueueFilters;
+  /**
+   * What the review has done lately across the whole platform, whatever the filters are. Null when
+   * it could not be read this time: informing never holds up the list, and an unread count is not
+   * a count of zero.
+   */
+  volume: QueueVolume | null;
 }
 
 /**

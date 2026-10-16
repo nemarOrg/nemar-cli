@@ -1,7 +1,8 @@
 /**
  * Admin routes for the dataset pull-request review queue (ADR 0093, following ADR 0092):
  *
- *   GET    /admin/pr-reviews                      every open pull request to `main`, with its review
+ *   GET    /admin/pr-reviews                      every open pull request to `main`, with its review,
+ *                                                 and the volume of reviews over the last day and week
  *   GET    /admin/pr-reviews/:dataset/:pr         one pull request: stored report, history, author
  *                                                 (`?head=<sha>` asks about that commit, not GitHub's)
  *   GET    /admin/pr-review-authors/:login        a contributor's record, override and standing

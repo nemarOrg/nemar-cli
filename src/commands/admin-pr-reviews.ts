@@ -26,8 +26,11 @@ import {
   type QueueEntry,
   type QueueResponse,
   type QueueVerdict,
+  type QueueVolume,
   type ReadVerdict,
+  STORED_VERDICTS,
   type StartReviewResponse,
+  type VolumeWindow,
 } from "../../shared/contract/pr-review-admin.js";
 import {
   type ReviewOutcome,
@@ -190,6 +193,78 @@ export function renderQueue(entries: QueueEntry[], now: number = Date.now()): st
       `${r.e.needs_you ? chalk.bold.cyan(r.mark) : r.mark} ${r.ds.padEnd(8)}  ${r.pr.padStart(wPr)}  ${r.author.padEnd(wAuthor)}  ${chalk.dim(r.from.padEnd(wFrom))}  ${verdictColor(r.e.verdict)(r.verdict.padEnd(wVerdict))}  ${checkCell(r.e.bids, 7)}  ${checkCell(r.e.version, 7)}  ${r.age.padStart(wAge)}  ${plain(r.e.url)}`,
   );
   return [header, ...lines];
+}
+
+// ---------------------------------------------------------------------------------------------
+// The volume line
+// ---------------------------------------------------------------------------------------------
+
+/** A count the server sent, or null when it is not a whole number of at least zero: unknown is never zero. */
+function countOf(n: unknown): number | null {
+  return typeof n === "number" && Number.isSafeInteger(n) && n >= 0 ? n : null;
+}
+
+/** "1 review", "2 reviews": a count and its noun, or "?" when the count could not be read. */
+function counted(n: unknown, one: string, many = `${one}s`): string {
+  const c = countOf(n);
+  return c === null ? `? ${many}` : `${c} ${c === 1 ? one : many}`;
+}
+
+/** The declined reviews as words, `2 contributor paused, 1 rate limited`, for the ones there are. */
+function declineWords(declines: Record<string, unknown> | undefined): string {
+  return Object.entries(declines ?? {})
+    .filter(([, n]) => countOf(n) !== 0)
+    .map(([word, n]) => `${countOf(n) ?? "?"} ${detailWord(word)}`)
+    .join(", ");
+}
+
+/**
+ * One window as a sentence, or null when what the server sent for it cannot be read.
+ * `5 reviews recorded, 6 model calls; 3 pass, 1 fail, 1 not reviewed (1 contributor paused)`.
+ */
+function volumeWindowText(w: VolumeWindow | null | undefined): string | null {
+  if (typeof w !== "object" || w === null) return null;
+  const reviews = countOf(w.reviews);
+  if (reviews === null || countOf(w.model_calls) === null) return null;
+  if (reviews === 0) return "no reviews recorded";
+  // The words the list uses, in the order a person reads them: what was decided, then what was
+  // not. A word a newer server adds is shown as itself after them, and a count that cannot be read
+  // is a question mark, never a zero.
+  const byVerdict: Record<string, unknown> =
+    typeof w.by_verdict === "object" && w.by_verdict !== null ? { ...w.by_verdict } : {};
+  const known: readonly string[] = STORED_VERDICTS;
+  const order = [...known, ...Object.keys(byVerdict).filter((k) => !known.includes(k))];
+  const parts: string[] = [];
+  for (const word of order) {
+    const n = byVerdict[word];
+    if (n === undefined || countOf(n) === 0) continue;
+    const text = `${countOf(n) ?? "?"} ${verdictWord(word)}`;
+    const why = word === "not_reviewed" ? declineWords(w.declines) : "";
+    parts.push(why ? `${text} (${why})` : text);
+  }
+  const head = `${counted(reviews, "review")} recorded, ${counted(w.model_calls, "model call")}`;
+  return parts.length > 0 ? `${head}; ${parts.join(", ")}` : head;
+}
+
+/**
+ * What the review has done lately, one line for each window, as the list prints it. Information
+ * only, and it says so: no count here limits a review (ADR 0107). Nothing at all when the server
+ * did not send one (an older server), and a plain note when it tried and could not read it, since
+ * an unread volume is not a volume of zero.
+ */
+export function volumeLines(volume: QueueVolume | null | undefined): string[] {
+  if (volume === undefined) return [];
+  if (volume === null) return [chalk.dim("The review volume could not be read this time.")];
+  const windows: Array<[string, VolumeWindow | null | undefined]> = [
+    ["Last 24 hours:", volume.last_24_hours],
+    ["Last 7 days:", volume.last_7_days],
+  ];
+  return [
+    chalk.dim("Review volume, for information only (no count limits reviews):"),
+    ...windows.map(
+      ([label, w]) => `  ${label.padEnd(15)}${plain(volumeWindowText(w) ?? "could not be read")}.`,
+    ),
+  ];
 }
 
 /**
@@ -580,6 +655,11 @@ prReviewsCommand
             `  ${q.skipped.not_a_dataset} pull request(s) in non-dataset repositories ignored.`,
           ),
         );
+      }
+      const volume = volumeLines(q.volume);
+      if (volume.length > 0) {
+        console.log();
+        for (const l of volume) console.log(l);
       }
       envNote(q.environment);
       if (lines.length > 0) {
