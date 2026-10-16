@@ -81,6 +81,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.request
 from collections.abc import Callable, Mapping, MutableMapping
 from concurrent.futures import (
@@ -3915,6 +3916,20 @@ def _edf_declared_channel_count(path: str) -> int | None:
     return sum(1 for label in labels if label not in EDF_ANNOTATION_LABELS)
 
 
+def _vhdr_common_infos(text: str) -> str | None:
+    """The body of a BrainVision header's `[Common Infos]` section, or None.
+
+    The one place the section rule lives, shared by the channel count and the
+    data-file name below. Scoped to that section because it is where MNE reads
+    both from, so a comment or a key in any other section can never supply
+    them. The section name is matched exactly and the key, by the callers,
+    without regard to case, because that is how MNE's configparser reads them:
+    `numberofchannels=4` converts, and a case-sensitive key left such a file
+    with no header count."""
+    section = re.search(r"^\[Common Infos\][^\n]*\n(.*?)(?=^\[|\Z)", text, re.M | re.S)
+    return section.group(1) if section else None
+
+
 def _vhdr_declared_channel_count(path: str) -> int | None:
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
@@ -3922,14 +3937,9 @@ def _vhdr_declared_channel_count(path: str) -> int | None:
     except OSError as exc:
         _warn_unreadable_header("BrainVision", path, f"{type(exc).__name__}: {exc}")
         return None
-    # Scoped to [Common Infos], the section MNE reads it from, so a
-    # comment elsewhere in the header can never supply the count. The section
-    # name is matched exactly and the key without regard to case, because that
-    # is how MNE's configparser reads them: `numberofchannels=4` converts, and
-    # a case-sensitive key here left such a file with no header count.
-    section = re.search(r"^\[Common Infos\][^\n]*\n(.*?)(?=^\[|\Z)", text, re.M | re.S)
+    section = _vhdr_common_infos(text)
     m = section and re.search(
-        r"^\s*NumberOfChannels\s*=\s*(\d+)", section.group(1), re.MULTILINE | re.IGNORECASE
+        r"^\s*NumberOfChannels\s*=\s*(\d+)", section, re.MULTILINE | re.IGNORECASE
     )
     if not m:
         _warn_unreadable_header(
@@ -7522,6 +7532,152 @@ def stage_declared_fdt(
     return set_local
 
 
+# --- Companion data the tree must hold (#1801) --------------------------------
+#
+# A BrainVision header and an EEGLAB `.set` can say their samples live in another
+# file. When the dataset tree at the pinned commit holds no such file there is
+# nothing to convert, and the reader's own error cannot say so reliably: its
+# shape for a missing DataFile changed across biosigIO releases, and it cannot
+# tell "absent from the tree" from "tracked under another stem and never
+# fetched". The tree can. So the question is asked of the tree, before the read
+# (`require_companions`), mirroring the fallbacks biosigIO itself applies so a
+# recording that converts today is never refused here.
+
+# The same-stem names biosigIO tries for a BrainVision `DataFile=` that names a
+# file the header's directory lacks (`_SIBLING_EXTS["datafile"]`).
+_VHDR_DATA_EXTS = (".eeg", ".dat")
+
+
+def _vhdr_data_file(path: str) -> str | None:
+    """The `DataFile=` a BrainVision header names in its `[Common Infos]`
+    section, or None when it names none or cannot be read (then the reader
+    decides, not this rule). Decoded as UTF-8, else Latin-1, which is what an
+    ANSI header written by a Windows tool is; the key is read without regard to
+    case, as `NumberOfChannels` is (`_vhdr_common_infos`)."""
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1")
+    section = _vhdr_common_infos(text)
+    m = section and re.search(
+        r"^[ \t]*DataFile[ \t]*=[ \t]*(.*?)[ \t]*\r?$", section, re.MULTILINE | re.IGNORECASE
+    )
+    return (m.group(1) or None) if m else None
+
+
+def _tracked_same_stem(primary: str, head_files: set[str], exts: tuple[str, ...]) -> bool:
+    """Whether the tree tracks a file beside `primary`, with its stem and one of
+    `exts`, the extension compared without regard to case. The stem is compared
+    up to Unicode normalization, as biosigIO's sibling search does, so an NFD
+    name in one place and NFC in another is one file."""
+    directory = os.path.dirname(primary)
+    stem = unicodedata.normalize("NFC", filename_stem(primary))
+    for tracked in head_files:
+        if os.path.dirname(tracked) != directory:
+            continue
+        base, ext = os.path.splitext(os.path.basename(tracked))
+        if ext.lower() in exts and unicodedata.normalize("NFC", base) == stem:
+            return True
+    return False
+
+
+def _eeglab_names_an_fdt(path: str) -> bool:
+    """Whether an EEGLAB `.set` keeps its samples in a `.fdt` (`EEG.data` is the
+    file's NAME, not a matrix), from the header alone through the same bounded
+    readers the channel gate uses. False for a header that cannot be read: that
+    is the reader's to refuse."""
+    try:
+        with open(path, "rb") as fh:
+            v73 = fh.read(len(_MATLAB_V73_MAGIC)) == _MATLAB_V73_MAGIC
+        fields = _h5_eeglab_header(path) if v73 else _mat5_eeglab_header(path)
+    except MemoryError:
+        raise
+    except Exception:  # noqa: BLE001 - an unreadable header is the reader's to refuse
+        return False
+    return fields.get("data") == "fdt"
+
+
+def _eeglab_fdt_reference(path: str) -> str | None:
+    """The `.fdt` file name an EEGLAB `.set` stores in `EEG.data`, or None when
+    it cannot be read. Only called for a `.set` that `_eeglab_names_an_fdt` says
+    holds a name, which is a header with no sample matrix, so reading the
+    variable whole is cheap; the bounded readers above keep only a sentinel."""
+    try:
+        with open(path, "rb") as fh:
+            v73 = fh.read(len(_MATLAB_V73_MAGIC)) == _MATLAB_V73_MAGIC
+        if v73:
+            import h5py  # type: ignore[import-not-found]  # biosigIO's [hdf5] extra
+
+            with h5py.File(path, "r") as f:
+                group = f.get("EEG", f)
+                codes = group["data"][()].ravel()
+                name = "".join(chr(int(code)) for code in codes)
+        else:
+            from scipy.io import loadmat  # biosigIO's own dependency
+
+            mat = loadmat(path, squeeze_me=True, struct_as_record=False,
+                          variable_names=["EEG", "data"])
+            struct = mat.get("EEG")
+            name = getattr(struct, "data", None) if struct is not None else mat.get("data")
+    except MemoryError:
+        raise
+    except Exception:  # noqa: BLE001 - the name stays unknown; the sibling rule decides
+        return None
+    return name.strip() or None if isinstance(name, str) else None
+
+
+def require_companions(
+    primary: str, primary_local: str, head_files: set[str], head: str, fdt_declared: bool
+) -> None:
+    """Refuse, as `CompanionMissing`, a recording whose header says its samples
+    live in a file the dataset tree does not hold. Runs before anything reads the
+    recording, so the verdict does not depend on how a reader words its error.
+
+    - BrainVision (`.vhdr`): the `[Common Infos]` DataFile is untracked AND no
+      same-stem `.eeg` or `.dat` is. The second term is biosigIO's recovery for
+      a header BIDS renamed the data file out from under (biosigio#132): such a
+      recording converts, so it is not refused.
+    - EEGLAB (`.set`): `EEG.data` is a file name, the same-stem `.fdt` is
+      untracked, and no reviewed ADR 0073 declaration supplies one
+      (`fdt_declared`; `stage_declared_fdt` verifies those and refuses them
+      typed itself). biosigIO reads the same-stem file first and the embedded
+      name second, so a tracked file of that name beside the `.set` also counts.
+
+    Anything the rule cannot read it leaves alone: an unreadable header is the
+    reader's to refuse. Messages name the missing file by its BIDS path and the
+    commit judged, never a scratch path (`failure_detail` strips those)."""
+    ext = lower_ext(primary)
+    directory = os.path.dirname(primary)
+    if ext == ".vhdr":
+        name = _vhdr_data_file(primary_local)
+        if name is None:
+            return
+        wanted = os.path.normpath(os.path.join(directory, name))
+        if wanted in head_files or _tracked_same_stem(primary, head_files, _VHDR_DATA_EXTS):
+            return
+        raise CompanionMissing(
+            f"BrainVision header names data file {wanted}, which is not in the dataset "
+            f"tree at {head[:8]}"
+        )
+    if ext == ".set":
+        sibling = os.path.splitext(primary)[0] + ".fdt"
+        if fdt_declared or sibling in head_files or not _eeglab_names_an_fdt(primary_local):
+            return
+        embedded = _eeglab_fdt_reference(primary_local)
+        beside = os.path.join(directory, os.path.basename(embedded)) if embedded else None
+        if beside is not None and beside in head_files:
+            return
+        raise CompanionMissing(
+            f"EEGLAB samples are in a separate .fdt file, and {sibling} is not in the "
+            f"dataset tree at {head[:8]}"
+        )
+
+
 def embed_attr(meta_path: str, key: str, value: object) -> None:
     """Write a key into the `attributes` dict of an arbitrary Zarr v3 group zarr.json.
 
@@ -8625,6 +8781,14 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
                 repo=c["repo"], head_files=c["head_files"], head=c["head"],
                 local=c["local"], bucket=c.get("bucket"), dataset_id=c.get("dataset_id"),
             )
+        # A header that names a data file the tree does not hold has nothing to
+        # convert: refuse it typed, by the missing file's name, before a reader's
+        # error has to be interpreted (#1801). After the declared-.fdt staging so a
+        # reviewed declaration has already been verified, before the MaxShield
+        # probe, which reads the file.
+        require_companions(
+            primary, primary_local, c["head_files"], c["head"], fdt_decl is not None
+        )
         # ADR 0028. Substituted HERE rather than inside convert_recording, which
         # derives modality, size and the streaming decision from the path it is given
         # (a late rebind would leave all three describing the unfiltered file). The

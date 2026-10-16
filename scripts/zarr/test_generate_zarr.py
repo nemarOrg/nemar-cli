@@ -11476,9 +11476,15 @@ class TestConvertOneEeglabSidecarOvercount(unittest.TestCase):
             )
         work = os.path.join(self._tmp.name, "work")
         os.makedirs(work, exist_ok=True)
+        # The tree tracks what is on disk: a `.set` that keeps its samples in a
+        # `.fdt` has that `.fdt` in the dataset (`require_companions` asks the tree).
+        fdt = os.path.splitext(self.PRIMARY)[0] + ".fdt"
+        tracked = {self.PRIMARY, self.TSV}
+        if os.path.exists(os.path.join(self.repo, fdt)):
+            tracked.add(fdt)
         generate_zarr._init_worker({
             "repo": self.repo, "bucket": "nemar-test", "dataset_id": "on003645",
-            "head": "b" * 40, "head_files": {self.PRIMARY, self.TSV}, "local": True,
+            "head": "b" * 40, "head_files": tracked, "local": True,
             "tmp": work, "updated": "2026-09-29T00:00:00Z",
             "contract_base": "https://zarr.nemar.org", "engine_version": "3",
             "dataset_row": None, "provenance_fetch_failed": False,
@@ -13940,10 +13946,15 @@ class TestDeclaredFdtConvertOne(unittest.TestCase):
         self.assertEqual(group["n_channels"], self.NBCHAN)
         self.assertEqual(group["n_samples"], self.PNTS)
 
-    def test_an_undeclared_dataset_fails_exactly_as_before(self):
+    def test_an_undeclared_dataset_is_refused_for_the_fdt_its_tree_lacks(self):
+        # No declaration, and the tree has no .fdt beside the .set nor under the
+        # name the header embeds: `companion_missing` (it was `file_read_error`,
+        # "none was found"), naming the file by its BIDS path. It is the
+        # declaration that supplies this .fdt, so it is not a declaration refusal.
         result = self.convert({})
         self.assertFalse(result["ok"])
-        self.assertIn("none was found", result["error"])
+        self.assertEqual(result["code"], "companion_missing")
+        self.assertIn("sub-01/eeg/sub-01_task-x_eeg.fdt", result["error"])
         self.assertNotEqual(result["code"], "fdt_declaration_refused")
 
     def test_a_declared_fdt_converts_in_local_mode(self):
@@ -14353,7 +14364,7 @@ class TestMainConvertsADeclaredFdt(unittest.TestCase):
         self.declare({})
         _, log, _ = self.run_main(1)
         self.assertNotIn(f"converted {self.SET}", log)
-        self.assertIn("none was found", log)
+        self.assertIn("sub-01/eeg/sub-01_task-x_eeg.fdt is not in the dataset tree", log)
 
 
 # A stand-in `aws` that serves a local directory laid out EXACTLY like the bucket:
@@ -15169,6 +15180,465 @@ class TestTypedVerdictCodes(unittest.TestCase):
             with self.subTest(code):
                 self.assertNotIn(code, RETRYABLE_CODES)
                 self.assertNotIn(code, generate_zarr.STORAGE_STATE_CODES)
+
+
+class TestVhdrDataFile(unittest.TestCase):
+    """`_vhdr_data_file`: the `DataFile=` a BrainVision header names, read the way
+    the channel-count rule reads `NumberOfChannels=` (the `[Common Infos]`
+    section, the key without regard to case). None when the header names no
+    data file or cannot be read: the reader decides then, not this rule."""
+
+    def parse(self, content: str | bytes) -> str | None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "sub-01_task-x_eeg.vhdr")
+            with open(path, "wb") as fh:
+                fh.write(content if isinstance(content, bytes) else content.encode("utf-8"))
+            return generate_zarr._vhdr_data_file(path)
+
+    def test_the_file_name(self):
+        self.assertEqual(
+            self.parse("Brain Vision Data Exchange Header File Version 1.0\n"
+                       "[Common Infos]\nCodepage=UTF-8\nDataFile=x.eeg\nMarkerFile=x.vmrk\n"),
+            "x.eeg",
+        )
+        # Spaces around the sign and after the value are not part of the name;
+        # one inside it is.
+        self.assertEqual(self.parse("[Common Infos]\nDataFile = my data.eeg  \n"), "my data.eeg")
+
+    def test_only_the_common_infos_section_counts(self):
+        # A DataFile line in another section, ahead of or behind [Common Infos],
+        # names nothing: MNE reads the key from that section alone.
+        self.assertIsNone(self.parse("[Marker Infos]\nDataFile=wrong.eeg\n[Common Infos]\nCodepage=UTF-8\n"))
+        self.assertIsNone(self.parse("[Common Infos]\nCodepage=UTF-8\n[Binary Infos]\nDataFile=wrong.eeg\n"))
+        self.assertEqual(
+            self.parse("[Marker Infos]\nDataFile=wrong.eeg\n[Common Infos]\nDataFile=right.eeg\n[Binary Infos]\nDataFile=wrong.eeg\n"),
+            "right.eeg",
+        )
+        # The section name is matched exactly, as the channel count does.
+        self.assertIsNone(self.parse("[Common Infos 2]\nDataFile=wrong.eeg\n"))
+        # A commented-out line is not a key.
+        self.assertIsNone(self.parse("[Common Infos]\n; DataFile=wrong.eeg\n"))
+
+    def test_the_key_is_read_without_regard_to_case(self):
+        for key in ("datafile", "DATAFILE", "DataFile", "dataFile"):
+            with self.subTest(key):
+                self.assertEqual(self.parse(f"[Common Infos]\n{key}=x.eeg\n"), "x.eeg")
+        # A longer key that merely starts the same way is a different key.
+        self.assertIsNone(self.parse("[Common Infos]\nDataFileFormat=BINARY\n"))
+
+    def test_crlf_line_endings_leave_no_carriage_return_in_the_name(self):
+        self.assertEqual(
+            self.parse("[Common Infos]\r\nDataFile=x.eeg\r\nMarkerFile=x.vmrk\r\n"), "x.eeg"
+        )
+        self.assertEqual(self.parse("[Common Infos]\r\nDataFile=x.eeg"), "x.eeg")
+
+    def test_an_absent_or_empty_key_names_nothing(self):
+        self.assertIsNone(self.parse("[Common Infos]\nCodepage=UTF-8\n"))
+        self.assertIsNone(self.parse("[Common Infos]\nDataFile=\n"))
+        self.assertIsNone(self.parse("[Common Infos]\nDataFile=   \n"))
+        self.assertIsNone(self.parse(""))
+
+    def test_a_latin1_header_is_read(self):
+        # Written by a Windows tool in cp1252: not UTF-8, and `µV` is one byte.
+        header = (
+            "[Common Infos]\nCodepage=ANSI\nDataFile=é.eeg\n[Channel Infos]\nCh1=Fz,,0.1,µV\n"
+        ).encode("latin-1")
+        self.assertEqual(self.parse(header), "é.eeg")
+
+    def test_an_unreadable_header_names_nothing(self):
+        self.assertIsNone(generate_zarr._vhdr_data_file("/no/such/dir/sub-01_task-x_eeg.vhdr"))
+
+
+class TestRequireCompanionsVhdr(unittest.TestCase):
+    """`require_companions` for a BrainVision recording, judged against the git
+    tree: refuse only when the header's DataFile is untracked AND no same-stem
+    `.eeg` or `.dat` is, which is the question biosigIO's own stale-header
+    recovery (biosigio#132) answers before it gives up."""
+
+    PRIMARY = "sub-01/eeg/sub-01_task-rest_eeg.vhdr"
+    HEAD = "0123456789abcdef" * 2 + "01234567"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.local = os.path.join(self._tmp.name, "sub-01_task-rest_eeg.vhdr")
+
+    def check(self, tracked, data_file="sub-01_task-rest_eeg.eeg", *, header=True):
+        if header:
+            with open(self.local, "w", encoding="utf-8") as fh:
+                fh.write(
+                    "Brain Vision Data Exchange Header File Version 1.0\n"
+                    f"[Common Infos]\nDataFile={data_file}\nMarkerFile=x.vmrk\n"
+                )
+        generate_zarr.require_companions(
+            self.PRIMARY, self.local, {self.PRIMARY, *tracked}, self.HEAD, False
+        )
+
+    def test_a_header_whose_data_file_is_tracked_passes(self):
+        self.check({"sub-01/eeg/sub-01_task-rest_eeg.eeg"})
+
+    def test_an_untracked_data_file_is_refused_by_its_tree_path(self):
+        with self.assertRaises(generate_zarr.CompanionMissing) as cm:
+            self.check({"sub-01/eeg/sub-01_task-rest_eeg.vmrk"})
+        exc = cm.exception
+        self.assertEqual(exc.code, "companion_missing")
+        # The BIDS-relative path of the missing file, never a scratch path, and
+        # the commit it was judged against.
+        self.assertIn("sub-01/eeg/sub-01_task-rest_eeg.eeg", str(exc))
+        self.assertIn(self.HEAD[:8], str(exc))
+        # Survives `failure_detail` as written: a relative path is not stripped.
+        self.assertIn("sub-01/eeg/sub-01_task-rest_eeg.eeg", failure_detail(exc) or "")
+
+    def test_a_stale_header_with_a_same_stem_sibling_passes(self):
+        # BIDS renamed the .eeg on disk and not the name inside the header.
+        self.check({"sub-01/eeg/sub-01_task-rest_eeg.eeg"}, data_file="old_name.eeg")
+        self.check({"sub-01/eeg/sub-01_task-rest_eeg.dat"}, data_file="old_name.eeg")
+
+    def test_the_sibling_extension_is_matched_without_regard_to_case(self):
+        for ext in (".EEG", ".Eeg", ".DAT"):
+            with self.subTest(ext):
+                self.check({f"sub-01/eeg/sub-01_task-rest_eeg{ext}"}, data_file="old_name.eeg")
+
+    def test_a_stale_header_with_no_sibling_is_refused(self):
+        with self.assertRaises(generate_zarr.CompanionMissing) as cm:
+            self.check({"sub-01/eeg/sub-01_task-rest_eeg.vmrk"}, data_file="old_name.eeg")
+        self.assertIn("sub-01/eeg/old_name.eeg", str(cm.exception))
+
+    def test_only_the_stem_of_this_recording_counts(self):
+        for other in (
+            "sub-01/eeg/sub-01_task-other_eeg.eeg",   # another recording's data
+            "sub-02/eeg/sub-01_task-rest_eeg.eeg",    # the same name in another directory
+            "sub-01/eeg/sub-01_task-rest_eeg.eeg.bak",  # not an extension we read
+        ):
+            with self.subTest(other), self.assertRaises(generate_zarr.CompanionMissing):
+                self.check({other}, data_file="old_name.eeg")
+
+    def test_a_data_file_tracked_under_another_name_is_not_this_rules_to_refuse(self):
+        # The tree HAS the file the header names, so there is nothing missing to
+        # report; whether the reader gets it is a different question.
+        self.check({"sub-01/eeg/shared.eeg"}, data_file="shared.eeg")
+
+    def test_a_header_in_a_subdirectory_reference_is_resolved_from_its_directory(self):
+        self.check({"sub-01/eeg/data/run1.eeg"}, data_file="data/run1.eeg")
+        with self.assertRaises(generate_zarr.CompanionMissing) as cm:
+            self.check({"sub-01/eeg/run1.eeg"}, data_file="data/run1.eeg")
+        self.assertIn("sub-01/eeg/data/run1.eeg", str(cm.exception))
+
+    def test_nothing_is_refused_that_the_rule_cannot_read(self):
+        # No such header, a header naming no data file: the reader decides.
+        self.check(set(), header=False)
+        self.check(set(), data_file="")
+
+    def test_other_formats_are_untouched(self):
+        for primary in (
+            "sub-01/eeg/sub-01_task-rest_eeg.edf",
+            "sub-01/eeg/sub-01_task-rest_eeg.bdf",
+            "sub-01/meg/sub-01_task-rest_meg.fif",
+            "sub-01/meg/sub-01_task-rest_meg.ds",
+        ):
+            with self.subTest(primary):
+                generate_zarr.require_companions(
+                    primary, "/no/such/file", {primary}, self.HEAD, False
+                )
+
+
+def write_fdt_backed_set(path: str, embedded: str = "orig_name.fdt", nbchan: int = 4) -> str:
+    """A classic EEGLAB `.set` whose `EEG.data` is a file NAME (the samples live in
+    a `.fdt`), written by the pure-Python `Mat5` writer so the fast tier can use
+    it. No `.fdt` is written: the tests decide what the tree holds."""
+    m = Mat5("<")
+    fields = [
+        ("setname", m.chars("", "fixture")),
+        ("nbchan", m.scalar("", nbchan)),
+        ("trials", m.scalar("", 1)),
+        ("pnts", m.scalar("", 100)),
+        ("srate", m.scalar("", 250.0)),
+        ("data", m.chars("", embedded)),
+    ]
+    return m.file(path, [m.struct("EEG", [fields])])
+
+
+def write_inline_set(path: str, nbchan: int = 2) -> str:
+    """A classic EEGLAB `.set` that carries its samples inline (a numeric
+    `EEG.data`), by the same writer."""
+    import struct
+
+    m = Mat5("<")
+    pnts = 5
+    count = nbchan * pnts
+    samples = m.matrix("", 6, [nbchan, pnts], m.elem(9, struct.pack(f"<{count}d", *range(count))))
+    fields = [
+        ("setname", m.chars("", "fixture")),
+        ("nbchan", m.scalar("", nbchan)),
+        ("trials", m.scalar("", 1)),
+        ("pnts", m.scalar("", pnts)),
+        ("srate", m.scalar("", 250.0)),
+        ("data", samples),
+    ]
+    return m.file(path, [m.struct("EEG", [fields])])
+
+
+class TestRequireCompanionsSet(unittest.TestCase):
+    """`require_companions` for an EEGLAB `.set` whose samples are in a `.fdt`:
+    refused only when the header says so (`EEG.data` is a file name), the
+    same-stem `.fdt` is untracked, no reviewed ADR 0073 declaration supplies one,
+    and the name the header embeds is not a tracked file beside it either (the
+    second place biosigIO's `_read_fdt` looks)."""
+
+    PRIMARY = "sub-01/eeg/sub-01_task-rest_eeg.set"
+    SIBLING = "sub-01/eeg/sub-01_task-rest_eeg.fdt"
+    HEAD = "89abcdef" * 5
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.local = os.path.join(self._tmp.name, "sub-01_task-rest_eeg.set")
+
+    def check(self, tracked, *, declared=False):
+        generate_zarr.require_companions(
+            self.PRIMARY, self.local, {self.PRIMARY, *tracked}, self.HEAD, declared
+        )
+
+    def test_a_tracked_sibling_passes_without_reading_the_header(self):
+        # No file at all: the tree already answers, so the header is not opened.
+        self.check({self.SIBLING})
+
+    def test_an_untracked_fdt_is_refused_by_its_tree_path(self):
+        write_fdt_backed_set(self.local, embedded="sub-01_task-rest_eeg.fdt")
+        with self.assertRaises(generate_zarr.CompanionMissing) as cm:
+            self.check(set())
+        exc = cm.exception
+        self.assertEqual(exc.code, "companion_missing")
+        self.assertIn(self.SIBLING, str(exc))
+        self.assertIn(self.HEAD[:8], str(exc))
+        self.assertIn(self.SIBLING, failure_detail(exc) or "")
+
+    def test_a_declared_fdt_is_not_this_rules_to_refuse(self):
+        # ADR 0073: a reviewed declaration supplies the .fdt, and
+        # `stage_declared_fdt` verifies it (and refuses, typed, if it is wrong).
+        write_fdt_backed_set(self.local)
+        self.check(set(), declared=True)
+
+    def test_a_set_with_inline_samples_needs_no_fdt(self):
+        write_inline_set(self.local)
+        self.check(set())
+
+    def test_an_unreadable_set_is_left_to_the_reader(self):
+        for content in (b"", b"not a MAT file", b"MATLAB 5.0 MAT-file" + b"\0" * 20):
+            with self.subTest(content=content[:12]):
+                with open(self.local, "wb") as fh:
+                    fh.write(content)
+                self.check(set())
+        os.remove(self.local)
+        self.check(set())
+
+    def test_a_tracked_sibling_of_another_recording_is_not_this_ones(self):
+        write_fdt_backed_set(self.local, embedded="sub-01_task-rest_eeg.fdt")
+        for other in ("sub-01/eeg/sub-01_task-other_eeg.fdt", "sub-02/eeg/sub-01_task-rest_eeg.fdt"):
+            with self.subTest(other), self.assertRaises(generate_zarr.CompanionMissing):
+                self.check({other})
+
+    def test_the_name_the_header_embeds_is_a_companion_when_it_is_tracked_beside_the_set(self):
+        # biosigIO reads <set stem>.fdt first and the embedded name second, so a
+        # .set whose own stem has no .fdt but whose embedded name is tracked
+        # beside it CONVERTS; refusing it would turn a served store into a failure.
+        try:
+            import scipy.io  # noqa: F401
+        except ImportError:
+            self.skipTest("scipy not installed (the fast tier); the full tier runs this")
+        write_fdt_backed_set(self.local, embedded="orig_name.fdt")
+        self.check({"sub-01/eeg/orig_name.fdt"})
+        # Beside the .set, not anywhere else, and by the name the header gives.
+        for tracked in ("sub-02/eeg/orig_name.fdt", "sub-01/eeg/other_name.fdt"):
+            with self.subTest(tracked), self.assertRaises(generate_zarr.CompanionMissing):
+                self.check({tracked})
+
+    def test_a_v73_set_with_its_samples_in_a_fdt(self):
+        for wrapped in (True, False):
+            with self.subTest(wrapped=wrapped):
+                try:
+                    build_eeglab_set(self.local, 4, v73=True, fdt=True, wrapped=wrapped)
+                except ImportError as exc:
+                    self.skipTest(f"{exc.name} not installed (the fast tier); the full tier runs this")
+                # build_eeglab_set wrote <stem>.fdt beside the .set on disk; the
+                # TREE is what is judged, and it tracks nothing.
+                with self.assertRaises(generate_zarr.CompanionMissing) as cm:
+                    self.check(set())
+                self.assertIn(self.SIBLING, str(cm.exception))
+                self.check({self.SIBLING})
+
+    def test_a_v73_sets_embedded_fdt_name_is_a_companion_when_tracked_beside_it(self):
+        # The .set was saved as orig_name_eeg.set (so it embeds orig_name_eeg.fdt)
+        # and renamed to the BIDS name; the .fdt kept its name.
+        for wrapped in (True, False):
+            with self.subTest(wrapped=wrapped):
+                original = os.path.join(self._tmp.name, "orig_name_eeg.set")
+                try:
+                    build_eeglab_set(original, 4, v73=True, fdt=True, wrapped=wrapped)
+                except ImportError as exc:
+                    self.skipTest(f"{exc.name} not installed (the fast tier); the full tier runs this")
+                os.replace(original, self.local)
+                self.check({"sub-01/eeg/orig_name_eeg.fdt"})
+                with self.assertRaises(generate_zarr.CompanionMissing):
+                    self.check({"sub-01/eeg/other_name_eeg.fdt"})
+
+    def test_other_formats_are_untouched(self):
+        generate_zarr.require_companions(
+            "sub-01/eeg/sub-01_task-rest_eeg.edf", "/no/such/file", set(), self.HEAD, False
+        )
+
+
+class ConvertOneLocalCase(unittest.TestCase):
+    """Shared harness for the full-tier cases below: `convert_one` in LOCAL mode
+    (the Hallu path) over real files in a throwaway repository, up to the upload,
+    which a no-op `aws` absorbs. Nothing else is substituted. Subclasses say which
+    libraries they need through `REQUIRES`."""
+
+    REQUIRES: ClassVar[tuple[str, ...]] = ("zarr",)
+
+    @classmethod
+    def setUpClass(cls):
+        for name in cls.REQUIRES:
+            try:
+                __import__(name)
+            except Exception as exc:  # noqa: BLE001
+                raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = os.path.join(self._tmp.name, "repo")
+        os.makedirs(self.repo)
+        bindir = os.path.join(self._tmp.name, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        path = os.environ["PATH"]
+        os.environ["PATH"] = bindir + os.pathsep + path
+        self.addCleanup(os.environ.__setitem__, "PATH", path)
+        saved_ctx = dict(generate_zarr._CTX)
+        self.addCleanup(lambda: (generate_zarr._CTX.clear(), generate_zarr._CTX.update(saved_ctx)))
+
+    def convert(self, primary: str, head_files, **ctx) -> dict:
+        work = os.path.join(self._tmp.name, "work")
+        os.makedirs(work, exist_ok=True)
+        generate_zarr._init_worker({
+            "repo": self.repo, "bucket": "nemar-test", "dataset_id": "nm099999",
+            "head": "d" * 40, "head_files": set(head_files), "local": True,
+            "tmp": work, "updated": "2026-10-15T00:00:00Z",
+            "contract_base": "https://zarr.nemar.org", "engine_version": ZARR_ENGINE_VERSION,
+            "dataset_row": None, "provenance_fetch_failed": False,
+            "mem_budget": None, "hard_ceiling": None, "projections": {},
+            **ctx,
+        })
+        with contextlib.redirect_stdout(io.StringIO()):
+            return convert_one(primary)
+
+    def assert_refused_as_data(self, result: dict, code: str) -> None:
+        """A typed data failure: not ok, the expected code, never retried, and
+        counted as a property of the data rather than of the node."""
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["code"], code, result.get("error"))
+        self.assertNotIn(code, RETRYABLE_CODES)
+        entry = _failure_entry(result["primary"], result["code"], result["detail"])
+        self.assertEqual(count_infra_failures([result["primary"]], [entry]), 0)
+        self.assertTrue(generate_zarr.dataset_failure_is_deterministic([result["primary"]], [entry]))
+
+
+class TestCompanionMissingThroughConvertOne(ConvertOneLocalCase):
+    """A recording whose companion data the tree does not hold, through the real
+    `convert_one` and the real readers (MNE for BrainVision, scipy and biosigIO
+    for EEGLAB): a typed `companion_missing` that names the file, where it was an
+    opaque `file_read_error`; and the controls that prove the rule does not
+    refuse what converts."""
+
+    REQUIRES = ("zarr", "scipy.io", "mne", "biosigio")
+
+    SET = "sub-01/eeg/sub-01_task-x_eeg.set"
+    SET_FDT = "sub-01/eeg/sub-01_task-x_eeg.fdt"
+    VHDR = "sub-01/eeg/sub-01_task-rest_eeg.vhdr"
+    VMRK = "sub-01/eeg/sub-01_task-rest_eeg.vmrk"
+    EEG = "sub-01/eeg/sub-01_task-rest_eeg.eeg"
+
+    def write_set(self, fdt_rel: str | None, *, embedded: str = "orig_name.fdt") -> None:
+        write_eeglab_set(
+            os.path.join(self.repo, self.SET),
+            None if fdt_rel is None else os.path.join(self.repo, fdt_rel),
+            embedded=embedded,
+        )
+
+    def assert_converted(self, result: dict) -> None:
+        self.assertTrue(result["ok"], result.get("error"))
+        (group,) = result["entry"]["groups"]
+        self.assertEqual((group["n_channels"], group["n_samples"]), (4, 1000))
+
+    def test_an_eeglab_set_without_its_fdt_is_companion_missing(self):
+        self.write_set(self.SET_FDT, embedded="sub-01_task-x_eeg.fdt")
+        os.remove(os.path.join(self.repo, self.SET_FDT))  # the data is not in the dataset
+        result = self.convert(self.SET, {self.SET})
+        self.assert_refused_as_data(result, "companion_missing")
+        # Names the file the tree lacks, by its BIDS path, in the published detail.
+        self.assertIn(self.SET_FDT, result["error"])
+        self.assertIn(self.SET_FDT, result["detail"])
+        self.assertNotIn(self.repo, result["detail"])
+
+    def test_biosigio_refuses_the_same_file_so_the_rule_pre_empts_nothing(self):
+        # Without this the rule could be refusing a file the reader would have
+        # converted. The reader, handed the same bytes, fails: it reports the
+        # missing .fdt as a generic read error.
+        from biosigio import Recording
+        from biosigio.exceptions import FileReadError
+
+        self.write_set(self.SET_FDT, embedded="sub-01_task-x_eeg.fdt")
+        os.remove(os.path.join(self.repo, self.SET_FDT))
+        with self.assertRaises(FileReadError) as cm:
+            Recording.from_file(os.path.join(self.repo, self.SET))
+        self.assertIn("none was found", str(cm.exception))
+        self.assertEqual(cm.exception.code, "file_read_error")
+
+    def test_the_same_set_converts_once_its_fdt_is_in_the_tree(self):
+        self.write_set(self.SET_FDT, embedded="sub-01_task-x_eeg.fdt")
+        self.assert_converted(self.convert(self.SET, {self.SET, self.SET_FDT}))
+
+    def test_a_set_whose_embedded_fdt_name_is_tracked_beside_it_still_converts(self):
+        # The .set names orig_name.fdt, which sits beside it and is tracked; there
+        # is no <stem>.fdt. biosigIO reads the embedded name second, so this
+        # converts today and must keep converting.
+        fdt = "sub-01/eeg/orig_name.fdt"
+        self.write_set(fdt, embedded="orig_name.fdt")
+        self.assert_converted(self.convert(self.SET, {self.SET, fdt}))
+
+    def test_a_brainvision_header_without_its_data_file_is_companion_missing(self):
+        write_brainvision(self.vhdr_path(), ["Fz", "Cz", "Pz", "Oz"])
+        os.remove(os.path.join(self.repo, self.EEG))
+        result = self.convert(self.VHDR, {self.VHDR, self.VMRK})
+        self.assert_refused_as_data(result, "companion_missing")
+        self.assertIn(self.EEG, result["error"])
+        self.assertIn(self.EEG, result["detail"])
+
+    def test_the_same_brainvision_recording_converts_with_its_data_file(self):
+        write_brainvision(self.vhdr_path(), ["Fz", "Cz", "Pz", "Oz"])
+        result = self.convert(self.VHDR, {self.VHDR, self.VMRK, self.EEG})
+        self.assertTrue(result["ok"], result.get("error"))
+
+    def test_a_stale_brainvision_header_with_a_same_stem_data_file_converts(self):
+        # BIDS renamed the .eeg and not the name in the header (biosigio#132).
+        # Measured: this converts, so it must not become companion_missing.
+        write_brainvision(self.vhdr_path(), ["Fz", "Cz", "Pz", "Oz"])
+        header = os.path.join(self.repo, self.VHDR)
+        with open(header, encoding="utf-8") as fh:
+            text = fh.read()
+        stem = "sub-01_task-rest_eeg"
+        with open(header, "w", encoding="utf-8") as fh:
+            fh.write(text.replace(f"DataFile={stem}.eeg", "DataFile=pre_rename.eeg"))
+        result = self.convert(self.VHDR, {self.VHDR, self.VMRK, self.EEG})
+        self.assertTrue(result["ok"], result.get("error"))
+
+    def vhdr_path(self) -> str:
+        path = os.path.join(self.repo, self.VHDR)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        return path
 
 
 # --- Subject information never reaches a store (#1626) -------------------------
