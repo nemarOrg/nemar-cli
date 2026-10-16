@@ -130,7 +130,11 @@ const CASES: Record<TextProblemCode, { refused: [TextKind, string][]; passes: st
       ["title", "Add ${N} subjects"],
       ["title", "<your title here>"],
       ["description", "[describe the change]"],
+      ["description", "[Describe your change]"],
+      ["description", "[Fill in the description]"],
+      ["title", "<insert title>"],
       ["description", "FirstAuthorSurname"],
+      ["title", "Rename it to year-keyword-paperDOI"],
     ],
     passes: [
       // BIDS field and label names are CamelCase by specification: the vocabulary of an update.
@@ -141,6 +145,14 @@ const CASES: Record<TextProblemCode, { refused: [TextKind, string][]; passes: st
       "Rename files to sub-<label>_task-<label>_eeg.edf",
       "[WIP] Add sub-21 recordings",
       "Remove the {} left in the README",
+      // A key name, or the text of a Markdown link, is not a field left unfilled.
+      "Press <Enter> to continue; the task prompt now says <Write> before each trial.",
+      "Fix: [Replace] stale checksum values",
+      "Added the [Enter] key to the response mapping",
+      "Follows [your lab's data policy](https://example.org/policy) for the new recordings.",
+      "Adds the [Your lab](https://example.org) link to the README.",
+      "Details are in the [Write-up](https://example.org/writeup.pdf).",
+      "See [your lab][1] for the protocol.",
     ],
   },
   no_words: {

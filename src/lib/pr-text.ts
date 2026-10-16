@@ -77,13 +77,17 @@ const STAND_IN_TEXT: readonly RegExp[] = [
  * There is deliberately NO rule for "a long CamelCase word". BIDS field names are CamelCase by
  * specification (`PowerLineFrequency`, `DatasetDOI`, `ReferencesAndLinks`), as are task labels
  * (`task-RestingStateEyesClosed`), and they are the vocabulary of an ordinary dataset update.
- * Square and angle brackets are refused only when they ask the reader to write something, so
- * `sub-<label>_task-<label>_eeg.edf` stays an ordinary sentence.
+ *
+ * A bracket asks the reader to write something only when its first word is one that asks (your,
+ * insert, enter, describe, write, fill in, replace) and more words follow inside it, and it is not
+ * the text of a Markdown link. `<your title here>` and `[describe the change]` are refused;
+ * `<Enter>`, `[Replace]`, `[Write-up](url)`, `[your lab](url)` and
+ * `sub-<label>_task-<label>_eeg.edf` stay ordinary text.
  */
 const TEMPLATE_FIELDS: readonly RegExp[] = [
   /\{\{[^{}]*\}\}/, // {{title}}
   /\$\{[^{}]*\}/, // ${TITLE}
-  /[<[]\s*(?:your|insert|enter|describe|write|fill in|replace)\b[^<>[\]]*[>\]]/i, // <your title>
+  /[<[]\s*(?:your|insert|enter|describe|write|fill in|replace)\s+[^<>[\]]+[>\]](?![([])/i, // <your title>
   /\b(?:FirstAuthorSurname|paperDOI)\b/,
 ];
 
@@ -159,7 +163,7 @@ export function findTextProblem(kind: TextKind, raw: string | undefined): TextPr
   return null;
 }
 
-/** One sentence about a refused text: `subject` is what to call it ("The title (-m)"). */
+/** One sentence about a refused text: `subject` is what to call it ("The title (--message)"). */
 export function describeTextProblem(subject: string, problem: TextProblem): string {
   return `${subject} ${problem.reason}.`;
 }
