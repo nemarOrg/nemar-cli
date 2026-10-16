@@ -78,7 +78,7 @@ And the review only ever sees a pull request's text and metadata, so a count of 
   A stored row with one of them renders as "Not reviewed" with a sentence that says the limit no longer exists and what to do now: push a new commit, or ask an administrator to start the review.
   `start --all` no longer stops when a daily pool is spent, and its JSON no longer carries `not_tried`.
 - **An administrator's explicit `block` still declines, and `allow` only clears a block.**
-  The tally stays as information in `standing` and in the queue.
+  The tally stays as information in `standing`.
   A delivery is judged in this order: exempt, then a block, then the review.
   A block on an owner's or administrator's account therefore changes nothing for a commit no review has touched, and a restart of a review already on record is held to the block like anyone's.
 - **The automatic tally pause (more than 5 rejected and more than 10 percent) is removed.**
@@ -168,6 +168,10 @@ And the review only ever sees a pull request's text and metadata, so a count of 
   It reads `CONTRIBUTOR` for a private organization member, so neither the exemption nor the screen uses it.
 - **The cross-check costs one GitHub call per role-matched account on a delivery** (two when someone other than the author caused it; one delivery asks about each account once), each bounded to a few seconds.
   An admin queue request asks once per exempt author and dataset, a few at a time and within 20 seconds, and a pull request whose lookup did not run in time is listed as not exempt.
+- **An installed CLI older than this change cannot read the standing answer.**
+  It reads `thresholds`, which is gone, so `standing` and `show` fail, and `allow`, `block` and `clear` report a failure after the Worker has stored the change.
+  A newer CLI against a Worker that has not been released yet calls any pause an administrator's block.
+  Both are administrators' tools, the Worker itself is unaffected, and the remedy is to upgrade the CLI; the two fields are not kept, because they would describe a rule that no longer exists.
 - **Until the screen ships, nothing bounds spend but the workspace limit.**
   Phase P2 removes the counts and phase P3 adds the screen, so the epic's branch must not be released with the first and without the second.
 - **Without caps, cost is bounded by the screen and the spend limit.**
