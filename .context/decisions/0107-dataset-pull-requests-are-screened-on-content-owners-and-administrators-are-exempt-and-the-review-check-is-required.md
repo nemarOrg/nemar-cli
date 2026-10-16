@@ -17,21 +17,21 @@ The rest is decided here and built by the later phases; until they ship, the cap
 ## Context
 
 The automated review of ADR 0092 was built to be advisory, and it is about to become a required check.
-Three things measured on 2026-10-16 (read only, production D1 and GitHub) say it cannot become one as it stands.
+Three findings from the epic's planning pass (read-only queries of production D1 and GitHub on 2026-10-16, not re-measured when this ADR was written) say it cannot become one as it stands.
 
 - **It declines the people it should never decline.**
-  An operational administrator account opened a pull request that the review declined on the per-author daily cap.
-  GitHub reports `author_association` to the App as `CONTRIBUTOR` for an organization member whose membership is private, so that account sat on the stranger tier (3 an hour, 6 a day) and not the trusted one.
-  The same account has 22 `rate_limited` declines.
-- **The tally pause would lock out the main data author.**
-  That contributor opened 90 of the last 100 pull requests in the organization and has 163 `contributor_paused` declines against 6 reported reviews.
+  A pull request opened by an operational administrator account was declined on the per-author daily cap (production review 208).
+  That account's organization membership is private, which GitHub reports to the App as `author_association` `CONTRIBUTOR`, so it sat on the stranger tier (3 an hour, 6 a day) and not the trusted one.
+  The membership being private was re-checked against the organization's public members list; the decline was read from the production table.
+- **The tally pause would lock out a main data author.**
+  The queries found a prolific data author paused by the tally, with 163 `contributor_paused` declines against 6 reported reviews.
   With the check required, a paused contributor could never merge.
 - **The false-fail question ADR 0092 left open is real.**
-  2 of 36 reported reviews passed in production.
-  Nearly every fail is `advances_revision` (a CHANGES entry missing or the version not advanced), and `nemar dataset update` never writes a CHANGES entry.
+  The same queries found 2 of 36 reported reviews passing, and nearly every fail was `advances_revision` (a CHANGES entry missing or the version not advanced).
+  The code side of that was checked in the source: `nemar dataset update` writes no CHANGES entry.
 
 Two more facts shape the exemption.
-Some NEMAR accounts name a GitHub login that no one has registered, so a login match alone would exempt whoever registers it.
+The planning pass found an operational account in production that names a GitHub login no one has registered (GitHub answers 404 for it, re-checked), so a login match alone would exempt whoever registers it.
 And the review only ever sees a pull request's text and metadata, so a count of how many someone opened says nothing about whether this one is spam.
 
 ## Decision
@@ -134,7 +134,7 @@ And the review only ever sees a pull request's text and metadata, so a count of 
   It reads `CONTRIBUTOR` for a private organization member, so neither the exemption nor the screen uses it.
 - **The cross-check costs one GitHub call per role-matched account on a delivery** (two when someone other than the author caused it), bounded to a few seconds, and one per exempt author and dataset for an admin queue request.
 - **Without caps, cost is bounded by the screen and the spend limit.**
-  One account pushing every minute to a pull request that passes stage 1 could cost up to about $70 a day at $0.10 and $0.50 per million input and output tokens, and spam that fails stage 1 costs under one cent a pull request.
+  One account pushing every minute to a pull request that passes stage 1 could cost up to about $70 a day at $0.10 and $0.50 per million input and output tokens (the planning pass's estimate), and spam that fails stage 1 costs under one cent a pull request.
   The workspace spend limit is what makes that a bound and not an estimate, and when it trips the checks read "Could not decide" and required repositories wait for an administrator.
 - **Staging canaries need a non-exempt GitHub account**, because the operational admin accounts there are exempt.
 - **A wrong identity match would exempt the wrong person.**
