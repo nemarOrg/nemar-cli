@@ -17085,7 +17085,7 @@ class TestLateOnsetThroughConvertOne(ConvertOneLocalCase):
     # still held the annotations (a no-op apply) would otherwise pass.
     TSV_EVENTS = ([2.0, 3.25], ["go", "stop"])
     # The store writer `convert_recording` hands to `write_store` on each path.
-    WRITER = {"in-memory": "to_zarr", "streaming": "stream_to_zarr"}
+    WRITER: ClassVar[dict[str, str]] = {"in-memory": "to_zarr", "streaming": "stream_to_zarr"}
 
     def late_onset_formats(self):
         import pyedflib
