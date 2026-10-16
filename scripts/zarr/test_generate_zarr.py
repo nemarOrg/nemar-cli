@@ -17194,9 +17194,7 @@ class TestCutShortBrainVisionThroughConvertOne(ConvertOneLocalCase):
 
     def test_a_data_file_cut_by_one_byte_is_terminal_corrupt_or_truncated(self):
         os.makedirs(os.path.join(self.repo, "sub-01/eeg"))
-        paths = write_brainvision(
-            os.path.join(self.repo, self.PRIMARY), ["Fp1", "Fp2", "Cz", "Pz"]
-        )
+        paths = write_brainvision(os.path.join(self.repo, self.PRIMARY), ["Fp1", "Fp2", "Cz", "Pz"])
         head_files = {os.path.relpath(path, self.repo) for path in paths}
         data = paths[2]
         self.assertEqual(os.path.splitext(data)[1], ".eeg")
