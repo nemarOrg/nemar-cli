@@ -53,6 +53,15 @@ export function normalizeTitle(raw: string): string {
 }
 
 /**
+ * The text as the commands store it: a title is one line and a description is trimmed. This is the
+ * one place that says so, and {@link findTextProblem} judges exactly what it returns, so the text
+ * that was checked is the text that goes to git, to GitHub and into CHANGES.
+ */
+export function cleanPrText(kind: TextKind, raw: string | undefined): string {
+  return kind === "title" ? normalizeTitle(raw ?? "") : (raw ?? "").trim();
+}
+
+/**
  * Text that stands in for text. Matched against the whole text, lower-cased, with trailing
  * punctuation dropped, so "Save changes to the channel locations" is an ordinary sentence and only
  * "Save changes." is refused.
@@ -122,11 +131,11 @@ function quoted(text: string): string {
 
 /**
  * The first reason `raw` cannot go into a pull request as the title or the description of a
- * change, or null when it can. A missing value is `empty`. Title text is judged as the one line
- * {@link normalizeTitle} makes of it.
+ * change, or null when it can. A missing value is `empty`. The text is judged as
+ * {@link cleanPrText} returns it.
  */
 export function findTextProblem(kind: TextKind, raw: string | undefined): TextProblem | null {
-  const text = kind === "title" ? normalizeTitle(raw ?? "") : (raw ?? "").trim();
+  const text = cleanPrText(kind, raw);
   if (text === "") return { code: "empty", reason: "is empty; say in plain words what changed" };
   if (DIGEST.test(text) || isJsonDocument(text)) {
     return {

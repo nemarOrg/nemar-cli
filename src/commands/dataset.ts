@@ -199,11 +199,11 @@ import {
   type TextKind,
   buildUpdateBody,
   buildUpdateTitle,
+  cleanPrText,
   describeChangelogWrite,
   describeTextProblem,
   findTextProblem,
   localIsoDate,
-  normalizeTitle,
   parsePorcelainPaths,
   parseStagedChanges,
   writeChangelogEntry,
@@ -3348,7 +3348,7 @@ function requirePrText(given: PrTextGiven, flags: PrTextFlags, interactive: bool
     if (problem) {
       refusals.push(describeTextProblem(`${PR_TEXT_SUBJECT[kind]} (${flag})`, problem));
     } else {
-      settled[kind] = kind === "title" ? normalizeTitle(raw) : raw.trim();
+      settled[kind] = cleanPrText(kind, raw);
     }
   }
   if (refusals.length === 0 && (missing.length === 0 || interactive)) return settled;
@@ -3388,7 +3388,7 @@ async function promptForPrText(kind: TextKind): Promise<string> {
       { type: "input", name: "value", message: PR_TEXT_QUESTIONS[kind] },
     ]);
     const problem = findTextProblem(kind, value);
-    if (!problem) return kind === "title" ? normalizeTitle(value) : value.trim();
+    if (!problem) return cleanPrText(kind, value);
     console.log(chalk.red(`  ${describeTextProblem("That", problem)}`));
   }
 }

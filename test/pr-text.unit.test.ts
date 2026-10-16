@@ -47,6 +47,7 @@ import {
   addChangelogEntry,
   buildUpdateBody,
   buildUpdateTitle,
+  cleanPrText,
   describeChangelogWrite,
   describeTextProblem,
   findTextProblem,
@@ -201,9 +202,46 @@ describe("findTextProblem", () => {
   });
 
   test("a title is judged as the one line it becomes", () => {
-    // Two lines that are each fine, and one that is a placeholder once joined, are one title.
+    // Two lines that are each fine are one title; two that read as a placeholder once joined are
+    // refused as one.
     expect(findTextProblem("title", "Add twelve subjects\nwith EEG recordings")).toBeNull();
+    expect(findTextProblem("title", "Save\nchanges")?.code).toBe("placeholder");
+    expect(findTextProblem("title", "Update from branch\nmain")?.code).toBe("placeholder");
     expect(normalizeTitle("  Add   twelve\nsubjects\t(v2) ")).toBe("Add twelve subjects (v2)");
+  });
+
+  describe("cleanPrText", () => {
+    test("a title is one line and a description is trimmed with its paragraphs kept", () => {
+      expect(cleanPrText("title", "  Add   twelve\nsubjects\t(v2) ")).toBe(
+        "Add twelve subjects (v2)",
+      );
+      expect(cleanPrText("description", "  Adds sub-21.\n\nEach has one run.  \n")).toBe(
+        "Adds sub-21.\n\nEach has one run.",
+      );
+      expect(cleanPrText("title", undefined)).toBe("");
+      expect(cleanPrText("description", undefined)).toBe("");
+    });
+
+    test("what is judged is what is stored", () => {
+      // Padded, split and refused variants: judging the raw text and judging the cleaned text must
+      // agree, so a text that passes is the text that goes to git, to GitHub and into CHANGES.
+      const raws = [
+        "  Add   twelve\nsubjects ",
+        "Save\nchanges",
+        "  \n  ",
+        "Update from branch\n main ",
+        "  {{title}}  ",
+        "\tFixed typo.\n",
+        `  ${SHA256}  `,
+      ];
+      for (const kind of ["title", "description"] as const) {
+        for (const raw of raws) {
+          expect(findTextProblem(kind, raw)?.code).toBe(
+            findTextProblem(kind, cleanPrText(kind, raw))?.code,
+          );
+        }
+      }
+    });
   });
 
   test("a title may be exactly as long as the limit and no longer", () => {
@@ -1110,6 +1148,29 @@ describe("nemar dataset update opens a pull request a person can read", () => {
     expect(facts.changelogEntry).toBe("added");
   });
 
+  test("a padded, two-line title is one line in the commit, in CHANGES and in the pull request", async () => {
+    const { work } = newClone();
+    write(work, "sub-03/eeg/sub-03_task-rest_eeg.json", '{"TaskName": "rest"}\n');
+    const r = await runNemar(
+      [
+        "dataset",
+        "update",
+        "--yes",
+        "--branch",
+        "update/pr-text-title",
+        "-m",
+        "  Add  subject 03\nand rename the dataset ",
+        "--description",
+        GOOD_DESCRIPTION,
+      ],
+      work,
+    );
+    expect(r.exitCode, r.stdout + r.stderr).toBe(0);
+    expect(git(work, "log", "-1", "--format=%s", "update/pr-text-title")).toBe(GOOD_TITLE);
+    expect(git(work, "show", "update/pr-text-title:CHANGES")).toContain(`  - ${GOOD_TITLE}`);
+    expect(valueAfter(ghArgs() ?? [], "--title")).toBe(`${GOOD_TITLE} (v1.0.1)`);
+  });
+
   test("a bulk change is summarized by folder, not dumped as paths", async () => {
     const { work } = newClone();
     for (let i = 0; i < 25; i++) {
@@ -1310,7 +1371,8 @@ describe("nemar dataset update at a terminal asks for what the command line left
     await term.until('That is placeholder text ("Save changes"); say what actually changed.');
     // Asked again on a fresh line, so the person is never left to delete what was refused.
     await term.until("Title (one line saying what changed):");
-    term.type(`${GOOD_TITLE}\r`);
+    // Typed with padding and doubled spaces: the stored title is the one-line form of it.
+    term.type("  Add  subject 03 and   rename the dataset  \r");
     await term.until("Description (what changed and why):");
     term.type("\r");
     await term.until("That is empty; say in plain words what changed.");
