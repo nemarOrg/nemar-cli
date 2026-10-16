@@ -570,9 +570,28 @@ export type ReviewOutcome =
   | { kind: "unreported" }
   /**
    * Not reviewed, by design: the author is a NEMAR owner or administrator (ADR 0107). It is only
-   * ever published, never stored, so no row has this outcome and nothing reads it back.
+   * ever published, never stored, so no row has this outcome and nothing reads it back:
+   * {@link StoredOutcome} is the type of everything that is stored or read back.
    */
   | { kind: "exempt" };
+
+/** An outcome a `pr_reviews` row can stand for: every outcome but the one that is never stored. */
+export type StoredOutcome = Exclude<ReviewOutcome, { kind: "exempt" }>;
+
+/**
+ * Every kind of outcome, from a record keyed by the union's own tags, so that adding a kind to
+ * {@link ReviewOutcome} without listing it here is a compile error. The tests build one outcome
+ * of each kind and check them against this list, so a new kind cannot slip past the rule that only
+ * `exempt` is `skipped`.
+ */
+const OUTCOME_KINDS: Record<ReviewOutcome["kind"], true> = {
+  reported: true,
+  declined: true,
+  error: true,
+  unreported: true,
+  exempt: true,
+};
+export const REVIEW_OUTCOME_KINDS = Object.keys(OUTCOME_KINDS) as ReviewOutcome["kind"][];
 
 export type CheckConclusion = "success" | "failure" | "action_required" | "skipped";
 
@@ -916,7 +935,11 @@ export const HOURLY_REVIEW_CAP = { trusted: 20, other: 3 } as const;
 /** Reviews one contributor may start per day, so a few accounts cannot drain the platform's pool. */
 export const DAILY_AUTHOR_CAP = { trusted: 100, other: 6 } as const;
 
-/** Reviews the whole platform starts per day, a ceiling on spend whatever else is true. */
+/**
+ * Reviews the whole platform starts per day, a ceiling on spend whatever else is true of the
+ * reviews that are started. A delivery an owner or administrator is behind is not started as a
+ * review at all (ADR 0107), so it is not counted against this.
+ */
 export const DAILY_REVIEW_CAP = 400;
 
 export function hourlyCapFor(authorAssociation: string | null | undefined): number {

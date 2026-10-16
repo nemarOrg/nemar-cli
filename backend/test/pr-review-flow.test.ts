@@ -39,6 +39,7 @@ import {
   readAuthorTally,
   sweepStalePrReviews,
 } from "../src/services/pr-review";
+import { REVIEW_EXEMPT_SQL } from "../src/services/pr-review-exemption";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, interceptingD1, realD1, wrapD1, yieldingD1 } from "./helpers/d1";
 import { type PermissionAnswer, permissionResponse } from "./helpers/github-permission";
@@ -755,42 +756,150 @@ describe("owners and administrators are not reviewed (ADR 0107)", () => {
     expect(r.body).toMatchObject({ dispatched: true, reason: "dispatched" });
   });
 
-  test("an exempt head that already has a row reuses its check run and edits its comment", async () => {
-    // A review of this commit exists, from before its author held the role.
-    seedRow({ pr: 7, sha: SHA_A, author: 601, assoc: "NONE", ago: "-1 hours" });
-    db.run("UPDATE pr_reviews SET check_run_id = 4242, comment_id = 5252 WHERE pr_number = 7");
+  /** A collaborator pushes to the administrator's branch and the review finds the change wanting. */
+  async function strangerPushFailsReview(sha: string, number = 7) {
+    seedAccount({ github: "admin-gh", role: "admin" });
+    seedAccount({ github: "member-gh", role: "member" });
+    const pushed = await deliver(
+      prEvent({
+        login: "admin-gh",
+        userId: 602,
+        number,
+        sha,
+        action: "synchronize",
+        sender: "member-gh",
+      }),
+    );
+    expect(pushed.body).toMatchObject({ dispatched: true });
+    const id = pushed.body.review_id as number;
+    await callback(id, { outcome: "reported", report: failingReport() });
+    expect(rows()[0]).toMatchObject({ state: "reported", verdict: "fail" });
+    // What the commit's check says now, before the log of GitHub's calls is cleared.
+    expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "failure" });
+    calls = [];
+    return id;
+  }
+
+  test("an exempt author's own event never rewrites a commit a review has touched", async () => {
+    // The review of the stranger's push failed. The administrator reopening the pull request,
+    // force-pushing back to this commit, or the administrator's start, must not turn that failed
+    // review into `skipped`, which a required check counts as passing.
+    await strangerPushFailsReview(SHA_A);
     const before = rows();
-    seedAccount({ github: "owner-gh", role: "owner" });
 
-    const r = await deliver(prEvent({ login: "owner-gh", userId: 601, number: 7, sha: SHA_A }));
-    expect(r.body).toMatchObject({ dispatched: false, reason: "exempt_author" });
-
-    // The commit carries one current result: the same check run, now skipped, not a second one.
-    expect(posted()).toHaveLength(1);
-    expect(posted()[0]).toMatchObject({
-      method: "PATCH",
-      path: `/repos/nemarDatasets/${DATASET}/check-runs/4242`,
-      body: { status: "completed", conclusion: "skipped" },
-    });
-    // The pull request's review comment stops saying what the earlier review said, and no new
-    // comment is made.
-    expect(comments()).toHaveLength(1);
-    expect(comments()[0]).toMatchObject({
-      method: "PATCH",
-      path: `/repos/nemarDatasets/${DATASET}/issues/comments/5252`,
-    });
-    expect(String(comments()[0].body?.body)).toContain("NOT REQUIRED");
-    // And the stored review is untouched: nothing is written for an exempt pull request.
-    expect(rows()).toEqual(before);
+    for (const action of ["reopened", "synchronize", "ready_for_review"]) {
+      const r = await deliver(
+        prEvent({ action, login: "admin-gh", userId: 602, number: 7, sha: SHA_A }),
+      );
+      expect(r.body, action).toMatchObject({ dispatched: false, reason: "duplicate" });
+    }
+    // Not one check was written, so the result still on the commit is the review's failure.
+    expect(posted()).toEqual([]);
+    expect(JSON.stringify(calls)).not.toContain("skipped");
+    // The comment is the stored review re-stated, not the exempt notice.
+    const edits = comments().filter((c) => c.method === "PATCH");
+    expect(edits.length).toBeGreaterThan(0);
+    expect(String(edits.at(-1)?.body?.body)).toContain("NEEDS CHANGES");
+    // The row is what it was, but for the time it was last seen.
+    expect(rows().map((r) => ({ ...r, seen_at: null }))).toEqual(
+      before.map((r) => ({ ...r, seen_at: null })),
+    );
   });
 
-  test("an exempt pull request that was never reviewed gets no comment, whoever pushed earlier", async () => {
-    // A comment on ANOTHER pull request of the same dataset is not this one's.
-    seedRow({ pr: 8, sha: SHA_B, author: 777, assoc: "NONE", ago: "-1 hours" });
-    db.run("UPDATE pr_reviews SET comment_id = 6262 WHERE pr_number = 8");
+  test("an exempt push on top of a reviewed commit posts its own check and leaves the review comment alone", async () => {
+    await strangerPushFailsReview(SHA_A);
+    const r = await deliver(
+      prEvent({
+        login: "admin-gh",
+        userId: 602,
+        number: 7,
+        sha: SHA_B,
+        action: "synchronize",
+        sender: "admin-gh",
+      }),
+    );
+    expect(r.body).toMatchObject({ dispatched: false, reason: "exempt_author" });
+    // The new commit gets a check of its own, created and not an old one updated, and the pull
+    // request's comment (which names the commit it is about) is not touched.
+    expect(posted()).toHaveLength(1);
+    expect(posted()[0]).toMatchObject({
+      method: "POST",
+      body: { head_sha: SHA_B, status: "completed", conclusion: "skipped" },
+    });
+    expect(comments()).toEqual([]);
+    expect(rows()).toHaveLength(1);
+  });
+
+  test("a pull request by someone who is not exempt is never skipped because an administrator acted on it", async () => {
+    // The author half of the rule: a member's pull request, with an administrator behind the
+    // delivery, is still the member's. Every action, one commit each.
+    seedAccount({ github: "member-gh", role: "member" });
+    seedAccount({ github: "admin-gh", role: "admin" });
+    for (const [i, action] of ["synchronize", "reopened", "ready_for_review"].entries()) {
+      const r = await deliver(
+        prEvent({
+          action,
+          login: "member-gh",
+          userId: 603,
+          number: 50 + i,
+          sha: `${i + 1}`.repeat(40),
+          sender: "admin-gh",
+        }),
+      );
+      expect(r.body, action).toMatchObject({ dispatched: true, reason: "dispatched" });
+    }
+    expect(rows()).toHaveLength(3);
+    expect(dispatchesMade()).toHaveLength(3);
+    expect(JSON.stringify(calls)).not.toContain("skipped");
+  });
+
+  test("a review an outsider causes on an owner's pull request is held to the allowances like any other", async () => {
+    seedAccount({ github: "admin-gh", role: "admin" });
+    seedAccount({ github: "member-gh", role: "member" });
+    // The platform's pool for the day is spent.
+    for (let i = 0; i < DAILY_REVIEW_CAP; i++) {
+      seedRow({ pr: 1000 + i, sha: `${i}`.padStart(40, "b"), author: 20_000 + i, ago: "-3 hours" });
+    }
+    const outsider = await deliver(
+      prEvent({
+        login: "admin-gh",
+        userId: 602,
+        number: 5,
+        sha: SHA_A,
+        action: "synchronize",
+        sender: "member-gh",
+      }),
+    );
+    expect(outsider.body).toMatchObject({ dispatched: false, reason: "daily_limit" });
+    expect(dispatchesMade()).toHaveLength(0);
+
+    // The owner's own push is exempt before any allowance is asked, whatever the pool says.
+    const own = await deliver(
+      prEvent({
+        login: "admin-gh",
+        userId: 602,
+        number: 6,
+        sha: SHA_B,
+        action: "synchronize",
+        sender: "admin-gh",
+      }),
+    );
+    expect(own.body).toMatchObject({ dispatched: false, reason: "exempt_author" });
+  });
+
+  test("a database failure on the exemption read answers 500 and stores and dispatches nothing", async () => {
     seedAccount({ github: "owner-gh", role: "owner" });
-    await deliver(prEvent({ login: "owner-gh", userId: 601, number: 7, sha: SHA_A }));
-    expect(comments()).toHaveLength(0);
+    const failing = wrapD1(realD1(db), (sql) => {
+      if (sql === REVIEW_EXEMPT_SQL) throw new Error("D1 unavailable");
+    });
+    const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }), "pull_request", {
+      ...env(),
+      DB: failing,
+    } as Bindings);
+    expect(r.status).toBe(500);
+    expect(r.body).toMatchObject({ ok: false, dispatched: false, reason: "pr_review_error" });
+    expect(rows()).toHaveLength(0);
+    expect(calls).toHaveLength(0);
   });
 
   test("a demoted administrator is reviewed from the next delivery on: the role is read every time", async () => {
@@ -891,12 +1000,9 @@ describe("owners and administrators are not reviewed (ADR 0107)", () => {
     );
     expect(r.body).toMatchObject({ dispatched: true, reason: "dispatched" });
     // The author was asked first and was fine, then the pusher, who was not. The allowance check
-    // asks about the author once more, because a role can change between the two reads.
-    expect(permissionAsks().map((c) => c.path.split("/")[5])).toEqual([
-      "admin-gh",
-      "owner-gh",
-      "admin-gh",
-    ]);
+    // reads the accounts again (a role can change between the two reads) but does not ask GitHub
+    // about the author a second time: one delivery's answers are remembered.
+    expect(permissionAsks().map((c) => c.path.split("/")[5])).toEqual(["admin-gh", "owner-gh"]);
   });
 
   test("GitHub is asked only about accounts that matched, once for an author who is also the pusher", async () => {

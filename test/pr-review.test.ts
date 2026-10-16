@@ -25,6 +25,7 @@ import {
   type PrReviewReport,
   PrReviewReportError,
   REJECTION_COUNT,
+  REVIEW_OUTCOME_KINDS,
   REVIEW_STATES,
   RUN_ERRORS,
   type ReviewOutcome,
@@ -507,6 +508,10 @@ describe("conclusions: only a clear pass is green, nothing unknown ever satisfie
     );
     expect(conclusionOf({ kind: "error", error: "model_refused" })).toBe("action_required");
     expect(conclusionOf({ kind: "unreported" })).toBe("action_required");
+  });
+
+  test("everyOutcome has every kind of outcome there is, so the rules below see them all", () => {
+    expect(new Set(everyOutcome().map((o) => o.kind))).toEqual(new Set(REVIEW_OUTCOME_KINDS));
   });
 
   test("neutral is the conclusion of nothing: GitHub counts it as passing", () => {

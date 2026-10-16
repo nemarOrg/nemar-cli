@@ -15,6 +15,7 @@ import { join } from "node:path";
 import type { Server } from "bun";
 import { ACCOUNT_KIND_VALUES } from "../../shared/contract/user";
 import {
+  type AdminAnswers,
   REVIEW_EXEMPT_KINDS,
   REVIEW_EXEMPT_ROLES,
   REVIEW_EXEMPT_SQL,
@@ -22,7 +23,7 @@ import {
   isReviewExempt,
 } from "../src/services/pr-review-exemption";
 import type { Bindings } from "../src/types/bindings";
-import { freshDb, realD1 } from "./helpers/d1";
+import { freshDb, realD1, wrapD1 } from "./helpers/d1";
 import { type PermissionAnswer, permissionResponse } from "./helpers/github-permission";
 
 const REPO = "nm000460";
@@ -171,6 +172,20 @@ describe("who is exempt from the review", () => {
     for (const login of ["", " ", "a b", "x[bot]", "-lead", "a".repeat(40), "owner\u0000"]) {
       expect(await exempt(login), JSON.stringify(login)).toBe(false);
     }
+    // Not looked up: neither the accounts' answer nor GitHub's was needed, and GitHub was not asked
+    // (the stored empty handle above would otherwise have reached `collaborators//permission`).
+    expect(asked).toEqual([]);
+  });
+
+  test("a database failure on the accounts' read throws, and GitHub is not asked", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    const failing = wrapD1(realD1(db), (sql) => {
+      if (sql === REVIEW_EXEMPT_SQL) throw new Error("D1 unavailable");
+    });
+    await expect(
+      isReviewExempt({ ...env(), DB: failing } as Bindings, { login: "owner-gh", repo: REPO }),
+    ).rejects.toThrow("D1 unavailable");
+    expect(asked).toEqual([]);
   });
 
   test("every combination of role, kind, status and deletion, against the written rule", async () => {
@@ -246,6 +261,72 @@ describe("GitHub has to agree", () => {
       permissions = { "admin-gh": answer };
       expect(await exempt("Admin-GH"), why).toBe(false);
     }
+  });
+
+  test("a login GitHub does not know is a warning, and every other failure is an error, with no token or login in any line", async () => {
+    admin();
+    const lines: { level: "warn" | "error"; text: string }[] = [];
+    const originals = { warn: console.warn, error: console.error };
+    const grab =
+      (level: "warn" | "error") =>
+      (...args: unknown[]) => {
+        lines.push({ level, text: args.map(String).join(" ") });
+      };
+    console.warn = grab("warn");
+    console.error = grab("error");
+    const levels: [string, PermissionAnswer, "warn" | "error"][] = [
+      ["a login GitHub does not have", 404, "warn"],
+      ["a refusal", 403, "error"],
+      ["a bad credential", 401, "error"],
+      ["a server error", 500, "error"],
+      ["a body that is not JSON", "garbage", "error"],
+      ["a body with no role_name", "no_role_name", "error"],
+    ];
+    const seen: ("warn" | "error")[] = [];
+    try {
+      for (const [, answer] of levels) {
+        permissions = { "admin-gh": answer };
+        const before = lines.filter((l) => l.text.startsWith("[pr-review-exempt]")).length;
+        await exempt("Admin-GH");
+        const ours = lines.filter((l) => l.text.startsWith("[pr-review-exempt]"));
+        // Exactly one of our lines per failure (the transport's retry notices are not ours).
+        expect(ours.length - before).toBe(1);
+        seen.push(ours.at(-1)?.level ?? "warn");
+      }
+    } finally {
+      Object.assign(console, originals);
+    }
+    expect(seen).toEqual(levels.map(([, , level]) => level));
+    for (const l of lines.filter((x) => x.text.startsWith("[pr-review-exempt]"))) {
+      expect(l.text).not.toContain(TOKEN);
+      expect(l.text.toLowerCase()).not.toContain("admin-gh");
+    }
+  });
+
+  test("one delivery asks GitHub once per login and repository, however many questions it asks", async () => {
+    admin();
+    const answers: AdminAnswers = new Map();
+    const who = { login: "Admin-GH", repo: REPO };
+    expect(await isReviewExempt(env(), who, answers)).toBe(true);
+    expect(await isReviewExempt(env(), who, answers)).toBe(true);
+    // Case does not make it a second question, and another repository is one.
+    expect(await isReviewExempt(env(), { ...who, login: "admin-gh" }, answers)).toBe(true);
+    expect(asked).toHaveLength(1);
+    expect(await isReviewExempt(env(), { ...who, repo: "nm000461" }, answers)).toBe(true);
+    expect(asked).toHaveLength(2);
+    // Without the memory every question is asked.
+    expect(await isReviewExempt(env(), who)).toBe(true);
+    expect(asked).toHaveLength(3);
+  });
+
+  test("only GitHub's half is remembered: the accounts are read again, so a demotion is seen", async () => {
+    admin();
+    const answers: AdminAnswers = new Map();
+    const who = { login: "Admin-GH", repo: REPO };
+    expect(await isReviewExempt(env(), who, answers)).toBe(true);
+    db.run("UPDATE users SET role = 'member' WHERE github_username = 'Admin-GH'");
+    expect(await isReviewExempt(env(), who, answers)).toBe(false);
+    expect(asked).toHaveLength(1);
   });
 
   test("a GitHub that does not answer in time is not exempt", async () => {

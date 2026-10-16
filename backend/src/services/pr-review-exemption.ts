@@ -25,7 +25,7 @@
  * demotion, a revocation or a deleted account ends the exemption on the very next pull request.
  *
  * A database failure throws, like every read in the review's intake: the webhook answers 500 and
- * the delivery can be redelivered. A GitHub failure never throws here; it answers not exempt.
+ * the delivery can be redelivered. A GitHub failure never throws here; it answers not exempt, and says so in the log.
  */
 
 import type { AccountKind } from "../../../shared/contract/user.js";
@@ -75,6 +75,14 @@ export interface ReviewExemptSubject {
 }
 
 /**
+ * What GitHub said about each (repository, login), kept for the length of ONE delivery and handed
+ * back to {@link isReviewExempt}: the intake and the allowance check both ask whether the author is
+ * exempt, and a GitHub that is slow or refusing should be waited on once, not twice. Only GitHub's
+ * half is kept; the accounts are read again every time, because a role can be granted in between.
+ */
+export type AdminAnswers = Map<string, Promise<boolean>>;
+
+/**
  * The longest the question to GitHub may take, in all, before it is abandoned and the answer is
  * "not exempt". It runs inside the webhook's own request, which GitHub gives ten seconds, and a
  * pusher other than the author is a second question.
@@ -106,9 +114,12 @@ async function holdsRepositoryAdmin(env: Bindings, who: ReviewExemptSubject): Pr
       { kind: "interactive", maxAttempts: 2, maxThrottleMs: 2_000, refreshTokenOn401: refresh },
     );
     if (!res.ok) {
-      console.warn(
-        `[pr-review-exempt] ${who.repo}: GitHub answered HTTP ${res.status} to the permission check; not exempt`,
-      );
+      // A login GitHub does not know is an answer (an account that names a login nobody holds).
+      // Anything else is GitHub or the credential failing, which every exempt account feels at
+      // once, so it is logged as the fault it is.
+      const line = `[pr-review-exempt] ${who.repo}: GitHub answered HTTP ${res.status} to the permission check; not exempt`;
+      if (res.status === 404) console.warn(line);
+      else console.error(line);
       return false;
     }
     const body: unknown = await res.json().catch(() => null);
@@ -116,10 +127,18 @@ async function holdsRepositoryAdmin(env: Bindings, who: ReviewExemptSubject): Pr
       typeof body === "object" && body !== null && !Array.isArray(body)
         ? (body as Record<string, unknown>).role_name
         : undefined;
+    if (typeof role !== "string") {
+      // The answer is not the shape this reads. If GitHub changed it, every exempt account is
+      // reviewed from now on, and this line is the only sign of it.
+      console.error(
+        `[pr-review-exempt] ${who.repo}: the permission check answered with no usable role_name; not exempt`,
+      );
+      return false;
+    }
     return role === ADMIN_ROLE;
   } catch (err) {
     // Fixed words and the error's own message (a status or a timeout), never a token or a login.
-    console.warn(
+    console.error(
       `[pr-review-exempt] ${who.repo}: the permission check failed (${err instanceof Error ? err.message.slice(0, 120) : "unknown"}); not exempt`,
     );
     return false;
@@ -130,11 +149,24 @@ async function holdsRepositoryAdmin(env: Bindings, who: ReviewExemptSubject): Pr
  * Whether this GitHub login is exempt from the review on this dataset: a live, approved owner or
  * administrator account holds it (the query), and GitHub agrees that it holds `admin` on the
  * repository. A login that is not shaped like one is never exempt and is not looked up, and
- * GitHub is asked only after the accounts have said yes.
+ * GitHub is asked only after the accounts have said yes. `answers` is one delivery's memory of
+ * what GitHub said (see {@link AdminAnswers}); without it every call asks GitHub afresh.
  */
-export async function isReviewExempt(env: Bindings, who: ReviewExemptSubject): Promise<boolean> {
+export async function isReviewExempt(
+  env: Bindings,
+  who: ReviewExemptSubject,
+  answers?: AdminAnswers,
+): Promise<boolean> {
   if (!GITHUB_LOGIN.test(who.login)) return false;
   const row = await env.DB.prepare(REVIEW_EXEMPT_SQL).bind(who.login).first<{ exempt: number }>();
-  if (row === null) return false;
-  return await holdsRepositoryAdmin(env, who);
+  // `!row`, not `=== null`: anything but a row is "no account", whatever D1 answers with.
+  if (!row) return false;
+  if (!answers) return await holdsRepositoryAdmin(env, who);
+  const key = `${who.repo}#${who.login.toLowerCase()}`;
+  let answer = answers.get(key);
+  if (answer === undefined) {
+    answer = holdsRepositoryAdmin(env, who);
+    answers.set(key, answer);
+  }
+  return await answer;
 }
