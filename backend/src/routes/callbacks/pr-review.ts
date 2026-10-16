@@ -95,8 +95,8 @@ export function registerPrReviewRoutes(webhooks: WebhookRouter): void {
     const outcome = parseCallbackOutcome(
       { outcome: v.body.outcome, report: v.body.report, error: v.body.error },
       // The parser's reason is a fixed word, so it is safe to log, and without it a contract that
-      // drifted between the script (which the workflow checks out of main or dev) and the Worker
-      // looks like a silent "report_invalid" for every review.
+      // drifted between the script (deployed from main) and the Worker looks like a silent
+      // "report_invalid" for every review.
       (code) =>
         console.warn(
           `[pr-review-result] review ${v.reviewId} (${v.datasetId}): report refused (${code})`,

@@ -65,25 +65,6 @@ const step = (name: string): Step => {
   return s;
 };
 
-/**
- * The branch the review script is checked out at for a dispatch from `environment`.
- *
- * The `ref` is an Actions expression, which only GitHub evaluates, so this evaluates the one shape
- * the file uses (`<payload environment> == '<x>' && '<a>' || '<b>'`) and refuses any other: a
- * rewritten expression then fails loudly instead of being read as something it is not. Actions
- * compares strings without regard to case and counts a non-empty string as true, which is what
- * makes `&& ... ||` a conditional.
- */
-function checkoutRefFor(expression: string, environment: string | undefined): string {
-  const shape =
-    /^\$\{\{\s*github\.event\.client_payload\.environment\s*==\s*'([^']+)'\s*&&\s*'([^']+)'\s*\|\|\s*'([^']+)'\s*\}\}$/;
-  const m = shape.exec(expression.trim());
-  if (!m) throw new Error(`the checkout ref is not the expected conditional: ${expression}`);
-  const [, compared, whenEqual, otherwise] = m;
-  const equal = environment !== undefined && environment.toLowerCase() === compared.toLowerCase();
-  return equal ? whenEqual : otherwise;
-}
-
 /** The reporter script the validate step writes, as it will exist on the runner. */
 const REPORTER = (() => {
   const run = (job.steps.find((x) => x.name === "Validate the dispatch")?.run ?? "").split("\n");
@@ -393,9 +374,10 @@ describe("nothing from the pull request runs", () => {
     );
   });
 
-  test("the only code that runs is the script checked out from nemar-cli", () => {
+  test("the only code that runs is the script checked out from nemar-cli main", () => {
     const checkout = step("Check out the review script");
     expect(checkout.with?.repository).toBe("nemarOrg/nemar-cli");
+    expect(checkout.with?.ref).toBe("main");
     expect(checkout.with?.["persist-credentials"]).toBe(false as never);
     for (const s of job.steps) {
       if (s.run?.includes("bun run")) {
@@ -406,24 +388,16 @@ describe("nothing from the pull request runs", () => {
     expect(SRC).not.toMatch(/\$RUNNER_TEMP\/repo\/(?!\.git)[^\s"']*\.(sh|ts|js|py)/);
   });
 
-  test("a dev dispatch checks out dev and a production dispatch checks out main", () => {
-    const ref = step("Check out the review script").with?.ref ?? "";
-    expect(checkoutRefFor(ref, "dev")).toBe("dev");
-    expect(checkoutRefFor(ref, "production")).toBe("main");
-    // Anything but the dev environment gets main, the released script, and the result is always
-    // one of the expression's own two literals, never text taken from the payload. The validate
-    // step refuses every one of these before the checkout can run; this is the second fence.
-    for (const other of ["staging", "main", "devel", "dev-1", "", undefined]) {
-      expect(checkoutRefFor(ref, other), String(other)).toBe("main");
-    }
-    // GitHub's expressions reference says "GitHub ignores case when comparing strings", so `DEV`
-    // reaches the dev branch here. Only the validate step keeps it out (see its test below), and
-    // this line is what makes the model above say so: without it, removing the case folding from
-    // `checkoutRefFor` would change no result.
-    expect(checkoutRefFor(ref, "DEV")).toBe("dev");
-    // The validate step checks the job's ENVIRONMENT, so the ref has to read the same payload
-    // field. If they ever differed, a value could pass validation and be read differently here.
-    expect(job.env.ENVIRONMENT).toBe("${{ github.event.client_payload.environment }}");
+  test("a dev dispatch and a production dispatch both check out main", () => {
+    // The ref is a plain branch name, never an expression over the payload, so no dispatch, the
+    // dev Worker's included, can choose which branch of nemar-cli its script comes from: a change
+    // to the script reaches a review only through a release to main. run-publication-review.yml
+    // holds to the same rule. Both dispatch environments pass the validate step, so both reach
+    // this checkout, and a literal gives each of them the same ref.
+    const checkout = step("Check out the review script");
+    expect(checkout.with?.ref).toBe("main");
+    expect(JSON.stringify(checkout.with)).not.toContain("${{");
+    expect(JSON.stringify(checkout)).not.toMatch(/client_payload|ENVIRONMENT/);
   });
 });
 
@@ -590,39 +564,6 @@ describe("the shell steps, run for real", () => {
     expect(r.status).not.toBe(0);
     expect(r.envFile).toBe("");
     expect(existsSync(join(r.dir, "pwned"))).toBe(false);
-  });
-
-  test("validate: exactly production and dev get past it, and each reaches its own checkout branch", async () => {
-    // Actions compares strings without regard to case, so the checkout's ref expression would read
-    // `DEV` as dev. The validate step does not, and it runs first: bash compares exactly.
-    const probes = [
-      "production",
-      "dev",
-      "DEV",
-      "Dev",
-      "Production",
-      "dev ",
-      " dev",
-      "dev\n",
-      "staging",
-      "main",
-      "",
-    ];
-    const accepted: string[] = [];
-    for (const environment of probes) {
-      const r = await runStepScript("Validate the dispatch", { ...GOOD, ENVIRONMENT: environment });
-      if (r.status === 0) {
-        accepted.push(environment);
-      } else {
-        // Refused by the guard that names the environment, not by a later line that happens to
-        // fail: a script that stops on an unbound variable would also exit non-zero.
-        expect(r.stdout, JSON.stringify(environment)).toContain("::error::malformed environment");
-      }
-    }
-    expect(accepted).toEqual(["production", "dev"]);
-    const ref = step("Check out the review script").with?.ref ?? "";
-    const branches = accepted.map((environment) => checkoutRefFor(ref, environment));
-    expect(branches).toEqual(["main", "dev"]);
   });
 
   /** Validate, then hand the claim step the stand-in's origin as the real job would see it. */
