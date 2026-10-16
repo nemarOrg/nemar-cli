@@ -40,7 +40,7 @@ import {
   sweepStalePrReviews,
 } from "../src/services/pr-review";
 import type { Bindings, Variables } from "../src/types/bindings";
-import { freshDb, realD1, wrapD1, yieldingD1 } from "./helpers/d1";
+import { freshDb, interceptingD1, realD1, wrapD1, yieldingD1 } from "./helpers/d1";
 
 const WEBHOOK_SECRET = "pr-review-webhook-secret";
 const CALLBACK_SECRET = "pr-review-callback-secret";
@@ -146,6 +146,30 @@ function seedDataset(id: string) {
   );
 }
 
+/** An account whose GitHub login is `github`, as `users` holds it. Approved person unless said otherwise. */
+function seedAccount(o: {
+  github: string;
+  role: string;
+  kind?: string;
+  status?: string;
+}): number {
+  db.run(
+    `INSERT INTO users (username, email, status, role, email_verified, github_username, account_kind)
+     VALUES (?, ?, ?, ?, 1, ?, ?)`,
+    [
+      `account-${o.github}`,
+      `${o.github}@example.org`,
+      o.status ?? "approved",
+      o.role,
+      o.github,
+      o.kind ?? "person",
+    ],
+  );
+  return (
+    db.query("SELECT id FROM users WHERE github_username = ?").get(o.github) as { id: number }
+  ).id;
+}
+
 beforeEach(() => {
   db = freshDb();
   app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -182,6 +206,11 @@ interface PrOpts {
   userType?: string;
   assoc?: string;
   headRepo?: string | null;
+  /**
+   * Who caused the delivery (GitHub's `sender`): the author unless said otherwise, and no sender at
+   * all for `null`.
+   */
+  sender?: string | null;
 }
 
 function prEvent(o: PrOpts = {}): Record<string, unknown> {
@@ -208,6 +237,14 @@ function prEvent(o: PrOpts = {}): Record<string, unknown> {
         repo: o.headRepo === null ? null : { full_name: o.headRepo ?? `${owner}/${repo}` },
       },
     },
+    ...(o.sender === null
+      ? {}
+      : {
+          sender: {
+            login: o.sender ?? o.login ?? "contributor",
+            type: o.sender?.endsWith("[bot]") ? "Bot" : "User",
+          },
+        }),
   };
 }
 
@@ -498,6 +535,302 @@ describe("taking up a pull request", () => {
   test("an event type other than push or pull_request is still ignored", async () => {
     const r = await deliver({ zen: "x" }, "release");
     expect(r.body).toMatchObject({ reason: "event_ignored" });
+  });
+});
+
+describe("owners and administrators are not reviewed (ADR 0107)", () => {
+  /** What GitHub was asked to publish: every check-run write, as the stand-in recorded it. */
+  const posted = () => checks().map((c) => ({ method: c.method, path: c.path, body: c.body }));
+
+  test("an owner's pull request gets a skipped check, no row and no dispatch", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+    expect(r.body).toMatchObject({ ok: true, dispatched: false, reason: "exempt_author" });
+    expect(rows()).toHaveLength(0);
+    expect(dispatchesMade()).toHaveLength(0);
+
+    // One check, created completed with the conclusion that a required check accepts, and said in
+    // words. It is never shown as running, and no comment is made for a pull request that was
+    // never reviewed.
+    expect(posted()).toHaveLength(1);
+    expect(posted()[0]).toMatchObject({
+      method: "POST",
+      path: `/repos/nemarDatasets/${DATASET}/check-runs`,
+      body: {
+        name: "NEMAR PR Review",
+        head_sha: SHA_A,
+        status: "completed",
+        conclusion: "skipped",
+      },
+    });
+    expect(lastCheck().output?.title).toBe(
+      "Not required: opened by a NEMAR owner or administrator",
+    );
+    expect(comments()).toHaveLength(0);
+    // Nothing the pull request wrote travelled anywhere, and the only calls are the check's.
+    expect(JSON.stringify(calls)).not.toContain(LEAK);
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      `POST /repos/nemarDatasets/${DATASET}/check-runs`,
+    ]);
+  });
+
+  test("an admin's pull request gets the same, whatever the case of the login", async () => {
+    seedAccount({ github: "Admin-GH", role: "admin" });
+    const r = await deliver(prEvent({ login: "ADMIN-gh", userId: 602 }));
+    expect(r.body).toMatchObject({ dispatched: false, reason: "exempt_author" });
+    expect(rows()).toHaveLength(0);
+    expect(dispatchesMade()).toHaveLength(0);
+    expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "skipped" });
+  });
+
+  test("a member's pull request is dispatched", async () => {
+    // The control: the same login shape and the same delivery, an account without the role.
+    seedAccount({ github: "member-gh", role: "member" });
+    const r = await deliver(prEvent({ login: "member-gh", userId: 603 }));
+    expect(r.body).toMatchObject({ dispatched: true, reason: "dispatched" });
+    expect(rows()).toHaveLength(1);
+    expect(dispatchesMade()).toHaveLength(1);
+    expect(lastCheck()).toMatchObject({ status: "in_progress" });
+  });
+
+  test("an account that holds the role but is a test persona, or revoked, is reviewed", async () => {
+    seedAccount({ github: "persona-gh", role: "admin", kind: "test" });
+    seedAccount({ github: "revoked-gh", role: "owner", status: "revoked" });
+    const a = await deliver(prEvent({ login: "persona-gh", userId: 604, number: 1, sha: SHA_A }));
+    const b = await deliver(prEvent({ login: "revoked-gh", userId: 605, number: 2, sha: SHA_B }));
+    expect(a.body).toMatchObject({ dispatched: true });
+    expect(b.body).toMatchObject({ dispatched: true });
+    expect(rows()).toHaveLength(2);
+  });
+
+  test("a push by an account that is not exempt to an admin's pull request is reviewed", async () => {
+    seedAccount({ github: "admin-gh", role: "admin" });
+    seedAccount({ github: "member-gh", role: "member" });
+    seedAccount({ github: "owner-gh", role: "owner" });
+    const base = { login: "admin-gh", userId: 602, number: 7, action: "synchronize" };
+
+    // A collaborator pushes to the administrator's branch: that content is reviewed.
+    const pushedByMember = await deliver(prEvent({ ...base, sha: SHA_A, sender: "member-gh" }));
+    expect(pushedByMember.body).toMatchObject({ dispatched: true, reason: "dispatched" });
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]).toMatchObject({ author_login: "admin-gh", author_id: 602, head_sha: SHA_A });
+    expect(dispatchesMade()).toHaveLength(1);
+
+    // The administrator, or another exempt account, pushing on top of it is not.
+    const byAuthor = await deliver(prEvent({ ...base, sha: SHA_B, sender: "admin-gh" }));
+    const byOwner = await deliver(prEvent({ ...base, sha: "c".repeat(40), sender: "OWNER-gh" }));
+    expect(byAuthor.body).toMatchObject({ dispatched: false, reason: "exempt_author" });
+    expect(byOwner.body).toMatchObject({ dispatched: false, reason: "exempt_author" });
+    expect(rows()).toHaveLength(1);
+    expect(dispatchesMade()).toHaveLength(1);
+  });
+
+  test("a delivery that names no usable sender is reviewed, so an exemption is never assumed", async () => {
+    seedAccount({ github: "admin-gh", role: "admin" });
+    const base = { login: "admin-gh", userId: 602, action: "synchronize" };
+    const none = await deliver(prEvent({ ...base, number: 1, sha: SHA_A, sender: null }));
+    const bot = await deliver(prEvent({ ...base, number: 2, sha: SHA_B, sender: "helper[bot]" }));
+    expect(none.body).toMatchObject({ dispatched: true });
+    expect(bot.body).toMatchObject({ dispatched: true });
+    expect(rows()).toHaveLength(2);
+  });
+
+  test("someone else reopening or marking ready an admin's pull request does not exempt it", async () => {
+    // `reopened` keeps the head commit, and a draft takes pushes unreviewed: what an exempt author
+    // did not push must not be passed on the strength of an event someone else caused.
+    seedAccount({ github: "admin-gh", role: "admin" });
+    seedAccount({ github: "member-gh", role: "member" });
+    for (const [i, action] of ["reopened", "ready_for_review"].entries()) {
+      const r = await deliver(
+        prEvent({
+          action,
+          login: "admin-gh",
+          userId: 602,
+          number: 10 + i,
+          sha: `${i + 1}`.repeat(40),
+          sender: "member-gh",
+        }),
+      );
+      expect(r.body, action).toMatchObject({ dispatched: true });
+    }
+    // The administrator doing the same is exempt.
+    for (const [i, action] of ["reopened", "ready_for_review", "opened"].entries()) {
+      const r = await deliver(
+        prEvent({
+          action,
+          login: "admin-gh",
+          userId: 602,
+          number: 20 + i,
+          sha: `${i + 4}`.repeat(40),
+        }),
+      );
+      expect(r.body, action).toMatchObject({ dispatched: false, reason: "exempt_author" });
+    }
+    expect(rows()).toHaveLength(2);
+  });
+
+  test("an exempt author is never rate limited past the hourly cap", async () => {
+    const adminId = seedAccount({ github: "admin-gh", role: "admin" });
+    seedAccount({ github: "member-gh", role: "member" });
+    // Past the most a collaborator is allowed in an hour, and past the platform's pool as well.
+    for (const author of [adminId + 1000, 777]) {
+      for (let i = 0; i < 21; i++) {
+        seedRow({
+          pr: 300 + i,
+          sha: `${author}${i}`.padEnd(40, "e"),
+          author,
+          assoc: "COLLABORATOR",
+          ago: "-10 minutes",
+        });
+      }
+    }
+    // The control: the same history stops a member.
+    const over = await deliver(
+      prEvent({ login: "member-gh", userId: 777, assoc: "COLLABORATOR", number: 99 }),
+    );
+    expect(over.body).toMatchObject({ dispatched: false, reason: "rate_limited" });
+
+    const before = rows().length;
+    for (let n = 0; n < 3; n++) {
+      const r = await deliver(
+        prEvent({
+          login: "admin-gh",
+          userId: adminId + 1000,
+          assoc: "COLLABORATOR",
+          number: 200 + n,
+          sha: `${n + 1}`.repeat(40),
+          action: n === 0 ? "opened" : "synchronize",
+        }),
+      );
+      expect(r.body).toMatchObject({ dispatched: false, reason: "exempt_author" });
+    }
+    // Nothing was declined, nothing was stored: the history above is all there is.
+    expect(rows()).toHaveLength(before);
+    expect(rows().filter((r) => r.author_id === adminId + 1000 && r.state === "declined")).toEqual(
+      [],
+    );
+  });
+
+  test("a role granted between intake and the cap check lifts the caps", async () => {
+    // Three reviews inside the hour use up a stranger's allowance, and the fourth would be declined.
+    for (let i = 0; i < 3; i++) {
+      seedRow({
+        pr: 70 + i,
+        sha: `${i}`.padStart(40, "d"),
+        author: 777,
+        assoc: "NONE",
+        ago: "-20 minutes",
+      });
+    }
+    seedAccount({ github: "late-gh", role: "member" });
+    const fourth = (number: number, sha: string) =>
+      prEvent({ login: "late-gh", userId: 777, assoc: "NONE", number, sha });
+
+    // Without the grant, the cap holds.
+    expect((await deliver(fourth(80, "7".repeat(40)))).body).toMatchObject({
+      reason: "rate_limited",
+    });
+
+    // The role is granted by someone else after the intake looked and before the row is ranked:
+    // the allowance is asked about an account that is exempt now, and does not decline it.
+    let granted = false;
+    const racing = interceptingD1(realD1(db), (sql) => {
+      if (!granted && /INSERT INTO pr_reviews/.test(sql)) {
+        granted = true;
+        db.run("UPDATE users SET role = 'admin' WHERE github_username = 'late-gh'");
+      }
+    });
+    const r = await deliver(fourth(81, "8".repeat(40)), "pull_request", {
+      ...env(),
+      DB: racing,
+    } as Bindings);
+    expect(granted).toBe(true);
+    expect(r.body).toMatchObject({ dispatched: true, reason: "dispatched" });
+  });
+
+  test("an exempt head that already has a row reuses its check run and edits its comment", async () => {
+    // A review of this commit exists, from before its author held the role.
+    seedRow({ pr: 7, sha: SHA_A, author: 601, assoc: "NONE", ago: "-1 hours" });
+    db.run("UPDATE pr_reviews SET check_run_id = 4242, comment_id = 5252 WHERE pr_number = 7");
+    const before = rows();
+    seedAccount({ github: "owner-gh", role: "owner" });
+
+    const r = await deliver(prEvent({ login: "owner-gh", userId: 601, number: 7, sha: SHA_A }));
+    expect(r.body).toMatchObject({ dispatched: false, reason: "exempt_author" });
+
+    // The commit carries one current result: the same check run, now skipped, not a second one.
+    expect(posted()).toHaveLength(1);
+    expect(posted()[0]).toMatchObject({
+      method: "PATCH",
+      path: `/repos/nemarDatasets/${DATASET}/check-runs/4242`,
+      body: { status: "completed", conclusion: "skipped" },
+    });
+    // The pull request's review comment stops saying what the earlier review said, and no new
+    // comment is made.
+    expect(comments()).toHaveLength(1);
+    expect(comments()[0]).toMatchObject({
+      method: "PATCH",
+      path: `/repos/nemarDatasets/${DATASET}/issues/comments/5252`,
+    });
+    expect(String(comments()[0].body?.body)).toContain("NOT REQUIRED");
+    // And the stored review is untouched: nothing is written for an exempt pull request.
+    expect(rows()).toEqual(before);
+  });
+
+  test("an exempt pull request that was never reviewed gets no comment, whoever pushed earlier", async () => {
+    // A comment on ANOTHER pull request of the same dataset is not this one's.
+    seedRow({ pr: 8, sha: SHA_B, author: 777, assoc: "NONE", ago: "-1 hours" });
+    db.run("UPDATE pr_reviews SET comment_id = 6262 WHERE pr_number = 8");
+    seedAccount({ github: "owner-gh", role: "owner" });
+    await deliver(prEvent({ login: "owner-gh", userId: 601, number: 7, sha: SHA_A }));
+    expect(comments()).toHaveLength(0);
+  });
+
+  test("a demoted administrator is reviewed from the next delivery on: the role is read every time", async () => {
+    seedAccount({ github: "admin-gh", role: "admin" });
+    const first = await deliver(
+      prEvent({ login: "admin-gh", userId: 602, number: 7, sha: SHA_A, action: "opened" }),
+    );
+    expect(first.body).toMatchObject({ reason: "exempt_author" });
+    db.run("UPDATE users SET role = 'member' WHERE github_username = 'admin-gh'");
+    const second = await deliver(
+      prEvent({ login: "admin-gh", userId: 602, number: 7, sha: SHA_B, action: "synchronize" }),
+    );
+    expect(second.body).toMatchObject({ dispatched: true, reason: "dispatched" });
+    expect(rows()).toHaveLength(1);
+  });
+
+  test("a check that cannot be published answers 500 and stores nothing, so the delivery can be redelivered", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    checkStatus = 500;
+    const failed = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+    expect(failed.status).toBe(500);
+    expect(failed.body).toMatchObject({ ok: false, dispatched: false, reason: "pr_review_error" });
+    expect(rows()).toHaveLength(0);
+    expect(dispatchesMade()).toHaveLength(0);
+
+    // The redelivery, once GitHub answers, posts the check.
+    checkStatus = 200;
+    const again = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+    expect(again.status).toBe(200);
+    expect(again.body).toMatchObject({ reason: "exempt_author" });
+    expect(lastCheck()).toMatchObject({ conclusion: "skipped" });
+  });
+
+  test("the review's own gates still come first: a dataset that is not reviewable gets no check", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    db.run("UPDATE datasets SET visibility = 'private'");
+    const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+    expect(r.body).toMatchObject({ dispatched: false, reason: "dataset_not_reviewable" });
+    expect(calls).toHaveLength(0);
+  });
+
+  test("it is off with the rest of the review", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    envOverrides = { PR_REVIEW_ENABLED: undefined };
+    const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+    expect(r.body).toMatchObject({ dispatched: false, reason: "pr_review_disabled" });
+    expect(calls).toHaveLength(0);
   });
 });
 

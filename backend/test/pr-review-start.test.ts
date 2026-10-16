@@ -616,6 +616,80 @@ describe("what an administrator's start does not skip", () => {
   });
 });
 
+describe("an owner's or administrator's pull request is not started (ADR 0107)", () => {
+  /** The check-run writes GitHub recorded. */
+  const checkWrites = () => calls.filter((c) => /\/check-runs(\/\d+)?$/.test(c.path));
+
+  test("it is answered exempt_author, gets the skipped check, and writes no row and no audit row", async () => {
+    // The seeded administrator's GitHub login, as seedUser stores it.
+    pulls[`${DATASET}#7`] = restPull({ number: 7, userId: 4001, login: "startadmin-gh" });
+
+    const r = await start(DATASET, 7);
+
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({
+      environment: "production",
+      dispatched: false,
+      reason: "exempt_author",
+      review_id: null,
+      author_login: "startadmin-gh",
+    });
+    expect(rows()).toHaveLength(0);
+    expect(dispatches()).toHaveLength(0);
+    expect(checkWrites()).toHaveLength(1);
+    expect(checkWrites()[0].body).toMatchObject({
+      name: "NEMAR PR Review",
+      head_sha: SHA_A,
+      status: "completed",
+      conclusion: "skipped",
+    });
+    // Only a start that was handed to GitHub is an audited fact.
+    expect(db.query("SELECT * FROM audit_log WHERE action = 'pr_review_started'").all()).toEqual(
+      [],
+    );
+  });
+
+  test("a commit whose review ended without a verdict is not started again: its author is exempt now", async () => {
+    // An earlier review of this commit errored, from before its author held the role. A start would
+    // normally restart it; this one answers the exemption first and leaves the row as it was.
+    seedReview(db, {
+      ds: DATASET,
+      n: 7,
+      sha: SHA_A,
+      authorId: 4001,
+      login: "startadmin-gh",
+      state: "errored",
+      detail: "workflow_failed",
+    });
+    db.run("UPDATE pr_reviews SET check_run_id = 4242 WHERE pr_number = 7");
+    const before = rows();
+    pulls[`${DATASET}#7`] = restPull({ number: 7, userId: 4001, login: "startadmin-gh" });
+
+    const r = await start(DATASET, 7);
+
+    expect(r.body).toMatchObject({ dispatched: false, reason: "exempt_author", review_id: null });
+    expect(dispatches()).toHaveLength(0);
+    expect(checkWrites()).toHaveLength(1);
+    expect(checkWrites()[0]).toMatchObject({
+      method: "PATCH",
+      path: `/repos/nemarDatasets/${DATASET}/check-runs/4242`,
+    });
+    expect(checkWrites()[0].body).toMatchObject({ conclusion: "skipped" });
+    expect(rows()).toEqual(before);
+  });
+
+  test("a pull request by an account that is not exempt is started as before", async () => {
+    // The control: the seeded member differs from the seeded administrator in the role alone.
+    pulls[`${DATASET}#7`] = restPull({ number: 7, userId: 4002, login: "startmember-gh" });
+
+    const r = await start(DATASET, 7);
+
+    expect(r.body).toMatchObject({ dispatched: true, reason: "dispatched" });
+    expect(rows()).toHaveLength(1);
+    expect(dispatches()).toHaveLength(1);
+  });
+});
+
 describe("the platform's daily pool counts model calls, not rows", () => {
   /** A full pool less one: a restart of a spent review is the 400th call, then the 401st. */
   function seedPool(callsSpent: number) {

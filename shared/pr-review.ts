@@ -22,7 +22,9 @@
  *
  * **Unknown is never green** (ADR 0053, ADR 0054, ADR 0086). Anything that is not a clear pass maps to a
  * conclusion that does not satisfy a required check: `neutral` and `skipped` DO satisfy one on
- * GitHub, which is why neither appears in {@link conclusionOf}.
+ * GitHub, which is why `neutral` appears nowhere in {@link conclusionOf}, and `skipped` for exactly
+ * one outcome, `exempt`: a pull request opened by a NEMAR owner or administrator is not reviewed at
+ * all, so there is no unknown in it to hide (ADR 0107).
  *
  * The parser throws a fixed-word {@link PrReviewReportError}; it never quotes its input.
  */
@@ -565,9 +567,14 @@ export type ReviewOutcome =
   | { kind: "reported"; report: PrReviewReport }
   | { kind: "declined"; reason: DeclineReason }
   | { kind: "error"; error: RunError }
-  | { kind: "unreported" };
+  | { kind: "unreported" }
+  /**
+   * Not reviewed, by design: the author is a NEMAR owner or administrator (ADR 0107). It is only
+   * ever published, never stored, so no row has this outcome and nothing reads it back.
+   */
+  | { kind: "exempt" };
 
-export type CheckConclusion = "success" | "failure" | "action_required";
+export type CheckConclusion = "success" | "failure" | "action_required" | "skipped";
 
 /**
  * The check-run conclusion for an outcome.
@@ -576,8 +583,14 @@ export type CheckConclusion = "success" | "failure" | "action_required";
  * could not decide, did not run, or never reported, is `action_required`: GitHub does not count
  * it as passing for a required check, and it tells a person to look. `neutral` is deliberately
  * unused, because a required check accepts it as a pass.
+ *
+ * `skipped` is the conclusion of exactly one outcome, `exempt`, and of no other: a required check
+ * accepts it, which is the point (a pull request nobody is asked to review must not be held by a
+ * review that does not apply to it), and it is safe only because it is never what a review that
+ * ran, failed or could not decide says.
  */
 export function conclusionOf(outcome: ReviewOutcome): CheckConclusion {
+  if (outcome.kind === "exempt") return "skipped";
   if (outcome.kind !== "reported") return "action_required";
   const v = verdictOf(outcome.report);
   return v === "pass" ? "success" : v === "fail" ? "failure" : "action_required";
@@ -603,6 +616,18 @@ const DECLINE_COPY: Record<DeclineReason, string> = {
   daily_limit:
     "The daily limit of automated reviews was reached. A maintainer needs to review this one by hand.",
 };
+
+/**
+ * What a pull request opened by an owner or administrator is told (ADR 0107). It says the review is
+ * not required, and that skipped is not a pass: nobody reading the check should mistake "this does
+ * not apply" for "this was reviewed and is fine".
+ */
+const EXEMPT_COPY = {
+  title: "Not required: opened by a NEMAR owner or administrator",
+  summary:
+    "The automated review did not run on this pull request. NEMAR owners and administrators are not reviewed, and may merge without it.",
+  text: "Skipped is not a pass. It says the review is not required here, not that this change was reviewed. A pull request opened by anyone else is reviewed.",
+} as const;
 
 const ERROR_COPY: Record<RunError, string> = {
   evidence_unavailable: "The changes could not be read.",
@@ -753,6 +778,7 @@ export function findingLines(report: PrReviewReport): string[] {
 
 /** Render the check-run's title, summary and detail from an outcome. Pure; no input is quoted raw. */
 export function renderCheck(outcome: ReviewOutcome): RenderedCheck {
+  if (outcome.kind === "exempt") return { ...EXEMPT_COPY };
   if (outcome.kind === "declined") {
     return {
       title: "Not reviewed",
@@ -811,19 +837,21 @@ export const PR_REVIEW_COMMENT_MARKER = "<!-- nemar-pr-review:v1 -->";
 
 const SHA7 = /^[0-9a-f]{7,40}$/;
 
+/** The word on the comment's heading for each conclusion. A record, so a new conclusion cannot lack one. */
+const COMMENT_BADGE: Record<CheckConclusion, string> = {
+  success: "PASS",
+  failure: "NEEDS CHANGES",
+  action_required: "NEEDS A PERSON",
+  skipped: "NOT REQUIRED",
+};
+
 /**
  * The pull-request comment: the same words as the check-run, led by the marker and the commit it
  * is about. `headSha` is validated here (a malformed value is left out rather than quoted).
  */
 export function renderComment(outcome: ReviewOutcome, headSha: string): string {
   const { title, summary, text } = renderCheck(outcome);
-  const conclusion = conclusionOf(outcome);
-  const badge =
-    conclusion === "success"
-      ? "PASS"
-      : conclusion === "failure"
-        ? "NEEDS CHANGES"
-        : "NEEDS A PERSON";
+  const badge = COMMENT_BADGE[conclusionOf(outcome)];
   const commit = SHA7.test(headSha) ? ` on commit \`${headSha.slice(0, 7)}\`` : "";
   return [
     PR_REVIEW_COMMENT_MARKER,
