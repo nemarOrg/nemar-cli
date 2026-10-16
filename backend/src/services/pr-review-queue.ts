@@ -17,6 +17,12 @@
  * - **Nothing here trusts a pull request's words.** Titles go through `sanitizeNote`, branch names
  *   are reduced to a conservative character set, links are built from the dataset id and number, and
  *   no body is read.
+ * - **An owner's or administrator's pull request is `exempt`** (ADR 0107). It is not reviewed and
+ *   stores no row, so without a word of its own it would read `not_reviewed` for ever and be offered
+ *   to an administrator to review by hand. The word is given only while the current commit has no
+ *   review of its own: a push by someone who is not exempt IS reviewed, and that review's verdict
+ *   stands. Which authors are exempt is `isReviewExempt`'s to say, asked once per dataset and login
+ *   for the length of one request and never kept.
  * - **Overrides are keyed by GitHub's numeric id**, because a login can be renamed and reused.
  */
 
@@ -61,6 +67,7 @@ import { getDatasetsTokenWithRefresher } from "./github-auth.js";
 import { deriveContexts } from "./github/branch-protection.js";
 import { GITHUB_API, ORG_NAME, ghHeaders } from "./github/shared.js";
 import { githubFetchWithRetry } from "./github/transport.js";
+import { isReviewExempt } from "./pr-review-exemption.js";
 import {
   PR_REVIEW_DEADLINE_MINUTES,
   outcomeOfRow,
@@ -185,8 +192,10 @@ export function readCheckContext(node: unknown): CheckContext | null {
     if (typeof n.conclusion === "string" && CHECK_FAIL.has(n.conclusion)) {
       return { name: n.name, kind: "run", state: "fail", at: started, appId };
     }
-    // NEUTRAL and SKIPPED count as passing for a required check on GitHub. Neither of NEMAR's
-    // checks emits them, so seeing one means something else is posting under the name.
+    // NEUTRAL and SKIPPED count as passing for a required check on GitHub. Neither of the two
+    // checks read here (BIDS and version) emits them, so seeing one means something else is posting
+    // under the name. (The review's own check does emit SKIPPED, for an exempt pull request, but it
+    // is not one of the names this queue reads.)
     return { name: n.name, kind: "run", state: "unknown", at: started, appId };
   }
   if (n.__typename === "StatusContext" && typeof n.context === "string") {
@@ -743,7 +752,8 @@ async function loadReviews(db: D1Database, datasetIds: readonly string[]): Promi
 /**
  * Verdicts an administrator can act on: approve a pass, or review by hand what the automation
  * could not or did not decide. A fail is the author's to fix and an in-progress review is waiting
- * on the machine, so neither is yours yet.
+ * on the machine, so neither is yours yet, and an exempt pull request is not reviewed at all, so
+ * nothing about it waits for a person.
  */
 const NEEDS_YOU: ReadonlySet<QueueVerdict> = new Set([
   "pass",
@@ -764,6 +774,7 @@ const VERDICT_RANK: Record<QueueVerdict, number> = {
   not_reviewed: 3,
   in_progress: 4,
   fail: 5,
+  exempt: 6,
 };
 
 function checkRank(e: Pick<QueueEntry, "bids" | "version">): number {
@@ -835,6 +846,25 @@ export function ownedHere(env: Bindings, datasetId: string): boolean {
   return isNonProductionEnv(env) ? isDevOwnedDatasetId(datasetId) : !isDevOwnedDatasetId(datasetId);
 }
 
+/**
+ * `isReviewExempt`, asked once per (dataset, login) for the length of ONE request and never kept
+ * beyond it: an author with several open pull requests costs one lookup, and a role that changes
+ * is seen by the next request. The dataset is part of the key because the answer is about a
+ * repository, not only a person.
+ */
+function exemptionLookup(env: Bindings): (datasetId: string, login: string) => Promise<boolean> {
+  const answers = new Map<string, Promise<boolean>>();
+  return (datasetId, login) => {
+    const key = `${datasetId}#${login.toLowerCase()}`;
+    let answer = answers.get(key);
+    if (answer === undefined) {
+      answer = isReviewExempt(env, { login, repo: datasetId });
+      answers.set(key, answer);
+    }
+    return answer;
+  };
+}
+
 export async function buildQueue(env: Bindings, filters: QueueFilters): Promise<QueueResponse> {
   const open = await fetchOpenPullRequests(env);
   const skipped: QueueSkipped = {
@@ -848,17 +878,28 @@ export async function buildQueue(env: Bindings, filters: QueueFilters): Promise<
     return owned;
   });
   const reviews = await loadReviews(env.DB, [...new Set(mine.map((pr) => pr.datasetId))]);
+  const isExempt = exemptionLookup(env);
 
-  const all: QueueEntry[] = mine.map((pr) => {
+  const all: QueueEntry[] = [];
+  for (const pr of mine) {
     // The review of the current commit if there is one; else the newest, which `classify` will
     // show as another commit's.
     const row =
       reviews.byHead.get(headKey(pr.datasetId, pr.prNumber, pr.headSha)) ??
       reviews.newest.get(`${pr.datasetId}#${pr.prNumber}`) ??
       null;
-    const classified = classify(row, pr.headSha);
+    let classified = classify(row, pr.headSha);
+    // An exempt pull request has no review of its current commit, by design. A bot or a ghost
+    // (no GitHub user id) is never an owner or administrator.
+    if (
+      classified.review_current !== true &&
+      pr.authorId !== null &&
+      (await isExempt(pr.datasetId, pr.authorLogin))
+    ) {
+      classified = { ...classified, verdict: "exempt", detail: null };
+    }
     const verdictAndDraft = { verdict: classified.verdict, draft: pr.draft };
-    return {
+    all.push({
       dataset_id: pr.datasetId,
       pr_number: pr.prNumber,
       url: pullUrl(pr.datasetId, pr.prNumber),
@@ -875,8 +916,8 @@ export async function buildQueue(env: Bindings, filters: QueueFilters): Promise<
       bids: pr.bids,
       version: pr.version,
       needs_you: needsYou(verdictAndDraft),
-    };
-  });
+    });
+  }
   return {
     environment: environmentName(env),
     review_enabled: env.PR_REVIEW_ENABLED === "1",
@@ -1092,7 +1133,17 @@ export async function readPrReviewDetail(
           outcome,
         }
       : null;
-  const effective = classify(row && derived ? { ...row, ...derived } : null, head);
+  let effective = classify(row && derived ? { ...row, ...derived } : null, head);
+  // The same word as the list gives, on the same terms (see `buildQueue`): an owner's or
+  // administrator's pull request with no review of its current commit.
+  if (
+    effective.review_current !== true &&
+    livePr !== null &&
+    livePr.author_id !== null &&
+    (await exemptionLookup(env)(datasetId, livePr.author_login))
+  ) {
+    effective = { ...effective, verdict: "exempt", detail: null };
+  }
 
   const history: ReviewHistoryItem[] = results.slice(0, HISTORY_LIMIT).map((r) => {
     const state: ReviewState = REVIEW_STATE_SET.has(r.state) ? (r.state as ReviewState) : "errored";

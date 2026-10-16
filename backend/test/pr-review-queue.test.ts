@@ -26,6 +26,7 @@ import {
   __seedRateLimitStateForTests,
 } from "../src/services/github/transport";
 import { handlePullRequestEvent } from "../src/services/pr-review";
+import { REVIEW_EXEMPT_SQL } from "../src/services/pr-review-exemption";
 import {
   __setGraphqlTimeoutForTests,
   checkStateOf,
@@ -1894,6 +1895,191 @@ describe("the detail view says why it has no live pull request", () => {
     expect((await detail("nm000201", 7)).body).toMatchObject({
       live: null,
       live_status: "unreadable",
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Owners and administrators (ADR 0107)
+// ---------------------------------------------------------------------------------------------
+
+describe("an owner's or administrator's pull request is exempt (ADR 0107)", () => {
+  /** The seeded administrator's GitHub login, as `seedUser` stores it. */
+  const ADMIN_GH = "queueadmin-gh";
+  /** An approved member, as `seedUser` stores it: the same account in everything but the role. */
+  const MEMBER_GH = "queuemember-gh";
+
+  test("it reads exempt, is not yours to act on, and sorts after everything else", async () => {
+    seedReview({ ds: "nm000203", n: 3, state: "reported", verdict: "fail", authorId: 700 });
+    nodes(
+      { ds: "nm000201", n: 1, author: ADMIN_GH, authorId: 4001, created: "2026-09-01T00:00:00Z" },
+      { ds: "nm000202", n: 2, author: "stranger", authorId: 700 },
+      { ds: "nm000203", n: 3, author: "stranger", authorId: 700 },
+    );
+    const { body } = await queue();
+    const by = Object.fromEntries(body.entries.map((e) => [e.dataset_id, e]));
+    expect(by.nm000201).toMatchObject({
+      verdict: "exempt",
+      detail: null,
+      needs_you: false,
+      reviewed_sha: null,
+      review_current: null,
+      stale_verdict: null,
+    });
+    // The control: a stranger's pull request with no review is still asking for a person.
+    expect(by.nm000202).toMatchObject({ verdict: "not_reviewed", needs_you: true });
+    // Not reviewed, then a failure, then the exempt one, though it was opened first.
+    expect(body.entries.map((e) => e.dataset_id)).toEqual(["nm000202", "nm000203", "nm000201"]);
+  });
+
+  test("an owner and an administrator are both exempt, a member and a test persona are not", async () => {
+    await seedUser(
+      "queueowner",
+      "owner",
+      "approved",
+      "queue-owner-key-0123456789abcdef0123456789ab",
+    );
+    db.run(
+      `INSERT INTO users (username, email, github_username, status, role, email_verified, account_kind)
+       VALUES ('persona', 'persona@example.org', 'persona-gh', 'approved', 'admin', 1, 'test')`,
+    );
+    nodes(
+      { ds: "nm000201", n: 1, author: "queueowner-gh", authorId: 4002 },
+      { ds: "nm000202", n: 2, author: ADMIN_GH, authorId: 4001 },
+      { ds: "nm000203", n: 3, author: MEMBER_GH, authorId: 4003 },
+      { ds: "nm000204", n: 4, author: "persona-gh", authorId: 4004 },
+    );
+    const { body } = await queue();
+    const verdicts = Object.fromEntries(body.entries.map((e) => [e.dataset_id, e.verdict]));
+    expect(verdicts).toEqual({
+      nm000201: "exempt",
+      nm000202: "exempt",
+      nm000203: "not_reviewed",
+      nm000204: "not_reviewed",
+    });
+  });
+
+  test("a review of the current commit stands: a push by someone who is not exempt was reviewed", async () => {
+    seedReview({
+      ds: "nm000201",
+      n: 1,
+      sha: SHA_A,
+      state: "reported",
+      verdict: "fail",
+      authorId: 4001,
+      login: ADMIN_GH,
+    });
+    nodes({ ds: "nm000201", n: 1, sha: SHA_A, author: ADMIN_GH, authorId: 4001 });
+    const { body } = await queue();
+    expect(body.entries[0]).toMatchObject({ verdict: "fail", review_current: true });
+  });
+
+  test("a review of another commit is not carried over, and does not stop it being exempt", async () => {
+    seedReview({
+      ds: "nm000201",
+      n: 1,
+      sha: SHA_B,
+      state: "reported",
+      verdict: "pass",
+      authorId: 4001,
+      login: ADMIN_GH,
+    });
+    nodes({ ds: "nm000201", n: 1, sha: SHA_A, author: ADMIN_GH, authorId: 4001 });
+    const { body } = await queue();
+    expect(body.entries[0]).toMatchObject({
+      verdict: "exempt",
+      review_current: false,
+      reviewed_sha: SHA_B,
+      stale_verdict: "pass",
+      needs_you: false,
+    });
+  });
+
+  test("a bot, or an author GitHub has no user for, is never exempt, whatever its name", async () => {
+    nodes(
+      { ds: "nm000201", n: 1, author: ADMIN_GH, authorType: "Bot" },
+      { ds: "nm000202", n: 2, author: null },
+    );
+    const { body } = await queue();
+    expect(body.entries.map((e) => e.verdict)).toEqual(["not_reviewed", "not_reviewed"]);
+  });
+
+  test("the verdict can be asked for, and --needs-me leaves it out", async () => {
+    nodes(
+      { ds: "nm000201", n: 1, author: ADMIN_GH, authorId: 4001 },
+      { ds: "nm000202", n: 2, author: "stranger", authorId: 700 },
+    );
+    const only = await queue("?verdict=exempt");
+    expect(only.status).toBe(200);
+    expect(only.body.entries.map((e) => e.dataset_id)).toEqual(["nm000201"]);
+    const mine = await queue("?needs_me=1");
+    expect(mine.body.entries.map((e) => e.dataset_id)).toEqual(["nm000202"]);
+    const both = await queue("?verdict=exempt,not-reviewed");
+    expect(both.body.entries).toHaveLength(2);
+  });
+
+  test("the role is read once per dataset and author for a request, and again for the next", async () => {
+    // A second administrator, so demoting one does not take away the caller's own access.
+    await seedUser(
+      "queueother",
+      "admin",
+      "approved",
+      "queue-other-key-0123456789abcdef0123456789ab",
+    );
+    const other = "queueother-gh";
+    nodes(
+      { ds: "nm000201", n: 1, author: other, authorId: 4005 },
+      { ds: "nm000201", n: 2, author: other.toUpperCase(), authorId: 4005 },
+      { ds: "nm000201", n: 3, author: other, authorId: 4005 },
+      { ds: "nm000202", n: 4, author: other, authorId: 4005 },
+    );
+    let lookups = 0;
+    const counting = wrapD1(realD1(db), (sql) => {
+      if (sql === REVIEW_EXEMPT_SQL) lookups++;
+    });
+    const res = await app.request(
+      "/admin/pr-reviews",
+      { headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+      { ...env(), DB: counting } as Bindings,
+    );
+    const body = (await res.json()) as unknown as QueueResponse;
+    expect(body.entries.every((e) => e.verdict === "exempt")).toBe(true);
+    // Two datasets, one author: two lookups for four pull requests, not four.
+    expect(lookups).toBe(2);
+
+    // Nothing is kept: a demotion is seen by the very next request.
+    db.run("UPDATE users SET role = 'member' WHERE github_username = ?", [other]);
+    const demoted = await queue();
+    expect(demoted.body.entries).toHaveLength(4);
+    expect(demoted.body.entries.every((e) => e.verdict === "not_reviewed")).toBe(true);
+  });
+
+  test("the detail of one pull request says exempt on the same terms, and not for a member", async () => {
+    pulls["nm000201#7"] = livePull({ user: { login: ADMIN_GH, id: 4001, type: "User" } });
+    const exempt = await detail("nm000201", 7);
+    expect(exempt.status).toBe(200);
+    expect(exempt.body).toMatchObject({
+      verdict: "exempt",
+      detail: null,
+      review: null,
+      review_current: null,
+    });
+
+    pulls["nm000201#8"] = livePull({
+      number: 8,
+      user: { login: MEMBER_GH, id: 4003, type: "User" },
+    });
+    expect((await detail("nm000201", 8)).body.verdict).toBe("not_reviewed");
+
+    // A review of the current commit is still the verdict.
+    seedReview({ ds: "nm000201", n: 9, state: "reported", verdict: "uncertain", authorId: 4001 });
+    pulls["nm000201#9"] = livePull({
+      number: 9,
+      user: { login: ADMIN_GH, id: 4001, type: "User" },
+    });
+    expect((await detail("nm000201", 9)).body).toMatchObject({
+      verdict: "uncertain",
+      review_current: true,
     });
   });
 });

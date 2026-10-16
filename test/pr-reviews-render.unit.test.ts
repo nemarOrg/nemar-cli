@@ -135,6 +135,13 @@ describe("renderQueue", () => {
     expect(rows[2]).toMatch(/^ {2}nm000201 +#2 .* fail /);
     expect(rows[3]).toContain("pass [draft]");
     expect(rows[4]).toContain("not reviewed (other commit)");
+    // An owner's or administrator's pull request is named for what it is, in the word the API
+    // sends, and is not marked as yours to act on.
+    const exempt = renderQueue([entry({ verdict: "exempt", needs_you: false })]).map((l) =>
+      l.replace(ANSI, ""),
+    );
+    expect(exempt[1]).toContain("exempt (owner or admin)");
+    expect(exempt[1]).toMatch(/^ {2}nm000201 /);
     // Fork or branch.
     expect(rows[1]).toContain("branch add-subjects");
     expect(renderQueue([entry({ from_fork: true, head_label: "bob:fix" })])[1]).toContain(
@@ -170,6 +177,16 @@ describe("verdictText", () => {
     expect(
       verdictText({ verdict: "not_reviewed", detail: "contributor_paused", review_current: null }),
     ).toBe("not reviewed (contributor paused)");
+  });
+
+  test("an owner's or administrator's pull request reads exempt (owner or admin), whatever else is on record", () => {
+    expect(verdictText({ verdict: "exempt", detail: null, review_current: null })).toBe(
+      "exempt (owner or admin)",
+    );
+    // Another commit's review does not turn it into "other commit", which is a not_reviewed word.
+    expect(verdictText({ verdict: "exempt", detail: null, review_current: false })).toBe(
+      "exempt (owner or admin)",
+    );
   });
 });
 

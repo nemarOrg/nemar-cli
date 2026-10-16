@@ -38,6 +38,11 @@ export type { OverrideMode, ReviewState };
  *  - `in_progress`: the review was handed to GitHub and has not reported.
  *  - `could_not_decide`: the review ran and ended without a verdict (an error, or it never
  *    reported). `detail` says why.
+ *  - `exempt`: the pull request's author is a NEMAR owner or administrator, who are not reviewed
+ *    (ADR 0107), so no review of the current commit is on record and none is wanted: the check on
+ *    the commit reads `skipped`. A review of the current commit still wins over this word, because a
+ *    push by someone who is not exempt IS reviewed, and a review of another commit is never carried
+ *    over to this one.
  */
 export const QUEUE_VERDICTS = [
   "pass",
@@ -46,6 +51,7 @@ export const QUEUE_VERDICTS = [
   "not_reviewed",
   "in_progress",
   "could_not_decide",
+  "exempt",
 ] as const;
 export type QueueVerdict = (typeof QUEUE_VERDICTS)[number];
 
@@ -152,9 +158,10 @@ export interface QueueResponse {
  * What starting the review of one open pull request came to. `reason` is one of the review's own
  * fixed words (ADR 0092): `dispatched`, `redispatched` (a commit started again) or `dispatch_claimed`
  * (GitHub's answer was lost but the workflow had already claimed it) when it was handed to GitHub,
- * otherwise why not (`duplicate`, `contributor_paused`, `daily_limit`, `draft`, `not_open`, `not_main`,
- * `bot_author`, `dataset_not_reviewable`, `pr_review_disabled`, ...). `review_id` is null when no
- * review row exists for it.
+ * otherwise why not (`duplicate`, `contributor_paused`, `daily_limit`, `exempt_author` (its author is
+ * an owner or administrator, so it is not reviewed and its check was posted as skipped), `draft`,
+ * `not_open`, `not_main`, `bot_author`, `dataset_not_reviewable`, `pr_review_disabled`, ...).
+ * `review_id` is null when no review row exists for it.
  */
 export interface StartReviewResponse {
   environment: QueueEnvironment;

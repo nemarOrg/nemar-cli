@@ -349,6 +349,30 @@ describe("nemar admin pr-reviews (list)", () => {
     expect(none.stdout).toContain("No pull requests match (3 open in all).");
   });
 
+  test("an owner's or administrator's pull request reads exempt (owner or admin) and is not marked as yours", async () => {
+    // The seeded administrator opened one, and so did a stranger.
+    nodes(
+      { ds: "nm000201", n: 5, author: "queueadmin-gh", authorId: 4001 },
+      { ds: "nm000203", n: 4, author: "carol", authorId: 44 },
+    );
+    const r = await cli(PR);
+    expect(r.exitCode).toBe(0);
+    const lines = r.stdout.split("\n");
+    const row = (ds: string) => lines.find((l) => l.includes(ds)) ?? "";
+    expect(row("nm000201")).toMatch(
+      /^ {2}nm000201\s+#5\s+queueadmin-gh\s+branch update-metadata\s+exempt \(owner or admin\)\s+ok\s+ok/,
+    );
+    expect(row("nm000203")).toMatch(/^\* nm000203\s+#4\s+carol\s+.*not reviewed/);
+    expect(r.stdout).toContain("2 open pull requests, 1 you can act on.");
+
+    // The word can be asked for, with the dash spelling the other words have.
+    const only = await cli([...PR, "--verdict", "exempt"]);
+    expect(only.exitCode).toBe(0);
+    expect(only.stdout).toContain("nm000201");
+    expect(only.stdout).not.toContain("nm000203");
+    expect((await cli([...PR, "--needs-me"])).stdout).not.toContain("nm000201");
+  });
+
   test("a bad filter is refused before anything is asked of the API", async () => {
     for (const [args, message] of [
       [["--verdict", "great"], "is not a verdict"],
@@ -516,6 +540,37 @@ describe("nemar admin pr-reviews show", () => {
     expect(r.stdout).toMatch(/^Changed files \(1 of 3\)$/m);
     // The author's record rides along.
     expect(r.stdout).toContain("0 of 1 decided pull request rejected (0.0%)");
+  });
+
+  test("says plainly that an owner's or administrator's pull request is not reviewed, and is not a pass", async () => {
+    gh.pulls["nm000201#7"] = { sha: SHA_A, author: "queueadmin-gh", authorId: 4001 };
+    const r = await cli([...PR, "show", "nm000201", "7"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("Review:    exempt (owner or admin)");
+    expect(r.stdout).toContain("no automated review is required");
+    expect(r.stdout).toContain("Its check reads skipped, which is not a pass.");
+    expect(r.stdout).not.toContain("not reviewed");
+    expect(r.stdout).not.toContain("No automated review has been recorded");
+  });
+
+  test("an earlier commit's review is named as that commit's, not shown as this one's report", async () => {
+    gh.pulls["nm000201#7"] = { sha: SHA_B, author: "queueadmin-gh", authorId: 4001 };
+    seed({
+      ds: "nm000201",
+      n: 7,
+      sha: SHA_A,
+      authorId: 4001,
+      login: "queueadmin-gh",
+      state: "reported",
+      verdict: "fail",
+    });
+    const r = await cli([...PR, "show", "nm000201", "7"]);
+    expect(r.stdout).toContain("Review:    exempt (owner or admin)");
+    expect(r.stdout).toContain("An earlier commit (aaaaaaa) was reviewed and read fail");
+    expect(r.stdout).toContain("that does not apply to this one");
+    // The old report is not printed as if it were about this commit.
+    expect(r.stdout).not.toContain("Needs changes");
+    expect(r.stdout).not.toContain("a DIFFERENT commit");
   });
 
   test("says plainly when the review read an earlier commit", async () => {
@@ -769,6 +824,16 @@ describe("nemar admin pr-reviews approve", () => {
     const r = await cli([...PR, "approve", "nm000201", "7"]);
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain("use --yes or --no");
+    expect(reviewPosts()).toHaveLength(0);
+  });
+
+  test("an owner's or administrator's pull request asks first and says the review did not run", async () => {
+    gh.pulls["nm000201#7"] = { sha: SHA_A, author: "queueadmin-gh", authorId: 4001 };
+    const r = await cli([...PR, "approve", "nm000201", "7", "--dry-run"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("Review:   exempt (owner or admin)");
+    expect(r.stdout).toContain("The automated review did not run");
+    expect(r.stdout).toContain("Dry run: nothing was approved or merged.");
     expect(reviewPosts()).toHaveLength(0);
   });
 

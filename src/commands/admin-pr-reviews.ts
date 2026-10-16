@@ -112,6 +112,7 @@ const VERDICT_WORD: Record<QueueVerdict, string> = {
   not_reviewed: "not reviewed",
   in_progress: "in progress",
   could_not_decide: "could not decide",
+  exempt: "exempt (owner or admin)",
 };
 
 /** A verdict as a word. One a newer server invents is shown as itself, never as a pass. */
@@ -131,6 +132,7 @@ function verdictColor(v: string): (s: string) => string {
     case "in_progress":
       return chalk.cyan;
     case "not_reviewed":
+    case "exempt":
       return chalk.dim;
     default:
       return chalk.yellow;
@@ -423,6 +425,9 @@ REVIEW column (the automated review of the pull request's CURRENT commit):
                     as "other commit")
   in progress       the review is running
   could not decide  the review ended without a verdict (an error, or it never reported)
+  exempt (owner or admin)
+                    a NEMAR owner or administrator opened it, so it is not reviewed and its check
+                    reads skipped; nothing waits for you, and a push by anyone else IS reviewed
 A verdict is never carried over to a commit it did not read. '*' marks the pull requests you can
 act on now: a pass to approve, or one nobody has decided for you (drafts are never marked).
 
@@ -627,7 +632,25 @@ prReviewsCommand
     console.log();
 
     const color = verdictColor(d.verdict);
-    if (!d.review) {
+    if (d.verdict === "exempt") {
+      // Not reviewed by design, and not a gap: say so, and do not show another commit's report.
+      console.log(
+        `  Review:    ${color(verdictText({ verdict: d.verdict, detail: d.detail, review_current: d.review_current }))}`,
+      );
+      console.log(
+        chalk.dim(
+          "             A NEMAR owner or administrator opened this pull request, so no automated review is required.",
+        ),
+      );
+      console.log(chalk.dim("             Its check reads skipped, which is not a pass."));
+      if (d.review) {
+        console.log(
+          chalk.dim(
+            `             An earlier commit (${short(d.review.head_sha)}) was reviewed and read ${verdictWord(d.review.verdict)}; that does not apply to this one.`,
+          ),
+        );
+      }
+    } else if (!d.review) {
       console.log(`  Review:    ${color("not reviewed")}`);
       console.log(
         chalk.dim(
@@ -882,6 +905,7 @@ const NOT_STARTED: Record<string, string> = {
   duplicate: "this commit already has a review (running or finished)",
   contributor_paused: "the contributor is paused",
   daily_limit: "the platform's daily pool of reviews is spent",
+  exempt_author: "its author is a NEMAR owner or administrator, so it is not reviewed",
   draft: "it is a draft",
   not_open: "it is not open any more",
   not_main: "it does not target main",
@@ -935,11 +959,13 @@ The automated review runs when GitHub tells the NEMAR API a pull request was ope
 pull request that was already open when the review was switched on produced no such event, so it has
 no review until its author pushes again. This asks for one by name. The API reads the pull request
 from GitHub itself and runs it through the same gate as any other: the contributor pause and the
-platform's daily pool still apply. What a start lifts is the per-contributor hourly and daily
-allowance, because you chose this one. A commit whose review was declined, ended in an error or never
-reported is started again, and so is one handed to GitHub more than 30 minutes ago that never came
-back; one that is running or has a result is not started again. A start that restarts a review that
-already cost a model call costs a second one, and counts as one against the daily pool.
+platform's daily pool still apply, and a pull request opened by a NEMAR owner or administrator is
+not reviewed (its check is posted as skipped and nothing is started). What a start lifts is the
+per-contributor hourly and daily allowance, because you chose this one. A commit whose review was
+declined, ended in an error or never reported is started again, and so is one handed to GitHub more
+than 30 minutes ago that never came back; one that is running or has a result is not started again.
+A start that restarts a review that already cost a model call costs a second one, and counts as one
+against the daily pool.
 
   nemar admin pr-reviews start nm000108 12
   nemar admin pr-reviews start --all --dry-run
@@ -1432,6 +1458,9 @@ function noReportWhy(a: {
     return "The review on record is of another commit, so its report is not shown.";
   }
   if (a.verdict === "in_progress") return "The review is still running.";
+  if (a.verdict === "exempt") {
+    return "A NEMAR owner or administrator opened this pull request, so it is not reviewed.";
+  }
   if (a.verdict === "not_reviewed") return "This commit has not been reviewed.";
   return "A review of this commit is on record, but its report could not be read.";
 }

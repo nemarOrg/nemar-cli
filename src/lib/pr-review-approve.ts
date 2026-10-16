@@ -456,6 +456,13 @@ export function approvalGate(input: {
             ? "The automated review has not read this commit."
             : `The automated review read a different commit of this pull request (it said: ${input.staleVerdict}), not this one.`,
       };
+    case "exempt":
+      // Not a pass and not a failure: nothing was asked of a review, and the check reads skipped.
+      return {
+        kind: "confirm",
+        warning:
+          "The automated review did not run: a NEMAR owner or administrator opened this pull request, and they are not reviewed.",
+      };
   }
 }
 
