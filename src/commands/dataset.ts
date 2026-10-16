@@ -3284,8 +3284,6 @@ interface PrTextFlags {
   title: string;
   /** The description option as the author types it. */
   description: string;
-  /** Whether the command has `--yes`, which the refusal must say does not stand in for words. */
-  hasYes: boolean;
   /** A complete command that would have worked. */
   example: string;
 }
@@ -3295,11 +3293,16 @@ interface PrTextGiven {
   description?: string;
 }
 
+/** What decides whether a missing piece of text can be asked for: `--yes`, and a terminal. */
+interface AskMode {
+  yes: boolean;
+  terminal: boolean;
+}
+
 const UPDATE_TEXT_FLAGS: PrTextFlags = {
   command: "nemar dataset update",
   title: "--message",
   description: "--description",
-  hasYes: true,
   example:
     'nemar dataset update -m "Add twelve subjects" --description "Adds sub-21 to sub-32, each with a resting-state recording."',
 };
@@ -3308,7 +3311,6 @@ const PUSH_TEXT_FLAGS: PrTextFlags = {
   command: "nemar dataset push --pr",
   title: "--title",
   description: "--body",
-  hasYes: false,
   example:
     'nemar dataset push --pr -t "Add the second session" -b "Adds ses-02 for sub-01 to sub-05."',
 };
@@ -3326,14 +3328,14 @@ const PR_TEXT_SUBJECT: Record<TextKind, string> = {
 /**
  * Settle the pull request text the author put on the command line, before the command touches the
  * network or the repository. Text a person could not read is refused. Missing text is refused too,
- * unless `interactive` (a terminal is attached and there is no `--yes`), where {@link askForPrText}
- * asks for it once there is a change to describe. `--yes` stands in for a confirmation, never for
- * the words.
+ * unless a terminal is attached and there is no `--yes`, where {@link askForPrText} asks for it
+ * once there is a change to describe. `--yes` stands in for a confirmation, never for the words.
  *
  * An empty value is text the author gave and got wrong, not text they left out: `-m ""` from an
  * unset shell variable must not fall through to a prompt, or to nothing.
  */
-function requirePrText(given: PrTextGiven, flags: PrTextFlags, interactive: boolean): PrTextGiven {
+function requirePrText(given: PrTextGiven, flags: PrTextFlags, mode: AskMode): PrTextGiven {
+  const interactive = mode.terminal && !mode.yes;
   const settled: PrTextGiven = {};
   const refusals: string[] = [];
   const missing: string[] = [];
@@ -3364,10 +3366,13 @@ function requirePrText(given: PrTextGiven, flags: PrTextFlags, interactive: bool
     console.log(
       "  They are written into the pull request for a person to read, so say in plain words what changed.",
     );
+    // Say the reason that is true: --yes at a terminal is the one case where asking is possible.
     console.log(
-      flags.hasYes
-        ? "  --yes does not stand in for them, and without a terminal nothing can ask for them."
-        : "  Without a terminal nothing can ask for them.",
+      mode.yes
+        ? mode.terminal
+          ? "  --yes does not stand in for them: drop it to be asked for them here, or pass both."
+          : "  --yes does not stand in for them, and without a terminal nothing can ask for them: pass both."
+        : "  Without a terminal nothing can ask for them: pass both.",
     );
     console.log(chalk.dim(`  Example: ${flags.example}`));
   }
@@ -3409,7 +3414,7 @@ async function settlePushPrText(options: {
   const given = requirePrText(
     { title: options.title, description: options.body },
     PUSH_TEXT_FLAGS,
-    process.stdin.isTTY === true,
+    { yes: false, terminal: process.stdin.isTTY === true },
   );
   return askForPrText(given);
 }
@@ -3483,7 +3488,7 @@ Examples:
       const givenText = requirePrText(
         { title: options.message, description: options.description },
         UPDATE_TEXT_FLAGS,
-        !options.yes && process.stdin.isTTY === true,
+        { yes: options.yes === true, terminal: process.stdin.isTTY === true },
       );
 
       requireAuth();

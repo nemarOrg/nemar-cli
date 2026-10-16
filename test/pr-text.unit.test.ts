@@ -1027,7 +1027,10 @@ describe("nemar dataset update refuses before it does anything", () => {
     const r = await runNemar(["dataset", "update", "--yes", "-m", GOOD_TITLE], cwd, signedOut());
     expect(r.exitCode).toBe(1);
     expect(said(r)).toContain("needs a pull request title and description; missing --description.");
-    expect(said(r)).toContain("--yes does not stand in for them");
+    // No terminal and --yes: both are true, and the line says so.
+    expect(said(r)).toContain(
+      "--yes does not stand in for them, and without a terminal nothing can ask for them: pass both.",
+    );
     expect(said(r)).toContain('Example: nemar dataset update -m "');
     // Refused first: not "Not authenticated", not a repository error, and no request but the notice.
     expect(said(r)).not.toContain("Not authenticated");
@@ -1063,7 +1066,9 @@ describe("nemar dataset update refuses before it does anything", () => {
     const r = await runNemar(["dataset", "update"], cwd, signedOut());
     expect(r.exitCode).toBe(1);
     expect(said(r)).toContain("missing --message and --description.");
-    expect(said(r)).toContain("without a terminal nothing can ask for them");
+    // Without --yes the only reason is the missing terminal, so --yes is not blamed.
+    expect(said(r)).toContain("Without a terminal nothing can ask for them: pass both.");
+    expect(said(r)).not.toContain("--yes does not stand in");
   });
 
   test("refuses the CLI's own placeholder, and says so", async () => {
@@ -1357,7 +1362,7 @@ describe("nemar dataset push --pr settles the text before it pushes", () => {
     expect(said(r)).toContain(
       "nemar dataset push --pr needs a pull request title and description; missing --title and --body.",
     );
-    expect(said(r)).toContain("Without a terminal nothing can ask for them.");
+    expect(said(r)).toContain("Without a terminal nothing can ask for them: pass both.");
     expect(pushed(remote)).toBe("");
     expect(ghArgs()).toBeNull();
   });
@@ -1523,8 +1528,16 @@ describe("nemar dataset update at a terminal asks for what the command line left
     const { work } = newClone();
     write(work, "sub-03/eeg/sub-03_task-rest_eeg.json", '{"TaskName": "rest"}\n');
     const term = onTerminal(["dataset", "update", "--yes"], work);
-    expect(await term.exited).toBe(1);
+    const exitCode = await term.exited;
+    // The data of a pseudo terminal can arrive a moment after the process has exited.
+    await term.until("or pass both.");
+    expect(exitCode).toBe(1);
     expect(term.seen()).toContain("missing --message and --description.");
+    // A terminal IS attached, so the reason is --yes alone, and the way out is to drop it.
+    expect(term.seen()).toContain(
+      "--yes does not stand in for them: drop it to be asked for them here, or pass both.",
+    );
+    expect(term.seen()).not.toContain("without a terminal");
     expect(term.seen()).not.toContain("Title (one line saying what changed):");
   });
 });
