@@ -2010,6 +2010,32 @@ _VERDICT_CHAIN_LINKS = 5
 # MNE's refusal to read the head of a split series whose next file is not beside
 # it. It quotes the file by the path it looked at, which is a scratch path here.
 _MNE_SPLIT_RE = re.compile(r"Split raw file detected but next file (.+?) does not exist")
+# pyedflib's refusal, which biosigIO's streaming EDF/BDF source re-raises as a bare
+# `OSError`; matched anywhere in the text, the way it has always been.
+_PYEDFLIB_REFUSAL = "not EDF(+) or BDF(+) compliant"
+# biosigIO's tolerant fallback (`importers/_edf_tolerant.py`, 1.2.11) reads a file
+# pyedflib refuses and raises its OWN bare, errno-less `OSError` when the file is
+# cut short or its header is unusable. Each message is `<path>: <text>`, the path
+# being a scratch path here, so only the tail is matched, and all of it: a
+# sentence that merely contains these words is not the refusal. One per `raise`
+# in `probe_edf_header` (the first three) and `_check_not_truncated`.
+_BIOSIGIO_TRUNCATION_RES = (
+    re.compile(r"(?s)\A.+: EDF/BDF header is truncated \(<256 bytes\)\Z"),
+    re.compile(r"(?s)\A.+: invalid number of signals in header \(-?\d+\)\Z"),
+    re.compile(r"(?s)\A.+: signal header is truncated\Z"),
+    re.compile(
+        r"(?s)\A.+: file is truncated \(expected at least \d+ bytes "
+        r"for \d+ data record\(s\), found \d+\)\Z"
+    ),
+)
+
+
+def _is_streaming_edf_refusal(message: str) -> bool:
+    """True if `message` is pyedflib's refusal or one of biosigIO's tolerant
+    fallback's truncation errors: the texts rule 4 of `failure_verdict` types."""
+    return _PYEDFLIB_REFUSAL in message or any(
+        pattern.search(message) for pattern in _BIOSIGIO_TRUNCATION_RES
+    )
 
 
 def _exception_chain(exc: BaseException) -> list[BaseException]:
@@ -2057,15 +2083,20 @@ def failure_verdict(
        its `.set` header says, `corrupt_or_truncated`. DEFENSE until biosigIO
        types the mismatch itself.
     4. `exc` ITSELF is exactly `OSError`, with no errno, saying "not EDF(+) or
-       BDF(+) compliant": pyedflib's refusal, re-raised bare by biosigIO's
-       streaming EDF/BDF source, `corrupt_or_truncated`, as its in-memory path
-       types the same file. TEMPORARY, like its canary
+       BDF(+) compliant" (pyedflib's refusal, re-raised bare by biosigIO's
+       streaming EDF/BDF source) or one of the four truncation errors biosigIO's
+       tolerant fallback raises bare (`_BIOSIGIO_TRUNCATION_RES`: a header or
+       signal header cut short, an impossible signal count, a file shorter than
+       its header implies): `corrupt_or_truncated`, as its in-memory path types
+       the same file. TEMPORARY, like its canary
        (`TestStreamingRefusalCanary`): biosigio#149 types the streaming refusal,
        and the pull request that raises the biosigIO cap past that fix deletes
-       this rule and the canary together. The guard is exact on purpose: an
-       `OSError` that carries an errno (EIO, ENOSPC, EACCES) or is a subclass
-       (`PermissionError`) is the HOST saying no, a condition that must keep its
-       retry. And it is `exc`, never a link behind it: biosigIO recovers some
+       the pyedflib half of this rule and its canary case. The fallback's four
+       truncation errors are a separate raise that #149 does not name, so that
+       half stays until its own canary case fails. The guard is exact on
+       purpose: an `OSError` that carries an errno (EIO, ENOSPC, EACCES) or is
+       a subclass (`PermissionError`) is the HOST saying no, a condition that
+       must keep its retry. And it is `exc`, never a link behind it: biosigIO recovers some
        refusals inside the `except` block that caught them, so a host error
        raised during that recovery carries the bare refusal as its
        `__context__`, and reading the chain would type the host's error as the
@@ -2095,11 +2126,7 @@ def failure_verdict(
         return EPOCHED_RECORDING, None
     if any("float32 samples but the .set header implies" in m for m in messages):
         return "corrupt_or_truncated", None
-    if (
-        type(exc) is OSError
-        and exc.errno is None
-        and "not EDF(+) or BDF(+) compliant" in str(exc)
-    ):
+    if type(exc) is OSError and exc.errno is None and _is_streaming_edf_refusal(str(exc)):
         return "corrupt_or_truncated", None
     return code, None
 
