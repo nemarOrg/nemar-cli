@@ -17082,6 +17082,10 @@ class TestLateOnsetThroughConvertOne(ConvertOneLocalCase):
         )
 
     EVENTS = ([1.0, 4.5], ["stimulus", "response"])
+    # The `events.tsv` rows of the test below. They differ from the file's own
+    # annotations on purpose: `apply_events_tsv` replaces events, and a store that
+    # still held the annotations (a no-op apply) would otherwise pass.
+    TSV_EVENTS = ([2.0, 3.25], ["go", "stop"])
 
     def late_onset_formats(self):
         import pyedflib
@@ -17146,11 +17150,13 @@ class TestLateOnsetThroughConvertOne(ConvertOneLocalCase):
     def test_events_tsv_events_reach_the_store_of_a_late_first_onset_recording(self):
         """On the streaming path the events come from the BIDS `events.tsv`, so
         that is where a late recording's events are checked against expected
-        values on both exporters."""
+        values on both exporters. The rows differ from the file's own
+        annotations, so only the sidecar's values can satisfy the test."""
+        self.assertNotEqual(self.TSV_EVENTS, self.EVENTS)
         tsv = "sub-01/eeg/sub-01_task-rest_events.tsv"
         os.makedirs(os.path.join(self.repo, "sub-01/eeg"), exist_ok=True)
         with open(os.path.join(self.repo, tsv), "w", encoding="utf-8") as fh:
-            fh.write("onset\tduration\ttrial_type\n1.0\t0\tstimulus\n4.5\t0.5\tresponse\n")
+            fh.write("onset\tduration\ttrial_type\n2.0\t0.5\tgo\n3.25\t0\tstop\n")
 
         for label, ext, file_type in self.late_onset_formats():
             primary = f"sub-01/eeg/sub-01_task-rest_eeg.{ext}"
@@ -17165,8 +17171,9 @@ class TestLateOnsetThroughConvertOne(ConvertOneLocalCase):
                     shutil.rmtree(self.synced_dir, ignore_errors=True)
                     result = self.convert(primary, {primary, tsv})
                     self.assertTrue(result["ok"], result.get("error"))
-                    self.assertEqual(self.published_events(result["entry"]), self.EVENTS)
+                    self.assertEqual(self.published_events(result["entry"]), self.TSV_EVENTS)
                     self.assertEqual(result["entry"]["n_events"], 2)
+                    self.assertEqual(result["entry"]["trial_types"], {"go": 1, "stop": 1})
 
 
 class TestReaderRefusalsThroughConvertOne(ConvertOneLocalCase):
