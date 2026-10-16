@@ -278,6 +278,15 @@ describe("standingLines", () => {
     expect(allowed).toContain("not paused: reviewed automatically");
   });
 
+  test("a pause this CLI does not know the cause of is a plain pause, never called a block", () => {
+    // An older Worker still pauses by the contributor's record, and says so as `tally`.
+    const text = standingLines(standing({ standing: { paused: true, because: "tally" } as never }))
+      .map((l) => l.replace(ANSI, ""))
+      .join("\n");
+    expect(text).toContain("paused: their pull requests need a person");
+    expect(text).not.toContain("administrator's block");
+  });
+
   test("says an owner or administrator is exempt whatever is decided, so a block or an allow is not misread", () => {
     for (const s of [
       standing(),

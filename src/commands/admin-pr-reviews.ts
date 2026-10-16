@@ -397,7 +397,12 @@ export function standingLines(s: ContributorStanding): string[] {
   out.push(
     `  Standing:  ${
       s.standing.paused
-        ? chalk.red("paused by an administrator's block: their pull requests need a person")
+        ? chalk.red(
+            // A Worker older than this CLI can still pause by the record, and its pause is not a block.
+            s.standing.because === "maintainer"
+              ? "paused by an administrator's block: their pull requests need a person"
+              : "paused: their pull requests need a person",
+          )
         : chalk.green("not paused: reviewed automatically")
     }`,
   );

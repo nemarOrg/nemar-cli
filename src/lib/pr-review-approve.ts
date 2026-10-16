@@ -380,10 +380,12 @@ export function reviewForApproval(d: unknown, head: string): ReviewForApproval {
   if (current !== null && typeof current !== "boolean") {
     return { ok: false, why: "the NEMAR API sent a review this version of the CLI cannot read" };
   }
-  const standing = (r.author as { standing?: { paused?: unknown } } | null)?.standing;
+  const standing = (r.author as { standing?: { paused?: unknown; because?: unknown } } | null)
+    ?.standing;
+  // A Worker older than this CLI can still pause by the record, and its pause is not a block.
   const contributorNote =
     standing?.paused === true
-      ? "The contributor's pull requests are not reviewed automatically (paused by an administrator's block)."
+      ? `The contributor's pull requests are not reviewed automatically (paused${standing.because === "maintainer" ? " by an administrator's block" : ""}).`
       : null;
   return {
     ok: true,
