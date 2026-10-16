@@ -74,7 +74,7 @@ import { signPrReviewCallbackToken } from "./github/callback-tokens.js";
 import { approvalDispatchEnvironment, triggerPrReviewRun } from "./github/dispatch.js";
 import { upsertReviewCheckRun, upsertReviewComment } from "./github/pr-review-api.js";
 import { ORG_NAME } from "./github/shared.js";
-import { type AdminAnswers, isReviewExempt } from "./pr-review-exemption.js";
+import { isReviewExempt } from "./pr-review-exemption.js";
 
 /** `pull_request` actions that put new content in front of a reviewer. */
 export const PR_REVIEW_ACTIONS: ReadonlySet<string> = new Set([
@@ -591,12 +591,6 @@ export interface PrReviewOptions {
    * whether the pull request is exempt is judged on its author alone.
    */
   adminStart?: boolean;
-  /**
-   * What GitHub said about each login on this repository, kept for the length of one delivery so a
-   * login that is asked about twice costs GitHub one question, and a slow or refusing GitHub is
-   * waited on once. Set by `handlePullRequestEvent` itself; callers do not pass it.
-   */
-  adminAnswers?: AdminAnswers;
 }
 
 /**
@@ -619,13 +613,12 @@ async function isExemptDelivery(
   options: PrReviewOptions,
 ): Promise<boolean> {
   const repo = pr.datasetId;
-  const answers = options.adminAnswers;
-  if (!(await isReviewExempt(env, { login: pr.authorLogin, repo }, answers))) return false;
+  if (!(await isReviewExempt(env, { login: pr.authorLogin, repo }))) return false;
   if (options.adminStart === true) return true;
   const sender = pr.senderLogin;
   if (sender === null) return false;
   if (sender.toLowerCase() === pr.authorLogin.toLowerCase()) return true;
-  return await isReviewExempt(env, { login: sender, repo }, answers);
+  return await isReviewExempt(env, { login: sender, repo });
 }
 
 /** What the gate decides for a delivery. */
@@ -742,20 +735,17 @@ export async function handlePullRequestEvent(
   if (reviewable === "unknown") return no("unknown_dataset");
   if (reviewable === "not_reviewable") return no("dataset_not_reviewable");
 
-  // What one delivery asks GitHub about an account is asked once (see `PrReviewOptions`).
-  const scoped: PrReviewOptions = { ...options, adminAnswers: new Map() };
-
   // A commit a review has touched keeps what that review said, whoever acts on it next: a row means
   // someone put this commit through review (a stranger's push to an owner's branch, or an author
   // who was not exempt yet), and an exempt author's reopening, or an administrator's start, must not
   // turn another person's failed or undecided review into `skipped`, which a required check counts
   // as passing. `handleRepeat` re-states the row instead.
   const existing = await readRowByKey(db, pr.datasetId, pr.prNumber, pr.headSha);
-  if (existing) return await handleRepeat(env, existing, secret, pr, scoped);
+  if (existing) return await handleRepeat(env, existing, secret, pr, options);
 
   // Every other delivery meets the gate once, before any row is written: an exempt pull request
   // stores no row, so no redelivery or restart can carry it into the review.
-  const gate = await gateDecision(env, pr, scoped, "new");
+  const gate = await gateDecision(env, pr, options, "new");
   if (gate === "exempt") return await publishExempt(env, pr);
   const paused = gate === "blocked";
   const nonce = crypto.randomUUID();
@@ -783,7 +773,7 @@ export async function handlePullRequestEvent(
   if ((inserted.meta.changes ?? 0) !== 1) {
     // Another delivery of the same commit won the insert between the read and the write.
     const raced = await readRowByKey(db, pr.datasetId, pr.prNumber, pr.headSha);
-    return raced ? await handleRepeat(env, raced, secret, pr, scoped) : no("duplicate");
+    return raced ? await handleRepeat(env, raced, secret, pr, options) : no("duplicate");
   }
   const reviewId = Number(inserted.meta.last_row_id);
   try {
