@@ -327,7 +327,7 @@ export function standingLines(s: ContributorStanding): string[] {
   }
   out.push(
     chalk.dim(
-      "  Exempt:    a NEMAR owner or administrator is not reviewed whatever is decided here.",
+      "  Exempt:    a NEMAR owner or administrator is not reviewed whatever is decided here, unless a review of the commit is already on record.",
     ),
   );
   return out;
@@ -958,7 +958,7 @@ prReviewsCommand
   )
   .option(
     "--all",
-    "Every open pull request whose current commit has no review, or one that was declined or ended without a verdict (not one an owner or administrator opened: it is exempt)",
+    "Every open pull request whose current commit has no review, or one that was declined or ended without a verdict (an owner's or administrator's is exempt and left out, unless a review of its current commit is on record)",
   )
   .option("--dry-run", "With --all: list what would be started and start nothing")
   .option("-y, --yes", "With --all: do not ask before starting")
@@ -1912,7 +1912,8 @@ function overrideCommand(mode: "allow" | "block"): void {
       "after",
       `
 A NEMAR owner or administrator is exempt from the review whatever is decided here: their pull
-requests are not reviewed, so a block does not hold them back and an allow changes nothing.
+requests are not reviewed, so a block does not hold them back and an allow changes nothing. (A
+commit a review is already on record for is handled as before, a block included.)
 `,
     )
     .action(async (loginArg: string, options: { reason?: string; json?: boolean }) => {

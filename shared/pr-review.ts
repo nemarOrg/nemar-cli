@@ -937,8 +937,9 @@ export const DAILY_AUTHOR_CAP = { trusted: 100, other: 6 } as const;
 
 /**
  * Reviews the whole platform starts per day, a ceiling on spend whatever else is true of the
- * reviews that are started. A delivery an owner or administrator is behind is not started as a
- * review at all (ADR 0107), so it is not counted against this.
+ * reviews that are started. A delivery an owner or administrator is behind is not held to it
+ * (ADR 0107): it is answered without a review, or, for a commit a review has already touched,
+ * handled as for anyone and not held back by this.
  */
 export const DAILY_REVIEW_CAP = 400;
 

@@ -63,7 +63,7 @@ And the review only ever sees a pull request's text and metadata, so a count of 
   A commit that has a row keeps what its review said, whoever acts on it next: the author reopening the pull request, a force-push back to it, or an administrator's start.
   A row means someone put the commit through review (a stranger's push to an owner's branch, or an author who was not exempt yet), `skipped` counts as passing for a required check, and writing it over a failed or undecided review would erase a verdict nobody exempt gave.
   An exempt author who wants such a commit through pushes a new commit, which is exempt in its own right.
-  An administrator's start of such a commit is handled like anyone's: a review is started again if its review ended without a verdict.
+  An administrator's start of such a commit, and an exempt author's own redelivery of one whose dispatch failed, are handled like anyone's: a review is started again if the earlier one ended without a verdict, a block on the author holds it back, and no allowance or platform pool does, because none is held against an exempt actor.
 - **`skipped` does not break "unknown is never green" (ADR 0092, ADR 0053, ADR 0086).**
   GitHub counts `skipped` as passing for a required check, which is why ADR 0092 kept it out of `conclusionOf`.
   It is now the conclusion of exactly one outcome, `exempt`, and of no other, and a test pins that.
@@ -77,7 +77,8 @@ And the review only ever sees a pull request's text and metadata, so a count of 
   The historical words `rate_limited` and `daily_limit` stay readable in stored rows and are never produced again; no migration.
 - **An administrator's explicit `block` still declines, and `allow` only clears a block.**
   The tally stays as information in `standing` and in the queue.
-  A delivery is judged in this order: exempt, then a block, then the review, so a block on an owner's or administrator's account changes nothing.
+  A delivery is judged in this order: exempt, then a block, then the review.
+  A block on an owner's or administrator's account therefore changes nothing for a commit no review has touched, and a restart of a review already on record is held to the block like anyone's.
 - **The automatic tally pause (more than 5 rejected and more than 10 percent) is removed.**
   The owner confirmed this; the code keeps the pause until phase P2 removes it.
 
@@ -151,6 +152,8 @@ And the review only ever sees a pull request's text and metadata, so a count of 
   It stays valid for its commit until the commit changes, and the next delivery reads the role afresh.
 - **An exempt push stores no row, so it does not supersede a review of the previous commit that is still running.**
   That review's late result can rewrite the pull request's review comment, which names the commit it is about; the check on the new commit is unaffected.
+- **A review that starts for the same commit between the row read and the exempt publish leaves the commit with two checks of the same name.**
+  The window is the length of the permission lookups, only an exempt actor can cause the exempt delivery, and which of the two checks a required check reads is GitHub's rule, not verified here.
 - **The `exempt` label is inferred from who opened the pull request, not read from GitHub.**
   It does not prove the check was posted: a publish that fails answers 500 and shows in the App's delivery log, and the queue says nothing about a check it does not read.
 - **GitHub's `author_association` is not a reason to exempt or to reject anyone.**

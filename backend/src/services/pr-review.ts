@@ -700,9 +700,10 @@ export class ExemptCheckNotPublished extends Error {
  *
  * It is only reached for a commit that has no row (see `handlePullRequestEvent`): a commit a review
  * has touched keeps what the review said, so `skipped` is never written over a verdict, a decline
- * or an error. For the same reason a NEW check run is created and an old one is never updated. The
- * pull request's review comment, when an earlier commit's review left one, is not touched: it names
- * the commit it is about.
+ * or an error. For the same reason a NEW check run is created and an old one is never updated (a
+ * review that starts for the same commit between the row read and this publish therefore leaves
+ * the commit with two checks; the ADR says so). The pull request's review comment, when an earlier
+ * commit's review left one, is not touched: it names the commit it is about.
  *
  * It writes nothing, so there is nothing for the watchdog to publish again. A check that cannot
  * be published is therefore thrown ({@link ExemptCheckNotPublished}) and the webhook answers 500:

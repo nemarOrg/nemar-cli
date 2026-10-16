@@ -39,10 +39,10 @@ export type { OverrideMode, ReviewState };
  *  - `could_not_decide`: the review ran and ended without a verdict (an error, or it never
  *    reported). `detail` says why.
  *  - `exempt`: the pull request's author is a NEMAR owner or administrator, who are not reviewed
- *    (ADR 0107), so no review of the current commit is on record and none is wanted: the check on
- *    the commit reads `skipped`. A review of the current commit still wins over this word, because a
- *    push by someone who is not exempt IS reviewed, and a review of another commit is never carried
- *    over to this one.
+ *    (ADR 0107), so no review of the current commit is on record and none is wanted. Its review
+ *    check is posted as `skipped` when the commit arrives; this list does not verify that. A review
+ *    of the current commit still wins over this word, because a push by someone who is not exempt
+ *    IS reviewed, and a review of another commit is never carried over to this one.
  */
 export const QUEUE_VERDICTS = [
   "pass",
