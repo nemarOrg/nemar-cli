@@ -2002,10 +2002,10 @@ def reason_for_code(code: str | None) -> str:
 _REFINABLE_CODES = frozenset(
     {None, "file_read_error", "corrupt_or_truncated", "maxshield_probe_failed"}
 )
-# How far down a `__cause__`/`__context__` chain to read: the exception itself and
-# five links. The refusals below sit one to three links down (biosigIO's typed
-# error `from` MNE's, the probe's `from` MNE's); the bound keeps a pathological
-# chain from costing anything.
+# How far down a `__cause__` chain to read: the exception itself and five links.
+# The refusals below sit one to three links down (biosigIO's typed error `from`
+# MNE's, the probe's `from` MNE's); the bound keeps a pathological chain from
+# costing anything.
 _VERDICT_CHAIN_LINKS = 5
 # MNE's refusal to read the head of a split series whose next file is not beside
 # it. It quotes the file by the path it looked at, which is a scratch path here.
@@ -2013,17 +2013,20 @@ _MNE_SPLIT_RE = re.compile(r"Split raw file detected but next file (.+?) does no
 
 
 def _exception_chain(exc: BaseException) -> list[BaseException]:
-    """`exc` and up to `_VERDICT_CHAIN_LINKS` of its causes, nearest first. An
-    explicit `__cause__` is followed in preference to the implicit `__context__`
-    (a `raise ... from None` only hides the context from a traceback). Stops at a
-    cycle."""
+    """`exc` and up to `_VERDICT_CHAIN_LINKS` of its causes, nearest first. Only
+    the explicit `__cause__` is followed, never the implicit `__context__`: a
+    context is whatever was being handled when something else was raised, which is
+    as often the host's error as the file's. Every wrapping site that types a
+    reader's failure raises `from` it (biosigIO's `classify_read_error(...) from
+    e` in each importer, `MaxShieldProbeFailed ... from exc`), so the cause is
+    where the refusal is. Stops at a cycle."""
     chain: list[BaseException] = []
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen and len(chain) <= _VERDICT_CHAIN_LINKS:
         chain.append(current)
         seen.add(id(current))
-        current = current.__cause__ or current.__context__
+        current = current.__cause__
     return chain
 
 
@@ -2037,9 +2040,11 @@ def failure_verdict(
     has a better one than the exception's (it names the file by its BIDS path,
     never a scratch path); None means `failure_detail(exc)`.
 
-    Reads `exc` and five `__cause__`/`__context__` links (rule 4 reads `exc`
-    alone), and only for the codes in `_REFINABLE_CODES`. The first rule that
-    matches wins:
+    Reads `exc` and five `__cause__` links (rule 4 reads `exc` alone), and only
+    for the codes in `_REFINABLE_CODES`. Never `__context__`: an exception raised
+    while another was being handled is not caused by it, and a host error raised
+    during a read's recovery must keep its retry. The first rule that matches
+    wins:
 
     1. MNE's "Split raw file detected but next file X does not exist":
        `split_part_missing`, naming `dirname(primary)/basename(X)`, when the TREE
@@ -2064,7 +2069,8 @@ def failure_verdict(
        refusals inside the `except` block that caught them, so a host error
        raised during that recovery carries the bare refusal as its
        `__context__`, and reading the chain would type the host's error as the
-       file's.
+       file's. Rules 1 to 3 do read causes, but only explicit ones, for the
+       same reason.
     5. Otherwise the exception's own code, which may be None.
 
     A `.code` that is not a non-empty string is not a code: the exception is

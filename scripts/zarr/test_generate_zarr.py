@@ -15969,7 +15969,7 @@ class TestFailureVerdict(unittest.TestCase):
         try:
             try:
                 raise refusal
-            except OSError:
+            except Exception:  # noqa: BLE001 - any refusal, not only an OSError
                 raise make_next()
         except Exception as raised:  # noqa: BLE001 - the exception is the product
             return raised
@@ -16143,25 +16143,98 @@ class TestFailureVerdict(unittest.TestCase):
             with self.subTest(refusal_at=depth):
                 self.assertEqual(self.verdict(self.wrapper_chain(refusal, depth)), (None, None))
 
-    def test_the_walk_follows_the_implicit_context_too(self):
+    def test_the_walk_does_not_follow_the_implicit_context(self):
+        # The cause contract: a reader that types a failure raises `... from` the
+        # reader's own error (biosigIO's `classify_read_error(...) from e`, the
+        # probe's `MaxShieldProbeFailed ... from exc`), and that explicit link is
+        # the only one read. `__context__` is whatever was being handled when
+        # something else was raised, which is the HOST's error as often as the
+        # file's, so it is not a statement of cause.
         try:
             try:
                 raise ValueError(self.FDT_MISMATCH)
             except ValueError:
                 raise RuntimeError("while handling that") from None
         except RuntimeError as exc:
-            # `from None` suppresses DISPLAY of the context; the link is still there.
+            # The control: the link is there (`from None` only hides it from a
+            # traceback), so (None, None) is the walk declining to follow it.
             self.assertIsNotNone(exc.__context__)
+            self.assertEqual(self.verdict(exc, self.SET), (None, None))
+        implicit = self.raised_while_handling(
+            ValueError(self.FDT_MISMATCH), lambda: RuntimeError("while handling that")
+        )
+        self.assertIsNotNone(implicit.__context__)
+        self.assertEqual(self.verdict(implicit, self.SET), (None, None))
+        # The same link, made explicit, is read.
+        try:
+            try:
+                raise ValueError(self.FDT_MISMATCH)
+            except ValueError as inner:
+                raise RuntimeError("wrapped on purpose") from inner
+        except RuntimeError as exc:
             self.assertEqual(self.verdict(exc, self.SET), ("corrupt_or_truncated", None))
-        # What it must NOT carry to a data verdict is a host error: raised while
-        # handling pyedflib's refusal, it holds the refusal as its context and is
-        # still the host's.
+        # And what it must NOT carry to a data verdict is a host error: raised
+        # while handling pyedflib's refusal, it holds the refusal as its context
+        # and is still the host's.
         host = self.raised_while_handling(
             OSError(f"x.bdf: {EDF_REFUSAL} (Filesize)"),
             lambda: OSError(errno.EIO, "Input/output error"),
         )
         self.assertIsNotNone(host.__context__)
         self.assertEqual(self.verdict(host), (None, None))
+
+    # -- rules 1 to 3 read causes, never contexts ----------------------------
+    #
+    # A host error raised while a handler was reading a file carries that file's
+    # refusal as its `__context__`. It is the host saying no, and keeps its retry:
+    # the refusal behind it is not what the exception is. Each exception below is
+    # RAISED inside the handler that caught the refusal, so the link is the
+    # interpreter's own.
+
+    HOSTS: ClassVar[tuple[tuple[str, Callable[[], BaseException]], ...]] = (
+        ("EIO", lambda: OSError(errno.EIO, "Input/output error")),
+        ("ENOSPC", lambda: OSError(errno.ENOSPC, "No space left on device")),
+        ("EACCES", lambda: PermissionError(errno.EACCES, "Permission denied")),
+        # A typed generic code is no more a statement of cause than an errno:
+        # it was raised without `from`, so it names no cause.
+        ("untied generic", lambda: Refusal("read failed", "file_read_error")),
+    )
+
+    def assert_context_is_not_a_cause(self, refusal, primary, tracked=()):
+        for label, make in self.HOSTS:
+            with self.subTest(label):
+                exc = self.raised_while_handling(refusal, make)
+                # The control: the refusal really is the context, and nothing is
+                # the cause, so the verdict is the rule declining to read it.
+                self.assertIsNone(exc.__cause__)
+                self.assertIn(str(refusal), str(exc.__context__))
+                self.assertEqual(self.verdict(exc, primary, tracked), (getattr(exc, "code", None), None))
+
+    def test_a_split_refusal_in_the_context_is_not_a_missing_part(self):
+        refusal = ValueError(MNE_SPLIT_REFUSAL.format(path="/w/sub-01_task-rest_split-02_meg.fif"))
+        self.assert_context_is_not_a_cause(refusal, self.SPLIT_HEAD)
+        # The control for the control: as the explicit cause, the same refusal
+        # is read, and the part the tree lacks is named.
+        code, detail = self.verdict(chained(OSError(errno.EIO, "Input/output error"), refusal),
+                                    self.SPLIT_HEAD)
+        self.assertEqual(code, "split_part_missing")
+        self.assertIn(self.SPLIT_NEXT, detail or "")
+
+    def test_an_epoched_refusal_in_the_context_is_not_an_epoched_recording(self):
+        refusal = ValueError("Must pass 2-d input. shape=(4, 500, 3)")
+        self.assert_context_is_not_a_cause(refusal, self.SET)
+        self.assertEqual(
+            self.verdict(chained(OSError(errno.EIO, "Input/output error"), refusal), self.SET),
+            ("epoched_recording", None),
+        )
+
+    def test_a_size_mismatch_in_the_context_is_not_a_truncated_fdt(self):
+        refusal = ValueError(self.FDT_MISMATCH)
+        self.assert_context_is_not_a_cause(refusal, self.SET)
+        self.assertEqual(
+            self.verdict(chained(OSError(errno.EIO, "Input/output error"), refusal), self.SET),
+            ("corrupt_or_truncated", None),
+        )
 
     def test_a_cause_cycle_terminates(self):
         a, b = RuntimeError("a"), RuntimeError("b")
