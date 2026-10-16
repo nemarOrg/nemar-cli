@@ -16173,6 +16173,34 @@ class TestFailureVerdict(unittest.TestCase):
             with self.subTest(code):
                 self.assertEqual(self.verdict(Refusal("something else entirely", code)), (code, None))
 
+    def test_a_code_that_is_not_a_nonempty_string_is_absent(self):
+        # The code is tested for membership in a frozenset, which raises TypeError
+        # for an unhashable value (a list, a dict, a set). That TypeError escaped
+        # `convert_one`'s `except` branch and turned a recording's failure into a
+        # crash of the worker. Any `.code` that is not a non-empty string is not a
+        # code: the exception is read as uncoded, which is also what gets its
+        # message refined and what keeps a stray value off the public index.
+        cases = (
+            ("plain", "read failed", "sub-01/eeg/sub-01_task-x_eeg.edf", None),
+            ("split", MNE_SPLIT_REFUSAL.format(path="/w/sub-01_task-rest_split-02_meg.fif"),
+             self.SPLIT_HEAD, "split_part_missing"),
+            ("epoched", "Must pass 2-d input. shape=(4, 500, 3)", self.SET, "epoched_recording"),
+            ("fdt", self.FDT_MISMATCH, self.SET, "corrupt_or_truncated"),
+        )
+        for label, message, primary, refined in cases:
+            uncoded = self.verdict(Refusal(message, None), primary)
+            # The control: an uncoded exception really is refined (or not) as
+            # expected, so equality below compares against a non-trivial verdict.
+            self.assertEqual(uncoded[0], refined, label)
+            for bad in (["file_read_error"], {"file_read_error"}, {"code": 1}, 7, b"x", "", object()):
+                with self.subTest(label, code=type(bad).__name__):
+                    odd = type("OddCoded", (Exception,), {"code": bad})(message)
+                    try:
+                        verdict = self.verdict(odd, primary)
+                    except TypeError as exc:  # pragma: no cover - the defect itself
+                        self.fail(f"failure_verdict raised {exc!r} for code {bad!r}")
+                    self.assertEqual(verdict, uncoded)
+
 
 def build_truncated_edfplus(path: str) -> str:
     """A REAL EDF+ written by pyedflib and cut to half its length: the reader's

@@ -2066,8 +2066,15 @@ def failure_verdict(
        `__context__`, and reading the chain would type the host's error as the
        file's.
     5. Otherwise the exception's own code, which may be None.
+
+    A `.code` that is not a non-empty string is not a code: the exception is
+    read as uncoded. Membership in a frozenset hashes the value, so a list
+    there would raise `TypeError` out of `convert_one`'s `except` branch, and
+    the worker would crash on a failure it exists to report.
     """
     code = getattr(exc, "code", None)
+    if not isinstance(code, str) or not code:
+        code = None
     if code not in _REFINABLE_CODES:
         return code, None
     chain = _exception_chain(exc)
