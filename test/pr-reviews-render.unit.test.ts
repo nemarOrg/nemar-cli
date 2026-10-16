@@ -379,6 +379,40 @@ describe("volumeLines", () => {
     expect(lines[2]).toBe("  Last 7 days:   could not be read.");
   });
 
+  test("a breakdown the server did not send is said to be missing, and is never read as nothing", () => {
+    const noBreakdown = text(
+      volumeLines({
+        last_24_hours: window({ by_verdict: null as never }),
+        last_7_days: window({ by_verdict: undefined as never }),
+      }),
+    );
+    expect(noBreakdown[1]).toBe(
+      "  Last 24 hours: 14 reviews recorded, 9 model calls; what they came to could not be read.",
+    );
+    expect(noBreakdown[2]).toContain("what they came to could not be read");
+
+    // A word every server sends and this one did not: a question mark, not a zero and not nothing.
+    const { in_progress: _missing, ...rest } = window().by_verdict;
+    const lines = text(
+      volumeLines({
+        last_24_hours: window({ by_verdict: rest as never }),
+        last_7_days: window(),
+      }),
+    );
+    expect(lines[1]).toContain("? in progress");
+    expect(lines[2]).not.toContain("in progress");
+
+    // Not reviewed with no reasons sent: the reasons are said to be missing, not left out.
+    const noReasons = text(
+      volumeLines({
+        last_24_hours: window({ declines: undefined as never }),
+        last_7_days: window({ declines: null as never }),
+      }),
+    );
+    expect(noReasons[1]).toContain("4 not reviewed (reasons could not be read)");
+    expect(noReasons[2]).toContain("4 not reviewed (reasons could not be read)");
+  });
+
   test("a word a newer server adds is shown as itself, cleaned, after the ones this version knows", () => {
     const lines = text(
       volumeLines({

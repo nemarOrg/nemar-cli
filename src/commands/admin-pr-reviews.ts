@@ -28,7 +28,6 @@ import {
   type QueueVerdict,
   type QueueVolume,
   type ReadVerdict,
-  STORED_VERDICTS,
   type StartReviewResponse,
   type VolumeWindow,
 } from "../../shared/contract/pr-review-admin.js";
@@ -204,15 +203,28 @@ function countOf(n: unknown): number | null {
   return typeof n === "number" && Number.isSafeInteger(n) && n >= 0 ? n : null;
 }
 
-/** "1 review", "2 reviews": a count and its noun, or "?" when the count could not be read. */
-function counted(n: unknown, one: string, many = `${one}s`): string {
-  const c = countOf(n);
-  return c === null ? `? ${many}` : `${c} ${c === 1 ? one : many}`;
+/** "1 review", "2 reviews". */
+function plural(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`;
 }
 
-/** The declined reviews as words, `2 contributor paused, 1 rate limited`, for the ones there are. */
-function declineWords(declines: Record<string, unknown> | undefined): string {
-  return Object.entries(declines ?? {})
+/** The order the list reads verdicts in: what was decided, then what was not. */
+const VOLUME_VERDICT_ORDER: readonly string[] = [
+  "pass",
+  "fail",
+  "uncertain",
+  "could_not_decide",
+  "in_progress",
+  "not_reviewed",
+];
+
+/**
+ * The declined reviews as words, `2 contributor paused, 1 rate limited`, for the ones there are; a
+ * plain note when the server sent no breakdown, which is not the same as there being none.
+ */
+function declineWords(declines: unknown): string {
+  if (typeof declines !== "object" || declines === null) return "reasons could not be read";
+  return Object.entries(declines)
     .filter(([, n]) => countOf(n) !== 0)
     .map(([word, n]) => `${countOf(n) ?? "?"} ${detailWord(word)}`)
     .join(", ");
@@ -221,28 +233,33 @@ function declineWords(declines: Record<string, unknown> | undefined): string {
 /**
  * One window as a sentence, or null when what the server sent for it cannot be read.
  * `5 reviews recorded, 6 model calls; 3 pass, 1 fail, 1 not reviewed (1 contributor paused)`.
+ * A count that cannot be read is a question mark and a missing breakdown is said to be missing,
+ * never a zero: the words are the list's own, a word a newer server adds is shown as itself after
+ * them, and a real zero is left out.
  */
 function volumeWindowText(w: VolumeWindow | null | undefined): string | null {
   if (typeof w !== "object" || w === null) return null;
   const reviews = countOf(w.reviews);
-  if (reviews === null || countOf(w.model_calls) === null) return null;
+  const calls = countOf(w.model_calls);
+  if (reviews === null || calls === null) return null;
   if (reviews === 0) return "no reviews recorded";
-  // The words the list uses, in the order a person reads them: what was decided, then what was
-  // not. A word a newer server adds is shown as itself after them, and a count that cannot be read
-  // is a question mark, never a zero.
-  const byVerdict: Record<string, unknown> =
-    typeof w.by_verdict === "object" && w.by_verdict !== null ? { ...w.by_verdict } : {};
-  const known: readonly string[] = STORED_VERDICTS;
-  const order = [...known, ...Object.keys(byVerdict).filter((k) => !known.includes(k))];
+  const head = `${plural(reviews, "review", "reviews")} recorded, ${plural(calls, "model call", "model calls")}`;
+  if (typeof w.by_verdict !== "object" || w.by_verdict === null) {
+    return `${head}; what they came to could not be read`;
+  }
+  const counts: Record<string, unknown> = { ...w.by_verdict };
+  const words = [
+    ...VOLUME_VERDICT_ORDER,
+    ...Object.keys(counts).filter((k) => !VOLUME_VERDICT_ORDER.includes(k)),
+  ];
   const parts: string[] = [];
-  for (const word of order) {
-    const n = byVerdict[word];
-    if (n === undefined || countOf(n) === 0) continue;
+  for (const word of words) {
+    const n = counts[word];
+    if (countOf(n) === 0) continue;
     const text = `${countOf(n) ?? "?"} ${verdictWord(word)}`;
     const why = word === "not_reviewed" ? declineWords(w.declines) : "";
     parts.push(why ? `${text} (${why})` : text);
   }
-  const head = `${counted(reviews, "review")} recorded, ${counted(w.model_calls, "model call")}`;
   return parts.length > 0 ? `${head}; ${parts.join(", ")}` : head;
 }
 
