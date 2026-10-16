@@ -651,8 +651,9 @@ const RESULT_WORD: Record<CriterionResult, string> = {
 /**
  * What a declined pull request is told. `contributor_paused` does not say who paused the
  * contributor: rows written while a rejection record paused people automatically hold the same
- * word, and they are shown again whenever a stored result is re-stated. The two historical words are about a limit that
- * no longer exists, so they say so and say what to do now, which is the same for both.
+ * word, and they are shown again whenever a stored result is re-stated. The two historical words
+ * are about a limit that no longer exists, so they say so and say what to do now, which is the
+ * same for both.
  */
 const DECLINE_COPY: Record<DeclineReason, string> = {
   contributor_paused:

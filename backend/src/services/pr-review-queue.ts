@@ -936,9 +936,9 @@ function exemptionLookup(env: Bindings) {
 
 /**
  * The records of the last week, grouped by everything a count needs, with their model calls. One
- * group is a state, a verdict, a reason, whether a running review is overdue (read as the list
- * reads it, see {@link meaningOf}) and whether it is inside the last day. Bound: how many minutes
- * after it was handed over a review that never reported stops reading as running.
+ * group is a state, a verdict, a reason, whether a running review is overdue and whether it is
+ * inside the last day. The one bound value is how many minutes after it was handed over a review
+ * that never reported stops reading as running, which is the list's own rule (`OVERDUE_AFTER_MS`).
  */
 const VOLUME_SQL = `
   SELECT state, verdict, detail,

@@ -1046,10 +1046,10 @@ no review until its author pushes again. This asks for one by name. The API read
 from GitHub itself and runs it through the same gate as any other: an administrator's block on the
 contributor still applies, and a pull request opened by a NEMAR owner or administrator is not
 reviewed (its check is posted as skipped and nothing is started). No count of reviews, and no
-record of rejected pull requests, holds a start back. A commit whose
-review was declined, ended in an error or never reported is started again, and so is one handed to
-GitHub more than 30 minutes ago that never came back; one that is running or has a result is not
-started again. A start that restarts a review that already cost a model call costs a second one.
+record of rejected pull requests, holds a start back. A commit whose review was declined, ended in
+an error or never reported is started again, and so is one handed to GitHub more than 30 minutes
+ago that never came back; one that is running or has a result is not started again. A start that
+restarts a review that already cost a model call costs a second one.
 
   nemar admin pr-reviews start nm000108 12
   nemar admin pr-reviews start --all --dry-run
