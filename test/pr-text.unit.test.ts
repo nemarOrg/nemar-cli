@@ -542,6 +542,8 @@ describe("the pull request title and body of an update", () => {
         { status: "added", path: "CHANGES" },
       ],
     });
+    // Exactly this: so neither what that body said before (a heading, "## Dataset Update", that
+    // says nothing) nor its path missing the first letter can be in it.
     expect(body).toBe(
       [
         "Adds sub-03 with a resting-state recording.",
@@ -554,10 +556,6 @@ describe("the pull request title and body of an update", () => {
         "- `dataset_description.json` (modified)",
       ].join("\n"),
     );
-    // What the body of that pull request said before: a heading that says nothing, and a path
-    // missing its first letter.
-    expect(body).not.toContain("## Dataset Update");
-    expect(body).not.toContain("ataset_description.json\n");
   });
 });
 
@@ -1420,6 +1418,16 @@ describe("nemar dataset push --pr settles the text before it pushes", () => {
     expect(pushed(remote)).toContain("refs/heads/main");
     expect(ghArgs()).toBeNull();
   });
+
+  test("on master, as on main, there is no pull request to describe", async () => {
+    const { work, remote } = newAnnexFeatureClone();
+    git(work, "checkout", "-q", "-b", "master");
+    const r = await runNemar(["dataset", "push", "--pr", "--no-s3"], work);
+    expect(r.exitCode, said(r)).toBe(0);
+    expect(said(r)).toContain("Skipping PR: already on main branch");
+    expect(pushed(remote)).toContain("refs/heads/master");
+    expect(ghArgs()).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -1521,6 +1529,25 @@ describe("nemar dataset update at a terminal asks for what the command line left
     await term.until("Create update PR for xx000000?");
     term.type("y\r");
     expect(await term.exited, term.seen()).toBe(0);
+    expect(term.seen()).not.toContain("Title (one line saying what changed):");
+  });
+
+  test("does not ask when there is nothing to describe", async () => {
+    const { work } = newClone();
+    const term = onTerminal(["dataset", "update", "--branch", "update/pr-text-none"], work);
+    const exitCode = await term.exited;
+    await term.until("No changes detected.");
+    expect(exitCode).toBe(0);
+    expect(term.seen()).not.toContain("Title (one line saying what changed):");
+  });
+
+  test("does not ask a person who is not signed in", async () => {
+    const { work } = newClone();
+    write(work, "README.md", "# Resting EEG, revised\n");
+    const term = onTerminal(["dataset", "update"], work, configDir(false));
+    const exitCode = await term.exited;
+    await term.until("Not authenticated");
+    expect(exitCode).toBe(1);
     expect(term.seen()).not.toContain("Title (one line saying what changed):");
   });
 
