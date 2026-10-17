@@ -42,7 +42,17 @@ describe("there is one copy of the rule", () => {
     expect(
       textFactsOf({ title: "t", body: "x" }, listing("Lee2019 X", "Lee2019 X")).nameProblem,
     ).toBeNull();
-    expect(textFactsOf({ title: "t", body: "" }, listing(null, null)).descriptionEmpty).toBe(true);
+    // An empty description, in each form GitHub sends one: null (never written), an empty string,
+    // and blanks only. Anything with a word in it is not empty.
+    for (const body of [null, undefined, "", "  \n\t "]) {
+      expect(
+        textFactsOf({ title: "t", body }, listing(null, null)).descriptionEmpty,
+        `${body}`,
+      ).toBe(true);
+    }
+    expect(
+      textFactsOf({ title: "t", body: "Adds sub-03." }, listing(null, null)).descriptionEmpty,
+    ).toBe(false);
   });
 });
 
