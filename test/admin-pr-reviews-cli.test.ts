@@ -501,8 +501,8 @@ describe("nemar admin pr-reviews (list)", () => {
       expect(r.stdout).toContain(
         [
           "Review volume, for information only (no count limits reviews):",
-          "  Last 24 hours: 4 reviews recorded, 3 model calls; 2 pass, 1 fail, 1 not reviewed (1 contributor paused).",
-          "  Last 7 days:   5 reviews recorded, 4 model calls; 3 pass, 1 fail, 1 not reviewed (1 contributor paused).",
+          "  Last 24 hours: 4 reviews recorded, 3 review runs; 2 pass, 1 fail, 1 not reviewed (1 contributor paused).",
+          "  Last 7 days:   5 reviews recorded, 4 review runs; 3 pass, 1 fail, 1 not reviewed (1 contributor paused).",
         ].join("\n"),
       );
       // Sentences, not a dump: no JSON, no quoted keys, no underscored words.
@@ -515,7 +515,7 @@ describe("nemar admin pr-reviews (list)", () => {
       const q = JSON.parse((await cli([...PR, "--json"])).stdout) as QueueResponse;
       expect(q.volume?.last_24_hours).toMatchObject({
         reviews: 4,
-        model_calls: 3,
+        review_runs: 3,
         by_verdict: { pass: 2, fail: 1, not_reviewed: 1 },
         declines: { contributor_paused: 1, rate_limited: 0, daily_limit: 0 },
       });

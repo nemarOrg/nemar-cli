@@ -319,7 +319,7 @@ describe("standingLines", () => {
 describe("volumeLines", () => {
   const window = (over: Partial<VolumeWindow> = {}): VolumeWindow => ({
     reviews: 14,
-    model_calls: 9,
+    review_runs: 9,
     by_verdict: {
       pass: 5,
       fail: 4,
@@ -338,7 +338,7 @@ describe("volumeLines", () => {
       volumeLines({
         last_24_hours: window({
           reviews: 1,
-          model_calls: 1,
+          review_runs: 1,
           by_verdict: {
             ...window().by_verdict,
             pass: 1,
@@ -353,15 +353,15 @@ describe("volumeLines", () => {
     );
     expect(lines).toEqual([
       "Review volume, for information only (no count limits reviews):",
-      "  Last 24 hours: 1 review recorded, 1 model call; 1 pass.",
-      "  Last 7 days:   14 reviews recorded, 9 model calls; 5 pass, 4 fail, 1 could not decide, 4 not reviewed (1 contributor paused, 1 rate limited, 2 daily limit).",
+      "  Last 24 hours: 1 review recorded, 1 review run; 1 pass.",
+      "  Last 7 days:   14 reviews recorded, 9 review runs; 5 pass, 4 fail, 1 could not decide, 4 not reviewed (1 contributor paused, 1 rate limited, 2 daily limit).",
     ]);
   });
 
   test("a window with nothing in it says so, and a count of zero is not left out of a real one", () => {
     const quiet = window({
       reviews: 0,
-      model_calls: 0,
+      review_runs: 0,
       by_verdict: {
         pass: 0,
         fail: 0,
@@ -402,7 +402,7 @@ describe("volumeLines", () => {
       }),
     );
     expect(noBreakdown[1]).toBe(
-      "  Last 24 hours: 14 reviews recorded, 9 model calls; what they came to could not be read.",
+      "  Last 24 hours: 14 reviews recorded, 9 review runs; what they came to could not be read.",
     );
     expect(noBreakdown[2]).toContain("what they came to could not be read");
 
@@ -575,7 +575,7 @@ describe("tokenText", () => {
   const window = (tokens: unknown, cost: unknown = 0.12): VolumeWindow =>
     ({
       reviews: 1,
-      model_calls: 2,
+      review_runs: 2,
       by_verdict: {},
       declines: {},
       tokens,

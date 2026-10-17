@@ -167,11 +167,12 @@ export interface VolumeWindow {
   /** Review records created in the window. A commit started again counts as a new record. */
   reviews: number;
   /**
-   * Model calls those records cost, or may yet cost: the sum of their attempts, leaving out a
-   * decline and a run that never reached the model (a dispatch GitHub did not run, a commit a newer
-   * one superseded).
+   * Runs of the review those records cost, or may yet cost: the sum of their attempts, leaving out
+   * a decline and a run that never reached the model (a dispatch GitHub did not run, a commit a
+   * newer one superseded). Each run makes one or two model calls: the screen, and then the review
+   * unless the screen stopped the pull request.
    */
-  model_calls: number;
+  review_runs: number;
   /** The records by what they came to, in the words the list uses. Every word is there, zero if unseen. */
   by_verdict: Record<StoredVerdict, number>;
   /** The declined records by their reason word. Every stored word is there, zero if unseen. */

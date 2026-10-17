@@ -987,9 +987,9 @@ async function isRestartable(db: Db, row: ReviewRow, options: PrReviewOptions): 
 }
 
 /**
- * Whether a row's attempt may have cost a model call: the complement of a decline or an attempt
- * GitHub never ran. A restart of a row that did adds a second call to its `attempts`, and the
- * administrator's volume count sums `attempts` over the rows that did.
+ * Whether a row's attempt may have reached the model (one run, of one or two calls): the complement
+ * of a decline or an attempt GitHub never ran. A restart of a row that did adds a second run to its
+ * `attempts`, and the administrator's volume count sums `attempts` over the rows that did.
  */
 export function spentACall(row: { state: string; detail: string | null }): boolean {
   if (row.state === "declined") return false;
@@ -1145,10 +1145,11 @@ const NEWER_REVIEW_EXISTS = `EXISTS (
 
 /**
  * The workflow's first real step, before it mints an identity or reads anything: take the review. The
- * caller has verified the token. A review is claimed once, so one dispatch buys one model call;
- * a dispatch for a commit that is no longer the latest delivery recorded by the Worker is refused
- * and recorded as `stale_head`. The workflow also compares the dispatched SHA against the fetched
- * pull ref and current pull-request API response before the model call.
+ * caller has verified the token. A review is claimed once, so one dispatch buys one run (the
+ * screen, and the review unless the screen stops it); a dispatch for a commit that is no longer the
+ * latest delivery recorded by the Worker is refused and recorded as `stale_head`. The workflow also
+ * compares the dispatched SHA against the fetched pull ref and current pull-request API response
+ * before any model call.
  */
 export async function claimPrReview(
   env: Bindings,

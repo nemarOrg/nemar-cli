@@ -1958,7 +1958,7 @@ describe("the volume of reviews in the list: information, never a gate", () => {
     // The last 24 hours: ten records.
     seedAt(1, 2, { state: "reported", verdict: "pass" });
     seedAt(2, 2, { state: "reported", verdict: "fail" });
-    withAttempts(2, 2); // restarted once: two model calls
+    withAttempts(2, 2); // restarted once: two runs
     seedAt(3, 2, { state: "reported", verdict: "uncertain" });
     seedAt(4, 2, { state: "declined", detail: "contributor_paused" });
     seedAt(5, 2, { state: "errored", detail: "model_unavailable" });
@@ -1982,7 +1982,7 @@ describe("the volume of reviews in the list: information, never a gate", () => {
     reviews: 10,
     // pass 1 + fail 2 + uncertain 1 + model_unavailable 1 + running 1 + unreported 1 + overdue 1:
     // a decline and the two runs that never reached the model cost none.
-    model_calls: 8,
+    review_runs: 8,
     by_verdict: {
       pass: 1,
       fail: 1,
@@ -1998,7 +1998,7 @@ describe("the volume of reviews in the list: information, never a gate", () => {
   };
   const week: VolumeWindow = {
     reviews: 15,
-    model_calls: 10,
+    review_runs: 10,
     by_verdict: {
       pass: 2,
       fail: 2,
@@ -2012,7 +2012,7 @@ describe("the volume of reviews in the list: information, never a gate", () => {
     estimated_cost_usd: 0,
   };
 
-  test("the list carries the records and model calls of the last day and week, with verdicts and declines", async () => {
+  test("the list carries the records and review runs of the last day and week, with verdicts and declines", async () => {
     seedWeek();
     const { status, body } = await queue();
     expect(status).toBe(200);
@@ -2029,7 +2029,7 @@ describe("the volume of reviews in the list: information, never a gate", () => {
   test("an empty history is zeros, which is a count, and not an unread volume", async () => {
     const { body } = await queue();
     expect(body.volume?.last_24_hours.reviews).toBe(0);
-    expect(body.volume?.last_7_days.model_calls).toBe(0);
+    expect(body.volume?.last_7_days.review_runs).toBe(0);
     expect(Object.values(body.volume?.last_7_days.by_verdict ?? {})).toEqual([0, 0, 0, 0, 0, 0]);
     expect(Object.values(body.volume?.last_7_days.declines ?? {})).toEqual([0, 0, 0]);
   });
@@ -2073,7 +2073,7 @@ describe("the volume of reviews in the list: information, never a gate", () => {
     seedAt(2, 1, { state: "reported", verdict: "fail" });
     withAttempts(2, 3);
     const volume = await readVolume(realD1(db));
-    expect(volume.last_24_hours).toMatchObject({ reviews: 1, model_calls: 3 });
+    expect(volume.last_24_hours).toMatchObject({ reviews: 1, review_runs: 3 });
   });
 
   test("it never holds up the list: when it cannot be read the list is answered and says null, not zero", async () => {

@@ -238,7 +238,7 @@ function declineWords(declines: unknown): string {
 
 /**
  * One window as a sentence, or null when what the server sent for it cannot be read.
- * `5 reviews recorded, 6 model calls; 3 pass, 1 fail, 1 not reviewed (1 contributor paused)`.
+ * `5 reviews recorded, 6 review runs; 3 pass, 1 fail, 1 not reviewed (1 contributor paused)`.
  * A count that cannot be read is a question mark and a missing breakdown is said to be missing,
  * never a zero: the words are the list's own, a word a newer server adds is shown as itself after
  * them, and a real zero is left out.
@@ -246,10 +246,10 @@ function declineWords(declines: unknown): string {
 function volumeWindowText(w: VolumeWindow | null | undefined): string | null {
   if (typeof w !== "object" || w === null) return null;
   const reviews = countOf(w.reviews);
-  const calls = countOf(w.model_calls);
-  if (reviews === null || calls === null) return null;
+  const runs = countOf(w.review_runs);
+  if (reviews === null || runs === null) return null;
   if (reviews === 0) return "no reviews recorded";
-  const head = `${plural(reviews, "review", "reviews")} recorded, ${plural(calls, "model call", "model calls")}`;
+  const head = `${plural(reviews, "review", "reviews")} recorded, ${plural(runs, "review run", "review runs")}`;
   if (typeof w.by_verdict !== "object" || w.by_verdict === null) {
     return `${head}; what they came to could not be read`;
   }
@@ -1141,15 +1141,16 @@ from GitHub itself and runs it through the same gate as any other: an administra
 contributor still applies, and a pull request opened by a NEMAR owner or administrator is not
 reviewed (its check is posted as skipped and nothing is started). No count of reviews, and no
 record of rejected pull requests, holds a start back. A commit whose review was declined, ended in
-an error or never reported is started again, and so is one handed to GitHub more than 30 minutes
+an error or never reported is started again, and so is one handed to GitHub more than 40 minutes
 ago that never came back; one that is running or has a result is not started again. A start that
-restarts a review that already cost a model call costs a second one.
+restarts a review that already ran costs a second run.
 
   nemar admin pr-reviews start nm000108 12
   nemar admin pr-reviews start --all --dry-run
   nemar admin pr-reviews start --all --yes
 
-Each review is one model call. A blocked contributor is asked about like any other and declined by the
+Each review is one run of one or two model calls: the screen, and then the review unless the screen
+stops it as spam. A blocked contributor is asked about like any other and declined by the
 Worker, which says so; after 'allow', the same command starts it. --all leaves drafts out and asks
 before spending (--yes skips that).
 `,
@@ -1300,7 +1301,7 @@ async function startAll(options: {
   }
   if (!json) console.log();
   const go = await confirm(
-    `Start the automated review of ${todo.length} pull request${todo.length === 1 ? "" : "s"}? Each is one model call.`,
+    `Start the automated review of ${todo.length} pull request${todo.length === 1 ? "" : "s"}? Each is one run of one or two model calls.`,
     { yes: options.yes },
   );
   if (go !== "confirmed") {

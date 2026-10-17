@@ -951,7 +951,7 @@ const USAGE_SUMS = `COALESCE(SUM(CASE WHEN ${V2_REPORT} THEN json_extract(report
          COALESCE(SUM(CASE WHEN ${V2_REPORT} THEN 1 ELSE 0 END), 0) AS counted`;
 
 /**
- * The records of the last week, grouped by everything a count needs, with their model calls. One
+ * The records of the last week, grouped by everything a count needs, with their runs. One
  * group is a state, a verdict, a reason, whether a running review is overdue and whether it is
  * inside the last day. The one bound value is how many minutes after it was handed over a review
  * that never reported stops reading as running, which is the list's own rule (`OVERDUE_AFTER_MS`).
@@ -986,7 +986,7 @@ interface VolumeGroup {
 function emptyWindow(): VolumeWindow {
   return {
     reviews: 0,
-    model_calls: 0,
+    review_runs: 0,
     by_verdict: Object.fromEntries(
       STORED_VERDICTS.map((v) => [v, 0]),
     ) as VolumeWindow["by_verdict"],
@@ -1004,8 +1004,8 @@ function emptyWindow(): VolumeWindow {
 
 /**
  * What the review has done over the last 24 hours and the last 7 days, for the administrator who
- * reads the list: the records created, the model calls they cost, what they came to and why the
- * declined ones were. Counted from the records and used for nothing else: it informs and never
+ * reads the list: the records created, the runs of the review they cost, what they came to and why
+ * the declined ones were. Counted from the records and used for nothing else: it informs and never
  * blocks (ADR 0107), so nothing here, or anywhere, reads it to decide whether a pull request is
  * reviewed. A record is counted when it was created, and a commit started again is created anew.
  */
@@ -1024,7 +1024,7 @@ export async function readVolume(db: D1Database): Promise<QueueVolume> {
         : meaningOf(g);
     for (const w of g.in_day === 1 ? [week, day] : [week]) {
       w.reviews += g.reviews;
-      if (spentACall(g)) w.model_calls += g.attempts;
+      if (spentACall(g)) w.review_runs += g.attempts;
       w.by_verdict[meant.verdict] += g.reviews;
       if (g.state === "declined" && isDeclineReason(g.detail)) w.declines[g.detail] += g.reviews;
       const t = w.tokens;

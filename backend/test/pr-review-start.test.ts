@@ -6,7 +6,7 @@
  * GitHub ITSELF (nothing about it comes from the caller), builds the same intake a delivery would
  * have, and runs it through the same gate. The same start also restarts a commit whose review
  * ended without a verdict (declined, errored, never reported, or handed to GitHub and overdue),
- * which a new delivery never does, and records the restart as a second model call on its row.
+ * which a new delivery never does, and records the restart as a second run on its row.
  *
  * Real engine only: bun:sqlite behind realD1 with every migration applied, the real admin router
  * with its real auth middleware and a real hashed token, and GitHub as a `Bun.serve()` stand-in
@@ -815,7 +815,7 @@ describe("an owner's or administrator's pull request is not started (ADR 0107)",
   });
 });
 
-describe("a restart adds a model call to the row only when the earlier attempt spent one", () => {
+describe("a restart adds a run to the row only when the earlier attempt reached the model", () => {
   test("restarting a review that already spent a call costs a second one", async () => {
     seedReview(db, {
       ds: DATASET,
@@ -858,7 +858,7 @@ describe("a restart adds a model call to the row only when the earlier attempt s
     expect(rows().find((x) => x.pr_number === 7)).toMatchObject({ attempts: 3 });
   });
 
-  test("the administrator's volume counts the second call: one record, two model calls", async () => {
+  test("the administrator's volume counts the second run: one record, two review runs", async () => {
     seedReview(db, {
       ds: DATASET,
       n: 7,
@@ -872,7 +872,7 @@ describe("a restart adds a model call to the row only when the earlier attempt s
     await start(DATASET, 7);
 
     const volume = await readVolume(realD1(db));
-    expect(volume.last_24_hours).toMatchObject({ reviews: 1, model_calls: 2 });
+    expect(volume.last_24_hours).toMatchObject({ reviews: 1, review_runs: 2 });
     expect(volume.last_24_hours.by_verdict.in_progress).toBe(1);
   });
 
@@ -900,9 +900,9 @@ describe("a restart adds a model call to the row only when the earlier attempt s
       detail: "contributor_paused",
       attempts: 1,
     });
-    // The administrator's volume agrees: a decline is a record and no model call.
+    // The administrator's volume agrees: a decline is a record and no run.
     const volume = await readVolume(realD1(db));
-    expect(volume.last_24_hours).toMatchObject({ reviews: 1, model_calls: 0 });
+    expect(volume.last_24_hours).toMatchObject({ reviews: 1, review_runs: 0 });
     expect(volume.last_24_hours.declines.contributor_paused).toBe(1);
   });
 

@@ -26,6 +26,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { PR_REVIEW_DEADLINE_MINUTES } from "../backend/src/services/pr-review";
 import { hashApiKey } from "../backend/src/services/token";
 import type { Bindings } from "../backend/src/types/bindings";
 import { freshDb, realD1 } from "../backend/test/helpers/d1";
@@ -255,6 +256,16 @@ describe("nemar admin pr-reviews start <dataset> <pr>", () => {
     const checks = gh.seen.filter((s) => s.method === "POST" && s.path.endsWith("/check-runs"));
     expect(checks).toHaveLength(1);
     expect(checks[0].body).toMatchObject({ status: "completed", conclusion: "failure" });
+  });
+
+  test("the help says when a review that never came back may be started again, in the Worker's minutes", async () => {
+    const r = await cli([...START, "--help-all"]);
+    expect(r.exitCode).toBe(0);
+    const help = r.stdout.replace(/\s+/g, " ");
+    expect(help).toContain(
+      `more than ${PR_REVIEW_DEADLINE_MINUTES} minutes ago that never came back`,
+    );
+    expect(help).toContain("one or two model calls");
   });
 
   test("a pull request GitHub does not have is an error with a word", async () => {
