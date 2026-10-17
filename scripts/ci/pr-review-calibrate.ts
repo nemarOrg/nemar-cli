@@ -164,6 +164,17 @@ function fetchPullRequest(t: CalibrationTarget, root: string): FetchedPullReques
   const dir = join(root, `${t.dataset}-${t.number}`);
   run("git", ["init", "-q", dir]);
   run("git", ["-C", dir, "config", "core.hooksPath", "/dev/null"]);
+  // A named promisor remote, as the workflow sets it up, so the blob-less clone fetches a blob the
+  // evidence reader asks for when it asks.
+  run("git", [
+    "-C",
+    dir,
+    "remote",
+    "add",
+    "origin",
+    `https://github.com/nemarDatasets/${t.dataset}.git`,
+  ]);
+  run("git", ["-C", dir, "config", "extensions.partialClone", "origin"]);
   run("git", [
     "-C",
     dir,
@@ -171,7 +182,7 @@ function fetchPullRequest(t: CalibrationTarget, root: string): FetchedPullReques
     "-q",
     "--no-tags",
     "--filter=blob:none",
-    `https://github.com/nemarDatasets/${t.dataset}.git`,
+    "origin",
     `+refs/pull/${t.number}/head:refs/remotes/pr/head`,
     base,
   ]);
