@@ -522,6 +522,36 @@ describe("nemar admin pr-reviews (list)", () => {
       expect(q.volume?.last_7_days.reviews).toBe(5);
     });
 
+    test("adds the tokens of the reports that carry them, with an estimate in dollars", async () => {
+      seedVolume();
+      const usage = (screen: [number, number], review: [number, number]) =>
+        JSON.stringify({
+          v: 2,
+          stage: "full",
+          usage: {
+            screen: { input_tokens: screen[0], output_tokens: screen[1] },
+            review: { input_tokens: review[0], output_tokens: review[1] },
+          },
+        });
+      seed({
+        ds: "nm000302",
+        n: 1,
+        authorId: 42,
+        login: "alice",
+        createdAt: hoursAgo(1),
+        state: "reported",
+        verdict: "pass",
+        report: usage([3000, 1200], [20000, 8000]),
+      });
+      const r = await cli(PR);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain(
+        "  Tokens, 24 hours: 23,000 in and 9,200 out over 1 report (screen 3,000 in, 1,200 out; review 20,000 in, 8,000 out), about $0.12 at list prices; runs that ended without a report are not counted.",
+      );
+      const block = r.stdout.slice(r.stdout.indexOf("Review volume"));
+      expect(block).not.toMatch(/[{}"]|_/);
+    });
+
     test("says when the Worker could not read it, and prints nothing for a server that sends none", async () => {
       const base: QueueResponse = {
         environment: "production",

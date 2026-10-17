@@ -277,12 +277,55 @@ export function volumeLines(volume: QueueVolume | null | undefined): string[] {
     ["Last 24 hours:", volume.last_24_hours],
     ["Last 7 days:", volume.last_7_days],
   ];
-  return [
+  const lines = [
     chalk.dim("Review volume, for information only (no count limits reviews):"),
     ...windows.map(
       ([label, w]) => `  ${label.padEnd(15)}${plain(volumeWindowText(w) ?? "could not be read")}.`,
     ),
   ];
+  const tokenWindows: Array<[string, VolumeWindow | null | undefined]> = [
+    ["Tokens, 24 hours:", volume.last_24_hours],
+    ["Tokens, 7 days:", volume.last_7_days],
+  ];
+  for (const [label, w] of tokenWindows) {
+    const tokens = tokenText(w);
+    if (tokens !== null) lines.push(`  ${label.padEnd(18)}${plain(tokens)}.`);
+  }
+  return lines;
+}
+
+/** A whole number with thousands separated, the way the list prints counts of tokens. */
+function grouped(n: number): string {
+  return Math.round(n).toLocaleString("en-US");
+}
+
+/**
+ * The tokens of a window as one sentence, with the estimate in dollars. Null when there is nothing
+ * to say: the server sent no token counts (an older server), or no report in the window carries
+ * them (reports from before the screen do not). Says how many reports the sum is over, because a
+ * report from before the screen and a run that ended without a report are not in it.
+ * `410,000 in and 95,000 out over 12 reports (screen 30,000 in, 60,000 out; review 380,000 in,
+ * 35,000 out), about $1.12 at list prices; runs that ended without a report are not counted`.
+ */
+export function tokenText(w: VolumeWindow | null | undefined): string | null {
+  if (typeof w !== "object" || w === null) return null;
+  const t = w.tokens;
+  if (typeof t !== "object" || t === null) return null;
+  const counts = [
+    t.screen_input,
+    t.screen_output,
+    t.review_input,
+    t.review_output,
+    t.reviews_counted,
+  ].map(countOf);
+  if (counts.some((n) => n === null)) return "token counts could not be read";
+  const [si, so, ri, ro, counted] = counts as number[];
+  if (counted === 0) return null;
+  const cost =
+    typeof w.estimated_cost_usd === "number" && Number.isFinite(w.estimated_cost_usd)
+      ? `, about $${w.estimated_cost_usd.toFixed(2)} at list prices`
+      : "";
+  return `${grouped(si + ri)} in and ${grouped(so + ro)} out over ${plural(counted, "report", "reports")} (screen ${grouped(si)} in, ${grouped(so)} out; review ${grouped(ri)} in, ${grouped(ro)} out)${cost}; runs that ended without a report are not counted`;
 }
 
 /**

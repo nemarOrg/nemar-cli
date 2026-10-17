@@ -23,6 +23,7 @@ import type {
   RunError,
   Standing,
   StoredOutcome,
+  TokenTotals,
 } from "../pr-review.js";
 
 // The review's own vocabulary (ADR 0092) is declared once, in `shared/pr-review.ts`.
@@ -172,6 +173,18 @@ export interface VolumeWindow {
   by_verdict: Record<StoredVerdict, number>;
   /** The declined records by their reason word. Every stored word is there, zero if unseen. */
   declines: Record<DeclineReason, number>;
+  /**
+   * The tokens the window's reported reviews used, by stage, summed from their reports. Only a
+   * version 2 report carries its usage, so `reviews_counted` says how many reports were summed: a
+   * report from before the screen, and a run that ended without a report (an error, a refusal, a
+   * truncation), cost tokens that are not here. Absent from an older Worker's answer.
+   */
+  tokens?: TokenTotals & { reviews_counted: number };
+  /**
+   * What `tokens` cost at the list prices in `shared/pr-review.ts`, in US dollars to the cent: an
+   * estimate for orientation, never a bill. Absent from an older Worker's answer.
+   */
+  estimated_cost_usd?: number;
 }
 
 /** The volume of the last day and of the last week, counted from when each record was created. */

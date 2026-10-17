@@ -21,6 +21,7 @@ import {
   reportLines,
   standingLines,
   terminalize,
+  tokenText,
   verdictText,
   volumeLines,
 } from "../src/commands/admin-pr-reviews";
@@ -564,5 +565,61 @@ describe("a version 2 report on the terminal", () => {
       .join("\n");
     expect(text).toContain("Passes: nothing lost, revision advances, materially better");
     expect(text).toContain("Reviewed with claude-haiku-5-5.");
+  });
+});
+
+describe("tokenText", () => {
+  const window = (tokens: unknown, cost: unknown = 0.12): VolumeWindow =>
+    ({
+      reviews: 1,
+      model_calls: 2,
+      by_verdict: {},
+      declines: {},
+      tokens,
+      estimated_cost_usd: cost,
+    }) as unknown as VolumeWindow;
+
+  test("says the totals, the stages, how many reports, and the estimate", () => {
+    const text = tokenText(
+      window({
+        screen_input: 3000,
+        screen_output: 1200,
+        review_input: 20000,
+        review_output: 8000,
+        reviews_counted: 1,
+      }),
+    );
+    expect(text).toBe(
+      "23,000 in and 9,200 out over 1 report (screen 3,000 in, 1,200 out; review 20,000 in, 8,000 out), about $0.12 at list prices; runs that ended without a report are not counted",
+    );
+  });
+
+  test("says nothing for an older server, or when no report carries its usage", () => {
+    expect(tokenText(window(undefined))).toBeNull();
+    expect(
+      tokenText(
+        window({
+          screen_input: 0,
+          screen_output: 0,
+          review_input: 0,
+          review_output: 0,
+          reviews_counted: 0,
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  test("a count that cannot be read is said to be unreadable, never a zero", () => {
+    expect(
+      tokenText(
+        window({
+          screen_input: -1,
+          screen_output: 0,
+          review_input: 0,
+          review_output: 0,
+          reviews_counted: 1,
+        }),
+      ),
+    ).toBe("token counts could not be read");
   });
 });
