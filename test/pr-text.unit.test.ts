@@ -39,6 +39,7 @@ import { dirname, join } from "node:path";
 import { spawn } from "bun";
 import { gatherGitFacts } from "../scripts/ci/pr-review-evidence";
 import {
+  AUTHOR_YEAR_PREFIX,
   type ChangedFile,
   MAX_NAMED_FILES,
   MAX_TITLE_LENGTH,
@@ -475,36 +476,48 @@ describe("findTextProblem", () => {
       expect(findAuthorYearPrefix("")).toBeNull();
     });
 
-    test("a very long first word is judged in linear time", () => {
-      // The name takes hyphens and apostrophes inside it, so a long run of letters and those, with
-      // a year that never completes, is the shape that makes a backtracking pattern slow. The text
-      // is whatever was pasted, so a hang is a defect. Each hostile word is timed against the same
-      // word with a year that does complete, which no pattern backtracks on, so the bound follows
-      // the speed of the machine and not a number of milliseconds (the first version of this test
-      // used 100 ms and failed on a CI runner that is six times slower than a laptop). An engine
-      // may give up on a runaway pattern and answer null, which reads as right and costs far more
-      // than the scan.
-      const fastest = (text: string): number => {
-        let best = Number.POSITIVE_INFINITY;
-        for (let run = 0; run < 3; run++) {
-          const started = performance.now();
-          findAuthorYearPrefix(text);
-          best = Math.min(best, performance.now() - started);
-        }
-        return best;
-      };
+    test("a very long first word is judged without error, and found whole when a year completes it", () => {
+      // The name takes hyphens and apostrophes inside it, so a long run of letters and those is the
+      // shape a pasted word could have. Nothing here is timed: the next test checks the pattern's
+      // shape, which is what keeps it linear.
       for (const unit of ["a", "a-", "a'", "ab-c'"]) {
         const word = unit.repeat(100_000);
-        // Control: the same long word, with a year that does complete, is found whole.
+        for (const tail of ["20", "-20", "x"]) {
+          expect(findAuthorYearPrefix(`${word}${tail}`)).toBeNull();
+        }
         const completes = `${word}a2019`;
         expect(findAuthorYearPrefix(`${completes} EEG`)).toBe(completes);
-        const scan = fastest(completes);
-        for (const tail of ["20", "-20", "x"]) {
-          const hostile = `${word}${tail}`;
-          expect(findAuthorYearPrefix(hostile)).toBeNull();
-          expect(fastest(hostile)).toBeLessThan(20 * scan + 25);
-        }
       }
+    });
+
+    test("the pattern keeps the shape that makes it linear", () => {
+      // The pattern runs on whatever a person pastes, and a backtracking engine stays linear on this
+      // shape only: anchored, so it is tried once; a run of letters; then one repeated group that
+      // starts with a delimiter the letters cannot match, so a word can be split in only one way;
+      // and no repetition of a repetition. Timing a hostile word says the same and flakes with the
+      // machine (a first version of this test did), so the shape is what is checked. A change that
+      // keeps these facts true keeps this test green, and one that breaks them has to show why the
+      // pattern is still linear. The flags are not part of `source`.
+      const { source } = AUTHOR_YEAR_PREFIX;
+      const shape = /^\^(\[[^\]]+\])\+\(\?:(\[[^\]]+\])(\[[^\]]+\])\+\)\*/.exec(source);
+      if (!shape)
+        throw new Error(`the pattern is no longer a run of letters and one group: ${source}`);
+      const [, letters, delimiter, lettersAgain] = shape;
+      expect(lettersAgain).toBe(letters);
+      // Exactly one group is repeated, the one just found.
+      expect([...source.matchAll(/\)[*+?]|\)\{/g)]).toHaveLength(1);
+      // No delimiter is a letter, anywhere in Unicode, so the run of letters never reaches into the
+      // group and the group never reaches into the next letters.
+      const isLetter = new RegExp(`^${letters}$`, "u");
+      const isDelimiter = new RegExp(`^${delimiter}$`, "u");
+      const delimiters: string[] = [];
+      for (let code = 0; code <= 0x10ffff; code++) {
+        const character = String.fromCodePoint(code);
+        if (isDelimiter.test(character)) delimiters.push(character);
+      }
+      expect(delimiters).toContain("-");
+      expect(delimiters).toContain("'");
+      expect(delimiters.filter((character) => isLetter.test(character))).toEqual([]);
     });
   });
 });

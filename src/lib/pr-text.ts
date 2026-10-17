@@ -109,9 +109,11 @@ const TEMPLATE_FIELDS: readonly RegExp[] = [
  * A word of letters with an apostrophe (straight or curly) or a hyphen allowed inside it, then one
  * optional hyphen or underscore, then a year from 1900 to 2099 that is not the start of a longer
  * number. Each repeated part is set off by a character the part before it cannot match, so a long
- * first word is judged in linear time.
+ * first word is judged in linear time. That shape is the whole argument, so a test checks it on the
+ * pattern itself, which is why the pattern is exported; nothing in the suite is timed.
  */
-const AUTHOR_YEAR_PREFIX = /^[\p{L}\p{M}]+(?:[-'\u{2019}][\p{L}\p{M}]+)*[-_]?(?:19|20)\d{2}(?!\d)/u;
+export const AUTHOR_YEAR_PREFIX =
+  /^[\p{L}\p{M}]+(?:[-'\u{2019}][\p{L}\p{M}]+)*[-_]?(?:19|20)\d{2}(?!\d)/u;
 
 /**
  * What `text` opens with when that is a name and a year, as it was typed (`Lee-2019` for
