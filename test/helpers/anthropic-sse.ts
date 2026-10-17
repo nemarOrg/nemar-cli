@@ -180,6 +180,43 @@ export function stalledReply(m: StandInMessage, signal: AbortSignal): Response {
   });
 }
 
+/** A streamed response whose body is exactly these events, then the end of the body. */
+function eventStream(events: string[]): Response {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const e of events) controller.enqueue(encoder.encode(e));
+      controller.close();
+    },
+  });
+  return new Response(body, {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
+}
+
+/**
+ * A stream that breaks off: the message and its first block begin, some text arrives, and the body
+ * ends there, with no stop reason and no `message_stop`. What a connection lost mid-answer looks
+ * like to the SDK.
+ */
+export function cutShortReply(m: StandInMessage): Response {
+  const events = sseEvents(m);
+  const textStart = events.findIndex((e) => e.includes('"type":"text"'));
+  return eventStream(events.slice(0, textStart >= 0 ? textStart + 2 : 1));
+}
+
+/** A 200 that streams nothing at all. */
+export function emptyStreamReply(): Response {
+  return eventStream([]);
+}
+
+/** A stream that begins and then carries the API's own `error` event, as an overload mid-answer does. */
+export function errorEventReply(m: StandInMessage, type: string, message: string): Response {
+  const first = sseEvents(m)[0] ?? "";
+  return eventStream([first, event("error", { type: "error", error: { type, message } })]);
+}
+
 /**
  * The reply to a request: streamed when it asked to stream, plain otherwise. A `Response` is sent as
  * it is (an error a test builds), so a stand-in's reply function can return either.

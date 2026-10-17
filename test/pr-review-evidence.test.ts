@@ -34,9 +34,10 @@ import {
   CALLBACK_ORIGINS,
   STAGE_BUDGETS,
   type StageObservation,
-  __setStageDeadlinesForTests,
+  __setStageBudgetsForTests,
   callStage,
   describeError,
+  isSpendLimit,
   main,
   mapError,
   postCallback,
@@ -82,6 +83,9 @@ import {
 } from "../shared/pr-review";
 import {
   type StandInMessage,
+  cutShortReply,
+  emptyStreamReply,
+  errorEventReply,
   replyFor,
   stalledReply,
   standInMessage,
@@ -170,8 +174,12 @@ interface ModelRequest {
   method: string;
   path: string;
   body: Record<string, unknown>;
+  /** The credential the request carried: its bearer token, or its API key. */
+  credential: string | null;
 }
 const modelRequests: ModelRequest[] = [];
+/** The identity exchanges of workload identity federation the stand-in was asked for. */
+const tokenExchanges: Array<Record<string, unknown>> = [];
 
 /** The text facts of a pull request with a fine title, a description and no name change. */
 const NO_TEXT_PROBLEMS: TextFacts = {
@@ -226,13 +234,22 @@ function failureReply(status: number, message: string): Response {
 }
 
 type Reply = StandInMessage | Response;
+type Replier = (body: Record<string, unknown>, signal: AbortSignal) => Reply | Promise<Reply>;
 /** What the screen (claude-haiku-5-5) answers, and what the review (claude-sonnet-5-5) answers. */
-let screenReply: (body: Record<string, unknown>, signal: AbortSignal) => Reply = () =>
-  standInMessage(JSON.stringify(PROCEED));
-let reviewReply: (body: Record<string, unknown>, signal: AbortSignal) => Reply = () =>
+let screenReply: Replier = () => standInMessage(JSON.stringify(PROCEED));
+let reviewReply: Replier = () =>
   standInMessage(JSON.stringify(STAND_IN_OUTPUT), { model: "claude-sonnet-5-5" });
 /** When set, answers every request whatever its model: a failure, or an answer for one call. */
-let modelReply: ((body: Record<string, unknown>, signal: AbortSignal) => Reply) | null = null;
+let modelReply: Replier | null = null;
+/** The token endpoint's answer to an identity exchange: an access token, unless a test stalls it. */
+let tokenReply: (signal: AbortSignal) => Response | Promise<Response> = () =>
+  Response.json({ access_token: "federated-access-token", token_type: "Bearer", expires_in: 3600 });
+/** A reply that never comes: the request is held until the caller gives up on it. */
+function never(signal: AbortSignal): Promise<Response> {
+  return new Promise((resolve) => {
+    signal.addEventListener("abort", () => resolve(new Response(null, { status: 499 })));
+  });
+}
 let modelServer: ReturnType<typeof Bun.serve>;
 const SDK_ENV = [
   "ANTHROPIC_API_KEY",
@@ -255,10 +272,21 @@ beforeAll(() => {
     idleTimeout: 0,
     async fetch(req) {
       const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
-      modelRequests.push({ method: req.method, path: new URL(req.url).pathname, body });
+      const path = new URL(req.url).pathname;
+      if (path === "/v1/oauth/token") {
+        tokenExchanges.push(body);
+        return await tokenReply(req.signal);
+      }
+      const bearer = req.headers.get("authorization")?.replace(/^Bearer /, "") ?? null;
+      modelRequests.push({
+        method: req.method,
+        path,
+        body,
+        credential: bearer ?? req.headers.get("x-api-key"),
+      });
       const answer =
         modelReply ?? (body.model === STAGE_BUDGETS.review.model ? reviewReply : screenReply);
-      return replyFor(body, answer(body, req.signal));
+      return replyFor(body, await answer(body, req.signal));
     },
   });
   for (const k of SDK_ENV) {
@@ -277,6 +305,13 @@ afterAll(() => {
 });
 beforeEach(() => {
   modelRequests.length = 0;
+  tokenExchanges.length = 0;
+  tokenReply = () =>
+    Response.json({
+      access_token: "federated-access-token",
+      token_type: "Bearer",
+      expires_in: 3600,
+    });
   modelReply = null;
   screenReply = () => standInMessage(JSON.stringify(PROCEED));
   reviewReply = () =>
@@ -769,13 +804,23 @@ describe("runReview: the job around the model call", () => {
     expect(req.body).not.toHaveProperty("thinking");
   });
 
-  test("the stage budgets are the ones decided: each model, max tokens, and a deadline per stage", () => {
-    expect(STAGE_BUDGETS.screen).toMatchObject({ model: "claude-haiku-5-5", maxTokens: 32_000 });
-    expect(STAGE_BUDGETS.review).toMatchObject({ model: "claude-sonnet-5-5", maxTokens: 32_000 });
-    for (const stage of [STAGE_BUDGETS.screen, STAGE_BUDGETS.review]) {
-      expect(stage.deadlineMs).toBeGreaterThan(stage.timeoutMs);
-      expect(stage.maxRetries).toBeGreaterThanOrEqual(0);
-    }
+  test("the stage budgets are the ones decided: model, max tokens, waits, retries and deadline", () => {
+    expect(STAGE_BUDGETS).toEqual({
+      screen: {
+        model: "claude-haiku-5-5",
+        maxTokens: 32_000,
+        timeoutMs: 90_000,
+        deadlineMs: 4 * 60_000,
+        maxRetries: 1,
+      },
+      review: {
+        model: "claude-sonnet-5-5",
+        maxTokens: 32_000,
+        timeoutMs: 120_000,
+        deadlineMs: 11 * 60_000,
+        maxRetries: 1,
+      },
+    });
   });
 
   test("a proceed makes two requests, and the report carries the usage each one reported", async () => {
@@ -882,6 +927,11 @@ describe("runReview: the job around the model call", () => {
   test.each([
     ["refusal", "model_refused"],
     ["max_tokens", "model_truncated"],
+    ["model_context_window_exceeded", "model_truncated"],
+    ["tool_use", "model_invalid"],
+    ["pause_turn", "model_invalid"],
+    ["stop_sequence", "model_invalid"],
+    ["a_reason_from_the_future", "model_invalid"],
   ])("callStage reads a stop reason of %s as the word %s", async (stop, word) => {
     modelReply = () => messageReply(JSON.stringify(PROCEED), stop);
     const err = await callStage("screen", "s", "u").then(
@@ -920,7 +970,7 @@ describe("runReview: the job around the model call", () => {
   });
 
   test("a stream that stalls is cut at the stage's deadline: no verdict, and the run ends", async () => {
-    __setStageDeadlinesForTests({ screen: 300 });
+    __setStageBudgetsForTests({ screen: { deadlineMs: 300 } });
     try {
       modelReply = (_body, signal) => stalledReply(standInMessage("{}"), signal);
       const started = Date.now();
@@ -928,10 +978,162 @@ describe("runReview: the job around the model call", () => {
         () => null,
         (e) => e,
       );
-      expect(Date.now() - started).toBeLessThan(10_000);
+      expect(Date.now() - started).toBeLessThan(4_000);
       expect(mapError(err)).toBe("model_unavailable");
+      // A stream that has begun is not retried: the deadline ends the stage.
+      expect(modelRequests).toHaveLength(1);
     } finally {
-      __setStageDeadlinesForTests(null);
+      __setStageBudgetsForTests(null);
+    }
+  });
+
+  test("a response that never begins is waited for per attempt and retried as budgeted, then no verdict", async () => {
+    // The SDK's own defaults are two retries and ten minutes a wait: three requests, or a stage
+    // held to its deadline. The stage's budget is one retry and its own wait.
+    __setStageBudgetsForTests({ screen: { timeoutMs: 250, deadlineMs: 20_000 } });
+    try {
+      modelReply = (_body, signal) => never(signal);
+      const started = Date.now();
+      const err = await callStage("screen", "s", "u").then(
+        () => null,
+        (e) => e,
+      );
+      expect(mapError(err)).toBe("model_unavailable");
+      expect(modelRequests).toHaveLength(STAGE_BUDGETS.screen.maxRetries + 1);
+      expect(Date.now() - started).toBeLessThan(10_000);
+    } finally {
+      __setStageBudgetsForTests(null);
+    }
+  });
+
+  test.each([
+    ["breaks off mid-answer", () => cutShortReply(standInMessage(JSON.stringify(PROCEED)))],
+    ["is empty", () => emptyStreamReply()],
+  ])(
+    "a stream that %s is the model unavailable, never a sign-in failure",
+    async (_label, reply) => {
+      modelReply = () => reply();
+      const err = await callStage("screen", "s", "u").then(
+        () => null,
+        (e) => e,
+      );
+      expect(mapError(err)).toBe("model_unavailable");
+      expect(describeError(err)).toBe("RunFailure model_unavailable stream_dropped");
+    },
+  );
+
+  test("an error event inside the stream is the model unavailable", async () => {
+    modelReply = () => errorEventReply(standInMessage("{}"), "overloaded_error", "Overloaded");
+    const err = await callStage("review", "s", "u").then(
+      () => null,
+      (e) => e,
+    );
+    expect(mapError(err)).toBe("model_unavailable");
+  });
+
+  test.each([
+    [
+      400,
+      "invalid_request_error",
+      "You have reached your specified API usage limits. You will regain access on 2026-11-01 at 00:00 UTC.",
+    ],
+    [400, "invalid_request_error", "Your credit balance is too low to access the Anthropic API."],
+    [402, "billing_error", "There is a problem with the billing of this account."],
+  ])(
+    "a spent allowance (%d %s) is the model unavailable, and the log says spend_limit",
+    async (status, type, message) => {
+      modelReply = () =>
+        new Response(JSON.stringify({ type: "error", error: { type, message } }), {
+          status,
+          headers: { "content-type": "application/json", "x-should-retry": "false" },
+        });
+      const err = await callStage("screen", "s", "u").then(
+        () => null,
+        (e) => e,
+      );
+      expect(isSpendLimit(err)).toBe(true);
+      expect(mapError(err)).toBe("model_unavailable");
+      expect(describeError(err)).toBe(`${err.constructor.name} status=${status} spend_limit`);
+    },
+  );
+
+  test("a bad request that is not about the allowance is still model_invalid", async () => {
+    modelReply = () => failureReply(400, "max_tokens: 64000 > 32000, the most this model allows");
+    const err = await callStage("screen", "s", "u").then(
+      () => null,
+      (e) => e,
+    );
+    expect(isSpendLimit(err)).toBe(false);
+    expect(mapError(err)).toBe("model_invalid");
+  });
+
+  /**
+   * Sign the SDK in through workload identity federation against this file's token endpoint, the
+   * way the job's environment does, for one test. Returns the function that puts things back.
+   */
+  function federate(): () => void {
+    const keys = [
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_FEDERATION_RULE_ID",
+      "ANTHROPIC_ORGANIZATION_ID",
+      "ANTHROPIC_SERVICE_ACCOUNT_ID",
+      "ANTHROPIC_WORKSPACE_ID",
+      "ANTHROPIC_IDENTITY_TOKEN_FILE",
+    ];
+    const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+    const tokenFile = join(root, `oidc-${Math.random().toString(36).slice(2)}.jwt`);
+    writeFileSync(tokenFile, "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0In0.");
+    Reflect.deleteProperty(process.env, "ANTHROPIC_API_KEY");
+    process.env.ANTHROPIC_FEDERATION_RULE_ID = "fdrl_test";
+    process.env.ANTHROPIC_ORGANIZATION_ID = "org-test";
+    process.env.ANTHROPIC_SERVICE_ACCOUNT_ID = "svac_test";
+    process.env.ANTHROPIC_WORKSPACE_ID = "wrkspc_test";
+    process.env.ANTHROPIC_IDENTITY_TOKEN_FILE = tokenFile;
+    return () => {
+      for (const k of keys) {
+        if (saved[k] === undefined) Reflect.deleteProperty(process.env, k);
+        else process.env[k] = saved[k];
+      }
+    };
+  }
+
+  test("one review run signs in once: both stages use the one federated access token", async () => {
+    const restore = federate();
+    try {
+      const r = setup("run-one-sign-in");
+      const pr = prJson(r.dir, {
+        head: { sha: r.head, repo: { full_name: "nemarDatasets/nm000460" } },
+      });
+      const res = await runReview(args(r, pr));
+      expect(res.outcome).toBe("reported");
+      expect(tokenExchanges).toHaveLength(1);
+      expect(modelRequests.map((m) => m.credential)).toEqual([
+        "federated-access-token",
+        "federated-access-token",
+      ]);
+    } finally {
+      restore();
+    }
+  });
+
+  test("a sign-in that never answers is ended by the backstop, since the exchange takes no signal", async () => {
+    const restore = federate();
+    __setStageBudgetsForTests({ screen: { deadlineMs: 200, graceMs: 200 } });
+    tokenReply = (signal) => never(signal);
+    try {
+      const started = Date.now();
+      const err = await callStage("screen", "s", "u").then(
+        () => null,
+        (e) => e,
+      );
+      expect(Date.now() - started).toBeLessThan(4_000);
+      expect(mapError(err)).toBe("model_unavailable");
+      expect(describeError(err)).toBe("RunFailure model_unavailable deadline_backstop");
+      expect(tokenExchanges).toHaveLength(1);
+      expect(modelRequests).toHaveLength(0);
+    } finally {
+      __setStageBudgetsForTests(null);
+      restore();
     }
   });
 

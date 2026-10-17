@@ -29,6 +29,7 @@ import {
   CALLBACK_ATTEMPTS,
   CALLBACK_ORIGINS,
   CALLBACK_TIMEOUT_MS,
+  DEADLINE_GRACE_MS,
   STAGE_BUDGETS,
   callbackBackoffMs,
 } from "../scripts/ci/pr-review";
@@ -601,9 +602,11 @@ describe("failure and logging", () => {
     // Both evidence passes over a partial clone, each cut at its budget: the change list, the trees
     // and commits, then one batched blob fetch for the diffs. A large change is about a minute.
     const EVIDENCE_MINUTES = minutes(EVIDENCE_BUDGET_MS.listing + EVIDENCE_BUDGET_MS.content);
-    // Each stage is cut at its deadline, every attempt and the stream together (an abort signal).
+    // Each stage is cut at its deadline, every attempt and the stream together (an abort signal),
+    // and at worst by the backstop a grace period later, for the sign-in that takes no signal.
     const stages =
-      minutes(STAGE_BUDGETS.screen.deadlineMs) + minutes(STAGE_BUDGETS.review.deadlineMs);
+      minutes(STAGE_BUDGETS.screen.deadlineMs + DEADLINE_GRACE_MS) +
+      minutes(STAGE_BUDGETS.review.deadlineMs + DEADLINE_GRACE_MS);
     // The callback's attempts at their timeout, and the pauses between them.
     let callbackMs = CALLBACK_ATTEMPTS * CALLBACK_TIMEOUT_MS;
     for (let attempt = 1; attempt < CALLBACK_ATTEMPTS; attempt++) {

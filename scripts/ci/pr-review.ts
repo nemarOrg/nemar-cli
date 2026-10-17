@@ -84,13 +84,23 @@ export const STAGES = ["screen", "review"] as const;
 export type Stage = (typeof STAGES)[number];
 
 /**
- * What each stage may spend. `maxTokens` is the output budget, which the model's thinking counts
+ * What one stage may spend. `maxTokens` is the output budget, which the model's thinking counts
  * toward; `timeoutMs` bounds each attempt's wait for the response to begin (the SDK's own timeout);
  * `deadlineMs` bounds the whole stage, every attempt and the streamed answer together, through an
  * abort signal, because a stream that has begun is not bounded by the SDK's timeout at all.
  * `maxRetries` is the SDK's retry count for a failure it may retry (a 5xx, a 429, a lost connection).
- * The workflow test keeps the worst case, both deadlines and the callback's retries, inside the job's
- * `timeout-minutes`.
+ */
+export interface StageBudget {
+  model: string;
+  maxTokens: number;
+  timeoutMs: number;
+  deadlineMs: number;
+  maxRetries: number;
+}
+
+/**
+ * Each stage's {@link StageBudget}. The workflow test keeps the worst case, both deadlines, the
+ * evidence budget and the callback's retries, inside the job's `timeout-minutes`.
  */
 export const STAGE_BUDGETS = {
   screen: {
@@ -107,21 +117,36 @@ export const STAGE_BUDGETS = {
     deadlineMs: 11 * 60_000,
     maxRetries: 1,
   },
-} as const satisfies Record<
-  Stage,
-  { model: string; maxTokens: number; timeoutMs: number; deadlineMs: number; maxRetries: number }
->;
+} as const satisfies Record<Stage, StageBudget>;
+
+/**
+ * How long past its deadline a stage waits for the SDK to give up by itself. The deadline is an
+ * abort signal, which the SDK honors for the request and the stream but not for workload identity
+ * federation's token exchange, a request it makes with no signal at all. This is the backstop for
+ * that part, so a stage never outlives its deadline by more than this.
+ */
+export const DEADLINE_GRACE_MS = 5_000;
 
 const STAGE_SCHEMAS: Record<Stage, Record<string, unknown>> = {
   screen: SCREEN_OUTPUT_SCHEMA,
   review: REVIEW_OUTPUT_SCHEMA,
 };
 
-/** A shorter deadline for a test of what a stalled stream comes to; production never sets one. */
-let deadlineOverrides: Partial<Record<Stage, number>> = {};
+/** What a test may shorten: a stage's waits and retries, and the backstop's grace. */
+export type StageBudgetOverride = Partial<
+  Pick<StageBudget, "timeoutMs" | "deadlineMs" | "maxRetries">
+> & { graceMs?: number };
 
-export function __setStageDeadlinesForTests(ms: Partial<Record<Stage, number>> | null): void {
-  deadlineOverrides = ms ?? {};
+/**
+ * Budgets a test shortens, merged over {@link STAGE_BUDGETS} where a stage reads its own, so a test
+ * of a stall runs the same code with smaller numbers. Production never sets one.
+ */
+let budgetOverrides: Partial<Record<Stage, StageBudgetOverride>> = {};
+
+export function __setStageBudgetsForTests(
+  overrides: Partial<Record<Stage, StageBudgetOverride>> | null,
+): void {
+  budgetOverrides = overrides ?? {};
 }
 
 /** How the callback is retried: the attempts, and the timeout of each. See {@link postCallback}. */
@@ -132,11 +157,17 @@ export type ReviewResult =
   | { outcome: "reported"; report: PrReviewReport }
   | { outcome: "error"; error: RunError; diag?: string };
 
+/**
+ * A failure of the run, as its fixed word. `marker` is a second fixed word, for the public log only,
+ * where the word alone does not say which cause it was (a dropped stream, a backstop).
+ */
 class RunFailure extends Error {
   readonly error: RunError;
-  constructor(error: RunError) {
+  readonly marker: string | null;
+  constructor(error: RunError, marker: string | null = null) {
     super(error);
     this.error = error;
+    this.marker = marker;
   }
 }
 
@@ -146,6 +177,17 @@ export interface ReviewArgs {
   head: string;
   fetchedHead: string;
   prJson: string;
+}
+
+/**
+ * Whether the API refused the call because the account's spending allowance is used up: its billing
+ * error (a 402, or that error type on any status), or the 400 a usage limit has been answered with,
+ * known only by its words. The message is matched here and never forwarded.
+ */
+export function isSpendLimit(e: unknown): boolean {
+  if (!(e instanceof Anthropic.APIError)) return false;
+  if (e.type === "billing_error" || e.status === 402) return true;
+  return e.status === 400 && /usage limits?|credit balance|spend(ing)? limits?/i.test(e.message);
 }
 
 /** Map anything that went wrong to a fixed word. The error's text is never forwarded. */
@@ -161,10 +203,13 @@ export function mapError(e: unknown): RunError {
   }
   // The SDK's federation failures (an identity token it cannot read, an exchange the rule
   // rejects) are plain AnthropicErrors named "Error", not API errors: there is no HTTP response of
-  // the messages API yet.
+  // the messages API yet. The same class after the response began is a dropped stream, which
+  // callStage turns into model_unavailable before it gets here.
   if (e instanceof Anthropic.AnthropicError && !(e instanceof Anthropic.APIError)) {
     return "auth_failed";
   }
+  // A spent allowance is the service being unavailable to this job, not a malformed request.
+  if (isSpendLimit(e)) return "model_unavailable";
   if (e instanceof Anthropic.BadRequestError) return "model_invalid";
   // A stage that ran past its deadline is aborted by its signal, which the SDK reports as a user
   // abort: the model did not finish in time, which is the same answer as an unavailable one.
@@ -174,15 +219,17 @@ export function mapError(e: unknown): RunError {
 
 /**
  * Why a run failed, in words that are safe in a public log: class names the SDK and this module
- * define, HTTP status numbers, parser codes, and the fixed strings of {@link EvidenceError}. Never
- * the text of an error that could carry pull request content.
+ * define, HTTP status numbers, parser codes, the fixed strings of {@link EvidenceError}, and the
+ * fixed markers of this module. Never the text of an error that could carry pull request content.
  */
 export function describeError(e: unknown): string {
   const cls = e instanceof Error ? e.constructor.name : typeof e;
-  if (e instanceof Anthropic.APIError) return `${cls} status=${e.status ?? "none"}`;
+  if (e instanceof Anthropic.APIError) {
+    return `${cls} status=${e.status ?? "none"}${isSpendLimit(e) ? " spend_limit" : ""}`;
+  }
   if (e instanceof PrReviewReportError) return `${cls} code=${e.code}`;
   if (e instanceof EvidenceError) return `${cls}: ${e.message}`;
-  if (e instanceof RunFailure) return `${cls} ${e.error}`;
+  if (e instanceof RunFailure) return `${cls} ${e.error}${e.marker ? ` ${e.marker}` : ""}`;
   return cls;
 }
 
@@ -207,19 +254,48 @@ export interface StageAnswer {
 }
 
 /**
+ * The client a review run asks both stages with. Given no credentials it resolves workload identity
+ * federation from the environment (ANTHROPIC_FEDERATION_RULE_ID, _ORGANIZATION_ID,
+ * _SERVICE_ACCOUNT_ID, _WORKSPACE_ID and ANTHROPIC_IDENTITY_TOKEN_FILE), exchanges the job's OIDC
+ * token once, and keeps the access token for the second stage, so one run makes one exchange.
+ * Each stage's waits and retries are set on its own request.
+ */
+export function newModelClient(): Anthropic {
+  return new Anthropic();
+}
+
+/** A promise that fails the stage after `ms` whatever the SDK is doing, and a way to stop it. */
+function deadlineBackstop(ms: number): { promise: Promise<never>; cancel: () => void } {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const promise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new RunFailure("model_unavailable", "deadline_backstop")), ms);
+  });
+  return { promise, cancel: () => clearTimeout(timer) };
+}
+
+/**
  * One call to one stage's model: max effort, a schema-constrained answer, streamed, no tools. The
- * model can read the prompt and write a JSON object; it cannot do anything else. A refusal and a
- * truncation are run errors (`model_refused`, `model_truncated`): no verdict, never a pass.
+ * model can read the prompt and write a JSON object; it cannot do anything else. Only an answer
+ * that ended its turn is read. A refusal and a truncation are run errors (`model_refused`,
+ * `model_truncated`): no verdict, never a pass. `client` is the run's ({@link newModelClient}); a
+ * call without one makes its own.
  */
 export async function callStage(
   stage: Stage,
   system: string,
   user: string,
   observe?: StageObserver,
+  client?: Anthropic,
 ): Promise<StageAnswer> {
-  const budget = STAGE_BUDGETS[stage];
+  const override = budgetOverrides[stage] ?? {};
+  const budget: StageBudget = { ...STAGE_BUDGETS[stage], ...override };
   const started = performance.now();
   let usage: StageTokens | null = null;
+  // Set when the response began. After that, a failure that is not an API error is the stream
+  // breaking off (a connection reset, or a body that ended before the message did); before it, the
+  // same class of failure is the sign-in, which mapError reads as an auth failure.
+  let connected = false;
+  const backstop = deadlineBackstop(budget.deadlineMs + (override.graceMs ?? DEADLINE_GRACE_MS));
   const report = (result: "ok" | RunError) =>
     observe?.({
       stage,
@@ -229,29 +305,49 @@ export async function callStage(
       result,
     });
   try {
-    // A client given no credentials resolves workload identity federation from the environment
-    // (ANTHROPIC_FEDERATION_RULE_ID, _ORGANIZATION_ID, _SERVICE_ACCOUNT_ID, _WORKSPACE_ID and
-    // ANTHROPIC_IDENTITY_TOKEN_FILE), exchanges the job's OIDC token, and refreshes it.
-    const client = new Anthropic({ maxRetries: budget.maxRetries, timeout: budget.timeoutMs });
-    const res = await client.messages
-      .stream(
-        {
-          model: budget.model,
-          max_tokens: budget.maxTokens,
-          system,
-          messages: [{ role: "user", content: user }],
-          output_config: {
-            // Both stages think as long as they need to; thinking cannot be turned off at max.
-            effort: "max",
-            format: { type: "json_schema", schema: STAGE_SCHEMAS[stage] },
-          },
+    const stream = (client ?? newModelClient()).messages.stream(
+      {
+        model: budget.model,
+        max_tokens: budget.maxTokens,
+        system,
+        messages: [{ role: "user", content: user }],
+        output_config: {
+          // Both stages think as long as they need to; thinking cannot be turned off at max.
+          effort: "max",
+          format: { type: "json_schema", schema: STAGE_SCHEMAS[stage] },
         },
-        { signal: AbortSignal.timeout(deadlineOverrides[stage] ?? budget.deadlineMs) },
-      )
-      .finalMessage();
+      },
+      {
+        timeout: budget.timeoutMs,
+        maxRetries: budget.maxRetries,
+        signal: AbortSignal.timeout(budget.deadlineMs),
+      },
+    );
+    stream.on("connect", () => {
+      connected = true;
+    });
+    let res: Awaited<ReturnType<typeof stream.finalMessage>>;
+    try {
+      res = await Promise.race([stream.finalMessage(), backstop.promise]);
+    } catch (e) {
+      // The backstop won: stop whatever the SDK is still waiting for.
+      if (e instanceof RunFailure) stream.abort();
+      throw e;
+    }
     usage = { input_tokens: res.usage.input_tokens, output_tokens: res.usage.output_tokens };
-    if (res.stop_reason === "refusal") throw new RunFailure("model_refused");
-    if (res.stop_reason === "max_tokens") throw new RunFailure("model_truncated");
+    switch (res.stop_reason) {
+      case "end_turn":
+        break;
+      case "refusal":
+        throw new RunFailure("model_refused");
+      case "max_tokens":
+      case "model_context_window_exceeded":
+        throw new RunFailure("model_truncated");
+      default:
+        // A tool call, a paused turn, a stop sequence, or a reason newer than this script: none
+        // is an answer that finished, and the JSON parser is not the place to find that out.
+        throw new RunFailure("model_invalid", "unexpected_stop");
+    }
     const text = res.content.find((b) => b.type === "text");
     if (!text || text.type !== "text") throw new RunFailure("model_invalid");
     let output: unknown;
@@ -263,8 +359,14 @@ export async function callStage(
     report("ok");
     return { output, usage };
   } catch (e) {
-    report(mapError(e));
-    throw e;
+    const failure =
+      connected && e instanceof Anthropic.AnthropicError && !(e instanceof Anthropic.APIError)
+        ? new RunFailure("model_unavailable", "stream_dropped")
+        : e;
+    report(mapError(failure));
+    throw failure;
+  } finally {
+    backstop.cancel();
   }
 }
 
@@ -332,7 +434,14 @@ export async function reviewPullRequest(
     authorAssociation: typeof pr.author_association === "string" ? pr.author_association : null,
     nonce: randomUUID().replaceAll("-", ""),
   });
-  const screen = await callStage("screen", screenMessages.system, screenMessages.user, observe);
+  const client = newModelClient();
+  const screen = await callStage(
+    "screen",
+    screenMessages.system,
+    screenMessages.user,
+    observe,
+    client,
+  );
   if (readScreenAnswer(screen.output).decision === "reject") {
     return assembleReport(screen.output, null, buildScreenEvidence(listing, facts), {
       screen: screen.usage,
@@ -349,7 +458,13 @@ export async function reviewPullRequest(
     fromFork,
     nonce: randomUUID().replaceAll("-", ""),
   });
-  const review = await callStage("review", reviewMessages.system, reviewMessages.user, observe);
+  const review = await callStage(
+    "review",
+    reviewMessages.system,
+    reviewMessages.user,
+    observe,
+    client,
+  );
   return assembleReport(screen.output, review.output, evidence, {
     screen: screen.usage,
     review: review.usage,
