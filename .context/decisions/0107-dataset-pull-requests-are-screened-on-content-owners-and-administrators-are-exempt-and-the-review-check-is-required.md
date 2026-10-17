@@ -11,8 +11,8 @@ The Worker as the gate, the per-commit row, the one-shot claim, the derived verd
 Follows ADR 0048 (account kinds), ADR 0053 and ADR 0086 (unknown is never clear), ADR 0020 (a workflow edit reaches ~785 repositories at once).
 
 This ADR records the decisions of epic #1813.
-Two phases are built so far: the exemption with the `exempt` queue verdict and its CLI wording (#1814), and the removal of the counts, which is the caps, the platform's pool and the automatic tally pause, with a volume line in the admin list (#1815).
-The rest is decided here and built by the later phases; until they ship, the three-question review of ADR 0092 is what runs.
+Built so far: the exemption with the `exempt` queue verdict and its CLI wording (#1814); the removal of the counts, which is the caps, the platform's pool and the automatic tally pause, with a volume line in the admin list (#1815); readable pull request text from the CLI (#1818); and the two-stage review with report version 2, the naming rule and its one override (#1816).
+The rest is decided here and built by the later phases.
 The removal of the counts is released only together with the stage-1 screen, so that spend is never left without a bound.
 
 ## Context
@@ -90,15 +90,40 @@ And the review only ever sees a pull request's text and metadata, so a count of 
   For the last 24 hours and the last 7 days it gives the review records created, the model calls they cost (the sum of their attempts, leaving out a decline and a run that never reached the model), what they came to, and the declined ones by reason word.
   It informs and never blocks: nothing reads it to decide whether a pull request is reviewed, and a volume that could not be read is said so and is never shown as zero.
 
-### 3. Two model calls, at the highest effort Haiku 5.5 offers
+### 3. Two model calls at the highest effort: a screen, then a review
 
-- **Stage 1 sees metadata only**, with the pull request's text fenced as untrusted, and can reject only spam, vandalism or a change with no plausible purpose.
-  When unsure it proceeds.
-  A reject, or a steering attempt, ends the run with a screen report; stage 2 is never called and no file content is read.
-- **Stage 2 reads the content and answers five questions**: nothing lost, the revision advances, materially better, a clear title and description, and a description that is not misleading.
+The owner set the models, the budgets and the prompt on 2026-10-16, after a comparison of `claude-haiku-5-5` and `claude-sonnet-5-5` on labeled pull request text.
+
+- **Stage 1, the screen, runs on `claude-haiku-5-5`.**
+  It sees the pull request's text, fenced as untrusted, and the platform's account of which files changed, never a file's content.
+  It may reject only spam: promotional content, content unrelated to the dataset, content with no purpose, or repeated links.
+  Everything else proceeds, including placeholder or unreadable text, an empty or misleading description and an attempt to steer it, which stage 2 judges; when unsure it proceeds.
+  A reject ends the run with a screen report; stage 2 is never called and no file's content is read beyond `dataset_description.json`.
+- **Stage 2, the review, runs on `claude-sonnet-5-5`.**
+  It reads the content, answers the three questions about the files (nothing lost, the revision advances, materially better), and judges the pull request's text with prompt v3's rules, copied word for word: whether the title and the description say what changed, whether the description misleads, and whether anything steers the reviewer (a claim that someone other than the author approved the change, or text that tells the reviewer what to answer).
+- **Both stages run at effort `max`, streamed, with `max_tokens` 32000**, each under a deadline for the whole stage (every attempt and the streamed answer together, through an abort signal).
+  The screen's deadline is 4 minutes and the review's 11; with the setup steps and the callback's retries the worst case is about 26 minutes, inside the job's 28, which is inside the Worker's 40-minute deadline (`PR_REVIEW_DEADLINE_MINUTES`); a test reads the workflow and checks the inequalities.
+- **A refusal or a truncation at either stage is no verdict.**
+  The check is `action_required`, which does not pass a required check, and its text says a NEMAR administrator needs to look.
 - **The verdict stays derived.**
   The model never writes it, a fact can lower an answer and never raise one, and a screen report can never pass.
-  Both calls use `claude-haiku-5-5` at effort `max`, streamed, with per-stage token budgets and a job timeout that sits inside the Worker's deadline; a test checks the inequality.
+- **The report is version 2:** its stage, both models, six criteria (the screen's `genuine_contribution`, the three questions, and the two text criteria), the facts decided before any model (an empty description and the naming rule), and the tokens each call used.
+  A callback must carry version 2; a version 1 report sent by callback is refused as `report_invalid`, a check that needs a person.
+  Rows stored before the screen keep their version 1 reports, which are read back by their own rules, so no stored verdict changes.
+
+### 3a. The naming rule runs first, on every pull request
+
+- **A pull request title, and the dataset's new name when a pull request changes it, may not start with an author and a year or hold a naming-template token.**
+  The rule refuses a first word of letters, of any case, directly followed by a four-digit year from 1900 to 2099, with an optional hyphen or underscore (`Lee2019`, `Lee-2019-EEG`, `BNCI2014_001`), and a template token (`FirstAuthorSurname`, `paperDOI`, `{{x}}`, `${x}`, `<your title>`, `[describe the change]`).
+  The name is the `Name` field of `dataset_description.json` at the head, compared with the merge base: a name the pull request did not change is not its problem.
+- **One pure function decides, in `shared/naming-rule.ts`**, which the CLI asks before it opens a pull request, the review job asks before any model call, and the Worker asks of a pull request it does not review.
+  A refusal fails the verdict whatever a model says.
+- **Owners and administrators are not exempt from it.**
+  The exemption still skips the review, but the Worker applies the rule first: a refused title or name fails the check, and a name GitHub will not show makes it a check that needs a person, never a skip.
+- **The only way past the rule without a change is an explicit override**, `nemar admin pr-reviews allow <dataset> <pr> --admin`, which replaces the exemption for this rule.
+  The Worker reads the pull request itself, refuses it for an author who is not exempt (their review includes the rule) and for a commit a review has touched, records the waiver in the audit log (who, the commit, what the rule found as closed words, the reason given; never the title or the name), and then posts a `skipped` check that says the rule was waived.
+  The waiver is for that commit only: a new commit is checked again.
+  A contributor's pull request that the rule refuses is fixed by its author, or merged in the GitHub UI by an owner or administrator (decision 5).
 
 ### 4. Titles and descriptions must be meaningful, and an edit re-runs the review
 
@@ -135,8 +160,8 @@ And the review only ever sees a pull request's text and metadata, so a count of 
 
 - **ADR 0092, the second Decision bullet:** the hourly, daily and platform caps and the tally pause.
   The per-commit row and the administrator's block stay.
-- **ADR 0092, the reviewer bullet and "The model has no tools and writes little":** effort `high`, and a model that "answers three questions".
-  Now two calls, five questions, effort `max`.
+- **ADR 0092, the reviewer bullet and "The model has no tools and writes little":** effort `high`, one model, and a model that "answers three questions".
+  Now two calls on two models (decision 3), five questions and the naming rule's facts, effort `max`.
 - **ADR 0092, "Green and red are real; everything else needs a person":** plus `skipped`, for an exempt pull request alone.
 - **ADR 0092, "The check is not required by any ruleset yet", and the Consequences that lean on it** ("acceptable only because the check is not required", "This is why the check is not required", "only matter once the check is required"): the check is required on reviewable datasets, and the risk that a model's false green lets a maintainer merge is accepted, bounded by facts, calibration and re-review on edit.
 - **ADR 0092, the accepted risks "Many new accounts" and "Padding the tally":** replaced by the stage-1 cost bound and the workspace spend limit.
@@ -175,10 +200,15 @@ And the review only ever sees a pull request's text and metadata, so a count of 
   Both are administrators' tools, the Worker itself is unaffected, and the remedy is to upgrade the CLI; the two fields are not kept, because they would describe a rule that no longer exists.
 - **Until the screen ships, nothing bounds spend but the workspace limit.**
   Phase P2 removes the counts and phase P3 adds the screen, so the epic's branch must not be released with the first and without the second.
-- **Without caps, cost is bounded by the screen and the spend limit.**
-  One account pushing every minute to a pull request that passes stage 1 could cost up to about $70 a day at $0.10 and $0.50 per million input and output tokens (the planning pass's estimate, which assumes prompts under 100,000 tokens: above that the price is five times higher, and the review's input caps keep it below).
-  Spam that fails stage 1 costs under one cent a pull request.
-  The workspace spend limit ($175 a month, the owner's Console action) is what makes that a bound and not an estimate, and when it trips the checks read "Could not decide" and required repositories wait for an administrator.
+- **Without caps, cost is bounded by the screen and the spend limit, and the review on `claude-sonnet-5-5` is what costs.**
+  At list prices ($0.10 and $0.50 per million input and output tokens for Haiku 5.5 on prompts under 100,000 tokens; $2 and $10 for Sonnet 5.5), the screen costs under a cent and the review is the bill.
+  The first calibration run (2026-10-16, two public pull requests) measured $0.13 and $0.29 a full review, the review writing 11,000 and 28,000 output tokens; the earlier planning estimate of about a cent assumed Haiku for both stages.
+  At the observed eligible volume of 7 to 167 reviews a day, that is roughly $1 to $50 a day, so the workspace spend limit of $175 a month (about $6 a day, some 20 to 45 full reviews) can trip on a busy day.
+  When it trips the checks read "Could not decide" and required repositories wait for an administrator.
+  The owner decides whether to raise the limit, before the check is required.
+- **A long answer can run out of room.**
+  The same run's second review used 28,000 of its 32,000 output tokens on a one-file pull request, and in the model comparison Haiku once used more than 32,000 on a text-only screen.
+  Either is a truncation, which is no verdict and a check that needs a person; the calibration gate counts them.
 - **The production canary exercises the gate because it is not exempt.**
   An exempt account cannot, so the canary is a data author whose pull requests are reviewed.
 - **A wrong identity match would exempt the wrong person.**
@@ -197,7 +227,10 @@ And the review only ever sees a pull request's text and metadata, so a count of 
 
 ## Receipts
 
-- Epic #1813 and its first two phases, #1814 and #1815.
+- Epic #1813 and its phases #1814, #1815, #1818 and #1816.
+- The two stages and report version 2 (#1816): `scripts/ci/pr-review.ts` (`STAGE_BUDGETS`, `callStage`, `reviewPullRequest`), `scripts/ci/pr-review-prompt.ts` (`SCREEN_SYSTEM_PROMPT`, `REVIEW_SYSTEM_PROMPT`, `V3_RULES`, `assembleReport`), `scripts/ci/pr-review-evidence.ts` (`gatherListing`, `gatherContent`), `shared/pr-review.ts` (`parsePrReviewReport`, `parseStoredPrReviewReport`).
+- The naming rule and its override (#1816): `shared/naming-rule.ts` (`namingProblemOf`), `backend/src/services/pr-review-naming.ts`, `backend/src/services/pr-review-waiver.ts`, `src/commands/admin-pr-reviews.ts` (`allow --admin`).
+- The calibration: `scripts/ci/pr-review-calibrate.ts`.
 - Exemption: `backend/src/services/pr-review-exemption.ts`, `backend/src/services/pr-review.ts` (`isExemptDelivery`, `publishExempt`), `shared/pr-review.ts` (`exempt`, `skipped`).
 - The gate and the removal of the counts (#1815): `backend/src/services/pr-review.ts` (`gateDecision`: exempt, then blocked, then reviewed), `shared/pr-review.ts` (`PRODUCED_DECLINE_REASONS`, `HISTORICAL_DECLINE_REASONS`, `standingOf`).
 - The volume line: `backend/src/services/pr-review-queue.ts` (`readVolume`), `shared/contract/pr-review-admin.ts` (`QueueVolume`), `src/commands/admin-pr-reviews.ts` (`volumeLines`).
