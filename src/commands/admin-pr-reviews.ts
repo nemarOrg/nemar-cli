@@ -35,6 +35,7 @@ import {
   type ReviewOutcome,
   factsOf,
   findingLines,
+  namingLines,
   renderCheck,
   verdictOf,
 } from "../../shared/pr-review.js";
@@ -326,12 +327,15 @@ export function reportLines(outcome: ReviewOutcome): string[] {
 function versionLine(report: Extract<ReviewOutcome, { kind: "reported" }>["report"]): string {
   const { version_before: before, version_after: after } = report.evidence;
   const advances = factsOf(report).criteria.advances_revision;
+  const screened = report.v === 2 && report.stage === "screen";
   const word =
     advances === "pass"
       ? chalk.green("revision advances: yes")
       : advances === "fail"
         ? chalk.red("revision advances: NO")
-        : chalk.yellow("revision advances: unknown");
+        : screened
+          ? chalk.dim("revision advances: not assessed (stopped by the screen)")
+          : chalk.yellow("revision advances: unknown");
   return `Version:  ${plain(before ?? "unknown")} to ${plain(after ?? "unknown")}   ${word}`;
 }
 
@@ -350,6 +354,8 @@ export function briefLines(outcome: unknown): string[] {
     const lines = [chalk.bold(plain(r.title))];
     if (o.report.summary) lines.push(plain(o.report.summary));
     lines.push(versionLine(o.report));
+    const naming = namingLines(o.report);
+    if (naming.length > 0) lines.push(chalk.bold("Naming rule:"), ...naming.map((l) => `- ${l}`));
     const findings = findingLines(o.report);
     if (findings.length > 0) lines.push(chalk.bold("Findings:"), ...findings.map(terminalize));
     return lines;

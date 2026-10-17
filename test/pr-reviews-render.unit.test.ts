@@ -12,8 +12,10 @@ import type {
   QueueEntry,
   VolumeWindow,
 } from "../shared/contract/pr-review-admin";
+import { parsePrReviewReport, parseStoredPrReviewReport } from "../shared/pr-review";
 import {
   ageOf,
+  briefLines,
   plain,
   renderQueue,
   reportLines,
@@ -458,5 +460,109 @@ describe("reportLines", () => {
     const text = reportLines({ kind: "declined", reason: "rate_limited" }).join("\n");
     expect(text).toContain("Not reviewed");
     expect(text).toContain("rate limited");
+  });
+});
+
+describe("a version 2 report on the terminal", () => {
+  const areas = {
+    dataset_description: { added: 0, modified: 1, removed: 0 },
+    readme_and_changes: { added: 0, modified: 0, removed: 0 },
+    participants: { added: 0, modified: 0, removed: 0 },
+    sidecars: { added: 0, modified: 0, removed: 0 },
+    recordings: { added: 0, modified: 0, removed: 0 },
+    derivatives: { added: 0, modified: 0, removed: 0 },
+    sourcedata: { added: 0, modified: 0, removed: 0 },
+    code: { added: 0, modified: 0, removed: 0 },
+    other: { added: 0, modified: 0, removed: 0 },
+  };
+  const evidence = (over: Record<string, unknown> = {}) => ({
+    files_changed: 1,
+    files_read: 0,
+    truncated: true,
+    version_before: "1.0.0",
+    version_after: "1.0.1",
+    subjects_before: 2,
+    subjects_after: 2,
+    areas,
+    listed: [{ status: "modified", path: "dataset_description.json" }],
+    description_empty: false,
+    title_problem: null,
+    name_problem: null,
+    ...over,
+  });
+  const screen = (over: Record<string, unknown> = {}) =>
+    parsePrReviewReport({
+      v: 2,
+      stage: "screen",
+      models: { screen: "claude-haiku-5-5", review: null },
+      criteria: {
+        genuine_contribution: "fail",
+        no_degradation: "unknown",
+        advances_revision: "unknown",
+        material_improvement: "unknown",
+        clear_title_and_description: "unknown",
+        description_not_misleading: "unknown",
+      },
+      findings: [
+        {
+          criterion: "genuine_contribution",
+          severity: "blocker",
+          code: "spam",
+          path: null,
+          note: "",
+        },
+      ],
+      summary: "The description advertises an unrelated service.",
+      steering: false,
+      evidence: evidence(),
+      usage: { screen: { input_tokens: 900, output_tokens: 300 }, review: null },
+      ...over,
+    });
+
+  test("a screen report says the revision was not assessed, not unknown", () => {
+    const lines = briefLines({ kind: "reported", report: screen() }).map((l) =>
+      l.replace(ANSI, ""),
+    );
+    expect(lines.join("\n")).toContain("revision advances: not assessed (stopped by the screen)");
+    expect(lines[0]).toBe("Needs changes: stopped by the screen");
+  });
+
+  test("the naming rule's findings are printed in sentences", () => {
+    const lines = briefLines({
+      kind: "reported",
+      report: screen({ evidence: evidence({ title_problem: "author_year" }) }),
+    }).map((l) => l.replace(ANSI, ""));
+    const text = lines.join("\n");
+    expect(text).toContain("Naming rule:");
+    expect(text).toContain("The title starts with a name and a year");
+    expect(text).not.toMatch(/author_year/);
+    for (const l of lines) expect(DANGEROUS.test(l)).toBe(false);
+  });
+
+  test("a stored version 1 report still renders in full", () => {
+    const report = parseStoredPrReviewReport({
+      v: 1,
+      model: "claude-haiku-5-5",
+      criteria: { no_degradation: "pass", advances_revision: "pass", material_improvement: "pass" },
+      findings: [],
+      summary: "Adds a subject.",
+      steering: false,
+      evidence: {
+        files_changed: 1,
+        files_read: 1,
+        truncated: false,
+        version_before: "1.0.0",
+        version_after: "1.0.1",
+        subjects_before: 2,
+        subjects_after: 3,
+        areas,
+        listed: [],
+      },
+    });
+    const text = reportLines({ kind: "reported", report })
+      .map((l) => l.replace(ANSI, ""))
+      .join("\n");
+    expect(text).toContain("Passes: nothing lost, revision advances, materially better");
+    expect(text).toContain("Reviewed with claude-haiku-5-5.");
   });
 });
