@@ -16,8 +16,11 @@
 export interface NamingRepo {
   /** The merge base the comparison names; the base commit of the request when absent. */
   mergeBase?: string;
-  /** The files the comparison lists. */
-  files?: string[];
+  /**
+   * The files the comparison lists: a name (listed as modified), or GitHub's own entry, for a status
+   * of its own or a rename (`previous_filename`). `null` leaves the list out of the answer.
+   */
+  files?: Array<string | { filename: string; status?: string; previous_filename?: string }> | null;
   /**
    * What `dataset_description.json` holds at a commit: a `Name` (the file is
    * `{"Name": ..., "BIDSVersion": "1.9.0"}`), null for no file (404), or an HTTP status to answer.
@@ -53,7 +56,13 @@ export async function namingResponse(
     }
     return Response.json({
       merge_base_commit: { sha: repo.mergeBase ?? compare[2] },
-      files: (repo.files ?? []).map((filename) => ({ filename, status: "modified" })),
+      ...(repo.files === null
+        ? {}
+        : {
+            files: (repo.files ?? []).map((f) =>
+              typeof f === "string" ? { filename: f, status: "modified" } : f,
+            ),
+          }),
     });
   }
   const contents = url.pathname.match(CONTENTS);

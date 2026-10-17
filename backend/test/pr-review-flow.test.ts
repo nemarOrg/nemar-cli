@@ -1198,6 +1198,80 @@ describe("the naming rule runs first, owners and administrators included (ADR 01
     expect(other.body).toMatchObject({ reason: "naming_rule" });
   });
 
+  test("a comparison as long as GitHub lists may have cut the file off: the name is read", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    naming[DATASET] = {
+      files: Array.from({ length: 300 }, (_, i) => `sub-${i}/eeg/sub-${i}_task-rest_events.tsv`),
+      names: { [SHA_A]: "Lee2019 Resting EEG", [BASE_SHA]: "Resting EEG of volunteers" },
+    };
+    const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+    expect(r.body).toMatchObject({ reason: "naming_rule" });
+    expect(lastCheck()).toMatchObject({ conclusion: "failure" });
+  });
+
+  test("one file short of that cap, the list is whole and the name is not read", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    naming[DATASET] = {
+      files: Array.from({ length: 299 }, (_, i) => `sub-${i}/eeg/sub-${i}_task-rest_events.tsv`),
+      names: { [SHA_A]: "Lee2019 Resting EEG", [BASE_SHA]: "Resting EEG of volunteers" },
+    };
+    const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+    expect(r.body).toMatchObject({ reason: "exempt_author" });
+  });
+
+  test("a comparison with no list of files says nothing about the file: the name is read", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    naming[DATASET] = {
+      files: null,
+      names: { [SHA_A]: "Lee2019 Resting EEG", [BASE_SHA]: "Resting EEG of volunteers" },
+    };
+    const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+    expect(r.body).toMatchObject({ reason: "naming_rule" });
+  });
+
+  test("a file renamed to dataset_description.json is a change of it: the name is read", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    naming[DATASET] = {
+      files: [
+        {
+          filename: "dataset_description.json",
+          previous_filename: "old_description.json",
+          status: "renamed",
+        },
+      ],
+      names: { [SHA_A]: "Lee2019 Resting EEG" },
+    };
+    const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+    expect(r.body).toMatchObject({ reason: "naming_rule" });
+  });
+
+  test("dataset_description.json renamed away leaves no name to refuse", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    naming[DATASET] = {
+      files: [
+        {
+          filename: "old_description.json",
+          previous_filename: "dataset_description.json",
+          status: "renamed",
+        },
+      ],
+      names: { [BASE_SHA]: "Lee2019 Resting EEG" },
+    };
+    const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+    expect(r.body).toMatchObject({ reason: "exempt_author" });
+  });
+
+  test("a file GitHub listed as changed that it then cannot find at the head is unchecked, never clean", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    naming[DATASET] = {
+      files: ["dataset_description.json"],
+      names: { [BASE_SHA]: "Resting EEG of volunteers" },
+    };
+    const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+    expect(r.body).toMatchObject({ reason: "naming_unchecked" });
+    expect(lastCheck()).toMatchObject({ conclusion: "action_required" });
+  });
+
   test("a waiver covers what it recorded: a problem it did not see is checked again", async () => {
     seedAccount({ github: "owner-gh", role: "owner" });
     db.run(

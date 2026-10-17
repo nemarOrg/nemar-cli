@@ -78,14 +78,15 @@ async function get(
 }
 
 /**
- * The merge base of the pull request, and whether `dataset_description.json` may have changed: it
- * is in GitHub's list of changed files, or the list is long enough to have been cut.
+ * The merge base of the pull request, whether `dataset_description.json` may have changed (it is in
+ * GitHub's list of changed files, the list is long enough to have been cut, or there is no list),
+ * and whether the list says the file is there at the head (added, changed or renamed to it).
  */
 async function compare(
   token: string,
   refresh: () => Promise<string>,
   pr: NamingSubject & { baseSha: string },
-): Promise<{ mergeBase: string; descriptionMayChange: boolean }> {
+): Promise<{ mergeBase: string; descriptionMayChange: boolean; listedAtHead: boolean }> {
   const res = await get(
     token,
     refresh,
@@ -98,38 +99,50 @@ async function compare(
   const mergeBase = typeof base?.sha === "string" && SHA40.test(base.sha) ? base.sha : null;
   if (mergeBase === null) throw new Unreadable("compare named no merge base");
   const files = Array.isArray(record.files) ? record.files : null;
-  if (files === null) return { mergeBase, descriptionMayChange: true };
-  const named = files.some((f) => {
-    const file = typeof f === "object" && f !== null ? (f as Record<string, unknown>) : {};
-    return file.filename === DESCRIPTION || file.previous_filename === DESCRIPTION;
-  });
-  return { mergeBase, descriptionMayChange: named || files.length >= COMPARE_FILE_CAP };
+  if (files === null) return { mergeBase, descriptionMayChange: true, listedAtHead: false };
+  const entries = files.map((f) =>
+    typeof f === "object" && f !== null ? (f as Record<string, unknown>) : {},
+  );
+  const named = entries.some(
+    (file) => file.filename === DESCRIPTION || file.previous_filename === DESCRIPTION,
+  );
+  const listedAtHead = entries.some(
+    (file) => file.filename === DESCRIPTION && file.status !== "removed",
+  );
+  return {
+    mergeBase,
+    descriptionMayChange: named || files.length >= COMPARE_FILE_CAP,
+    listedAtHead,
+  };
 }
 
-/** The dataset's `Name` at a commit: a string, or null when the file or a string `Name` is absent. */
+/**
+ * `dataset_description.json` at a commit: whether it is there, and its `Name`, null when the file
+ * has no string `Name` or is not JSON.
+ */
 async function nameAt(
   token: string,
   refresh: () => Promise<string>,
   datasetId: string,
   ref: string,
-): Promise<string | null> {
+): Promise<{ present: boolean; name: string | null }> {
   const res = await get(
     token,
     refresh,
     `${GITHUB_API()}/repos/${ORG_NAME}/${encodeURIComponent(datasetId)}/contents/${DESCRIPTION}?ref=${ref}`,
     "application/vnd.github.raw+json",
   );
-  if (res.status === 404) return null;
+  if (res.status === 404) return { present: false, name: null };
   if (!res.ok) throw new Unreadable(`contents answered HTTP ${res.status}`);
   const text = await res.text();
   try {
     const doc: unknown = JSON.parse(text);
     const name =
       typeof doc === "object" && doc !== null ? (doc as Record<string, unknown>).Name : undefined;
-    return typeof name === "string" ? name : null;
+    return { present: true, name: typeof name === "string" ? name : null };
   } catch {
     // A file that is not JSON has no name to check; the BIDS validator says what is wrong with it.
-    return null;
+    return { present: true, name: null };
   }
 }
 
@@ -148,7 +161,7 @@ async function nameProblemOf(
   }
   try {
     const { token, refresh } = await getDatasetsTokenWithRefresher(env);
-    const { mergeBase, descriptionMayChange } = await compare(token, refresh, {
+    const { mergeBase, descriptionMayChange, listedAtHead } = await compare(token, refresh, {
       ...pr,
       baseSha: pr.baseSha,
     });
@@ -157,8 +170,11 @@ async function nameProblemOf(
       nameAt(token, refresh, pr.datasetId, pr.headSha),
       nameAt(token, refresh, pr.datasetId, mergeBase),
     ]);
-    if (after === null || after === before) return null;
-    return namingProblemOf(after);
+    // GitHub listed the file as there at the head and then said it is not: the two answers
+    // disagree, and the name is not known, which is not the same as there being none.
+    if (listedAtHead && !after.present) throw new Unreadable("the listed file was not found");
+    if (after.name === null || after.name === before.name) return null;
+    return namingProblemOf(after.name);
   } catch (err) {
     // Fixed words and the error's own message (a status or a timeout), never a name or a title.
     console.error(
