@@ -69,6 +69,7 @@ export const EVIDENCE_ERRORS = [
   "no_merge_base",
   "changes_unreadable",
   "commits_unreadable",
+  "timed_out",
 ] as const;
 export type EvidenceErrorCode = (typeof EVIDENCE_ERRORS)[number];
 
@@ -269,37 +270,49 @@ const MAX_COSMETIC_CHECKS = 2_000;
 
 const CHANGELOG_NAME = /^(CHANGES|CHANGELOG)(\.(md|txt|rst))?$/i;
 
-function git(dir: string, args: string[]): string {
-  return execFileSync(
-    "git",
-    [
-      "--literal-pathspecs",
-      "-C",
-      dir,
-      "-c",
-      "core.hooksPath=/dev/null",
-      "-c",
-      "core.fsmonitor=false",
-      "-c",
-      "protocol.ext.allow=never",
-      ...args,
-    ],
-    {
-      encoding: "utf8",
-      maxBuffer: 256 * 1024 * 1024,
-      env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" },
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
+/**
+ * How long each evidence pass may spend in git, all its calls together: the listing, before the
+ * screen, and the content, after it. The job reads a partial clone, whose missing blobs git fetches
+ * from GitHub inside these calls, so a stalled fetch would otherwise run on to the job's own
+ * timeout. A pass that runs out is `timed_out`, which is no verdict. The workflow test counts both
+ * in the job's worst case.
+ */
+export const EVIDENCE_BUDGET_MS = { listing: 60_000, content: 120_000 } as const;
+
+/** When the pass now running must be done by (epoch ms); null outside a pass. */
+let gitDeadline: number | null = null;
+
+/** A shorter budget for a test of a stall; production never sets one. */
+let budgetOverride: Partial<Record<keyof typeof EVIDENCE_BUDGET_MS, number>> = {};
+
+export function __setEvidenceBudgetForTests(
+  ms: Partial<Record<keyof typeof EVIDENCE_BUDGET_MS, number>> | null,
+): void {
+  budgetOverride = ms ?? {};
+}
+
+/** Run one pass under its budget. The passes are synchronous, so one deadline at a time holds. */
+function withinBudget<T>(pass: keyof typeof EVIDENCE_BUDGET_MS, read: () => T): T {
+  const saved = gitDeadline;
+  gitDeadline = Date.now() + (budgetOverride[pass] ?? EVIDENCE_BUDGET_MS[pass]);
+  try {
+    return read();
+  } finally {
+    gitDeadline = saved;
+  }
 }
 
 /**
- * The same call as {@link tryGit} but with the bytes kept: each byte becomes the one character with
- * that code (latin1), so two blobs that differ only in bytes that are not valid UTF-8 (`caf\xe9`
- * and `caf\xe8`) are still different strings. Decoding them as UTF-8 would turn both into the same
- * replacement characters.
+ * One git call, bounded by what is left of the pass's budget. Running out, before the call or
+ * during it, is {@link EvidenceError} `timed_out`, which no caller swallows; any other failure is
+ * thrown as git's own error, for the caller to turn into its word.
  */
-function tryGitBytes(dir: string, args: string[]): string | null {
+function runGit(dir: string, args: string[], encoding: "utf8" | "latin1"): string {
+  let timeout: number | undefined;
+  if (gitDeadline !== null) {
+    timeout = gitDeadline - Date.now();
+    if (timeout <= 0) throw new EvidenceError("timed_out");
+  }
   try {
     return execFileSync(
       "git",
@@ -316,21 +329,40 @@ function tryGitBytes(dir: string, args: string[]): string | null {
         ...args,
       ],
       {
-        encoding: "latin1",
+        encoding,
         maxBuffer: 256 * 1024 * 1024,
         env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" },
         stdio: ["ignore", "pipe", "pipe"],
+        ...(timeout === undefined ? {} : { timeout }),
       },
     );
-  } catch {
+  } catch (e) {
+    if ((e as { code?: unknown }).code === "ETIMEDOUT") throw new EvidenceError("timed_out");
+    throw e;
+  }
+}
+
+/**
+ * The same call as {@link tryGit} but with the bytes kept: each byte becomes the one character with
+ * that code (latin1), so two blobs that differ only in bytes that are not valid UTF-8 (`caf\xe9`
+ * and `caf\xe8`) are still different strings. Decoding them as UTF-8 would turn both into the same
+ * replacement characters.
+ */
+function tryGitBytes(dir: string, args: string[]): string | null {
+  try {
+    return runGit(dir, args, "latin1");
+  } catch (e) {
+    if (e instanceof EvidenceError) throw e;
     return null;
   }
 }
 
+/** A git call whose failure is null, for the caller to name; running out of time is thrown. */
 function tryGit(dir: string, args: string[]): string | null {
   try {
-    return git(dir, args);
-  } catch {
+    return runGit(dir, args, "utf8");
+  } catch (e) {
+    if (e instanceof EvidenceError) throw e;
     return null;
   }
 }
@@ -585,10 +617,15 @@ function byShapeOrder(a: PathShape, b: PathShape): number {
  *
  * `baseSha` is the tip of `main`; the diff is taken against the merge base, so a pull request
  * is judged on what IT changes and not on what `main` gained since. Throws {@link EvidenceError}
- * when the commits are not present or share no history. Every call here reads a tree, a commit or
- * that one file, so a partial clone fetches no other blob for it.
+ * when the commits are not present or share no history, or when the pass runs past its share of
+ * {@link EVIDENCE_BUDGET_MS}. Every call here reads a tree, a commit or that one file, so a partial
+ * clone fetches no other blob for it.
  */
 export function gatherListing(dir: string, baseSha: string, headSha: string): Listing {
+  return withinBudget("listing", () => readListing(dir, baseSha, headSha));
+}
+
+function readListing(dir: string, baseSha: string, headSha: string): Listing {
   requireSha(baseSha);
   requireSha(headSha);
   const mergeBase = tryGit(dir, ["merge-base", baseSha, headSha])?.trim();
@@ -635,9 +672,14 @@ export function gatherListing(dir: string, baseSha: string, headSha: string): Li
 /**
  * Read what only the full review is shown, for a listing {@link gatherListing} made: the cosmetic
  * proofs, the diffs of the changed metadata files that fit the budget, and the change log. Called
- * only when the screen let the pull request through.
+ * only when the screen let the pull request through, and bounded by its share of
+ * {@link EVIDENCE_BUDGET_MS}.
  */
 export function gatherContent(dir: string, listing: Listing): ContentFacts {
+  return withinBudget("content", () => readContent(dir, listing));
+}
+
+function readContent(dir: string, listing: Listing): ContentFacts {
   const { mergeBase } = listing;
   const headSha = listing.head;
   const wanted = readableChanges(listing.changes);

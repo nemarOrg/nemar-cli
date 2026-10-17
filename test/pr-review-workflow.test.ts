@@ -32,6 +32,7 @@ import {
   STAGE_BUDGETS,
   callbackBackoffMs,
 } from "../scripts/ci/pr-review";
+import { EVIDENCE_BUDGET_MS } from "../scripts/ci/pr-review-evidence";
 import { isRunError, parseCallbackOutcome } from "../shared/pr-review";
 
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -594,10 +595,12 @@ describe("failure and logging", () => {
     // each, one and two seconds apart (93 s), then the mint, the checkout, Bun, the install, the
     // blob-less fetch, the pull request read and the identity token, which take about two minutes
     // on a large dataset.
+    // These steps are GitHub's (the checkout, Bun, the install, the fetch), bounded by the job's own
+    // timeout and not by the script, so this one is an allowance and not a budget the script keeps.
     const SETUP_MINUTES = 4;
-    // Both evidence passes over a partial clone: the change list, the trees and commits, then one
-    // batched blob fetch for the diffs. A large change is about a minute; three is the allowance.
-    const EVIDENCE_MINUTES = 3;
+    // Both evidence passes over a partial clone, each cut at its budget: the change list, the trees
+    // and commits, then one batched blob fetch for the diffs. A large change is about a minute.
+    const EVIDENCE_MINUTES = minutes(EVIDENCE_BUDGET_MS.listing + EVIDENCE_BUDGET_MS.content);
     // Each stage is cut at its deadline, every attempt and the stream together (an abort signal).
     const stages =
       minutes(STAGE_BUDGETS.screen.deadlineMs) + minutes(STAGE_BUDGETS.review.deadlineMs);

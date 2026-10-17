@@ -1,7 +1,7 @@
 /**
  * A pass-through wrapper for the real Git executable. Tests may add environment
- * variables to one matching call or record its arguments; it never changes Git's
- * output or exit status.
+ * variables to one matching call, record its arguments, or delay it; it never changes
+ * Git's output or exit status.
  *
  * `env` lets a test steer one child process (for example point git-annex's HTTP client
  * at a dead local proxy) without writing to `process.env`: Bun keeps a proxy variable
@@ -18,6 +18,12 @@ export interface ShimRule {
   env?: Record<string, string>;
   /** Append the call's arguments, one line per call, then run the real Git executable. */
   log?: string;
+  /**
+   * Wait this many seconds before running the real Git executable: a fetch that stalls. The wait
+   * holds none of the call's pipes, so a caller that kills the call on a timeout is not kept
+   * waiting for it.
+   */
+  sleepSeconds?: number;
 }
 
 const quote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
@@ -36,6 +42,9 @@ export function installGitShim(root: string, rules: ShimRule[]): () => void {
       ([k, v]) => `  export ${k}=${quote(v)}`,
     );
     if (rule.log !== undefined) lines.push(`  printf '%s\\n' "$args" >> ${quote(rule.log)}`);
+    if (rule.sleepSeconds !== undefined) {
+      lines.push(`  sleep ${Number(rule.sleepSeconds)} </dev/null >/dev/null 2>&1`);
+    }
     return [`case "$args" in *${quote(rule.match)}*)`, ...lines, "  ;;", "esac"].join("\n");
   });
   const script = [

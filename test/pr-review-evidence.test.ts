@@ -43,6 +43,7 @@ import {
   runReview,
 } from "../scripts/ci/pr-review";
 import {
+  EVIDENCE_BUDGET_MS,
   EVIDENCE_ERRORS,
   EvidenceError,
   MAX_GROUPS,
@@ -50,9 +51,12 @@ import {
   MAX_PATCH_FILES,
   MAX_PATCH_TOTAL_CHARS,
   type TextFacts,
+  __setEvidenceBudgetForTests,
   buildEvidence,
   classifyPath,
+  gatherContent,
   gatherGitFacts,
+  gatherListing,
   parseNameStatus,
   pathPattern,
 } from "../scripts/ci/pr-review-evidence";
@@ -470,6 +474,44 @@ describe("reading a real pull request as git data", () => {
       { status: "modified", path: "dir/a\nb.json" },
       { status: "removed", path: "gone.edf" },
     ]);
+  });
+});
+
+describe("each evidence pass reads git within a time budget", () => {
+  test("the budgets are the ones the job's worst case counts", () => {
+    expect(EVIDENCE_BUDGET_MS).toEqual({ listing: 60_000, content: 120_000 });
+  });
+
+  test.each([
+    ["listing", " merge-base "],
+    ["content", " --numstat "],
+  ] as const)(
+    "a git call that stalls past the %s budget is timed_out, and the pass ends",
+    (pass, match) => {
+      const dir = newDataset(`budget-${pass}`);
+      const r = branch(dir, () => write(dir, "README.md", "# Stalled\n"));
+      const listing = pass === "content" ? gatherListing(r.dir, r.base, r.head) : null;
+      const restore = installGitShim(root, [{ match, sleepSeconds: 5 }]);
+      __setEvidenceBudgetForTests({ [pass]: 300 });
+      const started = Date.now();
+      try {
+        const read = () =>
+          listing === null ? gatherListing(r.dir, r.base, r.head) : gatherContent(r.dir, listing);
+        expect(codeOf(read)).toBe("timed_out");
+      } finally {
+        __setEvidenceBudgetForTests(null);
+        restore();
+      }
+      expect(Date.now() - started).toBeLessThan(4_000);
+      // The budget belongs to the pass: the next one starts with its own.
+      expect(gatherGitFacts(r.dir, r.base, r.head).changes).toHaveLength(1);
+    },
+  );
+
+  test("a timed-out read reaches the job as evidence_unavailable, with the cause in the log words", () => {
+    const err = new EvidenceError("timed_out");
+    expect(mapError(err)).toBe("evidence_unavailable");
+    expect(describeError(err)).toBe("EvidenceError: timed_out");
   });
 });
 
