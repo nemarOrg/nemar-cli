@@ -716,7 +716,7 @@ export async function exemptOutcomeFor(
 ): Promise<Extract<ReviewOutcome, { kind: "exempt" | "naming" }>> {
   const facts = await namingFactsFor(env, pr);
   if (namingClean(facts)) return { kind: "exempt" };
-  if (await isNamingWaived(env.DB, pr)) return { kind: "exempt", waived: true };
+  if (await isNamingWaived(env.DB, pr, facts)) return { kind: "exempt", waived: true };
   return { kind: "naming", facts };
 }
 

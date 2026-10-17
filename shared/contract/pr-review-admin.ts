@@ -241,8 +241,11 @@ export interface StartReviewResponse {
 /**
  * The words a waiver of the naming rule can come to (`POST /admin/pr-reviews/:dataset/:pr/allow`):
  *  - `waived`: the rule refused the commit, the waiver is recorded, and its check is now skipped;
- *  - `already_waived`: a waiver for this commit was already recorded; its check was posted again;
+ *  - `already_waived`: a waiver for this commit covers what the rule finds; its check was posted
+ *    again;
  *  - `nothing_to_waive`: the rule finds nothing on the commit; its check was posted as skipped;
+ *  - `naming_unchecked`: the dataset's name could not be read from GitHub, so there is nothing
+ *    definite to waive and nothing was recorded or posted; asking again reads it again;
  *  - `not_exempt`: the author is not a NEMAR owner or administrator, whose review it would bypass;
  *  - `reviewed`: the commit was reviewed (someone who is not exempt pushed it), and its review stands;
  *  - or why the pull request was not looked at, in the start's words (`pr_review_disabled`,
@@ -253,6 +256,7 @@ export type WaiveNamingReason =
   | "waived"
   | "already_waived"
   | "nothing_to_waive"
+  | "naming_unchecked"
   | "not_exempt"
   | "reviewed"
   | (string & {});
@@ -264,7 +268,7 @@ export interface WaiveNamingResponse {
   reason: WaiveNamingReason;
   /** The commit the answer is about, when the pull request was read that far. */
   head_sha: string | null;
-  /** What the naming rule found on that commit, when it was waived now. */
+  /** What the naming rule found on that commit, when it was waived now or could not be read. */
   facts: NamingFacts | null;
 }
 

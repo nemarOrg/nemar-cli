@@ -187,21 +187,36 @@ export function namingResource(datasetId: string, prNumber: number): string {
 }
 
 /**
- * Whether an administrator waived the naming rule for this commit of this pull request: the
- * recorded override (`nemar admin pr-reviews allow <dataset> <pr> --admin`), read from the audit
- * log, which is where the waiver lives. It is for one commit, so a new commit is checked again.
+ * Whether an administrator waived what the naming rule finds now on this commit of this pull
+ * request: a recorded override (`nemar admin pr-reviews allow <dataset> <pr> --admin`), read from
+ * the audit log, which is where the waiver lives. It is for one commit, so a new commit is checked
+ * again, and it covers what it recorded: each problem found now must be the one the waiver recorded
+ * for that field. A name that cannot be read now matches no waiver (none records one), so it is a
+ * check that needs a person rather than a skip.
  */
 export async function isNamingWaived(
   db: D1Database,
   pr: { datasetId: string; prNumber: number; headSha: string },
+  facts: NamingFacts,
 ): Promise<boolean> {
   const row = await db
     .prepare(
       `SELECT 1 AS waived FROM audit_log
-        WHERE action = ? AND resource_id = ? AND json_extract(details, '$.head_sha') = ?
+        WHERE action = ? AND resource_id = ? AND json_valid(details)
+          AND json_extract(details, '$.head_sha') = ?
+          AND (? IS NULL OR json_extract(details, '$.title') = ?)
+          AND (? IS NULL OR json_extract(details, '$.name') = ?)
         LIMIT 1`,
     )
-    .bind(NAMING_WAIVED_ACTION, namingResource(pr.datasetId, pr.prNumber), pr.headSha)
+    .bind(
+      NAMING_WAIVED_ACTION,
+      namingResource(pr.datasetId, pr.prNumber),
+      pr.headSha,
+      facts.title,
+      facts.title,
+      facts.name,
+      facts.name,
+    )
     .first<{ waived: number }>();
   return row !== null && row !== undefined;
 }

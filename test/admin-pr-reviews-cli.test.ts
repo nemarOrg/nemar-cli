@@ -689,6 +689,20 @@ describe("nemar admin pr-reviews allow <dataset> <pr> --admin: the naming rule's
     expect(JSON.parse(r.stdout)).toMatchObject({ waived: false, reason: "nothing_to_waive" });
   });
 
+  test("a dataset name GitHub would not show is not waived: it says so in words, and exits 1", async () => {
+    reviewable("nm000201");
+    gh.pulls["nm000201#7"] = { sha: SHA_A, author: "queueadmin-gh", title: "Lee2019 EEG rename" };
+    gh.naming.nm000201 = { files: ["dataset_description.json"], names: { [SHA_A]: 502 } };
+    const r = await cli([...PR, "allow", "nm000201", "7", "--admin"]);
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain(
+      `Not waived: the dataset name of nm000201 #7 at ${SHA_A.slice(0, 7)} could not be read from GitHub`,
+    );
+    expect(r.stdout).toContain("Run the same command again in a moment");
+    expect(r.stdout).not.toMatch(/naming_unchecked|unchecked/);
+    expect(waivers()).toHaveLength(0);
+  });
+
   test("--admin needs a pull request, and a login takes none", async () => {
     const missing = await cli([...PR, "allow", "nm000201", "--admin"]);
     expect(missing.exitCode).toBe(1);

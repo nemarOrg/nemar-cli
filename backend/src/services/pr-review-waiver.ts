@@ -12,13 +12,16 @@
  *     pull request is open, aimed at `main`, not a draft and not a bot's.
  *  2. Its current commit must not have been reviewed (a review of it stands, whoever acts next),
  *     and its author must be exempt: the override replaces the exemption for this rule, so it is
- *     never a way past a contributor's review.
+ *     never a way past a contributor's review. When GitHub does not answer whether the author holds
+ *     the repository's admin role, nothing is waived and the answer is an error, not "not exempt".
  *  3. The rule runs again on that commit. When it finds nothing there is nothing to waive, and the
- *     plain `skipped` check is posted.
+ *     plain `skipped` check is posted. When it could not read the dataset's name there is nothing
+ *     definite to waive yet, and nothing is: a waiver covers only what the rule found.
  *  4. Otherwise the waiver is recorded first (`pr_review_naming_waived` in the audit log: who, the
  *     commit, what the rule found as closed words, and the reason given), and then a `skipped`
  *     check that says the rule was waived is posted on the commit. The exempt path reads the same
- *     row, so a later delivery of that commit keeps the waiver; a new commit is checked again.
+ *     row, so a later delivery of that commit keeps the waiver for what it recorded; a problem the
+ *     rule finds there later that the waiver did not record, and a new commit, are checked again.
  *
  * It never approves or merges anything, and it records no pull request text: the audit row holds
  * the rule's closed words, not the title or the name.
@@ -28,7 +31,7 @@ import type { WaiveNamingResponse } from "../../../shared/contract/pr-review-adm
 import { sanitizeNote } from "../../../shared/pr-review.js";
 import { auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
-import { isReviewExempt } from "./pr-review-exemption.js";
+import { reviewExemption } from "./pr-review-exemption.js";
 import { NAMING_WAIVED_ACTION, namingResource } from "./pr-review-naming.js";
 import { QueueError, environmentName, ownedHere } from "./pr-review-queue.js";
 import { readPullRequest } from "./pr-review-start.js";
@@ -100,12 +103,21 @@ export async function waiveNamingRule(
     .bind(pr.datasetId, pr.prNumber, pr.headSha)
     .first<{ reviewed: number }>();
   if (reviewed) return answer("reviewed", head);
-  if (!(await isReviewExempt(env, { login: pr.authorLogin, repo: pr.datasetId }))) {
-    return answer("not_exempt", head);
+  const exemption = await reviewExemption(env, { login: pr.authorLogin, repo: pr.datasetId });
+  if (exemption === "unknown") {
+    throw new QueueError(
+      502,
+      "github_unavailable",
+      "GitHub did not say whether the author holds the repository's admin role, so nothing was waived. Ask again in a moment.",
+    );
   }
+  if (exemption === "not_exempt") return answer("not_exempt", head);
 
   const outcome = await exemptOutcomeFor(env, pr);
   const facts = outcome.kind === "naming" ? outcome.facts : null;
+  // A waiver is for what the rule found. A name it could not read is not a finding, and waiving it
+  // would also cover whatever that name turns out to be.
+  if (facts?.name === "unchecked") return answer("naming_unchecked", { ...head, facts });
   try {
     if (outcome.kind === "exempt" && !outcome.waived) {
       // Nothing to waive, now: post the check the commit should carry.

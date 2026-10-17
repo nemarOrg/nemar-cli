@@ -2145,6 +2145,15 @@ export function waiverLines(r: WaiveNamingResponse, dataset: string, pr: number)
           `Not waived: ${label} was reviewed (someone who is not exempt pushed it), and that review stands.`,
         ),
       ];
+    case "naming_unchecked":
+      return [
+        chalk.yellow(
+          `Not waived: the dataset name of ${label} could not be read from GitHub, so there is nothing definite to waive yet.`,
+        ),
+        chalk.dim(
+          "  A waiver covers only what the naming rule found. Run the same command again in a moment, when GitHub answers.",
+        ),
+      ];
     default: {
       const why = NOT_STARTED[r.reason] ?? plain(r.reason).replaceAll("_", " ");
       return [chalk.yellow(`Not waived: ${why}.`)];

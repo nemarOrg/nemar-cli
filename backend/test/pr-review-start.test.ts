@@ -1450,6 +1450,35 @@ describe("the override: nemar admin pr-reviews allow <dataset> <pr> --admin", ()
     expect(reason).not.toContain("https://");
   });
 
+  test("a name GitHub would not show is not waived: there is nothing definite to waive", async () => {
+    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
+    naming[DATASET] = { files: ["dataset_description.json"], names: { [SHA_A]: 502 } };
+    const r = await allow(DATASET, 7);
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({
+      waived: false,
+      reason: "naming_unchecked",
+      head_sha: SHA_A,
+      facts: { title: "author_year", name: "unchecked" },
+    });
+    expect(waivers()).toHaveLength(0);
+    expect(calls.some((c) => c.path.endsWith("/check-runs"))).toBe(false);
+  });
+
+  test("GitHub not saying whether the author is an administrator is an error, never not_exempt", async () => {
+    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
+    permissions = { [ADMIN_LOGIN]: 503 };
+    const r = await allow(DATASET, 7);
+    expect(r.status).toBe(502);
+    expect(r.body).toMatchObject({ code: "github_unavailable" });
+    expect(String(r.body.error)).toContain("nothing was waived");
+    expect(waivers()).toHaveLength(0);
+    expect(calls.some((c) => c.path.endsWith("/check-runs"))).toBe(false);
+    // GitHub's own "no" is still an answer.
+    permissions = { [ADMIN_LOGIN]: "write" };
+    expect((await allow(DATASET, 7)).body).toMatchObject({ reason: "not_exempt" });
+  });
+
   test("with the review off nothing is waived and nothing is posted", async () => {
     envOverrides = { PR_REVIEW_ENABLED: "0" };
     pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });

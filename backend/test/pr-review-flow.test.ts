@@ -1198,6 +1198,36 @@ describe("the naming rule runs first, owners and administrators included (ADR 01
     expect(other.body).toMatchObject({ reason: "naming_rule" });
   });
 
+  test("a waiver covers what it recorded: a problem it did not see is checked again", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    db.run(
+      `INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
+       VALUES (1, 'pr_review_naming_waived', 'pr_review', ?, ?)`,
+      [`${DATASET}#7`, JSON.stringify({ head_sha: SHA_A, title: "author_year", name: null })],
+    );
+    // The same commit, now with a refused name the waiver never recorded.
+    naming[DATASET] = {
+      files: ["dataset_description.json"],
+      names: { [SHA_A]: "Lee-2019-EEG", [BASE_SHA]: "Resting EEG of volunteers" },
+    };
+    const both = await deliver(
+      prEvent({ login: "owner-gh", userId: 601, title: "Smith2020 rename" }),
+    );
+    expect(both.body).toMatchObject({ reason: "naming_rule" });
+    expect(lastCheck()).toMatchObject({ conclusion: "failure" });
+    // A different problem with the title is not the one waived either.
+    naming[DATASET] = {};
+    const other = await deliver(
+      prEvent({ login: "owner-gh", userId: 601, title: "Fix {{title}}", action: "reopened" }),
+    );
+    expect(other.body).toMatchObject({ reason: "naming_rule" });
+    // The problem it recorded, alone, is still waived.
+    const same = await deliver(
+      prEvent({ login: "owner-gh", userId: 601, title: "Smith2020 rename", action: "reopened" }),
+    );
+    expect(same.body).toMatchObject({ reason: "exempt_naming_waived" });
+  });
+
   test("a member's pull request is dispatched whatever its title: the job applies the rule to it", async () => {
     seedAccount({ github: "member-gh", role: "member" });
     const r = await deliver(
