@@ -1319,3 +1319,142 @@ describe("owners and administrators meet the naming rule before their exemption"
     expect(check?.body).toMatchObject({ conclusion: "action_required" });
   });
 });
+
+describe("the override: nemar admin pr-reviews allow <dataset> <pr> --admin", () => {
+  const ADMIN_LOGIN = "startadmin-gh";
+
+  async function allow(ds: string, n: number, body: Record<string, unknown> = {}, key = ADMIN_KEY) {
+    const res = await app.request(
+      `/admin/pr-reviews/${ds}/${n}/allow`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      env(),
+    );
+    return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+  }
+
+  function waivers() {
+    return db
+      .query("SELECT user_id, resource_id, details FROM audit_log WHERE action = ? ORDER BY id")
+      .all("pr_review_naming_waived") as Array<{
+      user_id: number;
+      resource_id: string;
+      details: string;
+    }>;
+  }
+
+  function lastCheck() {
+    const posted = calls.filter((c) => c.method === "POST" && c.path.endsWith("/check-runs"));
+    return posted[posted.length - 1]?.body as {
+      conclusion?: string;
+      head_sha?: string;
+      output?: { title: string; summary: string };
+    };
+  }
+
+  test("a refused commit is waived: the waiver is recorded first, then the check is skipped", async () => {
+    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
+    const r = await allow(DATASET, 7, { reason: "Name kept until the rename release" });
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({
+      environment: "production",
+      waived: true,
+      reason: "waived",
+      head_sha: SHA_A,
+      facts: { title: "author_year", name: null },
+    });
+    const recorded = waivers();
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]?.user_id).toBe(adminId);
+    expect(recorded[0]?.resource_id).toBe(`${DATASET}#7`);
+    expect(JSON.parse(recorded[0]?.details ?? "{}")).toEqual({
+      head_sha: SHA_A,
+      title: "author_year",
+      name: null,
+      reason: "Name kept until the rename release",
+    });
+    // The record holds the rule's closed words, never the title.
+    expect(recorded[0]?.details).not.toContain("Lee2019");
+    expect(lastCheck()).toMatchObject({ conclusion: "skipped", head_sha: SHA_A });
+    expect(lastCheck().output?.title).toContain("naming rule waived");
+    expect(rows()).toHaveLength(0);
+    expect(dispatches()).toHaveLength(0);
+  });
+
+  test("the waiver holds for that commit on a later delivery, and a new commit is checked again", async () => {
+    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
+    await allow(DATASET, 7);
+    calls = [];
+    // A later delivery of the same commit (here an administrator's start) keeps the waiver.
+    expect((await start(DATASET, 7)).body).toMatchObject({ reason: "exempt_naming_waived" });
+    expect(lastCheck()).toMatchObject({ conclusion: "skipped" });
+    // A new commit is a new question.
+    pulls[`${DATASET}#7`] = restPull({
+      login: ADMIN_LOGIN,
+      title: "Lee2019 EEG rename",
+      sha: SHA_B,
+    });
+    expect((await start(DATASET, 7)).body).toMatchObject({ reason: "naming_rule" });
+    expect(lastCheck()).toMatchObject({ conclusion: "failure", head_sha: SHA_B });
+  });
+
+  test("asking twice records once, and says it was already waived", async () => {
+    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
+    await allow(DATASET, 7);
+    const again = await allow(DATASET, 7);
+    expect(again.body).toMatchObject({ waived: true, reason: "already_waived" });
+    expect(waivers()).toHaveLength(1);
+  });
+
+  test("a contributor's pull request is not waived: the override replaces only the exemption", async () => {
+    pulls[`${DATASET}#7`] = restPull({ login: "contributor", title: "Lee2019 EEG rename" });
+    const r = await allow(DATASET, 7);
+    expect(r.body).toMatchObject({ waived: false, reason: "not_exempt", head_sha: SHA_A });
+    expect(waivers()).toHaveLength(0);
+    expect(calls.some((c) => c.path.endsWith("/check-runs"))).toBe(false);
+  });
+
+  test("a commit a review touched is not waived: its review stands", async () => {
+    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
+    seedReview(db, { ds: DATASET, n: 7, state: "reported", verdict: "fail", login: ADMIN_LOGIN });
+    const r = await allow(DATASET, 7);
+    expect(r.body).toMatchObject({ waived: false, reason: "reviewed" });
+    expect(waivers()).toHaveLength(0);
+  });
+
+  test("a commit the rule finds nothing on has nothing to waive, and gets its plain skipped check", async () => {
+    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Add three EEG recordings" });
+    const r = await allow(DATASET, 7);
+    expect(r.body).toMatchObject({ waived: false, reason: "nothing_to_waive" });
+    expect(waivers()).toHaveLength(0);
+    expect(lastCheck()).toMatchObject({ conclusion: "skipped" });
+    expect(lastCheck().output?.title).not.toContain("waived");
+  });
+
+  test("a member cannot waive, and an unknown key in the body is refused", async () => {
+    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
+    expect((await allow(DATASET, 7, {}, MEMBER_KEY)).status).toBe(403);
+    expect((await allow(DATASET, 7, { reason: "x", force: true })).status).toBe(400);
+    expect(waivers()).toHaveLength(0);
+  });
+
+  test("a reason is kept as plain words, cut to 200 characters", async () => {
+    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
+    await allow(DATASET, 7, { reason: `see @owner [here](https://x.example) ${"a".repeat(400)}` });
+    const reason = JSON.parse(waivers()[0]?.details ?? "{}").reason as string;
+    expect(reason.length).toBeLessThanOrEqual(200);
+    expect(reason).not.toContain("@");
+    expect(reason).not.toContain("https://");
+  });
+
+  test("with the review off nothing is waived and nothing is posted", async () => {
+    envOverrides = { PR_REVIEW_ENABLED: "0" };
+    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
+    const r = await allow(DATASET, 7);
+    expect(r.body).toMatchObject({ waived: false, reason: "pr_review_disabled" });
+    expect(calls).toHaveLength(0);
+  });
+});

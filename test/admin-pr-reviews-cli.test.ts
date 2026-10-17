@@ -624,6 +624,90 @@ describe("nemar admin pr-reviews allow and block say an owner or administrator i
   });
 });
 
+describe("nemar admin pr-reviews allow <dataset> <pr> --admin: the naming rule's one override", () => {
+  /** The dataset the pull request is in, as a live, named publication the review applies to. */
+  function reviewable(id: string) {
+    db.run(
+      `INSERT OR IGNORE INTO users (id, username, email, password_hash, status, role, email_verified)
+       VALUES (1, 'owner', 'owner@example.org', 'x', 'approved', 'member', 1)`,
+    );
+    db.run(
+      `INSERT INTO datasets
+         (dataset_id, name, owner_user_id, status, visibility, is_sandbox, github_repo, first_published_at)
+       VALUES (?, 'A dataset', 1, 'active', 'public', 0, ?, '2026-01-01 00:00:00')`,
+      [id, `nemarDatasets/${id}`],
+    );
+  }
+  const waivers = () =>
+    db
+      .query("SELECT details FROM audit_log WHERE action = 'pr_review_naming_waived'")
+      .all() as Array<{
+      details: string;
+    }>;
+
+  test("waives it for an administrator's pull request at its current commit, and says so in sentences", async () => {
+    reviewable("nm000201");
+    gh.pulls["nm000201#7"] = { sha: SHA_A, author: "queueadmin-gh", title: "Lee2019 EEG rename" };
+    const r = await cli([
+      ...PR,
+      "allow",
+      "nm000201",
+      "7",
+      "--admin",
+      "--reason",
+      "Kept until the rename",
+    ]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(`Waived the naming rule for nm000201 #7 at ${SHA_A.slice(0, 7)}.`);
+    expect(r.stdout).toContain("The rule found: the title starts with a name and a year.");
+    expect(r.stdout).toContain("it is for this commit only: a new commit is checked again");
+    expect(r.stdout).not.toMatch(/[{}"]|author_year|_waived/);
+    expect(waivers()).toHaveLength(1);
+    expect(JSON.parse(waivers()[0]?.details ?? "{}")).toMatchObject({
+      head_sha: SHA_A,
+      reason: "Kept until the rename",
+    });
+    const check = gh.seen.find((x) => x.method === "POST" && x.path.endsWith("/check-runs"));
+    expect(check?.body).toMatchObject({ conclusion: "skipped" });
+  });
+
+  test("refuses a contributor's pull request, says why, and exits 1", async () => {
+    reviewable("nm000201");
+    gh.pulls["nm000201#7"] = { sha: SHA_A, author: "alice", title: "Lee2019 EEG rename" };
+    const r = await cli([...PR, "allow", "nm000201", "7", "--admin"]);
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("Not waived: the author of nm000201 #7");
+    expect(r.stdout).toContain("is not a NEMAR owner or administrator");
+    expect(waivers()).toHaveLength(0);
+  });
+
+  test("with --json the answer is the Worker's, and a clean title has nothing to waive (exit 0)", async () => {
+    reviewable("nm000201");
+    gh.pulls["nm000201#7"] = { sha: SHA_A, author: "queueadmin-gh", title: "Add three recordings" };
+    const r = await cli([...PR, "allow", "nm000201", "7", "--admin", "--json"]);
+    expect(r.exitCode).toBe(0);
+    expect(JSON.parse(r.stdout)).toMatchObject({ waived: false, reason: "nothing_to_waive" });
+  });
+
+  test("--admin needs a pull request, and a login takes none", async () => {
+    const missing = await cli([...PR, "allow", "nm000201", "--admin"]);
+    expect(missing.exitCode).toBe(1);
+    expect(missing.stdout).toContain("give a dataset and a pull request number");
+    const stray = await cli([...PR, "allow", "alice", "7"]);
+    expect(stray.exitCode).toBe(1);
+    expect(stray.stdout).toContain("To waive the naming rule for a pull request, add --admin.");
+  });
+
+  test("the detailed help says what the override does and what it is refused for", async () => {
+    const r = await cli([...PR, "allow", "--help-all"]);
+    expect(r.exitCode).toBe(0);
+    const help = r.stdout.replace(/\s+/g, " ");
+    expect(help).toContain("allow <dataset> <pr> --admin");
+    expect(help).toContain("waives the rule for the pull request's CURRENT commit");
+    expect(help).toContain("records the waiver");
+  });
+});
+
 describe("nemar admin pr-reviews show", () => {
   test("prints the stored report in the words of the pull-request comment", async () => {
     livePull();

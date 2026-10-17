@@ -8,6 +8,8 @@
  *   PUT    /admin/pr-review-authors/:login        block a contributor, or lift a block (allow)
  *   DELETE /admin/pr-review-authors/:login        remove that decision
  *   POST   /admin/pr-reviews/:dataset/:pr/start   review a pull request that is already open
+ *   POST   /admin/pr-reviews/:dataset/:pr/allow   waive the naming rule for an owner's or an
+ *                                                 administrator's pull request, at its current commit
  *
  * Types, the closed vocabularies, and nothing else, so the Worker that answers and the CLI that
  * prints read ONE definition. Every string a pull request's author controls (title, branch) arrives
@@ -18,6 +20,7 @@
 import type {
   AuthorTally,
   DeclineReason,
+  NamingFacts,
   OverrideMode,
   ReviewState,
   RunError,
@@ -232,6 +235,42 @@ export interface StartReviewResponse {
   review_id: number | null;
   /** The pull request's author, when GitHub gave a login of the shape a login has; else null. */
   author_login: string | null;
+}
+
+/**
+ * The words a waiver of the naming rule can come to (`POST /admin/pr-reviews/:dataset/:pr/allow`):
+ *  - `waived`: the rule refused the commit, the waiver is recorded, and its check is now skipped;
+ *  - `already_waived`: a waiver for this commit was already recorded; its check was posted again;
+ *  - `nothing_to_waive`: the rule finds nothing on the commit; its check was posted as skipped;
+ *  - `not_exempt`: the author is not a NEMAR owner or administrator, whose review it would bypass;
+ *  - `reviewed`: the commit was reviewed (someone who is not exempt pushed it), and its review stands;
+ *  - or why the pull request was not looked at, in the start's words (`pr_review_disabled`,
+ *    `unknown_dataset`, `dataset_not_reviewable`, `not_open`, `not_main`, `draft`, `bot_author`,
+ *    `malformed`, ...).
+ */
+export type WaiveNamingReason =
+  | "waived"
+  | "already_waived"
+  | "nothing_to_waive"
+  | "not_exempt"
+  | "reviewed"
+  | (string & {});
+
+export interface WaiveNamingResponse {
+  environment: QueueEnvironment;
+  /** True when the commit's check is skipped by a waiver, recorded now or before. */
+  waived: boolean;
+  reason: WaiveNamingReason;
+  /** The commit the answer is about, when the pull request was read that far. */
+  head_sha: string | null;
+  /** What the naming rule found on that commit, when it was waived now. */
+  facts: NamingFacts | null;
+}
+
+/** The body of `POST /admin/pr-reviews/:dataset/:pr/allow`. */
+export interface WaiveNamingRequest {
+  /** Plain words; kept to 200 characters. */
+  reason?: string;
 }
 
 export interface ReviewHistoryItem {

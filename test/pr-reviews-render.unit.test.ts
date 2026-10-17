@@ -11,11 +11,13 @@ import type {
   ContributorStanding,
   QueueEntry,
   VolumeWindow,
+  WaiveNamingResponse,
 } from "../shared/contract/pr-review-admin";
 import { parsePrReviewReport, parseStoredPrReviewReport } from "../shared/pr-review";
 import {
   ageOf,
   briefLines,
+  namingFactLines,
   plain,
   renderQueue,
   reportLines,
@@ -24,6 +26,7 @@ import {
   tokenText,
   verdictText,
   volumeLines,
+  waiverLines,
 } from "../src/commands/admin-pr-reviews";
 
 const ESC = String.fromCharCode(27);
@@ -621,5 +624,54 @@ describe("tokenText", () => {
         }),
       ),
     ).toBe("token counts could not be read");
+  });
+});
+
+describe("waiverLines", () => {
+  const answer = (over: Partial<WaiveNamingResponse>): WaiveNamingResponse => ({
+    environment: "production",
+    waived: false,
+    reason: "nothing_to_waive",
+    head_sha: "a".repeat(40),
+    facts: null,
+    ...over,
+  });
+  const text = (r: WaiveNamingResponse) =>
+    waiverLines(r, "nm000201", 7)
+      .map((l) => l.replace(ANSI, ""))
+      .join("\n");
+
+  test("a waiver says what the rule found, in words, and that it is for this commit only", () => {
+    const t = text(
+      answer({
+        waived: true,
+        reason: "waived",
+        facts: { title: "author_year", name: "template_field" },
+      }),
+    );
+    expect(t).toContain("Waived the naming rule for nm000201 #7 at aaaaaaa.");
+    expect(t).toContain(
+      "The rule found: the title starts with a name and a year; the pull request changes the dataset name to one with an unfilled template field.",
+    );
+    expect(t).toContain("a new commit is checked again");
+    expect(t).not.toMatch(/author_year|template_field|[{}]/);
+  });
+
+  test("each refusal is a sentence a person reads, with no code word in it", () => {
+    for (const reason of ["not_exempt", "reviewed", "already_waived", "draft", "not_open"]) {
+      const t = text(answer({ reason }));
+      expect(t, reason).not.toMatch(/_/);
+      expect(t.length, reason).toBeGreaterThan(20);
+    }
+    expect(text(answer({ reason: "not_exempt" }))).toContain(
+      "is not a NEMAR owner or administrator",
+    );
+  });
+
+  test("namingFactLines names an unreadable name as such", () => {
+    expect(namingFactLines({ title: null, name: "unchecked" })).toEqual([
+      "the dataset name could not be read to be checked",
+    ]);
+    expect(namingFactLines(null)).toEqual([]);
   });
 });

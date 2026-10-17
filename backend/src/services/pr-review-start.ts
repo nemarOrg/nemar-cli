@@ -41,11 +41,16 @@ function said(err: unknown): string {
   return sanitizeNote(err instanceof Error ? err.message : String(err), 160) || "no reason given";
 }
 
-/** GitHub's REST record of one pull request, or why there is none. */
-async function readPullRequest(
+/**
+ * GitHub's REST record of one pull request, or why there is none (a {@link QueueError}). Shared
+ * with the naming rule's waiver, which acts on the same record.
+ */
+export async function readPullRequest(
   env: Bindings,
   datasetId: string,
   prNumber: number,
+  /** What did not happen when GitHub cannot be read, for the administrator's sentence. */
+  consequence = "nothing was started",
 ): Promise<Record<string, unknown>> {
   const where = `${datasetId}#${prNumber}`;
   let res: Response;
@@ -67,14 +72,10 @@ async function readPullRequest(
       throw new QueueError(
         502,
         "github_timeout",
-        "GitHub took too long to answer, so nothing was started.",
+        `GitHub took too long to answer, so ${consequence}.`,
       );
     }
-    throw new QueueError(
-      502,
-      "github_unavailable",
-      "GitHub did not answer, so nothing was started.",
-    );
+    throw new QueueError(502, "github_unavailable", `GitHub did not answer, so ${consequence}.`);
   }
   if (res.status === 404) {
     // GitHub also answers 404 for a repository the token cannot see, so the sentence says both.
@@ -104,14 +105,10 @@ async function readPullRequest(
       throw new QueueError(
         502,
         "github_refused",
-        `GitHub refused the read (HTTP ${res.status}), so nothing was started.`,
+        `GitHub refused the read (HTTP ${res.status}), so ${consequence}.`,
       );
     }
-    throw new QueueError(
-      502,
-      "github_unavailable",
-      "GitHub did not answer, so nothing was started.",
-    );
+    throw new QueueError(502, "github_unavailable", `GitHub did not answer, so ${consequence}.`);
   }
   const parsed = (await res.json().catch((err) => {
     console.error(`[pr-review-start] ${where}: GitHub's answer could not be read (${said(err)})`);
