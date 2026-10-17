@@ -384,13 +384,14 @@ describe("findTextProblem", () => {
   test("a very long run of punctuation is judged, and trimmed, without error", () => {
     // Trimming it with `/[\s.!:;,]+$/` took ten seconds on 160,000 characters: the run is tried
     // again from every start. The trim is now a loop over the end of the text, which looks at each
-    // character once. Nothing here is timed (a wall-clock bound fails on a loaded runner): the
-    // answers on a run this long are what is checked.
-    const hostile = `${".".repeat(200_000)}a`;
+    // character once. Nothing here is timed (a wall-clock bound fails on a loaded runner). The run
+    // is long enough that the quadratic trim would take hours, far past the file's test timeout,
+    // while the loop takes milliseconds: the answers on a run this long are what is checked.
+    const hostile = `${".".repeat(2_000_000)}a`;
     expect(findTextProblem("description", hostile)?.code).toBe("no_words");
     expect(findTextProblem("title", hostile)?.code).toBe("no_words");
     // The trailing run is really trimmed: what it hides is found under it.
-    expect(findTextProblem("title", `Save changes${".!:;, ".repeat(40_000)}`)?.code).toBe(
+    expect(findTextProblem("title", `Save changes${".!:;, ".repeat(400_000)}`)?.code).toBe(
       "placeholder",
     );
   });
@@ -399,10 +400,11 @@ describe("findTextProblem", () => {
     // `\s+` and the characters after it overlap on blanks, so an unclosed `[your` or `<insert`
     // followed by tens of thousands of them was tried as every split of the run: 64,000 took
     // eleven seconds. A description is only trimmed, so its whitespace reaches the rule. What keeps
-    // it linear is the pattern's shape, checked in the next test; here, the answers.
+    // it linear is the pattern's shape, checked in the next test; here, the answers, on runs ten
+    // times that long, which the old shape would take far past the file's test timeout to judge.
     for (const opener of ["[your", "<insert", "[fill in"]) {
       for (const blank of [" ", " \t", "\n"]) {
-        const hostile = `Adds data.\n\n${opener}${blank.repeat(64_000 / blank.length)}x`;
+        const hostile = `Adds data.\n\n${opener}${blank.repeat(640_000 / blank.length)}x`;
         expect(findTextProblem("description", hostile)).toBeNull();
       }
     }
@@ -830,14 +832,15 @@ describe("the changed-file summary", () => {
     expect(summary).toContain("- and 5 more files at the dataset root");
   });
 
-  test("a change of a hundred thousand files in one folder is summarized whole", () => {
-    // Copying the folder's array on every file took six seconds here, after the branch was pushed
-    // and while the pull request spinner showed; each file is now added to its folder's list once.
-    // Nothing is timed: the summary of a change this large is what is checked.
-    const paths = Array.from({ length: 100_000 }, (_, i) => `sub-01/eeg/run-${i}_eeg.json`);
+  test("a change of a million files in one folder is summarized whole", () => {
+    // Copying the folder's array on every file took six seconds for a hundred thousand, after the
+    // branch was pushed and while the pull request spinner showed; each file is now added to its
+    // folder's list once. Nothing is timed: at a million files the copying would run far past the
+    // file's test timeout, and the list takes a fraction of a second, so the summary is checked.
+    const paths = Array.from({ length: 1_000_000 }, (_, i) => `sub-01/eeg/run-${i}_eeg.json`);
     const summary = summarizeChangedFiles(filesNamed("added", paths));
     expect(summary).toBe(
-      "100000 files changed: 100000 added.\n\n- `sub-01/`: 100000 files (100000 added)",
+      "1000000 files changed: 1000000 added.\n\n- `sub-01/`: 1000000 files (1000000 added)",
     );
   });
 
