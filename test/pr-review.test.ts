@@ -203,9 +203,13 @@ function everyOutcome(): ReviewOutcome[] {
     { kind: "unreported" },
     { kind: "exempt" },
     { kind: "exempt", waived: true },
+    { kind: "reported", report: parsePrReviewReport(screenReport()) },
+    { kind: "reported", report: parseStoredPrReviewReport(reportV1()) },
     { kind: "naming", facts: { title: "author_year", name: null } },
     { kind: "naming", facts: { title: null, name: "template_field" } },
     { kind: "naming", facts: { title: null, name: "unchecked" } },
+    { kind: "naming", facts: { title: "template_field", name: "unchecked" } },
+    { kind: "naming", facts: { title: "author_year", name: "author_year" } },
   ];
 }
 
@@ -611,8 +615,11 @@ describe("conclusions: only a clear pass is green, nothing unknown ever satisfie
     expect(skipped).toEqual([{ kind: "exempt" }, { kind: "exempt", waived: true }]);
     // And an exempt outcome is not a pass by another name: the only `success` is a reported pass.
     const green = everyOutcome().filter((o) => conclusionOf(o) === "success");
-    expect(green).toHaveLength(1);
-    expect(green[0]).toMatchObject({ kind: "reported" });
+    expect(green.length).toBeGreaterThan(0);
+    for (const o of green) {
+      expect(o.kind).toBe("reported");
+      if (o.kind === "reported") expect(verdictOf(o.report)).toBe("pass");
+    }
   });
 
   test("a pull request opened by an owner or administrator says the review is not required, and that skipped is not a pass", () => {
@@ -1619,6 +1626,22 @@ describe("the check text of version 2", () => {
     }
   });
 
+  test("no word in angle brackets is left outside a code span, where GitHub would strip it as a tag", () => {
+    for (const o of everyOutcome()) {
+      const r = renderCheck(o);
+      for (const text of [
+        `${r.title}\n${r.summary}\n${r.text}`,
+        renderComment(o, "a".repeat(40)),
+      ]) {
+        const bare = text
+          .replace(/`[^`]*`/g, "")
+          .replace(/<\/?(details|summary)>/g, "")
+          .replace(/<!--[^>]*-->/g, "");
+        expect(bare, o.kind).not.toMatch(/<\/?[A-Za-z][^>]*>/);
+      }
+    }
+  });
+
   test("the human text carries no closed code word and no JSON, outside the file names it lists", () => {
     // The words with an underscore: a one-word code (spam, other) is also a plain English word.
     const words = [
@@ -1660,7 +1683,7 @@ describe("the naming rule on an owner's or administrator's pull request", () => 
     expect(r.title).toBe("Needs changes: the naming rule");
     expect(r.summary).toContain("Edit the title.");
     expect(r.summary).toContain("changes the dataset's name");
-    expect(r.text).toContain("nemar admin pr-reviews allow <dataset> <pr> --admin");
+    expect(r.text).toContain("`nemar admin pr-reviews allow <dataset> <pr> --admin`");
     const u = renderCheck({ kind: "naming", facts: { title: null, name: "unchecked" } });
     expect(u.title).toBe("Could not decide: the naming rule was not checked");
     expect(u.summary).toContain("could not be read from GitHub");

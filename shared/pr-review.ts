@@ -1250,10 +1250,10 @@ function renderNaming(facts: NamingFacts): RenderedCheck {
   }
   const unchecked =
     facts.name === "unchecked"
-      ? "The dataset's name could not be read from GitHub, so it was not checked against the naming rule. Start the check again with nemar admin pr-reviews start."
+      ? "The dataset's name could not be read from GitHub, so it was not checked against the naming rule. Start the check again with `nemar admin pr-reviews start <dataset> <pr>`."
       : null;
   const override =
-    "The only way past the naming rule without a change is an explicit override by a NEMAR administrator: nemar admin pr-reviews allow <dataset> <pr> --admin, which is recorded and applies to this commit only.";
+    "The only way past the naming rule without a change is an explicit override by a NEMAR administrator: `nemar admin pr-reviews allow <dataset> <pr> --admin`, which is recorded and applies to this commit only.";
   if (namingRefused(facts)) {
     return {
       title: "Needs changes: the naming rule",
