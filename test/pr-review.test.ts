@@ -1574,6 +1574,10 @@ describe("the check text of version 2", () => {
     });
     expect(title).toBe("Needs changes: stopped by the screen");
     expect(summary).toContain("the full review did not run");
+    // A mistaken stop has somewhere to go.
+    expect(summary).toContain(
+      "If that is a mistake, ask a NEMAR administrator to look at this pull request.",
+    );
     expect(summary).toContain("| A genuine contribution, not spam | No |");
     expect(summary).toContain("| Nothing is lost or broken | Not assessed |");
     expect(summary).toContain("| The description is not misleading | Not assessed |");

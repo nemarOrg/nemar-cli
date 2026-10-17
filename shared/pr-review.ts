@@ -1324,7 +1324,7 @@ export function renderCheck(outcome: ReviewOutcome): RenderedCheck {
   const lines: string[] = [];
   if (screened) {
     lines.push(
-      "The screen read this pull request as spam (promotional, unrelated or purposeless content, or repeated links), so the full review did not run.",
+      `The screen read this pull request as spam (promotional, unrelated or purposeless content, or repeated links), so the full review did not run. If that is a mistake, ask ${PERSON} to look at this pull request.`,
       "",
     );
   }
