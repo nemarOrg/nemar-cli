@@ -258,6 +258,45 @@ describe("nemar admin pr-reviews start <dataset> <pr>", () => {
     expect(checks[0].body).toMatchObject({ status: "completed", conclusion: "failure" });
   });
 
+  test("an administrator's pull request whose dataset name GitHub would not show is a fault: exit 1, and how to retry", async () => {
+    openPr({ ds: "nm000201", n: 12, author: "startadmin-gh", authorId: 4001 });
+    gh.naming.nm000201 = {
+      files: ["dataset_description.json"],
+      names: { [SHA_A]: 502 },
+    };
+
+    const r = await cli([...START, "nm000201", "12"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain(
+      "not started: its author is a NEMAR owner or administrator, and its dataset name could not be read to check the naming rule, so its check needs a person",
+    );
+    expect(r.stdout).toContain("run the same command again in a moment");
+    expect(r.stdout).not.toContain("naming_unchecked");
+    const checks = gh.seen.filter((s) => s.method === "POST" && s.path.endsWith("/check-runs"));
+    expect(checks[0]?.body).toMatchObject({ conclusion: "action_required" });
+  });
+
+  test("an administrator's pull request whose naming problem was waived for this commit says so, exit 0", async () => {
+    openPr({ ds: "nm000201", n: 12, author: "startadmin-gh", authorId: 4001 });
+    const pull = gh.pulls["nm000201#12"];
+    if (!pull) throw new Error("no pull request");
+    pull.title = "Lee2019 EEG rename";
+    db.run(
+      `INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
+       VALUES (1, 'pr_review_naming_waived', 'pr_review', 'nm000201#12', ?)`,
+      [JSON.stringify({ head_sha: SHA_A, title: "author_year", name: null })],
+    );
+
+    const r = await cli([...START, "nm000201", "12"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(
+      "not started: its author is a NEMAR owner or administrator, and the naming rule was waived for this commit",
+    );
+    expect(dispatches()).toHaveLength(0);
+  });
+
   test("the help says when a review that never came back may be started again, in the Worker's minutes", async () => {
     const r = await cli([...START, "--help-all"]);
     expect(r.exitCode).toBe(0);

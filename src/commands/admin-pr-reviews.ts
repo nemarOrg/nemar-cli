@@ -1102,6 +1102,8 @@ const START_FAULTS = new Set([
   "misconfigured",
   "unknown_dataset",
   "malformed",
+  // GitHub did not show the dataset's name, so the check needs a person until a start reads it.
+  "naming_unchecked",
 ]);
 
 function startedWord(r: StartReviewResponse): string {
@@ -1115,7 +1117,9 @@ function notStartedText(r: StartReviewResponse): string {
       ? ` (lift it with: nemar admin pr-reviews allow ${plain(r.author_login)})`
       : r.reason === "naming_rule"
         ? " (the author fixes the title or the name; to waive the rule for this commit: nemar admin pr-reviews allow <dataset> <pr> --admin)"
-        : "";
+        : r.reason === "naming_unchecked"
+          ? " (run the same command again in a moment: it reads the name again and posts the check it comes to)"
+          : "";
   return `not started: ${why}${hint}`;
 }
 
