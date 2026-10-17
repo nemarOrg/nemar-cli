@@ -1586,6 +1586,27 @@ describe("the check text of version 2", () => {
     expect(text).not.toContain("not shown to the reviewer in full");
   });
 
+  test("a full report that could not tell says so: Not assessed belongs to the screen alone", () => {
+    const { title, summary } = renderCheck({
+      kind: "reported",
+      report: parsed({ criteria: { no_degradation: "unknown" } }),
+    });
+    expect(title).toBe("Could not decide");
+    expect(summary).toContain("| Nothing is lost or broken | Could not tell |");
+    expect(summary).not.toContain("Not assessed");
+  });
+
+  test("a full pass says every question it answered, in the version 2 title", () => {
+    const { title, summary } = renderCheck({ kind: "reported", report: parsed() });
+    expect(title).toBe(
+      "Passes: nothing lost, revision advances, materially better, clearly described",
+    );
+    expect(summary).toContain("| The title and description say what changed | Yes |");
+    expect(summary).toContain("| The description is not misleading | Yes |");
+    const v1 = renderCheck({ kind: "reported", report: parseStoredPrReviewReport(reportV1()) });
+    expect(v1.title).toBe("Passes: nothing lost, revision advances, materially better");
+  });
+
   test("a rule that failed a criterion of a screen report reads No, not Not assessed", () => {
     const { summary } = renderCheck({
       kind: "reported",
@@ -1717,6 +1738,17 @@ describe("the estimate of what the reviews cost", () => {
     expect(
       estimateCostUsd({ screen_input: 0, screen_output: 0, review_input: 0, review_output: 0 }),
     ).toBe(0);
+    // A different count in each place, so a price applied to the wrong stage or direction shows:
+    // 4M screen in at 0.1, 3M screen out at 0.5, 2M review in at 2, 1M review out at 10.
+    expect(
+      estimateCostUsd({
+        screen_input: 4_000_000,
+        screen_output: 3_000_000,
+        review_input: 2_000_000,
+        review_output: 1_000_000,
+      }),
+    ).toBe(0.4 + 1.5 + 4 + 10);
     expect(MODEL_PRICES_USD_PER_MTOK["claude-sonnet-5-5"]).toEqual({ input: 2, output: 10 });
+    expect(MODEL_PRICES_USD_PER_MTOK["claude-haiku-5-5"]).toEqual({ input: 0.1, output: 0.5 });
   });
 });
