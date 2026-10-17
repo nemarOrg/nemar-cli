@@ -2096,6 +2096,122 @@ describe("the review prompt carries prompt v3's rules word for word", () => {
   });
 });
 
+describe("the facts come before any model, and fail the verdict whatever it says", () => {
+  function prJsonFor(dir: string, head: string, over: Record<string, unknown> = {}): string {
+    const path = join(dir, "..", `pr-${Math.random().toString(36).slice(2)}.json`);
+    writeFileSync(
+      path,
+      JSON.stringify({
+        state: "open",
+        title: "Correct the sampling rate in the EEG sidecars",
+        body: "The sidecars said 256 Hz; the recordings are 512 Hz.",
+        base: { ref: "main", repo: { full_name: "nemarDatasets/nm000460" } },
+        head: { sha: head, repo: { full_name: "nemarDatasets/nm000460" } },
+        ...over,
+      }),
+    );
+    return path;
+  }
+
+  async function reviewWith(
+    name: string,
+    edit: (dir: string) => void,
+    over: Record<string, unknown> = {},
+  ) {
+    const dir = newDataset(name);
+    const r = branch(dir, () => {
+      write(dir, "dataset_description.json", desc("1.1.0"));
+      write(
+        dir,
+        "CHANGES",
+        "1.1.0 2026-10-16\n - Fixed units\n1.0.0 2026-01-01\n - Initial release\n",
+      );
+      edit(dir);
+    });
+    const res = await runReview({
+      repoDir: r.dir,
+      base: r.base,
+      head: r.head,
+      fetchedHead: r.head,
+      prJson: prJsonFor(r.dir, r.head, over),
+    });
+    if (res.outcome !== "reported" || res.report.v !== 2) throw new Error("no version 2 report");
+    return res.report;
+  }
+
+  test("a clean pull request with an all-pass answer passes: the control", async () => {
+    const report = await reviewWith("facts-control", () => {});
+    expect(report.evidence).toMatchObject({
+      description_empty: false,
+      title_problem: null,
+      name_problem: null,
+    });
+    expect(verdictOf(report)).toBe("pass");
+  });
+
+  test("a title that starts with an author and a year fails, though the model passed it", async () => {
+    const report = await reviewWith("facts-title", () => {}, {
+      title: "Lee2019 EEG dataset update",
+    });
+    expect(report.evidence.title_problem).toBe("author_year");
+    expect(verdictOf(report)).toBe("fail");
+    const { text } = renderCheck({ kind: "reported", report });
+    expect(text).toContain("Title starts with a name and a year");
+  });
+
+  test("a title with a naming-template token fails", async () => {
+    const report = await reviewWith("facts-template", () => {}, {
+      title: "Rename dataset to FirstAuthorSurname-year-keyword-paperDOI",
+    });
+    expect(report.evidence.title_problem).toBe("template_field");
+    expect(verdictOf(report)).toBe("fail");
+  });
+
+  test("a pull request that changes the dataset name to an author-and-year name fails", async () => {
+    const report = await reviewWith("facts-name", (dir) =>
+      write(dir, "dataset_description.json", desc("1.1.0", { Name: "Lee2019-EEG-Motor" })),
+    );
+    expect(report.evidence.name_problem).toBe("author_year");
+    expect(verdictOf(report)).toBe("fail");
+    const { summary } = renderCheck({ kind: "reported", report });
+    expect(summary).toContain("changes the dataset's name");
+  });
+
+  test("an author-and-year name the pull request did not change is not its problem", async () => {
+    const dir = newDataset("facts-name-kept");
+    write(dir, "dataset_description.json", desc("1.0.0", { Name: "Lee2019 Motor Imagery" }));
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "an old name");
+    const r = branch(dir, () => {
+      write(dir, "dataset_description.json", desc("1.1.0", { Name: "Lee2019 Motor Imagery" }));
+      write(dir, "CHANGES", "1.1.0 2026-10-16\n - Fixed units\n1.0.0 2026-01-01\n - Initial\n");
+    });
+    const res = await runReview({
+      repoDir: r.dir,
+      base: r.base,
+      head: r.head,
+      fetchedHead: r.head,
+      prJson: prJsonFor(r.dir, r.head),
+    });
+    if (res.outcome !== "reported" || res.report.v !== 2) throw new Error("no version 2 report");
+    expect(res.report.evidence.name_problem).toBeNull();
+    expect(verdictOf(res.report)).toBe("pass");
+  });
+
+  test("an empty description fails the text criterion, whatever the model said", async () => {
+    const report = await reviewWith("facts-empty", () => {}, { body: "   \n" });
+    expect(report.evidence.description_empty).toBe(true);
+    expect(verdictOf(report)).toBe("fail");
+  });
+
+  test("the facts are decided even when the screen stops the pull request", async () => {
+    screenReply = () => standInMessage(JSON.stringify(REJECT));
+    const report = await reviewWith("facts-screen", () => {}, { title: "Smith2020 promo" });
+    expect(report.stage).toBe("screen");
+    expect(report.evidence.title_problem).toBe("author_year");
+  });
+});
+
 describe("the worst case fits", () => {
   test("the worst-case user messages of both stages stay under 300,000 characters", () => {
     const long = (n: number, c = "x") => c.repeat(n);

@@ -7,6 +7,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { textFactsOf } from "../scripts/ci/pr-review";
+import type { Listing } from "../scripts/ci/pr-review-evidence";
 import {
   AUTHOR_YEAR_PREFIX,
   NAMING_PROBLEMS,
@@ -21,6 +23,24 @@ describe("there is one copy of the rule", () => {
   test("the CLI's exports are the shared rule's own functions and pattern, not copies", () => {
     expect(cli.findAuthorYearPrefix).toBe(findAuthorYearPrefix);
     expect(cli.AUTHOR_YEAR_PREFIX).toBe(AUTHOR_YEAR_PREFIX);
+  });
+
+  test("the review job's facts are the rule's answers, on the title and on a changed name", () => {
+    const listing = (nameBefore: string | null, nameAfter: string | null) =>
+      ({ nameBefore, nameAfter }) as Listing;
+    for (const title of ["Lee2019 EEG dataset", "Fix {{title}}", "Add three EEG recordings"]) {
+      expect(textFactsOf({ title, body: "x" }, listing("A", "A")).titleProblem, title).toBe(
+        namingProblemOf(title),
+      );
+    }
+    expect(textFactsOf({ title: "t", body: "x" }, listing("A", "Lee2019 X")).nameProblem).toBe(
+      "author_year",
+    );
+    // The name is the pull request's problem only when it changes the name.
+    expect(
+      textFactsOf({ title: "t", body: "x" }, listing("Lee2019 X", "Lee2019 X")).nameProblem,
+    ).toBeNull();
+    expect(textFactsOf({ title: "t", body: "" }, listing(null, null)).descriptionEmpty).toBe(true);
   });
 });
 

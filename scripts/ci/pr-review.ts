@@ -39,6 +39,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import Anthropic from "@anthropic-ai/sdk";
+import { namingProblemOf } from "../../shared/naming-rule";
 import {
   type PrReviewReport,
   PrReviewReportError,
@@ -280,14 +281,19 @@ interface PullRequestJson {
 
 /**
  * The facts decided before any model is asked (ADR 0107), from the pull request as the API returns
- * it and from the listing: whether the description is empty. The naming rule's two facts, on the
- * title and on a changed dataset name, join it with the shared rule.
+ * it and from the listing: whether the description is empty, how the title breaks the naming rule,
+ * and how the dataset's name breaks it when the pull request changes the name. The rule is the
+ * shared one the CLI and the Worker use; nothing here is a judgment.
  */
-export function textFactsOf(pr: { title?: unknown; body?: unknown }, _listing: Listing): TextFacts {
+export function textFactsOf(pr: { title?: unknown; body?: unknown }, listing: Listing): TextFacts {
+  const changedName =
+    listing.nameAfter !== null && listing.nameAfter !== listing.nameBefore
+      ? listing.nameAfter
+      : null;
   return {
     descriptionEmpty: typeof pr.body !== "string" || pr.body.trim() === "",
-    titleProblem: null,
-    nameProblem: null,
+    titleProblem: namingProblemOf(typeof pr.title === "string" ? pr.title : ""),
+    nameProblem: changedName === null ? null : namingProblemOf(changedName),
   };
 }
 

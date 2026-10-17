@@ -272,6 +272,13 @@ describe("one pull request, through the job's own stage flow", () => {
     expect(row.files).toBe(3);
   });
 
+  test("the facts come first: an author-and-year title fails, whatever the models said", async () => {
+    const read = localPullRequest("title", { title: "Lee2019 EEG update" });
+    const row = await withStandIn(() => calibrateOne(target("pass"), root, read));
+    expect(row.facts).toEqual(["title_author_year"]);
+    expect(row.verdict).toBe("fail");
+  });
+
   test("a stop by the screen is one call and a fail", async () => {
     screenReply = () => standInMessage(JSON.stringify({ decision: "reject", note: "Advert." }));
     const row = await withStandIn(() => calibrateOne(target(), root, localPullRequest("spam")));
