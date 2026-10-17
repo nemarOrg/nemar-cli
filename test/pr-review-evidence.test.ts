@@ -1693,6 +1693,106 @@ describe("renames, and the edges of what the model is shown", () => {
   });
 });
 
+describe("the review's text judgments become the two text criteria and their findings", () => {
+  let evidence: ReturnType<typeof buildEvidence>;
+  let emptyEvidence: ReturnType<typeof buildEvidence>;
+  beforeAll(() => {
+    const dir = newDataset("text-judgments");
+    const r = branch(dir, () => {
+      write(dir, "dataset_description.json", desc("1.1.0"));
+      write(dir, "README.md", "# Text\n");
+    });
+    const facts = gatherGitFacts(r.dir, r.base, r.head);
+    evidence = buildEvidence(facts, NO_TEXT_PROBLEMS);
+    emptyEvidence = buildEvidence(facts, { ...NO_TEXT_PROBLEMS, descriptionEmpty: true });
+  });
+  const codes = (report: PrReviewReport) => report.findings.map((f) => f.code);
+  const finding = (code: string, criterion = "clear_title_and_description") => ({
+    criterion,
+    severity: "blocker",
+    code,
+    path: null,
+    note: "Said by the review.",
+  });
+
+  test("all four judgments clean: both text criteria pass and nothing is added", () => {
+    const report = full(reviewOutput(), evidence);
+    expect(report.criteria.clear_title_and_description).toBe("pass");
+    expect(report.criteria.description_not_misleading).toBe("pass");
+    expect(report.findings).toEqual([]);
+    expect(verdictOf(report)).toBe("pass");
+  });
+
+  test("a title the review failed without saying why fails, with the script's one finding", () => {
+    const report = full(reviewOutput({ title_ok: false }), evidence);
+    expect(report.criteria.clear_title_and_description).toBe("fail");
+    expect(codes(report)).toEqual(["title_not_descriptive"]);
+    expect(verdictOf(report)).toBe("fail");
+  });
+
+  test("a title finding the review gave itself is not doubled", () => {
+    for (const code of ["title_placeholder", "title_not_descriptive"]) {
+      const report = full(reviewOutput({ title_ok: false, findings: [finding(code)] }), evidence);
+      expect(codes(report), code).toEqual([code]);
+    }
+  });
+
+  test("a description that is there but unreadable fails, with the script's placeholder finding", () => {
+    const report = full(reviewOutput({ body_ok: false }), evidence);
+    expect(report.criteria.clear_title_and_description).toBe("fail");
+    expect(codes(report)).toEqual(["description_placeholder"]);
+  });
+
+  test("an empty description the review failed is named as empty, never as 'no detail given'", () => {
+    const report = full(reviewOutput({ body_ok: false }), emptyEvidence);
+    expect(report.criteria.clear_title_and_description).toBe("fail");
+    expect(codes(report)).toEqual(["description_missing"]);
+    const text = renderCheck({ kind: "reported", report }).text;
+    expect(text).toContain("Description is empty");
+    expect(text).not.toContain("No detail given");
+    // The fact is stated once: the finding says it, so the fact's own line is not repeated.
+    expect(text.match(/Description is empty/g)).toHaveLength(1);
+  });
+
+  test("a misleading description fails its own criterion, with the script's finding", () => {
+    const report = full(reviewOutput({ misleading_body: true }), evidence);
+    expect(report.criteria.description_not_misleading).toBe("fail");
+    expect(report.criteria.clear_title_and_description).toBe("pass");
+    expect(codes(report)).toEqual(["description_misleading"]);
+    expect(verdictOf(report)).toBe("fail");
+    const own = full(
+      reviewOutput({
+        misleading_body: true,
+        findings: [finding("description_misleading", "description_not_misleading")],
+      }),
+      evidence,
+    );
+    expect(codes(own)).toEqual(["description_misleading"]);
+  });
+
+  test("a judgment that is not true or false is a model error, never a default", () => {
+    for (const key of ["title_ok", "body_ok", "misleading_body"]) {
+      for (const bad of [null, "true", 1, undefined]) {
+        expect(() => full(reviewOutput({ [key]: bad }), evidence), `${key}=${bad}`).toThrow(
+          PrReviewReportError,
+        );
+      }
+    }
+  });
+
+  test("eight findings of the review and a failed judgment: the script's finding is kept", () => {
+    const eight = Array.from({ length: 8 }, (_, i) => ({
+      ...finding("other", "no_degradation"),
+      severity: "note",
+      note: `finding ${i}`,
+    }));
+    const report = full(reviewOutput({ title_ok: false, findings: eight }), evidence);
+    expect(report.findings).toHaveLength(8);
+    expect(report.findings.at(-1)?.code).toBe("title_not_descriptive");
+    expect(report.criteria.clear_title_and_description).toBe("fail");
+  });
+});
+
 describe("a path or a patch is only ever data", () => {
   test("a file named like a pathspec cannot make git read another file's content", () => {
     const dir = newDataset("pathspec-magic");

@@ -399,7 +399,7 @@ export const REVIEW_OUTPUT_SCHEMA: Record<string, unknown> = {
  * words, so a red check always tells the author what to fix.
  */
 const UNEXPLAINED_TEXT_FINDING: Record<
-  "title" | "body" | "misleading",
+  "title" | "body" | "empty" | "misleading",
   Omit<ReviewFinding, "path">
 > = {
   title: {
@@ -413,6 +413,12 @@ const UNEXPLAINED_TEXT_FINDING: Record<
     severity: "blocker",
     code: "description_placeholder",
     note: "The description is not a readable account of what changed.",
+  },
+  empty: {
+    criterion: "clear_title_and_description",
+    severity: "blocker",
+    code: "description_missing",
+    note: "The description is empty. A pull request needs a description of what changed.",
   },
   misleading: {
     criterion: "description_not_misleading",
@@ -499,8 +505,12 @@ export function assembleReport(
   if (!titleOk && !said(["title_placeholder", "title_not_descriptive"])) {
     added.push({ ...UNEXPLAINED_TEXT_FINDING.title, path: null });
   }
-  // An empty description is stated by its own fact; this is for one that is there but unreadable.
-  if (!bodyOk && !evidence.description_empty && !said(["description_placeholder"])) {
+  // A description the review failed is either empty, which is a fact and is named as one, or there
+  // but unreadable. Either way the failed criterion carries its reason, so the parser never has to
+  // fill in "No detail given".
+  if (!bodyOk && evidence.description_empty) {
+    added.push({ ...UNEXPLAINED_TEXT_FINDING.empty, path: null });
+  } else if (!bodyOk && !said(["description_placeholder"])) {
     added.push({ ...UNEXPLAINED_TEXT_FINDING.body, path: null });
   }
   if (misleading && !said(["description_misleading"])) {
