@@ -300,11 +300,26 @@ function lastCheck() {
 }
 
 const EMPTY = { added: 0, modified: 0, removed: 0 };
+const ALL_PASS = {
+  genuine_contribution: "pass",
+  no_degradation: "pass",
+  advances_revision: "pass",
+  material_improvement: "pass",
+  clear_title_and_description: "pass",
+  description_not_misleading: "pass",
+};
+
+/**
+ * A version 2 full report as the job posts it. A `criteria` in `over` is laid on top of the six
+ * all-pass answers, so a test names only the answers it is about.
+ */
 function goodReport(over: Record<string, unknown> = {}) {
+  const { criteria, ...rest } = over;
   return {
-    v: 1,
-    model: "claude-haiku-5-5",
-    criteria: { no_degradation: "pass", advances_revision: "pass", material_improvement: "pass" },
+    v: 2,
+    stage: "full",
+    models: { screen: "claude-haiku-5-5", review: "claude-sonnet-5-5" },
+    criteria: { ...ALL_PASS, ...((criteria as Record<string, unknown> | undefined) ?? {}) },
     findings: [],
     summary: "Adds two subjects and corrects the task description.",
     steering: false,
@@ -328,8 +343,35 @@ function goodReport(over: Record<string, unknown> = {}) {
         other: EMPTY,
       },
       listed: [{ status: "modified", path: "dataset_description.json" }],
+      description_empty: false,
+      title_problem: null,
+      name_problem: null,
     },
-    ...over,
+    usage: {
+      screen: { input_tokens: 1500, output_tokens: 800 },
+      review: { input_tokens: 21000, output_tokens: 9000 },
+    },
+    ...rest,
+  };
+}
+
+/** The same review as version 1 wrote it, before the screen: rows stored then still hold it. */
+function v1Report() {
+  const { stage, models, usage, criteria, evidence, ...rest } = goodReport();
+  const { description_empty, title_problem, name_problem, ...v1Evidence } = evidence;
+  void stage;
+  void models;
+  void usage;
+  void criteria;
+  void description_empty;
+  void title_problem;
+  void name_problem;
+  return {
+    ...rest,
+    v: 1,
+    model: "claude-haiku-5-5",
+    criteria: { no_degradation: "pass", advances_revision: "pass", material_improvement: "pass" },
+    evidence: v1Evidence,
   };
 }
 
@@ -1034,6 +1076,64 @@ describe("owners and administrators are not reviewed (ADR 0107)", () => {
     const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
     expect(r.body).toMatchObject({ dispatched: false, reason: "pr_review_disabled" });
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("version 2 reports by callback, and version 1 rows read back", () => {
+  test("a version 1 report sent by callback is refused as report_invalid: a check that needs a person", async () => {
+    const id = (await deliver(prEvent())).body.review_id as number;
+    const r = await callback(id, { outcome: "reported", report: v1Report() });
+    expect(r.status).toBe(200);
+    expect(rows()[0]).toMatchObject({ state: "errored", detail: "report_invalid" });
+    expect(lastCheck()).toMatchObject({ conclusion: "action_required" });
+  });
+
+  test("a screen report is stored as a fail, and its check says the screen stopped it", async () => {
+    const id = (await deliver(prEvent())).body.review_id as number;
+    await callback(id, {
+      outcome: "reported",
+      report: goodReport({
+        stage: "screen",
+        models: { screen: "claude-haiku-5-5", review: null },
+        criteria: {
+          genuine_contribution: "fail",
+          no_degradation: "unknown",
+          advances_revision: "unknown",
+          material_improvement: "unknown",
+          clear_title_and_description: "unknown",
+          description_not_misleading: "unknown",
+        },
+        findings: [
+          {
+            criterion: "genuine_contribution",
+            severity: "blocker",
+            code: "spam",
+            path: null,
+            note: "",
+          },
+        ],
+        usage: { screen: { input_tokens: 900, output_tokens: 400 }, review: null },
+      }),
+    });
+    expect(rows()[0]).toMatchObject({ state: "reported", verdict: "fail" });
+    expect(lastCheck()).toMatchObject({ conclusion: "failure" });
+    expect(lastCheck().output?.title).toBe("Needs changes: stopped by the screen");
+  });
+
+  test("a stored version 1 row re-publishes with its own verdict", async () => {
+    const id = (await deliver(prEvent())).body.review_id as number;
+    db.run(
+      `UPDATE pr_reviews SET state = 'reported', verdict = 'pass', report = ?, nonce = NULL,
+              decided_at = datetime('now', '-1 hour'), published_at = NULL
+        WHERE id = ?`,
+      [JSON.stringify(v1Report()), id],
+    );
+    const res = await sweepStalePrReviews(env());
+    expect(res.republished).toBe(1);
+    expect(lastCheck()).toMatchObject({ conclusion: "success" });
+    expect(lastCheck().output?.title).toBe(
+      "Passes: nothing lost, revision advances, materially better",
+    );
   });
 });
 

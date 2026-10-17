@@ -6,9 +6,10 @@
  * The Worker decides whether to review it, records the attempt in `pr_reviews`, and dispatches a
  * workflow to `nemarDatasets/.github`. The workflow CLAIMS the review (the Worker accepts the
  * one-shot token and records the time) before it spends anything, reads the change as git
- * data, and asks a model three questions. It posts a report back; the Worker validates it against
- * the closed vocabulary in `shared/pr-review.ts`, derives the verdict, and publishes a check-run
- * and one pull-request comment.
+ * data, and runs two model stages: a screen that may stop only spam, and a review of the content.
+ * It posts a report back; the Worker validates it against the closed vocabulary in
+ * `shared/pr-review.ts` (version 2 only, by callback), derives the verdict, and publishes a
+ * check-run and one pull-request comment.
  *
  * **Why the Worker is the gate.** Every pull request reaches it, a fork's included, from a
  * delivery GitHub signs; no workflow in a dataset repository takes part, so no collaborator can
@@ -60,7 +61,7 @@ import {
   isDeclineReason,
   isOverrideMode,
   isRunError,
-  parsePrReviewReport,
+  parseStoredPrReviewReport,
   renderCheck,
   renderComment,
   standingOf,
@@ -89,10 +90,13 @@ export const PR_REVIEW_BASE_BRANCH = "main";
 
 /**
  * How long a dispatched review may take, counted from when its row was recorded, before the
- * watchdog gives up on it. The review workflow's `timeout-minutes` is kept below this (a test in
- * `test/pr-review-workflow.test.ts` checks the order).
+ * watchdog gives up on it. The review workflow's `timeout-minutes` (28) is kept below this, and the
+ * job's worst case (the setup steps, both model stages at their deadlines, the callback's retries)
+ * below that; a test in `test/pr-review-workflow.test.ts` checks both. The deadline runs from when
+ * the row was recorded and the job's limit from when it starts, so the gap between them is the time
+ * a dispatch may wait in GitHub's queue.
  */
-export const PR_REVIEW_DEADLINE_MINUTES = 30;
+export const PR_REVIEW_DEADLINE_MINUTES = 40;
 
 /**
  * A result that did not reach GitHub is eligible to be tried again this long after it was decided,
@@ -371,11 +375,18 @@ async function readRowByKey(
   return r ? toRow(r) : null;
 }
 
-/** The outcome a stored row stands for, or null for a review still waiting for its report. */
+/**
+ * The outcome a stored row stands for, or null for a review still waiting for its report. A stored
+ * report is read by the stored parser, which reads a version 1 report by its own rules, so a review
+ * stored before the screen existed keeps the verdict it had.
+ */
 export function outcomeOfRow(row: ReviewRow): StoredOutcome | null {
   if (row.state === "reported") {
     try {
-      return { kind: "reported", report: parsePrReviewReport(JSON.parse(row.report ?? "null")) };
+      return {
+        kind: "reported",
+        report: parseStoredPrReviewReport(JSON.parse(row.report ?? "null")),
+      };
     } catch (err) {
       // A stored report that no longer parses (the contract moved under it, or the column was
       // edited by hand) is shown as "could not decide". Anything else is a bug and surfaces.
