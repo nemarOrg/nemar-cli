@@ -2656,10 +2656,13 @@ describe("the facts come before any model, and fail the verdict whatever it says
 describe("the worst case fits", () => {
   test("the worst-case user messages of both stages stay under 300,000 characters", () => {
     const long = (n: number, c = "x") => c.repeat(n);
+    // Only the first few hundred paths reach either message, so a list past that adds digits to
+    // the counts and nothing else: 2,000 changes are within a few characters of the 500,000 the
+    // job accepts, and build in milliseconds rather than seconds.
     const listing = {
       mergeBase: "a".repeat(40),
       head: "b".repeat(40),
-      changes: Array.from({ length: 500_000 }, (_, i) => ({
+      changes: Array.from({ length: 2_000 }, (_, i) => ({
         status: "modified" as const,
         path: `sub-${i}/${long(190)}_events.tsv`,
       })),
