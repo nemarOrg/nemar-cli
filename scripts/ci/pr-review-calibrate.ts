@@ -32,6 +32,9 @@
  *
  * **What the table holds.** Closed words, counts, token counts, seconds and an estimate in dollars,
  * never a pull request's text or a word a model wrote, so it can be pasted anywhere.
+ *
+ * Exits 0 when every pull request reached a verdict, 1 when any did not (the table says why, in a
+ * closed word), and 2 for bad arguments or an environment it refuses to run in.
  */
 
 import { execFileSync } from "node:child_process";
@@ -78,7 +81,10 @@ export interface CalibrationRow {
   criteria: Partial<Record<Criterion, string>> | null;
   verdict: Verdict | null;
   check: string | null;
-  /** Why no report was made: a run error, or what could not be read before the review began. */
+  /**
+   * Why no report was made: a run error, or what could not be read before the review began
+   * ({@link CALIBRATION_READ_ERRORS}).
+   */
   error: string | null;
   screenTokens: StageTokens | null;
   reviewTokens: StageTokens | null;
@@ -119,18 +125,34 @@ const REFUSED_FLAGS = new Set([
   "pr-json",
 ]);
 
-const GIT_ENV = {
-  ...process.env,
-  GIT_TERMINAL_PROMPT: "0",
-  GIT_CONFIG_NOSYSTEM: "1",
-  GIT_CONFIG_GLOBAL: "/dev/null",
-};
+/**
+ * Why a pull request could not be read before its review began, as a closed word for the table:
+ * `gh` failed or answered with something that is not a pull request, the pull request names no
+ * base or head commit, or git could not fetch them.
+ */
+export const CALIBRATION_READ_ERRORS = ["gh_failed", "no_commit", "fetch_failed"] as const;
+export type CalibrationReadErrorCode = (typeof CALIBRATION_READ_ERRORS)[number];
 
+export class CalibrationReadError extends Error {
+  readonly code: CalibrationReadErrorCode;
+  constructor(code: CalibrationReadErrorCode) {
+    super(code);
+    this.name = "CalibrationReadError";
+    this.code = code;
+  }
+}
+
+/** A command, with git's own configuration kept out and no prompt; the environment read now. */
 function run(cmd: string, args: string[], cwd?: string): string {
   return execFileSync(cmd, args, {
     cwd,
     encoding: "utf8",
-    env: GIT_ENV,
+    env: {
+      ...process.env,
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+    },
     maxBuffer: 64 * 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -146,11 +168,19 @@ export interface FetchedPullRequest {
 /**
  * Read the pull request with `gh api` and fetch its base and head as git data, the way the
  * workflow does: `git init` and a blob-less `git fetch`, never a checkout, so nothing in the pull
- * request runs. The base is the one GitHub recorded on the pull request.
+ * request runs. The base is the one GitHub recorded on the pull request. A failure is a
+ * {@link CalibrationReadError}, so the table says which step failed.
  */
 function fetchPullRequest(t: CalibrationTarget, root: string): FetchedPullRequest {
-  const raw = run("gh", ["api", `repos/nemarDatasets/${t.dataset}/pulls/${t.number}`]);
-  const pr = JSON.parse(raw) as Record<string, unknown>;
+  let pr: Record<string, unknown>;
+  try {
+    const raw = run("gh", ["api", `repos/nemarDatasets/${t.dataset}/pulls/${t.number}`]);
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error();
+    pr = parsed as Record<string, unknown>;
+  } catch {
+    throw new CalibrationReadError("gh_failed");
+  }
   const base = (pr.base as { sha?: unknown } | undefined)?.sha;
   const head = (pr.head as { sha?: unknown } | undefined)?.sha;
   if (
@@ -159,9 +189,19 @@ function fetchPullRequest(t: CalibrationTarget, root: string): FetchedPullReques
     typeof head !== "string" ||
     !SHA40.test(head)
   ) {
-    throw new Error("the pull request names no base or head commit");
+    throw new CalibrationReadError("no_commit");
   }
   const dir = join(root, `${t.dataset}-${t.number}`);
+  try {
+    fetchInto(dir, t, base);
+  } catch {
+    throw new CalibrationReadError("fetch_failed");
+  }
+  return { dir, base, head, pr };
+}
+
+/** `git init` and the blob-less fetch of the pull ref and the base, into `dir`. */
+function fetchInto(dir: string, t: CalibrationTarget, base: string): void {
   run("git", ["init", "-q", dir]);
   run("git", ["-C", dir, "config", "core.hooksPath", "/dev/null"]);
   // A named promisor remote, as the workflow sets it up, so the blob-less clone fetches a blob the
@@ -186,7 +226,6 @@ function fetchPullRequest(t: CalibrationTarget, root: string): FetchedPullReques
     `+refs/pull/${t.number}/head:refs/remotes/pr/head`,
     base,
   ]);
-  return { dir, base, head, pr };
 }
 
 function sum(tokens: Array<StageTokens | null>): StageTokens | null {
@@ -238,8 +277,9 @@ export async function calibrateOne(
   let fetched: FetchedPullRequest;
   try {
     fetched = read(t, root);
-  } catch {
-    row.error = "not_readable";
+  } catch (e) {
+    // A word of the closed list, or the generic one; never the error's own text.
+    row.error = e instanceof CalibrationReadError ? e.code : "not_readable";
     return row;
   }
   const observe = (o: StageObservation) => {
@@ -351,11 +391,17 @@ export function renderTable(rows: readonly CalibrationRow[]): string[] {
       .trimEnd();
   const total = rows.reduce((n, r) => n + (r.costUsd ?? 0), 0);
   const tokensUsed = sum(rows.flatMap((r) => [r.screenTokens, r.reviewTokens]));
+  const noVerdict = rows.filter((r) => r.verdict === null).length;
+  // No tokens is no measurement, not a cost of nothing.
+  const spend =
+    tokensUsed === null
+      ? "no tokens reported, so no cost estimate"
+      : `${tokensUsed.input_tokens} tokens in, ${tokensUsed.output_tokens} out; about $${total.toFixed(2)} at list prices`;
   return [
     line(header),
     ...cells.map(line),
     "",
-    `${rows.length} pull request${rows.length === 1 ? "" : "s"}; screen ${STAGE_BUDGETS.screen.model}, review ${STAGE_BUDGETS.review.model}, both at max effort; ${tokensUsed === null ? "no tokens reported" : `${tokensUsed.input_tokens} tokens in, ${tokensUsed.output_tokens} out`}; about $${total.toFixed(2)} at list prices.`,
+    `${rows.length} pull request${rows.length === 1 ? "" : "s"}, ${noVerdict} without a verdict; screen ${STAGE_BUDGETS.screen.model}, review ${STAGE_BUDGETS.review.model}, both at max effort; ${spend}.`,
     "Review columns, after the facts: lost = nothing is lost or broken, rev = the revision advances, better = materially better, text = the title and description say what changed, honest = the description is not misleading. pass, FAIL, or ? for could not tell (or not assessed when the screen stopped it).",
   ];
 }
@@ -369,10 +415,23 @@ function usage(why: string): number {
   return 2;
 }
 
-/** Read the arguments, refuse what would post or leak the key, calibrate, and print. */
+/**
+ * The exit code of a run: 0 when every pull request reached a verdict, 1 when any did not. A row
+ * with no verdict is something a person has to look at (a refusal, a truncation, a pull request that
+ * could not be read), so the run says so even when the others passed.
+ */
+export function exitCodeOf(rows: readonly CalibrationRow[]): 0 | 1 {
+  return rows.some((r) => r.verdict === null) ? 1 : 0;
+}
+
+/**
+ * Read the arguments, refuse what would post or leak the key, calibrate, and print. `read` is where
+ * each pull request comes from, as for {@link calibrateOne}.
+ */
 export async function calibrateMain(
   argv: readonly string[],
   out: (line: string) => void = (l) => console.log(l),
+  read: (t: CalibrationTarget, root: string) => FetchedPullRequest = fetchPullRequest,
 ): Promise<number> {
   if (process.env.PR_REVIEW_CALLBACK_TOKEN) {
     return usage("a review's callback token is set here; calibrate posts nothing and will not run");
@@ -429,11 +488,10 @@ export async function calibrateMain(
   const root = mkdtempSync(join(tmpdir(), "pr-review-calibrate-"));
   try {
     const rows: CalibrationRow[] = [];
-    for (const t of targets) rows.push(await calibrateOne(t, root));
+    for (const t of targets) rows.push(await calibrateOne(t, root, read));
     if (json) out(JSON.stringify(rows, null, 2));
     else for (const line of renderTable(rows)) out(line);
-    // A run in which no pull request reached a verdict is a failure, whatever the reason.
-    return rows.every((r) => r.verdict === null) ? 1 : 0;
+    return exitCodeOf(rows);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

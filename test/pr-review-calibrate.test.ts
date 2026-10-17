@@ -11,15 +11,19 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { gatherListing } from "../scripts/ci/pr-review-evidence";
 import {
+  CalibrationReadError,
   type CalibrationRow,
   type CalibrationTarget,
   type FetchedPullRequest,
   calibrateMain,
   calibrateOne,
+  exitCodeOf,
+  fetchPullRequest,
   parseTarget,
   renderTable,
 } from "../scripts/ci/pr-review-calibrate";
@@ -301,6 +305,177 @@ describe("one pull request, through the job's own stage flow", () => {
     });
     expect(row).toMatchObject({ error: "not_readable", verdict: null });
     expect(JSON.stringify(row)).not.toContain(SECRET);
+  });
+
+  test("a read that failed at a known step says which, in its closed word", async () => {
+    for (const code of ["gh_failed", "no_commit", "fetch_failed"] as const) {
+      const row = await calibrateOne(target(), root, () => {
+        throw new CalibrationReadError(code);
+      });
+      expect(row).toMatchObject({ error: code, verdict: null, costUsd: null });
+    }
+    expect(requests).toHaveLength(0);
+  });
+});
+
+describe("reading a pull request from GitHub, as the workflow does", () => {
+  /**
+   * A bare repository standing in for github.com/nemarDatasets/nm000460, with the pull request's
+   * head at refs/pull/2/head and blob-less fetches allowed, and a `gh` on PATH that answers the one
+   * API read with `answer`. Git is sent to the bare repository by a url rewrite in the environment.
+   */
+  function standInGitHub(name: string, answer: string) {
+    const read = localPullRequest(`${name}-source`);
+    const { dir, base, head } = read(target());
+    const origin = join(root, `${name}-origin.git`);
+    execFileSync("git", ["clone", "-q", "--bare", dir, origin], { env: GIT_ENV });
+    git(origin, "update-ref", "refs/pull/2/head", head);
+    git(origin, "config", "uploadpack.allowFilter", "true");
+    git(origin, "config", "uploadpack.allowAnySHA1InWant", "true");
+    const bin = join(root, `${name}-bin`);
+    mkdirSync(bin, { recursive: true });
+    const reply = join(bin, "reply.json");
+    writeFileSync(reply, answer.replaceAll("BASE", base).replaceAll("HEAD", head));
+    writeFileSync(join(bin, "gh"), `#!/bin/sh\ncat '${reply}'\n`);
+    chmodSync(join(bin, "gh"), 0o755);
+    const saved = {
+      PATH: process.env.PATH,
+      GIT_CONFIG_COUNT: process.env.GIT_CONFIG_COUNT,
+      GIT_CONFIG_KEY_0: process.env.GIT_CONFIG_KEY_0,
+      GIT_CONFIG_VALUE_0: process.env.GIT_CONFIG_VALUE_0,
+    };
+    process.env.PATH = `${bin}:${saved.PATH ?? ""}`;
+    process.env.GIT_CONFIG_COUNT = "1";
+    process.env.GIT_CONFIG_KEY_0 = `url.file://${origin}.insteadOf`;
+    process.env.GIT_CONFIG_VALUE_0 = "https://github.com/nemarDatasets/nm000460.git";
+    const restore = () => {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) Reflect.deleteProperty(process.env, k);
+        else process.env[k] = v;
+      }
+    };
+    return { base, head, restore };
+  }
+
+  test("it reads the pull request with gh and fetches its base and head blob-less", () => {
+    const gh = standInGitHub("fetch-ok", '{"base":{"sha":"BASE"},"head":{"sha":"HEAD"}}');
+    const into = mkdtempSync(join(root, "into-"));
+    try {
+      const fetched = fetchPullRequest(target(), into);
+      expect(fetched.base).toBe(gh.base);
+      expect(fetched.head).toBe(gh.head);
+      expect(fetched.pr).toMatchObject({ base: { sha: gh.base } });
+      // A partial clone of the stand-in, as the workflow's: no checkout, blobs fetched on demand.
+      expect(git(fetched.dir, "config", "extensions.partialClone")).toBe("origin");
+      expect(git(fetched.dir, "rev-parse", "refs/remotes/pr/head")).toBe(gh.head);
+      // And the review's listing can read it, fetching dataset_description.json when it asks.
+      const listing = gatherListing(fetched.dir, fetched.base, fetched.head);
+      expect(listing.changes).toHaveLength(3);
+      expect(listing.versionAfter).toBe("1.1.0");
+    } finally {
+      gh.restore();
+    }
+  });
+
+  test("an answer that names no commit is no_commit, and a gh that is not JSON is gh_failed", () => {
+    const into = mkdtempSync(join(root, "into-"));
+    const noCommit = standInGitHub("fetch-no-commit", '{"base":{"sha":"BASE"},"head":{}}');
+    try {
+      expect(() => fetchPullRequest(target(), into)).toThrow(new CalibrationReadError("no_commit"));
+    } finally {
+      noCommit.restore();
+    }
+    const garbage = standInGitHub("fetch-garbage", "<html>rate limited</html>");
+    try {
+      expect(() => fetchPullRequest(target(), into)).toThrow(new CalibrationReadError("gh_failed"));
+    } finally {
+      garbage.restore();
+    }
+  });
+
+  test("a base commit the repository does not have is fetch_failed", () => {
+    const into = mkdtempSync(join(root, "into-"));
+    const gh = standInGitHub(
+      "fetch-missing",
+      `{"base":{"sha":"${"e".repeat(40)}"},"head":{"sha":"HEAD"}}`,
+    );
+    try {
+      expect(() => fetchPullRequest(target(), into)).toThrow(
+        new CalibrationReadError("fetch_failed"),
+      );
+    } finally {
+      gh.restore();
+    }
+  });
+});
+
+describe("the run: its arguments, its output, and its exit code", () => {
+  test("every pull request with a verdict is exit 0; any without one is exit 1", () => {
+    const row = (verdict: CalibrationRow["verdict"]): CalibrationRow =>
+      ({ verdict }) as CalibrationRow;
+    expect(exitCodeOf([row("pass"), row("fail"), row("uncertain")])).toBe(0);
+    expect(exitCodeOf([row("pass"), row(null)])).toBe(1);
+    expect(exitCodeOf([row(null)])).toBe(1);
+  });
+
+  test("--prs reads a file of pull requests, skipping blanks and comments; --json prints the rows", async () => {
+    const file = join(root, "prs.txt");
+    writeFileSync(file, "# the gate's first two\nnm000153#2 pass\n\nnemarDatasets/nm000456#1\n");
+    const out: string[] = [];
+    const code = await calibrateMain(
+      ["--prs", file, "--json"],
+      (l) => out.push(l),
+      () => {
+        throw new CalibrationReadError("gh_failed");
+      },
+    );
+    // Neither could be read, so neither has a verdict: exit 1, and the rows say why.
+    expect(code).toBe(1);
+    const rows = JSON.parse(out.join("\n")) as CalibrationRow[];
+    expect(rows.map((r) => [r.pr, r.expected, r.error])).toEqual([
+      ["nm000153#2", "pass", "gh_failed"],
+      ["nm000456#1", null, "gh_failed"],
+    ]);
+    expect(requests).toHaveLength(0);
+  });
+
+  test("the table's last lines count the rows without a verdict and do not price what was not counted", async () => {
+    const out: string[] = [];
+    const code = await calibrateMain(
+      ["--pr", "nm000153#2"],
+      (l) => out.push(l),
+      () => {
+        throw new CalibrationReadError("fetch_failed");
+      },
+    );
+    expect(code).toBe(1);
+    const text = out.join("\n");
+    expect(text).toContain("no verdict (fetch_failed)");
+    expect(text).toContain("1 pull request, 1 without a verdict");
+    expect(text).toContain("no tokens reported, so no cost estimate");
+    expect(text).not.toContain("$0.00");
+  });
+
+  test("a line of the file that is not a pull request is a usage error, and nothing is read", async () => {
+    const file = join(root, "bad-prs.txt");
+    writeFileSync(file, "nm000153#2\nnot a pull request\n");
+    const quiet = console.error;
+    console.error = () => {};
+    let read = 0;
+    try {
+      const code = await calibrateMain(
+        ["--prs", file],
+        () => {},
+        () => {
+          read++;
+          throw new CalibrationReadError("gh_failed");
+        },
+      );
+      expect(code).toBe(2);
+    } finally {
+      console.error = quiet;
+    }
+    expect(read).toBe(0);
   });
 });
 
