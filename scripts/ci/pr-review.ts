@@ -83,9 +83,6 @@ export const MAX_REVIEWABLE_FILES = 500_000;
 export const STAGES = ["screen", "review"] as const;
 export type Stage = (typeof STAGES)[number];
 
-/** Both stages think as long as they need to: thinking cannot be turned off at this effort. */
-export const EFFORT = "max" as const;
-
 /**
  * What each stage may spend. `maxTokens` is the output budget, which the model's thinking counts
  * toward; `timeoutMs` bounds each attempt's wait for the response to begin (the SDK's own timeout);
@@ -244,7 +241,8 @@ export async function callStage(
           system,
           messages: [{ role: "user", content: user }],
           output_config: {
-            effort: EFFORT,
+            // Both stages think as long as they need to; thinking cannot be turned off at max.
+            effort: "max",
             format: { type: "json_schema", schema: STAGE_SCHEMAS[stage] },
           },
         },
