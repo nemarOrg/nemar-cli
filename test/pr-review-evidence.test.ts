@@ -616,6 +616,34 @@ describe("the prompt keeps the pull request inside its fence", () => {
     expect(Object.keys(screen).sort()).toEqual(["decision", "note"]);
   });
 
+  test("the review is offered every code but those the facts and the screen decide, and every criterion but the screen's", () => {
+    const item = (
+      REVIEW_OUTPUT_SCHEMA.properties as {
+        findings: { items: { properties: Record<string, { enum: string[] }> } };
+      }
+    ).findings.items.properties;
+    expect(item.criterion?.enum).toEqual([
+      "no_degradation",
+      "advances_revision",
+      "material_improvement",
+      "clear_title_and_description",
+      "description_not_misleading",
+    ]);
+    const offered = new Set(item.code?.enum);
+    expect(FINDING_CODES.filter((c) => !offered.has(c)).sort()).toEqual([
+      "description_missing",
+      "name_author_year",
+      "name_template_field",
+      "spam",
+      "title_author_year",
+      "title_template_field",
+    ]);
+    expect([...offered].every((c) => (FINDING_CODES as readonly string[]).includes(c))).toBe(true);
+    const decision = (SCREEN_OUTPUT_SCHEMA.properties as Record<string, { enum?: string[] }>)
+      .decision;
+    expect(decision?.enum).toEqual(["proceed", "reject"]);
+  });
+
   test("a model that returns extra fields cannot smuggle them into the report", () => {
     const dir = newDataset("smuggle");
     const r = branch(dir, () => write(dir, "README.md", "# E\n"));
@@ -763,10 +791,11 @@ describe("runReview: the job around the model call", () => {
   });
 
   /** The two requests a full review makes, in order: the screen's, then the review's. */
-  async function bothRequests(name: string) {
+  async function bothRequests(name: string, over: Record<string, unknown> = {}) {
     const r = setup(name);
     const pr = prJson(r.dir, {
       head: { sha: r.head, repo: { full_name: "nemarDatasets/nm000460" } },
+      ...over,
     });
     const res = await runReview(args(r, pr));
     expect(res.outcome).toBe("reported");
@@ -789,6 +818,43 @@ describe("runReview: the job around the model call", () => {
     expect(req.body).not.toHaveProperty("tool_choice");
     expect(req.body).not.toHaveProperty("thinking");
     expect(req.body).not.toHaveProperty("temperature");
+  });
+
+  /** The one user message of a request, as the model reads it. */
+  function userText(req: ModelRequest): string {
+    const messages = req.body.messages as Array<{ role: string; content: string }>;
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.role).toBe("user");
+    return messages[0]?.content ?? "";
+  }
+
+  test("the screen is asked with its own prompt, about this pull request's text, files and author", async () => {
+    const { screen: req } = await bothRequests("run-stage1-content", {
+      title: "Add a subject to the README",
+      body: "Adds sub-03 and its sidecar.",
+      author_association: "FIRST_TIME_CONTRIBUTOR",
+    });
+    expect(req.body.system).toBe(SCREEN_SYSTEM_PROMPT);
+    const user = userText(req);
+    expect(user).toContain("Add a subject to the README");
+    expect(user).toContain("Adds sub-03 and its sidecar.");
+    expect(user).toContain("README.md");
+    expect(user).toContain('"author_association": "FIRST_TIME_CONTRIBUTOR"');
+    expect(user).toContain('"files_changed": 2');
+  });
+
+  test("the review is asked with its own prompt, the same text, and the content the screen never saw", async () => {
+    const { screen, review } = await bothRequests("run-stage2-content", {
+      title: "Add a subject to the README",
+      body: "Adds sub-03 and its sidecar.",
+    });
+    const user = userText(review);
+    expect(user).not.toBe(userText(screen));
+    expect(user).toContain("Add a subject to the README");
+    expect(user).toContain("Adds sub-03 and its sidecar.");
+    expect(user).toContain("content-of-changed-metadata-files");
+    // The diff of the edited README, read from git.
+    expect(user).toContain("# Edited");
   });
 
   test("stage 2 is Sonnet 5.5 at max effort, streamed, 32000 tokens, the review schema and the review prompt", async () => {
@@ -872,14 +938,45 @@ describe("runReview: the job around the model call", () => {
     expect(res.report.usage.review).toBeNull();
     expect(res.report.findings.map((f) => f.code)).toEqual(["spam"]);
     expect(verdictOf(res.report)).toBe("fail");
-    // The git calls: trees, commits, and dataset_description.json, never another file's content.
+    // The git calls: trees, commits, the list of changed names, and dataset_description.json, and
+    // nothing else. An allowlist, so a new kind of read has to be added here on purpose.
     const calls = readFileSync(log, "utf8").split("\n").filter(Boolean);
     expect(calls.length).toBeGreaterThan(0);
+    const allowed = (command: string): boolean => {
+      const [verb, first] = command.trim().split(" ");
+      if (verb === "merge-base" || verb === "log" || verb === "ls-tree") return true;
+      if (verb === "diff") return first === "--name-status";
+      if (verb === "show") return /^[0-9a-f]{40}:dataset_description\.json$/.test(first ?? "");
+      return false;
+    };
     for (const call of calls) {
-      expect(call).not.toMatch(/ diff -U2 | --numstat | diff --raw /);
-      const shown = call.match(/ show [0-9a-f]{40}:(\S+) /);
-      if (shown) expect(shown[1]).toBe("dataset_description.json");
+      const command = call.split("protocol.ext.allow=never ")[1] ?? call;
+      expect(allowed(command), command).toBe(true);
     }
+  });
+
+  test("a reject of a change longer than the list the model is shown is still a valid screen report", async () => {
+    const dir = newDataset("run-reject-cut");
+    const r = branch(dir, () => {
+      for (let i = 0; i <= MAX_MODEL_FILES; i++) {
+        const sub = `sub-${String(i).padStart(4, "0")}`;
+        write(dir, `${sub}/eeg/${sub}_task-rest_eeg.edf`, `recording ${i}`);
+      }
+    });
+    const pr = prJson(r.dir, {
+      head: { sha: r.head, repo: { full_name: "nemarDatasets/nm000460" } },
+    });
+    screenReply = () => standInMessage(JSON.stringify(REJECT));
+    const res = await runReview(args(r, pr));
+    expect(modelRequests).toHaveLength(1);
+    expect(res.outcome).toBe("reported");
+    if (res.outcome !== "reported" || res.report.v !== 2) throw new Error("not a version 2 report");
+    expect(res.report.stage).toBe("screen");
+    expect(res.report.evidence.files_changed).toBe(MAX_MODEL_FILES + 1);
+    expect(res.report.evidence.listed.length).toBeLessThan(MAX_MODEL_FILES + 1);
+    // The list was cut, so the report says the reviewer did not see everything.
+    expect(res.report.evidence.truncated).toBe(true);
+    expect(verdictOf(res.report)).toBe("fail");
   });
 
   test("the screen never sees a file's content: its user message holds no diff", async () => {
