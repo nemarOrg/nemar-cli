@@ -271,6 +271,7 @@ function openPullRequest(authorId: number, login: string, number: number, headSh
         state: "open",
         draft: false,
         merged: false,
+        title: "Add a subject",
         author_association: "COLLABORATOR",
         user: { id: authorId, login, type: "User" },
         base: { ref: "main" },

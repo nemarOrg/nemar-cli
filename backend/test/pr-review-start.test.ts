@@ -941,6 +941,7 @@ describe("a redelivery of a failed dispatch is held to the block like a new deli
         state: "open",
         draft: false,
         merged: false,
+        title: "Add a subject",
         author_association: "COLLABORATOR",
         user: { id: 501, login: "contributor", type: "User" },
         base: { ref: "main" },

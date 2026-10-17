@@ -1272,6 +1272,15 @@ describe("the naming rule runs first, owners and administrators included (ADR 01
     expect(lastCheck()).toMatchObject({ conclusion: "action_required" });
   });
 
+  test("a delivery whose title is not a string is malformed: no check calls it clean", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    const payload = prEvent({ login: "owner-gh", userId: 601 });
+    (payload.pull_request as Record<string, unknown>).title = null;
+    const r = await deliver(payload);
+    expect(r.body).toMatchObject({ reason: "malformed" });
+    expect(posted()).toHaveLength(0);
+  });
+
   test("a waiver covers what it recorded: a problem it did not see is checked again", async () => {
     seedAccount({ github: "owner-gh", role: "owner" });
     db.run(

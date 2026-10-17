@@ -242,12 +242,15 @@ export function readPullRequestEvent(payload: unknown): IntakeResult {
   const user = rec(pr.user);
   const prNumber = posInt(pr.number);
   const authorId = posInt(user?.id);
+  // GitHub always sends a title. One that is not a string is a delivery this cannot read, and the
+  // naming rule must never take it for a clean one.
   if (
     prNumber === null ||
     authorId === null ||
     typeof head?.sha !== "string" ||
     !SHA40.test(head.sha) ||
-    typeof user?.login !== "string"
+    typeof user?.login !== "string" ||
+    typeof pr.title !== "string"
   ) {
     return { ok: false, reason: "malformed" };
   }
@@ -278,7 +281,7 @@ export function readPullRequestEvent(payload: unknown): IntakeResult {
       fromFork,
       senderLogin:
         typeof sender?.login === "string" && LOGIN.test(sender.login) ? sender.login : null,
-      title: typeof pr.title === "string" ? pr.title : "",
+      title: pr.title,
       baseSha: typeof base.sha === "string" && SHA40.test(base.sha) ? base.sha : null,
     },
   };
