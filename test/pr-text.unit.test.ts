@@ -478,22 +478,33 @@ describe("findTextProblem", () => {
     test("a very long first word is judged in linear time", () => {
       // The name takes hyphens and apostrophes inside it, so a long run of letters and those, with
       // a year that never completes, is the shape that makes a backtracking pattern slow. The text
-      // is whatever was pasted, so a hang is a defect. Each call is timed alone: an engine may give
-      // up on a runaway pattern and answer null, which reads as right and costs far more than the
-      // millisecond or so that a linear scan of this text takes.
-      const started = performance.now();
+      // is whatever was pasted, so a hang is a defect. Each hostile word is timed against the same
+      // word with a year that does complete, which no pattern backtracks on, so the bound follows
+      // the speed of the machine and not a number of milliseconds (the first version of this test
+      // used 100 ms and failed on a CI runner that is six times slower than a laptop). An engine
+      // may give up on a runaway pattern and answer null, which reads as right and costs far more
+      // than the scan.
+      const fastest = (text: string): number => {
+        let best = Number.POSITIVE_INFINITY;
+        for (let run = 0; run < 3; run++) {
+          const started = performance.now();
+          findAuthorYearPrefix(text);
+          best = Math.min(best, performance.now() - started);
+        }
+        return best;
+      };
       for (const unit of ["a", "a-", "a'", "ab-c'"]) {
+        const word = unit.repeat(100_000);
+        // Control: the same long word, with a year that does complete, is found whole.
+        const completes = `${word}a2019`;
+        expect(findAuthorYearPrefix(`${completes} EEG`)).toBe(completes);
+        const scan = fastest(completes);
         for (const tail of ["20", "-20", "x"]) {
-          const hostile = `${unit.repeat(100_000)}${tail}`;
-          const call = performance.now();
+          const hostile = `${word}${tail}`;
           expect(findAuthorYearPrefix(hostile)).toBeNull();
-          expect(performance.now() - call).toBeLessThan(100);
+          expect(fastest(hostile)).toBeLessThan(20 * scan + 25);
         }
       }
-      expect(performance.now() - started).toBeLessThan(2_000);
-      // Control: the same long word, with a year that does complete, is found whole.
-      const name = "a-".repeat(100_000);
-      expect(findAuthorYearPrefix(`${name}2019 EEG`)).toBe(`${name}2019`);
     });
   });
 });
