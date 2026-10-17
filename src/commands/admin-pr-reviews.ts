@@ -1064,6 +1064,12 @@ const NOT_STARTED: Record<string, string> = {
   duplicate: "this commit already has a review (running or finished)",
   contributor_paused: "the contributor is blocked by an administrator",
   exempt_author: "its author is a NEMAR owner or administrator, so it is not reviewed",
+  exempt_naming_waived:
+    "its author is a NEMAR owner or administrator, and the naming rule was waived for this commit",
+  naming_rule:
+    "its author is a NEMAR owner or administrator, and the naming rule refused its title or its new dataset name, so its check failed",
+  naming_unchecked:
+    "its author is a NEMAR owner or administrator, and its dataset name could not be read to check the naming rule, so its check needs a person",
   draft: "it is a draft",
   not_open: "it is not open any more",
   not_main: "it does not target main",

@@ -7,6 +7,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { namingFactsFor } from "../backend/src/services/pr-review-naming";
+import type { Bindings } from "../backend/src/types/bindings";
 import { textFactsOf } from "../scripts/ci/pr-review";
 import type { Listing } from "../scripts/ci/pr-review-evidence";
 import {
@@ -41,6 +43,17 @@ describe("there is one copy of the rule", () => {
       textFactsOf({ title: "t", body: "x" }, listing("Lee2019 X", "Lee2019 X")).nameProblem,
     ).toBeNull();
     expect(textFactsOf({ title: "t", body: "" }, listing(null, null)).descriptionEmpty).toBe(true);
+  });
+});
+
+describe("the Worker asks the same rule of an exempt pull request", () => {
+  test("its title fact is the rule's answer; a name it cannot compare is unchecked, never fine", async () => {
+    const subject = { datasetId: "nm000460", prNumber: 7, headSha: "a".repeat(40), baseSha: null };
+    for (const title of ["Lee2019 EEG dataset", "Fix ${TITLE}", "Add three EEG recordings"]) {
+      const facts = await namingFactsFor({} as Bindings, { ...subject, title });
+      expect(facts.title, title).toBe(namingProblemOf(title));
+      expect(facts.name, title).toBe("unchecked");
+    }
   });
 });
 

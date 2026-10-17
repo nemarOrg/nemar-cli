@@ -218,9 +218,12 @@ export interface QueueResponse {
  * fixed words (ADR 0092): `dispatched`, `redispatched` (a commit started again) or `dispatch_claimed`
  * (GitHub's answer was lost but the workflow had already claimed it) when it was handed to GitHub,
  * otherwise why not (`duplicate`, `contributor_paused`, `exempt_author` (its author is an owner or
- * administrator, so it is not reviewed and its check was posted as skipped), `draft`,
- * `not_open`, `not_main`, `bot_author`, `dataset_not_reviewable`, `pr_review_disabled`, ...).
- * `review_id` is null when no review row exists for it.
+ * administrator, so it is not reviewed and its check was posted as skipped), `naming_rule` (its
+ * author is exempt, and the naming rule refused its title or its new dataset name, so its check was
+ * posted as failed), `naming_unchecked` (exempt, and the dataset name could not be read, so the
+ * check needs a person), `exempt_naming_waived` (exempt, and an administrator waived the naming rule
+ * for this commit), `draft`, `not_open`, `not_main`, `bot_author`, `dataset_not_reviewable`,
+ * `pr_review_disabled`, ...). `review_id` is null when no review row exists for it.
  */
 export interface StartReviewResponse {
   environment: QueueEnvironment;

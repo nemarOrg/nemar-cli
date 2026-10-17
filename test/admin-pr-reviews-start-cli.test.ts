@@ -239,6 +239,24 @@ describe("nemar admin pr-reviews start <dataset> <pr>", () => {
     expect(checks[0].body).toMatchObject({ status: "completed", conclusion: "skipped" });
   });
 
+  test("an administrator's pull request whose title breaks the naming rule is not started, and its check fails", async () => {
+    openPr({ ds: "nm000201", n: 12, author: "startadmin-gh", authorId: 4001 });
+    const pull = gh.pulls["nm000201#12"];
+    if (!pull) throw new Error("no pull request");
+    pull.title = "Lee2019 EEG rename";
+
+    const r = await cli([...START, "nm000201", "12"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(
+      "not started: its author is a NEMAR owner or administrator, and the naming rule refused its title or its new dataset name, so its check failed",
+    );
+    expect(dispatches()).toHaveLength(0);
+    const checks = gh.seen.filter((s) => s.method === "POST" && s.path.endsWith("/check-runs"));
+    expect(checks).toHaveLength(1);
+    expect(checks[0].body).toMatchObject({ status: "completed", conclusion: "failure" });
+  });
+
   test("a pull request GitHub does not have is an error with a word", async () => {
     const r = await cli([...START, "nm000201", "99"]);
 
