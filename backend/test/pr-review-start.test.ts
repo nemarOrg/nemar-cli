@@ -1450,6 +1450,24 @@ describe("the override: nemar admin pr-reviews allow <dataset> <pr> --admin", ()
     expect(reason).not.toContain("https://");
   });
 
+  test("a check GitHub will not take: the waiver stands recorded, and asking again posts it", async () => {
+    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
+    checkStatus = 500;
+    const failed = await allow(DATASET, 7);
+    expect(failed.status).toBe(502);
+    expect(failed.body).toMatchObject({ code: "github_unavailable" });
+    // Recorded before the post: who decided it is never lost to a GitHub outage.
+    expect(waivers()).toHaveLength(1);
+
+    checkStatus = 200;
+    calls = [];
+    const again = await allow(DATASET, 7);
+    expect(again.body).toMatchObject({ waived: true, reason: "already_waived" });
+    expect(waivers()).toHaveLength(1);
+    expect(lastCheck()).toMatchObject({ conclusion: "skipped" });
+    expect(lastCheck().output?.title).toContain("naming rule waived");
+  });
+
   test("a name GitHub would not show is not waived: there is nothing definite to waive", async () => {
     pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
     naming[DATASET] = { files: ["dataset_description.json"], names: { [SHA_A]: 502 } };
@@ -1477,6 +1495,19 @@ describe("the override: nemar admin pr-reviews allow <dataset> <pr> --admin", ()
     // GitHub's own "no" is still an answer.
     permissions = { [ADMIN_LOGIN]: "write" };
     expect((await allow(DATASET, 7)).body).toMatchObject({ reason: "not_exempt" });
+  });
+
+  test.each([
+    ["a draft", { draft: true }, "draft"],
+    ["a closed pull request", { state: "closed" }, "not_open"],
+    ["a bot's pull request", { login: "dependabot[bot]", type: "Bot" }, "bot_author"],
+    ["one not aimed at main", { base: "develop" }, "not_main"],
+  ])("%s is not waived, and nothing is recorded or posted", async (_label, over, word) => {
+    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename", ...over });
+    const r = await allow(DATASET, 7);
+    expect(r.body).toMatchObject({ waived: false, reason: word });
+    expect(waivers()).toHaveLength(0);
+    expect(calls.some((c) => c.path.endsWith("/check-runs"))).toBe(false);
   });
 
   test("with the review off nothing is waived and nothing is posted", async () => {
