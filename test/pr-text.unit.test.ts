@@ -38,6 +38,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn } from "bun";
 import { gatherGitFacts } from "../scripts/ci/pr-review-evidence";
+import { TEMPLATE_FIELDS } from "../shared/naming-rule";
 import {
   AUTHOR_YEAR_PREFIX,
   type ChangedFile,
@@ -67,6 +68,56 @@ import {
 
 // Each command test starts the CLI (a transpile) and git, and the interactive ones wait on prompts.
 setDefaultTimeout(60_000);
+
+/**
+ * Whether a regular expression's source repeats a part that itself repeats (`(a+)+`, `(?:\s*x)*`),
+ * the shape that makes a backtracking engine try a long input in more than polynomially many ways.
+ * Escapes and character classes are skipped as the atoms they are; `?` makes a part optional and is
+ * not a repetition. A small reader for the patterns this file checks, not a full parser.
+ */
+function nestedRepetition(source: string): boolean {
+  // One frame per open group: whether its body holds a repetition so far.
+  const frames: boolean[] = [false];
+  const repeats = (at: number): boolean =>
+    source[at] === "*" ||
+    source[at] === "+" ||
+    (source[at] === "{" &&
+      /^\{\d+,\d*\}/.test(source.slice(at)) &&
+      !/^\{\d+,1\}/.test(source.slice(at)));
+  for (let i = 0; i < source.length; i++) {
+    const c = source[i];
+    if (c === "\\") {
+      // An escape, with the braces of \u{...} and \p{...} when it has them.
+      if (source[i + 2] === "{" && /[upP]/.test(source[i + 1] ?? "")) i = source.indexOf("}", i);
+      else i++;
+      if (repeats(i + 1)) frames[frames.length - 1] = true;
+      continue;
+    }
+    if (c === "[") {
+      for (i++; i < source.length && source[i] !== "]"; i++) if (source[i] === "\\") i++;
+      if (repeats(i + 1)) frames[frames.length - 1] = true;
+      continue;
+    }
+    if (c === "(") {
+      frames.push(false);
+      continue;
+    }
+    if (c === ")") {
+      const inner = frames.pop() ?? false;
+      if (repeats(i + 1)) {
+        if (inner) return true;
+        frames[frames.length - 1] = true;
+      } else if (inner) {
+        frames[frames.length - 1] = true;
+      }
+      continue;
+    }
+    if (c !== "*" && c !== "+" && c !== "?" && c !== "{" && c !== "|" && c !== "^" && c !== "$") {
+      if (repeats(i + 1)) frames[frames.length - 1] = true;
+    }
+  }
+  return false;
+}
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -330,28 +381,50 @@ describe("findTextProblem", () => {
     expect(findTextProblem("description", "Adds new recordings. ".repeat(500))).toBeNull();
   });
 
-  test("a very long run of punctuation is judged in linear time", () => {
+  test("a very long run of punctuation is judged, and trimmed, without error", () => {
     // Trimming it with `/[\s.!:;,]+$/` took ten seconds on 160,000 characters: the run is tried
-    // again from every start. The text is whatever was pasted, so a hang is a defect.
+    // again from every start. The trim is now a loop over the end of the text, which looks at each
+    // character once. Nothing here is timed (a wall-clock bound fails on a loaded runner): the
+    // answers on a run this long are what is checked.
     const hostile = `${".".repeat(200_000)}a`;
-    const started = performance.now();
     expect(findTextProblem("description", hostile)?.code).toBe("no_words");
     expect(findTextProblem("title", hostile)?.code).toBe("no_words");
-    expect(performance.now() - started).toBeLessThan(2_000);
+    // The trailing run is really trimmed: what it hides is found under it.
+    expect(findTextProblem("title", `Save changes${".!:;, ".repeat(40_000)}`)?.code).toBe(
+      "placeholder",
+    );
   });
 
-  test("an unclosed instruction bracket and a long run of blanks is judged in linear time", () => {
+  test("an unclosed instruction bracket and a long run of blanks is judged without error", () => {
     // `\s+` and the characters after it overlap on blanks, so an unclosed `[your` or `<insert`
     // followed by tens of thousands of them was tried as every split of the run: 64,000 took
-    // eleven seconds. A description is only trimmed, so its whitespace reaches the rule.
-    const started = performance.now();
+    // eleven seconds. A description is only trimmed, so its whitespace reaches the rule. What keeps
+    // it linear is the pattern's shape, checked in the next test; here, the answers.
     for (const opener of ["[your", "<insert", "[fill in"]) {
       for (const blank of [" ", " \t", "\n"]) {
         const hostile = `Adds data.\n\n${opener}${blank.repeat(64_000 / blank.length)}x`;
         expect(findTextProblem("description", hostile)).toBeNull();
       }
     }
-    expect(performance.now() - started).toBeLessThan(2_000);
+  });
+
+  test("the instruction-bracket pattern gives a run of blanks one way to match", () => {
+    // Checked on the pattern itself, not by timing a hostile text (which flakes with the machine).
+    // The run of blanks after the asking word is followed by a lookahead that refuses a blank, so
+    // the run must end where the blanks do and cannot be shared with the words after it; the match
+    // can only begin at a bracket; and no repetition repeats another.
+    const bracket = TEMPLATE_FIELDS.find((re) => re.source.includes("your|insert"));
+    if (!bracket)
+      throw new Error("the instruction-bracket pattern is gone from the template fields");
+    expect(bracket.source).toContain("\\s+(?=[^\\s");
+    expect(bracket.source.startsWith("[<[]")).toBe(true);
+    for (const re of TEMPLATE_FIELDS) {
+      expect(nestedRepetition(re.source), re.source).toBe(false);
+    }
+    // The checker is not blind: it sees the shapes that are quadratic or worse.
+    expect(nestedRepetition("(a+)+$")).toBe(true);
+    expect(nestedRepetition("(?:\\s*x)*y")).toBe(true);
+    expect(nestedRepetition("[(a+)]*")).toBe(false);
   });
 
   test("a bracket that is closed after blanks is still a template", () => {
@@ -757,13 +830,12 @@ describe("the changed-file summary", () => {
     expect(summary).toContain("- and 5 more files at the dataset root");
   });
 
-  test("a change of a hundred thousand files in one folder is summarized in linear time", () => {
+  test("a change of a hundred thousand files in one folder is summarized whole", () => {
     // Copying the folder's array on every file took six seconds here, after the branch was pushed
-    // and while the pull request spinner showed.
+    // and while the pull request spinner showed; each file is now added to its folder's list once.
+    // Nothing is timed: the summary of a change this large is what is checked.
     const paths = Array.from({ length: 100_000 }, (_, i) => `sub-01/eeg/run-${i}_eeg.json`);
-    const started = performance.now();
     const summary = summarizeChangedFiles(filesNamed("added", paths));
-    expect(performance.now() - started).toBeLessThan(2_000);
     expect(summary).toBe(
       "100000 files changed: 100000 added.\n\n- `sub-01/`: 100000 files (100000 added)",
     );

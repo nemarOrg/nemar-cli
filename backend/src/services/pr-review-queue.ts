@@ -58,6 +58,7 @@ import {
   REVIEW_STATES,
   type ReviewState,
   type StoredOutcome,
+  estimateCostUsd,
   isDeclineReason,
   isRunError,
   sanitizeNote,
@@ -934,6 +935,21 @@ function exemptionLookup(env: Bindings) {
 // The volume line
 // ---------------------------------------------------------------------------------------------
 
+/** A row whose stored report is version 2, the first to carry its usage. */
+const V2_REPORT = "state = 'reported' AND json_valid(report) AND json_extract(report, '$.v') = 2";
+
+/**
+ * The token sums of a group: each stage's input and output tokens from the reports that carry them
+ * (a version 2 report, stored only for a reported review), and how many reports were summed. A
+ * stored report is the parsed report re-serialized, so its usage is the parser's counts; a review
+ * that ended without a report has none, and `counted` is how the line says so.
+ */
+const USAGE_SUMS = `COALESCE(SUM(CASE WHEN ${V2_REPORT} THEN json_extract(report, '$.usage.screen.input_tokens') END), 0) AS screen_input,
+         COALESCE(SUM(CASE WHEN ${V2_REPORT} THEN json_extract(report, '$.usage.screen.output_tokens') END), 0) AS screen_output,
+         COALESCE(SUM(CASE WHEN ${V2_REPORT} THEN json_extract(report, '$.usage.review.input_tokens') END), 0) AS review_input,
+         COALESCE(SUM(CASE WHEN ${V2_REPORT} THEN json_extract(report, '$.usage.review.output_tokens') END), 0) AS review_output,
+         COALESCE(SUM(CASE WHEN ${V2_REPORT} THEN 1 ELSE 0 END), 0) AS counted`;
+
 /**
  * The records of the last week, grouped by everything a count needs, with their model calls. One
  * group is a state, a verdict, a reason, whether a running review is overdue and whether it is
@@ -946,7 +962,8 @@ const VOLUME_SQL = `
                AND created_at < datetime('now', '-' || ? || ' minutes') THEN 1 ELSE 0 END AS overdue,
          CASE WHEN created_at >= datetime('now', '-1 day') THEN 1 ELSE 0 END AS in_day,
          COUNT(*) AS reviews,
-         COALESCE(SUM(attempts), 0) AS attempts
+         COALESCE(SUM(attempts), 0) AS attempts,
+         ${USAGE_SUMS}
     FROM pr_reviews
    WHERE created_at >= datetime('now', '-7 days')
    GROUP BY state, verdict, detail, overdue, in_day`;
@@ -959,6 +976,11 @@ interface VolumeGroup {
   in_day: number;
   reviews: number;
   attempts: number;
+  screen_input: number;
+  screen_output: number;
+  review_input: number;
+  review_output: number;
+  counted: number;
 }
 
 function emptyWindow(): VolumeWindow {
@@ -969,6 +991,14 @@ function emptyWindow(): VolumeWindow {
       STORED_VERDICTS.map((v) => [v, 0]),
     ) as VolumeWindow["by_verdict"],
     declines: Object.fromEntries(DECLINE_REASONS.map((w) => [w, 0])) as VolumeWindow["declines"],
+    tokens: {
+      screen_input: 0,
+      screen_output: 0,
+      review_input: 0,
+      review_output: 0,
+      reviews_counted: 0,
+    },
+    estimated_cost_usd: 0,
   };
 }
 
@@ -997,7 +1027,18 @@ export async function readVolume(db: D1Database): Promise<QueueVolume> {
       if (spentACall(g)) w.model_calls += g.attempts;
       w.by_verdict[meant.verdict] += g.reviews;
       if (g.state === "declined" && isDeclineReason(g.detail)) w.declines[g.detail] += g.reviews;
+      const t = w.tokens;
+      if (t) {
+        t.screen_input += g.screen_input;
+        t.screen_output += g.screen_output;
+        t.review_input += g.review_input;
+        t.review_output += g.review_output;
+        t.reviews_counted += g.counted;
+      }
     }
+  }
+  for (const w of [day, week]) {
+    if (w.tokens) w.estimated_cost_usd = estimateCostUsd(w.tokens);
   }
   return { last_24_hours: day, last_7_days: week };
 }

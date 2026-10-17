@@ -11,6 +11,9 @@
  *   POST   /admin/pr-reviews/:dataset/:pr/start   review a pull request that is already open (or
  *                                                 start again a commit whose review ended without a
  *                                                 verdict); the Worker reads it from GitHub itself
+ *   POST   /admin/pr-reviews/:dataset/:pr/allow   waive the naming rule for an owner's or an
+ *                                                 administrator's pull request at its current commit
+ *                                                 (`{reason?}`); recorded, and the check is skipped
  *
  * Admin-only through the router's `authMiddleware` and `adminMiddleware`. The reads need no switch:
  * `PR_REVIEW_ENABLED` gates the REVIEW, not the view of it, so with the review off the queue lists
@@ -18,8 +21,9 @@
  * a pull request an owner or administrator opened, ADR 0107). Nothing here approves or merges a
  * pull request: no Worker code path approves, and the Worker holds nothing that belongs to an
  * individual administrator. An approval is the administrator's own act with their own GitHub
- * identity, taken by the CLI (ADR 0093). `start` is the one route that makes the Worker act: it
- * makes the dispatch, check and comment calls any review makes, and nothing more.
+ * identity, taken by the CLI (ADR 0093). `start` and `allow` are the routes that make the Worker
+ * act: `start` makes the dispatch, check and comment calls any review makes, and `allow` records a
+ * waiver of the naming rule and posts the one check an exempt pull request carries (ADR 0107).
  *
  * The contributor routes live under their own prefix (`pr-review-authors`) rather than under
  * `pr-reviews/authors/...`, because `pr-reviews/:dataset/:pr` has the same shape and a router that
@@ -29,7 +33,10 @@
 import { zValidator } from "@hono/zod-validator";
 import type { Context } from "hono";
 import { z } from "zod";
-import type { SetOverrideRequest } from "../../../../shared/contract/pr-review-admin";
+import type {
+  SetOverrideRequest,
+  WaiveNamingRequest,
+} from "../../../../shared/contract/pr-review-admin";
 import { isValidDatasetId } from "../../services/datasetId";
 import {
   QueueError,
@@ -42,6 +49,7 @@ import {
   setOverride,
 } from "../../services/pr-review-queue";
 import { startPullRequestReview } from "../../services/pr-review-start";
+import { waiveNamingRule } from "../../services/pr-review-waiver";
 import type { AdminRouter } from "./shared";
 
 const overrideSchema = z
@@ -50,6 +58,23 @@ const overrideSchema = z
     reason: z.string().max(500).optional(),
   })
   .strict() satisfies z.ZodType<SetOverrideRequest>;
+
+const waiveSchema = z
+  .object({ reason: z.string().max(500).optional() })
+  .strict() satisfies z.ZodType<WaiveNamingRequest>;
+
+/** The dataset and pull request number of a `/pr-reviews/:dataset/:pr/...` route, checked. */
+function target(c: Context): { dataset: string; pr: number } {
+  const dataset = c.req.param("dataset") ?? "";
+  const pr = Number(c.req.param("pr"));
+  if (!isValidDatasetId(dataset)) {
+    throw new QueueError(400, "bad_dataset", "That is not a dataset id.");
+  }
+  if (!Number.isSafeInteger(pr) || pr <= 0) {
+    throw new QueueError(400, "bad_pr", "A pull request number is a positive whole number.");
+  }
+  return { dataset, pr };
+}
 
 /** A thrown `QueueError` becomes its status and sentence; anything else is a 500 that says no more. */
 function fail(c: Context, err: unknown) {
@@ -115,6 +140,16 @@ export function registerPrReviewRoutes(admin: AdminRouter): void {
         throw new QueueError(400, "bad_pr", "A pull request number is a positive whole number.");
       }
       return c.json(await startPullRequestReview(c.env, c.get("user").id, dataset, pr));
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  admin.post("/pr-reviews/:dataset/:pr/allow", zValidator("json", waiveSchema), async (c) => {
+    try {
+      const { dataset, pr } = target(c);
+      const body = c.req.valid("json");
+      return c.json(await waiveNamingRule(c.env, c.get("user").id, dataset, pr, body.reason));
     } catch (err) {
       return fail(c, err);
     }

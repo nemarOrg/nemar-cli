@@ -1,0 +1,73 @@
+/**
+ * GitHub's answers to the two reads the naming rule makes on an exempt pull request (ADR 0107),
+ * for the test stand-ins that stand in for api.github.com:
+ *
+ *   GET /repos/nemarDatasets/{repo}/compare/{base}...{head}
+ *       the merge base, and the files the pull request changes
+ *   GET /repos/nemarDatasets/{repo}/contents/dataset_description.json?ref={sha}
+ *       the file at a commit (the Worker asks for the raw text)
+ *
+ * Each stand-in keeps a table keyed by repository. A repository with no entry gets {@link
+ * UNCHANGED_NAME}: the merge base is the base commit and `dataset_description.json` is not among
+ * the changed files, so the rule finds no name change and reads nothing more, which is what a test
+ * about something else needs.
+ */
+
+export interface NamingRepo {
+  /** The merge base the comparison names; the base commit of the request when absent. */
+  mergeBase?: string;
+  /** The files the comparison lists. */
+  files?: string[];
+  /**
+   * What `dataset_description.json` holds at a commit: a `Name` (the file is
+   * `{"Name": ..., "BIDSVersion": "1.9.0"}`), null for no file (404), or an HTTP status to answer.
+   */
+  names?: Record<string, string | null | number>;
+  /** An HTTP status for the comparison itself, instead of an answer. */
+  compareStatus?: number;
+  /** Answer the comparison only after this long, past any timeout a test sets. */
+  compareDelayMs?: number;
+}
+
+export const UNCHANGED_NAME: NamingRepo = { files: ["README.md"] };
+
+const COMPARE = /^\/repos\/nemarDatasets\/([^/]+)\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/;
+const CONTENTS = /^\/repos\/nemarDatasets\/([^/]+)\/contents\/dataset_description\.json$/;
+
+/** Whether a request is one of the naming rule's reads. */
+export function isNamingPath(pathname: string): boolean {
+  return COMPARE.test(pathname) || CONTENTS.test(pathname);
+}
+
+/** The answer for a request, or null when it is not one of the naming rule's reads. */
+export async function namingResponse(
+  url: URL,
+  table: Readonly<Record<string, NamingRepo>>,
+): Promise<Response | null> {
+  const compare = url.pathname.match(COMPARE);
+  if (compare) {
+    const repo = table[decodeURIComponent(compare[1])] ?? UNCHANGED_NAME;
+    if (repo.compareDelayMs !== undefined) await Bun.sleep(repo.compareDelayMs);
+    if (repo.compareStatus !== undefined) {
+      return new Response("{}", { status: repo.compareStatus, headers: { "retry-after": "0" } });
+    }
+    return Response.json({
+      merge_base_commit: { sha: repo.mergeBase ?? compare[2] },
+      files: (repo.files ?? []).map((filename) => ({ filename, status: "modified" })),
+    });
+  }
+  const contents = url.pathname.match(CONTENTS);
+  if (contents) {
+    const repo = table[decodeURIComponent(contents[1])] ?? UNCHANGED_NAME;
+    const ref = url.searchParams.get("ref") ?? "";
+    const name = repo.names?.[ref];
+    if (name === undefined || name === null) return new Response("not found", { status: 404 });
+    if (typeof name === "number") {
+      return new Response("{}", { status: name, headers: { "retry-after": "0" } });
+    }
+    return new Response(JSON.stringify({ Name: name, BIDSVersion: "1.9.0" }), {
+      headers: { "content-type": "application/vnd.github.raw+json" },
+    });
+  }
+  return null;
+}

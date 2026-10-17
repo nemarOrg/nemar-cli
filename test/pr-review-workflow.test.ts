@@ -25,7 +25,13 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { parse } from "yaml";
 import { PR_REVIEW_DEADLINE_MINUTES } from "../backend/src/services/pr-review";
-import { CALLBACK_ORIGINS } from "../scripts/ci/pr-review";
+import {
+  CALLBACK_ATTEMPTS,
+  CALLBACK_ORIGINS,
+  CALLBACK_TIMEOUT_MS,
+  STAGE_BUDGETS,
+  callbackBackoffMs,
+} from "../scripts/ci/pr-review";
 import { isRunError, parseCallbackOutcome } from "../shared/pr-review";
 
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -580,6 +586,35 @@ describe("failure and logging", () => {
   test("a job cannot run for ever, and ends before the Worker gives up on it", () => {
     expect(job["timeout-minutes"]).toBeLessThanOrEqual(30);
     expect(job["timeout-minutes"]).toBeLessThan(PR_REVIEW_DEADLINE_MINUTES);
+  });
+
+  test("the review's worst case fits the job's timeout, which fits the Worker's deadline", () => {
+    const minutes = (ms: number) => ms / 60_000;
+    // The steps before the review script, at their worst: the claim's three tries of 30 seconds
+    // each, one and two seconds apart (93 s), then the mint, the checkout, Bun, the install, the
+    // blob-less fetch, the pull request read and the identity token, which take about two minutes
+    // on a large dataset.
+    const SETUP_MINUTES = 4;
+    // Both evidence passes over a partial clone: the change list, the trees and commits, then one
+    // batched blob fetch for the diffs. A large change is about a minute; three is the allowance.
+    const EVIDENCE_MINUTES = 3;
+    // Each stage is cut at its deadline, every attempt and the stream together (an abort signal).
+    const stages =
+      minutes(STAGE_BUDGETS.screen.deadlineMs) + minutes(STAGE_BUDGETS.review.deadlineMs);
+    // The callback's attempts at their timeout, and the pauses between them.
+    let callbackMs = CALLBACK_ATTEMPTS * CALLBACK_TIMEOUT_MS;
+    for (let attempt = 1; attempt < CALLBACK_ATTEMPTS; attempt++) {
+      callbackMs += callbackBackoffMs(attempt);
+    }
+    const worst = SETUP_MINUTES + EVIDENCE_MINUTES + stages + minutes(callbackMs);
+    expect(job["timeout-minutes"]).toBe(28);
+    expect(PR_REVIEW_DEADLINE_MINUTES).toBe(40);
+    expect(worst).toBeLessThanOrEqual(job["timeout-minutes"]);
+    expect(job["timeout-minutes"]).toBeLessThan(PR_REVIEW_DEADLINE_MINUTES);
+    // Each stage's first-byte timeout fits inside its own deadline, so a retry can still happen.
+    for (const stage of [STAGE_BUDGETS.screen, STAGE_BUDGETS.review]) {
+      expect(stage.timeoutMs * 2).toBeLessThanOrEqual(stage.deadlineMs);
+    }
   });
 });
 

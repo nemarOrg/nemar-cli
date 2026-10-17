@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * The pull-request review job's script (ADR 0092). Run by the central workflow
+ * The pull-request review job's script (ADR 0092, ADR 0107). Run by the central workflow
  * `run-pr-review.yml` in `nemarDatasets/.github`, after the workflow has claimed the review. This
  * step's environment holds a federated Anthropic identity and the one-shot callback token, and no
  * GitHub credential. The repository was fetched by an earlier step, whose read-only token stays in
@@ -14,6 +14,14 @@
  * The callback token comes from the environment (PR_REVIEW_CALLBACK_TOKEN), never argv. A job that
  * fails before this script can report is reported by the workflow's own curl step, which needs
  * nothing installed.
+ *
+ * **The order of a review.** The facts first, before any model is asked: the naming rule on the
+ * title and on a changed dataset name, and whether there is a description at all. Then the screen
+ * (stage 1), which sees the pull request's text and the list of changed files, never a file's
+ * content, and may stop only spam. A stop ends the run with a screen report, and no file's content
+ * is read. Otherwise the content is read and the review (stage 2) answers. Both stages run at max
+ * effort and stream, each under {@link STAGE_BUDGETS}; a refusal or a truncation at either is no
+ * verdict, which the Worker publishes as a check that does not pass and needs a person.
  *
  * **Nothing in the dispatch is trusted for a decision.** The pull request is re-read from the API
  * (`--pr-json`): it must still be open, still target `main`, and still be at `--head`, and the
@@ -31,13 +39,32 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import Anthropic from "@anthropic-ai/sdk";
-import { type PrReviewReport, PrReviewReportError, type RunError } from "../../shared/pr-review";
-import { EvidenceError, SHA40, buildEvidence, gatherGitFacts } from "./pr-review-evidence";
+import { namingProblemOf } from "../../shared/naming-rule";
+import {
+  type PrReviewReport,
+  PrReviewReportError,
+  type RunError,
+  type StageTokens,
+} from "../../shared/pr-review";
+import {
+  EvidenceError,
+  type Listing,
+  SHA40,
+  type TextFacts,
+  buildEvidence,
+  buildScreenEvidence,
+  gatherContent,
+  gatherListing,
+} from "./pr-review-evidence";
 import {
   REVIEW_MODEL,
   REVIEW_OUTPUT_SCHEMA,
+  SCREEN_MODEL,
+  SCREEN_OUTPUT_SCHEMA,
   assembleReport,
   buildReviewMessages,
+  buildScreenMessages,
+  readScreenAnswer,
 } from "./pr-review-prompt";
 
 /** The API origin for each environment NAME. A payload never supplies a URL. */
@@ -51,8 +78,58 @@ const DATASET_ID = /^(nm|xx|on)\d{6}$/;
 
 /** A change this large is not reviewed by a model; a person has to look. */
 export const MAX_REVIEWABLE_FILES = 500_000;
-/** Output budget. Adaptive thinking at high effort counts toward it. */
-const MAX_TOKENS = 16_000;
+
+/** The two model calls of a review. */
+export const STAGES = ["screen", "review"] as const;
+export type Stage = (typeof STAGES)[number];
+
+/** Both stages think as long as they need to: thinking cannot be turned off at this effort. */
+export const EFFORT = "max" as const;
+
+/**
+ * What each stage may spend. `maxTokens` is the output budget, which the model's thinking counts
+ * toward; `timeoutMs` bounds each attempt's wait for the response to begin (the SDK's own timeout);
+ * `deadlineMs` bounds the whole stage, every attempt and the streamed answer together, through an
+ * abort signal, because a stream that has begun is not bounded by the SDK's timeout at all.
+ * `maxRetries` is the SDK's retry count for a failure it may retry (a 5xx, a 429, a lost connection).
+ * The workflow test keeps the worst case, both deadlines and the callback's retries, inside the job's
+ * `timeout-minutes`.
+ */
+export const STAGE_BUDGETS = {
+  screen: {
+    model: SCREEN_MODEL,
+    maxTokens: 32_000,
+    timeoutMs: 90_000,
+    deadlineMs: 4 * 60_000,
+    maxRetries: 1,
+  },
+  review: {
+    model: REVIEW_MODEL,
+    maxTokens: 32_000,
+    timeoutMs: 120_000,
+    deadlineMs: 11 * 60_000,
+    maxRetries: 1,
+  },
+} as const satisfies Record<
+  Stage,
+  { model: string; maxTokens: number; timeoutMs: number; deadlineMs: number; maxRetries: number }
+>;
+
+const STAGE_SCHEMAS: Record<Stage, Record<string, unknown>> = {
+  screen: SCREEN_OUTPUT_SCHEMA,
+  review: REVIEW_OUTPUT_SCHEMA,
+};
+
+/** A shorter deadline for a test of what a stalled stream comes to; production never sets one. */
+let deadlineOverrides: Partial<Record<Stage, number>> = {};
+
+export function __setStageDeadlinesForTests(ms: Partial<Record<Stage, number>> | null): void {
+  deadlineOverrides = ms ?? {};
+}
+
+/** How the callback is retried: the attempts, and the timeout of each. See {@link postCallback}. */
+export const CALLBACK_ATTEMPTS = 4;
+export const CALLBACK_TIMEOUT_MS = 60_000;
 
 export type ReviewResult =
   | { outcome: "reported"; report: PrReviewReport }
@@ -92,6 +169,8 @@ export function mapError(e: unknown): RunError {
     return "auth_failed";
   }
   if (e instanceof Anthropic.BadRequestError) return "model_invalid";
+  // A stage that ran past its deadline is aborted by its signal, which the SDK reports as a user
+  // abort: the model did not finish in time, which is the same answer as an unavailable one.
   if (e instanceof Anthropic.APIError) return "model_unavailable";
   return "workflow_failed";
 }
@@ -110,33 +189,84 @@ export function describeError(e: unknown): string {
   return cls;
 }
 
+/** What one stage's call came to, for an observer: the calibration's timing and token table. */
+export interface StageObservation {
+  stage: Stage;
+  model: string;
+  /** Milliseconds from the request to the end of the answer, or to the failure. */
+  ms: number;
+  /** The tokens the API said the call used; null when no answer arrived. */
+  usage: StageTokens | null;
+  /** How the call ended: `ok`, or the run error it became. */
+  result: "ok" | RunError;
+}
+
+export type StageObserver = (o: StageObservation) => void;
+
+/** What a stage answered: the model's JSON, and what it cost. */
+export interface StageAnswer {
+  output: unknown;
+  usage: StageTokens;
+}
+
 /**
- * One call to the model: Haiku 5.5 at high effort, no tools, a schema-constrained answer. The
- * model can read the prompt and write a JSON object; it cannot do anything else.
+ * One call to one stage's model: max effort, a schema-constrained answer, streamed, no tools. The
+ * model can read the prompt and write a JSON object; it cannot do anything else. A refusal and a
+ * truncation are run errors (`model_refused`, `model_truncated`): no verdict, never a pass.
  */
-export async function callReviewModel(system: string, user: string): Promise<unknown> {
-  // A client given no credentials resolves workload identity federation from the environment
-  // (ANTHROPIC_FEDERATION_RULE_ID, _ORGANIZATION_ID, _SERVICE_ACCOUNT_ID, _WORKSPACE_ID and
-  // ANTHROPIC_IDENTITY_TOKEN_FILE), exchanges the job's OIDC token, and refreshes it.
-  const client = new Anthropic({ maxRetries: 2, timeout: 180_000 });
-  const res = await client.messages.create({
-    model: REVIEW_MODEL,
-    max_tokens: MAX_TOKENS,
-    system,
-    messages: [{ role: "user", content: user }],
-    output_config: {
-      effort: "high",
-      format: { type: "json_schema", schema: REVIEW_OUTPUT_SCHEMA },
-    },
-  });
-  if (res.stop_reason === "refusal") throw new RunFailure("model_refused");
-  if (res.stop_reason === "max_tokens") throw new RunFailure("model_truncated");
-  const text = res.content.find((b) => b.type === "text");
-  if (!text || text.type !== "text") throw new RunFailure("model_invalid");
+export async function callStage(
+  stage: Stage,
+  system: string,
+  user: string,
+  observe?: StageObserver,
+): Promise<StageAnswer> {
+  const budget = STAGE_BUDGETS[stage];
+  const started = performance.now();
+  let usage: StageTokens | null = null;
+  const report = (result: "ok" | RunError) =>
+    observe?.({
+      stage,
+      model: budget.model,
+      ms: Math.round(performance.now() - started),
+      usage,
+      result,
+    });
   try {
-    return JSON.parse(text.text);
-  } catch {
-    throw new RunFailure("model_invalid");
+    // A client given no credentials resolves workload identity federation from the environment
+    // (ANTHROPIC_FEDERATION_RULE_ID, _ORGANIZATION_ID, _SERVICE_ACCOUNT_ID, _WORKSPACE_ID and
+    // ANTHROPIC_IDENTITY_TOKEN_FILE), exchanges the job's OIDC token, and refreshes it.
+    const client = new Anthropic({ maxRetries: budget.maxRetries, timeout: budget.timeoutMs });
+    const res = await client.messages
+      .stream(
+        {
+          model: budget.model,
+          max_tokens: budget.maxTokens,
+          system,
+          messages: [{ role: "user", content: user }],
+          output_config: {
+            effort: EFFORT,
+            format: { type: "json_schema", schema: STAGE_SCHEMAS[stage] },
+          },
+        },
+        { signal: AbortSignal.timeout(deadlineOverrides[stage] ?? budget.deadlineMs) },
+      )
+      .finalMessage();
+    usage = { input_tokens: res.usage.input_tokens, output_tokens: res.usage.output_tokens };
+    if (res.stop_reason === "refusal") throw new RunFailure("model_refused");
+    if (res.stop_reason === "max_tokens") throw new RunFailure("model_truncated");
+    const text = res.content.find((b) => b.type === "text");
+    if (!text || text.type !== "text") throw new RunFailure("model_invalid");
+    let output: unknown;
+    try {
+      output = JSON.parse(text.text);
+    } catch {
+      throw new RunFailure("model_invalid");
+    }
+    report("ok");
+    return { output, usage };
+  } catch (e) {
+    report(mapError(e));
+    throw e;
   }
 }
 
@@ -144,12 +274,92 @@ interface PullRequestJson {
   state?: unknown;
   title?: unknown;
   body?: unknown;
+  author_association?: unknown;
   base?: { ref?: unknown; repo?: { full_name?: unknown } };
   head?: { sha?: unknown; repo?: { full_name?: unknown } | null };
 }
 
+/**
+ * The facts decided before any model is asked (ADR 0107), from the pull request as the API returns
+ * it and from the listing: whether the description is empty, how the title breaks the naming rule,
+ * and how the dataset's name breaks it when the pull request changes the name. The rule is the
+ * shared one the CLI and the Worker use; nothing here is a judgment.
+ */
+export function textFactsOf(pr: { title?: unknown; body?: unknown }, listing: Listing): TextFacts {
+  const changedName =
+    listing.nameAfter !== null && listing.nameAfter !== listing.nameBefore
+      ? listing.nameAfter
+      : null;
+  return {
+    descriptionEmpty: typeof pr.body !== "string" || pr.body.trim() === "",
+    titleProblem: namingProblemOf(typeof pr.title === "string" ? pr.title : ""),
+    nameProblem: changedName === null ? null : namingProblemOf(changedName),
+  };
+}
+
+/** What the stage flow needs about a pull request: where its commits are, and its own text. */
+export interface PullRequestUnderReview {
+  repoDir: string;
+  /** The tip of `main` the pull request is compared against (through the merge base). */
+  base: string;
+  head: string;
+  /** The pull request as the API returns it: its title, its description, its author's label. */
+  pr: { title?: unknown; body?: unknown; author_association?: unknown };
+  fromFork: boolean;
+}
+
+/**
+ * The stage flow, for a pull request whose commits and text are known: the facts first, then the
+ * screen, and the review only when the screen let it through. Throws what it meets; {@link
+ * runReview} turns that into a fixed word. The calibration runs exactly this, on pull requests that
+ * are no longer open, which is why the dispatch's own checks are not part of it.
+ */
+export async function reviewPullRequest(
+  input: PullRequestUnderReview,
+  observe?: StageObserver,
+): Promise<PrReviewReport> {
+  const { repoDir, base, head, pr, fromFork } = input;
+  const text = { title: pr.title, body: pr.body };
+
+  // What the screen is shown, with no file's content read but dataset_description.json's.
+  const listing = gatherListing(repoDir, base, head);
+  if (listing.changes.length > MAX_REVIEWABLE_FILES) throw new RunFailure("too_large");
+  // The facts, before any model call.
+  const facts = textFactsOf(pr, listing);
+
+  const screenMessages = buildScreenMessages({
+    listing,
+    pr: text,
+    fromFork,
+    authorAssociation: typeof pr.author_association === "string" ? pr.author_association : null,
+    nonce: randomUUID().replaceAll("-", ""),
+  });
+  const screen = await callStage("screen", screenMessages.system, screenMessages.user, observe);
+  if (readScreenAnswer(screen.output).decision === "reject") {
+    return assembleReport(screen.output, null, buildScreenEvidence(listing, facts), {
+      screen: screen.usage,
+      review: null,
+    });
+  }
+
+  const all = { ...listing, ...gatherContent(repoDir, listing) };
+  const evidence = buildEvidence(all, facts);
+  const reviewMessages = buildReviewMessages({
+    facts: all,
+    evidence,
+    pr: text,
+    fromFork,
+    nonce: randomUUID().replaceAll("-", ""),
+  });
+  const review = await callStage("review", reviewMessages.system, reviewMessages.user, observe);
+  return assembleReport(screen.output, review.output, evidence, {
+    screen: screen.usage,
+    review: review.usage,
+  });
+}
+
 /** Review one pull request. Never throws: every failure is a fixed word. */
-export async function runReview(args: ReviewArgs): Promise<ReviewResult> {
+export async function runReview(args: ReviewArgs, observe?: StageObserver): Promise<ReviewResult> {
   try {
     if (!SHA40.test(args.base) || !SHA40.test(args.head) || !SHA40.test(args.fetchedHead)) {
       throw new RunFailure("evidence_unavailable");
@@ -170,26 +380,31 @@ export async function runReview(args: ReviewArgs): Promise<ReviewResult> {
     ) {
       throw new RunFailure("stale_head");
     }
-    const fromFork =
-      typeof pr.head?.repo?.full_name !== "string" ||
-      typeof pr.base?.repo?.full_name !== "string" ||
-      pr.head.repo.full_name.toLowerCase() !== pr.base.repo.full_name.toLowerCase();
-
-    const facts = gatherGitFacts(args.repoDir, args.base, args.head);
-    if (facts.changes.length > MAX_REVIEWABLE_FILES) throw new RunFailure("too_large");
-    const evidence = buildEvidence(facts);
-    const { system, user } = buildReviewMessages({
-      facts,
-      evidence,
-      pr: { title: pr.title, body: pr.body },
-      fromFork,
-      nonce: randomUUID().replaceAll("-", ""),
-    });
-    const modelOutput = await callReviewModel(system, user);
-    return { outcome: "reported", report: assembleReport(modelOutput, evidence) };
+    const report = await reviewPullRequest(
+      { repoDir: args.repoDir, base: args.base, head: args.head, pr, fromFork: isFromFork(pr) },
+      observe,
+    );
+    return { outcome: "reported", report };
   } catch (e) {
     return { outcome: "error", error: mapError(e), diag: describeError(e) };
   }
+}
+
+/** Whether the pull request's head lives in another repository; a deleted fork's head reads as one. */
+export function isFromFork(pr: {
+  base?: { repo?: { full_name?: unknown } };
+  head?: { repo?: { full_name?: unknown } | null };
+}): boolean {
+  return (
+    typeof pr.head?.repo?.full_name !== "string" ||
+    typeof pr.base?.repo?.full_name !== "string" ||
+    pr.head.repo.full_name.toLowerCase() !== pr.base.repo.full_name.toLowerCase()
+  );
+}
+
+/** The pause before each retry of the callback: 2, 4, then 8 seconds. */
+export function callbackBackoffMs(attempt: number): number {
+  return 2 ** attempt * 1000;
 }
 
 /** POST the result, retrying a network failure or a 5xx. A 4xx will not improve and is not retried. */
@@ -200,15 +415,15 @@ export async function postCallback(
   sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
 ): Promise<{ delivered: boolean; status: number | null }> {
   let status: number | null = null;
-  for (let attempt = 0; attempt < 4; attempt++) {
-    if (attempt > 0) await sleep(2 ** attempt * 1000);
+  for (let attempt = 0; attempt < CALLBACK_ATTEMPTS; attempt++) {
+    if (attempt > 0) await sleep(callbackBackoffMs(attempt));
     try {
       const res = await fetch(`${origin}/webhooks/pr-review-result`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Webhook-Token": token },
         body: JSON.stringify(body),
         // The Worker publishes the check and the comment before it answers.
-        signal: AbortSignal.timeout(60_000),
+        signal: AbortSignal.timeout(CALLBACK_TIMEOUT_MS),
       });
       status = res.status;
       if (res.ok) return { delivered: true, status };
@@ -278,9 +493,11 @@ export async function main(
     ...(result.outcome === "reported" ? { report: result.report } : { error: result.error }),
   };
   const sent = await postCallback(origins[environment], token, body);
-  // A review id and fixed words only: this log is public.
+  // A review id and fixed words only: this log is public. A report's stage is a fixed word too.
+  const stage =
+    result.outcome === "reported" && result.report.v === 2 ? ` at ${result.report.stage}` : "";
   console.log(
-    `review ${reviewId}: ${result.outcome}${result.outcome === "error" ? ` (${result.error}${result.diag ? `; ${result.diag}` : ""})` : ""}; callback ${
+    `review ${reviewId}: ${result.outcome}${stage}${result.outcome === "error" ? ` (${result.error}${result.diag ? `; ${result.diag}` : ""})` : ""}; callback ${
       sent.delivered ? "delivered" : `not delivered (${sent.status ?? "no response"})`
     }`,
   );

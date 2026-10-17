@@ -8,6 +8,8 @@
  *   PUT    /admin/pr-review-authors/:login        block a contributor, or lift a block (allow)
  *   DELETE /admin/pr-review-authors/:login        remove that decision
  *   POST   /admin/pr-reviews/:dataset/:pr/start   review a pull request that is already open
+ *   POST   /admin/pr-reviews/:dataset/:pr/allow   waive the naming rule for an owner's or an
+ *                                                 administrator's pull request, at its current commit
  *
  * Types, the closed vocabularies, and nothing else, so the Worker that answers and the CLI that
  * prints read ONE definition. Every string a pull request's author controls (title, branch) arrives
@@ -18,11 +20,13 @@
 import type {
   AuthorTally,
   DeclineReason,
+  NamingFacts,
   OverrideMode,
   ReviewState,
   RunError,
   Standing,
   StoredOutcome,
+  TokenTotals,
 } from "../pr-review.js";
 
 // The review's own vocabulary (ADR 0092) is declared once, in `shared/pr-review.ts`.
@@ -172,6 +176,18 @@ export interface VolumeWindow {
   by_verdict: Record<StoredVerdict, number>;
   /** The declined records by their reason word. Every stored word is there, zero if unseen. */
   declines: Record<DeclineReason, number>;
+  /**
+   * The tokens the window's reported reviews used, by stage, summed from their reports. Only a
+   * version 2 report carries its usage, so `reviews_counted` says how many reports were summed: a
+   * report from before the screen, and a run that ended without a report (an error, a refusal, a
+   * truncation), cost tokens that are not here. Absent from an older Worker's answer.
+   */
+  tokens?: TokenTotals & { reviews_counted: number };
+  /**
+   * What `tokens` cost at the list prices in `shared/pr-review.ts`, in US dollars to the cent: an
+   * estimate for orientation, never a bill. Absent from an older Worker's answer.
+   */
+  estimated_cost_usd?: number;
 }
 
 /** The volume of the last day and of the last week, counted from when each record was created. */
@@ -205,9 +221,12 @@ export interface QueueResponse {
  * fixed words (ADR 0092): `dispatched`, `redispatched` (a commit started again) or `dispatch_claimed`
  * (GitHub's answer was lost but the workflow had already claimed it) when it was handed to GitHub,
  * otherwise why not (`duplicate`, `contributor_paused`, `exempt_author` (its author is an owner or
- * administrator, so it is not reviewed and its check was posted as skipped), `draft`,
- * `not_open`, `not_main`, `bot_author`, `dataset_not_reviewable`, `pr_review_disabled`, ...).
- * `review_id` is null when no review row exists for it.
+ * administrator, so it is not reviewed and its check was posted as skipped), `naming_rule` (its
+ * author is exempt, and the naming rule refused its title or its new dataset name, so its check was
+ * posted as failed), `naming_unchecked` (exempt, and the dataset name could not be read, so the
+ * check needs a person), `exempt_naming_waived` (exempt, and an administrator waived the naming rule
+ * for this commit), `draft`, `not_open`, `not_main`, `bot_author`, `dataset_not_reviewable`,
+ * `pr_review_disabled`, ...). `review_id` is null when no review row exists for it.
  */
 export interface StartReviewResponse {
   environment: QueueEnvironment;
@@ -216,6 +235,42 @@ export interface StartReviewResponse {
   review_id: number | null;
   /** The pull request's author, when GitHub gave a login of the shape a login has; else null. */
   author_login: string | null;
+}
+
+/**
+ * The words a waiver of the naming rule can come to (`POST /admin/pr-reviews/:dataset/:pr/allow`):
+ *  - `waived`: the rule refused the commit, the waiver is recorded, and its check is now skipped;
+ *  - `already_waived`: a waiver for this commit was already recorded; its check was posted again;
+ *  - `nothing_to_waive`: the rule finds nothing on the commit; its check was posted as skipped;
+ *  - `not_exempt`: the author is not a NEMAR owner or administrator, whose review it would bypass;
+ *  - `reviewed`: the commit was reviewed (someone who is not exempt pushed it), and its review stands;
+ *  - or why the pull request was not looked at, in the start's words (`pr_review_disabled`,
+ *    `unknown_dataset`, `dataset_not_reviewable`, `not_open`, `not_main`, `draft`, `bot_author`,
+ *    `malformed`, ...).
+ */
+export type WaiveNamingReason =
+  | "waived"
+  | "already_waived"
+  | "nothing_to_waive"
+  | "not_exempt"
+  | "reviewed"
+  | (string & {});
+
+export interface WaiveNamingResponse {
+  environment: QueueEnvironment;
+  /** True when the commit's check is skipped by a waiver, recorded now or before. */
+  waived: boolean;
+  reason: WaiveNamingReason;
+  /** The commit the answer is about, when the pull request was read that far. */
+  head_sha: string | null;
+  /** What the naming rule found on that commit, when it was waived now. */
+  facts: NamingFacts | null;
+}
+
+/** The body of `POST /admin/pr-reviews/:dataset/:pr/allow`. */
+export interface WaiveNamingRequest {
+  /** Plain words; kept to 200 characters. */
+  reason?: string;
 }
 
 export interface ReviewHistoryItem {

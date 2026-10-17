@@ -11,16 +11,22 @@ import type {
   ContributorStanding,
   QueueEntry,
   VolumeWindow,
+  WaiveNamingResponse,
 } from "../shared/contract/pr-review-admin";
+import { parsePrReviewReport, parseStoredPrReviewReport } from "../shared/pr-review";
 import {
   ageOf,
+  briefLines,
+  namingFactLines,
   plain,
   renderQueue,
   reportLines,
   standingLines,
   terminalize,
+  tokenText,
   verdictText,
   volumeLines,
+  waiverLines,
 } from "../src/commands/admin-pr-reviews";
 
 const ESC = String.fromCharCode(27);
@@ -458,5 +464,214 @@ describe("reportLines", () => {
     const text = reportLines({ kind: "declined", reason: "rate_limited" }).join("\n");
     expect(text).toContain("Not reviewed");
     expect(text).toContain("rate limited");
+  });
+});
+
+describe("a version 2 report on the terminal", () => {
+  const areas = {
+    dataset_description: { added: 0, modified: 1, removed: 0 },
+    readme_and_changes: { added: 0, modified: 0, removed: 0 },
+    participants: { added: 0, modified: 0, removed: 0 },
+    sidecars: { added: 0, modified: 0, removed: 0 },
+    recordings: { added: 0, modified: 0, removed: 0 },
+    derivatives: { added: 0, modified: 0, removed: 0 },
+    sourcedata: { added: 0, modified: 0, removed: 0 },
+    code: { added: 0, modified: 0, removed: 0 },
+    other: { added: 0, modified: 0, removed: 0 },
+  };
+  const evidence = (over: Record<string, unknown> = {}) => ({
+    files_changed: 1,
+    files_read: 0,
+    truncated: true,
+    version_before: "1.0.0",
+    version_after: "1.0.1",
+    subjects_before: 2,
+    subjects_after: 2,
+    areas,
+    listed: [{ status: "modified", path: "dataset_description.json" }],
+    description_empty: false,
+    title_problem: null,
+    name_problem: null,
+    ...over,
+  });
+  const screen = (over: Record<string, unknown> = {}) =>
+    parsePrReviewReport({
+      v: 2,
+      stage: "screen",
+      models: { screen: "claude-haiku-5-5", review: null },
+      criteria: {
+        genuine_contribution: "fail",
+        no_degradation: "unknown",
+        advances_revision: "unknown",
+        material_improvement: "unknown",
+        clear_title_and_description: "unknown",
+        description_not_misleading: "unknown",
+      },
+      findings: [
+        {
+          criterion: "genuine_contribution",
+          severity: "blocker",
+          code: "spam",
+          path: null,
+          note: "",
+        },
+      ],
+      summary: "The description advertises an unrelated service.",
+      steering: false,
+      evidence: evidence(),
+      usage: { screen: { input_tokens: 900, output_tokens: 300 }, review: null },
+      ...over,
+    });
+
+  test("a screen report says the revision was not assessed, not unknown", () => {
+    const lines = briefLines({ kind: "reported", report: screen() }).map((l) =>
+      l.replace(ANSI, ""),
+    );
+    expect(lines.join("\n")).toContain("revision advances: not assessed (stopped by the screen)");
+    expect(lines[0]).toBe("Needs changes: stopped by the screen");
+  });
+
+  test("the naming rule's findings are printed in sentences", () => {
+    const lines = briefLines({
+      kind: "reported",
+      report: screen({ evidence: evidence({ title_problem: "author_year" }) }),
+    }).map((l) => l.replace(ANSI, ""));
+    const text = lines.join("\n");
+    expect(text).toContain("Naming rule:");
+    expect(text).toContain("The title starts with a name and a year");
+    expect(text).not.toMatch(/author_year/);
+    for (const l of lines) expect(DANGEROUS.test(l)).toBe(false);
+  });
+
+  test("a stored version 1 report still renders in full", () => {
+    const report = parseStoredPrReviewReport({
+      v: 1,
+      model: "claude-haiku-5-5",
+      criteria: { no_degradation: "pass", advances_revision: "pass", material_improvement: "pass" },
+      findings: [],
+      summary: "Adds a subject.",
+      steering: false,
+      evidence: {
+        files_changed: 1,
+        files_read: 1,
+        truncated: false,
+        version_before: "1.0.0",
+        version_after: "1.0.1",
+        subjects_before: 2,
+        subjects_after: 3,
+        areas,
+        listed: [],
+      },
+    });
+    const text = reportLines({ kind: "reported", report })
+      .map((l) => l.replace(ANSI, ""))
+      .join("\n");
+    expect(text).toContain("Passes: nothing lost, revision advances, materially better");
+    expect(text).toContain("Reviewed with claude-haiku-5-5.");
+  });
+});
+
+describe("tokenText", () => {
+  const window = (tokens: unknown, cost: unknown = 0.12): VolumeWindow =>
+    ({
+      reviews: 1,
+      model_calls: 2,
+      by_verdict: {},
+      declines: {},
+      tokens,
+      estimated_cost_usd: cost,
+    }) as unknown as VolumeWindow;
+
+  test("says the totals, the stages, how many reports, and the estimate", () => {
+    const text = tokenText(
+      window({
+        screen_input: 3000,
+        screen_output: 1200,
+        review_input: 20000,
+        review_output: 8000,
+        reviews_counted: 1,
+      }),
+    );
+    expect(text).toBe(
+      "23,000 in and 9,200 out over 1 report (screen 3,000 in, 1,200 out; review 20,000 in, 8,000 out), about $0.12 at list prices; runs that ended without a report are not counted",
+    );
+  });
+
+  test("says nothing for an older server, or when no report carries its usage", () => {
+    expect(tokenText(window(undefined))).toBeNull();
+    expect(
+      tokenText(
+        window({
+          screen_input: 0,
+          screen_output: 0,
+          review_input: 0,
+          review_output: 0,
+          reviews_counted: 0,
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  test("a count that cannot be read is said to be unreadable, never a zero", () => {
+    expect(
+      tokenText(
+        window({
+          screen_input: -1,
+          screen_output: 0,
+          review_input: 0,
+          review_output: 0,
+          reviews_counted: 1,
+        }),
+      ),
+    ).toBe("token counts could not be read");
+  });
+});
+
+describe("waiverLines", () => {
+  const answer = (over: Partial<WaiveNamingResponse>): WaiveNamingResponse => ({
+    environment: "production",
+    waived: false,
+    reason: "nothing_to_waive",
+    head_sha: "a".repeat(40),
+    facts: null,
+    ...over,
+  });
+  const text = (r: WaiveNamingResponse) =>
+    waiverLines(r, "nm000201", 7)
+      .map((l) => l.replace(ANSI, ""))
+      .join("\n");
+
+  test("a waiver says what the rule found, in words, and that it is for this commit only", () => {
+    const t = text(
+      answer({
+        waived: true,
+        reason: "waived",
+        facts: { title: "author_year", name: "template_field" },
+      }),
+    );
+    expect(t).toContain("Waived the naming rule for nm000201 #7 at aaaaaaa.");
+    expect(t).toContain(
+      "The rule found: the title starts with a name and a year; the pull request changes the dataset name to one with an unfilled template field.",
+    );
+    expect(t).toContain("a new commit is checked again");
+    expect(t).not.toMatch(/author_year|template_field|[{}]/);
+  });
+
+  test("each refusal is a sentence a person reads, with no code word in it", () => {
+    for (const reason of ["not_exempt", "reviewed", "already_waived", "draft", "not_open"]) {
+      const t = text(answer({ reason }));
+      expect(t, reason).not.toMatch(/_/);
+      expect(t.length, reason).toBeGreaterThan(20);
+    }
+    expect(text(answer({ reason: "not_exempt" }))).toContain(
+      "is not a NEMAR owner or administrator",
+    );
+  });
+
+  test("namingFactLines names an unreadable name as such", () => {
+    expect(namingFactLines({ title: null, name: "unchecked" })).toEqual([
+      "the dataset name could not be read to be checked",
+    ]);
+    expect(namingFactLines(null)).toEqual([]);
   });
 });

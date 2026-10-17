@@ -1929,6 +1929,31 @@ describe("the volume of reviews in the list: information, never a gate", () => {
     r: Omit<Parameters<typeof seedReview>[0], "ds" | "n" | "createdAt">,
   ) => seedReview({ ...r, ds: "nm000201", n, createdAt: ago(hours) });
 
+  const NO_TOKENS = {
+    screen_input: 0,
+    screen_output: 0,
+    review_input: 0,
+    review_output: 0,
+    reviews_counted: 0,
+  };
+
+  /** A version 2 report with the usage given, as the job posts it. */
+  const v2Report = (screen: [number, number], review: [number, number] | null) =>
+    JSON.stringify({
+      v: 2,
+      stage: review === null ? "screen" : "full",
+      models: { screen: "claude-haiku-5-5", review: review === null ? null : "claude-sonnet-5-5" },
+      criteria: {},
+      findings: [],
+      summary: "",
+      steering: false,
+      evidence: {},
+      usage: {
+        screen: { input_tokens: screen[0], output_tokens: screen[1] },
+        review: review === null ? null : { input_tokens: review[0], output_tokens: review[1] },
+      },
+    });
+
   function seedWeek() {
     // The last 24 hours: ten records.
     seedAt(1, 2, { state: "reported", verdict: "pass" });
@@ -1967,6 +1992,9 @@ describe("the volume of reviews in the list: information, never a gate", () => {
       not_reviewed: 1,
     },
     declines: { contributor_paused: 1, rate_limited: 0, daily_limit: 0 },
+    // The seeded reports are version 1, which carry no usage: nothing to sum, and it says so.
+    tokens: NO_TOKENS,
+    estimated_cost_usd: 0,
   };
   const week: VolumeWindow = {
     reviews: 15,
@@ -1980,6 +2008,8 @@ describe("the volume of reviews in the list: information, never a gate", () => {
       not_reviewed: 4,
     },
     declines: { contributor_paused: 1, rate_limited: 1, daily_limit: 2 },
+    tokens: NO_TOKENS,
+    estimated_cost_usd: 0,
   };
 
   test("the list carries the records and model calls of the last day and week, with verdicts and declines", async () => {
@@ -2002,6 +2032,41 @@ describe("the volume of reviews in the list: information, never a gate", () => {
     expect(body.volume?.last_7_days.model_calls).toBe(0);
     expect(Object.values(body.volume?.last_7_days.by_verdict ?? {})).toEqual([0, 0, 0, 0, 0, 0]);
     expect(Object.values(body.volume?.last_7_days.declines ?? {})).toEqual([0, 0, 0]);
+  });
+
+  test("the tokens of version 2 reports are summed by stage and priced as an estimate; others are not counted", async () => {
+    seedAt(1, 2, {
+      state: "reported",
+      verdict: "pass",
+      report: v2Report([1000, 500], [20000, 8000]),
+    });
+    seedAt(2, 2, { state: "reported", verdict: "fail", report: v2Report([2000, 700], null) });
+    // A version 1 report (no usage) and a run that ended without a report (no report at all).
+    seedAt(3, 2, { state: "reported", verdict: "pass" });
+    seedAt(4, 2, { state: "errored", detail: "model_truncated" });
+    // A week ago: in the week, out of the day.
+    seedAt(5, 72, {
+      state: "reported",
+      verdict: "pass",
+      report: v2Report([1000, 1000], [1000, 1000]),
+    });
+    const volume = await readVolume(realD1(db));
+    expect(volume.last_24_hours.tokens).toEqual({
+      screen_input: 3000,
+      screen_output: 1200,
+      review_input: 20000,
+      review_output: 8000,
+      reviews_counted: 2,
+    });
+    // 3,000 x 0.10 + 1,200 x 0.50 + 20,000 x 2 + 8,000 x 10, per million: $0.12.
+    expect(volume.last_24_hours.estimated_cost_usd).toBe(0.12);
+    expect(volume.last_7_days.tokens).toMatchObject({ reviews_counted: 3, screen_input: 4000 });
+  });
+
+  test("a report that is not JSON is not summed and does not fail the volume", async () => {
+    seedAt(1, 2, { state: "reported", verdict: "pass", report: "not json" });
+    const volume = await readVolume(realD1(db));
+    expect(volume.last_24_hours).toMatchObject({ reviews: 1, tokens: NO_TOKENS });
   });
 
   test("a restart that spent a second call is counted as two calls and one record", async () => {

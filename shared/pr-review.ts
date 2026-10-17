@@ -1,11 +1,18 @@
 /**
- * The dataset pull-request review's contract (ADR 0092): the report a review run posts, the
- * verdict derived from it, the check-run words shown to people, and the one standing decision
+ * The dataset pull-request review's contract (ADR 0092, ADR 0107): the report a review run posts,
+ * the verdict derived from it, the check-run words shown to people, and the one standing decision
  * about a contributor, an administrator's block.
  *
  * One module, three readers. The workflow script builds a report with it, the Worker parses
  * what comes back with it before storing a byte, and the check-run is rendered from it, so
  * the check, the stored row and the tally cannot disagree about what a review said.
+ *
+ * **Two stages, one report (version 2).** A screen (stage 1) reads only the pull request's own
+ * metadata and may stop it as spam; everything it does not stop goes to the review (stage 2), which
+ * reads the content. The report says which stage it ended at (`stage`), and a report that ended at
+ * the screen can never pass. Rows written before the screen existed hold version 1 reports, which
+ * {@link parseStoredPrReviewReport} still reads with their own rules, so a stored verdict does not
+ * change; a version 1 report arriving by callback is refused.
  *
  * **Every field of a pull request is attacker-controlled text**: title, body, commit messages,
  * file names, file contents. That text reaches a language model, and the model's output reaches
@@ -14,8 +21,9 @@
  *  1. **The verdict is derived, never reported.** The model supplies a result per criterion and
  *     some findings. {@link verdictOf} decides pass, fail or uncertain from those and from
  *     facts the script computed from git, and no field of the report is "the verdict".
- *  2. **Facts override the model.** A criterion the git facts contradict cannot pass, whatever
- *     the model said ({@link factsOf}).
+ *  2. **Facts override the model.** A criterion the facts contradict cannot pass, whatever the
+ *     model said ({@link factsOf}): the git facts, an empty description, and the naming rule on the
+ *     title and on the dataset's name.
  *  3. **Free text is a note, never markup.** The one place a model's words reach a person,
  *     {@link sanitizeNote}, removes links, mentions, cross-references, HTML and emphasis, so a
  *     note cannot ping someone, link anywhere or hide the verdict.
@@ -24,29 +32,68 @@
  * conclusion that does not satisfy a required check: `neutral` and `skipped` DO satisfy one on
  * GitHub, which is why `neutral` appears nowhere in {@link conclusionOf}, and `skipped` for exactly
  * one outcome, `exempt`: a pull request opened by a NEMAR owner or administrator is not reviewed at
- * all, so there is no unknown in it to hide (ADR 0107).
+ * all, so there is no unknown in it to hide (ADR 0107). The naming rule still applies to it: a title
+ * or a dataset name that breaks the rule is a `naming` outcome, which fails.
  *
  * The parser throws a fixed-word {@link PrReviewReportError}; it never quotes its input.
  */
 
+import { NAMING_PROBLEMS, type NamingProblem } from "./naming-rule.js";
 import { sanitizeNote } from "./untrusted-text.js";
 
 // The sanitizer lives in `shared/untrusted-text.ts`, shared with the publication review
 // (ADR 0102); it is re-exported so every importer of this module keeps working.
 export { sanitizeNote };
+// The naming rule's words, declared with the rule itself.
+export { NAMING_PROBLEMS, type NamingProblem };
 
-export const REPORT_VERSION = 1;
+/** The report version the job writes and a callback must carry. */
+export const REPORT_VERSION = 2;
 
 /** The check-run's name. Stable: a ruleset that requires the check names it. */
 export const PR_REVIEW_CHECK_NAME = "NEMAR PR Review";
 
-/** The models a report may name. A closed set, so a model change is a reviewed code change. */
-export const REVIEW_MODELS = ["claude-haiku-5-5"] as const;
-export type ReviewModel = (typeof REVIEW_MODELS)[number];
+/** Where a review ended: at the screen (stage 1), or after the full review (stage 2). */
+export const REVIEW_STAGES = ["screen", "full"] as const;
+export type ReviewStage = (typeof REVIEW_STAGES)[number];
 
-/** What a pull request to a dataset is asked to be: the three questions of the review. */
-export const CRITERIA = ["no_degradation", "advances_revision", "material_improvement"] as const;
+/**
+ * The models a report may name, per stage. Closed sets, so a model change is a reviewed code change.
+ * The screen is the small model, because it reads only a pull request's own text and may stop only
+ * spam; the review reads the content and judges the text.
+ */
+export const SCREEN_MODELS = ["claude-haiku-5-5"] as const;
+export type ScreenModel = (typeof SCREEN_MODELS)[number];
+export const REVIEW_MODELS = ["claude-sonnet-5-5"] as const;
+export type ReviewModel = (typeof REVIEW_MODELS)[number];
+/** The one model a version 1 report could name. Read back from stored rows only. */
+export const V1_MODELS = ["claude-haiku-5-5"] as const;
+export type V1Model = (typeof V1_MODELS)[number];
+
+/**
+ * What a pull request to a dataset is asked to be: the six criteria of a version 2 report.
+ *
+ *  - `genuine_contribution`: set by the script from the screen, never by a model's say-so in the
+ *    review: proceed is a pass, a stop is a fail.
+ *  - `no_degradation`, `advances_revision`, `material_improvement`: the review's three questions
+ *    about the files.
+ *  - `clear_title_and_description`: the title and the description say, in readable words, what
+ *    changed.
+ *  - `description_not_misleading`: the description does not contradict the title or itself.
+ */
+export const CRITERIA = [
+  "genuine_contribution",
+  "no_degradation",
+  "advances_revision",
+  "material_improvement",
+  "clear_title_and_description",
+  "description_not_misleading",
+] as const;
 export type Criterion = (typeof CRITERIA)[number];
+
+/** The three questions of a version 1 report, which stored rows still hold. */
+export const V1_CRITERIA = ["no_degradation", "advances_revision", "material_improvement"] as const;
+export type V1Criterion = (typeof V1_CRITERIA)[number];
 
 export const CRITERION_RESULTS = ["pass", "fail", "unknown"] as const;
 export type CriterionResult = (typeof CRITERION_RESULTS)[number];
@@ -69,6 +116,19 @@ export const FINDING_CODES = [
   "improvement_unclear",
   "evidence_incomplete",
   "steering_attempt",
+  // The screen's one reason to stop a pull request.
+  "spam",
+  // The review's judgments of the pull request's own text.
+  "title_placeholder",
+  "title_not_descriptive",
+  "description_missing",
+  "description_placeholder",
+  "description_misleading",
+  // The naming rule (`shared/naming-rule.ts`), decided by the script and never by a model.
+  "title_author_year",
+  "title_template_field",
+  "name_author_year",
+  "name_template_field",
   "other",
 ] as const;
 export type FindingCode = (typeof FINDING_CODES)[number];
@@ -152,11 +212,12 @@ export interface ChangedFile {
 }
 
 /**
- * Facts the script computed from git. The model never writes this block, so the account of what
- * changed cannot be shaded by it: the counts come from the whole change list, and they must add
- * up to `files_changed` ({@link parsePrReviewReport} refuses a report where they do not).
+ * Facts the script computed from git, as a version 1 report carries them. The model never writes
+ * this block, so the account of what changed cannot be shaded by it: the counts come from the whole
+ * change list, and they must add up to `files_changed` ({@link parsePrReviewReport} refuses a report
+ * where they do not).
  */
-export interface ReviewEvidence {
+export interface ReviewEvidenceV1 {
   files_changed: number;
   /** How many changed files had their content (a diff) given to the model. The rest were judged by name and type. */
   files_read: number;
@@ -177,29 +238,93 @@ export interface ReviewEvidence {
   listed: ChangedFile[];
 }
 
-export interface ReportShape {
-  v: typeof REPORT_VERSION;
-  model: ReviewModel;
-  criteria: Record<Criterion, CriterionResult>;
+/**
+ * The facts of a version 2 report: version 1's, and three decided before any model is asked, from
+ * the pull request as the API returns it and from git. Each fails the verdict whatever a model says.
+ */
+export interface ReviewEvidence extends ReviewEvidenceV1 {
+  /** The pull request's description is empty or only whitespace. */
+  description_empty: boolean;
+  /** How the title breaks the naming rule, or null when it does not. */
+  title_problem: NamingProblem | null;
+  /**
+   * How the pull request's new dataset name (the `Name` of `dataset_description.json` at the head,
+   * when it differs from the name at the merge base) breaks the naming rule. Null when the name is
+   * unchanged, unreadable, or fine.
+   */
+  name_problem: NamingProblem | null;
+}
+
+/** Tokens one model call used, from the API's own response. */
+export interface StageTokens {
+  input_tokens: number;
+  output_tokens: number;
+}
+
+/**
+ * What the review cost, counted from the API's responses: the screen's call, and the review's when
+ * there was one. Never rendered in a check; the administrator's volume line sums it.
+ */
+export interface ReviewUsage {
+  screen: StageTokens;
+  review: StageTokens | null;
+}
+
+interface ReportCommon {
   findings: ReviewFinding[];
   summary: string;
   /** The model says the pull request tried to instruct it. Always fails the review. */
   steering: boolean;
-  evidence: ReviewEvidence;
 }
+
+/** A version 1 report: one model, three questions. Read back from stored rows only. */
+export interface ReportShapeV1 extends ReportCommon {
+  v: 1;
+  model: V1Model;
+  criteria: Record<V1Criterion, CriterionResult>;
+  evidence: ReviewEvidenceV1;
+}
+
+/** A version 2 report: the screen, the review when the screen let it through, six criteria. */
+export interface ReportShapeV2 extends ReportCommon {
+  v: typeof REPORT_VERSION;
+  stage: ReviewStage;
+  models: { screen: ScreenModel; review: ReviewModel | null };
+  criteria: Record<Criterion, CriterionResult>;
+  evidence: ReviewEvidence;
+  usage: ReviewUsage;
+}
+
+export type ReportShape = ReportShapeV1 | ReportShapeV2;
 
 declare const validated: unique symbol;
 
 /**
- * A report that {@link parsePrReviewReport} accepted. The brand makes that a fact of the type for
- * an object literal: one cannot be handed to {@link verdictOf}, {@link renderCheck} or a stored
- * {@link ReviewOutcome} without going through the parser, so the closed vocabulary and the
- * counts-must-add-up rule cannot be skipped by accident. It does NOT stop a cast, and it does
- * not stop a spread of a parsed report (`{ ...report, steering: false }` keeps the brand in its
- * type), and `Readonly` is shallow. The brand guards against forgetting to parse, not against
- * someone who means to bypass it; a test keeps `as PrReviewReport` out of every other file.
+ * A report that {@link parsePrReviewReport} or {@link parseStoredPrReviewReport} accepted. The brand
+ * makes that a fact of the type for an object literal: one cannot be handed to {@link verdictOf},
+ * {@link renderCheck} or a stored {@link ReviewOutcome} without going through a parser, so the
+ * closed vocabulary and the counts-must-add-up rule cannot be skipped by accident. It does NOT stop
+ * a cast, and it does not stop a spread of a parsed report (`{ ...report, steering: false }` keeps
+ * the brand in its type), and `Readonly` is shallow. The brand guards against forgetting to parse,
+ * not against someone who means to bypass it; a test keeps `as PrReviewReport` out of every other
+ * file.
  */
-export type PrReviewReport = Readonly<ReportShape> & { readonly [validated]: true };
+export type PrReviewReport = (Readonly<ReportShapeV1> | Readonly<ReportShapeV2>) & {
+  readonly [validated]: true;
+};
+
+/** The criteria a report answers, in the order a person reads them. */
+export function criteriaOf(report: Pick<ReportShape, "v">): readonly Criterion[] {
+  return report.v === 1 ? V1_CRITERIA : CRITERIA;
+}
+
+/** One criterion's answer, or undefined when the report's version does not ask it. */
+function resultOf(
+  criteria: Readonly<Partial<Record<Criterion, CriterionResult>>>,
+  c: Criterion,
+): CriterionResult | undefined {
+  return criteria[c];
+}
 
 // ---------------------------------------------------------------------------------------------
 // Parsing: a closed vocabulary, enforced at the door.
@@ -211,11 +336,13 @@ export const REPORT_ERRORS = [
   "unknown_key",
   "bad_version",
   "bad_model",
+  "bad_stage",
   "bad_criteria",
   "bad_findings",
   "bad_summary",
   "bad_steering",
   "bad_evidence",
+  "bad_usage",
 ] as const;
 export type ReportErrorCode = (typeof REPORT_ERRORS)[number];
 
@@ -233,6 +360,8 @@ export const SEMVER = /^\d{1,9}\.\d{1,9}\.\d{1,9}$/;
 /** A BIDS-shaped path. Anything else is dropped from a finding, not trusted into a check-run. */
 const SAFE_PATH = /^[A-Za-z0-9._\-/]{1,200}$/;
 const MAX_FILES = 10_000_000;
+/** More tokens than any one call can use, input and output together; a larger count is not a count. */
+const MAX_TOKENS_COUNTED = 10_000_000;
 
 /** Whether `x` is one of the words in a closed list, as a type guard. */
 export function isOneOf<T extends string>(all: readonly T[], x: unknown): x is T {
@@ -253,13 +382,13 @@ function hasExactKeys(o: Record<string, unknown>, keys: readonly string[]): bool
   return own.length === keys.length && keys.every((k) => Object.hasOwn(o, k));
 }
 
-function parseFinding(raw: unknown): ReviewFinding {
+function parseFinding(raw: unknown, criteria: readonly Criterion[]): ReviewFinding {
   if (!isRecord(raw) || !hasExactKeys(raw, ["criterion", "severity", "code", "path", "note"])) {
     throw new PrReviewReportError("bad_findings");
   }
   const { criterion, severity, code, path, note } = raw;
   if (
-    !isOneOf(CRITERIA, criterion) ||
+    !isOneOf(criteria, criterion) ||
     !isOneOf(SEVERITIES, severity) ||
     !isOneOf(FINDING_CODES, code)
   ) {
@@ -305,23 +434,26 @@ function parseListed(raw: unknown): ChangedFile {
   return { status, path: safePath(path) };
 }
 
-function parseEvidence(raw: unknown): ReviewEvidence {
-  if (
-    !isRecord(raw) ||
-    !hasExactKeys(raw, [
-      "files_changed",
-      "files_read",
-      "truncated",
-      "version_before",
-      "version_after",
-      "subjects_before",
-      "subjects_after",
-      "areas",
-      "listed",
-    ])
-  ) {
-    throw new PrReviewReportError("bad_evidence");
-  }
+const EVIDENCE_V1_KEYS = [
+  "files_changed",
+  "files_read",
+  "truncated",
+  "version_before",
+  "version_after",
+  "subjects_before",
+  "subjects_after",
+  "areas",
+  "listed",
+] as const;
+
+const EVIDENCE_V2_KEYS = [
+  ...EVIDENCE_V1_KEYS,
+  "description_empty",
+  "title_problem",
+  "name_problem",
+] as const;
+
+function parseEvidenceV1Fields(raw: Record<string, unknown>): ReviewEvidenceV1 {
   const files_changed = count(raw.files_changed);
   const files_read = count(raw.files_read);
   if (files_read > files_changed || typeof raw.truncated !== "boolean") {
@@ -362,52 +494,87 @@ function parseEvidence(raw: unknown): ReviewEvidence {
   };
 }
 
-/**
- * Validate a report. Accepts only the keys declared above, only members of the closed sets,
- * only counts that are non-negative integers, and only versions that are `X.Y.Z`. Free text
- * (`note`, `summary`) is not rejected for its content, it is sanitised: a model's wording is
- * not a reason to lose the review.
- *
- * A criterion that fails with no finding against it gets one added (`other`, "No detail given."),
- * so a red check always has something for a person to read. Room is made by dropping the model's
- * LAST findings (the prompt asks for most important first), never one of the added ones.
- */
-export function parsePrReviewReport(raw: unknown): PrReviewReport {
-  if (!isRecord(raw)) throw new PrReviewReportError("not_an_object");
-  const keys = ["v", "model", "criteria", "findings", "summary", "steering", "evidence"];
-  if (!hasExactKeys(raw, keys)) throw new PrReviewReportError("unknown_key");
-  if (raw.v !== REPORT_VERSION) throw new PrReviewReportError("bad_version");
-  if (!isOneOf(REVIEW_MODELS, raw.model)) throw new PrReviewReportError("bad_model");
-  const rawCriteria = raw.criteria;
-  if (!isRecord(rawCriteria) || !hasExactKeys(rawCriteria, CRITERIA)) {
+function parseEvidenceV1(raw: unknown): ReviewEvidenceV1 {
+  if (!isRecord(raw) || !hasExactKeys(raw, EVIDENCE_V1_KEYS)) {
+    throw new PrReviewReportError("bad_evidence");
+  }
+  return parseEvidenceV1Fields(raw);
+}
+
+function nullableNamingProblem(v: unknown): NamingProblem | null {
+  if (v === null) return null;
+  if (isOneOf(NAMING_PROBLEMS, v)) return v;
+  throw new PrReviewReportError("bad_evidence");
+}
+
+function parseEvidence(raw: unknown): ReviewEvidence {
+  if (!isRecord(raw) || !hasExactKeys(raw, EVIDENCE_V2_KEYS)) {
+    throw new PrReviewReportError("bad_evidence");
+  }
+  if (typeof raw.description_empty !== "boolean") throw new PrReviewReportError("bad_evidence");
+  return {
+    ...parseEvidenceV1Fields(raw),
+    description_empty: raw.description_empty,
+    title_problem: nullableNamingProblem(raw.title_problem),
+    name_problem: nullableNamingProblem(raw.name_problem),
+  };
+}
+
+function parseTokens(raw: unknown): StageTokens {
+  if (!isRecord(raw) || !hasExactKeys(raw, ["input_tokens", "output_tokens"])) {
+    throw new PrReviewReportError("bad_usage");
+  }
+  const tokens = (v: unknown): number => {
+    if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0 || v > MAX_TOKENS_COUNTED) {
+      throw new PrReviewReportError("bad_usage");
+    }
+    return v;
+  };
+  return { input_tokens: tokens(raw.input_tokens), output_tokens: tokens(raw.output_tokens) };
+}
+
+function parseCriteria<C extends Criterion>(
+  raw: unknown,
+  criteria: readonly C[],
+): Record<C, CriterionResult> {
+  if (!isRecord(raw) || !hasExactKeys(raw, criteria)) {
     throw new PrReviewReportError("bad_criteria");
   }
-  const criteria = {} as Record<Criterion, CriterionResult>;
-  for (const c of CRITERIA) {
-    const r = rawCriteria[c];
+  const out = {} as Record<C, CriterionResult>;
+  for (const c of criteria) {
+    const r = raw[c];
     if (!isOneOf(CRITERION_RESULTS, r)) throw new PrReviewReportError("bad_criteria");
-    criteria[c] = r;
+    out[c] = r;
   }
-  if (!Array.isArray(raw.findings) || raw.findings.length > MAX_FINDINGS) {
+  return out;
+}
+
+/**
+ * The rules every version shares, which make a report agree with itself in the direction of "needs
+ * a person": a finding that says the pull request tried to instruct the reviewer IS a steering
+ * attempt whatever the flag says, a criterion cannot pass while a blocker is filed against it, and
+ * a criterion that fails with no finding against it gets one (`other`, "No detail given.") so a red
+ * check always has something for a person to read. Room for that is made by dropping the model's
+ * LAST findings (the prompt asks for most important first), never one of the added ones. None of it
+ * can raise anything.
+ */
+function settle<C extends Criterion>(
+  rawFindings: unknown,
+  rawSteering: unknown,
+  criteria: Record<C, CriterionResult>,
+  order: readonly C[],
+): { findings: ReviewFinding[]; steering: boolean } {
+  if (!Array.isArray(rawFindings) || rawFindings.length > MAX_FINDINGS) {
     throw new PrReviewReportError("bad_findings");
   }
-  const findings = raw.findings.map(parseFinding);
-  if (typeof raw.summary !== "string") throw new PrReviewReportError("bad_summary");
-  if (typeof raw.steering !== "boolean") throw new PrReviewReportError("bad_steering");
-  const evidence = parseEvidence(raw.evidence);
-
-  // The report must agree with itself, because the verdict reads the flags and not the prose.
-  // A finding that says the pull request tried to instruct the reviewer IS a steering attempt
-  // whatever the flag says, and a criterion cannot pass while a blocker is filed against it.
-  // Both coerce toward "needs a person"; neither can raise anything.
-  const steering = raw.steering || findings.some((f) => f.code === "steering_attempt");
+  const findings = rawFindings.map((f) => parseFinding(f, order));
+  if (typeof rawSteering !== "boolean") throw new PrReviewReportError("bad_steering");
+  const steering = rawSteering || findings.some((f) => f.code === "steering_attempt");
   for (const f of findings) {
-    if (f.severity === "blocker" && criteria[f.criterion] === "pass") {
-      criteria[f.criterion] = "unknown";
-    }
+    const c = f.criterion as C;
+    if (f.severity === "blocker" && criteria[c] === "pass") criteria[c] = "unknown";
   }
-
-  const unexplained = CRITERIA.filter(
+  const unexplained = order.filter(
     (c) => criteria[c] === "fail" && !findings.some((f) => f.criterion === c),
   );
   findings.splice(MAX_FINDINGS - unexplained.length);
@@ -420,9 +587,33 @@ export function parsePrReviewReport(raw: unknown): PrReviewReport {
       note: "No detail given.",
     });
   }
+  return { findings, steering };
+}
 
-  const report: ReportShape = {
-    v: REPORT_VERSION,
+const V1_KEYS = ["v", "model", "criteria", "findings", "summary", "steering", "evidence"];
+const V2_KEYS = [
+  "v",
+  "stage",
+  "models",
+  "criteria",
+  "findings",
+  "summary",
+  "steering",
+  "evidence",
+  "usage",
+];
+
+/** The version 1 parser, unchanged, for rows stored before the screen existed. */
+function parseV1Report(raw: Record<string, unknown>): PrReviewReport {
+  if (!hasExactKeys(raw, V1_KEYS)) throw new PrReviewReportError("unknown_key");
+  if (raw.v !== 1) throw new PrReviewReportError("bad_version");
+  if (!isOneOf(V1_MODELS, raw.model)) throw new PrReviewReportError("bad_model");
+  const criteria = parseCriteria(raw.criteria, V1_CRITERIA);
+  if (typeof raw.summary !== "string") throw new PrReviewReportError("bad_summary");
+  const evidence = parseEvidenceV1(raw.evidence);
+  const { findings, steering } = settle(raw.findings, raw.steering, criteria, V1_CRITERIA);
+  const report: ReportShapeV1 = {
+    v: 1,
     model: raw.model,
     criteria,
     findings,
@@ -433,11 +624,94 @@ export function parsePrReviewReport(raw: unknown): PrReviewReport {
   return report as PrReviewReport;
 }
 
+/**
+ * Validate a version 2 report: what a callback must carry. Accepts only the keys declared above,
+ * only members of the closed sets, only counts that are non-negative integers, and only versions
+ * that are `X.Y.Z`. Free text (`note`, `summary`) is not rejected for its content, it is sanitised:
+ * a model's wording is not a reason to lose the review. Any other version, version 1 included, is
+ * refused (`bad_version`): a report is posted by the job of the same release.
+ *
+ * The stage is a contract, not a label:
+ *  - `screen`: the screen stopped the pull request, so `genuine_contribution` is a fail, the other
+ *    five were never assessed (`unknown`), no review model is named and the review used nothing;
+ *  - `full`: the screen let it through, so `genuine_contribution` is a pass, and the review's model
+ *    and usage are named.
+ * A report that breaks either is refused (`bad_stage`), which is how a screen report can never pass.
+ */
+export function parsePrReviewReport(raw: unknown): PrReviewReport {
+  if (!isRecord(raw)) throw new PrReviewReportError("not_an_object");
+  if (raw.v !== REPORT_VERSION) throw new PrReviewReportError("bad_version");
+  if (!hasExactKeys(raw, V2_KEYS)) throw new PrReviewReportError("unknown_key");
+  if (!isOneOf(REVIEW_STAGES, raw.stage)) throw new PrReviewReportError("bad_stage");
+  const stage = raw.stage;
+
+  const models = raw.models;
+  if (!isRecord(models) || !hasExactKeys(models, ["screen", "review"])) {
+    throw new PrReviewReportError("bad_model");
+  }
+  if (!isOneOf(SCREEN_MODELS, models.screen)) throw new PrReviewReportError("bad_model");
+  const screenModel = models.screen;
+  let reviewModel: ReviewModel | null = null;
+  if (stage === "full") {
+    if (!isOneOf(REVIEW_MODELS, models.review)) throw new PrReviewReportError("bad_model");
+    reviewModel = models.review;
+  } else if (models.review !== null) {
+    throw new PrReviewReportError("bad_model");
+  }
+
+  const criteria = parseCriteria(raw.criteria, CRITERIA);
+  if (stage === "screen") {
+    if (criteria.genuine_contribution !== "fail") throw new PrReviewReportError("bad_stage");
+    if (CRITERIA.some((c) => c !== "genuine_contribution" && criteria[c] !== "unknown")) {
+      throw new PrReviewReportError("bad_stage");
+    }
+  } else if (criteria.genuine_contribution !== "pass") {
+    throw new PrReviewReportError("bad_stage");
+  }
+
+  if (typeof raw.summary !== "string") throw new PrReviewReportError("bad_summary");
+  const evidence = parseEvidence(raw.evidence);
+
+  const usage = raw.usage;
+  if (!isRecord(usage) || !hasExactKeys(usage, ["screen", "review"])) {
+    throw new PrReviewReportError("bad_usage");
+  }
+  const screenTokens = parseTokens(usage.screen);
+  let reviewTokens: StageTokens | null = null;
+  if (stage === "full") reviewTokens = parseTokens(usage.review);
+  else if (usage.review !== null) throw new PrReviewReportError("bad_usage");
+
+  const { findings, steering } = settle(raw.findings, raw.steering, criteria, CRITERIA);
+  const report: ReportShapeV2 = {
+    v: REPORT_VERSION,
+    stage,
+    models: { screen: screenModel, review: reviewModel },
+    criteria,
+    findings,
+    summary: sanitizeNote(raw.summary, SUMMARY_MAX),
+    steering,
+    evidence,
+    usage: { screen: screenTokens, review: reviewTokens },
+  };
+  return report as PrReviewReport;
+}
+
+/**
+ * Validate a report read back from a stored row: version 2 by {@link parsePrReviewReport}, and
+ * version 1 by its own rules, so a review stored before the screen existed keeps the verdict it
+ * had. Used to show and re-publish a stored result (`outcomeOfRow`, the watchdog, the admin views),
+ * never for a callback.
+ */
+export function parseStoredPrReviewReport(raw: unknown): PrReviewReport {
+  if (isRecord(raw) && raw.v === 1) return parseV1Report(raw);
+  return parsePrReviewReport(raw);
+}
+
 // ---------------------------------------------------------------------------------------------
-// Verdict: derived from the report and the git facts, never read from it.
+// Verdict: derived from the report and the facts, never read from it.
 // ---------------------------------------------------------------------------------------------
 
-/** A fact found from the files that moved a criterion away from what the model said. */
+/** A fact that moved a criterion away from what the model said, or that a rule found. */
 export interface FactNote {
   criterion: Criterion;
   code: FindingCode;
@@ -455,10 +729,21 @@ function compareVersions(a: string, b: string): number {
   return 0;
 }
 
+const TITLE_RULE_CODE: Record<NamingProblem, FindingCode> = {
+  author_year: "title_author_year",
+  template_field: "title_template_field",
+};
+
+const NAME_RULE_CODE: Record<NamingProblem, FindingCode> = {
+  author_year: "name_author_year",
+  template_field: "name_template_field",
+};
+
 /**
- * The criteria after the git facts have had their say, and the facts that moved them. The model's
+ * The criteria after the facts have had their say, and the facts that moved them. The model's
  * answer can only be lowered by a fact, never raised.
  *
+ * The git facts, in every version:
  *  - No file changed: the pull request improves nothing, so `material_improvement` fails.
  *  - Both versions are known and the new one is not newer (equal, or a downgrade):
  *    `advances_revision` fails. (The required `version-check` already refuses this for a merge;
@@ -471,20 +756,35 @@ function compareVersions(a: string, b: string): number {
  *    recording, a sidecar, anything) or the subject count fell: a removal can be right (a privacy
  *    correction) but it is never something to pass on a model's word, so `no_degradation` is
  *    unknown and a person confirms it.
+ *
+ * The rules of a version 2 report, each of which fails its criterion and is ALWAYS stated, even
+ * when another fact or the model already failed that criterion, so the author reads every problem
+ * at once:
+ *  - An empty description fails `clear_title_and_description` (`description_missing`).
+ *  - A title that breaks the naming rule fails `clear_title_and_description`.
+ *  - A new dataset name that breaks the naming rule fails `no_degradation`: the name is part of the
+ *    dataset, and a name the policy refuses is broken metadata.
  */
 export function factsOf(report: PrReviewReport): {
-  criteria: Record<Criterion, CriterionResult>;
+  criteria: Partial<Record<Criterion, CriterionResult>>;
   notes: FactNote[];
 } {
-  const out = { ...report.criteria };
+  const out: Partial<Record<Criterion, CriterionResult>> = { ...report.criteria };
   const notes: FactNote[] = [];
+  const rank = { pass: 2, unknown: 1, fail: 0 } as const;
   const lower = (criterion: Criterion, code: FindingCode, to: "fail" | "unknown") => {
+    const now = out[criterion];
     // Only ever lower a criterion: a fail stays a fail, and unknown never replaces a fail.
-    const rank = { pass: 2, unknown: 1, fail: 0 } as const;
-    if (rank[to] < rank[out[criterion]]) {
+    if (now !== undefined && rank[to] < rank[now]) {
       out[criterion] = to;
       notes.push({ criterion, code, result: to });
     }
+  };
+  /** A rule: it fails the criterion, and it is stated whether or not it moved it. */
+  const rule = (criterion: Criterion, code: FindingCode) => {
+    if (out[criterion] === undefined) return;
+    out[criterion] = "fail";
+    notes.push({ criterion, code, result: "fail" });
   };
   const e = report.evidence;
   if (e.files_changed === 0) lower("material_improvement", "no_substantive_change", "fail");
@@ -515,17 +815,27 @@ export function factsOf(report: PrReviewReport): {
   ) {
     lower("no_degradation", "data_removed", "unknown");
   }
+  if (report.v === REPORT_VERSION) {
+    const v2 = report.evidence;
+    if (v2.description_empty) rule("clear_title_and_description", "description_missing");
+    if (v2.title_problem !== null) {
+      rule("clear_title_and_description", TITLE_RULE_CODE[v2.title_problem]);
+    }
+    if (v2.name_problem !== null) rule("no_degradation", NAME_RULE_CODE[v2.name_problem]);
+  }
   return { criteria: out, notes };
 }
 
-export function effectiveCriteria(report: PrReviewReport): Record<Criterion, CriterionResult> {
+export function effectiveCriteria(
+  report: PrReviewReport,
+): Partial<Record<Criterion, CriterionResult>> {
   return factsOf(report).criteria;
 }
 
 export function verdictOf(report: PrReviewReport): Verdict {
   if (report.steering) return "fail";
   const c = effectiveCriteria(report);
-  const results = CRITERIA.map((k) => c[k]);
+  const results = criteriaOf(report).map((k) => resultOf(c, k) ?? "unknown");
   if (results.includes("fail")) return "fail";
   if (results.every((r) => r === "pass")) return "pass";
   return "uncertain";
@@ -585,20 +895,36 @@ export function isDeclineReason(x: unknown): x is DeclineReason {
   return isOneOf(DECLINE_REASONS, x);
 }
 
+/**
+ * What the naming rule found on a pull request it was applied to without a review: the title, and
+ * the dataset's new name when the pull request changes it. `name` is `unchecked` when the name
+ * could not be read from GitHub.
+ */
+export interface NamingFacts {
+  title: NamingProblem | null;
+  name: NamingProblem | null | "unchecked";
+}
+
 export type ReviewOutcome =
   | { kind: "reported"; report: PrReviewReport }
   | { kind: "declined"; reason: DeclineReason }
   | { kind: "error"; error: RunError }
   | { kind: "unreported" }
   /**
-   * Not reviewed, by design: the author is a NEMAR owner or administrator (ADR 0107). It is only
+   * Not reviewed, by design: the author is a NEMAR owner or administrator (ADR 0107), and the
+   * naming rule found nothing, or an administrator waived it for this commit (`waived`). It is only
    * ever published, never stored, so no row has this outcome and nothing reads it back:
    * {@link StoredOutcome} is the type of everything that is stored or read back.
    */
-  | { kind: "exempt" };
+  | { kind: "exempt"; waived?: boolean }
+  /**
+   * An owner's or administrator's pull request that the naming rule refuses, or could not check:
+   * the review does not run for them, and the rule runs first. Published, never stored.
+   */
+  | { kind: "naming"; facts: NamingFacts };
 
-/** An outcome a `pr_reviews` row can stand for: every outcome but the one that is never stored. */
-export type StoredOutcome = Exclude<ReviewOutcome, { kind: "exempt" }>;
+/** An outcome a `pr_reviews` row can stand for: every outcome but the ones never stored. */
+export type StoredOutcome = Exclude<ReviewOutcome, { kind: "exempt" } | { kind: "naming" }>;
 
 /**
  * Every kind of outcome, from a record keyed by the union's own tags, so that adding a kind to
@@ -612,10 +938,16 @@ const OUTCOME_KINDS: Record<ReviewOutcome["kind"], true> = {
   error: true,
   unreported: true,
   exempt: true,
+  naming: true,
 };
 export const REVIEW_OUTCOME_KINDS = Object.keys(OUTCOME_KINDS) as ReviewOutcome["kind"][];
 
 export type CheckConclusion = "success" | "failure" | "action_required" | "skipped";
+
+/** Whether the naming rule refused something (as opposed to not being able to check it). */
+function namingRefused(facts: NamingFacts): boolean {
+  return facts.title !== null || (facts.name !== null && facts.name !== "unchecked");
+}
 
 /**
  * The check-run conclusion for an outcome.
@@ -628,19 +960,26 @@ export type CheckConclusion = "success" | "failure" | "action_required" | "skipp
  * `skipped` is the conclusion of exactly one outcome, `exempt`, and of no other: a required check
  * accepts it, which is the point (a pull request nobody is asked to review must not be held by a
  * review that does not apply to it), and it is safe only because it is never what a review that
- * ran, failed or could not decide says.
+ * ran, failed or could not decide says. An owner's pull request that the naming rule refuses is a
+ * `failure`; one whose name could not be checked needs a person.
  */
 export function conclusionOf(outcome: ReviewOutcome): CheckConclusion {
   if (outcome.kind === "exempt") return "skipped";
+  if (outcome.kind === "naming") {
+    return namingRefused(outcome.facts) ? "failure" : "action_required";
+  }
   if (outcome.kind !== "reported") return "action_required";
   const v = verdictOf(outcome.report);
   return v === "pass" ? "success" : v === "fail" ? "failure" : "action_required";
 }
 
 const CRITERION_LABEL: Record<Criterion, string> = {
+  genuine_contribution: "A genuine contribution, not spam",
   no_degradation: "Nothing is lost or broken",
   advances_revision: "The revision advances",
   material_improvement: "The dataset is materially better",
+  clear_title_and_description: "The title and description say what changed",
+  description_not_misleading: "The description is not misleading",
 };
 
 const RESULT_WORD: Record<CriterionResult, string> = {
@@ -648,6 +987,9 @@ const RESULT_WORD: Record<CriterionResult, string> = {
   fail: "No",
   unknown: "Could not tell",
 };
+
+/** Who reads a pull request the automation could not decide. */
+const PERSON = "a NEMAR administrator";
 
 /**
  * What a declined pull request is told. A stored row is shown again whenever its result is
@@ -658,34 +1000,60 @@ const RESULT_WORD: Record<CriterionResult, string> = {
  * which is the same for both.
  */
 const DECLINE_COPY: Record<DeclineReason, string> = {
-  contributor_paused:
-    "Automated review was paused for this contributor when this commit arrived. A maintainer needs to review this one by hand.",
+  contributor_paused: `Automated review was paused for this contributor when this commit arrived. ${capitalized(PERSON)} needs to review this one by hand.`,
   rate_limited:
     "Automated review was rate limited for this contributor when this commit arrived. That limit has since been removed. Push a new commit, or ask a NEMAR administrator to start the review.",
   daily_limit:
     "The daily limit of automated reviews had been reached when this commit arrived. That limit has since been removed. Push a new commit, or ask a NEMAR administrator to start the review.",
 };
 
+function capitalized(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
 /**
  * What a pull request opened by an owner or administrator is told (ADR 0107). It says the review is
  * not required, and that skipped is not a pass: nobody reading the check should mistake "this does
- * not apply" for "this was reviewed and is fine".
+ * not apply" for "this was reviewed and is fine". The naming rule is said to have run, because it
+ * did, and a waiver is said to be one.
  */
 const EXEMPT_COPY = {
   title: "Not required: opened by a NEMAR owner or administrator",
   summary:
-    "The automated review did not run on this pull request. NEMAR owners and administrators are not reviewed, and may merge without it.",
+    "The automated review did not run on this pull request. NEMAR owners and administrators are not reviewed, and may merge without it. The title and the dataset name were checked against the naming rule, and nothing was found.",
   text: "Skipped is not a pass. It says the review is not required here, not that this change was reviewed. A pull request opened by anyone else is reviewed.",
 } as const;
+
+const WAIVED_COPY = {
+  title: "Not required: opened by a NEMAR owner or administrator (naming rule waived)",
+  summary:
+    "The automated review did not run on this pull request. NEMAR owners and administrators are not reviewed. The title or the dataset name breaks the naming rule, and a NEMAR administrator waived the rule for this commit with an explicit override, which is recorded.",
+  text: "Skipped is not a pass. A new commit is checked against the naming rule again, and the waiver does not carry over to it.",
+} as const;
+
+/** What each finding of the naming rule says to the author, with what to do about it. */
+const NAMING_SENTENCE: Record<"title" | "name", Record<NamingProblem, string>> = {
+  title: {
+    author_year:
+      "The title starts with a name and a year, the way a dataset is named (for example Lee2019 or Lee-2019-EEG). A pull request title says what the change does, such as Add three EEG recordings. Edit the title.",
+    template_field:
+      "The title still has an unfilled template field (such as FirstAuthorSurname, paperDOI, or a bracketed instruction). Put the real words in its place. Edit the title.",
+  },
+  name: {
+    author_year:
+      "This pull request changes the dataset's name (the Name field of dataset_description.json) to one that starts with a name and a year, which the naming rule refuses. Choose a name that says what the dataset is.",
+    template_field:
+      "This pull request changes the dataset's name (the Name field of dataset_description.json) to one with an unfilled template field. Put the real name in its place.",
+  },
+};
 
 const ERROR_COPY: Record<RunError, string> = {
   evidence_unavailable: "The changes could not be read.",
   stale_head:
     "The pull request or dataset changed while the review was starting. Check the current pull request and publication status; a new delivery may be needed.",
-  too_large: "The change is too large for automated review. A maintainer needs to review it.",
-  auth_failed:
-    "The review service could not sign in. A maintainer needs to fix the review service.",
-  model_unavailable: "The reviewing model was unavailable.",
+  too_large: `The change is too large for automated review. ${capitalized(PERSON)} needs to review it.`,
+  auth_failed: `The review service could not sign in. ${capitalized(PERSON)} needs to fix the review service.`,
+  model_unavailable: "The reviewing model was unavailable, or did not finish in time.",
   model_refused: "The reviewing model declined to review this change.",
   model_truncated: "The reviewing model ran out of room before it finished.",
   model_invalid: "The reviewing model did not return a usable review.",
@@ -708,8 +1076,33 @@ const CODE_LABEL: Record<FindingCode, string> = {
   improvement_unclear: "Improvement unclear",
   evidence_incomplete: "Evidence incomplete",
   steering_attempt: "Text in the pull request tried to instruct the reviewer",
+  spam: "Spam: promotional, unrelated or purposeless content, or repeated links",
+  title_placeholder: "Title is placeholder or template text",
+  title_not_descriptive: "Title does not say what changed",
+  description_missing: "Description is empty",
+  description_placeholder: "Description is placeholder text or not readable",
+  description_misleading: "Description is misleading",
+  title_author_year: "Title starts with a name and a year",
+  title_template_field: "Title has an unfilled template field",
+  name_author_year: "New dataset name starts with a name and a year",
+  name_template_field: "New dataset name has an unfilled template field",
   other: "Other",
 };
+
+/** Where a fact came from, in the words the check uses for it. */
+function factSource(code: FindingCode): string {
+  switch (code) {
+    case "description_missing":
+      return "found from the pull request, not by the reviewer: a pull request needs a description of what changed";
+    case "title_author_year":
+    case "title_template_field":
+    case "name_author_year":
+    case "name_template_field":
+      return "found by the naming rule, not by the reviewer";
+    default:
+      return "found from the files, not by the reviewer";
+  }
+}
 
 export interface RenderedCheck {
   title: string;
@@ -718,8 +1111,12 @@ export interface RenderedCheck {
 }
 
 const FOOTER =
-  "An automated review of the changes in this pull request. It does not replace a maintainer, " +
-  "and a maintainer's approval is what merges it.";
+  "An automated review of the changes in this pull request. It does not replace a NEMAR " +
+  "administrator, whose approval is what merges it. Where the dataset's rules require this check, " +
+  "the pull request cannot be merged until it passes.";
+
+/** The line every outcome without a verdict ends with: it does not pass, and a person must look. */
+const NO_VERDICT = `No verdict was reached, so this check does not pass. ${capitalized(PERSON)} needs to look at this pull request.`;
 
 const AREA_LABEL: Record<Area, string> = {
   dataset_description: "Dataset description",
@@ -746,9 +1143,10 @@ function plural(n: number, one: string, many: string): string {
 /**
  * The account of what changed: a table of counts per area, the version and subject change, and
  * how much of it the model actually read. Computed from git, so it is the same whatever the model
- * said, and it accounts for every changed file.
+ * said, and it accounts for every changed file. `screened` says the full review never ran, so
+ * nothing was read.
  */
-export function describeChanges(e: ReviewEvidence): string[] {
+export function describeChanges(e: ReviewEvidenceV1, screened = false): string[] {
   const out: string[] = ["**What changed**", ""];
   if (e.files_changed === 0) {
     out.push("No files changed.", "");
@@ -769,15 +1167,17 @@ export function describeChanges(e: ReviewEvidence): string[] {
     facts.push(`Subjects ${e.subjects_before ?? "unknown"} to ${e.subjects_after ?? "unknown"}.`);
   }
   facts.push(
-    e.files_read === e.files_changed
-      ? `The content of all ${plural(e.files_changed, "changed file", "changed files")} was read.`
-      : `The content of ${e.files_read} of ${plural(e.files_changed, "changed file", "changed files")} was read. Files not read were judged by name and type only. Recordings and other data files are stored outside git and are never read.`,
+    screened
+      ? "The full review did not run, so no file's content was read."
+      : e.files_read === e.files_changed
+        ? `The content of all ${plural(e.files_changed, "changed file", "changed files")} was read.`
+        : `The content of ${e.files_read} of ${plural(e.files_changed, "changed file", "changed files")} was read. Files not read were judged by name and type only. Recordings and other data files are stored outside git and are never read.`,
   );
   out.push(facts.join(" "), "");
   return out;
 }
 
-function listChangedFiles(e: ReviewEvidence): string {
+function listChangedFiles(e: ReviewEvidenceV1): string {
   if (e.listed.length === 0) return "";
   const rows = e.listed.map((f) =>
     f.path
@@ -791,9 +1191,9 @@ function listChangedFiles(e: ReviewEvidence): string {
 }
 
 /**
- * What a reader should look at before approving: a steering attempt, each finding, the facts found
- * from the files that no finding already states, and a warning when the reviewer did not see
- * everything. Empty when there is nothing to say. One bullet per line, in markdown.
+ * What a reader should look at before approving: a steering attempt, each finding, the facts
+ * that no finding already states, and a warning when the reviewer did not see everything. Empty
+ * when there is nothing to say. One bullet per line, in markdown.
  */
 export function findingLines(report: PrReviewReport): string[] {
   // A code newer than this build (the CLI ships apart from the Worker) is named, not "undefined".
@@ -809,15 +1209,18 @@ export function findingLines(report: PrReviewReport): string[] {
     const note = f.note ? `: ${f.note}` : "";
     details.push(`- **${labelOf(f.code)}**${where}, ${f.severity}${note}`);
   }
-  // Facts found from the files, stated in their own right so a red or amber answer is never left
-  // without a reason. A model finding that already says the same thing is not repeated.
+  // Facts stated in their own right so a red or amber answer is never left without a reason. A
+  // model finding that already says the same thing is not repeated.
   for (const n of notes) {
     if (report.findings.some((f) => f.criterion === n.criterion && f.code === n.code)) continue;
     details.push(
-      `- **${labelOf(n.code)}**, ${n.result === "fail" ? "blocker" : "concern"}: found from the files, not by the reviewer.`,
+      `- **${labelOf(n.code)}**, ${n.result === "fail" ? "blocker" : "concern"}: ${factSource(n.code)}.`,
     );
   }
-  if (report.evidence.truncated) {
+  // A report that ended at the screen read no content at all, which the account of what changed
+  // already says; this line is about a review that read some of it.
+  const screened = report.v === REPORT_VERSION && report.stage === "screen";
+  if (report.evidence.truncated && !screened) {
     details.push(
       "- Some changed files were not shown to the reviewer in full, so a clean result is not claimed.",
     );
@@ -825,9 +1228,63 @@ export function findingLines(report: PrReviewReport): string[] {
   return details;
 }
 
+/** What the naming rule says to an author, sentence by sentence. Empty when it found nothing. */
+export function namingLines(report: PrReviewReport): string[] {
+  if (report.v !== REPORT_VERSION) return [];
+  const out: string[] = [];
+  if (report.evidence.title_problem !== null) {
+    out.push(NAMING_SENTENCE.title[report.evidence.title_problem]);
+  }
+  if (report.evidence.name_problem !== null) {
+    out.push(NAMING_SENTENCE.name[report.evidence.name_problem]);
+  }
+  return out;
+}
+
+/** The check of an owner's or administrator's pull request the naming rule refused or could not check. */
+function renderNaming(facts: NamingFacts): RenderedCheck {
+  const lines: string[] = [];
+  if (facts.title !== null) lines.push(NAMING_SENTENCE.title[facts.title]);
+  if (facts.name !== null && facts.name !== "unchecked") {
+    lines.push(NAMING_SENTENCE.name[facts.name]);
+  }
+  const unchecked =
+    facts.name === "unchecked"
+      ? "The dataset's name could not be read from GitHub, so it was not checked against the naming rule. Start the check again with nemar admin pr-reviews start."
+      : null;
+  const override =
+    "The only way past the naming rule without a change is an explicit override by a NEMAR administrator: nemar admin pr-reviews allow <dataset> <pr> --admin, which is recorded and applies to this commit only.";
+  if (namingRefused(facts)) {
+    return {
+      title: "Needs changes: the naming rule",
+      summary: [
+        "The automated review does not run for NEMAR owners and administrators, but the naming rule applies to every pull request, and it found a problem.",
+        "",
+        ...lines.map((l) => `- ${l}`),
+        ...(unchecked ? ["", unchecked] : []),
+      ].join("\n"),
+      text: `${override}\n\n${FOOTER}`,
+    };
+  }
+  return {
+    title: "Could not decide: the naming rule was not checked",
+    summary: unchecked ?? NO_VERDICT,
+    text: `${NO_VERDICT}\n\n${FOOTER}`,
+  };
+}
+
+/** The model line at the foot of a report: which model screened it, and which reviewed it. */
+function modelLine(report: PrReviewReport): string {
+  if (report.v === 1) return `Reviewed with ${report.model}.`;
+  return report.stage === "screen"
+    ? `Screened with ${report.models.screen}; the full review did not run.`
+    : `Screened with ${report.models.screen} and reviewed with ${report.models.review}.`;
+}
+
 /** Render the check-run's title, summary and detail from an outcome. Pure; no input is quoted raw. */
 export function renderCheck(outcome: ReviewOutcome): RenderedCheck {
-  if (outcome.kind === "exempt") return { ...EXEMPT_COPY };
+  if (outcome.kind === "exempt") return outcome.waived ? { ...WAIVED_COPY } : { ...EXEMPT_COPY };
+  if (outcome.kind === "naming") return renderNaming(outcome.facts);
   if (outcome.kind === "declined") {
     return {
       title: "Not reviewed",
@@ -839,37 +1296,59 @@ export function renderCheck(outcome: ReviewOutcome): RenderedCheck {
     return {
       title: "Could not decide",
       summary: ERROR_COPY[outcome.error],
-      text: `${FOOTER}\n\nNo verdict was reached, so this check does not pass.`,
+      text: `${FOOTER}\n\n${NO_VERDICT}`,
     };
   }
   if (outcome.kind === "unreported") {
     return {
       title: "Could not decide",
       summary: "The review did not finish in time. Push again to re-run it.",
-      text: `${FOOTER}\n\nNo verdict was reached, so this check does not pass.`,
+      text: `${FOOTER}\n\n${NO_VERDICT}`,
     };
   }
 
   const { report } = outcome;
   const verdict = verdictOf(report);
   const { criteria } = factsOf(report);
+  const screened = report.v === REPORT_VERSION && report.stage === "screen";
   const title =
     verdict === "pass"
-      ? "Passes: nothing lost, revision advances, materially better"
+      ? report.v === 1
+        ? "Passes: nothing lost, revision advances, materially better"
+        : "Passes: nothing lost, revision advances, materially better, clearly described"
       : verdict === "fail"
-        ? "Needs changes"
+        ? screened
+          ? "Needs changes: stopped by the screen"
+          : "Needs changes"
         : "Could not decide";
   const lines: string[] = [];
+  if (screened) {
+    lines.push(
+      "The screen read this pull request as spam (promotional, unrelated or purposeless content, or repeated links), so the full review did not run.",
+      "",
+    );
+  }
   if (report.summary) lines.push(report.summary, "");
-  lines.push(...describeChanges(report.evidence));
+  const naming = namingLines(report);
+  if (naming.length > 0) {
+    lines.push("**Naming rule**", "", ...naming.map((l) => `- ${l}`), "");
+  }
+  lines.push(...describeChanges(report.evidence, screened));
   lines.push("| Question | Answer |", "| --- | --- |");
-  for (const c of CRITERIA) lines.push(`| ${CRITERION_LABEL[c]} | ${RESULT_WORD[criteria[c]]} |`);
+  for (const c of criteriaOf(report)) {
+    const result = resultOf(criteria, c) ?? "unknown";
+    // A screen report never asked anything but whether the pull request is genuine; a rule may
+    // still have failed one of the others.
+    const word = screened && result === "unknown" ? "Not assessed" : RESULT_WORD[result];
+    lines.push(`| ${CRITERION_LABEL[c]} | ${word} |`);
+  }
   const details = findingLines(report);
   const text = [
     details.length ? `### Findings\n\n${details.join("\n")}` : "No findings.",
     listChangedFiles(report.evidence),
     FOOTER,
-    `Reviewed with ${report.model}.`,
+    verdict === "uncertain" ? `${capitalized(PERSON)} needs to look at this pull request.` : "",
+    modelLine(report),
   ]
     .filter((x) => x !== "")
     .join("\n\n");
@@ -912,6 +1391,47 @@ export function renderComment(outcome: ReviewOutcome, headSha: string): string {
 }
 
 // ---------------------------------------------------------------------------------------------
+// What the reviews cost: token counts and an estimate in dollars, for the administrator's list.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * List prices in US dollars per million tokens, by model, checked against the published price list
+ * on 2026-10-16. Haiku 5.5's is the rate for prompts up to 100,000 tokens (five times that above),
+ * which the screen's always are; thinking is billed as output and is inside `output_tokens`. An
+ * estimate for orientation, never an input to a decision: the token counts are the measurement.
+ */
+export const MODEL_PRICES_USD_PER_MTOK: Readonly<
+  Record<ScreenModel | ReviewModel, { input: number; output: number }>
+> = {
+  "claude-haiku-5-5": { input: 0.1, output: 0.5 },
+  "claude-sonnet-5-5": { input: 2, output: 10 },
+};
+
+/** Token totals of a set of reviews, by stage. */
+export interface TokenTotals {
+  screen_input: number;
+  screen_output: number;
+  review_input: number;
+  review_output: number;
+}
+
+/**
+ * What the token totals cost at {@link MODEL_PRICES_USD_PER_MTOK}, in US dollars, to the cent. The
+ * screen is priced as {@link SCREEN_MODELS}' model and the review as {@link REVIEW_MODELS}'.
+ */
+export function estimateCostUsd(t: TokenTotals): number {
+  const screen = MODEL_PRICES_USD_PER_MTOK[SCREEN_MODELS[0]];
+  const review = MODEL_PRICES_USD_PER_MTOK[REVIEW_MODELS[0]];
+  const dollars =
+    (t.screen_input * screen.input +
+      t.screen_output * screen.output +
+      t.review_input * review.input +
+      t.review_output * review.output) /
+    1_000_000;
+  return Math.round(dollars * 100) / 100;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Who gets reviewed: an administrator's block, and the record shown beside it.
 // ---------------------------------------------------------------------------------------------
 
@@ -949,9 +1469,10 @@ export type CallbackOutcome = Extract<ReviewOutcome, { kind: "reported" | "error
 
 /**
  * Turn a callback's untrusted `outcome`, `report` and `error` fields into an outcome. A report
- * goes through {@link parsePrReviewReport}; one it refuses is the run error `report_invalid`. An
- * error word that is not in the vocabulary, or that only the Worker may use, is `workflow_failed`. Anything else (a missing or
- * unknown `outcome`) is also `workflow_failed`: it can never become a verdict.
+ * goes through {@link parsePrReviewReport} (version 2 only); one it refuses is the run error
+ * `report_invalid`. An error word that is not in the vocabulary, or that only the Worker may use,
+ * is `workflow_failed`. Anything else (a missing or unknown `outcome`) is also `workflow_failed`: it
+ * can never become a verdict.
  */
 export function parseCallbackOutcome(
   body: {
