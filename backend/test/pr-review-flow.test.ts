@@ -40,6 +40,7 @@ import {
   sweepStalePrReviews,
 } from "../src/services/pr-review";
 import { REVIEW_EXEMPT_SQL } from "../src/services/pr-review-exemption";
+import { __setNamingReadTimeoutForTests } from "../src/services/pr-review-naming";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1, wrapD1, yieldingD1 } from "./helpers/d1";
 import { type NamingRepo, namingResponse } from "./helpers/github-naming";
@@ -109,7 +110,7 @@ beforeAll(() => {
       }
       const permission = req.method === "GET" ? await permissionResponse(url, permissions) : null;
       if (permission) return permission;
-      const named = req.method === "GET" ? namingResponse(url, naming) : null;
+      const named = req.method === "GET" ? await namingResponse(url, naming) : null;
       if (named) return named;
       return new Response("not found", { status: 404 });
     },
@@ -1162,6 +1163,19 @@ describe("the naming rule runs first, owners and administrators included (ADR 01
     );
     const noBase = await deliver(payload);
     expect(noBase.body).toMatchObject({ reason: "naming_unchecked" });
+  });
+
+  test("a GitHub too slow to answer makes the name unchecked: the check needs a person", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    naming[DATASET] = { compareDelayMs: 1_000 };
+    __setNamingReadTimeoutForTests(100);
+    try {
+      const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+      expect(r.body).toMatchObject({ reason: "naming_unchecked" });
+      expect(lastCheck()).toMatchObject({ conclusion: "action_required" });
+    } finally {
+      __setNamingReadTimeoutForTests(null);
+    }
   });
 
   test("a recorded waiver for the commit turns the failure into a skipped check; another commit's does not", async () => {

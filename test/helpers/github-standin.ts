@@ -199,7 +199,7 @@ export function startGitHubStandin(): GitHubStandin {
       const permission = req.method === "GET" ? await permissionResponse(url, {}) : null;
       if (permission) return permission;
       // The naming rule's reads on an owner's or administrator's pull request (ADR 0107).
-      const named = req.method === "GET" ? namingResponse(url, state.naming) : null;
+      const named = req.method === "GET" ? await namingResponse(url, state.naming) : null;
       if (named) return named;
 
       const user = url.pathname.match(/^\/users\/([^/]+)$/);

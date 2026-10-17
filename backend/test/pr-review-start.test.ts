@@ -84,7 +84,7 @@ beforeAll(() => {
       }
       const permission = req.method === "GET" ? await permissionResponse(url, permissions) : null;
       if (permission) return permission;
-      const named = req.method === "GET" ? namingResponse(url, naming) : null;
+      const named = req.method === "GET" ? await namingResponse(url, naming) : null;
       if (named) return named;
       const pull = url.pathname.match(/^\/repos\/nemarDatasets\/([^/]+)\/pulls\/(\d+)$/);
       if (req.method === "GET" && pull) {

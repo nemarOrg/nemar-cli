@@ -28,11 +28,15 @@ import { getDatasetsTokenWithRefresher } from "./github-auth.js";
 import { GITHUB_API, ORG_NAME, ghHeaders } from "./github/shared.js";
 import { githubFetchWithRetry } from "./github/transport.js";
 
-/** The longest one read may take before the name is `unchecked`. */
-let readTimeoutMs = 4_000;
+/**
+ * The longest one read may take before the name is `unchecked`. The comparison and then the two
+ * reads of the file (made together) run inside the webhook's ten seconds, after the exemption's own
+ * GitHub question and before the check is posted, so each is kept short.
+ */
+let readTimeoutMs = 3_000;
 
 export function __setNamingReadTimeoutForTests(ms: number | null): void {
-  readTimeoutMs = ms ?? 4_000;
+  readTimeoutMs = ms ?? 3_000;
 }
 
 const SHA40 = /^[0-9a-f]{40}$/;

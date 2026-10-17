@@ -25,6 +25,8 @@ export interface NamingRepo {
   names?: Record<string, string | null | number>;
   /** An HTTP status for the comparison itself, instead of an answer. */
   compareStatus?: number;
+  /** Answer the comparison only after this long, past any timeout a test sets. */
+  compareDelayMs?: number;
 }
 
 export const UNCHANGED_NAME: NamingRepo = { files: ["README.md"] };
@@ -38,13 +40,14 @@ export function isNamingPath(pathname: string): boolean {
 }
 
 /** The answer for a request, or null when it is not one of the naming rule's reads. */
-export function namingResponse(
+export async function namingResponse(
   url: URL,
   table: Readonly<Record<string, NamingRepo>>,
-): Response | null {
+): Promise<Response | null> {
   const compare = url.pathname.match(COMPARE);
   if (compare) {
     const repo = table[decodeURIComponent(compare[1])] ?? UNCHANGED_NAME;
+    if (repo.compareDelayMs !== undefined) await Bun.sleep(repo.compareDelayMs);
     if (repo.compareStatus !== undefined) {
       return new Response("{}", { status: repo.compareStatus, headers: { "retry-after": "0" } });
     }
