@@ -17,11 +17,13 @@
  *
  * **The order of a review.** The facts first, before any model is asked: the naming rule on the
  * title and on a changed dataset name, and whether there is a description at all. Then the screen
- * (stage 1), which sees the pull request's text and the list of changed files, never a file's
- * content, and may stop only spam. A stop ends the run with a screen report, and no file's content
- * is read. Otherwise the content is read and the review (stage 2) answers. Both stages run at max
- * effort and stream, each under {@link STAGE_BUDGETS}; a refusal or a truncation at either is no
- * verdict, which the Worker publishes as a check that does not pass and needs a person.
+ * (stage 1), which sees the pull request's text, the list of changed files and the platform's
+ * facts, and may stop only spam. To state those facts the listing reads one file's content,
+ * `dataset_description.json` (the version and the name, before and after), and shows the screen
+ * the facts and never the file. A stop ends the run with a screen report, and no other file's
+ * content is read. Otherwise the content is read and the review (stage 2) answers. Both stages run
+ * at max effort and stream, each under {@link STAGE_BUDGETS}; a refusal or a truncation at either
+ * is no verdict, which the Worker publishes as a check that does not pass and needs a person.
  *
  * **Nothing in the dispatch is trusted for a decision.** The pull request is re-read from the API
  * (`--pr-json`): it must still be open, still target `main`, and still be at `--head`, and the

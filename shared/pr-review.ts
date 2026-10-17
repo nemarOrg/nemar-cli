@@ -171,7 +171,7 @@ export interface ReviewFinding {
   code: FindingCode;
   /** A repository path the finding is about, or null. Pattern-checked, never trusted. */
   path: string | null;
-  /** Sanitised free text, at most {@link NOTE_MAX} characters. */
+  /** Sanitized free text, at most {@link NOTE_MAX} characters. */
   note: string;
 }
 
@@ -627,7 +627,7 @@ function parseV1Report(raw: Record<string, unknown>): PrReviewReport {
 /**
  * Validate a version 2 report: what a callback must carry. Accepts only the keys declared above,
  * only members of the closed sets, only counts that are non-negative integers, and only versions
- * that are `X.Y.Z`. Free text (`note`, `summary`) is not rejected for its content, it is sanitised:
+ * that are `X.Y.Z`. Free text (`note`, `summary`) is not rejected for its content, it is sanitized:
  * a model's wording is not a reason to lose the review. Any other version, version 1 included, is
  * refused (`bad_version`): a report is posted by the job of the same release.
  *

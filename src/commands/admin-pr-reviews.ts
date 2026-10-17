@@ -1043,7 +1043,7 @@ async function assessPullRequest(
   };
 }
 
-/** The review as one coloured cell: its verdict and reason, or "unknown" when it could not be read. */
+/** The review as one colored cell: its verdict and reason, or "unknown" when it could not be read. */
 function reviewCell(a: {
   verdict: QueueVerdict;
   detail: string | null;
