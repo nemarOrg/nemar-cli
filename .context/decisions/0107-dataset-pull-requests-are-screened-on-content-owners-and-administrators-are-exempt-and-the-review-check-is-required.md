@@ -152,6 +152,8 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
   GitHub may take longer to compute a comparison for a pull request with many commits or files, and that has not been measured.
   A read that times out makes the name `unchecked`: a check that needs a person, never a pass.
   The reads run inside the webhook's own request, and at their worst the permission lookup (4 seconds), the comparison (3), the file reads (3) and the check post (5) add up to more than the 10 seconds GitHub gives a delivery; the sum has not been measured either.
+  GitHub does not retry a failed delivery by itself, so a delivery that times out or fails is recovered by redelivering it from the App's delivery log, and a redelivered exempt commit posts the same check again.
+  The staging soak measures these durations before the required check is turned on; if they come near the limit, the reads move off the request.
 - **The only way past the rule without a change is an explicit override**, `nemar admin pr-reviews allow <dataset> <pr> --admin --reason <why>`, which replaces the exemption for this rule.
   The Worker reads the pull request itself, refuses it for an author who is not exempt (their review includes the rule) and for a commit a review has touched, records the waiver in the audit log (who, the commit, what the rule found as closed words, the reason given; never the title or the name), and then posts a `skipped` check that says the rule was waived.
   The record comes first: if it cannot be written, nothing is posted, and a recorded waiver whose check did not land is posted by asking again.
