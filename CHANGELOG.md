@@ -16,7 +16,7 @@ earlier releases are described only by their generated notes.
 ## 0.10.20 - 2026-10-18
 
 The Zarr conversion that runs on `hallu` now pins biosigIO 1.2.13 and types the failures caused by missing companion data.
-Existing stores are not reconverted by this release, because the engine stamp (`ZARR_ENGINE_VERSION`) stays `3`; a recording gets the new verdicts when it converts again.
+This release requeues nothing and leaves `ZARR_ENGINE_VERSION` at `3`. A dataset's stores are rebuilt when that dataset next runs: the drain rebuilds every recording with `--clean`, and a biosigIO change makes a published index non-current, so a pending retry round also rebuilds. A recording that converts again gets the new verdicts.
 There is no migration and no new Worker secret or variable.
 The Worker serves the index schema from one route, so the descriptions that route returns change on deploy; no Worker logic changes.
 The conversion changes run on `hallu` from this repository's `main` branch, not from the npm package.
@@ -24,7 +24,7 @@ The conversion changes run on `hallu` from this repository's `main` branch, not 
 ### Changed
 
 - **Zarr conversion pins biosigIO 1.2.13 (`>=1.2.13,<1.2.14`).**
-  A BrainVision data file shorter than its header declares is refused as `corrupt_or_truncated`, where 1.2.12 read it with the tail dropped.
+  A BrainVision data file that does not hold whole frames is refused as `corrupt_or_truncated`: shorter than its header's `DataPoints` count declares, or, when the header has no `DataPoints` count, a size that is not a whole number of frames. 1.2.12 read the whole frames of such a file and dropped the trailing partial frame without a warning.
   An EDF+C or BDF+C recording whose first time-keeping onset is not zero now converts, where it was refused as not EDF(+) or BDF(+) compliant.
   A truncated FIF read through `Recording.from_file` is typed `corrupt_or_truncated`, where it was `file_read_error`.
   A BrainVision cut that falls exactly on a frame boundary of a file with no `DataPoints` count is not detected; that is a known limit of the reader.
@@ -33,7 +33,7 @@ The conversion changes run on `hallu` from this repository's `main` branch, not 
   These replace the `retry_exhausted`, `maxshield_probe_failed` and `file_read_error` verdicts that the same recordings used to receive, and none of them is retried.
   A host error raised while the reader recovers from a refusal keeps its retry: a refusal's code is read from the exception and its direct causes, never from its context.
   Discovery now lists tree paths with `-z`, so a recording whose name has non-ASCII bytes matches the header that names it.
-  That widens discovery for those datasets; a dataset converted before this release keeps its old discovery until the engine stamp is bumped, which this release does not do.
+  That widens discovery for those datasets. A dataset takes the new discovery when it next runs; the engine stamp, which this release leaves at `3`, governs requeues only.
 - **The source copy of the dataset pull-request review workflow now matches the copy that dataset repositories run (#1820).**
   The review workflow runs the checkout, the Bun setup and the install after it mints the dataset token, and before it writes the token to the clone's configuration.
   The install uses `--ignore-scripts`, and the job timeout is 28 minutes, below the 30-minute watchdog deadline.
@@ -48,9 +48,11 @@ The conversion changes run on `hallu` from this repository's `main` branch, not 
 
 ### Known limitations
 
-- Existing stores are unchanged, and no requeue is part of this release.
+- This release requeues nothing; a dataset's stores change only when that dataset next runs (see the first paragraph above).
 - Streamed export still raises an uncoded error for a truncated FIF (biosigIO #161) and for truncated KIT and 4D/BTi files (biosigIO #168), so those are retried until the retry budget runs out.
 - In a local run, a git-annex pointer whose content was never fetched is a typed `file_read_error` that is never retried; whether it should stay retryable is open (#1812).
+- A host read error during the MaxShield header probe is still recorded as `maxshield_probe_failed`, which is terminal (#1833).
+- A short read of an EEGLAB `.fdt` caused by an I/O error is reported as a sample-count mismatch, which is typed `corrupt_or_truncated` (biosigIO #169).
 
 ## 0.10.19 - 2026-10-16
 
