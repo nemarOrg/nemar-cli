@@ -608,6 +608,7 @@ with a comment, c comments).
 
 REVIEW column (the automated review of the pull request's CURRENT commit):
   pass              nothing lost, the revision advances, the dataset is materially better
+                    (a version 2 report also needs a clear title and description)
   fail              the review found a problem; the author needs to change something
   uncertain         the review could not decide whether it is a good change
   not reviewed      no review of this commit is on record: the review is off, the contributor was

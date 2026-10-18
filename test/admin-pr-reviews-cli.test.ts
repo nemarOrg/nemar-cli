@@ -657,6 +657,25 @@ function livePull(
   gh.pulls["nm000201#7"] = { sha, author: "alice", ...over };
 }
 
+describe("the REVIEW column legend", () => {
+  test("says what a pass needs: the three questions, and for a version 2 report a clear title and description", async () => {
+    const r = await cli([...PR, "--help-all"]);
+    expect(r.exitCode).toBe(0);
+    const help = r.stdout.replace(/\s+/g, " ");
+    expect(help).toContain(
+      "pass nothing lost, the revision advances, the dataset is materially better (a version 2 report also needs a clear title and description)",
+    );
+  });
+
+  test("says what the words on an exempt row mean, and how to release one", async () => {
+    const r = await cli([...PR, "--help-all"]);
+    const help = r.stdout.replace(/\s+/g, " ");
+    expect(help).toContain('"naming rule failed: needs allow --admin"');
+    expect(help).toContain('"naming rule not checked: run start"');
+    expect(help).toContain("allow <dataset> <pr> --admin --reason <why>");
+  });
+});
+
 describe("nemar admin pr-reviews allow and block say an owner or administrator is exempt", () => {
   test("in their detailed help, so a block is not read as holding one back", async () => {
     for (const verb of ["allow", "block"]) {
