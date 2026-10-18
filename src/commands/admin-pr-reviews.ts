@@ -40,6 +40,7 @@ import {
   type ReviewEvidence,
   type ReviewOutcome,
   factsOf,
+  factsStop,
   findingLines,
   namingLines,
   renderCheck,
@@ -389,12 +390,11 @@ export function reportLines(outcome: ReviewOutcome): string[] {
 /**
  * Why a review ended at the facts, in the words of the check's own title: the naming rule found a
  * problem (`Needs changes: the naming rule`), or it could not check the dataset's name (`Could not
- * decide: the naming rule was not checked`).
+ * decide: the naming rule was not checked`). Both come from the same answer, `factsStop`, so this
+ * line and the title cannot disagree, whatever the verdict is.
  */
 function factsReason(e: ReviewEvidence): string {
-  const refused =
-    e.title_problem !== null || (e.name_problem !== null && e.name_problem !== "unchecked");
-  return refused
+  return factsStop(e) === "refused"
     ? "the naming rule found a problem"
     : "the naming rule could not check the dataset name";
 }

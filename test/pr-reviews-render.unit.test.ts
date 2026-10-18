@@ -13,7 +13,12 @@ import type {
   VolumeWindow,
   WaiveNamingResponse,
 } from "../shared/contract/pr-review-admin";
-import { parsePrReviewReport, parseStoredPrReviewReport, renderCheck } from "../shared/pr-review";
+import {
+  parsePrReviewReport,
+  parseStoredPrReviewReport,
+  renderCheck,
+  verdictOf,
+} from "../shared/pr-review";
 import {
   ageOf,
   briefLines,
@@ -627,6 +632,45 @@ describe("a version 2 report on the terminal", () => {
     expect(lines).toContain(
       "Version:  1.0.0 to 1.0.0   revision advances: NO; stage: facts only; the review did not run (the naming rule found a problem)",
     );
+  });
+
+  test("the title, the copy and the reason line follow the naming fact, not the verdict", () => {
+    // A name that could not be read, with a version that did not go up: the verdict fails (the
+    // revision does not advance), but the naming rule refused nothing, and every surface that says
+    // why the review did not run says that the name was not checked.
+    const report = factsOnly({ name_problem: "unchecked", version_after: "1.0.0" });
+    expect(verdictOf(report)).toBe("fail");
+    const check = renderCheck({ kind: "reported", report });
+    expect(check.title).toBe("Could not decide: the naming rule was not checked");
+    expect(check.summary).toContain("could not check this pull request's new dataset name");
+    expect(check.summary).not.toContain("found a problem with this pull request");
+    const next = brief(report);
+    expect(next[0]).toBe("Could not decide: the naming rule was not checked");
+    expect(next).toContain(
+      "Version:  1.0.0 to 1.0.0   revision advances: NO; stage: facts only; the review did not run (the naming rule could not check the dataset name)",
+    );
+    const show = reportLines({ kind: "reported", report }).map((l) => l.replace(ANSI, ""));
+    expect(show[0]).toBe("Could not decide: the naming rule was not checked");
+    expect(show.join("\n")).toContain("could not check this pull request's new dataset name");
+
+    // The same version with a refusal reads "found a problem" in all three, and so does a refusal
+    // beside an unreadable name: what the rule found decides over what it could not read.
+    for (const found of [
+      { title_problem: "author_year" },
+      { name_problem: "template_field" },
+      { title_problem: "template_field", name_problem: "unchecked" },
+    ]) {
+      const refused = factsOnly({ ...found, version_after: "1.0.0" });
+      expect(verdictOf(refused)).toBe("fail");
+      const said = renderCheck({ kind: "reported", report: refused });
+      expect(said.title, JSON.stringify(found)).toBe("Needs changes: the naming rule");
+      expect(said.summary, JSON.stringify(found)).toContain(
+        "found a problem with this pull request",
+      );
+      expect(brief(refused).join("\n"), JSON.stringify(found)).toContain(
+        "(the naming rule found a problem)",
+      );
+    }
   });
 
   test("a screen report and a full report keep their own words", () => {

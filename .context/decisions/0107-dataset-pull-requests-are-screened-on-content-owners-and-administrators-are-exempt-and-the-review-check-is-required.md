@@ -118,7 +118,9 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
   The review job decides the facts first.
   When the title, or the dataset's changed name, breaks the naming rule (3a), or the changed name cannot be read, the run ends at the `facts` stage: no model is called and no tokens are spent, `models` names none, all six criteria are not assessed, and the report says why in the rule's own sentences.
   The report stage is `facts`, and a facts report can never pass: the parser refuses one that names a model, assesses anything, spent a token, or has no naming fact to explain it.
-  The check reads "Needs changes: the naming rule", or "Could not decide: the naming rule was not checked" when the name could not be read, and the author edits the title or the `Name` and pushes again.
+  The check reads "Needs changes: the naming rule", or "Could not decide: the naming rule was not checked" when the name could not be read and the rule refused nothing, and the author edits the title or the `Name` and pushes again.
+  The title, the copy under it and the CLI's reason line are all chosen by the naming fact (`factsStop`) and never by the verdict, so they agree: a version that did not advance fails the verdict of a facts report whose name was only unreadable, and that report still reads "not checked" everywhere.
+  A refusal beside an unreadable name reads "Needs changes", because the rule found something.
 - **A description is read up to 12,000 characters, and a longer one is recorded as cut.**
   Both models are shown the first 12,000 characters of the tidied description and the mark `[cut]`, and the evidence records `description_cut`.
   A cut description cannot pass: `description_not_misleading` is no better than unknown, because whether the rest misleads, or tries to instruct the reviewer, was not assessed.

@@ -1088,6 +1088,21 @@ function namingRefused(facts: NamingFacts): boolean {
 }
 
 /**
+ * Why a report that ended at the facts ended there, from its naming fact alone: `refused` when the
+ * rule found a problem with the title or the new dataset name, `unchecked` when it found none and
+ * could not read the name. The check's title and copy, and the CLI's one-line reason, all come from
+ * this answer, so they cannot disagree. The verdict is not the answer: a version that did not
+ * advance fails the verdict of a report whose name was only unreadable, and the rule refused nothing.
+ */
+export function factsStop(
+  evidence: Pick<ReviewEvidence, "title_problem" | "name_problem">,
+): "refused" | "unchecked" {
+  return namingRefused({ title: evidence.title_problem, name: evidence.name_problem })
+    ? "refused"
+    : "unchecked";
+}
+
+/**
  * The check-run conclusion for an outcome.
  *
  * `success` and `failure` are the two answers a review can give. Everything else, a review that
@@ -1173,14 +1188,15 @@ const WAIVED_COPY = {
 } as const;
 
 /**
- * What a pull request whose review ended at the facts is told, in the order of its verdict: it says
- * the rule decided and no model was asked, and what the author does, which is to fix the title or
- * the dataset's name and push again. Nothing is reviewed until the rule is satisfied, so the next
- * push is what runs the review.
+ * What a pull request whose review ended at the facts is told, by the naming fact that ended it
+ * ({@link factsStop}, not the verdict): it says the rule decided and no model was asked, and what
+ * the author does, which is to fix the title or the dataset's name and push again. Nothing is
+ * reviewed until the rule is satisfied, so the next push is what runs the review.
  */
 const FACTS_COPY = {
-  fail: "The naming rule found a problem with this pull request, so the review stage did not run and no model was asked. Edit the title, or the Name in dataset_description.json, as described below, and push again: the review runs on the new commit.",
-  uncertain:
+  refused:
+    "The naming rule found a problem with this pull request, so the review stage did not run and no model was asked. Edit the title, or the Name in dataset_description.json, as described below, and push again: the review runs on the new commit.",
+  unchecked:
     "The naming rule could not check this pull request's new dataset name, so the review stage did not run and no model was asked. Fixing dataset_description.json as described below and pushing again runs the review.",
 } as const;
 
@@ -1510,6 +1526,8 @@ export function renderCheck(outcome: ReviewOutcome): RenderedCheck {
   const stage = report.v === REPORT_VERSION ? report.stage : "full";
   const screened = stage === "screen";
   const factsOnly = stage === "facts";
+  // Why a facts report ended, which picks its title and copy: the naming fact, and never the verdict.
+  const stop = report.v === REPORT_VERSION && factsOnly ? factsStop(report.evidence) : null;
   // Neither the screen nor the facts read a file, and a question they never asked is not assessed.
   const unread = stage !== "full";
   const title =
@@ -1517,14 +1535,14 @@ export function renderCheck(outcome: ReviewOutcome): RenderedCheck {
       ? report.v === 1
         ? "Passes: nothing lost, revision advances, materially better"
         : "Passes: nothing lost, revision advances, materially better, clearly described"
-      : verdict === "fail"
-        ? screened
-          ? "Needs changes: stopped by the screen"
-          : factsOnly
-            ? "Needs changes: the naming rule"
+      : stop !== null
+        ? stop === "refused"
+          ? "Needs changes: the naming rule"
+          : "Could not decide: the naming rule was not checked"
+        : verdict === "fail"
+          ? screened
+            ? "Needs changes: stopped by the screen"
             : "Needs changes"
-        : factsOnly
-          ? "Could not decide: the naming rule was not checked"
           : "Could not decide";
   const lines: string[] = [];
   if (screened) {
@@ -1533,7 +1551,7 @@ export function renderCheck(outcome: ReviewOutcome): RenderedCheck {
       "",
     );
   }
-  if (factsOnly) lines.push(FACTS_COPY[verdict === "fail" ? "fail" : "uncertain"], "");
+  if (stop !== null) lines.push(FACTS_COPY[stop], "");
   if (report.summary) lines.push(report.summary, "");
   const naming = namingLines(report);
   if (naming.length > 0) {
