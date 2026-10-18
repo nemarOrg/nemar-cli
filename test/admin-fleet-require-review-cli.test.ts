@@ -239,6 +239,7 @@ describe("one dataset", () => {
       dataset_id: "nm000201",
       dry_run: true,
       review_enabled: true,
+      auto_require: false,
       intent: "require",
       action: "create",
       applied: false,

@@ -262,7 +262,10 @@ export interface Bindings {
   // gates the addition only: a dataset that is not reviewed has its ruleset taken off whatever
   // this says. The explicit tools (the review-ruleset routes and `nemar admin fleet
   // require-review`) do not read it. The owner turns it on when the fleet step of the rollout
-  // starts, after the canary and the calibration gate; it is never on before.
+  // starts, after the canary and the calibration gate; it is never on before. It is set in the
+  // configuration file, but a Worker secret of the same name would also turn it on, survives a
+  // deploy and does not show in the file, so the review-ruleset routes report what the Worker
+  // reads as `auto_require`.
   PR_REVIEW_AUTO_REQUIRE?: string; // "1" lets the automatic paths put the review ruleset on
 
   // Publication review (ADR 0102). When PUBLICATION_REVIEW_ENABLED is exactly "1", a stored

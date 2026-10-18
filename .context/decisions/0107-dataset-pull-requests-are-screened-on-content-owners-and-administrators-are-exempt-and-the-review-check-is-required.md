@@ -127,6 +127,8 @@ And the review only ever sees a pull request's text and metadata, so a count of 
   The switch does not gate a removal: a dataset that is not reviewed has the review ruleset taken off whatever the switches say, so a dataset made private while the switch is off does not keep a ruleset that nothing will satisfy.
   The review runs from the day the Worker is deployed, so without a switch of its own the first publication or enforce run after a deploy would require the check before the canary and the calibration gate.
   The owner turns it on when the fleet step starts, after both, and it is never on before; it is absent from every vars block of the Worker's configuration file until then, and a test says so.
+  That test reads the file and nothing else: the switch can also be set as a Worker secret, which survives a deploy and does not show in the file.
+  So the single and the bulk review-ruleset routes answer with `auto_require`, which is what the Worker itself reads, and a dry run of `nemar admin fleet require-review <dataset-id> --json` shows it.
   The explicit tools, the review-ruleset routes and `nemar admin fleet require-review`, do not read it: the canary and the fleet are applied with them, a dry run first.
   A fleet rollback has four steps, in this order, and a removal is allowed whatever the switches say.
   (a) Start the removal while the switch is still on: `nemar admin fleet require-review --all --remove --apply` does ONE page (25 datasets by default, 50 at most) and prints a `Next page:` line instead of looping, so repeat it with `--after` set to the last id of the page just done, until the output has no `Next page:` line.

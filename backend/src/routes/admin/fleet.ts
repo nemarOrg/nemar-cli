@@ -42,6 +42,7 @@ import {
   REVIEWABLE_ROW_COLUMNS,
   type ReviewableRow,
   automaticReviewIntent,
+  isAutoRequireEnabled,
   isRequirementTarget,
   isReviewEnabled,
   isReviewRulesetFixture,
@@ -730,7 +731,9 @@ export function registerFleetRoutes(admin: AdminRouter): void {
    * never refused, since it is the way out. No dataset is special-cased for being live.
    *
    * Every answer carries the two App ids (`github_app_id`, `ruleset_app_id`, `app_id_matches`), so
-   * a dry run shows whether `dry_run:false` would be refused for that reason.
+   * a dry run shows whether `dry_run:false` would be refused for that reason, and the two switches
+   * as this Worker reads them (`review_enabled`, `auto_require`). The second is how a switch that
+   * was set as a Worker secret, which the configuration file cannot show, becomes visible.
    */
   admin.post("/datasets/:id/review-ruleset", zValidator("json", reviewRulesetSchema), async (c) => {
     const datasetId = c.req.param("id");
@@ -738,6 +741,7 @@ export function registerFleetRoutes(admin: AdminRouter): void {
     const dryRun = dry_run !== false;
     const removing = remove === true;
     const enabled = isReviewEnabled(c.env);
+    const autoRequire = isAutoRequireEnabled(c.env);
 
     if (isReviewRulesetFixture(datasetId)) {
       return c.json(
@@ -777,7 +781,13 @@ export function registerFleetRoutes(admin: AdminRouter): void {
       return c.json({ error: outcome.error, code: outcome.code }, 502);
     }
     await auditReviewRuleset(c.env.DB, c.get("user"), outcome, false);
-    return c.json({ dry_run: dryRun, review_enabled: enabled, ...reviewAppIds(c.env), ...outcome });
+    return c.json({
+      dry_run: dryRun,
+      review_enabled: enabled,
+      auto_require: autoRequire,
+      ...reviewAppIds(c.env),
+      ...outcome,
+    });
   });
 
   /**
@@ -807,6 +817,7 @@ export function registerFleetRoutes(admin: AdminRouter): void {
       const removing = remove === true;
       const cap = limit ?? 25;
       const enabled = isReviewEnabled(c.env);
+      const autoRequire = isAutoRequireEnabled(c.env);
 
       const clauses: string[] = ["github_repo IS NOT NULL", OUTSIDE_FIXTURE_BAND.sql];
       const binds: unknown[] = [OUTSIDE_FIXTURE_BAND.bind];
@@ -843,6 +854,7 @@ export function registerFleetRoutes(admin: AdminRouter): void {
       return c.json({
         dry_run: dryRun,
         review_enabled: enabled,
+        auto_require: autoRequire,
         ...reviewAppIds(c.env),
         remove: removing,
         limit: cap,

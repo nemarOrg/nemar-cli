@@ -1291,6 +1291,33 @@ describe("the enforce routes and the automatic switch", () => {
       expect(held("nm000302")).toEqual([]);
     });
 
+    // The configuration file cannot show a switch that was set as a Worker secret, so the answers
+    // carry what the Worker reads: beside review_enabled, and as a boolean, never a missing field.
+    test("both answer with the switch as the Worker reads it, exactly 1 and nothing else", async () => {
+      seedDataset("nm000301");
+      const reads = async () => {
+        const one = await single("nm000301");
+        const many = await bulk({});
+        expect(one.status).toBe(200);
+        expect(many.status).toBe(200);
+        return [one.body.auto_require, many.body.auto_require];
+      };
+
+      expect(await reads()).toEqual([false, false]);
+      envOverrides = { PR_REVIEW_AUTO_REQUIRE: "1" };
+      expect(await reads()).toEqual([true, true]);
+      for (const value of ["0", "true", "yes", " 1", "01", ""]) {
+        envOverrides = { PR_REVIEW_AUTO_REQUIRE: value };
+        expect(await reads(), JSON.stringify(value)).toEqual([false, false]);
+      }
+      // Independent of the review itself: the two are reported side by side.
+      envOverrides = { PR_REVIEW_AUTO_REQUIRE: "1", PR_REVIEW_ENABLED: undefined };
+      const off = await single("nm000301");
+      expect(off.body).toMatchObject({ review_enabled: false, auto_require: true });
+      const page = await bulk({});
+      expect(page.body).toMatchObject({ review_enabled: false, auto_require: true });
+    });
+
     test("they still refuse a live require while the review itself is off, switch or no switch", async () => {
       seedDataset("nm000201");
       for (const auto of [undefined, "1"]) {

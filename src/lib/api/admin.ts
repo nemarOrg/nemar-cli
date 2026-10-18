@@ -1415,11 +1415,17 @@ export interface ReviewRulesetResponse extends ReviewRulesetOutcome, ReviewAppId
   dry_run: boolean;
   /** The automated review is switched on in this environment (PR_REVIEW_ENABLED). */
   review_enabled: boolean;
+  /**
+   * The owner's switch for the automatic requirement (PR_REVIEW_AUTO_REQUIRE) is exactly "1" on
+   * this Worker, however it was set: in its configuration file or as a Worker secret.
+   */
+  auto_require: boolean;
 }
 
 export interface ReviewRulesetBulkResponse extends ReviewAppIds {
   dry_run: boolean;
   review_enabled: boolean;
+  auto_require: boolean;
   remove: boolean;
   limit: number;
   count: number;

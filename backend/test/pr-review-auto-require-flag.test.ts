@@ -2,16 +2,20 @@
  * Where the owner's switch for the automatic review requirement is set, and where it is not
  * (ADR 0107).
  *
- * `PR_REVIEW_AUTO_REQUIRE` is absent from `[vars]` and from every `[env.*.vars]` block, so it is
- * off in every environment. The owner turns it on, in a reviewed change to this file, when the
+ * `PR_REVIEW_AUTO_REQUIRE` is absent from `[vars]` and from every `[env.*.vars]` block, so this
+ * file turns it on nowhere. The owner turns it on, in a reviewed change to this file, when the
  * fleet step of the rollout starts; until then no automatic path puts the review ruleset on a
  * repository. A line added to a vars block by any other change would turn it on somewhere nobody
  * decided it should be, and that is what this test refuses.
  *
  * The test reads the real file and parses it with Bun's TOML parser, as
  * publication-review-flag.test.ts does, so a misplaced line (under another table) fails here.
- * It cannot see a value set in the Cloudflare dashboard or as a Worker secret, which
- * `wrangler deploy` would drop in any case: the variable lives in this file or nowhere.
+ * It covers the file and nothing else. The switch can also be set as a Worker secret: a secret
+ * survives `wrangler deploy` and does not show in the file, so this test cannot see one, and a
+ * green run is not proof that the switch is off in an environment. What the Worker reads is the
+ * `auto_require` field of the review-ruleset answers (`nemar admin fleet require-review
+ * <dataset-id> --json`, a dry run). A variable set only in the Cloudflare dashboard is the one
+ * the next deploy drops, which is why the owner's change is made in this file.
  */
 
 import { describe, expect, test } from "bun:test";
