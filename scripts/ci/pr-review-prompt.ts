@@ -241,7 +241,8 @@ export const REVIEW_FINDING_CODES: readonly FindingCode[] = FINDING_CODES.filter
     c !== "title_author_year" &&
     c !== "title_template_field" &&
     c !== "name_author_year" &&
-    c !== "name_template_field",
+    c !== "name_template_field" &&
+    c !== "name_unchecked",
 );
 
 /** The three questions about the files the review answers in `criteria`. */

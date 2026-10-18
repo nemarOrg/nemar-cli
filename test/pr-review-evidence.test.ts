@@ -664,6 +664,7 @@ describe("the prompt keeps the pull request inside its fence", () => {
       "description_missing",
       "name_author_year",
       "name_template_field",
+      "name_unchecked",
       "spam",
       "title_author_year",
       "title_template_field",
@@ -2707,6 +2708,99 @@ describe("the facts come before any model, and fail the verdict whatever it says
     expect(summary).toContain("changes the dataset's name");
   });
 
+  test.each([
+    ["a Name that is a number", desc("1.1.0", { Name: 42 })],
+    ["a Name that is a list", desc("1.1.0", { Name: ["Lee2019-EEG-Motor"] })],
+    ["a Name that is null", desc("1.1.0", { Name: null })],
+    ["no Name at all", JSON.stringify({ BIDSVersion: "1.9.0", Version: "1.1.0" })],
+    ["a file that is not JSON", '{ "Name": "Lee2019-EEG-Motor", '],
+  ])(
+    "a changed dataset_description.json with %s has an unchecked name: it cannot pass",
+    async (what, content) => {
+      const report = await reviewWith(`facts-name-${hash(what)}`, (dir) =>
+        write(dir, "dataset_description.json", content),
+      );
+      // Not "no name, so clean": the rule had nothing to ask, and the fact says so.
+      expect(report.evidence.name_problem).toBe("unchecked");
+      expect(factsOf(report).criteria.no_degradation).toBe("unknown");
+      expect(factsOf(report).notes.map((n) => n.code)).toContain("name_unchecked");
+      // Whatever the models answered, the verdict is neither a pass nor a fail: a person looks.
+      expect(verdictOf(report)).toBe("uncertain");
+      const check = renderCheck({ kind: "reported", report });
+      expect(check.title).toBe("Could not decide");
+      expect(check.summary).toContain("could not be read from it, so the name was not checked");
+      expect(check.text).toContain("A NEMAR administrator needs to look at this pull request.");
+    },
+  );
+
+  test("a changed dataset_description.json with a new, readable, fine name keeps the review as it was", async () => {
+    const report = await reviewWith("facts-name-fine", (dir) =>
+      write(
+        dir,
+        "dataset_description.json",
+        desc("1.1.0", { Name: "Resting EEG of volunteers, with eyes closed" }),
+      ),
+    );
+    expect(report.evidence.name_problem).toBeNull();
+    expect(verdictOf(report)).toBe("pass");
+  });
+
+  test("a dataset_description.json the pull request does not touch is not asked about, readable or not", async () => {
+    const dir = newDataset("facts-name-untouched");
+    write(dir, "dataset_description.json", desc("1.0.0", { Name: 42 }));
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "a name that is not text, from before");
+    const r = branch(dir, () => {
+      write(dir, "README.md", "# Edited\n");
+      write(
+        dir,
+        "CHANGES",
+        "1.1.0 2026-10-16\n - Edited the README\n1.0.0 2026-01-01\n - Initial\n",
+      );
+    });
+    const res = await runReview({
+      repoDir: r.dir,
+      base: r.base,
+      head: r.head,
+      fetchedHead: r.head,
+      prJson: prJsonFor(r.dir, r.head),
+    });
+    if (res.outcome !== "reported" || res.report.v !== 2) throw new Error("no version 2 report");
+    expect(res.report.evidence.name_problem).toBeNull();
+    expect(factsOf(res.report).notes.map((n) => n.code)).not.toContain("name_unchecked");
+  });
+
+  test("the listing says a name is unreadable only for a description the pull request adds or edits", () => {
+    const listingOf = (edit: (dir: string) => void, name: string) => {
+      const dir = newDataset(name);
+      const r = branch(dir, () => edit(dir));
+      return gatherListing(r.dir, r.base, r.head);
+    };
+    const edited = (content: string) => (dir: string) =>
+      write(dir, "dataset_description.json", content);
+    // Edited, name unreadable: unreadable.
+    expect(listingOf(edited('{ "Name": '), "unreadable-edited").nameUnreadable).toBe(true);
+    expect(listingOf(edited(desc("1.1.0", { Name: 7 })), "unreadable-number").nameUnreadable).toBe(
+      true,
+    );
+    // Edited, name readable: not.
+    const fine = listingOf(edited(desc("1.1.0")), "unreadable-fine");
+    expect(fine.nameUnreadable).toBe(false);
+    expect(fine.nameAfter).toBe("Resting EEG of volunteers");
+    // Not touched: the head has the name the base had, and there is nothing to read.
+    expect(
+      listingOf((dir) => write(dir, "README.md", "# R\n"), "unreadable-untouched"),
+    ).toMatchObject({ nameUnreadable: false, nameAfter: "Resting EEG of volunteers" });
+    // Removed: a removal is a fact of its own, and there is no name to fail to read.
+    const removed = listingOf(
+      (dir) =>
+        execFileSync("git", ["-C", dir, "rm", "-q", "dataset_description.json"], { env: GIT_ENV }),
+      "unreadable-removed",
+    );
+    expect(removed.nameUnreadable).toBe(false);
+    expect(removed.nameAfter).toBeNull();
+  });
+
   test("an author-and-year name the pull request did not change is not its problem", async () => {
     const dir = newDataset("facts-name-kept");
     write(dir, "dataset_description.json", desc("1.0.0", { Name: "Lee2019 Motor Imagery" }));
@@ -2821,6 +2915,7 @@ describe("the worst case fits", () => {
       versionAfter: "1.1.0",
       nameBefore: "A",
       nameAfter: "B",
+      nameUnreadable: false,
       subjectsBefore: 1,
       subjectsAfter: 2,
       listCut: true,

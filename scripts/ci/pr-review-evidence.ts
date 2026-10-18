@@ -39,6 +39,7 @@ import {
   type ChangelogEntry,
   MAX_LISTED,
   MAX_MODEL_FILES,
+  type NameFinding,
   type NamingProblem,
   type ReviewEvidence,
   SEMVER,
@@ -166,6 +167,13 @@ export interface Listing {
    */
   nameBefore: string | null;
   nameAfter: string | null;
+  /**
+   * The pull request adds or edits `dataset_description.json` and there is no readable name at the
+   * head: the file is not JSON, or has no `Name`, or its `Name` is not text. `nameAfter` is null for
+   * that and for a file the pull request does not touch, and only this says which it was, so a
+   * name nobody could read is not mistaken for a dataset with no name to check.
+   */
+  nameUnreadable: boolean;
   subjectsBefore: number | null;
   subjectsAfter: number | null;
   /** True when the change list was longer than {@link MAX_MODEL_FILES}. */
@@ -246,7 +254,8 @@ export interface TextFacts {
    */
   descriptionCut: boolean;
   titleProblem: NamingProblem | null;
-  nameProblem: NamingProblem | null;
+  /** How the new name breaks the rule, or `unchecked` when it changed and cannot be read. */
+  nameProblem: NameFinding | null;
 }
 
 /** One shape of changed path: `sub-*` and `ses-*` and `run-*` stand for any value. */
@@ -646,6 +655,10 @@ function readListing(dir: string, baseSha: string, headSha: string): Listing {
 
   const before = descriptionAt(dir, mergeBase);
   const after = descriptionAt(dir, headSha);
+  // A removed file has no name to read, and its removal is a fact of its own.
+  const descriptionKept = changes.some(
+    (c) => c.path === "dataset_description.json" && c.status !== "removed",
+  );
   // An empty list would read to the model as "no commits", so a failed read is an error.
   const log = tryGit(dir, ["log", "--format=%s", `-n${MAX_COMMITS}`, `${mergeBase}..${headSha}`]);
   if (log === null) throw new EvidenceError("commits_unreadable");
@@ -658,6 +671,7 @@ function readListing(dir: string, baseSha: string, headSha: string): Listing {
     versionAfter: after.version,
     nameBefore: before.name,
     nameAfter: after.name,
+    nameUnreadable: descriptionKept && after.name === null,
     subjectsBefore: subjectsAt(dir, mergeBase),
     subjectsAfter: subjectsAt(dir, headSha),
     listCut: changes.length > MAX_MODEL_FILES,

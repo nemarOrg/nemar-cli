@@ -22,9 +22,12 @@ import {
 } from "../shared/naming-rule";
 import * as cli from "../src/lib/pr-text";
 
-/** The two fields of a listing the text facts read: the dataset's name at the base and at the head. */
-const listing = (nameBefore: string | null, nameAfter: string | null) =>
-  ({ nameBefore, nameAfter }) as Listing;
+/**
+ * The fields of a listing the text facts read: the dataset's name at the base and at the head, and
+ * whether the pull request changes the description and leaves no readable name in it.
+ */
+const listing = (nameBefore: string | null, nameAfter: string | null, nameUnreadable = false) =>
+  ({ nameBefore, nameAfter, nameUnreadable }) as Listing;
 
 describe("there is one copy of the rule", () => {
   test("the CLI's exports are the shared rule's own functions and pattern, not copies", () => {
@@ -56,6 +59,18 @@ describe("there is one copy of the rule", () => {
     expect(
       textFactsOf({ title: "t", body: "Adds sub-03." }, listing(null, null)).descriptionEmpty,
     ).toBe(false);
+  });
+
+  test("a changed description with no readable name is unchecked, never clean", () => {
+    const facts = (l: Listing) => textFactsOf({ title: "t", body: "x" }, l).nameProblem;
+    expect(facts(listing("A", null, true))).toBe("unchecked");
+    expect(facts(listing(null, null, true))).toBe("unchecked");
+    // A name that was read is the rule's to judge, and the flag never replaces its answer.
+    expect(facts(listing("A", "Lee2019 X", true))).toBe("author_year");
+    expect(facts(listing("A", "Resting EEG", true))).toBeNull();
+    // A description the pull request does not touch is not asked about.
+    expect(facts(listing("A", null, false))).toBeNull();
+    expect(facts(listing(null, null, false))).toBeNull();
   });
 
   test("a description is empty when the models read it as blank, and not otherwise", () => {

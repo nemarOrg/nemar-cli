@@ -1367,6 +1367,14 @@ describe("a version 2 report is exactly its keys, and its stage is a contract", 
     expect(refusal(report({ evidence: evidence({ title_problem: "surname_year" }) }))).toBe(
       "bad_evidence",
     );
+    // `unchecked` is a finding about a name that could not be read; a title is always readable.
+    expect(refusal(report({ evidence: evidence({ title_problem: "unchecked" }) }))).toBe(
+      "bad_evidence",
+    );
+    expect(refusal(report({ evidence: evidence({ name_problem: "unchecked" }) }))).toBe("accepted");
+    expect(refusal(report({ evidence: evidence({ name_problem: "unreadable" }) }))).toBe(
+      "bad_evidence",
+    );
     expect(refusal(report({ evidence: evidence({ description_empty: "no" }) }))).toBe(
       "bad_evidence",
     );
@@ -1590,6 +1598,34 @@ describe("the text facts fail the verdict whatever the model says", () => {
     expect(renderCheck({ kind: "reported", report: r }).summary).toContain(
       "changes the dataset's name",
     );
+  });
+
+  test("a changed dataset name that could not be read is never a clean one: a person must look", () => {
+    const r = parsed({ evidence: evidence({ name_problem: "unchecked" }) });
+    // The models answered pass to all of it.
+    expect(r.criteria.no_degradation).toBe("pass");
+    expect(factsOf(r).criteria.no_degradation).toBe("unknown");
+    expect(factsOf(r).notes).toContainEqual({
+      criterion: "no_degradation",
+      code: "name_unchecked",
+      result: "unknown",
+    });
+    expect(verdictOf(r)).toBe("uncertain");
+    expect(conclusionOf({ kind: "reported", report: r })).toBe("action_required");
+    const check = renderCheck({ kind: "reported", report: r });
+    expect(check.title).toBe("Could not decide");
+    expect(check.summary).toContain("**Naming rule**");
+    expect(check.summary).toContain("could not be read from it, so the name was not checked");
+    expect(check.text).toContain("New dataset name could not be read");
+    expect(check.text).toContain("A NEMAR administrator needs to look at this pull request.");
+    // It lowers and never raises: a failure the models found stays a failure.
+    const failed = parsed({
+      criteria: { no_degradation: "fail" },
+      evidence: evidence({ name_problem: "unchecked" }),
+    });
+    expect(verdictOf(failed)).toBe("fail");
+    // And a name that was read, whatever it was, is not "unchecked".
+    expect(factsOf(parsed()).notes.map((n) => n.code)).not.toContain("name_unchecked");
   });
 
   test("every rule that applies is stated, even when another already failed the criterion", () => {

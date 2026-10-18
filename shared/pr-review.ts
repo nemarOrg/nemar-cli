@@ -131,6 +131,8 @@ export const FINDING_CODES = [
   "title_template_field",
   "name_author_year",
   "name_template_field",
+  // The pull request changes dataset_description.json and its new name could not be read.
+  "name_unchecked",
   "other",
 ] as const;
 export type FindingCode = (typeof FINDING_CODES)[number];
@@ -262,10 +264,11 @@ export interface ReviewEvidence extends ReviewEvidenceV1 {
   title_problem: NamingProblem | null;
   /**
    * How the pull request's new dataset name (the `Name` of `dataset_description.json` at the head,
-   * when it differs from the name at the merge base) breaks the naming rule. Null when the name is
-   * unchanged, unreadable, or fine.
+   * when it differs from the name at the merge base) breaks the naming rule; `unchecked` when the
+   * pull request changes that file and the head's name cannot be read from it. Null when the name
+   * is unchanged or fine, or the file was not touched.
    */
-  name_problem: NamingProblem | null;
+  name_problem: NameFinding | null;
 }
 
 /**
@@ -283,6 +286,14 @@ export interface ReviewEvidence extends ReviewEvidenceV1 {
  */
 export const CHANGELOG_ENTRIES = ["added", "not_added", "no_file", "unknown_version"] as const;
 export type ChangelogEntry = (typeof CHANGELOG_ENTRIES)[number];
+
+/**
+ * What the naming rule made of a pull request's new dataset name: one of its two problems, or
+ * `unchecked` when the pull request changes `dataset_description.json` and the name in it could not
+ * be read (the file is not JSON, or its `Name` is not text), so there was no name to ask about. An
+ * unreadable name is never a clean one.
+ */
+export type NameFinding = NamingProblem | "unchecked";
 
 /** Tokens one model call used, from the API's own response. */
 export interface StageTokens {
@@ -538,6 +549,11 @@ function nullableNamingProblem(v: unknown): NamingProblem | null {
   throw new PrReviewReportError("bad_evidence");
 }
 
+/** A name's finding: a title is never `unchecked`, only a name that could not be read. */
+function nullableNameFinding(v: unknown): NameFinding | null {
+  return v === "unchecked" ? v : nullableNamingProblem(v);
+}
+
 function nullableChangelogEntry(v: unknown): ChangelogEntry | null {
   if (v === null) return null;
   if (isOneOf(CHANGELOG_ENTRIES, v)) return v;
@@ -557,7 +573,7 @@ function parseEvidence(raw: unknown): ReviewEvidence {
     description_cut: raw.description_cut,
     changelog_entry: nullableChangelogEntry(raw.changelog_entry),
     title_problem: nullableNamingProblem(raw.title_problem),
-    name_problem: nullableNamingProblem(raw.name_problem),
+    name_problem: nullableNameFinding(raw.name_problem),
   };
 }
 
@@ -810,16 +826,20 @@ const NAME_RULE_CODE: Record<NamingProblem, FindingCode> = {
  *  - A title that breaks the naming rule fails `clear_title_and_description`.
  *  - A new dataset name that breaks the naming rule fails `no_degradation`: the name is part of the
  *    dataset, and a name the policy refuses is broken metadata.
- *
  *  - A new version with no new entry in the change log fails `advances_revision`
  *    (`changes_log_missing`): the CHANGES file must gain an entry headed by the new version, and
  *    both a log that did not gain one and no log at all mean there is none. An unknown new version
  *    is not this rule's to judge; the version fact above has already made it `unknown`.
  *
- * A description longer than the models read (`description_cut`) lowers `description_not_misleading`
- * to `unknown`: the models saw only its start, so that it does not mislead, and that it does not try
- * to instruct them, were not assessed. A steering finding on the part they did see still fails the
- * review whatever this says.
+ * Two facts lower a criterion to `unknown` and never to a fail, because they are things nobody could
+ * check, not things found wrong:
+ *  - A description longer than the models read (`description_cut`) lowers
+ *    `description_not_misleading`: the models saw only its start, so that it does not mislead, and
+ *    that it does not try to instruct them, were not assessed. A steering finding on the part they
+ *    did see still fails the review whatever this says.
+ *  - A pull request that changes `dataset_description.json` and leaves a name that cannot be read
+ *    (`name_problem` is `unchecked`) lowers `no_degradation`: the naming rule had no name to ask
+ *    about, and an unreadable name is never a clean one.
  */
 export function factsOf(report: PrReviewReport): {
   criteria: Partial<Record<Criterion, CriterionResult>>;
@@ -881,7 +901,11 @@ export function factsOf(report: PrReviewReport): {
     if (v2.title_problem !== null) {
       rule("clear_title_and_description", TITLE_RULE_CODE[v2.title_problem]);
     }
-    if (v2.name_problem !== null) rule("no_degradation", NAME_RULE_CODE[v2.name_problem]);
+    if (v2.name_problem === "unchecked") {
+      lower("no_degradation", "name_unchecked", "unknown");
+    } else if (v2.name_problem !== null) {
+      rule("no_degradation", NAME_RULE_CODE[v2.name_problem]);
+    }
   }
   return { criteria: out, notes };
 }
@@ -962,7 +986,7 @@ export function isDeclineReason(x: unknown): x is DeclineReason {
  */
 export interface NamingFacts {
   title: NamingProblem | null;
-  name: NamingProblem | null | "unchecked";
+  name: NameFinding | null;
 }
 
 export type ReviewOutcome =
@@ -1107,6 +1131,10 @@ const NAMING_SENTENCE: Record<"title" | "name", Record<NamingProblem, string>> =
   },
 };
 
+/** What the check says when a pull request changes the dataset description and its name cannot be read. */
+const NAME_UNCHECKED_SENTENCE =
+  "This pull request changes dataset_description.json, but the dataset's name (its Name field) could not be read from it, so the name was not checked against the naming rule. Make sure the file is valid JSON and that Name is text.";
+
 const ERROR_COPY: Record<RunError, string> = {
   evidence_unavailable: "The changes could not be read.",
   stale_head:
@@ -1147,6 +1175,7 @@ const CODE_LABEL: Record<FindingCode, string> = {
   title_template_field: "Title has an unfilled template field",
   name_author_year: "New dataset name starts with a name and a year",
   name_template_field: "New dataset name has an unfilled template field",
+  name_unchecked: "New dataset name could not be read",
   other: "Other",
 };
 
@@ -1161,6 +1190,7 @@ function factSource(code: FindingCode): string {
     case "title_template_field":
     case "name_author_year":
     case "name_template_field":
+    case "name_unchecked":
       return "found by the naming rule, not by the reviewer";
     default:
       return "found from the files, not by the reviewer";
@@ -1298,9 +1328,9 @@ export function namingLines(report: PrReviewReport): string[] {
   if (report.evidence.title_problem !== null) {
     out.push(NAMING_SENTENCE.title[report.evidence.title_problem]);
   }
-  if (report.evidence.name_problem !== null) {
-    out.push(NAMING_SENTENCE.name[report.evidence.name_problem]);
-  }
+  const name = report.evidence.name_problem;
+  if (name === "unchecked") out.push(NAME_UNCHECKED_SENTENCE);
+  else if (name !== null) out.push(NAMING_SENTENCE.name[name]);
   return out;
 }
 

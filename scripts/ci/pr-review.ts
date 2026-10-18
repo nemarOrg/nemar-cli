@@ -388,6 +388,10 @@ interface PullRequestJson {
  * and how the dataset's name breaks it when the pull request changes the name. The rule is the
  * shared one the CLI and the Worker use; nothing here is a judgment.
  *
+ * A pull request that changes `dataset_description.json` and leaves no readable name in it has no
+ * name to ask the rule about, and that is not a clean name: the fact is `unchecked`, which keeps
+ * the verdict from passing and sends a person to look.
+ *
  * The description is judged as the models read it, after {@link tidy}: a body of zero-width spaces
  * and soft hyphens is blank to them, so it is empty here, though `trim` leaves it. The whole of it is
  * judged, not the cut the models are given (tidy would end a long run of blanks with its `[cut]`
@@ -405,7 +409,12 @@ export function textFactsOf(pr: { title?: unknown; body?: unknown }, listing: Li
     descriptionEmpty: body.trim() === "",
     descriptionCut: body.length > MAX_BODY_CHARS,
     titleProblem: namingProblemOf(typeof pr.title === "string" ? pr.title : ""),
-    nameProblem: changedName === null ? null : namingProblemOf(changedName),
+    nameProblem:
+      changedName !== null
+        ? namingProblemOf(changedName)
+        : listing.nameUnreadable
+          ? "unchecked"
+          : null,
   };
 }
 
