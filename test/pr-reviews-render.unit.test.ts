@@ -674,10 +674,48 @@ describe("a version 2 report on the terminal", () => {
     }
   });
 
+  /** A full report: the screen let the pull request through, and the review read the files and answered. */
+  const full = (criteriaOver: Record<string, string> = {}) =>
+    parsePrReviewReport({
+      v: 2,
+      stage: "full",
+      models: { screen: "claude-haiku-5-5", review: "claude-sonnet-5-5" },
+      criteria: {
+        genuine_contribution: "pass",
+        no_degradation: "pass",
+        advances_revision: "pass",
+        material_improvement: "pass",
+        clear_title_and_description: "pass",
+        description_not_misleading: "pass",
+        ...criteriaOver,
+      },
+      findings: [],
+      summary: "Adds a subject.",
+      steering: false,
+      evidence: evidence({ files_read: 1, truncated: false, changelog_entry: "added" }),
+      usage: {
+        screen: { input_tokens: 900, output_tokens: 300 },
+        review: { input_tokens: 5000, output_tokens: 700 },
+      },
+    });
+
   test("a screen report and a full report keep their own words", () => {
     const stopped = brief(screen());
     expect(stopped.join("\n")).not.toContain("stage: facts only");
     expect(stopped.join("\n")).toContain("revision advances: not assessed (stopped by the screen)");
+
+    // A full report read the files, so an answer it could not give is unknown, and it is not said
+    // to be unassessed: the review ran and could not tell.
+    const unsure = brief(full({ advances_revision: "unknown" })).join("\n");
+    expect(unsure).toContain("Version:  1.0.0 to 1.0.1   revision advances: unknown");
+    expect(unsure).not.toContain("not assessed");
+    expect(unsure).not.toContain("stage: facts only");
+    // A complete one answers, and says neither.
+    const sure = brief(full()).join("\n");
+    expect(sure).toContain("Version:  1.0.0 to 1.0.1   revision advances: yes");
+    expect(sure).not.toContain("revision advances: unknown");
+    expect(sure).not.toContain("not assessed");
+    expect(sure).not.toContain("stage: facts only");
   });
 
   test("the naming rule's findings are printed in sentences", () => {
