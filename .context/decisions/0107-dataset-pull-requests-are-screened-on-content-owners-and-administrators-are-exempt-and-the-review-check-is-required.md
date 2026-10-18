@@ -115,14 +115,23 @@ And the review only ever sees a pull request's text and metadata, so a count of 
 - **The bypass is the NEMAR App (the enrichment workflow pushes to `main` with its token), organization administrators, and the repository `admin` role.**
   Maintainers and outside collaborators get none.
   The `dataset-admin` team is the GitHub side of "admin"; org owners manage it and NEMAR code does not.
-- **It is applied to exactly the datasets the Worker reviews** (active, public, named, first-published), removed when a dataset stops being one, and refused while `PR_REVIEW_ENABLED` is not `1`.
-- **The paths that act on their own wait for the owner's switch, `PR_REVIEW_AUTO_REQUIRE`.**
-  Publishing a dataset, a visibility change and the enforce routes manage the ruleset only while it is exactly `1`; unset, they make no ruleset call and leave any existing ruleset alone.
+- **It is applied to exactly the datasets the Worker reviews** (active, public, named, first-published), and removed when a dataset stops being one.
+  Apart from the standing test fixtures, which the tooling never touches in either direction, only a live request to REQUIRE it is ever refused, and for two reasons.
+  The review is off in this environment (`PR_REVIEW_ENABLED` is not `1`), so nothing would post the check and requiring it would block every merge (a 409, `review_disabled`).
+  Or the Worker's GitHub App is not the one the ruleset names: the ruleset requires the check from App 3679074, and the Worker posts it as the App in its `GITHUB_APP_ID`, so unless that is exactly `3679074` the check never arrives (a 409, `review_app_mismatch`, in a sentence that names both ids; a dry run prints both too).
+  A removal is never refused for either reason, because taking the ruleset off is the way out.
+  The test is the intent a dataset's row works out to and not the shape of the request: a live request for a private dataset is a removal and goes through, and a page of datasets applies its removals and refuses its require rows one by one.
+- **The paths that act on their own wait for the owner's switch, `PR_REVIEW_AUTO_REQUIRE`, to ADD the requirement.**
+  Publishing a dataset, a visibility change and the enforce routes put the review ruleset on a repository only while the switch is exactly `1`, `PR_REVIEW_ENABLED` is exactly `1` too, and the App ids agree.
+  Otherwise a reviewed dataset's review ruleset is left as it is and they make no review-ruleset call for it (the branch and tag rulesets are written as before); with the App ids different they also log why.
+  The switch does not gate a removal: a dataset that is not reviewed has the review ruleset taken off whatever the switches say, so a dataset made private while the switch is off does not keep a ruleset that nothing will satisfy.
   The review runs from the day the Worker is deployed, so without a switch of its own the first publication or enforce run after a deploy would require the check before the canary and the calibration gate.
-  The owner turns it on when the fleet step starts, after both, and it is never on before.
+  The owner turns it on when the fleet step starts, after both, and it is never on before; it is absent from every vars block of the Worker's configuration file until then, and a test says so.
   The explicit tools, the review-ruleset routes and `nemar admin fleet require-review`, do not read it: the canary and the fleet are applied with them, a dry run first.
+  A fleet rollback turns the switch off first and takes the rulesets off second (`nemar admin fleet require-review --all --remove --apply`, which works whatever the switches say), so that no publication or visibility change during it puts the requirement back on a repository it has just cleared.
+  `PR_REVIEW_ENABLED` itself is not turned off while any repository carries the ruleset: every pull request there would wait for a check nothing posts.
 - **A pull request whose required review failed is merged in the GitHub UI by an owner or administrator.**
-  The CLI never uses the bypass (ADR 0093 stands), and its message says so.
+  The CLI never uses the bypass (ADR 0093 stands), and its message says so: it names what can block a merge (the BIDS validation, the version check, the review) and says that only the review check can be overridden there, and only where its ruleset is in force.
 
 ### 6. Rollout is its own gated step
 
