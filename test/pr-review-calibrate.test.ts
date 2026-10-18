@@ -385,6 +385,8 @@ describe("one pull request, through the job's own stage flow", () => {
       reviewTokens: null,
       // A measurement, not a missing one: no model was asked, so nothing was spent.
       costUsd: 0,
+      // Nothing was asked of a model, so nothing was flagged: a report's own answer, not a gap.
+      steering: false,
     });
     const table = renderTable([row]).join("\n");
     expect(table).toMatch(/nm000460#2 +3 +title_author_year +not_run +/);
@@ -693,9 +695,52 @@ describe("the table", () => {
     expect(table).toContain("EXPECTED");
     expect(table).toContain("no verdict (model_truncated)");
     expect(table).toMatch(
-      /nm000460#2 +3 +none +proceed +pass pass pass pass pass +pass +success +pass +yes/,
+      /nm000460#2 +3 +none +proceed +pass pass pass pass pass +no +pass +success +pass +yes/,
     );
     expect(table).toContain("claude-haiku-5-5");
     expect(table).toContain("claude-sonnet-5-5");
+  });
+
+  test("a steering flag is a column and a count, because the gate allows none on a legitimate pull request", async () => {
+    // The review answers pass to every question and says the description tried to instruct it.
+    reviewReply = () =>
+      standInMessage(JSON.stringify({ ...JSON.parse(REVIEW), steering: true }), {
+        model: "claude-sonnet-5-5",
+        usage: { input_tokens: 20000, output_tokens: 8000 },
+      });
+    const flagged = await withStandIn(() =>
+      calibrateOne(target("pass"), root, localPullRequest("steered")),
+    );
+    reviewReply = () =>
+      standInMessage(REVIEW, {
+        model: "claude-sonnet-5-5",
+        usage: { input_tokens: 20000, output_tokens: 8000 },
+      });
+    const clean = await withStandIn(() =>
+      calibrateOne(target("pass"), root, localPullRequest("unsteered")),
+    );
+    const unread = await calibrateOne(target(), root, () => {
+      throw new CalibrationReadError("gh_failed");
+    });
+    expect(flagged).toMatchObject({ steering: true, verdict: "fail", check: "failure" });
+    expect(clean).toMatchObject({ steering: false, verdict: "pass" });
+    // No report, no answer: not "no flag".
+    expect(unread.steering).toBeNull();
+    // It travels in the rows a person pastes as JSON, too.
+    expect(
+      JSON.parse(JSON.stringify([flagged, clean, unread])).map((r: CalibrationRow) => r.steering),
+    ).toEqual([true, false, null]);
+
+    const lines = renderTable([flagged, clean, unread]);
+    const table = lines.join("\n");
+    expect(lines[0]).toContain("STEERING");
+    expect(table).toMatch(/pass pass pass pass pass +YES +fail +failure/);
+    expect(table).toMatch(/pass pass pass pass pass +no +pass +success/);
+    expect(table).toMatch(/ +- +no verdict \(gh_failed\)/);
+    expect(table).toContain("3 pull requests, 1 without a verdict, 1 with a steering flag;");
+    // And the note under the table says what the word means.
+    expect(table).toContain(
+      "STEERING is YES when the review said text in the pull request tried to instruct it",
+    );
   });
 });

@@ -34,7 +34,10 @@
  * and to nothing it starts. No message repeats the value of an argument: a refusal names the flag.
  *
  * **What the table holds.** Closed words, counts, token counts, seconds and an estimate in dollars,
- * never a pull request's text or a word a model wrote, so it can be pasted anywhere.
+ * never a pull request's text or a word a model wrote, so it can be pasted anywhere. Its columns
+ * are what the gate reads: the verdict, and whether it agrees with the one a person expected (a
+ * false pass or a false fail), the screen's decision (a stop of a legitimate pull request), and
+ * whether the review flagged steering, which the gate allows on no legitimate pull request.
  *
  * Exits 0 when every pull request reached a verdict, 1 when any did not (the table says why, in a
  * closed word), and 2 for bad arguments or an environment it refuses to run in.
@@ -85,6 +88,11 @@ export interface CalibrationRow {
   screen: "proceed" | "reject" | "not_run" | RunError | null;
   /** The criteria after the facts, in the report's order; null with no report. */
   criteria: Partial<Record<Criterion, string>> | null;
+  /**
+   * Whether the report says the pull request tried to instruct the reviewer, which fails it whatever
+   * else it says; null with no report. The gate allows none on a legitimate pull request.
+   */
+  steering: boolean | null;
   verdict: Verdict | null;
   check: string | null;
   /**
@@ -287,6 +295,7 @@ export async function calibrateOne(
     stage: null,
     screen: null,
     criteria: null,
+    steering: null,
     verdict: null,
     check: null,
     error: null,
@@ -336,6 +345,7 @@ export async function calibrateOne(
         report.stage === "facts" ? "not_run" : report.stage === "screen" ? "reject" : "proceed";
     }
     row.criteria = factsOf(report).criteria;
+    row.steering = report.steering;
     row.verdict = verdictOf(report);
     row.check = conclusionOf({ kind: "reported", report });
   } catch (e) {
@@ -388,6 +398,7 @@ export function renderTable(rows: readonly CalibrationRow[]): string[] {
       r.facts.length > 0 ? r.facts.join(",") : "none",
       r.screen ?? "-",
       answers,
+      r.steering === null ? "-" : r.steering ? "YES" : "no",
       r.verdict ?? `no verdict (${r.error ?? "unknown"})`,
       r.check ?? "-",
       ...(rows.some((x) => x.expected !== null) ? [r.expected ?? "-", agrees] : []),
@@ -402,6 +413,7 @@ export function renderTable(rows: readonly CalibrationRow[]): string[] {
     "FACTS",
     "SCREEN",
     `REVIEW (${COLUMNS.map(([, h]) => h).join(" ")})`,
+    "STEERING",
     "VERDICT",
     "CHECK",
     ...(rows.some((x) => x.expected !== null) ? ["EXPECTED", "AGREES"] : []),
@@ -418,6 +430,7 @@ export function renderTable(rows: readonly CalibrationRow[]): string[] {
   const total = rows.reduce((n, r) => n + (r.costUsd ?? 0), 0);
   const tokensUsed = sum(rows.flatMap((r) => [r.screenTokens, r.reviewTokens]));
   const noVerdict = rows.filter((r) => r.verdict === null).length;
+  const steered = rows.filter((r) => r.steering === true).length;
   // No tokens is no measurement, not a cost of nothing.
   const spend =
     tokensUsed === null
@@ -427,8 +440,8 @@ export function renderTable(rows: readonly CalibrationRow[]): string[] {
     line(header),
     ...cells.map(line),
     "",
-    `${rows.length} pull request${rows.length === 1 ? "" : "s"}, ${noVerdict} without a verdict; screen ${STAGE_BUDGETS.screen.model}, review ${STAGE_BUDGETS.review.model}, both at max effort; ${spend}.`,
-    "Review columns, after the facts: lost = nothing is lost or broken, rev = the revision advances, better = materially better, text = the title and description say what changed, honest = the description is not misleading. pass, FAIL, or ? for could not tell (or not assessed when the screen stopped it).",
+    `${rows.length} pull request${rows.length === 1 ? "" : "s"}, ${noVerdict} without a verdict, ${steered} with a steering flag; screen ${STAGE_BUDGETS.screen.model}, review ${STAGE_BUDGETS.review.model}, both at max effort; ${spend}.`,
+    "Review columns, after the facts: lost = nothing is lost or broken, rev = the revision advances, better = materially better, text = the title and description say what changed, honest = the description is not misleading. pass, FAIL, or ? for could not tell (or not assessed when the screen stopped it or the naming rule ended the review). STEERING is YES when the review said text in the pull request tried to instruct it, which fails the pull request whatever else it says.",
   ];
 }
 
