@@ -31,7 +31,8 @@
  * keeps what its review said, whoever acts on it next: `skipped` is never written over a review.
  * They are not exempt from the naming rule, which runs first: a title or a new dataset name it
  * refuses fails their check, and only an administrator's recorded waiver for that commit
- * (`nemar admin pr-reviews allow <dataset> <pr> --admin`) turns it back into `skipped`.
+ * (`nemar admin pr-reviews allow <dataset> <pr> --admin --reason <why>`) turns it back into
+ * `skipped`.
  *
  * **Nothing here trusts the pull request.** The event is read by {@link readPullRequestEvent},
  * which accepts only the shapes it expects; the dispatch carries the review's coordinates and not

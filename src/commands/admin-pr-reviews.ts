@@ -2229,7 +2229,7 @@ async function waiveNaming(
   if (options.commit !== undefined && !COMMIT_PREFIX_RE.test(options.commit)) {
     die(
       `"${plain(options.commit)}" is not a commit id: give its first 7 to 40 characters (hexadecimal).`,
-      "nemar admin pr-reviews allow nm000108 12 --admin --commit 1a2b3c4",
+      'nemar admin pr-reviews allow nm000108 12 --admin --commit 1a2b3c4 --reason "Name kept until the rename release"',
       options.json,
     );
   }
@@ -2269,7 +2269,7 @@ async function waiveNaming(
 prReviewsCommand
   .command("allow <subject> [pr]")
   .description(
-    "Lift a block on a contributor (allow <login>), or, with --admin, waive the naming rule for an owner's or administrator's pull request (allow <dataset> <pr> --admin)",
+    "Lift a block on a contributor (allow <login>), or, with --admin, waive the naming rule for an owner's or administrator's pull request (allow <dataset> <pr> --admin --reason <why>)",
   )
   .option(
     "--admin",
@@ -2328,7 +2328,7 @@ allow <dataset> <pr> --admin
       if (options.commit !== undefined && !options.admin) {
         die(
           "--commit goes with --admin: it names the commit of a pull request whose naming rule is waived.",
-          "nemar admin pr-reviews allow nm000108 12 --admin --commit 1a2b3c4",
+          'nemar admin pr-reviews allow nm000108 12 --admin --commit 1a2b3c4 --reason "Name kept until the rename release"',
           options.json,
         );
       }

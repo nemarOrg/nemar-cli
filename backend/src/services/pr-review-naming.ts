@@ -248,11 +248,11 @@ export function namingResource(datasetId: string, prNumber: number): string {
 
 /**
  * Whether an administrator waived what the naming rule finds now on this commit of this pull
- * request: a recorded override (`nemar admin pr-reviews allow <dataset> <pr> --admin`), read from
- * the audit log, which is where the waiver lives. It is for one commit, so a new commit is checked
- * again, and it covers what it recorded: each problem found now must be the one the waiver recorded
- * for that field. A name that cannot be read now matches no waiver (none records one), so it is a
- * check that needs a person rather than a skip.
+ * request: a recorded override (`nemar admin pr-reviews allow <dataset> <pr> --admin --reason
+ * <why>`), read from the audit log, which is where the waiver lives. It is for one commit, so a new
+ * commit is checked again, and it covers what it recorded: each problem found now must be the one
+ * the waiver recorded for that field. A name that cannot be read now matches no waiver (none
+ * records one), so it is a check that needs a person rather than a skip.
  */
 export async function isNamingWaived(
   db: D1Database,

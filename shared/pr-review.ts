@@ -1434,7 +1434,7 @@ function renderNaming(facts: NamingFacts): RenderedCheck {
     };
   }
   const override =
-    "The only way past the naming rule without a change is an explicit override by a NEMAR administrator: `nemar admin pr-reviews allow <dataset> <pr> --admin`, which is recorded and applies to this commit only.";
+    "The only way past the naming rule without a change is an explicit override by a NEMAR administrator: `nemar admin pr-reviews allow <dataset> <pr> --admin --reason <why>`, which is recorded with the reason and applies to this commit only.";
   if (namingRefused(facts)) {
     return {
       title: "Needs changes: the naming rule",

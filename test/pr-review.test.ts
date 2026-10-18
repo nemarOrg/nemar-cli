@@ -2149,7 +2149,10 @@ describe("the naming rule on an owner's or administrator's pull request", () => 
     expect(r.title).toBe("Needs changes: the naming rule");
     expect(r.summary).toContain("Edit the title.");
     expect(r.summary).toContain("changes the dataset's name");
-    expect(r.text).toContain("`nemar admin pr-reviews allow <dataset> <pr> --admin`");
+    // The reason is required with --admin, so the one command the check offers carries it.
+    expect(r.text).toContain(
+      "`nemar admin pr-reviews allow <dataset> <pr> --admin --reason <why>`",
+    );
     const u = renderCheck({ kind: "naming", facts: { title: null, name: "unchecked" } });
     expect(u.title).toBe("Could not decide: the naming rule was not checked");
     expect(u.summary).toContain("could not be read from GitHub");

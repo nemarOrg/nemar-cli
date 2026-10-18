@@ -802,6 +802,8 @@ describe("nemar admin pr-reviews allow <dataset> <pr> --admin: the naming rule's
         ]);
         expect(r.exitCode, bad).toBe(1);
         expect(r.stdout, bad).toContain("is not a commit id");
+        // The command it offers to run instead is a whole one: --reason is required with --admin.
+        expect(r.stdout, bad).toContain("--admin --commit 1a2b3c4 --reason");
         expect(
           apiRequests.filter((x) => x.includes("/admin/")),
           bad,
@@ -811,6 +813,7 @@ describe("nemar admin pr-reviews allow <dataset> <pr> --admin: the naming rule's
       const noAdmin = await cli([...PR, "allow", "alice", "--commit", SHA_A.slice(0, 7)]);
       expect(noAdmin.exitCode).toBe(1);
       expect(noAdmin.stdout).toContain("--commit goes with --admin");
+      expect(noAdmin.stdout).toContain("--admin --commit 1a2b3c4 --reason");
       expect(apiRequests.filter((x) => x.includes("/admin/"))).toHaveLength(0);
     });
   });
@@ -870,6 +873,8 @@ describe("nemar admin pr-reviews allow <dataset> <pr> --admin: the naming rule's
     expect(r.exitCode).toBe(0);
     const help = r.stdout.replace(/\s+/g, " ");
     expect(help).toContain("allow <dataset> <pr> --admin");
+    // The one-line description names the whole command, reason included.
+    expect(help).toContain("(allow <dataset> <pr> --admin --reason <why>)");
     expect(help).toContain("waives the rule for the pull request's CURRENT commit");
     expect(help).toContain("records the waiver");
     // The reason it records is required, and the help says so where the option and the override are.
