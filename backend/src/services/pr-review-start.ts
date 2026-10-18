@@ -14,7 +14,7 @@
  * nothing, `exempt_naming_waived` with a `skipped` check that says so when an administrator waived
  * the rule for this commit, `naming_rule` with a failed check when the title or the new dataset
  * name breaks it, and `naming_unchecked` with a check that needs a person when the dataset's name
- * could not be read. One thing differs, and it is the administrator's choice made by name: a
+ * could not be read (whatever the title says). One thing differs, and it is the administrator's choice made by name: a
  * commit whose review ended without a verdict (declined, errored, never reported) is started again.
  *
  * Nothing here approves, merges or comments on a pull request itself; the review's own check and

@@ -276,12 +276,13 @@ export function checkStateOf(
  * Why an exempt pull request is held by the naming rule, if it is, read from GitHub's record of the
  * review's own check on the current commit: `naming_rule` when that check failed (the rule refused
  * the title or the new dataset name, which an administrator can waive for the commit), and
- * `naming_unchecked` when it asks for a person (the dataset's name could not be read, so there is
- * nothing to waive until a start reads it). The queue infers who is exempt from who opened the pull
- * request and posts nothing itself, so this is the only place it learns the rule's answer. A
- * review check that passed, was skipped, is still running or is absent is no hold, and neither is
- * one on a list that was cut short, where the check might be on the next page. Only informs: a
- * workflow job named like the check could make the label wrong, and nothing is decided by it.
+ * `naming_unchecked` when it asks for a person (the dataset's name could not be read, whatever the
+ * title says, so there is nothing to waive until a start reads it). The queue infers who is exempt
+ * from who opened the pull request and posts nothing itself, so this is the only place it learns the
+ * rule's answer. A review check that passed, was skipped, is still running or is absent is no hold,
+ * and neither is one on a list that was cut short, where the check might be on the next page. Only
+ * informs: a workflow job named like the check could make the label wrong, and nothing is decided
+ * by it.
  */
 export function namingHoldOf(
   contexts: readonly CheckContext[],

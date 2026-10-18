@@ -1196,6 +1196,21 @@ describe("the naming rule runs first, owners and administrators included (ADR 01
     }
   });
 
+  test("a refused title beside a name that could not be read needs a person: the unread name decides, and what the title broke is still said", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    naming[DATASET] = { compareStatus: 500 };
+    const r = await deliver(prEvent({ login: "owner-gh", userId: 601, title: "Smith2020 rename" }));
+    // Not `naming_rule` and not a failure: a waiver of the title would be refused while the name is
+    // unread, so the check and the answer must not offer one.
+    expect(r.body).toMatchObject({ dispatched: false, reason: "naming_unchecked" });
+    expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "action_required" });
+    expect(lastCheck().output?.title).toBe("Could not decide: the naming rule was not checked");
+    expect(lastCheck().output?.summary).toContain("starts with a name and a year");
+    expect(lastCheck().output?.summary).toContain("could not be read");
+    expect(lastCheck().output?.text).not.toContain("--admin");
+    expect(rows()).toHaveLength(0);
+  });
+
   test("a recorded waiver for the commit turns the failure into a skipped check; another commit's does not", async () => {
     seedAccount({ github: "owner-gh", role: "owner" });
     db.run(

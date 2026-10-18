@@ -2117,9 +2117,31 @@ describe("the naming rule on an owner's or administrator's pull request", () => 
     expect(conclusionOf({ kind: "naming", facts: { title: null, name: "unchecked" } })).toBe(
       "action_required",
     );
+    // A name that could not be read decides it, whatever the title says: nothing can be waived while
+    // the name is unread, so a failure would offer a waiver that is then refused.
+    for (const title of ["template_field", "author_year"] as const) {
+      expect(conclusionOf({ kind: "naming", facts: { title, name: "unchecked" } })).toBe(
+        "action_required",
+      );
+    }
+  });
+
+  test("a refused title beside a name that could not be read is a check that needs a person, and says both", () => {
+    const r = renderCheck({
+      kind: "naming",
+      facts: { title: "author_year", name: "unchecked" },
+    });
+    expect(r.title).toBe("Could not decide: the naming rule was not checked");
+    // What the rule did find is not lost, and no override is offered while the name is unread.
+    expect(r.summary).toContain("Edit the title.");
+    expect(r.summary).toContain("could not be read");
+    expect(`${r.summary}\n${r.text}`).not.toContain("--admin");
     expect(
-      conclusionOf({ kind: "naming", facts: { title: "template_field", name: "unchecked" } }),
-    ).toBe("failure");
+      renderComment(
+        { kind: "naming", facts: { title: "author_year", name: "unchecked" } },
+        "a".repeat(40),
+      ),
+    ).toContain("NEEDS A PERSON");
   });
 
   test("the check says what the rule found, how to fix it, and the one override", () => {

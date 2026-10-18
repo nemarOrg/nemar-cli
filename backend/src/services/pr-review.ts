@@ -723,14 +723,17 @@ export async function exemptOutcomeFor(
   return { kind: "naming", facts };
 }
 
-/** The fixed word an exempt outcome is answered with, for the webhook and an administrator's start. */
+/**
+ * The fixed word an exempt outcome is answered with, for the webhook and an administrator's start.
+ * A name that could not be read is `naming_unchecked` whatever the title says, because that is what
+ * the check says (it needs a person) and what a waiver answers: nothing can be waived until the
+ * name is read.
+ */
 export function exemptReason(
   outcome: Extract<ReviewOutcome, { kind: "exempt" | "naming" }>,
 ): string {
   if (outcome.kind === "exempt") return outcome.waived ? "exempt_naming_waived" : "exempt_author";
-  return outcome.facts.title === null && outcome.facts.name === "unchecked"
-    ? "naming_unchecked"
-    : "naming_rule";
+  return outcome.facts.name === "unchecked" ? "naming_unchecked" : "naming_rule";
 }
 
 /**

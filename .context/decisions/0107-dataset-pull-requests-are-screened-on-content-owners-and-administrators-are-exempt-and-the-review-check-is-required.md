@@ -59,7 +59,7 @@ And the review only ever sees a pull request's text and metadata, so a count of 
 - **An exempt pull request gets one completed check and no review, and the naming rule (decision 3a) decides which check.**
   The check is `skipped` when the rule finds nothing on the commit, or when an administrator has waived it for that commit.
   The skipped title says the review is not required for an owner or administrator, and the text says skipped is not a pass.
-  When the rule refuses the title or the dataset's new name the check is a failure, and when the dataset's name could not be read it is `action_required`, a check that needs a person and does not pass.
+  When the rule refuses the title or the dataset's new name the check is a failure, and when the dataset's name could not be read it is `action_required`, a check that needs a person and does not pass, whatever the title says: nothing can be waived while the name is unread, so the check, the answer of a start and the list's label all say that the name has to be read first.
   No row is stored, no model is called, nothing is dispatched, and no comment is made.
 - **That applies only to a commit no review has touched.**
   A commit that has a row keeps what its review said, whoever acts on it next: the author reopening the pull request, a force-push back to it, or an administrator's start.
@@ -140,7 +140,7 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
 - **One pure function decides, in `shared/naming-rule.ts`**, which the CLI asks before it opens a pull request, the review job asks before any model call, and the Worker asks of a pull request it does not review.
   A refusal fails the verdict whatever a model says.
 - **Owners and administrators are not exempt from it.**
-  The exemption still skips the review, but the Worker applies the rule first: a refused title or name fails the check, and a name GitHub will not show makes it a check that needs a person, never a skip.
+  The exemption still skips the review, but the Worker applies the rule first: a refused title or name fails the check, and a name that cannot be read makes it a check that needs a person, never a skip, even when the title is also refused (the title's problem is stated in the check, and the unread name is what decides its conclusion).
 - **A name that cannot be read is checked as `unchecked`, and unchecked cannot pass.**
   In the review job, a pull request that changes `dataset_description.json` and leaves a `Name` that is not text or shows a reader nothing (empty, blanks, or only characters nobody sees), or a file that is not JSON, has the finding `unchecked`: the run ends at the facts stage and the check does not pass.
   The Worker, for a pull request it does not review, compares the base with the head and, when the comparison says `dataset_description.json` may have changed, reads the file at the head and at the merge base.

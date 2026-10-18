@@ -1347,6 +1347,16 @@ describe("owners and administrators meet the naming rule before their exemption"
     },
   );
 
+  test("a refused title beside a name GitHub will not show is naming_unchecked, a check that needs a person, never naming_rule", async () => {
+    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
+    naming[DATASET] = { compareStatus: 500 };
+    const r = await start(DATASET, 7);
+    expect(r.body).toMatchObject({ dispatched: false, reason: "naming_unchecked" });
+    const check = calls.find((c) => c.method === "POST" && c.path.endsWith("/check-runs"));
+    expect(check?.body).toMatchObject({ conclusion: "action_required" });
+    expect(rows()).toHaveLength(0);
+  });
+
   test.each([
     ["empty", ""],
     ["only blanks", "   "],

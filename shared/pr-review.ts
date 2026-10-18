@@ -1099,12 +1099,15 @@ function namingRefused(facts: NamingFacts): boolean {
  * accepts it, which is the point (a pull request nobody is asked to review must not be held by a
  * review that does not apply to it), and it is safe only because it is never what a review that
  * ran, failed or could not decide says. An owner's pull request that the naming rule refuses is a
- * `failure`; one whose name could not be checked needs a person.
+ * `failure`; one whose name could not be checked needs a person, whatever else the rule found: a
+ * waiver covers only what the rule found, so while the name cannot be read nothing can be waived,
+ * and a `failure` would offer the administrator a waiver that is then refused.
  */
 export function conclusionOf(outcome: ReviewOutcome): CheckConclusion {
   if (outcome.kind === "exempt") return "skipped";
   if (outcome.kind === "naming") {
-    return namingRefused(outcome.facts) ? "failure" : "action_required";
+    const { facts } = outcome;
+    return facts.name !== "unchecked" && namingRefused(facts) ? "failure" : "action_required";
   }
   if (outcome.kind !== "reported") return "action_required";
   const v = verdictOf(outcome.report);
@@ -1400,17 +1403,36 @@ export function namingLines(report: PrReviewReport): string[] {
   return out;
 }
 
-/** The check of an owner's or administrator's pull request the naming rule refused or could not check. */
+/**
+ * The check of an owner's or administrator's pull request the naming rule refused or could not
+ * check. A name that could not be read decides it, whatever the title says (the reason is given
+ * with {@link conclusionOf}): the check needs a person, and says what else the rule found in what
+ * it could read. Otherwise a refusal is a failure, and the override is the one way past it without
+ * a change.
+ */
 function renderNaming(facts: NamingFacts): RenderedCheck {
   const lines: string[] = [];
   if (facts.title !== null) lines.push(NAMING_SENTENCE.title[facts.title]);
   if (facts.name !== null && facts.name !== "unchecked") {
     lines.push(NAMING_SENTENCE.name[facts.name]);
   }
-  const unchecked =
-    facts.name === "unchecked"
-      ? "The dataset's name could not be read from GitHub, so it was not checked against the naming rule. Start the check again with `nemar admin pr-reviews start <dataset> <pr>`."
-      : null;
+  if (facts.name === "unchecked") {
+    return {
+      title: "Could not decide: the naming rule was not checked",
+      summary: [
+        ...(lines.length > 0
+          ? [
+              "The naming rule also found a problem in what it could read.",
+              "",
+              ...lines.map((l) => `- ${l}`),
+              "",
+            ]
+          : []),
+        "The dataset's name could not be read from GitHub, so it was not checked against the naming rule. Start the check again with `nemar admin pr-reviews start <dataset> <pr>`.",
+      ].join("\n"),
+      text: `${NO_VERDICT}\n\n${FOOTER}`,
+    };
+  }
   const override =
     "The only way past the naming rule without a change is an explicit override by a NEMAR administrator: `nemar admin pr-reviews allow <dataset> <pr> --admin`, which is recorded and applies to this commit only.";
   if (namingRefused(facts)) {
@@ -1420,14 +1442,13 @@ function renderNaming(facts: NamingFacts): RenderedCheck {
         "The automated review does not run for NEMAR owners and administrators, but the naming rule applies to every pull request, and it found a problem.",
         "",
         ...lines.map((l) => `- ${l}`),
-        ...(unchecked ? ["", unchecked] : []),
       ].join("\n"),
       text: `${override}\n\n${FOOTER}`,
     };
   }
   return {
     title: "Could not decide: the naming rule was not checked",
-    summary: unchecked ?? NO_VERDICT,
+    summary: NO_VERDICT,
     text: `${NO_VERDICT}\n\n${FOOTER}`,
   };
 }

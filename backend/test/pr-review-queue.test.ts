@@ -20,7 +20,12 @@ import type {
   SetOverrideResponse,
   VolumeWindow,
 } from "../../shared/contract/pr-review-admin";
-import { renderCheck } from "../../shared/pr-review";
+import {
+  type NameFinding,
+  type NamingProblem,
+  conclusionOf,
+  renderCheck,
+} from "../../shared/pr-review";
 import { adminRoutes } from "../src/routes/admin";
 import {
   __resetRateLimitStateForTests,
@@ -2210,6 +2215,41 @@ describe("an owner's or administrator's pull request is exempt (ADR 0107)", () =
         detail: "naming_unchecked",
         needs_you: false,
       });
+    });
+
+    test("a refused title beside a name that could not be read reads naming_unchecked, as the check the Worker posts for it: no waiver is offered", async () => {
+      // The conclusion the exempt path posts for the facts, in GitHub's words. A failure would be
+      // listed as "needs allow --admin", and the waiver is refused while the name is unread.
+      const posted = (title: NamingProblem | null, name: NameFinding | null) =>
+        conclusionOf({ kind: "naming", facts: { title, name } }).toUpperCase();
+      nodes(
+        {
+          ds: "nm000201",
+          n: 1,
+          author: ADMIN_GH,
+          authorId: 4001,
+          checks: withChecks("nm000201", reviewCheck(posted("author_year", "unchecked"))),
+        },
+        {
+          ds: "nm000202",
+          n: 2,
+          author: ADMIN_GH,
+          authorId: 4001,
+          checks: withChecks("nm000202", reviewCheck(posted("author_year", null))),
+        },
+        {
+          ds: "nm000203",
+          n: 3,
+          author: ADMIN_GH,
+          authorId: 4001,
+          checks: withChecks("nm000203", reviewCheck(posted(null, "unchecked"))),
+        },
+      );
+      const by = await detailOf();
+      expect(by.nm000201).toMatchObject({ verdict: "exempt", detail: "naming_unchecked" });
+      // The controls: a refusal alone is waivable, and an unread name alone is as it was.
+      expect(by.nm000202).toMatchObject({ verdict: "exempt", detail: "naming_rule" });
+      expect(by.nm000203).toMatchObject({ verdict: "exempt", detail: "naming_unchecked" });
     });
 
     test("a check that was skipped, is running, or is not there is the plain exemption", async () => {
