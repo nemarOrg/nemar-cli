@@ -16254,12 +16254,16 @@ class TestFailureVerdict(unittest.TestCase):
         raise AssertionError("make_next() was not raised")
 
     def test_a_host_error_raised_while_recovering_from_a_refusal_keeps_its_retry(self):
-        # biosigIO recovers three kinds of header pyedflib refuses by reading the
-        # file again INSIDE the `except` block that caught the refusal. A host
+        # A reader's recovery can read the file again INSIDE the `except` block
+        # that caught its refusal (biosigIO's tolerant EDF read does). A host
         # error raised by that second read (a failing disk, a full volume, a
         # permission) therefore carries the refusal as its `__context__`. It is
         # the host saying no, and keeps its retry: the refusal behind it is not
-        # what this exception is.
+        # what this exception is. The refusal here is one a rule reads (MNE's
+        # split refusal), so (None, None) can only mean the walk declined the
+        # context; behind a refusal no rule reads it would hold whatever the
+        # walk did.
+        text = MNE_SPLIT_REFUSAL.format(path="/w/sub-01_task-rest_split-02_meg.fif")
         for label, make in (
             ("EIO", lambda: OSError(errno.EIO, "Input/output error")),
             ("ENOSPC", lambda: OSError(errno.ENOSPC, "No space left on device")),
@@ -16267,24 +16271,52 @@ class TestFailureVerdict(unittest.TestCase):
             ("no errno, other words", lambda: OSError("fallback read failed")),
         ):
             with self.subTest(label):
-                exc = self.raised_while_handling(
-                    OSError(f"x.bdf: {EDF_REFUSAL} (Filesize)"), make
-                )
+                refusal = ValueError(text)
+                exc = self.raised_while_handling(refusal, make)
                 # The control: the refusal really is the context, so a verdict
                 # of (None, None) is the rule declining to read it.
-                self.assertIn(EDF_REFUSAL, str(exc.__context__))
-                self.assertEqual(self.verdict(exc), (None, None))
+                self.assertIn(text, str(exc.__context__))
+                self.assertEqual(self.verdict(exc, self.SPLIT_HEAD), (None, None))
+                # And the walk does read this refusal as a cause: the same host
+                # error raised `from` it names the part the tree lacks.
+                self.assertEqual(
+                    self.verdict(chained(make(), refusal), self.SPLIT_HEAD)[0],
+                    "split_part_missing",
+                )
 
-    def test_a_refusal_behind_another_exception_is_not_the_refusal(self):
-        # A refusal text behind the exception is not a verdict: no rule reads an
-        # `OSError`'s words, at the top or down a chain.
-        refusal = OSError(f"x.bdf: {EDF_REFUSAL} (Filesize)")
-        host = OSError(errno.EIO, "Input/output error")
-        host.__cause__ = refusal
-        self.assertEqual(self.verdict(host), (None, None))
+    def test_a_split_refusal_is_read_through_five_causes_and_never_by_context(self):
+        # The walk reads the exception and five explicit `__cause__` links: a host
+        # error on top does not hide a refusal that close, and nothing further
+        # down is read. A context is not a link at any depth.
+        text = MNE_SPLIT_REFUSAL.format(path="/w/sub-01_task-rest_split-02_meg.fif")
+
+        def host_over(leaf, depth):
+            """A host error whose explicit causes reach `leaf` after `depth` links."""
+            host = OSError(errno.EIO, "Input/output error")
+            host.__cause__ = self.wrapper_chain(leaf, depth - 1)
+            return host
+
         for depth in range(1, 6):
-            with self.subTest(depth=depth):
-                self.assertEqual(self.verdict(self.wrapper_chain(refusal, depth)), (None, None))
+            with self.subTest(cause_at=depth):
+                code, detail = self.verdict(
+                    host_over(ValueError(text), depth), self.SPLIT_HEAD
+                )
+                self.assertEqual(code, "split_part_missing")
+                self.assertIn(self.SPLIT_NEXT, detail or "")
+        # One link further is out of reach.
+        exc = host_over(ValueError(text), 6)
+        self.assertEqual(self.verdict(exc, self.SPLIT_HEAD), (None, None))
+        # The same distances with the last hop an implicit context instead of a
+        # cause: the host error nearest the refusal was raised while handling it.
+        for depth in range(1, 6):
+            with self.subTest(context_at=depth):
+                tail = self.raised_while_handling(
+                    ValueError(text), lambda: OSError(errno.EIO, "Input/output error")
+                )
+                self.assertIsNone(tail.__cause__)
+                self.assertIn(text, str(tail.__context__))
+                exc = host_over(tail, depth - 1) if depth > 1 else tail
+                self.assertEqual(self.verdict(exc, self.SPLIT_HEAD), (None, None))
 
     # -- a code that is not generic passes through -------------------------
 
