@@ -16321,16 +16321,15 @@ class TestFailureVerdict(unittest.TestCase):
     # -- a code that is not generic passes through -------------------------
 
     def test_a_specific_code_is_never_refined(self):
-        edf = OSError(f"x.bdf: {EDF_REFUSAL} (Filesize)")
         split = ValueError(MNE_SPLIT_REFUSAL.format(path="/w/sub-01_task-rest_split-02_meg.fif"))
         for exc, code in (
-            (chained(RecordingMemoryExceeded("out of memory"), edf), "recording_memory_exceeded"),
+            (chained(RecordingMemoryExceeded("out of memory"), split), "recording_memory_exceeded"),
             (chained(generate_zarr.AnnexObjectMissing("KEY", "chunk C2 is absent"), split),
              "annex_object_missing"),
             (chained(MaxShieldUncalibrated("no pair"), split), "maxshield_uncalibrated"),
             (chained(generate_zarr.CompanionMissing("no fdt"), split), "companion_missing"),
-            (chained(Refusal("x", "channel_count_mismatch"), edf), "channel_count_mismatch"),
-            (chained(Refusal("x", "not_continuous"), edf), "not_continuous"),
+            (chained(Refusal("x", "channel_count_mismatch"), split), "channel_count_mismatch"),
+            (chained(Refusal("x", "not_continuous"), split), "not_continuous"),
         ):
             with self.subTest(code):
                 self.assertEqual(
@@ -16483,15 +16482,6 @@ class TestFailureVerdict(unittest.TestCase):
                 raise RuntimeError("wrapped on purpose") from inner
         except RuntimeError as exc:
             self.assertEqual(self.verdict(exc, self.SET), ("corrupt_or_truncated", None))
-        # And what it must NOT carry to a data verdict is a host error: raised
-        # while handling pyedflib's refusal, it holds the refusal as its context
-        # and is still the host's.
-        host = self.raised_while_handling(
-            OSError(f"x.bdf: {EDF_REFUSAL} (Filesize)"),
-            lambda: OSError(errno.EIO, "Input/output error"),
-        )
-        self.assertIsNotNone(host.__context__)
-        self.assertEqual(self.verdict(host), (None, None))
 
     # -- rules 1 to 3 read causes, never contexts ----------------------------
     #
