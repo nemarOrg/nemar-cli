@@ -188,7 +188,10 @@
 # owner-approved step.
 # >=1.2.13: a BrainVision data file whose header shows it was cut short is a typed
 # `CorruptFileError` (`corrupt_or_truncated`) on both the in-memory and the
-# streaming path, where it used to read with the tail dropped. Through
+# streaming path, where it used to read with the tail dropped. The converter opts
+# in to `allow_partial_frame`: a file with no positive `DataPoints` count that ends
+# in a partial frame is read as whole frames, as 1.2.12 read it, and the dropped
+# byte count is recorded in the store (`brainvision_dropped_bytes`). Through
 # `Recording.from_file` a FIF file truncated in its data is typed
 # `corrupt_or_truncated` too. The streaming export still raises a bare
 # `ValueError` for a truncated FIF (biosigio#161) and for a truncated KIT `.sqd`

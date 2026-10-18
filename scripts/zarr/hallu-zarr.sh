@@ -388,7 +388,9 @@ sys.exit(code)
 # an EDF+C or BDF+C recording whose first time-keeping onset is late
 # (biosigio#145), and 1.2.13 refuses a BrainVision data file whose header shows it
 # was cut short, with a typed `CorruptFileError`, where it used to read with the
-# tail dropped. It types a truncated FIF the same way only through
+# tail dropped. The converter opts in to `allow_partial_frame`, so a file with no
+# `DataPoints` count that ends in a partial frame is read as whole frames and its
+# dropped byte count is recorded. It types a truncated FIF the same way only through
 # `Recording.from_file`. The streaming export still raises a bare `ValueError` for
 # a truncated FIF (biosigio#161) and for a truncated KIT `.sqd` or 4D/BTi `config`
 # or `hs_file` (biosigio#168), and an uncoded failure is retried until
