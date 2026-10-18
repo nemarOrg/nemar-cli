@@ -355,6 +355,27 @@ describe("it posts nothing, and the key reaches only the API", () => {
       GIT_CONFIG_NOSYSTEM: "1",
     });
   });
+
+  test("a child is not handed the request for an identity token, in any case, and keeps the rest", () => {
+    const env = childEnv({
+      ACTIONS_ID_TOKEN_REQUEST_URL: "https://pipelines.example/idtoken?api-version=2.0",
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: "request-SECRET",
+      actions_id_token_request_token: "lower-request-SECRET",
+      ACTIONS_ID_TOKEN_REQUEST_FUTURE: "another",
+      GH_TOKEN: "ghp_token",
+      GITHUB_TOKEN: "github_token",
+      HOME: "/home/operator",
+      PATH: "/usr/bin",
+    });
+    expect(Object.keys(env).filter((name) => /^actions_id_token_request_/i.test(name))).toEqual([]);
+    expect(Object.values(env).join("\n")).not.toContain("request-SECRET");
+    expect(env).toMatchObject({
+      GH_TOKEN: "ghp_token",
+      GITHUB_TOKEN: "github_token",
+      HOME: "/home/operator",
+      PATH: "/usr/bin",
+    });
+  });
 });
 
 describe("one pull request, through the job's own stage flow", () => {
@@ -573,12 +594,15 @@ describe("reading a pull request from GitHub, as the workflow does", () => {
   });
 
   test("every git calibrateOne starts, its fetch and the review's reads, is handed childEnv and no key", async () => {
-    // The process holds the operator's key (the beforeAll above); a callback token and a federation
-    // rule are the other names no child may be handed. calibrateMain refuses a token, calibrateOne
-    // does not, so setting one here proves the filter and not the refusal.
+    // The process holds the operator's key (the beforeAll above); a callback token, a federation
+    // rule and the request for an identity token are the other names no child may be handed.
+    // calibrateMain refuses a token, calibrateOne does not, so setting one here proves the filter
+    // and not the refusal.
     const extra = {
       PR_REVIEW_CALLBACK_TOKEN: "callback-SECRET-TOKEN",
       ANTHROPIC_FEDERATION_RULE_ID: "rule-SECRET-ID",
+      ACTIONS_ID_TOKEN_REQUEST_URL: "https://pipelines.example/idtoken-SECRET-URL",
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: "request-SECRET-TOKEN",
     };
     const saved = Object.fromEntries(Object.keys(extra).map((k) => [k, process.env[k]]));
     const key = process.env.ANTHROPIC_API_KEY;
@@ -639,7 +663,7 @@ describe("reading a pull request from GitHub, as the workflow does", () => {
     // No git, nested or not, was handed a key, a token or a rule, by name or under another one.
     for (const call of seen) {
       const names = Object.keys(call.env);
-      const keys = names.filter((n) => /^anthropic_/i.test(n));
+      const keys = names.filter((n) => /^(?:anthropic_|actions_id_token_request_)/i.test(n));
       expect(keys, call.args).toEqual([]);
       expect(names, call.args).not.toContain("PR_REVIEW_CALLBACK_TOKEN");
     }

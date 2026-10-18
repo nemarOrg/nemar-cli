@@ -8,8 +8,9 @@
  * call passes its arguments as an array (no shell) after the commit ids have been checked against
  * a 40-hex shape, and with `--literal-pathspecs`, so a path or a branch name is only ever data and
  * a file named like a pathspec (`:(glob)*.json`) cannot make git read another file's content. Each
- * call also runs with {@link childEnv}, this process's environment less the model credential and
- * the callback token, so the git that reads a contributor's objects is handed neither.
+ * call also runs with {@link childEnv}, this process's environment less the model credential, the
+ * request for an identity token and the callback token, so the git that reads a contributor's
+ * objects is handed none of them.
  *
  * **Two passes, for the two stages.** {@link gatherListing} reads what the screen is shown: the
  * change list, the version and name in `dataset_description.json` (the one file whose content it
@@ -319,9 +320,14 @@ function withinBudget<T>(pass: keyof typeof EVIDENCE_BUDGET_MS, read: () => T): 
 /**
  * What no child process of the review is handed: the model credential and everything that
  * redirects or federates it (every `ANTHROPIC_*` variable, in any case, because a name that only
- * looks different is not worth the risk) and the callback token the job posts its report with.
+ * looks different is not worth the risk); the request for an identity token
+ * (`ACTIONS_ID_TOKEN_REQUEST_URL` and `ACTIONS_ID_TOKEN_REQUEST_TOKEN`, which the runner puts in
+ * every step of a job with `id-token: write`, and with which a holder can mint a token for the
+ * federation; the workflow minted the one the SDK reads in an earlier step, into a file); and the
+ * callback token the job posts its report with.
  */
-const WITHHELD_FROM_CHILDREN = /^(?:ANTHROPIC_|PR_REVIEW_CALLBACK_TOKEN$)/i;
+const WITHHELD_FROM_CHILDREN =
+  /^(?:ANTHROPIC_|ACTIONS_ID_TOKEN_REQUEST_|PR_REVIEW_CALLBACK_TOKEN$)/i;
 
 /**
  * The environment every child of the review is run with, here and in the calibration script

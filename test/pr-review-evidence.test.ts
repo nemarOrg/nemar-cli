@@ -995,9 +995,10 @@ describe("runReview: the job around the model call", () => {
   });
 
   test("every git a review starts is handed neither the model credential nor the callback token", async () => {
-    // The model step's environment holds the callback token and the federation identifiers, and this
-    // file's beforeAll gives the SDK a key and a gateway address. None is for git, which reads a
-    // contributor's objects. The environment is read as each call starts, so it is set around the run.
+    // The model step's environment holds the callback token, the federation identifiers and the
+    // runner's request for an identity token, and this file's beforeAll gives the SDK a key and a
+    // gateway address. None is for git, which reads a contributor's objects. The environment is read
+    // as each call starts, so it is set around the run.
     const r = setup("run-child-env");
     const pr = prJson(r.dir, {
       head: { sha: r.head, repo: { full_name: "nemarDatasets/nm000460" } },
@@ -1005,6 +1006,8 @@ describe("runReview: the job around the model call", () => {
     const extra = {
       PR_REVIEW_CALLBACK_TOKEN: "callback-SECRET-TOKEN",
       ANTHROPIC_FEDERATION_RULE_ID: "rule-SECRET-ID",
+      ACTIONS_ID_TOKEN_REQUEST_URL: "https://pipelines.example/idtoken-SECRET-URL",
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: "request-SECRET-TOKEN",
     };
     const saved = Object.fromEntries(Object.keys(extra).map((k) => [k, process.env[k]]));
     const sdk = [process.env.ANTHROPIC_API_KEY, process.env.ANTHROPIC_BASE_URL];
@@ -1034,7 +1037,7 @@ describe("runReview: the job around the model call", () => {
     const rewritten = new Set(["_", "PWD", "OLDPWD", "SHLVL"]);
     for (const call of calls) {
       const names = Object.keys(call.env);
-      const keys = names.filter((n) => /^anthropic_/i.test(n));
+      const keys = names.filter((n) => /^(?:anthropic_|actions_id_token_request_)/i.test(n));
       expect(keys, call.args).toEqual([]);
       expect(names, call.args).not.toContain("PR_REVIEW_CALLBACK_TOKEN");
       for (const [name, value] of Object.entries(expected)) {
