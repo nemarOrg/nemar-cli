@@ -28,6 +28,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import unittest
 import urllib.error
 import urllib.request
@@ -15319,7 +15320,15 @@ class TestRequireCompanionsVhdr(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.local = os.path.join(self._tmp.name, "sub-01_task-rest_eeg.vhdr")
 
-    def check(self, tracked, data_file="sub-01_task-rest_eeg.eeg", *, header=True):
+    def check(
+        self,
+        tracked,
+        data_file="sub-01_task-rest_eeg.eeg",
+        *,
+        header=True,
+        primary=None,
+    ):
+        primary = primary or self.PRIMARY
         if header:
             with open(self.local, "w", encoding="utf-8") as fh:
                 fh.write(
@@ -15327,7 +15336,7 @@ class TestRequireCompanionsVhdr(unittest.TestCase):
                     f"[Common Infos]\nDataFile={data_file}\nMarkerFile=x.vmrk\n"
                 )
         generate_zarr.require_companions(
-            self.PRIMARY, self.local, {self.PRIMARY, *tracked}, self.HEAD, False
+            primary, self.local, {primary, *tracked}, self.HEAD, False
         )
 
     def test_a_header_whose_data_file_is_tracked_passes(self):
@@ -15354,6 +15363,29 @@ class TestRequireCompanionsVhdr(unittest.TestCase):
         for ext in (".EEG", ".Eeg", ".DAT"):
             with self.subTest(ext):
                 self.check({f"sub-01/eeg/sub-01_task-rest_eeg{ext}"}, data_file="old_name.eeg")
+
+    def test_a_same_stem_match_is_unicode_normalized(self):
+        # A name can reach the tree composed (one code point for the accented
+        # letter) or decomposed (the letter, then a combining accent), and the
+        # sibling search takes the two for one stem. The header's DataFile names
+        # neither, so only the sibling clause can satisfy the rule.
+        composed = "sub-01_task-caf\u00e9_eeg"
+        decomposed = "sub-01_task-cafe\u0301_eeg"
+        self.assertNotEqual(composed, decomposed)
+        self.assertEqual(unicodedata.normalize("NFC", decomposed), composed)
+        for label, header_stem, data_stem in (
+            ("decomposed header, composed data file", decomposed, composed),
+            ("composed header, decomposed data file", composed, decomposed),
+        ):
+            with self.subTest(label):
+                primary = f"sub-01/eeg/{header_stem}.vhdr"
+                data = f"sub-01/eeg/{data_stem}.eeg"
+                self.check({data}, data_file="old_name.eeg", primary=primary)
+                # The controls: no sibling at all, and a sibling whose stem
+                # differs by more than the spelling of its accent.
+                for tracked in (set(), {"sub-01/eeg/sub-01_task-cafe_eeg.eeg"}):
+                    with self.assertRaises(generate_zarr.CompanionMissing):
+                        self.check(tracked, data_file="old_name.eeg", primary=primary)
 
     def test_a_stale_header_with_no_sibling_is_refused(self):
         with self.assertRaises(generate_zarr.CompanionMissing) as cm:
