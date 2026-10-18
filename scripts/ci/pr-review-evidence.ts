@@ -844,12 +844,13 @@ export function buildEvidence(facts: GitFacts, text: TextFacts): ReviewEvidence 
 }
 
 /**
- * The evidence block of a report that ended at the screen: the same account, and no content read.
- * `truncated` keeps its meaning: the change list was cut, or a modified or removed metadata file
- * was not shown, which, with nothing read, is any such file at all. The change log is content, so
- * it was not read either: `changelog_entry` is null.
+ * The evidence block of a report that ended before the review read any content, at the screen or at
+ * the facts: the same account, built from the listing alone, and no content read. `truncated` keeps
+ * its meaning: the change list was cut, or a modified or removed metadata file was not shown, which,
+ * with nothing read, is any such file at all. The change log is content, so it was not read either:
+ * `changelog_entry` is null.
  */
-export function buildScreenEvidence(listing: Listing, text: TextFacts): ReviewEvidence {
+export function buildListingEvidence(listing: Listing, text: TextFacts): ReviewEvidence {
   return {
     ...listedEvidence(listing, text),
     files_read: 0,

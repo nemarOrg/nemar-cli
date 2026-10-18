@@ -16,14 +16,16 @@
  * nothing installed.
  *
  * **The order of a review.** The facts first, before any model is asked: the naming rule on the
- * title and on a changed dataset name, and whether there is a description at all. Then the screen
- * (stage 1), which sees the pull request's text, the list of changed files and the platform's
- * facts, and may stop only spam. To state those facts the listing reads one file's content,
- * `dataset_description.json` (the version and the name, before and after), and shows the screen
- * the facts and never the file. A stop ends the run with a screen report, and no other file's
- * content is read. Otherwise the content is read and the review (stage 2) answers. Both stages run
- * at max effort and stream, each under {@link STAGE_BUDGETS}; a refusal or a truncation at either
- * is no verdict, which the Worker publishes as a check that does not pass and needs a person.
+ * title and on a changed dataset name, and whether there is a description at all. When the naming
+ * rule fails the pull request, or cannot check a changed name, the review ends there, at the
+ * `facts` stage, and no model is asked. Otherwise the screen (stage 1), which sees the pull
+ * request's text, the list of changed files and the platform's facts, and may stop only spam. To
+ * state those facts the listing reads one file's content, `dataset_description.json` (the version
+ * and the name, before and after), and shows the screen the facts and never the file. A stop ends
+ * the run with a screen report, and no other file's content is read. Otherwise the content is read
+ * and the review (stage 2) answers. Both stages run at max effort and stream, each under
+ * {@link STAGE_BUDGETS}; a refusal or a truncation at either is no verdict, which the Worker
+ * publishes as a check that does not pass and needs a person.
  *
  * **Nothing in the dispatch is trusted for a decision.** The pull request is re-read from the API
  * (`--pr-json`): it must still be open, still target `main`, and still be at `--head`, and the
@@ -55,7 +57,7 @@ import {
   SHA40,
   type TextFacts,
   buildEvidence,
-  buildScreenEvidence,
+  buildListingEvidence,
   gatherContent,
   gatherListing,
 } from "./pr-review-evidence";
@@ -65,6 +67,7 @@ import {
   REVIEW_OUTPUT_SCHEMA,
   SCREEN_MODEL,
   SCREEN_OUTPUT_SCHEMA,
+  assembleFactsReport,
   assembleReport,
   buildReviewMessages,
   buildScreenMessages,
@@ -430,8 +433,9 @@ export interface PullRequestUnderReview {
 }
 
 /**
- * The stage flow, for a pull request whose commits and text are known: the facts first, then the
- * screen, and the review only when the screen let it through. Throws what it meets; {@link
+ * The stage flow, for a pull request whose commits and text are known: the facts first, and the
+ * screen and the review only when the naming rule left the pull request standing, the review only
+ * when the screen let it through. Throws what it meets; {@link
  * runReview} turns that into a fixed word. The calibration runs exactly this, on pull requests that
  * are no longer open, which is why the dispatch's own checks are not part of it.
  */
@@ -447,6 +451,12 @@ export async function reviewPullRequest(
   if (listing.changes.length > MAX_REVIEWABLE_FILES) throw new RunFailure("too_large");
   // The facts, before any model call.
   const facts = textFactsOf(pr, listing);
+  // A title or a dataset name the naming rule refuses, or a changed name nobody could read, decides
+  // the review: it fails, or a person must look. The rule needs no model, and the screen and the
+  // review would be paid for an answer the facts overrule, so neither is asked.
+  if (facts.titleProblem !== null || facts.nameProblem !== null) {
+    return assembleFactsReport(buildListingEvidence(listing, facts));
+  }
 
   const screenMessages = buildScreenMessages({
     listing,
@@ -463,7 +473,7 @@ export async function reviewPullRequest(
     client,
   );
   if (readScreenAnswer(screen.output).decision === "reject") {
-    return assembleReport(screen.output, null, buildScreenEvidence(listing, facts), {
+    return assembleReport(screen.output, null, buildListingEvidence(listing, facts), {
       screen: screen.usage,
       review: null,
     });

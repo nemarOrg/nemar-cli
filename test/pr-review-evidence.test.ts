@@ -1395,6 +1395,31 @@ describe("runReview: the job around the model call", () => {
       expect(log).not.toContain("Updates the README.");
     });
 
+    test("a naming fact ends the review at the facts: it posts a report without asking a model, and says so in the log", async () => {
+      const r = setup("main-facts");
+      const pr = prJson(r.dir, {
+        head: { sha: r.head, repo: { full_name: "nemarDatasets/nm000460" } },
+        title: "Lee2019 EEG dataset update",
+      });
+      const { code, log } = await runMain(argvFor(r, pr));
+      expect(code).toBe(0);
+      expect(modelRequests).toHaveLength(0);
+      expect(received).toHaveLength(1);
+      const outcome = parseCallbackOutcome({
+        outcome: received[0].body.outcome,
+        report: received[0].body.report,
+        error: received[0].body.error,
+      });
+      expect(outcome.kind).toBe("reported");
+      if (outcome.kind !== "reported") return;
+      if (outcome.report.v !== 2) throw new Error("not version 2");
+      expect(outcome.report.stage).toBe("facts");
+      expect(verdictOf(outcome.report)).toBe("fail");
+      // A review id and fixed words: the title is a pull request's text and stays out of the log.
+      expect(log).toContain("review 41: reported at facts");
+      expect(log).not.toContain("Lee2019");
+    });
+
     test("the production environment posts to the production origin and not the dev one", async () => {
       const { r, pr } = ready("main-prod");
       const { code } = await runMain(argvFor(r, pr, { environment: "production" }));
@@ -2588,7 +2613,8 @@ describe("the facts come before any model, and fail the verdict whatever it says
     return path;
   }
 
-  async function reviewWith(
+  /** A release in a repository, and the arguments to review it: `edit` lays the case on top. */
+  function releaseWith(
     name: string,
     edit: (dir: string) => void,
     over: Record<string, unknown> = {},
@@ -2603,13 +2629,21 @@ describe("the facts come before any model, and fail the verdict whatever it says
       );
       edit(dir);
     });
-    const res = await runReview({
+    return {
       repoDir: r.dir,
       base: r.base,
       head: r.head,
       fetchedHead: r.head,
       prJson: prJsonFor(r.dir, r.head, over),
-    });
+    };
+  }
+
+  async function reviewWith(
+    name: string,
+    edit: (dir: string) => void,
+    over: Record<string, unknown> = {},
+  ) {
+    const res = await runReview(releaseWith(name, edit, over));
     if (res.outcome !== "reported" || res.report.v !== 2) throw new Error("no version 2 report");
     return res.report;
   }
@@ -2680,28 +2714,177 @@ describe("the facts come before any model, and fail the verdict whatever it says
     expect(verdictOf(report)).toBe("uncertain");
   });
 
-  test("a title that starts with an author and a year fails, though the model passed it", async () => {
+  // -------------------------------------------------------------------------------------------
+  // A naming fact ends the review at the facts
+  // -------------------------------------------------------------------------------------------
+
+  test.each([
+    [
+      "a title that starts with an author and a year",
+      { title: "Lee2019 EEG update" },
+      null,
+      "fail",
+    ],
+    [
+      "a title with a naming-template token joined to other text",
+      { title: "Rename to FirstAuthorSurname_year_keyword_paperDOI" },
+      null,
+      "fail",
+    ],
+    [
+      "a changed name that starts with an author and a year",
+      {},
+      desc("1.1.0", { Name: "Lee2019-EEG-Motor" }),
+      "fail",
+    ],
+    [
+      "a changed name with an unfilled template field",
+      {},
+      desc("1.1.0", { Name: "{{dataset name}}" }),
+      "fail",
+    ],
+    ["a changed name nobody can read", {}, desc("1.1.0", { Name: 7 }), "uncertain"],
+  ])(
+    "%s ends the review at the facts: no model request, and a report the shared parser takes",
+    async (what, over, description, verdict) => {
+      const report = await reviewWith(
+        `facts-ends-${hash(what)}`,
+        (dir) => {
+          if (description !== null) write(dir, "dataset_description.json", description);
+        },
+        over,
+      );
+      // Not the screen, not the review, and not a token exchange with the provider.
+      expect(modelRequests).toHaveLength(0);
+      expect(tokenExchanges).toHaveLength(0);
+      expect(report.stage).toBe("facts");
+      expect(report.models).toEqual({ screen: null, review: null });
+      expect(report.usage).toEqual({
+        screen: { input_tokens: 0, output_tokens: 0 },
+        review: null,
+      });
+      // Nothing was assessed, and no file's content was read.
+      expect(Object.values(report.criteria)).toEqual(Array(6).fill("unknown"));
+      expect(report.evidence.files_read).toBe(0);
+      expect(report.evidence.changelog_entry).toBeNull();
+      expect(verdictOf(report)).toBe(verdict);
+      // What the Worker's parser makes of the body the job would post.
+      const body = JSON.parse(JSON.stringify(report));
+      expect(parsePrReviewReport(body)).toEqual(report);
+      expect(
+        parseCallbackOutcome({ outcome: "reported", report: body, error: undefined }).kind,
+      ).toBe("reported");
+    },
+  );
+
+  test("the failing report names the naming blocker, and the check says what to do about it", async () => {
+    const title = await reviewWith("facts-ends-title-text", () => {}, {
+      title: "Lee2019 EEG update",
+    });
+    expect(factsOf(title).notes).toContainEqual({
+      criterion: "clear_title_and_description",
+      code: "title_author_year",
+      result: "fail",
+    });
+    const check = renderCheck({ kind: "reported", report: title });
+    expect(check.title).toBe("Needs changes: the naming rule");
+    // What the rule found, that the review stage did not run, and that the author fixes it and pushes.
+    expect(check.summary).toContain("The title starts with a name and a year");
+    expect(check.summary).toContain("the review stage did not run and no model was asked");
+    expect(check.summary).toContain("Edit the title, or the Name in dataset_description.json");
+    expect(check.summary).toContain("push again");
+    const name = await reviewWith("facts-ends-name-text", (dir) =>
+      write(dir, "dataset_description.json", desc("1.1.0", { Name: "Lee2019-EEG-Motor" })),
+    );
+    expect(factsOf(name).notes).toContainEqual({
+      criterion: "no_degradation",
+      code: "name_author_year",
+      result: "fail",
+    });
+    expect(renderCheck({ kind: "reported", report: name }).summary).toContain(
+      "changes the dataset's name",
+    );
+    expect(modelRequests).toHaveLength(0);
+  });
+
+  test("the screen is not asked, so it cannot stop a pull request the naming rule already failed", async () => {
+    // A screen that rejects everything: it is never reached.
+    screenReply = () => standInMessage(JSON.stringify(REJECT));
+    const report = await reviewWith("facts-ends-before-screen", () => {}, {
+      title: "Smith2020 promo",
+    });
+    expect(modelRequests).toHaveLength(0);
+    expect(report.stage).toBe("facts");
+    expect(report.evidence.title_problem).toBe("author_year");
+  });
+
+  test("a naming fact that does not fail the pull request leaves the review as it was: both models are asked", async () => {
+    // A fine title and a readable, fine, changed name.
+    const report = await reviewWith(
+      "facts-not-ended",
+      (dir) => write(dir, "dataset_description.json", desc("1.1.0", { Name: "Resting EEG v2" })),
+      { title: "Correct the sampling rate in the EEG sidecars" },
+    );
+    expect(report.stage).toBe("full");
+    expect(modelRequests).toHaveLength(2);
+  });
+
+  test("the facts stage reads no file's content: only trees, commits, names and the description", async () => {
+    const args = releaseWith("facts-ends-reads", () => {}, { title: "Lee2019 EEG update" });
+    const log = join(root, `git-calls-${Math.random().toString(36).slice(2)}.log`);
+    const restore = installGitShim(root, [{ match: " ", log }]);
+    let res: Awaited<ReturnType<typeof runReview>>;
+    try {
+      res = await runReview(args);
+    } finally {
+      restore();
+    }
+    expect(res.outcome).toBe("reported");
+    if (res.outcome !== "reported" || res.report.v !== 2) throw new Error("no version 2 report");
+    expect(res.report.stage).toBe("facts");
+    const calls = readFileSync(log, "utf8").split("\n").filter(Boolean);
+    expect(calls.length).toBeGreaterThan(0);
+    for (const call of calls) {
+      const command = call.split("protocol.ext.allow=never ")[1] ?? call;
+      const [verb, first] = command.trim().split(" ");
+      const allowed =
+        verb === "merge-base" ||
+        verb === "log" ||
+        verb === "ls-tree" ||
+        (verb === "diff" && first === "--name-status") ||
+        (verb === "show" && /^[0-9a-f]{40}:dataset_description\.json$/.test(first ?? ""));
+      expect(allowed, command).toBe(true);
+    }
+  });
+
+  test("a title that starts with an author and a year fails, and no model is asked", async () => {
     const report = await reviewWith("facts-title", () => {}, {
       title: "Lee2019 EEG dataset update",
     });
+    expect(modelRequests).toHaveLength(0);
+    expect(report.stage).toBe("facts");
     expect(report.evidence.title_problem).toBe("author_year");
     expect(verdictOf(report)).toBe("fail");
     const { text } = renderCheck({ kind: "reported", report });
     expect(text).toContain("Title starts with a name and a year");
   });
 
-  test("a title with a naming-template token fails", async () => {
+  test("a title with a naming-template token fails, and no model is asked", async () => {
     const report = await reviewWith("facts-template", () => {}, {
       title: "Rename dataset to FirstAuthorSurname-year-keyword-paperDOI",
     });
+    expect(modelRequests).toHaveLength(0);
+    expect(report.stage).toBe("facts");
     expect(report.evidence.title_problem).toBe("template_field");
     expect(verdictOf(report)).toBe("fail");
   });
 
-  test("a pull request that changes the dataset name to an author-and-year name fails", async () => {
+  test("a pull request that changes the dataset name to an author-and-year name fails, and no model is asked", async () => {
     const report = await reviewWith("facts-name", (dir) =>
       write(dir, "dataset_description.json", desc("1.1.0", { Name: "Lee2019-EEG-Motor" })),
     );
+    expect(modelRequests).toHaveLength(0);
+    expect(report.stage).toBe("facts");
     expect(report.evidence.name_problem).toBe("author_year");
     expect(verdictOf(report)).toBe("fail");
     const { summary } = renderCheck({ kind: "reported", report });
@@ -2724,10 +2907,13 @@ describe("the facts come before any model, and fail the verdict whatever it says
       expect(report.evidence.name_problem).toBe("unchecked");
       expect(factsOf(report).criteria.no_degradation).toBe("unknown");
       expect(factsOf(report).notes.map((n) => n.code)).toContain("name_unchecked");
-      // Whatever the models answered, the verdict is neither a pass nor a fail: a person looks.
+      // There is no name to judge and so nothing for a model to add: none is asked, and the verdict
+      // is neither a pass nor a fail but a person's to give.
+      expect(modelRequests).toHaveLength(0);
+      expect(report.stage).toBe("facts");
       expect(verdictOf(report)).toBe("uncertain");
       const check = renderCheck({ kind: "reported", report });
-      expect(check.title).toBe("Could not decide");
+      expect(check.title).toBe("Could not decide: the naming rule was not checked");
       expect(check.summary).toContain("could not be read from it, so the name was not checked");
       expect(check.text).toContain("A NEMAR administrator needs to look at this pull request.");
     },
@@ -2891,9 +3077,11 @@ describe("the facts come before any model, and fail the verdict whatever it says
 
   test("the facts are decided even when the screen stops the pull request", async () => {
     screenReply = () => standInMessage(JSON.stringify(REJECT));
-    const report = await reviewWith("facts-screen", () => {}, { title: "Smith2020 promo" });
+    // An empty description is a fact, but not one that ends the review: the screen is still asked.
+    const report = await reviewWith("facts-screen", () => {}, { body: "  " });
     expect(report.stage).toBe("screen");
-    expect(report.evidence.title_problem).toBe("author_year");
+    expect(modelRequests).toHaveLength(1);
+    expect(report.evidence.description_empty).toBe(true);
   });
 });
 

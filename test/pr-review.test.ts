@@ -34,6 +34,7 @@ import {
   estimateCostUsd,
   factsOf,
   isRunError,
+  namingLines,
   parseCallbackOutcome,
   parsePrReviewReport,
   parseStoredPrReviewReport,
@@ -162,6 +163,39 @@ function screenReport(over: Record<string, unknown> = {}): Record<string, unknow
   });
 }
 
+/** The six criteria of a report that asked no model: none was assessed. */
+const NOT_ASSESSED = {
+  genuine_contribution: "unknown",
+  no_degradation: "unknown",
+  advances_revision: "unknown",
+  material_improvement: "unknown",
+  clear_title_and_description: "unknown",
+  description_not_misleading: "unknown",
+};
+
+/**
+ * A version 2 report that ended at the facts: the naming rule decided the review before any model
+ * was asked, so no model is named, no criterion was assessed, and no tokens were spent.
+ */
+function factsReport(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return report({
+    stage: "facts",
+    models: { screen: null, review: null },
+    criteria: NOT_ASSESSED,
+    findings: [],
+    summary: "",
+    // Nothing was read, so a change to a metadata file is one the reviewer was not shown: `truncated`.
+    evidence: evidence({
+      files_read: 0,
+      truncated: true,
+      changelog_entry: null,
+      title_problem: "author_year",
+    }),
+    usage: { screen: { input_tokens: 0, output_tokens: 0 }, review: null },
+    ...over,
+  });
+}
+
 /** A version 1 report, as rows stored before the screen existed hold it. */
 function reportV1(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -207,6 +241,20 @@ function everyOutcome(): ReviewOutcome[] {
     { kind: "exempt" },
     { kind: "exempt", waived: true },
     { kind: "reported", report: parsePrReviewReport(screenReport()) },
+    { kind: "reported", report: parsePrReviewReport(factsReport()) },
+    {
+      kind: "reported",
+      report: parsePrReviewReport(
+        factsReport({
+          evidence: evidence({
+            files_read: 0,
+            changelog_entry: null,
+            title_problem: null,
+            name_problem: "unchecked",
+          }),
+        }),
+      ),
+    },
     { kind: "reported", report: parseStoredPrReviewReport(reportV1()) },
     { kind: "naming", facts: { title: "author_year", name: null } },
     { kind: "naming", facts: { title: null, name: "template_field" } },
@@ -1476,6 +1524,203 @@ describe("a version 2 report is exactly its keys, and its stage is a contract", 
   });
 });
 
+describe("a review that ended at the facts: the naming rule decided it before any model was asked", () => {
+  /** The evidence of a facts report whose naming facts are `naming`. */
+  const factsEvidence = (naming: Record<string, unknown>) =>
+    evidence({
+      files_read: 0,
+      truncated: true,
+      changelog_entry: null,
+      title_problem: null,
+      name_problem: null,
+      ...naming,
+    });
+  const factsWith = (naming: Record<string, unknown>) =>
+    parsePrReviewReport(factsReport({ evidence: factsEvidence(naming) }));
+
+  test("is accepted as exactly its shape: no model, nothing assessed, no tokens, and a naming fact", () => {
+    expect(refusal(factsReport())).toBe("accepted");
+    const r = parsePrReviewReport(factsReport());
+    if (r.v !== 2) throw new Error("not version 2");
+    expect(r.stage).toBe("facts");
+    expect(r.models).toEqual({ screen: null, review: null });
+    expect(r.usage).toEqual({ screen: { input_tokens: 0, output_tokens: 0 }, review: null });
+    expect(Object.values(r.criteria)).toEqual(Array(6).fill("unknown"));
+    // The stage is a word the parser reads, one of three.
+    expect(refusal(factsReport({ stage: "naming" }))).toBe("bad_stage");
+  });
+
+  test("is refused when it names a model: none was asked", () => {
+    for (const models of [
+      { screen: "claude-haiku-5-5", review: null },
+      { screen: null, review: "claude-sonnet-5-5" },
+      { screen: "claude-haiku-5-5", review: "claude-sonnet-5-5" },
+      { screen: null },
+      { screen: "some-other-model", review: null },
+    ]) {
+      expect(refusal(factsReport({ models })), JSON.stringify(models)).toBe("bad_model");
+    }
+    // And every other stage still has to name the screen: null is the facts stage's alone.
+    expect(refusal(screenReport({ models: { screen: null, review: null } }))).toBe("bad_model");
+    expect(refusal(report({ models: { screen: null, review: "claude-sonnet-5-5" } }))).toBe(
+      "bad_model",
+    );
+  });
+
+  test("is refused when any criterion was assessed: a report that assessed nothing cannot pass", () => {
+    for (const c of CRITERIA) {
+      for (const result of ["pass", "fail"]) {
+        const criteria = { ...NOT_ASSESSED, [c]: result };
+        expect(refusal(factsReport({ criteria })), `${c} ${result}`).toBe("bad_stage");
+      }
+    }
+    // The screen's report, relabeled, is not a facts report.
+    expect(refusal(factsReport({ criteria: SCREENED }))).toBe("bad_stage");
+    expect(refusal(report({ stage: "facts" }))).toBe("bad_model");
+  });
+
+  test("is refused when it spent tokens: nothing was asked", () => {
+    for (const screenTokens of [
+      { input_tokens: 1, output_tokens: 0 },
+      { input_tokens: 0, output_tokens: 1 },
+    ]) {
+      const usage = { screen: screenTokens, review: null };
+      expect(refusal(factsReport({ usage })), JSON.stringify(screenTokens)).toBe("bad_usage");
+    }
+    const review = { input_tokens: 0, output_tokens: 0 };
+    expect(
+      refusal(factsReport({ usage: { screen: { input_tokens: 0, output_tokens: 0 }, review } })),
+    ).toBe("bad_usage");
+  });
+
+  test("is refused when no naming fact ended it: it would have ended for no reason", () => {
+    expect(refusal(factsReport({ evidence: factsEvidence({}) }))).toBe("bad_stage");
+    for (const naming of [
+      { title_problem: "author_year" },
+      { title_problem: "template_field" },
+      { name_problem: "author_year" },
+      { name_problem: "template_field" },
+      { name_problem: "unchecked" },
+    ]) {
+      expect(
+        refusal(factsReport({ evidence: factsEvidence(naming) })),
+        JSON.stringify(naming),
+      ).toBe("accepted");
+    }
+  });
+
+  test("fails with the naming blocker for a title or a name the rule refuses", () => {
+    const cases: Array<[Record<string, unknown>, string, string]> = [
+      [{ title_problem: "author_year" }, "clear_title_and_description", "title_author_year"],
+      [{ title_problem: "template_field" }, "clear_title_and_description", "title_template_field"],
+      [{ name_problem: "author_year" }, "no_degradation", "name_author_year"],
+      [{ name_problem: "template_field" }, "no_degradation", "name_template_field"],
+    ];
+    for (const [naming, criterion, code] of cases) {
+      const r = factsWith(naming);
+      expect(factsOf(r).criteria[criterion as keyof typeof NOT_ASSESSED], code).toBe("fail");
+      expect(factsOf(r).notes, code).toContainEqual({ criterion, code, result: "fail" });
+      expect(verdictOf(r), code).toBe("fail");
+      expect(conclusionOf({ kind: "reported", report: r }), code).toBe("failure");
+      // The check lists the blocker, as the rule's own finding and not a reviewer's.
+      const { text } = renderCheck({ kind: "reported", report: r });
+      expect(text, code).toContain("blocker");
+      expect(text, code).toContain("found by the naming rule, not by the reviewer");
+    }
+  });
+
+  test("with only an unreadable name needs a person, and with a title that fails still fails", () => {
+    const unreadable = factsWith({ name_problem: "unchecked" });
+    expect(verdictOf(unreadable)).toBe("uncertain");
+    expect(conclusionOf({ kind: "reported", report: unreadable })).toBe("action_required");
+    expect(factsOf(unreadable).notes).toContainEqual({
+      criterion: "no_degradation",
+      code: "name_unchecked",
+      result: "unknown",
+    });
+    // Not a pass, not "skipped": the review is required here and nothing was reviewed.
+    const both = factsWith({ title_problem: "author_year", name_problem: "unchecked" });
+    expect(verdictOf(both)).toBe("fail");
+    expect(namingLines(both)).toHaveLength(2);
+  });
+
+  test("never passes, whatever the facts are", () => {
+    const namings = [
+      { title_problem: "author_year" },
+      { title_problem: "template_field" },
+      { name_problem: "author_year" },
+      { name_problem: "template_field" },
+      { name_problem: "unchecked" },
+      { title_problem: "author_year", name_problem: "template_field" },
+      { title_problem: "author_year", name_problem: "unchecked" },
+    ];
+    for (const naming of namings) {
+      for (const over of [{}, { description_empty: true }, { description_cut: true }]) {
+        const r = factsWith({ ...naming, ...over });
+        expect(verdictOf(r), JSON.stringify([naming, over])).not.toBe("pass");
+        expect(conclusionOf({ kind: "reported", report: r })).not.toBe("success");
+        expect(conclusionOf({ kind: "reported", report: r })).not.toBe("skipped");
+      }
+      // Nor does a steering flag change what it is: a fail.
+      const steered = parsePrReviewReport(
+        factsReport({ steering: true, evidence: factsEvidence(naming) }),
+      );
+      expect(verdictOf(steered), JSON.stringify(naming)).toBe("fail");
+    }
+  });
+
+  test("the callback takes it, and a screen report that only says it is a facts report is refused", () => {
+    const told: string[] = [];
+    const o = parseCallbackOutcome(
+      { outcome: "reported", report: factsReport(), error: undefined },
+      (c) => told.push(c),
+    );
+    expect(o.kind).toBe("reported");
+    expect(told).toEqual([]);
+    const lie = parseCallbackOutcome(
+      { outcome: "reported", report: screenReport({ stage: "facts" }), error: undefined },
+      (c) => told.push(c),
+    );
+    expect(lie).toEqual({ kind: "error", error: "report_invalid" });
+    expect(told).toEqual(["bad_model"]);
+  });
+
+  test("the check says what the rule found, that the review stage did not run, and what to do", () => {
+    const r = factsWith({ title_problem: "author_year" });
+    const check = renderCheck({ kind: "reported", report: r });
+    expect(check.title).toBe("Needs changes: the naming rule");
+    // What the rule found, in the author's words, with the way to fix it.
+    expect(check.summary).toContain("**Naming rule**");
+    expect(check.summary).toContain("The title starts with a name and a year");
+    expect(check.summary).toContain("Edit the title.");
+    // That the review stage did not run and no model was asked.
+    expect(check.summary).toContain("the review stage did not run and no model was asked");
+    expect(check.summary).toContain("The full review did not run, so no file's content was read.");
+    // That the author fixes the title or the Name and pushes again.
+    expect(check.summary).toContain("Edit the title, or the Name in dataset_description.json");
+    expect(check.summary).toContain("push again");
+    // Nothing was assessed, and the table says so, with only the rule's own failure a No.
+    expect(check.summary).toContain("| A genuine contribution, not spam | Not assessed |");
+    expect(check.summary).toContain("| Nothing is lost or broken | Not assessed |");
+    expect(check.summary).toContain("| The title and description say what changed | No |");
+    expect(check.text).toContain("No model was asked: the screen and the full review did not run.");
+    expect(check.text).not.toContain("Screened with");
+    expect(check.text).not.toContain("not shown to the reviewer in full");
+  });
+
+  test("an unreadable name is said to need a person, in its own title", () => {
+    const check = renderCheck({
+      kind: "reported",
+      report: factsWith({ name_problem: "unchecked" }),
+    });
+    expect(check.title).toBe("Could not decide: the naming rule was not checked");
+    expect(check.summary).toContain("could not check this pull request's new dataset name");
+    expect(check.summary).toContain("the review stage did not run and no model was asked");
+    expect(check.summary).toContain("could not be read from it, so the name was not checked");
+    expect(check.text).toContain("A NEMAR administrator needs to look at this pull request.");
+  });
+});
+
 describe("the text facts fail the verdict whatever the model says", () => {
   test("an empty description fails the text criterion", () => {
     const r = parsed({ evidence: evidence({ description_empty: true }) });
@@ -1735,7 +1980,11 @@ describe("the check text of version 2", () => {
   test("a screen report reads Not assessed for every question it never asked", () => {
     const { title, summary, text } = renderCheck({
       kind: "reported",
-      report: parsePrReviewReport(screenReport()),
+      report: parsePrReviewReport(
+        screenReport({
+          evidence: evidence({ files_read: 0, truncated: true, changelog_entry: null }),
+        }),
+      ),
     });
     expect(title).toBe("Needs changes: stopped by the screen");
     expect(summary).toContain("the full review did not run");

@@ -10,7 +10,10 @@
  * **Two stages, one report (version 2).** A screen (stage 1) reads only the pull request's own
  * metadata and may stop it as spam; everything it does not stop goes to the review (stage 2), which
  * reads the content. The report says which stage it ended at (`stage`), and a report that ended at
- * the screen can never pass. Rows written before the screen existed hold version 1 reports, which
+ * the screen can never pass. A review can also end before either: the naming rule needs no model, so
+ * a pull request whose title breaks it, or whose changed dataset name breaks it or cannot be read,
+ * is reported at the `facts` stage with no model asked, nothing assessed and no tokens spent; it can
+ * never pass either. Rows written before the screen existed hold version 1 reports, which
  * {@link parseStoredPrReviewReport} still reads with their own rules, so a stored verdict does not
  * change; a version 1 report arriving by callback is refused.
  *
@@ -53,8 +56,11 @@ export const REPORT_VERSION = 2;
 /** The check-run's name. Stable: a ruleset that requires the check names it. */
 export const PR_REVIEW_CHECK_NAME = "NEMAR PR Review";
 
-/** Where a review ended: at the screen (stage 1), or after the full review (stage 2). */
-export const REVIEW_STAGES = ["screen", "full"] as const;
+/**
+ * Where a review ended: at the screen (stage 1), after the full review (stage 2), or at the facts,
+ * before either, because the naming rule had already decided it and no model was asked.
+ */
+export const REVIEW_STAGES = ["screen", "full", "facts"] as const;
 export type ReviewStage = (typeof REVIEW_STAGES)[number];
 
 /**
@@ -325,11 +331,15 @@ export interface ReportShapeV1 extends ReportCommon {
   evidence: ReviewEvidenceV1;
 }
 
-/** A version 2 report: the screen, the review when the screen let it through, six criteria. */
+/**
+ * A version 2 report: the screen, the review when the screen let it through, six criteria. A model
+ * is named only if it was asked: `screen` is null at the `facts` stage, which asked none, and
+ * `review` is null unless the review ran.
+ */
 export interface ReportShapeV2 extends ReportCommon {
   v: typeof REPORT_VERSION;
   stage: ReviewStage;
-  models: { screen: ScreenModel; review: ReviewModel | null };
+  models: { screen: ScreenModel | null; review: ReviewModel | null };
   criteria: Record<Criterion, CriterionResult>;
   evidence: ReviewEvidence;
   usage: ReviewUsage;
@@ -689,11 +699,15 @@ function parseV1Report(raw: Record<string, unknown>): PrReviewReport {
  * refused (`bad_version`): a report is posted by the job of the same release.
  *
  * The stage is a contract, not a label:
+ *  - `facts`: the naming rule ended the review before any model was asked, so no model is named,
+ *    every criterion is `unknown` (the rules of {@link factsOf} still fail what they find), no
+ *    tokens were used, and the evidence holds the naming fact that ended it;
  *  - `screen`: the screen stopped the pull request, so `genuine_contribution` is a fail, the other
  *    five were never assessed (`unknown`), no review model is named and the review used nothing;
  *  - `full`: the screen let it through, so `genuine_contribution` is a pass, the review's model and
  *    usage are named, and the evidence says what the change log holds (`changelog_entry`).
- * A report that breaks either is refused (`bad_stage`), which is how a screen report can never pass.
+ * A report that breaks its stage's contract is refused (`bad_stage`, or `bad_model` and `bad_usage`
+ * for the models and the tokens), which is how a screen report or a facts report can never pass.
  */
 export function parsePrReviewReport(raw: unknown): PrReviewReport {
   if (!isRecord(raw)) throw new PrReviewReportError("not_an_object");
@@ -706,8 +720,14 @@ export function parsePrReviewReport(raw: unknown): PrReviewReport {
   if (!isRecord(models) || !hasExactKeys(models, ["screen", "review"])) {
     throw new PrReviewReportError("bad_model");
   }
-  if (!isOneOf(SCREEN_MODELS, models.screen)) throw new PrReviewReportError("bad_model");
-  const screenModel = models.screen;
+  // The facts stage asked no model at all; every other stage asked the screen.
+  let screenModel: ScreenModel | null = null;
+  if (stage === "facts") {
+    if (models.screen !== null) throw new PrReviewReportError("bad_model");
+  } else {
+    if (!isOneOf(SCREEN_MODELS, models.screen)) throw new PrReviewReportError("bad_model");
+    screenModel = models.screen;
+  }
   let reviewModel: ReviewModel | null = null;
   if (stage === "full") {
     if (!isOneOf(REVIEW_MODELS, models.review)) throw new PrReviewReportError("bad_model");
@@ -722,6 +742,9 @@ export function parsePrReviewReport(raw: unknown): PrReviewReport {
     if (CRITERIA.some((c) => c !== "genuine_contribution" && criteria[c] !== "unknown")) {
       throw new PrReviewReportError("bad_stage");
     }
+  } else if (stage === "facts") {
+    // No model was asked, so nothing was assessed, and a report that assessed nothing cannot pass.
+    if (CRITERIA.some((c) => criteria[c] !== "unknown")) throw new PrReviewReportError("bad_stage");
   } else if (criteria.genuine_contribution !== "pass") {
     throw new PrReviewReportError("bad_stage");
   }
@@ -733,12 +756,20 @@ export function parsePrReviewReport(raw: unknown): PrReviewReport {
   if (stage === "full" && evidence.changelog_entry === null) {
     throw new PrReviewReportError("bad_evidence");
   }
+  // The facts stage exists because a naming fact ended the review; without one it ended for no reason.
+  if (stage === "facts" && evidence.title_problem === null && evidence.name_problem === null) {
+    throw new PrReviewReportError("bad_stage");
+  }
 
   const usage = raw.usage;
   if (!isRecord(usage) || !hasExactKeys(usage, ["screen", "review"])) {
     throw new PrReviewReportError("bad_usage");
   }
   const screenTokens = parseTokens(usage.screen);
+  // Nothing was asked at the facts stage, so nothing was spent.
+  if (stage === "facts" && (screenTokens.input_tokens !== 0 || screenTokens.output_tokens !== 0)) {
+    throw new PrReviewReportError("bad_usage");
+  }
   let reviewTokens: StageTokens | null = null;
   if (stage === "full") reviewTokens = parseTokens(usage.review);
   else if (usage.review !== null) throw new PrReviewReportError("bad_usage");
@@ -836,10 +867,10 @@ const NAME_RULE_CODE: Record<NamingProblem, FindingCode> = {
  *  - A description longer than the models read (`description_cut`) lowers
  *    `description_not_misleading`: the models saw only its start, so that it does not mislead, and
  *    that it does not try to instruct them, were not assessed. A steering finding on the part they
- *    did see still fails the review whatever this says.
+ *    did see still fails the review whatever this says. It is stated when it moves the answer.
  *  - A pull request that changes `dataset_description.json` and leaves a name that cannot be read
  *    (`name_problem` is `unchecked`) lowers `no_degradation`: the naming rule had no name to ask
- *    about, and an unreadable name is never a clean one.
+ *    about, and an unreadable name is never a clean one. It is always stated, as the rules are.
  */
 export function factsOf(report: PrReviewReport): {
   criteria: Partial<Record<Criterion, CriterionResult>>;
@@ -861,6 +892,17 @@ export function factsOf(report: PrReviewReport): {
     if (out[criterion] === undefined) return;
     out[criterion] = "fail";
     notes.push({ criterion, code, result: "fail" });
+  };
+  /**
+   * A fact nobody could check: it lowers the criterion to `unknown`, never to a fail, and is stated
+   * whether or not it moved it, so a review that asked nothing (the facts stage) still says why a
+   * person must look.
+   */
+  const unchecked = (criterion: Criterion, code: FindingCode) => {
+    const now = out[criterion];
+    if (now === undefined) return;
+    if (rank.unknown < rank[now]) out[criterion] = "unknown";
+    notes.push({ criterion, code, result: "unknown" });
   };
   const e = report.evidence;
   if (e.files_changed === 0) lower("material_improvement", "no_substantive_change", "fail");
@@ -902,7 +944,7 @@ export function factsOf(report: PrReviewReport): {
       rule("clear_title_and_description", TITLE_RULE_CODE[v2.title_problem]);
     }
     if (v2.name_problem === "unchecked") {
-      lower("no_degradation", "name_unchecked", "unknown");
+      unchecked("no_degradation", "name_unchecked");
     } else if (v2.name_problem !== null) {
       rule("no_degradation", NAME_RULE_CODE[v2.name_problem]);
     }
@@ -1115,6 +1157,18 @@ const WAIVED_COPY = {
   text: "Skipped is not a pass. A new commit is checked against the naming rule again, and the waiver does not carry over to it.",
 } as const;
 
+/**
+ * What a pull request whose review ended at the facts is told, in the order of its verdict: it says
+ * the rule decided and no model was asked, and what the author does, which is to fix the title or
+ * the dataset's name and push again. Nothing is reviewed until the rule is satisfied, so the next
+ * push is what runs the review.
+ */
+const FACTS_COPY = {
+  fail: "The naming rule found a problem with this pull request, so the review stage did not run and no model was asked. Edit the title, or the Name in dataset_description.json, as described below, and push again: the review runs on the new commit.",
+  uncertain:
+    "The naming rule could not check this pull request's new dataset name, so the review stage did not run and no model was asked. Fixing dataset_description.json as described below and pushing again runs the review.",
+} as const;
+
 /** What each finding of the naming rule says to the author, with what to do about it. */
 const NAMING_SENTENCE: Record<"title" | "name", Record<NamingProblem, string>> = {
   title: {
@@ -1310,10 +1364,10 @@ export function findingLines(report: PrReviewReport): string[] {
       `- **${labelOf(n.code)}**, ${n.result === "fail" ? "blocker" : "concern"}: ${factSource(n.code)}.`,
     );
   }
-  // A report that ended at the screen read no content at all, which the account of what changed
-  // already says; this line is about a review that read some of it.
-  const screened = report.v === REPORT_VERSION && report.stage === "screen";
-  if (report.evidence.truncated && !screened) {
+  // A report that ended before the review read no content at all, which the account of what
+  // changed already says; this line is about a review that read some of it.
+  const unread = report.v === REPORT_VERSION && report.stage !== "full";
+  if (report.evidence.truncated && !unread) {
     details.push(
       "- Some changed files were not shown to the reviewer in full, so a clean result is not claimed.",
     );
@@ -1366,12 +1420,17 @@ function renderNaming(facts: NamingFacts): RenderedCheck {
   };
 }
 
-/** The model line at the foot of a report: which model screened it, and which reviewed it. */
+/**
+ * The model line at the foot of a report: which model screened it, and which reviewed it. A model
+ * is named only if it was asked, so a report that asked none says that.
+ */
 function modelLine(report: PrReviewReport): string {
   if (report.v === 1) return `Reviewed with ${report.model}.`;
-  return report.stage === "screen"
-    ? `Screened with ${report.models.screen}; the full review did not run.`
-    : `Screened with ${report.models.screen} and reviewed with ${report.models.review}.`;
+  const { screen, review } = report.models;
+  if (screen === null) return "No model was asked: the screen and the full review did not run.";
+  return review === null
+    ? `Screened with ${screen}; the full review did not run.`
+    : `Screened with ${screen} and reviewed with ${review}.`;
 }
 
 /** Render the check-run's title, summary and detail from an outcome. Pure; no input is quoted raw. */
@@ -1403,7 +1462,11 @@ export function renderCheck(outcome: ReviewOutcome): RenderedCheck {
   const { report } = outcome;
   const verdict = verdictOf(report);
   const { criteria } = factsOf(report);
-  const screened = report.v === REPORT_VERSION && report.stage === "screen";
+  const stage = report.v === REPORT_VERSION ? report.stage : "full";
+  const screened = stage === "screen";
+  const factsOnly = stage === "facts";
+  // Neither the screen nor the facts read a file, and a question they never asked is not assessed.
+  const unread = stage !== "full";
   const title =
     verdict === "pass"
       ? report.v === 1
@@ -1412,8 +1475,12 @@ export function renderCheck(outcome: ReviewOutcome): RenderedCheck {
       : verdict === "fail"
         ? screened
           ? "Needs changes: stopped by the screen"
-          : "Needs changes"
-        : "Could not decide";
+          : factsOnly
+            ? "Needs changes: the naming rule"
+            : "Needs changes"
+        : factsOnly
+          ? "Could not decide: the naming rule was not checked"
+          : "Could not decide";
   const lines: string[] = [];
   if (screened) {
     lines.push(
@@ -1421,18 +1488,19 @@ export function renderCheck(outcome: ReviewOutcome): RenderedCheck {
       "",
     );
   }
+  if (factsOnly) lines.push(FACTS_COPY[verdict === "fail" ? "fail" : "uncertain"], "");
   if (report.summary) lines.push(report.summary, "");
   const naming = namingLines(report);
   if (naming.length > 0) {
     lines.push("**Naming rule**", "", ...naming.map((l) => `- ${l}`), "");
   }
-  lines.push(...describeChanges(report.evidence, screened));
+  lines.push(...describeChanges(report.evidence, unread));
   lines.push("| Question | Answer |", "| --- | --- |");
   for (const c of criteriaOf(report)) {
     const result = resultOf(criteria, c) ?? "unknown";
-    // A screen report never asked anything but whether the pull request is genuine; a rule may
-    // still have failed one of the others.
-    const word = screened && result === "unknown" ? "Not assessed" : RESULT_WORD[result];
+    // A screen report never asked anything but whether the pull request is genuine, and a facts
+    // report asked nothing; a rule may still have failed one of the questions.
+    const word = unread && result === "unknown" ? "Not assessed" : RESULT_WORD[result];
     lines.push(`| ${CRITERION_LABEL[c]} | ${word} |`);
   }
   const details = findingLines(report);

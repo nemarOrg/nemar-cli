@@ -75,9 +75,12 @@ export interface CalibrationRow {
   /** The facts the script decided before any model: closed words, or `none`. */
   facts: string[];
   files: number | null;
-  stage: "screen" | "full" | null;
-  /** The screen's decision, or what stopped it. */
-  screen: "proceed" | "reject" | RunError | null;
+  stage: "screen" | "full" | "facts" | null;
+  /**
+   * The screen's decision, or what stopped it; `not_run` when the naming rule ended the review
+   * first and no model was asked.
+   */
+  screen: "proceed" | "reject" | "not_run" | RunError | null;
   /** The criteria after the facts, in the report's order; null with no report. */
   criteria: Partial<Record<Criterion, string>> | null;
   verdict: Verdict | null;
@@ -311,7 +314,8 @@ export async function calibrateOne(
     row.facts = factWords(report);
     if (report.v === 2) {
       row.stage = report.stage;
-      row.screen = report.stage === "screen" ? "reject" : "proceed";
+      row.screen =
+        report.stage === "facts" ? "not_run" : report.stage === "screen" ? "reject" : "proceed";
     }
     row.criteria = factsOf(report).criteria;
     row.verdict = verdictOf(report);
@@ -319,9 +323,12 @@ export async function calibrateOne(
   } catch (e) {
     row.error = mapError(e);
   }
+  // No tokens is no measurement, unless no model was asked: then nothing was spent, and that is one.
   row.costUsd =
     row.screenTokens === null && row.reviewTokens === null
-      ? null
+      ? row.stage === "facts"
+        ? 0
+        : null
       : estimateCostUsd({
           screen_input: row.screenTokens?.input_tokens ?? 0,
           screen_output: row.screenTokens?.output_tokens ?? 0,

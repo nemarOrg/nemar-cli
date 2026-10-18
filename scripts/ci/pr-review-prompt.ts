@@ -8,6 +8,10 @@
  * description misleads, and whether anything tries to steer the reviewer. The text judgments use
  * prompt v3's rules, word for word (see {@link V3_RULES}).
  *
+ * A pull request whose title or changed dataset name the naming rule refuses, or whose changed name
+ * cannot be read, never reaches either: the rule needs no model, and {@link assembleFactsReport}
+ * builds the report of a review that ended there.
+ *
  * Everything a pull request wrote reaches a model, so both prompts are built around one rule:
  * **the model is told what it may trust and what it may not, and what it returns can do very
  * little.** The pull request's text and the dataset's content are fenced under a per-run random
@@ -435,6 +439,30 @@ const UNEXPLAINED_TEXT_FINDING: Record<
 
 function isRecordValue(x: unknown): x is Record<string, unknown> {
   return typeof x === "object" && x !== null && !Array.isArray(x);
+}
+
+/**
+ * The report of a review that ended at the facts (ADR 0107): the naming rule had already failed the
+ * pull request, or could not check its dataset's new name, so no model was asked. Nothing was
+ * assessed, so every criterion is `unknown`; the rules of `factsOf` fail the ones the naming fact
+ * decides (the title fails `clear_title_and_description`, the name `no_degradation`) and an
+ * unreadable name leaves the verdict `uncertain`. No model is named and no tokens were spent. There
+ * is no sentence of a model's to carry, and the words the check says come from the facts, so a
+ * stored report is re-stated in the words of the release that shows it. The same parser as the
+ * Worker's validates it, which refuses a facts report with no naming fact in it.
+ */
+export function assembleFactsReport(evidence: ReviewEvidence): PrReviewReport {
+  return parsePrReviewReport({
+    v: REPORT_VERSION,
+    stage: "facts",
+    models: { screen: null, review: null },
+    criteria: Object.fromEntries(CRITERIA.map((c) => [c, "unknown"])),
+    findings: [],
+    summary: "",
+    steering: false,
+    evidence,
+    usage: { screen: { input_tokens: 0, output_tokens: 0 }, review: null },
+  });
 }
 
 /**

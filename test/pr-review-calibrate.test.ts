@@ -283,6 +283,60 @@ describe("one pull request, through the job's own stage flow", () => {
     expect(row.verdict).toBe("fail");
   });
 
+  test("a naming fact ends it at the facts: no model is asked, the screen did not run, and nothing was spent", async () => {
+    const read = localPullRequest("facts", { title: "Lee2019 EEG update" });
+    const row = await withStandIn(() => calibrateOne(target("fail"), root, read));
+    expect(requests).toHaveLength(0);
+    expect(row).toMatchObject({
+      stage: "facts",
+      screen: "not_run",
+      facts: ["title_author_year"],
+      verdict: "fail",
+      check: "failure",
+      error: null,
+      screenTokens: null,
+      reviewTokens: null,
+      // A measurement, not a missing one: no model was asked, so nothing was spent.
+      costUsd: 0,
+    });
+    const table = renderTable([row]).join("\n");
+    expect(table).toMatch(/nm000460#2 +3 +title_author_year +not_run +/);
+    expect(table).toContain("$0.00");
+  });
+
+  test("a changed name nobody can read ends it at the facts too, and is a pull request a person must look at", async () => {
+    const dir = join(root, "unreadable-name");
+    mkdirSync(dir, { recursive: true });
+    git(dir, "init", "-q", "-b", "main");
+    write(
+      dir,
+      "dataset_description.json",
+      JSON.stringify({ Name: "Resting EEG", Version: "1.0.0" }),
+    );
+    write(dir, "CHANGES", "1.0.0 2026-01-01\n - Initial release\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "initial");
+    const base = git(dir, "rev-parse", "HEAD");
+    git(dir, "checkout", "-q", "-b", "contrib");
+    write(dir, "dataset_description.json", JSON.stringify({ Name: 7, Version: "1.1.0" }));
+    write(dir, "CHANGES", "1.1.0 2026-10-16\n - Renamed\n1.0.0 2026-01-01\n - Initial release\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "rename");
+    const head = git(dir, "rev-parse", "HEAD");
+    const pr = { title: "Rename the dataset", body: "The name field was a label." };
+    const row = await withStandIn(() =>
+      calibrateOne(target("uncertain"), root, () => ({ dir, base, head, pr })),
+    );
+    expect(requests).toHaveLength(0);
+    expect(row).toMatchObject({
+      stage: "facts",
+      facts: ["name_unchecked"],
+      verdict: "uncertain",
+      check: "action_required",
+      error: null,
+    });
+  });
+
   test("a stop by the screen is one call and a fail", async () => {
     screenReply = () => standInMessage(JSON.stringify({ decision: "reject", note: "Advert." }));
     const row = await withStandIn(() => calibrateOne(target(), root, localPullRequest("spam")));
