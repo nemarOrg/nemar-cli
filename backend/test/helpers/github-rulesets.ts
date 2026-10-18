@@ -8,8 +8,11 @@
  * `DELETE` answer 404 for an id it does not hold, and the list endpoint leaves out organization
  * rulesets only when asked for `includes_parents=false`, which is exactly how an inherited ruleset
  * of the same name would be mistaken for a repository's own. A write is checked against what
- * GitHub documents about the body (target, enforcement, bypass actor types and modes), so a
- * misspelled field is a 422 here as it is there.
+ * GitHub documents about the body: target, enforcement, bypass actor types and modes, the ref_name
+ * condition of a branch or tag ruleset, and the parameters of a required_status_checks rule
+ * (a boolean strict policy, a list of checks that each name a context, an integer integration id
+ * where one is given, a boolean do_not_enforce_on_create). A field that is missing (so a
+ * misspelled name) or of the wrong type is a 422 here as it is there.
  *
  * Install it with `globalThis.NEMAR_GITHUB_API_URL = standIn.url`, as the other GitHub stand-ins do,
  * and restore that in `afterAll`.
@@ -77,6 +80,52 @@ const BYPASS_MODES = new Set(["always", "pull_request"]);
 const TARGETS = new Set(["branch", "tag", "push"]);
 const ENFORCEMENTS = new Set(["active", "disabled", "evaluate"]);
 
+/**
+ * The reason GitHub would refuse a required_status_checks rule's parameters, or null. `integration_id`
+ * is optional (an unpinned check omits it) and an integer when it is there.
+ */
+function statusChecksRefusal(parameters: unknown): string | null {
+  if (typeof parameters !== "object" || parameters === null) {
+    return "required_status_checks needs parameters";
+  }
+  const p = parameters as Record<string, unknown>;
+  if (typeof p.strict_required_status_checks_policy !== "boolean") {
+    return "strict_required_status_checks_policy must be a boolean";
+  }
+  if (p.do_not_enforce_on_create !== undefined && typeof p.do_not_enforce_on_create !== "boolean") {
+    return "do_not_enforce_on_create must be a boolean";
+  }
+  if (!Array.isArray(p.required_status_checks)) return "required_status_checks must be an array";
+  for (const check of p.required_status_checks as Array<Record<string, unknown> | null>) {
+    if (typeof check !== "object" || check === null || typeof check.context !== "string") {
+      return "every required status check needs a context";
+    }
+    if (check.context === "") return "a required status check's context cannot be empty";
+    if (check.integration_id !== undefined && !Number.isInteger(check.integration_id)) {
+      return "integration_id must be an integer";
+    }
+  }
+  return null;
+}
+
+/** The reason GitHub would refuse a branch or tag ruleset's ref_name condition, or null. */
+function refNameRefusal(conditions: unknown): string | null {
+  const ref =
+    typeof conditions === "object" && conditions !== null
+      ? (conditions as { ref_name?: unknown }).ref_name
+      : undefined;
+  if (typeof ref !== "object" || ref === null) {
+    return "conditions.ref_name is required for a branch or tag ruleset";
+  }
+  for (const key of ["include", "exclude"] as const) {
+    const patterns = (ref as Record<string, unknown>)[key];
+    if (!Array.isArray(patterns) || !patterns.every((p) => typeof p === "string")) {
+      return `conditions.ref_name.${key} must be an array of strings`;
+    }
+  }
+  return null;
+}
+
 /** The reasons GitHub would refuse a ruleset body with a 422, or null when it would take it. */
 function refusal(body: Record<string, unknown> | null): string | null {
   if (!body) return "body is not an object";
@@ -84,6 +133,10 @@ function refusal(body: Record<string, unknown> | null): string | null {
   if (typeof body.target !== "string" || !TARGETS.has(body.target)) return "target is invalid";
   if (typeof body.enforcement !== "string" || !ENFORCEMENTS.has(body.enforcement)) {
     return "enforcement is invalid";
+  }
+  if (body.target === "branch" || body.target === "tag") {
+    const why = refNameRefusal(body.conditions);
+    if (why) return why;
   }
   if (!Array.isArray(body.rules)) return "rules must be an array";
   for (const rule of body.rules) {
@@ -93,6 +146,10 @@ function refusal(body: Record<string, unknown> | null): string | null {
       typeof (rule as { type?: unknown }).type !== "string"
     ) {
       return "every rule needs a type";
+    }
+    if ((rule as { type: string }).type === "required_status_checks") {
+      const why = statusChecksRefusal((rule as { parameters?: unknown }).parameters);
+      if (why) return why;
     }
   }
   if (body.bypass_actors !== undefined) {

@@ -444,3 +444,159 @@ describe("reconcileReviewRuleset", () => {
     expect(heldBy(REPO)).toEqual([]);
   });
 });
+
+// The stand-in is what tells these tests that a body is wrong, so it has to refuse what GitHub
+// refuses: a body that merely has the right shape at the top would pass a misspelled or mistyped
+// rule parameter, and the first the team would hear of it is a 422 from the real thing. Each case
+// starts from the pinned review body and breaks one field.
+describe("the GitHub stand-in refuses what GitHub refuses", () => {
+  const rulesetsUrl = () => `${standIn.url}/repos/nemarDatasets/${REPO}/rulesets`;
+  const send = (body: unknown, url = rulesetsUrl(), method = "POST") =>
+    fetch(url, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  type Params = Record<string, unknown>;
+  /** The pinned review body with its status-check parameters changed by `edit`. */
+  function withParameters(edit: (p: Params) => void): Record<string, unknown> {
+    const body = structuredClone(PINNED_PAYLOAD) as Record<string, unknown>;
+    const rule = (body.rules as Array<{ parameters: Params }>)[0];
+    edit(rule.parameters);
+    return body;
+  }
+
+  test("the pinned body is taken, so the refusals below are not a blanket 422", async () => {
+    const res = await send(PINNED_PAYLOAD);
+    expect(res.status).toBe(201);
+    expect(heldBy(REPO)).toEqual([REVIEW_RULESET_NAME]);
+  });
+
+  test("an unpinned check, with no integration_id, is taken: GitHub makes that field optional", async () => {
+    const res = await send(
+      withParameters((p) => {
+        p.required_status_checks = [{ context: "version-check" }];
+      }),
+    );
+    expect(res.status).toBe(201);
+  });
+
+  test.each<[string, (p: Params) => void, string]>([
+    [
+      "a strict policy that is not a boolean",
+      (p) => {
+        p.strict_required_status_checks_policy = "false";
+      },
+      "strict_required_status_checks_policy",
+    ],
+    [
+      "a strict policy under a misspelled name",
+      (p) => {
+        p.strict_required_status_checks_policy = undefined;
+        p.strict_required_checks_policy = false;
+      },
+      "strict_required_status_checks_policy",
+    ],
+    [
+      "a do_not_enforce_on_create that is not a boolean",
+      (p) => {
+        p.do_not_enforce_on_create = "true";
+      },
+      "do_not_enforce_on_create",
+    ],
+    [
+      "required_status_checks that is not an array",
+      (p) => {
+        p.required_status_checks = { context: "NEMAR PR Review", integration_id: 3679074 };
+      },
+      "required_status_checks must be an array",
+    ],
+    [
+      "a check with no context",
+      (p) => {
+        p.required_status_checks = [{ integration_id: 3679074 }];
+      },
+      "context",
+    ],
+    [
+      "a check whose context is not a string",
+      (p) => {
+        p.required_status_checks = [{ context: 42, integration_id: 3679074 }];
+      },
+      "context",
+    ],
+    [
+      "an integration_id that is not an integer",
+      (p) => {
+        p.required_status_checks = [{ context: "NEMAR PR Review", integration_id: "3679074" }];
+      },
+      "integration_id",
+    ],
+  ])("%s is a 422, and nothing is held", async (_name, edit, field) => {
+    const res = await send(withParameters(edit));
+
+    expect(res.status).toBe(422);
+    expect(JSON.stringify(await res.json())).toContain(field);
+    expect(heldBy(REPO)).toEqual([]);
+  });
+
+  test("a status-check rule with no parameters is a 422", async () => {
+    const body = structuredClone(PINNED_PAYLOAD) as Record<string, unknown>;
+    body.rules = [{ type: "required_status_checks" }];
+
+    expect((await send(body)).status).toBe(422);
+    expect(heldBy(REPO)).toEqual([]);
+  });
+
+  test.each<[string, unknown]>([
+    ["no conditions at all", undefined],
+    ["conditions without a ref_name", {}],
+    ["a ref_name without include", { ref_name: { exclude: [] } }],
+    ["a ref_name without exclude", { ref_name: { include: ["~DEFAULT_BRANCH"] } }],
+    ["an include that is not an array", { ref_name: { include: "~DEFAULT_BRANCH", exclude: [] } }],
+    ["an include of something that is not a string", { ref_name: { include: [1], exclude: [] } }],
+  ])("a branch ruleset with %s is a 422, and nothing is held", async (_name, conditions) => {
+    const body = { ...structuredClone(PINNED_PAYLOAD), conditions } as Record<string, unknown>;
+
+    const res = await send(body);
+
+    expect(res.status).toBe(422);
+    expect(JSON.stringify(await res.json())).toContain("ref_name");
+    expect(heldBy(REPO)).toEqual([]);
+  });
+
+  test("a tag ruleset is held to the same condition", async () => {
+    const tag = {
+      name: "Protect version tags",
+      target: "tag",
+      enforcement: "active",
+      rules: [{ type: "deletion" }],
+    };
+
+    expect((await send(tag)).status).toBe(422);
+    const ok = await send({
+      ...tag,
+      conditions: { ref_name: { include: ["refs/tags/v*"], exclude: [] } },
+    });
+    expect(ok.status).toBe(201);
+  });
+
+  test("an update is held to the same rules as a create", async () => {
+    await ensureReviewRuleset(REPO, PAT);
+    const held = standIn.rulesets.get(REPO)?.[0];
+    if (!held) throw new Error("the ruleset was not created");
+    const before = structuredClone(held);
+
+    const res = await send(
+      withParameters((p) => {
+        p.strict_required_status_checks_policy = "false";
+      }),
+      `${rulesetsUrl()}/${held.id}`,
+      "PUT",
+    );
+
+    expect(res.status).toBe(422);
+    expect(standIn.rulesets.get(REPO)?.[0]).toStrictEqual(before);
+  });
+});
