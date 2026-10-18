@@ -787,6 +787,24 @@ export interface RepoSpecResult {
 }
 
 /**
+ * What a failed review-ruleset request is called in a step's `detail`: GitHub's status code and
+ * none of what GitHub said. The step is printed by `nemar admin fleet enforce`, and GitHub's own
+ * body is JSON, so it stays in the server log (the caller logs the full error text) and out of a
+ * terminal. A 4xx is a refusal. For anything else, and for no answer at all, a write may have been
+ * made before the answer was lost, so it is said not to be known (a dry run writes nothing).
+ */
+export function reviewStepFailure(e: unknown, dryRun: boolean): string {
+  if (e instanceof HttpError && e.status >= 400 && e.status < 500 && e.status !== 429) {
+    return `GitHub refused the review ruleset with HTTP ${e.status}`;
+  }
+  const unknown = dryRun ? "" : "; it is not known whether it was changed";
+  if (e instanceof HttpError) {
+    return `GitHub could not complete the review ruleset request (HTTP ${e.status})${unknown}`;
+  }
+  return `the request to GitHub for the review ruleset did not complete${unknown}`;
+}
+
+/**
  * What a review step records, in the words the other steps use. Never throws.
  *
  * `defaultBranch` is the default branch as GitHub said it, or `undefined` when the caller could not
@@ -855,7 +873,11 @@ async function reviewRulesetStepOf(
     const detail = step.action === "none" ? "nothing to remove" : words[step.action];
     return { status: "ok", detail: `${detail}${privateNote}` };
   } catch (e) {
-    return { status: "failed", detail: errText(e) };
+    // The whole error, with GitHub's words, is for the server log. What is returned is printed.
+    console.error(
+      `[repo-spec] review ruleset step failed for ${repo}${o.dryRun ? " (dry run)" : ""}: ${errText(e)}`,
+    );
+    return { status: "failed", detail: reviewStepFailure(e, o.dryRun) };
   }
 }
 

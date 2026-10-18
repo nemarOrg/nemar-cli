@@ -1243,6 +1243,43 @@ describe("the enforce routes and the review", () => {
     expect(held("nm000201")).not.toContain(REVIEW_RULESET_NAME);
   });
 
+  // `nemar admin fleet enforce` prints each step's detail as the route sends it, so a step GitHub
+  // refuses must reach the answer as GitHub's status and a sentence, never as GitHub's own body.
+  test("a review step GitHub refuses is a status and a sentence in the answer of both routes, and not GitHub's body", async () => {
+    seedDataset("nm000201");
+    await ensureReviewRuleset("nm000201", PAT);
+    // The review ruleset's own address, so the branch ruleset's write is not the one refused.
+    const reviewId = standIn.rulesets
+      .get("nm000201")
+      ?.find((x) => x.name === REVIEW_RULESET_NAME)?.id;
+    const review = new RegExp(`/repos/nemarDatasets/nm000201/rulesets/${reviewId}$`);
+    const quiet = console.error;
+    console.error = () => {};
+    try {
+      standIn.failNext("PUT", review, 403);
+      const one = await enforce("nm000201", { dry_run: false });
+      standIn.failNext("PUT", review, 403);
+      const many = await post("/admin/datasets/enforce/bulk", { dry_run: false }, OWNER_KEY);
+
+      expect(one.status).toBe(200);
+      expect(one.body.result.steps.review_ruleset).toEqual({
+        status: "failed",
+        detail: "GitHub refused the review ruleset with HTTP 403",
+      });
+      expect(many.status).toBe(200);
+      expect(many.body.results[0].steps.review_ruleset).toEqual({
+        status: "failed",
+        detail: "GitHub refused the review ruleset with HTTP 403",
+      });
+      for (const body of [one.body, many.body]) {
+        expect(JSON.stringify(body)).not.toContain("refused by the stand-in");
+        expect(JSON.stringify(body)).not.toContain("Review ruleset update failed");
+      }
+    } finally {
+      console.error = quiet;
+    }
+  });
+
   test("enforce leaves a standing fixture's rulesets alone, in either direction", async () => {
     seedDataset("nm099998", { visibility: "private" });
     await ensureReviewRuleset("nm099998", PAT);

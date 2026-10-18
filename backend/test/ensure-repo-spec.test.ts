@@ -21,6 +21,8 @@ import {
   ensureReviewRuleset,
   isRequiredCheckGreen,
 } from "../src/services/github";
+import { reviewStepFailure } from "../src/services/github/branch-protection";
+import { HttpError } from "../src/services/retry";
 import { type RulesetStandIn, startRulesetStandIn } from "./helpers/github-rulesets";
 
 const BIDS: RequiredCheck = { context: "Run BIDS Validation", integration_id: NEMAR_APP_ID };
@@ -166,17 +168,134 @@ describe("ensureRepoToSpec and the required review", () => {
     expect(heldBy("nm000202")).toEqual([]);
   });
 
-  test("a review step that fails is recorded and does not stop the rest", async () => {
+  /** Run `fn` and return what it wrote to console.error. */
+  async function logged(fn: () => Promise<void>): Promise<string[]> {
+    const lines: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => {
+      lines.push(args.map(String).join(" "));
+    };
+    try {
+      await fn();
+    } finally {
+      console.error = realError;
+    }
+    return lines;
+  }
+
+  // `nemar admin fleet enforce` prints a step's detail as it is. GitHub's body is JSON, and the name
+  // of the function that threw is no use to the person reading, so the detail is GitHub's status
+  // and a sentence, and the whole error text goes to the server log.
+  test("a review step that fails is recorded with GitHub's status and none of its words, and does not stop the rest", async () => {
     await ensureReviewRuleset(REPO, PAT);
     // The review ruleset exists, so its write is the only PUT; the branch ruleset is a POST.
     standIn.failNext("PUT", /\/rulesets\/\d+$/, 403);
 
-    const result = await ensureRepoToSpec(REPO, PAT, { visibility: "public", review: "require" });
+    let result: Awaited<ReturnType<typeof ensureRepoToSpec>> | undefined;
+    const lines = await logged(async () => {
+      result = await ensureRepoToSpec(REPO, PAT, { visibility: "public", review: "require" });
+    });
 
-    expect(result.steps.review_ruleset?.status).toBe("failed");
-    expect(result.steps.review_ruleset?.detail).toContain("Review ruleset update failed");
-    expect(result.steps.branch_ruleset).toEqual({ status: "ok" });
-    expect(result.steps.tag_ruleset).toEqual({ status: "ok" });
+    expect(result?.steps.review_ruleset).toEqual({
+      status: "failed",
+      detail: "GitHub refused the review ruleset with HTTP 403",
+    });
+    expect(result?.steps.branch_ruleset).toEqual({ status: "ok" });
+    expect(result?.steps.tag_ruleset).toEqual({ status: "ok" });
+    // Nothing GitHub said, and nothing about which function threw, is in what is returned.
+    const answer = JSON.stringify(result);
+    expect(answer).not.toContain("refused by the stand-in");
+    expect(answer).not.toContain("Review ruleset update failed");
+    // (A JSON body inside a JSON string is written with escaped quotes.)
+    expect(answer).not.toContain('{\\"message');
+    // The whole error text is in the server log, with the repository and the stage.
+    const line = lines.find((l) => l.includes("review ruleset step failed"));
+    expect(line).toBeDefined();
+    expect(line).toContain(REPO);
+    expect(line).toContain("Review ruleset update failed for nm000201: HTTP 403");
+    expect(line).toContain("refused by the stand-in");
+  });
+
+  test("a create that GitHub refuses with a 422 is a refusal, with the status and not the body", async () => {
+    // With the BIDS check red the review ruleset is the only one written, so it is the only POST.
+    standIn.bidsConclusion.set(REPO, "failure");
+    standIn.failNext("POST", /\/rulesets$/, 422);
+
+    let result: Awaited<ReturnType<typeof ensureRepoToSpec>> | undefined;
+    const lines = await logged(async () => {
+      result = await ensureRepoToSpec(REPO, PAT, { visibility: "public", review: "require" });
+    });
+
+    expect(result?.steps.review_ruleset).toEqual({
+      status: "failed",
+      detail: "GitHub refused the review ruleset with HTTP 422",
+    });
+    expect(JSON.stringify(result)).not.toContain("refused by the stand-in");
+    expect(lines.some((l) => l.includes("refused by the stand-in"))).toBe(true);
+    expect(heldBy()).toEqual([]);
+  });
+
+  test("a failure that is not a refusal says it is not known whether the change was made, and a dry run does not", async () => {
+    await ensureReviewRuleset(REPO, PAT);
+    // The transport tries three times before it gives GitHub's 503 to the caller.
+    standIn.failNext("PUT", /\/rulesets\/\d+$/, 503, 3);
+
+    let live: Awaited<ReturnType<typeof ensureRepoToSpec>> | undefined;
+    await logged(async () => {
+      live = await ensureRepoToSpec(REPO, PAT, { visibility: "public", review: "require" });
+    });
+    expect(live?.steps.review_ruleset).toEqual({
+      status: "failed",
+      detail:
+        "GitHub could not complete the review ruleset request (HTTP 503); it is not known whether it was changed",
+    });
+
+    // A dry run writes nothing, so nothing could have been changed and it does not say that.
+    standIn.failNext("GET", /\/rulesets$/, 503, 3);
+    let dry: Awaited<ReturnType<typeof ensureRepoToSpec>> | undefined;
+    await logged(async () => {
+      dry = await ensureRepoToSpec(REPO, PAT, {
+        visibility: "public",
+        review: "require",
+        dryRun: true,
+      });
+    });
+    expect(dry?.steps.review_ruleset).toEqual({
+      status: "failed",
+      detail: "GitHub could not complete the review ruleset request (HTTP 503)",
+    });
+  }, 20_000);
+
+  test("the sentence is the status and nothing else: a refusal, a failure with a status, and no answer", () => {
+    const body = '{"message":"Validation Failed","errors":["Name must be unique"]}';
+    const refused = new HttpError(
+      `Review ruleset create failed for x: HTTP 422: ${body}`,
+      422,
+      body,
+    );
+    expect(reviewStepFailure(refused, false)).toBe(
+      "GitHub refused the review ruleset with HTTP 422",
+    );
+    expect(reviewStepFailure(refused, true)).toBe(
+      "GitHub refused the review ruleset with HTTP 422",
+    );
+    // A 429 is not a refusal of this request: it is asked again later.
+    const limited = new HttpError(`rate limited: ${body}`, 429, body);
+    expect(reviewStepFailure(limited, false)).toBe(
+      "GitHub could not complete the review ruleset request (HTTP 429); it is not known whether it was changed",
+    );
+    // No status at all: the network, or something that is not an HTTP answer.
+    const noAnswer = new TypeError(`fetch failed: ${body}`);
+    expect(reviewStepFailure(noAnswer, false)).toBe(
+      "the request to GitHub for the review ruleset did not complete; it is not known whether it was changed",
+    );
+    expect(reviewStepFailure(noAnswer, true)).toBe(
+      "the request to GitHub for the review ruleset did not complete",
+    );
+    for (const e of [refused, limited, noAnswer]) {
+      for (const dry of [true, false])
+        expect(reviewStepFailure(e, dry)).not.toContain("Validation");
+    }
   });
 
   test("a dry run reports what each intent would do and writes nothing", async () => {
