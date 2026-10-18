@@ -116,6 +116,11 @@ And the review only ever sees a pull request's text and metadata, so a count of 
   Maintainers and outside collaborators get none.
   The `dataset-admin` team is the GitHub side of "admin"; org owners manage it and NEMAR code does not.
 - **It is applied to exactly the datasets the Worker reviews** (active, public, named, first-published), removed when a dataset stops being one, and refused while `PR_REVIEW_ENABLED` is not `1`.
+- **The paths that act on their own wait for the owner's switch, `PR_REVIEW_AUTO_REQUIRE`.**
+  Publishing a dataset, a visibility change and the enforce routes manage the ruleset only while it is exactly `1`; unset, they make no ruleset call and leave any existing ruleset alone.
+  The review runs from the day the Worker is deployed, so without a switch of its own the first publication or enforce run after a deploy would require the check before the canary and the calibration gate.
+  The owner turns it on when the fleet step starts, after both, and it is never on before.
+  The explicit tools, the review-ruleset routes and `nemar admin fleet require-review`, do not read it: the canary and the fleet are applied with them, a dry run first.
 - **A pull request whose required review failed is merged in the GitHub UI by an owner or administrator.**
   The CLI never uses the bypass (ADR 0093 stands), and its message says so.
 
