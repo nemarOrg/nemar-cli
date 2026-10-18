@@ -808,6 +808,13 @@ describe("waiverLines", () => {
       }
     });
 
+    test("a word that is not text is not a crash, and not a word", () => {
+      for (const notText of [undefined, null, 7, {}, ["x"]]) {
+        const out = lines(answer({ reason: notText as never }));
+        expect(out).toEqual(["Not waived: ."]);
+      }
+    });
+
     test("a very long word from the server does not run on: the line stays short and says it was cut", () => {
       const out = lines(answer({ reason: LONG }));
       expect(out).toHaveLength(1);
