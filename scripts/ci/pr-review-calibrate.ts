@@ -33,7 +33,9 @@
  * `git` the review's evidence reader runs on a contributor's objects, is started with
  * {@link childEnv} (`pr-review-evidence.ts`): this process's environment without any `ANTHROPIC_*`
  * variable and without the review's callback token. So the key goes to the SDK in this process and
- * to nothing it starts. No message repeats the value of an argument: a refusal names the flag.
+ * to nothing it starts. No message repeats an argument: a flag is named only if the script knows it
+ * (one it accepts, or one it refuses by name), and any other is `unknown flag`, because a key
+ * pasted after two dashes looks like one.
  *
  * **What the table holds.** Closed words, counts, token counts, seconds and an estimate in dollars,
  * never a pull request's text or a word a model wrote, so it can be pasted anywhere. Its columns
@@ -141,6 +143,13 @@ const REFUSED_FLAGS = new Set([
   "fetched-head",
   "pr-json",
 ]);
+
+/**
+ * The flags the script accepts. With {@link REFUSED_FLAGS} they are the only flags a message ever
+ * names: any other name may be a key pasted after two dashes, and a message is no place to print one.
+ */
+const ACCEPTED_FLAGS = ["pr", "prs", "json"] as const;
+const KNOWN_FLAGS: ReadonlySet<string> = new Set<string>([...ACCEPTED_FLAGS, ...REFUSED_FLAGS]);
 
 /**
  * Why a pull request could not be read before its review began, as a closed word for the table:
@@ -473,10 +482,12 @@ export async function calibrateMain(
   let json = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] as string;
-    // Only the flag's name is read or said. What follows an `=` is a value, and a value is never
-    // echoed: it may be a token, and a refusal is no place to print one.
+    // Only the flag's name is read, and it is said only if the script knows it. What follows an `=`
+    // is a value, and a value is never echoed: it may be a token, and a refusal is no place to
+    // print one. An unknown name is no safer, since a key pasted after two dashes is one.
     const name = arg.startsWith("--") ? (arg.slice(2).split("=", 1)[0] ?? "") : null;
     if (name === null) return usage("arguments are flags: --pr, --prs and --json");
+    if (!KNOWN_FLAGS.has(name)) return usage("unknown flag");
     if (REFUSED_FLAGS.has(name)) {
       return usage(`--${name} is refused: calibrate posts nothing and reviews no dispatch`);
     }
@@ -508,7 +519,8 @@ export async function calibrateMain(
         targets.push(t);
       }
     } else {
-      return usage(`unknown argument --${name}`);
+      // Not reachable while the accepted flags and this chain agree; the word names nothing.
+      return usage("unknown flag");
     }
   }
   if (targets.length === 0) return usage("name at least one pull request");

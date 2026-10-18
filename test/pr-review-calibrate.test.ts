@@ -289,6 +289,31 @@ describe("it posts nothing, and the key reaches only the API", () => {
     }
   });
 
+  test("an unknown flag is never named, so a key pasted after two dashes is not printed", async () => {
+    // What a key looks like when it lands where a flag goes. Each form used to be said back: as
+    // `--NAME needs a value` when nothing followed it, and as `unknown argument --NAME` otherwise.
+    const pasted = `--${KEY}`;
+    for (const argv of [
+      [pasted],
+      [pasted, "x"],
+      ["--pr", "nm000153#2", pasted],
+      ["--pr", "nm000153#2", pasted, "--json"],
+      [`${pasted}=value`],
+      ["--json", pasted, "nm000153#2"],
+    ]) {
+      const r = await refused(argv);
+      expect(r.code, JSON.stringify(argv)).toBe(2);
+      expect(r.said, JSON.stringify(argv)).toContain("unknown flag");
+      expect(r.said, JSON.stringify(argv)).not.toContain(KEY);
+    }
+    // The flags the script knows are still named, so a message stays useful.
+    for (const known of ["--pr", "--prs"]) {
+      const r = await refused([known]);
+      expect(r.code, known).toBe(2);
+      expect(r.said, known).toContain(`${known} needs a value`);
+    }
+  });
+
   test("a line of the file that is not a pull request is named by its number, not its text", async () => {
     const file = join(root, "numbered-prs.txt");
     writeFileSync(file, `nm000153#2\n\n# a comment\n${KEY}\n`);
