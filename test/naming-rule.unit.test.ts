@@ -18,7 +18,9 @@ import {
   TEMPLATE_FIELDS,
   findAuthorYearPrefix,
   findTemplateField,
+  hasVisibleText,
   namingProblemOf,
+  withoutInvisible,
 } from "../shared/naming-rule";
 import * as cli from "../src/lib/pr-text";
 
@@ -184,6 +186,98 @@ describe("namingProblemOf", () => {
       // The same lead before an ordinary title changes nothing about it.
       expect(namingProblemOf(`${lead}Add three EEG recordings`), what).toBeNull();
       expect(namingProblemOf(`${lead}2019 release notes`), what).toBeNull();
+    }
+  });
+
+  test("what no reader sees does not hide a template token or a name anywhere in the text", () => {
+    // The character draws nothing, so a person reads the refused text: `paper\u00adDOI` is
+    // `paperDOI`. A rule that cleared only the start of the text passed every one of these. Each
+    // class of the rule has a row that only it covers: a soft hyphen is a format character AND
+    // default-ignorable, so the combining grapheme joiner (a mark) and the Hangul filler (a letter)
+    // stand for the default-ignorable class, the Arabic number sign for the format class alone.
+    const templateField = [
+      "paper\u00adDOI", // a soft hyphen
+      "First\u200bAuthorSurname", // a zero-width space
+      "Rename to First\u2060Author\u200dSurname-year", // a word joiner and a joiner
+      "paper\u034fDOI", // a combining grapheme joiner: default-ignorable, not a format character
+      "First\u3164AuthorSurname", // a Hangul filler: default-ignorable, and a letter
+      "paper\u0600DOI", // a format character that is not default-ignorable
+      "paper\u0007DOI", // a control character
+      "paper\u2800DOI", // the braille blank
+      "{\u200b{title}}",
+      "<you\u200br title here>",
+    ];
+    for (const text of templateField) {
+      expect(namingProblemOf(text), JSON.stringify(text)).toBe("template_field");
+    }
+    const authorYear = [
+      "Le\u200be2019 EEG", // a zero-width space inside the name
+      "Lee\u00ad2019 EEG", // a soft hyphen between the name and the year
+      "Lee-\u200d2019-EEG", // a joiner after the hyphen
+      "Le\u0007e2019 EEG", // a control character
+      "Le\u2800e2019 EEG", // the braille blank
+      "\u2800Lee2019 EEG", // a braille blank in front, which is a symbol, not a blank
+      "\u2800\u2800 \u200b\u2800Lee-2019-EEG", // and a run of them with blanks between
+    ];
+    for (const text of authorYear) {
+      expect(namingProblemOf(text), JSON.stringify(text)).toBe("author_year");
+    }
+    // What is reported is what a reader sees: the answer holds no invisible character.
+    expect(findAuthorYearPrefix("Le\u200be-\u00ad2019 EEG")).toBe("Lee-2019");
+    expect(findTemplateField("Add the paper\u00adDOI to the README")).toBe("paperDOI");
+  });
+
+  test("a blank is never removed: it ends a word, and the instruction bracket still reads it", () => {
+    // A space, a tab and a newline separate words, so removing one would glue `Release 2019` into a
+    // name and a year, and `<your\ntitle>` into a word that asks nothing.
+    for (const text of [
+      "Release 2019",
+      "Lee 2019 EEG",
+      "Lee\t2019 EEG",
+      "Lee\n2019 EEG",
+      "Lee\r2019",
+    ]) {
+      expect(namingProblemOf(text), JSON.stringify(text)).toBeNull();
+    }
+    for (const text of [
+      "<your\ntitle here>",
+      "Update [describe\tthe change]",
+      "[write\r\nthe change]",
+    ]) {
+      expect(namingProblemOf(text), JSON.stringify(text)).toBe("template_field");
+    }
+  });
+
+  test("invisible characters in an ordinary text do not make it a problem", () => {
+    for (const text of [
+      "2019 release notes",
+      "Add three EEG recordings",
+      // An emoji joined by a zero-width joiner, and one with a variation selector.
+      "\u{1F469}\u200d\u{1F4BB} Add three EEG recordings",
+      "Add \u{1F468}\u200d\u{1F469}\u200d\u{1F467} family recordings",
+      "Fix \u2764\ufe0f in the README",
+      // Invisible characters between ordinary words, and ahead of a year that has no name before it.
+      "Add\u200b three\u00ad EEG recordings",
+      "\u2800\u200b2019 release notes",
+      "\u00a0Release 2019",
+    ]) {
+      expect(namingProblemOf(text), JSON.stringify(text)).toBeNull();
+    }
+  });
+
+  test("withoutInvisible removes, never replaces, and leaves every blank alone", () => {
+    expect(withoutInvisible("a\u200bb\u00adc\u2800d\u0007e\u{e0020}f")).toBe("abcdef");
+    const blanks = "a b\u00a0c\td\ne\rf\u3000g";
+    expect(withoutInvisible(blanks)).toBe(blanks);
+    expect(withoutInvisible("")).toBe("");
+  });
+
+  test("hasVisibleText is false only for a text a reader sees nothing in", () => {
+    for (const text of ["", "   ", "\u200b", "\u200b \u00ad\n\ufeff\t", "\u2800", "\u2060\u200d"]) {
+      expect(hasVisibleText(text), JSON.stringify(text)).toBe(false);
+    }
+    for (const text of ["a", ".", "0", "\u200ba\u200b", "\u2800 x"]) {
+      expect(hasVisibleText(text), JSON.stringify(text)).toBe(true);
     }
   });
 

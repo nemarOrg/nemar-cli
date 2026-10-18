@@ -297,8 +297,9 @@ export type ChangelogEntry = (typeof CHANGELOG_ENTRIES)[number];
 /**
  * What the naming rule made of a pull request's new dataset name: one of its two problems, or
  * `unchecked` when the pull request changes `dataset_description.json` and the name in it could not
- * be read (the file is not JSON, or its `Name` is not text), so there was no name to ask about. An
- * unreadable name is never a clean one.
+ * be read (the file is not JSON, or its `Name` is not text or shows a reader nothing, as an empty
+ * one or one of zero-width characters does), so there was no name to ask about. An unreadable name
+ * is never a clean one.
  */
 export type NameFinding = NamingProblem | "unchecked";
 

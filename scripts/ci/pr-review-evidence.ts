@@ -32,6 +32,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { hasVisibleText } from "../../shared/naming-rule";
 import {
   AREAS,
   type Area,
@@ -165,15 +166,16 @@ export interface Listing {
   versionAfter: string | null;
   /**
    * The dataset's `Name` in `dataset_description.json` at the merge base and at the head, or null
-   * where the file is absent, unparseable or has no string `Name`. Attacker-controlled at the head.
+   * where the file is absent, unparseable, or has no `Name` that is text a reader can see (a `Name`
+   * of blanks or of invisible characters is none). Attacker-controlled at the head.
    */
   nameBefore: string | null;
   nameAfter: string | null;
   /**
    * The pull request adds or edits `dataset_description.json` and there is no readable name at the
-   * head: the file is not JSON, or has no `Name`, or its `Name` is not text. `nameAfter` is null for
-   * that and for a file the pull request does not touch, and only this says which it was, so a
-   * name nobody could read is not mistaken for a dataset with no name to check.
+   * head: the file is not JSON, or has no `Name`, or its `Name` is not text or shows nothing.
+   * `nameAfter` is null for that and for a file the pull request does not touch, and only this says
+   * which it was, so a name nobody could read is not mistaken for a dataset with no name to check.
    */
   nameUnreadable: boolean;
   subjectsBefore: number | null;
@@ -424,7 +426,8 @@ export function parseNameStatus(raw: string): RawChange[] {
 /**
  * The `Version` and the `Name` in `dataset_description.json` at a revision. Either is null when the
  * file has none: an absent file, a file that is not JSON, a missing field, a `Version` that is not
- * `X.Y.Z`, a `Name` that is not a string. A file that EXISTS but cannot be read is not "no
+ * `X.Y.Z`, a `Name` that is not a string or shows a reader nothing (empty, blanks, or only
+ * characters nobody sees, see `hasVisibleText`). A file that EXISTS but cannot be read is not "no
  * version": it is an {@link EvidenceError}, so a failed fetch of a blob cannot pass as "this
  * dataset has no version".
  */
@@ -444,7 +447,9 @@ function descriptionAt(dir: string, rev: string): { version: string | null; name
     const n = doc.Name;
     return {
       version: typeof v === "string" && SEMVER.test(v) ? v : null,
-      name: typeof n === "string" ? n : null,
+      // A name that shows nothing is no name to ask the naming rule about: it is unreadable, and
+      // a changed one is `unchecked`, never clean.
+      name: typeof n === "string" && hasVisibleText(n) ? n : null,
     };
   } catch {
     return { version: null, name: null };

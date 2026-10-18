@@ -27,6 +27,8 @@ export type NamingProblem = (typeof NAMING_PROBLEMS)[number];
  * The two tokens of that rule are matched anywhere in the text, in any case, with no word boundary.
  * A template is filled in by joining its parts, and `_` and digits are word characters, so a
  * boundary would pass `FirstAuthorSurname_year_keyword_paperDOI` and `paperDOI10.1234` untouched.
+ * They are matched in the text a reader sees ({@link INVISIBLE}), so a soft hyphen or a zero-width
+ * space inside `paperDOI` does not hide it.
  *
  * There is deliberately NO rule for "a long CamelCase word". BIDS field names are CamelCase by
  * specification (`PowerLineFrequency`, `DatasetDOI`, `ReferencesAndLinks`), as are task labels
@@ -60,22 +62,47 @@ export const AUTHOR_YEAR_PREFIX =
   /^[\p{L}\p{M}]+(?:[-'\u{2019}][\p{L}\p{M}]+)*[-_]?(?:19|20)\d{2}(?!\d)/u;
 
 /**
- * What no reader sees at the start of a text: control characters, invisible format characters (a
- * zero-width space, a soft hyphen, a byte-order mark, a directional mark, a word joiner) and
- * whitespace. The review's models get the text with each of them replaced by a space (`tidy`,
- * `shared/untrusted-text.ts`), so a title that opens with one reads, to them and to a person, as a
- * title that opens with whatever follows. The run is anchored at the start and is one character
- * class repeated, so it is read once, in linear time.
+ * What no reader sees, wherever it is in a text and not only at its start:
+ *  - every default-ignorable code point (a soft hyphen, a zero-width space, joiner or non-joiner, a
+ *    directional mark, a word joiner, a variation selector, a Hangul filler, a tag character);
+ *  - every other format character (`\p{Cf}`) and every control character (`\p{Cc}`), except the
+ *    five that are blanks to a reader: tab, line feed, vertical tab, form feed and carriage return;
+ *  - U+2800, the braille blank, which is a symbol (so no class above covers it) that draws as a space.
+ *
+ * They are REMOVED, not replaced: nothing is drawn where they are, so `paper\u00adDOI` reads
+ * `paperDOI` and `Le\u200be2019` reads `Lee2019`. (The review's models are shown each control and
+ * format character as a space, `tidy` in `shared/untrusted-text.ts`; a rule that judged only that
+ * view could be passed by a character a person cannot see.) The five blanks stay, because they
+ * separate words as a space does, and the patterns that read a blank (the `\s+` after the asking
+ * word of `<your title>`) need them. One character class under one lookahead, applied by a global
+ * replace, so it is read once, in linear time.
  */
-const LEADING_INVISIBLE = /^[\p{Cf}\p{Cc}\s]+/u;
+const INVISIBLE = /(?![\t-\r])[\p{Default_Ignorable_Code_Point}\p{Cf}\p{Cc}\u2800]/gu;
 
 /**
- * What `text` opens with when that is a name and a year, as it was typed (`Lee-2019` for
- * `Lee-2019-EEG`, `MOVING2024` for `MOVING2024 release`), or null. That is how a dataset is named
- * (the atlas naming rule is FirstAuthorSurname-year-keyword-paperDOI), and a pull request title says
- * what the change does, not what the dataset is called: `Lee2019 EEG dataset`, `Lee-2019-EEG`,
- * `O'Brien_2020` and `MOVING2024 release` are refused. The function is pure and exported so that
- * the pull request review, and any check on a dataset name, ask the same question.
+ * `text` as a reader sees it: {@link INVISIBLE} removed at every position. Ordinary spaces are never
+ * touched here; {@link findAuthorYearPrefix} alone skips the blanks at the start of a text.
+ */
+export function withoutInvisible(text: string): string {
+  return text.replace(INVISIBLE, "");
+}
+
+/**
+ * Whether `text` shows a reader anything: false for an empty text, for blanks, and for a text of
+ * nothing but what {@link INVISIBLE} removes. A dataset name that shows nothing is no name to ask
+ * the rule about, so the readers of `dataset_description.json` treat it as unreadable.
+ */
+export function hasVisibleText(text: string): boolean {
+  return withoutInvisible(text).trim() !== "";
+}
+
+/**
+ * What `text` opens with when that is a name and a year, as it was typed less what no reader sees
+ * (`Lee-2019` for `Lee-2019-EEG`, `MOVING2024` for `MOVING2024 release`), or null. That is how a
+ * dataset is named (the atlas naming rule is FirstAuthorSurname-year-keyword-paperDOI), and a pull
+ * request title says what the change does, not what the dataset is called: `Lee2019 EEG dataset`,
+ * `Lee-2019-EEG`, `O'Brien_2020` and `MOVING2024 release` are refused. The function is pure and
+ * exported so that the pull request review, and any check on a dataset name, ask the same question.
  *
  * The name is the first word: letters of any case, with an apostrophe or a hyphen allowed inside it
  * (`O'Brien`, `Smith-Jones`). The year is four digits from 1900 to 2099 that are not the start of a
@@ -88,23 +115,25 @@ const LEADING_INVISIBLE = /^[\p{Cf}\p{Cc}\s]+/u;
  * Nothing here can tell a surname from any other letters, so an acronym such as `BNCI2014_001`, a
  * funding code such as `H2020` and a BIDS label such as `ses-2019` are refused too.
  *
- * What no reader sees before the text is skipped: blanks, control characters and invisible format
- * characters (see {@link LEADING_INVISIBLE}), so `\u200bLee2019 EEG` is refused like `Lee2019 EEG`,
- * and the answer is the same before and after the CLI's `normalizeTitle` (`src/lib/pr-text.ts`).
- * Only the start is cleared: an invisible character inside the text ends the first word, as any
- * character that is not a letter does.
+ * The text is judged as a reader sees it ({@link INVISIBLE}), at every position: `Le\u200be2019
+ * EEG` and `Lee\u00ad2019 EEG` are refused like `Lee2019 EEG`, and so is `\u2800Lee2019 EEG`. The
+ * blanks before the text are skipped, as the CLI's `normalizeTitle` (`src/lib/pr-text.ts`) trims
+ * them: a space, a tab, a newline and the no-break space are all blanks. A blank between the name
+ * and the year still ends the word, so `Lee\t2019 EEG` is a sentence like `Lee 2019 EEG`.
  */
 export function findAuthorYearPrefix(text: string): string | null {
-  return text.replace(LEADING_INVISIBLE, "").match(AUTHOR_YEAR_PREFIX)?.[0] ?? null;
+  return withoutInvisible(text).trimStart().match(AUTHOR_YEAR_PREFIX)?.[0] ?? null;
 }
 
 /**
- * The first template field `text` still holds, as it appears there, or null: the first of
- * {@link TEMPLATE_FIELDS}, in their order, that matches anywhere in the text.
+ * The first template field `text` still holds, as a reader sees it there ({@link INVISIBLE} is not
+ * part of it), or null: the first of {@link TEMPLATE_FIELDS}, in their order, that matches anywhere
+ * in the text.
  */
 export function findTemplateField(text: string): string | null {
+  const seen = withoutInvisible(text);
   for (const re of TEMPLATE_FIELDS) {
-    const field = text.match(re)?.[0];
+    const field = seen.match(re)?.[0];
     if (field !== undefined) return field;
   }
   return null;

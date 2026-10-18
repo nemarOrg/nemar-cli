@@ -2802,6 +2802,24 @@ describe("the facts come before any model, and fail the verdict whatever it says
       desc("1.1.0", { Name: "{{dataset name}}" }),
       "fail",
     ],
+    [
+      "a changed name that hides an author and a year behind a zero-width space",
+      {},
+      desc("1.1.0", { Name: "Le\u200be2019-EEG-Motor" }),
+      "fail",
+    ],
+    [
+      "a changed name that hides a template token behind a soft hyphen",
+      {},
+      desc("1.1.0", { Name: "Resting EEG paper\u00adDOI" }),
+      "fail",
+    ],
+    [
+      "a title that hides an author and a year behind a zero-width space",
+      { title: "Le\u200be2019 EEG update" },
+      null,
+      "fail",
+    ],
     ["a changed name nobody can read", {}, desc("1.1.0", { Name: 7 }), "uncertain"],
   ])(
     "%s ends the review at the facts: no model request, and a report the shared parser takes",
@@ -2954,6 +2972,10 @@ describe("the facts come before any model, and fail the verdict whatever it says
     ["a Name that is a number", desc("1.1.0", { Name: 42 })],
     ["a Name that is a list", desc("1.1.0", { Name: ["Lee2019-EEG-Motor"] })],
     ["a Name that is null", desc("1.1.0", { Name: null })],
+    ["a Name of only zero-width characters", desc("1.1.0", { Name: "\u200b\u2060\u00ad" })],
+    ["a Name of only a braille blank", desc("1.1.0", { Name: "\u2800" })],
+    ["a Name of only blanks", desc("1.1.0", { Name: " \t\n " })],
+    ["an empty Name", desc("1.1.0", { Name: "" })],
     ["no Name at all", JSON.stringify({ BIDSVersion: "1.9.0", Version: "1.1.0" })],
     ["a file that is not JSON", '{ "Name": "Lee2019-EEG-Motor", '],
   ])(
@@ -3028,10 +3050,26 @@ describe("the facts come before any model, and fail the verdict whatever it says
     expect(listingOf(edited(desc("1.1.0", { Name: 7 })), "unreadable-number").nameUnreadable).toBe(
       true,
     );
-    // Edited, name readable: not.
+    // Edited, and the name shows a reader nothing: as unreadable as one that is not text.
+    for (const blank of ["", "   ", "\u200b\u2060", "\u2800", "\u00ad \n"]) {
+      const l = listingOf(
+        edited(desc("1.1.0", { Name: blank })),
+        `unreadable-blank-${hash(blank)}`,
+      );
+      expect(l.nameUnreadable, JSON.stringify(blank)).toBe(true);
+      expect(l.nameAfter, JSON.stringify(blank)).toBeNull();
+    }
+    // Edited, name readable: not. An invisible character inside a name is the rule's to judge, so the
+    // name is kept as it was written.
     const fine = listingOf(edited(desc("1.1.0")), "unreadable-fine");
     expect(fine.nameUnreadable).toBe(false);
     expect(fine.nameAfter).toBe("Resting EEG of volunteers");
+    const hiding = listingOf(
+      edited(desc("1.1.0", { Name: "Resting\u200b EEG" })),
+      "unreadable-hidden-inside",
+    );
+    expect(hiding.nameUnreadable).toBe(false);
+    expect(hiding.nameAfter).toBe("Resting\u200b EEG");
     // Not touched: the head has the name the base had, and there is nothing to read.
     expect(
       listingOf((dir) => write(dir, "README.md", "# R\n"), "unreadable-untouched"),
