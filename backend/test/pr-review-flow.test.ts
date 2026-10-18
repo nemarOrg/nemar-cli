@@ -1361,6 +1361,41 @@ describe("the naming rule runs first, owners and administrators included (ADR 01
     },
   );
 
+  test.each([
+    ["empty", ""],
+    ["only blanks", "   "],
+    ["only zero-width spaces", "\u200b\u200b"],
+    ["only a soft hyphen", "\u00ad"],
+    ["only the braille blank", "\u2800"],
+    ["only a byte order mark and a newline", "\ufeff\n"],
+  ])(
+    "a changed Name that is %s shows a reader nothing: it is unchecked in the Worker as in the job, never a skip",
+    async (_what, shown) => {
+      seedAccount({ github: "owner-gh", role: "owner" });
+      naming[DATASET] = {
+        files: ["dataset_description.json"],
+        names: { [SHA_A]: shown, [BASE_SHA]: "Resting EEG of volunteers" },
+      };
+      const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+      expect(r.body).toMatchObject({ reason: "naming_unchecked" });
+      expect(lastCheck()).toMatchObject({ conclusion: "action_required" });
+    },
+  );
+
+  test("invisible characters around a Name that shows text do not hide it: the text is judged", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    naming[DATASET] = {
+      files: ["dataset_description.json"],
+      names: {
+        [SHA_A]: "\u200bLee2019 Resting EEG\u200b",
+        [BASE_SHA]: "Resting EEG of volunteers",
+      },
+    };
+    const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+    expect(r.body).toMatchObject({ reason: "naming_rule" });
+    expect(lastCheck()).toMatchObject({ conclusion: "failure" });
+  });
+
   test("a head file GitHub cannot find, with no list to say it was removed, is unchecked: the comparison lists nothing", async () => {
     seedAccount({ github: "owner-gh", role: "owner" });
     naming[DATASET] = { files: null, names: { [BASE_SHA]: "Resting EEG of volunteers" } };

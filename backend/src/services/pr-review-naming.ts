@@ -18,14 +18,18 @@
  * comparison ({@link compare}); otherwise it is treated as absent and both names are read.
  *
  * **Unknown is never green.** A name that cannot be read (GitHub refuses, times out, or answers with
- * something this cannot read: a file at the head that is not JSON or has no `Name` that is text, or
- * one that is missing where nothing says it was removed) is `unchecked`, which publishes a check
- * that does not pass. A file the comparison lists as removed is a removal, which is not a naming
- * failure. Each read runs inside the webhook's own request, which GitHub gives ten seconds, so each
- * is bounded.
+ * something this cannot read: a file at the head that is not JSON or has no `Name` that is text and
+ * shows something, or one that is missing where nothing says it was removed) is `unchecked`, which
+ * publishes a check that does not pass. A file the comparison lists as removed is a removal, which
+ * is not a naming failure. Each read runs inside the webhook's own request, which GitHub gives ten
+ * seconds, so each is bounded.
  */
 
-import { type NamingProblem, namingProblemOf } from "../../../shared/naming-rule.js";
+import {
+  type NamingProblem,
+  hasVisibleText,
+  namingProblemOf,
+} from "../../../shared/naming-rule.js";
 import type { NamingFacts } from "../../../shared/pr-review.js";
 import type { Bindings } from "../types/bindings.js";
 import { getDatasetsTokenWithRefresher } from "./github-auth.js";
@@ -144,7 +148,9 @@ async function compare(
 
 /**
  * `dataset_description.json` at a commit: whether it is there (a 404 says it is not), and its
- * `Name`, null when the file has no string `Name` or is not JSON. What a missing file or a missing
+ * `Name`, null when the file has no string `Name`, is not JSON, or has a `Name` that shows a reader
+ * nothing (empty, blanks, or only characters nobody sees, see `hasVisibleText`): the review job
+ * reads a name the same way, so the two agree on what is no name. What a missing file or a missing
  * name means depends on which commit was asked, so the caller decides.
  */
 async function nameAt(
@@ -166,7 +172,7 @@ async function nameAt(
     const doc: unknown = JSON.parse(text);
     const name =
       typeof doc === "object" && doc !== null ? (doc as Record<string, unknown>).Name : undefined;
-    return { present: true, name: typeof name === "string" ? name : null };
+    return { present: true, name: typeof name === "string" && hasVisibleText(name) ? name : null };
   } catch {
     // A file that is not JSON has no name to check; the BIDS validator says what is wrong with it.
     return { present: true, name: null };

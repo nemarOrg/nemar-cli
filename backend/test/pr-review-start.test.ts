@@ -1347,6 +1347,26 @@ describe("owners and administrators meet the naming rule before their exemption"
     },
   );
 
+  test.each([
+    ["empty", ""],
+    ["only blanks", "   "],
+    ["only zero-width spaces", "\u200b\u200b"],
+    ["only the braille blank", "\u2800"],
+  ])(
+    "a changed Name that is %s shows a reader nothing: it is unchecked, never a skip",
+    async (_what, shown) => {
+      pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Fix a sidecar" });
+      naming[DATASET] = {
+        files: ["dataset_description.json"],
+        names: { [SHA_A]: shown, [BASE_SHA]: "Resting EEG of volunteers" },
+      };
+      const r = await start(DATASET, 7);
+      expect(r.body).toMatchObject({ dispatched: false, reason: "naming_unchecked" });
+      const check = calls.find((c) => c.method === "POST" && c.path.endsWith("/check-runs"));
+      expect(check?.body).toMatchObject({ conclusion: "action_required" });
+    },
+  );
+
   test("a head file GitHub cannot find, with no list or a list that may have been cut, is unchecked", async () => {
     pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Fix a sidecar" });
     for (const files of [null, CUT_LIST]) {

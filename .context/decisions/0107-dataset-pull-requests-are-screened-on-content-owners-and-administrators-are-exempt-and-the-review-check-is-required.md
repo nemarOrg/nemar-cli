@@ -142,10 +142,10 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
 - **Owners and administrators are not exempt from it.**
   The exemption still skips the review, but the Worker applies the rule first: a refused title or name fails the check, and a name GitHub will not show makes it a check that needs a person, never a skip.
 - **A name that cannot be read is checked as `unchecked`, and unchecked cannot pass.**
-  In the review job, a pull request that changes `dataset_description.json` and leaves a `Name` that is not text, or a file that is not JSON, has the finding `unchecked`: the run ends at the facts stage and the check does not pass.
+  In the review job, a pull request that changes `dataset_description.json` and leaves a `Name` that is not text or shows a reader nothing (empty, blanks, or only characters nobody sees), or a file that is not JSON, has the finding `unchecked`: the run ends at the facts stage and the check does not pass.
   The Worker, for a pull request it does not review, compares the base with the head and, when the comparison says `dataset_description.json` may have changed, reads the file at the head and at the merge base.
   It asks for a page of 100 commits and believes the comparison's list of changed files only when the answer holds every commit of the comparison (`commits` as long as `total_commits`, both present); a longer comparison, or an answer without the counts, is treated as having no list, so both names are read.
-  A head file that is not JSON, has no `Name` that is text, or is not found where the comparison does not list it as removed is `unchecked`.
+  A head file that is not JSON, has no `Name` that is text and shows something, or is not found where the comparison does not list it as removed is `unchecked`, as in the job.
   A file the comparison lists as removed (or renamed to another name) has no name to refuse, and a removal is not a naming failure.
   The merge base is held to less: no file there, or one with no readable name, means the pull request gives the dataset its first name, and that name is checked.
 - **The Worker's reads are bounded, and the bounds are unmeasured on large pull requests.**
