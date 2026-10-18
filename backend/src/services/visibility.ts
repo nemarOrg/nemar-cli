@@ -218,7 +218,8 @@ export async function applyDatasetVisibility(
       // in the publication orchestrator; an exhaustive scan found this one.
       visibility: isPrivate ? "private" : "public",
       // The row after the update above, so a dataset made public and reviewed is given the
-      // required review and one made private has it taken off (ADR 0107).
+      // required review and one made private has it taken off (ADR 0107), once the owner has
+      // turned automatic requirement on (PR_REVIEW_AUTO_REQUIRE); until then it is left as it is.
       review: await readReviewIntent(env, datasetId),
       collaborators: { ownerLogin, approvedWriters },
     });

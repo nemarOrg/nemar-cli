@@ -678,6 +678,14 @@ describe("the enforce routes and the review", () => {
   const enforce = (id: string, body: unknown = {}) =>
     post(`/admin/datasets/${id}/enforce`, body, ADMIN_KEY);
 
+  // Enforce manages the review ruleset on its own, so it waits for the owner's switch
+  // (PR_REVIEW_AUTO_REQUIRE). These tests are about what it does once that is on; the ones that
+  // are about the switch itself are in the describe below. The explicit routes above run without
+  // it, which is also what shows they do not read it.
+  beforeEach(() => {
+    envOverrides = { PR_REVIEW_AUTO_REQUIRE: "1" };
+  });
+
   test("a dry run of enforce on a reviewed dataset reports the review step and writes nothing", async () => {
     seedDataset("nm000201");
 
@@ -703,7 +711,8 @@ describe("the enforce routes and the review", () => {
     seedDataset("nm000201");
     await ensureReviewRuleset("nm000201", PAT);
     const before = structuredClone(standIn.rulesets.get("nm000201"));
-    envOverrides = { PR_REVIEW_ENABLED: undefined };
+    // The automatic switch stays on: it is the review itself that is off here.
+    envOverrides = { PR_REVIEW_AUTO_REQUIRE: "1", PR_REVIEW_ENABLED: undefined };
 
     const r = await enforce("nm000201", { dry_run: false });
 

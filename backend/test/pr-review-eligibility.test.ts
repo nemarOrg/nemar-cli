@@ -191,9 +191,9 @@ describe("what a dataset row calls for", () => {
     insert(db, "nm000301", reviewable);
     insert(db, "nm000302", { ...reviewable, visibility: "private" });
     const env = (flag: string | undefined) =>
-      ({ DB: realD1(db), PR_REVIEW_ENABLED: flag }) as unknown as Pick<
+      ({ DB: realD1(db), PR_REVIEW_ENABLED: flag, PR_REVIEW_AUTO_REQUIRE: "1" }) as unknown as Pick<
         Bindings,
-        "DB" | "PR_REVIEW_ENABLED"
+        "DB" | "PR_REVIEW_ENABLED" | "PR_REVIEW_AUTO_REQUIRE"
       >;
 
     expect(await readReviewIntent(env("1"), "nm000301")).toBe("require");
@@ -217,10 +217,11 @@ describe("what a dataset row calls for", () => {
       if (sql.includes("FROM datasets")) throw new Error("D1 is unavailable");
     });
 
+    // Both switches on, so that the only reason for an empty answer is the failed read.
     const intent = await readReviewIntent(
-      { DB: failing, PR_REVIEW_ENABLED: "1" } as unknown as Pick<
+      { DB: failing, PR_REVIEW_ENABLED: "1", PR_REVIEW_AUTO_REQUIRE: "1" } as unknown as Pick<
         Bindings,
-        "DB" | "PR_REVIEW_ENABLED"
+        "DB" | "PR_REVIEW_ENABLED" | "PR_REVIEW_AUTO_REQUIRE"
       >,
       "nm000301",
     );

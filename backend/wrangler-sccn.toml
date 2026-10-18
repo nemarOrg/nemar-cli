@@ -227,6 +227,10 @@ ENVIRONMENT = "production"
 # Dataset pull-request review (ADR 0092). On in production from 2026-10-13. It lives in this
 # file because `wrangler deploy` drops dashboard-only variables (see [env.dev.vars]).
 PR_REVIEW_ENABLED = "1"
+# PR_REVIEW_AUTO_REQUIRE is deliberately not set here. Unset, publishing, a visibility change and
+# the enforce routes leave the review ruleset alone, so this deploy requires the review of no
+# dataset. The owner adds it, in a reviewed change, when the fleet step of the rollout starts,
+# after the canary and the calibration gate (ADR 0107); it is never added before.
 # Claude Platform on AWS (Anthropic-operated Messages API, AWS Marketplace
 # billing; NOT Bedrock). Used by LLM enrichment. The paired ANTHROPIC_API_KEY
 # is a worker secret; both of these are required alongside it — requests

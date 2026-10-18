@@ -1451,7 +1451,8 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         // orchestrator had.
         visibility: repoShouldBePrivate ? "private" : "public",
         // The row after the update above: a published dataset is given the required review
-        // (ADR 0107), unless the review is off.
+        // (ADR 0107), unless the review is off or the owner has not turned automatic requirement
+        // on (PR_REVIEW_AUTO_REQUIRE), in which case the review ruleset is left as it is.
         review: await readReviewIntent(c.env, datasetId),
         collaborators: { ownerLogin, approvedWriters },
       });

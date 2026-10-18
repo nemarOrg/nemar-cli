@@ -1,6 +1,7 @@
 /**
  * Every place that brings a dataset repository to its spec also decides the required pull-request
- * review for it (ADR 0107), and decides it from the dataset's row.
+ * review for it (ADR 0107), decides it from the dataset's row, and asks the owner's switch first
+ * (PR_REVIEW_AUTO_REQUIRE): until the owner turns it on, no automatic path requires the review.
  *
  * Publishing a dataset, flipping its visibility, withdrawing or restoring it, and the two enforce
  * routes all end in `ensureRepoToSpec`. What the review step does for each intent is tested
@@ -9,10 +10,12 @@
  * cannot be driven here, which is the boundary visibility.test.ts documents, so this scan is what
  * stands behind them, in the shape of the scans in anonymity-publication-paths.test.ts.
  *
- * Two ways for a caller to be wrong, and the scan fails on both:
+ * Three ways for a caller to be wrong, and the scan fails on all of them:
  *  - it says nothing about the review, so the repository's ruleset is never kept in step with the
  *    dataset (a published dataset is never gated, or an unpublished one keeps a ruleset);
- *  - it passes a literal, which puts the requirement on, or takes it off, whatever the row says.
+ *  - it passes a literal, which puts the requirement on, or takes it off, whatever the row says;
+ *  - it asks the row alone (`reviewIntentOf`), which has no switch, so the review is required on
+ *    that path whatever the owner has decided.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -40,8 +43,11 @@ function callText(text: string, at: number): string {
   return closes ? text.slice(at, at + closes.index + closes[0].length) : text.slice(at, at + 2000);
 }
 
-/** What the `review` option is given: the row's answer, never a literal. */
-const COMPUTED_REVIEW = /\breview:\s*(await\s+)?(readReviewIntent|reviewIntentOf)\(/;
+/**
+ * What the `review` option is given: the answer of the two functions that ask the switch, never a
+ * literal and never `reviewIntentOf`, which is the row's answer without it.
+ */
+const COMPUTED_REVIEW = /\breview:\s*(await\s+)?(readReviewIntent|automaticReviewIntent)\(/;
 
 interface Site {
   where: string;
@@ -86,9 +92,11 @@ describe("every caller of ensureRepoToSpec decides the required review from the 
     }
   });
 
-  test("the pattern tells a decided call from an undecided one and from a literal", () => {
+  test("the pattern tells a decided call from an undecided one, a literal and one with no switch", () => {
     expect(COMPUTED_REVIEW.test("review: await readReviewIntent(c.env, datasetId),")).toBe(true);
-    expect(COMPUTED_REVIEW.test("review: reviewIntentOf(id, row, enabled),")).toBe(true);
+    expect(COMPUTED_REVIEW.test("review: automaticReviewIntent(c.env, id, row),")).toBe(true);
+    // The row's answer alone has no switch, so a caller that uses it requires the review on its own.
+    expect(COMPUTED_REVIEW.test("review: reviewIntentOf(id, row, enabled),")).toBe(false);
     expect(COMPUTED_REVIEW.test('review: "require",')).toBe(false);
     expect(COMPUTED_REVIEW.test("review: undefined,")).toBe(false);
     expect(COMPUTED_REVIEW.test("visibility: 'public', dryRun,")).toBe(false);

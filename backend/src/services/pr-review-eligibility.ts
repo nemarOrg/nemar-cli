@@ -60,6 +60,20 @@ export function isReviewEnabled(env: Pick<Bindings, "PR_REVIEW_ENABLED">): boole
 }
 
 /**
+ * Whether the automatic paths (publishing a dataset, a visibility change, the enforce routes) may
+ * put the review ruleset on a repository or take it off one. Exactly "1"; unset is off.
+ *
+ * It is a switch of its own, apart from {@link isReviewEnabled}, because the review runs from the
+ * day the Worker is deployed and the requirement is the owner's step: the owner turns this on when
+ * the fleet step of the rollout starts, after the canary and the calibration gate, and it is never
+ * on before. The explicit tools (the review-ruleset routes and `nemar admin fleet require-review`)
+ * do not read it.
+ */
+export function isAutoRequireEnabled(env: Pick<Bindings, "PR_REVIEW_AUTO_REQUIRE">): boolean {
+  return env.PR_REVIEW_AUTO_REQUIRE === "1";
+}
+
+/**
  * The dataset ids the ruleset tooling never touches: the top 100 ids of the `nm` prefix
  * (nm099900 to nm099999), which the fixture rule reserves for standing test fixtures. They are the
  * end-to-end dataset (nm099999), the standing anonymous deposit (nm099998) and the fixtures that
@@ -85,11 +99,14 @@ export const OUTSIDE_FIXTURE_BAND = {
 } as const;
 
 /**
- * What a dataset calls for, as the lifecycle code (publishing, a visibility change, `enforce`)
- * should ask of its repository: take the ruleset off a dataset that is not reviewed, put it on one
- * that is, and, while the review is off, leave a reviewed dataset's ruleset alone (`undefined`).
- * Requiring a check that nothing is posting would block every merge, so the requirement is never
- * put on while the review is off; lifting it never waits for anything.
+ * What a dataset's row calls for: take the ruleset off a dataset that is not reviewed, put it on
+ * one that is, and, while the review is off, leave a reviewed dataset's ruleset alone
+ * (`undefined`). Requiring a check that nothing is posting would block every merge, so the
+ * requirement is never put on while the review is off; lifting it never waits for anything.
+ *
+ * This is the row's answer and nothing more. The drift report asks it directly. The paths that
+ * WRITE on their own, publishing, a visibility change and `enforce`, ask {@link automaticReviewIntent}
+ * instead, which adds the owner's switch.
  *
  * A standing test fixture ({@link isReviewRulesetFixture}) calls for nothing, whatever its row
  * says: the tooling does not touch its repository's rulesets in either direction.
@@ -105,15 +122,32 @@ export function reviewIntentOf(
 }
 
 /**
- * {@link reviewIntentOf} for a dataset, read from the catalog now. A dataset the catalog does not
- * hold has no answer (`undefined`: touch nothing), and neither has one whose row could not be read.
- * The read is made while the lifecycle code is bringing a repository to its spec, with the branch
- * ruleset and the collaborators still to do, so a failure is logged and leaves the review ruleset
- * as it is instead of costing the rest of that work. The drift report shows a repository left out
- * of step.
+ * What the AUTOMATIC paths ask of a repository, which are publishing a dataset, a visibility change
+ * and the enforce routes: {@link reviewIntentOf} while {@link isAutoRequireEnabled}, and otherwise
+ * nothing. `undefined` leaves the review ruleset exactly as it is, in either direction, and the
+ * caller makes no ruleset call for it. This is the one place the owner's switch is read, so a path
+ * that asks here cannot require the review before the owner has started the fleet step.
+ */
+export function automaticReviewIntent(
+  env: Pick<Bindings, "PR_REVIEW_ENABLED" | "PR_REVIEW_AUTO_REQUIRE">,
+  datasetId: string,
+  row: ReviewableRow,
+): ReviewIntent | undefined {
+  if (!isAutoRequireEnabled(env)) return undefined;
+  return reviewIntentOf(datasetId, row, isReviewEnabled(env));
+}
+
+/**
+ * {@link automaticReviewIntent} for a dataset, read from the catalog now. A dataset the catalog
+ * does not hold has no answer (`undefined`: touch nothing), and neither has one whose row could not
+ * be read. The read is made while the lifecycle code is bringing a repository to its spec, with the
+ * branch ruleset and the collaborators still to do, so a failure is logged and leaves the review
+ * ruleset as it is instead of costing the rest of that work. The drift report shows a repository
+ * left out of step. The row is read whether or not the switch is on, so that the decision stays in
+ * the one function.
  */
 export async function readReviewIntent(
-  env: Pick<Bindings, "DB" | "PR_REVIEW_ENABLED">,
+  env: Pick<Bindings, "DB" | "PR_REVIEW_ENABLED" | "PR_REVIEW_AUTO_REQUIRE">,
   datasetId: string,
 ): Promise<ReviewIntent | undefined> {
   try {
@@ -122,7 +156,7 @@ export async function readReviewIntent(
     )
       .bind(datasetId)
       .first<ReviewableRow>();
-    return row ? reviewIntentOf(datasetId, row, isReviewEnabled(env)) : undefined;
+    return row ? automaticReviewIntent(env, datasetId, row) : undefined;
   } catch (e) {
     console.error(
       `[review-ruleset] could not read ${datasetId} to decide its review ruleset; leaving it as it is:`,
