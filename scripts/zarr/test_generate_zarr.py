@@ -17208,11 +17208,15 @@ class TestCutShortBrainVisionThroughConvertOne(ConvertOneKeepingStoreCase):
     Before biosigIO 1.2.13 the reader dropped the partial trailing frame, and any
     marker in it, without a word. 1.2.13 refuses it, and the converter opts back
     in (`allow_partial_frame`) for ONE case: a multiplexed file that ends in a
-    partial frame and whose header declares no positive `DataPoints` count. With
-    no count that cannot be told from a complete recording that ends in stray
-    bytes, so the whole frames convert and the dropped byte count is recorded in
-    the store's `recording_metadata` as `brainvision_dropped_bytes`, where it used
-    to vanish.
+    partial frame and whose header declares no positive `DataPoints` count.
+    Without a count, a partial frame cannot be told from a complete recording
+    that ends in stray bytes, so the whole frames convert and the dropped byte
+    count is recorded in the store's `recording_metadata` as
+    `brainvision_dropped_bytes`, where it used to vanish. Every other refusal
+    stays a terminal `corrupt_or_truncated`: a file that holds fewer frames than
+    the positive `DataPoints` count its header declares, vectorized data with a
+    partial frame (a cut there moves every channel after the first), and a file
+    that holds no whole frame.
 
     A frame is one sample of every channel: channels times bytes per sample, read
     from the header. The files are a real BrainVision triplet written by
@@ -17265,20 +17269,44 @@ class TestCutShortBrainVisionThroughConvertOne(ConvertOneKeepingStoreCase):
         (group,) = result["entry"]["groups"]
         return group["n_samples"]
 
+    def edit_header(self, vhdr: str, old: str, new: str) -> None:
+        """Rewrite part of the header the fixture wrote. The part must be there
+        exactly once: an edit that matched nothing would leave the unedited file
+        under test."""
+        with open(vhdr, encoding="utf-8") as fh:
+            header = fh.read()
+        self.assertEqual(header.count(old), 1, old)
+        with open(vhdr, "w", encoding="utf-8") as fh:
+            fh.write(header.replace(old, new))
+
+    def assert_converts(self, head_files: set[str], samples: int) -> None:
+        """The control of a test: the recording converts on both exporters, with
+        every frame and nothing dropped, so what the test does to it next is what
+        is being judged and not the fixture."""
+        for path_name in self.PATHS:
+            with self.subTest("complete", path=path_name):
+                result = self.convert_on(path_name, head_files)
+                self.assertTrue(result["ok"], result.get("error"))
+                self.assertEqual(self.n_samples(result), samples)
+                self.assertNotIn(self.DROPPED, self.published_recording_metadata(result["entry"]))
+
+    def assert_refused(self, head_files: set[str], data: str) -> None:
+        """Both exporters refuse the recording, typed and never retried, naming its
+        data file, and publish no store for it."""
+        for path_name in self.PATHS:
+            with self.subTest("refused", path=path_name):
+                result = self.convert_on(path_name, head_files)
+                self.assert_refused_as_data(result, "corrupt_or_truncated")
+                self.assertIn(os.path.basename(data), result["detail"])
+                self.assertNotIn("entry", result)
+
     def test_a_data_file_cut_inside_its_last_frame_converts_the_whole_frames(self):
         head_files, vhdr, data = self.write_recording()
         frame = self.frame_bytes(vhdr)
         size = os.path.getsize(data)
         self.assertEqual(size % frame, 0)
 
-        # The control: the complete triplet converts, with every frame and nothing
-        # dropped, so the cut below is what is being converted and not the fixture.
-        for path_name in self.PATHS:
-            with self.subTest("complete", path=path_name):
-                result = self.convert_on(path_name, head_files)
-                self.assertTrue(result["ok"], result.get("error"))
-                self.assertEqual(self.n_samples(result), size // frame)
-                self.assertNotIn(self.DROPPED, self.published_recording_metadata(result["entry"]))
+        self.assert_converts(head_files, size // frame)
 
         with open(data, "r+b") as fh:
             fh.truncate(size - 1)
@@ -17296,6 +17324,48 @@ class TestCutShortBrainVisionThroughConvertOne(ConvertOneKeepingStoreCase):
                 self.assertEqual(
                     self.published_recording_metadata(result["entry"]).get(self.DROPPED), dropped
                 )
+
+    def test_a_data_file_cut_below_its_declared_data_points_is_terminal_corrupt_or_truncated(self):
+        head_files, vhdr, data = self.write_recording()
+        frame = self.frame_bytes(vhdr)
+        size = os.path.getsize(data)
+        # The header now declares the complete recording's frame count. The same
+        # one-byte cut as above then leaves fewer frames than the file promises, and
+        # the opt-in, which covers a file that declares no count, does not touch it.
+        self.edit_header(
+            vhdr,
+            "DataOrientation=MULTIPLEXED\n",
+            f"DataOrientation=MULTIPLEXED\nDataPoints={size // frame}\n",
+        )
+        self.assert_converts(head_files, size // frame)
+
+        with open(data, "r+b") as fh:
+            fh.truncate(size - 1)
+        self.assert_refused(head_files, data)
+
+    def test_a_vectorized_data_file_with_a_partial_frame_is_terminal_corrupt_or_truncated(self):
+        head_files, vhdr, data = self.write_recording()
+        frame = self.frame_bytes(vhdr)
+        size = os.path.getsize(data)
+        # The same bytes, declared as channel after channel instead of sample after
+        # sample. A cut there moves every channel boundary after the first, so the
+        # whole frames are not a shorter recording and the opt-in does not apply.
+        self.edit_header(vhdr, "DataOrientation=MULTIPLEXED", "DataOrientation=VECTORIZED")
+        self.assert_converts(head_files, size // frame)
+
+        with open(data, "r+b") as fh:
+            fh.truncate(size - 1)
+        self.assert_refused(head_files, data)
+
+    def test_a_data_file_smaller_than_one_frame_is_terminal_corrupt_or_truncated(self):
+        head_files, vhdr, data = self.write_recording()
+        frame = self.frame_bytes(vhdr)
+        self.assert_converts(head_files, os.path.getsize(data) // frame)
+
+        # One byte short of a single frame: no whole frame is left to read.
+        with open(data, "r+b") as fh:
+            fh.truncate(frame - 1)
+        self.assert_refused(head_files, data)
 
 
 class TestStreamedTruncatedFifThroughConvertOne(ConvertOneLocalCase):
