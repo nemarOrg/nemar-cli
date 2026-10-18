@@ -48,12 +48,9 @@ describe("backend/wrangler-sccn.toml and the automatic requirement switch", () =
     expect(varsBlocks().map(([name]) => name)).toContain("[env.dev.vars]");
   });
 
-  test("the pull-request review itself is set where the switch is checked for", () => {
-    // The review is on in both blocks, so the switch's absence from them is a decision about the
-    // requirement and not a file that says nothing about the review at all.
-    expect(config.vars?.PR_REVIEW_ENABLED).toBe("1");
-    expect(config.env?.dev?.vars?.PR_REVIEW_ENABLED).toBe("1");
-  });
+  // PR_REVIEW_ENABLED is deliberately not pinned here. The last step of a rollback switches the
+  // review off (ADR 0107), and a pin would fail this test, and so the deploy's test gate, on the
+  // change that does it. The checks above already keep the guard from being vacuous.
 
   test("the switch is in no vars block, so it is off everywhere", () => {
     const setIn = varsBlocks()
