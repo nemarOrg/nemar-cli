@@ -11,6 +11,10 @@
  * UNCHANGED_NAME}: the merge base is the base commit and `dataset_description.json` is not among
  * the changed files, so the rule finds no name change and reads nothing more, which is what a test
  * about something else needs.
+ *
+ * The comparison answers as GitHub's does in the two respects the rule depends on: the file list
+ * comes with the first page, and the commits are paged by the `per_page` the request asks for (30
+ * when it asks for none, at most 100), with the whole count in `total_commits`.
  */
 
 /**
@@ -44,6 +48,14 @@ export interface NamingRepo {
    * of its own or a rename (`previous_filename`). `null` leaves the list out of the answer.
    */
   files?: Array<string | { filename: string; status?: string; previous_filename?: string }> | null;
+  /**
+   * The commits of the comparison: how many it has (`total`, one when absent), and how many of them
+   * the answer's page holds. A page holds as many as the request's `per_page` allows, as GitHub's
+   * does, unless `onPage` says how many it holds whatever was asked: a page that is only part of the
+   * comparison, which is what a test sets to see the rule refuse to believe a `files` that may not
+   * cover it. `null` leaves `commits` and `total_commits` out of the answer.
+   */
+  commits?: { total: number; onPage?: number } | null;
   /**
    * What `dataset_description.json` holds at a commit: a `Name` (the file is
    * `{"Name": ..., "BIDSVersion": "1.9.0"}`), null for no file (404), an HTTP status to answer, or
@@ -81,8 +93,20 @@ export async function namingResponse(
     if (repo.compareStatus !== undefined) {
       return new Response("{}", { status: repo.compareStatus, headers: { "retry-after": "0" } });
     }
+    const total = repo.commits?.total ?? 1;
+    const asked = Number(url.searchParams.get("per_page") ?? "30");
+    const pageSize = Number.isInteger(asked) && asked > 0 ? Math.min(asked, 100) : 30;
+    const onPage = repo.commits?.onPage ?? Math.min(total, pageSize);
     return Response.json({
       merge_base_commit: { sha: repo.mergeBase ?? compare[2] },
+      ...(repo.commits === null
+        ? {}
+        : {
+            total_commits: total,
+            commits: Array.from({ length: onPage }, (_, i) => ({
+              sha: (i + 1).toString(16).padStart(40, "0"),
+            })),
+          }),
       ...(repo.files === null
         ? {}
         : {

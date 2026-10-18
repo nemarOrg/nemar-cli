@@ -1237,6 +1237,58 @@ describe("the naming rule runs first, owners and administrators included (ADR 01
     expect(r.body).toMatchObject({ reason: "exempt_author" });
   });
 
+  test("a page that holds only some of the comparison's commits does not speak for its files: the names are read", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    // One commit of two, and a file list that does not name the description. Believed, it would
+    // skip a name the pull request changed; the refused name below must be found.
+    naming[DATASET] = {
+      commits: { total: 2, onPage: 1 },
+      files: [],
+      names: { [SHA_A]: "Lee2019 Resting EEG", [BASE_SHA]: "Resting EEG of volunteers" },
+    };
+    const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+    expect(r.body).toMatchObject({ reason: "naming_rule" });
+    expect(lastCheck()).toMatchObject({ conclusion: "failure" });
+  });
+
+  test("a comparison of more commits than one page holds is read through its names, however many files it lists", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    // A hundred of a hundred and fifty commits: the page GitHub gives for the size asked.
+    naming[DATASET] = {
+      commits: { total: 150 },
+      files: ["README.md"],
+      names: { [SHA_A]: "Lee2019 Resting EEG", [BASE_SHA]: "Resting EEG of volunteers" },
+    };
+    const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+    expect(r.body).toMatchObject({ reason: "naming_rule" });
+  });
+
+  test("an answer that counts no commits is not believed about its files: the names are read", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    naming[DATASET] = {
+      commits: null,
+      files: ["README.md"],
+      names: { [SHA_A]: "Lee2019 Resting EEG", [BASE_SHA]: "Resting EEG of volunteers" },
+    };
+    const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+    expect(r.body).toMatchObject({ reason: "naming_rule" });
+  });
+
+  test("a comparison the answer holds whole is believed about its files, up to a full page of commits: the name is not read", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    // Forty commits, and a hundred: both fit in the page that is asked for. The names would be
+    // refused if they were read, so a skip says the list was believed.
+    for (const total of [40, 100]) {
+      naming[DATASET] = {
+        commits: { total },
+        files: ["README.md"],
+        names: { [SHA_A]: "Lee2019 Resting EEG", [BASE_SHA]: "Resting EEG of volunteers" },
+      };
+      const r = await deliver(prEvent({ login: "owner-gh", userId: 601, action: "reopened" }));
+      expect(r.body, `${total} commits`).toMatchObject({ reason: "exempt_author" });
+    }
+  });
+
   test("a comparison with no list of files says nothing about the file: the name is read", async () => {
     seedAccount({ github: "owner-gh", role: "owner" });
     naming[DATASET] = {

@@ -14,7 +14,8 @@
  * at the merge base: the rule applies when the pull request CHANGES the name, so a name that was
  * already there is not this pull request's to fix. The merge base comes from GitHub's comparison of
  * the base and the head, whose file list also says when `dataset_description.json` did not change,
- * and then nothing more is read.
+ * and then nothing more is read. The list is believed only when the answer holds every commit of the
+ * comparison ({@link compare}); otherwise it is treated as absent and both names are read.
  *
  * **Unknown is never green.** A name that cannot be read (GitHub refuses, times out, or answers with
  * something this cannot read: a file at the head that is not JSON or has no `Name` that is text, or
@@ -46,6 +47,8 @@ const SHA40 = /^[0-9a-f]{40}$/;
 const DESCRIPTION = "dataset_description.json";
 /** GitHub's comparison lists at most this many files; a list this long may be cut. */
 const COMPARE_FILE_CAP = 300;
+/** The most commits GitHub puts on one page of a comparison, and so the page size that is asked for. */
+const COMPARE_PAGE_SIZE = 100;
 
 /** The pull request the rule is applied to. `title` is the pull request's own, unread elsewhere. */
 export interface NamingSubject {
@@ -82,10 +85,19 @@ async function get(
 
 /**
  * The merge base of the pull request, whether `dataset_description.json` may have changed (it is in
- * GitHub's list of changed files, the list is long enough to have been cut, or there is no list),
- * and whether the list says the file is gone at the head (removed, or renamed to another name).
- * Only that list can say so: a file GitHub then cannot find at the head is otherwise not known to be
- * gone.
+ * GitHub's list of changed files, the list is long enough to have been cut, or there is no list we
+ * may believe), and whether the list says the file is gone at the head (removed, or renamed to
+ * another name). Only that list can say so: a file GitHub then cannot find at the head is otherwise
+ * not known to be gone.
+ *
+ * **When the list is believed.** GitHub documents the file list as part of the comparison's first
+ * page and as covering the whole comparison, up to {@link COMPARE_FILE_CAP} files, and an answer to
+ * a request for one commit was measured to do so (2026-10-18, a public repository). The answer does
+ * not say so itself, so the list is used only when the answer is the whole comparison: its `commits`
+ * are as many as its `total_commits`, and both are there. Where the comparison has more commits than
+ * a page holds ({@link COMPARE_PAGE_SIZE}), or the answer lacks either count, the list is treated as
+ * absent and both names are read. That costs two reads and is never wrong, while believing a list
+ * that did not cover the pull request would skip a name.
  */
 async function compare(
   token: string,
@@ -95,7 +107,7 @@ async function compare(
   const res = await get(
     token,
     refresh,
-    `${GITHUB_API()}/repos/${ORG_NAME}/${encodeURIComponent(pr.datasetId)}/compare/${pr.baseSha}...${pr.headSha}?per_page=1`,
+    `${GITHUB_API()}/repos/${ORG_NAME}/${encodeURIComponent(pr.datasetId)}/compare/${pr.baseSha}...${pr.headSha}?per_page=${COMPARE_PAGE_SIZE}`,
   );
   if (!res.ok) throw new Unreadable(`compare answered HTTP ${res.status}`);
   const body: unknown = await res.json().catch(() => null);
@@ -103,7 +115,11 @@ async function compare(
   const base = record.merge_base_commit as { sha?: unknown } | null | undefined;
   const mergeBase = typeof base?.sha === "string" && SHA40.test(base.sha) ? base.sha : null;
   if (mergeBase === null) throw new Unreadable("compare named no merge base");
-  const files = Array.isArray(record.files) ? record.files : null;
+  const wholeComparison =
+    Array.isArray(record.commits) &&
+    typeof record.total_commits === "number" &&
+    record.commits.length === record.total_commits;
+  const files = wholeComparison && Array.isArray(record.files) ? record.files : null;
   if (files === null) return { mergeBase, descriptionMayChange: true, removedAtHead: false };
   const entries = files.map((f) =>
     typeof f === "object" && f !== null ? (f as Record<string, unknown>) : {},

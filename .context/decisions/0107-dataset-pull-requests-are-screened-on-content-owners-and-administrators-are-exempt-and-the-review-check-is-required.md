@@ -144,6 +144,7 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
 - **A name that cannot be read is checked as `unchecked`, and unchecked cannot pass.**
   In the review job, a pull request that changes `dataset_description.json` and leaves a `Name` that is not text, or a file that is not JSON, has the finding `unchecked`: the run ends at the facts stage and the check does not pass.
   The Worker, for a pull request it does not review, compares the base with the head and, when the comparison says `dataset_description.json` may have changed, reads the file at the head and at the merge base.
+  It asks for a page of 100 commits and believes the comparison's list of changed files only when the answer holds every commit of the comparison (`commits` as long as `total_commits`, both present); a longer comparison, or an answer without the counts, is treated as having no list, so both names are read.
   A head file that is not JSON, has no `Name` that is text, or is not found where the comparison does not list it as removed is `unchecked`.
   A file the comparison lists as removed (or renamed to another name) has no name to refuse, and a removal is not a naming failure.
   The merge base is held to less: no file there, or one with no readable name, means the pull request gives the dataset its first name, and that name is checked.
@@ -246,7 +247,7 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
   It reads `CONTRIBUTOR` for a private organization member, so neither the exemption nor the screen uses it.
 - **An exempt delivery makes up to four GitHub reads: the cross-check, then the naming rule's three.**
   The cross-check is one call per role-matched account (two when someone other than the author caused the delivery; one delivery asks about each account once), each bounded to 4 seconds.
-  The naming rule then compares the base with the head and, only when that says `dataset_description.json` may have changed (it is listed, the list may have been cut at GitHub's 300 files, or there is no list), reads the file at the head and at the merge base, together; each read is bounded to 3 seconds.
+  The naming rule then compares the base with the head and, only when that says `dataset_description.json` may have changed (it is listed, the list may have been cut at GitHub's 300 files, or there is no list that can be believed, see decision 3a), reads the file at the head and at the merge base, together; each read is bounded to 3 seconds.
   A delivery that is not exempt makes none of the three: the review job applies the rule to it.
   An admin queue request asks once per exempt author and dataset, a few at a time and within 20 seconds, and a pull request whose lookup did not run in time is listed as not exempt.
 - **An installed CLI older than this change cannot read the standing answer.**

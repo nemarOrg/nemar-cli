@@ -1359,6 +1359,21 @@ describe("owners and administrators meet the naming rule before their exemption"
     }
   });
 
+  test("a page that holds only some of the comparison's commits does not speak for its files: the names are read", async () => {
+    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Fix a sidecar" });
+    // One commit of two, and a file list that does not name the description. Believed, it would
+    // skip a name the pull request changed; the refused name below must be found.
+    naming[DATASET] = {
+      commits: { total: 2, onPage: 1 },
+      files: [],
+      names: { [SHA_A]: "Lee2019 Motor Imagery", [BASE_SHA]: "Motor imagery EEG" },
+    };
+    const r = await start(DATASET, 7);
+    expect(r.body).toMatchObject({ dispatched: false, reason: "naming_rule" });
+    const check = calls.find((c) => c.method === "POST" && c.path.endsWith("/check-runs"));
+    expect(check?.body).toMatchObject({ conclusion: "failure" });
+  });
+
   test("a file the comparison lists as removed is a removal, not a naming failure: it is skipped", async () => {
     pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Fix a sidecar" });
     naming[DATASET] = {
