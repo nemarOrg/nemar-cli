@@ -256,7 +256,7 @@ export interface Bindings {
   // this says. The explicit tools (the review-ruleset routes and `nemar admin fleet
   // require-review`) do not read it. The owner turns it on when the fleet step of the rollout
   // starts, after the canary and the calibration gate; it is never on before.
-  PR_REVIEW_AUTO_REQUIRE?: string; // "1" lets the automatic paths manage the review ruleset
+  PR_REVIEW_AUTO_REQUIRE?: string; // "1" lets the automatic paths put the review ruleset on
 
   // Publication review (ADR 0102). When PUBLICATION_REVIEW_ENABLED is exactly "1", a stored
   // identifier-screen result whose gate is clear or acknowledge starts a model review of the

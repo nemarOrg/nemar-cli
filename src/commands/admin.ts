@@ -5566,7 +5566,6 @@ function reviewAppLine(ids: {
 const BULK_OWNER_ONLY_HINT =
   "The bulk apply is owner-only. An administrator can bring one dataset at a time to its review spec: nemar admin fleet require-review <dataset-id> --apply.";
 
-/** One dataset's line in a page: what is done, to which dataset, and why when it is not obvious. */
 /**
  * A requirement the Worker refused on a row of a page is said in a line there, and the sentence
  * that explains it is printed once after the page: the same long sentence on up to fifty rows would
@@ -5577,6 +5576,7 @@ const REFUSED_ROW_WORDS: Record<string, string> = {
   review_app_mismatch: "refused: this Worker posts the check as a different GitHub App",
 };
 
+/** One dataset's line in a page: what is done, to which dataset, and why when it is not obvious. */
 function reviewRulesetRow(o: ReviewRulesetOutcome, dryRun: boolean): string {
   const id = plain(o.dataset_id);
   if (o.error) {

@@ -821,10 +821,10 @@ async function reviewRulesetStepOf(
         };
       }
     }
-    // The live run makes main the default branch (step 2 of ensureRepoToSpec) before it gets
-    // here, so on a repository that is on another branch it repoints first and then writes. A dry
-    // run has not repointed anything, and would read the unchanged branch and report a skip the
-    // live run never makes, so it plans the same two steps.
+    // The live run makes main the default branch (the main_branch step of ensureRepoToSpec)
+    // before it gets here, so on a repository that is on another branch it repoints first and
+    // then writes. A dry run has not repointed anything, and would read the unchanged branch and
+    // report a skip the live run never makes, so it plans the same two steps.
     const repoints =
       o.dryRun &&
       intent === "require" &&

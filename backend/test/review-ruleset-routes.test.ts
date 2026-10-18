@@ -324,7 +324,7 @@ describe("POST /admin/datasets/:id/review-ruleset", () => {
       }
     });
 
-    test("the refusal comes before a token is minted or GitHub is asked", async () => {
+    test("the refusal comes before GitHub is asked anything", async () => {
       seedDataset("nm000201");
       envOverrides = { PR_REVIEW_ENABLED: undefined };
 
