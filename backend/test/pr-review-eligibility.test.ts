@@ -18,6 +18,7 @@ import {
   type ReviewableRow,
   automaticReviewIntent,
   isAutoRequireEnabled,
+  isRequirementTarget,
   isReviewEnabled,
   isReviewRulesetFixture,
   isReviewableRow,
@@ -258,9 +259,20 @@ describe("the automatic requirement switch (PR_REVIEW_AUTO_REQUIRE)", () => {
     }
   });
 
-  test("off, the automatic paths ask nothing of any row, with the review on or off", () => {
+  test("off, the automatic paths ask for no requirement, with the review on or off", () => {
+    for (const review of ["1", undefined]) {
+      const env = { PR_REVIEW_ENABLED: review, PR_REVIEW_AUTO_REQUIRE: undefined };
+      expect(
+        automaticReviewIntent(env, "nm000301", reviewable),
+        `reviewable, review=${review}`,
+      ).toBeUndefined();
+    }
+  });
+
+  test("off, they still take the ruleset off a dataset that is not reviewed: the switch gates only the addition", () => {
+    // A dataset made private while the switch is off must not keep a ruleset that nothing can
+    // satisfy, so a row that is not reviewed is removed whatever the switch and the review say.
     const rows: ReviewableRow[] = [
-      reviewable,
       { ...reviewable, visibility: "private" },
       { ...reviewable, status: "archived" },
       { ...reviewable, first_published_at: null },
@@ -268,12 +280,41 @@ describe("the automatic requirement switch (PR_REVIEW_AUTO_REQUIRE)", () => {
     ];
     for (const row of rows) {
       for (const review of ["1", undefined]) {
-        const env = { PR_REVIEW_ENABLED: review, PR_REVIEW_AUTO_REQUIRE: undefined };
-        expect(
-          automaticReviewIntent(env, "nm000301", row),
-          `${JSON.stringify(row)} review=${review}`,
-        ).toBeUndefined();
+        for (const auto of [undefined, "0", "1"]) {
+          const env = { PR_REVIEW_ENABLED: review, PR_REVIEW_AUTO_REQUIRE: auto };
+          expect(
+            automaticReviewIntent(env, "nm000301", row),
+            `${JSON.stringify(row)} review=${review} auto=${auto}`,
+          ).toBe("remove");
+        }
       }
+    }
+  });
+
+  test("a standing fixture is left alone with the switch off, as it is with it on", () => {
+    const priv = { ...reviewable, visibility: "private" };
+    for (const auto of [undefined, "1"]) {
+      const env = { PR_REVIEW_ENABLED: "1", PR_REVIEW_AUTO_REQUIRE: auto };
+      expect(automaticReviewIntent(env, "nm099998", priv), String(auto)).toBeUndefined();
+      expect(automaticReviewIntent(env, "nm099999", reviewable), String(auto)).toBeUndefined();
+    }
+  });
+
+  test("the requirement is the target only with the review on AND the switch on, each exactly 1", () => {
+    expect(isRequirementTarget({ PR_REVIEW_ENABLED: "1", PR_REVIEW_AUTO_REQUIRE: "1" })).toBe(true);
+    for (const [review, auto] of [
+      ["1", undefined],
+      [undefined, "1"],
+      ["1", "0"],
+      ["0", "1"],
+      ["1", "true"],
+      ["true", "1"],
+      [undefined, undefined],
+    ] as const) {
+      expect(
+        isRequirementTarget({ PR_REVIEW_ENABLED: review, PR_REVIEW_AUTO_REQUIRE: auto }),
+        `${review}/${auto}`,
+      ).toBe(false);
     }
   });
 
@@ -320,13 +361,13 @@ describe("the automatic requirement switch (PR_REVIEW_AUTO_REQUIRE)", () => {
       expect(await readReviewIntent(env("1", "1"), "nm000301")).toBe("require");
     });
 
-    test("on, a private dataset has the requirement removed; off, it has no answer", async () => {
+    test("a private dataset has the requirement removed, with the switch on or off", async () => {
       const { env } = seeded();
       expect(await readReviewIntent(env("1", "1"), "nm000302")).toBe("remove");
-      expect(await readReviewIntent(env("1", undefined), "nm000302")).toBeUndefined();
+      expect(await readReviewIntent(env("1", undefined), "nm000302")).toBe("remove");
     });
 
-    test("anything but exactly 1 is off", async () => {
+    test("anything but exactly 1 is off: no requirement, and the removal is still asked for", async () => {
       const { env } = seeded();
       for (const value of ["", "0", "true", "yes", " 1", "01", "11"]) {
         expect(
@@ -336,7 +377,7 @@ describe("the automatic requirement switch (PR_REVIEW_AUTO_REQUIRE)", () => {
         expect(
           await readReviewIntent(env("1", value), "nm000302"),
           `private, ${JSON.stringify(value)}`,
-        ).toBeUndefined();
+        ).toBe("remove");
       }
     });
 
@@ -351,8 +392,9 @@ describe("the automatic requirement switch (PR_REVIEW_AUTO_REQUIRE)", () => {
       expect(await readReviewIntent(env("1", "1"), "nm000301")).toBe("require");
       db.run("UPDATE datasets SET visibility = 'private' WHERE dataset_id = 'nm000301'");
       expect(await readReviewIntent(env("1", "1"), "nm000301")).toBe("remove");
-      // Turned off again, the same row has no answer.
-      expect(await readReviewIntent(env("1", undefined), "nm000301")).toBeUndefined();
+      // Turned off again, the same row still has the ruleset taken off: the switch gates only the
+      // addition.
+      expect(await readReviewIntent(env("1", undefined), "nm000301")).toBe("remove");
     });
   });
 });

@@ -249,12 +249,13 @@ export interface Bindings {
   // the merges stop. Take the ruleset off first, then switch the review off.
   PR_REVIEW_ENABLED?: string; // "1" enables the review
 
-  // Automatic requirement of the pull-request review (ADR 0107). Only when this is exactly "1" do
-  // publishing, a visibility change and the enforce routes put the review ruleset on a repository
-  // or take it off one; unset, they leave it as it is. The explicit tools (the review-ruleset
-  // routes and `nemar admin fleet require-review`) do not read it. The owner turns it on when the
-  // fleet step of the rollout starts, after the canary and the calibration gate; it is never on
-  // before.
+  // Automatic requirement of the pull-request review (ADR 0107). Only when this is exactly "1" (and
+  // PR_REVIEW_ENABLED is too) do publishing, a visibility change and the enforce routes put the
+  // review ruleset ON a repository; unset, they leave a reviewed dataset's ruleset as it is. It
+  // gates the addition only: a dataset that is not reviewed has its ruleset taken off whatever
+  // this says. The explicit tools (the review-ruleset routes and `nemar admin fleet
+  // require-review`) do not read it. The owner turns it on when the fleet step of the rollout
+  // starts, after the canary and the calibration gate; it is never on before.
   PR_REVIEW_AUTO_REQUIRE?: string; // "1" lets the automatic paths manage the review ruleset
 
   // Publication review (ADR 0102). When PUBLICATION_REVIEW_ENABLED is exactly "1", a stored

@@ -855,18 +855,32 @@ describe("the enforce routes and the automatic switch", () => {
       expect(reviewWrites(before.map((x) => x.id))).toEqual([]);
     });
 
-    test("off, a review ruleset is not taken off a dataset that is no longer reviewed", async () => {
+    // The switch gates the requirement being added, and nothing else: a dataset made private
+    // while it is off must not keep a ruleset that nothing will satisfy.
+    test("off, the ruleset is still taken off a dataset that is no longer reviewed", async () => {
       seedDataset("nm000201", { visibility: "private" });
       await ensureReviewRuleset("nm000201", PAT);
-      const before = structuredClone(reviewRulesetsOf("nm000201"));
+      const ids = reviewRulesetsOf("nm000201").map((x) => x.id);
       standIn.calls.length = 0;
 
       const r = await enforceVia(route, "nm000201", false);
 
       expect(r.status).toBe(200);
-      expect(r.steps?.review_ruleset).toBeUndefined();
-      expect(reviewRulesetsOf("nm000201")).toStrictEqual(before);
-      expect(reviewWrites(before.map((x) => x.id))).toEqual([]);
+      expect(r.steps?.review_ruleset).toEqual({ status: "ok", detail: "removed" });
+      expect(reviewWrites(ids).map((c) => c.method)).toEqual(["DELETE"]);
+      expect(reviewRulesetsOf("nm000201")).toEqual([]);
+    });
+
+    test("off, a dry run plans the removal for a dataset that is no longer reviewed, and writes nothing", async () => {
+      seedDataset("nm000201", { visibility: "private" });
+      await ensureReviewRuleset("nm000201", PAT);
+      standIn.calls.length = 0;
+
+      const r = await enforceVia(route, "nm000201", true);
+
+      expect(r.steps?.review_ruleset).toEqual({ status: "ok", detail: "would remove" });
+      expect(standIn.writes()).toHaveLength(0);
+      expect(reviewRulesetsOf("nm000201")).toHaveLength(1);
     });
 
     test("on, a live run creates the review ruleset with the pinned payload, then updates it", async () => {
@@ -905,28 +919,36 @@ describe("the enforce routes and the automatic switch", () => {
     });
   });
 
-  test("off, one bulk page leaves every dataset's review ruleset as it was", async () => {
+  test("off, one bulk page puts no ruleset on a reviewed dataset and takes the stray one off the rest", async () => {
     seedDataset("nm000301"); // reviewed, without the ruleset
     seedDataset("nm000302"); // reviewed, with it
     seedDataset("nm000303", { visibility: "private" }); // not reviewed, with a stray one
     await ensureReviewRuleset("nm000302", PAT);
     await ensureReviewRuleset("nm000303", PAT);
-    const before = Object.fromEntries(
-      ["nm000301", "nm000302", "nm000303"].map((id) => [id, structuredClone(reviewRulesetsOf(id))]),
+    const reviewed = Object.fromEntries(
+      ["nm000301", "nm000302"].map((id) => [id, structuredClone(reviewRulesetsOf(id))]),
     );
+    const stray = reviewRulesetsOf("nm000303").map((x) => x.id);
     standIn.calls.length = 0;
 
     const r = await post("/admin/datasets/enforce/bulk", { dry_run: false }, OWNER_KEY);
 
     expect(r.status).toBe(200);
     expect(r.body.count).toBe(3);
-    for (const row of r.body.results) {
-      expect(row.steps.review_ruleset, row.dataset_id).toBeUndefined();
-      expect(reviewRulesetsOf(row.dataset_id), row.dataset_id).toStrictEqual(
-        before[row.dataset_id],
-      );
+    const byId = Object.fromEntries(r.body.results.map((x: Json) => [x.dataset_id, x]));
+    // A reviewed dataset has no review step at all, and keeps the ruleset it has (or lacks).
+    for (const id of ["nm000301", "nm000302"]) {
+      expect(byId[id].steps.review_ruleset, id).toBeUndefined();
+      expect(reviewRulesetsOf(id), id).toStrictEqual(reviewed[id]);
     }
-    expect(reviewWrites(Object.values(before).flatMap((x) => x.map((y) => y.id)))).toEqual([]);
+    // The dataset that is not reviewed had its ruleset taken off, and nothing else was touched.
+    expect(byId.nm000303.steps.review_ruleset).toEqual({ status: "ok", detail: "removed" });
+    expect(reviewRulesetsOf("nm000303")).toEqual([]);
+    expect(
+      reviewWrites([...stray, ...Object.values(reviewed).flatMap((x) => x.map((y) => y.id))]).map(
+        (c) => `${c.method} ${c.path.split("/")[3]}`,
+      ),
+    ).toEqual(["DELETE nm000303"]);
   });
 
   describe("the explicit routes do not read the switch", () => {

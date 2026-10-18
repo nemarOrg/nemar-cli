@@ -304,10 +304,12 @@ describe("PATCH /admin/datasets/:id/visibility (the visibility service)", () => 
     expect(held(ID)).toContain(REVIEW_RULESET_NAME);
   });
 
-  test("off, making a dataset private leaves the review ruleset it has", async () => {
+  // The switch gates the requirement being added and nothing else, so a dataset made private
+  // while it is off does not keep a ruleset that nothing will satisfy.
+  test("off, making a dataset private still takes the review ruleset off", async () => {
     seedPublished();
     await ensureReviewRuleset(ID, PAT);
-    const before = structuredClone(reviewRulesetsOf(ID));
+    const ids = reviewRulesetsOf(ID).map((x) => x.id);
     github.calls.length = 0;
 
     const r = await flip("private");
@@ -315,9 +317,24 @@ describe("PATCH /admin/datasets/:id/visibility (the visibility service)", () => 
     expect(r.status).toBe(200);
     expect(visibilityPatches()).toEqual([true]);
     expect(isDatasetPrivate(s3.policy, BUCKET, ID)).toBe(true);
-    expect(r.body.spec_enforcement.review_ruleset).toBeUndefined();
-    expect(reviewRulesetsOf(ID)).toStrictEqual(before);
-    expect(reviewWrites(before.map((x) => x.id))).toEqual([]);
+    expect(r.body.spec_enforcement.review_ruleset).toEqual({ status: "ok", detail: "removed" });
+    expect(reviewWrites(ids).map((c) => c.method)).toEqual(["DELETE"]);
+    expect(reviewRulesetsOf(ID)).toEqual([]);
+  });
+
+  test("off, making a dataset private that has no review ruleset only reads the rulesets", async () => {
+    seedPublished();
+    github.calls.length = 0;
+
+    const r = await flip("private");
+
+    expect(r.status).toBe(200);
+    expect(r.body.spec_enforcement.review_ruleset).toEqual({
+      status: "ok",
+      detail: "nothing to remove",
+    });
+    expect(reviewWrites()).toEqual([]);
+    expect(reviewRulesetsOf(ID)).toEqual([]);
   });
 
   test("on, making a dataset private takes the review ruleset off", async () => {

@@ -368,8 +368,9 @@ export function registerFleetRoutes(admin: AdminRouter): void {
    * The required pull-request review (ADR 0107) is one more step, decided from the
    * dataset's row: required on a reviewed dataset while the review is on, removed
    * from any other, left alone while the review is off or for a standing fixture.
-   * All of it waits for the owner's switch (PR_REVIEW_AUTO_REQUIRE): with the switch off
-   * there is no review step and the review ruleset is left exactly as it is. The explicit
+   * Only the REQUIREMENT waits for the owner's switch (PR_REVIEW_AUTO_REQUIRE): with the
+   * switch off a reviewed dataset has no review step and its review ruleset is left exactly as
+   * it is, while a dataset that is not reviewed still has the ruleset taken off. The explicit
    * review-ruleset routes below do not wait for it.
    */
   admin.post("/datasets/:id/enforce", zValidator("json", enforceSchema), async (c) => {
@@ -407,8 +408,8 @@ export function registerFleetRoutes(admin: AdminRouter): void {
         visibility,
         collaborators: { ownerLogin, approvedWriters },
         dryRun: dryRun,
-        // The required review follows the row, as it does on publication (ADR 0107), once the
-        // owner has turned automatic requirement on. Until then: no review step, no ruleset call.
+        // The required review follows the row, as it does on publication (ADR 0107). Putting it
+        // on waits for the owner to turn automatic requirement on; taking it off does not.
         review: automaticReviewIntent(c.env, datasetId, dataset),
       });
     } catch (e) {
@@ -532,8 +533,8 @@ export function registerFleetRoutes(admin: AdminRouter): void {
    * POST /admin/datasets/enforce/bulk - Run ensureRepoToSpec across a filtered set
    * SEQUENTIALLY (shared App rate limit). `dry_run` defaults to TRUE; pass
    * `dry_run:false` to actually apply. Always excludes nm099999. Owner-only.
-   * Each dataset's required review follows its row, as in the single route, and waits for the
-   * owner's switch (PR_REVIEW_AUTO_REQUIRE) in the same way.
+   * Each dataset's required review follows its row, as in the single route, and its requirement
+   * waits for the owner's switch (PR_REVIEW_AUTO_REQUIRE) in the same way.
    */
   admin.post("/datasets/enforce/bulk", zValidator("json", enforceBulkSchema), async (c) => {
     if (c.get("user").role !== "owner") {
