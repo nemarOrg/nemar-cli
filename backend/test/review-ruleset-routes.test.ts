@@ -1427,15 +1427,63 @@ describe("GET /admin/fleet/drift and the review", () => {
     expect(r.body.buckets.REVIEW_RULESET_MISSING).toEqual(["nm000401"]);
   });
 
-  test("a repository GitHub cannot answer for is not reported, so an outage is not a finding", async () => {
+  // Both the branch-ruleset read and the review-ruleset read list the repository's own rulesets,
+  // with the same URL, so the review read is told by the count: one list request when the review
+  // ruleset is not asked about, two when it is.
+  const listRequests = (id: string) =>
+    standIn.calls.filter(
+      (c) =>
+        c.method === "GET" &&
+        c.path === `/repos/nemarDatasets/${id}/rulesets` &&
+        c.search === "?includes_parents=false",
+    );
+
+  test("a repository GitHub cannot answer for is not reported missing, so an outage is not a finding", async () => {
     seedDataset("nm000401");
-    // The list is asked by the branch-ruleset read and the review-ruleset read; refuse the second
-    // and leave the first, so only the review read fails.
+
+    // The requirement is not the target, so the review ruleset is not even read.
+    envOverrides = { PR_REVIEW_ENABLED: "1", PR_REVIEW_AUTO_REQUIRE: undefined };
+    await drift();
+    expect(listRequests("nm000401")).toHaveLength(1);
+
+    // With the requirement the target the review read is made, and a ruleset that is not there is
+    // a finding. This is what an outage must not be taken for.
+    envOverrides = requirementOn;
+    standIn.calls.length = 0;
+    const answered = await drift();
+    expect(listRequests("nm000401")).toHaveLength(2);
+    expect(answered.body.buckets.REVIEW_RULESET_MISSING).toEqual(["nm000401"]);
+
+    // GitHub refuses every list: the review read is made, fails, and reports nothing.
     standIn.failNext("GET", /\/repos\/nemarDatasets\/nm000401\/rulesets$/, 403, 100);
+    standIn.calls.length = 0;
+    const refused = await drift();
 
-    const r = await drift();
+    expect(refused.status).toBe(200);
+    expect(refused.body.scanned).toBe(1);
+    expect(listRequests("nm000401")).toHaveLength(2);
+    expect(refused.body.buckets.REVIEW_RULESET_MISSING).toBeUndefined();
+    expect(refused.body.buckets.REVIEW_RULESET_STRAY).toBeUndefined();
+  });
 
-    expect(r.body.buckets.REVIEW_RULESET_MISSING).toBeUndefined();
-    expect(r.body.buckets.REVIEW_RULESET_STRAY).toBeUndefined();
+  test("and a ruleset on a repository GitHub cannot answer for is not called stray either", async () => {
+    // A dataset the Worker does not review calls for a removal whatever the switches say, so its
+    // ruleset is read with the requirement not the target as well.
+    seedDataset("nm000403", { visibility: "private" });
+    await ensureReviewRuleset("nm000403", PAT);
+    standIn.calls.length = 0;
+    const answered = await drift();
+    expect(listRequests("nm000403")).toHaveLength(2);
+    expect(answered.body.buckets.REVIEW_RULESET_STRAY).toEqual(["nm000403"]);
+
+    standIn.failNext("GET", /\/repos\/nemarDatasets\/nm000403\/rulesets$/, 403, 100);
+    standIn.calls.length = 0;
+    const refused = await drift();
+
+    expect(refused.status).toBe(200);
+    expect(refused.body.scanned).toBe(1);
+    expect(listRequests("nm000403")).toHaveLength(2);
+    expect(refused.body.buckets.REVIEW_RULESET_STRAY).toBeUndefined();
+    expect(refused.body.buckets.REVIEW_RULESET_MISSING).toBeUndefined();
   });
 });
