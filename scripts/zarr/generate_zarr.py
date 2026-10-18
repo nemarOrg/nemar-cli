@@ -8392,8 +8392,9 @@ def _recording_size_bytes(primary_local: str) -> int:
 # trailing partial frame and no positive `DataPoints` count, and to record the
 # dropped bytes. So the converter takes no older release
 # (TestCutShortBrainVisionThroughConvertOne). A cut exactly at a frame boundary of
-# a file with no positive `DataPoints` count is not detected: it reads as a
-# shorter recording.
+# a file with no positive `DataPoints` count is not detected: multiplexed data
+# reads as a shorter recording, and vectorized data is corrupted from the second
+# channel on, because each channel is stored whole.
 SUBJECT_INFO_FLOOR = "1.2.13"
 SUBJECT_INFO_OPTION = "exclude_subject_info"
 SUBJECT_INFO_EXCLUDED_ATTR = "subject_info_excluded"
@@ -8780,13 +8781,14 @@ def convert_recording(
             mixed_rate="resample",
             bids_channels=bids_channels_arg(channels_local),
             # A trailing partial frame in a BrainVision file whose header declares
-            # no `DataPoints` count cannot be told from a complete recording that
-            # ends in stray bytes (biosigIO ignores this for every other format).
-            # The whole frames are read, as biosigIO 1.2.12 read them, and the
-            # dropped byte count is recorded in the store's `recording_metadata`
-            # as `brainvision_dropped_bytes`. A file shorter than the `DataPoints`
-            # count it declares, vectorized data with a partial frame and a file
-            # with no whole frame are still refused as `corrupt_or_truncated`.
+            # no positive `DataPoints` count cannot be told from a complete
+            # recording that ends in stray bytes. The whole frames are read, as
+            # biosigIO 1.2.12 read them, and the dropped byte count is recorded in
+            # the store's `recording_metadata` as `brainvision_dropped_bytes`. A
+            # file shorter than the `DataPoints` count it declares, vectorized data
+            # with a partial frame and a file with no whole frame are still refused
+            # as `corrupt_or_truncated`. biosigIO ignores the flag for every other
+            # format.
             allow_partial_frame=True,
         )
         if events_local and os.path.exists(events_local):
@@ -8842,13 +8844,13 @@ def convert_recording(
                 bids_channels=bids_channels_arg(channels_local),
                 # The in-memory path's policy, so the two exporters cannot disagree
                 # about a cut BrainVision file: a trailing partial frame in a file
-                # with no `DataPoints` count cannot be told from a complete recording
-                # that ends in stray bytes, so the whole frames are read as 1.2.12
-                # read them and the dropped byte count is recorded in the store's
-                # `recording_metadata` (`brainvision_dropped_bytes`). A file shorter
-                # than its declared `DataPoints` count, vectorized data with a
-                # partial frame and a file with no whole frame are still refused.
-                # Ignored for every other format.
+                # with no positive `DataPoints` count cannot be told from a complete
+                # recording that ends in stray bytes, so the whole frames are read as
+                # 1.2.12 read them and the dropped byte count is recorded in the
+                # store's `recording_metadata` (`brainvision_dropped_bytes`). A file
+                # shorter than its declared `DataPoints` count, vectorized data with
+                # a partial frame and a file with no whole frame are still refused.
+                # biosigIO ignores the flag for every other format.
                 allow_partial_frame=True,
             )
         except MixedSamplingRateError:
