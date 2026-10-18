@@ -469,7 +469,10 @@ If that happens, the only fix is a hard reset: `bin/nb down`, `docker volume rm 
 
 ## Cloudflare Tunnel (for the lead)
 
-**Status:** live. The node has been public at its hostname since 2026-10-16, with the tunnel enabled, and serves the production store. It is not registered with Neurobagel's federation; the 14-day soak counts from 2026-10-16 (see the epic note).
+**Status:** live, as recorded on 2026-10-16.
+The node has been public at its hostname with the tunnel enabled, and it serves the production store.
+It is not registered with Neurobagel's federation.
+The 14-day soak counts from 2026-10-16; see `.context/epic_neurobagel_federation.md`.
 
 The node's public path is the `tunnel` profile, and the hostname is `neurobagel.nemar.org`.
 The profile adds a `cloudflared` connector on a network of its own that holds only the API, so it exposes exactly one thing, the node API, as `http://api:8000`; GraphDB is on a different network and is never one route away.
@@ -483,8 +486,9 @@ Where the token is stored and how the host supplies it are host specifics, kept 
    The token does not have to live in `.env`: `bin/nb compose` passes `.env` as an env file, and a variable already in the shell environment wins over it, so a host can supply the token from its own environment, for example from a wrapper that exports it for the one command in step 4, and leave `NB_TUNNEL_TOKEN` empty in `.env`.
    `bin/nb up` refuses to start the profile while the token is in neither place.
 4. Start the connector without touching the running node: `bin/nb compose --profile tunnel up -d --no-deps cloudflared`.
-5. Check: `curl -s https://<hostname>/` returns the node API welcome page, `curl -s -X POST -H 'Content-Type: application/json' -d '{}' https://<hostname>/datasets` returns the datasets, and `bin/nb status` shows `cloudflared` healthy.
-6. Recommended edge rules: a Cloudflare rate-limiting rule on the hostname, and a rule that blocks `POST /subjects` from outside if nobody needs it. Confirm in the dashboard that both are in place; the operator records the answer in the gated operations documentation.
+5. Check: `curl -s https://<hostname>/` returns the node API welcome page, `curl -s -X POST -H 'Content-Type: application/json' -d '{}' https://<hostname>/datasets` returns the datasets, each marked protected and without an access email, and `bin/nb status` shows `cloudflared` healthy.
+6. Recommended edge rules: a Cloudflare rate-limiting rule on the hostname, and a rule that blocks `POST /subjects` from outside if nobody needs it.
+   Confirm in the dashboard which of these rules are in place; the lead records the answer in the gated operations documentation.
 
 Registration in Neurobagel's federation (the `neurobagel/menu` pull request) is Phase 7, and happens only after the gate in the epic.
 Do not register this node before then.
