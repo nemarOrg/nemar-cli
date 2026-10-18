@@ -36,6 +36,7 @@ import {
 } from "../../shared/contract/pr-review-admin.js";
 import {
   type NamingFacts,
+  type ReviewEvidence,
   type ReviewOutcome,
   factsOf,
   findingLines,
@@ -371,11 +372,34 @@ export function reportLines(outcome: ReviewOutcome): string[] {
   }
 }
 
-/** `Version:  1.0.0 to 1.1.0   revision advances: yes`, from the review's own evidence and answer. */
+/**
+ * Why a review ended at the facts, in the words of the check's own title: the naming rule found a
+ * problem (`Needs changes: the naming rule`), or it could not check the dataset's name (`Could not
+ * decide: the naming rule was not checked`).
+ */
+function factsReason(e: ReviewEvidence): string {
+  const refused =
+    e.title_problem !== null || (e.name_problem !== null && e.name_problem !== "unchecked");
+  return refused
+    ? "the naming rule found a problem"
+    : "the naming rule could not check the dataset name";
+}
+
+/**
+ * `Version:  1.0.0 to 1.1.0   revision advances: yes`, from the review's own evidence and answer.
+ * A report that ended before the review read anything says so instead of "unknown": the screen
+ * stopped it, or, at the facts stage, the naming rule ended it and no model was asked, so the
+ * revision was never assessed. A git fact that failed the revision anyway (the version did not go
+ * up) is still said, and the facts stage is said after it.
+ */
 function versionLine(report: Extract<ReviewOutcome, { kind: "reported" }>["report"]): string {
   const { version_before: before, version_after: after } = report.evidence;
   const advances = factsOf(report).criteria.advances_revision;
   const screened = report.v === 2 && report.stage === "screen";
+  const factsOnly = report.v === 2 && report.stage === "facts";
+  const stage = factsOnly
+    ? chalk.dim(`stage: facts only; the review did not run (${factsReason(report.evidence)})`)
+    : null;
   const word =
     advances === "pass"
       ? chalk.green("revision advances: yes")
@@ -383,8 +407,11 @@ function versionLine(report: Extract<ReviewOutcome, { kind: "reported" }>["repor
         ? chalk.red("revision advances: NO")
         : screened
           ? chalk.dim("revision advances: not assessed (stopped by the screen)")
-          : chalk.yellow("revision advances: unknown");
-  return `Version:  ${plain(before ?? "unknown")} to ${plain(after ?? "unknown")}   ${word}`;
+          : factsOnly
+            ? null
+            : chalk.yellow("revision advances: unknown");
+  const said = [word, stage].filter((w): w is string => w !== null).join("; ");
+  return `Version:  ${plain(before ?? "unknown")} to ${plain(after ?? "unknown")}   ${said}`;
 }
 
 /**

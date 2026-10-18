@@ -534,6 +534,59 @@ describe("a version 2 report on the terminal", () => {
     expect(lines[0]).toBe("Needs changes: stopped by the screen");
   });
 
+  /** A report that ended at the facts: the naming rule decided it and no model was asked. */
+  const factsOnly = (evidenceOver: Record<string, unknown>) =>
+    parsePrReviewReport({
+      v: 2,
+      stage: "facts",
+      models: { screen: null, review: null },
+      criteria: {
+        genuine_contribution: "unknown",
+        no_degradation: "unknown",
+        advances_revision: "unknown",
+        material_improvement: "unknown",
+        clear_title_and_description: "unknown",
+        description_not_misleading: "unknown",
+      },
+      findings: [],
+      summary: "",
+      steering: false,
+      evidence: evidence(evidenceOver),
+      usage: { screen: { input_tokens: 0, output_tokens: 0 }, review: null },
+    });
+  const brief = (report: ReturnType<typeof factsOnly>) =>
+    briefLines({ kind: "reported", report }).map((l) => l.replace(ANSI, ""));
+
+  test("a facts report says the review did not run and why, not that the revision is unknown", () => {
+    const refused = brief(factsOnly({ title_problem: "author_year" }));
+    expect(refused[0]).toBe("Needs changes: the naming rule");
+    expect(refused).toContain(
+      "Version:  1.0.0 to 1.0.1   stage: facts only; the review did not run (the naming rule found a problem)",
+    );
+    expect(refused.join("\n")).not.toContain("revision advances: unknown");
+
+    // A name that could not be read is a different reason, in the check's own words.
+    const unread = brief(factsOnly({ name_problem: "unchecked" }));
+    expect(unread[0]).toBe("Could not decide: the naming rule was not checked");
+    expect(unread).toContain(
+      "Version:  1.0.0 to 1.0.1   stage: facts only; the review did not run (the naming rule could not check the dataset name)",
+    );
+    expect(unread.join("\n")).not.toContain("revision advances: unknown");
+  });
+
+  test("a facts report whose version did not go up still says so, and then that the review did not run", () => {
+    const lines = brief(factsOnly({ title_problem: "template_field", version_after: "1.0.0" }));
+    expect(lines).toContain(
+      "Version:  1.0.0 to 1.0.0   revision advances: NO; stage: facts only; the review did not run (the naming rule found a problem)",
+    );
+  });
+
+  test("a screen report and a full report keep their own words", () => {
+    const stopped = brief(screen());
+    expect(stopped.join("\n")).not.toContain("stage: facts only");
+    expect(stopped.join("\n")).toContain("revision advances: not assessed (stopped by the screen)");
+  });
+
   test("the naming rule's findings are printed in sentences", () => {
     const lines = briefLines({
       kind: "reported",
