@@ -34,6 +34,13 @@ try:
 except ImportError:
     HAVE_BIOSIGIO = False
 
+try:
+    import mne  # noqa: F401
+
+    HAVE_MNE = True
+except ImportError:
+    HAVE_MNE = False
+
 NEEDS_DEPS = unittest.skipUnless(
     HAVE_PYEDFLIB and HAVE_BIOSIGIO,
     "needs pyedflib + biosigio (CI installs scripts/zarr/requirements.txt)",
@@ -239,6 +246,7 @@ class PatchDurationTests(unittest.TestCase):
         self.assertEqual((filled, gaps), (0, 0))
         self.assertEqual(records[0]["signal_summary"]["recording_duration"], first)
 
+    @unittest.skipUnless(HAVE_MNE, "needs mne (CI installs scripts/zarr/requirements.txt)")
     def test_brainvision_ending_in_a_partial_frame_counts_the_whole_frames(self):
         # The header declares no positive DataPoints count, so a data file that ends
         # in a partial frame cannot be told from a complete recording with stray
