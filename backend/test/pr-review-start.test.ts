@@ -1501,6 +1501,26 @@ describe("the override: nemar admin pr-reviews allow <dataset> <pr> --admin", ()
       expect(now.body).toMatchObject({ waived: true, head_sha: SHA_B });
     });
 
+    test("only the start of a commit id names it: the middle or the end of the same id is another commit", async () => {
+      // An id that reads differently from the front, the middle and the back (SHA_A is all one letter).
+      const mixed = `${"0123456789abcdef".repeat(2)}01234567`;
+      pulls[`${DATASET}#7`] = restPull({
+        login: ADMIN_LOGIN,
+        title: "Lee2019 EEG rename",
+        sha: mixed,
+      });
+      const auditBefore = auditRows();
+      for (const named of [mixed.slice(1, 9), mixed.slice(-7), mixed.slice(18, 26)]) {
+        const moved = await allow(DATASET, 7, { head_sha: named });
+        expect(moved.status, named).toBe(409);
+        expect(moved.body, named).toMatchObject({ code: "head_moved" });
+      }
+      expect(auditRows()).toBe(auditBefore);
+      expect(checkPosts()).toHaveLength(0);
+      const front = await allow(DATASET, 7, { head_sha: mixed.slice(0, 7) });
+      expect(front.body).toMatchObject({ waived: true, head_sha: mixed });
+    });
+
     test("without a commit the current one is waived whatever it is, and the answer and the record name it", async () => {
       pulls[`${DATASET}#7`] = restPull({
         login: ADMIN_LOGIN,
