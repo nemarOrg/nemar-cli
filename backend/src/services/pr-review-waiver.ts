@@ -3,8 +3,8 @@
  * opened by a NEMAR owner or administrator (ADR 0107).
  *
  * Owners and administrators are exempt from the automated review, and not from the naming rule:
- * a title that starts with an author and a year, or a change of the dataset's name to such a name,
- * fails their pull request's check like anyone's. The one way past it without a change is this
+ * a title that has an author and a year anywhere in it, or a change of the dataset's name to such a
+ * name, fails their pull request's check like anyone's. The one way past it without a change is this
  * override, asked for by name with
  * `nemar admin pr-reviews allow <dataset> <pr> --admin --reason <why>`:
  *

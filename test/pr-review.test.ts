@@ -1696,7 +1696,7 @@ describe("a review that ended at the facts: the naming rule decided it before an
     expect(check.title).toBe("Needs changes: the naming rule");
     // What the rule found, in the author's words, with the way to fix it.
     expect(check.summary).toContain("**Naming rule**");
-    expect(check.summary).toContain("The title starts with a name and a year");
+    expect(check.summary).toContain("The title has a citation (an author and a year)");
     expect(check.summary).toContain("Edit the title.");
     // That the review stage did not run and no model was asked.
     expect(check.summary).toContain("the review stage did not run and no model was asked");
@@ -1837,7 +1837,7 @@ describe("the text facts fail the verdict whatever the model says", () => {
     const check = renderCheck({ kind: "reported", report: r });
     expect(check.summary).toContain("**Naming rule**");
     expect(check.summary).toContain("Edit the title.");
-    expect(check.text).toContain("Title starts with a name and a year");
+    expect(check.text).toContain("Title has a citation (an author and a year)");
     expect(check.text).toContain("found by the naming rule, not by the reviewer");
   });
 

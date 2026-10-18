@@ -419,6 +419,20 @@ describe("one pull request, through the job's own stage flow", () => {
     expect(row.verdict).toBe("fail");
   });
 
+  test("a key in the middle of a title is a fact too, and a year after a space is not", async () => {
+    const middle = localPullRequest("title-middle", { title: "Add the Lee2019 recordings" });
+    const row = await withStandIn(() => calibrateOne(target("fail"), root, middle));
+    expect(row.facts).toEqual(["title_author_year"]);
+    expect(row.stage).toBe("facts");
+    expect(row.verdict).toBe("fail");
+    expect(renderTable([row]).join("\n")).toMatch(/nm000460#2 +3 +title_author_year +not_run +/);
+    // The control: the same year after a space is no key, so both models are asked.
+    const spaced = localPullRequest("title-space", { title: "Add the 2019 recordings" });
+    const control = await withStandIn(() => calibrateOne(target("pass"), root, spaced));
+    expect(control.facts).toEqual([]);
+    expect(control.stage).toBe("full");
+  });
+
   test("a naming fact ends it at the facts: no model is asked, the screen did not run, and nothing was spent", async () => {
     const read = localPullRequest("facts", { title: "Lee2019 EEG update" });
     const row = await withStandIn(() => calibrateOne(target("fail"), root, read));

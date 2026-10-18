@@ -730,7 +730,7 @@ describe("nemar admin pr-reviews allow <dataset> <pr> --admin: the naming rule's
     ]);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain(`Waived the naming rule for nm000201 #7 at ${SHA_A.slice(0, 7)}.`);
-    expect(r.stdout).toContain("The rule found: the title starts with a name and a year.");
+    expect(r.stdout).toContain("The rule found: the title has a citation (an author and a year).");
     expect(r.stdout).toContain("it is for this commit only: a new commit is checked again");
     expect(r.stdout).not.toMatch(/[{}"]|author_year|_waived/);
     expect(waivers()).toHaveLength(1);

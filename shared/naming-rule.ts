@@ -2,16 +2,19 @@
  * The naming rule: what a pull request title and a dataset name may not be (ADR 0107).
  *
  * A dataset is named after its paper (the atlas naming rule, FirstAuthorSurname-year-keyword-paperDOI),
- * and a pull request title says what a change does, so the two are kept apart, and a naming template
- * left unfilled is never a title or a name. The rule is one pure function, used by the CLI before it
- * opens a pull request, by the review job before it asks any model, and by the Worker on a pull
- * request it does not review (an owner's or an administrator's), so all three refuse the same text.
+ * and a pull request title says what a change does, so the two are kept apart: a citation (an author
+ * and a year) is refused anywhere in a title or a dataset name, and the paper is cited in
+ * ReferencesAndLinks and the README instead. A naming template left unfilled is never a title or a
+ * name either. The rule is one pure function, used by the CLI before it opens a pull request, by the
+ * review job before it asks any model, and by the Worker on a pull request it does not review (an
+ * owner's or an administrator's), so all three refuse the same text.
  */
 
 /**
  * Every way the rule refuses a text, as a closed word:
- *  - `author_year`: the text starts with a word of letters directly followed by a year from 1900 to
- *    2099, with an optional hyphen or underscore (`Lee2019`, `Lee-2019-EEG`, `BNCI2014_001`);
+ *  - `author_year`: the text holds an author-year key anywhere in it, a run of letters directly
+ *    followed by an optional hyphen or underscore and a year from 1900 to 2099 (`Lee2019`,
+ *    `Lee-2019-EEG`, `BNCI2014_001`, and in the middle of a text `Results from Zhou-2016 cohort`);
  *  - `template_field`: the text still holds a naming-template token or an unfilled template field
  *    (`FirstAuthorSurname`, `paperDOI`, `{{x}}`, `${x}`, `<your title>`, `[describe the change]`).
  */
@@ -52,14 +55,15 @@ export const TEMPLATE_FIELDS: readonly RegExp[] = [
 ];
 
 /**
- * A word of letters with an apostrophe (straight or curly) or a hyphen allowed inside it, then one
- * optional hyphen or underscore, then a year from 1900 to 2099 that is not the start of a longer
- * number. Each repeated part is set off by a character the part before it cannot match, so a long
- * first word is judged in linear time. That shape is the whole argument, so a test checks it on the
- * pattern itself, which is why the pattern is exported; nothing in the suite is timed.
+ * A year from 1900 to 2099 that is not the start of a longer number. {@link findAuthorYearKey}
+ * reads every year of a text with it, so it is one pattern with no unbounded repetition at all, let
+ * alone one that repeats another. A test checks its source for that, which is why it is exported;
+ * no test asserts a duration.
  */
-export const AUTHOR_YEAR_PREFIX =
-  /^[\p{L}\p{M}]+(?:[-'\u{2019}][\p{L}\p{M}]+)*[-_]?(?:19|20)\d{2}(?!\d)/u;
+export const YEAR_PATTERN = /(?:19|20)\d{2}(?!\d)/u;
+
+/** One character that is a letter of any script, or a combining mark that goes with one. */
+const LETTER = /^[\p{L}\p{M}]$/u;
 
 /**
  * What no reader sees, wherever it is in a text and not only at its start:
@@ -80,8 +84,8 @@ export const AUTHOR_YEAR_PREFIX =
 const INVISIBLE = /(?![\t-\r])[\p{Default_Ignorable_Code_Point}\p{Cf}\p{Cc}\u2800]/gu;
 
 /**
- * `text` as a reader sees it: {@link INVISIBLE} removed at every position. Ordinary spaces are never
- * touched here; {@link findAuthorYearPrefix} alone skips the blanks at the start of a text.
+ * `text` as a reader sees it: {@link INVISIBLE} removed at every position. Blanks and ordinary
+ * spaces are never touched here.
  */
 export function withoutInvisible(text: string): string {
   return text.replace(INVISIBLE, "");
@@ -97,32 +101,72 @@ export function hasVisibleText(text: string): boolean {
 }
 
 /**
- * What `text` opens with when that is a name and a year, as it was typed less what no reader sees
- * (`Lee-2019` for `Lee-2019-EEG`, `MOVING2024` for `MOVING2024 release`), or null. That is how a
- * dataset is named (the atlas naming rule is FirstAuthorSurname-year-keyword-paperDOI), and a pull
- * request title says what the change does, not what the dataset is called: `Lee2019 EEG dataset`,
- * `Lee-2019-EEG`, `O'Brien_2020` and `MOVING2024 release` are refused. The function is pure and
- * exported so that the pull request review, and any check on a dataset name, ask the same question.
+ * Where the run of letters that ends at `end` begins, or `end` itself when the character before it
+ * is no letter. It walks left one code point at a time (a surrogate pair is one letter, never two
+ * halves) and stops at the first character that is not a letter.
+ */
+function lettersStart(text: string, end: number): number {
+  let start = end;
+  while (start > 0) {
+    const low = text.charCodeAt(start - 1);
+    const high = start >= 2 ? text.charCodeAt(start - 2) : 0;
+    const pair = low >= 0xdc00 && low <= 0xdfff && high >= 0xd800 && high <= 0xdbff;
+    const from = pair ? start - 2 : start - 1;
+    if (!LETTER.test(text.slice(from, start))) break;
+    start = from;
+  }
+  return start;
+}
+
+/**
+ * The first author-year key in `text`, as it was typed less what no reader sees (`Lee-2019` for
+ * `Lee-2019-EEG`, `Zhou-2016` for `Results from Zhou-2016 cohort`), or null. That is how a dataset is
+ * named after its paper (the atlas naming rule is FirstAuthorSurname-year-keyword-paperDOI), and a
+ * pull request title says what the change does, not which paper the data came from, so a key is
+ * refused wherever it stands in a title or a dataset name: `Lee2019 EEG dataset`, `Lee-2019-EEG`,
+ * `O'Brien_2020`, `Add the Lee2019 recordings` and `sourcedata: add the validation files the MOABB
+ * loader reads (Mainsah2025_L)` all hold one. The function is pure and exported so that the CLI, the
+ * pull request review and any check on a dataset name ask the same question.
  *
- * The name is the first word: letters of any case, with an apostrophe or a hyphen allowed inside it
- * (`O'Brien`, `Smith-Jones`). The year is four digits from 1900 to 2099 that are not the start of a
- * longer number, and it follows the name directly or after one hyphen or underscore; whatever comes
- * after the year does not matter. A space ends the word, so `Release 2019` and `Add 2019
- * recordings` are ordinary sentences, and a title that begins with the year (`2019 release notes`)
- * has no name before it. Only the start of the text is looked at: `Rename the dataset to
- * Lee-2019-EEG` is a sentence.
+ * A key is a run of letters (any script, with their combining marks) directly followed by an
+ * optional single hyphen or underscore, then a year from 1900 to 2099 that is not the start of a
+ * longer number. Whatever comes after the year does not matter. What is returned is the letters,
+ * the separator and the year, so `O'Brien2019` gives `Brien2019`: an apostrophe or a hyphen inside a
+ * name ends the run of letters.
+ *
+ * **The letters must touch the separator or the year, and that is a deliberate boundary.** A space
+ * ends a key before it starts, so `Andreev 2012`, `Release 2019` and `Add 2019 recordings` are
+ * ordinary sentences: a rule that read a word and a year across a space would refuse every title
+ * that mentions a year. So are a title that begins with the year (`2019 release notes`), a year
+ * range (`2019-2020 study`), and a year that follows a digit, a dot, a colon or a doubled separator
+ * (`Study2-2019`, `Lee.2019`, `Lee--2019`). The price is that a citation typed with a space
+ * (`Sawada 2022`) is not caught.
  *
  * Nothing here can tell a surname from any other letters, so an acronym such as `BNCI2014_001`, a
- * funding code such as `H2020` and a BIDS label such as `ses-2019` are refused too.
+ * funding code such as `H2020`, a BIDS label such as `ses-2019` and a software release such as
+ * `R2019b` are refused too, wherever they stand in the text.
  *
  * The text is judged as a reader sees it ({@link INVISIBLE}), at every position: `Le\u200be2019
- * EEG` and `Lee\u00ad2019 EEG` are refused like `Lee2019 EEG`, and so is `\u2800Lee2019 EEG`. The
- * blanks before the text are skipped, as the CLI's `normalizeTitle` (`src/lib/pr-text.ts`) trims
- * them: a space, a tab, a newline and the no-break space are all blanks. A blank between the name
- * and the year still ends the word, so `Lee\t2019 EEG` is a sentence like `Lee 2019 EEG`.
+ * EEG` and `Lee\u00ad2019 EEG` hold the key `Lee2019`. A blank is never removed, so `Lee\t2019 EEG`
+ * is a sentence like `Lee 2019 EEG`.
+ *
+ * **It is linear in the length of the text.** The years are read in order by {@link YEAR_PATTERN}.
+ * For each one the character before it is looked at once, for the separator, and the character
+ * before that once more, for a letter; only a year that has a letter there makes the letters be
+ * walked, once, to find where the key starts, and then the function returns. So a year without a
+ * letter costs a constant, a walk happens at most once, and a text with no year (however long a run
+ * of letters or of letters and hyphens it holds) is read once by the pattern and never walked.
  */
-export function findAuthorYearPrefix(text: string): string | null {
-  return withoutInvisible(text).trimStart().match(AUTHOR_YEAR_PREFIX)?.[0] ?? null;
+export function findAuthorYearKey(text: string): string | null {
+  const seen = withoutInvisible(text);
+  for (const year of seen.matchAll(new RegExp(YEAR_PATTERN, "gu"))) {
+    const at = year.index;
+    const before = seen.charAt(at - 1);
+    const end = before === "-" || before === "_" ? at - 1 : at;
+    const start = lettersStart(seen, end);
+    if (start < end) return seen.slice(start, at + year[0].length);
+  }
+  return null;
 }
 
 /**
@@ -140,14 +184,14 @@ export function findTemplateField(text: string): string | null {
 }
 
 /**
- * How `text` breaks the naming rule, or null when it does not: a name and a year at its start
- * (`author_year`, {@link findAuthorYearPrefix}), or a naming-template token or unfilled template
- * field anywhere in it (`template_field`, {@link findTemplateField}). The one question the CLI asks
- * of a title, the review job asks of a title and of a changed dataset name before any model, and the
+ * How `text` breaks the naming rule, or null when it does not: an author-year key anywhere in it
+ * (`author_year`, {@link findAuthorYearKey}), or a naming-template token or unfilled template field
+ * anywhere in it (`template_field`, {@link findTemplateField}). The one question the CLI asks of a
+ * title, the review job asks of a title and of a changed dataset name before any model, and the
  * Worker asks of an owner's or administrator's pull request.
  */
 export function namingProblemOf(text: string): NamingProblem | null {
-  if (findAuthorYearPrefix(text) !== null) return "author_year";
+  if (findAuthorYearKey(text) !== null) return "author_year";
   if (findTemplateField(text) !== null) return "template_field";
   return null;
 }

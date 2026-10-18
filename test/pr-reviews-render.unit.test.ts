@@ -727,7 +727,7 @@ describe("a version 2 report on the terminal", () => {
     }).map((l) => l.replace(ANSI, ""));
     const text = lines.join("\n");
     expect(text).toContain("Naming rule:");
-    expect(text).toContain("The title starts with a name and a year");
+    expect(text).toContain("The title has a citation (an author and a year)");
     expect(text).not.toMatch(/author_year/);
     for (const l of lines) expect(DANGEROUS.test(l)).toBe(false);
   });
@@ -852,10 +852,20 @@ describe("waiverLines", () => {
     );
     expect(t).toContain("Waived the naming rule for nm000201 #7 at aaaaaaa.");
     expect(t).toContain(
-      "The rule found: the title starts with a name and a year; the pull request changes the dataset name to one with an unfilled template field.",
+      "The rule found: the title has a citation (an author and a year); the pull request changes the dataset name to one with an unfilled template field.",
     );
     expect(t).toContain("a new commit is checked again");
     expect(t).not.toMatch(/author_year|template_field|[{}]/);
+  });
+
+  test("a waiver of a name with a key says so in the same plain words as for a title", () => {
+    const t = text(
+      answer({ waived: true, reason: "waived", facts: { title: null, name: "author_year" } }),
+    );
+    expect(t).toContain(
+      "The rule found: the pull request changes the dataset name to one that has a citation (an author and a year).",
+    );
+    expect(t).not.toMatch(/author_year|[{}]/);
   });
 
   test("each refusal is a sentence a person reads, with no code word in it", () => {

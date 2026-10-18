@@ -2,8 +2,9 @@
  * The naming rule (`shared/naming-rule.ts`, ADR 0107): one pure function the CLI, the review job and
  * the Worker all ask, so a title or a dataset name is refused the same way wherever it is checked.
  * The rule's cases are tested in depth through the CLI's own refusals (`pr-text.unit.test.ts`);
- * this file checks that there is ONE copy of it and that the review's question gives the same
- * answers.
+ * this file checks that there is ONE copy of it, that the review's question gives the same answers,
+ * where in a text an author-year key is found and where it is not, and that the rule reads a long
+ * text once.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -13,16 +14,26 @@ import { textFactsOf } from "../scripts/ci/pr-review";
 import type { Listing } from "../scripts/ci/pr-review-evidence";
 import { MAX_BODY_CHARS } from "../scripts/ci/pr-review-prompt";
 import {
-  AUTHOR_YEAR_PREFIX,
   NAMING_PROBLEMS,
   TEMPLATE_FIELDS,
-  findAuthorYearPrefix,
+  findAuthorYearKey,
   findTemplateField,
   hasVisibleText,
   namingProblemOf,
   withoutInvisible,
 } from "../shared/naming-rule";
 import * as cli from "../src/lib/pr-text";
+
+/**
+ * Two real texts the owner pointed at, each with an author-year key and a DOI at the end, in
+ * parentheses. The second is the Name of nm000536. Both are quoted as they were written.
+ */
+const SAWADA =
+  "Mapping effective connectivity of human amygdala with intracranial stimulation - es-TT evoked potentials (Sawada-2022-mapping-10.1038/s41467-022-32644-y)";
+const SAGGIO =
+  "Epidynamics: single-channel intracranial seizure recordings from 7 centres with onset/offset dynamotype metadata (Saggio-2020-taxonomy-10.7910/...)";
+/** A pull request title as it is written in the field, with the key at the end of it. */
+const MAINSAH = "sourcedata: add the validation files the MOABB loader reads (Mainsah2025_L)";
 
 /**
  * The fields of a listing the text facts read: the dataset's name at the base and at the head, and
@@ -32,18 +43,27 @@ const listing = (nameBefore: string | null, nameAfter: string | null, nameUnread
   ({ nameBefore, nameAfter, nameUnreadable }) as Listing;
 
 describe("there is one copy of the rule", () => {
-  test("the CLI's exports are the shared rule's own functions and pattern, not copies", () => {
-    expect(cli.findAuthorYearPrefix).toBe(findAuthorYearPrefix);
-    expect(cli.AUTHOR_YEAR_PREFIX).toBe(AUTHOR_YEAR_PREFIX);
+  test("the CLI's export is the shared rule's own function, not a copy", () => {
+    expect(cli.findAuthorYearKey).toBe(findAuthorYearKey);
   });
 
   test("the review job's facts are the rule's answers, on the title and on a changed name", () => {
-    for (const title of ["Lee2019 EEG dataset", "Fix {{title}}", "Add three EEG recordings"]) {
+    for (const title of [
+      "Lee2019 EEG dataset",
+      "Fix {{title}}",
+      "Add three EEG recordings",
+      MAINSAH,
+      "Add 2019 recordings",
+    ]) {
       expect(textFactsOf({ title, body: "x" }, listing("A", "A")).titleProblem, title).toBe(
         namingProblemOf(title),
       );
     }
     expect(textFactsOf({ title: "t", body: "x" }, listing("A", "Lee2019 X")).nameProblem).toBe(
+      "author_year",
+    );
+    // A key anywhere in a changed name is the name's problem, as it is anywhere in a title's.
+    expect(textFactsOf({ title: "t", body: "x" }, listing("A", SAGGIO)).nameProblem).toBe(
       "author_year",
     );
     // The name is the pull request's problem only when it changes the name.
@@ -105,7 +125,13 @@ describe("there is one copy of the rule", () => {
 describe("the Worker asks the same rule of an exempt pull request", () => {
   test("its title fact is the rule's answer; a name it cannot compare is unchecked, never fine", async () => {
     const subject = { datasetId: "nm000460", prNumber: 7, headSha: "a".repeat(40), baseSha: null };
-    for (const title of ["Lee2019 EEG dataset", "Fix ${TITLE}", "Add three EEG recordings"]) {
+    for (const title of [
+      "Lee2019 EEG dataset",
+      "Fix ${TITLE}",
+      "Add three EEG recordings",
+      MAINSAH,
+      "Add 2019 recordings",
+    ]) {
       const facts = await namingFactsFor({} as Bindings, { ...subject, title });
       expect(facts.title, title).toBe(namingProblemOf(title));
       expect(facts.name, title).toBe("unchecked");
@@ -114,9 +140,77 @@ describe("the Worker asks the same rule of an exempt pull request", () => {
 });
 
 describe("namingProblemOf", () => {
-  test("a name and a year at the start is author_year", () => {
-    for (const text of ["Lee2019 EEG dataset", "Lee-2019-EEG", "BNCI2014_001", "lee2019 eeg"]) {
+  test("an author-year key is author_year, at the start of the text and anywhere else in it", () => {
+    for (const text of [
+      // At the start, as the rule first read it.
+      "Lee2019 EEG dataset",
+      "Lee-2019-EEG",
+      "BNCI2014_001",
+      "lee2019 eeg",
+      "BNCI2014_001 motor imagery",
+      // In the middle, and at the end, of a longer text.
+      "Results from Zhou-2016 cohort",
+      "Add the Lee2019 recordings",
+      "Rename the dataset to Lee-2019-EEG",
+      MAINSAH,
+      // The two texts the owner pointed at: the key and a DOI, in parentheses at the end.
+      SAWADA,
+      SAGGIO,
+    ]) {
       expect(namingProblemOf(text), text).toBe("author_year");
+    }
+  });
+
+  test("the key is what is found: the letters, the separator and the year, as typed", () => {
+    const found: Array<[string, string]> = [
+      ["Lee2019 EEG dataset", "Lee2019"],
+      ["Lee-2019-EEG", "Lee-2019"],
+      ["Lee_2019_EEG", "Lee_2019"],
+      ["BNCI2014_001 motor imagery", "BNCI2014"],
+      ["Results from Zhou-2016 cohort", "Zhou-2016"],
+      [MAINSAH, "Mainsah2025"],
+      [SAWADA, "Sawada-2022"],
+      [SAGGIO, "Saggio-2020"],
+      // The first of several keys, and the letters that touch the year when a name has more parts.
+      ["Lee2019 and Zhou-2016", "Lee2019"],
+      ["O'Brien2019 recordings", "Brien2019"],
+      ["Smith-Jones_2020 EEG", "Jones_2020"],
+      // Letters that are not ASCII, with a combining mark, and one beyond the basic plane.
+      ["Mu\u0308ller2021 EEG", "Mu\u0308ller2021"],
+      ["M\u{fc}ller-2021 EEG", "M\u{fc}ller-2021"],
+      ["Add \u{20000}2019 recordings", "\u{20000}2019"],
+      ["Add \u{20000}-2019 recordings", "\u{20000}-2019"],
+    ];
+    for (const [text, key] of found) {
+      expect(findAuthorYearKey(text), JSON.stringify(text)).toBe(key);
+    }
+  });
+
+  test("a space between the letters and the year is a deliberate boundary: it is not a key", () => {
+    // The letters must touch the year, or the one hyphen or underscore before it. A rule that read a
+    // word and a year across a space would refuse every title that mentions a year.
+    for (const text of [
+      "Release 2019 notes",
+      "Add 2019 recordings",
+      "Andreev 2012 is not refused",
+      "Release\u00a02019",
+      "2019-2020 study",
+      "Add the 2019 recordings of Lee",
+      // A digit, a dot, a colon or a second separator stands between the letters and the year.
+      "Study2-2019 recordings added",
+      "Lee.2019 EEG",
+      "Lee:2019 EEG",
+      "Lee--2019 EEG",
+      "Lee-_2019 EEG",
+      // A year is four digits from 1900 to 2099 that do not start a longer number.
+      "Lee1899 EEG",
+      "Lee2100 EEG",
+      "Lee201 EEG",
+      "Lee20195 EEG",
+      "Lee12019 EEG",
+    ]) {
+      expect(findAuthorYearKey(text), JSON.stringify(text)).toBeNull();
+      expect(namingProblemOf(text), JSON.stringify(text)).toBeNull();
     }
   });
 
@@ -141,7 +235,7 @@ describe("namingProblemOf", () => {
       "Rename to Lee_paperDOI",
       "paperDOI10.1234",
       "xFirstAuthorSurnamex",
-      "Rename to firstauthorsurname-2019",
+      "Rename to firstauthorsurname-keyword",
       "Add the PAPERDOI",
       "PaperDoi",
     ]) {
@@ -150,6 +244,10 @@ describe("namingProblemOf", () => {
     // The field is reported as it appears, whatever its case and whatever it is joined to.
     expect(findTemplateField("Lee_firstAuthorSURNAME_2019")).toBe("firstAuthorSURNAME");
     expect(findTemplateField("paperDOI10.1234")).toBe("paperDOI");
+    // Joined to a year, the token is also an author-year key, and the rule asks about that first:
+    // the text is refused either way, and the token is still found.
+    expect(findTemplateField("Rename to firstauthorsurname-2019")).toBe("firstauthorsurname");
+    expect(namingProblemOf("Rename to firstauthorsurname-2019")).toBe("author_year");
   });
 
   test("an ordinary title or name is not refused", () => {
@@ -158,8 +256,8 @@ describe("namingProblemOf", () => {
       "Release 2019 recordings",
       "2019 release notes",
       "Motor imagery EEG of 52 volunteers",
-      "Rename the dataset to Lee-2019-EEG",
       "Fix sub-<label>_task-<label>_eeg.edf naming",
+      "Recordings of 10.5 Hz tones",
       "",
     ]) {
       expect(namingProblemOf(text), text).toBeNull();
@@ -182,7 +280,7 @@ describe("namingProblemOf", () => {
     ];
     for (const [what, lead] of invisible) {
       expect(namingProblemOf(`${lead}Lee2019 EEG dataset`), what).toBe("author_year");
-      expect(findAuthorYearPrefix(`${lead}Lee-2019-EEG`), what).toBe("Lee-2019");
+      expect(findAuthorYearKey(`${lead}Lee-2019-EEG`), what).toBe("Lee-2019");
       // The same lead before an ordinary title changes nothing about it.
       expect(namingProblemOf(`${lead}Add three EEG recordings`), what).toBeNull();
       expect(namingProblemOf(`${lead}2019 release notes`), what).toBeNull();
@@ -218,12 +316,15 @@ describe("namingProblemOf", () => {
       "Le\u2800e2019 EEG", // the braille blank
       "\u2800Lee2019 EEG", // a braille blank in front, which is a symbol, not a blank
       "\u2800\u2800 \u200b\u2800Lee-2019-EEG", // and a run of them with blanks between
+      "Add the Le\u200be2019 recordings", // anywhere in the text, not only at its start
+      "Results from Zhou\u00ad-2016 cohort", // a soft hyphen between the letters and the separator
+      "Results from Zhou-\u200d2016 cohort", // a joiner between the separator and the year
     ];
     for (const text of authorYear) {
       expect(namingProblemOf(text), JSON.stringify(text)).toBe("author_year");
     }
     // What is reported is what a reader sees: the answer holds no invisible character.
-    expect(findAuthorYearPrefix("Le\u200be-\u00ad2019 EEG")).toBe("Lee-2019");
+    expect(findAuthorYearKey("Le\u200be-\u00ad2019 EEG")).toBe("Lee-2019");
     expect(findTemplateField("Add the paper\u00adDOI to the README")).toBe("paperDOI");
   });
 
@@ -285,10 +386,53 @@ describe("namingProblemOf", () => {
     expect(namingProblemOf("Lee2019 FirstAuthorSurname")).toBe("author_year");
   });
 
+  test("an invisible character does not make a space into a key, or a key into a space", () => {
+    // Removing what no reader sees can only join what the reader already sees side by side: a space
+    // that is drawn stays between the letters and the year, so it is never glued into a key.
+    for (const text of [
+      "Release\u200b 2019 notes",
+      "Release \u00ad2019 notes",
+      "Release\u2800 2019 notes",
+      "Andreev\u200d 2012 is not refused",
+    ]) {
+      expect(namingProblemOf(text), JSON.stringify(text)).toBeNull();
+    }
+  });
+
   test("its words are the closed list the report carries", () => {
     expect(NAMING_PROBLEMS).toEqual(["author_year", "template_field"]);
     expect(findTemplateField("Fix {{a}} and ${b}")).toBe("{{a}}");
     expect(findTemplateField("Nothing to fill")).toBeNull();
     expect(TEMPLATE_FIELDS.length).toBe(4);
+  });
+});
+
+describe("the rule reads a long text once", () => {
+  // A dataset name or a pull request title is whatever was pasted, so the rule must not be
+  // quadratic in its length. Nothing here asserts a duration, which fails on a loaded runner. Each
+  // text is long enough that a scan which restarts at every letter, or looks back from every
+  // position, cannot get through this file's test timeout: it would take a minute or more for the
+  // letters, against a few milliseconds for the rule. A regression to such a scan fails these tests
+  // by timeout, and a longer text would only make it fail later.
+  test("300,000 letters with no year are read once", () => {
+    const hostile = "a".repeat(300_000);
+    expect(findAuthorYearKey(hostile)).toBeNull();
+    expect(namingProblemOf(hostile)).toBeNull();
+  });
+
+  test("300,000 characters of letter-hyphen pairs with no year are read once", () => {
+    const hostile = "a-".repeat(150_000);
+    expect(hostile).toHaveLength(300_000);
+    expect(findAuthorYearKey(hostile)).toBeNull();
+    expect(namingProblemOf(hostile)).toBeNull();
+  });
+
+  test("many years that are not keys, and a long run of letters that ends in one, are read once", () => {
+    // Fifty thousand years, each after a digit and a hyphen: none has a letter before it.
+    expect(findAuthorYearKey("1-2019 ".repeat(50_000))).toBeNull();
+    // The run is walked once, to where the key starts, and the key is the whole of it.
+    const letters = "a".repeat(300_000);
+    expect(findAuthorYearKey(`${letters}2019`)).toBe(`${letters}2019`);
+    expect(findAuthorYearKey(`Add ${letters}-2019 recordings`)).toBe(`${letters}-2019`);
   });
 });

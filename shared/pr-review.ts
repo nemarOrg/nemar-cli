@@ -1204,13 +1204,13 @@ const FACTS_COPY = {
 const NAMING_SENTENCE: Record<"title" | "name", Record<NamingProblem, string>> = {
   title: {
     author_year:
-      "The title starts with a name and a year, the way a dataset is named (for example Lee2019 or Lee-2019-EEG). A pull request title says what the change does, such as Add three EEG recordings. Edit the title.",
+      "The title has a citation (an author and a year) in it, the way a dataset is named (for example Lee2019 or Lee-2019-EEG), and the naming rule refuses one anywhere in a title. A pull request title says what the change does, such as Add three EEG recordings. Edit the title. Cite the paper in ReferencesAndLinks and the README instead.",
     template_field:
       "The title still has an unfilled template field (such as FirstAuthorSurname, paperDOI, or a bracketed instruction). Put the real words in its place. Edit the title.",
   },
   name: {
     author_year:
-      "This pull request changes the dataset's name (the Name field of dataset_description.json) to one that starts with a name and a year, which the naming rule refuses. Choose a name that says what the dataset is.",
+      "This pull request changes the dataset's name (the Name field of dataset_description.json) to one that has a citation (an author and a year) in it, which the naming rule refuses anywhere in a name. Choose a name that says what the dataset is, and cite the paper in ReferencesAndLinks and the README instead.",
     template_field:
       "This pull request changes the dataset's name (the Name field of dataset_description.json) to one with an unfilled template field. Put the real name in its place.",
   },
@@ -1268,9 +1268,9 @@ const CODE_LABEL: Record<FindingCode, string> = {
   description_placeholder: "Description is placeholder text or not readable",
   description_misleading: "Description is misleading",
   description_cut: "Description is too long to read in full",
-  title_author_year: "Title starts with a name and a year",
+  title_author_year: "Title has a citation (an author and a year)",
   title_template_field: "Title has an unfilled template field",
-  name_author_year: "New dataset name starts with a name and a year",
+  name_author_year: "New dataset name has a citation (an author and a year)",
   name_template_field: "New dataset name has an unfilled template field",
   name_unchecked: "New dataset name could not be read",
   other: "Other",

@@ -1145,6 +1145,28 @@ describe("the naming rule runs first, owners and administrators included (ADR 01
     expect(lastCheck()).toMatchObject({ conclusion: "failure" });
   });
 
+  test("an owner's title with the key in the middle fails too, and a year after a space is skipped as before", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    const middle = await deliver(
+      prEvent({
+        login: "owner-gh",
+        userId: 601,
+        title: "sourcedata: add the validation files the MOABB loader reads (Mainsah2025_L)",
+      }),
+    );
+    expect(middle.body).toMatchObject({ dispatched: false, reason: "naming_rule" });
+    expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "failure" });
+    expect(lastCheck().output?.summary).toContain("has a citation (an author and a year)");
+    // The check says what the rule found in its own words: the title is never quoted.
+    expect(JSON.stringify(calls)).not.toContain("Mainsah2025");
+    // The control: a year after a space is a sentence, so the same author is exempt as before.
+    const spaced = await deliver(
+      prEvent({ login: "owner-gh", userId: 601, title: "Add the 2019 recordings", sha: SHA_B }),
+    );
+    expect(spaced.body).toMatchObject({ reason: "exempt_author" });
+    expect(lastCheck()).toMatchObject({ conclusion: "skipped" });
+  });
+
   test("an owner's change of the dataset name to an author-and-year name fails", async () => {
     seedAccount({ github: "owner-gh", role: "owner" });
     naming[DATASET] = {
@@ -1154,6 +1176,21 @@ describe("the naming rule runs first, owners and administrators included (ADR 01
     const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
     expect(r.body).toMatchObject({ reason: "naming_rule" });
     expect(lastCheck().output?.summary).toContain("changes the dataset's name");
+  });
+
+  test("an owner's change of the dataset name to one with the key at its end fails", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    naming[DATASET] = {
+      files: ["dataset_description.json"],
+      names: {
+        [SHA_A]: "Epidynamics recordings (Saggio-2020-taxonomy)",
+        [BASE_SHA]: "Resting EEG of volunteers",
+      },
+    };
+    const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+    expect(r.body).toMatchObject({ reason: "naming_rule" });
+    expect(lastCheck().output?.summary).toContain("changes the dataset's name");
+    expect(lastCheck().output?.summary).toContain("has a citation (an author and a year)");
   });
 
   test("a change of the name to one that passes is skipped as before", async () => {
@@ -1205,7 +1242,7 @@ describe("the naming rule runs first, owners and administrators included (ADR 01
     expect(r.body).toMatchObject({ dispatched: false, reason: "naming_unchecked" });
     expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "action_required" });
     expect(lastCheck().output?.title).toBe("Could not decide: the naming rule was not checked");
-    expect(lastCheck().output?.summary).toContain("starts with a name and a year");
+    expect(lastCheck().output?.summary).toContain("has a citation (an author and a year)");
     expect(lastCheck().output?.summary).toContain("GitHub may not have answered");
     expect(lastCheck().output?.text).not.toContain("--admin");
     expect(rows()).toHaveLength(0);

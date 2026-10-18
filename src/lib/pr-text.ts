@@ -20,12 +20,12 @@
 
 import { lstatSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { findAuthorYearPrefix, findTemplateField } from "../../shared/naming-rule.js";
+import { findAuthorYearKey, findTemplateField } from "../../shared/naming-rule.js";
 
-// The naming rule (a name and a year at the start, an unfilled template field) lives in
+// The naming rule (an author-year key anywhere, an unfilled template field) lives in
 // `shared/naming-rule.ts`, where the review job and the Worker read it too; what this module
-// exported of it is exported from here still, so every importer keeps working.
-export { AUTHOR_YEAR_PREFIX, findAuthorYearPrefix } from "../../shared/naming-rule.js";
+// exports of it is exported from here, so the CLI and its tests ask the one rule.
+export { findAuthorYearKey } from "../../shared/naming-rule.js";
 
 // ---------------------------------------------------------------------------------------------
 // Readable text
@@ -124,11 +124,11 @@ export function findTextProblem(kind: TextKind, raw: string | undefined): TextPr
   // A title only: a description may cite a paper the way the paper is cited. Before the digest
   // check, because a name of the letters a to f and a year (`Decade2019`) is also seven or more hex
   // digits, and it is a name that was typed.
-  const authorYear = kind === "title" ? findAuthorYearPrefix(text) : null;
+  const authorYear = kind === "title" ? findAuthorYearKey(text) : null;
   if (authorYear !== null) {
     return {
       code: "author_year",
-      reason: `starts with a name and a year (${quoted(authorYear)}); describe the change in plain words, such as "Add three EEG recordings"`,
+      reason: `has a citation (an author and a year) in it (${quoted(authorYear)}); describe the change in plain words, such as "Add three EEG recordings", and cite the paper in ReferencesAndLinks and the README instead`,
     };
   }
   if (DIGEST.test(text) || isJsonDocument(text)) {

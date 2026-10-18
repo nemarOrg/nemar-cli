@@ -2827,6 +2827,18 @@ describe("the facts come before any model, and fail the verdict whatever it says
       null,
       "fail",
     ],
+    [
+      "a title with an author-year key in the middle of it",
+      { title: "sourcedata: add the validation files the MOABB loader reads (Mainsah2025_L)" },
+      null,
+      "fail",
+    ],
+    [
+      "a changed name with an author-year key at the end of it",
+      {},
+      desc("1.1.0", { Name: "Epidynamics recordings (Saggio-2020-taxonomy)" }),
+      "fail",
+    ],
     ["a changed name nobody can read", {}, desc("1.1.0", { Name: 7 }), "uncertain"],
   ])(
     "%s ends the review at the facts: no model request, and a report the shared parser takes",
@@ -2873,7 +2885,7 @@ describe("the facts come before any model, and fail the verdict whatever it says
     const check = renderCheck({ kind: "reported", report: title });
     expect(check.title).toBe("Needs changes: the naming rule");
     // What the rule found, that the review stage did not run, and that the author fixes it and pushes.
-    expect(check.summary).toContain("The title starts with a name and a year");
+    expect(check.summary).toContain("The title has a citation (an author and a year)");
     expect(check.summary).toContain("the review stage did not run and no model was asked");
     expect(check.summary).toContain("Edit the title, or the Name in dataset_description.json");
     expect(check.summary).toContain("push again");
@@ -2950,7 +2962,29 @@ describe("the facts come before any model, and fail the verdict whatever it says
     expect(report.evidence.title_problem).toBe("author_year");
     expect(verdictOf(report)).toBe("fail");
     const { text } = renderCheck({ kind: "reported", report });
-    expect(text).toContain("Title starts with a name and a year");
+    expect(text).toContain("Title has a citation (an author and a year)");
+  });
+
+  test("a title with the key in the middle fails the same way, says so, and no model is asked", async () => {
+    const report = await reviewWith("facts-title-middle", () => {}, {
+      title: "Add the Lee2019 recordings of resting EEG",
+    });
+    expect(modelRequests).toHaveLength(0);
+    expect(report.stage).toBe("facts");
+    expect(report.evidence.title_problem).toBe("author_year");
+    expect(verdictOf(report)).toBe("fail");
+    const check = renderCheck({ kind: "reported", report });
+    expect(check.summary).toContain("The title has a citation (an author and a year)");
+    expect(check.text).toContain("Title has a citation (an author and a year)");
+  });
+
+  test("a year after a space in a title is no key: the control is reviewed as before", async () => {
+    const report = await reviewWith("facts-title-year-space", () => {}, {
+      title: "Add the 2019 recordings of resting EEG",
+    });
+    expect(report.stage).toBe("full");
+    expect(report.evidence.title_problem).toBeNull();
+    expect(modelRequests).toHaveLength(2);
   });
 
   test("a title with a naming-template token fails, and no model is asked", async () => {
