@@ -213,6 +213,10 @@ const CASES: Record<TextProblemCode, { refused: [TextKind, string][]; passes: st
       ["description", "FirstAuthorSurname"],
       ["title", "Rename it to year-keyword-paperDOI"],
       ["description", "paperDOI"],
+      // The tokens joined to other text by an underscore or a digit, and in another case.
+      ["title", "FirstAuthorSurname_year_keyword_paperDOI"],
+      ["description", "paperDOI10.1234"],
+      ["title", "Rename it to firstauthorsurname-2019"],
     ],
     passes: [
       // BIDS field and label names are CamelCase by specification: the vocabulary of an update.

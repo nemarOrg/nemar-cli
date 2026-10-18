@@ -87,6 +87,25 @@ describe("namingProblemOf", () => {
     }
   });
 
+  test("a naming-template token is refused beside a letter, a digit or an underscore, in any case", () => {
+    // `_` and digits are word characters, so a pattern bounded by `\b` passes every one of these:
+    // a template is filled in by joining its parts, not by spacing them out.
+    for (const text of [
+      "FirstAuthorSurname_year_keyword_paperDOI",
+      "Rename to Lee_paperDOI",
+      "paperDOI10.1234",
+      "xFirstAuthorSurnamex",
+      "Rename to firstauthorsurname-2019",
+      "Add the PAPERDOI",
+      "PaperDoi",
+    ]) {
+      expect(namingProblemOf(text), text).toBe("template_field");
+    }
+    // The field is reported as it appears, whatever its case and whatever it is joined to.
+    expect(findTemplateField("Lee_firstAuthorSURNAME_2019")).toBe("firstAuthorSURNAME");
+    expect(findTemplateField("paperDOI10.1234")).toBe("paperDOI");
+  });
+
   test("an ordinary title or name is not refused", () => {
     for (const text of [
       "Add three EEG recordings",

@@ -24,6 +24,10 @@ export type NamingProblem = (typeof NAMING_PROBLEMS)[number];
  * one real instance this was written for: a dataset's rename PR was titled with the naming rule
  * "FirstAuthorSurname-year-keyword-paperDOI" instead of the name that rule produces.
  *
+ * The two tokens of that rule are matched anywhere in the text, in any case, with no word boundary.
+ * A template is filled in by joining its parts, and `_` and digits are word characters, so a
+ * boundary would pass `FirstAuthorSurname_year_keyword_paperDOI` and `paperDOI10.1234` untouched.
+ *
  * There is deliberately NO rule for "a long CamelCase word". BIDS field names are CamelCase by
  * specification (`PowerLineFrequency`, `DatasetDOI`, `ReferencesAndLinks`), as are task labels
  * (`task-RestingStateEyesClosed`), and they are the vocabulary of an ordinary dataset update.
@@ -42,7 +46,7 @@ export const TEMPLATE_FIELDS: readonly RegExp[] = [
   /\{\{[^{}]*\}\}/, // {{title}}
   /\$\{[^{}]*\}/, // ${TITLE}
   /[<[]\s*(?:your|insert|enter|describe|write|fill in|replace)\s+(?=[^\s<>[\]])[^<>[\]]*[>\]](?![([])/i, // <your title>
-  /\b(?:FirstAuthorSurname|paperDOI)\b/,
+  /FirstAuthorSurname|paperDOI/i,
 ];
 
 /**
