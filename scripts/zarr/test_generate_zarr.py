@@ -15455,16 +15455,38 @@ class TestRequireCompanionsSet(unittest.TestCase):
             self.PRIMARY, self.local, {self.PRIMARY, *tracked}, self.HEAD, declared
         )
 
-    def test_a_tracked_sibling_passes_without_reading_the_header(self):
-        # No file at all: the tree already answers, so the header is not opened.
-        self.check({self.SIBLING})
+    def test_a_tracked_same_stem_fdt_satisfies_a_set_in_any_matlab_format(self):
+        # The BIDS-rename shape: the .fdt was renamed with the .set, and the name
+        # stored inside the .set is the stale pre-rename one. The header is
+        # readable and names a file the tree lacks, so only the tracked
+        # <stem>.fdt can satisfy the rule, in every format a .set is saved in.
+        for label, v73, wrapped in (
+            ("classic", False, True),
+            ("v7.3 wrapped", True, True),
+            ("v7.3 flat", True, False),
+        ):
+            with self.subTest(label):
+                original = os.path.join(self._tmp.name, "pre_rename.set")
+                try:
+                    build_eeglab_set(original, 4, fdt=True, v73=v73, wrapped=wrapped)
+                except ImportError as exc:
+                    self.skipTest(
+                        f"{exc.name} not installed (the fast tier); the full tier runs this"
+                    )
+                os.replace(original, self.local)
+                self.check({self.SIBLING})
+                # The control: without that sibling the same header is refused, so
+                # the pass above is the sibling clause and not a header the rule
+                # could not read.
+                with self.assertRaises(generate_zarr.CompanionMissing):
+                    self.check(set())
 
     def test_a_tracked_same_stem_fdt_passes_though_the_header_names_another(self):
         # The common BIDS-rename shape: the .fdt was renamed with the .set, and
-        # the name inside the .set is the stale pre-rename one. The case above
-        # cannot see the same-stem clause (no file, so the header is unreadable
-        # and the rule returns anyway); this header IS readable, names a file
-        # the tree lacks, and only the tracked <stem>.fdt satisfies the rule.
+        # the name inside the .set is the stale pre-rename one. The header IS
+        # readable, names a file the tree lacks, and only the tracked <stem>.fdt
+        # satisfies the rule. Written without scipy or h5py, so the fast tier
+        # runs it too.
         write_fdt_backed_set(self.local, embedded="pre_rename.fdt")
         self.check({self.SIBLING})
         # The control: without that sibling the same header is refused.
