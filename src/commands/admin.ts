@@ -50,7 +50,14 @@ import {
   neurobagelVerificationState,
 } from "../../shared/contract/neurobagel-admin.js";
 import { weeklyAttention } from "../../shared/contract/weekly-attention.js";
-import { failWith, handleCommandError } from "../lib/admin-command.js";
+import {
+  checkedDatasetId,
+  failMessage,
+  failWith,
+  handleCommandError,
+  requireSignedIn,
+  say,
+} from "../lib/admin-command.js";
 import {
   CLEAR_FLAGS,
   EDIT_FLAG_FIELDS,
@@ -92,6 +99,7 @@ import {
   type ReindexFilter,
   type ReindexOptions,
   type ReindexResponse,
+  type ReviewRulesetOutcome,
   type SignalDefaultsSweepBatchResponse,
   type SummaryVersionCoverage,
   type UserListItem,
@@ -153,6 +161,8 @@ import {
   restoreDataset,
   retryImport,
   revalidateDataset,
+  reviewRuleset,
+  reviewRulesetBulk,
   revokeKeyFor,
   revokeUser,
   revokeUserById,
@@ -217,6 +227,7 @@ import {
   resolveRecoverTargets,
 } from "../lib/recover-datasets.js";
 import { sanitizeSnippetText as safeText } from "../lib/render/snippet.js";
+import { plain } from "../lib/terminal-text.js";
 import {
   type WithdrawnDatasetEntry,
   loadWithdrawnDatasets,
@@ -5505,6 +5516,230 @@ fleetCommand
       process.exit(1);
     }
   });
+
+// ----------------------------------------------------------------------------
+// The required pull-request review (ADR 0107)
+// ----------------------------------------------------------------------------
+
+/** What an action is called before it happens (a dry run) and after. */
+const REVIEW_ACTION_WORDS: Record<string, { dry: string; done: string }> = {
+  create: { dry: "would create", done: "created" },
+  update: { dry: "would update", done: "updated" },
+  remove: { dry: "would remove", done: "removed" },
+  none: { dry: "nothing to remove", done: "nothing to remove" },
+  skip: { dry: "would skip", done: "skipped" },
+};
+
+/** Why a dataset is not one the automated review covers, in the words a person would use. */
+const NOT_REVIEWED_WORDS: Record<string, string> = {
+  inactive: "archived or deleted",
+  private: "private",
+  anonymous: "an anonymous deposit",
+  unpublished: "not yet published",
+};
+
+/** One dataset's line in a page: what is done, to which dataset, and why when it is not obvious. */
+function reviewRulesetRow(o: ReviewRulesetOutcome, dryRun: boolean): string {
+  const id = plain(o.dataset_id);
+  if (o.error) return `${chalk.red("error".padEnd(18))} ${id}: ${plain(o.error)}`;
+  const words = o.action ? REVIEW_ACTION_WORDS[o.action] : undefined;
+  const verb = words ? (dryRun ? words.dry : words.done) : "unknown";
+  let note = "";
+  if (o.action === "skip") {
+    note = `default branch is ${plain(o.default_branch ?? "unknown")}, not main`;
+  } else if (!o.reviewable && o.not_reviewable_because) {
+    note = `not reviewed: ${NOT_REVIEWED_WORDS[o.not_reviewable_because] ?? "not reviewed"}`;
+  }
+  const color = o.action === "skip" ? chalk.yellow : o.action === "none" ? chalk.dim : chalk.cyan;
+  return `${color(verb.padEnd(18))} ${id}${note ? chalk.dim(`  (${note})`) : ""}`;
+}
+
+fleetCommand
+  .command("require-review")
+  .description(
+    "Require the NEMAR PR Review check on the datasets the automated review covers, and take it off the rest. Dry run by default.",
+  )
+  .argument("[dataset-id]", "Dataset to bring to its review spec (omit when using --all)")
+  .option("--all", "A page of datasets in id order, not one (owner-only)")
+  .option("--prefix <prefix>", "With --all: only ids that start with this, such as nm or on")
+  .option(
+    "--after <dataset-id>",
+    "With --all: continue after this id, the last of the previous page",
+  )
+  .option("--limit <n>", "With --all: datasets in a page, 1 to 50 (default 25)")
+  .option("--apply", "Change the repositories (the default is a dry run that changes nothing)")
+  .option("--remove", "Take the ruleset off instead, from every dataset asked about (the rollback)")
+  .option("--json", "Output raw JSON")
+  .addHelpText(
+    "after",
+    `
+What it does, per dataset:
+  A dataset the automated review covers (active, public, named, first-published) gets the
+  "NEMAR PR review required" ruleset on its default branch: a pull request cannot merge until the
+  NEMAR PR Review check passes. The NEMAR GitHub App, organization administrators and the
+  repository Admin role bypass it; maintainers and outside collaborators do not.
+  Any other dataset (private, unpublished, anonymous, archived) has the ruleset taken off.
+  A repository whose default branch is not main is skipped, and the standing test fixtures
+  (nm099900 to nm099999) are never touched. No dataset is treated differently for being live.
+
+Nothing changes without --apply. Putting the ruleset on needs the review switched on in the
+environment (PR_REVIEW_ENABLED); taking it off never does, so --remove --apply always works.
+
+Examples:
+  $ nemar admin fleet require-review xx099900                 # dry run: shows the body it would send
+  $ nemar admin fleet require-review xx099900 --apply
+  $ nemar admin fleet require-review --all --prefix nm --limit 50
+  $ nemar admin fleet require-review --all --prefix nm --limit 50 --apply
+  $ nemar admin fleet require-review --all --prefix nm --limit 50 --after nm000312 --apply
+  $ nemar admin fleet require-review nm000456 --remove --apply   # roll one dataset back
+`,
+  )
+  .action(
+    async (
+      datasetArg: string | undefined,
+      options: {
+        all?: boolean;
+        prefix?: string;
+        after?: string;
+        limit?: string;
+        apply?: boolean;
+        remove?: boolean;
+        json?: boolean;
+      },
+    ) => {
+      const json = Boolean(options.json);
+      if (!requireSignedIn(json)) return;
+      const refuse = (message: string, hint?: string) =>
+        failMessage(message, { json, answered: true, hint });
+
+      if (datasetArg && options.all) {
+        return refuse("Name a dataset OR use --all, not both.");
+      }
+      if (!datasetArg && !options.all) {
+        return refuse("Name a dataset, or use --all for a page of datasets.");
+      }
+      if (!options.all && (options.prefix || options.after || options.limit)) {
+        return refuse("--prefix, --after and --limit go with --all.");
+      }
+      let limit: number | undefined;
+      if (options.limit !== undefined) {
+        limit = /^\d+$/.test(options.limit) ? Number.parseInt(options.limit, 10) : Number.NaN;
+        if (!(limit >= 1 && limit <= 50)) {
+          return refuse("--limit is a number from 1 to 50.");
+        }
+      }
+      const id = datasetArg ? checkedDatasetId(datasetArg, json) : null;
+      if (datasetArg && !id) return;
+
+      const dryRun = !options.apply;
+      const remove = Boolean(options.remove);
+      const tag = dryRun ? "[dry run] " : "";
+      const spinner = json ? null : ora(`${tag}Reading the review ruleset...`).start();
+      const out = say(false);
+      try {
+        if (id) {
+          const r = await reviewRuleset(id, { dryRun, remove });
+          if (json) {
+            console.log(JSON.stringify(r, null, 2));
+            return;
+          }
+          spinner?.stop();
+          out(`${tag}${reviewRulesetRow(r, dryRun)}`);
+          out(
+            chalk.dim(
+              `  The dataset is ${r.reviewable ? "one the automated review covers" : `not reviewed (${NOT_REVIEWED_WORDS[r.not_reviewable_because ?? ""] ?? "not covered"})`}; the ruleset is to be ${r.intent === "require" ? "put on" : "taken off"}.`,
+            ),
+          );
+          if (dryRun && r.payload) {
+            out("");
+            out("  The body that would be sent to GitHub:");
+            for (const line of JSON.stringify(r.payload, null, 2).split("\n")) out(`  ${line}`);
+          }
+          if (dryRun && !r.review_enabled && !remove) {
+            out("");
+            out(
+              chalk.yellow(
+                "  The automated review is off in this environment (PR_REVIEW_ENABLED is not 1), so --apply would be refused: nothing would post the check. --remove --apply is not refused.",
+              ),
+            );
+          }
+          out("");
+          if (r.action === "skip") {
+            // Adding --apply would skip it again, so say what has to change first.
+            out(
+              chalk.yellow(
+                "Nothing was changed: the default branch has to be main first. `nemar admin fleet drift` lists such repositories as DEFAULT_BRANCH_OUTLIER.",
+              ),
+            );
+          } else if (dryRun) {
+            out(chalk.dim("Dry run: nothing was changed. Add --apply to change it."));
+          } else {
+            out(r.applied ? chalk.green("Done.") : chalk.dim("Nothing needed to change."));
+          }
+          return;
+        }
+
+        const r = await reviewRulesetBulk({
+          prefix: options.prefix,
+          after: options.after,
+          limit,
+          dryRun,
+          remove,
+        });
+        if (json) {
+          console.log(JSON.stringify(r, null, 2));
+          if (r.results.some((x) => x.error)) process.exitCode = 1;
+          return;
+        }
+        spinner?.stop();
+        const first = r.results[0]?.dataset_id;
+        const last = r.results[r.results.length - 1]?.dataset_id;
+        out(
+          `${tag}${r.count} dataset(s)${first && last ? ` (${first} to ${last})` : ""}${remove ? ", taking the ruleset off" : ""}`,
+        );
+        for (const row of r.results) out(`  ${reviewRulesetRow(row, dryRun)}`);
+
+        const tally = new Map<string, number>();
+        for (const row of r.results) {
+          const word = row.error
+            ? "error"
+            : row.action
+              ? REVIEW_ACTION_WORDS[row.action][dryRun ? "dry" : "done"]
+              : "unknown";
+          tally.set(word, (tally.get(word) ?? 0) + 1);
+        }
+        out("");
+        out(
+          [...tally.entries()].map(([word, n]) => `${n} ${word}`).join(", ") ||
+            chalk.dim("No datasets matched."),
+        );
+        if (dryRun && !r.review_enabled && !remove) {
+          out(
+            chalk.yellow(
+              "The automated review is off in this environment (PR_REVIEW_ENABLED is not 1), so --apply would be refused. --remove --apply is not refused.",
+            ),
+          );
+        }
+        if (r.next_after) {
+          const next = [
+            "nemar admin fleet require-review --all",
+            options.prefix ? `--prefix ${options.prefix}` : "",
+            `--limit ${r.limit}`,
+            `--after ${r.next_after}`,
+            remove ? "--remove" : "",
+            dryRun ? "" : "--apply",
+          ]
+            .filter(Boolean)
+            .join(" ");
+          out(chalk.dim(`Next page: ${next}`));
+        }
+        if (dryRun) out(chalk.dim("Dry run: nothing was changed. Add --apply to change it."));
+        if (r.results.some((x) => x.error)) process.exitCode = 1;
+      } catch (error) {
+        failWith(error, spinner, "The review ruleset request failed", undefined, { json });
+      }
+    },
+  );
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 

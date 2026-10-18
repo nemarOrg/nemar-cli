@@ -1359,6 +1359,100 @@ export async function enforceBulk(opts: {
   );
 }
 
+// ----------------------------------------------------------------------------
+// The required pull-request review (ADR 0107)
+// ----------------------------------------------------------------------------
+
+/** The body the Worker sends GitHub for the "NEMAR PR review required" ruleset. */
+export interface ReviewRulesetPayload {
+  name: string;
+  target: string;
+  enforcement: string;
+  conditions: { ref_name: { include: string[]; exclude: string[] } };
+  bypass_actors: Array<{ actor_id: number; actor_type: string; bypass_mode: string }>;
+  rules: Array<Record<string, unknown>>;
+}
+
+/** Why the Worker does not review a dataset's pull requests: the first condition it fails. */
+export type NotReviewableReason = "inactive" | "private" | "anonymous" | "unpublished";
+
+/**
+ * What a review-ruleset request came to for one dataset. `intent` is what the dataset's row
+ * called for (or `--remove` asked for) and `action` is what was done, or with a dry run would be:
+ * `create`, `update`, `remove`, `none` (nothing to take off), `skip` (required here but not
+ * written, see `reason`), or null when the attempt failed (`error` says how).
+ */
+export interface ReviewRulesetOutcome {
+  dataset_id: string;
+  reviewable: boolean;
+  not_reviewable_because: NotReviewableReason | null;
+  intent: "require" | "remove";
+  action: "create" | "update" | "remove" | "none" | "skip" | null;
+  applied: boolean;
+  reason?: string;
+  default_branch?: string;
+  payload?: ReviewRulesetPayload;
+  error?: string;
+}
+
+export interface ReviewRulesetResponse extends ReviewRulesetOutcome {
+  dry_run: boolean;
+  /** The automated review is switched on in this environment (PR_REVIEW_ENABLED). */
+  review_enabled: boolean;
+}
+
+export interface ReviewRulesetBulkResponse {
+  dry_run: boolean;
+  review_enabled: boolean;
+  remove: boolean;
+  limit: number;
+  count: number;
+  /** The last id of a full page, to send as `after` for the next one; null on the last page. */
+  next_after: string | null;
+  /** The body every create and update row sends; null with `remove`. */
+  payload: ReviewRulesetPayload | null;
+  results: ReviewRulesetOutcome[];
+}
+
+/**
+ * Put the review ruleset on one dataset's repository, or take it off. A dry run unless `dryRun`
+ * is false; with `remove` it is taken off whatever the dataset's row says.
+ */
+export async function reviewRuleset(
+  datasetId: string,
+  opts: { dryRun: boolean; remove: boolean },
+): Promise<ReviewRulesetResponse> {
+  return request<ReviewRulesetResponse>(
+    `/admin/datasets/${datasetId}/review-ruleset`,
+    { method: "POST", body: JSON.stringify({ dry_run: opts.dryRun, remove: opts.remove }) },
+    true,
+  );
+}
+
+/** The same across a page of datasets, in id order (owner-only, at most 50 a page). */
+export async function reviewRulesetBulk(opts: {
+  prefix?: string;
+  after?: string;
+  limit?: number;
+  dryRun: boolean;
+  remove: boolean;
+}): Promise<ReviewRulesetBulkResponse> {
+  return request<ReviewRulesetBulkResponse>(
+    "/admin/datasets/review-ruleset/bulk",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        prefix: opts.prefix,
+        after: opts.after,
+        limit: opts.limit,
+        dry_run: opts.dryRun,
+        remove: opts.remove,
+      }),
+    },
+    true,
+  );
+}
+
 export interface RevalidateResponse {
   dataset_id: string;
   head_sha: string | null;
