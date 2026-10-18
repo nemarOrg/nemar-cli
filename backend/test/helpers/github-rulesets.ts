@@ -238,6 +238,9 @@ export function startRulesetStandIn(): RulesetStandIn {
         return Response.json({ statuses: [] });
       }
       if (rest === "/collaborators" && method === "GET") return Response.json([]);
+      if (/^\/collaborators\/[^/]+$/.test(rest) && (method === "PUT" || method === "DELETE")) {
+        return new Response(null, { status: 204 });
+      }
 
       return Response.json(
         { message: `no stand-in for ${method} ${url.pathname}` },

@@ -60,38 +60,6 @@ export function isReviewEnabled(env: Pick<Bindings, "PR_REVIEW_ENABLED">): boole
 }
 
 /**
- * What a dataset row calls for, as the lifecycle code (publishing, a visibility change, `enforce`)
- * should ask of the repository: take the ruleset off a dataset that is not reviewed, put it on one
- * that is, and, while the review is off, leave a reviewed dataset's ruleset alone (`undefined`).
- * Requiring a check that nothing is posting would block every merge, so the requirement is never
- * put on while the review is off; lifting it never waits for anything.
- */
-export function reviewIntentOf(
-  row: ReviewableRow,
-  reviewEnabled: boolean,
-): ReviewIntent | undefined {
-  if (!isReviewableRow(row)) return "remove";
-  return reviewEnabled ? "require" : undefined;
-}
-
-/**
- * {@link reviewIntentOf} for a dataset, read from the catalog now. A dataset the catalog does not
- * hold has no answer (`undefined`: touch nothing), and a failed read throws for the caller to
- * handle, as the lifecycle code does for the rest of its repository work.
- */
-export async function readReviewIntent(
-  env: Pick<Bindings, "DB" | "PR_REVIEW_ENABLED">,
-  datasetId: string,
-): Promise<ReviewIntent | undefined> {
-  const row = await env.DB.prepare(
-    `SELECT ${REVIEWABLE_ROW_COLUMNS} FROM datasets WHERE dataset_id = ?`,
-  )
-    .bind(datasetId)
-    .first<ReviewableRow>();
-  return row ? reviewIntentOf(row, isReviewEnabled(env)) : undefined;
-}
-
-/**
  * The dataset ids the ruleset tooling never touches: the top 100 ids of the `nm` prefix
  * (nm099900 to nm099999), which the fixture rule reserves for standing test fixtures. They are the
  * end-to-end dataset (nm099999), the standing anonymous deposit (nm099998) and the fixtures that
@@ -115,3 +83,40 @@ export const OUTSIDE_FIXTURE_BAND = {
   sql: "NOT (substr(dataset_id, 1, 2) = 'nm' AND CAST(substr(dataset_id, 3) AS INTEGER) >= ?)",
   bind: RESERVED_FIXTURE_FLOOR,
 } as const;
+
+/**
+ * What a dataset calls for, as the lifecycle code (publishing, a visibility change, `enforce`)
+ * should ask of its repository: take the ruleset off a dataset that is not reviewed, put it on one
+ * that is, and, while the review is off, leave a reviewed dataset's ruleset alone (`undefined`).
+ * Requiring a check that nothing is posting would block every merge, so the requirement is never
+ * put on while the review is off; lifting it never waits for anything.
+ *
+ * A standing test fixture ({@link isReviewRulesetFixture}) calls for nothing, whatever its row
+ * says: the tooling does not touch its repository's rulesets in either direction.
+ */
+export function reviewIntentOf(
+  datasetId: string,
+  row: ReviewableRow,
+  reviewEnabled: boolean,
+): ReviewIntent | undefined {
+  if (isReviewRulesetFixture(datasetId)) return undefined;
+  if (!isReviewableRow(row)) return "remove";
+  return reviewEnabled ? "require" : undefined;
+}
+
+/**
+ * {@link reviewIntentOf} for a dataset, read from the catalog now. A dataset the catalog does not
+ * hold has no answer (`undefined`: touch nothing), and a failed read throws for the caller to
+ * handle, as the lifecycle code does for the rest of its repository work.
+ */
+export async function readReviewIntent(
+  env: Pick<Bindings, "DB" | "PR_REVIEW_ENABLED">,
+  datasetId: string,
+): Promise<ReviewIntent | undefined> {
+  const row = await env.DB.prepare(
+    `SELECT ${REVIEWABLE_ROW_COLUMNS} FROM datasets WHERE dataset_id = ?`,
+  )
+    .bind(datasetId)
+    .first<ReviewableRow>();
+  return row ? reviewIntentOf(datasetId, row, isReviewEnabled(env)) : undefined;
+}

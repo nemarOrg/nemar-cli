@@ -147,8 +147,8 @@ describe("what a dataset row calls for", () => {
   };
 
   test("a reviewed dataset is required while the review is on, and left alone while it is off", () => {
-    expect(reviewIntentOf(reviewable, true)).toBe("require");
-    expect(reviewIntentOf(reviewable, false)).toBeUndefined();
+    expect(reviewIntentOf("nm000301", reviewable, true)).toBe("require");
+    expect(reviewIntentOf("nm000301", reviewable, false)).toBeUndefined();
   });
 
   test("a dataset that is not reviewed has the ruleset removed, whether the review is on or off", () => {
@@ -158,9 +158,25 @@ describe("what a dataset row calls for", () => {
       { ...reviewable, anonymous: 1, first_published_at: null },
       { ...reviewable, first_published_at: null },
     ]) {
-      expect(reviewIntentOf(row, true)).toBe("remove");
-      expect(reviewIntentOf(row, false)).toBe("remove");
+      expect(reviewIntentOf("nm000301", row, true)).toBe("remove");
+      expect(reviewIntentOf("nm000301", row, false)).toBe("remove");
     }
+  });
+
+  test("a standing fixture calls for nothing, whatever its row says", () => {
+    // A reviewed-looking row would be required, a private one removed: neither touches a fixture.
+    for (const id of ["nm099999", "nm099998", "nm099900"]) {
+      for (const row of [reviewable, { ...reviewable, visibility: "private" }]) {
+        for (const enabled of [true, false]) {
+          expect(
+            reviewIntentOf(id, row, enabled),
+            `${id} ${row.visibility} ${enabled}`,
+          ).toBeUndefined();
+        }
+      }
+    }
+    // The staging exemplars are not fixtures to the tooling: they are where a ruleset is tried.
+    expect(reviewIntentOf("xx099900", reviewable, true)).toBe("require");
   });
 
   test("the review is on only for exactly 1", () => {
@@ -185,6 +201,9 @@ describe("what a dataset row calls for", () => {
     expect(await readReviewIntent(env("1"), "nm000302")).toBe("remove");
     // A dataset the catalog does not hold gets no answer, so nothing is touched.
     expect(await readReviewIntent(env("1"), "nm000399")).toBeUndefined();
+    // Nor does a fixture, although its row is there and is reviewed.
+    insert(db, "nm099950", reviewable);
+    expect(await readReviewIntent(env("1"), "nm099950")).toBeUndefined();
 
     // And it follows the row: the same dataset, made private, no longer calls for the ruleset.
     db.run("UPDATE datasets SET visibility = 'private' WHERE dataset_id = 'nm000301'");

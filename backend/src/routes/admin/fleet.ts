@@ -44,6 +44,7 @@ import {
   isReviewEnabled,
   isReviewRulesetFixture,
   notReviewableReason,
+  reviewIntentOf,
 } from "../../services/pr-review-eligibility";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../services/repo-spec";
 import { applyDatasetVisibility } from "../../services/visibility";
@@ -359,6 +360,10 @@ export function registerFleetRoutes(admin: AdminRouter): void {
    * ensureRepoToSpec (public locks + reconciles; private removes the ruleset +
    * reconciles). `dry_run` defaults to TRUE (must pass `dry_run:false` to apply),
    * matching the bulk endpoint so a bare `{}` body never mutates.
+   *
+   * The required pull-request review (ADR 0107) is one more step, decided from the
+   * dataset's row: required on a reviewed dataset while the review is on, removed
+   * from any other, left alone while the review is off or for a standing fixture.
    */
   admin.post("/datasets/:id/enforce", zValidator("json", enforceSchema), async (c) => {
     const datasetId = c.req.param("id");
@@ -377,9 +382,9 @@ export function registerFleetRoutes(admin: AdminRouter): void {
     }
 
     const dataset = await db
-      .prepare("SELECT github_repo, visibility, anonymous FROM datasets WHERE dataset_id = ?")
+      .prepare(`SELECT github_repo, ${REVIEWABLE_ROW_COLUMNS} FROM datasets WHERE dataset_id = ?`)
       .bind(datasetId)
-      .first<{ github_repo: string | null; visibility: string; anonymous: number | null }>();
+      .first<ReviewableRow & { github_repo: string | null }>();
     if (!dataset) return c.json({ error: "Dataset not found" }, 404);
     if (!dataset.github_repo) return c.json({ error: "Dataset has no GitHub repository" }, 400);
     const repoName = dataset.github_repo.split("/")[1];
@@ -395,6 +400,8 @@ export function registerFleetRoutes(admin: AdminRouter): void {
         visibility,
         collaborators: { ownerLogin, approvedWriters },
         dryRun: dryRun,
+        // The required review follows the row, as it does on publication (ADR 0107).
+        review: reviewIntentOf(datasetId, dataset, isReviewEnabled(c.env)),
       });
     } catch (e) {
       return c.json(
@@ -517,6 +524,7 @@ export function registerFleetRoutes(admin: AdminRouter): void {
    * POST /admin/datasets/enforce/bulk - Run ensureRepoToSpec across a filtered set
    * SEQUENTIALLY (shared App rate limit). `dry_run` defaults to TRUE; pass
    * `dry_run:false` to actually apply. Always excludes nm099999. Owner-only.
+   * Each dataset's required review follows its row, as in the single route.
    */
   admin.post("/datasets/enforce/bulk", zValidator("json", enforceBulkSchema), async (c) => {
     if (c.get("user").role !== "owner") {
@@ -548,19 +556,15 @@ export function registerFleetRoutes(admin: AdminRouter): void {
 
     const rows = await db
       .prepare(
-        `SELECT dataset_id, github_repo, visibility, anonymous FROM datasets
+        `SELECT dataset_id, github_repo, ${REVIEWABLE_ROW_COLUMNS} FROM datasets
         WHERE ${clauses.join(" AND ")} ORDER BY dataset_id LIMIT ?`,
       )
       .bind(...binds, cap)
-      .all<{
-        dataset_id: string;
-        github_repo: string;
-        visibility: string;
-        anonymous: number | null;
-      }>();
+      .all<ReviewableRow & { dataset_id: string; github_repo: string }>();
 
     const datasets = rows.results ?? [];
     const pat = await getDatasetsToken(c.env);
+    const reviewEnabled = isReviewEnabled(c.env);
     const results: Array<{
       dataset_id: string;
       steps?: Record<string, { status: string; detail?: string }>;
@@ -580,6 +584,7 @@ export function registerFleetRoutes(admin: AdminRouter): void {
           visibility: vis,
           collaborators: { ownerLogin, approvedWriters },
           dryRun: dryRun,
+          review: reviewIntentOf(d.dataset_id, d, reviewEnabled),
         });
         if (!dryRun) await mirrorReconcileRemovals(db, d.dataset_id, spec.reconcile?.removed);
         results.push({ dataset_id: d.dataset_id, steps: spec.steps });

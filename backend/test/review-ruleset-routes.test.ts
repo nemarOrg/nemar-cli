@@ -673,3 +673,81 @@ describe("POST /admin/datasets/review-ruleset/bulk", () => {
     expect(standIn.calls).toHaveLength(0);
   });
 });
+
+describe("the enforce routes and the review", () => {
+  const enforce = (id: string, body: unknown = {}) =>
+    post(`/admin/datasets/${id}/enforce`, body, ADMIN_KEY);
+
+  test("a dry run of enforce on a reviewed dataset reports the review step and writes nothing", async () => {
+    seedDataset("nm000201");
+
+    const r = await enforce("nm000201");
+
+    expect(r.status).toBe(200);
+    expect(r.body.result.steps.review_ruleset).toEqual({ status: "ok", detail: "would create" });
+    expect(standIn.writes()).toHaveLength(0);
+  });
+
+  test("applying enforce puts the requirement on a reviewed dataset, next to the branch ruleset", async () => {
+    seedDataset("nm000201");
+
+    const r = await enforce("nm000201", { dry_run: false });
+
+    expect(r.status).toBe(200);
+    expect(r.body.result.steps.review_ruleset).toEqual({ status: "ok", detail: "created" });
+    expect(held("nm000201")).toContain(REVIEW_RULESET_NAME);
+    expect(held("nm000201")).toContain(BRANCH_RULESET_NAME);
+  });
+
+  test("while the review is off enforce says nothing about the review, and leaves its ruleset as it is", async () => {
+    seedDataset("nm000201");
+    await ensureReviewRuleset("nm000201", PAT);
+    const before = structuredClone(standIn.rulesets.get("nm000201"));
+    envOverrides = { PR_REVIEW_ENABLED: undefined };
+
+    const r = await enforce("nm000201", { dry_run: false });
+
+    expect(r.status).toBe(200);
+    expect(r.body.result.steps.review_ruleset).toBeUndefined();
+    expect(
+      standIn.rulesets.get("nm000201")?.filter((x) => x.name === REVIEW_RULESET_NAME),
+    ).toStrictEqual(before);
+  });
+
+  test("a dataset that is no longer reviewed has the ruleset taken off by enforce", async () => {
+    seedDataset("nm000201", { visibility: "private" });
+    await ensureReviewRuleset("nm000201", PAT);
+
+    const r = await enforce("nm000201", { dry_run: false });
+
+    expect(r.body.result.steps.review_ruleset).toEqual({ status: "ok", detail: "removed" });
+    expect(held("nm000201")).not.toContain(REVIEW_RULESET_NAME);
+  });
+
+  test("enforce leaves a standing fixture's rulesets alone, in either direction", async () => {
+    seedDataset("nm099998", { visibility: "private" });
+    await ensureReviewRuleset("nm099998", PAT);
+    const before = structuredClone(standIn.rulesets.get("nm099998"));
+
+    const r = await enforce("nm099998", { dry_run: false });
+
+    expect(r.status).toBe(200);
+    expect(r.body.result.steps.review_ruleset).toBeUndefined();
+    expect(standIn.rulesets.get("nm099998")).toStrictEqual(before);
+  });
+
+  test("bulk enforce gives each dataset the review step its own row calls for", async () => {
+    seedDataset("nm000301");
+    seedDataset("nm000302", { visibility: "private" });
+    await ensureReviewRuleset("nm000302", PAT);
+
+    const r = await post("/admin/datasets/enforce/bulk", { dry_run: false }, OWNER_KEY);
+
+    expect(r.status).toBe(200);
+    const byId = Object.fromEntries(r.body.results.map((x: Json) => [x.dataset_id, x]));
+    expect(byId.nm000301.steps.review_ruleset).toEqual({ status: "ok", detail: "created" });
+    expect(byId.nm000302.steps.review_ruleset).toEqual({ status: "ok", detail: "removed" });
+    expect(held("nm000301")).toContain(REVIEW_RULESET_NAME);
+    expect(held("nm000302")).not.toContain(REVIEW_RULESET_NAME);
+  });
+});
