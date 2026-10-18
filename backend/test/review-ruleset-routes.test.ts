@@ -761,6 +761,220 @@ describe("the enforce routes and the review", () => {
   });
 });
 
+// PR_REVIEW_AUTO_REQUIRE is the owner's switch for the paths that manage the review ruleset on
+// their own. The production Worker already runs the review (PR_REVIEW_ENABLED), so without this
+// an enforce run would require the check on every reviewable dataset before the canary and the
+// calibration gate. Each test runs through BOTH routes, the single one and the bulk one, and the
+// stand-in is what is asked: not what a function was called with.
+describe("the enforce routes and the automatic switch", () => {
+  type Steps = Record<string, { status: string; detail?: string }> | undefined;
+
+  /** One enforce of one dataset through the named route, and the steps that route reports for it. */
+  async function enforceVia(
+    route: "single" | "bulk",
+    id: string,
+    dryRun: boolean,
+  ): Promise<{ status: number; steps: Steps }> {
+    if (route === "single") {
+      const r = await post(`/admin/datasets/${id}/enforce`, { dry_run: dryRun }, ADMIN_KEY);
+      return { status: r.status, steps: r.body.result?.steps };
+    }
+    const r = await post("/admin/datasets/enforce/bulk", { dry_run: dryRun }, OWNER_KEY);
+    const row = (r.body.results ?? []).find((x: Json) => x.dataset_id === id);
+    return { status: r.status, steps: row?.steps };
+  }
+
+  /** The review rulesets a repository holds, as the stand-in keeps them. */
+  const reviewRulesetsOf = (repo: string) =>
+    (standIn.rulesets.get(repo) ?? []).filter((x) => x.name === REVIEW_RULESET_NAME);
+
+  /**
+   * The writes that created, replaced or deleted a REVIEW ruleset. The branch ruleset enforce
+   * writes on a public repository is not counted. A delete carries no body, so it is told by the
+   * id of the ruleset it names.
+   */
+  const reviewWrites = (ids: number[] = []) =>
+    standIn
+      .rulesetWrites()
+      .filter(
+        (c) =>
+          c.body?.name === REVIEW_RULESET_NAME ||
+          ids.some((id) => c.path.endsWith(`/rulesets/${id}`)),
+      );
+
+  describe.each(["single", "bulk"] as const)("the %s route", (route) => {
+    test("off, a dry run reports no review step and asks GitHub nothing about rulesets", async () => {
+      seedDataset("nm000201");
+
+      const r = await enforceVia(route, "nm000201", true);
+
+      expect(r.status).toBe(200);
+      // The route ran: it planned the repository, and said nothing of the review.
+      expect(r.steps?.plan).toBeDefined();
+      expect(r.steps?.review_ruleset).toBeUndefined();
+      expect(standIn.calls.filter((c) => c.path.includes("/rulesets"))).toEqual([]);
+    });
+
+    test("on, the same dry run reads the repository's rulesets and reports the step", async () => {
+      envOverrides = { PR_REVIEW_AUTO_REQUIRE: "1" };
+      seedDataset("nm000201");
+
+      const r = await enforceVia(route, "nm000201", true);
+
+      expect(r.steps?.review_ruleset).toEqual({ status: "ok", detail: "would create" });
+      expect(
+        standIn.calls.filter((c) => c.method === "GET" && c.path.endsWith("/rulesets")),
+      ).not.toHaveLength(0);
+      expect(standIn.writes()).toHaveLength(0);
+    });
+
+    test("off, a live run writes no review ruleset and still does the rest of its work", async () => {
+      seedDataset("nm000201");
+
+      const r = await enforceVia(route, "nm000201", false);
+
+      expect(r.status).toBe(200);
+      expect(r.steps?.review_ruleset).toBeUndefined();
+      expect(reviewWrites()).toEqual([]);
+      expect(held("nm000201")).not.toContain(REVIEW_RULESET_NAME);
+      // Not a route that did nothing: the branch protection enforce always writes is there.
+      expect(held("nm000201")).toContain(BRANCH_RULESET_NAME);
+    });
+
+    test("off, a review ruleset already on a reviewed dataset is left exactly as it is", async () => {
+      seedDataset("nm000201");
+      await ensureReviewRuleset("nm000201", PAT);
+      const before = structuredClone(reviewRulesetsOf("nm000201"));
+      standIn.calls.length = 0;
+
+      const r = await enforceVia(route, "nm000201", false);
+
+      expect(r.status).toBe(200);
+      expect(r.steps?.review_ruleset).toBeUndefined();
+      expect(reviewRulesetsOf("nm000201")).toStrictEqual(before);
+      expect(reviewWrites(before.map((x) => x.id))).toEqual([]);
+    });
+
+    test("off, a review ruleset is not taken off a dataset that is no longer reviewed", async () => {
+      seedDataset("nm000201", { visibility: "private" });
+      await ensureReviewRuleset("nm000201", PAT);
+      const before = structuredClone(reviewRulesetsOf("nm000201"));
+      standIn.calls.length = 0;
+
+      const r = await enforceVia(route, "nm000201", false);
+
+      expect(r.status).toBe(200);
+      expect(r.steps?.review_ruleset).toBeUndefined();
+      expect(reviewRulesetsOf("nm000201")).toStrictEqual(before);
+      expect(reviewWrites(before.map((x) => x.id))).toEqual([]);
+    });
+
+    test("on, a live run creates the review ruleset with the pinned payload, then updates it", async () => {
+      envOverrides = { PR_REVIEW_AUTO_REQUIRE: "1" };
+      seedDataset("nm000201");
+
+      const created = await enforceVia(route, "nm000201", false);
+
+      expect(created.steps?.review_ruleset).toEqual({ status: "ok", detail: "created" });
+      const posts = reviewWrites();
+      expect(posts.map((c) => c.method)).toEqual(["POST"]);
+      expect(posts[0].body).toStrictEqual(buildReviewRulesetPayload());
+
+      const ids = reviewRulesetsOf("nm000201").map((x) => x.id);
+      standIn.calls.length = 0;
+      const updated = await enforceVia(route, "nm000201", false);
+
+      expect(updated.steps?.review_ruleset).toEqual({ status: "ok", detail: "updated" });
+      const puts = reviewWrites(ids);
+      expect(puts.map((c) => c.method)).toEqual(["PUT"]);
+      expect(puts[0].body).toStrictEqual(buildReviewRulesetPayload());
+    });
+
+    test("on, the ruleset is deleted from a dataset that is no longer reviewed", async () => {
+      envOverrides = { PR_REVIEW_AUTO_REQUIRE: "1" };
+      seedDataset("nm000201", { visibility: "private" });
+      await ensureReviewRuleset("nm000201", PAT);
+      const ids = reviewRulesetsOf("nm000201").map((x) => x.id);
+      standIn.calls.length = 0;
+
+      const r = await enforceVia(route, "nm000201", false);
+
+      expect(r.steps?.review_ruleset).toEqual({ status: "ok", detail: "removed" });
+      expect(reviewWrites(ids).map((c) => c.method)).toEqual(["DELETE"]);
+      expect(reviewRulesetsOf("nm000201")).toEqual([]);
+    });
+  });
+
+  test("off, one bulk page leaves every dataset's review ruleset as it was", async () => {
+    seedDataset("nm000301"); // reviewed, without the ruleset
+    seedDataset("nm000302"); // reviewed, with it
+    seedDataset("nm000303", { visibility: "private" }); // not reviewed, with a stray one
+    await ensureReviewRuleset("nm000302", PAT);
+    await ensureReviewRuleset("nm000303", PAT);
+    const before = Object.fromEntries(
+      ["nm000301", "nm000302", "nm000303"].map((id) => [id, structuredClone(reviewRulesetsOf(id))]),
+    );
+    standIn.calls.length = 0;
+
+    const r = await post("/admin/datasets/enforce/bulk", { dry_run: false }, OWNER_KEY);
+
+    expect(r.status).toBe(200);
+    expect(r.body.count).toBe(3);
+    for (const row of r.body.results) {
+      expect(row.steps.review_ruleset, row.dataset_id).toBeUndefined();
+      expect(reviewRulesetsOf(row.dataset_id), row.dataset_id).toStrictEqual(
+        before[row.dataset_id],
+      );
+    }
+    expect(reviewWrites(Object.values(before).flatMap((x) => x.map((y) => y.id)))).toEqual([]);
+  });
+
+  describe("the explicit routes do not read the switch", () => {
+    test("the single route applies and removes with the switch off, and a dry run still answers", async () => {
+      envOverrides = { PR_REVIEW_AUTO_REQUIRE: "0" };
+      seedDataset("nm000201");
+
+      const dry = await single("nm000201");
+      expect(dry.body).toMatchObject({ review_enabled: true, intent: "require", action: "create" });
+
+      const applied = await single("nm000201", { dry_run: false });
+      expect(applied.body).toMatchObject({ action: "create", applied: true });
+      expect(held("nm000201")).toEqual([REVIEW_RULESET_NAME]);
+
+      const removed = await single("nm000201", { dry_run: false, remove: true });
+      expect(removed.body).toMatchObject({ action: "remove", applied: true });
+      expect(held("nm000201")).toEqual([]);
+    });
+
+    test("the bulk route applies the same way", async () => {
+      envOverrides = { PR_REVIEW_AUTO_REQUIRE: "0" };
+      seedDataset("nm000301");
+      seedDataset("nm000302", { visibility: "private" });
+
+      const r = await bulk({ dry_run: false });
+
+      expect(r.status).toBe(200);
+      expect(held("nm000301")).toEqual([REVIEW_RULESET_NAME]);
+      expect(held("nm000302")).toEqual([]);
+    });
+
+    test("they still refuse a live require while the review itself is off, switch or no switch", async () => {
+      seedDataset("nm000201");
+      for (const auto of [undefined, "1"]) {
+        envOverrides = { PR_REVIEW_ENABLED: undefined, PR_REVIEW_AUTO_REQUIRE: auto };
+
+        const one = await single("nm000201", { dry_run: false });
+        const many = await bulk({ dry_run: false });
+
+        expect(one.status, `single, switch ${auto}`).toBe(409);
+        expect(many.status, `bulk, switch ${auto}`).toBe(409);
+        expect(one.body.code).toBe("review_disabled");
+      }
+      expect(standIn.calls).toHaveLength(0);
+    });
+  });
+});
+
 describe("GET /admin/fleet/drift and the review", () => {
   const drift = async (query = "?prefix=nm&limit=50") => {
     const res = await app.request(
