@@ -221,6 +221,68 @@ describe("ensureReviewRuleset", () => {
     expect(standIn.rulesetWrites()).toHaveLength(0);
   });
 
+  // The transport sends a POST again after a 5xx. A create that GitHub processed and then answered
+  // with a 502 is therefore written twice, and the second meets the name the first made.
+  test("a create GitHub processed but answered with a 502 ends as an update of the ruleset it made", async () => {
+    standIn.failAfterWriting("POST", /\/rulesets$/, 502);
+
+    const result = await ensureReviewRuleset(REPO, PAT);
+
+    expect(result.action).toBe("updated");
+    // One ruleset, with the payload, and not an error for a repository that is right.
+    expect(heldBy(REPO)).toEqual([REVIEW_RULESET_NAME]);
+    expect(standIn.rulesets.get(REPO)?.[0].body).toStrictEqual(PINNED_PAYLOAD);
+    // The first POST, the transport's second POST (a 422: the name is taken), then the update.
+    expect(standIn.rulesetWrites().map((w) => w.method)).toEqual(["POST", "POST", "PUT"]);
+  }, 20_000);
+
+  test("a ruleset that appears between the list and the create is brought to the payload", async () => {
+    standIn.beforeNext("POST", /\/rulesets$/, () =>
+      standIn.rulesets.set(REPO, [
+        {
+          id: 555,
+          name: REVIEW_RULESET_NAME,
+          source_type: "Repository",
+          body: { ...PINNED_PAYLOAD, enforcement: "disabled" },
+        },
+      ]),
+    );
+
+    const result = await ensureReviewRuleset(REPO, PAT);
+
+    expect(result.action).toBe("updated");
+    expect(standIn.rulesets.get(REPO)).toHaveLength(1);
+    expect(standIn.rulesets.get(REPO)?.[0].body).toStrictEqual(PINNED_PAYLOAD);
+    expect(standIn.rulesetWrites().map((w) => w.method)).toEqual(["POST", "PUT"]);
+  });
+
+  test("a 422 with no ruleset behind it is still the error: one more list, no update", async () => {
+    standIn.failNext("POST", /\/rulesets$/, 422);
+
+    const err = await ensureReviewRuleset(REPO, PAT).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(HttpError);
+    expect((err as HttpError).status).toBe(422);
+    expect((err as HttpError).message).toContain(`Review ruleset create failed for ${REPO}`);
+    expect(standIn.rulesetWrites().map((w) => w.method)).toEqual(["POST"]);
+    expect(
+      standIn.calls.filter((c) => c.method === "GET" && c.path.endsWith("/rulesets")),
+    ).toHaveLength(2);
+    expect(heldBy(REPO)).toEqual([]);
+  });
+
+  test("a re-list that fails leaves the create's 422 as the error", async () => {
+    standIn.failNext("POST", /\/rulesets$/, 422);
+    // Arm the refusal of the list just before the create, so that only the second list is refused.
+    standIn.beforeNext("POST", /\/rulesets$/, () => standIn.failNext("GET", /\/rulesets$/, 403));
+
+    const err = await ensureReviewRuleset(REPO, PAT).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(HttpError);
+    expect((err as HttpError).status).toBe(422);
+    expect((err as HttpError).message).toContain(`Review ruleset create failed for ${REPO}`);
+  });
+
   // The transport retries a 5xx (three attempts, a second apart), so a write that GitHub keeps
   // answering with 500 reaches the caller after all three, which is why these two take two seconds.
   test("a 500 on the update is an error with that status, and the ruleset is as it was", async () => {

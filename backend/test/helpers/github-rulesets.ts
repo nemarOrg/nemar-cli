@@ -60,6 +60,13 @@ export interface RulesetStandIn {
    * else deletes after it was listed, or creates before it is written).
    */
   beforeNext(method: string, path: RegExp, run: () => void): void;
+  /**
+   * Apply the next `times` requests that match, and then answer each with `status` in place of
+   * the answer GitHub gave: a write that GitHub processed and whose answer was lost to a gateway
+   * error (a 502). A request that GitHub refused keeps its own refusal. Use a status the transport
+   * retries (500 and up), and the retry is a second write of the same body.
+   */
+  failAfterWriting(method: string, path: RegExp, status: number, times?: number): void;
   /** Requests that changed something: every method but GET. */
   writes(): StandInCall[];
   /** The writes to rulesets only. */
@@ -189,7 +196,114 @@ export function startRulesetStandIn(): RulesetStandIn {
   const bidsConclusion = new Map<string, string>();
   const failures: Array<{ method: string; path: RegExp; status: number; remaining: number }> = [];
   const hooks: Array<{ method: string; path: RegExp; run: () => void }> = [];
+  const lateFailures: Array<{ method: string; path: RegExp; status: number; remaining: number }> =
+    [];
   let nextId = 1000;
+
+  /** Answer one request, once the failures and hooks have had their say. Synchronous: the body is already read. */
+  const respond = (method: string, url: URL, body: Record<string, unknown> | null): Response => {
+    if (url.pathname === "/orgs/nemarDatasets/members") return Response.json([]);
+
+    const m = url.pathname.match(/^\/repos\/nemarDatasets\/([^/]+)(\/.*)?$/);
+    if (!m) return new Response("{}", { status: 404 });
+    const repo = decodeURIComponent(m[1]);
+    const rest = m[2] ?? "";
+    const branch = defaultBranches.has(repo) ? defaultBranches.get(repo) : "main";
+    if (branch === null || branch === undefined) {
+      return Response.json({ message: "Not Found" }, { status: 404 });
+    }
+    const own = rulesets.get(repo) ?? [];
+
+    if (rest === "") {
+      if (method === "GET") return Response.json({ name: repo, default_branch: branch });
+      if (method === "PATCH") {
+        // The one repository setting a test follows is the default branch, which is what
+        // ensureMainBranch repoints; a visibility or auto-merge PATCH carries no such field.
+        if (typeof body?.default_branch === "string") {
+          defaultBranches.set(repo, body.default_branch);
+        }
+        return Response.json({ name: repo });
+      }
+    }
+    // Every repository has a `main` branch to repoint to. The case where ensureMainBranch has to
+    // rename a branch, because `main` is missing, is not modeled.
+    if (rest === "/branches/main" && method === "GET") return Response.json({ name: "main" });
+
+    if (rest === "/rulesets") {
+      if (method === "GET") {
+        const parents = url.searchParams.get("includes_parents") !== "false";
+        const listed = [...own, ...(parents ? orgRulesets : [])];
+        return Response.json(listed.map((r) => summary(r, repo)));
+      }
+      if (method === "POST") {
+        const why = refusal(body);
+        if (why)
+          return Response.json({ message: "Validation Failed", errors: [why] }, { status: 422 });
+        if (own.some((r) => r.name === body?.name)) {
+          return Response.json(
+            { message: "Validation Failed", errors: ["Name must be unique"] },
+            { status: 422 },
+          );
+        }
+        const record: RulesetRecord = {
+          id: ++nextId,
+          name: String(body?.name),
+          source_type: "Repository",
+          body: body as Record<string, unknown>,
+        };
+        rulesets.set(repo, [...own, record]);
+        return Response.json({ id: record.id, ...record.body }, { status: 201 });
+      }
+    }
+
+    const one = rest.match(/^\/rulesets\/(\d+)$/);
+    if (one) {
+      const id = Number(one[1]);
+      const record = own.find((r) => r.id === id);
+      if (!record) return Response.json({ message: "Not Found" }, { status: 404 });
+      if (method === "GET") return Response.json({ id: record.id, ...record.body });
+      if (method === "PUT") {
+        const why = refusal(body);
+        if (why)
+          return Response.json({ message: "Validation Failed", errors: [why] }, { status: 422 });
+        record.name = String(body?.name);
+        record.body = body as Record<string, unknown>;
+        return Response.json({ id: record.id, ...record.body });
+      }
+      if (method === "DELETE") {
+        rulesets.set(
+          repo,
+          own.filter((r) => r.id !== id),
+        );
+        return new Response(null, { status: 204 });
+      }
+    }
+
+    if (rest === "/contents/.github/workflows" && method === "GET") {
+      // Every workflow the Worker would deploy is already there.
+      return Response.json(getWorkflowTemplates().map((w) => ({ path: w.path, type: "file" })));
+    }
+    if (/^\/commits\/[^/]+\/check-runs$/.test(rest) && method === "GET") {
+      return Response.json({
+        check_runs: [
+          {
+            name: "Run BIDS Validation",
+            conclusion: bidsConclusion.get(repo) ?? "success",
+            app: { id: 3679074 },
+          },
+        ],
+      });
+    }
+    if (/^\/commits\/[^/]+\/status$/.test(rest) && method === "GET") {
+      return Response.json({ statuses: [] });
+    }
+    if (rest === "/collaborators" && method === "GET") return Response.json([]);
+    if (/^\/collaborators\/[^/]+$/.test(rest) && (method === "PUT" || method === "DELETE")) {
+      return new Response(null, { status: 204 });
+    }
+
+    return Response.json({ message: `no stand-in for ${method} ${url.pathname}` }, { status: 404 });
+  };
 
   const server: Server = Bun.serve({
     port: 0,
@@ -219,110 +333,15 @@ export function startRulesetStandIn(): RulesetStandIn {
         return Response.json({ message: "refused by the stand-in" }, { status: failure.status });
       }
 
-      if (url.pathname === "/orgs/nemarDatasets/members") return Response.json([]);
-
-      const m = url.pathname.match(/^\/repos\/nemarDatasets\/([^/]+)(\/.*)?$/);
-      if (!m) return new Response("{}", { status: 404 });
-      const repo = decodeURIComponent(m[1]);
-      const rest = m[2] ?? "";
-      const branch = defaultBranches.has(repo) ? defaultBranches.get(repo) : "main";
-      if (branch === null || branch === undefined) {
-        return Response.json({ message: "Not Found" }, { status: 404 });
-      }
-      const own = rulesets.get(repo) ?? [];
-
-      if (rest === "") {
-        if (method === "GET") return Response.json({ name: repo, default_branch: branch });
-        if (method === "PATCH") {
-          // The one repository setting a test follows is the default branch, which is what
-          // ensureMainBranch repoints; a visibility or auto-merge PATCH carries no such field.
-          if (typeof body?.default_branch === "string") {
-            defaultBranches.set(repo, body.default_branch);
-          }
-          return Response.json({ name: repo });
-        }
-      }
-      // Every repository has a `main` branch to repoint to. The case where ensureMainBranch has to
-      // rename a branch, because `main` is missing, is not modeled.
-      if (rest === "/branches/main" && method === "GET") return Response.json({ name: "main" });
-
-      if (rest === "/rulesets") {
-        if (method === "GET") {
-          const parents = url.searchParams.get("includes_parents") !== "false";
-          const listed = [...own, ...(parents ? orgRulesets : [])];
-          return Response.json(listed.map((r) => summary(r, repo)));
-        }
-        if (method === "POST") {
-          const why = refusal(body);
-          if (why)
-            return Response.json({ message: "Validation Failed", errors: [why] }, { status: 422 });
-          if (own.some((r) => r.name === body?.name)) {
-            return Response.json(
-              { message: "Validation Failed", errors: ["Name must be unique"] },
-              { status: 422 },
-            );
-          }
-          const record: RulesetRecord = {
-            id: ++nextId,
-            name: String(body?.name),
-            source_type: "Repository",
-            body: body as Record<string, unknown>,
-          };
-          rulesets.set(repo, [...own, record]);
-          return Response.json({ id: record.id, ...record.body }, { status: 201 });
-        }
-      }
-
-      const one = rest.match(/^\/rulesets\/(\d+)$/);
-      if (one) {
-        const id = Number(one[1]);
-        const record = own.find((r) => r.id === id);
-        if (!record) return Response.json({ message: "Not Found" }, { status: 404 });
-        if (method === "GET") return Response.json({ id: record.id, ...record.body });
-        if (method === "PUT") {
-          const why = refusal(body);
-          if (why)
-            return Response.json({ message: "Validation Failed", errors: [why] }, { status: 422 });
-          record.name = String(body?.name);
-          record.body = body as Record<string, unknown>;
-          return Response.json({ id: record.id, ...record.body });
-        }
-        if (method === "DELETE") {
-          rulesets.set(
-            repo,
-            own.filter((r) => r.id !== id),
-          );
-          return new Response(null, { status: 204 });
-        }
-      }
-
-      if (rest === "/contents/.github/workflows" && method === "GET") {
-        // Every workflow the Worker would deploy is already there.
-        return Response.json(getWorkflowTemplates().map((w) => ({ path: w.path, type: "file" })));
-      }
-      if (/^\/commits\/[^/]+\/check-runs$/.test(rest) && method === "GET") {
-        return Response.json({
-          check_runs: [
-            {
-              name: "Run BIDS Validation",
-              conclusion: bidsConclusion.get(repo) ?? "success",
-              app: { id: 3679074 },
-            },
-          ],
-        });
-      }
-      if (/^\/commits\/[^/]+\/status$/.test(rest) && method === "GET") {
-        return Response.json({ statuses: [] });
-      }
-      if (rest === "/collaborators" && method === "GET") return Response.json([]);
-      if (/^\/collaborators\/[^/]+$/.test(rest) && (method === "PUT" || method === "DELETE")) {
-        return new Response(null, { status: 204 });
-      }
-
-      return Response.json(
-        { message: `no stand-in for ${method} ${url.pathname}` },
-        { status: 404 },
+      const response = respond(method, url, body);
+      const late = lateFailures.find(
+        (f) => f.remaining > 0 && f.method === method && f.path.test(url.pathname),
       );
+      if (late && response.ok) {
+        late.remaining--;
+        return Response.json({ message: "answered late by the stand-in" }, { status: late.status });
+      }
+      return response;
     },
   });
 
@@ -339,6 +358,9 @@ export function startRulesetStandIn(): RulesetStandIn {
     beforeNext(method, path, run) {
       hooks.push({ method, path, run });
     },
+    failAfterWriting(method, path, status, times = 1) {
+      lateFailures.push({ method, path, status, remaining: times });
+    },
     writes: () => calls.filter((c) => c.method !== "GET"),
     rulesetWrites: () => calls.filter((c) => c.method !== "GET" && c.path.includes("/rulesets")),
     reset() {
@@ -349,6 +371,7 @@ export function startRulesetStandIn(): RulesetStandIn {
       bidsConclusion.clear();
       failures.length = 0;
       hooks.length = 0;
+      lateFailures.length = 0;
     },
     stop() {
       server.stop(true);

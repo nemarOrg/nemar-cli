@@ -570,7 +570,13 @@ async function listOwnRulesets(repo: string, pat: string): Promise<RulesetSummar
  * Put the review ruleset in place on a repository, or bring it back to the payload: GET-first, so
  * the choice between creating and updating is never a guess from an error code (see
  * {@link ensureBranchRuleset}). A 422 on the write is a real validation error and is surfaced as it
- * came.
+ * came, with one exception.
+ *
+ * The exception is a 422 on a create. The transport sends a POST again after a 5xx, so a create
+ * that GitHub processed and then answered with a 502 is sent twice, and the second meets the name
+ * the first made: a 422, and a repository that is in the state asked for. So after a 422 on a
+ * create the list is read once more, and a ruleset that is there now is brought to the payload by
+ * an update. A 422 with no such ruleset is a real validation error, and is surfaced as it came.
  *
  * Writes whatever the repository's state is; whether it SHOULD be required here is the caller's
  * decision ({@link reconcileReviewRuleset} is the one that makes it).
@@ -581,17 +587,34 @@ export async function ensureReviewRuleset(
 ): Promise<{ action: "created" | "updated"; payload: ReviewRulesetPayload }> {
   const payload = buildReviewRulesetPayload();
   const rulesetsUrl = `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/rulesets`;
-  const existing = (await listOwnRulesets(repo, pat)).find((r) => r.name === REVIEW_RULESET_NAME);
+  const named = async () =>
+    (await listOwnRulesets(repo, pat)).find((r) => r.name === REVIEW_RULESET_NAME);
+  const send = (existing: RulesetSummary | undefined) =>
+    githubFetchWithRetry(
+      existing ? `${rulesetsUrl}/${existing.id}` : rulesetsUrl,
+      {
+        method: existing ? "PUT" : "POST",
+        headers: { ...ghHeaders(pat), "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+      { retryOn404: true },
+    );
 
-  const write = await githubFetchWithRetry(
-    existing ? `${rulesetsUrl}/${existing.id}` : rulesetsUrl,
-    {
-      method: existing ? "PUT" : "POST",
-      headers: { ...ghHeaders(pat), "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    },
-    { retryOn404: true },
-  );
+  let existing = await named();
+  let write = await send(existing);
+  if (write.status === 422 && !existing) {
+    let now: RulesetSummary | undefined;
+    try {
+      now = await named();
+    } catch (e) {
+      // The 422 is the answer to the create, and the more useful one to report.
+      console.error(`[review-ruleset] re-list after a 422 failed for ${repo}: ${errText(e)}`);
+    }
+    if (now) {
+      existing = now;
+      write = await send(existing);
+    }
+  }
   if (write.ok) {
     return { action: existing ? "updated" : "created", payload };
   }
