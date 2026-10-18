@@ -11,6 +11,7 @@ import { namingFactsFor } from "../backend/src/services/pr-review-naming";
 import type { Bindings } from "../backend/src/types/bindings";
 import { textFactsOf } from "../scripts/ci/pr-review";
 import type { Listing } from "../scripts/ci/pr-review-evidence";
+import { MAX_BODY_CHARS } from "../scripts/ci/pr-review-prompt";
 import {
   AUTHOR_YEAR_PREFIX,
   NAMING_PROBLEMS,
@@ -21,6 +22,10 @@ import {
 } from "../shared/naming-rule";
 import * as cli from "../src/lib/pr-text";
 
+/** The two fields of a listing the text facts read: the dataset's name at the base and at the head. */
+const listing = (nameBefore: string | null, nameAfter: string | null) =>
+  ({ nameBefore, nameAfter }) as Listing;
+
 describe("there is one copy of the rule", () => {
   test("the CLI's exports are the shared rule's own functions and pattern, not copies", () => {
     expect(cli.findAuthorYearPrefix).toBe(findAuthorYearPrefix);
@@ -28,8 +33,6 @@ describe("there is one copy of the rule", () => {
   });
 
   test("the review job's facts are the rule's answers, on the title and on a changed name", () => {
-    const listing = (nameBefore: string | null, nameAfter: string | null) =>
-      ({ nameBefore, nameAfter }) as Listing;
     for (const title of ["Lee2019 EEG dataset", "Fix {{title}}", "Add three EEG recordings"]) {
       expect(textFactsOf({ title, body: "x" }, listing("A", "A")).titleProblem, title).toBe(
         namingProblemOf(title),
@@ -53,6 +56,32 @@ describe("there is one copy of the rule", () => {
     expect(
       textFactsOf({ title: "t", body: "Adds sub-03." }, listing(null, null)).descriptionEmpty,
     ).toBe(false);
+  });
+
+  test("a description is empty when the models read it as blank, and not otherwise", () => {
+    // `tidy` turns each control and invisible format character into a space before a model reads
+    // the text, so a body of zero-width spaces and soft hyphens is blank to them. `trim` alone
+    // does not remove them, and called such a body a description.
+    const listed = listing(null, null);
+    const empty = (body: unknown) => textFactsOf({ title: "t", body }, listed).descriptionEmpty;
+    for (const body of [
+      "\u200b\u00ad",
+      "\u200b \u00ad\n\ufeff\t",
+      "\u0007",
+      "\u{e0020}\u2060",
+      // However long: a run of blanks past the models' cut is still nothing.
+      `${" ".repeat(MAX_BODY_CHARS + 1_000)}\u200b`,
+    ]) {
+      expect(empty(body), JSON.stringify(body.slice(0, 12))).toBe(true);
+    }
+    // A word anywhere in it is a description, however much invisible text surrounds the word.
+    for (const body of [
+      "\u200b\u00adAdds sub-03.\u200b",
+      `${" ".repeat(MAX_BODY_CHARS + 1_000)}Adds sub-03.`,
+      "\u200b.\u00ad",
+    ]) {
+      expect(empty(body), JSON.stringify(body.slice(0, 12))).toBe(false);
+    }
   });
 });
 

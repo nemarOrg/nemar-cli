@@ -48,6 +48,7 @@ import {
   type RunError,
   type StageTokens,
 } from "../../shared/pr-review";
+import { tidy } from "../../shared/untrusted-text";
 import {
   EvidenceError,
   type Listing,
@@ -385,6 +386,11 @@ interface PullRequestJson {
  * it and from the listing: whether the description is empty, how the title breaks the naming rule,
  * and how the dataset's name breaks it when the pull request changes the name. The rule is the
  * shared one the CLI and the Worker use; nothing here is a judgment.
+ *
+ * The description is judged as the models read it, after {@link tidy}: a body of zero-width spaces
+ * and soft hyphens is blank to them, so it is empty here, though `trim` leaves it. The whole of it is
+ * judged, not the cut the models are given (tidy would end a long run of blanks with its `[cut]`
+ * mark, and a description of nothing but blanks is empty however long it is).
  */
 export function textFactsOf(pr: { title?: unknown; body?: unknown }, listing: Listing): TextFacts {
   const changedName =
@@ -392,7 +398,7 @@ export function textFactsOf(pr: { title?: unknown; body?: unknown }, listing: Li
       ? listing.nameAfter
       : null;
   return {
-    descriptionEmpty: typeof pr.body !== "string" || pr.body.trim() === "",
+    descriptionEmpty: tidy(pr.body, Number.POSITIVE_INFINITY).trim() === "",
     titleProblem: namingProblemOf(typeof pr.title === "string" ? pr.title : ""),
     nameProblem: changedName === null ? null : namingProblemOf(changedName),
   };
