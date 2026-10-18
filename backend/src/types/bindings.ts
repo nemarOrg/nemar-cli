@@ -246,7 +246,14 @@ export interface Bindings {
   //
   // Not a casual switch: once any repository carries the review ruleset (ADR 0107), an unset or 0
   // value leaves every pull request on that repository waiting for a check that nothing posts, so
-  // the merges stop. Take the ruleset off first, then switch the review off.
+  // the merges stop. The rulesets come off before the review does, in this order, and a removal is
+  // allowed whatever the switches say: (a) while PR_REVIEW_AUTO_REQUIRE is still on, run
+  // `nemar admin fleet require-review --all --remove --apply` and repeat it with `--after` set to
+  // the last id of each page (it does ONE page, 25 datasets by default and 50 at most, and prints
+  // `Next page:` instead of looping) until the output has no `Next page:` line; (b) dry run the
+  // same pages and expect no row that would remove; (c) turn PR_REVIEW_AUTO_REQUIRE off through a
+  // release, because the next deploy drops what was changed only in the dashboard; (d) repeat (a)
+  // and (b) once more, for the datasets that changed in between. Only then switch the review off.
   PR_REVIEW_ENABLED?: string; // "1" enables the review
 
   // Automatic requirement of the pull-request review (ADR 0107). Only when this is exactly "1" (and

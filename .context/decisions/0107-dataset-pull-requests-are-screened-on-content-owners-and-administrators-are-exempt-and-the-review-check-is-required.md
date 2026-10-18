@@ -128,7 +128,12 @@ And the review only ever sees a pull request's text and metadata, so a count of 
   The review runs from the day the Worker is deployed, so without a switch of its own the first publication or enforce run after a deploy would require the check before the canary and the calibration gate.
   The owner turns it on when the fleet step starts, after both, and it is never on before; it is absent from every vars block of the Worker's configuration file until then, and a test says so.
   The explicit tools, the review-ruleset routes and `nemar admin fleet require-review`, do not read it: the canary and the fleet are applied with them, a dry run first.
-  A fleet rollback turns the switch off first and takes the rulesets off second (`nemar admin fleet require-review --all --remove --apply`, which works whatever the switches say), so that no publication or visibility change during it puts the requirement back on a repository it has just cleared.
+  A fleet rollback has four steps, in this order, and a removal is allowed whatever the switches say.
+  (a) Start the removal while the switch is still on: `nemar admin fleet require-review --all --remove --apply` does ONE page (25 datasets by default, 50 at most) and prints a `Next page:` line instead of looping, so repeat it with `--after` set to the last id of the page just done, until the output has no `Next page:` line.
+  (b) Dry run the same pages (the same command without `--apply`) and expect no row that would remove.
+  (c) Turn the switch off through a release: the next deploy replaces the Worker's variables with the ones in the configuration file, so a change made in the dashboard does not last.
+  A switch that was ever set as a Worker secret is deleted as a secret instead, because a secret survives a deploy.
+  (d) Repeat (a) and (b) once more, to catch the datasets that were published or changed between the first pass and the release, because the automatic paths can put the requirement back until the release lands.
   `PR_REVIEW_ENABLED` itself is not turned off while any repository carries the ruleset: every pull request there would wait for a check nothing posts.
 - **A pull request whose required review failed is merged in the GitHub UI by an owner or administrator.**
   The CLI never uses the bypass (ADR 0093 stands), and its message says so: it names what can block a merge (the BIDS validation, the version check, the review) and says that only the review check can be overridden there, and only where its ruleset is in force.
