@@ -14,7 +14,6 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { gatherListing } from "../scripts/ci/pr-review-evidence";
 import {
   CalibrationReadError,
   type CalibrationRow,
@@ -27,6 +26,7 @@ import {
   parseTarget,
   renderTable,
 } from "../scripts/ci/pr-review-calibrate";
+import { gatherListing } from "../scripts/ci/pr-review-evidence";
 import { type StandInMessage, replyFor, standInMessage } from "./helpers/anthropic-sse";
 
 let root: string;
