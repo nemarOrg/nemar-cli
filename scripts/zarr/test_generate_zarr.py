@@ -17290,14 +17290,18 @@ class TestCutShortBrainVisionThroughConvertOne(ConvertOneKeepingStoreCase):
                 self.assertEqual(self.n_samples(result), samples)
                 self.assertNotIn(self.DROPPED, self.published_recording_metadata(result["entry"]))
 
-    def assert_refused(self, head_files: set[str], data: str) -> None:
+    def assert_refused(self, head_files: set[str], data: str, reason: str) -> None:
         """Both exporters refuse the recording, typed and never retried, naming its
-        data file, and publish no store for it."""
+        data file, and publish no store for it. `reason` is the part of biosigIO's
+        message that says why, so a refusal for another cause does not pass. It is
+        read from `error`: `detail` is capped at 300 characters, and the longest
+        refusal runs past that."""
         for path_name in self.PATHS:
             with self.subTest("refused", path=path_name):
                 result = self.convert_on(path_name, head_files)
                 self.assert_refused_as_data(result, "corrupt_or_truncated")
                 self.assertIn(os.path.basename(data), result["detail"])
+                self.assertIn(reason, result["error"])
                 self.assertNotIn("entry", result)
 
     def test_a_data_file_cut_inside_its_last_frame_converts_the_whole_frames(self):
@@ -17341,7 +17345,11 @@ class TestCutShortBrainVisionThroughConvertOne(ConvertOneKeepingStoreCase):
 
         with open(data, "r+b") as fh:
             fh.truncate(size - 1)
-        self.assert_refused(head_files, data)
+        # biosigIO's refusal for a file smaller than the frames its header declares.
+        declared = size // frame * frame
+        self.assert_refused(
+            head_files, data, f"is smaller than the {declared} bytes its header declares"
+        )
 
     def test_a_vectorized_data_file_with_a_partial_frame_is_terminal_corrupt_or_truncated(self):
         head_files, vhdr, data = self.write_recording()
@@ -17355,7 +17363,9 @@ class TestCutShortBrainVisionThroughConvertOne(ConvertOneKeepingStoreCase):
 
         with open(data, "r+b") as fh:
             fh.truncate(size - 1)
-        self.assert_refused(head_files, data)
+        # biosigIO says the flag does not apply only when the flag was passed, so
+        # this also fails if the converter stops passing it.
+        self.assert_refused(head_files, data, "does not apply to vectorized data")
 
     def test_a_data_file_smaller_than_one_frame_is_terminal_corrupt_or_truncated(self):
         head_files, vhdr, data = self.write_recording()
@@ -17365,7 +17375,7 @@ class TestCutShortBrainVisionThroughConvertOne(ConvertOneKeepingStoreCase):
         # One byte short of a single frame: no whole frame is left to read.
         with open(data, "r+b") as fh:
             fh.truncate(frame - 1)
-        self.assert_refused(head_files, data)
+        self.assert_refused(head_files, data, "so the file holds no whole frame")
 
 
 class TestStreamedTruncatedFifThroughConvertOne(ConvertOneLocalCase):
