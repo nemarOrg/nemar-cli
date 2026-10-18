@@ -13,11 +13,12 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
-## 0.10.20 - unreleased
+## 0.10.20 - 2026-10-18
 
 The Zarr conversion that runs on `hallu` now pins biosigIO 1.2.13 and types the failures caused by missing companion data.
 Existing stores are not reconverted by this release, because the engine stamp (`ZARR_ENGINE_VERSION`) stays `3`; a recording gets the new verdicts when it converts again.
-There is no migration, no new Worker secret or variable, and no change to the Worker's behavior.
+There is no migration and no new Worker secret or variable.
+The Worker serves the index schema from one route, so the descriptions that route returns change on deploy; no Worker logic changes.
 The conversion changes run on `hallu` from this repository's `main` branch, not from the npm package.
 
 ### Changed
@@ -33,12 +34,14 @@ The conversion changes run on `hallu` from this repository's `main` branch, not 
   A host error raised while the reader recovers from a refusal keeps its retry: a refusal's code is read from the exception and its direct causes, never from its context.
   Discovery now lists tree paths with `-z`, so a recording whose name has non-ASCII bytes matches the header that names it.
   That widens discovery for those datasets; a dataset converted before this release keeps its old discovery until the engine stamp is bumped, which this release does not do.
-- **The dataset pull-request review installs after the token mint (#1820).**
+- **The source copy of the dataset pull-request review workflow now matches the copy that dataset repositories run (#1820).**
   The review workflow runs the checkout, the Bun setup and the install after it mints the dataset token, and before it writes the token to the clone's configuration.
   The install uses `--ignore-scripts`, and the job timeout is 28 minutes, below the 30-minute watchdog deadline.
+  The shared workflow repository already runs this body; this release brings the source copy in this repository to the same content.
 - **The index contract says what a retry can change.**
-  The `failure` description in `shared/zarr-index.schema.json` says that retrying in the same state will not change the outcome, except for content that is not yet fetched locally.
-  The code list there names `companion_missing`, `split_part_missing` and `epoched_recording`.
+  The `failure` description in `shared/zarr-index.schema.json` says that retrying in the same state will not change the outcome.
+  The `failure_count` description excludes content that is not yet fetched locally from the failures that need a change to the data or the converter.
+  The code list names `companion_missing`, `split_part_missing` and `epoched_recording`.
   This is a description-only change.
 - **The unexpected-skip guard in `test.yml` exempts pytest expected failures (epic #1800).**
   A pinned known gap no longer fails the run as a skip; a real skip still does.
