@@ -22,9 +22,11 @@
  *   to an administrator to review by hand. The word is given only while the current commit has no
  *   review of its own: a push by someone who is not exempt IS reviewed, and that review's verdict
  *   stands. It is inferred from who opened the pull request, not read from GitHub: nothing here
- *   checks that the review check was posted as `skipped`. Which authors are exempt is
- *   `isReviewExempt`'s to say, asked once per dataset and login for the length of one request, a
- *   few at a time and within a time budget, and never kept.
+ *   checks that the review check was posted as `skipped`. The one thing read of that check is
+ *   whether the naming rule holds the pull request (the check failed, or asks for a person), which
+ *   the row says in `detail`, so the list shows it waits for a fix or for `allow --admin`. Which
+ *   authors are exempt is `isReviewExempt`'s to say, asked once per dataset and login for the
+ *   length of one request, a few at a time and within a time budget, and never kept.
  * - **Overrides are keyed by GitHub's numeric id**, because a login can be renamed and reused.
  */
 
@@ -55,6 +57,7 @@ import {
 import {
   type AuthorOverride,
   DECLINE_REASONS,
+  PR_REVIEW_CHECK_NAME,
   REVIEW_STATES,
   type ReviewState,
   type StoredOutcome,
@@ -166,6 +169,12 @@ export interface CheckContext {
    * check run whose App could not be read.
    */
   appId: number | null;
+  /**
+   * A completed check run's conclusion as GitHub words it (`FAILURE`, `ACTION_REQUIRED`, ...). Only
+   * `state` decides whether a required check is green; this is for telling a failure from a check
+   * that asks for a person, which `state` calls `fail` for both.
+   */
+  conclusion?: string;
 }
 
 const CHECK_FAIL = new Set([
@@ -198,7 +207,14 @@ export function readCheckContext(node: unknown): CheckContext | null {
       return { name: n.name, kind: "run", state: "pass", at: started, appId };
     }
     if (typeof n.conclusion === "string" && CHECK_FAIL.has(n.conclusion)) {
-      return { name: n.name, kind: "run", state: "fail", at: started, appId };
+      return {
+        name: n.name,
+        kind: "run",
+        state: "fail",
+        at: started,
+        appId,
+        conclusion: n.conclusion,
+      };
     }
     // NEUTRAL and SKIPPED count as passing for a required check on GitHub. Neither of the two
     // checks read here (BIDS and version) emits them, so seeing one means something else is posting
@@ -256,6 +272,32 @@ export function checkStateOf(
   return listComplete ? "missing" : "unknown";
 }
 
+/**
+ * Why an exempt pull request is held by the naming rule, if it is, read from GitHub's record of the
+ * review's own check on the current commit: `naming_rule` when that check failed (the rule refused
+ * the title or the new dataset name, which an administrator can waive for the commit), and
+ * `naming_unchecked` when it asks for a person (the dataset's name could not be read, so there is
+ * nothing to waive until a start reads it). The queue infers who is exempt from who opened the pull
+ * request and posts nothing itself, so this is the only place it learns the rule's answer. A
+ * review check that passed, was skipped, is still running or is absent is no hold, and neither is
+ * one on a list that was cut short, where the check might be on the next page. Only informs: a
+ * workflow job named like the check could make the label wrong, and nothing is decided by it.
+ */
+export function namingHoldOf(
+  contexts: readonly CheckContext[],
+  listComplete: boolean,
+): "naming_rule" | "naming_unchecked" | null {
+  if (!listComplete) return null;
+  let newest: CheckContext | null = null;
+  for (const c of contexts) {
+    if (c.kind !== "run" || c.name !== PR_REVIEW_CHECK_NAME) continue;
+    if (!newest || c.at >= newest.at) newest = c;
+  }
+  if (newest?.conclusion === "FAILURE") return "naming_rule";
+  if (newest?.conclusion === "ACTION_REQUIRED") return "naming_unchecked";
+  return null;
+}
+
 // ---------------------------------------------------------------------------------------------
 // The GitHub side
 // ---------------------------------------------------------------------------------------------
@@ -274,6 +316,8 @@ export interface OpenPullRequest {
   authorId: number | null;
   bids: CheckState;
   version: CheckState;
+  /** How the naming rule left the review's own check on the head commit, if it held it ({@link namingHoldOf}). */
+  namingHold: "naming_rule" | "naming_unchecked" | null;
 }
 
 export interface OpenPullRequests {
@@ -425,6 +469,7 @@ function readOpenPullRequest(node: unknown): { pr: OpenPullRequest } | { skip: S
       // post it as a plain workflow job.
       bids: checkStateOf(list, [bidsCtx.context], readable, bidsCtx.integration_id),
       version: checkStateOf(list, [versionCtx.context], readable, versionCtx.integration_id),
+      namingHold: namingHoldOf(list, readable),
     },
   };
 }
@@ -761,7 +806,8 @@ async function loadReviews(db: D1Database, datasetIds: readonly string[]): Promi
  * Verdicts an administrator can act on: approve a pass, or review by hand what the automation
  * could not or did not decide. A fail is the author's to fix and an in-progress review is waiting
  * on the machine, so neither is yours yet, and an exempt pull request is not reviewed at all, so
- * nothing about it waits for a person.
+ * there is no review for a person to read (when the naming rule holds one, its row says so in
+ * `detail`, and the author's fix or an `allow --admin` is what releases it).
  */
 const NEEDS_YOU: ReadonlySet<QueueVerdict> = new Set([
   "pass",
@@ -1093,9 +1139,11 @@ export async function buildQueue(env: Bindings, filters: QueueFilters): Promise<
 
   const all: QueueEntry[] = [];
   for (const { pr, base, mayBeExempt } of staged) {
+    // An exempt row says when the naming rule holds it (its check failed, or asks for a person), so
+    // the list shows it waits on a fix or an `allow --admin`; otherwise it carries no detail.
     const classified: Classified =
       mayBeExempt && exempt.known(pr.datasetId, pr.authorLogin)
-        ? { ...base, verdict: "exempt", detail: null }
+        ? { ...base, verdict: "exempt", detail: pr.namingHold }
         : base;
     const verdictAndDraft = { verdict: classified.verdict, draft: pr.draft };
     all.push({

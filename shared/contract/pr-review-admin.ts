@@ -83,8 +83,20 @@ export type CheckState = (typeof CHECK_STATES)[number];
 
 export type QueueEnvironment = "production" | "non-production";
 
-/** The closed reason behind a `not_reviewed` (a decline) or `could_not_decide` (a run error). */
-export type VerdictDetail = DeclineReason | RunError | "unreported";
+/**
+ * The closed reason behind a `not_reviewed` (a decline) or `could_not_decide` (a run error), or, for
+ * an `exempt` row in the list, why the naming rule holds it: `naming_rule` (the review's check on
+ * the current commit failed, so the author fixes the title or the dataset name, or an administrator
+ * waives the rule for the commit with `allow --admin`) and `naming_unchecked` (that check asks for a
+ * person, because the dataset's name could not be read: there is nothing to waive until a start
+ * reads it). An exempt row the rule does not hold has no detail.
+ */
+export type VerdictDetail =
+  | DeclineReason
+  | RunError
+  | "unreported"
+  | "naming_rule"
+  | "naming_unchecked";
 
 /**
  * Every error word these routes answer with, in the body's `code` field. (The body's `error` field

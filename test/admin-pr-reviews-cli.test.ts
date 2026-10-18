@@ -373,6 +373,52 @@ describe("nemar admin pr-reviews (list)", () => {
     expect((await cli([...PR, "--needs-me"])).stdout).not.toContain("nm000201");
   });
 
+  test("an exempt pull request the naming rule holds says it waits for allow --admin, and the plain one does not", async () => {
+    const reviewCheck = (conclusion: string) => ({
+      type: "run" as const,
+      name: "NEMAR PR Review",
+      status: "COMPLETED",
+      conclusion,
+    });
+    nodes(
+      {
+        ds: "nm000201",
+        n: 5,
+        author: "queueadmin-gh",
+        authorId: 4001,
+        checks: [bidsOk("nm000201"), versionOk, reviewCheck("FAILURE")],
+      },
+      {
+        ds: "nm000202",
+        n: 6,
+        author: "queueadmin-gh",
+        authorId: 4001,
+        checks: [bidsOk("nm000202"), versionOk, reviewCheck("ACTION_REQUIRED")],
+      },
+      {
+        ds: "nm000203",
+        n: 7,
+        author: "queueadmin-gh",
+        authorId: 4001,
+        checks: [bidsOk("nm000203"), versionOk, reviewCheck("SKIPPED")],
+      },
+    );
+    const r = await cli(PR);
+    expect(r.exitCode).toBe(0);
+    const lines = r.stdout.split("\n");
+    const row = (ds: string) => lines.find((l) => l.includes(ds)) ?? "";
+    expect(row("nm000201")).toMatch(/exempt, naming rule failed: needs allow --admin\s+ok\s+ok/);
+    expect(row("nm000202")).toMatch(/exempt, naming rule not checked: run start\s+ok\s+ok/);
+    expect(row("nm000203")).toMatch(/exempt \(owner or admin\)\s+ok\s+ok/);
+    // The word reaches the JSON as a closed word, not a sentence.
+    const json = JSON.parse((await cli([...PR, "--json"])).stdout) as QueueResponse;
+    expect(json.entries.map((e) => [e.dataset_id, e.verdict, e.detail])).toEqual([
+      ["nm000201", "exempt", "naming_rule"],
+      ["nm000202", "exempt", "naming_unchecked"],
+      ["nm000203", "exempt", null],
+    ]);
+  });
+
   test("a bad filter is refused before anything is asked of the API", async () => {
     for (const [args, message] of [
       [["--verdict", "great"], "is not a verdict"],

@@ -48,6 +48,7 @@ import {
 } from "./helpers/github-permission";
 import { projectOnto } from "./helpers/graphql-select";
 import {
+  type CheckSpec,
   type PrSpec,
   SHA_A,
   SHA_B,
@@ -2164,6 +2165,188 @@ describe("an owner's or administrator's pull request is exempt (ADR 0107)", () =
     expect(by.nm000202).toMatchObject({ verdict: "not_reviewed", needs_you: true });
     // Not reviewed, then a failure, then the exempt one, though it was opened first.
     expect(body.entries.map((e) => e.dataset_id)).toEqual(["nm000202", "nm000203", "nm000201"]);
+  });
+
+  describe("when the naming rule holds it", () => {
+    /** The review's own check on a commit, as the exempt path posts it. */
+    const reviewCheck = (conclusion: string, over: Partial<CheckSpec> = {}): CheckSpec => ({
+      type: "run",
+      name: "NEMAR PR Review",
+      status: "COMPLETED",
+      conclusion,
+      ...over,
+    });
+    const withChecks = (ds: string, ...extra: CheckSpec[]) => [bidsOk(ds), versionOk, ...extra];
+    const detailOf = async () => {
+      const { body } = await queue();
+      return Object.fromEntries(body.entries.map((e) => [e.dataset_id, e]));
+    };
+
+    test("a check that failed reads naming_rule, one that asks for a person reads naming_unchecked, and neither is yours to act on", async () => {
+      nodes(
+        {
+          ds: "nm000201",
+          n: 1,
+          author: ADMIN_GH,
+          authorId: 4001,
+          checks: withChecks("nm000201", reviewCheck("FAILURE")),
+        },
+        {
+          ds: "nm000202",
+          n: 2,
+          author: ADMIN_GH,
+          authorId: 4001,
+          checks: withChecks("nm000202", reviewCheck("ACTION_REQUIRED")),
+        },
+      );
+      const by = await detailOf();
+      expect(by.nm000201).toMatchObject({
+        verdict: "exempt",
+        detail: "naming_rule",
+        needs_you: false,
+      });
+      expect(by.nm000202).toMatchObject({
+        verdict: "exempt",
+        detail: "naming_unchecked",
+        needs_you: false,
+      });
+    });
+
+    test("a check that was skipped, is running, or is not there is the plain exemption", async () => {
+      nodes(
+        {
+          ds: "nm000201",
+          n: 1,
+          author: ADMIN_GH,
+          authorId: 4001,
+          checks: withChecks("nm000201", reviewCheck("SKIPPED")),
+        },
+        {
+          ds: "nm000202",
+          n: 2,
+          author: ADMIN_GH,
+          authorId: 4001,
+          checks: withChecks(
+            "nm000202",
+            reviewCheck("", { status: "IN_PROGRESS", conclusion: null }),
+          ),
+        },
+        { ds: "nm000203", n: 3, author: ADMIN_GH, authorId: 4001 },
+        { ds: "nm000204", n: 4, author: ADMIN_GH, authorId: 4001, checks: null },
+      );
+      const by = await detailOf();
+      for (const ds of ["nm000201", "nm000202", "nm000203", "nm000204"]) {
+        expect(by[ds], ds).toMatchObject({ verdict: "exempt", detail: null });
+      }
+    });
+
+    test("the newest run of the check wins: a waiver's skipped check after the failure releases it, a later failure holds it", async () => {
+      nodes(
+        {
+          ds: "nm000201",
+          n: 1,
+          author: ADMIN_GH,
+          authorId: 4001,
+          checks: withChecks(
+            "nm000201",
+            reviewCheck("FAILURE", { at: "2026-10-01T10:00:00Z" }),
+            reviewCheck("SKIPPED", { at: "2026-10-01T11:00:00Z" }),
+          ),
+        },
+        {
+          ds: "nm000202",
+          n: 2,
+          author: ADMIN_GH,
+          authorId: 4001,
+          checks: withChecks(
+            "nm000202",
+            reviewCheck("SKIPPED", { at: "2026-10-01T10:00:00Z" }),
+            reviewCheck("FAILURE", { at: "2026-10-01T11:00:00Z" }),
+          ),
+        },
+      );
+      const by = await detailOf();
+      expect(by.nm000201).toMatchObject({ verdict: "exempt", detail: null });
+      expect(by.nm000202).toMatchObject({ verdict: "exempt", detail: "naming_rule" });
+    });
+
+    test("a list of checks cut short is not read for it, and a commit status of the same name is not a check run", async () => {
+      nodes(
+        {
+          ds: "nm000201",
+          n: 1,
+          author: ADMIN_GH,
+          authorId: 4001,
+          checks: withChecks("nm000201", reviewCheck("FAILURE")),
+          moreChecks: true,
+        },
+        {
+          ds: "nm000202",
+          n: 2,
+          author: ADMIN_GH,
+          authorId: 4001,
+          checks: withChecks("nm000202", {
+            type: "status",
+            name: "NEMAR PR Review",
+            state: "FAILURE",
+          }),
+        },
+      );
+      const by = await detailOf();
+      expect(by.nm000201).toMatchObject({ verdict: "exempt", detail: null });
+      expect(by.nm000202).toMatchObject({ verdict: "exempt", detail: null });
+    });
+
+    test("only an exempt row carries it: another author's failed check is not labeled, and a review of the commit wins", async () => {
+      seedReview({
+        ds: "nm000203",
+        n: 3,
+        sha: SHA_A,
+        state: "reported",
+        verdict: "fail",
+        authorId: 4001,
+        login: ADMIN_GH,
+      });
+      nodes(
+        {
+          ds: "nm000201",
+          n: 1,
+          author: "stranger",
+          authorId: 700,
+          checks: withChecks("nm000201", reviewCheck("FAILURE")),
+        },
+        {
+          ds: "nm000203",
+          n: 3,
+          sha: SHA_A,
+          author: ADMIN_GH,
+          authorId: 4001,
+          checks: withChecks("nm000203", reviewCheck("FAILURE")),
+        },
+      );
+      const by = await detailOf();
+      expect(by.nm000201).toMatchObject({ verdict: "not_reviewed", detail: null });
+      expect(by.nm000203).toMatchObject({ verdict: "fail", detail: null, review_current: true });
+    });
+
+    test("the word can be filtered for with exempt, and sorts with the exempt rows", async () => {
+      nodes(
+        {
+          ds: "nm000201",
+          n: 1,
+          author: ADMIN_GH,
+          authorId: 4001,
+          checks: withChecks("nm000201", reviewCheck("FAILURE")),
+        },
+        { ds: "nm000202", n: 2, author: "stranger", authorId: 700 },
+      );
+      const only = await queue("?verdict=exempt");
+      expect(only.body.entries.map((e) => [e.dataset_id, e.detail])).toEqual([
+        ["nm000201", "naming_rule"],
+      ]);
+      const all = await queue();
+      expect(all.body.entries.map((e) => e.dataset_id)).toEqual(["nm000202", "nm000201"]);
+    });
   });
 
   test("an owner and an administrator are both exempt, a member and a test persona are not", async () => {

@@ -149,11 +149,22 @@ function verdictColor(v: string): (s: string) => string {
   }
 }
 
-/** The verdict as a person reads it, with the closed word behind it when there is one. */
+/**
+ * The verdict as a person reads it, with the closed word behind it when there is one. An exempt
+ * pull request the naming rule holds says what releases it, because "exempt" alone reads as nothing
+ * waiting: the rule failed it (waive it for the commit, or the author fixes it), or could not check
+ * it (a start reads the name again).
+ */
 export function verdictText(e: Pick<QueueEntry, "verdict" | "detail" | "review_current">): string {
   const word = verdictWord(e.verdict);
   if (e.verdict === "not_reviewed" && e.review_current === false) {
     return `${word} (other commit)`;
+  }
+  if (e.verdict === "exempt" && e.detail === "naming_rule") {
+    return "exempt, naming rule failed: needs allow --admin";
+  }
+  if (e.verdict === "exempt" && e.detail === "naming_unchecked") {
+    return "exempt, naming rule not checked: run start";
   }
   return e.detail ? `${word} (${detailWord(e.detail)})` : word;
 }
@@ -181,7 +192,8 @@ export function renderQueue(entries: QueueEntry[], now: number = Date.now()): st
     pr: `#${plain(String(e.pr_number))}`,
     author: clip(e.author_login, 20),
     from: clip(e.from_fork ? `fork ${e.head_label}` : `branch ${e.head_label}`, 34),
-    verdict: clip(`${verdictText(e)}${e.draft ? " [draft]" : ""}`, 40),
+    // Wide enough for the longest word a row can carry: an exempt row the naming rule holds, drafted.
+    verdict: clip(`${verdictText(e)}${e.draft ? " [draft]" : ""}`, 56),
     age: ageOf(e.created_at, now),
   }));
   const w = (f: (r: (typeof rows)[number]) => string, min: number) =>
@@ -611,7 +623,9 @@ REVIEW column (the automated review of the pull request's CURRENT commit):
                     for you, and a push by anyone else IS reviewed. The naming rule still applies:
                     a title or a new dataset name it refuses fails the check instead, until the
                     title or the name is fixed or the rule is waived for that commit with
-                    'nemar admin pr-reviews allow <dataset> <pr> --admin'
+                    'nemar admin pr-reviews allow <dataset> <pr> --admin'. The row says so when
+                    the check failed ("naming rule failed: needs allow --admin") or when the name
+                    could not be read ("naming rule not checked: run start")
 A verdict is never carried over to a commit it did not read. '*' marks the pull requests you can
 act on now: a pass to approve, or one nobody has decided for you (drafts are never marked).
 

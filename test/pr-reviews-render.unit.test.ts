@@ -158,6 +158,39 @@ describe("renderQueue", () => {
     );
   });
 
+  test("an exempt row the naming rule holds says what releases it, whole, even as a draft", () => {
+    const rows = renderQueue([
+      entry({ pr_number: 1, verdict: "exempt", detail: "naming_rule", needs_you: false }),
+      entry({
+        pr_number: 2,
+        verdict: "exempt",
+        detail: "naming_unchecked",
+        draft: true,
+        needs_you: false,
+      }),
+      entry({ pr_number: 3, verdict: "exempt", detail: null, needs_you: false }),
+    ]).map((l) => l.replace(ANSI, ""));
+    expect(rows[1]).toContain("exempt, naming rule failed: needs allow --admin  ");
+    expect(rows[2]).toContain("exempt, naming rule not checked: run start [draft]");
+    // Whole: nothing the table cut off.
+    expect(rows.join("\n")).not.toContain("…");
+    // The plain exemption keeps its word, so the held rows are told apart from it.
+    expect(rows[3]).toContain("exempt (owner or admin)");
+    expect(rows[3]).not.toContain("naming rule");
+    // The columns still line up with the longer word in the column.
+    const linkColumn = rows.map((l) =>
+      l.indexOf("https://") === -1 ? l.indexOf("LINK") : l.indexOf("https://"),
+    );
+    expect(new Set(linkColumn).size).toBe(1);
+  });
+
+  test("a hostile detail on an exempt row is cleaned like any other", () => {
+    const rows = renderQueue([
+      entry({ verdict: "exempt", detail: HOSTILE as never, needs_you: false }),
+    ]).map((l) => l.replace(ANSI, ""));
+    expect(DANGEROUS.test(rows[1])).toBe(false);
+  });
+
   test("an empty queue renders nothing, and the columns line up", () => {
     expect(renderQueue([])).toEqual([]);
     const rows = renderQueue([
@@ -196,6 +229,19 @@ describe("verdictText", () => {
     expect(verdictText({ verdict: "exempt", detail: null, review_current: false })).toBe(
       "exempt (owner or admin)",
     );
+  });
+
+  test("an exempt pull request the naming rule holds says what it waits for", () => {
+    expect(verdictText({ verdict: "exempt", detail: "naming_rule", review_current: null })).toBe(
+      "exempt, naming rule failed: needs allow --admin",
+    );
+    expect(
+      verdictText({ verdict: "exempt", detail: "naming_unchecked", review_current: false }),
+    ).toBe("exempt, naming rule not checked: run start");
+    // The two words belong to an exempt row alone: anywhere else they are shown as themselves.
+    expect(
+      verdictText({ verdict: "not_reviewed", detail: "naming_rule", review_current: true }),
+    ).toBe("not reviewed (naming rule)");
   });
 });
 
