@@ -130,7 +130,12 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
   The evidence reader looks for a heading for the new version in the head's change log that the merge base's did not have (`changelog_entry`: `added`, `not_added`, `no_file` or `unknown_version`).
   When there is none (`not_added` or `no_file`) `advances_revision` fails with `changes_log_missing`, whatever a model said; an unknown new version is not this rule's to judge.
   A full report that says nothing about the log is refused, so the rule cannot be skipped by leaving it out.
-- **The report is version 2:** its stage, both models, six criteria (the screen's `genuine_contribution`, the three questions, and the two text criteria), the facts decided before any model (an empty description, a description that was cut, the change log's entry for the new version, and the naming rule), and the tokens each call used.
+- **The report is version 2:** its stage, both models, six criteria (the screen's `genuine_contribution`, the three questions, and the two text criteria), the facts, and the tokens each call used.
+  The evidence carries exactly five fact keys, and they differ in when they are read and in what they do.
+  Four are decided before any model is asked: `description_empty`, `description_cut`, and the naming rule's `title_problem` and `name_problem`.
+  The fifth, `changelog_entry`, is read from git after the screen lets the pull request through, so it is null in a screen report and in a facts report, and a full report always has one.
+  An empty description, a refused title or name, and a new version with no change-log entry each fail a criterion.
+  A description that was cut and a changed name that could not be read only lower a criterion to unknown (`description_not_misleading` and `no_degradation`) and never fail it: nothing was found wrong, it was not assessed, and a person looks.
   A callback must carry version 2; a version 1 report sent by callback is refused as `report_invalid`, a check that needs a person.
   Rows stored before the screen keep their version 1 reports, which are read back by their own rules, so no stored verdict changes.
 
@@ -154,9 +159,9 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
   The comparison and the two file reads (made together) are each bounded to 3 seconds.
   GitHub may take longer to compute a comparison for a pull request with many commits or files, and that has not been measured.
   A read that times out makes the name `unchecked`: a check that needs a person, never a pass.
-  The reads run inside the webhook's own request, and at their worst the permission lookup (4 seconds), the comparison (3), the file reads (3) and the check post (5) add up to more than the 10 seconds GitHub gives a delivery; the sum has not been measured either.
+  The reads run inside the webhook's own request, and at their worst the permission lookups (two, 4 seconds each), the comparison (3), the file reads (3) and the check post (5) add up to more than the 10 seconds GitHub gives a delivery; the sum has not been measured either.
   GitHub does not retry a failed delivery by itself, so a delivery that times out or fails is recovered by redelivering it from the App's delivery log, and a redelivered exempt commit posts the same check again.
-  The staging soak measures these durations before the required check is turned on; if they come near the limit, the reads move off the request.
+  The staging step of the rollout (decision 6) measures these durations before the required check is turned on; if they come near the limit, the reads move off the request.
 - **The only way past the rule without a change is an explicit override**, `nemar admin pr-reviews allow <dataset> <pr> --admin --reason <why>`, which replaces the exemption for this rule.
   The Worker reads the pull request itself, refuses it for an author who is not exempt (their review includes the rule) and for a commit a review has touched, records the waiver in the audit log (who, the commit, what the rule found as closed words, the reason given; never the title or the name), and then posts a `skipped` check that says the rule was waived.
   The record comes first: if it cannot be written, nothing is posted, and a recorded waiver whose check did not land is posted by asking again.
@@ -198,8 +203,11 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
 
 - The workflow's timeout, wording and install order (after the token is minted, with `--ignore-scripts`, as the publication review's workflow does) change first and are mirrored to `nemarDatasets/.github`, because the parity test makes any edit a two-repository change.
   Every dispatch, staging included, runs `main`'s script, so the new reviewer cannot run on staging before a release.
-- There is therefore no staging soak.
-  After the release the new review runs in an advisory shadow mode on production pull requests, and the check is made required only after the shadow run, the calibration gate and the re-review on an edit (decision 4, phase P4).
+- There is therefore no staging soak of the reviewer: its screen and its review first run on production, in an advisory shadow mode on production pull requests after the release, and the check is made required only after the shadow run, the calibration gate and the re-review on an edit (decision 4, phase P4).
+- The Worker's side is soaked on staging, as a rollout step of its own.
+  The dev Worker deploys from `dev` with the epic, before the release, and the exempt path never dispatches, so a pull request opened by an administrator against a dev-owned exemplar exercises the naming rule's reads, the check posted for it and the override on staging.
+  That step verifies two statements of this ADR and no others: how long the naming rule's GitHub reads take against the ten seconds GitHub gives a delivery (decision 3a), and that GitHub reads the newest check run of a name, which is what lets a waiver release a required check (Consequences).
+  It is done before the check is made required, and until it is done both statements stand as unverified.
 - The calibration gate, approved by the owner: no false pass on a blocking problem; at most 10 percent false fails among the pull requests labeled pass; no stage-1 reject of a legitimate pull request; no steering flag on a legitimate pull request.
 - The production canary is a data author's account named in the epic, and its pull requests exercise the gate first.
   No dataset is special-cased (more than 900 are live): every reviewable dataset is in scope, applied in batches, with a dry run as the default and an explicit apply flag.
@@ -240,7 +248,7 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
 - **The waiver depends on GitHub reading the newest check run of a name, and that is not yet verified.**
   A waiver posts a new `NEMAR PR Review` check run beside the failed one on the same commit, because a check run is created and an old one is never updated (an exempt pull request has no row to update).
   It releases a required check only if GitHub reads the newest run of a name, which is GitHub's rule and the same unverified rule as the two checks of the same name above.
-  The first staging run of `allow --admin` against a required check verifies it, and until it has, a waiver is not known to release one.
+  The staging step of the rollout (decision 6) verifies it with a first run of `allow --admin` against a required check on a dev-owned exemplar, and until that is done, a waiver is not known to release one.
 - **The `exempt` label is inferred from who opened the pull request, not read from GitHub.**
   It does not prove the check was posted: a publish that fails answers 500 and shows in the App's delivery log.
   The one thing the list reads of that check is whether the newest `NEMAR PR Review` check run on the current commit failed or asks for a person, which the row says in `detail` (`naming_rule` or `naming_unchecked`) and the CLI prints as "exempt, naming rule failed: needs allow --admin" or "exempt, naming rule not checked: start once, else fix the file".
@@ -248,8 +256,9 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
   It informs and decides nothing: a workflow job of the same name could make it wrong, and the row is still not marked as yours to act on.
 - **GitHub's `author_association` is not a reason to exempt or to reject anyone.**
   It reads `CONTRIBUTOR` for a private organization member, so neither the exemption nor the screen uses it.
-- **An exempt delivery makes up to four GitHub reads: the cross-check, then the naming rule's three.**
-  The cross-check is one call per role-matched account (two when someone other than the author caused the delivery; one delivery asks about each account once), each bounded to 4 seconds.
+- **An exempt delivery makes up to five GitHub reads: the cross-check, then the naming rule's three.**
+  The cross-check is one call per role-matched account, so two at most (the author's, and the sender's when someone other than the author caused the delivery and is role-matched too; one delivery asks about each account once), each bounded to 4 seconds.
+  An administrator's start has no sender, so its cross-check is one call and its most is four reads.
   The naming rule then compares the base with the head and, only when that says `dataset_description.json` may have changed (it is listed, the list may have been cut at GitHub's 300 files, or there is no list that can be believed, see decision 3a), reads the file at the head and at the merge base, together; each read is bounded to 3 seconds.
   A delivery that is not exempt makes none of the three: the review job applies the rule to it.
   An admin queue request asks once per exempt author and dataset, a few at a time and within 20 seconds, and a pull request whose lookup did not run in time is listed as not exempt.
