@@ -776,4 +776,47 @@ describe("waiverLines", () => {
     ]);
     expect(namingFactLines(null)).toEqual([]);
   });
+
+  describe("whatever the server or the caller sent", () => {
+    const LONG = "x".repeat(10_000);
+    const lines = (r: WaiveNamingResponse, dataset = "nm000201") =>
+      waiverLines(r, dataset, 7).map((l) => l.replace(ANSI, ""));
+
+    test("no line carries a control sequence, in any answer", () => {
+      const answers: WaiveNamingResponse[] = [
+        // The word a newer or hostile server invents, in the default branch.
+        answer({ reason: HOSTILE }),
+        // The commit it names.
+        answer({ reason: "waived", waived: true, head_sha: HOSTILE }),
+        answer({ reason: "already_waived", waived: true, head_sha: HOSTILE }),
+        answer({ reason: "nothing_to_waive", head_sha: HOSTILE }),
+        answer({ reason: "not_exempt", head_sha: HOSTILE }),
+        answer({ reason: "reviewed", head_sha: HOSTILE }),
+        answer({ reason: "naming_unchecked", head_sha: HOSTILE }),
+        // What the rule found, when the words are not the closed ones.
+        answer({
+          reason: "waived",
+          waived: true,
+          facts: { title: HOSTILE as never, name: HOSTILE as never },
+        }),
+      ];
+      for (const r of answers) {
+        const out = lines(r, `nm00${HOSTILE}`);
+        expect(out.length, r.reason).toBeGreaterThan(0);
+        for (const l of out)
+          expect(DANGEROUS.test(l), `${r.reason}: ${JSON.stringify(l)}`).toBe(false);
+      }
+    });
+
+    test("a very long word from the server does not run on: the line stays short and says it was cut", () => {
+      const out = lines(answer({ reason: LONG }));
+      expect(out).toHaveLength(1);
+      expect(out[0].length).toBeLessThan(200);
+      expect(out[0]).toContain("…");
+      // Nor does one the CLI builds from the commit it was given.
+      for (const l of lines(answer({ reason: "waived", waived: true, head_sha: LONG }))) {
+        expect(l.length).toBeLessThan(400);
+      }
+    });
+  });
 });

@@ -1132,6 +1132,33 @@ describe("who is reviewed", () => {
     expect(db.query("SELECT COUNT(*) AS n FROM pr_review_overrides").get()).toEqual({ n: 0 });
   });
 
+  test("block refuses a reason longer than the Worker keeps, before anything is asked of the API, and takes exactly that many", async () => {
+    gh.users.dave = { id: 88, login: "dave", type: "User" };
+    apiRequests = [];
+    const tooLong = await cli([...PR, "block", "dave", "--reason", "x".repeat(201)]);
+    expect(tooLong.exitCode).toBe(1);
+    expect(tooLong.stdout).toContain("The reason is 201 characters; 200 is the most that is kept.");
+    expect(apiRequests.filter((x) => x.includes("/admin/"))).toHaveLength(0);
+    expect(db.query("SELECT COUNT(*) AS n FROM pr_review_overrides").get()).toEqual({ n: 0 });
+
+    const exact = await cli([...PR, "block", "dave", "--reason", "x".repeat(200)]);
+    expect(exact.exitCode).toBe(0);
+    expect(db.query("SELECT mode, reason FROM pr_review_overrides").get()).toEqual({
+      mode: "block",
+      reason: "x".repeat(200),
+    });
+  });
+
+  test("allow --admin refuses a reason longer than the Worker keeps, and waives nothing", async () => {
+    // (The same check as above, on the other command that records a reason; it runs before the
+    // pull request is looked at, so nothing needs to be set up on GitHub.)
+    apiRequests = [];
+    const r = await cli([...PR, "allow", "nm000201", "7", "--admin", "--reason", "y".repeat(201)]);
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("The reason is 201 characters; 200 is the most that is kept.");
+    expect(apiRequests.filter((x) => x.includes("/admin/"))).toHaveLength(0);
+  });
+
   test("a login GitHub does not know, and a malformed one, are refused", async () => {
     const unknown = await cli([...PR, "block", "nobody"]);
     expect(unknown.exitCode).toBe(1);

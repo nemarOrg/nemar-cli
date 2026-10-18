@@ -2153,10 +2153,14 @@ export function namingFactLines(facts: NamingFacts | null): string[] {
   return out;
 }
 
-/** What a waiver came to, in plain sentences. Pure, so it is tested without a server. */
+/**
+ * What a waiver came to, in plain sentences. Pure, so it is tested without a server. Nothing in it
+ * is trusted to be plain: the dataset, the commit and the word the server sent are cleaned here, and
+ * a word longer than a word has any reason to be is cut.
+ */
 export function waiverLines(r: WaiveNamingResponse, dataset: string, pr: number): string[] {
   const at = r.head_sha ? ` at ${short(r.head_sha)}` : "";
-  const label = `${dataset} #${pr}${at}`;
+  const label = `${plain(dataset)} #${pr}${at}`;
   switch (r.reason) {
     case "waived": {
       const found = namingFactLines(r.facts);
@@ -2203,7 +2207,7 @@ export function waiverLines(r: WaiveNamingResponse, dataset: string, pr: number)
         ),
       ];
     default: {
-      const why = NOT_STARTED[r.reason] ?? plain(r.reason).replaceAll("_", " ");
+      const why = NOT_STARTED[r.reason] ?? clip(plain(r.reason).replaceAll("_", " "), 80);
       return [chalk.yellow(`Not waived: ${why}.`)];
     }
   }
