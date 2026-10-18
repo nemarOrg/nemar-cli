@@ -13,6 +13,42 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## 0.10.20 - unreleased
+
+The Zarr conversion that runs on `hallu` now pins biosigIO 1.2.13 and types the failures caused by missing companion data.
+Existing stores are not reconverted by this release, because the engine stamp (`ZARR_ENGINE_VERSION`) stays `3`; a recording gets the new verdicts when it converts again.
+There is no migration, no new Worker secret or variable, and no change to the Worker's behavior.
+The conversion changes run on `hallu` from this repository's `main` branch, not from the npm package.
+
+### Changed
+
+- **Zarr conversion pins biosigIO 1.2.13 (`>=1.2.13,<1.2.14`).**
+  A BrainVision data file shorter than its header declares is refused as `corrupt_or_truncated`, where 1.2.12 read it with the tail dropped.
+  An EDF+C or BDF+C recording whose first time-keeping onset is not zero now converts, where it was refused as not EDF(+) or BDF(+) compliant.
+  A truncated FIF read through `Recording.from_file` is typed `corrupt_or_truncated`, where it was `file_read_error`.
+  A BrainVision cut that falls exactly on a frame boundary of a file with no `DataPoints` count is not detected; that is a known limit of the reader.
+- **Missing companion data gets a typed, terminal verdict (#1808).**
+  A BrainVision header that names a data file the tree does not hold is `companion_missing`; a FIF file whose next split part is not in the tree is `split_part_missing`; an EEGLAB `.set` that stores epoched data is `epoched_recording`.
+  These replace the `retry_exhausted`, `maxshield_probe_failed` and `file_read_error` verdicts that the same recordings used to receive, and none of them is retried.
+  A host error raised while the reader recovers from a refusal keeps its retry: a refusal's code is read from the exception and its direct causes, never from its context.
+  Discovery now lists tree paths with `-z`, so a recording whose name has non-ASCII bytes matches the header that names it.
+  That widens discovery for those datasets; a dataset converted before this release keeps its old discovery until the engine stamp is bumped, which this release does not do.
+- **The dataset pull-request review installs after the token mint (#1820).**
+  The review workflow runs the checkout, the Bun setup and the install after it mints the dataset token, and before it writes the token to the clone's configuration.
+  The install uses `--ignore-scripts`, and the job timeout is 28 minutes, below the 30-minute watchdog deadline.
+- **The index contract says what a retry can change.**
+  The `failure` description in `shared/zarr-index.schema.json` says that retrying in the same state will not change the outcome, except for content that is not yet fetched locally.
+  The code list there names `companion_missing`, `split_part_missing` and `epoched_recording`.
+  This is a description-only change.
+- **The unexpected-skip guard in `test.yml` exempts pytest expected failures (epic #1800).**
+  A pinned known gap no longer fails the run as a skip; a real skip still does.
+
+### Known limitations
+
+- Existing stores are unchanged, and no requeue is part of this release.
+- Streamed export still raises an uncoded error for a truncated FIF (biosigIO #161) and for truncated KIT and 4D/BTi files (biosigIO #168), so those are retried until the retry budget runs out.
+- In a local run, a git-annex pointer whose content was never fetched is a typed `file_read_error` that is never retried; whether it should stay retryable is open (#1812).
+
 ## 0.10.19 - 2026-10-16
 
 A publication request now gets one derived verdict that is built by the Worker from the mechanical gates and a no-tools model review of the submission, and approving over anything that is not a clear pass is the administrator's recorded act (epic #1726, #1782; Architecture Decision Record (ADR) 0102 and ADR 0105).
