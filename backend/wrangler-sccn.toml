@@ -226,6 +226,10 @@ invocation_logs = true
 ENVIRONMENT = "production"
 # Dataset pull-request review (ADR 0092). On in production from 2026-10-13. It lives in this
 # file because `wrangler deploy` drops dashboard-only variables (see [env.dev.vars]).
+# Not a casual switch: once any repository carries the review ruleset (ADR 0107), an unset or 0
+# value leaves every pull request on that repository waiting for a check that nothing posts, and
+# the merges stop. Take the ruleset off first (`nemar admin fleet require-review --all --remove
+# --apply`, which works with the review off), and only then switch the review off.
 PR_REVIEW_ENABLED = "1"
 # PR_REVIEW_AUTO_REQUIRE is deliberately not set here. Unset, publishing, a visibility change and
 # the enforce routes leave the review ruleset alone, so this deploy requires the review of no
@@ -579,6 +583,9 @@ PRESCREEN_ENABLED = "true"
 # The variable lives in this file and not in the dashboard because `wrangler deploy` replaces
 # the Worker's variables with the ones in this file (no keep_vars), so a dashboard-only value
 # is dropped by the next deploy.
+# Not a casual switch here either: once a dev-owned repository carries the review ruleset, an
+# unset or 0 value leaves its pull requests waiting for a check nothing posts. Take the ruleset
+# off first, as the note on [vars] says.
 PR_REVIEW_ENABLED = "1"
 # Publication review (ADR 0102). On here for the soak: a stored identifier-screen result whose
 # gate is clear or needs an acknowledgment starts a model review of the screened commit, for the

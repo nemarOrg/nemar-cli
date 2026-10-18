@@ -243,6 +243,10 @@ export interface Bindings {
   // pull requests by itself. The callback token reuses PRESCREEN_CALLBACK_SECRET under its own
   // domain tag. Set on the PRODUCTION Worker only unless a staging test is deliberate: the dev
   // Worker answers only for repositories it owns (see the ownership fence in the webhook).
+  //
+  // Not a casual switch: once any repository carries the review ruleset (ADR 0107), an unset or 0
+  // value leaves every pull request on that repository waiting for a check that nothing posts, so
+  // the merges stop. Take the ruleset off first, then switch the review off.
   PR_REVIEW_ENABLED?: string; // "1" enables the review
 
   // Automatic requirement of the pull-request review (ADR 0107). Only when this is exactly "1" do
