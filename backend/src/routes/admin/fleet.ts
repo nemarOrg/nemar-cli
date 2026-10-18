@@ -42,6 +42,7 @@ import {
   REVIEWABLE_ROW_COLUMNS,
   type ReviewableRow,
   automaticReviewIntent,
+  isRequirementTarget,
   isReviewEnabled,
   isReviewRulesetFixture,
   notReviewableReason,
@@ -292,6 +293,11 @@ export function registerFleetRoutes(admin: AdminRouter): void {
    * spec. Read-only; gathers live GitHub state per repo (sequential, to respect
    * the shared App rate limit) and classifies into drift buckets. Filter with
    * ?prefix=nm, ?visibility=public|private, ?limit=N (default 25, max 50).
+   *
+   * The required review (ADR 0107) is measured against the requirement being the target, which it
+   * is only with PR_REVIEW_ENABLED and PR_REVIEW_AUTO_REQUIRE both on: before that no reviewed
+   * dataset is reported as missing the ruleset, while a ruleset on a dataset that is not
+   * reviewed is reported as stray whatever the switches say.
    */
   admin.get("/fleet/drift", async (c) => {
     const db = c.env.DB;
@@ -323,7 +329,11 @@ export function registerFleetRoutes(admin: AdminRouter): void {
 
     const datasets = rows.results ?? [];
     const pat = await getDatasetsToken(c.env);
-    const reviewEnabled = isReviewEnabled(c.env);
+    // The requirement is the target only once the review is on AND the owner has turned the
+    // automatic requirement on. Before that no dataset is "missing" it: right after a deploy every
+    // reviewed public dataset lacks the ruleset, and that is what nobody has asked for yet. A
+    // ruleset on a dataset that is not reviewed is stray whatever the switches say.
+    const requirementOn = isRequirementTarget(c.env);
     const buckets: Partial<Record<DriftBucket, string[]>> = {};
     const repos: Array<{ dataset_id: string; buckets: DriftBucket[] }> = [];
 
@@ -338,7 +348,7 @@ export function registerFleetRoutes(admin: AdminRouter): void {
             repoName,
             visibility,
             pat,
-            reviewIntentOf(d.dataset_id, d, reviewEnabled),
+            reviewIntentOf(d.dataset_id, d, requirementOn),
           ),
         );
       } catch (e) {

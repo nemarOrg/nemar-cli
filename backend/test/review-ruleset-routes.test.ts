@@ -1007,7 +1007,12 @@ describe("GET /admin/fleet/drift and the review", () => {
     return { status: res.status, body: (await res.json()) as Json };
   };
 
+  // The requirement is the target only with the review on AND the owner's switch on. The tests
+  // that expect a ruleset to be missing set both; the ones about the switches are below.
+  const requirementOn = { PR_REVIEW_ENABLED: "1", PR_REVIEW_AUTO_REQUIRE: "1" } as const;
+
   test("a reviewed dataset without the ruleset is missing it, and one with it is not", async () => {
+    envOverrides = requirementOn;
     seedDataset("nm000401");
     seedDataset("nm000402");
     await ensureReviewRuleset("nm000402", PAT);
@@ -1030,11 +1035,19 @@ describe("GET /admin/fleet/drift and the review", () => {
     expect(r.body.buckets.REVIEW_RULESET_MISSING).toBeUndefined();
   });
 
-  test("while the review is off nothing is missing, but a stray ruleset still is", async () => {
+  test.each<[string, Partial<Bindings>]>([
+    ["the review is off", { PR_REVIEW_ENABLED: undefined, PR_REVIEW_AUTO_REQUIRE: "1" }],
+    ["the owner's switch is off", { PR_REVIEW_ENABLED: "1", PR_REVIEW_AUTO_REQUIRE: undefined }],
+    ["both are off", { PR_REVIEW_ENABLED: undefined, PR_REVIEW_AUTO_REQUIRE: undefined }],
+    [
+      "the owner's switch is not exactly 1",
+      { PR_REVIEW_ENABLED: "1", PR_REVIEW_AUTO_REQUIRE: "true" },
+    ],
+  ])("while %s nothing is missing, but a stray ruleset still is", async (_name, overrides) => {
     seedDataset("nm000401");
     seedDataset("nm000403", { visibility: "private" });
     await ensureReviewRuleset("nm000403", PAT);
-    envOverrides = { PR_REVIEW_ENABLED: undefined };
+    envOverrides = overrides;
 
     const r = await drift();
 
@@ -1042,7 +1055,27 @@ describe("GET /admin/fleet/drift and the review", () => {
     expect(r.body.buckets.REVIEW_RULESET_STRAY).toEqual(["nm000403"]);
   });
 
+  test("right after a deploy, with the owner's switch off, no reviewed dataset is reported missing the ruleset", async () => {
+    // The review has run since the deploy, and not one repository has been asked to require it:
+    // that every reviewed public dataset lacks the ruleset is the state nobody has changed yet.
+    for (let n = 1; n <= 5; n++) seedDataset(`nm00050${n}`);
+    envOverrides = { PR_REVIEW_ENABLED: "1", PR_REVIEW_AUTO_REQUIRE: undefined };
+
+    const r = await drift();
+
+    expect(r.status).toBe(200);
+    expect(r.body.buckets.REVIEW_RULESET_MISSING).toBeUndefined();
+    expect(r.body.buckets.REVIEW_RULESET_STRAY).toBeUndefined();
+    // Not a report that saw nothing: it scanned the five repositories.
+    expect(r.body.scanned).toBe(5);
+    // With the switch on, the same five are every one of them missing it.
+    envOverrides = requirementOn;
+    const on = await drift();
+    expect(on.body.buckets.REVIEW_RULESET_MISSING).toHaveLength(5);
+  });
+
   test("a ruleset that was switched off by hand counts as missing", async () => {
+    envOverrides = requirementOn;
     seedDataset("nm000401");
     await ensureReviewRuleset("nm000401", PAT);
     const held = standIn.rulesets.get("nm000401")?.[0];

@@ -70,8 +70,10 @@ export interface RepoDriftState {
   hasDeprecatedWorkflow: boolean;
   /**
    * What the dataset's row calls for as to the required review (`reviewIntentOf`): `require` for
-   * a dataset the Worker reviews while the review is on, `remove` for one it does not, and
-   * `undefined` where the tooling has no say (the review is off, or a standing fixture).
+   * a dataset the Worker reviews while the requirement is the target (the review is on and the
+   * owner has turned the automatic requirement on), `remove` for one it does not review whatever
+   * the switches say, and `undefined` where the tooling has no say (the requirement is not the
+   * target yet, or a standing fixture).
    */
   reviewIntent: ReviewIntent | undefined;
   /**
