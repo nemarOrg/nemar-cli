@@ -261,6 +261,23 @@ function everyOutcome(): ReviewOutcome[] {
     { kind: "naming", facts: { title: null, name: "unchecked" } },
     { kind: "naming", facts: { title: "template_field", name: "unchecked" } },
     { kind: "naming", facts: { title: "author_year", name: "author_year" } },
+    { kind: "naming", facts: { title: "doi", name: null } },
+    { kind: "naming", facts: { title: null, name: "doi" } },
+    { kind: "naming", facts: { title: "doi", name: "unchecked" } },
+    {
+      kind: "reported",
+      report: parsePrReviewReport(
+        factsReport({
+          evidence: evidence({
+            files_read: 0,
+            truncated: true,
+            changelog_entry: null,
+            title_problem: "doi",
+            name_problem: "doi",
+          }),
+        }),
+      ),
+    },
   ];
 }
 
@@ -1602,8 +1619,10 @@ describe("a review that ended at the facts: the naming rule decided it before an
     expect(refusal(factsReport({ evidence: factsEvidence({}) }))).toBe("bad_stage");
     for (const naming of [
       { title_problem: "author_year" },
+      { title_problem: "doi" },
       { title_problem: "template_field" },
       { name_problem: "author_year" },
+      { name_problem: "doi" },
       { name_problem: "template_field" },
       { name_problem: "unchecked" },
     ]) {
@@ -1617,8 +1636,10 @@ describe("a review that ended at the facts: the naming rule decided it before an
   test("fails with the naming blocker for a title or a name the rule refuses", () => {
     const cases: Array<[Record<string, unknown>, string, string]> = [
       [{ title_problem: "author_year" }, "clear_title_and_description", "title_author_year"],
+      [{ title_problem: "doi" }, "clear_title_and_description", "title_doi"],
       [{ title_problem: "template_field" }, "clear_title_and_description", "title_template_field"],
       [{ name_problem: "author_year" }, "no_degradation", "name_author_year"],
+      [{ name_problem: "doi" }, "no_degradation", "name_doi"],
       [{ name_problem: "template_field" }, "no_degradation", "name_template_field"],
     ];
     for (const [naming, criterion, code] of cases) {
@@ -1652,12 +1673,15 @@ describe("a review that ended at the facts: the naming rule decided it before an
   test("never passes, whatever the facts are", () => {
     const namings = [
       { title_problem: "author_year" },
+      { title_problem: "doi" },
       { title_problem: "template_field" },
       { name_problem: "author_year" },
+      { name_problem: "doi" },
       { name_problem: "template_field" },
       { name_problem: "unchecked" },
       { title_problem: "author_year", name_problem: "template_field" },
       { title_problem: "author_year", name_problem: "unchecked" },
+      { title_problem: "doi", name_problem: "unchecked" },
     ];
     for (const naming of namings) {
       for (const over of [{}, { description_empty: true }, { description_cut: true }]) {
@@ -1696,7 +1720,7 @@ describe("a review that ended at the facts: the naming rule decided it before an
     expect(check.title).toBe("Needs changes: the naming rule");
     // What the rule found, in the author's words, with the way to fix it.
     expect(check.summary).toContain("**Naming rule**");
-    expect(check.summary).toContain("The title has a citation (an author and a year)");
+    expect(check.summary).toContain("The title has a citation (an author and a year, or a DOI)");
     expect(check.summary).toContain("Edit the title.");
     // That the review stage did not run and no model was asked.
     expect(check.summary).toContain("the review stage did not run and no model was asked");
@@ -1711,6 +1735,47 @@ describe("a review that ended at the facts: the naming rule decided it before an
     expect(check.text).toContain("No model was asked: the screen and the full review did not run.");
     expect(check.text).not.toContain("Screened with");
     expect(check.text).not.toContain("not shown to the reviewer in full");
+  });
+
+  test("a DOI is said in the same plain words as an author and a year, and never as its code", () => {
+    for (const [what, over, summary, label] of [
+      [
+        "a title",
+        { title_problem: "doi" },
+        "The title has a citation (an author and a year, or a DOI)",
+        "Title has a citation (an author and a year, or a DOI)",
+      ],
+      [
+        "a changed name",
+        { name_problem: "doi" },
+        "changes the dataset's name",
+        "New dataset name has a citation (an author and a year, or a DOI)",
+      ],
+    ] as const) {
+      const doi = renderCheck({ kind: "reported", report: factsWith(over) });
+      const key = renderCheck({
+        kind: "reported",
+        report: factsWith(
+          what === "a title" ? { title_problem: "author_year" } : { name_problem: "author_year" },
+        ),
+      });
+      expect(doi.title, what).toBe("Needs changes: the naming rule");
+      expect(doi.summary, what).toContain(summary);
+      expect(doi.summary, what).toContain("ReferencesAndLinks and the README instead");
+      expect(doi.text, what).toContain(label);
+      // The two kinds of citation are one thing to an author: the same words, the same label.
+      expect(doi.summary, what).toBe(key.summary);
+      expect(doi.text, what).toBe(key.text);
+      // No code word reaches the text: not the finding code, and not the closed word.
+      expect(`${doi.title}\n${doi.summary}\n${doi.text}`, what).not.toMatch(
+        /title_doi|name_doi|\bdoi\b/,
+      );
+    }
+    // An owner's or administrator's pull request is told the same.
+    const exempt = renderCheck({ kind: "naming", facts: { title: "doi", name: null } });
+    expect(exempt.title).toBe("Needs changes: the naming rule");
+    expect(exempt.summary).toContain("The title has a citation (an author and a year, or a DOI)");
+    expect(exempt.summary).not.toMatch(/\bdoi\b/);
   });
 
   test("an unreadable name is said to need a person, in its own title", () => {
@@ -1837,7 +1902,7 @@ describe("the text facts fail the verdict whatever the model says", () => {
     const check = renderCheck({ kind: "reported", report: r });
     expect(check.summary).toContain("**Naming rule**");
     expect(check.summary).toContain("Edit the title.");
-    expect(check.text).toContain("Title has a citation (an author and a year)");
+    expect(check.text).toContain("Title has a citation (an author and a year, or a DOI)");
     expect(check.text).toContain("found by the naming rule, not by the reviewer");
   });
 

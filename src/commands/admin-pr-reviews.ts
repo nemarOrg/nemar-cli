@@ -2162,11 +2162,13 @@ async function setContributor(
 export function namingFactLines(facts: NamingFacts | null): string[] {
   if (facts === null) return [];
   const out: string[] = [];
-  if (facts.title === "author_year") out.push("the title has a citation (an author and a year)");
+  if (facts.title === "author_year" || facts.title === "doi") {
+    out.push("the title has a citation (an author and a year, or a DOI)");
+  }
   if (facts.title === "template_field") out.push("the title has an unfilled template field");
-  if (facts.name === "author_year") {
+  if (facts.name === "author_year" || facts.name === "doi") {
     out.push(
-      "the pull request changes the dataset name to one that has a citation (an author and a year)",
+      "the pull request changes the dataset name to one that has a citation (an author and a year, or a DOI)",
     );
   }
   if (facts.name === "template_field") {
@@ -2322,11 +2324,11 @@ allow <login>
 
 allow <dataset> <pr> --admin
   Owners and administrators are exempt from the review, not from the naming rule: a pull request
-  title that has a citation (an author and a year, as in Lee2019 EEG dataset) anywhere in it or
-  holds an unfilled template field, and a change of the dataset's name to such a name, fail their
-  check like anyone's. This is the one way past it without a change: it waives the rule for the
-  pull request's CURRENT commit, records the waiver (who, the commit, what the rule found, and your
-  --reason, which is required), and posts the check as skipped with a line saying the rule was
+  title that has a citation (an author and a year, as in Lee2019 EEG dataset, or a DOI) anywhere in
+  it or holds an unfilled template field, and a change of the dataset's name to such a name, fail
+  their check like anyone's. This is the one way past it without a change: it waives the rule for
+  the pull request's CURRENT commit, records the waiver (who, the commit, what the rule found, and
+  your --reason, which is required), and posts the check as skipped with a line saying the rule was
   waived. A new commit is checked again. It is refused for a pull request whose author is not an
   owner or administrator (their review includes the rule) and for a commit that was reviewed.
 

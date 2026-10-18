@@ -664,10 +664,12 @@ describe("the prompt keeps the pull request inside its fence", () => {
       "description_cut",
       "description_missing",
       "name_author_year",
+      "name_doi",
       "name_template_field",
       "name_unchecked",
       "spam",
       "title_author_year",
+      "title_doi",
       "title_template_field",
     ]);
     expect([...offered].every((c) => (FINDING_CODES as readonly string[]).includes(c))).toBe(true);
@@ -2839,6 +2841,24 @@ describe("the facts come before any model, and fail the verdict whatever it says
       desc("1.1.0", { Name: "Epidynamics recordings (Saggio-2020-taxonomy)" }),
       "fail",
     ],
+    [
+      "a title with a DOI in it",
+      { title: "Add the recordings described in 10.1038/s41597-020-0532-5" },
+      null,
+      "fail",
+    ],
+    [
+      "a changed name with a DOI at the end of it",
+      {},
+      desc("1.1.0", { Name: "Epidynamics recordings (10.7910/DVN/ABC123)" }),
+      "fail",
+    ],
+    [
+      "a title that hides a DOI behind a zero-width space",
+      { title: "Add the recordings described in 10.\u200b1038/s41597" },
+      null,
+      "fail",
+    ],
     ["a changed name nobody can read", {}, desc("1.1.0", { Name: 7 }), "uncertain"],
   ])(
     "%s ends the review at the facts: no model request, and a report the shared parser takes",
@@ -2885,7 +2905,7 @@ describe("the facts come before any model, and fail the verdict whatever it says
     const check = renderCheck({ kind: "reported", report: title });
     expect(check.title).toBe("Needs changes: the naming rule");
     // What the rule found, that the review stage did not run, and that the author fixes it and pushes.
-    expect(check.summary).toContain("The title has a citation (an author and a year)");
+    expect(check.summary).toContain("The title has a citation (an author and a year, or a DOI)");
     expect(check.summary).toContain("the review stage did not run and no model was asked");
     expect(check.summary).toContain("Edit the title, or the Name in dataset_description.json");
     expect(check.summary).toContain("push again");
@@ -2962,7 +2982,7 @@ describe("the facts come before any model, and fail the verdict whatever it says
     expect(report.evidence.title_problem).toBe("author_year");
     expect(verdictOf(report)).toBe("fail");
     const { text } = renderCheck({ kind: "reported", report });
-    expect(text).toContain("Title has a citation (an author and a year)");
+    expect(text).toContain("Title has a citation (an author and a year, or a DOI)");
   });
 
   test("a title with the key in the middle fails the same way, says so, and no model is asked", async () => {
@@ -2974,8 +2994,48 @@ describe("the facts come before any model, and fail the verdict whatever it says
     expect(report.evidence.title_problem).toBe("author_year");
     expect(verdictOf(report)).toBe("fail");
     const check = renderCheck({ kind: "reported", report });
-    expect(check.summary).toContain("The title has a citation (an author and a year)");
-    expect(check.text).toContain("Title has a citation (an author and a year)");
+    expect(check.summary).toContain("The title has a citation (an author and a year, or a DOI)");
+    expect(check.text).toContain("Title has a citation (an author and a year, or a DOI)");
+  });
+
+  test("a title with a DOI fails with its own finding, in the words of an author and a year", async () => {
+    const report = await reviewWith("facts-title-doi", () => {}, {
+      title: "Add the recordings described in 10.1038/s41597-020-0532-5",
+    });
+    expect(modelRequests).toHaveLength(0);
+    expect(report.stage).toBe("facts");
+    expect(report.evidence.title_problem).toBe("doi");
+    expect(factsOf(report).notes).toContainEqual({
+      criterion: "clear_title_and_description",
+      code: "title_doi",
+      result: "fail",
+    });
+    expect(verdictOf(report)).toBe("fail");
+    const check = renderCheck({ kind: "reported", report });
+    expect(check.summary).toContain("The title has a citation (an author and a year, or a DOI)");
+    expect(check.text).toContain("Title has a citation (an author and a year, or a DOI)");
+    const name = await reviewWith("facts-name-doi", (dir) =>
+      write(dir, "dataset_description.json", desc("1.1.0", { Name: "EEG of 7 sites 10.7910/DVN" })),
+    );
+    expect(name.evidence.name_problem).toBe("doi");
+    expect(factsOf(name).notes).toContainEqual({
+      criterion: "no_degradation",
+      code: "name_doi",
+      result: "fail",
+    });
+    expect(renderCheck({ kind: "reported", report: name }).summary).toContain(
+      "changes the dataset's name",
+    );
+    expect(modelRequests).toHaveLength(0);
+  });
+
+  test("a number with a dot in a title is no DOI: the control is reviewed as before", async () => {
+    const report = await reviewWith("facts-title-hz", () => {}, {
+      title: "Correct the sampling rate to 10.5 Hz in the EEG sidecars",
+    });
+    expect(report.stage).toBe("full");
+    expect(report.evidence.title_problem).toBeNull();
+    expect(modelRequests).toHaveLength(2);
   });
 
   test("a year after a space in a title is no key: the control is reviewed as before", async () => {

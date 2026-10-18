@@ -630,6 +630,18 @@ describe("a version 2 report on the terminal", () => {
     expect(unread.join("\n")).not.toContain("revision advances: unknown");
   });
 
+  test("a facts report of a DOI is printed in the naming rule's sentence, not as its code", () => {
+    const lines = brief(factsOnly({ title_problem: "doi" }));
+    expect(lines[0]).toBe("Needs changes: the naming rule");
+    const text = lines.join("\n");
+    expect(text).toContain("Naming rule:");
+    expect(text).toContain("The title has a citation (an author and a year, or a DOI)");
+    expect(text).toContain(
+      "Version:  1.0.0 to 1.0.1   stage: facts only; the review did not run (the naming rule found a problem)",
+    );
+    expect(text).not.toMatch(/title_doi|\bdoi\b/);
+  });
+
   test("a facts report whose version did not go up still says so, and then that the review did not run", () => {
     const lines = brief(factsOnly({ title_problem: "template_field", version_after: "1.0.0" }));
     expect(lines).toContain(
@@ -727,7 +739,7 @@ describe("a version 2 report on the terminal", () => {
     }).map((l) => l.replace(ANSI, ""));
     const text = lines.join("\n");
     expect(text).toContain("Naming rule:");
-    expect(text).toContain("The title has a citation (an author and a year)");
+    expect(text).toContain("The title has a citation (an author and a year, or a DOI)");
     expect(text).not.toMatch(/author_year/);
     for (const l of lines) expect(DANGEROUS.test(l)).toBe(false);
   });
@@ -852,7 +864,7 @@ describe("waiverLines", () => {
     );
     expect(t).toContain("Waived the naming rule for nm000201 #7 at aaaaaaa.");
     expect(t).toContain(
-      "The rule found: the title has a citation (an author and a year); the pull request changes the dataset name to one with an unfilled template field.",
+      "The rule found: the title has a citation (an author and a year, or a DOI); the pull request changes the dataset name to one with an unfilled template field.",
     );
     expect(t).toContain("a new commit is checked again");
     expect(t).not.toMatch(/author_year|template_field|[{}]/);
@@ -863,9 +875,36 @@ describe("waiverLines", () => {
       answer({ waived: true, reason: "waived", facts: { title: null, name: "author_year" } }),
     );
     expect(t).toContain(
-      "The rule found: the pull request changes the dataset name to one that has a citation (an author and a year).",
+      "The rule found: the pull request changes the dataset name to one that has a citation (an author and a year, or a DOI).",
     );
     expect(t).not.toMatch(/author_year|[{}]/);
+  });
+
+  test("a waiver of a DOI is told in the words of an author and a year, and not as its code", () => {
+    const title = text(
+      answer({ waived: true, reason: "waived", facts: { title: "doi", name: null } }),
+    );
+    expect(title).toContain(
+      "The rule found: the title has a citation (an author and a year, or a DOI).",
+    );
+    const name = text(
+      answer({ waived: true, reason: "waived", facts: { title: null, name: "doi" } }),
+    );
+    expect(name).toContain(
+      "The rule found: the pull request changes the dataset name to one that has a citation (an author and a year, or a DOI).",
+    );
+    for (const t of [title, name]) expect(t).not.toMatch(/\bdoi\b|[{}]/);
+    // A name and a title of the two kinds are one line each, since they say one thing.
+    const both = text(
+      answer({
+        waived: true,
+        reason: "waived",
+        facts: { title: "doi", name: "author_year" },
+      }),
+    );
+    expect(both).toContain(
+      "The rule found: the title has a citation (an author and a year, or a DOI); the pull request changes the dataset name to one that has a citation (an author and a year, or a DOI).",
+    );
   });
 
   test("each refusal is a sentence a person reads, with no code word in it", () => {

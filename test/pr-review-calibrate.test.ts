@@ -433,6 +433,21 @@ describe("one pull request, through the job's own stage flow", () => {
     expect(control.stage).toBe("full");
   });
 
+  test("a DOI in a title is its own fact in the table, and a number with a dot is none", async () => {
+    const doi = localPullRequest("title-doi", {
+      title: "Add the recordings described in 10.1038/s41597-020-0532-5",
+    });
+    const row = await withStandIn(() => calibrateOne(target("fail"), root, doi));
+    expect(row.facts).toEqual(["title_doi"]);
+    expect(row.stage).toBe("facts");
+    expect(row.verdict).toBe("fail");
+    expect(renderTable([row]).join("\n")).toMatch(/nm000460#2 +3 +title_doi +not_run +/);
+    const hz = localPullRequest("title-hz", { title: "Correct the rate to 10.5 Hz" });
+    const control = await withStandIn(() => calibrateOne(target("pass"), root, hz));
+    expect(control.facts).toEqual([]);
+    expect(control.stage).toBe("full");
+  });
+
   test("a naming fact ends it at the facts: no model is asked, the screen did not run, and nothing was spent", async () => {
     const read = localPullRequest("facts", { title: "Lee2019 EEG update" });
     const row = await withStandIn(() => calibrateOne(target("fail"), root, read));

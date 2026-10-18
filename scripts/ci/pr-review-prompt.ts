@@ -243,8 +243,10 @@ export const REVIEW_FINDING_CODES: readonly FindingCode[] = FINDING_CODES.filter
     c !== "description_missing" &&
     c !== "description_cut" &&
     c !== "title_author_year" &&
+    c !== "title_doi" &&
     c !== "title_template_field" &&
     c !== "name_author_year" &&
+    c !== "name_doi" &&
     c !== "name_template_field" &&
     c !== "name_unchecked",
 );

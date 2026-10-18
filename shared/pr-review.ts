@@ -135,8 +135,10 @@ export const FINDING_CODES = [
   "description_cut",
   // The naming rule (`shared/naming-rule.ts`), decided by the script and never by a model.
   "title_author_year",
+  "title_doi",
   "title_template_field",
   "name_author_year",
+  "name_doi",
   "name_template_field",
   // The pull request changes dataset_description.json and its new name could not be read.
   "name_unchecked",
@@ -836,11 +838,13 @@ function compareVersions(a: string, b: string): number {
 
 const TITLE_RULE_CODE: Record<NamingProblem, FindingCode> = {
   author_year: "title_author_year",
+  doi: "title_doi",
   template_field: "title_template_field",
 };
 
 const NAME_RULE_CODE: Record<NamingProblem, FindingCode> = {
   author_year: "name_author_year",
+  doi: "name_doi",
   template_field: "name_template_field",
 };
 
@@ -1200,17 +1204,26 @@ const FACTS_COPY = {
     "The naming rule could not check this pull request's new dataset name, so the review stage did not run and no model was asked. Fixing dataset_description.json as described below and pushing again runs the review.",
 } as const;
 
+/**
+ * What the rule says of a citation, an author-year key or a DOI: the two are one thing to an author,
+ * so they are said in the same words, and neither names the closed word it was found as.
+ */
+const CITATION_TITLE_SENTENCE =
+  "The title has a citation (an author and a year, or a DOI) in it, the way a dataset is named (for example Lee2019, Lee-2019-EEG or 10.1038/s41597-020-0532-5), and the naming rule refuses one anywhere in a title. A pull request title says what the change does, such as Add three EEG recordings. Edit the title. Cite the paper in ReferencesAndLinks and the README instead.";
+const CITATION_NAME_SENTENCE =
+  "This pull request changes the dataset's name (the Name field of dataset_description.json) to one that has a citation (an author and a year, or a DOI) in it, which the naming rule refuses anywhere in a name. Choose a name that says what the dataset is, and cite the paper in ReferencesAndLinks and the README instead.";
+
 /** What each finding of the naming rule says to the author, with what to do about it. */
 const NAMING_SENTENCE: Record<"title" | "name", Record<NamingProblem, string>> = {
   title: {
-    author_year:
-      "The title has a citation (an author and a year) in it, the way a dataset is named (for example Lee2019 or Lee-2019-EEG), and the naming rule refuses one anywhere in a title. A pull request title says what the change does, such as Add three EEG recordings. Edit the title. Cite the paper in ReferencesAndLinks and the README instead.",
+    author_year: CITATION_TITLE_SENTENCE,
+    doi: CITATION_TITLE_SENTENCE,
     template_field:
       "The title still has an unfilled template field (such as FirstAuthorSurname, paperDOI, or a bracketed instruction). Put the real words in its place. Edit the title.",
   },
   name: {
-    author_year:
-      "This pull request changes the dataset's name (the Name field of dataset_description.json) to one that has a citation (an author and a year) in it, which the naming rule refuses anywhere in a name. Choose a name that says what the dataset is, and cite the paper in ReferencesAndLinks and the README instead.",
+    author_year: CITATION_NAME_SENTENCE,
+    doi: CITATION_NAME_SENTENCE,
     template_field:
       "This pull request changes the dataset's name (the Name field of dataset_description.json) to one with an unfilled template field. Put the real name in its place.",
   },
@@ -1268,9 +1281,11 @@ const CODE_LABEL: Record<FindingCode, string> = {
   description_placeholder: "Description is placeholder text or not readable",
   description_misleading: "Description is misleading",
   description_cut: "Description is too long to read in full",
-  title_author_year: "Title has a citation (an author and a year)",
+  title_author_year: "Title has a citation (an author and a year, or a DOI)",
+  title_doi: "Title has a citation (an author and a year, or a DOI)",
   title_template_field: "Title has an unfilled template field",
-  name_author_year: "New dataset name has a citation (an author and a year)",
+  name_author_year: "New dataset name has a citation (an author and a year, or a DOI)",
+  name_doi: "New dataset name has a citation (an author and a year, or a DOI)",
   name_template_field: "New dataset name has an unfilled template field",
   name_unchecked: "New dataset name could not be read",
   other: "Other",
@@ -1284,8 +1299,10 @@ function factSource(code: FindingCode): string {
     case "description_cut":
       return "found from the pull request, not by the reviewer: the description is longer than the reviewer reads, so whether it is misleading, or tries to instruct the reviewer, was not assessed";
     case "title_author_year":
+    case "title_doi":
     case "title_template_field":
     case "name_author_year":
+    case "name_doi":
     case "name_template_field":
     case "name_unchecked":
       return "found by the naming rule, not by the reviewer";

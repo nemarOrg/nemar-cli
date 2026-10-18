@@ -1291,6 +1291,25 @@ describe("owners and administrators meet the naming rule before their exemption"
     });
   });
 
+  test.each([
+    ["an author-year key in the middle", "Rename the dataset to Lee-2019-EEG"],
+    ["a DOI", "Add the recordings described in 10.1038/s41597-020-0532-5"],
+  ])("an administrator's title with %s fails, and nothing is started", async (_what, title) => {
+    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title });
+    const r = await start(DATASET, 7);
+    expect(r.body).toMatchObject({ dispatched: false, reason: "naming_rule" });
+    expect(rows()).toHaveLength(0);
+    expect(dispatches()).toHaveLength(0);
+    const check = calls.find((c) => c.method === "POST" && c.path.endsWith("/check-runs"));
+    expect(check?.body).toMatchObject({
+      conclusion: "failure",
+      output: { title: "Needs changes: the naming rule" },
+    });
+    expect(JSON.stringify(check?.body)).toContain(
+      "has a citation (an author and a year, or a DOI)",
+    );
+  });
+
   test("the same pull request with a title that says what changed is skipped: the control", async () => {
     pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Add three EEG recordings" });
     const r = await start(DATASET, 7);

@@ -3,8 +3,8 @@
  * the Worker all ask, so a title or a dataset name is refused the same way wherever it is checked.
  * The rule's cases are tested in depth through the CLI's own refusals (`pr-text.unit.test.ts`);
  * this file checks that there is ONE copy of it, that the review's question gives the same answers,
- * where in a text an author-year key is found and where it is not, and that the rule reads a long
- * text once.
+ * where in a text an author-year key or a DOI is found and where it is not, and that the rule reads
+ * a long text once.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -17,6 +17,7 @@ import {
   NAMING_PROBLEMS,
   TEMPLATE_FIELDS,
   findAuthorYearKey,
+  findDoi,
   findTemplateField,
   hasVisibleText,
   namingProblemOf,
@@ -43,8 +44,9 @@ const listing = (nameBefore: string | null, nameAfter: string | null, nameUnread
   ({ nameBefore, nameAfter, nameUnreadable }) as Listing;
 
 describe("there is one copy of the rule", () => {
-  test("the CLI's export is the shared rule's own function, not a copy", () => {
+  test("the CLI's exports are the shared rule's own functions, not copies", () => {
     expect(cli.findAuthorYearKey).toBe(findAuthorYearKey);
+    expect(cli.findDoi).toBe(findDoi);
   });
 
   test("the review job's facts are the rule's answers, on the title and on a changed name", () => {
@@ -54,6 +56,7 @@ describe("there is one copy of the rule", () => {
       "Add three EEG recordings",
       MAINSAH,
       "Add 2019 recordings",
+      "Described in 10.1038/s41597-020-0532-5",
     ]) {
       expect(textFactsOf({ title, body: "x" }, listing("A", "A")).titleProblem, title).toBe(
         namingProblemOf(title),
@@ -66,6 +69,11 @@ describe("there is one copy of the rule", () => {
     expect(textFactsOf({ title: "t", body: "x" }, listing("A", SAGGIO)).nameProblem).toBe(
       "author_year",
     );
+    // A DOI is the name's problem too, and it has its own word.
+    expect(
+      textFactsOf({ title: "t", body: "x" }, listing("A", "EEG of 7 centres 10.7910/DVN/ABC"))
+        .nameProblem,
+    ).toBe("doi");
     // The name is the pull request's problem only when it changes the name.
     expect(
       textFactsOf({ title: "t", body: "x" }, listing("Lee2019 X", "Lee2019 X")).nameProblem,
@@ -131,6 +139,7 @@ describe("the Worker asks the same rule of an exempt pull request", () => {
       "Add three EEG recordings",
       MAINSAH,
       "Add 2019 recordings",
+      "Described in 10.1038/s41597-020-0532-5",
     ]) {
       const facts = await namingFactsFor({} as Bindings, { ...subject, title });
       expect(facts.title, title).toBe(namingProblemOf(title));
@@ -400,10 +409,83 @@ describe("namingProblemOf", () => {
   });
 
   test("its words are the closed list the report carries", () => {
-    expect(NAMING_PROBLEMS).toEqual(["author_year", "template_field"]);
+    expect(NAMING_PROBLEMS).toEqual(["author_year", "doi", "template_field"]);
     expect(findTemplateField("Fix {{a}} and ${b}")).toBe("{{a}}");
     expect(findTemplateField("Nothing to fill")).toBeNull();
     expect(TEMPLATE_FIELDS.length).toBe(4);
+  });
+});
+
+describe("a DOI is refused anywhere in a text", () => {
+  test("a DOI is doi wherever it stands in a title or a name, and however it is written", () => {
+    const found: Array<[string, string]> = [
+      ["Described in 10.1038/s41597-020-0532-5", "10.1038/"],
+      ["Data from https://doi.org/10.7910/DVN/ABC123", "10.7910/"],
+      ["See doi:10.1234/abc", "10.1234/"],
+      // At the start, and joined to the text before it by a hyphen.
+      ["10.5281/zenodo.1234567 recordings", "10.5281/"],
+      ["Add recordings (taxonomy-10.7910/...)", "10.7910/"],
+      // Four digits and nine digits, the shortest and the longest registrant code.
+      ["10.1000/182", "10.1000/"],
+      ["10.123456789/x", "10.123456789/"],
+      // The first of several.
+      ["10.1234/a and 10.5678/b", "10.1234/"],
+    ];
+    for (const [text, doi] of found) {
+      expect(findDoi(text), text).toBe(doi);
+      expect(namingProblemOf(text), text).toBe("doi");
+    }
+  });
+
+  test("a number with a dot is no DOI without its four to nine digits and its slash", () => {
+    for (const text of [
+      "Recordings of 10.5 Hz tones",
+      "Version 10.2019 notes",
+      "Fix 10.1234 in the README",
+      // Three digits, ten digits, and a slash that is not the next character.
+      "Add 10.123/day recordings",
+      "Add 10.1234567890/x",
+      "Add 10.1234 /x",
+      // The slash is the DOI's own: an encoded one is not read as it.
+      "Described in 10.1038%2Fs41597",
+    ]) {
+      expect(findDoi(text), text).toBeNull();
+      expect(namingProblemOf(text), text).toBeNull();
+    }
+  });
+
+  test("an invisible character does not hide a DOI, and the DOI is found as a reader sees it", () => {
+    for (const text of [
+      "Described in 10.\u200b1038/s41597",
+      "Described in 10\u00ad.1038/s41597",
+      "Described in 10.1038\u2060/s41597",
+      "Described in 1\u200d0.1038/s41597",
+      "Described in 10.\u2800\u{e0020}1038/s41597",
+    ]) {
+      expect(findDoi(text), JSON.stringify(text)).toBe("10.1038/");
+      expect(namingProblemOf(text), JSON.stringify(text)).toBe("doi");
+    }
+    // A blank stays: it ends the number, so a DOI with a space inside it is not one.
+    expect(findDoi("Described in 10.1038 /s41597")).toBeNull();
+    expect(findDoi("Described in 10. 1038/s41597")).toBeNull();
+  });
+
+  test("a text that breaks several rules is the first the rule asks about", () => {
+    // The order is author_year, doi, template_field, as in the closed list the report carries.
+    expect(namingProblemOf("Lee2019 10.1234/x FirstAuthorSurname")).toBe("author_year");
+    expect(namingProblemOf("10.1234/x FirstAuthorSurname")).toBe("doi");
+    expect(namingProblemOf("FirstAuthorSurname-paperDOI10.1234/x")).toBe("doi");
+    expect(namingProblemOf("FirstAuthorSurname")).toBe("template_field");
+    // The two real texts hold both an author-year key and a DOI: the key is the first problem, and
+    // the DOI is found in them all the same.
+    for (const [text, key, doi] of [
+      [SAWADA, "Sawada-2022", "10.1038/"],
+      [SAGGIO, "Saggio-2020", "10.7910/"],
+    ]) {
+      expect(findAuthorYearKey(text), text).toBe(key);
+      expect(findDoi(text), text).toBe(doi);
+      expect(namingProblemOf(text), text).toBe("author_year");
+    }
   });
 });
 
@@ -425,6 +507,19 @@ describe("the rule reads a long text once", () => {
     expect(hostile).toHaveLength(300_000);
     expect(findAuthorYearKey(hostile)).toBeNull();
     expect(namingProblemOf(hostile)).toBeNull();
+  });
+
+  test("a million characters of DOI prefixes with no slash are read once", () => {
+    // Every `10.` is the start of a candidate; none is followed by four digits and a slash. The
+    // text is long enough that a scan which reads on from every candidate to the end of the text
+    // takes a minute or more, against a few milliseconds here.
+    for (const unit of ["10.", "10.123456789", "10.1234"]) {
+      const hostile = unit.repeat(Math.ceil(1_000_000 / unit.length));
+      expect(findDoi(hostile), unit).toBeNull();
+      expect(namingProblemOf(hostile), unit).toBeNull();
+    }
+    // And one that ends a long text is found.
+    expect(findDoi(`${"10.".repeat(100_000)}1234/x`)).toBe("10.1234/");
   });
 
   test("many years that are not keys, and a long run of letters that ends in one, are read once", () => {

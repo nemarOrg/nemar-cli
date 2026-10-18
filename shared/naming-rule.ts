@@ -3,7 +3,7 @@
  *
  * A dataset is named after its paper (the atlas naming rule, FirstAuthorSurname-year-keyword-paperDOI),
  * and a pull request title says what a change does, so the two are kept apart: a citation (an author
- * and a year) is refused anywhere in a title or a dataset name, and the paper is cited in
+ * and a year, or a DOI) is refused anywhere in a title or a dataset name, and the paper is cited in
  * ReferencesAndLinks and the README instead. A naming template left unfilled is never a title or a
  * name either. The rule is one pure function, used by the CLI before it opens a pull request, by the
  * review job before it asks any model, and by the Worker on a pull request it does not review (an
@@ -11,14 +11,16 @@
  */
 
 /**
- * Every way the rule refuses a text, as a closed word:
+ * Every way the rule refuses a text, as a closed word, in the order the rule asks about them:
  *  - `author_year`: the text holds an author-year key anywhere in it, a run of letters directly
  *    followed by an optional hyphen or underscore and a year from 1900 to 2099 (`Lee2019`,
  *    `Lee-2019-EEG`, `BNCI2014_001`, and in the middle of a text `Results from Zhou-2016 cohort`);
+ *  - `doi`: the text holds a DOI anywhere in it, the characters `10.`, four to nine digits and a
+ *    slash (`10.1038/s41597-020-0532-5`, `https://doi.org/10.7910/DVN/ABC`, `doi:10.1234/x`);
  *  - `template_field`: the text still holds a naming-template token or an unfilled template field
  *    (`FirstAuthorSurname`, `paperDOI`, `{{x}}`, `${x}`, `<your title>`, `[describe the change]`).
  */
-export const NAMING_PROBLEMS = ["author_year", "template_field"] as const;
+export const NAMING_PROBLEMS = ["author_year", "doi", "template_field"] as const;
 export type NamingProblem = (typeof NAMING_PROBLEMS)[number];
 
 /**
@@ -61,6 +63,13 @@ export const TEMPLATE_FIELDS: readonly RegExp[] = [
  * no test asserts a duration.
  */
 export const YEAR_PATTERN = /(?:19|20)\d{2}(?!\d)/u;
+
+/**
+ * The start of a DOI: `10.`, four to nine digits and a slash, as {@link findDoi} reads it. One
+ * pattern whose only repetition is bounded, so it is read once in linear time; a test checks its
+ * source for that, which is why it is exported.
+ */
+export const DOI_PATTERN = /10\.\d{4,9}\//u;
 
 /** One character that is a letter of any script, or a combining mark that goes with one. */
 const LETTER = /^[\p{L}\p{M}]$/u;
@@ -170,6 +179,32 @@ export function findAuthorYearKey(text: string): string | null {
 }
 
 /**
+ * The start of the first DOI in `text`, as it was typed less what no reader sees (`10.1038/` for
+ * `Described in 10.1038/s41597-020-0532-5`), or null. A DOI is the characters `10.`, then four to
+ * nine digits, then a slash: the prefix every DOI begins with and the slash that opens its suffix.
+ * That covers a `doi.org` link, a bare `doi:10.1234/x`, and a DOI that ends a name in parentheses
+ * (`Saggio-2020-taxonomy-10.7910/...`), wherever it stands in a title or a dataset name. The paper a
+ * dataset comes from is cited in ReferencesAndLinks and the README, not in its title or its name.
+ *
+ * What is returned is `10.`, the digits and the slash, which is enough to find the DOI in a text
+ * and short enough to show. A DOI's suffix may hold almost any character, so where it ends is not
+ * a thing to guess, and it is not asked for.
+ *
+ * The slash is part of what is asked for, so `Recordings of 10.5 Hz tones`, `Version 10.2019` and a
+ * bare `10.1234` are not DOIs. Nothing is asked of the character before the `10`, as the template
+ * tokens ask nothing of theirs: a DOI is as often joined to the text before it by a hyphen as set
+ * off by a space, and `2010.1234/x` is refused with the rest. A DOI whose slash is written `%2F` is
+ * not read as one.
+ *
+ * The text is judged as a reader sees it ({@link INVISIBLE}), so `10.\u200b1038/x` is a DOI.
+ * The scan is linear: {@link DOI_PATTERN} has no unbounded repetition, so each position costs at
+ * most the thirteen characters of a longest match.
+ */
+export function findDoi(text: string): string | null {
+  return withoutInvisible(text).match(DOI_PATTERN)?.[0] ?? null;
+}
+
+/**
  * The first template field `text` still holds, as a reader sees it there ({@link INVISIBLE} is not
  * part of it), or null: the first of {@link TEMPLATE_FIELDS}, in their order, that matches anywhere
  * in the text.
@@ -185,13 +220,15 @@ export function findTemplateField(text: string): string | null {
 
 /**
  * How `text` breaks the naming rule, or null when it does not: an author-year key anywhere in it
- * (`author_year`, {@link findAuthorYearKey}), or a naming-template token or unfilled template field
- * anywhere in it (`template_field`, {@link findTemplateField}). The one question the CLI asks of a
- * title, the review job asks of a title and of a changed dataset name before any model, and the
- * Worker asks of an owner's or administrator's pull request.
+ * (`author_year`, {@link findAuthorYearKey}), a DOI anywhere in it (`doi`, {@link findDoi}), or a
+ * naming-template token or unfilled template field anywhere in it (`template_field`,
+ * {@link findTemplateField}), asked in that order, so a text that breaks several is the first of
+ * them. The one question the CLI asks of a title, the review job asks of a title and of a changed
+ * dataset name before any model, and the Worker asks of an owner's or administrator's pull request.
  */
 export function namingProblemOf(text: string): NamingProblem | null {
   if (findAuthorYearKey(text) !== null) return "author_year";
+  if (findDoi(text) !== null) return "doi";
   if (findTemplateField(text) !== null) return "template_field";
   return null;
 }

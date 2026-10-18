@@ -21,6 +21,7 @@ import type {
   VolumeWindow,
 } from "../../shared/contract/pr-review-admin";
 import {
+  NAMING_PROBLEMS,
   type NameFinding,
   type NamingProblem,
   conclusionOf,
@@ -2290,6 +2291,38 @@ describe("an owner's or administrator's pull request is exempt (ADR 0107)", () =
       // The controls: a refusal alone is waivable, and an unread name alone is as it was.
       expect(by.nm000202).toMatchObject({ verdict: "exempt", detail: "naming_rule" });
       expect(by.nm000203).toMatchObject({ verdict: "exempt", detail: "naming_unchecked" });
+    });
+
+    test("a title or a name the rule refuses reads naming_rule whatever the problem is, a DOI among them", async () => {
+      // Each closed word of the rule, as a refused title and as a refused new name, posted as the
+      // exempt path posts it: the list's label does not say which problem it was, so a word the
+      // rule gains cannot be listed as anything but a failure an administrator may waive.
+      const posted = (title: NamingProblem | null, name: NameFinding | null) =>
+        conclusionOf({ kind: "naming", facts: { title, name } }).toUpperCase();
+      const specs = NAMING_PROBLEMS.flatMap((problem, i) =>
+        [posted(problem, null), posted(null, problem)].map((conclusion, j) => {
+          const ds = `nm0002${i}${j + 1}`;
+          return {
+            ds,
+            n: i * 2 + j + 1,
+            author: ADMIN_GH,
+            authorId: 4001,
+            checks: withChecks(ds, reviewCheck(conclusion)),
+          };
+        }),
+      );
+      expect(specs).toHaveLength(NAMING_PROBLEMS.length * 2);
+      nodes(...specs);
+      const by = await detailOf();
+      for (const spec of specs) {
+        expect(by[spec.ds], spec.ds).toMatchObject({
+          verdict: "exempt",
+          detail: "naming_rule",
+          needs_you: false,
+        });
+      }
+      // The words are the ones the closed list holds, the DOI among them.
+      expect([...NAMING_PROBLEMS]).toContain("doi");
     });
 
     test("a check that was skipped, is running, or is not there is the plain exemption", async () => {

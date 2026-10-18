@@ -2,12 +2,12 @@
  * The naming rule on a pull request the review does not run for (ADR 0107).
  *
  * A pull request opened by a NEMAR owner or administrator is not reviewed, but the naming rule
- * applies to it all the same, and it runs first: a title that has an author and a year anywhere in
- * it or holds a naming-template token, or a change of the dataset's name to such a name, fails its
- * check. The rule is the one in `shared/naming-rule.ts`, which the CLI and the review job use too,
- * so the three refuse the same text. The review job applies it to everyone else's pull requests
- * before it asks any model; this module applies it here, because an exempt pull request never
- * reaches the job.
+ * applies to it all the same, and it runs first: a title that has an author and a year, or a DOI,
+ * anywhere in it or holds a naming-template token, or a change of the dataset's name to such a name,
+ * fails its check. The rule is the one in `shared/naming-rule.ts`, which the CLI and the review job
+ * use too, so the three refuse the same text. The review job applies it to everyone else's pull
+ * requests before it asks any model; this module applies it here, because an exempt pull request
+ * never reaches the job.
  *
  * **What is read.** The title comes from the delivery (or, for an administrator's start, GitHub's
  * own record of the pull request); it is read for this rule only, and never shown, stored or logged.

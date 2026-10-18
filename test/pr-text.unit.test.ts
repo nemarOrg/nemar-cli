@@ -38,7 +38,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn } from "bun";
 import { gatherGitFacts } from "../scripts/ci/pr-review-evidence";
-import { TEMPLATE_FIELDS, YEAR_PATTERN } from "../shared/naming-rule";
+import { DOI_PATTERN, TEMPLATE_FIELDS, YEAR_PATTERN } from "../shared/naming-rule";
 import {
   type ChangedFile,
   MAX_NAMED_FILES,
@@ -54,6 +54,7 @@ import {
   describeTextProblem,
   describeUnopenedPullRequest,
   findAuthorYearKey,
+  findDoi,
   findTextProblem,
   hasChangelogHeading,
   inspectChangelog,
@@ -294,6 +295,25 @@ const CASES: Record<TextProblemCode, { refused: [TextKind, string][]; passes: st
       "Study2-2019 recordings added",
     ],
   },
+  doi: {
+    refused: [
+      // A DOI as a link, as a bare prefix, at the start, joined by a hyphen, and with an invisible
+      // character inside its prefix.
+      ["title", "Described in 10.1038/s41597-020-0532-5"],
+      ["title", "Add the recordings from https://doi.org/10.7910/DVN/ABC123"],
+      ["title", "See doi:10.1234/abc"],
+      ["title", "10.5281/zenodo.1234567 recordings"],
+      ["title", "Add recordings (taxonomy-10.7910/x)"],
+      ["title", "Described in 10.\u{200b}1038/s41597"],
+    ],
+    passes: [
+      // A number with a dot is no DOI without its four to nine digits and its slash.
+      "Recordings of 10.5 Hz tones",
+      "Version 10.2019 notes",
+      "Add 10.123/day recordings",
+      "Described in the README, which links doi.org",
+    ],
+  },
   no_words: {
     refused: [
       ["title", "..."],
@@ -501,7 +521,7 @@ describe("findTextProblem", () => {
         expect(problem?.code).toBe("author_year");
         if (!problem) throw new Error("expected a problem");
         expect(describeTextProblem("The title (--message)", problem)).toBe(
-          `The title (--message) has a citation (an author and a year) in it ("${found}"); describe the change in plain words, such as "Add three EEG recordings", and cite the paper in ReferencesAndLinks and the README instead.`,
+          `The title (--message) has a citation (an author and a year, or a DOI) in it ("${found}"); describe the change in plain words, such as "Add three EEG recordings", and cite the paper in ReferencesAndLinks and the README instead.`,
         );
       }
       // The title it offers is one that is accepted.
@@ -593,19 +613,72 @@ describe("findTextProblem", () => {
       }
     });
 
-    test("the year pattern keeps the shape that makes the rule linear", () => {
+    test("the year and DOI patterns keep the shape that makes the rule linear", () => {
       // The pattern runs on whatever a person pastes. A backtracking engine stays linear on it
       // because it has no unbounded repetition at all, so nothing is tried in more than one way, and
       // no repetition repeats another. Timing a hostile text says the same and flakes with the
       // machine, so the shape is what is checked.
-      expect(YEAR_PATTERN.source).not.toMatch(/[*+]|\{\d+,\}/);
-      expect(nestedRepetition(YEAR_PATTERN.source), YEAR_PATTERN.source).toBe(false);
+      for (const { source } of [YEAR_PATTERN, DOI_PATTERN]) {
+        expect(source).not.toMatch(/[*+]|\{\d+,\}/);
+        expect(nestedRepetition(source), source).toBe(false);
+      }
       // The pattern is exactly the year: 19 or 20 and two digits, and not the start of a number.
       expect(YEAR_PATTERN.test("1900")).toBe(true);
       expect(YEAR_PATTERN.test("2099")).toBe(true);
       expect(YEAR_PATTERN.test("1899")).toBe(false);
       expect(YEAR_PATTERN.test("2100")).toBe(false);
       expect(YEAR_PATTERN.test("20195")).toBe(false);
+      // The DOI pattern is exactly `10.`, four to nine digits and a slash.
+      expect(DOI_PATTERN.test("10.1234/")).toBe(true);
+      expect(DOI_PATTERN.test("10.123456789/")).toBe(true);
+      expect(DOI_PATTERN.test("10.123/")).toBe(false);
+      expect(DOI_PATTERN.test("10.1234567890/")).toBe(false);
+      expect(DOI_PATTERN.test("10.1234")).toBe(false);
+    });
+  });
+
+  describe("a title with a DOI in it", () => {
+    test("is refused as a title and left alone in a description", () => {
+      for (const text of [
+        "Described in 10.1038/s41597-020-0532-5",
+        "Add recordings (taxonomy-10.7910/x)",
+      ]) {
+        expect(findTextProblem("title", text)?.code, text).toBe("doi");
+        expect(findTextProblem("description", text), text).toBeNull();
+      }
+      // A description may cite a paper by its DOI, the way the paper is cited.
+      expect(
+        findTextProblem("description", "Recorded for https://doi.org/10.1038/s41597-020-0532-5."),
+      ).toBeNull();
+    });
+
+    test("says what it found, in the words an author and a year are told", () => {
+      for (const [title, found] of [
+        ["Described in 10.1038/s41597-020-0532-5", "10.1038/"],
+        ["Add the recordings from https://doi.org/10.7910/DVN/ABC123", "10.7910/"],
+      ] as const) {
+        expect(findDoi(title), title).toBe(found);
+        const problem = findTextProblem("title", title);
+        expect(problem?.code).toBe("doi");
+        if (!problem) throw new Error("expected a problem");
+        expect(describeTextProblem("The title (--message)", problem)).toBe(
+          `The title (--message) has a citation (an author and a year, or a DOI) in it ("${found}"); describe the change in plain words, such as "Add three EEG recordings", and cite the paper in ReferencesAndLinks and the README instead.`,
+        );
+      }
+      // The same sentence as for a key, apart from what was found.
+      const key = findTextProblem("title", "Results from Zhou-2016 cohort");
+      const doi = findTextProblem("title", "Results from 10.1234/x cohort");
+      expect(key?.reason.replace('"Zhou-2016"', "FOUND")).toBe(
+        doi?.reason.replace('"10.1234/"', "FOUND"),
+      );
+    });
+
+    test("a title with both an author and a year and a DOI is told about the author and the year", () => {
+      // The first of the two the rule asks about, as namingProblemOf orders them.
+      const title =
+        "Mapping effective connectivity (Sawada-2022-mapping-10.1038/s41467-022-32644-y)";
+      expect(findTextProblem("title", title)?.code).toBe("author_year");
+      expect(findDoi(title)).toBe("10.1038/");
     });
   });
 });
@@ -1483,7 +1556,7 @@ describe("nemar dataset update refuses before it does anything", () => {
     );
     expect(r.exitCode).toBe(1);
     expect(said(r)).toContain(
-      'The title (--message) has a citation (an author and a year) in it ("Lee2019"); describe the change in plain words, such as "Add three EEG recordings", and cite the paper in ReferencesAndLinks and the README instead.',
+      'The title (--message) has a citation (an author and a year, or a DOI) in it ("Lee2019"); describe the change in plain words, such as "Add three EEG recordings", and cite the paper in ReferencesAndLinks and the README instead.',
     );
     expect(said(r)).not.toContain("The description");
     // Refused before sign-in, like every other refusal of the text.
@@ -1508,7 +1581,7 @@ describe("nemar dataset update refuses before it does anything", () => {
     );
     expect(r.exitCode).toBe(1);
     expect(said(r)).toContain(
-      'The title (--message) has a citation (an author and a year) in it ("BNCI2014"); describe the change in plain words, such as "Add three EEG recordings", and cite the paper in ReferencesAndLinks and the README instead.',
+      'The title (--message) has a citation (an author and a year, or a DOI) in it ("BNCI2014"); describe the change in plain words, such as "Add three EEG recordings", and cite the paper in ReferencesAndLinks and the README instead.',
     );
     expect(said(r)).not.toContain("Not authenticated");
   });
@@ -1531,9 +1604,53 @@ describe("nemar dataset update refuses before it does anything", () => {
     );
     expect(r.exitCode).toBe(1);
     expect(said(r)).toContain(
-      'The title (--message) has a citation (an author and a year) in it ("BNCI2014"); describe the change in plain words, such as "Add three EEG recordings", and cite the paper in ReferencesAndLinks and the README instead.',
+      'The title (--message) has a citation (an author and a year, or a DOI) in it ("BNCI2014"); describe the change in plain words, such as "Add three EEG recordings", and cite the paper in ReferencesAndLinks and the README instead.',
     );
     expect(said(r)).not.toContain("Not authenticated");
+  });
+
+  test("refuses a DOI in the title in the same words, before sign-in", async () => {
+    const cwd = fresh("empty");
+    mkdirSync(cwd, { recursive: true });
+    const r = await runNemar(
+      [
+        "dataset",
+        "update",
+        "--yes",
+        "-m",
+        "Described in 10.1038/s41597-020-0532-5",
+        "--description",
+        GOOD_DESCRIPTION,
+      ],
+      cwd,
+      signedOut(),
+    );
+    expect(r.exitCode).toBe(1);
+    expect(said(r)).toContain(
+      'The title (--message) has a citation (an author and a year, or a DOI) in it ("10.1038/"); describe the change in plain words, such as "Add three EEG recordings", and cite the paper in ReferencesAndLinks and the README instead.',
+    );
+    expect(said(r)).not.toContain("Not authenticated");
+  });
+
+  test("control: a number with a dot is no DOI, so it meets sign-in", async () => {
+    const cwd = fresh("empty");
+    mkdirSync(cwd, { recursive: true });
+    const r = await runNemar(
+      [
+        "dataset",
+        "update",
+        "--yes",
+        "-m",
+        "Add recordings of 10.5 Hz tones",
+        "--description",
+        GOOD_DESCRIPTION,
+      ],
+      cwd,
+      signedOut(),
+    );
+    expect(r.exitCode).toBe(1);
+    expect(said(r)).toContain("Not authenticated");
+    expect(said(r)).not.toContain("has a citation");
   });
 
   test("control: a year after a space is a sentence, so it meets sign-in", async () => {
@@ -1890,7 +2007,30 @@ describe("nemar dataset push --pr settles the text before it pushes", () => {
     );
     expect(r.exitCode).toBe(1);
     expect(said(r)).toContain(
-      'The title (--title) has a citation (an author and a year) in it ("Lee-2019"); describe the change in plain words, such as "Add three EEG recordings", and cite the paper in ReferencesAndLinks and the README instead.',
+      'The title (--title) has a citation (an author and a year, or a DOI) in it ("Lee-2019"); describe the change in plain words, such as "Add three EEG recordings", and cite the paper in ReferencesAndLinks and the README instead.',
+    );
+    expect(pushed(remote)).toBe("");
+    expect(ghArgs()).toBeNull();
+  });
+
+  test("refuses a title with a DOI in it, and pushes nothing", async () => {
+    const { work, remote } = newAnnexFeatureClone();
+    const r = await runNemar(
+      [
+        "dataset",
+        "push",
+        "--pr",
+        "--no-s3",
+        "-t",
+        "Add the recordings from doi:10.7910/DVN/ABC123",
+        "-b",
+        GOOD_DESCRIPTION,
+      ],
+      work,
+    );
+    expect(r.exitCode).toBe(1);
+    expect(said(r)).toContain(
+      'The title (--title) has a citation (an author and a year, or a DOI) in it ("10.7910/"); describe the change in plain words, such as "Add three EEG recordings", and cite the paper in ReferencesAndLinks and the README instead.',
     );
     expect(pushed(remote)).toBe("");
     expect(ghArgs()).toBeNull();
@@ -2012,7 +2152,7 @@ describe("nemar dataset update at a terminal asks for what the command line left
     // A name and a year is refused the same way, with what to write instead.
     term.type("Lee2019 EEG dataset\r");
     await term.until(
-      'That has a citation (an author and a year) in it ("Lee2019"); describe the change in plain words, such as "Add three EEG recordings", and cite the paper in ReferencesAndLinks and the README instead.',
+      'That has a citation (an author and a year, or a DOI) in it ("Lee2019"); describe the change in plain words, such as "Add three EEG recordings", and cite the paper in ReferencesAndLinks and the README instead.',
     );
     await term.until("Title (one line saying what changed):");
     // Typed with padding and doubled spaces: the stored title is the one-line form of it.

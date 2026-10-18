@@ -1156,7 +1156,9 @@ describe("the naming rule runs first, owners and administrators included (ADR 01
     );
     expect(middle.body).toMatchObject({ dispatched: false, reason: "naming_rule" });
     expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "failure" });
-    expect(lastCheck().output?.summary).toContain("has a citation (an author and a year)");
+    expect(lastCheck().output?.summary).toContain(
+      "has a citation (an author and a year, or a DOI)",
+    );
     // The check says what the rule found in its own words: the title is never quoted.
     expect(JSON.stringify(calls)).not.toContain("Mainsah2025");
     // The control: a year after a space is a sentence, so the same author is exempt as before.
@@ -1165,6 +1167,55 @@ describe("the naming rule runs first, owners and administrators included (ADR 01
     );
     expect(spaced.body).toMatchObject({ reason: "exempt_author" });
     expect(lastCheck()).toMatchObject({ conclusion: "skipped" });
+  });
+
+  test("an owner's title with a DOI fails too, in the words of an author and a year", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    const r = await deliver(
+      prEvent({
+        login: "owner-gh",
+        userId: 601,
+        title: `Add the recordings described in 10.5555/${LEAK}`,
+      }),
+    );
+    expect(r.body).toMatchObject({ dispatched: false, reason: "naming_rule" });
+    expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "failure" });
+    expect(lastCheck().output?.title).toBe("Needs changes: the naming rule");
+    expect(lastCheck().output?.summary).toContain(
+      "has a citation (an author and a year, or a DOI)",
+    );
+    // Neither the title's DOI nor the closed word reaches the check.
+    expect(JSON.stringify(calls)).not.toContain("10.5555");
+    expect(JSON.stringify(calls)).not.toContain(LEAK);
+    expect(lastCheck().output?.summary).not.toMatch(/\bdoi\b/);
+    // A number with a dot is no DOI: the same author is exempt as before.
+    const hz = await deliver(
+      prEvent({
+        login: "owner-gh",
+        userId: 601,
+        title: "Correct the rate to 10.5 Hz",
+        sha: SHA_B,
+      }),
+    );
+    expect(hz.body).toMatchObject({ reason: "exempt_author" });
+    expect(lastCheck()).toMatchObject({ conclusion: "skipped" });
+  });
+
+  test("an owner's change of the dataset name to one with a DOI in it fails", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    naming[DATASET] = {
+      files: ["dataset_description.json"],
+      names: {
+        [SHA_A]: "Epidynamics recordings (10.7910/DVN/ABC123)",
+        [BASE_SHA]: "Resting EEG of volunteers",
+      },
+    };
+    const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+    expect(r.body).toMatchObject({ reason: "naming_rule" });
+    expect(lastCheck().output?.summary).toContain("changes the dataset's name");
+    expect(lastCheck().output?.summary).toContain(
+      "has a citation (an author and a year, or a DOI)",
+    );
   });
 
   test("an owner's change of the dataset name to an author-and-year name fails", async () => {
@@ -1190,7 +1241,9 @@ describe("the naming rule runs first, owners and administrators included (ADR 01
     const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
     expect(r.body).toMatchObject({ reason: "naming_rule" });
     expect(lastCheck().output?.summary).toContain("changes the dataset's name");
-    expect(lastCheck().output?.summary).toContain("has a citation (an author and a year)");
+    expect(lastCheck().output?.summary).toContain(
+      "has a citation (an author and a year, or a DOI)",
+    );
   });
 
   test("a change of the name to one that passes is skipped as before", async () => {
@@ -1242,7 +1295,9 @@ describe("the naming rule runs first, owners and administrators included (ADR 01
     expect(r.body).toMatchObject({ dispatched: false, reason: "naming_unchecked" });
     expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "action_required" });
     expect(lastCheck().output?.title).toBe("Could not decide: the naming rule was not checked");
-    expect(lastCheck().output?.summary).toContain("has a citation (an author and a year)");
+    expect(lastCheck().output?.summary).toContain(
+      "has a citation (an author and a year, or a DOI)",
+    );
     expect(lastCheck().output?.summary).toContain("GitHub may not have answered");
     expect(lastCheck().output?.text).not.toContain("--admin");
     expect(rows()).toHaveLength(0);
@@ -1264,6 +1319,29 @@ describe("the naming rule runs first, owners and administrators included (ADR 01
 
     const other = await deliver(
       prEvent({ login: "owner-gh", userId: 601, title: "Smith2020 rename", sha: SHA_B }),
+    );
+    expect(other.body).toMatchObject({ reason: "naming_rule" });
+  });
+
+  test("a recorded waiver for a DOI covers a DOI and not another problem", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    db.run(
+      `INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
+       VALUES (1, 'pr_review_naming_waived', 'pr_review', ?, ?)`,
+      [`${DATASET}#7`, JSON.stringify({ head_sha: SHA_A, title: "doi", name: null })],
+    );
+    const waived = await deliver(
+      prEvent({
+        login: "owner-gh",
+        userId: 601,
+        title: "Add the recordings described in 10.1038/s41597-020-0532-5",
+      }),
+    );
+    expect(waived.body).toMatchObject({ reason: "exempt_naming_waived" });
+    expect(lastCheck()).toMatchObject({ conclusion: "skipped" });
+    // The waiver recorded a DOI: a title that breaks another rule on the same commit is not covered.
+    const other = await deliver(
+      prEvent({ login: "owner-gh", userId: 601, title: "Smith2020 rename" }),
     );
     expect(other.body).toMatchObject({ reason: "naming_rule" });
   });

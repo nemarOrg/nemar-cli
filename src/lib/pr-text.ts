@@ -20,12 +20,12 @@
 
 import { lstatSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { findAuthorYearKey, findTemplateField } from "../../shared/naming-rule.js";
+import { findAuthorYearKey, findDoi, findTemplateField } from "../../shared/naming-rule.js";
 
-// The naming rule (an author-year key anywhere, an unfilled template field) lives in
+// The naming rule (an author-year key or a DOI anywhere, an unfilled template field) lives in
 // `shared/naming-rule.ts`, where the review job and the Worker read it too; what this module
 // exports of it is exported from here, so the CLI and its tests ask the one rule.
-export { findAuthorYearKey } from "../../shared/naming-rule.js";
+export { findAuthorYearKey, findDoi } from "../../shared/naming-rule.js";
 
 // ---------------------------------------------------------------------------------------------
 // Readable text
@@ -37,6 +37,7 @@ export type TextKind = "title" | "description";
 export const TEXT_PROBLEMS = [
   "empty",
   "author_year",
+  "doi",
   "machine_output",
   "placeholder",
   "template_field",
@@ -114,6 +115,14 @@ function quoted(text: string): string {
 }
 
 /**
+ * What a citation is told, whether it was found as an author and a year or as a DOI: the same plain
+ * words either way, what was found, and where the paper is cited instead.
+ */
+function citationReason(found: string): string {
+  return `has a citation (an author and a year, or a DOI) in it (${quoted(found)}); describe the change in plain words, such as "Add three EEG recordings", and cite the paper in ReferencesAndLinks and the README instead`;
+}
+
+/**
  * The first reason `raw` cannot go into a pull request as the title or the description of a
  * change, or null when it can. A missing value is `empty`. The text is judged as
  * {@link cleanPrText} returns it.
@@ -125,12 +134,9 @@ export function findTextProblem(kind: TextKind, raw: string | undefined): TextPr
   // check, because a name of the letters a to f and a year (`Decade2019`) is also seven or more hex
   // digits, and it is a name that was typed.
   const authorYear = kind === "title" ? findAuthorYearKey(text) : null;
-  if (authorYear !== null) {
-    return {
-      code: "author_year",
-      reason: `has a citation (an author and a year) in it (${quoted(authorYear)}); describe the change in plain words, such as "Add three EEG recordings", and cite the paper in ReferencesAndLinks and the README instead`,
-    };
-  }
+  if (authorYear !== null) return { code: "author_year", reason: citationReason(authorYear) };
+  const doi = kind === "title" ? findDoi(text) : null;
+  if (doi !== null) return { code: "doi", reason: citationReason(doi) };
   if (DIGEST.test(text) || isJsonDocument(text)) {
     return {
       code: "machine_output",

@@ -730,13 +730,47 @@ describe("nemar admin pr-reviews allow <dataset> <pr> --admin: the naming rule's
     ]);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain(`Waived the naming rule for nm000201 #7 at ${SHA_A.slice(0, 7)}.`);
-    expect(r.stdout).toContain("The rule found: the title has a citation (an author and a year).");
+    expect(r.stdout).toContain(
+      "The rule found: the title has a citation (an author and a year, or a DOI).",
+    );
     expect(r.stdout).toContain("it is for this commit only: a new commit is checked again");
     expect(r.stdout).not.toMatch(/[{}"]|author_year|_waived/);
     expect(waivers()).toHaveLength(1);
     expect(JSON.parse(waivers()[0]?.details ?? "{}")).toMatchObject({
       head_sha: SHA_A,
       reason: "Kept until the rename",
+    });
+    const check = gh.seen.find((x) => x.method === "POST" && x.path.endsWith("/check-runs"));
+    expect(check?.body).toMatchObject({ conclusion: "skipped" });
+  });
+
+  test("waives a DOI in the title the same way: the record holds the closed word, the terminal does not", async () => {
+    reviewable("nm000201");
+    gh.pulls["nm000201#7"] = {
+      sha: SHA_A,
+      author: "queueadmin-gh",
+      title: "Add the recordings described in 10.1038/s41597-020-0532-5",
+    };
+    const r = await cli([
+      ...PR,
+      "allow",
+      "nm000201",
+      "7",
+      "--admin",
+      "--reason",
+      "Kept until the rename",
+    ]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(`Waived the naming rule for nm000201 #7 at ${SHA_A.slice(0, 7)}.`);
+    expect(r.stdout).toContain(
+      "The rule found: the title has a citation (an author and a year, or a DOI).",
+    );
+    expect(r.stdout).not.toMatch(/[{}"]|\bdoi\b|_waived/);
+    expect(waivers()).toHaveLength(1);
+    expect(JSON.parse(waivers()[0]?.details ?? "{}")).toMatchObject({
+      head_sha: SHA_A,
+      title: "doi",
+      name: null,
     });
     const check = gh.seen.find((x) => x.method === "POST" && x.path.endsWith("/check-runs"));
     expect(check?.body).toMatchObject({ conclusion: "skipped" });
