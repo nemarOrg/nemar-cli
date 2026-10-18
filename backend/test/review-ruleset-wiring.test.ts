@@ -3,12 +3,16 @@
  * review for it (ADR 0107), decides it from the dataset's row, and asks the owner's switch first
  * (PR_REVIEW_AUTO_REQUIRE): until the owner turns it on, no automatic path requires the review.
  *
- * Publishing a dataset, flipping its visibility, withdrawing or restoring it, and the two enforce
- * routes all end in `ensureRepoToSpec`. What the review step does for each intent is tested
- * against a GitHub stand-in (ensure-repo-spec.test.ts), and the enforce routes are driven through
- * the real router (review-ruleset-routes.test.ts). The other three callers sit behind a live S3 and
- * cannot be driven here, which is the boundary visibility.test.ts documents, so this scan is what
- * stands behind them, in the shape of the scans in anonymity-publication-paths.test.ts.
+ * Publishing a dataset (the orchestrator and the direct route), flipping its visibility, and the
+ * two enforce routes all end in `ensureRepoToSpec`. What the review step does for each intent is
+ * tested against a GitHub stand-in (ensure-repo-spec.test.ts). What each of the five callers does
+ * with the switch off and on is driven through the real routes: the enforce routes in
+ * review-ruleset-routes.test.ts, the other three in review-auto-require-paths.test.ts, which
+ * stands in for S3's bucket policy as well.
+ *
+ * This scan stays because those tests can only drive the callers that exist today. A sixth call
+ * to `ensureRepoToSpec`, added later, would not be in any of them, and the scan is what notices
+ * it, in the shape of the scans in anonymity-publication-paths.test.ts.
  *
  * Three ways for a caller to be wrong, and the scan fails on all of them:
  *  - it says nothing about the review, so the repository's ruleset is never kept in step with the
@@ -70,7 +74,7 @@ function sites(): Site[] {
 }
 
 describe("every caller of ensureRepoToSpec decides the required review from the row", () => {
-  test("none leaves it out, and none passes a literal", () => {
+  test("none leaves it out, passes a literal, or skips the owner's switch", () => {
     const offenders = sites()
       .filter((s) => !COMPUTED_REVIEW.test(s.text))
       .map((s) => s.where);
