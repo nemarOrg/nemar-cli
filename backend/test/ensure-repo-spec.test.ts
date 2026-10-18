@@ -204,20 +204,94 @@ describe("ensureRepoToSpec and the required review", () => {
     expect(standIn.writes()).toHaveLength(0);
   });
 
-  test("a dry run says a repository on another default branch would be skipped", async () => {
-    standIn.defaultBranches.set(REPO, "master");
+  // Step 2 of the live run makes main the default branch, and only then does the review step run,
+  // so a repository on another branch is repointed and given the ruleset, not skipped. The dry run
+  // plans those same two steps.
+  describe("a repository whose default branch is not main", () => {
+    const REPO_PATH = `/repos/nemarDatasets/${REPO}`;
 
-    const result = await ensureRepoToSpec(REPO, PAT, {
-      visibility: "public",
-      review: "require",
-      dryRun: true,
+    test("a dry run says it would repoint the default branch to main, then create the ruleset", async () => {
+      standIn.defaultBranches.set(REPO, "master");
+
+      const result = await ensureRepoToSpec(REPO, PAT, {
+        visibility: "public",
+        review: "require",
+        dryRun: true,
+      });
+
+      expect(result.steps.review_ruleset).toEqual({
+        status: "ok",
+        detail: "would repoint the default branch to main, then create",
+      });
+      expect(result.steps.plan?.detail).toBe("public, default=master");
+      expect(standIn.writes()).toHaveLength(0);
+      // The plan did not change what it was planning for.
+      expect(standIn.defaultBranches.get(REPO)).toBe("master");
     });
 
-    expect(result.steps.review_ruleset).toEqual({
-      status: "skipped",
-      detail: "default branch is master, not main",
+    test("a dry run says update when the ruleset is already there", async () => {
+      await ensureReviewRuleset(REPO, PAT);
+      standIn.defaultBranches.set(REPO, "git-annex");
+      standIn.calls.length = 0;
+
+      const result = await ensureRepoToSpec(REPO, PAT, {
+        visibility: "public",
+        review: "require",
+        dryRun: true,
+      });
+
+      expect(result.steps.review_ruleset).toEqual({
+        status: "ok",
+        detail: "would repoint the default branch to main, then update",
+      });
+      expect(standIn.writes()).toHaveLength(0);
     });
-    expect(standIn.writes()).toHaveLength(0);
+
+    test("the live run does what the dry run said: it repoints, then creates the ruleset", async () => {
+      standIn.defaultBranches.set(REPO, "master");
+
+      const live = await ensureRepoToSpec(REPO, PAT, { visibility: "public", review: "require" });
+
+      expect(live.steps.main_branch).toEqual({ status: "ok", detail: "repointed from master" });
+      expect(live.steps.review_ruleset).toEqual({ status: "ok", detail: "created" });
+      expect(standIn.defaultBranches.get(REPO)).toBe("main");
+      expect(heldBy()).toContain(REVIEW_RULESET_NAME);
+      // The review step took ensureMainBranch's word for it: the repository was read twice (to
+      // capture the branch, and by ensureMainBranch), and not a third time for the review.
+      expect(standIn.calls.filter((c) => c.method === "GET" && c.path === REPO_PATH)).toHaveLength(
+        2,
+      );
+    });
+
+    test("a dry run reads the repository once, and the review step does not read it again", async () => {
+      standIn.defaultBranches.set(REPO, "master");
+
+      await ensureRepoToSpec(REPO, PAT, { visibility: "public", review: "require", dryRun: true });
+
+      expect(standIn.calls.filter((c) => c.method === "GET" && c.path === REPO_PATH)).toHaveLength(
+        1,
+      );
+    });
+
+    test("where the repository would be skipped anyway, nothing is planned: private and removal are as they were", async () => {
+      standIn.defaultBranches.set(REPO, "master");
+
+      const priv = await ensureRepoToSpec(REPO, PAT, {
+        visibility: "private",
+        review: "require",
+        dryRun: true,
+      });
+      expect(priv.steps.review_ruleset).toEqual({
+        status: "ok",
+        detail: "nothing to remove (private)",
+      });
+      const remove = await ensureRepoToSpec(REPO, PAT, {
+        visibility: "public",
+        review: "remove",
+        dryRun: true,
+      });
+      expect(remove.steps.review_ruleset).toEqual({ status: "ok", detail: "nothing to remove" });
+    });
   });
 
   // The other steps fall back to "main" when the repository cannot be read, because all they need

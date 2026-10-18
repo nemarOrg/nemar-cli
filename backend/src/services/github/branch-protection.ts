@@ -798,15 +798,30 @@ async function reviewRulesetStepOf(
         };
       }
     }
+    // The live run makes main the default branch (step 2 of ensureRepoToSpec) before it gets
+    // here, so on a repository that is on another branch it repoints first and then writes. A dry
+    // run has not repointed anything, and would read the unchanged branch and report a skip the
+    // live run never makes, so it plans the same two steps.
+    const repoints =
+      o.dryRun &&
+      intent === "require" &&
+      defaultBranch !== undefined &&
+      defaultBranch !== REVIEW_BASE_BRANCH;
     const step = await reconcileReviewRuleset(repo, pat, {
       intent,
       dryRun: o.dryRun,
-      defaultBranch,
+      defaultBranch: repoints ? REVIEW_BASE_BRANCH : defaultBranch,
     });
     if (step.action === "skip") {
       return {
         status: "skipped",
         detail: `default branch is ${step.defaultBranch}, not ${REVIEW_BASE_BRANCH}`,
+      };
+    }
+    if (repoints) {
+      return {
+        status: "ok",
+        detail: `would repoint the default branch to ${REVIEW_BASE_BRANCH}, then ${step.action}`,
       };
     }
     const words = o.dryRun

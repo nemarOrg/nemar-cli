@@ -233,8 +233,18 @@ export function startRulesetStandIn(): RulesetStandIn {
 
       if (rest === "") {
         if (method === "GET") return Response.json({ name: repo, default_branch: branch });
-        if (method === "PATCH") return Response.json({ name: repo });
+        if (method === "PATCH") {
+          // The one repository setting a test follows is the default branch, which is what
+          // ensureMainBranch repoints; a visibility or auto-merge PATCH carries no such field.
+          if (typeof body?.default_branch === "string") {
+            defaultBranches.set(repo, body.default_branch);
+          }
+          return Response.json({ name: repo });
+        }
       }
+      // Every repository has a `main` branch to repoint to. The case where ensureMainBranch has to
+      // rename a branch, because `main` is missing, is not modeled.
+      if (rest === "/branches/main" && method === "GET") return Response.json({ name: "main" });
 
       if (rest === "/rulesets") {
         if (method === "GET") {
