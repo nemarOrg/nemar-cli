@@ -994,12 +994,20 @@ async function isRestartable(db: Db, row: ReviewRow, options: PrReviewOptions): 
 }
 
 /**
- * Whether a row's attempt may have reached the model (one run, of one or two calls): the complement
- * of a decline or an attempt GitHub never ran. A restart of a row that did adds a second run to its
- * `attempts`, and the administrator's volume count sums `attempts` over the rows that did.
+ * Whether a row's attempt may have reached the model (one run, of up to two calls): the complement
+ * of a decline, an attempt GitHub never ran, and a run that ended at the facts stage (`stage` is
+ * `facts`: the naming rule decided it before any model was asked, so it made no call). A restart of
+ * a row that did adds a second run to its `attempts`, and the administrator's volume count sums
+ * `attempts` over the rows that did. `stage` is the stage of a stored version 2 report and is
+ * absent for any other row; a row a restart reads is never a reported one.
  */
-export function spentACall(row: { state: string; detail: string | null }): boolean {
+export function spentACall(row: {
+  state: string;
+  detail: string | null;
+  stage?: string | null;
+}): boolean {
   if (row.state === "declined") return false;
+  if (row.stage === "facts") return false;
   return !(
     row.state === "errored" &&
     (row.detail === "stale_head" || row.detail === "dispatch_failed")

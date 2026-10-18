@@ -89,7 +89,7 @@ And the review only ever sees a pull request's text and metadata, so a count of 
   Rows written while the pause was automatic hold the same word, so its copy does not say who paused the contributor.
   The standing answer no longer carries `by_record` or `thresholds`, which described the rule that is gone.
 - **The admin list carries a volume line.**
-  For the last 24 hours and the last 7 days it gives the review records created, the review runs they cost (`review_runs`: the sum of their attempts, leaving out a decline and a run that never reached the model), what they came to, and the declined ones by reason word.
+  For the last 24 hours and the last 7 days it gives the review records created, the review runs they cost (`review_runs`: the sum of their attempts, leaving out a decline, a run that never reached the model, and a run the naming rule ended at the facts stage, which asked no model; a run makes up to two model calls), what they came to, and the declined ones by reason word.
   Each window also sums the tokens of each stage and an estimated cost in dollars at the list prices under Consequences, an estimate for orientation and not a bill.
   Only a version 2 report carries its usage, so only version 2 reports are counted, and the line says how many were: a refusal, a truncation, an earlier attempt of a restarted review and a report from before the screen cost tokens that are not in the sum.
   For example, 30,000 screen input tokens, 60,000 screen output tokens, 380,000 review input tokens and 35,000 review output tokens come to about $1.14 (30,000 x $0.10 + 60,000 x $0.50 + 380,000 x $2 + 35,000 x $10, per million tokens).

@@ -311,7 +311,10 @@ describe("nemar admin pr-reviews start <dataset> <pr>", () => {
     expect(help).toContain(
       `more than ${PR_REVIEW_DEADLINE_MINUTES} minutes ago that never came back`,
     );
-    expect(help).toContain("one or two model calls");
+    expect(help).toContain("up to two model calls");
+    expect(help).not.toContain("one or two model calls");
+    // A run the naming rule ends asked no model, so it is not a call either.
+    expect(help).toContain("a run the naming rule ends makes none");
   });
 
   test("a pull request GitHub does not have is an error with a word", async () => {

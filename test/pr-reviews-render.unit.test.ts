@@ -27,6 +27,7 @@ import {
   renderQueue,
   reportLines,
   standingLines,
+  startAllQuestion,
   terminalize,
   tokenText,
   verdictText,
@@ -716,6 +717,18 @@ describe("a version 2 report on the terminal", () => {
       .join("\n");
     expect(text).toContain("Passes: nothing lost, revision advances, materially better");
     expect(text).toContain("Reviewed with claude-haiku-5-5.");
+  });
+});
+
+describe("startAllQuestion", () => {
+  test("says how many pull requests, and that a review is a run of up to two model calls", () => {
+    expect(startAllQuestion(1)).toBe(
+      "Start the automated review of 1 pull request? Each is one run of up to two model calls.",
+    );
+    expect(startAllQuestion(3)).toBe(
+      "Start the automated review of 3 pull requests? Each is one run of up to two model calls.",
+    );
+    expect(startAllQuestion(3)).not.toContain("one or two");
   });
 });
 

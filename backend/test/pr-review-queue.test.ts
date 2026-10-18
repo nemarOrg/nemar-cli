@@ -1987,6 +1987,20 @@ describe("the volume of reviews in the list: information, never a gate", () => {
       },
     });
 
+  /** A version 2 report that ended at the facts stage: the naming rule decided it, no model was asked. */
+  const factsReport = () =>
+    JSON.stringify({
+      v: 2,
+      stage: "facts",
+      models: { screen: null, review: null },
+      criteria: {},
+      findings: [],
+      summary: "",
+      steering: false,
+      evidence: {},
+      usage: { screen: { input_tokens: 0, output_tokens: 0 }, review: null },
+    });
+
   function seedWeek() {
     // The last 24 hours: ten records.
     seedAt(1, 2, { state: "reported", verdict: "pass" });
@@ -2094,6 +2108,32 @@ describe("the volume of reviews in the list: information, never a gate", () => {
     // 3,000 x 0.10 + 1,200 x 0.50 + 20,000 x 2 + 8,000 x 10, per million: $0.12.
     expect(volume.last_24_hours.estimated_cost_usd).toBe(0.12);
     expect(volume.last_7_days.tokens).toMatchObject({ reviews_counted: 3, screen_input: 4000 });
+  });
+
+  test("a run that ended at the facts stage made no model call, so it is not a review run, and a full run is", async () => {
+    const runs = async () => {
+      const { last_24_hours: day, last_7_days: week } = await readVolume(realD1(db));
+      return [day.review_runs, week.review_runs];
+    };
+    // Each record is one run. A full run costs a run.
+    seedAt(1, 2, {
+      state: "reported",
+      verdict: "pass",
+      report: v2Report([1000, 500], [20000, 8000]),
+    });
+    expect(await runs()).toEqual([1, 1]);
+    // The naming rule ended these before any model was asked: records, but no run. One is in the
+    // last day and one is older, so both windows are shown to leave them out.
+    seedAt(2, 2, { state: "reported", verdict: "fail", report: factsReport() });
+    seedAt(3, 72, { state: "reported", verdict: "uncertain", report: factsReport() });
+    expect(await runs()).toEqual([1, 1]);
+    const { last_24_hours: day, last_7_days: week } = await readVolume(realD1(db));
+    // They are still reviews, with the verdicts they came to: only the runs are fewer.
+    expect(day).toMatchObject({ reviews: 2, by_verdict: { pass: 1, fail: 1 } });
+    expect(week).toMatchObject({ reviews: 3, by_verdict: { pass: 1, fail: 1, uncertain: 1 } });
+    // A run the screen stopped made a call, so it is a run, and raises the count again.
+    seedAt(4, 2, { state: "reported", verdict: "fail", report: v2Report([2000, 700], null) });
+    expect(await runs()).toEqual([2, 2]);
   });
 
   test("a report that is not JSON is not summed and does not fail the volume", async () => {

@@ -1202,10 +1202,10 @@ result is not started again. A start that restarts a review that already ran cos
   nemar admin pr-reviews start --all --dry-run
   nemar admin pr-reviews start --all --yes
 
-Each review is one run of one or two model calls: the screen, and then the review unless the screen
-stops it as spam. A blocked contributor is asked about like any other and declined by the
-Worker, which says so; after 'allow', the same command starts it. --all leaves drafts out and asks
-before spending (--yes skips that).
+Each review is one run of up to two model calls: the screen, and then the review unless the screen
+stops it as spam; a run the naming rule ends makes none. A blocked contributor is asked about like
+any other and declined by the Worker, which says so; after 'allow', the same command starts it.
+--all leaves drafts out and asks before spending (--yes skips that).
 `,
   )
   .action(
@@ -1275,6 +1275,15 @@ before spending (--yes skips that).
 type StartResult =
   | (StartReviewResponse & { dataset_id: string; pr_number: number })
   | { dataset_id: string; pr_number: number; error: string };
+
+/**
+ * The question `start --all` asks before it spends: how many pull requests, and what a review of
+ * one costs, which is a run of up to two model calls (a run the screen or the naming rule ends
+ * makes fewer).
+ */
+export function startAllQuestion(count: number): string {
+  return `Start the automated review of ${count} pull request${count === 1 ? "" : "s"}? Each is one run of up to two model calls.`;
+}
 
 /** The `--all` run: list, show, ask, then start one at a time. */
 async function startAll(options: {
@@ -1353,10 +1362,7 @@ async function startAll(options: {
     return;
   }
   if (!json) console.log();
-  const go = await confirm(
-    `Start the automated review of ${todo.length} pull request${todo.length === 1 ? "" : "s"}? Each is one run of one or two model calls.`,
-    { yes: options.yes },
-  );
+  const go = await confirm(startAllQuestion(todo.length), { yes: options.yes });
   if (go !== "confirmed") {
     // Not on stdout under --json, which is read as one document.
     (json ? console.error : console.log)("Cancelled.");

@@ -185,8 +185,9 @@ export interface VolumeWindow {
   /**
    * Runs of the review those records cost, or may yet cost: the sum of their attempts, leaving out
    * a decline and a run that never reached the model (a dispatch GitHub did not run, a commit a
-   * newer one superseded). Each run makes one or two model calls: the screen, and then the review
-   * unless the screen stopped the pull request.
+   * newer one superseded) or asked none (a run the naming rule ended at the facts stage). Each run
+   * makes up to two model calls: the screen, and then the review unless the screen stopped the pull
+   * request.
    */
   review_runs: number;
   /** The records by what they came to, in the words the list uses. Every word is there, zero if unseen. */

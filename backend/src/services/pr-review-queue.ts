@@ -999,12 +999,15 @@ const USAGE_SUMS = `COALESCE(SUM(CASE WHEN ${V2_REPORT} THEN json_extract(report
 
 /**
  * The records of the last week, grouped by everything a count needs, with their runs. One
- * group is a state, a verdict, a reason, whether a running review is overdue and whether it is
- * inside the last day. The one bound value is how many minutes after it was handed over a review
- * that never reported stops reading as running, which is the list's own rule (`OVERDUE_AFTER_MS`).
+ * group is a state, a verdict, a reason, the stage of a stored version 2 report (a run that ended
+ * at the facts stage made no model call and is not a run, see `spentACall`), whether a running
+ * review is overdue and whether it is inside the last day. The one bound value is how many minutes
+ * after it was handed over a review that never reported stops reading as running, which is the
+ * list's own rule (`OVERDUE_AFTER_MS`).
  */
 const VOLUME_SQL = `
   SELECT state, verdict, detail,
+         CASE WHEN ${V2_REPORT} THEN json_extract(report, '$.stage') END AS stage,
          CASE WHEN state = 'dispatched'
                AND created_at < datetime('now', '-' || ? || ' minutes') THEN 1 ELSE 0 END AS overdue,
          CASE WHEN created_at >= datetime('now', '-1 day') THEN 1 ELSE 0 END AS in_day,
@@ -1013,12 +1016,13 @@ const VOLUME_SQL = `
          ${USAGE_SUMS}
     FROM pr_reviews
    WHERE created_at >= datetime('now', '-7 days')
-   GROUP BY state, verdict, detail, overdue, in_day`;
+   GROUP BY state, verdict, detail, stage, overdue, in_day`;
 
 interface VolumeGroup {
   state: string;
   verdict: string | null;
   detail: string | null;
+  stage: string | null;
   overdue: number;
   in_day: number;
   reviews: number;
