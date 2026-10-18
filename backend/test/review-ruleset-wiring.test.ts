@@ -12,7 +12,9 @@
  *
  * This scan stays because those tests can only drive the callers that exist today. A sixth call
  * to `ensureRepoToSpec`, added later, would not be in any of them, and the scan is what notices
- * it, in the shape of the scans in anonymity-publication-paths.test.ts.
+ * it, in the shape of the scans in anonymity-publication-paths.test.ts. It finds a call however
+ * it is spelled (awaited, returned, made inside a callback such as `Promise.all(rows.map(...))`),
+ * in the code with its comments removed, and judges each call by its own arguments.
  *
  * Three ways for a caller to be wrong, and the scan fails on all of them:
  *  - it says nothing about the review, so the repository's ruleset is never kept in step with the
@@ -45,13 +47,39 @@ function sourceFiles(dir: string): string[] {
   return out;
 }
 
-/** An awaited CALL. `await` excludes the declaration and the comments that name the function. */
-const CALL = /await\s+ensureRepoToSpec\s*\(/g;
+/**
+ * A CALL, however it is spelled: the name and an opening parenthesis. Awaited, returned, assigned
+ * or handed to a callback all match, which a pattern that wants `await` in front would miss.
+ */
+const CALL = /\bensureRepoToSpec\s*\(/g;
 
-/** The text of one call, from its `await` to the first line that closes it with `});`. */
+/** What stands in front of the name in its declaration, which is not a call. */
+const DECLARED = /\bfunction\s+$/;
+
+/** The index of the quote that closes the string literal opened at `from`. */
+function stringEnd(text: string, from: number): number {
+  const quote = text[from];
+  for (let i = from + 1; i < text.length; i++) {
+    if (text[i] === "\\") i++;
+    else if (text[i] === quote) return i;
+  }
+  return text.length;
+}
+
+/**
+ * The text of one call: from its name to the parenthesis that closes its argument list, so a call
+ * is judged by its own arguments and not by whatever follows it in the file. A parenthesis inside
+ * a string does not count.
+ */
 function callText(text: string, at: number): string {
-  const closes = /\n\s*\}\);/.exec(text.slice(at));
-  return closes ? text.slice(at, at + closes.index + closes[0].length) : text.slice(at, at + 2000);
+  let depth = 0;
+  for (let i = text.indexOf("(", at); i >= 0 && i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"' || ch === "'" || ch === "`") i = stringEnd(text, i);
+    else if (ch === "(") depth++;
+    else if (ch === ")" && --depth === 0) return text.slice(at, i + 1);
+  }
+  return text.slice(at);
 }
 
 /**
@@ -65,21 +93,6 @@ interface Site {
   text: string;
 }
 
-function sites(): Site[] {
-  const found: Site[] = [];
-  for (const file of sourceFiles(SRC)) {
-    const text = readFileSync(file, "utf8");
-    for (const match of text.matchAll(CALL)) {
-      const line = text.slice(0, match.index).split("\n").length;
-      found.push({
-        where: `${relative(SRC, file).split(sep).join("/")}:${line}`,
-        text: callText(text, match.index ?? 0),
-      });
-    }
-  }
-  return found;
-}
-
 /**
  * The same text with its comments blanked, so that a name in the documentation is not a use of it.
  * Block comments keep their newlines, so a line number is still the file's own.
@@ -88,6 +101,34 @@ function code(text: string): string {
   return text
     .replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, " "))
     .replace(/\/\/[^\n]*/g, "");
+}
+
+/** Every call of ensureRepoToSpec in `source`, found in its code, the declaration left out. */
+function callsIn(where: string, source: string): Site[] {
+  const text = code(source);
+  const found: Site[] = [];
+  for (const match of text.matchAll(CALL)) {
+    const at = match.index ?? 0;
+    if (DECLARED.test(text.slice(0, at))) continue;
+    found.push({
+      where: `${where}:${text.slice(0, at).split("\n").length}`,
+      text: callText(text, at),
+    });
+  }
+  return found;
+}
+
+/** The calls in `source` that do not decide the review from the row and the owner's switch. */
+function undecidedCallsIn(where: string, source: string): string[] {
+  return callsIn(where, source)
+    .filter((s) => !COMPUTED_REVIEW.test(s.text))
+    .map((s) => s.where);
+}
+
+function sites(): Site[] {
+  return sourceFiles(SRC).flatMap((file) =>
+    callsIn(relative(SRC, file).split(sep).join("/"), readFileSync(file, "utf8")),
+  );
 }
 
 /** The functions that put the review ruleset on a repository or take it off one. */
@@ -225,5 +266,79 @@ describe("every caller of ensureRepoToSpec decides the required review from the 
     expect(COMPUTED_REVIEW.test('review: "require",')).toBe(false);
     expect(COMPUTED_REVIEW.test("review: undefined,")).toBe(false);
     expect(COMPUTED_REVIEW.test("visibility: 'public', dryRun,")).toBe(false);
+  });
+
+  // The scan is run on scratch source, so that each way a caller can hide from it is shown to be
+  // caught, and not only that the callers there are today pass.
+  describe("the scan finds a call however it is spelled", () => {
+    const READ = "await readReviewIntent(env, id)";
+    const DECIDED = `review: ${READ}`;
+
+    test("a call that is returned, not awaited, with a literal, is an offender", () => {
+      const source = [
+        "export function enforceOne(repo: string, pat: string) {",
+        '  return ensureRepoToSpec(repo, pat, { visibility: "public", review: "require" });',
+        "}",
+      ].join("\n");
+
+      expect(undecidedCallsIn("scratch/returned.ts", source)).toEqual(["scratch/returned.ts:2"]);
+      // The same call, deciding the review as every caller must, is not.
+      expect(
+        undecidedCallsIn("scratch/returned.ts", source.replace('review: "require"', DECIDED)),
+      ).toEqual([]);
+    });
+
+    test("a call made inside Promise.all(rows.map(...)), with a literal, is an offender", () => {
+      const source = [
+        "export async function enforceAll(rows: Row[], pat: string) {",
+        "  return Promise.all(",
+        "    rows.map((row) =>",
+        "      ensureRepoToSpec(row.repo, pat, {",
+        '        visibility: "public",',
+        '        review: "require",',
+        "      }),",
+        "    ),",
+        "  );",
+        "}",
+      ].join("\n");
+
+      expect(undecidedCallsIn("scratch/mapped.ts", source)).toEqual(["scratch/mapped.ts:4"]);
+      expect(undecidedCallsIn("scratch/mapped.ts", source.replace('"require"', READ))).toEqual([]);
+    });
+
+    test("a call is judged by its own arguments: a decided call after it does not vouch for it", () => {
+      const source = [
+        "export async function both(repo: string, pat: string, env: Bindings, id: string) {",
+        "  await Promise.all([ensureRepoToSpec(repo, pat, { visibility: 'public' })]);",
+        `  return await ensureRepoToSpec(repo, pat, { visibility: 'public', ${DECIDED} });`,
+        "}",
+      ].join("\n");
+
+      expect(undecidedCallsIn("scratch/both.ts", source)).toEqual(["scratch/both.ts:2"]);
+    });
+
+    test("the declaration, a mention in a comment, and a type position are not calls", () => {
+      const source = [
+        "/** ensureRepoToSpec(repo, pat, opts) brings a repository to its spec. */",
+        "export async function ensureRepoToSpec(repo: string, pat: string) {}",
+        "// callers: await ensureRepoToSpec(repo, pat, {})",
+        "type Spec = Awaited<ReturnType<typeof ensureRepoToSpec>>;",
+        'import { ensureRepoToSpec } from "./branch-protection";',
+      ].join("\n");
+
+      expect(callsIn("scratch/declared.ts", source)).toEqual([]);
+    });
+
+    test("a parenthesis inside a string does not end a call early", () => {
+      const source = [
+        "const spec = await ensureRepoToSpec(repo, pat, {",
+        '  note: "closes with ) in a string",',
+        `  ${DECIDED},`,
+        "});",
+      ].join("\n");
+
+      expect(callsIn("scratch/string.ts", source)).toHaveLength(1);
+      expect(undecidedCallsIn("scratch/string.ts", source)).toEqual([]);
+    });
   });
 });
