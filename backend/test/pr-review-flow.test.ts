@@ -355,6 +355,8 @@ function goodReport(over: Record<string, unknown> = {}) {
       },
       listed: [{ status: "modified", path: "dataset_description.json" }],
       description_empty: false,
+      description_cut: false,
+      changelog_entry: "added",
       title_problem: null,
       name_problem: null,
     },
@@ -369,12 +371,21 @@ function goodReport(over: Record<string, unknown> = {}) {
 /** The same review as version 1 wrote it, before the screen: rows stored then still hold it. */
 function v1Report() {
   const { stage, models, usage, criteria, evidence, ...rest } = goodReport();
-  const { description_empty, title_problem, name_problem, ...v1Evidence } = evidence;
+  const {
+    description_empty,
+    description_cut,
+    changelog_entry,
+    title_problem,
+    name_problem,
+    ...v1Evidence
+  } = evidence;
   void stage;
   void models;
   void usage;
   void criteria;
   void description_empty;
+  void description_cut;
+  void changelog_entry;
   void title_problem;
   void name_problem;
   return {
