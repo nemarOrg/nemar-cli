@@ -36,6 +36,7 @@ import {
   type AreaCounts,
   type ChangeStatus,
   type ChangedFile,
+  type ChangelogEntry,
   MAX_LISTED,
   MAX_MODEL_FILES,
   type NamingProblem,
@@ -45,6 +46,7 @@ import {
 import { shouldAnnex } from "../../src/lib/git-annex/policy";
 
 export { MAX_MODEL_FILES };
+export type { ChangelogEntry };
 /** At most this many files have their content (a diff) shown to the model. */
 export const MAX_PATCH_FILES = 40;
 /** Characters of one file's diff shown to the model. */
@@ -220,7 +222,11 @@ export interface ContentFacts {
   groups: PathGroup[];
   /** Changed metadata files that belong to a path shape cut by {@link MAX_GROUPS}. */
   groupsOmittedFiles: number;
-  /** Whether this pull request adds an entry for the new version to the change log. */
+  /**
+   * Whether this pull request adds an entry for the new version to the change log, in the words of
+   * {@link ChangelogEntry} (declared with the report, which enforces them). The report carries it
+   * as `changelog_entry`, and a version without an entry cannot advance the revision.
+   */
   changelogEntry: ChangelogEntry;
 }
 
@@ -242,19 +248,6 @@ export interface TextFacts {
   titleProblem: NamingProblem | null;
   nameProblem: NamingProblem | null;
 }
-
-/**
- * What the change log says about the new version:
- *  - `added`: a heading for the new version is in the head's change log and was not in the merge
- *    base's (a heading is a line that starts with the version, after any `#` or `[`, and an
- *    optional `v`, `version` or `release`; a bullet is not a heading);
- *  - `not_added`: the head has a change log but no new heading for the new version, which includes
- *    a heading that was already there, a date-only heading, and a version only mentioned in prose;
- *  - `no_file`: the head has no change log file;
- *  - `unknown_version`: the new version is unknown (absent or not `X.Y.Z`), so the platform cannot
- *    tell what to look for. This is decided first, so it wins over `no_file`.
- */
-export type ChangelogEntry = "added" | "not_added" | "no_file" | "unknown_version";
 
 /** One shape of changed path: `sub-*` and `ses-*` and `run-*` stand for any value. */
 export interface PathGroup {
@@ -832,13 +825,15 @@ export function buildEvidence(facts: GitFacts, text: TextFacts): ReviewEvidence 
     ...listedEvidence(facts, text),
     files_read: facts.patches.length,
     truncated: facts.listCut || facts.readIncomplete,
+    changelog_entry: facts.changelogEntry,
   };
 }
 
 /**
  * The evidence block of a report that ended at the screen: the same account, and no content read.
  * `truncated` keeps its meaning: the change list was cut, or a modified or removed metadata file
- * was not shown, which, with nothing read, is any such file at all.
+ * was not shown, which, with nothing read, is any such file at all. The change log is content, so
+ * it was not read either: `changelog_entry` is null.
  */
 export function buildScreenEvidence(listing: Listing, text: TextFacts): ReviewEvidence {
   return {
@@ -846,5 +841,6 @@ export function buildScreenEvidence(listing: Listing, text: TextFacts): ReviewEv
     files_read: 0,
     truncated:
       listing.listCut || readableChanges(listing.changes).some((c) => c.status !== "added"),
+    changelog_entry: null,
   };
 }

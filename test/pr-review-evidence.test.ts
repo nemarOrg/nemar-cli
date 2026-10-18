@@ -125,6 +125,20 @@ function desc(version: string, extra: Record<string, unknown> = {}): string {
   });
 }
 
+/**
+ * A new release the way a contributor makes one: the version goes up and CHANGES gains the entry
+ * headed by it. A version bump without the entry cannot advance the revision (`changes_log_missing`),
+ * so a test that means a clean release writes both.
+ */
+function release(dir: string, version = "1.1.0"): void {
+  write(dir, "dataset_description.json", desc(version));
+  write(
+    dir,
+    "CHANGES",
+    `${version} 2026-10-16\n - Fixed units\n1.0.0 2026-01-01\n - Initial release\n`,
+  );
+}
+
 interface Repo {
   dir: string;
   base: string;
@@ -392,6 +406,7 @@ describe("reading a real pull request as git data", () => {
     expect(e.areas.sidecars).toEqual({ added: 1, modified: 0, removed: 0 });
     expect(e.version_before).toBe("1.0.0");
     expect(e.version_after).toBe("1.1.0");
+    expect(e.changelog_entry).toBe("added");
     expect(e.subjects_before).toBe(2);
     expect(e.subjects_after).toBe(3);
     // The areas add up to the total: the Worker's parser will insist on it.
@@ -708,7 +723,7 @@ describe("runReview: the job around the model call", () => {
   function setup(name: string) {
     const dir = newDataset(name);
     const r = branch(dir, () => {
-      write(dir, "dataset_description.json", desc("1.1.0"));
+      release(dir);
       write(dir, "README.md", "# Edited\n");
     });
     return r;
@@ -856,7 +871,8 @@ describe("runReview: the job around the model call", () => {
     expect(user).toContain("Add a subject to the README");
     expect(user).toContain("Adds sub-03 and its sidecar.");
     expect(user).toContain("README.md");
-    expect(user).toContain('"files_changed": 2');
+    // The README, the dataset description with its new version, and the CHANGES entry for it.
+    expect(user).toContain('"files_changed": 3');
     expect(user).not.toContain("author_association");
     expect(user).not.toContain("FIRST_TIME_CONTRIBUTOR");
     expect(SCREEN_SYSTEM_PROMPT).not.toContain("author_association");
@@ -954,6 +970,8 @@ describe("runReview: the job around the model call", () => {
     if (res.outcome !== "reported" || res.report.v !== 2) throw new Error("not a version 2 report");
     expect(res.report.stage).toBe("screen");
     expect(res.report.evidence.files_read).toBe(0);
+    // The change log is content, and no content was read.
+    expect(res.report.evidence.changelog_entry).toBeNull();
     expect(res.report.usage.review).toBeNull();
     expect(res.report.findings.map((f) => f.code)).toEqual(["spam"]);
     expect(verdictOf(res.report)).toBe("fail");
@@ -1368,8 +1386,8 @@ describe("runReview: the job around the model call", () => {
       expect(outcome.kind).toBe("reported");
       if (outcome.kind !== "reported") return;
       expect(verdictOf(outcome.report)).toBe("pass");
-      // The account of what changed is git's, not the model's: two files.
-      expect(outcome.report.evidence.files_changed).toBe(2);
+      // The account of what changed is git's, not the model's: the README, the description and CHANGES.
+      expect(outcome.report.evidence.files_changed).toBe(3);
       // The public log has the review id and fixed words, and neither the token nor the model's text.
       expect(log).toContain("review 41: reported at full");
       expect(log).not.toContain(TOKEN);
@@ -1591,7 +1609,7 @@ describe("what the reviewer was not shown is a fact", () => {
       for (let i = 0; i < 18; i++) {
         write(dir, `sub-${pad(i)}/eeg/sub-${pad(i)}_task-rest_eeg.json`, "{}");
       }
-      write(dir, "dataset_description.json", desc("1.1.0"));
+      release(dir);
     });
     const facts = gatherGitFacts(r.dir, r.base, r.head);
     const e = buildEvidence(facts, NO_TEXT_PROBLEMS);
@@ -1612,12 +1630,13 @@ describe("what the reviewer was not shown is a fact", () => {
           "onset\tduration\n1\t2\n3\t4\n5\t6\n7\t8\n",
         );
       }
-      write(dir, "dataset_description.json", desc("1.1.0"));
+      release(dir);
     });
     const facts = gatherGitFacts(r.dir, r.base, r.head);
     const e = buildEvidence(facts, NO_TEXT_PROBLEMS);
     expect(e.truncated).toBe(false);
-    expect(e.files_read).toBe(6);
+    // Five events tables, the dataset description, and the CHANGES entry for its new version.
+    expect(e.files_read).toBe(7);
     expect(verdictOf(full(allPass, e))).toBe("pass");
   });
 
@@ -1671,7 +1690,7 @@ describe("what the reviewer was not shown is a fact", () => {
     const dir = newBigDataset("removed-first", 3);
     const r = branch(dir, () => {
       execFileSync("git", ["-C", dir, "rm", "-q", "participants.tsv"], { env: GIT_ENV });
-      write(dir, "dataset_description.json", desc("1.1.0"));
+      release(dir);
       for (let i = 100; i < 160; i++)
         write(dir, `sub-${pad(i)}/eeg/sub-${pad(i)}_task-rest_eeg.json`, "{}");
     });
@@ -1737,12 +1756,13 @@ describe("renames, and the edges of what the model is shown", () => {
         "sub-01/eeg/sub-01_task-rest_eeg.edf",
         "sub-01/eeg/sub-01_task-renamed_eeg.edf",
       );
-      write(dir, "dataset_description.json", desc("1.1.0"));
+      release(dir);
     });
     const facts = gatherGitFacts(r.dir, r.base, r.head);
     const e = buildEvidence(facts, NO_TEXT_PROBLEMS);
     // Without --no-renames git reports the move as one rename and the removal never shows.
-    expect(e.files_changed).toBe(3);
+    // The removed name, the added name, the dataset description and the CHANGES entry.
+    expect(e.files_changed).toBe(4);
     expect(e.areas.recordings.removed).toBe(1);
     expect(e.areas.recordings.added).toBe(1);
     // And a removed recording needs a person, whatever the model said.
@@ -1810,7 +1830,7 @@ describe("the review's text judgments become the two text criteria and their fin
   beforeAll(() => {
     const dir = newDataset("text-judgments");
     const r = branch(dir, () => {
-      write(dir, "dataset_description.json", desc("1.1.0"));
+      release(dir);
       write(dir, "README.md", "# Text\n");
     });
     const facts = gatherGitFacts(r.dir, r.base, r.head);
@@ -2601,6 +2621,62 @@ describe("the facts come before any model, and fail the verdict whatever it says
       name_problem: null,
     });
     expect(verdictOf(report)).toBe("pass");
+  });
+
+  /** The review stage's request, which tells the model the change log fact. */
+  const reviewRequest = () => {
+    const req = modelRequests.find((r) => r.body.model === STAGE_BUDGETS.review.model);
+    if (!req) throw new Error("the review was not asked");
+    return userMessageOf(req);
+  };
+
+  test("a version bump with no CHANGES entry cannot advance the revision, though both models passed it", async () => {
+    const report = await reviewWith("facts-no-entry", (dir) => {
+      // The version went up in dataset_description.json; CHANGES is left as it was.
+      write(dir, "CHANGES", "1.0.0 2026-01-01\n - Initial release\n");
+    });
+    expect(report.stage).toBe("full");
+    expect(report.evidence.changelog_entry).toBe("not_added");
+    // The review was told as much, and answered pass to the revision anyway.
+    expect(reviewRequest()).toContain('"changelog_entry": "not_added"');
+    expect(report.criteria.advances_revision).toBe("pass");
+    // The platform does not take that answer: the question fails, with the blocker named.
+    expect(factsOf(report).criteria.advances_revision).toBe("fail");
+    expect(factsOf(report).notes).toContainEqual({
+      criterion: "advances_revision",
+      code: "changes_log_missing",
+      result: "fail",
+    });
+    expect(verdictOf(report)).toBe("fail");
+    expect(renderCheck({ kind: "reported", report }).text).toContain("CHANGES entry missing");
+  });
+
+  test("a version bump with no change log at all fails the same way", async () => {
+    const report = await reviewWith("facts-no-log", (dir) => {
+      execFileSync("git", ["-C", dir, "rm", "-q", "-f", "CHANGES"], { env: GIT_ENV });
+    });
+    expect(report.evidence.changelog_entry).toBe("no_file");
+    expect(report.criteria.advances_revision).toBe("pass");
+    expect(factsOf(report).criteria.advances_revision).toBe("fail");
+    expect(verdictOf(report)).toBe("fail");
+  });
+
+  test("an entry for the new version is what lets the revision advance: the control passes", async () => {
+    const report = await reviewWith("facts-entry", () => {});
+    expect(report.evidence.changelog_entry).toBe("added");
+    expect(reviewRequest()).toContain('"changelog_entry": "added"');
+    expect(factsOf(report).notes.map((n) => n.code)).not.toContain("changes_log_missing");
+    expect(verdictOf(report)).toBe("pass");
+  });
+
+  test("a version nobody can read is not blamed on the change log", async () => {
+    const report = await reviewWith("facts-no-version", (dir) => {
+      write(dir, "dataset_description.json", JSON.stringify({ Name: "Resting EEG of volunteers" }));
+    });
+    expect(report.evidence.changelog_entry).toBe("unknown_version");
+    expect(factsOf(report).notes.map((n) => n.code)).not.toContain("changes_log_missing");
+    expect(factsOf(report).criteria.advances_revision).toBe("unknown");
+    expect(verdictOf(report)).toBe("uncertain");
   });
 
   test("a title that starts with an author and a year fails, though the model passed it", async () => {

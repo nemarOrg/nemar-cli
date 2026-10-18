@@ -86,6 +86,7 @@ function evidence(over: Record<string, unknown> = {}): Record<string, unknown> {
     ...evidenceV1(over),
     description_empty: false,
     description_cut: false,
+    changelog_entry: "added",
     title_problem: null,
     name_problem: null,
     ...over,
@@ -154,7 +155,8 @@ function screenReport(over: Record<string, unknown> = {}): Record<string, unknow
       },
     ],
     summary: "The description advertises an unrelated service.",
-    evidence: evidence({ files_read: 0 }),
+    // The screen reads no content, and the change log is content.
+    evidence: evidence({ files_read: 0, changelog_entry: null }),
     usage: { screen: { input_tokens: 1500, output_tokens: 800 }, review: null },
     ...over,
   });
@@ -1330,7 +1332,7 @@ describe("the check shows what the facts left of an answer, not what the model s
 // ---------------------------------------------------------------------------------------------
 
 describe("a version 2 report is exactly its keys, and its stage is a contract", () => {
-  test("the report carries exactly the version 2 keys, and its evidence the three text facts", () => {
+  test("the report carries exactly the version 2 keys, and its evidence the text facts", () => {
     const r = parsed();
     expect(Object.keys(r).sort()).toEqual([
       "criteria",
@@ -1347,10 +1349,17 @@ describe("a version 2 report is exactly its keys, and its stage is a contract", 
     expect(r.evidence).toMatchObject({
       description_empty: false,
       description_cut: false,
+      changelog_entry: "added",
       title_problem: null,
       name_problem: null,
     });
-    for (const key of ["description_empty", "description_cut", "title_problem", "name_problem"]) {
+    for (const key of [
+      "description_empty",
+      "description_cut",
+      "changelog_entry",
+      "title_problem",
+      "name_problem",
+    ]) {
       const e = evidence();
       delete e[key];
       expect(refusal(report({ evidence: e })), key).toBe("bad_evidence");
@@ -1363,6 +1372,25 @@ describe("a version 2 report is exactly its keys, and its stage is a contract", 
     );
     expect(refusal(report({ evidence: evidence({ description_cut: "no" }) }))).toBe("bad_evidence");
     expect(refusal(report({ evidence: evidence({ description_cut: null }) }))).toBe("bad_evidence");
+    // The change log's word is one of four, or null where nothing read it.
+    for (const bad of ["missing", "ADDED", true, 0, undefined]) {
+      expect(refusal(report({ evidence: evidence({ changelog_entry: bad }) })), `${bad}`).toBe(
+        "bad_evidence",
+      );
+    }
+    for (const word of ["added", "not_added", "no_file", "unknown_version"]) {
+      expect(refusal(report({ evidence: evidence({ changelog_entry: word }) })), word).toBe(
+        "accepted",
+      );
+    }
+  });
+
+  test("a full report must say what the change log holds; one that ended at the screen could not", () => {
+    // The review reads the change log and a rule fails a revision with no entry in it, so a full
+    // report that says nothing about it would be a way past the rule.
+    expect(refusal(report({ evidence: evidence({ changelog_entry: null }) }))).toBe("bad_evidence");
+    expect(refusal(screenReport())).toBe("accepted");
+    expect(parsePrReviewReport(screenReport()).evidence.changelog_entry).toBeNull();
   });
 
   test("a screen report is accepted only as a fail of genuine_contribution, the rest not assessed", () => {
@@ -1446,6 +1474,72 @@ describe("the text facts fail the verdict whatever the model says", () => {
     expect(factsOf(r).criteria.clear_title_and_description).toBe("fail");
     expect(verdictOf(r)).toBe("fail");
     expect(renderCheck({ kind: "reported", report: r }).text).toContain("Description is empty");
+  });
+
+  test("a new version with no entry in the change log cannot advance the revision, whatever the model said", () => {
+    for (const word of ["not_added", "no_file"]) {
+      const r = parsed({ evidence: evidence({ changelog_entry: word }) });
+      // Both versions are known and the new one is newer; the model answered pass.
+      expect(r.criteria.advances_revision, word).toBe("pass");
+      expect(factsOf(r).criteria.advances_revision, word).toBe("fail");
+      expect(factsOf(r).notes, word).toContainEqual({
+        criterion: "advances_revision",
+        code: "changes_log_missing",
+        result: "fail",
+      });
+      expect(verdictOf(r), word).toBe("fail");
+      expect(conclusionOf({ kind: "reported", report: r }), word).toBe("failure");
+      const check = renderCheck({ kind: "reported", report: r });
+      expect(check.summary, word).toMatch(/The revision advances[^\n]*\bNo\b/);
+      expect(check.text, word).toContain("CHANGES entry missing");
+      expect(check.text, word).toContain("blocker");
+    }
+  });
+
+  test("an entry that was added, or a version nobody can look for, is not this rule's failure", () => {
+    const added = parsed({ evidence: evidence({ changelog_entry: "added" }) });
+    expect(factsOf(added).notes.map((n) => n.code)).not.toContain("changes_log_missing");
+    expect(verdictOf(added)).toBe("pass");
+    // No new version: the version fact has made the answer unknown, and the log is not asked about.
+    const unknown = parsed({
+      evidence: evidence({ changelog_entry: "unknown_version", version_after: null }),
+    });
+    expect(factsOf(unknown).criteria.advances_revision).toBe("unknown");
+    expect(factsOf(unknown).notes.map((n) => n.code)).not.toContain("changes_log_missing");
+    expect(verdictOf(unknown)).toBe("uncertain");
+  });
+
+  test("the missing entry is stated with every other problem, and not doubled when the model said it", () => {
+    // The version did not move and the log has no entry: the author reads both at once.
+    const both = parsed({
+      evidence: evidence({
+        version_before: "1.0.0",
+        version_after: "1.0.0",
+        changelog_entry: "not_added",
+      }),
+    });
+    expect(factsOf(both).notes.map((n) => n.code)).toEqual([
+      "version_not_advanced",
+      "changes_log_missing",
+    ]);
+    // A model that followed the prompt and failed the question with its own finding says it once.
+    const said = parsed({
+      criteria: { advances_revision: "fail" },
+      findings: [
+        {
+          criterion: "advances_revision",
+          severity: "blocker",
+          code: "changes_log_missing",
+          path: null,
+          note: "No heading for 1.1.0.",
+        },
+      ],
+      evidence: evidence({ changelog_entry: "not_added" }),
+    });
+    expect(verdictOf(said)).toBe("fail");
+    expect(
+      renderCheck({ kind: "reported", report: said }).text.match(/CHANGES entry missing/g),
+    ).toHaveLength(1);
   });
 
   test("a description longer than the models read cannot pass: the rest was not assessed", () => {

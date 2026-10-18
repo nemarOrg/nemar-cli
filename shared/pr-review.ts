@@ -252,6 +252,12 @@ export interface ReviewEvidence extends ReviewEvidenceV1 {
    * `[cut]`. Whether the rest misleads, or tries to instruct them, was not assessed.
    */
   description_cut: boolean;
+  /**
+   * What the change log says about the new version (see {@link ChangelogEntry}), or null when no
+   * review read it: the content is read only after the screen lets a pull request through, so a
+   * report that ended at the screen has none, and a full report always has one.
+   */
+  changelog_entry: ChangelogEntry | null;
   /** How the title breaks the naming rule, or null when it does not. */
   title_problem: NamingProblem | null;
   /**
@@ -261,6 +267,22 @@ export interface ReviewEvidence extends ReviewEvidenceV1 {
    */
   name_problem: NamingProblem | null;
 }
+
+/**
+ * What the change log says about the new version, as the evidence reader decides it from git:
+ *  - `added`: a heading for the new version is in the head's change log and was not in the merge
+ *    base's (a heading is a line that starts with the version, after any `#` or `[`, and an
+ *    optional `v`, `version` or `release`; a bullet is not a heading);
+ *  - `not_added`: the head has a change log but no new heading for the new version, which includes
+ *    a heading that was already there, a date-only heading, and a version only mentioned in prose;
+ *  - `no_file`: the head has no change log file;
+ *  - `unknown_version`: the new version is unknown (absent or not `X.Y.Z`), so the platform cannot
+ *    tell what to look for. This is decided first, so it wins over `no_file`.
+ * Both models are told this word as a fact, and {@link factsOf} enforces what it means: a revision
+ * with no new entry in the change log does not advance, whatever a model answered.
+ */
+export const CHANGELOG_ENTRIES = ["added", "not_added", "no_file", "unknown_version"] as const;
+export type ChangelogEntry = (typeof CHANGELOG_ENTRIES)[number];
 
 /** Tokens one model call used, from the API's own response. */
 export interface StageTokens {
@@ -457,6 +479,7 @@ const EVIDENCE_V2_KEYS = [
   ...EVIDENCE_V1_KEYS,
   "description_empty",
   "description_cut",
+  "changelog_entry",
   "title_problem",
   "name_problem",
 ] as const;
@@ -515,6 +538,12 @@ function nullableNamingProblem(v: unknown): NamingProblem | null {
   throw new PrReviewReportError("bad_evidence");
 }
 
+function nullableChangelogEntry(v: unknown): ChangelogEntry | null {
+  if (v === null) return null;
+  if (isOneOf(CHANGELOG_ENTRIES, v)) return v;
+  throw new PrReviewReportError("bad_evidence");
+}
+
 function parseEvidence(raw: unknown): ReviewEvidence {
   if (!isRecord(raw) || !hasExactKeys(raw, EVIDENCE_V2_KEYS)) {
     throw new PrReviewReportError("bad_evidence");
@@ -526,6 +555,7 @@ function parseEvidence(raw: unknown): ReviewEvidence {
     ...parseEvidenceV1Fields(raw),
     description_empty: raw.description_empty,
     description_cut: raw.description_cut,
+    changelog_entry: nullableChangelogEntry(raw.changelog_entry),
     title_problem: nullableNamingProblem(raw.title_problem),
     name_problem: nullableNamingProblem(raw.name_problem),
   };
@@ -645,8 +675,8 @@ function parseV1Report(raw: Record<string, unknown>): PrReviewReport {
  * The stage is a contract, not a label:
  *  - `screen`: the screen stopped the pull request, so `genuine_contribution` is a fail, the other
  *    five were never assessed (`unknown`), no review model is named and the review used nothing;
- *  - `full`: the screen let it through, so `genuine_contribution` is a pass, and the review's model
- *    and usage are named.
+ *  - `full`: the screen let it through, so `genuine_contribution` is a pass, the review's model and
+ *    usage are named, and the evidence says what the change log holds (`changelog_entry`).
  * A report that breaks either is refused (`bad_stage`), which is how a screen report can never pass.
  */
 export function parsePrReviewReport(raw: unknown): PrReviewReport {
@@ -682,6 +712,11 @@ export function parsePrReviewReport(raw: unknown): PrReviewReport {
 
   if (typeof raw.summary !== "string") throw new PrReviewReportError("bad_summary");
   const evidence = parseEvidence(raw.evidence);
+  // The review reads the change log, and a rule below fails a revision that has no entry in it: a
+  // full report that says nothing about the log would be a way to skip the rule.
+  if (stage === "full" && evidence.changelog_entry === null) {
+    throw new PrReviewReportError("bad_evidence");
+  }
 
   const usage = raw.usage;
   if (!isRecord(usage) || !hasExactKeys(usage, ["screen", "review"])) {
@@ -776,6 +811,11 @@ const NAME_RULE_CODE: Record<NamingProblem, FindingCode> = {
  *  - A new dataset name that breaks the naming rule fails `no_degradation`: the name is part of the
  *    dataset, and a name the policy refuses is broken metadata.
  *
+ *  - A new version with no new entry in the change log fails `advances_revision`
+ *    (`changes_log_missing`): the CHANGES file must gain an entry headed by the new version, and
+ *    both a log that did not gain one and no log at all mean there is none. An unknown new version
+ *    is not this rule's to judge; the version fact above has already made it `unknown`.
+ *
  * A description longer than the models read (`description_cut`) lowers `description_not_misleading`
  * to `unknown`: the models saw only its start, so that it does not mislead, and that it does not try
  * to instruct them, were not assessed. A steering finding on the part they did see still fails the
@@ -834,6 +874,9 @@ export function factsOf(report: PrReviewReport): {
   if (report.v === REPORT_VERSION) {
     const v2 = report.evidence;
     if (v2.description_empty) rule("clear_title_and_description", "description_missing");
+    if (v2.changelog_entry === "not_added" || v2.changelog_entry === "no_file") {
+      rule("advances_revision", "changes_log_missing");
+    }
     if (v2.description_cut) lower("description_not_misleading", "description_cut", "unknown");
     if (v2.title_problem !== null) {
       rule("clear_title_and_description", TITLE_RULE_CODE[v2.title_problem]);

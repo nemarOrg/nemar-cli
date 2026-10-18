@@ -491,6 +491,8 @@ describe("a version 2 report on the terminal", () => {
     listed: [{ status: "modified", path: "dataset_description.json" }],
     description_empty: false,
     description_cut: false,
+    // Every report this file builds ended at the screen, which never read the change log.
+    changelog_entry: null,
     title_problem: null,
     name_problem: null,
     ...over,
