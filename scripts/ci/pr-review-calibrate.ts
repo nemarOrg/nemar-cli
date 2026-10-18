@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 /**
- * The pull-request review's offline calibration (ADR 0107; the calibration gate the plan names G1).
+ * The pull-request review's offline calibration (ADR 0107): the measurement behind the
+ * pre-enforcement calibration gate that ADR records.
  *
  * Before the review check is required, someone has to know how its two stages answer real pull
  * requests: how often a legitimate one is stopped or failed, what each stage costs, and how long
