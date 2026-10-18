@@ -9,6 +9,7 @@
  */
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { buildBranchRulesetPayload } from "../backend/src/services/github";
 import {
   adminGitHubToken,
   approvalGate,
@@ -818,23 +819,31 @@ describe("what GitHub's mergeable state allows, asked before anything is written
     }
   });
 
-  test("a blocked state names what can block, and says only the review check can be overridden in the GitHub UI, and only where its ruleset is in force", () => {
+  test("a blocked state names what can block, and names the review check, and no other, as the one to override in the GitHub UI, where its ruleset is in force", () => {
     // GitHub says `blocked` for any required check or review that is not satisfied. The review is
-    // one of them where a dataset's ruleset requires it (ADR 0107), and only that check is one an
-    // owner or administrator can override in the GitHub UI: the tool never uses the bypass an
-    // administrator holds there. Saying so of every blocked pull request would send an
+    // one of them where a dataset's ruleset requires it (ADR 0107), and it is the one check this
+    // tool names as overridable in the GitHub UI by an owner or administrator: the tool never uses
+    // the bypass they hold there. Saying so of every blocked pull request would send an
     // administrator to override a block that is not the review's.
     const why = refusal("blocked") ?? "";
     expect(why).toContain("a required check or review is not satisfied");
     // The other blocks are named, not left to be read as the review.
     expect(why).toContain("the BIDS validation, the version check");
     expect(why).toContain("where its ruleset is in force, the NEMAR PR Review");
-    // What an owner or administrator can override is said of the review check alone, and of it
-    // only where its ruleset is in force.
+    // What the tool names as overridable is the review check alone, and only where its ruleset is
+    // in force. It is what the tool names, and not a claim about what GitHub allows.
     expect(why).toContain(
-      "an owner or administrator can override only the NEMAR PR Review check, in the GitHub UI, and only where its ruleset is in force",
+      "this tool names the NEMAR PR Review check, and no other, as one an owner or administrator can override in the GitHub UI, and only where its ruleset is in force",
     );
     expect(why).toContain("never uses the bypass");
+    // It must not say that the review is the only check anyone can override. An organization owner
+    // bypasses the NEMAR branch protection ruleset too, and that is the ruleset that carries the
+    // BIDS validation and the version check.
+    expect(
+      buildBranchRulesetPayload({ checks: [] }).bypass_actors.map((a) => a.actor_type),
+    ).toContain("OrganizationAdmin");
+    expect(why).not.toContain("can override only");
+    expect(why).not.toContain("override only");
     // The old sentence told them to merge "such a pull request", whichever check was blocking it.
     expect(why).not.toContain("such a pull request");
     expect(why).not.toContain("merges");

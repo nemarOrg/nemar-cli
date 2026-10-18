@@ -139,7 +139,8 @@ And the review only ever sees a pull request's text and metadata, so a count of 
   (d) Repeat (a) and (b) once more, to catch the datasets that were published or changed between the first pass and the release, because the automatic paths can put the requirement back until the release lands.
   `PR_REVIEW_ENABLED` itself is not turned off while any repository carries the ruleset: every pull request there would wait for a check nothing posts.
 - **A pull request whose required review failed is merged in the GitHub UI by an owner or administrator.**
-  The CLI never uses the bypass (ADR 0093 stands), and its message says so: it names what can block a merge (the BIDS validation, the version check, the review) and says that only the review check can be overridden there, and only where its ruleset is in force.
+  The CLI never uses the bypass (ADR 0093 stands), and its message says so: it names what can block a merge (the BIDS validation, the version check, the review) and names the review check, and no other, as the one an owner or administrator can override in the GitHub UI, and only where its ruleset is in force.
+  That is what the message names and not all that GitHub allows: an organization owner also bypasses the "NEMAR branch protection" ruleset, which carries the BIDS validation and the version check, and the message does not point anyone at it.
 
 ### 6. Rollout is its own gated step
 

@@ -667,12 +667,14 @@ const NOT_CLEAN_WHY = new Map<string, string>([
     "blocked",
     // GitHub says `blocked` for any required check or review that is not satisfied, and does not say
     // which, so this names what they can be. Where its ruleset is in force (ADR 0107) one of them
-    // is the NEMAR PR Review check, and that is the one an owner or administrator can override in
-    // the GitHub UI; the bypass is theirs on GitHub, and this tool never uses it (ADR 0093). It
-    // is said of that check alone, and only where its ruleset is in force, because a block by the
-    // BIDS validation or the version check is not that, and where the review is not required a
+    // is the NEMAR PR Review check, and that is the one this tool names as overridable in the GitHub
+    // UI, for an owner or administrator; the bypass is theirs on GitHub, and this tool never uses
+    // it (ADR 0093). That is what this tool names, not all that GitHub allows: an organization
+    // owner also bypasses the NEMAR branch protection ruleset, which carries the BIDS validation
+    // and the version check, and nothing here points anyone at that one. It is said of the review
+    // alone, and only where its ruleset is in force, because where the review is not required a
     // pull request is not held by it at all.
-    "a required check or review is not satisfied (the BIDS validation, the version check or, where its ruleset is in force, the NEMAR PR Review); an owner or administrator can override only the NEMAR PR Review check, in the GitHub UI, and only where its ruleset is in force, since this tool never uses the bypass",
+    "a required check or review is not satisfied (the BIDS validation, the version check or, where its ruleset is in force, the NEMAR PR Review); this tool names the NEMAR PR Review check, and no other, as one an owner or administrator can override in the GitHub UI, and only where its ruleset is in force, and it never uses the bypass itself",
   ],
   ["behind", "the branch is behind main"],
   ["dirty", "it has merge conflicts"],
