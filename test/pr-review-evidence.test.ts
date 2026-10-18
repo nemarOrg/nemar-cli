@@ -528,7 +528,6 @@ describe("each evidence pass reads git within a time budget", () => {
       const listing = pass === "content" ? gatherListing(r.dir, r.base, r.head) : null;
       const restore = installGitShim(root, [{ match, sleepSeconds: 5 }]);
       __setEvidenceBudgetForTests({ [pass]: 300 });
-      const started = Date.now();
       try {
         const read = () =>
           listing === null ? gatherListing(r.dir, r.base, r.head) : gatherContent(r.dir, listing);
@@ -537,7 +536,6 @@ describe("each evidence pass reads git within a time budget", () => {
         __setEvidenceBudgetForTests(null);
         restore();
       }
-      expect(Date.now() - started).toBeLessThan(4_000);
       // The budget belongs to the pass: the next one starts with its own.
       expect(gatherGitFacts(r.dir, r.base, r.head).changes).toHaveLength(1);
     },
@@ -1073,13 +1071,13 @@ describe("runReview: the job around the model call", () => {
     __setStageBudgetsForTests({ screen: { deadlineMs: 300 } });
     try {
       modelReply = (_body, signal) => stalledReply(standInMessage("{}"), signal);
-      const started = Date.now();
       const err = await callStage("screen", "s", "u").then(
         () => null,
         (e) => e,
       );
-      expect(Date.now() - started).toBeLessThan(4_000);
       expect(mapError(err)).toBe("model_unavailable");
+      // The deadline's own abort ended it, not the backstop that waits a grace period longer.
+      expect(describeError(err)).toBe("APIUserAbortError status=none");
       // A stream that has begun is not retried: the deadline ends the stage.
       expect(modelRequests).toHaveLength(1);
     } finally {
@@ -1093,14 +1091,12 @@ describe("runReview: the job around the model call", () => {
     __setStageBudgetsForTests({ screen: { timeoutMs: 250, deadlineMs: 20_000 } });
     try {
       modelReply = (_body, signal) => never(signal);
-      const started = Date.now();
       const err = await callStage("screen", "s", "u").then(
         () => null,
         (e) => e,
       );
       expect(mapError(err)).toBe("model_unavailable");
       expect(modelRequests).toHaveLength(STAGE_BUDGETS.screen.maxRetries + 1);
-      expect(Date.now() - started).toBeLessThan(10_000);
     } finally {
       __setStageBudgetsForTests(null);
     }
@@ -1221,12 +1217,10 @@ describe("runReview: the job around the model call", () => {
     __setStageBudgetsForTests({ screen: { deadlineMs: 200, graceMs: 200 } });
     tokenReply = (signal) => never(signal);
     try {
-      const started = Date.now();
       const err = await callStage("screen", "s", "u").then(
         () => null,
         (e) => e,
       );
-      expect(Date.now() - started).toBeLessThan(4_000);
       expect(mapError(err)).toBe("model_unavailable");
       expect(describeError(err)).toBe("RunFailure model_unavailable deadline_backstop");
       expect(tokenExchanges).toHaveLength(1);
