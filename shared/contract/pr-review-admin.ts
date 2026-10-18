@@ -100,6 +100,7 @@ export const QUEUE_ERROR_CODES = [
   "no_such_user",
   "not_a_user",
   "ambiguous_login",
+  "head_moved",
   "github_unavailable",
   "github_timeout",
   "github_rate_limited",
@@ -266,16 +267,29 @@ export interface WaiveNamingResponse {
   /** True when the commit's check is skipped by a waiver, recorded now or before. */
   waived: boolean;
   reason: WaiveNamingReason;
-  /** The commit the answer is about, when the pull request was read that far. */
+  /**
+   * The commit the answer is about, in full, when the pull request was read that far. When
+   * `waived` is true it is the commit that was waived, whether or not the request named one.
+   */
   head_sha: string | null;
   /** What the naming rule found on that commit, when it was waived now or could not be read. */
   facts: NamingFacts | null;
 }
 
-/** The body of `POST /admin/pr-reviews/:dataset/:pr/allow`. */
+/**
+ * The body of `POST /admin/pr-reviews/:dataset/:pr/allow`. A pull request that has moved on from
+ * `head_sha` is not waived: the answer is a 409 with the code `head_moved`, and nothing is recorded
+ * or posted.
+ */
 export interface WaiveNamingRequest {
   /** Plain words; kept to 200 characters. */
   reason?: string;
+  /**
+   * The commit the caller means: the first seven to forty characters of its id (hexadecimal). The
+   * pull request's current commit is waived only if its id starts with this. Without it the current
+   * commit is waived whatever it is, and the answer's `head_sha` says which one that was.
+   */
+  head_sha?: string;
 }
 
 export interface ReviewHistoryItem {

@@ -1453,6 +1453,83 @@ describe("the override: nemar admin pr-reviews allow <dataset> <pr> --admin", ()
     expect(lastCheck()).toMatchObject({ conclusion: "failure", head_sha: SHA_B });
   });
 
+  describe("naming the commit", () => {
+    const auditRows = () =>
+      (db.query("SELECT COUNT(*) AS n FROM audit_log").get() as { n: number }).n;
+    const checkPosts = () =>
+      calls.filter((c) => c.method === "POST" && c.path.endsWith("/check-runs"));
+
+    test("a head_sha that starts the current commit waives it, however long and in either case", async () => {
+      pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
+      const short = await allow(DATASET, 7, { head_sha: SHA_A.slice(0, 7) });
+      expect(short.status).toBe(200);
+      expect(short.body).toMatchObject({ waived: true, reason: "waived", head_sha: SHA_A });
+      expect(waivers()).toHaveLength(1);
+      expect(lastCheck()).toMatchObject({ conclusion: "skipped", head_sha: SHA_A });
+
+      // The same commit named in full, and in capitals: asking again, so it was already waived.
+      for (const named of [SHA_A, SHA_A.toUpperCase()]) {
+        const again = await allow(DATASET, 7, { head_sha: named });
+        expect(again.body).toMatchObject({
+          waived: true,
+          reason: "already_waived",
+          head_sha: SHA_A,
+        });
+      }
+      expect(waivers()).toHaveLength(1);
+    });
+
+    test("a pull request that has moved on from the commit named is not waived: 409, nothing recorded, nothing posted", async () => {
+      // The administrator looked at SHA_A; the author has pushed SHA_B since.
+      pulls[`${DATASET}#7`] = restPull({
+        login: ADMIN_LOGIN,
+        title: "Lee2019 EEG rename",
+        sha: SHA_B,
+      });
+      const auditBefore = auditRows();
+      const r = await allow(DATASET, 7, { head_sha: SHA_A.slice(0, 7), reason: "Looked at it" });
+      expect(r.status).toBe(409);
+      expect(r.body).toMatchObject({ code: "head_moved" });
+      // The sentence says where it is now, in seven characters, and that nothing was waived.
+      expect(String(r.body.error)).toContain(SHA_B.slice(0, 7));
+      expect(String(r.body.error)).toContain("nothing was waived");
+      expect(waivers()).toHaveLength(0);
+      expect(auditRows()).toBe(auditBefore);
+      expect(checkPosts()).toHaveLength(0);
+      // Naming the commit it is at now is the same request, and it goes through.
+      const now = await allow(DATASET, 7, { head_sha: SHA_B.slice(0, 7) });
+      expect(now.body).toMatchObject({ waived: true, head_sha: SHA_B });
+    });
+
+    test("without a commit the current one is waived whatever it is, and the answer and the record name it", async () => {
+      pulls[`${DATASET}#7`] = restPull({
+        login: ADMIN_LOGIN,
+        title: "Lee2019 EEG rename",
+        sha: SHA_B,
+      });
+      const r = await allow(DATASET, 7);
+      expect(r.body).toMatchObject({ waived: true, reason: "waived", head_sha: SHA_B });
+      expect(JSON.parse(waivers()[0]?.details ?? "{}")).toMatchObject({ head_sha: SHA_B });
+      expect(lastCheck()).toMatchObject({ head_sha: SHA_B });
+    });
+
+    test.each([
+      ["too short to name a commit", "abc123"],
+      ["not hexadecimal", "zzzzzzzz"],
+      ["longer than a commit id", "a".repeat(41)],
+      ["empty", ""],
+    ])("a head_sha that is %s is a 400 with a sentence, and nothing happens", async (_why, bad) => {
+      pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
+      const auditBefore = auditRows();
+      const r = await allow(DATASET, 7, { head_sha: bad });
+      expect(r.status).toBe(400);
+      expect(r.body).toMatchObject({ code: "bad_head" });
+      expect(String(r.body.error)).toContain("first 7 to 40 characters of a commit id");
+      expect(auditRows()).toBe(auditBefore);
+      expect(calls).toHaveLength(0);
+    });
+  });
+
   test("asking twice records once, and says it was already waived", async () => {
     pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
     await allow(DATASET, 7);

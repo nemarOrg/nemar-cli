@@ -13,7 +13,10 @@
  *                                                 verdict); the Worker reads it from GitHub itself
  *   POST   /admin/pr-reviews/:dataset/:pr/allow   waive the naming rule for an owner's or an
  *                                                 administrator's pull request at its current commit
- *                                                 (`{reason?}`); recorded, and the check is skipped
+ *                                                 (`{reason?, head_sha?}`); recorded, and the check
+ *                                                 is skipped. With `head_sha` (a hex prefix of 7+
+ *                                                 characters) a pull request that has moved on is a
+ *                                                 409 `head_moved`, and nothing is recorded or posted
  *
  * Admin-only through the router's `authMiddleware` and `adminMiddleware`. The reads need no switch:
  * `PR_REVIEW_ENABLED` gates the REVIEW, not the view of it, so with the review off the queue lists
@@ -59,8 +62,14 @@ const overrideSchema = z
   })
   .strict() satisfies z.ZodType<SetOverrideRequest>;
 
+/** A commit named by its first seven to forty characters; the service lowercases it. */
+const COMMIT_PREFIX = /^[0-9a-fA-F]{7,40}$/;
+
 const waiveSchema = z
-  .object({ reason: z.string().max(500).optional() })
+  .object({
+    reason: z.string().max(500).optional(),
+    head_sha: z.string().regex(COMMIT_PREFIX).optional(),
+  })
   .strict() satisfies z.ZodType<WaiveNamingRequest>;
 
 /** The dataset and pull request number of a `/pr-reviews/:dataset/:pr/...` route, checked. */
@@ -145,15 +154,36 @@ export function registerPrReviewRoutes(admin: AdminRouter): void {
     }
   });
 
-  admin.post("/pr-reviews/:dataset/:pr/allow", zValidator("json", waiveSchema), async (c) => {
-    try {
-      const { dataset, pr } = target(c);
-      const body = c.req.valid("json");
-      return c.json(await waiveNamingRule(c.env, c.get("user").id, dataset, pr, body.reason));
-    } catch (err) {
-      return fail(c, err);
-    }
-  });
+  admin.post(
+    "/pr-reviews/:dataset/:pr/allow",
+    zValidator("json", waiveSchema, (result, c) => {
+      // A field a person typed gets a sentence; anything else keeps the validator's own 400.
+      if (!result.success && result.error.issues[0]?.path[0] === "head_sha") {
+        return fail(
+          c,
+          new QueueError(
+            400,
+            "bad_head",
+            "head_sha is the first 7 to 40 characters of a commit id (hexadecimal).",
+          ),
+        );
+      }
+    }),
+    async (c) => {
+      try {
+        const { dataset, pr } = target(c);
+        const body = c.req.valid("json");
+        return c.json(
+          await waiveNamingRule(c.env, c.get("user").id, dataset, pr, {
+            reason: body.reason,
+            commit: body.head_sha,
+          }),
+        );
+      } catch (err) {
+        return fail(c, err);
+      }
+    },
+  );
 
   admin.get("/pr-review-authors/:login", async (c) => {
     try {

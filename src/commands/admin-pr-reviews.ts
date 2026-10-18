@@ -2192,25 +2192,42 @@ export function waiverLines(r: WaiveNamingResponse, dataset: string, pr: number)
   }
 }
 
+/** The first seven to forty characters of a commit id, the way `git log --oneline` shortens one. */
+const COMMIT_PREFIX_RE = /^[0-9a-fA-F]{7,40}$/;
+
 /** Waive the naming rule for a pull request's current commit, and say what came of it. */
 async function waiveNaming(
   datasetArg: string,
   prArg: string,
-  options: { reason?: string; json?: boolean },
+  options: { reason?: string; commit?: string; json?: boolean },
 ): Promise<void> {
   const dataset = checkDataset(datasetArg, options.json);
   const pr = checkPr(prArg, options.json);
+  if (options.commit !== undefined && !COMMIT_PREFIX_RE.test(options.commit)) {
+    die(
+      `"${plain(options.commit)}" is not a commit id: give its first 7 to 40 characters (hexadecimal).`,
+      "nemar admin pr-reviews allow nm000108 12 --admin --commit 1a2b3c4",
+      options.json,
+    );
+  }
   const spinner = options.json
     ? null
     : ora(`Waiving the naming rule for ${dataset} #${pr}...`).start();
   let r: WaiveNamingResponse;
   try {
-    r = await waivePrReviewNaming(dataset, pr, options.reason);
+    r = await waivePrReviewNaming(dataset, pr, options.reason, options.commit);
     spinner?.stop();
   } catch (err) {
     if (err instanceof ApiError && errorWord(err) === "no_such_pull_request") {
       spinner?.fail(`${dataset} #${pr}: GitHub has no such pull request.`);
       if (!spinner) say(options.json)(chalk.red("GitHub has no such pull request."));
+      markReportedExit();
+      process.exit(1);
+    }
+    if (err instanceof ApiError && errorWord(err) === "head_moved") {
+      // An answer about the pull request, not a fault: the commit named is no longer its head.
+      spinner?.fail(plain(err.message));
+      if (!spinner) say(options.json)(chalk.red(plain(err.message)));
       markReportedExit();
       process.exit(1);
     }
@@ -2236,6 +2253,10 @@ prReviewsCommand
     "Waive the naming rule for <dataset> <pr> at its current commit: an explicit override, recorded with your reason",
   )
   .option("--reason <text>", "Why, in plain words (up to 200 characters; kept with the decision)")
+  .option(
+    "--commit <sha>",
+    "With --admin: the commit you looked at (its first 7 to 40 characters); a pull request that has moved on is not waived",
+  )
   .option("--json", "Output the raw JSON")
   .addHelpText(
     "after",
@@ -2256,20 +2277,32 @@ allow <dataset> <pr> --admin
   whose author is not an owner or administrator (their review includes the rule) and for a commit
   that was reviewed.
 
-  nemar admin pr-reviews allow nm000108 12 --admin --reason "Name kept until the rename release"
+  Name the commit you looked at with --commit <sha> (its first 7 to 40 characters, as git log
+  --oneline shows them). If the pull request has been pushed to since, nothing is waived or posted
+  and the command says so. Without it, whatever the pull request's current commit is gets waived,
+  and the answer says which one.
+
+  nemar admin pr-reviews allow nm000108 12 --admin --commit 1a2b3c4 --reason "Name kept until the rename release"
 `,
   )
   .action(
     async (
       subject: string,
       prArg: string | undefined,
-      options: { admin?: boolean; reason?: string; json?: boolean },
+      options: { admin?: boolean; reason?: string; commit?: string; json?: boolean },
     ) => {
       if (!requireAuth(options.json)) process.exit(1);
       if (options.reason && options.reason.length > MAX_REASON) {
         die(
           `The reason is ${options.reason.length} characters; ${MAX_REASON} is the most that is kept.`,
           undefined,
+          options.json,
+        );
+      }
+      if (options.commit !== undefined && !options.admin) {
+        die(
+          "--commit goes with --admin: it names the commit of a pull request whose naming rule is waived.",
+          "nemar admin pr-reviews allow nm000108 12 --admin --commit 1a2b3c4",
           options.json,
         );
       }

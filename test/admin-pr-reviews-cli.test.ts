@@ -671,6 +671,83 @@ describe("nemar admin pr-reviews allow <dataset> <pr> --admin: the naming rule's
     expect(check?.body).toMatchObject({ conclusion: "skipped" });
   });
 
+  describe("--commit", () => {
+    const checkPosts = () =>
+      gh.seen.filter((x) => x.method === "POST" && x.path.endsWith("/check-runs"));
+
+    test("waives the commit named, and the success text names its first seven characters", async () => {
+      reviewable("nm000201");
+      gh.pulls["nm000201#7"] = { sha: SHA_A, author: "queueadmin-gh", title: "Lee2019 EEG rename" };
+      const r = await cli([
+        ...PR,
+        "allow",
+        "nm000201",
+        "7",
+        "--admin",
+        "--commit",
+        SHA_A.slice(0, 9),
+        "--reason",
+        "Kept until the rename",
+      ]);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain(`Waived the naming rule for nm000201 #7 at ${SHA_A.slice(0, 7)}.`);
+      // The request carried the commit, and the Worker recorded the commit it waived in full.
+      const sent = apiRequests.filter((x) => x === "POST /admin/pr-reviews/nm000201/7/allow");
+      expect(sent).toHaveLength(1);
+      expect(JSON.parse(waivers()[0]?.details ?? "{}")).toMatchObject({ head_sha: SHA_A });
+    });
+
+    test("a pull request pushed to since is not waived: the command says so, exits 1, and nothing is recorded or posted", async () => {
+      reviewable("nm000201");
+      gh.pulls["nm000201#7"] = { sha: SHA_B, author: "queueadmin-gh", title: "Lee2019 EEG rename" };
+      const r = await cli([
+        ...PR,
+        "allow",
+        "nm000201",
+        "7",
+        "--admin",
+        "--commit",
+        SHA_A.slice(0, 7),
+        "--reason",
+        "Looked at it",
+      ]);
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout + r.stderr).toContain("no longer at that commit");
+      expect(r.stdout + r.stderr).toContain(SHA_B.slice(0, 7));
+      expect(r.stdout + r.stderr).not.toContain("--debug");
+      expect(waivers()).toHaveLength(0);
+      expect(checkPosts()).toHaveLength(0);
+    });
+
+    test("is refused before the API is asked when it is not a commit prefix, or when --admin is missing", async () => {
+      for (const bad of ["abc12", "not-a-sha-at-all", "a".repeat(41)]) {
+        apiRequests = [];
+        const r = await cli([
+          ...PR,
+          "allow",
+          "nm000201",
+          "7",
+          "--admin",
+          "--commit",
+          bad,
+          "--reason",
+          "x",
+        ]);
+        expect(r.exitCode, bad).toBe(1);
+        expect(r.stdout, bad).toContain("is not a commit id");
+        expect(
+          apiRequests.filter((x) => x.includes("/admin/")),
+          bad,
+        ).toHaveLength(0);
+      }
+      apiRequests = [];
+      const noAdmin = await cli([...PR, "allow", "alice", "--commit", SHA_A.slice(0, 7)]);
+      expect(noAdmin.exitCode).toBe(1);
+      expect(noAdmin.stdout).toContain("--commit goes with --admin");
+      expect(apiRequests.filter((x) => x.includes("/admin/"))).toHaveLength(0);
+    });
+  });
+
   test("refuses a contributor's pull request, says why, and exits 1", async () => {
     reviewable("nm000201");
     gh.pulls["nm000201#7"] = { sha: SHA_A, author: "alice", title: "Lee2019 EEG rename" };

@@ -9,7 +9,10 @@
  *
  *  1. The Worker reads the pull request from GitHub itself (nothing about it comes from the caller)
  *     and holds it to the same gates as a start: the review is on, the dataset is reviewable, the
- *     pull request is open, aimed at `main`, not a draft and not a bot's.
+ *     pull request is open, aimed at `main`, not a draft and not a bot's. The caller may name the
+ *     commit it means, as a hex prefix of seven characters or more; if the pull request has moved
+ *     on from it, nothing is recorded or posted and the answer is `head_moved` (409). Without a
+ *     commit the current one is waived, and the answer names it.
  *  2. Its current commit must not have been reviewed (a review of it stands, whoever acts next),
  *     and its author must be exempt: the override replaces the exemption for this rule, so it is
  *     never a way past a contributor's review. When GitHub does not answer whether the author holds
@@ -46,18 +49,29 @@ import {
 /** The most of a reason that is kept, as for a contributor's allow or block. */
 const MAX_REASON = 200;
 
+/** What the caller says about the waiver, beyond which pull request it is for. */
+export interface WaiveRequest {
+  reason: string | undefined;
+  /**
+   * The commit the caller means: a lowercase hex prefix of seven characters or more, checked by the
+   * route. The pull request's current commit is waived only if it starts with this; absent, the
+   * current commit is waived whatever it is.
+   */
+  commit?: string;
+}
+
 /**
  * Waive the naming rule for `datasetId#prNumber`'s current commit. The answer says what happened in
  * a fixed word; a pull request that cannot be waived is an answer, not an error, and a dataset this
- * Worker does not own, a pull request GitHub does not have and a GitHub that does not answer are
- * errors.
+ * Worker does not own, a pull request GitHub does not have, a pull request that has moved on from
+ * the commit the caller named, and a GitHub that does not answer are errors.
  */
 export async function waiveNamingRule(
   env: Bindings,
   adminUserId: number,
   datasetId: string,
   prNumber: number,
-  reason: string | undefined,
+  { reason, commit }: WaiveRequest,
 ): Promise<WaiveNamingResponse> {
   const environment = environmentName(env);
   const answer = (
@@ -95,6 +109,16 @@ export async function waiveNamingRule(
   if (!intake.ok) return answer(intake.reason);
   const pr = intake.pr;
   const head = { head_sha: pr.headSha };
+
+  // The administrator looked at one commit. If the pull request has moved on, what they saw is not
+  // what would be waived, so nothing is: not a word recorded, not a check posted.
+  if (commit !== undefined && !pr.headSha.startsWith(commit.toLowerCase())) {
+    throw new QueueError(
+      409,
+      "head_moved",
+      `The pull request is no longer at that commit (it is at ${pr.headSha.slice(0, 7)} now), so nothing was waived. Look at the new commit and ask again.`,
+    );
+  }
 
   // A commit a review has touched keeps what its review said: the waiver is for the exempt path.
   const reviewed = await env.DB.prepare(
