@@ -1591,6 +1591,9 @@ describe("nemar admin pr-reviews approve", () => {
       expect(r.exitCode).toBe(1);
       expect(r.stdout).toContain("Approved nm000201 #7");
       expect(r.stdout).toContain("a required check or review is not satisfied");
+      expect(r.stdout).toContain(
+        "an owner or administrator merges such a pull request in the GitHub UI",
+      );
       expect(r.stdout).toContain("The approval stands.");
       expect(mergePuts()).toHaveLength(0);
     });

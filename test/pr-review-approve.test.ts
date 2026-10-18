@@ -818,6 +818,23 @@ describe("what GitHub's mergeable state allows, asked before anything is written
     }
   });
 
+  test("a blocked state names the required review and says who merges it, and where", () => {
+    // The review is a required check where a dataset's ruleset requires it (ADR 0107), and a
+    // failed one leaves the pull request blocked. The tool never uses the bypass an
+    // administrator holds on GitHub, so it says the merge is theirs to make in the GitHub UI.
+    const why = refusal("blocked") ?? "";
+    expect(why).toContain("a required check or review is not satisfied");
+    expect(why).toContain("NEMAR PR Review");
+    expect(why).toContain("an owner or administrator merges such a pull request in the GitHub UI");
+    expect(why).toContain("never uses the bypass");
+    // The same sentence reaches the card `next` shows, and no other state says it.
+    const check = mergeCheckOf("blocked");
+    if (!check.ok) expect(check.card).toContain("in the GitHub UI");
+    for (const state of ["behind", "dirty", "unstable", "draft", "unknown"]) {
+      expect(refusal(state), state).not.toContain("GitHub UI");
+    }
+  });
+
   test("a state that is the name of an object property is an unrecognised state, not that property", () => {
     for (const state of ["constructor", "toString", "hasOwnProperty", "__proto__", "valueOf"]) {
       const said = refusal(state);

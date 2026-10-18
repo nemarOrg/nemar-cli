@@ -663,7 +663,13 @@ const MERGEABLE = "clean";
  * more) is still refused, with the last sentence.
  */
 const NOT_CLEAN_WHY = new Map<string, string>([
-  ["blocked", "a required check or review is not satisfied"],
+  [
+    "blocked",
+    // The required review (ADR 0107) is one of the checks that can leave a pull request here.
+    // The bypass is an administrator's on GitHub; this tool never uses it (ADR 0093), so it says
+    // where the merge is made and by whom.
+    "a required check or review is not satisfied, such as the NEMAR PR Review; an owner or administrator merges such a pull request in the GitHub UI, since this tool never uses the bypass",
+  ],
   ["behind", "the branch is behind main"],
   ["dirty", "it has merge conflicts"],
   [
