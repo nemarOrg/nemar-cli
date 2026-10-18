@@ -246,9 +246,12 @@ export interface ContentFacts {
 export type GitFacts = Listing & ContentFacts;
 
 /**
- * The facts decided from the pull request's own text before any model is asked (ADR 0107): an empty
- * description, and the naming rule on the title and on a changed dataset name. Each fails the
- * verdict whatever a model says.
+ * The four facts decided before any model is asked (ADR 0107), from the pull request's own text and
+ * the dataset's name: whether the description is empty, whether it is cut, and how the title and a
+ * changed dataset name break the naming rule. An empty description and a naming problem fail a
+ * criterion whatever a model says; a cut description and an unreadable name only lower one to
+ * `unknown` (see `factsOf` in `shared/pr-review.ts`). The change log is not among them: it is read
+ * after the screen.
  */
 export interface TextFacts {
   descriptionEmpty: boolean;

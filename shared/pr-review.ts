@@ -250,8 +250,18 @@ export interface ReviewEvidenceV1 {
 }
 
 /**
- * The facts of a version 2 report: version 1's, and three decided before any model is asked, from
- * the pull request as the API returns it and from git. Each fails the verdict whatever a model says.
+ * The facts of a version 2 report: version 1's, and five more that the platform decides itself, from
+ * the pull request as the API returns it and from git, whatever a model says ({@link factsOf} turns
+ * them into criteria). Four are decided before any model is asked: `description_empty`,
+ * `description_cut`, `title_problem` and `name_problem`. The fifth, `changelog_entry`, is read from
+ * git after the screen lets the pull request through, so it is null in a `screen` report and in a
+ * `facts` report, and a `full` report always has one.
+ *
+ * Not every fact fails the verdict. An empty description, a title or a new dataset name that breaks
+ * the naming rule, and a new version with no entry in the change log each FAIL a criterion. A
+ * description cut short for the models (`description_cut`) and a changed dataset name nobody could
+ * read (`name_problem` is `unchecked`) only lower a criterion to `unknown`: nothing was found wrong,
+ * it was not assessed, and a person has to look.
  */
 export interface ReviewEvidence extends ReviewEvidenceV1 {
   /** The pull request's description is empty or only whitespace. */
