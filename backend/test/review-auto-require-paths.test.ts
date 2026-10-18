@@ -47,7 +47,11 @@ import { seedScreenedRequest, seedUser } from "./helpers/publication-review";
 
 const ADMIN_KEY = "autoreq-admin-key-0123456789abcdef0123456789abcdef";
 const PAT = "ghp_review_auto_require_paths";
-const BUCKET = "nemar";
+// An invented bucket name, never the production bucket's. The bucket policy is written to a host that
+// services/s3.ts hard-codes, which this file redirects to a stand-in; if that redirect ever failed
+// to catch a request, a signed request for a bucket that does not exist is what would go out, and
+// not one that names the real data.
+const BUCKET = "nemar-review-auto-require-paths-test";
 const REGION = "us-east-2";
 
 // biome-ignore lint/suspicious/noExplicitAny: a response body is read field by field
@@ -57,9 +61,34 @@ interface S3PolicyStandIn {
   url: string;
   /** The bucket policy it holds, or null when none is set (S3 answers 404 for that). */
   policy: BucketPolicy | null;
-  calls: Array<{ method: string; path: string; search: string }>;
+  /** Each request it received. `host` is the host the code addressed, before the redirect. */
+  calls: S3Call[];
   reset(): void;
   stop(): void;
+}
+
+interface S3Call {
+  method: string;
+  path: string;
+  search: string;
+  host: string | null;
+}
+
+/**
+ * The requests among `calls` that a test in this file has no business making: anything but a read
+ * or a write of the bucket policy of THE test's bucket. The stand-in answers every other request
+ * 404, which the code that made it could swallow, so the answer cannot be what tells a test.
+ */
+function unexpectedS3Calls(calls: readonly S3Call[]): S3Call[] {
+  return calls.filter(
+    (c) =>
+      !(
+        (c.method === "GET" || c.method === "PUT") &&
+        c.path === "/" &&
+        c.search === "?policy" &&
+        c.host === `${BUCKET}.s3.${REGION}.amazonaws.com`
+      ),
+  );
 }
 
 /** Just enough of S3 for the bucket policy: GET and PUT of `/?policy`, kept between calls. */
@@ -80,7 +109,12 @@ function startS3PolicyStandIn(): S3PolicyStandIn {
     port: 0,
     async fetch(req) {
       const url = new URL(req.url);
-      standIn.calls.push({ method: req.method, path: url.pathname, search: url.search });
+      standIn.calls.push({
+        method: req.method,
+        path: url.pathname,
+        search: url.search,
+        host: req.headers.get("x-original-host"),
+      });
       if (url.pathname === "/" && url.search === "?policy") {
         if (req.method === "GET") {
           return standIn.policy
@@ -112,7 +146,10 @@ function routeOutboundTraffic(s3Url: string): { refused: string[]; restore: () =
     const req = input instanceof Request ? input : new Request(input, init);
     const url = new URL(req.url);
     if (url.hostname.endsWith(".amazonaws.com")) {
-      return realFetch(new Request(new URL(url.pathname + url.search, s3Url), req));
+      const forwarded = new Request(new URL(url.pathname + url.search, s3Url), req);
+      // The stand-in cannot see the host the code addressed once it is redirected, so say it.
+      forwarded.headers.set("x-original-host", url.hostname);
+      return realFetch(forwarded);
     }
     if (url.hostname === "127.0.0.1" || url.hostname === "localhost") {
       return realFetch(input as RequestInfo, init);
@@ -152,6 +189,8 @@ afterAll(() => {
 afterEach(() => {
   // Not one request left for a host that is not a stand-in, whether or not the code noticed.
   expect(outbound.refused).toEqual([]);
+  // And of the ones the S3 stand-in did receive, only the bucket policy of the test's own bucket.
+  expect(unexpectedS3Calls(s3.calls)).toEqual([]);
 });
 
 beforeEach(async () => {
@@ -255,6 +294,31 @@ async function request(path: string, method: string, body?: unknown): Promise<Re
     env(),
   );
 }
+
+describe("the guard on what reaches the S3 stand-in", () => {
+  const policyGet: S3Call = {
+    method: "GET",
+    path: "/",
+    search: "?policy",
+    host: `${BUCKET}.s3.${REGION}.amazonaws.com`,
+  };
+
+  test("takes a read and a write of the bucket policy of the test's bucket", () => {
+    expect(unexpectedS3Calls([policyGet, { ...policyGet, method: "PUT" }])).toEqual([]);
+  });
+
+  test.each<[string, Partial<S3Call>]>([
+    ["another method on the policy", { method: "DELETE" }],
+    ["another path", { path: "/some/key" }],
+    ["another sub-resource", { search: "?acl" }],
+    ["a list of the bucket", { search: "?list-type=2" }],
+    ["the production bucket's host", { host: `nemar.s3.${REGION}.amazonaws.com` }],
+    ["a request that was not redirected from an S3 host", { host: null }],
+  ])("refuses %s", (_name, change) => {
+    const call = { ...policyGet, ...change };
+    expect(unexpectedS3Calls([policyGet, call])).toEqual([call]);
+  });
+});
 
 describe("PATCH /admin/datasets/:id/visibility (the visibility service)", () => {
   const ID = "nm000501";
