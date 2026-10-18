@@ -16,6 +16,8 @@ import {
   OUTSIDE_FIXTURE_BAND,
   REVIEWABLE_ROW_COLUMNS,
   type ReviewableRow,
+  automaticReviewIntent,
+  isAutoRequireEnabled,
   isReviewEnabled,
   isReviewRulesetFixture,
   isReviewableRow,
@@ -235,6 +237,123 @@ describe("what a dataset row calls for", () => {
         .map((c) => c.trim())
         .sort(),
     ).toEqual(["anonymous", "first_published_at", "status", "visibility"]);
+  });
+});
+
+describe("the automatic requirement switch (PR_REVIEW_AUTO_REQUIRE)", () => {
+  const reviewable: ReviewableRow = {
+    status: "active",
+    visibility: "public",
+    anonymous: 0,
+    first_published_at: "2026-01-01 00:00:00",
+  };
+  type AutoEnv = Pick<Bindings, "DB" | "PR_REVIEW_ENABLED" | "PR_REVIEW_AUTO_REQUIRE">;
+
+  test("is on only for exactly 1, and unset is off", () => {
+    expect(isAutoRequireEnabled({ PR_REVIEW_AUTO_REQUIRE: "1" })).toBe(true);
+    for (const value of [undefined, "", "0", "true", "yes", " 1", "01", "11"]) {
+      expect(isAutoRequireEnabled({ PR_REVIEW_AUTO_REQUIRE: value }), JSON.stringify(value)).toBe(
+        false,
+      );
+    }
+  });
+
+  test("off, the automatic paths ask nothing of any row, with the review on or off", () => {
+    const rows: ReviewableRow[] = [
+      reviewable,
+      { ...reviewable, visibility: "private" },
+      { ...reviewable, status: "archived" },
+      { ...reviewable, first_published_at: null },
+      { ...reviewable, anonymous: 1, first_published_at: null },
+    ];
+    for (const row of rows) {
+      for (const review of ["1", undefined]) {
+        const env = { PR_REVIEW_ENABLED: review, PR_REVIEW_AUTO_REQUIRE: undefined };
+        expect(
+          automaticReviewIntent(env, "nm000301", row),
+          `${JSON.stringify(row)} review=${review}`,
+        ).toBeUndefined();
+      }
+    }
+  });
+
+  test("on, they ask what the row calls for", () => {
+    const on = { PR_REVIEW_AUTO_REQUIRE: "1" };
+    expect(automaticReviewIntent({ ...on, PR_REVIEW_ENABLED: "1" }, "nm000301", reviewable)).toBe(
+      "require",
+    );
+    // The review being off still keeps the requirement off, as it did before the switch existed.
+    expect(automaticReviewIntent(on, "nm000301", reviewable)).toBeUndefined();
+    const priv = { ...reviewable, visibility: "private" };
+    expect(automaticReviewIntent({ ...on, PR_REVIEW_ENABLED: "1" }, "nm000301", priv)).toBe(
+      "remove",
+    );
+    expect(automaticReviewIntent(on, "nm000301", priv)).toBe("remove");
+    // And a standing fixture is still left alone.
+    expect(
+      automaticReviewIntent({ ...on, PR_REVIEW_ENABLED: "1" }, "nm099998", reviewable),
+    ).toBeUndefined();
+  });
+
+  // The function the publication, visibility and orchestrator paths call, against a real catalog.
+  describe("readReviewIntent, read from a real D1", () => {
+    function seeded() {
+      const db = freshDb();
+      insert(db, "nm000301", reviewable);
+      insert(db, "nm000302", { ...reviewable, visibility: "private" });
+      const env = (review: string | undefined, auto: string | undefined) =>
+        ({
+          DB: realD1(db),
+          PR_REVIEW_ENABLED: review,
+          PR_REVIEW_AUTO_REQUIRE: auto,
+        }) as unknown as AutoEnv;
+      return { db, env };
+    }
+
+    test("off, a reviewable public dataset has no answer although the review is on", async () => {
+      const { env } = seeded();
+      expect(await readReviewIntent(env("1", undefined), "nm000301")).toBeUndefined();
+    });
+
+    test("on, a reviewable public dataset is required", async () => {
+      const { env } = seeded();
+      expect(await readReviewIntent(env("1", "1"), "nm000301")).toBe("require");
+    });
+
+    test("on, a private dataset has the requirement removed; off, it has no answer", async () => {
+      const { env } = seeded();
+      expect(await readReviewIntent(env("1", "1"), "nm000302")).toBe("remove");
+      expect(await readReviewIntent(env("1", undefined), "nm000302")).toBeUndefined();
+    });
+
+    test("anything but exactly 1 is off", async () => {
+      const { env } = seeded();
+      for (const value of ["", "0", "true", "yes", " 1", "01", "11"]) {
+        expect(
+          await readReviewIntent(env("1", value), "nm000301"),
+          `reviewable, ${JSON.stringify(value)}`,
+        ).toBeUndefined();
+        expect(
+          await readReviewIntent(env("1", value), "nm000302"),
+          `private, ${JSON.stringify(value)}`,
+        ).toBeUndefined();
+      }
+    });
+
+    test("on with the review off keeps the requirement off, and still removes it", async () => {
+      const { env } = seeded();
+      expect(await readReviewIntent(env(undefined, "1"), "nm000301")).toBeUndefined();
+      expect(await readReviewIntent(env(undefined, "1"), "nm000302")).toBe("remove");
+    });
+
+    test("it follows the row, switching the same dataset from require to remove", async () => {
+      const { db, env } = seeded();
+      expect(await readReviewIntent(env("1", "1"), "nm000301")).toBe("require");
+      db.run("UPDATE datasets SET visibility = 'private' WHERE dataset_id = 'nm000301'");
+      expect(await readReviewIntent(env("1", "1"), "nm000301")).toBe("remove");
+      // Turned off again, the same row has no answer.
+      expect(await readReviewIntent(env("1", undefined), "nm000301")).toBeUndefined();
+    });
   });
 });
 
