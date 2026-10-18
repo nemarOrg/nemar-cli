@@ -46,9 +46,10 @@ export type { OverrideMode, ReviewState };
  *    reported). `detail` says why.
  *  - `exempt`: the pull request's author is a NEMAR owner or administrator, who are not reviewed
  *    (ADR 0107), so no review of the current commit is on record and none is wanted. Its review
- *    check is posted as `skipped` when the commit arrives; this list does not verify that. A review
- *    of the current commit still wins over this word, because a push by someone who is not exempt
- *    IS reviewed, and a review of another commit is never carried over to this one.
+ *    check is posted when the commit arrives, as `skipped` unless the naming rule fails it or
+ *    cannot check it; this list does not verify that. A review of the current commit still wins
+ *    over this word, because a push by someone who is not exempt IS reviewed, and a review of
+ *    another commit is never carried over to this one.
  */
 export const QUEUE_VERDICTS = [
   "pass",

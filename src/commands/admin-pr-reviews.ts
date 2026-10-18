@@ -1170,11 +1170,13 @@ pull request that was already open when the review was switched on produced no s
 no review until its author pushes again. This asks for one by name. The API reads the pull request
 from GitHub itself and runs it through the same gate as any other: an administrator's block on the
 contributor still applies, and a pull request opened by a NEMAR owner or administrator is not
-reviewed (its check is posted as skipped and nothing is started). No count of reviews, and no
-record of rejected pull requests, holds a start back. A commit whose review was declined, ended in
-an error or never reported is started again, and so is one handed to GitHub more than 40 minutes
-ago that never came back; one that is running or has a result is not started again. A start that
-restarts a review that already ran costs a second run.
+reviewed and nothing is started. Its check is posted all the same, as the naming rule decides:
+skipped when the rule finds nothing (or an administrator waived it for this commit), failed when it
+refuses the title or the new dataset name, and one that needs a person when the name could not be
+read. No count of reviews, and no record of rejected pull requests, holds a start back. A commit
+whose review was declined, ended in an error or never reported is started again, and so is one
+handed to GitHub more than 40 minutes ago that never came back; one that is running or has a
+result is not started again. A start that restarts a review that already ran costs a second run.
 
   nemar admin pr-reviews start nm000108 12
   nemar admin pr-reviews start --all --dry-run
