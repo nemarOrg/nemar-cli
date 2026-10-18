@@ -39,6 +39,7 @@ import { type GitHubAppEnv, getDatasetsToken } from "../../services/github-auth"
 import {
   type NotReviewableReason,
   OUTSIDE_FIXTURE_BAND,
+  REMOVAL_IS_NEVER_REFUSED,
   REVIEWABLE_ROW_COLUMNS,
   type ReviewableRow,
   automaticReviewIntent,
@@ -57,8 +58,7 @@ import { applyDatasetVisibility } from "../../services/visibility";
 import type { Bindings } from "../../types/bindings";
 import type { AdminRouter } from "./shared";
 
-const REVIEW_DISABLED_SENTENCE =
-  "The pull-request review is off in this environment (PR_REVIEW_ENABLED is not 1), so nothing would post the check, and requiring it would block every merge. Nothing was changed. Turn the review on first. Taking the requirement off is not refused: neither remove nor a dataset that is not reviewed is.";
+const REVIEW_DISABLED_SENTENCE = `The pull-request review is off in this environment (PR_REVIEW_ENABLED is not 1), so nothing would post the check, and requiring it would block every merge. Turn the review on first. ${REMOVAL_IS_NEVER_REFUSED}`;
 
 /** A dataset row as the review-ruleset routes read it. */
 interface ReviewRulesetRow extends ReviewableRow {
@@ -108,7 +108,12 @@ function reviewRulesetIntent(
   return { intent: remove || why !== null ? "remove" : "require", why };
 }
 
-/** Why a live requirement is refused in this environment: the word, and the sentence that says it. */
+/**
+ * Why a live requirement is refused in this environment: the word, and the sentence that says it.
+ * The sentence is also what one row of a page carries, and the CLI prints it once for the page, so
+ * it says nothing about whether anything was changed: on a page other rows were. The route for one
+ * dataset adds that nothing was.
+ */
 interface RequireRefusal {
   code: ReviewRulesetErrorCode;
   error: string;
@@ -771,7 +776,9 @@ export function registerFleetRoutes(admin: AdminRouter): void {
     // Refused before a token is minted or GitHub is asked anything, and only for a requirement.
     if (!dryRun && reviewRulesetIntent(row, removing).intent === "require") {
       const refusal = requireRefusal(c.env);
-      if (refusal) return c.json({ error: refusal.error, code: refusal.code }, 409);
+      if (refusal) {
+        return c.json({ error: `${refusal.error} Nothing was changed.`, code: refusal.code }, 409);
+      }
     }
 
     const outcome = await reconcileDatasetReview(row, await getDatasetsToken(c.env), {

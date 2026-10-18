@@ -276,6 +276,8 @@ describe("one dataset", () => {
     const refused = await cli(["nm000201", "--apply"]);
     expect(refused.exitCode).toBe(1);
     expect(refused.stdout + refused.stderr).toContain("PR_REVIEW_ENABLED");
+    // One dataset, refused: the whole request changed nothing, and that is said.
+    expect(refused.stdout + refused.stderr).toContain("Nothing was changed.");
     expect(standIn.writes()).toHaveLength(0);
 
     const dry = await cli(["nm000201"]);
@@ -474,6 +476,7 @@ describe("the GitHub App the ruleset requires the check from", () => {
     expect(said).toContain("3679074");
     expect(said).toContain("1234567");
     expect(said).toContain("would never arrive");
+    expect(said).toContain("Nothing was changed.");
     expect(standIn.calls).toHaveLength(0);
   });
 
@@ -510,6 +513,8 @@ describe("the GitHub App the ruleset requires the check from", () => {
     expect(r.stdout.split("would never arrive")).toHaveLength(2);
     expect(r.stdout).toContain("3679074");
     expect(r.stdout).toContain("1234567");
+    // A page is not one request to one dataset: its sentence does not say what was changed.
+    expect(r.stdout).not.toContain("Nothing was changed");
     expect(standIn.calls).toHaveLength(0);
   });
 
@@ -594,6 +599,7 @@ describe("the GitHub App the ruleset requires the check from", () => {
       expect(
         r.stdout.split("cannot sign in as the GitHub App for the nemarDatasets organization"),
       ).toHaveLength(2);
+      expect(r.stdout).not.toContain("Nothing was changed");
       expect(standIn.calls).toHaveLength(0);
     });
 
@@ -789,6 +795,16 @@ describe("a page of datasets", () => {
     expect(r.stdout).toMatch(/removed\s+nm000306/);
     expect(r.stdout).toContain("1 removed");
     expect(held("nm000306")).toEqual([]);
+    // The page changed something, so it must not go on to say that nothing was changed. The
+    // refusal is explained once, after the tally, in a plain sentence of the Worker's.
+    expect(r.stdout).toContain("5 error, 1 removed");
+    expect(r.stdout).not.toContain("Nothing was changed");
+    expect(r.stdout).not.toContain("neither remove");
+    const explained = r.stdout.split("Taking the ruleset off is never refused");
+    expect(explained).toHaveLength(2);
+    expect(r.stdout.indexOf("Taking the ruleset off is never refused")).toBeGreaterThan(
+      r.stdout.indexOf("5 error, 1 removed"),
+    );
     for (const id of ["nm000301", "nm000302", "nm000303", "nm000304", "nm000305"]) {
       expect(held(id), id).toEqual([]);
       expect(

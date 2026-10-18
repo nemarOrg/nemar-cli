@@ -5788,7 +5788,8 @@ Examples:
           [...tally.entries()].map(([word, n]) => `${n} ${word}`).join(", ") ||
             chalk.dim("No datasets matched."),
         );
-        // Each refusal is explained once, in the Worker's words, however many rows it refused.
+        // Each refusal is explained once, in the Worker's words, however many rows it refused. The
+        // sentence does not say that nothing was changed: on a page, other rows may have been.
         const explained = new Set<string>();
         for (const row of r.results) {
           if (row.code && row.error && REFUSED_ROW_WORDS[row.code] && !explained.has(row.code)) {

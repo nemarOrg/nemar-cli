@@ -16,6 +16,7 @@ import { reviewableDataset } from "../src/services/pr-review";
 import {
   type AppIdState,
   OUTSIDE_FIXTURE_BAND,
+  REMOVAL_IS_NEVER_REFUSED,
   REVIEWABLE_ROW_COLUMNS,
   type ReviewableRow,
   automaticReviewIntent,
@@ -455,7 +456,25 @@ describe("the GitHub App the ruleset requires the check from", () => {
     const sentence = reviewAppIdRefusal({ GITHUB_APP_ID: "1234567" }) ?? "";
     expect(sentence).toContain("3679074");
     expect(sentence).toContain("1234567");
-    expect(sentence).toContain("Nothing was changed");
+  });
+
+  // One row of a page carries this sentence and the CLI prints it once for the page, where other
+  // rows may have been changed, so it says nothing about what was changed. The route for one
+  // dataset adds that nothing was, and a test of it is in review-ruleset-routes.test.ts.
+  test("a refusal ends with the way out, in a plain sentence, and says nothing of what was changed", () => {
+    const sentences = [
+      reviewAppIdRefusal({ GITHUB_APP_ID: "1234567" }),
+      reviewAppInstallationRefusal({ GITHUB_APP_ID: "3679074" }),
+    ];
+    for (const sentence of sentences) {
+      expect(sentence).not.toBeNull();
+      expect(sentence).toEndWith(REMOVAL_IS_NEVER_REFUSED);
+      expect(sentence).not.toContain("Nothing was changed");
+      expect(sentence).not.toContain("neither remove");
+    }
+    expect(REMOVAL_IS_NEVER_REFUSED).toBe(
+      "Taking the ruleset off is never refused, whether it is asked for or the dataset is not one the review covers.",
+    );
   });
 
   // `github_app_id` is null for an unset binding and for one that holds something else, so the

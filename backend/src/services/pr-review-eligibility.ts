@@ -122,6 +122,15 @@ export function reviewAppIds(env: GitHubAppEnv): ReviewAppIds {
 }
 
 /**
+ * The last sentence of every refusal of a requirement: the way out is never refused. It is the
+ * same for the three reasons, so it is said once, here. A refusal's sentence says nothing about
+ * whether anything was changed: it is also what one row of a page says, and on a page other rows
+ * may have been changed. The route that answers one dataset adds that nothing was.
+ */
+export const REMOVAL_IS_NEVER_REFUSED =
+  "Taking the ruleset off is never refused, whether it is asked for or the dataset is not one the review covers.";
+
+/**
  * Why the review ruleset must not be REQUIRED from this Worker, or null when it may be: the ruleset
  * requires the check from the App with id {@link NEMAR_APP_ID}, so unless the Worker posts as that
  * App the check never arrives, and every pull request on the repository waits for it for good.
@@ -138,7 +147,7 @@ export function reviewAppIdRefusal(env: Pick<Bindings, "GITHUB_APP_ID">): string
       : ids.github_app_id_state === "not_a_number"
         ? "an App whose id is not a number (GITHUB_APP_ID is set but is not a plain number)"
         : "no App (GITHUB_APP_ID is not set)";
-  return `The review ruleset requires the NEMAR PR Review check from the GitHub App with id ${ids.ruleset_app_id}, but this Worker posts the check as ${posts}, so the check would never arrive and requiring it would block every merge. Nothing was changed. Taking the requirement off is not refused.`;
+  return `The review ruleset requires the NEMAR PR Review check from the GitHub App with id ${ids.ruleset_app_id}, but this Worker posts the check as ${posts}, so the check would never arrive and requiring it would block every merge. ${REMOVAL_IS_NEVER_REFUSED}`;
 }
 
 /**
@@ -151,7 +160,7 @@ export function reviewAppIdRefusal(env: Pick<Bindings, "GITHUB_APP_ID">): string
  */
 export function reviewAppInstallationRefusal(env: GitHubAppEnv): string | null {
   if (reviewAppIds(env).installation_configured) return null;
-  return "This Worker cannot sign in as the GitHub App for the nemarDatasets organization: GITHUB_APP_PRIVATE_KEY or GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS is missing or not valid. It would post the NEMAR PR Review check with a personal access token instead, and GitHub does not let a personal access token post a check run, so the check would never arrive and requiring it would block every merge. Nothing was changed. Taking the requirement off is not refused.";
+  return `This Worker cannot sign in as the GitHub App for the nemarDatasets organization: GITHUB_APP_PRIVATE_KEY or GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS is missing or not valid. It would post the NEMAR PR Review check with a personal access token instead, and GitHub does not let a personal access token post a check run, so the check would never arrive and requiring it would block every merge. ${REMOVAL_IS_NEVER_REFUSED}`;
 }
 
 /** The words a refusal about the GitHub App can carry as its `code`. */

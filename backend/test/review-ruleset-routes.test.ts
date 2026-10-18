@@ -22,6 +22,7 @@ import {
   ensureBranchRuleset,
   ensureReviewRuleset,
 } from "../src/services/github";
+import { REMOVAL_IS_NEVER_REFUSED } from "../src/services/pr-review-eligibility";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -1182,6 +1183,60 @@ describe("a Worker with the right App id and no way to sign in as the App", () =
     expect(off.body.code).toBe("review_disabled");
     expect(standIn.calls).toHaveLength(0);
   });
+});
+
+// A refusal is one sentence, and it is said in two places. The route for one dataset answers with
+// it, and adds that nothing was changed, which is the whole of that request. A page puts it on each
+// refused row and the CLI prints it once for the page, where the other rows may have been changed,
+// so on a row it says nothing about what was changed.
+describe("what a refusal says about what was changed", () => {
+  const CASES: Array<[string, string, Partial<Bindings>]> = [
+    ["review_disabled", "PR_REVIEW_ENABLED", { PR_REVIEW_ENABLED: undefined }],
+    ["review_app_mismatch", "1234567", { GITHUB_APP_ID: "1234567" }],
+    [
+      "review_app_not_configured",
+      "GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS",
+      { GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS: undefined },
+    ],
+  ];
+
+  test.each(CASES)(
+    "%s: the answer for one dataset ends with the fact that nothing was changed",
+    async (code, word, config) => {
+      seedDataset("nm000201");
+      envOverrides = config;
+
+      const r = await single("nm000201", { dry_run: false });
+
+      expect(r.status).toBe(409);
+      expect(r.body.code).toBe(code);
+      expect(r.body.error).toContain(word);
+      expect(r.body.error).toEndWith(` ${REMOVAL_IS_NEVER_REFUSED} Nothing was changed.`);
+      expect(standIn.calls).toHaveLength(0);
+    },
+  );
+
+  test.each(CASES)(
+    "%s: a refused row of a page says nothing about what was changed, and the removals on it were",
+    async (code, word, config) => {
+      seedDataset("nm000301");
+      seedDataset("nm000302", { visibility: "private" });
+      await ensureReviewRuleset("nm000302", PAT);
+      envOverrides = config;
+
+      const r = await bulk({ dry_run: false });
+
+      expect(r.status).toBe(200);
+      const byId = Object.fromEntries(r.body.results.map((x: Json) => [x.dataset_id, x]));
+      expect(byId.nm000301.code).toBe(code);
+      expect(byId.nm000301.error).toContain(word);
+      expect(byId.nm000301.error).toEndWith(REMOVAL_IS_NEVER_REFUSED);
+      // Said of a row of a page, it would be false: this page changed the other dataset.
+      expect(byId.nm000301.error).not.toContain("Nothing was changed");
+      expect(byId.nm000302).toMatchObject({ action: "remove", applied: true });
+      expect(held("nm000302")).toEqual([]);
+    },
+  );
 });
 
 describe("the enforce routes and the review", () => {
