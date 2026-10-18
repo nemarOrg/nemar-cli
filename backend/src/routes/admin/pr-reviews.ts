@@ -13,8 +13,9 @@
  *                                                 verdict); the Worker reads it from GitHub itself
  *   POST   /admin/pr-reviews/:dataset/:pr/allow   waive the naming rule for an owner's or an
  *                                                 administrator's pull request at its current commit
- *                                                 (`{reason?, head_sha?}`); recorded, and the check
- *                                                 is skipped. With `head_sha` (a hex prefix of 7+
+ *                                                 (`{reason, head_sha?}`); recorded, and the check
+ *                                                 is skipped. The reason is required (400 without
+ *                                                 one). With `head_sha` (a hex prefix of 7+
  *                                                 characters) a pull request that has moved on is a
  *                                                 409 `head_moved`, and nothing is recorded or posted
  *

@@ -58,9 +58,10 @@ export interface WaiveRequest {
   /** Why, as the caller wrote it. Required: a waiver is recorded with its reason. */
   reason: string;
   /**
-   * The commit the caller means: a lowercase hex prefix of seven characters or more, checked by the
-   * route. The pull request's current commit is waived only if it starts with this; absent, the
-   * current commit is waived whatever it is.
+   * The commit the caller means: a hex prefix of seven characters or more, in either case, checked
+   * by the route. The pull request's current commit is waived only if its id starts with this
+   * (compared in lowercase, as GitHub writes ids); absent, the current commit is waived whatever it
+   * is.
    */
   commit?: string;
 }
