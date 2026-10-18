@@ -43,7 +43,14 @@ import { REVIEW_EXEMPT_SQL } from "../src/services/pr-review-exemption";
 import { __setNamingReadTimeoutForTests } from "../src/services/pr-review-naming";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1, wrapD1, yieldingD1 } from "./helpers/d1";
-import { type NamingRepo, namingResponse } from "./helpers/github-naming";
+import {
+  CUT_LIST,
+  NAME_NOT_TEXT,
+  NOT_JSON,
+  NO_NAME,
+  type NamingRepo,
+  namingResponse,
+} from "./helpers/github-naming";
 import { type PermissionAnswer, permissionResponse } from "./helpers/github-permission";
 
 const WEBHOOK_SECRET = "pr-review-webhook-secret";
@@ -1281,6 +1288,71 @@ describe("the naming rule runs first, owners and administrators included (ADR 01
     const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
     expect(r.body).toMatchObject({ reason: "naming_unchecked" });
     expect(lastCheck()).toMatchObject({ conclusion: "action_required" });
+  });
+
+  test.each([
+    ["is not JSON", NOT_JSON],
+    ["has no Name", NO_NAME],
+    ["has a Name that is not text", NAME_NOT_TEXT],
+  ])(
+    "a dataset_description.json at the head that %s is a name nobody could read: it needs a person, never a skip",
+    async (_what, content) => {
+      seedAccount({ github: "owner-gh", role: "owner" });
+      naming[DATASET] = {
+        files: ["dataset_description.json"],
+        names: { [SHA_A]: content, [BASE_SHA]: "Resting EEG of volunteers" },
+      };
+      const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+      expect(r.body).toMatchObject({ reason: "naming_unchecked" });
+      expect(lastCheck()).toMatchObject({ conclusion: "action_required" });
+      expect(lastCheck().output?.title).toBe("Could not decide: the naming rule was not checked");
+    },
+  );
+
+  test("a head file GitHub cannot find, with no list to say it was removed, is unchecked: the comparison lists nothing", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    naming[DATASET] = { files: null, names: { [BASE_SHA]: "Resting EEG of volunteers" } };
+    const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+    expect(r.body).toMatchObject({ reason: "naming_unchecked" });
+    expect(lastCheck()).toMatchObject({ conclusion: "action_required" });
+  });
+
+  test("a head file GitHub cannot find, in a list that may have been cut, is unchecked", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    naming[DATASET] = { files: CUT_LIST, names: { [BASE_SHA]: "Resting EEG of volunteers" } };
+    const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+    expect(r.body).toMatchObject({ reason: "naming_unchecked" });
+    expect(lastCheck()).toMatchObject({ conclusion: "action_required" });
+  });
+
+  test("a file the comparison lists as removed is a removal, not a naming failure: it is skipped", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    naming[DATASET] = {
+      files: [{ filename: "dataset_description.json", status: "removed" }],
+      names: { [BASE_SHA]: "Lee2019 Resting EEG" },
+    };
+    const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+    expect(r.body).toMatchObject({ reason: "exempt_author" });
+    expect(lastCheck()).toMatchObject({ conclusion: "skipped" });
+  });
+
+  test("a merge base whose file cannot be read is a first name: the head's name is still checked", async () => {
+    seedAccount({ github: "owner-gh", role: "owner" });
+    for (const before of [NOT_JSON, NO_NAME, null]) {
+      naming[DATASET] = {
+        files: ["dataset_description.json"],
+        names: { [SHA_A]: "Lee2019 Resting EEG", [BASE_SHA]: before },
+      };
+      const r = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+      expect(r.body).toMatchObject({ reason: "naming_rule" });
+      expect(lastCheck()).toMatchObject({ conclusion: "failure" });
+    }
+    naming[DATASET] = {
+      files: ["dataset_description.json"],
+      names: { [SHA_A]: "Motor imagery EEG of 52 volunteers", [BASE_SHA]: NOT_JSON },
+    };
+    const clean = await deliver(prEvent({ login: "owner-gh", userId: 601 }));
+    expect(clean.body).toMatchObject({ reason: "exempt_author" });
   });
 
   test("a delivery whose title is not a string is malformed: no check calls it clean", async () => {

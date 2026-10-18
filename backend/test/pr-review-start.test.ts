@@ -27,7 +27,14 @@ import { readVolume } from "../src/services/pr-review-queue";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1, wrapD1 } from "./helpers/d1";
-import { type NamingRepo, namingResponse } from "./helpers/github-naming";
+import {
+  CUT_LIST,
+  NAME_NOT_TEXT,
+  NOT_JSON,
+  NO_NAME,
+  type NamingRepo,
+  namingResponse,
+} from "./helpers/github-naming";
 import { type PermissionAnswer, permissionResponse } from "./helpers/github-permission";
 import { SHA_A, SHA_B, seedReview } from "./helpers/pr-queue-fixtures";
 
@@ -1319,6 +1326,50 @@ describe("owners and administrators meet the naming rule before their exemption"
     const check = calls.find((c) => c.method === "POST" && c.path.endsWith("/check-runs"));
     expect(check?.body).toMatchObject({ conclusion: "action_required" });
   });
+
+  test.each([
+    ["is not JSON", NOT_JSON],
+    ["has no Name", NO_NAME],
+    ["has a Name that is not text", NAME_NOT_TEXT],
+  ])(
+    "a dataset_description.json at the head that %s is a name nobody could read: it needs a person, never a skip",
+    async (_what, content) => {
+      pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Fix a sidecar" });
+      naming[DATASET] = {
+        files: ["dataset_description.json"],
+        names: { [SHA_A]: content, [BASE_SHA]: "Resting EEG of volunteers" },
+      };
+      const r = await start(DATASET, 7);
+      expect(r.body).toMatchObject({ dispatched: false, reason: "naming_unchecked" });
+      const check = calls.find((c) => c.method === "POST" && c.path.endsWith("/check-runs"));
+      expect(check?.body).toMatchObject({ conclusion: "action_required" });
+      expect(rows()).toHaveLength(0);
+    },
+  );
+
+  test("a head file GitHub cannot find, with no list or a list that may have been cut, is unchecked", async () => {
+    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Fix a sidecar" });
+    for (const files of [null, CUT_LIST]) {
+      calls = [];
+      naming[DATASET] = { files, names: { [BASE_SHA]: "Resting EEG of volunteers" } };
+      const r = await start(DATASET, 7);
+      expect(r.body).toMatchObject({ reason: "naming_unchecked" });
+      const check = calls.find((c) => c.method === "POST" && c.path.endsWith("/check-runs"));
+      expect(check?.body).toMatchObject({ conclusion: "action_required" });
+    }
+  });
+
+  test("a file the comparison lists as removed is a removal, not a naming failure: it is skipped", async () => {
+    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Fix a sidecar" });
+    naming[DATASET] = {
+      files: [{ filename: "dataset_description.json", status: "removed" }],
+      names: { [BASE_SHA]: "Lee2019 Motor Imagery" },
+    };
+    const r = await start(DATASET, 7);
+    expect(r.body).toMatchObject({ reason: "exempt_author" });
+    const check = calls.find((c) => c.method === "POST" && c.path.endsWith("/check-runs"));
+    expect(check?.body).toMatchObject({ conclusion: "skipped" });
+  });
 });
 
 describe("the override: nemar admin pr-reviews allow <dataset> <pr> --admin", () => {
@@ -1478,6 +1529,22 @@ describe("the override: nemar admin pr-reviews allow <dataset> <pr> --admin", ()
       waived: false,
       reason: "naming_unchecked",
       head_sha: SHA_A,
+      facts: { title: "author_year", name: "unchecked" },
+    });
+    expect(waivers()).toHaveLength(0);
+    expect(calls.some((c) => c.path.endsWith("/check-runs"))).toBe(false);
+  });
+
+  test("a head file that is not JSON is a name nobody could read: not waived, and the title is not what is waived", async () => {
+    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
+    naming[DATASET] = {
+      files: ["dataset_description.json"],
+      names: { [SHA_A]: NOT_JSON, [BASE_SHA]: "Resting EEG of volunteers" },
+    };
+    const r = await allow(DATASET, 7);
+    expect(r.body).toMatchObject({
+      waived: false,
+      reason: "naming_unchecked",
       facts: { title: "author_year", name: "unchecked" },
     });
     expect(waivers()).toHaveLength(0);

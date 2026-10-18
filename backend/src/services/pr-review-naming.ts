@@ -17,8 +17,11 @@
  * and then nothing more is read.
  *
  * **Unknown is never green.** A name that cannot be read (GitHub refuses, times out, or answers with
- * something this cannot read) is `unchecked`, which publishes a check that does not pass. Each read
- * runs inside the webhook's own request, which GitHub gives ten seconds, so each is bounded.
+ * something this cannot read: a file at the head that is not JSON or has no `Name` that is text, or
+ * one that is missing where nothing says it was removed) is `unchecked`, which publishes a check
+ * that does not pass. A file the comparison lists as removed is a removal, which is not a naming
+ * failure. Each read runs inside the webhook's own request, which GitHub gives ten seconds, so each
+ * is bounded.
  */
 
 import { type NamingProblem, namingProblemOf } from "../../../shared/naming-rule.js";
@@ -80,13 +83,15 @@ async function get(
 /**
  * The merge base of the pull request, whether `dataset_description.json` may have changed (it is in
  * GitHub's list of changed files, the list is long enough to have been cut, or there is no list),
- * and whether the list says the file is there at the head (added, changed or renamed to it).
+ * and whether the list says the file is gone at the head (removed, or renamed to another name).
+ * Only that list can say so: a file GitHub then cannot find at the head is otherwise not known to be
+ * gone.
  */
 async function compare(
   token: string,
   refresh: () => Promise<string>,
   pr: NamingSubject & { baseSha: string },
-): Promise<{ mergeBase: string; descriptionMayChange: boolean; listedAtHead: boolean }> {
+): Promise<{ mergeBase: string; descriptionMayChange: boolean; removedAtHead: boolean }> {
   const res = await get(
     token,
     refresh,
@@ -99,26 +104,32 @@ async function compare(
   const mergeBase = typeof base?.sha === "string" && SHA40.test(base.sha) ? base.sha : null;
   if (mergeBase === null) throw new Unreadable("compare named no merge base");
   const files = Array.isArray(record.files) ? record.files : null;
-  if (files === null) return { mergeBase, descriptionMayChange: true, listedAtHead: false };
+  if (files === null) return { mergeBase, descriptionMayChange: true, removedAtHead: false };
   const entries = files.map((f) =>
     typeof f === "object" && f !== null ? (f as Record<string, unknown>) : {},
   );
   const named = entries.some(
     (file) => file.filename === DESCRIPTION || file.previous_filename === DESCRIPTION,
   );
-  const listedAtHead = entries.some(
-    (file) => file.filename === DESCRIPTION && file.status !== "removed",
+  // Gone at the head: deleted, or renamed to another name (the old name holds nothing there).
+  const removedAtHead = entries.some(
+    (file) =>
+      (file.filename === DESCRIPTION && file.status === "removed") ||
+      (file.previous_filename === DESCRIPTION &&
+        file.filename !== DESCRIPTION &&
+        file.status === "renamed"),
   );
   return {
     mergeBase,
     descriptionMayChange: named || files.length >= COMPARE_FILE_CAP,
-    listedAtHead,
+    removedAtHead,
   };
 }
 
 /**
- * `dataset_description.json` at a commit: whether it is there, and its `Name`, null when the file
- * has no string `Name` or is not JSON.
+ * `dataset_description.json` at a commit: whether it is there (a 404 says it is not), and its
+ * `Name`, null when the file has no string `Name` or is not JSON. What a missing file or a missing
+ * name means depends on which commit was asked, so the caller decides.
  */
 async function nameAt(
   token: string,
@@ -149,6 +160,13 @@ async function nameAt(
 /**
  * How the pull request's new dataset name breaks the naming rule: null when the name did not change
  * or is fine, `unchecked` when it could not be read. Never throws.
+ *
+ * The head's name has to be readable: a head file that is not JSON, has no string `Name`, or is not
+ * found where GitHub's comparison does not list it as removed is a name nobody could read, which is
+ * `unchecked` and never clean. (A file the comparison lists as removed has no name to refuse, and a
+ * removal is not a naming failure.) The merge base is held to less: no file there, or one with no
+ * readable name, means the pull request is giving the dataset its first name, and that name is
+ * checked.
  */
 async function nameProblemOf(
   env: Bindings,
@@ -161,7 +179,7 @@ async function nameProblemOf(
   }
   try {
     const { token, refresh } = await getDatasetsTokenWithRefresher(env);
-    const { mergeBase, descriptionMayChange, listedAtHead } = await compare(token, refresh, {
+    const { mergeBase, descriptionMayChange, removedAtHead } = await compare(token, refresh, {
       ...pr,
       baseSha: pr.baseSha,
     });
@@ -170,10 +188,14 @@ async function nameProblemOf(
       nameAt(token, refresh, pr.datasetId, pr.headSha),
       nameAt(token, refresh, pr.datasetId, mergeBase),
     ]);
-    // GitHub listed the file as there at the head and then said it is not: the two answers
-    // disagree, and the name is not known, which is not the same as there being none.
-    if (listedAtHead && !after.present) throw new Unreadable("the listed file was not found");
-    if (after.name === null || after.name === before.name) return null;
+    if (!after.present) {
+      if (removedAtHead) return null;
+      // Not found, and nothing says it was removed: the answers disagree, or the comparison could
+      // not say what changed. The name is not known, which is not the same as there being none.
+      throw new Unreadable("the file was not found at the head and is not listed as removed");
+    }
+    if (after.name === null) throw new Unreadable("the file at the head has no readable Name");
+    if (after.name === before.name) return null;
     return namingProblemOf(after.name);
   } catch (err) {
     // Fixed words and the error's own message (a status or a timeout), never a name or a title.

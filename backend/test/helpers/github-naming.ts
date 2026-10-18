@@ -13,6 +13,29 @@
  * about something else needs.
  */
 
+/**
+ * A `dataset_description.json` answered as these exact bytes, for a file whose content is not a
+ * name: use {@link NOT_JSON}, {@link NO_NAME} or {@link NAME_NOT_TEXT}.
+ */
+export interface RawDescription {
+  raw: string;
+}
+
+/** A file that is there and is not JSON at all. */
+export const NOT_JSON: RawDescription = { raw: "{ this is not json" };
+/** JSON with no `Name` in it. */
+export const NO_NAME: RawDescription = { raw: JSON.stringify({ BIDSVersion: "1.9.0" }) };
+/** JSON whose `Name` is not text. */
+export const NAME_NOT_TEXT: RawDescription = {
+  raw: JSON.stringify({ Name: 7, BIDSVersion: "1.9.0" }),
+};
+
+/** The comparison's file list when it has reached GitHub's cap, which may have cut the list short. */
+export const CUT_LIST: string[] = Array.from(
+  { length: 300 },
+  (_, i) => `sub-${i}/eeg/sub-${i}_task-rest_events.tsv`,
+);
+
 export interface NamingRepo {
   /** The merge base the comparison names; the base commit of the request when absent. */
   mergeBase?: string;
@@ -23,9 +46,13 @@ export interface NamingRepo {
   files?: Array<string | { filename: string; status?: string; previous_filename?: string }> | null;
   /**
    * What `dataset_description.json` holds at a commit: a `Name` (the file is
-   * `{"Name": ..., "BIDSVersion": "1.9.0"}`), null for no file (404), or an HTTP status to answer.
+   * `{"Name": ..., "BIDSVersion": "1.9.0"}`), null for no file (404), an HTTP status to answer, or
+   * a file whose content is not a name ({@link NOT_JSON}, {@link NO_NAME}, {@link NAME_NOT_TEXT}).
+   * A commit left out of the table is a 404, which the comparison's list may or may not explain: a
+   * file it lists as removed is gone, and one it does not list (`files: null`, {@link CUT_LIST}) is
+   * a 404 nothing accounts for.
    */
-  names?: Record<string, string | null | number>;
+  names?: Record<string, string | null | number | RawDescription>;
   /** An HTTP status for the comparison itself, instead of an answer. */
   compareStatus?: number;
   /** Answer the comparison only after this long, past any timeout a test sets. */
@@ -73,6 +100,11 @@ export async function namingResponse(
     if (name === undefined || name === null) return new Response("not found", { status: 404 });
     if (typeof name === "number") {
       return new Response("{}", { status: name, headers: { "retry-after": "0" } });
+    }
+    if (typeof name === "object") {
+      return new Response(name.raw, {
+        headers: { "content-type": "application/vnd.github.raw+json" },
+      });
     }
     return new Response(JSON.stringify({ Name: name, BIDSVersion: "1.9.0" }), {
       headers: { "content-type": "application/vnd.github.raw+json" },
