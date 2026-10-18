@@ -1617,6 +1617,28 @@ describe("the override: nemar admin pr-reviews allow <dataset> <pr> --admin", ()
     expect(lastCheck().output?.title).toContain("naming rule waived");
   });
 
+  test("a record that cannot be written stops the waiver before anything is posted: the record comes first", async () => {
+    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
+    // The audit log refuses every insert, as a database that is down would. A check posted before
+    // the record would leave a waiver on GitHub that nothing says who decided.
+    db.run(
+      `CREATE TRIGGER audit_log_down BEFORE INSERT ON audit_log
+       BEGIN SELECT RAISE(ABORT, 'audit log is down'); END`,
+    );
+    const failed = await allow(DATASET, 7);
+    expect(failed.status).toBe(500);
+    expect(failed.body).toMatchObject({ code: "internal" });
+    expect(waivers()).toHaveLength(0);
+    expect(calls.filter((c) => c.method === "POST" && c.path.endsWith("/check-runs"))).toEqual([]);
+
+    // Once the log takes a row again, asking again records the waiver and then posts the check.
+    db.run("DROP TRIGGER audit_log_down");
+    const again = await allow(DATASET, 7);
+    expect(again.body).toMatchObject({ waived: true, reason: "waived" });
+    expect(waivers()).toHaveLength(1);
+    expect(lastCheck()).toMatchObject({ conclusion: "skipped" });
+  });
+
   test("a name GitHub would not show is not waived: there is nothing definite to waive", async () => {
     pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
     naming[DATASET] = { files: ["dataset_description.json"], names: { [SHA_A]: 502 } };
