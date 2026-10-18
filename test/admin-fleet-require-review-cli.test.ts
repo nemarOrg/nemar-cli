@@ -267,6 +267,30 @@ describe("one dataset", () => {
     expect(off.stdout).toContain("nothing to remove");
   });
 
+  test("with the review off a dataset the Worker does not review is not refused: it is a removal", async () => {
+    seedDataset("nm000202", { visibility: "private" });
+    standIn.rulesets.set("nm000202", [
+      {
+        id: 4244,
+        name: REVIEW_RULESET,
+        source_type: "Repository",
+        body: { name: REVIEW_RULESET, target: "branch", enforcement: "active", rules: [] },
+      },
+    ]);
+    envOverrides = { PR_REVIEW_ENABLED: undefined };
+
+    // The dry run does not say --apply would be refused, because it would not be.
+    const dry = await cli(["nm000202"]);
+    expect(dry.exitCode).toBe(0);
+    expect(dry.stdout).toContain("would remove");
+    expect(dry.stdout).not.toContain("would be refused");
+
+    const applied = await cli(["nm000202", "--apply"]);
+    expect(applied.exitCode).toBe(0);
+    expect(applied.stdout).toContain("removed");
+    expect(held("nm000202")).toEqual([]);
+  });
+
   test("with --json a refusal goes to standard error and standard output stays empty", async () => {
     seedDataset("nm000201");
     envOverrides = { PR_REVIEW_ENABLED: undefined };
@@ -421,15 +445,55 @@ describe("a page of datasets", () => {
     expect(answer.payload.name).toBe(REVIEW_RULESET);
   });
 
-  test("with the review off a live page is refused as a whole", async () => {
+  test("with the review off a live page refuses the datasets that would get the ruleset, row by row, and still takes it off the rest", async () => {
     seedFleet();
+    // A ruleset left on the dataset that is now private.
+    standIn.rulesets.set("nm000306", [
+      {
+        id: 4243,
+        name: REVIEW_RULESET,
+        source_type: "Repository",
+        body: { name: REVIEW_RULESET, target: "branch", enforcement: "active", rules: [] },
+      },
+    ]);
     envOverrides = { PR_REVIEW_ENABLED: undefined };
 
     const r = await cli(["--all", "--prefix", "nm", "--apply"]);
 
+    // Five rows were refused, so the exit code says the run is not done.
     expect(r.exitCode).toBe(1);
-    expect(r.stdout + r.stderr).toContain("PR_REVIEW_ENABLED");
-    expect(standIn.calls).toHaveLength(0);
+    expect(r.stdout).toMatch(/error\s+nm000301: .*PR_REVIEW_ENABLED/);
+    expect(r.stdout).toMatch(/error\s+nm000305: .*PR_REVIEW_ENABLED/);
+    expect(r.stdout).toContain("5 error");
+    // The private dataset is a removal, and the review being off did not stop it.
+    expect(r.stdout).toMatch(/removed\s+nm000306/);
+    expect(r.stdout).toContain("1 removed");
+    expect(held("nm000306")).toEqual([]);
+    for (const id of ["nm000301", "nm000302", "nm000303", "nm000304", "nm000305"]) {
+      expect(held(id), id).toEqual([]);
+      expect(
+        standIn.calls.filter((c) => c.path.includes(`/repos/nemarDatasets/${id}`)),
+        id,
+      ).toHaveLength(0);
+    }
+  });
+
+  test("with the review off a dry run warns only when something on the page would be refused", async () => {
+    seedFleet();
+    envOverrides = { PR_REVIEW_ENABLED: undefined };
+
+    const mixed = await cli(["--all", "--prefix", "nm"]);
+    expect(mixed.exitCode).toBe(0);
+    expect(mixed.stdout).toContain(
+      "--apply would refuse the 5 dataset(s) that would get the ruleset",
+    );
+
+    // Only a dataset the Worker does not review: it is all removals, and nothing would be refused.
+    db.run("DELETE FROM datasets WHERE dataset_id != 'nm000306'");
+    const removalsOnly = await cli(["--all", "--prefix", "nm"]);
+    expect(removalsOnly.exitCode).toBe(0);
+    expect(removalsOnly.stdout).not.toContain("would be refused");
+    expect(removalsOnly.stdout).not.toContain("--apply would refuse");
   });
 });
 

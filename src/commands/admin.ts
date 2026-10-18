@@ -5583,7 +5583,9 @@ What it does, per dataset:
   (nm099900 to nm099999) are never touched. No dataset is treated differently for being live.
 
 Nothing changes without --apply. Putting the ruleset on needs the review switched on in the
-environment (PR_REVIEW_ENABLED); taking it off never does, so --remove --apply always works.
+environment (PR_REVIEW_ENABLED): a dataset that would get it is refused while the review is off,
+alone or on its row of a page. Taking it off never needs the review, so --remove --apply always
+works, and so does a dataset that is not reviewed.
 
 Examples:
   $ nemar admin fleet require-review xx099900                 # dry run: shows the body it would send
@@ -5655,7 +5657,7 @@ Examples:
             out("  The body that would be sent to GitHub:");
             for (const line of JSON.stringify(r.payload, null, 2).split("\n")) out(`  ${line}`);
           }
-          if (dryRun && !r.review_enabled && !remove) {
+          if (dryRun && !r.review_enabled && r.intent === "require") {
             out("");
             out(
               chalk.yellow(
@@ -5713,10 +5715,11 @@ Examples:
           [...tally.entries()].map(([word, n]) => `${n} ${word}`).join(", ") ||
             chalk.dim("No datasets matched."),
         );
-        if (dryRun && !r.review_enabled && !remove) {
+        const wouldRefuse = r.results.filter((x) => x.intent === "require").length;
+        if (dryRun && !r.review_enabled && wouldRefuse > 0) {
           out(
             chalk.yellow(
-              "The automated review is off in this environment (PR_REVIEW_ENABLED is not 1), so --apply would be refused. --remove --apply is not refused.",
+              `The automated review is off in this environment (PR_REVIEW_ENABLED is not 1), so --apply would refuse the ${wouldRefuse} dataset(s) that would get the ruleset, and still take it off the rest. --remove --apply is not refused.`,
             ),
           );
         }

@@ -50,7 +50,11 @@ import {
 } from "../../services/pr-review-eligibility";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../services/repo-spec";
 import { applyDatasetVisibility } from "../../services/visibility";
+import type { Bindings } from "../../types/bindings";
 import type { AdminRouter } from "./shared";
+
+const REVIEW_DISABLED_SENTENCE =
+  "The pull-request review is off in this environment (PR_REVIEW_ENABLED is not 1), so nothing would post the check, and requiring it would block every merge. Nothing was changed. Turn the review on first. Taking the requirement off is not refused: neither remove nor a dataset that is not reviewed is.";
 
 /** A dataset row as the review-ruleset routes read it. */
 interface ReviewRulesetRow extends ReviewableRow {
@@ -58,11 +62,15 @@ interface ReviewRulesetRow extends ReviewableRow {
   github_repo: string | null;
 }
 
+/** The words an `error` row of a review-ruleset outcome can carry as its `code`. */
+type ReviewRulesetErrorCode = "review_disabled";
+
 /**
  * What one dataset's review-ruleset request came to. `intent` is what the row calls for (or what
  * `remove` asked for), and `action` is what was done, or with a dry run would be: `create`,
  * `update`, `remove`, `none` (nothing to take off), `skip` (required here, not written: see
- * `reason`) or null when the attempt failed (`error` says how).
+ * `reason`) or null when the attempt failed (`error` says how, and `code` is its word when it
+ * has one).
  */
 interface ReviewRulesetOutcome {
   dataset_id: string;
@@ -75,21 +83,57 @@ interface ReviewRulesetOutcome {
   default_branch?: string;
   payload?: ReviewRulesetPayload;
   error?: string;
+  code?: ReviewRulesetErrorCode;
 }
 
 /**
- * Bring one dataset's repository to what its row calls for: the ruleset on a reviewed dataset, off
- * everything else, and off everywhere with `remove`. The decision is the row's, through the same
- * rule the Worker applies to a pull request (`notReviewableReason`), so a request cannot require
- * the review where the Worker will not give it. Never throws: a failure is the outcome's `error`.
+ * What a dataset's row, and a request's `remove`, call for: the ruleset on a reviewed dataset,
+ * off everything else, and off everywhere with `remove`. The decision is the row's, through the
+ * same rule the Worker applies to a pull request (`notReviewableReason`), so a request cannot
+ * require the review where the Worker will not give it.
+ */
+function reviewRulesetIntent(
+  row: ReviewableRow,
+  remove: boolean,
+): { intent: ReviewIntent; why: NotReviewableReason | null } {
+  const why = notReviewableReason(row);
+  return { intent: remove || why !== null ? "remove" : "require", why };
+}
+
+/** Why a live requirement is refused in this environment: the word, and the sentence that says it. */
+interface RequireRefusal {
+  code: ReviewRulesetErrorCode;
+  error: string;
+}
+
+/**
+ * Why a live REQUIREMENT is refused here, or null when it is not. Asked of a request whose
+ * computed intent is `require`, never of a request's shape: taking the ruleset off is the way out
+ * and is never refused, so a live request for a private dataset (which is a removal) goes through
+ * with the review off, and so does every removal row of a page.
+ */
+function requireRefusal(env: Pick<Bindings, "PR_REVIEW_ENABLED">): RequireRefusal | null {
+  if (!isReviewEnabled(env)) return { code: "review_disabled", error: REVIEW_DISABLED_SENTENCE };
+  return null;
+}
+
+/**
+ * Bring one dataset's repository to what its row calls for (see {@link reviewRulesetIntent}).
+ * With `refuseRequire`, a live request whose intent is `require` is not made and is the outcome's
+ * `error`, with the refusal's `code`; the rows of the same page that call for a removal are
+ * unaffected. Never throws: a failure is the outcome's `error`.
  */
 async function reconcileDatasetReview(
   row: ReviewRulesetRow,
   pat: string,
-  o: { dryRun: boolean; remove: boolean; withPayload: boolean },
+  o: {
+    dryRun: boolean;
+    remove: boolean;
+    withPayload: boolean;
+    refuseRequire?: RequireRefusal | null;
+  },
 ): Promise<ReviewRulesetOutcome> {
-  const why = notReviewableReason(row);
-  const intent: ReviewIntent = o.remove || why !== null ? "remove" : "require";
+  const { intent, why } = reviewRulesetIntent(row, o.remove);
   const base = {
     dataset_id: row.dataset_id,
     reviewable: why === null,
@@ -99,6 +143,15 @@ async function reconcileDatasetReview(
   const repoName = row.github_repo?.split("/")[1];
   if (!repoName) {
     return { ...base, action: null, applied: false, error: "the dataset has no GitHub repository" };
+  }
+  if (!o.dryRun && intent === "require" && o.refuseRequire) {
+    return {
+      ...base,
+      action: null,
+      applied: false,
+      error: o.refuseRequire.error,
+      code: o.refuseRequire.code,
+    };
   }
   try {
     const step = await reconcileReviewRuleset(repoName, pat, { intent, dryRun: o.dryRun });
@@ -142,9 +195,6 @@ async function auditReviewRuleset(
     );
   }
 }
-
-const REVIEW_DISABLED_SENTENCE =
-  "The pull-request review is off in this environment (PR_REVIEW_ENABLED is not 1), so nothing would post the check, and requiring it would block every merge. Nothing was changed. Turn the review on first. Taking the requirement off (remove) is not refused.";
 
 const reviewRulesetSchema = z
   .object({ dry_run: z.boolean().optional(), remove: z.boolean().optional() })
@@ -631,10 +681,12 @@ export function registerFleetRoutes(admin: AdminRouter): void {
    * takes it off whatever the row says (the rollback). `dry_run` defaults to TRUE; send
    * `dry_run:false` to change anything, so a bare `{}` never mutates.
    *
-   * Refused: a standing test fixture (nm099900 to nm099999), whatever else is asked; and, for a
-   * live request that would REQUIRE the review (no `remove`), an environment where the review is
-   * off, because a required check nothing posts blocks every merge. Taking the requirement off is
-   * never refused for that reason: it is the way out. No dataset is special-cased for being live.
+   * Refused: a standing test fixture (nm099900 to nm099999), whatever else is asked; and a live
+   * request whose COMPUTED intent is to require the review, in an environment where the review is
+   * off, because a required check nothing posts blocks every merge. The test is the intent the
+   * dataset's row works out to, not the shape of the request: a live request for a private dataset
+   * is a removal, and taking the requirement off is never refused, since it is the way out. No
+   * dataset is special-cased for being live.
    */
   admin.post("/datasets/:id/review-ruleset", zValidator("json", reviewRulesetSchema), async (c) => {
     const datasetId = c.req.param("id");
@@ -652,9 +704,6 @@ export function registerFleetRoutes(admin: AdminRouter): void {
         403,
       );
     }
-    if (!dryRun && !removing && !enabled) {
-      return c.json({ error: REVIEW_DISABLED_SENTENCE, code: "review_disabled" }, 409);
-    }
 
     const row = await c.env.DB.prepare(
       `SELECT dataset_id, github_repo, ${REVIEWABLE_ROW_COLUMNS} FROM datasets WHERE dataset_id = ?`,
@@ -663,6 +712,12 @@ export function registerFleetRoutes(admin: AdminRouter): void {
       .first<ReviewRulesetRow>();
     if (!row) return c.json({ error: "Dataset not found" }, 404);
     if (!row.github_repo) return c.json({ error: "Dataset has no GitHub repository" }, 400);
+
+    // Refused before a token is minted or GitHub is asked anything, and only for a requirement.
+    if (!dryRun && reviewRulesetIntent(row, removing).intent === "require") {
+      const refusal = requireRefusal(c.env);
+      if (refusal) return c.json({ error: refusal.error, code: refusal.code }, 409);
+    }
 
     const outcome = await reconcileDatasetReview(row, await getDatasetsToken(c.env), {
       dryRun,
@@ -685,6 +740,10 @@ export function registerFleetRoutes(admin: AdminRouter): void {
    * everywhere with `remove`. The fixture band nm099900 to nm099999 is never selected. A page is
    * at most 50 datasets; `next_after` is the last id of a full page, to send as `after` for the
    * next one. A dataset that fails is an `error` on its row and does not stop the page.
+   *
+   * With the review off, a live page still applies every removal. A row whose computed intent is
+   * to require the review is refused on its own row, with the code `review_disabled`, because
+   * requiring a check nothing posts would block every merge.
    */
   admin.post(
     "/datasets/review-ruleset/bulk",
@@ -698,9 +757,6 @@ export function registerFleetRoutes(admin: AdminRouter): void {
       const removing = remove === true;
       const cap = limit ?? 25;
       const enabled = isReviewEnabled(c.env);
-      if (!dryRun && !removing && !enabled) {
-        return c.json({ error: REVIEW_DISABLED_SENTENCE, code: "review_disabled" }, 409);
-      }
 
       const clauses: string[] = ["github_repo IS NOT NULL", OUTSIDE_FIXTURE_BAND.sql];
       const binds: unknown[] = [OUTSIDE_FIXTURE_BAND.bind];
@@ -722,11 +778,13 @@ export function registerFleetRoutes(admin: AdminRouter): void {
 
       const pat = await getDatasetsToken(c.env);
       const results: ReviewRulesetOutcome[] = [];
+      const refuseRequire = requireRefusal(c.env);
       for (const row of datasets) {
         const outcome = await reconcileDatasetReview(row, pat, {
           dryRun,
           remove: removing,
           withPayload: false,
+          refuseRequire,
         });
         results.push(outcome);
         await auditReviewRuleset(c.env.DB, c.get("user"), outcome, true);

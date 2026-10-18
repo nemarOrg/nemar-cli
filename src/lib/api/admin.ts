@@ -1380,7 +1380,8 @@ export type NotReviewableReason = "inactive" | "private" | "anonymous" | "unpubl
  * What a review-ruleset request came to for one dataset. `intent` is what the dataset's row
  * called for (or `--remove` asked for) and `action` is what was done, or with a dry run would be:
  * `create`, `update`, `remove`, `none` (nothing to take off), `skip` (required here but not
- * written, see `reason`), or null when the attempt failed (`error` says how).
+ * written, see `reason`), or null when the attempt failed (`error` says how, and `code` is its
+ * word when it has one: `review_disabled` is a requirement refused because the review is off).
  */
 export interface ReviewRulesetOutcome {
   dataset_id: string;
@@ -1393,6 +1394,7 @@ export interface ReviewRulesetOutcome {
   default_branch?: string;
   payload?: ReviewRulesetPayload;
   error?: string;
+  code?: "review_disabled";
 }
 
 export interface ReviewRulesetResponse extends ReviewRulesetOutcome {

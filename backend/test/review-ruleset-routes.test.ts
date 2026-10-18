@@ -288,16 +288,49 @@ describe("POST /admin/datasets/:id/review-ruleset", () => {
       },
     );
 
-    test("the refusal does not depend on what this dataset's row calls for", async () => {
-      // A private dataset would only be removed, but the request as typed is a live apply with the
-      // review off, and it is refused the same way: the rule does not read the catalog.
+    test("what is refused is the requirement, not the request: a live request for a dataset that is not reviewed is a removal and goes through", async () => {
+      // A private dataset is only ever taken off, so the review being off is no reason to refuse
+      // it, and refusing it would leave a ruleset that nothing satisfies where it stands.
       seedDataset("nm000201", { visibility: "private" });
+      await ensureReviewRuleset("nm000201", PAT);
+      envOverrides = { PR_REVIEW_ENABLED: undefined };
+
+      const r = await single("nm000201", { dry_run: false });
+
+      expect(r.status).toBe(200);
+      expect(r.body).toMatchObject({
+        intent: "remove",
+        action: "remove",
+        applied: true,
+        review_enabled: false,
+      });
+      expect(held("nm000201")).toEqual([]);
+      expect(audits().map((a) => a.action)).toEqual(["review_ruleset_removed"]);
+    });
+
+    test("an unpublished dataset, an archived one and an anonymous deposit are removals too", async () => {
+      envOverrides = { PR_REVIEW_ENABLED: undefined };
+      seedDataset("nm000211", { first_published_at: null });
+      seedDataset("nm000212", { status: "archived" });
+      seedDataset("nm000213", { anonymous: 1, first_published_at: null });
+
+      for (const id of ["nm000211", "nm000212", "nm000213"]) {
+        const r = await single(id, { dry_run: false });
+        expect(r.status, id).toBe(200);
+        expect(r.body, id).toMatchObject({ intent: "remove", action: "none" });
+      }
+    });
+
+    test("the refusal comes before a token is minted or GitHub is asked", async () => {
+      seedDataset("nm000201");
       envOverrides = { PR_REVIEW_ENABLED: undefined };
 
       const r = await single("nm000201", { dry_run: false });
 
       expect(r.status).toBe(409);
       expect(r.body.code).toBe("review_disabled");
+      expect(standIn.calls).toHaveLength(0);
+      expect(held("nm000201")).toEqual([]);
     });
 
     test("a dry run still answers, and says the review is off", async () => {
@@ -638,14 +671,56 @@ describe("POST /admin/datasets/review-ruleset/bulk", () => {
   });
 
   describe("while the review is off", () => {
-    test("a live request is refused as a whole with review_disabled, before the catalog is read", async () => {
+    test("a live page refuses each row that would require the review, and still applies the removals", async () => {
       seedFleet();
+      await ensureReviewRuleset("nm000303", PAT); // a ruleset left on a dataset that is now private
+      standIn.calls.length = 0;
       envOverrides = { PR_REVIEW_ENABLED: undefined };
 
       const r = await bulk({ dry_run: false });
 
-      expect(r.status).toBe(409);
-      expect(r.body.code).toBe("review_disabled");
+      expect(r.status).toBe(200);
+      const byId = Object.fromEntries(r.body.results.map((x: Json) => [x.dataset_id, x]));
+      // The three the Worker reviews are refused on their own rows, in the Worker's words.
+      for (const id of ["nm000301", "nm000302", "on000305"]) {
+        expect(byId[id], id).toMatchObject({
+          intent: "require",
+          action: null,
+          applied: false,
+          code: "review_disabled",
+        });
+        expect(byId[id].error, id).toContain("PR_REVIEW_ENABLED");
+        expect(held(id), id).toEqual([]);
+      }
+      // The two that it does not review went through: one lost its ruleset, one had none to lose.
+      expect(byId.nm000303).toMatchObject({ intent: "remove", action: "remove", applied: true });
+      expect(byId.nm000304).toMatchObject({ intent: "remove", action: "none", applied: false });
+      expect(byId.nm000303.error).toBeUndefined();
+      expect(held("nm000303")).toEqual([]);
+      expect(audits().map((a) => `${a.action} ${a.resource_id}`)).toEqual([
+        "review_ruleset_removed nm000303",
+      ]);
+      // And GitHub was not asked about a repository whose row was refused.
+      for (const id of ["nm000301", "nm000302", "on000305"]) {
+        expect(
+          standIn.calls.filter((c) => c.path.includes(`/repos/nemarDatasets/${id}`)),
+          id,
+        ).toHaveLength(0);
+      }
+    });
+
+    test("a live page of reviewed datasets only is refused row by row, and nothing is written", async () => {
+      seedDataset("nm000301");
+      seedDataset("nm000302");
+      envOverrides = { PR_REVIEW_ENABLED: undefined };
+
+      const r = await bulk({ dry_run: false });
+
+      expect(r.status).toBe(200);
+      expect(r.body.results.map((x: Json) => x.code)).toEqual([
+        "review_disabled",
+        "review_disabled",
+      ]);
       expect(standIn.calls).toHaveLength(0);
       expect(audits()).toEqual([]);
     });
@@ -988,9 +1063,11 @@ describe("the enforce routes and the automatic switch", () => {
         const one = await single("nm000201", { dry_run: false });
         const many = await bulk({ dry_run: false });
 
+        // The single request is refused outright. The page is answered, with the row refused.
         expect(one.status, `single, switch ${auto}`).toBe(409);
-        expect(many.status, `bulk, switch ${auto}`).toBe(409);
         expect(one.body.code).toBe("review_disabled");
+        expect(many.status, `bulk, switch ${auto}`).toBe(200);
+        expect(many.body.results.map((x: Json) => x.code)).toEqual(["review_disabled"]);
       }
       expect(standIn.calls).toHaveLength(0);
     });
