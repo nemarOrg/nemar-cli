@@ -389,16 +389,19 @@ describe("findTextProblem", () => {
   });
 
   test("a very long run of punctuation is judged, and trimmed, without error", () => {
-    // Trimming it with `/[\s.!:;,]+$/` took ten seconds on 160,000 characters: the run is tried
-    // again from every start. The trim is now a loop over the end of the text, which looks at each
-    // character once. Nothing here is timed (a wall-clock bound fails on a loaded runner). The run
-    // is long enough that the quadratic trim would take hours, far past the file's test timeout,
-    // while the loop takes milliseconds: the answers on a run this long are what is checked.
-    const hostile = `${".".repeat(2_000_000)}a`;
+    // Trimming it with `/[\s.!:;,]+$/` is quadratic, because the run is tried again from every
+    // start: 160,000 characters took ten seconds. The trim is now a loop over the end of the text,
+    // which looks at each character once. Nothing here is timed (a wall-clock bound fails on a
+    // loaded runner). The run is the shortest one the quadratic trim cannot get through inside this
+    // file's test timeout, about a minute and a half of work against sixty seconds, while the loop
+    // takes a few milliseconds: a regression fails this test by timeout, and a longer run would only
+    // make it fail later.
+    const hostile = `${".".repeat(500_000)}a`;
     expect(findTextProblem("description", hostile)?.code).toBe("no_words");
-    expect(findTextProblem("title", hostile)?.code).toBe("no_words");
+    // A title is judged on the same trim, so a shorter run is enough to check its answer.
+    expect(findTextProblem("title", `${".".repeat(20_000)}a`)?.code).toBe("no_words");
     // The trailing run is really trimmed: what it hides is found under it.
-    expect(findTextProblem("title", `Save changes${".!:;, ".repeat(400_000)}`)?.code).toBe(
+    expect(findTextProblem("title", `Save changes${".!:;, ".repeat(2_000)}`)?.code).toBe(
       "placeholder",
     );
   });
@@ -406,12 +409,13 @@ describe("findTextProblem", () => {
   test("an unclosed instruction bracket and a long run of blanks is judged without error", () => {
     // `\s+` and the characters after it overlap on blanks, so an unclosed `[your` or `<insert`
     // followed by tens of thousands of them was tried as every split of the run: 64,000 took
-    // eleven seconds. A description is only trimmed, so its whitespace reaches the rule. What keeps
-    // it linear is the pattern's shape, checked in the next test; here, the answers, on runs ten
-    // times that long, which the old shape would take far past the file's test timeout to judge.
+    // seconds. A description is only trimmed, so its whitespace reaches the rule. What keeps it
+    // linear is the pattern's shape, and the next test is the one that fails when the shape goes:
+    // a run long enough to push the old pattern past this file's test timeout would take minutes to
+    // fail, so these are the answers on runs that are long for a pull request and short for a test.
     for (const opener of ["[your", "<insert", "[fill in"]) {
       for (const blank of [" ", " \t", "\n"]) {
-        const hostile = `Adds data.\n\n${opener}${blank.repeat(640_000 / blank.length)}x`;
+        const hostile = `Adds data.\n\n${opener}${blank.repeat(30_000 / blank.length)}x`;
         expect(findTextProblem("description", hostile)).toBeNull();
       }
     }
@@ -839,15 +843,16 @@ describe("the changed-file summary", () => {
     expect(summary).toContain("- and 5 more files at the dataset root");
   });
 
-  test("a change of a million files in one folder is summarized whole", () => {
-    // Copying the folder's array on every file took six seconds for a hundred thousand, after the
-    // branch was pushed and while the pull request spinner showed; each file is now added to its
-    // folder's list once. Nothing is timed: at a million files the copying would run far past the
-    // file's test timeout, and the list takes a fraction of a second, so the summary is checked.
-    const paths = Array.from({ length: 1_000_000 }, (_, i) => `sub-01/eeg/run-${i}_eeg.json`);
+  test("a change of four hundred thousand files in one folder is summarized whole", () => {
+    // Copying the folder's array on every file is quadratic: a hundred thousand took six seconds,
+    // after the branch was pushed and while the pull request spinner showed. Each file is now added
+    // to its folder's list once. Nothing is timed. This is the smallest change the copying cannot
+    // get through inside this file's test timeout, about ninety seconds of work against sixty, while
+    // the list takes a fraction of a second: a regression fails this test by timeout.
+    const paths = Array.from({ length: 400_000 }, (_, i) => `sub-01/eeg/run-${i}_eeg.json`);
     const summary = summarizeChangedFiles(filesNamed("added", paths));
     expect(summary).toBe(
-      "1000000 files changed: 1000000 added.\n\n- `sub-01/`: 1000000 files (1000000 added)",
+      "400000 files changed: 400000 added.\n\n- `sub-01/`: 400000 files (400000 added)",
     );
   });
 
