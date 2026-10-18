@@ -513,11 +513,27 @@ export async function calibrateMain(
     }
   }
   if (targets.length === 0) return usage("name at least one pull request");
+  // A pull request named twice is calibrated once. Its second read would run `git remote add` in
+  // the directory the first made and fail, and its row would say fetch_failed for no fault of the
+  // pull request's. The first mention wins, and with it the outcome expected of the pull request.
+  const named = new Set<string>();
+  const once = targets.filter((t) => {
+    const key = `${t.dataset}#${t.number}`;
+    if (named.has(key)) return false;
+    named.add(key);
+    return true;
+  });
+  if (once.length < targets.length) {
+    const extra = targets.length - once.length;
+    console.error(
+      `pr-review-calibrate: ${extra} mention${extra === 1 ? "" : "s"} of a pull request already named; each is calibrated once, with the first expected outcome given`,
+    );
+  }
 
   const root = mkdtempSync(join(tmpdir(), "pr-review-calibrate-"));
   try {
     const rows: CalibrationRow[] = [];
-    for (const t of targets) rows.push(await calibrateOne(t, root, read));
+    for (const t of once) rows.push(await calibrateOne(t, root, read));
     if (json) out(JSON.stringify(rows, null, 2));
     else for (const line of renderTable(rows)) out(line);
     return exitCodeOf(rows);

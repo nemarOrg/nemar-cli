@@ -604,6 +604,42 @@ describe("the run: its arguments, its output, and its exit code", () => {
     expect(requests).toHaveLength(0);
   });
 
+  test("a pull request named twice is read and calibrated once, with the first expected outcome", async () => {
+    // Read twice into the same directory, the second `git remote add` fails and the second row says
+    // fetch_failed for no fault of the pull request's.
+    const file = join(root, "twice-prs.txt");
+    writeFileSync(
+      file,
+      "nm000153#2 pass\nnemarDatasets/nm000456#1\nnemarDatasets/nm000153#2 fail\nnm000153#2\n",
+    );
+    const read: string[] = [];
+    const out: string[] = [];
+    const said: string[] = [];
+    const quiet = console.error;
+    console.error = (...a: unknown[]) => void said.push(a.map(String).join(" "));
+    let code: number;
+    try {
+      code = await calibrateMain(
+        ["--prs", file, "--pr", "nm000456#1", "--json"],
+        (l) => out.push(l),
+        (t) => {
+          read.push(`${t.dataset}#${t.number}`);
+          throw new CalibrationReadError("gh_failed");
+        },
+      );
+    } finally {
+      console.error = quiet;
+    }
+    expect(code).toBe(1);
+    expect(read).toEqual(["nm000153#2", "nm000456#1"]);
+    const rows = JSON.parse(out.join("\n")) as CalibrationRow[];
+    expect(rows.map((r) => [r.pr, r.expected])).toEqual([
+      ["nm000153#2", "pass"],
+      ["nm000456#1", null],
+    ]);
+    expect(said.join("\n")).toContain("3 mentions of a pull request already named");
+  });
+
   test("the table's last lines count the rows without a verdict and do not price what was not counted", async () => {
     const out: string[] = [];
     const code = await calibrateMain(
