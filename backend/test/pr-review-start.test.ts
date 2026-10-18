@@ -1544,6 +1544,45 @@ describe("the override: nemar admin pr-reviews allow <dataset> <pr> --admin", ()
       },
     );
 
+    test.each([
+      ["a link", "https://example.org/rename-plan"],
+      ["a link without a scheme", "www.example.org/rename-plan"],
+      ["two links", "https://example.org/a http://example.org/b"],
+      ["the marker a link leaves, typed out", "(link removed)"],
+      ["punctuation", "... --- !!! ???"],
+      ["punctuation around a link", "-- https://example.org/plan --"],
+    ])(
+      "a reason that is only %s has no word in it: a 400, and nothing happens",
+      async (_why, reason) => {
+        pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
+        const auditBefore = auditRows();
+        const r = await allowAs(DATASET, 7, { reason });
+        expect(r.status).toBe(400);
+        expect(r.body).toMatchObject({ code: "bad_reason" });
+        expect(String(r.body.error)).toContain("no plain words");
+        expect(auditRows()).toBe(auditBefore);
+        expect(calls).toHaveLength(0);
+      },
+    );
+
+    test("a reason with words and a link is accepted, and the link is not what is recorded", async () => {
+      pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
+      const r = await allowAs(DATASET, 7, {
+        reason: "See https://example.org/plan for the rename release",
+      });
+      expect(r.body).toMatchObject({ waived: true, reason: "waived" });
+      const details = waivers()[0]?.details ?? "{}";
+      expect(JSON.parse(details).reason).toBe("See (link removed) for the rename release");
+      expect(details).not.toContain("example.org");
+    });
+
+    test("a letter or a digit in any alphabet is a word: a reason in another script is accepted", async () => {
+      pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
+      const r = await allowAs(DATASET, 7, { reason: "名前はリリースまで保持 2026" });
+      expect(r.body).toMatchObject({ waived: true, reason: "waived" });
+      expect(JSON.parse(waivers()[0]?.details ?? "{}").reason).toBe("名前はリリースまで保持 2026");
+    });
+
     test("the reason given is the reason recorded, trimmed and cleaned", async () => {
       pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
       const r = await allowAs(DATASET, 7, { reason: "  Kept until the *rename* release  " });

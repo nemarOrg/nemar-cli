@@ -294,10 +294,15 @@ export interface WaiveNamingResponse {
  * The body of `POST /admin/pr-reviews/:dataset/:pr/allow`. A pull request that has moved on from
  * `head_sha` is not waived: the answer is a 409 with the code `head_moved`, and nothing is recorded
  * or posted. A body with no reason, or one with no plain words in it, is a 400 with the code
- * `bad_reason`: a waiver is recorded with the reason it was given.
+ * `bad_reason`: a waiver is recorded with the reason it was given. A reason has plain words in it
+ * when a letter or a digit remains once links, mentions and markup are removed, so a link alone,
+ * or punctuation alone, is no reason.
  */
 export interface WaiveNamingRequest {
-  /** Why, in plain words; required, and kept to 200 characters. */
+  /**
+   * Why, in plain words; required, kept to 200 characters, and a link in it is removed before it
+   * is recorded.
+   */
   reason: string;
   /**
    * The commit the caller means: the first seven to forty characters of its id (hexadecimal). The

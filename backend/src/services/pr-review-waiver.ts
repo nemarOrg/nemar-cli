@@ -27,8 +27,9 @@
  *     rule finds there later that the waiver did not record, and a new commit, are checked again.
  *
  * The reason is required, because it is what the record keeps: a request without one, or with one
- * that has no plain words left once links, mentions and markup are removed, is a 400 (`bad_reason`)
- * and records and posts nothing.
+ * that has no plain words left once links, mentions and markup are removed (a letter or a digit
+ * must remain, so a link alone or punctuation alone is no reason), is a 400 (`bad_reason`) and
+ * records and posts nothing.
  *
  * It never approves or merges anything, and it records no pull request text: the audit row holds
  * the rule's closed words, not the title or the name.
@@ -36,6 +37,7 @@
 
 import type { WaiveNamingResponse } from "../../../shared/contract/pr-review-admin.js";
 import { sanitizeNote } from "../../../shared/pr-review.js";
+import { LINK_REMOVED } from "../../../shared/untrusted-text.js";
 import { auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { reviewExemption } from "./pr-review-exemption.js";
@@ -80,10 +82,12 @@ export async function waiveNamingRule(
   { reason, commit }: WaiveRequest,
 ): Promise<WaiveNamingResponse> {
   const environment = environmentName(env);
-  // The reason is what the record keeps, so a reason with nothing left of it once links, mentions
-  // and markup are taken out (the route has already refused a blank one) is no reason.
+  // The reason is what the record keeps, so a reason with no word left in it once links, mentions
+  // and markup are taken out (the route has already refused a blank one) is no reason. A link
+  // leaves its marker behind, which is not a word, and punctuation alone is not one either: the
+  // reason needs a letter or a digit.
   const kept = sanitizeNote(reason, MAX_REASON);
-  if (kept === "") {
+  if (!/[\p{L}\p{N}]/u.test(kept.replaceAll(LINK_REMOVED, ""))) {
     throw new QueueError(
       400,
       "bad_reason",

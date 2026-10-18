@@ -158,7 +158,7 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
 - **The only way past the rule without a change is an explicit override**, `nemar admin pr-reviews allow <dataset> <pr> --admin --reason <why>`, which replaces the exemption for this rule.
   The Worker reads the pull request itself, refuses it for an author who is not exempt (their review includes the rule) and for a commit a review has touched, records the waiver in the audit log (who, the commit, what the rule found as closed words, the reason given; never the title or the name), and then posts a `skipped` check that says the rule was waived.
   The record comes first: if it cannot be written, nothing is posted, and a recorded waiver whose check did not land is posted by asking again.
-  The reason is required, because it is what the record keeps: a request without one, or with one that has no plain words left once links, mentions and markup are removed, is a 400, and nothing is recorded or posted.
+  The reason is required, because it is what the record keeps: a request without one, or with one that has no plain words left once links, mentions and markup are removed (a letter or a digit must remain, so a link alone or punctuation alone is no reason), is a 400, and nothing is recorded or posted.
   The administrator may name the commit they looked at (`--commit`, the first 7 to 40 characters of its id).
   A pull request that has moved on from it is refused with `head_moved` (409), and nothing is recorded or posted; without a commit the current one is waived, and the answer and the record name it.
   The waiver is for that commit only: a new commit is checked again.
