@@ -123,14 +123,7 @@ export function registerPrReviewRoutes(admin: AdminRouter): void {
 
   admin.get("/pr-reviews/:dataset/:pr", async (c) => {
     try {
-      const dataset = c.req.param("dataset");
-      const pr = Number(c.req.param("pr"));
-      if (!isValidDatasetId(dataset)) {
-        throw new QueueError(400, "bad_dataset", "That is not a dataset id.");
-      }
-      if (!Number.isSafeInteger(pr) || pr <= 0) {
-        throw new QueueError(400, "bad_pr", "A pull request number is a positive whole number.");
-      }
+      const { dataset, pr } = target(c);
       const head = c.req.query("head") ?? null;
       return c.json(await readPrReviewDetail(c.env, dataset, pr, head));
     } catch (err) {
@@ -140,14 +133,7 @@ export function registerPrReviewRoutes(admin: AdminRouter): void {
 
   admin.post("/pr-reviews/:dataset/:pr/start", async (c) => {
     try {
-      const dataset = c.req.param("dataset");
-      const pr = Number(c.req.param("pr"));
-      if (!isValidDatasetId(dataset)) {
-        throw new QueueError(400, "bad_dataset", "That is not a dataset id.");
-      }
-      if (!Number.isSafeInteger(pr) || pr <= 0) {
-        throw new QueueError(400, "bad_pr", "A pull request number is a positive whole number.");
-      }
+      const { dataset, pr } = target(c);
       return c.json(await startPullRequestReview(c.env, c.get("user").id, dataset, pr));
     } catch (err) {
       return fail(c, err);

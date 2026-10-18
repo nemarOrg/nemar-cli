@@ -946,6 +946,32 @@ describe("GET /admin/pr-reviews/:dataset/:pr", () => {
     expect(r.status).toBe(400);
   });
 
+  test("says which of the two it refused, in the same words on every route that takes them", async () => {
+    const badDataset = { error: "That is not a dataset id.", code: "bad_dataset" };
+    const badPr = { error: "A pull request number is a positive whole number.", code: "bad_pr" };
+    for (const method of ["GET", "POST"]) {
+      // The detail read and the start take the same two path parameters; so does the waiver.
+      const suffix = method === "GET" ? "" : "/start";
+      const ask = (path: string) =>
+        app.request(
+          `/admin/pr-reviews/${path}${suffix}`,
+          { method, headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+          env(),
+        );
+      for (const [path, expected] of [
+        ["nm1/7", badDataset],
+        ["nm000201/abc", badPr],
+        ["nm000201/0", badPr],
+        ["nm000201/-3", badPr],
+        ["nm000201/1.5", badPr],
+      ] as const) {
+        const res = await ask(path);
+        expect(res.status, `${method} ${path}`).toBe(400);
+        expect(await res.json(), `${method} ${path}`).toEqual(expected);
+      }
+    }
+  });
+
   test("another environment's dataset is not answered here", async () => {
     envOverrides = { ENVIRONMENT: "staging" };
     const r = await detail("nm000201", 7);
