@@ -790,6 +790,39 @@ describe("nemar admin pr-reviews allow <dataset> <pr> --admin: the naming rule's
       expect(checkPosts()).toHaveLength(0);
     });
 
+    test("a head_moved sentence longer than the Worker's own is cut, whoever sent it", async () => {
+      reviewable("nm000201");
+      apiOverride = (req) =>
+        new URL(req.url).pathname === "/admin/pr-reviews/nm000201/7/allow"
+          ? Response.json(
+              {
+                error: `The pull request is no longer at that commit. ${"x".repeat(5000)}`,
+                code: "head_moved",
+              },
+              { status: 409 },
+            )
+          : null;
+      const r = await cli([
+        ...PR,
+        "allow",
+        "nm000201",
+        "7",
+        "--admin",
+        "--commit",
+        SHA_A.slice(0, 7),
+        "--reason",
+        "Looked at it",
+      ]);
+      expect(r.exitCode).toBe(1);
+      const said = (r.stdout + r.stderr)
+        .split("\n")
+        .find((l) => l.includes("no longer at that commit"));
+      expect(said).toBeDefined();
+      expect(said?.length).toBeLessThan(400);
+      expect(said).toContain("…");
+      expect(r.stdout + r.stderr).not.toContain("x".repeat(400));
+    });
+
     test("is refused before the API is asked when it is not a commit prefix, or when --admin is missing", async () => {
       for (const bad of ["abc12", "not-a-sha-at-all", "a".repeat(41)]) {
         apiRequests = [];

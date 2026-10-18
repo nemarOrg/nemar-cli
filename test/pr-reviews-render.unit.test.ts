@@ -10,6 +10,7 @@ import { describe, expect, test } from "bun:test";
 import type {
   ContributorStanding,
   QueueEntry,
+  StartReviewResponse,
   VolumeWindow,
   WaiveNamingResponse,
 } from "../shared/contract/pr-review-admin";
@@ -23,6 +24,7 @@ import {
   ageOf,
   briefLines,
   namingFactLines,
+  notStartedText,
   plain,
   renderQueue,
   reportLines,
@@ -898,6 +900,31 @@ describe("waiverLines", () => {
       expect(surfaces[where], where).toContain("GitHub may not have answered");
       expect(surfaces[where], where).toContain("has no readable Name");
       expect(surfaces[where], where).toMatch(/\bonce\b/);
+    }
+  });
+
+  test("a word that Object also has is a word, not the function it names", () => {
+    // `NOT_STARTED` is a plain object: `constructor` or `toString` would find an inherited function,
+    // and printing it prints that function's source. Every name Object.prototype has is tried.
+    const names = Object.getOwnPropertyNames(Object.prototype);
+    expect(names).toContain("constructor");
+    for (const name of names) {
+      const waiver = text(answer({ reason: name }));
+      expect(waiver, name).not.toContain("native code");
+      expect(waiver, name).not.toContain("[object");
+      const start = notStartedText({
+        environment: "production",
+        dispatched: false,
+        reason: name,
+        review_id: null,
+        author_login: null,
+      } satisfies StartReviewResponse);
+      expect(start, name).not.toContain("native code");
+      expect(start, name).not.toContain("[object");
+      // The generic text: the word itself, with its underscores as spaces.
+      const word = name.replaceAll("_", " ");
+      expect(waiver, name).toBe(`Not waived: ${word}.`);
+      expect(start, name).toBe(`not started: ${word}`);
     }
   });
 

@@ -1153,12 +1153,22 @@ const START_FAULTS = new Set([
   "naming_unchecked",
 ]);
 
+/**
+ * The sentence for one of the gate's fixed words, or undefined for any other. Only the table's own
+ * keys are words: `NOT_STARTED` is a plain object, so `constructor` or `toString` would otherwise
+ * find an inherited function, and printing it would print that function's source.
+ */
+function gateWord(reason: string): string | undefined {
+  return Object.hasOwn(NOT_STARTED, reason) ? NOT_STARTED[reason] : undefined;
+}
+
 function startedWord(r: StartReviewResponse): string {
   return r.reason === "redispatched" ? "started again" : "started";
 }
 
-function notStartedText(r: StartReviewResponse): string {
-  const why = NOT_STARTED[r.reason] ?? plain(r.reason).replaceAll("_", " ");
+/** Why a start did not start one, as the line `start` prints. Pure, so it is tested without a server. */
+export function notStartedText(r: StartReviewResponse): string {
+  const why = gateWord(r.reason) ?? plain(r.reason).replaceAll("_", " ");
   const hint =
     r.reason === "contributor_paused" && r.author_login
       ? ` (lift it with: nemar admin pr-reviews allow ${plain(r.author_login)})`
@@ -2218,7 +2228,7 @@ export function waiverLines(r: WaiveNamingResponse, dataset: string, pr: number)
         ),
       ];
     default: {
-      const why = NOT_STARTED[r.reason] ?? clip(plain(r.reason).replaceAll("_", " "), 80);
+      const why = gateWord(r.reason) ?? clip(plain(r.reason).replaceAll("_", " "), 80);
       return [chalk.yellow(`Not waived: ${why}.`)];
     }
   }
@@ -2226,6 +2236,9 @@ export function waiverLines(r: WaiveNamingResponse, dataset: string, pr: number)
 
 /** The first seven to forty characters of a commit id, the way `git log --oneline` shortens one. */
 const COMMIT_PREFIX_RE = /^[0-9a-fA-F]{7,40}$/;
+
+/** The most of the Worker's `head_moved` sentence that is printed; its own is about 130 characters. */
+const HEAD_MOVED_MAX = 300;
 
 /** Waive the naming rule for a pull request's current commit, and say what came of it. */
 async function waiveNaming(
@@ -2258,9 +2271,11 @@ async function waiveNaming(
       process.exit(1);
     }
     if (err instanceof ApiError && errorWord(err) === "head_moved") {
-      // An answer about the pull request, not a fault: the commit named is no longer its head.
-      spinner?.fail(plain(err.message));
-      if (!spinner) say(options.json)(chalk.red(plain(err.message)));
+      // An answer about the pull request, not a fault: the commit named is no longer its head. The
+      // Worker's sentence is short; a longer one is some other server's, and is cut like any word.
+      const said = clip(err.message, HEAD_MOVED_MAX);
+      spinner?.fail(said);
+      if (!spinner) say(options.json)(chalk.red(said));
       markReportedExit();
       process.exit(1);
     }
