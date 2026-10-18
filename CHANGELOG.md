@@ -53,6 +53,7 @@ The conversion changes run on `hallu` from this repository's `main` branch, not 
 - Streamed export still raises an uncoded error for a truncated FIF (biosigIO #161) and for truncated KIT and 4D/BTi files (biosigIO #168), so those are retried until the retry budget runs out.
 - In a local run, a git-annex pointer whose content was never fetched is a typed `file_read_error` that is never retried; whether it should stay retryable is open (#1812).
 - A BrainVision marker that falls inside a dropped partial frame is not kept; the dropped byte count is in the store's metadata, not in the public index.
+- A store whose recording metadata carries `brainvision_dropped_bytes` is refused by the scrub zarr stage until an operator names the member with `--allow-member`, as for the converter's other technical flags.
 - A host read error during the MaxShield header probe is still recorded as `maxshield_probe_failed`, which is terminal (#1833).
 - A short read of an EEGLAB `.fdt` caused by an I/O error is reported as a sample-count mismatch, which is typed `corrupt_or_truncated` (biosigIO #169).
 
