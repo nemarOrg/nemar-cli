@@ -8,6 +8,7 @@
  * intentional changes are import paths.
  */
 
+import { PR_REVIEW_CHECK_NAME } from "../../../../shared/pr-review.js";
 import { HttpError } from "../retry";
 import {
   type CollaboratorReconcileResult,
@@ -444,6 +445,310 @@ export async function checkRunGreenOnDefaultHead(
 }
 
 // ===========================================================================
+// The required pull-request review (ADR 0107)
+// ===========================================================================
+
+/**
+ * Ruleset name for the required pull-request review (the idempotent upsert key).
+ *
+ * A ruleset of its own, not a third check inside {@link BRANCH_RULESET_NAME}: that one waits on BIDS
+ * validation, is missing from most public repositories, and adding the repository Admin role to its
+ * bypass list would let that role skip the BIDS and version checks too.
+ */
+export const REVIEW_RULESET_NAME = "NEMAR PR review required";
+
+/**
+ * The only branch the Worker reviews pull requests against (`PR_REVIEW_BASE_BRANCH` in
+ * services/pr-review.ts, which a test ties to this). The ruleset follows the default branch, so it
+ * is only written where the default branch is this one: anywhere else it would require a check that
+ * no pull request is ever given.
+ */
+export const REVIEW_BASE_BRANCH = "main";
+
+/** What to do about the required review on a repository: put the ruleset in place, or take it out. */
+export type ReviewIntent = "require" | "remove";
+
+/** GitHub fixes the actor id of the `OrganizationAdmin` bypass actor at 1. */
+const ORGANIZATION_ADMIN_ACTOR_ID = 1;
+
+/**
+ * The id of the repository Admin role, as a `RepositoryRole` bypass actor of the review ruleset.
+ *
+ * NOT VERIFIED (item U1 of epic #1813). GitHub's ruleset documentation lists no role ids. The 5
+ * for the repository Admin role comes from the Terraform GitHub provider's documentation (admin 5,
+ * write 4, maintain 2 for the base roles), and nothing here has read it back from GitHub. A wrong
+ * id would hand the bypass to the wrong role (Maintain or Write in place of Admin), so the first
+ * apply, on a dev-owned exemplar, is followed by the check in the rollout runbook (step R1.2): read
+ * the ruleset back through GraphQL and expect exactly one RepositoryRole actor whose role name is
+ * "admin".
+ *
+ *   gh api graphql -f query='query{repository(owner:"nemarDatasets",name:"xx099900"){
+ *     rulesets(first:10){nodes{name bypassActors(first:10){nodes{bypassMode organizationAdmin
+ *     repositoryRoleName repositoryRoleDatabaseId actor{__typename ... on App{databaseId name}}}}}}}}'
+ *
+ * If it names any other role, remove the ruleset
+ * (`nemar admin fleet require-review <id> --remove --apply`), correct this constant and stop.
+ */
+export const REPOSITORY_ADMIN_ROLE_ID = 5;
+
+/** The ruleset body {@link ensureReviewRuleset} sends; the same shape as the branch ruleset's. */
+export type ReviewRulesetPayload = BranchRulesetPayload;
+
+/**
+ * Build the review-ruleset payload. Pure (no network) so it is unit-testable.
+ *
+ * - One rule and nothing else: the `NEMAR PR Review` check must pass, and it must come from the
+ *   NEMAR GitHub App (`integration_id`), so only the check-run the Worker publishes satisfies it.
+ *   There is no pull-request rule; requiring pull requests is the branch ruleset's job.
+ * - `~DEFAULT_BRANCH` tracks the default branch, as the branch ruleset does.
+ * - `strict` is off for the reason the branch ruleset gives: the check is published for a pull
+ *   request's head commit and never re-posted when the base moves, so requiring an up-to-date
+ *   branch would leave a pull request waiting for a check that cannot come.
+ *   `do_not_enforce_on_create` lets a new repository's first push through.
+ * - Bypass, all `always`: the NEMAR App (the enrichment workflow pushes to `main` with its token),
+ *   organization administrators, and the repository Admin role, which the `dataset-admin` team
+ *   holds on dataset repositories. Maintainers and outside collaborators get none.
+ */
+export function buildReviewRulesetPayload(): ReviewRulesetPayload {
+  return {
+    name: REVIEW_RULESET_NAME,
+    target: "branch",
+    enforcement: "active",
+    conditions: { ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] } },
+    bypass_actors: [
+      { actor_id: NEMAR_APP_ID, actor_type: "Integration", bypass_mode: "always" },
+      {
+        actor_id: ORGANIZATION_ADMIN_ACTOR_ID,
+        actor_type: "OrganizationAdmin",
+        bypass_mode: "always",
+      },
+      { actor_id: REPOSITORY_ADMIN_ROLE_ID, actor_type: "RepositoryRole", bypass_mode: "always" },
+    ],
+    rules: [
+      {
+        type: "required_status_checks",
+        parameters: {
+          strict_required_status_checks_policy: false,
+          do_not_enforce_on_create: true,
+          required_status_checks: [{ context: PR_REVIEW_CHECK_NAME, integration_id: NEMAR_APP_ID }],
+        },
+      },
+    ],
+  };
+}
+
+interface RulesetSummary {
+  id: number;
+  name: string;
+  enforcement?: string;
+}
+
+/**
+ * The repository's OWN rulesets (`includes_parents=false`, so an organization ruleset that shares a
+ * name is never mistaken for this one, or written to). Throws on any failure.
+ */
+async function listOwnRulesets(repo: string, pat: string): Promise<RulesetSummary[]> {
+  const list = await githubFetchWithRetry(
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/rulesets?includes_parents=false`,
+    { method: "GET", headers: ghHeaders(pat) },
+    { retryOn404: true },
+  );
+  if (!list.ok) {
+    const b = await list.text().catch(() => "<failed to read body>");
+    throw new HttpError(
+      `Review ruleset list failed for ${repo}: HTTP ${list.status}: ${b.slice(0, 300)}`,
+      list.status,
+      b.slice(0, 300),
+    );
+  }
+  return (await list.json()) as RulesetSummary[];
+}
+
+/**
+ * Put the review ruleset in place on a repository, or bring it back to the payload: GET-first, so
+ * the choice between creating and updating is never a guess from an error code (see
+ * {@link ensureBranchRuleset}). A 422 on the write is a real validation error and is surfaced as it
+ * came.
+ *
+ * Writes whatever the repository's state is; whether it SHOULD be required here is the caller's
+ * decision ({@link reconcileReviewRuleset} is the one that makes it).
+ */
+export async function ensureReviewRuleset(
+  repo: string,
+  pat: string,
+): Promise<{ action: "created" | "updated"; payload: ReviewRulesetPayload }> {
+  const payload = buildReviewRulesetPayload();
+  const rulesetsUrl = `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/rulesets`;
+  const existing = (await listOwnRulesets(repo, pat)).find((r) => r.name === REVIEW_RULESET_NAME);
+
+  const write = await githubFetchWithRetry(
+    existing ? `${rulesetsUrl}/${existing.id}` : rulesetsUrl,
+    {
+      method: existing ? "PUT" : "POST",
+      headers: { ...ghHeaders(pat), "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    { retryOn404: true },
+  );
+  if (write.ok) {
+    return { action: existing ? "updated" : "created", payload };
+  }
+
+  const body = await write.text().catch(() => "<failed to read body>");
+  throw new HttpError(
+    `Review ruleset ${existing ? "update" : "create"} failed for ${repo}: HTTP ${write.status}: ${body.slice(0, 300)}`,
+    write.status,
+    body.slice(0, 300),
+  );
+}
+
+/**
+ * The review ruleset among a repository's own, for taking it off: a repository GitHub cannot find
+ * has none, so that is `undefined` and not an error. Any other failure throws.
+ */
+async function findReviewRulesetToRemove(
+  repo: string,
+  pat: string,
+): Promise<RulesetSummary | undefined> {
+  try {
+    return (await listOwnRulesets(repo, pat)).find((r) => r.name === REVIEW_RULESET_NAME);
+  } catch (e) {
+    if (e instanceof HttpError && e.status === 404) return undefined;
+    throw e;
+  }
+}
+
+/**
+ * Delete the review ruleset if present. Only that ruleset: the branch ruleset and the tag ruleset
+ * are other rulesets by name and are never listed for deletion here. Returns whether one was
+ * deleted; a repository GitHub cannot find has none to delete, so that is `false` and not an error.
+ */
+export async function removeReviewRuleset(repo: string, pat: string): Promise<boolean> {
+  const existing = await findReviewRulesetToRemove(repo, pat);
+  if (!existing) return false;
+  const del = await githubFetchWithRetry(
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/rulesets/${existing.id}`,
+    { method: "DELETE", headers: ghHeaders(pat) },
+    { retryOn404: true },
+  );
+  if (del.ok || del.status === 404) return true;
+  const b = await del.text().catch(() => "<failed to read body>");
+  throw new HttpError(
+    `Review ruleset delete failed for ${repo}: HTTP ${del.status}: ${b.slice(0, 200)}`,
+    del.status,
+    b.slice(0, 200),
+  );
+}
+
+/**
+ * Read the review ruleset on a repository (for drift reporting and for a dry run): whether it is
+ * there, and whether it is being enforced. A ruleset that is present and not `active` (the
+ * break-glass rollback sets it to `disabled`) requires nothing, so it is present and not active.
+ * Read-only. Throws when GitHub cannot say, so a caller never mistakes an outage for an absence.
+ */
+export async function getReviewRulesetInfo(
+  repo: string,
+  pat: string,
+): Promise<{ present: boolean; active: boolean }> {
+  const existing = (await listOwnRulesets(repo, pat)).find((r) => r.name === REVIEW_RULESET_NAME);
+  return { present: Boolean(existing), active: existing?.enforcement === "active" };
+}
+
+/** The default branch of a repository, strictly: unlike {@link getRepoDefaultBranch} it never guesses. */
+async function readDefaultBranch(repo: string, pat: string): Promise<string> {
+  const r = await githubFetchWithRetry(
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}`,
+    { headers: ghHeaders(pat) },
+    { retryOn404: true },
+  );
+  if (!r.ok) {
+    const b = await r.text().catch(() => "<failed to read body>");
+    throw new HttpError(
+      `Repository read failed for ${repo}: HTTP ${r.status}: ${b.slice(0, 200)}`,
+      r.status,
+      b.slice(0, 200),
+    );
+  }
+  const info = (await r.json()) as { default_branch?: unknown };
+  if (typeof info.default_branch !== "string" || info.default_branch === "") {
+    throw new HttpError(`Repository read for ${repo} named no default branch`, r.status);
+  }
+  return info.default_branch;
+}
+
+/** What {@link reconcileReviewRuleset} did, or with `dryRun` would do. */
+export interface ReviewRulesetStep {
+  intent: ReviewIntent;
+  /**
+   * `create`/`update`: the ruleset is (to be) written. `remove`: it is (to be) deleted. `none`:
+   * there was nothing to remove. `skip`: it is required here but was not written, see `reason`.
+   */
+  action: "create" | "update" | "remove" | "none" | "skip";
+  /** Whether a write was made: always false for a dry run, and for `none` and `skip`. */
+  applied: boolean;
+  /** Why a required ruleset was not written. */
+  reason?: "default_branch_not_main";
+  /** The default branch that made it `skip`. */
+  defaultBranch?: string;
+  /** What is (to be) sent, for `create` and `update`. */
+  payload?: ReviewRulesetPayload;
+}
+
+/**
+ * Bring one repository to a review intent: the one place that decides what a request to require or
+ * remove the review means for a repository, shared by the admin routes and `ensureRepoToSpec`.
+ *
+ * `remove` deletes the ruleset wherever it is. `require` writes it, except where the default branch
+ * is not `main`: the ruleset follows the default branch and the Worker reviews only pull requests
+ * to `main`, so there it would require a check no pull request is given. That is a `skip`, never a
+ * silent write. A caller that already read the default branch passes it in.
+ *
+ * `dryRun` reads and writes nothing: it says what would happen, from what GitHub holds now.
+ */
+export async function reconcileReviewRuleset(
+  repo: string,
+  pat: string,
+  opts: { intent: ReviewIntent; dryRun?: boolean; defaultBranch?: string },
+): Promise<ReviewRulesetStep> {
+  if (opts.intent === "remove") {
+    if (opts.dryRun) {
+      // The same reading as the removal itself, so a dry run and the run it previews agree.
+      const present = Boolean(await findReviewRulesetToRemove(repo, pat));
+      return { intent: "remove", action: present ? "remove" : "none", applied: false };
+    }
+    const removed = await removeReviewRuleset(repo, pat);
+    return { intent: "remove", action: removed ? "remove" : "none", applied: removed };
+  }
+
+  const defaultBranch = opts.defaultBranch ?? (await readDefaultBranch(repo, pat));
+  if (defaultBranch !== REVIEW_BASE_BRANCH) {
+    return {
+      intent: "require",
+      action: "skip",
+      applied: false,
+      reason: "default_branch_not_main",
+      defaultBranch,
+    };
+  }
+  if (opts.dryRun) {
+    const info = await getReviewRulesetInfo(repo, pat);
+    return {
+      intent: "require",
+      action: info.present ? "update" : "create",
+      applied: false,
+      payload: buildReviewRulesetPayload(),
+    };
+  }
+  const written = await ensureReviewRuleset(repo, pat);
+  return {
+    intent: "require",
+    action: written.action === "created" ? "create" : "update",
+    applied: true,
+    payload: written.payload,
+  };
+}
+
+// ===========================================================================
 // Repo-to-spec enforcement (epic #713, phase #717)
 // ===========================================================================
 
@@ -456,6 +761,37 @@ export interface RepoSpecResult {
   reconcile?: CollaboratorReconcileResult;
 }
 
+/** What a review step records, in the words the other steps use. Never throws. */
+async function reviewRulesetStepOf(
+  repo: string,
+  pat: string,
+  o: { intent: ReviewIntent; isPublic: boolean; defaultBranch: string; dryRun: boolean },
+): Promise<{ status: StepStatus; detail?: string }> {
+  // Nothing publishes the review check on a private repository, so it is never required there.
+  const intent: ReviewIntent = o.isPublic ? o.intent : "remove";
+  const privateNote = intent === o.intent ? "" : " (private)";
+  try {
+    const step = await reconcileReviewRuleset(repo, pat, {
+      intent,
+      dryRun: o.dryRun,
+      defaultBranch: o.defaultBranch,
+    });
+    if (step.action === "skip") {
+      return {
+        status: "skipped",
+        detail: `default branch is ${step.defaultBranch}, not ${REVIEW_BASE_BRANCH}`,
+      };
+    }
+    const words = o.dryRun
+      ? { create: "would create", update: "would update", remove: "would remove" }
+      : { create: "created", update: "updated", remove: "removed" };
+    const detail = step.action === "none" ? "nothing to remove" : words[step.action];
+    return { status: "ok", detail: `${detail}${privateNote}` };
+  } catch (e) {
+    return { status: "failed", detail: errText(e) };
+  }
+}
+
 /**
  * The single idempotent enforcement point: bring a dataset repo to its target
  * spec for the given publish state. PUBLIC = locked main (branch + tag ruleset,
@@ -463,9 +799,14 @@ export interface RepoSpecResult {
  * branch ruleset) + workflows + reconcile. Each step records a structured
  * status; no cross-step rollback. `dryRun` computes the plan without mutating.
  *
+ * The required pull-request review is a step of its own, `review_ruleset`, and
+ * only when the caller says what it wants (`opts.review`). It does not wait for
+ * the BIDS check to be green or for the workflows: the review is published by
+ * the Worker, not by anything in the repository.
+ *
  * D1-free by design: the caller resolves `collaborators.ownerLogin` (from
  * `datasets.owner_user_id`) and `approvedWriters` (from `dataset_collaborators`)
- * and passes them in.
+ * and passes them in, and decides `review` from the dataset row.
  */
 export async function ensureRepoToSpec(
   repo: string,
@@ -474,6 +815,12 @@ export async function ensureRepoToSpec(
     visibility: "public" | "private";
     collaborators?: { ownerLogin: string | null; approvedWriters: string[]; skipLogins?: string[] };
     dryRun?: boolean;
+    /**
+     * What to do about the required review (ADR 0107). `undefined` leaves the review ruleset
+     * exactly as it is. On a private repository `require` is read as `remove`: nothing publishes
+     * the check there, so requiring it could only block.
+     */
+    review?: ReviewIntent;
   },
 ): Promise<RepoSpecResult> {
   const steps: RepoSpecResult["steps"] = {};
@@ -515,6 +862,14 @@ export async function ensureRepoToSpec(
           };
     } else {
       steps.branch_ruleset = { status: "skipped", detail: "private: no ruleset" };
+    }
+    if (opts.review !== undefined) {
+      steps.review_ruleset = await reviewRulesetStepOf(repo, pat, {
+        intent: opts.review,
+        isPublic,
+        defaultBranch,
+        dryRun: true,
+      });
     }
     if (opts.collaborators) {
       let current: DirectCollaborator[];
@@ -621,6 +976,17 @@ export async function ensureRepoToSpec(
     } catch (e) {
       steps.branch_ruleset = { status: "failed", detail: errText(e) };
     }
+  }
+
+  // 5b. The required review, when the caller decided it. Independent of step 5: a repository
+  // whose BIDS check is red still gets (or loses) the review requirement.
+  if (opts.review !== undefined) {
+    steps.review_ruleset = await reviewRulesetStepOf(repo, pat, {
+      intent: opts.review,
+      isPublic,
+      defaultBranch,
+      dryRun: false,
+    });
   }
 
   // 6. Collaborators (when the caller resolved the ledger).

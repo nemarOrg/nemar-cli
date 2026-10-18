@@ -1,0 +1,273 @@
+/**
+ * A `Bun.serve()` stand-in for the parts of api.github.com that put a ruleset on a dataset
+ * repository, read it back and take it off again, and for the reads `ensureRepoToSpec` makes around
+ * that (ADR 0107).
+ *
+ * It keeps state, because the property under test is what a repository holds after a call: rulesets
+ * live per repository, `POST` makes one and refuses a name the repository already uses, `PUT` and
+ * `DELETE` answer 404 for an id it does not hold, and the list endpoint leaves out organization
+ * rulesets only when asked for `includes_parents=false`, which is exactly how an inherited ruleset
+ * of the same name would be mistaken for a repository's own. A write is checked against what
+ * GitHub documents about the body (target, enforcement, bypass actor types and modes), so a
+ * misspelled field is a 422 here as it is there.
+ *
+ * Install it with `globalThis.NEMAR_GITHUB_API_URL = standIn.url`, as the other GitHub stand-ins do,
+ * and restore that in `afterAll`.
+ */
+
+import type { Server } from "bun";
+import { getWorkflowTemplates } from "../../src/services/github";
+
+export interface RulesetRecord {
+  id: number;
+  name: string;
+  source_type: "Repository" | "Organization";
+  /** The body as written, so a read-back shows what GitHub would hold. */
+  body: Record<string, unknown>;
+}
+
+export interface StandInCall {
+  method: string;
+  path: string;
+  search: string;
+  /** The Authorization header, as sent. */
+  auth: string | null;
+  body: Record<string, unknown> | null;
+}
+
+export interface RulesetStandIn {
+  url: string;
+  calls: StandInCall[];
+  /** Each repository's OWN rulesets. */
+  rulesets: Map<string, RulesetRecord[]>;
+  /** Organization rulesets, listed for every repository unless `includes_parents=false`. */
+  orgRulesets: RulesetRecord[];
+  /** A repository's default branch ("main" if absent); `null` makes the repository answer 404. */
+  defaultBranches: Map<string, string | null>;
+  /** The conclusion of the BIDS check on a repository's head ("success" if absent). */
+  bidsConclusion: Map<string, string>;
+  /**
+   * Answer the next `times` requests that match with `status` and no work done. Use a status the
+   * transport does not retry (403, 422), or the test waits out its backoff.
+   */
+  failNext(method: string, path: RegExp, status: number, times?: number): void;
+  /** Requests that changed something: every method but GET. */
+  writes(): StandInCall[];
+  /** The writes to rulesets only. */
+  rulesetWrites(): StandInCall[];
+  reset(): void;
+  stop(): void;
+}
+
+const ACTOR_TYPES = new Set([
+  "Integration",
+  "OrganizationAdmin",
+  "RepositoryRole",
+  "Team",
+  "DeployKey",
+  "User",
+]);
+const BYPASS_MODES = new Set(["always", "pull_request"]);
+const TARGETS = new Set(["branch", "tag", "push"]);
+const ENFORCEMENTS = new Set(["active", "disabled", "evaluate"]);
+
+/** The reasons GitHub would refuse a ruleset body with a 422, or null when it would take it. */
+function refusal(body: Record<string, unknown> | null): string | null {
+  if (!body) return "body is not an object";
+  if (typeof body.name !== "string" || body.name === "") return "name is required";
+  if (typeof body.target !== "string" || !TARGETS.has(body.target)) return "target is invalid";
+  if (typeof body.enforcement !== "string" || !ENFORCEMENTS.has(body.enforcement)) {
+    return "enforcement is invalid";
+  }
+  if (!Array.isArray(body.rules)) return "rules must be an array";
+  for (const rule of body.rules) {
+    if (
+      typeof rule !== "object" ||
+      rule === null ||
+      typeof (rule as { type?: unknown }).type !== "string"
+    ) {
+      return "every rule needs a type";
+    }
+  }
+  if (body.bypass_actors !== undefined) {
+    if (!Array.isArray(body.bypass_actors)) return "bypass_actors must be an array";
+    for (const actor of body.bypass_actors as Array<Record<string, unknown>>) {
+      if (typeof actor.actor_type !== "string" || !ACTOR_TYPES.has(actor.actor_type)) {
+        return "bypass actor type is invalid";
+      }
+      if (typeof actor.bypass_mode !== "string" || !BYPASS_MODES.has(actor.bypass_mode)) {
+        return "bypass mode is invalid";
+      }
+      if (
+        (actor.actor_type === "Integration" || actor.actor_type === "RepositoryRole") &&
+        !Number.isInteger(actor.actor_id)
+      ) {
+        return "this bypass actor needs an integer id";
+      }
+    }
+  }
+  return null;
+}
+
+const summary = (r: RulesetRecord, repo: string) => ({
+  id: r.id,
+  name: r.name,
+  target: r.body.target,
+  source_type: r.source_type,
+  source: r.source_type === "Repository" ? `nemarDatasets/${repo}` : "nemarDatasets",
+  enforcement: r.body.enforcement,
+});
+
+export function startRulesetStandIn(): RulesetStandIn {
+  const calls: StandInCall[] = [];
+  const rulesets = new Map<string, RulesetRecord[]>();
+  const orgRulesets: RulesetRecord[] = [];
+  const defaultBranches = new Map<string, string | null>();
+  const bidsConclusion = new Map<string, string>();
+  const failures: Array<{ method: string; path: RegExp; status: number; remaining: number }> = [];
+  let nextId = 1000;
+
+  const server: Server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const url = new URL(req.url);
+      const method = req.method;
+      const body =
+        method === "GET" || method === "DELETE"
+          ? null
+          : ((await req.json().catch(() => null)) as Record<string, unknown> | null);
+      calls.push({
+        method,
+        path: url.pathname,
+        search: url.search,
+        auth: req.headers.get("Authorization"),
+        body,
+      });
+
+      const failure = failures.find(
+        (f) => f.remaining > 0 && f.method === method && f.path.test(url.pathname),
+      );
+      if (failure) {
+        failure.remaining--;
+        return Response.json({ message: "refused by the stand-in" }, { status: failure.status });
+      }
+
+      if (url.pathname === "/orgs/nemarDatasets/members") return Response.json([]);
+
+      const m = url.pathname.match(/^\/repos\/nemarDatasets\/([^/]+)(\/.*)?$/);
+      if (!m) return new Response("{}", { status: 404 });
+      const repo = decodeURIComponent(m[1]);
+      const rest = m[2] ?? "";
+      const branch = defaultBranches.has(repo) ? defaultBranches.get(repo) : "main";
+      if (branch === null || branch === undefined) {
+        return Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      const own = rulesets.get(repo) ?? [];
+
+      if (rest === "") {
+        if (method === "GET") return Response.json({ name: repo, default_branch: branch });
+        if (method === "PATCH") return Response.json({ name: repo });
+      }
+
+      if (rest === "/rulesets") {
+        if (method === "GET") {
+          const parents = url.searchParams.get("includes_parents") !== "false";
+          const listed = [...own, ...(parents ? orgRulesets : [])];
+          return Response.json(listed.map((r) => summary(r, repo)));
+        }
+        if (method === "POST") {
+          const why = refusal(body);
+          if (why)
+            return Response.json({ message: "Validation Failed", errors: [why] }, { status: 422 });
+          if (own.some((r) => r.name === body?.name)) {
+            return Response.json(
+              { message: "Validation Failed", errors: ["Name must be unique"] },
+              { status: 422 },
+            );
+          }
+          const record: RulesetRecord = {
+            id: ++nextId,
+            name: String(body?.name),
+            source_type: "Repository",
+            body: body as Record<string, unknown>,
+          };
+          rulesets.set(repo, [...own, record]);
+          return Response.json({ id: record.id, ...record.body }, { status: 201 });
+        }
+      }
+
+      const one = rest.match(/^\/rulesets\/(\d+)$/);
+      if (one) {
+        const id = Number(one[1]);
+        const record = own.find((r) => r.id === id);
+        if (!record) return Response.json({ message: "Not Found" }, { status: 404 });
+        if (method === "GET") return Response.json({ id: record.id, ...record.body });
+        if (method === "PUT") {
+          const why = refusal(body);
+          if (why)
+            return Response.json({ message: "Validation Failed", errors: [why] }, { status: 422 });
+          record.name = String(body?.name);
+          record.body = body as Record<string, unknown>;
+          return Response.json({ id: record.id, ...record.body });
+        }
+        if (method === "DELETE") {
+          rulesets.set(
+            repo,
+            own.filter((r) => r.id !== id),
+          );
+          return new Response(null, { status: 204 });
+        }
+      }
+
+      if (rest === "/contents/.github/workflows" && method === "GET") {
+        // Every workflow the Worker would deploy is already there.
+        return Response.json(getWorkflowTemplates().map((w) => ({ path: w.path, type: "file" })));
+      }
+      if (/^\/commits\/[^/]+\/check-runs$/.test(rest) && method === "GET") {
+        return Response.json({
+          check_runs: [
+            {
+              name: "Run BIDS Validation",
+              conclusion: bidsConclusion.get(repo) ?? "success",
+              app: { id: 3679074 },
+            },
+          ],
+        });
+      }
+      if (/^\/commits\/[^/]+\/status$/.test(rest) && method === "GET") {
+        return Response.json({ statuses: [] });
+      }
+      if (rest === "/collaborators" && method === "GET") return Response.json([]);
+
+      return Response.json(
+        { message: `no stand-in for ${method} ${url.pathname}` },
+        { status: 404 },
+      );
+    },
+  });
+
+  return {
+    url: `http://127.0.0.1:${server.port}`,
+    calls,
+    rulesets,
+    orgRulesets,
+    defaultBranches,
+    bidsConclusion,
+    failNext(method, path, status, times = 1) {
+      failures.push({ method, path, status, remaining: times });
+    },
+    writes: () => calls.filter((c) => c.method !== "GET"),
+    rulesetWrites: () => calls.filter((c) => c.method !== "GET" && c.path.includes("/rulesets")),
+    reset() {
+      calls.length = 0;
+      rulesets.clear();
+      orgRulesets.length = 0;
+      defaultBranches.clear();
+      bidsConclusion.clear();
+      failures.length = 0;
+    },
+    stop() {
+      server.stop(true);
+    },
+  };
+}
