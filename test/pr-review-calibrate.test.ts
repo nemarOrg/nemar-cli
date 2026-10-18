@@ -11,7 +11,7 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -21,6 +21,7 @@ import {
   type FetchedPullRequest,
   calibrateMain,
   calibrateOne,
+  childEnv,
   exitCodeOf,
   fetchPullRequest,
   parseTarget,
@@ -236,9 +237,74 @@ describe("it posts nothing, and the key reaches only the API", () => {
     expect(r.said).not.toContain("gateway.example");
   });
 
+  const KEY = "sk-ant-SECRET-VALUE";
+
+  test("a flag given as --name=value is refused by its name, and the value is never printed", async () => {
+    for (const flag of ["callback-token", "environment", "token", "callback-url", "review-id"]) {
+      const r = await refused([`--${flag}=${KEY}`, "--pr", "nm000153#2"]);
+      expect(r.code, flag).toBe(2);
+      expect(r.said, flag).toContain(`--${flag} is refused`);
+      expect(r.said, flag).not.toContain(KEY);
+    }
+  });
+
+  test("no message repeats the value of an argument, whichever argument it is", async () => {
+    const lines = join(root, "secret-prs.txt");
+    writeFileSync(lines, `nm000153#2\n${KEY}\n`);
+    for (const argv of [
+      ["--bogus", KEY],
+      [`--bogus=${KEY}`],
+      [`--pr=${KEY}`],
+      [`--json=${KEY}`],
+      ["--pr", KEY],
+      ["--pr", "nm000153#2", KEY],
+      ["--prs", join(root, KEY)],
+      ["--prs", lines],
+      [KEY],
+    ]) {
+      const r = await refused(argv);
+      expect(r.code, JSON.stringify(argv)).toBe(2);
+      expect(r.said, JSON.stringify(argv)).not.toContain(KEY);
+    }
+  });
+
+  test("a line of the file that is not a pull request is named by its number, not its text", async () => {
+    const file = join(root, "numbered-prs.txt");
+    writeFileSync(file, `nm000153#2\n\n# a comment\n${KEY}\n`);
+    const r = await refused(["--prs", file]);
+    expect(r.code).toBe(2);
+    expect(r.said).toContain("line 4 of the pull request file");
+    expect(r.said).not.toContain(KEY);
+  });
+
   test("no pull request named is a usage error", async () => {
     expect((await refused([])).code).toBe(2);
     expect((await refused(["--pr", "not-a-pr"])).code).toBe(2);
+  });
+
+  test("gh and git are run without any ANTHROPIC_ variable, and keep what gh signs in with", () => {
+    const env = childEnv({
+      ANTHROPIC_API_KEY: "sk-ant-key",
+      ANTHROPIC_AUTH_TOKEN: "oauth",
+      ANTHROPIC_BASE_URL: "https://gateway.example",
+      ANTHROPIC_FEDERATION_RULE_ID: "rule",
+      anthropic_api_key: "lower",
+      GH_TOKEN: "ghp_token",
+      GITHUB_TOKEN: "github_token",
+      HOME: "/home/operator",
+      PATH: "/usr/bin",
+    });
+    expect(Object.keys(env).filter((name) => /^anthropic_/i.test(name))).toEqual([]);
+    expect(env).toMatchObject({
+      GH_TOKEN: "ghp_token",
+      GITHUB_TOKEN: "github_token",
+      HOME: "/home/operator",
+      PATH: "/usr/bin",
+      // And git's own configuration stays out, with no prompt.
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+    });
   });
 });
 
@@ -390,7 +456,9 @@ describe("reading a pull request from GitHub, as the workflow does", () => {
     mkdirSync(bin, { recursive: true });
     const reply = join(bin, "reply.json");
     writeFileSync(reply, answer.replaceAll("BASE", base).replaceAll("HEAD", head));
-    writeFileSync(join(bin, "gh"), `#!/bin/sh\ncat '${reply}'\n`);
+    // What the real `gh` would be handed: its environment is written out before it answers.
+    const ghEnv = join(bin, "gh-env.txt");
+    writeFileSync(join(bin, "gh"), `#!/bin/sh\nenv > '${ghEnv}'\ncat '${reply}'\n`);
     chmodSync(join(bin, "gh"), 0o755);
     const saved = {
       PATH: process.env.PATH,
@@ -408,7 +476,7 @@ describe("reading a pull request from GitHub, as the workflow does", () => {
         else process.env[k] = v;
       }
     };
-    return { base, head, restore };
+    return { base, head, ghEnv, restore };
   }
 
   test("it reads the pull request with gh and fetches its base and head blob-less", () => {
@@ -428,6 +496,28 @@ describe("reading a pull request from GitHub, as the workflow does", () => {
       expect(listing.versionAfter).toBe("1.1.0");
     } finally {
       gh.restore();
+    }
+  });
+
+  test("the gh that reads the pull request never sees the operator's key, and keeps its own sign-in", () => {
+    // The process has the key (the beforeAll above) and a GitHub token, as an operator's shell does.
+    const key = process.env.ANTHROPIC_API_KEY;
+    expect(key).toBeDefined();
+    const before = process.env.GH_TOKEN;
+    process.env.GH_TOKEN = "ghp-operator-token";
+    const gh = standInGitHub("fetch-env", '{"base":{"sha":"BASE"},"head":{"sha":"HEAD"}}');
+    const into = mkdtempSync(join(root, "into-"));
+    try {
+      fetchPullRequest(target(), into);
+      const seen = readFileSync(gh.ghEnv, "utf8");
+      expect(seen).not.toMatch(/^ANTHROPIC_/im);
+      expect(seen).not.toContain(key as string);
+      expect(seen).toContain("GH_TOKEN=ghp-operator-token");
+      expect(seen).toMatch(/^PATH=/m);
+    } finally {
+      gh.restore();
+      if (before === undefined) Reflect.deleteProperty(process.env, "GH_TOKEN");
+      else process.env.GH_TOKEN = before;
     }
   });
 

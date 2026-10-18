@@ -29,7 +29,9 @@
  *
  * **The operator's key reaches only the API.** It refuses to run while `ANTHROPIC_BASE_URL` or
  * `ANTHROPIC_AUTH_TOKEN` is set (a shell that points the SDK at a gateway would hand it the key),
- * and says which by name, never by value.
+ * and says which by name, never by value. The `gh` and `git` it runs get this process's environment
+ * without any `ANTHROPIC_*` variable ({@link childEnv}), so the key goes to the SDK in this process
+ * and to nothing it starts. No message repeats the value of an argument: a refusal names the flag.
  *
  * **What the table holds.** Closed words, counts, token counts, seconds and an estimate in dollars,
  * never a pull request's text or a word a model wrote, so it can be pasted anywhere.
@@ -146,17 +148,33 @@ export class CalibrationReadError extends Error {
   }
 }
 
-/** A command, with git's own configuration kept out and no prompt; the environment read now. */
+/**
+ * The environment `gh` and `git` are run with: `env` (this process's own, unless a test hands one
+ * in) without any `ANTHROPIC_*` variable, so the operator's key reaches the API through the SDK in
+ * this process and goes to nothing it starts, with git's own configuration kept out and no prompt.
+ * Everything else stays, which is what `gh` authenticates with (`GH_TOKEN`, `GITHUB_TOKEN`, `HOME`,
+ * its configuration directory). The name is matched without regard to case, because a variable
+ * that only looks different is not worth the risk.
+ */
+export function childEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const kept: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(env)) {
+    if (!/^ANTHROPIC_/i.test(name)) kept[name] = value;
+  }
+  return {
+    ...kept,
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+  };
+}
+
+/** A command, run with {@link childEnv}; the environment is read now. */
 function run(cmd: string, args: string[], cwd?: string): string {
   return execFileSync(cmd, args, {
     cwd,
     encoding: "utf8",
-    env: {
-      ...process.env,
-      GIT_TERMINAL_PROMPT: "0",
-      GIT_CONFIG_NOSYSTEM: "1",
-      GIT_CONFIG_GLOBAL: "/dev/null",
-    },
+    env: childEnv(),
     maxBuffer: 64 * 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -456,11 +474,14 @@ export async function calibrateMain(
   let json = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] as string;
-    const name = arg.startsWith("--") ? arg.slice(2) : null;
-    if (name === null) return usage(`unexpected argument ${JSON.stringify(arg)}`);
+    // Only the flag's name is read or said. What follows an `=` is a value, and a value is never
+    // echoed: it may be a token, and a refusal is no place to print one.
+    const name = arg.startsWith("--") ? (arg.slice(2).split("=", 1)[0] ?? "") : null;
+    if (name === null) return usage("arguments are flags: --pr, --prs and --json");
     if (REFUSED_FLAGS.has(name)) {
       return usage(`--${name} is refused: calibrate posts nothing and reviews no dispatch`);
     }
+    if (arg.includes("=")) return usage("write a flag and its value as two arguments");
     if (name === "json") {
       json = true;
       continue;
@@ -470,8 +491,7 @@ export async function calibrateMain(
     i++;
     if (name === "pr") {
       const t = parseTarget(value);
-      if (t === null)
-        return usage(`${JSON.stringify(value)} is not a pull request like nm000153#2`);
+      if (t === null) return usage("--pr needs a pull request like nm000153#2");
       targets.push(t);
     } else if (name === "prs") {
       let text: string;
@@ -480,11 +500,12 @@ export async function calibrateMain(
       } catch {
         return usage("the pull request file could not be read");
       }
-      for (const line of text.split("\n")) {
+      const lines = text.split("\n");
+      for (const [n, line] of lines.entries()) {
         if (line.trim() === "" || line.trim().startsWith("#")) continue;
         const t = parseTarget(line);
         if (t === null)
-          return usage(`${JSON.stringify(line.trim())} is not a line like nm000153#2 pass`);
+          return usage(`line ${n + 1} of the pull request file is not like nm000153#2 pass`);
         targets.push(t);
       }
     } else {
