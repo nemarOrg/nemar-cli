@@ -828,10 +828,12 @@ describe("runReview: the job around the model call", () => {
     return messages[0]?.content ?? "";
   }
 
-  test("the screen is asked with its own prompt, about this pull request's text, files and author", async () => {
+  test("the screen is asked with its own prompt, about this pull request's text and files, and never its author's association", async () => {
     const { screen: req } = await bothRequests("run-stage1-content", {
       title: "Add a subject to the README",
       body: "Adds sub-03 and its sidecar.",
+      // What the API sends for a private organization member. ADR 0107: neither the exemption nor
+      // the screen uses it, so it reaches the model nowhere, in the facts or in the prompt.
       author_association: "FIRST_TIME_CONTRIBUTOR",
     });
     expect(req.body.system).toBe(SCREEN_SYSTEM_PROMPT);
@@ -839,8 +841,10 @@ describe("runReview: the job around the model call", () => {
     expect(user).toContain("Add a subject to the README");
     expect(user).toContain("Adds sub-03 and its sidecar.");
     expect(user).toContain("README.md");
-    expect(user).toContain('"author_association": "FIRST_TIME_CONTRIBUTOR"');
     expect(user).toContain('"files_changed": 2');
+    expect(user).not.toContain("author_association");
+    expect(user).not.toContain("FIRST_TIME_CONTRIBUTOR");
+    expect(SCREEN_SYSTEM_PROMPT).not.toContain("author_association");
   });
 
   test("the review is asked with its own prompt, the same text, and the content the screen never saw", async () => {
@@ -989,7 +993,6 @@ describe("runReview: the job around the model call", () => {
     const user = JSON.stringify(screen.body.messages);
     expect(user).not.toContain("content-of-changed-metadata-files");
     expect(user).not.toContain("# Edited");
-    expect(user).toContain("author_association");
   });
 
   test.each([
@@ -2533,7 +2536,6 @@ describe("the review prompt carries prompt v3's rules word for word", () => {
       '"reject" only for spam, meaning promotional content, content unrelated to the dataset, content with no purpose, or repeated links',
     );
     expect(SCREEN_SYSTEM_PROMPT).toContain('When you are unsure, answer "proceed".');
-    expect(SCREEN_SYSTEM_PROMPT).toContain("never a reason to reject");
   });
 });
 
@@ -2687,7 +2689,6 @@ describe("the worst case fits", () => {
       listing,
       pr,
       fromFork: true,
-      authorAssociation: "NONE",
       nonce: "n".repeat(32),
     });
     const facts = {

@@ -376,7 +376,6 @@ interface PullRequestJson {
   state?: unknown;
   title?: unknown;
   body?: unknown;
-  author_association?: unknown;
   base?: { ref?: unknown; repo?: { full_name?: unknown } };
   head?: { sha?: unknown; repo?: { full_name?: unknown } | null };
 }
@@ -405,8 +404,8 @@ export interface PullRequestUnderReview {
   /** The tip of `main` the pull request is compared against (through the merge base). */
   base: string;
   head: string;
-  /** The pull request as the API returns it: its title, its description, its author's label. */
-  pr: { title?: unknown; body?: unknown; author_association?: unknown };
+  /** The pull request as the API returns it: its title and its description. */
+  pr: { title?: unknown; body?: unknown };
   fromFork: boolean;
 }
 
@@ -433,7 +432,6 @@ export async function reviewPullRequest(
     listing,
     pr: text,
     fromFork,
-    authorAssociation: typeof pr.author_association === "string" ? pr.author_association : null,
     nonce: randomUUID().replaceAll("-", ""),
   });
   const client = newModelClient();
