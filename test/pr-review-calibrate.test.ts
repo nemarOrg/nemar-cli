@@ -237,6 +237,27 @@ describe("it posts nothing, and the key reaches only the API", () => {
     expect(r.said).not.toContain("gateway.example");
   });
 
+  test("ANTHROPIC_AUTH_TOKEN alone is refused too, by name and not by value", async () => {
+    const r = await refused(["--pr", "nm000153#2"], {
+      ANTHROPIC_AUTH_TOKEN: "oauth-SECRET-VALUE",
+    });
+    expect(r.code).toBe(2);
+    expect(r.said).toContain("ANTHROPIC_AUTH_TOKEN is set");
+    expect(r.said).not.toContain("ANTHROPIC_BASE_URL");
+    expect(r.said).not.toContain("SECRET-VALUE");
+  });
+
+  test("both are named when both are set, and neither value is printed", async () => {
+    const r = await refused(["--pr", "nm000153#2"], {
+      ANTHROPIC_BASE_URL: "https://gateway.example/secret-path",
+      ANTHROPIC_AUTH_TOKEN: "oauth-SECRET-VALUE",
+    });
+    expect(r.code).toBe(2);
+    expect(r.said).toContain("ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN are set");
+    expect(r.said).not.toContain("gateway.example");
+    expect(r.said).not.toContain("SECRET-VALUE");
+  });
+
   const KEY = "sk-ant-SECRET-VALUE";
 
   test("a flag given as --name=value is refused by its name, and the value is never printed", async () => {
