@@ -25,8 +25,9 @@
  *     some findings. {@link verdictOf} decides pass, fail or uncertain from those and from
  *     facts the script computed from git, and no field of the report is "the verdict".
  *  2. **Facts override the model.** A criterion the facts contradict cannot pass, whatever the
- *     model said ({@link factsOf}): the git facts, an empty description, and the naming rule on the
- *     title and on the dataset's name.
+ *     model said ({@link factsOf}): the git facts, the change log's entry for a new version, an
+ *     empty or cut description, and the naming rule on the title and on the dataset's name, which
+ *     is also unable to pass a name it could not read.
  *  3. **Free text is a note, never markup.** The one place a model's words reach a person,
  *     {@link sanitizeNote}, removes links, mentions, cross-references, HTML and emphasis, so a
  *     note cannot ping someone, link anywhere or hide the verdict.
