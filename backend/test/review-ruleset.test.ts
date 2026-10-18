@@ -220,6 +220,32 @@ describe("ensureReviewRuleset", () => {
     expect((err as HttpError).message).toContain(`Review ruleset list failed for ${REPO}`);
     expect(standIn.rulesetWrites()).toHaveLength(0);
   });
+
+  // The transport retries a 5xx (three attempts, a second apart), so a write that GitHub keeps
+  // answering with 500 reaches the caller after all three, which is why these two take two seconds.
+  test("a 500 on the update is an error with that status, and the ruleset is as it was", async () => {
+    await ensureReviewRuleset(REPO, PAT);
+    const before = structuredClone(standIn.rulesets.get(REPO));
+    standIn.failNext("PUT", /\/rulesets\/\d+$/, 500, 3);
+
+    const err = await ensureReviewRuleset(REPO, PAT).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(HttpError);
+    expect((err as HttpError).status).toBe(500);
+    expect((err as HttpError).message).toContain(`Review ruleset update failed for ${REPO}`);
+    expect(standIn.rulesets.get(REPO)).toStrictEqual(before);
+  }, 20_000);
+
+  test("a 500 on the create is an error with that status, and the repository has no ruleset", async () => {
+    standIn.failNext("POST", /\/rulesets$/, 500, 3);
+
+    const err = await ensureReviewRuleset(REPO, PAT).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(HttpError);
+    expect((err as HttpError).status).toBe(500);
+    expect((err as HttpError).message).toContain(`Review ruleset create failed for ${REPO}`);
+    expect(heldBy(REPO)).toEqual([]);
+  }, 20_000);
 });
 
 describe("removeReviewRuleset", () => {
@@ -273,6 +299,18 @@ describe("removeReviewRuleset", () => {
 
     // The transport waits out its 404 retries first, which is why this one takes a few seconds.
     expect(await removeReviewRuleset("nm000999", PAT)).toBe(false);
+  }, 20_000);
+
+  test("a delete that answers 404 means the ruleset is already gone, which is the removal asked for", async () => {
+    await ensureReviewRuleset(REPO, PAT);
+    // Somebody else deletes it after it was listed and before this call's delete reaches GitHub.
+    standIn.beforeNext("DELETE", /\/rulesets\/\d+$/, () => standIn.rulesets.set(REPO, []));
+
+    // The transport waits out its 404 retries first, which is why this one takes a few seconds.
+    expect(await removeReviewRuleset(REPO, PAT)).toBe(true);
+
+    expect(heldBy(REPO)).toEqual([]);
+    expect(standIn.rulesetWrites().filter((w) => w.method === "DELETE").length).toBeGreaterThan(0);
   }, 20_000);
 });
 

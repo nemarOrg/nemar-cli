@@ -51,6 +51,12 @@ export interface RulesetStandIn {
    * transport does not retry (403, 422), or the test waits out its backoff.
    */
   failNext(method: string, path: RegExp, status: number, times?: number): void;
+  /**
+   * Run `run` once, just before the next request that matches is handled, so a test can change
+   * what GitHub holds at the moment between two of the caller's requests (a ruleset that somebody
+   * else deletes after it was listed, or creates before it is written).
+   */
+  beforeNext(method: string, path: RegExp, run: () => void): void;
   /** Requests that changed something: every method but GET. */
   writes(): StandInCall[];
   /** The writes to rulesets only. */
@@ -125,6 +131,7 @@ export function startRulesetStandIn(): RulesetStandIn {
   const defaultBranches = new Map<string, string | null>();
   const bidsConclusion = new Map<string, string>();
   const failures: Array<{ method: string; path: RegExp; status: number; remaining: number }> = [];
+  const hooks: Array<{ method: string; path: RegExp; run: () => void }> = [];
   let nextId = 1000;
 
   const server: Server = Bun.serve({
@@ -143,6 +150,9 @@ export function startRulesetStandIn(): RulesetStandIn {
         auth: req.headers.get("Authorization"),
         body,
       });
+
+      const hook = hooks.findIndex((h) => h.method === method && h.path.test(url.pathname));
+      if (hook >= 0) hooks.splice(hook, 1)[0].run();
 
       const failure = failures.find(
         (f) => f.remaining > 0 && f.method === method && f.path.test(url.pathname),
@@ -259,6 +269,9 @@ export function startRulesetStandIn(): RulesetStandIn {
     failNext(method, path, status, times = 1) {
       failures.push({ method, path, status, remaining: times });
     },
+    beforeNext(method, path, run) {
+      hooks.push({ method, path, run });
+    },
     writes: () => calls.filter((c) => c.method !== "GET"),
     rulesetWrites: () => calls.filter((c) => c.method !== "GET" && c.path.includes("/rulesets")),
     reset() {
@@ -268,6 +281,7 @@ export function startRulesetStandIn(): RulesetStandIn {
       defaultBranches.clear();
       bidsConclusion.clear();
       failures.length = 0;
+      hooks.length = 0;
     },
     stop() {
       server.stop(true);
