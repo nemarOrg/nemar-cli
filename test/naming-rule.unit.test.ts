@@ -120,6 +120,29 @@ describe("namingProblemOf", () => {
     }
   });
 
+  test("what no reader sees before the text does not hide a name and a year", () => {
+    // The review's models read these as spaces and a person sees nothing, so a title that opens
+    // with one is a title that opens with the name. `String.prototype.trimStart` skips only the
+    // first two of them.
+    const invisible: Array<[string, string]> = [
+      ["a zero-width space", "\u200b"],
+      ["a soft hyphen", "\u00ad"],
+      ["a byte-order mark", "\ufeff"],
+      ["a word joiner", "\u2060"],
+      ["a left-to-right mark", "\u200e"],
+      ["a bell, a control character", "\u0007"],
+      ["a tag space, a format character outside the basic plane", "\u{e0020}"],
+      ["a mix of blanks and invisible characters", " \u200b\u00ad\t\ufeff "],
+    ];
+    for (const [what, lead] of invisible) {
+      expect(namingProblemOf(`${lead}Lee2019 EEG dataset`), what).toBe("author_year");
+      expect(findAuthorYearPrefix(`${lead}Lee-2019-EEG`), what).toBe("Lee-2019");
+      // The same lead before an ordinary title changes nothing about it.
+      expect(namingProblemOf(`${lead}Add three EEG recordings`), what).toBeNull();
+      expect(namingProblemOf(`${lead}2019 release notes`), what).toBeNull();
+    }
+  });
+
   test("a text that breaks both is author_year, the first of the two the rule asks", () => {
     expect(namingProblemOf("Lee2019 FirstAuthorSurname")).toBe("author_year");
   });

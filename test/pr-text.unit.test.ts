@@ -264,6 +264,9 @@ const CASES: Record<TextProblemCode, { refused: [TextKind, string][]; passes: st
       // Judged as the one trimmed line the title becomes.
       ["title", "  Lee2019 EEG dataset  "],
       ["title", "\nLee-2019-EEG"],
+      // And with what no reader sees in front of it: a zero-width space, a soft hyphen, a byte-order mark.
+      ["title", "\u{200b}Lee2019 EEG dataset"],
+      ["title", "\u{ad}\u{feff} Lee-2019-EEG"],
     ],
     passes: [
       // A year, or a name, in an ordinary sentence. A space ends the first word.

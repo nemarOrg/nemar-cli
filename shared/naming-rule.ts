@@ -60,6 +60,16 @@ export const AUTHOR_YEAR_PREFIX =
   /^[\p{L}\p{M}]+(?:[-'\u{2019}][\p{L}\p{M}]+)*[-_]?(?:19|20)\d{2}(?!\d)/u;
 
 /**
+ * What no reader sees at the start of a text: control characters, invisible format characters (a
+ * zero-width space, a soft hyphen, a byte-order mark, a directional mark, a word joiner) and
+ * whitespace. The review's models get the text with each of them replaced by a space (`tidy`,
+ * `shared/untrusted-text.ts`), so a title that opens with one reads, to them and to a person, as a
+ * title that opens with whatever follows. The run is anchored at the start and is one character
+ * class repeated, so it is read once, in linear time.
+ */
+const LEADING_INVISIBLE = /^[\p{Cf}\p{Cc}\s]+/u;
+
+/**
  * What `text` opens with when that is a name and a year, as it was typed (`Lee-2019` for
  * `Lee-2019-EEG`, `MOVING2024` for `MOVING2024 release`), or null. That is how a dataset is named
  * (the atlas naming rule is FirstAuthorSurname-year-keyword-paperDOI), and a pull request title says
@@ -78,11 +88,14 @@ export const AUTHOR_YEAR_PREFIX =
  * Nothing here can tell a surname from any other letters, so an acronym such as `BNCI2014_001`, a
  * funding code such as `H2020` and a BIDS label such as `ses-2019` are refused too.
  *
- * Blanks before the text are skipped, so the answer is the same before and after the CLI's
- * `normalizeTitle` (`src/lib/pr-text.ts`).
+ * What no reader sees before the text is skipped: blanks, control characters and invisible format
+ * characters (see {@link LEADING_INVISIBLE}), so `\u200bLee2019 EEG` is refused like `Lee2019 EEG`,
+ * and the answer is the same before and after the CLI's `normalizeTitle` (`src/lib/pr-text.ts`).
+ * Only the start is cleared: an invisible character inside the text ends the first word, as any
+ * character that is not a letter does.
  */
 export function findAuthorYearPrefix(text: string): string | null {
-  return text.trimStart().match(AUTHOR_YEAR_PREFIX)?.[0] ?? null;
+  return text.replace(LEADING_INVISIBLE, "").match(AUTHOR_YEAR_PREFIX)?.[0] ?? null;
 }
 
 /**
