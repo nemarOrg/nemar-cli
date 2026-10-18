@@ -5402,6 +5402,8 @@ fleetCommand
         "PRIVATE_WITH_STRAY_READ",
         "DEFAULT_BRANCH_OUTLIER",
         "DEPRECATED_WORKFLOW_PRESENT",
+        "REVIEW_RULESET_MISSING",
+        "REVIEW_RULESET_STRAY",
         "COMPLIANT",
       ];
       for (const b of order) {

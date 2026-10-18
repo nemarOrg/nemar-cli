@@ -314,19 +314,15 @@ export function registerFleetRoutes(admin: AdminRouter): void {
 
     const rows = await db
       .prepare(
-        `SELECT dataset_id, github_repo, visibility, anonymous FROM datasets
+        `SELECT dataset_id, github_repo, ${REVIEWABLE_ROW_COLUMNS} FROM datasets
         WHERE ${clauses.join(" AND ")} ORDER BY dataset_id LIMIT ?`,
       )
       .bind(...binds, limit)
-      .all<{
-        dataset_id: string;
-        github_repo: string;
-        visibility: string;
-        anonymous: number | null;
-      }>();
+      .all<ReviewableRow & { dataset_id: string; github_repo: string }>();
 
     const datasets = rows.results ?? [];
     const pat = await getDatasetsToken(c.env);
+    const reviewEnabled = isReviewEnabled(c.env);
     const buckets: Partial<Record<DriftBucket, string[]>> = {};
     const repos: Array<{ dataset_id: string; buckets: DriftBucket[] }> = [];
 
@@ -336,7 +332,14 @@ export function registerFleetRoutes(admin: AdminRouter): void {
       const visibility = expectedRepoVisibility(d);
       let result: DriftBucket[];
       try {
-        result = classifyDatasetDrift(await gatherRepoDriftState(repoName, visibility, pat));
+        result = classifyDatasetDrift(
+          await gatherRepoDriftState(
+            repoName,
+            visibility,
+            pat,
+            reviewIntentOf(d.dataset_id, d, reviewEnabled),
+          ),
+        );
       } catch (e) {
         console.error(`[fleet/drift] gather failed for ${d.dataset_id}:`, e);
         continue;

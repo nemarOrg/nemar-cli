@@ -751,3 +751,73 @@ describe("the enforce routes and the review", () => {
     expect(held("nm000302")).not.toContain(REVIEW_RULESET_NAME);
   });
 });
+
+describe("GET /admin/fleet/drift and the review", () => {
+  const drift = async (query = "?prefix=nm&limit=50") => {
+    const res = await app.request(
+      `/admin/fleet/drift${query}`,
+      { headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+      env(),
+    );
+    return { status: res.status, body: (await res.json()) as Json };
+  };
+
+  test("a reviewed dataset without the ruleset is missing it, and one with it is not", async () => {
+    seedDataset("nm000401");
+    seedDataset("nm000402");
+    await ensureReviewRuleset("nm000402", PAT);
+
+    const r = await drift();
+
+    expect(r.status).toBe(200);
+    expect(r.body.buckets.REVIEW_RULESET_MISSING).toEqual(["nm000401"]);
+    expect(r.body.buckets.REVIEW_RULESET_STRAY).toBeUndefined();
+  });
+
+  test("a dataset the Worker does not review is stray when its repository still has the ruleset", async () => {
+    seedDataset("nm000403", { visibility: "private" });
+    await ensureReviewRuleset("nm000403", PAT);
+    seedDataset("nm000404", { visibility: "private" });
+
+    const r = await drift();
+
+    expect(r.body.buckets.REVIEW_RULESET_STRAY).toEqual(["nm000403"]);
+    expect(r.body.buckets.REVIEW_RULESET_MISSING).toBeUndefined();
+  });
+
+  test("while the review is off nothing is missing, but a stray ruleset still is", async () => {
+    seedDataset("nm000401");
+    seedDataset("nm000403", { visibility: "private" });
+    await ensureReviewRuleset("nm000403", PAT);
+    envOverrides = { PR_REVIEW_ENABLED: undefined };
+
+    const r = await drift();
+
+    expect(r.body.buckets.REVIEW_RULESET_MISSING).toBeUndefined();
+    expect(r.body.buckets.REVIEW_RULESET_STRAY).toEqual(["nm000403"]);
+  });
+
+  test("a ruleset that was switched off by hand counts as missing", async () => {
+    seedDataset("nm000401");
+    await ensureReviewRuleset("nm000401", PAT);
+    const held = standIn.rulesets.get("nm000401")?.[0];
+    if (!held) throw new Error("the ruleset was not created");
+    held.body = { ...held.body, enforcement: "disabled" };
+
+    const r = await drift();
+
+    expect(r.body.buckets.REVIEW_RULESET_MISSING).toEqual(["nm000401"]);
+  });
+
+  test("a repository GitHub cannot answer for is not reported, so an outage is not a finding", async () => {
+    seedDataset("nm000401");
+    // The list is asked by the branch-ruleset read and the review-ruleset read; refuse the second
+    // and leave the first, so only the review read fails.
+    standIn.failNext("GET", /\/repos\/nemarDatasets\/nm000401\/rulesets$/, 403, 100);
+
+    const r = await drift();
+
+    expect(r.body.buckets.REVIEW_RULESET_MISSING).toBeUndefined();
+    expect(r.body.buckets.REVIEW_RULESET_STRAY).toBeUndefined();
+  });
+});
