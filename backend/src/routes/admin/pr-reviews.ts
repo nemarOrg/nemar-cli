@@ -65,9 +65,14 @@ const overrideSchema = z
 /** A commit named by its first seven to forty characters; the service lowercases it. */
 const COMMIT_PREFIX = /^[0-9a-fA-F]{7,40}$/;
 
+/**
+ * A waiver is recorded with the reason it was given, so the reason is required: the route does not
+ * waive on a blank one. (The service also refuses a reason with no plain words left after the
+ * sanitizer, which the schema cannot see.)
+ */
 const waiveSchema = z
   .object({
-    reason: z.string().max(500).optional(),
+    reason: z.string().trim().min(1).max(500),
     head_sha: z.string().regex(COMMIT_PREFIX).optional(),
   })
   .strict() satisfies z.ZodType<WaiveNamingRequest>;
@@ -144,7 +149,21 @@ export function registerPrReviewRoutes(admin: AdminRouter): void {
     "/pr-reviews/:dataset/:pr/allow",
     zValidator("json", waiveSchema, (result, c) => {
       // A field a person typed gets a sentence; anything else keeps the validator's own 400.
-      if (!result.success && result.error.issues[0]?.path[0] === "head_sha") {
+      if (result.success) return;
+      const issue = result.error.issues[0];
+      if (issue?.path[0] === "reason") {
+        return fail(
+          c,
+          new QueueError(
+            400,
+            "bad_reason",
+            issue.code === "too_big"
+              ? "The reason is too long: 500 characters at most."
+              : "A reason is required: say, in plain words, why the naming rule is waived. It is recorded with the waiver.",
+          ),
+        );
+      }
+      if (issue?.path[0] === "head_sha") {
         return fail(
           c,
           new QueueError(

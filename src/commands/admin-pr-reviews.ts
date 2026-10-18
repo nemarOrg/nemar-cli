@@ -9,7 +9,8 @@
  *   nemar admin pr-reviews start --all       every open pull request waiting for a review
  *   nemar admin pr-reviews approve <ds> <pr> approve as YOU, with your own GitHub login
  *   nemar admin pr-reviews allow|block|clear <login>   who the automated review is spent on
- *   nemar admin pr-reviews allow <ds> <pr> --admin     waive the naming rule for an owner's or an
+ *   nemar admin pr-reviews allow <ds> <pr> --admin --reason <why> [--commit <sha>]
+ *                                            waive the naming rule for an owner's or an
  *                                            administrator's pull request, at its current commit
  *   nemar admin pr-reviews standing <login>  a contributor's record and what it means
  *
@@ -623,9 +624,9 @@ REVIEW column (the automated review of the pull request's CURRENT commit):
                     for you, and a push by anyone else IS reviewed. The naming rule still applies:
                     a title or a new dataset name it refuses fails the check instead, until the
                     title or the name is fixed or the rule is waived for that commit with
-                    'nemar admin pr-reviews allow <dataset> <pr> --admin'. The row says so when
-                    the check failed ("naming rule failed: needs allow --admin") or when the name
-                    could not be read ("naming rule not checked: run start")
+                    'nemar admin pr-reviews allow <dataset> <pr> --admin --reason <why>'. The row
+                    says so when the check failed ("naming rule failed: needs allow --admin") or
+                    when the name could not be read ("naming rule not checked: run start")
 A verdict is never carried over to a commit it did not read. '*' marks the pull requests you can
 act on now: a pass to approve, or one nobody has decided for you (drafts are never marked).
 
@@ -852,7 +853,7 @@ prReviewsCommand
       );
       console.log(
         chalk.dim(
-          "             The naming rule still applies: a title or a new dataset name it refuses fails the check instead (waive it for this commit with: nemar admin pr-reviews allow <dataset> <pr> --admin).",
+          "             The naming rule still applies: a title or a new dataset name it refuses fails the check instead (waive it for this commit with: nemar admin pr-reviews allow <dataset> <pr> --admin --reason <why>).",
         ),
       );
       if (d.review) {
@@ -1157,7 +1158,7 @@ function notStartedText(r: StartReviewResponse): string {
     r.reason === "contributor_paused" && r.author_login
       ? ` (lift it with: nemar admin pr-reviews allow ${plain(r.author_login)})`
       : r.reason === "naming_rule"
-        ? " (the author fixes the title or the name; to waive the rule for this commit: nemar admin pr-reviews allow <dataset> <pr> --admin)"
+        ? " (the author fixes the title or the name; to waive the rule for this commit: nemar admin pr-reviews allow <dataset> <pr> --admin --reason <why>)"
         : r.reason === "naming_unchecked"
           ? " (run the same command again in a moment: it reads the name again and posts the check it comes to)"
           : "";
@@ -2215,7 +2216,8 @@ const COMMIT_PREFIX_RE = /^[0-9a-fA-F]{7,40}$/;
 async function waiveNaming(
   datasetArg: string,
   prArg: string,
-  options: { reason?: string; commit?: string; json?: boolean },
+  reason: string,
+  options: { commit?: string; json?: boolean },
 ): Promise<void> {
   const dataset = checkDataset(datasetArg, options.json);
   const pr = checkPr(prArg, options.json);
@@ -2231,7 +2233,7 @@ async function waiveNaming(
     : ora(`Waiving the naming rule for ${dataset} #${pr}...`).start();
   let r: WaiveNamingResponse;
   try {
-    r = await waivePrReviewNaming(dataset, pr, options.reason, options.commit);
+    r = await waivePrReviewNaming(dataset, pr, reason, options.commit);
     spinner?.stop();
   } catch (err) {
     if (err instanceof ApiError && errorWord(err) === "no_such_pull_request") {
@@ -2268,7 +2270,10 @@ prReviewsCommand
     "--admin",
     "Waive the naming rule for <dataset> <pr> at its current commit: an explicit override, recorded with your reason",
   )
-  .option("--reason <text>", "Why, in plain words (up to 200 characters; kept with the decision)")
+  .option(
+    "--reason <text>",
+    "Why, in plain words (up to 200 characters; kept with the decision). Required with --admin",
+  )
   .option(
     "--commit <sha>",
     "With --admin: the commit you looked at (its first 7 to 40 characters); a pull request that has moved on is not waived",
@@ -2288,10 +2293,10 @@ allow <dataset> <pr> --admin
   title that starts with a name and a year (Lee2019 EEG dataset) or holds an unfilled template field,
   and a change of the dataset's name to such a name, fail their check like anyone's. This is the one
   way past it without a change: it waives the rule for the pull request's CURRENT commit, records the
-  waiver (who, the commit, what the rule found, and --reason), and posts the check as skipped with a
-  line saying the rule was waived. A new commit is checked again. It is refused for a pull request
-  whose author is not an owner or administrator (their review includes the rule) and for a commit
-  that was reviewed.
+  waiver (who, the commit, what the rule found, and your --reason, which is required), and posts the
+  check as skipped with a line saying the rule was waived. A new commit is checked again. It is
+  refused for a pull request whose author is not an owner or administrator (their review includes
+  the rule) and for a commit that was reviewed.
 
   Name the commit you looked at with --commit <sha> (its first 7 to 40 characters, as git log
   --oneline shows them). If the pull request has been pushed to since, nothing is waived or posted
@@ -2326,17 +2331,25 @@ allow <dataset> <pr> --admin
         if (prArg === undefined) {
           die(
             "--admin waives the naming rule for one pull request: give a dataset and a pull request number.",
-            "nemar admin pr-reviews allow nm000108 12 --admin",
+            'nemar admin pr-reviews allow nm000108 12 --admin --reason "Name kept until the rename release"',
             options.json,
           );
         }
-        await waiveNaming(subject, prArg, options);
+        const reason = options.reason?.trim() ?? "";
+        if (reason === "") {
+          die(
+            "--admin needs --reason: say, in plain words, why the naming rule is waived. It is recorded with the waiver.",
+            'nemar admin pr-reviews allow nm000108 12 --admin --reason "Name kept until the rename release"',
+            options.json,
+          );
+        }
+        await waiveNaming(subject, prArg, reason, options);
         return;
       }
       if (prArg !== undefined) {
         die(
           "A contributor is named by a login alone. To waive the naming rule for a pull request, add --admin.",
-          "nemar admin pr-reviews allow nm000108 12 --admin",
+          'nemar admin pr-reviews allow nm000108 12 --admin --reason "Name kept until the rename release"',
           options.json,
         );
       }

@@ -2326,25 +2326,22 @@ export async function clearPrReviewAuthor(login: string): Promise<ClearOverrideR
 /**
  * Waive the naming rule for an owner's or an administrator's pull request, at its current commit:
  * the explicit override that replaces their exemption for that rule (ADR 0107). The Worker reads
- * the pull request from GitHub itself, records the waiver with `reason`, and posts the check; the
- * answer's `reason` is a fixed word (`waived`, `nothing_to_waive`, `not_exempt`, ...). With `commit`
+ * the pull request from GitHub itself, records the waiver with `reason` (required: the Worker
+ * answers 400 `bad_reason` without one), and posts the check; the answer's `reason` is a fixed word (`waived`, `nothing_to_waive`, `not_exempt`, ...). With `commit`
  * (the first seven or more characters of a commit id) a pull request that has moved on is not
  * waived: the Worker answers 409 `head_moved`.
  */
 export async function waivePrReviewNaming(
   datasetId: string,
   prNumber: number,
-  reason?: string,
+  reason: string,
   commit?: string,
 ): Promise<WaiveNamingResponse> {
   return request<WaiveNamingResponse>(
     `/admin/pr-reviews/${encodeURIComponent(datasetId)}/${prNumber}/allow`,
     {
       method: "POST",
-      body: JSON.stringify({
-        ...(reason ? { reason } : {}),
-        ...(commit ? { head_sha: commit } : {}),
-      }),
+      body: JSON.stringify({ reason, ...(commit ? { head_sha: commit } : {}) }),
     },
     true,
   );

@@ -1375,7 +1375,8 @@ describe("owners and administrators meet the naming rule before their exemption"
 describe("the override: nemar admin pr-reviews allow <dataset> <pr> --admin", () => {
   const ADMIN_LOGIN = "startadmin-gh";
 
-  async function allow(ds: string, n: number, body: Record<string, unknown> = {}, key = ADMIN_KEY) {
+  /** The body exactly as given: the route requires a reason, so a test that omits one says so. */
+  async function allowAs(ds: string, n: number, body: Record<string, unknown>, key = ADMIN_KEY) {
     const res = await app.request(
       `/admin/pr-reviews/${ds}/${n}/allow`,
       {
@@ -1386,6 +1387,11 @@ describe("the override: nemar admin pr-reviews allow <dataset> <pr> --admin", ()
       env(),
     );
     return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+  }
+
+  /** A request with the reason every waiver is recorded with, unless the test gives its own. */
+  async function allow(ds: string, n: number, body: Record<string, unknown> = {}, key = ADMIN_KEY) {
+    return allowAs(ds, n, { reason: "Name kept until the rename release", ...body }, key);
   }
 
   function waivers() {
@@ -1451,6 +1457,66 @@ describe("the override: nemar admin pr-reviews allow <dataset> <pr> --admin", ()
     });
     expect((await start(DATASET, 7)).body).toMatchObject({ reason: "naming_rule" });
     expect(lastCheck()).toMatchObject({ conclusion: "failure", head_sha: SHA_B });
+  });
+
+  describe("the reason", () => {
+    const auditRows = () =>
+      (db.query("SELECT COUNT(*) AS n FROM audit_log").get() as { n: number }).n;
+
+    test.each([
+      ["missing", {}],
+      ["empty", { reason: "" }],
+      ["only spaces", { reason: "  \n\t  " }],
+      ["not text", { reason: 7 }],
+    ])(
+      "a reason that is %s is a 400 with a sentence: GitHub is not asked and nothing is recorded",
+      async (_why, body) => {
+        pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
+        const auditBefore = auditRows();
+        const r = await allowAs(DATASET, 7, body);
+        expect(r.status).toBe(400);
+        expect(r.body).toMatchObject({ code: "bad_reason" });
+        expect(String(r.body.error)).toContain("A reason is required");
+        expect(auditRows()).toBe(auditBefore);
+        expect(calls).toHaveLength(0);
+      },
+    );
+
+    test("a reason over 500 characters is a 400 that says how long it may be", async () => {
+      pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
+      const r = await allowAs(DATASET, 7, { reason: "a".repeat(501) });
+      expect(r.status).toBe(400);
+      expect(r.body).toMatchObject({ code: "bad_reason" });
+      expect(String(r.body.error)).toContain("500 characters at most");
+      expect(waivers()).toHaveLength(0);
+      expect(calls).toHaveLength(0);
+    });
+
+    test.each([
+      ["markup and symbols only", "@@@ *** ### <b></b>"],
+      ["control characters only", "\u0007\u0001\u001b"],
+    ])(
+      "a reason that is %s has no plain words left: a 400, and nothing happens",
+      async (_why, reason) => {
+        pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
+        const auditBefore = auditRows();
+        const r = await allowAs(DATASET, 7, { reason });
+        expect(r.status).toBe(400);
+        expect(r.body).toMatchObject({ code: "bad_reason" });
+        expect(String(r.body.error)).toContain("no plain words");
+        expect(auditRows()).toBe(auditBefore);
+        expect(calls).toHaveLength(0);
+      },
+    );
+
+    test("the reason given is the reason recorded, trimmed and cleaned", async () => {
+      pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
+      const r = await allowAs(DATASET, 7, { reason: "  Kept until the *rename* release  " });
+      expect(r.body).toMatchObject({ waived: true, reason: "waived" });
+      expect(JSON.parse(waivers()[0]?.details ?? "{}").reason).toBe(
+        "Kept until the rename release",
+      );
+    });
   });
 
   describe("naming the commit", () => {

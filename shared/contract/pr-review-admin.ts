@@ -107,6 +107,7 @@ export const QUEUE_ERROR_CODES = [
   "bad_dataset",
   "bad_pr",
   "bad_head",
+  "bad_reason",
   "bad_login",
   "not_owned_here",
   "no_such_pull_request",
@@ -292,11 +293,12 @@ export interface WaiveNamingResponse {
 /**
  * The body of `POST /admin/pr-reviews/:dataset/:pr/allow`. A pull request that has moved on from
  * `head_sha` is not waived: the answer is a 409 with the code `head_moved`, and nothing is recorded
- * or posted.
+ * or posted. A body with no reason, or one with no plain words in it, is a 400 with the code
+ * `bad_reason`: a waiver is recorded with the reason it was given.
  */
 export interface WaiveNamingRequest {
-  /** Plain words; kept to 200 characters. */
-  reason?: string;
+  /** Why, in plain words; required, and kept to 200 characters. */
+  reason: string;
   /**
    * The commit the caller means: the first seven to forty characters of its id (hexadecimal). The
    * pull request's current commit is waived only if its id starts with this. Without it the current

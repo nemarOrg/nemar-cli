@@ -684,6 +684,8 @@ describe("nemar admin pr-reviews allow <dataset> <pr> --admin: the naming rule's
       [id, `nemarDatasets/${id}`],
     );
   }
+  /** The reason every waiver here is given, because the command requires one. */
+  const REASON = "Kept until the rename";
   const waivers = () =>
     db
       .query("SELECT details FROM audit_log WHERE action = 'pr_review_naming_waived'")
@@ -797,7 +799,7 @@ describe("nemar admin pr-reviews allow <dataset> <pr> --admin: the naming rule's
   test("refuses a contributor's pull request, says why, and exits 1", async () => {
     reviewable("nm000201");
     gh.pulls["nm000201#7"] = { sha: SHA_A, author: "alice", title: "Lee2019 EEG rename" };
-    const r = await cli([...PR, "allow", "nm000201", "7", "--admin"]);
+    const r = await cli([...PR, "allow", "nm000201", "7", "--admin", "--reason", REASON]);
     expect(r.exitCode).toBe(1);
     expect(r.stdout).toContain("Not waived: the author of nm000201 #7");
     expect(r.stdout).toContain("is not a NEMAR owner or administrator");
@@ -807,14 +809,14 @@ describe("nemar admin pr-reviews allow <dataset> <pr> --admin: the naming rule's
   test("with --json the answer is the Worker's, and a clean title has nothing to waive (exit 0)", async () => {
     reviewable("nm000201");
     gh.pulls["nm000201#7"] = { sha: SHA_A, author: "queueadmin-gh", title: "Add three recordings" };
-    const r = await cli([...PR, "allow", "nm000201", "7", "--admin", "--json"]);
+    const r = await cli([...PR, "allow", "nm000201", "7", "--admin", "--reason", REASON, "--json"]);
     expect(r.exitCode).toBe(0);
     expect(JSON.parse(r.stdout)).toMatchObject({ waived: false, reason: "nothing_to_waive" });
   });
 
   test("a pull request GitHub does not have says so, and exits 1", async () => {
     reviewable("nm000201");
-    const r = await cli([...PR, "allow", "nm000201", "99", "--admin"]);
+    const r = await cli([...PR, "allow", "nm000201", "99", "--admin", "--reason", REASON]);
     expect(r.exitCode).toBe(1);
     expect(r.stdout + r.stderr).toContain("GitHub has no such pull request");
     expect(r.stdout + r.stderr).not.toContain("--debug");
@@ -825,7 +827,7 @@ describe("nemar admin pr-reviews allow <dataset> <pr> --admin: the naming rule's
     reviewable("nm000201");
     gh.pulls["nm000201#7"] = { sha: SHA_A, author: "queueadmin-gh", title: "Lee2019 EEG rename" };
     gh.naming.nm000201 = { files: ["dataset_description.json"], names: { [SHA_A]: 502 } };
-    const r = await cli([...PR, "allow", "nm000201", "7", "--admin"]);
+    const r = await cli([...PR, "allow", "nm000201", "7", "--admin", "--reason", REASON]);
     expect(r.exitCode).toBe(1);
     expect(r.stdout).toContain(
       `Not waived: the dataset name of nm000201 #7 at ${SHA_A.slice(0, 7)} could not be read from GitHub`,
@@ -851,6 +853,34 @@ describe("nemar admin pr-reviews allow <dataset> <pr> --admin: the naming rule's
     expect(help).toContain("allow <dataset> <pr> --admin");
     expect(help).toContain("waives the rule for the pull request's CURRENT commit");
     expect(help).toContain("records the waiver");
+    // The reason it records is required, and the help says so where the option and the override are.
+    expect(help).toContain("Required with --admin");
+    expect(help).toContain("and your --reason, which is required");
+  });
+
+  describe("--reason", () => {
+    test("is required: without one, or with a blank one, nothing is asked of the API and nothing is waived", async () => {
+      reviewable("nm000201");
+      gh.pulls["nm000201#7"] = { sha: SHA_A, author: "queueadmin-gh", title: "Lee2019 EEG rename" };
+      for (const extra of [[], ["--reason", ""], ["--reason", "   "]]) {
+        apiRequests = [];
+        const r = await cli([...PR, "allow", "nm000201", "7", "--admin", ...extra]);
+        expect(r.exitCode, extra.join(" ")).toBe(1);
+        expect(r.stdout, extra.join(" ")).toContain("--admin needs --reason");
+        expect(r.stdout, extra.join(" ")).toContain("recorded with the waiver");
+        expect(apiRequests.filter((x) => x.includes("/admin/"))).toHaveLength(0);
+        expect(waivers()).toHaveLength(0);
+        expect(gh.seen.some((x) => x.path.endsWith("/check-runs"))).toBe(false);
+      }
+    });
+
+    test("is not needed to lift a block, which has no waiver to record it with", async () => {
+      gh.users.alice = { id: 77, login: "alice", type: "User" };
+      expect((await cli([...PR, "block", "alice"])).exitCode).toBe(0);
+      const r = await cli([...PR, "allow", "alice"]);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("Allowed alice");
+    });
   });
 });
 

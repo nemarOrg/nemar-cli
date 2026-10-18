@@ -26,6 +26,10 @@
  *     row, so a later delivery of that commit keeps the waiver for what it recorded; a problem the
  *     rule finds there later that the waiver did not record, and a new commit, are checked again.
  *
+ * The reason is required, because it is what the record keeps: a request without one, or with one
+ * that has no plain words left once links, mentions and markup are removed, is a 400 (`bad_reason`)
+ * and records and posts nothing.
+ *
  * It never approves or merges anything, and it records no pull request text: the audit row holds
  * the rule's closed words, not the title or the name.
  */
@@ -51,7 +55,8 @@ const MAX_REASON = 200;
 
 /** What the caller says about the waiver, beyond which pull request it is for. */
 export interface WaiveRequest {
-  reason: string | undefined;
+  /** Why, as the caller wrote it. Required: a waiver is recorded with its reason. */
+  reason: string;
   /**
    * The commit the caller means: a lowercase hex prefix of seven characters or more, checked by the
    * route. The pull request's current commit is waived only if it starts with this; absent, the
@@ -74,6 +79,16 @@ export async function waiveNamingRule(
   { reason, commit }: WaiveRequest,
 ): Promise<WaiveNamingResponse> {
   const environment = environmentName(env);
+  // The reason is what the record keeps, so a reason with nothing left of it once links, mentions
+  // and markup are taken out (the route has already refused a blank one) is no reason.
+  const kept = sanitizeNote(reason, MAX_REASON);
+  if (kept === "") {
+    throw new QueueError(
+      400,
+      "bad_reason",
+      "The reason has no plain words in it (links, mentions and markup are removed). Say, in words, why the naming rule is waived.",
+    );
+  }
   const answer = (
     word: WaiveNamingResponse["reason"],
     rest: Partial<WaiveNamingResponse> = {},
@@ -165,7 +180,7 @@ export async function waiveNamingRule(
         head_sha: pr.headSha,
         title: facts?.title ?? null,
         name: facts?.name ?? null,
-        reason: reason ? sanitizeNote(reason, MAX_REASON) : null,
+        reason: kept,
       }),
     }).run();
     await postExemptCheck(env, pr, { kind: "exempt", waived: true });
