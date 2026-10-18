@@ -421,16 +421,87 @@ describe("POST /admin/datasets/:id/review-ruleset", () => {
     expect(standIn.calls).toHaveLength(0);
   });
 
-  test("a GitHub failure is a 502 with GitHub's answer, nothing is audited, and nothing is kept", async () => {
-    seedDataset("nm000201");
-    standIn.failNext("POST", /\/rulesets$/, 422);
+  describe("when GitHub fails", () => {
+    /** Run `fn` and return what it wrote to console.error. */
+    async function logged(fn: () => Promise<void>): Promise<string[]> {
+      const lines: string[] = [];
+      const realError = console.error;
+      console.error = (...args: unknown[]) => {
+        lines.push(args.map(String).join(" "));
+      };
+      try {
+        await fn();
+      } finally {
+        console.error = realError;
+      }
+      return lines;
+    }
 
-    const r = await single("nm000201", { dry_run: false });
+    test("a refusal is a 502 whose error is a sentence with the status, and GitHub's own words are not in it", async () => {
+      seedDataset("nm000201");
+      standIn.failNext("POST", /\/rulesets$/, 422);
 
-    expect(r.status).toBe(502);
-    expect(r.body.details).toContain("Review ruleset create failed for nm000201");
-    expect(held("nm000201")).toEqual([]);
-    expect(audits()).toEqual([]);
+      const r = await single("nm000201", { dry_run: false });
+
+      expect(r.status).toBe(502);
+      expect(r.body.error).toBe(
+        "GitHub refused the request for nm000201 (HTTP 422). Nothing was changed for this dataset.",
+      );
+      expect(r.body.code).toBe("github_request_failed");
+      // The cause is in `error`, where the CLI prints it, and not behind a title in `details`.
+      expect(r.body.details).toBeUndefined();
+      expect(JSON.stringify(r.body)).not.toContain("refused by the stand-in");
+      expect(held("nm000201")).toEqual([]);
+      expect(audits()).toEqual([]);
+    });
+
+    test("the status and a short message go to the server log", async () => {
+      seedDataset("nm000201");
+      standIn.failNext("POST", /\/rulesets$/, 422);
+
+      const lines = await logged(async () => {
+        await single("nm000201", { dry_run: false });
+      });
+
+      const line = lines.find((l) => l.includes("[review-ruleset]"));
+      expect(line).toBeDefined();
+      expect(line).toContain("nm000201");
+      expect(line).toContain("HTTP 422");
+      expect(line).toContain("Review ruleset create failed for nm000201");
+    });
+
+    test("a 5xx says it is not known whether the change was made, and that the command can be run again", async () => {
+      seedDataset("nm000201");
+      // The transport tries three times before it gives GitHub's 503 to the caller.
+      standIn.failNext("GET", /\/rulesets$/, 503, 3);
+
+      const r = await single("nm000201", { dry_run: false });
+
+      expect(r.status).toBe(502);
+      expect(r.body.error).toContain("(HTTP 503)");
+      expect(r.body.error).toContain("not known whether the change was made");
+      expect(r.body.error).toContain("Run the same command again");
+      expect(r.body.error).not.toContain("Nothing was changed");
+    }, 20_000);
+
+    test("no answer at all says the same, without a status", async () => {
+      seedDataset("nm000201");
+      const real = (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL;
+      // Nothing listens on port 1, so every attempt is refused at the socket.
+      (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = "http://127.0.0.1:1";
+      let r: { status: number; body: Json };
+      try {
+        r = await single("nm000201", { dry_run: false });
+      } finally {
+        (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = real;
+      }
+
+      expect(r.status).toBe(502);
+      expect(r.body.error).toBe(
+        "The request to GitHub for nm000201 did not complete, so it is not known whether the change was made. Run the same command again: it reads before it writes.",
+      );
+      expect(r.body.code).toBe("github_request_failed");
+    }, 20_000);
   });
 
   test("an administrator may use it, and a member may not", async () => {
@@ -650,7 +721,12 @@ describe("POST /admin/datasets/review-ruleset/bulk", () => {
     const byId = Object.fromEntries(r.body.results.map((x: Json) => [x.dataset_id, x]));
     expect(byId.nm000302.action).toBeNull();
     expect(byId.nm000302.applied).toBe(false);
-    expect(byId.nm000302.error).toContain("Review ruleset list failed for nm000302");
+    // A sentence with the status, and none of GitHub's own words.
+    expect(byId.nm000302.error).toBe(
+      "GitHub refused the request for nm000302 (HTTP 403). Nothing was changed for this dataset.",
+    );
+    expect(byId.nm000302.code).toBe("github_request_failed");
+    expect(JSON.stringify(byId.nm000302)).not.toContain("refused by the stand-in");
     expect(held("nm000301")).toEqual([REVIEW_RULESET_NAME]);
     expect(held("on000305")).toEqual([REVIEW_RULESET_NAME]);
     expect(held("nm000302")).toEqual([]);

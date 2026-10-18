@@ -1381,8 +1381,10 @@ export type NotReviewableReason = "inactive" | "private" | "anonymous" | "unpubl
  * called for (or `--remove` asked for) and `action` is what was done, or with a dry run would be:
  * `create`, `update`, `remove`, `none` (nothing to take off), `skip` (required here but not
  * written, see `reason`), or null when the attempt failed (`error` says how, and `code` is its
- * word when it has one: `review_disabled` is a requirement refused because the review is off, and
- * `review_app_mismatch` one refused because the Worker posts the check as another GitHub App).
+ * word when it has one: `review_disabled` is a requirement refused because the review is off,
+ * `review_app_mismatch` one refused because the Worker posts the check as another GitHub App, and
+ * `github_request_failed` a request GitHub refused or did not complete, whose `error` is a
+ * sentence that carries GitHub's status code and never GitHub's own words).
  */
 export interface ReviewRulesetOutcome {
   dataset_id: string;
@@ -1395,7 +1397,7 @@ export interface ReviewRulesetOutcome {
   default_branch?: string;
   payload?: ReviewRulesetPayload;
   error?: string;
-  code?: "review_disabled" | "review_app_mismatch";
+  code?: "review_disabled" | "review_app_mismatch" | "github_request_failed";
 }
 
 /**

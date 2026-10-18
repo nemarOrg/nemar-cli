@@ -305,6 +305,33 @@ describe("one dataset", () => {
     expect(r.stderr).toContain("PR_REVIEW_ENABLED");
   });
 
+  test("a GitHub failure on one dataset says what failed, with the status, and not the generic title", async () => {
+    seedDataset("nm000201");
+    standIn.failNext("POST", /\/rulesets$/, 422);
+
+    const r = await cli(["nm000201", "--apply"]);
+
+    expect(r.exitCode).toBe(1);
+    const said = r.stdout + r.stderr;
+    expect(said).toContain(
+      "GitHub refused the request for nm000201 (HTTP 422). Nothing was changed for this dataset.",
+    );
+    expect(said).not.toContain("Review ruleset request failed");
+    expect(said).not.toContain("refused by the stand-in");
+    expect(held("nm000201")).toEqual([]);
+  });
+
+  test("with --json the failure is on standard error, as a sentence, and standard output stays empty", async () => {
+    seedDataset("nm000201");
+    standIn.failNext("POST", /\/rulesets$/, 422);
+
+    const r = await cli(["nm000201", "--apply", "--json"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout.trim()).toBe("");
+    expect(r.stderr).toContain("GitHub refused the request for nm000201 (HTTP 422)");
+  });
+
   test("a standing fixture is refused and exits 1", async () => {
     seedDataset("nm099999");
 
@@ -518,7 +545,14 @@ describe("a page of datasets", () => {
     const r = await cli(["--all", "--prefix", "nm", "--limit", "3", "--apply"]);
 
     expect(r.exitCode).toBe(1);
-    expect(r.stdout).toMatch(/error\s+nm000302: Review ruleset list failed/);
+    // A sentence with the status, on its row. GitHub's own body (its JSON, here "refused by the
+    // stand-in") and the name of the function that threw are not printed.
+    expect(r.stdout).toMatch(
+      /error\s+nm000302: GitHub refused the request for nm000302 \(HTTP 403\)\. Nothing was changed/,
+    );
+    expect(r.stdout + r.stderr).not.toContain("refused by the stand-in");
+    expect(r.stdout + r.stderr).not.toContain("Review ruleset list failed");
+    expect(r.stdout + r.stderr).not.toContain("{");
     expect(held("nm000301")).toEqual([REVIEW_RULESET]);
     expect(held("nm000303")).toEqual([REVIEW_RULESET]);
     expect(held("nm000302")).toEqual([]);

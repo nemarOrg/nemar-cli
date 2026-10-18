@@ -51,6 +51,7 @@ import {
   reviewIntentOf,
 } from "../../services/pr-review-eligibility";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../services/repo-spec";
+import { HttpError } from "../../services/retry";
 import { applyDatasetVisibility } from "../../services/visibility";
 import type { Bindings } from "../../types/bindings";
 import type { AdminRouter } from "./shared";
@@ -65,7 +66,7 @@ interface ReviewRulesetRow extends ReviewableRow {
 }
 
 /** The words an `error` row of a review-ruleset outcome can carry as its `code`. */
-type ReviewRulesetErrorCode = "review_disabled" | "review_app_mismatch";
+type ReviewRulesetErrorCode = "review_disabled" | "review_app_mismatch" | "github_request_failed";
 
 /**
  * What one dataset's review-ruleset request came to. `intent` is what the row calls for (or what
@@ -171,13 +172,42 @@ async function reconcileDatasetReview(
       ...(o.withPayload && step.payload ? { payload: step.payload } : {}),
     };
   } catch (e) {
+    // What GitHub said stays on the server: the status and a short message go to the log, and the
+    // outcome gets a sentence with the status in it. GitHub's own body is not for a terminal.
+    console.error(
+      `[review-ruleset] GitHub failed for ${row.dataset_id} (${intent}${o.dryRun ? ", dry run" : ""}): ${
+        e instanceof HttpError ? `HTTP ${e.status}: ` : ""
+      }${(e instanceof Error ? e.message : String(e)).slice(0, 400)}`,
+    );
     return {
       ...base,
       action: null,
       applied: false,
-      error: e instanceof Error ? e.message : String(e),
+      error: githubFailureSentence(row.dataset_id, e),
+      code: "github_request_failed",
     };
   }
+}
+
+/**
+ * What a failed GitHub request is called to the person who ran the command: a plain sentence with
+ * GitHub's status code, and what is known about whether anything changed. A 4xx is a refusal, so
+ * nothing was changed. A 5xx or 429, or no answer at all, may have come after GitHub made the
+ * change (the answer is what was lost), so it is said not to be known, and the command is safe to
+ * run again because it reads before it writes. GitHub's own body is never repeated here.
+ */
+function githubFailureSentence(datasetId: string, e: unknown): string {
+  const again = "Run the same command again: it reads before it writes.";
+  if (e instanceof HttpError && e.status >= 400 && e.status < 500 && e.status !== 429) {
+    return `GitHub refused the request for ${datasetId} (HTTP ${e.status}). Nothing was changed for this dataset.`;
+  }
+  if (e instanceof HttpError && e.status >= 400) {
+    return `GitHub could not complete the request for ${datasetId} (HTTP ${e.status}), so it is not known whether the change was made. ${again}`;
+  }
+  if (e instanceof HttpError) {
+    return `GitHub's answer for ${datasetId} could not be used (HTTP ${e.status}, with no default branch in it). Nothing was changed for this dataset.`;
+  }
+  return `The request to GitHub for ${datasetId} did not complete, so it is not known whether the change was made. ${again}`;
 }
 
 /** The audit row for a ruleset that was written or deleted. Non-fatal, like the other admin audit rows. */
@@ -738,7 +768,9 @@ export function registerFleetRoutes(admin: AdminRouter): void {
       withPayload: true,
     });
     if (outcome.error) {
-      return c.json({ error: "Review ruleset request failed", details: outcome.error }, 502);
+      // The sentence is the answer: the CLI prints `error` and never `details`, so a cause kept
+      // behind a generic title never reached the person who ran the command.
+      return c.json({ error: outcome.error, code: outcome.code }, 502);
     }
     await auditReviewRuleset(c.env.DB, c.get("user"), outcome, false);
     return c.json({ dry_run: dryRun, review_enabled: enabled, ...reviewAppIds(c.env), ...outcome });
