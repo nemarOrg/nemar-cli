@@ -719,14 +719,15 @@ export function registerFleetRoutes(admin: AdminRouter): void {
    * takes it off whatever the row says (the rollback). `dry_run` defaults to TRUE; send
    * `dry_run:false` to change anything, so a bare `{}` never mutates.
    *
-   * Refused: a standing test fixture (nm099900 to nm099999), whatever else is asked; and a live
-   * request whose COMPUTED intent is to require the review where a required check could not
-   * arrive, because it would block every merge: the review is off in this environment
-   * (`review_disabled`), or this Worker posts the check as a different GitHub App than the one the
-   * ruleset requires it from (`review_app_mismatch`, which names both ids). Both are 409. The test
-   * is the intent the dataset's row works out to, not the shape of the request: a live request for
-   * a private dataset is a removal, and taking the requirement off is never refused, since it is
-   * the way out. No dataset is special-cased for being live.
+   * Refused, always with a 409: a standing test fixture (nm099900 to nm099999), whatever else is
+   * asked (`reserved_fixture_id`: a conflict with what the dataset is, not a matter of who is
+   * asking, which a 403 would say); and a live request whose COMPUTED intent is to require the
+   * review where a required check could not arrive, because it would block every merge: the
+   * review is off in this environment (`review_disabled`), or this Worker posts the check as a
+   * different GitHub App than the one the ruleset requires it from (`review_app_mismatch`, which
+   * names both ids). The test is the intent the dataset's row works out to, not the shape of the
+   * request: a live request for a private dataset is a removal, and taking the requirement off is
+   * never refused, since it is the way out. No dataset is special-cased for being live.
    *
    * Every answer carries the two App ids (`github_app_id`, `ruleset_app_id`, `app_id_matches`), so
    * a dry run shows whether `dry_run:false` would be refused for that reason.
@@ -744,7 +745,10 @@ export function registerFleetRoutes(admin: AdminRouter): void {
           error: `${datasetId} is a standing test fixture (the nm099900 to nm099999 band), so the review ruleset is never put on it or taken off it.`,
           code: "reserved_fixture_id",
         },
-        403,
+        // 409, not 403: the caller is allowed to ask, and the request conflicts with what this
+        // dataset is. A 403 makes the CLI tell an administrator that the command needs admin
+        // privileges, which they have.
+        409,
       );
     }
 

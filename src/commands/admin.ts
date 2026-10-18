@@ -5560,6 +5560,10 @@ function reviewAppLine(ids: {
   );
 }
 
+/** What to tell an administrator who tries a page: it is for the owner, and one dataset is not. */
+const BULK_OWNER_ONLY_HINT =
+  "The bulk apply is owner-only. An administrator can bring one dataset at a time to its review spec: nemar admin fleet require-review <dataset-id> --apply.";
+
 /** One dataset's line in a page: what is done, to which dataset, and why when it is not obvious. */
 /**
  * A requirement the Worker refused on a row of a page is said in a line there, and the sentence
@@ -5787,7 +5791,15 @@ Examples:
         if (dryRun) out(chalk.dim("Dry run: nothing was changed. Add --apply to change it."));
         if (r.results.some((x) => x.error)) process.exitCode = 1;
       } catch (error) {
-        failWith(error, spinner, "The review ruleset request failed", undefined, { json });
+        // A 403 on a page is the owner-only rule, not a lack of admin privileges (the generic hint
+        // says that), so the page says what it is. A 403 on one dataset keeps the generic hint.
+        failWith(
+          error,
+          spinner,
+          "The review ruleset request failed",
+          id ? undefined : { 403: BULK_OWNER_ONLY_HINT },
+          { json },
+        );
       }
     },
   );

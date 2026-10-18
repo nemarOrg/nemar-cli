@@ -40,6 +40,7 @@ const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
 const OWNER_KEY = "cli-review-owner-key-0123456789abcdef0123456789abcdef";
 const ADMIN_KEY = "cli-review-admin-key-0123456789abcdef0123456789abcdef";
+const MEMBER_KEY = "cli-review-member-key-0123456789abcdef0123456789abcdef";
 const REVIEW_RULESET = "NEMAR PR review required";
 
 let standIn: RulesetStandIn;
@@ -338,7 +339,10 @@ describe("one dataset", () => {
     const r = await cli(["nm099999", "--apply"]);
 
     expect(r.exitCode).toBe(1);
-    expect(r.stdout + r.stderr).toContain("standing test fixture");
+    const said = r.stdout + r.stderr;
+    expect(said).toContain("standing test fixture");
+    // It is the dataset that refuses, not a lack of privileges: the hint for a 403 is not printed.
+    expect(said).not.toContain("requires admin privileges");
     expect(standIn.calls).toHaveLength(0);
   });
 
@@ -522,7 +526,7 @@ describe("a page of datasets", () => {
     expect(held("nm099999")).toEqual([]);
   });
 
-  test("an administrator is refused, and says why", async () => {
+  test("an administrator is refused, and told the bulk apply is owner-only and not that admin privileges are needed", async () => {
     seedFleet();
     const adminDir = mkdtempSync(join(tmpdir(), "nemar-review-ruleset-cli-admin-"));
     try {
@@ -531,10 +535,34 @@ describe("a page of datasets", () => {
       const r = await cli(["--all", "--prefix", "nm"], adminDir);
 
       expect(r.exitCode).toBe(1);
-      expect(r.stdout + r.stderr).toContain("Only the NEMAR owner");
+      const said = r.stdout + r.stderr;
+      expect(said).toContain("Only the NEMAR owner can bulk-apply the review ruleset");
+      expect(said).toContain("The bulk apply is owner-only");
+      // They are an administrator: the generic 403 line would be wrong.
+      expect(said).not.toContain("requires admin privileges");
+      expect(said).toContain("nemar admin fleet require-review <dataset-id>");
       expect(standIn.calls).toHaveLength(0);
     } finally {
       rmSync(adminDir, { recursive: true, force: true });
+    }
+  });
+
+  test("a member refused on one dataset keeps the line that says what is needed", async () => {
+    seedDataset("nm000201");
+    await seedAccount("climember", "member", MEMBER_KEY);
+    const memberDir = mkdtempSync(join(tmpdir(), "nemar-review-ruleset-cli-member-"));
+    try {
+      writeConfig(memberDir, "climember", MEMBER_KEY);
+
+      const r = await cli(["nm000201", "--apply"], memberDir);
+
+      expect(r.exitCode).toBe(1);
+      const said = r.stdout + r.stderr;
+      expect(said).toContain("requires admin privileges");
+      expect(said).not.toContain("owner-only");
+      expect(standIn.calls).toHaveLength(0);
+    } finally {
+      rmSync(memberDir, { recursive: true, force: true });
     }
   });
 

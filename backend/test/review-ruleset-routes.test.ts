@@ -367,7 +367,8 @@ describe("POST /admin/datasets/:id/review-ruleset", () => {
         seedDataset(id);
         for (const body of [{}, { dry_run: false }, { dry_run: false, remove: true }]) {
           const r = await single(id, body);
-          expect(r.status, JSON.stringify(body)).toBe(403);
+          // A 409, not a 403: the administrator may ask, and the dataset is what refuses.
+          expect(r.status, JSON.stringify(body)).toBe(409);
           expect(r.body.code).toBe("reserved_fixture_id");
         }
         expect(standIn.calls).toHaveLength(0);
@@ -542,7 +543,7 @@ describe("POST /admin/datasets/review-ruleset/bulk", () => {
 
     const asAdmin = await bulk({}, ADMIN_KEY);
     expect(asAdmin.status).toBe(403);
-    expect(asAdmin.body.error).toContain("owner");
+    expect(asAdmin.body.error).toBe("Only the NEMAR owner can bulk-apply the review ruleset");
     expect(standIn.calls).toHaveLength(0);
 
     expect((await bulk({}, OWNER_KEY)).status).toBe(200);
