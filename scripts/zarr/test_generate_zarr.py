@@ -15412,6 +15412,23 @@ class TestRequireCompanionsVhdr(unittest.TestCase):
             self.check({"sub-01/eeg/run1.eeg"}, data_file="data/run1.eeg")
         self.assertIn("sub-01/eeg/data/run1.eeg", str(cm.exception))
 
+    def test_a_data_file_path_is_normalized_before_the_tree_lookup(self):
+        # The tree lists normalized paths, and a header may spell its DataFile with
+        # `.` and `..` components. The tracked file shares no stem with the header,
+        # so only the normalized path can satisfy the rule.
+        wanted = "sub-01/eeg/shared.eeg"
+        # Where two of the spellings would land if their `..` were dropped, not
+        # resolved.
+        decoys = {"sub-01/eeg/data/shared.eeg", "sub-01/eeg/eeg/shared.eeg"}
+        for written in ("./shared.eeg", "data/../shared.eeg", "../eeg/shared.eeg"):
+            with self.subTest(written):
+                self.check({wanted}, data_file=written)
+                # The control: with that file untracked the same header is refused,
+                # and the refusal names the path the spelling means.
+                with self.assertRaises(generate_zarr.CompanionMissing) as cm:
+                    self.check(decoys, data_file=written)
+                self.assertIn(wanted, str(cm.exception))
+
     def test_nothing_is_refused_that_the_rule_cannot_read(self):
         # No such header, a header naming no data file: the reader decides.
         self.check(set(), header=False)
