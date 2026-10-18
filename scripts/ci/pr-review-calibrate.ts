@@ -29,9 +29,11 @@
  *
  * **The operator's key reaches only the API.** It refuses to run while `ANTHROPIC_BASE_URL` or
  * `ANTHROPIC_AUTH_TOKEN` is set (a shell that points the SDK at a gateway would hand it the key),
- * and says which by name, never by value. The `gh` and `git` it runs get this process's environment
- * without any `ANTHROPIC_*` variable ({@link childEnv}), so the key goes to the SDK in this process
- * and to nothing it starts. No message repeats the value of an argument: a refusal names the flag.
+ * and says which by name, never by value. Every child it starts, its own `gh` and `git` and the
+ * `git` the review's evidence reader runs on a contributor's objects, is started with
+ * {@link childEnv} (`pr-review-evidence.ts`): this process's environment without any `ANTHROPIC_*`
+ * variable and without the review's callback token. So the key goes to the SDK in this process and
+ * to nothing it starts. No message repeats the value of an argument: a refusal names the flag.
  *
  * **What the table holds.** Closed words, counts, token counts, seconds and an estimate in dollars,
  * never a pull request's text or a word a model wrote, so it can be pasted anywhere. Its columns
@@ -65,6 +67,7 @@ import {
   mapError,
   reviewPullRequest,
 } from "./pr-review";
+import { childEnv } from "./pr-review-evidence";
 
 /** One pull request to calibrate on, and what a person expects of it, if they said. */
 export interface CalibrationTarget {
@@ -157,32 +160,15 @@ export class CalibrationReadError extends Error {
 }
 
 /**
- * The environment `gh` and `git` are run with: `env` (this process's own, unless a test hands one
- * in) without any `ANTHROPIC_*` variable, so the operator's key reaches the API through the SDK in
- * this process and goes to nothing it starts, with git's own configuration kept out and no prompt.
- * Everything else stays, which is what `gh` authenticates with (`GH_TOKEN`, `GITHUB_TOKEN`, `HOME`,
- * its configuration directory). The name is matched without regard to case, because a variable
- * that only looks different is not worth the risk.
+ * A command, run with {@link childEnv} (the one environment every child of the review gets, the
+ * evidence reader's git included) and, because it is an operator's machine, without the operator's
+ * own git configuration either; the environment is read now.
  */
-export function childEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const kept: NodeJS.ProcessEnv = {};
-  for (const [name, value] of Object.entries(env)) {
-    if (!/^ANTHROPIC_/i.test(name)) kept[name] = value;
-  }
-  return {
-    ...kept,
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: "/dev/null",
-  };
-}
-
-/** A command, run with {@link childEnv}; the environment is read now. */
 function run(cmd: string, args: string[], cwd?: string): string {
   return execFileSync(cmd, args, {
     cwd,
     encoding: "utf8",
-    env: childEnv(),
+    env: { ...childEnv(), GIT_CONFIG_GLOBAL: "/dev/null" },
     maxBuffer: 64 * 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
   });

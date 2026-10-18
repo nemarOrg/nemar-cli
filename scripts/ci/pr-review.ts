@@ -5,7 +5,8 @@
  * step's environment holds a federated Anthropic identity and the one-shot callback token, and no
  * GitHub credential. The repository was fetched by an earlier step, whose read-only token stays in
  * the clone's git config for the lazy blob reads this script's git calls make; this script never
- * reads it, prints it or sends it.
+ * reads it, prints it or sends it. Those git calls are started without the callback token and
+ * without any ANTHROPIC_ variable (`childEnv` in `pr-review-evidence.ts`).
  *
  *   bun run scripts/ci/pr-review.ts review \
  *     --repo-dir DIR --base SHA --head SHA --fetched-head SHA --pr-json FILE \

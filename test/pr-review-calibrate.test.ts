@@ -21,14 +21,14 @@ import {
   type FetchedPullRequest,
   calibrateMain,
   calibrateOne,
-  childEnv,
   exitCodeOf,
   fetchPullRequest,
   parseTarget,
   renderTable,
 } from "../scripts/ci/pr-review-calibrate";
-import { gatherListing } from "../scripts/ci/pr-review-evidence";
+import { childEnv, gatherListing } from "../scripts/ci/pr-review-evidence";
 import { type StandInMessage, replyFor, standInMessage } from "./helpers/anthropic-sse";
+import { installGitShim, readEnvLog } from "./helpers/git-shim";
 
 let root: string;
 const GIT_ENV = {
@@ -303,28 +303,31 @@ describe("it posts nothing, and the key reaches only the API", () => {
     expect((await refused(["--pr", "not-a-pr"])).code).toBe(2);
   });
 
-  test("gh and git are run without any ANTHROPIC_ variable, and keep what gh signs in with", () => {
+  test("a child is started without any ANTHROPIC_ variable or the callback token, and keeps what gh signs in with", () => {
     const env = childEnv({
       ANTHROPIC_API_KEY: "sk-ant-key",
       ANTHROPIC_AUTH_TOKEN: "oauth",
       ANTHROPIC_BASE_URL: "https://gateway.example",
       ANTHROPIC_FEDERATION_RULE_ID: "rule",
       anthropic_api_key: "lower",
+      PR_REVIEW_CALLBACK_TOKEN: "callback",
+      pr_review_callback_token: "lower-callback",
       GH_TOKEN: "ghp_token",
       GITHUB_TOKEN: "github_token",
       HOME: "/home/operator",
       PATH: "/usr/bin",
     });
-    expect(Object.keys(env).filter((name) => /^anthropic_/i.test(name))).toEqual([]);
+    expect(
+      Object.keys(env).filter((name) => /^(?:anthropic_|pr_review_callback_token$)/i.test(name)),
+    ).toEqual([]);
     expect(env).toMatchObject({
       GH_TOKEN: "ghp_token",
       GITHUB_TOKEN: "github_token",
       HOME: "/home/operator",
       PATH: "/usr/bin",
-      // And git's own configuration stays out, with no prompt.
+      // And git's system configuration stays out, with no prompt.
       GIT_TERMINAL_PROMPT: "0",
       GIT_CONFIG_NOSYSTEM: "1",
-      GIT_CONFIG_GLOBAL: "/dev/null",
     });
   });
 });
@@ -541,6 +544,83 @@ describe("reading a pull request from GitHub, as the workflow does", () => {
       gh.restore();
       if (before === undefined) Reflect.deleteProperty(process.env, "GH_TOKEN");
       else process.env.GH_TOKEN = before;
+    }
+  });
+
+  test("every git calibrateOne starts, its fetch and the review's reads, is handed childEnv and no key", async () => {
+    // The process holds the operator's key (the beforeAll above); a callback token and a federation
+    // rule are the other names no child may be handed. calibrateMain refuses a token, calibrateOne
+    // does not, so setting one here proves the filter and not the refusal.
+    const extra = {
+      PR_REVIEW_CALLBACK_TOKEN: "callback-SECRET-TOKEN",
+      ANTHROPIC_FEDERATION_RULE_ID: "rule-SECRET-ID",
+    };
+    const saved = Object.fromEntries(Object.keys(extra).map((k) => [k, process.env[k]]));
+    const key = process.env.ANTHROPIC_API_KEY;
+    expect(key).toBeDefined();
+    const gh = standInGitHub(
+      "fetch-git-env",
+      JSON.stringify({
+        base: { sha: "BASE" },
+        head: { sha: "HEAD" },
+        title: "Correct the sampling rate in the EEG sidecar",
+        body: "The sidecar said 256 Hz; the recording is 512 Hz.",
+      }),
+    );
+    const log = join(root, "git-env-calls.log");
+    const into = mkdtempSync(join(root, "into-"));
+    Object.assign(process.env, extra);
+    const restoreGit = installGitShim(root, [{ match: " ", envLog: log }]);
+    let seen: ReturnType<typeof readEnvLog>;
+    let expected: NodeJS.ProcessEnv;
+    let row: CalibrationRow;
+    try {
+      expected = childEnv();
+      row = await withStandIn(() => calibrateOne(target(), into, fetchPullRequest));
+      seen = readEnvLog(log);
+    } finally {
+      restoreGit();
+      gh.restore();
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) Reflect.deleteProperty(process.env, k);
+        else process.env[k] = v;
+      }
+    }
+    // Both passes of the review ran, so the fetch, the listing and the content were all read by git.
+    expect(row).toMatchObject({ stage: "full", error: null });
+    // The calls this code starts: the calibration's own (`git init`, then `git -C <dir> config`,
+    // `remote` and `fetch`) and the evidence reader's (every one carries the protocol fence).
+    const own = seen.filter((c) => /^ (?:init -q |-C \S+ (?:config|remote|fetch) )/.test(c.args));
+    const reads = seen.filter((c) => c.args.includes("protocol.ext.allow=never"));
+    expect(own.length).toBeGreaterThanOrEqual(5);
+    expect(own.some((c) => c.args.includes(" fetch "))).toBe(true);
+    expect(reads.some((c) => c.args.includes(" merge-base "))).toBe(true);
+    expect(reads.some((c) => c.args.includes(" --numstat "))).toBe(true);
+    // The shell the shim runs in rewrites these four, and git puts its own directory first on PATH
+    // for what it starts; every other variable is exactly what childEnv() gave.
+    const rewritten = new Set(["_", "PWD", "OLDPWD", "SHLVL", "PATH"]);
+    for (const call of [...own, ...reads]) {
+      expect(call.env.PATH, call.args).toBeDefined();
+      for (const [name, value] of Object.entries(expected)) {
+        // The log is `env` output: a name that is not a plain identifier (an exported shell function)
+        // and a value that spans lines are not told apart from the lines around them.
+        if (rewritten.has(name) || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue;
+        if (value?.includes("\n")) continue;
+        expect(call.env[name], `${name} in ${call.args}`).toBe(value);
+      }
+    }
+    // The calibration's own git also keeps the operator's configuration out of the clone.
+    for (const call of own) expect(call.env.GIT_CONFIG_GLOBAL, call.args).toBe("/dev/null");
+    // No git, nested or not, was handed a key, a token or a rule, by name or under another one.
+    for (const call of seen) {
+      const names = Object.keys(call.env);
+      const keys = names.filter((n) => /^anthropic_/i.test(n));
+      expect(keys, call.args).toEqual([]);
+      expect(names, call.args).not.toContain("PR_REVIEW_CALLBACK_TOKEN");
+    }
+    const everything = readFileSync(log, "utf8");
+    for (const secret of [key as string, ...Object.values(extra), `127.0.0.1:${server.port}`]) {
+      expect(everything).not.toContain(secret);
     }
   });
 

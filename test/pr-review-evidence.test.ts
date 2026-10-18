@@ -55,6 +55,7 @@ import {
   type TextFacts,
   __setEvidenceBudgetForTests,
   buildEvidence,
+  childEnv,
   classifyPath,
   gatherContent,
   gatherGitFacts,
@@ -93,7 +94,7 @@ import {
   stalledReply,
   standInMessage,
 } from "./helpers/anthropic-sse";
-import { installGitShim } from "./helpers/git-shim";
+import { installGitShim, readEnvLog } from "./helpers/git-shim";
 
 let root: string;
 const GIT_ENV = {
@@ -990,6 +991,64 @@ describe("runReview: the job around the model call", () => {
     for (const call of calls) {
       const command = call.split("protocol.ext.allow=never ")[1] ?? call;
       expect(allowed(command), command).toBe(true);
+    }
+  });
+
+  test("every git a review starts is handed neither the model credential nor the callback token", async () => {
+    // The model step's environment holds the callback token and the federation identifiers, and this
+    // file's beforeAll gives the SDK a key and a gateway address. None is for git, which reads a
+    // contributor's objects. The environment is read as each call starts, so it is set around the run.
+    const r = setup("run-child-env");
+    const pr = prJson(r.dir, {
+      head: { sha: r.head, repo: { full_name: "nemarDatasets/nm000460" } },
+    });
+    const extra = {
+      PR_REVIEW_CALLBACK_TOKEN: "callback-SECRET-TOKEN",
+      ANTHROPIC_FEDERATION_RULE_ID: "rule-SECRET-ID",
+    };
+    const saved = Object.fromEntries(Object.keys(extra).map((k) => [k, process.env[k]]));
+    const sdk = [process.env.ANTHROPIC_API_KEY, process.env.ANTHROPIC_BASE_URL];
+    expect(sdk.every((v) => v !== undefined)).toBe(true);
+    const log = join(root, `git-env-${Math.random().toString(36).slice(2)}.log`);
+    Object.assign(process.env, extra);
+    const restore = installGitShim(root, [{ match: " ", envLog: log }]);
+    let res: Awaited<ReturnType<typeof runReview>>;
+    let expected: NodeJS.ProcessEnv;
+    try {
+      expected = childEnv();
+      res = await runReview(args(r, pr));
+    } finally {
+      restore();
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) Reflect.deleteProperty(process.env, k);
+        else process.env[k] = v;
+      }
+    }
+    expect(res.outcome).toBe("reported");
+    // Both passes ran, so the listing and the content were both read.
+    expect(modelRequests).toHaveLength(2);
+    const calls = readEnvLog(log);
+    expect(calls.some((c) => c.args.includes(" merge-base "))).toBe(true);
+    expect(calls.some((c) => c.args.includes(" --numstat "))).toBe(true);
+    // The shell the shim runs in rewrites these; every other variable is exactly what childEnv() gave.
+    const rewritten = new Set(["_", "PWD", "OLDPWD", "SHLVL"]);
+    for (const call of calls) {
+      const names = Object.keys(call.env);
+      const keys = names.filter((n) => /^anthropic_/i.test(n));
+      expect(keys, call.args).toEqual([]);
+      expect(names, call.args).not.toContain("PR_REVIEW_CALLBACK_TOKEN");
+      for (const [name, value] of Object.entries(expected)) {
+        // The log is `env` output: a name that is not a plain identifier (an exported shell function)
+        // and a value that spans lines are not told apart from the lines around them.
+        if (rewritten.has(name) || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue;
+        if (value?.includes("\n")) continue;
+        expect(call.env[name], `${name} in ${call.args}`).toBe(value);
+      }
+    }
+    // And no value reached one under another name.
+    const everything = readFileSync(log, "utf8");
+    for (const secret of [...sdk, ...Object.values(extra)]) {
+      expect(everything).not.toContain(secret as string);
     }
   });
 
