@@ -862,7 +862,12 @@ describe("a Worker that posts the review check as another GitHub App", () => {
     expect(r.body.code).toBe("review_app_mismatch");
     expect(r.body.error).toContain("3679074");
     expect(r.body.error).toContain("GITHUB_APP_ID is not set");
+    // It names the one thing to fix: the binding is not there, which is not "not a number".
+    expect(r.body.error).not.toContain("plain number");
     expect(standIn.calls).toHaveLength(0);
+
+    const dry = await single("nm000201");
+    expect(dry.body).toMatchObject({ github_app_id: null, github_app_id_state: "unset" });
   });
 
   test("the same request goes through when the Worker posts as the App the ruleset names", async () => {
@@ -888,6 +893,7 @@ describe("a Worker that posts the review check as another GitHub App", () => {
       action: "create",
       applied: false,
       github_app_id: OTHER_APP,
+      github_app_id_state: "id",
       ruleset_app_id: 3679074,
       app_id_matches: false,
     });
@@ -901,6 +907,7 @@ describe("a Worker that posts the review check as another GitHub App", () => {
 
     expect(r.body).toMatchObject({
       github_app_id: "3679074",
+      github_app_id_state: "id",
       ruleset_app_id: 3679074,
       app_id_matches: true,
     });
@@ -913,10 +920,17 @@ describe("a Worker that posts the review check as another GitHub App", () => {
     const dry = await single("nm000201");
     const live = await single("nm000201", { dry_run: false });
 
-    expect(dry.body).toMatchObject({ github_app_id: null, app_id_matches: false });
+    expect(dry.body).toMatchObject({
+      github_app_id: null,
+      github_app_id_state: "not_a_number",
+      app_id_matches: false,
+    });
     expect(JSON.stringify(dry.body)).not.toContain("PRIVATE KEY");
     expect(live.status).toBe(409);
     expect(JSON.stringify(live.body)).not.toContain("PRIVATE KEY");
+    // It names the one thing to fix: the binding is set, to something that is not an id.
+    expect(live.body.error).toContain("GITHUB_APP_ID is set but is not a plain number");
+    expect(live.body.error).not.toContain("is not set");
   });
 
   test("a removal is not refused by it: remove:true, and a dataset the Worker does not review", async () => {

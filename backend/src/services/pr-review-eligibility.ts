@@ -77,23 +77,35 @@ export function isAutoRequireEnabled(env: Pick<Bindings, "PR_REVIEW_AUTO_REQUIRE
 }
 
 /**
+ * What the `GITHUB_APP_ID` binding holds, as far as an answer may say: nothing (`unset`), something
+ * that is not an App id (`not_a_number`, whatever it is, which is never repeated: a value pasted
+ * there by mistake can be a secret), or an id. They are three different things to fix.
+ */
+export type AppIdState = "unset" | "not_a_number" | "id";
+
+/**
  * The GitHub App ids that decide whether a requirement can ever be met. The ruleset requires the
  * `NEMAR PR Review` check from the App with id {@link NEMAR_APP_ID}, and this Worker posts that
  * check as the App whose id is its `GITHUB_APP_ID` binding. `github_app_id` is that binding when it
- * is a plain number and null otherwise (an unset binding, or a value that is not an id is never
- * repeated), `ruleset_app_id` is the one the ruleset names, and `app_id_matches` is whether they
- * are the same App: exactly the same digits, with nothing around them.
+ * is a plain number and null otherwise, `github_app_id_state` says which of the three cases the
+ * binding is in (an unset binding and a value that is not an id are both null in the first field
+ * and are told apart by the second), `ruleset_app_id` is the one the ruleset names, and
+ * `app_id_matches` is whether they are the same App: exactly the same digits, with nothing around
+ * them.
  */
 export interface ReviewAppIds {
   github_app_id: string | null;
+  github_app_id_state: AppIdState;
   ruleset_app_id: number;
   app_id_matches: boolean;
 }
 
 export function reviewAppIds(env: Pick<Bindings, "GITHUB_APP_ID">): ReviewAppIds {
   const raw = env.GITHUB_APP_ID;
+  const isId = typeof raw === "string" && /^\d{1,15}$/.test(raw);
   return {
-    github_app_id: typeof raw === "string" && /^\d{1,15}$/.test(raw) ? raw : null,
+    github_app_id: isId ? raw : null,
+    github_app_id_state: isId ? "id" : raw ? "not_a_number" : "unset",
     ruleset_app_id: NEMAR_APP_ID,
     app_id_matches: raw === String(NEMAR_APP_ID),
   };
@@ -109,11 +121,12 @@ export function reviewAppIds(env: Pick<Bindings, "GITHUB_APP_ID">): ReviewAppIds
 export function reviewAppIdRefusal(env: Pick<Bindings, "GITHUB_APP_ID">): string | null {
   const ids = reviewAppIds(env);
   if (ids.app_id_matches) return null;
-  const posts = ids.github_app_id
-    ? `the App with id ${ids.github_app_id}`
-    : env.GITHUB_APP_ID
-      ? "an App whose id is not a number (GITHUB_APP_ID holds something else)"
-      : "no App (GITHUB_APP_ID is not set)";
+  const posts =
+    ids.github_app_id_state === "id"
+      ? `the App with id ${ids.github_app_id}`
+      : ids.github_app_id_state === "not_a_number"
+        ? "an App whose id is not a number (GITHUB_APP_ID is set but is not a plain number)"
+        : "no App (GITHUB_APP_ID is not set)";
   return `The review ruleset requires the NEMAR PR Review check from the GitHub App with id ${ids.ruleset_app_id}, but this Worker posts the check as ${posts}, so the check would never arrive and requiring it would block every merge. Nothing was changed. Taking the requirement off is not refused.`;
 }
 

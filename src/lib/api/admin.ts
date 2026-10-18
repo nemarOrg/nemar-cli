@@ -1402,11 +1402,14 @@ export interface ReviewRulesetOutcome {
 
 /**
  * The GitHub App ids that decide whether a requirement can ever be met: the ruleset requires the
- * check from `ruleset_app_id`, and the Worker posts it as `github_app_id` (null when that is unset
- * or not an id). A requirement is refused (`review_app_mismatch`) unless they are the same App.
+ * check from `ruleset_app_id`, and the Worker posts it as `github_app_id`, which is null both when
+ * the binding is unset and when it holds something that is not an id, so `github_app_id_state`
+ * says which: `unset`, `not_a_number` or `id`. A requirement is refused (`review_app_mismatch`)
+ * unless they are the same App.
  */
 export interface ReviewAppIds {
   github_app_id: string | null;
+  github_app_id_state: "unset" | "not_a_number" | "id";
   ruleset_app_id: number;
   app_id_matches: boolean;
 }

@@ -101,6 +101,7 @@ import {
   type ReindexFilter,
   type ReindexOptions,
   type ReindexResponse,
+  type ReviewAppIds,
   type ReviewRulesetOutcome,
   type SignalDefaultsSweepBatchResponse,
   type SummaryVersionCoverage,
@@ -5544,19 +5545,19 @@ const NOT_REVIEWED_WORDS: Record<string, string> = {
  * Which GitHub App posts the review check and which one the ruleset requires it from, said on a
  * dry run. They have to be the same App or the check never arrives, and then `--apply` is refused.
  */
-function reviewAppLine(ids: {
-  github_app_id: string | null;
-  ruleset_app_id: number;
-  app_id_matches: boolean;
-}): string {
+function reviewAppLine(ids: ReviewAppIds): string {
   if (ids.app_id_matches) {
     return chalk.dim(
       `  GitHub App: this Worker posts the check as App ${ids.github_app_id}, the App the ruleset requires it from.`,
     );
   }
-  const posts = ids.github_app_id
-    ? `App ${ids.github_app_id}`
-    : "no App (GITHUB_APP_ID is not set)";
+  // Three different things to fix: an unset binding, a value that is not an id, and another App.
+  const posts =
+    ids.github_app_id_state === "id"
+      ? `App ${ids.github_app_id}`
+      : ids.github_app_id_state === "not_a_number"
+        ? "an App whose id is not a number (GITHUB_APP_ID is set but is not a plain number)"
+        : "no App (GITHUB_APP_ID is not set)";
   return chalk.yellow(
     `  GitHub App: this Worker posts the check as ${posts}, but the ruleset requires it from App ${ids.ruleset_app_id}, so --apply would be refused: the check would never arrive.`,
   );

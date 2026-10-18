@@ -14,6 +14,7 @@ import { describe, expect, test } from "bun:test";
 import { NEMAR_APP_ID } from "../src/services/github";
 import { reviewableDataset } from "../src/services/pr-review";
 import {
+  type AppIdState,
   OUTSIDE_FIXTURE_BAND,
   REVIEWABLE_ROW_COLUMNS,
   type ReviewableRow,
@@ -425,6 +426,7 @@ describe("the GitHub App the ruleset requires the check from", () => {
   test("agrees only with exactly the NEMAR App id, digit for digit", () => {
     expect(reviewAppIds({ GITHUB_APP_ID: "3679074" })).toEqual({
       github_app_id: "3679074",
+      github_app_id_state: "id",
       ruleset_app_id: 3679074,
       app_id_matches: true,
     });
@@ -453,6 +455,43 @@ describe("the GitHub App the ruleset requires the check from", () => {
     expect(sentence).toContain("3679074");
     expect(sentence).toContain("1234567");
     expect(sentence).toContain("Nothing was changed");
+  });
+
+  // `github_app_id` is null for an unset binding and for one that holds something else, so the
+  // two are told apart by the state, and an administrator is told which one to fix.
+  test("the binding is one of three states, unset, not a number and an id, and each is told apart", () => {
+    const cases: Array<[string | undefined, AppIdState, string | null]> = [
+      [undefined, "unset", null],
+      ["", "unset", null],
+      ["-----BEGIN PRIVATE KEY-----", "not_a_number", null],
+      [" 3679074", "not_a_number", null],
+      ["3679074\n", "not_a_number", null],
+      ["12345678901234567", "not_a_number", null],
+      ["app", "not_a_number", null],
+      ["1234567", "id", "1234567"],
+      ["3679074", "id", "3679074"],
+    ];
+    for (const [value, state, id] of cases) {
+      expect(reviewAppIds({ GITHUB_APP_ID: value }), JSON.stringify(value)).toMatchObject({
+        github_app_id_state: state,
+        github_app_id: id,
+      });
+    }
+  });
+
+  test("the sentence names the state the binding is in and not another", () => {
+    const unset = reviewAppIdRefusal({ GITHUB_APP_ID: undefined }) ?? "";
+    expect(unset).toContain("GITHUB_APP_ID is not set");
+    expect(unset).not.toContain("not a plain number");
+
+    const notANumber = reviewAppIdRefusal({ GITHUB_APP_ID: " 3679074" }) ?? "";
+    expect(notANumber).toContain("GITHUB_APP_ID is set but is not a plain number");
+    expect(notANumber).not.toContain("is not set");
+
+    const another = reviewAppIdRefusal({ GITHUB_APP_ID: "1234567" }) ?? "";
+    expect(another).toContain("the App with id 1234567");
+    expect(another).not.toContain("is not set");
+    expect(another).not.toContain("plain number");
   });
 
   test("an unset binding is said to be unset, and a value that is not an id is never repeated", () => {

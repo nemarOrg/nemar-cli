@@ -402,6 +402,57 @@ describe("the GitHub App the ruleset requires the check from", () => {
     expect(standIn.writes()).toHaveLength(0);
   });
 
+  // An unset binding, a value that is not an id and another App are three different things to fix,
+  // and the Worker's answer used to leave the first two both as a null id.
+  test("a dry run says which of three things is wrong with GITHUB_APP_ID: unset, not a number, or another App", async () => {
+    seedDataset("nm000201");
+    const dryRun = async (value: string | undefined) => {
+      envOverrides = { GITHUB_APP_ID: value };
+      const r = await cli(["nm000201"]);
+      expect(r.exitCode).toBe(0);
+      return r.stdout;
+    };
+
+    const unset = await dryRun(undefined);
+    expect(unset).toContain("this Worker posts the check as no App (GITHUB_APP_ID is not set)");
+    expect(unset).not.toContain("plain number");
+    expect(unset).toContain("--apply would be refused");
+
+    const pasted = await dryRun("-----BEGIN PRIVATE KEY-----");
+    expect(pasted).toContain(
+      "this Worker posts the check as an App whose id is not a number (GITHUB_APP_ID is set but is not a plain number)",
+    );
+    expect(pasted).not.toContain("is not set");
+    expect(pasted).not.toContain("PRIVATE KEY");
+    expect(pasted).toContain("--apply would be refused");
+
+    const other = await dryRun("1234567");
+    expect(other).toContain("this Worker posts the check as App 1234567");
+    expect(other).not.toContain("is not set");
+    expect(other).not.toContain("plain number");
+    expect(standIn.writes()).toHaveLength(0);
+  });
+
+  test("--apply is refused naming the right one of the three, and writes nothing", async () => {
+    seedDataset("nm000201");
+
+    envOverrides = { GITHUB_APP_ID: undefined };
+    const unset = await cli(["nm000201", "--apply"]);
+    envOverrides = { GITHUB_APP_ID: "-----BEGIN PRIVATE KEY-----" };
+    const pasted = await cli(["nm000201", "--apply"]);
+
+    expect(unset.exitCode).toBe(1);
+    expect(unset.stdout + unset.stderr).toContain("GITHUB_APP_ID is not set");
+    expect(unset.stdout + unset.stderr).not.toContain("plain number");
+    expect(pasted.exitCode).toBe(1);
+    expect(pasted.stdout + pasted.stderr).toContain(
+      "GITHUB_APP_ID is set but is not a plain number",
+    );
+    expect(pasted.stdout + pasted.stderr).not.toContain("is not set");
+    expect(pasted.stdout + pasted.stderr).not.toContain("PRIVATE KEY");
+    expect(standIn.calls).toHaveLength(0);
+  });
+
   test("--apply is refused in a sentence that names both ids, and exits 1 with nothing written", async () => {
     seedDataset("nm000201");
     envOverrides = { GITHUB_APP_ID: "1234567" };
