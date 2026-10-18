@@ -8387,7 +8387,10 @@ def _recording_size_bytes(primary_local: str) -> int:
 # text, so a 1.2.11 run would take every streamed refusal for the node's fault and
 # retry it until `retry_exhausted`. 1.2.13 is the pin's floor: it refuses a
 # BrainVision data file whose header shows it was cut short, where 1.2.12 read it
-# with the tail dropped, so the converter takes no older release
+# with the tail dropped, and it adds `allow_partial_frame`, which
+# `convert_recording` passes to read the whole frames of a multiplexed file with a
+# trailing partial frame and no positive `DataPoints` count, and to record the
+# dropped bytes. So the converter takes no older release
 # (TestCutShortBrainVisionThroughConvertOne). A cut exactly at a frame boundary of
 # a file with no positive `DataPoints` count is not detected: it reads as a
 # shorter recording.
@@ -8776,6 +8779,15 @@ def convert_recording(
             primary_local,
             mixed_rate="resample",
             bids_channels=bids_channels_arg(channels_local),
+            # A trailing partial frame in a BrainVision file whose header declares
+            # no `DataPoints` count cannot be told from a complete recording that
+            # ends in stray bytes (biosigIO ignores this for every other format).
+            # The whole frames are read, as biosigIO 1.2.12 read them, and the
+            # dropped byte count is recorded in the store's `recording_metadata`
+            # as `brainvision_dropped_bytes`. A file shorter than the `DataPoints`
+            # count it declares, vectorized data with a partial frame and a file
+            # with no whole frame are still refused as `corrupt_or_truncated`.
+            allow_partial_frame=True,
         )
         if events_local and os.path.exists(events_local):
             bids.apply_events_tsv(rec, events_local)
@@ -8828,6 +8840,16 @@ def convert_recording(
                 # disagreement that held the engine bump back until biosigio#128
                 # gave `stream_to_zarr` this parameter. See `bids_channels_arg`.
                 bids_channels=bids_channels_arg(channels_local),
+                # The in-memory path's policy, so the two exporters cannot disagree
+                # about a cut BrainVision file: a trailing partial frame in a file
+                # with no `DataPoints` count cannot be told from a complete recording
+                # that ends in stray bytes, so the whole frames are read as 1.2.12
+                # read them and the dropped byte count is recorded in the store's
+                # `recording_metadata` (`brainvision_dropped_bytes`). A file shorter
+                # than its declared `DataPoints` count, vectorized data with a
+                # partial frame and a file with no whole frame are still refused.
+                # Ignored for every other format.
+                allow_partial_frame=True,
             )
         except MixedSamplingRateError:
             # A mixed per-channel-rate EDF can't stream on a single grid; the
