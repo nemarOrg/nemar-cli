@@ -27,12 +27,14 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { isValidDatasetId } from "../backend/src/services/datasetId";
 import { NEMAR_APP_ID } from "../backend/src/services/github";
 import { hashApiKey } from "../backend/src/services/token";
 import type { Bindings } from "../backend/src/types/bindings";
 import { freshDb, realD1 } from "../backend/test/helpers/d1";
 import { type RulesetStandIn, startRulesetStandIn } from "../backend/test/helpers/github-rulesets";
 import { makePrQueueApp } from "../backend/test/helpers/pr-queue-app";
+import { isBoundedDatasetId, isDatasetIdPrefix } from "../src/lib/admin-command";
 
 setDefaultTimeout(30_000);
 
@@ -49,6 +51,8 @@ let db: Database;
 let configDir: string;
 let envOverrides: Partial<Bindings> = {};
 let handle: ReturnType<typeof makePrQueueApp>;
+/** The review-ruleset requests the Worker received, so a test can say that none was sent. */
+const sent: string[] = [];
 
 function env(): Bindings {
   return {
@@ -70,6 +74,7 @@ beforeAll(() => {
     port: 0,
     fetch(req) {
       const url = new URL(req.url);
+      if (url.pathname.includes("review-ruleset")) sent.push(`${req.method} ${url.pathname}`);
       if (url.pathname === "/notices") return Response.json({ notices: [] });
       if (url.pathname === "/datasets/facets") return Response.json({});
       return handle(req, env());
@@ -129,6 +134,7 @@ function writeConfig(dir: string, account: string, key: string): void {
 
 beforeEach(async () => {
   db = freshDb();
+  sent.length = 0;
   standIn.reset();
   envOverrides = {};
   configDir = mkdtempSync(join(tmpdir(), "nemar-review-ruleset-cli-"));
@@ -671,6 +677,74 @@ describe("what is asked for is checked before anything is sent", () => {
     expect(standIn.calls).toHaveLength(0);
   });
 
+  // The Worker refuses a bad prefix or id with a validation object, which the CLI would print as
+  // "[object Object]". Both are checked here first, in a sentence, and nothing is sent.
+  test.each<[string[], string]>([
+    [["--all", "--prefix", "NM"], "is not a dataset id prefix"],
+    [["--all", "--prefix", "n"], "is not a dataset id prefix"],
+    [["--all", "--prefix", "nm1234567"], "is not a dataset id prefix"],
+    [["--all", "--prefix", "nm%"], "is not a dataset id prefix"],
+    [["--all", "--prefix", "../"], "is not a dataset id prefix"],
+    [["--all", "--prefix", ""], "is not a dataset id prefix"],
+    [["--all", "--after", "nm0003"], "is not a dataset id"],
+    [["--all", "--after", "NM000312"], "is not a dataset id"],
+    [["--all", "--after", "nm100000"], "is not a dataset id"],
+    [["--all", "--after", ""], "is not a dataset id"],
+    [["--all", "--after", "nm000312 "], "is not a dataset id"],
+  ])("%j exits 1, says %j, and sends nothing", async (args, words) => {
+    const r = await cli(args);
+
+    expect(r.exitCode).toBe(1);
+    const said = r.stdout + r.stderr;
+    expect(said).toContain(words);
+    expect(said).not.toContain("[object Object]");
+    expect(sent).toEqual([]);
+    expect(standIn.calls).toHaveLength(0);
+  });
+
+  test("the refusal of a prefix says what a prefix is, and the one of --after says what it takes", async () => {
+    const prefix = await cli(["--all", "--prefix", "NM"]);
+    expect(prefix.stdout + prefix.stderr).toContain(
+      '"NM" is not a dataset id prefix: use two lowercase letters, then up to six digits (like nm or nm0001).',
+    );
+    const after = await cli(["--all", "--after", "nm0003"]);
+    expect(after.stdout + after.stderr).toContain(
+      '"nm0003" is not a dataset id (like nm000312). --after takes the last id of the previous page.',
+    );
+  });
+
+  test("with --json a refused prefix goes to standard error and standard output stays empty", async () => {
+    const r = await cli(["--all", "--prefix", "NM", "--json"]);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout.trim()).toBe("");
+    expect(r.stderr).toContain("is not a dataset id prefix");
+  });
+
+  test("a prefix and an id that are right are sent", async () => {
+    seedDataset("nm000401");
+    seedDataset("nm000402");
+
+    const r = await cli(["--all", "--prefix", "nm0004", "--after", "nm000401"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("nm000402");
+    expect(r.stdout).not.toContain("nm000401 ");
+    expect(sent).toEqual(["POST /admin/datasets/review-ruleset/bulk"]);
+  });
+
+  test("--prefix and --after without --all are refused even when empty", async () => {
+    for (const args of [
+      ["nm000201", "--prefix", ""],
+      ["nm000201", "--after", ""],
+    ]) {
+      const r = await cli(args);
+      expect(r.exitCode, args.join(" ")).toBe(1);
+      expect(r.stdout + r.stderr).toContain("go with --all");
+    }
+    expect(sent).toEqual([]);
+  });
+
   test("the override the first design had is gone: --force-live is not an option", async () => {
     seedDataset("nm000103");
 
@@ -699,5 +773,82 @@ describe("what is asked for is checked before anything is sent", () => {
     } finally {
       rmSync(emptyDir, { recursive: true, force: true });
     }
+  });
+});
+
+// The CLI cannot import the Worker's validators, so it states the same two rules itself. Two
+// statements of one rule can drift, and the first sign of it would be a prefix the CLI sends and
+// the Worker refuses as "[object Object]", or one the CLI refuses and the Worker would take. So the
+// same table is put to both, the id rule to `isValidDatasetId` itself and the prefix rule to the
+// real route.
+describe("the checks the CLI makes are the Worker's own", () => {
+  const PREFIXES = [
+    "nm",
+    "on",
+    "xx",
+    "zz",
+    "nm0",
+    "nm0001",
+    "nm000108",
+    "nm0000000",
+    "nm1",
+    "NM",
+    "Nm",
+    "n",
+    "",
+    "1m",
+    "nm%",
+    "n_",
+    "../",
+    "nm 1",
+    "nm\n",
+    "nm00010a",
+  ];
+  const IDS = [
+    "nm000312",
+    "on000001",
+    "xx099999",
+    "nm099999",
+    "nm099900",
+    "nm100000",
+    "nm999999",
+    "xx100000",
+    "nm00031",
+    "nm0003120",
+    "NM000312",
+    "ab000312",
+    "zz000001",
+    "",
+    "nm00031x",
+    " nm000312",
+    "nm000312 ",
+    "nm000312\n",
+  ];
+
+  test("an id is one to the CLI exactly when isValidDatasetId says so", () => {
+    for (const id of IDS) {
+      expect(isBoundedDatasetId(id), JSON.stringify(id)).toBe(isValidDatasetId(id));
+    }
+    // Not vacuous: both answers occur in the table.
+    expect(IDS.filter(isValidDatasetId).length).toBeGreaterThan(0);
+    expect(IDS.filter((id) => !isValidDatasetId(id)).length).toBeGreaterThan(0);
+  });
+
+  test("a prefix is one to the CLI exactly when the route takes it", async () => {
+    let taken = 0;
+    for (const prefix of PREFIXES) {
+      const res = await fetch(
+        `http://127.0.0.1:${apiServer.port}/admin/datasets/review-ruleset/bulk`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${OWNER_KEY}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ prefix }),
+        },
+      );
+      expect(isDatasetIdPrefix(prefix), JSON.stringify(prefix)).toBe(res.status === 200);
+      if (res.status === 200) taken++;
+    }
+    expect(taken).toBeGreaterThan(0);
+    expect(taken).toBeLessThan(PREFIXES.length);
   });
 });

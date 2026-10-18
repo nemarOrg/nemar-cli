@@ -51,7 +51,9 @@ import {
 } from "../../shared/contract/neurobagel-admin.js";
 import { weeklyAttention } from "../../shared/contract/weekly-attention.js";
 import {
+  checkedAfterDatasetId,
   checkedDatasetId,
+  checkedDatasetIdPrefix,
   failMessage,
   failWith,
   handleCommandError,
@@ -5659,7 +5661,10 @@ Examples:
       if (!datasetArg && !options.all) {
         return refuse("Name a dataset, or use --all for a page of datasets.");
       }
-      if (!options.all && (options.prefix || options.after || options.limit)) {
+      if (
+        !options.all &&
+        (options.prefix !== undefined || options.after !== undefined || options.limit !== undefined)
+      ) {
         return refuse("--prefix, --after and --limit go with --all.");
       }
       let limit: number | undefined;
@@ -5669,6 +5674,14 @@ Examples:
           return refuse("--limit is a number from 1 to 50.");
         }
       }
+      // What the Worker would refuse is refused here first, in a sentence: its own refusal of a
+      // bad prefix or id comes back as an object, which prints as "[object Object]".
+      const prefix =
+        options.prefix === undefined ? undefined : checkedDatasetIdPrefix(options.prefix, json);
+      if (prefix === null) return;
+      const after =
+        options.after === undefined ? undefined : checkedAfterDatasetId(options.after, json);
+      if (after === null) return;
       const id = datasetArg ? checkedDatasetId(datasetArg, json) : null;
       if (datasetArg && !id) return;
 
@@ -5725,8 +5738,8 @@ Examples:
         }
 
         const r = await reviewRulesetBulk({
-          prefix: options.prefix,
-          after: options.after,
+          prefix,
+          after,
           limit,
           dryRun,
           remove,
