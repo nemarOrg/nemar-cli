@@ -8780,8 +8780,8 @@ def convert_recording(
             primary_local,
             mixed_rate="resample",
             bids_channels=bids_channels_arg(channels_local),
-            # A trailing partial frame in a BrainVision file whose header declares
-            # no positive `DataPoints` count cannot be told from a complete
+            # A trailing partial frame in a multiplexed BrainVision file whose header
+            # declares no positive `DataPoints` count cannot be told from a complete
             # recording that ends in stray bytes. The whole frames are read, as
             # biosigIO 1.2.12 read them, and the dropped byte count is recorded in
             # the store's `recording_metadata` as `brainvision_dropped_bytes`. A
@@ -8843,7 +8843,7 @@ def convert_recording(
                 # gave `stream_to_zarr` this parameter. See `bids_channels_arg`.
                 bids_channels=bids_channels_arg(channels_local),
                 # The in-memory path's policy, so the two exporters cannot disagree
-                # about a cut BrainVision file: a trailing partial frame in a file
+                # about a cut BrainVision file: a trailing partial frame in a multiplexed file
                 # with no positive `DataPoints` count cannot be told from a complete
                 # recording that ends in stray bytes, so the whole frames are read as
                 # 1.2.12 read them and the dropped byte count is recorded in the
