@@ -52,7 +52,7 @@ describe("backend/wrangler-sccn.toml and the automatic requirement switch", () =
   // review off (ADR 0107), and a pin would fail this test, and so the deploy's test gate, on the
   // change that does it. The checks above already keep the guard from being vacuous.
 
-  test("the switch is in no vars block, so it is off everywhere", () => {
+  test("the switch is in no vars block, so the file turns it on nowhere", () => {
     const setIn = varsBlocks()
       .filter(([, vars]) => Object.keys(vars ?? {}).includes(SWITCH))
       .map(([name]) => name);
