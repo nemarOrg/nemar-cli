@@ -24,7 +24,8 @@ The conversion changes run on `hallu` from this repository's `main` branch, not 
 ### Changed
 
 - **Zarr conversion pins biosigIO 1.2.13 (`>=1.2.13,<1.2.14`).**
-  A BrainVision data file that does not hold whole frames is refused as `corrupt_or_truncated`: shorter than its header's `DataPoints` count declares, or, when the header has no `DataPoints` count, a size that is not a whole number of frames. 1.2.12 read the whole frames of such a file and dropped the trailing partial frame without a warning.
+  A BrainVision data file shorter than its header's `DataPoints` count is refused as `corrupt_or_truncated`.
+  A BrainVision data file with no `DataPoints` count that ends in a partial frame now converts: the converter reads the whole frames, as 1.2.12 did, and records the dropped byte count in the store's recording metadata (`brainvision_dropped_bytes`). A cut inside the last frame of such a file is therefore read rather than refused. Vectorized data with a partial frame, and a file with no whole frame, are still refused.
   An EDF+C or BDF+C recording whose first time-keeping onset is not zero now converts, where it was refused as not EDF(+) or BDF(+) compliant.
   A truncated FIF read through `Recording.from_file` is typed `corrupt_or_truncated`, where it was `file_read_error`.
   A BrainVision cut that falls exactly on a frame boundary of a file with no `DataPoints` count is not detected; that is a known limit of the reader.
@@ -51,6 +52,7 @@ The conversion changes run on `hallu` from this repository's `main` branch, not 
 - This release requeues nothing; a dataset's stores change only when that dataset next runs (see the first paragraph above).
 - Streamed export still raises an uncoded error for a truncated FIF (biosigIO #161) and for truncated KIT and 4D/BTi files (biosigIO #168), so those are retried until the retry budget runs out.
 - In a local run, a git-annex pointer whose content was never fetched is a typed `file_read_error` that is never retried; whether it should stay retryable is open (#1812).
+- A BrainVision marker that falls inside a dropped partial frame is not kept; the dropped byte count is in the store's metadata, not in the public index.
 - A host read error during the MaxShield header probe is still recorded as `maxshield_probe_failed`, which is terminal (#1833).
 - A short read of an EEGLAB `.fdt` caused by an I/O error is reported as a sample-count mismatch, which is typed `corrupt_or_truncated` (biosigIO #169).
 
