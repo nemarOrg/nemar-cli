@@ -205,12 +205,13 @@ describe("ensureRepoToSpec and the required review", () => {
   });
 
   // Step 2 of the live run makes main the default branch, and only then does the review step run,
-  // so a repository on another branch is repointed and given the ruleset, not skipped. The dry run
-  // plans those same two steps.
+  // so a repository on another branch is given the ruleset, not skipped. It makes main the default
+  // by moving the default to an existing main, or by renaming the branch when there is no main.
+  // The dry run plans those same two steps, in words that are true of both.
   describe("a repository whose default branch is not main", () => {
     const REPO_PATH = `/repos/nemarDatasets/${REPO}`;
 
-    test("a dry run says it would repoint the default branch to main, then create the ruleset", async () => {
+    test("a dry run says it would make main the default branch, then create the ruleset", async () => {
       standIn.defaultBranches.set(REPO, "master");
 
       const result = await ensureRepoToSpec(REPO, PAT, {
@@ -221,7 +222,7 @@ describe("ensureRepoToSpec and the required review", () => {
 
       expect(result.steps.review_ruleset).toEqual({
         status: "ok",
-        detail: "would repoint the default branch to main, then create",
+        detail: "would make main the default branch, then create",
       });
       expect(result.steps.plan?.detail).toBe("public, default=master");
       expect(standIn.writes()).toHaveLength(0);
@@ -242,12 +243,12 @@ describe("ensureRepoToSpec and the required review", () => {
 
       expect(result.steps.review_ruleset).toEqual({
         status: "ok",
-        detail: "would repoint the default branch to main, then update",
+        detail: "would make main the default branch, then update",
       });
       expect(standIn.writes()).toHaveLength(0);
     });
 
-    test("the live run does what the dry run said: it repoints, then creates the ruleset", async () => {
+    test("the live run does what the dry run said: it makes main the default, then creates the ruleset", async () => {
       standIn.defaultBranches.set(REPO, "master");
 
       const live = await ensureRepoToSpec(REPO, PAT, { visibility: "public", review: "require" });
@@ -261,6 +262,53 @@ describe("ensureRepoToSpec and the required review", () => {
       expect(standIn.calls.filter((c) => c.method === "GET" && c.path === REPO_PATH)).toHaveLength(
         2,
       );
+    });
+
+    // The dry run cannot know whether `main` exists, and does not ask. Its words are the same, and
+    // true, whichever the live run finds: it repoints to an existing main, or it renames the branch.
+    test("the dry run's words are true of both live outcomes: main is repointed to, or the branch is renamed to it", async () => {
+      const plan = {
+        status: "ok",
+        detail: "would make main the default branch, then create",
+      };
+
+      standIn.defaultBranches.set(REPO, "master");
+      const dryWithMain = await ensureRepoToSpec(REPO, PAT, {
+        visibility: "public",
+        review: "require",
+        dryRun: true,
+      });
+      expect(dryWithMain.steps.review_ruleset).toEqual(plan);
+      expect(standIn.writes()).toHaveLength(0);
+      const liveWithMain = await ensureRepoToSpec(REPO, PAT, {
+        visibility: "public",
+        review: "require",
+      });
+      expect(liveWithMain.steps.main_branch).toEqual({
+        status: "ok",
+        detail: "repointed from master",
+      });
+      expect(liveWithMain.steps.review_ruleset).toEqual({ status: "ok", detail: "created" });
+      expect(standIn.defaultBranches.get(REPO)).toBe("main");
+
+      // The same repository with no main branch at all: the live run renames its branch.
+      standIn.reset();
+      standIn.defaultBranches.set(REPO, "master");
+      standIn.missingMain.add(REPO);
+      const dryNoMain = await ensureRepoToSpec(REPO, PAT, {
+        visibility: "public",
+        review: "require",
+        dryRun: true,
+      });
+      expect(dryNoMain.steps.review_ruleset).toEqual(plan);
+      expect(standIn.writes()).toHaveLength(0);
+      const liveNoMain = await ensureRepoToSpec(REPO, PAT, {
+        visibility: "public",
+        review: "require",
+      });
+      expect(liveNoMain.steps.main_branch).toEqual({ status: "ok", detail: "renamed from master" });
+      expect(liveNoMain.steps.review_ruleset).toEqual({ status: "ok", detail: "created" });
+      expect(standIn.defaultBranches.get(REPO)).toBe("main");
     });
 
     test("a dry run reads the repository once, and the review step does not read it again", async () => {

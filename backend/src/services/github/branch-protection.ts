@@ -822,10 +822,12 @@ async function reviewRulesetStepOf(
       }
     }
     // The live run makes main the default branch (the main_branch step of ensureRepoToSpec)
-    // before it gets here, so on a repository that is on another branch it repoints first and
-    // then writes. A dry run has not repointed anything, and would read the unchanged branch and
-    // report a skip the live run never makes, so it plans the same two steps.
-    const repoints =
+    // before it gets here, so on a repository that is on another branch it does that first and
+    // then writes. How it does it depends on whether `main` exists: it moves the default to an
+    // existing `main`, and it renames the branch when there is none. A dry run has changed
+    // nothing, and would read the unchanged branch and report a skip the live run never makes, so
+    // it plans the same two steps, in words that are true of both ways.
+    const makesMainDefault =
       o.dryRun &&
       intent === "require" &&
       defaultBranch !== undefined &&
@@ -833,7 +835,7 @@ async function reviewRulesetStepOf(
     const step = await reconcileReviewRuleset(repo, pat, {
       intent,
       dryRun: o.dryRun,
-      defaultBranch: repoints ? REVIEW_BASE_BRANCH : defaultBranch,
+      defaultBranch: makesMainDefault ? REVIEW_BASE_BRANCH : defaultBranch,
     });
     if (step.action === "skip") {
       return {
@@ -841,10 +843,10 @@ async function reviewRulesetStepOf(
         detail: `default branch is ${step.defaultBranch}, not ${REVIEW_BASE_BRANCH}`,
       };
     }
-    if (repoints) {
+    if (makesMainDefault) {
       return {
         status: "ok",
-        detail: `would repoint the default branch to ${REVIEW_BASE_BRANCH}, then ${step.action}`,
+        detail: `would make ${REVIEW_BASE_BRANCH} the default branch, then ${step.action}`,
       };
     }
     const words = o.dryRun

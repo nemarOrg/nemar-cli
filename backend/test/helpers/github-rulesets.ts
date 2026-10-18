@@ -51,6 +51,11 @@ export interface RulesetStandIn {
   orgRulesets: RulesetRecord[];
   /** A repository's default branch ("main" if absent); `null` makes the repository answer 404. */
   defaultBranches: Map<string, string | null>;
+  /**
+   * Repositories that have no `main` branch: `GET /branches/main` answers 404 for them until the
+   * default branch is renamed to `main`, which is what ensureMainBranch does then.
+   */
+  missingMain: Set<string>;
   /** The conclusion of the BIDS check on a repository's head ("success" if absent). */
   bidsConclusion: Map<string, string>;
   /**
@@ -231,6 +236,7 @@ export function startRulesetStandIn(): RulesetStandIn {
   const orgRulesets: RulesetRecord[] = [];
   const defaultBranches = new Map<string, string | null>();
   const bidsConclusion = new Map<string, string>();
+  const missingMain = new Set<string>();
   const failures: Array<{ method: string; path: RegExp; status: number; remaining: number }> = [];
   const hooks: Array<{ method: string; path: RegExp; run: () => void }> = [];
   const lateFailures: Array<{ method: string; path: RegExp; status: number; remaining: number }> =
@@ -262,9 +268,20 @@ export function startRulesetStandIn(): RulesetStandIn {
         return Response.json({ name: repo });
       }
     }
-    // Every repository has a `main` branch to repoint to. The case where ensureMainBranch has to
-    // rename a branch, because `main` is missing, is not modeled.
-    if (rest === "/branches/main" && method === "GET") return Response.json({ name: "main" });
+    // A repository has a `main` branch to repoint to, unless it is in `missingMain`: then the
+    // default branch is renamed to `main`, and that is how it gets one.
+    if (rest === "/branches/main" && method === "GET") {
+      return missingMain.has(repo)
+        ? Response.json({ message: "Branch not found" }, { status: 404 })
+        : Response.json({ name: "main" });
+    }
+    if (/^\/branches\/[^/]+\/rename$/.test(rest) && method === "POST") {
+      if (body?.new_name === "main") {
+        defaultBranches.set(repo, "main");
+        missingMain.delete(repo);
+      }
+      return Response.json({ name: body?.new_name }, { status: 201 });
+    }
 
     if (rest === "/rulesets") {
       if (method === "GET") {
@@ -388,6 +405,7 @@ export function startRulesetStandIn(): RulesetStandIn {
     rulesets,
     orgRulesets,
     defaultBranches,
+    missingMain,
     bidsConclusion,
     failNext(method, path, status, times = 1) {
       failures.push({ method, path, status, remaining: times });
@@ -405,6 +423,7 @@ export function startRulesetStandIn(): RulesetStandIn {
       rulesets.clear();
       orgRulesets.length = 0;
       defaultBranches.clear();
+      missingMain.clear();
       bidsConclusion.clear();
       failures.length = 0;
       hooks.length = 0;
