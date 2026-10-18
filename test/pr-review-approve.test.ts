@@ -818,15 +818,26 @@ describe("what GitHub's mergeable state allows, asked before anything is written
     }
   });
 
-  test("a blocked state names the required review and says who merges it, and where", () => {
-    // The review is a required check where a dataset's ruleset requires it (ADR 0107), and a
-    // failed one leaves the pull request blocked. The tool never uses the bypass an
-    // administrator holds on GitHub, so it says the merge is theirs to make in the GitHub UI.
+  test("a blocked state names what can block, and says only the review check can be overridden in the GitHub UI, and only where its ruleset is in force", () => {
+    // GitHub says `blocked` for any required check or review that is not satisfied. The review is
+    // one of them where a dataset's ruleset requires it (ADR 0107), and only that check is one an
+    // owner or administrator can override in the GitHub UI: the tool never uses the bypass an
+    // administrator holds there. Saying so of every blocked pull request would send an
+    // administrator to override a block that is not the review's.
     const why = refusal("blocked") ?? "";
     expect(why).toContain("a required check or review is not satisfied");
-    expect(why).toContain("NEMAR PR Review");
-    expect(why).toContain("an owner or administrator merges such a pull request in the GitHub UI");
+    // The other blocks are named, not left to be read as the review.
+    expect(why).toContain("the BIDS validation, the version check");
+    expect(why).toContain("where its ruleset is in force, the NEMAR PR Review");
+    // What an owner or administrator can override is said of the review check alone, and of it
+    // only where its ruleset is in force.
+    expect(why).toContain(
+      "an owner or administrator can override only the NEMAR PR Review check, in the GitHub UI, and only where its ruleset is in force",
+    );
     expect(why).toContain("never uses the bypass");
+    // The old sentence told them to merge "such a pull request", whichever check was blocking it.
+    expect(why).not.toContain("such a pull request");
+    expect(why).not.toContain("merges");
     // The same sentence reaches the card `next` shows, and no other state says it.
     const check = mergeCheckOf("blocked");
     if (!check.ok) expect(check.card).toContain("in the GitHub UI");

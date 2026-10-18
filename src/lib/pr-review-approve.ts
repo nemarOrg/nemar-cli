@@ -665,10 +665,14 @@ const MERGEABLE = "clean";
 const NOT_CLEAN_WHY = new Map<string, string>([
   [
     "blocked",
-    // The required review (ADR 0107) is one of the checks that can leave a pull request here.
-    // The bypass is an administrator's on GitHub; this tool never uses it (ADR 0093), so it says
-    // where the merge is made and by whom.
-    "a required check or review is not satisfied, such as the NEMAR PR Review; an owner or administrator merges such a pull request in the GitHub UI, since this tool never uses the bypass",
+    // GitHub says `blocked` for any required check or review that is not satisfied, and does not say
+    // which, so this names what they can be. Where its ruleset is in force (ADR 0107) one of them
+    // is the NEMAR PR Review check, and that is the one an owner or administrator can override in
+    // the GitHub UI; the bypass is theirs on GitHub, and this tool never uses it (ADR 0093). It
+    // is said of that check alone, and only where its ruleset is in force, because a block by the
+    // BIDS validation or the version check is not that, and where the review is not required a
+    // pull request is not held by it at all.
+    "a required check or review is not satisfied (the BIDS validation, the version check or, where its ruleset is in force, the NEMAR PR Review); an owner or administrator can override only the NEMAR PR Review check, in the GitHub UI, and only where its ruleset is in force, since this tool never uses the bypass",
   ],
   ["behind", "the branch is behind main"],
   ["dirty", "it has merge conflicts"],
