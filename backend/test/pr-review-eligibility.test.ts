@@ -1,0 +1,267 @@
+/**
+ * Which datasets the review applies to (ADR 0107): the row-in-hand rule the ruleset tooling uses,
+ * tied to the SQL rule the Worker uses, and the band of fixture ids the tooling never touches.
+ *
+ * The tie is the point of the first block. `isReviewableRow` and the Worker's
+ * `REVIEWABLE_DATASET_PREDICATE` are two statements of one rule, and a ruleset put on a dataset
+ * the Worker will not review (or left off one it will) is a required check that never comes, or a
+ * review nobody requires. Both are run over the same rows, in a real SQLite database with every
+ * migration applied, through `reviewableDataset`, the Worker's own function.
+ */
+
+import type { Database } from "bun:sqlite";
+import { describe, expect, test } from "bun:test";
+import { reviewableDataset } from "../src/services/pr-review";
+import {
+  OUTSIDE_FIXTURE_BAND,
+  REVIEWABLE_ROW_COLUMNS,
+  type ReviewableRow,
+  isReviewEnabled,
+  isReviewRulesetFixture,
+  isReviewableRow,
+  notReviewableReason,
+  readReviewIntent,
+  reviewIntentOf,
+} from "../src/services/pr-review-eligibility";
+import type { Bindings } from "../src/types/bindings";
+import { freshDb, realD1 } from "./helpers/d1";
+
+const STATUSES = ["active", "archived", "deleted"] as const;
+const VISIBILITIES = ["public", "private"] as const;
+const ANONYMOUS = [0, 1] as const;
+// A real stamp, an empty string (which SQL's IS NOT NULL calls set), and NULL.
+const PUBLISHED = ["2026-01-01 00:00:00", "", null] as const;
+
+function combinations(): ReviewableRow[] {
+  const out: ReviewableRow[] = [];
+  for (const status of STATUSES)
+    for (const visibility of VISIBILITIES)
+      for (const anonymous of ANONYMOUS)
+        for (const first_published_at of PUBLISHED)
+          out.push({ status, visibility, anonymous, first_published_at });
+  return out;
+}
+
+function insert(db: Database, id: string, row: ReviewableRow): void {
+  db.run(
+    `INSERT OR IGNORE INTO users (id, username, email, password_hash, status, role, email_verified)
+     VALUES (1, 'owner', 'owner@example.org', 'x', 'approved', 'member', 1)`,
+  );
+  db.run(
+    `INSERT INTO datasets (dataset_id, name, owner_user_id, is_sandbox, github_repo,
+                           status, visibility, anonymous, first_published_at)
+     VALUES (?, ?, 1, 0, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      `Dataset ${id}`,
+      `nemarDatasets/${id}`,
+      row.status,
+      row.visibility,
+      row.anonymous,
+      row.first_published_at,
+    ],
+  );
+}
+
+describe("isReviewableRow agrees with the Worker's SQL rule", () => {
+  test("for every combination of status, visibility, anonymity and publication", async () => {
+    const db = freshDb();
+    // A published anonymous row cannot exist: these two triggers refuse it, which is the invariant
+    // the rule leans on. The rule must still say no to one, so the triggers are dropped in this
+    // scratch database to put the combination in front of the SQL as well.
+    db.run("DROP TRIGGER datasets_anonymous_unpublished_ai");
+    db.run("DROP TRIGGER datasets_anonymous_unpublished_au");
+
+    const rows = combinations();
+    const d1 = realD1(db);
+    const disagreements: string[] = [];
+    let reviewable = 0;
+    for (const [i, row] of rows.entries()) {
+      const id = `nm${String(300 + i).padStart(6, "0")}`;
+      insert(db, id, row);
+      const sql = (await reviewableDataset(d1, id)) === "reviewable";
+      if (sql) reviewable++;
+      if (sql !== isReviewableRow(row)) {
+        disagreements.push(`${JSON.stringify(row)}: SQL ${sql}, row ${isReviewableRow(row)}`);
+      }
+    }
+
+    expect(disagreements).toEqual([]);
+    // Not vacuous: both answers occur, and exactly the rows that are active, public, named and
+    // stamped (the stamp may be an empty string) are the reviewable ones.
+    expect(rows.length).toBe(36);
+    expect(reviewable).toBe(2);
+  });
+
+  test("a missing anonymity value is not reviewable, as SQL's anonymous = 0 is not true of NULL", () => {
+    // The column is NOT NULL, so no row holds this; the function still has to say no.
+    const row = {
+      status: "active",
+      visibility: "public",
+      anonymous: null,
+      first_published_at: "2026-01-01 00:00:00",
+    };
+    expect(isReviewableRow(row)).toBe(false);
+  });
+});
+
+describe("notReviewableReason", () => {
+  const reviewable: ReviewableRow = {
+    status: "active",
+    visibility: "public",
+    anonymous: 0,
+    first_published_at: "2026-01-01 00:00:00",
+  };
+
+  test("names the one condition a dataset fails", () => {
+    expect(notReviewableReason(reviewable)).toBeNull();
+    expect(notReviewableReason({ ...reviewable, status: "archived" })).toBe("inactive");
+    expect(notReviewableReason({ ...reviewable, visibility: "private" })).toBe("private");
+    expect(notReviewableReason({ ...reviewable, anonymous: 1, first_published_at: null })).toBe(
+      "anonymous",
+    );
+    expect(notReviewableReason({ ...reviewable, first_published_at: null })).toBe("unpublished");
+  });
+
+  test("names the first one in a fixed order when a dataset fails several", () => {
+    const nothing: ReviewableRow = {
+      status: "deleted",
+      visibility: "private",
+      anonymous: 1,
+      first_published_at: null,
+    };
+    expect(notReviewableReason(nothing)).toBe("inactive");
+    expect(notReviewableReason({ ...nothing, status: "active" })).toBe("private");
+    expect(notReviewableReason({ ...nothing, status: "active", visibility: "public" })).toBe(
+      "anonymous",
+    );
+  });
+});
+
+describe("what a dataset row calls for", () => {
+  const reviewable: ReviewableRow = {
+    status: "active",
+    visibility: "public",
+    anonymous: 0,
+    first_published_at: "2026-01-01 00:00:00",
+  };
+
+  test("a reviewed dataset is required while the review is on, and left alone while it is off", () => {
+    expect(reviewIntentOf(reviewable, true)).toBe("require");
+    expect(reviewIntentOf(reviewable, false)).toBeUndefined();
+  });
+
+  test("a dataset that is not reviewed has the ruleset removed, whether the review is on or off", () => {
+    for (const row of [
+      { ...reviewable, visibility: "private" },
+      { ...reviewable, status: "archived" },
+      { ...reviewable, anonymous: 1, first_published_at: null },
+      { ...reviewable, first_published_at: null },
+    ]) {
+      expect(reviewIntentOf(row, true)).toBe("remove");
+      expect(reviewIntentOf(row, false)).toBe("remove");
+    }
+  });
+
+  test("the review is on only for exactly 1", () => {
+    expect(isReviewEnabled({ PR_REVIEW_ENABLED: "1" })).toBe(true);
+    for (const value of [undefined, "", "0", "true", "yes", " 1", "01", "11"]) {
+      expect(isReviewEnabled({ PR_REVIEW_ENABLED: value }), JSON.stringify(value)).toBe(false);
+    }
+  });
+
+  test("is read from the catalog as it is now", async () => {
+    const db = freshDb();
+    insert(db, "nm000301", reviewable);
+    insert(db, "nm000302", { ...reviewable, visibility: "private" });
+    const env = (flag: string | undefined) =>
+      ({ DB: realD1(db), PR_REVIEW_ENABLED: flag }) as unknown as Pick<
+        Bindings,
+        "DB" | "PR_REVIEW_ENABLED"
+      >;
+
+    expect(await readReviewIntent(env("1"), "nm000301")).toBe("require");
+    expect(await readReviewIntent(env(undefined), "nm000301")).toBeUndefined();
+    expect(await readReviewIntent(env("1"), "nm000302")).toBe("remove");
+    // A dataset the catalog does not hold gets no answer, so nothing is touched.
+    expect(await readReviewIntent(env("1"), "nm000399")).toBeUndefined();
+
+    // And it follows the row: the same dataset, made private, no longer calls for the ruleset.
+    db.run("UPDATE datasets SET visibility = 'private' WHERE dataset_id = 'nm000301'");
+    expect(await readReviewIntent(env("1"), "nm000301")).toBe("remove");
+  });
+
+  test("the columns it selects are the ones the rule reads", () => {
+    expect(
+      REVIEWABLE_ROW_COLUMNS.split(",")
+        .map((c) => c.trim())
+        .sort(),
+    ).toEqual(["anonymous", "first_published_at", "status", "visibility"]);
+  });
+});
+
+describe("the fixture band the ruleset tooling never touches", () => {
+  test("is the top 100 ids of the nm prefix, nm099900 to nm099999, named as a band", () => {
+    for (let n = 99900; n <= 99999; n++) {
+      expect(isReviewRulesetFixture(`nm${String(n).padStart(6, "0")}`), String(n)).toBe(true);
+    }
+    // The ids on either side of the band are ordinary datasets.
+    expect(isReviewRulesetFixture("nm099899")).toBe(false);
+    expect(isReviewRulesetFixture("nm000108")).toBe(false);
+  });
+
+  test("names the fixtures that matter, and not the five datasets the old rule protected", () => {
+    expect(isReviewRulesetFixture("nm099999")).toBe(true); // the end-to-end dataset
+    expect(isReviewRulesetFixture("nm099998")).toBe(true); // the standing anonymous deposit
+    // More than 900 datasets are live, so no dataset is protected for being live. The five that
+    // an earlier rule named are datasets like any other here.
+    for (const id of ["nm000103", "nm000104", "nm000105", "nm000106", "nm000107"]) {
+      expect(isReviewRulesetFixture(id), id).toBe(false);
+    }
+  });
+
+  test("is the nm band only: the staging exemplars and imports are not in it", () => {
+    for (const id of ["xx099900", "xx099999", "on099950", "on000001", "xx000001"]) {
+      expect(isReviewRulesetFixture(id), id).toBe(false);
+    }
+  });
+
+  test("is not fooled by something that is not an id", () => {
+    for (const id of ["", "nm", "nm99999", "nm0999999", "NM099999", "nm099999 ", "x nm099999"]) {
+      expect(isReviewRulesetFixture(id), JSON.stringify(id)).toBe(false);
+    }
+  });
+
+  test("the WHERE condition and the function are one rule", () => {
+    const db = freshDb();
+    const ids = [
+      "nm000001",
+      "nm000103",
+      "nm000108",
+      "nm050000",
+      "nm099899",
+      "nm099900",
+      "nm099901",
+      "nm099950",
+      "nm099997",
+      "nm099998",
+      "nm099999",
+      "xx000001",
+      "xx099900",
+      "xx099999",
+      "on000001",
+      "on099950",
+      "on099999",
+    ];
+    const outside = db.query<{ dataset_id: string }, [string, number]>(
+      `SELECT dataset_id FROM (SELECT ? AS dataset_id) WHERE ${OUTSIDE_FIXTURE_BAND.sql}`,
+    );
+    for (const id of ids) {
+      const kept = outside.all(id, OUTSIDE_FIXTURE_BAND.bind).length === 1;
+      expect(kept, id).toBe(!isReviewRulesetFixture(id));
+    }
+    // Not vacuous: both outcomes occur.
+    expect(ids.filter(isReviewRulesetFixture).length).toBeGreaterThan(0);
+    expect(ids.filter((id) => !isReviewRulesetFixture(id)).length).toBeGreaterThan(0);
+  });
+});
