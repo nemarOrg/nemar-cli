@@ -13,26 +13,152 @@ import { z } from "zod";
 import { LIVE_DATASETS, isLiveDataset } from "../../constants";
 import { auditLogStatement } from "../../db/audit-log";
 import { expectedRepoVisibility } from "../../services/anonymity";
+import { isValidDatasetId } from "../../services/datasetId";
 import {
   type DriftBucket,
   classifyDatasetDrift,
   gatherRepoDriftState,
 } from "../../services/fleet-drift";
 import {
+  type ReviewIntent,
+  type ReviewRulesetPayload,
+  type ReviewRulesetStep,
+  buildReviewRulesetPayload,
   checkWorkflowExists,
   deployWorkflows,
   ensureRepoToSpec,
   getBranchRulesetInfo,
   getMainBranchSha,
   getWorkflowRuns,
+  reconcileReviewRuleset,
   syncWorkflowTemplates,
   triggerBidsValidation,
   validateDeployedWorkflows,
 } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
+import {
+  type NotReviewableReason,
+  OUTSIDE_FIXTURE_BAND,
+  REVIEWABLE_ROW_COLUMNS,
+  type ReviewableRow,
+  isReviewEnabled,
+  isReviewRulesetFixture,
+  notReviewableReason,
+} from "../../services/pr-review-eligibility";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../services/repo-spec";
 import { applyDatasetVisibility } from "../../services/visibility";
 import type { AdminRouter } from "./shared";
+
+/** A dataset row as the review-ruleset routes read it. */
+interface ReviewRulesetRow extends ReviewableRow {
+  dataset_id: string;
+  github_repo: string | null;
+}
+
+/**
+ * What one dataset's review-ruleset request came to. `intent` is what the row calls for (or what
+ * `remove` asked for), and `action` is what was done, or with a dry run would be: `create`,
+ * `update`, `remove`, `none` (nothing to take off), `skip` (required here, not written: see
+ * `reason`) or null when the attempt failed (`error` says how).
+ */
+interface ReviewRulesetOutcome {
+  dataset_id: string;
+  reviewable: boolean;
+  not_reviewable_because: NotReviewableReason | null;
+  intent: ReviewIntent;
+  action: ReviewRulesetStep["action"] | null;
+  applied: boolean;
+  reason?: string;
+  default_branch?: string;
+  payload?: ReviewRulesetPayload;
+  error?: string;
+}
+
+/**
+ * Bring one dataset's repository to what its row calls for: the ruleset on a reviewed dataset, off
+ * everything else, and off everywhere with `remove`. The decision is the row's, through the same
+ * rule the Worker applies to a pull request (`notReviewableReason`), so a request cannot require
+ * the review where the Worker will not give it. Never throws: a failure is the outcome's `error`.
+ */
+async function reconcileDatasetReview(
+  row: ReviewRulesetRow,
+  pat: string,
+  o: { dryRun: boolean; remove: boolean; withPayload: boolean },
+): Promise<ReviewRulesetOutcome> {
+  const why = notReviewableReason(row);
+  const intent: ReviewIntent = o.remove || why !== null ? "remove" : "require";
+  const base = {
+    dataset_id: row.dataset_id,
+    reviewable: why === null,
+    not_reviewable_because: why,
+    intent,
+  };
+  const repoName = row.github_repo?.split("/")[1];
+  if (!repoName) {
+    return { ...base, action: null, applied: false, error: "the dataset has no GitHub repository" };
+  }
+  try {
+    const step = await reconcileReviewRuleset(repoName, pat, { intent, dryRun: o.dryRun });
+    return {
+      ...base,
+      action: step.action,
+      applied: step.applied,
+      ...(step.reason ? { reason: step.reason, default_branch: step.defaultBranch } : {}),
+      ...(o.withPayload && step.payload ? { payload: step.payload } : {}),
+    };
+  } catch (e) {
+    return {
+      ...base,
+      action: null,
+      applied: false,
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+}
+
+/** The audit row for a ruleset that was written or deleted. Non-fatal, like the other admin audit rows. */
+async function auditReviewRuleset(
+  db: D1Database,
+  admin: { id: number; username: string },
+  outcome: ReviewRulesetOutcome,
+  bulk: boolean,
+): Promise<void> {
+  if (!outcome.applied) return;
+  try {
+    await auditLogStatement(db, {
+      userId: admin.id,
+      action: outcome.action === "remove" ? "review_ruleset_removed" : "review_ruleset_applied",
+      resourceType: "dataset",
+      resourceId: outcome.dataset_id,
+      details: JSON.stringify({ by: admin.username, action: outcome.action, bulk }),
+    }).run();
+  } catch (auditError) {
+    console.error(
+      `Audit log write failed for the review ruleset on ${outcome.dataset_id}:`,
+      auditError,
+    );
+  }
+}
+
+const REVIEW_DISABLED_SENTENCE =
+  "The pull-request review is off in this environment (PR_REVIEW_ENABLED is not 1), so nothing would post the check, and requiring it would block every merge. Nothing was changed. Turn the review on first. Taking the requirement off (remove) is not refused.";
+
+const reviewRulesetSchema = z
+  .object({ dry_run: z.boolean().optional(), remove: z.boolean().optional() })
+  .strict();
+
+const reviewRulesetBulkSchema = z
+  .object({
+    prefix: z
+      .string()
+      .regex(/^[a-z]{2}[0-9]{0,6}$/, "prefix is a dataset id prefix such as nm or nm0001")
+      .optional(),
+    after: z.string().refine(isValidDatasetId, "after is a dataset id").optional(),
+    limit: z.number().int().min(1).max(50).optional(),
+    dry_run: z.boolean().optional(),
+    remove: z.boolean().optional(),
+  })
+  .strict();
 
 export function registerFleetRoutes(admin: AdminRouter): void {
   // ============================================================================
@@ -467,6 +593,134 @@ export function registerFleetRoutes(admin: AdminRouter): void {
 
     return c.json({ dry_run: dryRun, count: datasets.length, results });
   });
+
+  // ============================================================================
+  // The required pull-request review (ADR 0107)
+  // ============================================================================
+
+  /**
+   * POST /admin/datasets/:id/review-ruleset - Put the "NEMAR PR review required" ruleset on one
+   * dataset's repository, or take it off.
+   *
+   * What the dataset calls for is decided from its row by the rule the Worker reviews by: required
+   * on a live, public, named, first-published dataset, removed from any other. `remove: true`
+   * takes it off whatever the row says (the rollback). `dry_run` defaults to TRUE; send
+   * `dry_run:false` to change anything, so a bare `{}` never mutates.
+   *
+   * Refused: a standing test fixture (nm099900 to nm099999), whatever else is asked; and, for a
+   * live request that would REQUIRE the review (no `remove`), an environment where the review is
+   * off, because a required check nothing posts blocks every merge. Taking the requirement off is
+   * never refused for that reason: it is the way out. No dataset is special-cased for being live.
+   */
+  admin.post("/datasets/:id/review-ruleset", zValidator("json", reviewRulesetSchema), async (c) => {
+    const datasetId = c.req.param("id");
+    const { dry_run, remove } = c.req.valid("json");
+    const dryRun = dry_run !== false;
+    const removing = remove === true;
+    const enabled = isReviewEnabled(c.env);
+
+    if (isReviewRulesetFixture(datasetId)) {
+      return c.json(
+        {
+          error: `${datasetId} is a standing test fixture (the nm099900 to nm099999 band), so the review ruleset is never put on it or taken off it.`,
+          code: "reserved_fixture_id",
+        },
+        403,
+      );
+    }
+    if (!dryRun && !removing && !enabled) {
+      return c.json({ error: REVIEW_DISABLED_SENTENCE, code: "review_disabled" }, 409);
+    }
+
+    const row = await c.env.DB.prepare(
+      `SELECT dataset_id, github_repo, ${REVIEWABLE_ROW_COLUMNS} FROM datasets WHERE dataset_id = ?`,
+    )
+      .bind(datasetId)
+      .first<ReviewRulesetRow>();
+    if (!row) return c.json({ error: "Dataset not found" }, 404);
+    if (!row.github_repo) return c.json({ error: "Dataset has no GitHub repository" }, 400);
+
+    const outcome = await reconcileDatasetReview(row, await getDatasetsToken(c.env), {
+      dryRun,
+      remove: removing,
+      withPayload: true,
+    });
+    if (outcome.error) {
+      return c.json({ error: "Review ruleset request failed", details: outcome.error }, 502);
+    }
+    await auditReviewRuleset(c.env.DB, c.get("user"), outcome, false);
+    return c.json({ dry_run: dryRun, review_enabled: enabled, ...outcome });
+  });
+
+  /**
+   * POST /admin/datasets/review-ruleset/bulk - The same across a page of datasets, in id order,
+   * SEQUENTIALLY (the App's rate limit is shared). Owner-only. `dry_run` defaults to TRUE.
+   *
+   * Each dataset gets what ITS row calls for: the ruleset where the Worker reviews, taken off
+   * everywhere else (a private dataset, an unpublished one, an anonymous deposit), and off
+   * everywhere with `remove`. The fixture band nm099900 to nm099999 is never selected. A page is
+   * at most 50 datasets; `next_after` is the last id of a full page, to send as `after` for the
+   * next one. A dataset that fails is an `error` on its row and does not stop the page.
+   */
+  admin.post(
+    "/datasets/review-ruleset/bulk",
+    zValidator("json", reviewRulesetBulkSchema),
+    async (c) => {
+      if (c.get("user").role !== "owner") {
+        return c.json({ error: "Only the NEMAR owner can bulk-apply the review ruleset" }, 403);
+      }
+      const { prefix, after, limit, dry_run, remove } = c.req.valid("json");
+      const dryRun = dry_run !== false;
+      const removing = remove === true;
+      const cap = limit ?? 25;
+      const enabled = isReviewEnabled(c.env);
+      if (!dryRun && !removing && !enabled) {
+        return c.json({ error: REVIEW_DISABLED_SENTENCE, code: "review_disabled" }, 409);
+      }
+
+      const clauses: string[] = ["github_repo IS NOT NULL", OUTSIDE_FIXTURE_BAND.sql];
+      const binds: unknown[] = [OUTSIDE_FIXTURE_BAND.bind];
+      if (prefix) {
+        clauses.push("dataset_id LIKE ?");
+        binds.push(`${prefix}%`);
+      }
+      if (after) {
+        clauses.push("dataset_id > ?");
+        binds.push(after);
+      }
+      const rows = await c.env.DB.prepare(
+        `SELECT dataset_id, github_repo, ${REVIEWABLE_ROW_COLUMNS} FROM datasets
+        WHERE ${clauses.join(" AND ")} ORDER BY dataset_id LIMIT ?`,
+      )
+        .bind(...binds, cap)
+        .all<ReviewRulesetRow>();
+      const datasets = rows.results ?? [];
+
+      const pat = await getDatasetsToken(c.env);
+      const results: ReviewRulesetOutcome[] = [];
+      for (const row of datasets) {
+        const outcome = await reconcileDatasetReview(row, pat, {
+          dryRun,
+          remove: removing,
+          withPayload: false,
+        });
+        results.push(outcome);
+        await auditReviewRuleset(c.env.DB, c.get("user"), outcome, true);
+      }
+
+      return c.json({
+        dry_run: dryRun,
+        review_enabled: enabled,
+        remove: removing,
+        limit: cap,
+        count: datasets.length,
+        next_after: datasets.length === cap ? datasets[datasets.length - 1].dataset_id : null,
+        // What every `create` and `update` row sends: one body for the page.
+        payload: removing ? null : buildReviewRulesetPayload(),
+        results,
+      });
+    },
+  );
 
   // ============================================================================
   // CI Management
