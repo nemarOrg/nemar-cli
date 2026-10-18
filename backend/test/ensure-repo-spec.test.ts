@@ -219,4 +219,73 @@ describe("ensureRepoToSpec and the required review", () => {
     });
     expect(standIn.writes()).toHaveLength(0);
   });
+
+  // The other steps fall back to "main" when the repository cannot be read, because all they need
+  // is a branch to look at. The review step writes a ruleset that follows the default branch, so a
+  // guess would put it on a repository whose default branch is another one.
+  describe("when the repository's default branch cannot be read", () => {
+    const REPO_READ = new RegExp(`^/repos/nemarDatasets/${REPO}$`);
+    const reviewWrites = () =>
+      standIn.rulesetWrites().filter((w) => w.body?.name === REVIEW_RULESET_NAME);
+
+    test("a repository on master gets no review ruleset: the guess does not stand in for the answer", async () => {
+      standIn.defaultBranches.set(REPO, "master");
+      // The first read (which captures the branch) and the one ensureMainBranch makes are refused.
+      // The third, which the review step makes for itself, is the one that tells it the truth.
+      standIn.failNext("GET", REPO_READ, 403, 2);
+
+      const result = await ensureRepoToSpec(REPO, PAT, { visibility: "public", review: "require" });
+
+      expect(result.steps.main_branch?.status).toBe("failed");
+      expect(result.steps.review_ruleset).toEqual({
+        status: "skipped",
+        detail: "default branch is master, not main",
+      });
+      expect(reviewWrites()).toEqual([]);
+      expect(heldBy()).not.toContain(REVIEW_RULESET_NAME);
+    });
+
+    test("with every read refused the review step is not applied, in a sentence, and writes nothing", async () => {
+      standIn.failNext("GET", REPO_READ, 403, 20);
+
+      const result = await ensureRepoToSpec(REPO, PAT, { visibility: "public", review: "require" });
+
+      expect(result.steps.main_branch?.status).toBe("failed");
+      expect(result.steps.review_ruleset).toEqual({
+        status: "failed",
+        detail: "not applied: the default branch could not be read from GitHub (HTTP 403)",
+      });
+      expect(reviewWrites()).toEqual([]);
+    });
+
+    test("a dry run says what the live run says for the same repository", async () => {
+      standIn.failNext("GET", REPO_READ, 403, 20);
+      const dry = await ensureRepoToSpec(REPO, PAT, {
+        visibility: "public",
+        review: "require",
+        dryRun: true,
+      });
+      standIn.reset();
+      standIn.failNext("GET", REPO_READ, 403, 20);
+      const live = await ensureRepoToSpec(REPO, PAT, { visibility: "public", review: "require" });
+
+      expect(dry.steps.review_ruleset).toEqual(live.steps.review_ruleset);
+      expect(dry.steps.review_ruleset?.status).toBe("failed");
+      // The plan does not name a branch it was not told.
+      expect(dry.steps.plan?.detail).toBe("public, default=unknown");
+      expect(standIn.writes().filter((w) => w.path.includes("/rulesets"))).not.toContainEqual(
+        expect.objectContaining({ body: expect.objectContaining({ name: REVIEW_RULESET_NAME }) }),
+      );
+    });
+
+    test("a removal needs no default branch, so an unreadable one does not stop it", async () => {
+      await ensureReviewRuleset(REPO, PAT);
+      standIn.failNext("GET", REPO_READ, 403, 20);
+
+      const result = await ensureRepoToSpec(REPO, PAT, { visibility: "public", review: "remove" });
+
+      expect(result.steps.review_ruleset).toEqual({ status: "ok", detail: "removed" });
+      expect(heldBy()).not.toContain(REVIEW_RULESET_NAME);
+    });
+  });
 });

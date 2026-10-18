@@ -763,20 +763,45 @@ export interface RepoSpecResult {
   reconcile?: CollaboratorReconcileResult;
 }
 
-/** What a review step records, in the words the other steps use. Never throws. */
+/**
+ * What a review step records, in the words the other steps use. Never throws.
+ *
+ * `defaultBranch` is the default branch as GitHub said it, or `undefined` when the caller could not
+ * get it from GitHub. Requiring the review writes a ruleset that follows the default branch, so a
+ * guess is never acted on: when none was given, the branch is read here, strictly, and a read that
+ * fails leaves the repository's review ruleset as it is and says so.
+ */
 async function reviewRulesetStepOf(
   repo: string,
   pat: string,
-  o: { intent: ReviewIntent; isPublic: boolean; defaultBranch: string; dryRun: boolean },
+  o: {
+    intent: ReviewIntent;
+    isPublic: boolean;
+    defaultBranch: string | undefined;
+    dryRun: boolean;
+  },
 ): Promise<{ status: StepStatus; detail?: string }> {
   // Nothing publishes the review check on a private repository, so it is never required there.
   const intent: ReviewIntent = o.isPublic ? o.intent : "remove";
   const privateNote = intent === o.intent ? "" : " (private)";
   try {
+    let defaultBranch = o.defaultBranch;
+    if (intent === "require" && defaultBranch === undefined) {
+      try {
+        defaultBranch = await readDefaultBranch(repo, pat);
+      } catch (e) {
+        console.error(`[repo-spec] default branch read failed for ${repo}: ${errText(e)}`);
+        const status = e instanceof HttpError ? ` (HTTP ${e.status})` : "";
+        return {
+          status: "failed",
+          detail: `not applied: the default branch could not be read from GitHub${status}`,
+        };
+      }
+    }
     const step = await reconcileReviewRuleset(repo, pat, {
       intent,
       dryRun: o.dryRun,
-      defaultBranch: o.defaultBranch,
+      defaultBranch,
     });
     if (step.action === "skip") {
       return {
@@ -829,8 +854,12 @@ export async function ensureRepoToSpec(
   const isPublic = opts.visibility === "public";
   const bidsCheck = deriveContexts(repo)[0];
 
-  // 1. Capture the default branch.
+  // 1. Capture the default branch. The steps that only need a branch to look at (the BIDS check
+  // on its head) fall back to "main" when the read fails. The review step does not: it is given
+  // `knownBranch`, which is set only from GitHub's own answer, so a repository whose default
+  // branch could not be read is never treated as one that is on main.
   let defaultBranch = "main";
+  let knownBranch: string | undefined;
   try {
     const r = await githubFetchWithRetry(
       `${GITHUB_API()}/repos/${ORG_NAME}/${repo}`,
@@ -840,6 +869,7 @@ export async function ensureRepoToSpec(
     if (r.ok) {
       const info = (await r.json()) as { default_branch?: string };
       defaultBranch = info.default_branch || "main";
+      if (info.default_branch) knownBranch = info.default_branch;
     } else {
       console.error(
         `[repo-spec] repo info fetch for ${repo} returned HTTP ${r.status}; defaulting branch to 'main'`,
@@ -853,7 +883,10 @@ export async function ensureRepoToSpec(
   }
 
   if (opts.dryRun) {
-    steps.plan = { status: "ok", detail: `${opts.visibility}, default=${defaultBranch}` };
+    steps.plan = {
+      status: "ok",
+      detail: `${opts.visibility}, default=${knownBranch ?? "unknown"}`,
+    };
     if (isPublic) {
       const g = await checkRunGreenOnDefaultHead(repo, defaultBranch, bidsCheck, pat);
       steps.branch_ruleset = g.green
@@ -869,7 +902,7 @@ export async function ensureRepoToSpec(
       steps.review_ruleset = await reviewRulesetStepOf(repo, pat, {
         intent: opts.review,
         isPublic,
-        defaultBranch,
+        defaultBranch: knownBranch,
         dryRun: true,
       });
     }
@@ -911,7 +944,9 @@ export async function ensureRepoToSpec(
       status: "ok",
       detail: r.changed ? `${r.action} from ${r.previousBranch}` : "main",
     };
-    if (r.changed) defaultBranch = "main";
+    // ensureMainBranch returns only when the default branch is main, as it was or as it made it.
+    defaultBranch = "main";
+    knownBranch = "main";
   } catch (e) {
     steps.main_branch = { status: "failed", detail: errText(e) };
   }
@@ -986,7 +1021,7 @@ export async function ensureRepoToSpec(
     steps.review_ruleset = await reviewRulesetStepOf(repo, pat, {
       intent: opts.review,
       isPublic,
-      defaultBranch,
+      defaultBranch: knownBranch,
       dryRun: false,
     });
   }
