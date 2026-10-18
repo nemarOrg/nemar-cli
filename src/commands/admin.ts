@@ -5543,12 +5543,20 @@ const NOT_REVIEWED_WORDS: Record<string, string> = {
 
 /**
  * Which GitHub App posts the review check and which one the ruleset requires it from, said on a
- * dry run. They have to be the same App or the check never arrives, and then `--apply` is refused.
+ * dry run. They have to be the same App, and the Worker has to be able to sign in as it, or the
+ * check never arrives, and then `--apply` is refused.
  */
 function reviewAppLine(ids: ReviewAppIds): string {
-  if (ids.app_id_matches) {
+  if (ids.app_id_matches && ids.installation_configured) {
     return chalk.dim(
       `  GitHub App: this Worker posts the check as App ${ids.github_app_id}, the App the ruleset requires it from.`,
+    );
+  }
+  if (ids.app_id_matches) {
+    // The right id, and no way to sign in as the App for nemarDatasets: the Worker would post with
+    // a personal access token, which GitHub does not let post a check run.
+    return chalk.yellow(
+      `  GitHub App: this Worker is set to App ${ids.github_app_id}, the App the ruleset requires it from, but it cannot sign in as that App for nemarDatasets (GITHUB_APP_PRIVATE_KEY or GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS is missing or not valid), so it would post with a personal access token, which cannot post a check run: --apply would be refused, and the check would never arrive.`,
     );
   }
   // Three different things to fix: an unset binding, a value that is not an id, and another App.
@@ -5575,6 +5583,8 @@ const BULK_OWNER_ONLY_HINT =
 const REFUSED_ROW_WORDS: Record<string, string> = {
   review_disabled: "refused: the review is off (PR_REVIEW_ENABLED is not 1)",
   review_app_mismatch: "refused: this Worker posts the check as a different GitHub App",
+  review_app_not_configured:
+    "refused: this Worker cannot sign in as the GitHub App that posts the check",
 };
 
 /** One dataset's line in a page: what is done, to which dataset, and why when it is not obvious. */
@@ -5630,8 +5640,10 @@ alone or on its row of a page. Taking it off never needs the review, so --remove
 works, and so does a dataset that is not reviewed.
 
 It also needs this Worker to post the review check as the GitHub App the ruleset requires it from
-(App 3679074). The dry run prints both ids, and a dataset that would get the ruleset is refused,
-the same way, when they differ.
+(App 3679074), and to be able to sign in as that App for nemarDatasets: the App's private key and
+the nemarDatasets installation id, without which it would post with a personal access token, and
+GitHub does not let one post a check run. The dry run says which, and a dataset that would get the
+ruleset is refused, the same way, when the App is another one or the Worker cannot sign in as it.
 
 Examples:
   $ nemar admin fleet require-review xx099900                 # dry run: shows the body it would send

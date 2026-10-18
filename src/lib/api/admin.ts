@@ -1382,9 +1382,10 @@ export type NotReviewableReason = "inactive" | "private" | "anonymous" | "unpubl
  * `create`, `update`, `remove`, `none` (nothing to take off), `skip` (required here but not
  * written, see `reason`), or null when the attempt failed (`error` says how, and `code` is its
  * word when it has one: `review_disabled` is a requirement refused because the review is off,
- * `review_app_mismatch` one refused because the Worker posts the check as another GitHub App, and
- * `github_request_failed` a request GitHub refused or did not complete, whose `error` is a
- * sentence that carries GitHub's status code and never GitHub's own words).
+ * `review_app_mismatch` one refused because the Worker posts the check as another GitHub App,
+ * `review_app_not_configured` one refused because the Worker has no way to sign in as the right
+ * App for nemarDatasets, and `github_request_failed` a request GitHub refused or did not complete,
+ * whose `error` is a sentence that carries GitHub's status code and never GitHub's own words).
  */
 export interface ReviewRulesetOutcome {
   dataset_id: string;
@@ -1397,7 +1398,11 @@ export interface ReviewRulesetOutcome {
   default_branch?: string;
   payload?: ReviewRulesetPayload;
   error?: string;
-  code?: "review_disabled" | "review_app_mismatch" | "github_request_failed";
+  code?:
+    | "review_disabled"
+    | "review_app_mismatch"
+    | "review_app_not_configured"
+    | "github_request_failed";
 }
 
 /**
@@ -1405,13 +1410,17 @@ export interface ReviewRulesetOutcome {
  * check from `ruleset_app_id`, and the Worker posts it as `github_app_id`, which is null both when
  * the binding is unset and when it holds something that is not an id, so `github_app_id_state`
  * says which: `unset`, `not_a_number` or `id`. A requirement is refused (`review_app_mismatch`)
- * unless they are the same App.
+ * unless they are the same App. The right id is not enough: the check is posted with an
+ * installation token for nemarDatasets, and a Worker without the App's private key or that
+ * installation id (`installation_configured` false) falls back to a personal access token, which
+ * cannot post a check run, so a requirement is refused then too (`review_app_not_configured`).
  */
 export interface ReviewAppIds {
   github_app_id: string | null;
   github_app_id_state: "unset" | "not_a_number" | "id";
   ruleset_app_id: number;
   app_id_matches: boolean;
+  installation_configured: boolean;
 }
 
 export interface ReviewRulesetResponse extends ReviewRulesetOutcome, ReviewAppIds {

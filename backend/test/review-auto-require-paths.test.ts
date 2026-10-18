@@ -35,14 +35,19 @@ import {
 } from "../src/services/bucket-policy";
 import {
   BRANCH_RULESET_NAME,
-  NEMAR_APP_ID,
   REVIEW_RULESET_NAME,
   buildReviewRulesetPayload,
   ensureReviewRuleset,
 } from "../src/services/github";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
-import { type RulesetStandIn, startRulesetStandIn } from "./helpers/github-rulesets";
+import {
+  REVIEW_APP_BINDINGS,
+  type RulesetStandIn,
+  dropStandInAppToken,
+  seedStandInAppToken,
+  startRulesetStandIn,
+} from "./helpers/github-rulesets";
 import { seedScreenedRequest, seedUser } from "./helpers/publication-review";
 
 const ADMIN_KEY = "autoreq-admin-key-0123456789abcdef0123456789abcdef";
@@ -177,10 +182,13 @@ beforeAll(() => {
   s3 = startS3PolicyStandIn();
   (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = github.url;
   outbound = routeOutboundTraffic(s3.url);
+  // The Worker signs in as the App (see REVIEW_APP_BINDINGS), and this is the token it finds.
+  seedStandInAppToken(PAT);
 });
 
 afterAll(() => {
   outbound.restore();
+  dropStandInAppToken();
   (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = undefined;
   github.stop();
   s3.stop();
@@ -211,8 +219,9 @@ function env(): Bindings {
     DB: realD1(db),
     ENVIRONMENT: "production",
     GITHUB_ADMIN_PAT: PAT,
-    // The App this Worker posts the review check as, which is the one the ruleset requires it from.
-    GITHUB_APP_ID: String(NEMAR_APP_ID),
+    // The App this Worker posts the review check as, which is the one the ruleset requires it
+    // from, with the key and installation it signs in with.
+    ...REVIEW_APP_BINDINGS,
     PR_REVIEW_ENABLED: "1",
     S3_BUCKET: BUCKET,
     AWS_REGION: REGION,
@@ -581,6 +590,84 @@ describe("a Worker that posts the review check as another GitHub App, with the s
 
   test("the right App is what lets the same flip require it", async () => {
     envOverrides = { PR_REVIEW_AUTO_REQUIRE: "1", GITHUB_APP_ID: "3679074" };
+    seedDataset(ID, { visibility: "private" });
+    s3.policy = buildPublicAccessPolicy(BUCKET, [ID]);
+
+    const res = await request(`/admin/datasets/${ID}/visibility`, "PATCH", {
+      visibility: "public",
+    });
+
+    expect(res.status).toBe(200);
+    expect(held(ID)).toContain(REVIEW_RULESET_NAME);
+  });
+});
+
+// The right App id is not enough: the check is posted with an installation token for nemarDatasets,
+// and a Worker without the App's private key or that installation id falls back to the personal
+// access token, which GitHub does not let post a check run. So, like another App, it requires
+// nothing on its own with the switch on, and says why in the log. A removal is not held back.
+describe("a Worker with the right App id and no installation of it, with the switch on", () => {
+  const ID = "nm000505";
+  const NO_INSTALLATION = {
+    PR_REVIEW_AUTO_REQUIRE: "1",
+    GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS: undefined,
+  };
+
+  async function logging<T>(fn: () => Promise<T>): Promise<{ result: T; logged: string[] }> {
+    const logged: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+    };
+    try {
+      return { result: await fn(), logged };
+    } finally {
+      console.error = realError;
+    }
+  }
+
+  test("making a dataset public does the rest and writes no review ruleset", async () => {
+    envOverrides = NO_INSTALLATION;
+    seedDataset(ID, { visibility: "private" });
+    s3.policy = buildPublicAccessPolicy(BUCKET, [ID]);
+
+    const { result: res, logged } = await logging(() =>
+      request(`/admin/datasets/${ID}/visibility`, "PATCH", { visibility: "public" }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(visibilityPatches()).toEqual([false]);
+    expect(held(ID)).toContain(BRANCH_RULESET_NAME);
+    expect(((await res.json()) as Json).spec_enforcement.review_ruleset).toBeUndefined();
+    expect(reviewWrites()).toEqual([]);
+    expect(held(ID)).not.toContain(REVIEW_RULESET_NAME);
+    expect(logged.some((l) => l.includes(ID) && l.includes("GITHUB_APP_INSTALLATION_ID"))).toBe(
+      true,
+    );
+  });
+
+  test("making a dataset private still takes the review ruleset off", async () => {
+    envOverrides = NO_INSTALLATION;
+    seedDataset(ID, { visibility: "public", first_published_at: "2026-01-01 00:00:00" });
+    s3.policy = buildPublicAccessPolicy(BUCKET, []);
+    await ensureReviewRuleset(ID, PAT);
+    const ids = reviewRulesetsOf(ID).map((x) => x.id);
+    github.calls.length = 0;
+
+    const res = await request(`/admin/datasets/${ID}/visibility`, "PATCH", {
+      visibility: "private",
+    });
+
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as Json).spec_enforcement.review_ruleset).toEqual({
+      status: "ok",
+      detail: "removed",
+    });
+    expect(reviewWrites(ids).map((c) => c.method)).toEqual(["DELETE"]);
+  });
+
+  test("the installation is what lets the same flip require it", async () => {
+    envOverrides = { PR_REVIEW_AUTO_REQUIRE: "1" };
     seedDataset(ID, { visibility: "private" });
     s3.policy = buildPublicAccessPolicy(BUCKET, [ID]);
 

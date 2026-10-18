@@ -35,7 +35,7 @@ import {
   triggerBidsValidation,
   validateDeployedWorkflows,
 } from "../../services/github";
-import { getDatasetsToken } from "../../services/github-auth";
+import { type GitHubAppEnv, getDatasetsToken } from "../../services/github-auth";
 import {
   type NotReviewableReason,
   OUTSIDE_FIXTURE_BAND,
@@ -47,8 +47,8 @@ import {
   isReviewEnabled,
   isReviewRulesetFixture,
   notReviewableReason,
-  reviewAppIdRefusal,
   reviewAppIds,
+  reviewAppRefusal,
   reviewIntentOf,
 } from "../../services/pr-review-eligibility";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../services/repo-spec";
@@ -67,7 +67,11 @@ interface ReviewRulesetRow extends ReviewableRow {
 }
 
 /** The words an `error` row of a review-ruleset outcome can carry as its `code`. */
-type ReviewRulesetErrorCode = "review_disabled" | "review_app_mismatch" | "github_request_failed";
+type ReviewRulesetErrorCode =
+  | "review_disabled"
+  | "review_app_mismatch"
+  | "review_app_not_configured"
+  | "github_request_failed";
 
 /**
  * What one dataset's review-ruleset request came to. `intent` is what the row calls for (or what
@@ -112,18 +116,18 @@ interface RequireRefusal {
 
 /**
  * Why a live REQUIREMENT is refused here, or null when it is not: the review is off (nothing would
- * post the check), or this Worker posts the check as a different GitHub App than the one the
- * ruleset requires it from (it would never arrive). Asked of a request whose computed intent is
- * `require`, never of a request's shape: taking the ruleset off is the way out and is never
- * refused, so a live request for a private dataset (which is a removal) goes through, and so does
- * every removal row of a page.
+ * post the check), or this Worker cannot post the check as the GitHub App the ruleset requires it
+ * from, because it posts as another App or has no way to sign in as the right one (it would never
+ * arrive). Asked of a request whose computed intent is `require`, never of a request's shape:
+ * taking the ruleset off is the way out and is never refused, so a live request for a private
+ * dataset (which is a removal) goes through, and so does every removal row of a page.
  */
 function requireRefusal(
-  env: Pick<Bindings, "PR_REVIEW_ENABLED" | "GITHUB_APP_ID">,
+  env: Pick<Bindings, "PR_REVIEW_ENABLED"> & GitHubAppEnv,
 ): RequireRefusal | null {
   if (!isReviewEnabled(env)) return { code: "review_disabled", error: REVIEW_DISABLED_SENTENCE };
-  const app = reviewAppIdRefusal(env);
-  if (app) return { code: "review_app_mismatch", error: app };
+  const app = reviewAppRefusal(env);
+  if (app) return { code: app.code, error: app.sentence };
   return null;
 }
 

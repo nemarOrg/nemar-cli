@@ -19,7 +19,11 @@
  */
 
 import type { Server } from "bun";
-import { getWorkflowTemplates } from "../../src/services/github";
+import { NEMAR_APP_ID, getWorkflowTemplates } from "../../src/services/github";
+import {
+  __seedInstallationTokenCacheForTests,
+  invalidateInstallationToken,
+} from "../../src/services/github-auth";
 
 export interface RulesetRecord {
   id: number;
@@ -73,6 +77,39 @@ export interface RulesetStandIn {
   rulesetWrites(): StandInCall[];
   reset(): void;
   stop(): void;
+}
+
+/** An installation id no real installation has, so the seeded token cannot be taken for one. */
+export const STAND_IN_INSTALLATION_ID = 7_654_321;
+
+/**
+ * The App configuration a Worker needs for the review check to be postable (ADR 0107): the NEMAR
+ * App's id, a private key and an installation id for nemarDatasets, which is what leaves the
+ * Worker signing in as the App and not falling back to the personal access token. Spread it into
+ * a test's environment, and call {@link seedStandInAppToken} in `beforeAll`.
+ *
+ * The key is deliberately not a key. A token for the installation is put in the module's cache
+ * instead, so nothing is ever minted; and if the cache were ever to miss, signing would throw
+ * before any request is made. Nothing configured here can reach GitHub.
+ */
+export const REVIEW_APP_BINDINGS = {
+  GITHUB_APP_ID: String(NEMAR_APP_ID),
+  GITHUB_APP_PRIVATE_KEY: "not a private key: a seeded token stands in for the one it would mint",
+  GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS: String(STAND_IN_INSTALLATION_ID),
+};
+
+/** Put `token` where `getDatasetsToken` finds it for the stand-in installation. */
+export function seedStandInAppToken(token: string): void {
+  __seedInstallationTokenCacheForTests(
+    STAND_IN_INSTALLATION_ID,
+    token,
+    Date.now() + 2 * 60 * 60 * 1000,
+  );
+}
+
+/** Take the seeded token out again, in `afterAll`, so no later test file finds it. */
+export function dropStandInAppToken(): void {
+  invalidateInstallationToken(STAND_IN_INSTALLATION_ID);
 }
 
 const ACTOR_TYPES = new Set([

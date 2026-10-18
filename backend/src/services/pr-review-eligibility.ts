@@ -17,6 +17,7 @@
 
 import type { Bindings } from "../types/bindings.js";
 import { RESERVED_FIXTURE_FLOOR, isReservedFixtureId } from "./datasetId.js";
+import { type GitHubAppEnv, getGitHubAppConfig } from "./github-auth.js";
 import { NEMAR_APP_ID, type ReviewIntent } from "./github/branch-protection.js";
 
 /** The four `datasets` columns the review's rule reads. */
@@ -91,16 +92,20 @@ export type AppIdState = "unset" | "not_a_number" | "id";
  * binding is in (an unset binding and a value that is not an id are both null in the first field
  * and are told apart by the second), `ruleset_app_id` is the one the ruleset names, and
  * `app_id_matches` is whether they are the same App: exactly the same digits, with nothing around
- * them.
+ * them. The right id is not enough: the check is posted with an installation token for the
+ * `nemarDatasets` organization, which needs the App's private key and that organization's
+ * installation id, and without them the Worker falls back to a personal access token, which GitHub
+ * does not let post a check run. `installation_configured` is whether the Worker holds both.
  */
 export interface ReviewAppIds {
   github_app_id: string | null;
   github_app_id_state: AppIdState;
   ruleset_app_id: number;
   app_id_matches: boolean;
+  installation_configured: boolean;
 }
 
-export function reviewAppIds(env: Pick<Bindings, "GITHUB_APP_ID">): ReviewAppIds {
+export function reviewAppIds(env: GitHubAppEnv): ReviewAppIds {
   const raw = env.GITHUB_APP_ID;
   const isId = typeof raw === "string" && /^\d{1,15}$/.test(raw);
   return {
@@ -108,6 +113,11 @@ export function reviewAppIds(env: Pick<Bindings, "GITHUB_APP_ID">): ReviewAppIds
     github_app_id_state: isId ? "id" : raw ? "not_a_number" : "unset",
     ruleset_app_id: NEMAR_APP_ID,
     app_id_matches: raw === String(NEMAR_APP_ID),
+    // Decided by getGitHubAppConfig, the single place that says whether App authentication is
+    // available and the one getDatasetsToken, which posts the check, goes by: with no installation
+    // id for the organization it falls back to the personal access token.
+    installation_configured:
+      getGitHubAppConfig(env)?.installationIdsByOrg.nemarDatasets !== undefined,
   };
 }
 
@@ -115,8 +125,9 @@ export function reviewAppIds(env: Pick<Bindings, "GITHUB_APP_ID">): ReviewAppIds
  * Why the review ruleset must not be REQUIRED from this Worker, or null when it may be: the ruleset
  * requires the check from the App with id {@link NEMAR_APP_ID}, so unless the Worker posts as that
  * App the check never arrives, and every pull request on the repository waits for it for good.
- * The sentence names both ids. Nothing is read or written to produce it; a removal is never
- * refused by it, because taking the ruleset off needs no check to arrive.
+ * The sentence names both ids. This is the App's id only; being able to sign in as it is
+ * {@link reviewAppInstallationRefusal}. Nothing is read or written to produce it; a removal is
+ * never refused by it, because taking the ruleset off needs no check to arrive.
  */
 export function reviewAppIdRefusal(env: Pick<Bindings, "GITHUB_APP_ID">): string | null {
   const ids = reviewAppIds(env);
@@ -128,6 +139,38 @@ export function reviewAppIdRefusal(env: Pick<Bindings, "GITHUB_APP_ID">): string
         ? "an App whose id is not a number (GITHUB_APP_ID is set but is not a plain number)"
         : "no App (GITHUB_APP_ID is not set)";
   return `The review ruleset requires the NEMAR PR Review check from the GitHub App with id ${ids.ruleset_app_id}, but this Worker posts the check as ${posts}, so the check would never arrive and requiring it would block every merge. Nothing was changed. Taking the requirement off is not refused.`;
+}
+
+/**
+ * Why the review ruleset must not be REQUIRED from this Worker although it posts as the right App,
+ * or null when it may be: the check is posted with an installation token for `nemarDatasets`, and
+ * without the App's private key or that organization's installation id the Worker falls back to a
+ * personal access token (`getDatasetsTokenWithRefresher`), which cannot post a check run. So the
+ * check would never arrive. Nothing is read or written to produce it, and a removal is never
+ * refused by it.
+ */
+export function reviewAppInstallationRefusal(env: GitHubAppEnv): string | null {
+  if (reviewAppIds(env).installation_configured) return null;
+  return "This Worker cannot sign in as the GitHub App for the nemarDatasets organization: GITHUB_APP_PRIVATE_KEY or GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS is missing or not valid. It would post the NEMAR PR Review check with a personal access token instead, and GitHub does not let a personal access token post a check run, so the check would never arrive and requiring it would block every merge. Nothing was changed. Taking the requirement off is not refused.";
+}
+
+/** The words a refusal about the GitHub App can carry as its `code`. */
+export type ReviewAppRefusalCode = "review_app_mismatch" | "review_app_not_configured";
+
+/**
+ * Why the check could not arrive from this Worker, as a code and a sentence, or null when it can:
+ * the Worker posts as another App ({@link reviewAppIdRefusal}), or as the right one without a way
+ * to sign in as it ({@link reviewAppInstallationRefusal}). The id is said first, because an unset or
+ * wrong id is also what makes the installation unusable.
+ */
+export function reviewAppRefusal(
+  env: GitHubAppEnv,
+): { code: ReviewAppRefusalCode; sentence: string } | null {
+  const id = reviewAppIdRefusal(env);
+  if (id) return { code: "review_app_mismatch", sentence: id };
+  const installation = reviewAppInstallationRefusal(env);
+  if (installation) return { code: "review_app_not_configured", sentence: installation };
+  return null;
 }
 
 /**
@@ -201,21 +244,24 @@ export function reviewIntentOf(
  * will satisfy. This is the one place the owner's switch is read for a path that writes, so a path
  * that asks here cannot require the review before the owner has started the fleet step.
  *
- * A requirement is also not asked for from a Worker whose GitHub App is not the one the ruleset
- * names ({@link reviewAppIdRefusal}): the check would never arrive. There is no caller to refuse
- * with a status here, so that case is `undefined` (the ruleset is left as it is) and an error in
- * the log that says why, and the explicit routes, which do refuse with a status, say it plainly.
+ * A requirement is also not asked for from a Worker that cannot post the check as the App the
+ * ruleset names ({@link reviewAppRefusal}): another App, or no way to sign in as the right one. The
+ * check would never arrive. There is no caller to refuse with a status here, so that case is
+ * `undefined` (the ruleset is left as it is) and an error in the log that says why, and the
+ * explicit routes, which do refuse with a status, say it plainly.
  */
 export function automaticReviewIntent(
-  env: Pick<Bindings, "PR_REVIEW_ENABLED" | "PR_REVIEW_AUTO_REQUIRE" | "GITHUB_APP_ID">,
+  env: Pick<Bindings, "PR_REVIEW_ENABLED" | "PR_REVIEW_AUTO_REQUIRE"> & GitHubAppEnv,
   datasetId: string,
   row: ReviewableRow,
 ): ReviewIntent | undefined {
   const intent = reviewIntentOf(datasetId, row, isRequirementTarget(env));
   if (intent !== "require") return intent;
-  const refusal = reviewAppIdRefusal(env);
+  const refusal = reviewAppRefusal(env);
   if (refusal) {
-    console.error(`[review-ruleset] not requiring the review for ${datasetId}: ${refusal}`);
+    console.error(
+      `[review-ruleset] not requiring the review for ${datasetId}: ${refusal.sentence}`,
+    );
     return undefined;
   }
   return intent;
@@ -232,7 +278,7 @@ export function automaticReviewIntent(
  * function.
  */
 export async function readReviewIntent(
-  env: Pick<Bindings, "DB" | "PR_REVIEW_ENABLED" | "PR_REVIEW_AUTO_REQUIRE" | "GITHUB_APP_ID">,
+  env: Pick<Bindings, "DB" | "PR_REVIEW_ENABLED" | "PR_REVIEW_AUTO_REQUIRE"> & GitHubAppEnv,
   datasetId: string,
 ): Promise<ReviewIntent | undefined> {
   try {

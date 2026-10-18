@@ -11,7 +11,7 @@
 
 import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { NEMAR_APP_ID } from "../src/services/github";
+import type { GitHubAppEnv } from "../src/services/github-auth";
 import { reviewableDataset } from "../src/services/pr-review";
 import {
   type AppIdState,
@@ -28,10 +28,16 @@ import {
   readReviewIntent,
   reviewAppIdRefusal,
   reviewAppIds,
+  reviewAppInstallationRefusal,
+  reviewAppRefusal,
   reviewIntentOf,
 } from "../src/services/pr-review-eligibility";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1, wrapD1 } from "./helpers/d1";
+import { REVIEW_APP_BINDINGS } from "./helpers/github-rulesets";
+
+/** What the functions that decide the review intent read of the Worker's environment. */
+type AutoEnv = Pick<Bindings, "DB" | "PR_REVIEW_ENABLED" | "PR_REVIEW_AUTO_REQUIRE"> & GitHubAppEnv;
 
 const STATUSES = ["active", "archived", "deleted"] as const;
 const VISIBILITIES = ["public", "private"] as const;
@@ -202,11 +208,8 @@ describe("what a dataset row calls for", () => {
         DB: realD1(db),
         PR_REVIEW_ENABLED: flag,
         PR_REVIEW_AUTO_REQUIRE: "1",
-        GITHUB_APP_ID: String(NEMAR_APP_ID),
-      }) as unknown as Pick<
-        Bindings,
-        "DB" | "PR_REVIEW_ENABLED" | "PR_REVIEW_AUTO_REQUIRE" | "GITHUB_APP_ID"
-      >;
+        ...REVIEW_APP_BINDINGS,
+      }) as unknown as AutoEnv;
 
     expect(await readReviewIntent(env("1"), "nm000301")).toBe("require");
     expect(await readReviewIntent(env(undefined), "nm000301")).toBeUndefined();
@@ -257,10 +260,6 @@ describe("the automatic requirement switch (PR_REVIEW_AUTO_REQUIRE)", () => {
     anonymous: 0,
     first_published_at: "2026-01-01 00:00:00",
   };
-  type AutoEnv = Pick<
-    Bindings,
-    "DB" | "PR_REVIEW_ENABLED" | "PR_REVIEW_AUTO_REQUIRE" | "GITHUB_APP_ID"
-  >;
 
   test("is on only for exactly 1, and unset is off", () => {
     expect(isAutoRequireEnabled({ PR_REVIEW_AUTO_REQUIRE: "1" })).toBe(true);
@@ -331,7 +330,7 @@ describe("the automatic requirement switch (PR_REVIEW_AUTO_REQUIRE)", () => {
   });
 
   test("on, they ask what the row calls for", () => {
-    const on = { PR_REVIEW_AUTO_REQUIRE: "1", GITHUB_APP_ID: String(NEMAR_APP_ID) };
+    const on = { PR_REVIEW_AUTO_REQUIRE: "1", ...REVIEW_APP_BINDINGS };
     expect(automaticReviewIntent({ ...on, PR_REVIEW_ENABLED: "1" }, "nm000301", reviewable)).toBe(
       "require",
     );
@@ -359,7 +358,7 @@ describe("the automatic requirement switch (PR_REVIEW_AUTO_REQUIRE)", () => {
           DB: realD1(db),
           PR_REVIEW_ENABLED: review,
           PR_REVIEW_AUTO_REQUIRE: auto,
-          GITHUB_APP_ID: String(NEMAR_APP_ID),
+          ...REVIEW_APP_BINDINGS,
         }) as unknown as AutoEnv;
       return { db, env };
     }
@@ -429,6 +428,8 @@ describe("the GitHub App the ruleset requires the check from", () => {
       github_app_id_state: "id",
       ruleset_app_id: 3679074,
       app_id_matches: true,
+      // The id alone is not a way to sign in as the App: see the installation tests below.
+      installation_configured: false,
     });
     expect(reviewAppIdRefusal({ GITHUB_APP_ID: "3679074" })).toBeNull();
     for (const value of [
@@ -526,9 +527,132 @@ describe("the GitHub App the ruleset requires the check from", () => {
     expect(logged[0]).toContain("3679074");
     expect(logged[0]).toContain("1234567");
     // And with the right App the same row is required.
-    expect(
-      automaticReviewIntent({ ...env, GITHUB_APP_ID: "3679074" }, "nm000301", reviewable),
-    ).toBe("require");
+    expect(automaticReviewIntent({ ...env, ...REVIEW_APP_BINDINGS }, "nm000301", reviewable)).toBe(
+      "require",
+    );
+  });
+
+  // The check is posted with an installation token for nemarDatasets. Without the App's private key
+  // or that organization's installation id the Worker falls back to a personal access token
+  // (getDatasetsTokenWithRefresher), and GitHub does not let one post a check run: a matching id
+  // is not enough.
+  describe("a Worker with the right App id and no way to sign in as the App", () => {
+    const withoutKey = { ...REVIEW_APP_BINDINGS, GITHUB_APP_PRIVATE_KEY: undefined };
+    const withoutInstallation = {
+      ...REVIEW_APP_BINDINGS,
+      GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS: undefined,
+    };
+
+    /** Run `fn` with the warning getGitHubAppConfig gives for a malformed installation id silenced. */
+    function quietly<T>(fn: () => T): T {
+      const realWarn = console.warn;
+      console.warn = () => {};
+      try {
+        return fn();
+      } finally {
+        console.warn = realWarn;
+      }
+    }
+
+    test("the installation is configured only with the key and a plain positive installation id", () => {
+      expect(reviewAppIds(REVIEW_APP_BINDINGS).installation_configured).toBe(true);
+      expect(reviewAppIds(withoutKey).installation_configured).toBe(false);
+      expect(reviewAppIds(withoutInstallation).installation_configured).toBe(false);
+      // An installation id for the other organization is not the one the check is posted with.
+      expect(
+        reviewAppIds({
+          ...withoutInstallation,
+          GITHUB_APP_INSTALLATION_ID_NEMAR_ORG: "424242",
+        }).installation_configured,
+      ).toBe(false);
+      for (const bad of ["", "0", "-5", "12abc", "4.2", "abc"]) {
+        const ids = quietly(() =>
+          reviewAppIds({ ...REVIEW_APP_BINDINGS, GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS: bad }),
+        );
+        expect(ids.installation_configured, JSON.stringify(bad)).toBe(false);
+      }
+      // The id still matches: it is only the way to sign in that is missing.
+      expect(reviewAppIds(withoutInstallation).app_id_matches).toBe(true);
+    });
+
+    test("the refusal is a plain sentence that says what is missing and why it matters", () => {
+      for (const env of [withoutKey, withoutInstallation]) {
+        const sentence = reviewAppInstallationRefusal(env) ?? "";
+        expect(sentence).toContain("GITHUB_APP_PRIVATE_KEY");
+        expect(sentence).toContain("GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS");
+        expect(sentence).toContain("personal access token");
+        expect(sentence).toContain("check would never arrive");
+        // It does not talk about the App's id: that is not what is wrong.
+        expect(sentence).not.toContain("3679074");
+      }
+      expect(reviewAppInstallationRefusal(REVIEW_APP_BINDINGS)).toBeNull();
+    });
+
+    test("the id is said first, and the installation only for the right App", () => {
+      expect(reviewAppRefusal(REVIEW_APP_BINDINGS)).toBeNull();
+      expect(reviewAppRefusal(withoutKey)?.code).toBe("review_app_not_configured");
+      expect(reviewAppRefusal(withoutInstallation)?.code).toBe("review_app_not_configured");
+      // Another App, and no installation either: the id is what is said.
+      const another = reviewAppRefusal({ GITHUB_APP_ID: "1234567" });
+      expect(another?.code).toBe("review_app_mismatch");
+      expect(another?.sentence).toContain("1234567");
+      expect(another?.sentence).not.toContain("GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS");
+    });
+
+    test("they ask for no requirement on their own, say why in the log, and still ask for the removal", () => {
+      const logged: string[] = [];
+      const realError = console.error;
+      console.error = (...args: unknown[]) => {
+        logged.push(args.map(String).join(" "));
+      };
+      try {
+        for (const config of [withoutKey, withoutInstallation]) {
+          const env = { PR_REVIEW_ENABLED: "1", PR_REVIEW_AUTO_REQUIRE: "1", ...config };
+          expect(automaticReviewIntent(env, "nm000301", reviewable)).toBeUndefined();
+          // A removal needs no check to arrive, so it is never held back by this.
+          expect(
+            automaticReviewIntent(env, "nm000301", { ...reviewable, visibility: "private" }),
+          ).toBe("remove");
+        }
+      } finally {
+        console.error = realError;
+      }
+      expect(logged).toHaveLength(2);
+      for (const line of logged) {
+        expect(line).toContain("nm000301");
+        expect(line).toContain("GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS");
+      }
+      // With both the right App and a way to sign in as it, the same row is required.
+      expect(
+        automaticReviewIntent(
+          { PR_REVIEW_ENABLED: "1", PR_REVIEW_AUTO_REQUIRE: "1", ...REVIEW_APP_BINDINGS },
+          "nm000301",
+          reviewable,
+        ),
+      ).toBe("require");
+    });
+
+    test("read from the catalog, the same", async () => {
+      const db = freshDb();
+      insert(db, "nm000301", reviewable);
+      insert(db, "nm000302", { ...reviewable, visibility: "private" });
+      const env = (config: Partial<GitHubAppEnv>) =>
+        ({
+          DB: realD1(db),
+          PR_REVIEW_ENABLED: "1",
+          PR_REVIEW_AUTO_REQUIRE: "1",
+          ...config,
+        }) as unknown as AutoEnv;
+      const realError = console.error;
+      console.error = () => {};
+      try {
+        expect(await readReviewIntent(env(REVIEW_APP_BINDINGS), "nm000301")).toBe("require");
+        expect(await readReviewIntent(env(withoutInstallation), "nm000301")).toBeUndefined();
+        expect(await readReviewIntent(env(withoutInstallation), "nm000302")).toBe("remove");
+      } finally {
+        console.error = realError;
+      }
+    });
   });
 
   test("the App id is not asked when nothing would be required", () => {

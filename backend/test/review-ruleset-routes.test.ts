@@ -16,7 +16,6 @@ import { Hono } from "hono";
 import { adminRoutes } from "../src/routes/admin";
 import {
   BRANCH_RULESET_NAME,
-  NEMAR_APP_ID,
   REVIEW_RULESET_NAME,
   buildReviewRulesetPayload,
   deriveContexts,
@@ -26,11 +25,20 @@ import {
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
-import { type RulesetStandIn, startRulesetStandIn } from "./helpers/github-rulesets";
+import {
+  REVIEW_APP_BINDINGS,
+  type RulesetStandIn,
+  dropStandInAppToken,
+  seedStandInAppToken,
+  startRulesetStandIn,
+} from "./helpers/github-rulesets";
 
 const ADMIN_KEY = "review-ruleset-admin-key-0123456789abcdef0123456789abcdef";
 const OWNER_KEY = "review-ruleset-owner-key-0123456789abcdef0123456789abcdef";
 const PAT = "ghp_review_ruleset_routes";
+// What the Worker finds when it signs in as the App. It differs from the PAT in `env()`, so a
+// request the stand-in saw tells which of the two the Worker used.
+const APP_TOKEN = "ghs_review_ruleset_routes_installation";
 
 let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
@@ -41,10 +49,13 @@ let adminId = 0;
 beforeAll(() => {
   standIn = startRulesetStandIn();
   (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = standIn.url;
+  // The Worker signs in as the App (see REVIEW_APP_BINDINGS), and this is the token it finds.
+  seedStandInAppToken(APP_TOKEN);
 });
 
 afterAll(() => {
   (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = undefined;
+  dropStandInAppToken();
   standIn.stop();
 });
 
@@ -82,8 +93,9 @@ function env(): Bindings {
     DB: realD1(db),
     ENVIRONMENT: "production",
     GITHUB_ADMIN_PAT: PAT,
-    // The App this Worker posts the review check as, which is the one the ruleset requires it from.
-    GITHUB_APP_ID: String(NEMAR_APP_ID),
+    // The App this Worker posts the review check as, which is the one the ruleset requires it
+    // from, with the key and installation it signs in with.
+    ...REVIEW_APP_BINDINGS,
     PR_REVIEW_ENABLED: "1",
     ...envOverrides,
   } as Bindings;
@@ -996,6 +1008,179 @@ describe("a Worker that posts the review check as another GitHub App", () => {
 
     expect(r.status).toBe(409);
     expect(r.body.code).toBe("review_disabled");
+  });
+});
+
+// The right App id is not enough. The check is posted with an installation token for
+// nemarDatasets, and a Worker without the App's private key or that installation id falls back to
+// the personal access token, which GitHub does not let post a check run. So the ruleset would wait
+// for a check that never comes, and a live requirement is refused. A removal is not.
+describe("a Worker with the right App id and no way to sign in as the App", () => {
+  /** What leaves the Worker without an installation of the App for nemarDatasets, in four ways. */
+  const WITHOUT: Array<[string, Partial<Bindings>]> = [
+    ["no private key", { GITHUB_APP_PRIVATE_KEY: undefined }],
+    ["no installation id", { GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS: undefined }],
+    [
+      "an installation id that is not a number",
+      { GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS: "x42" },
+    ],
+    [
+      "an installation id for the other organization only",
+      {
+        GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS: undefined,
+        GITHUB_APP_INSTALLATION_ID_NEMAR_ORG: "424242",
+      },
+    ],
+  ];
+
+  /** Run `fn` with the warning for a malformed installation id silenced. */
+  async function quietly<T>(fn: () => Promise<T>): Promise<T> {
+    const realWarn = console.warn;
+    console.warn = () => {};
+    try {
+      return await fn();
+    } finally {
+      console.warn = realWarn;
+    }
+  }
+
+  test.each(WITHOUT)(
+    "a live require is refused with 409, a plain sentence, and no call to GitHub (%s)",
+    async (_name, config) => {
+      seedDataset("nm000201");
+      envOverrides = config;
+
+      const r = await quietly(() => single("nm000201", { dry_run: false }));
+
+      expect(r.status).toBe(409);
+      expect(r.body.code).toBe("review_app_not_configured");
+      expect(r.body.error).toContain("cannot sign in as the GitHub App for the nemarDatasets");
+      expect(r.body.error).toContain("GITHUB_APP_PRIVATE_KEY");
+      expect(r.body.error).toContain("GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS");
+      expect(r.body.error).toContain("personal access token");
+      expect(r.body.error).toContain("Nothing was changed");
+      // The id is right, so it is not what the sentence is about.
+      expect(r.body.error).not.toContain("3679074");
+      expect(standIn.calls).toHaveLength(0);
+      expect(held("nm000201")).toEqual([]);
+      expect(audits()).toEqual([]);
+    },
+  );
+
+  test("a dry run still answers, and says the id is right and the installation is not", async () => {
+    seedDataset("nm000201");
+    envOverrides = { GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS: undefined };
+
+    const r = await single("nm000201");
+
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({
+      dry_run: true,
+      action: "create",
+      applied: false,
+      github_app_id: "3679074",
+      app_id_matches: true,
+      installation_configured: false,
+    });
+    expect(standIn.writes()).toHaveLength(0);
+  });
+
+  test("the same request goes through when the Worker can sign in as the App, and does so", async () => {
+    seedDataset("nm000201");
+
+    const dry = await single("nm000201");
+    expect(dry.body).toMatchObject({ app_id_matches: true, installation_configured: true });
+    const r = await single("nm000201", { dry_run: false });
+
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({
+      action: "create",
+      applied: true,
+      installation_configured: true,
+    });
+    expect(held("nm000201")).toEqual([REVIEW_RULESET_NAME]);
+    // It reached GitHub as the App's installation and not as the personal access token.
+    const sent = standIn.rulesetWrites();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].auth).toBe(`Bearer ${APP_TOKEN}`);
+  });
+
+  test("a removal is not refused, and is made with the personal access token the Worker has", async () => {
+    seedDataset("nm000201");
+    seedDataset("nm000202", { visibility: "private" });
+    await ensureReviewRuleset("nm000201", PAT);
+    await ensureReviewRuleset("nm000202", PAT);
+    standIn.calls.length = 0;
+    envOverrides = { GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS: undefined };
+
+    const removed = await single("nm000201", { dry_run: false, remove: true });
+    const stray = await single("nm000202", { dry_run: false });
+
+    expect(removed.status).toBe(200);
+    expect(removed.body).toMatchObject({ action: "remove", applied: true });
+    expect(stray.status).toBe(200);
+    expect(stray.body).toMatchObject({ intent: "remove", action: "remove", applied: true });
+    expect(held("nm000201")).toEqual([]);
+    expect(held("nm000202")).toEqual([]);
+    // This is the fallback the refusal is about: with no installation, the PAT is what is sent.
+    for (const call of standIn.calls) expect(call.auth).toBe(`Bearer ${PAT}`);
+  });
+
+  test("a live page refuses each row that would require the ruleset, and applies the removals", async () => {
+    seedDataset("nm000301");
+    seedDataset("nm000302", { visibility: "private" });
+    await ensureReviewRuleset("nm000302", PAT);
+    standIn.calls.length = 0;
+    envOverrides = { GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS: undefined };
+
+    const r = await bulk({ dry_run: false });
+
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ app_id_matches: true, installation_configured: false });
+    const byId = Object.fromEntries(r.body.results.map((x: Json) => [x.dataset_id, x]));
+    expect(byId.nm000301).toMatchObject({
+      action: null,
+      applied: false,
+      code: "review_app_not_configured",
+    });
+    expect(byId.nm000301.error).toContain("GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS");
+    expect(byId.nm000302).toMatchObject({ intent: "remove", action: "remove", applied: true });
+    expect(held("nm000301")).toEqual([]);
+    expect(held("nm000302")).toEqual([]);
+    expect(standIn.calls.filter((c) => c.path.includes("/nm000301"))).toHaveLength(0);
+  });
+
+  test("a dry run page answers with the state and no refusal", async () => {
+    seedDataset("nm000301");
+    envOverrides = { GITHUB_APP_PRIVATE_KEY: undefined };
+
+    const r = await bulk({});
+
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ app_id_matches: true, installation_configured: false });
+    expect(r.body.results[0]).toMatchObject({ action: "create", applied: false });
+    expect(r.body.results[0].error).toBeUndefined();
+  });
+
+  test("the id is said first when it is wrong too, and the review being off before both", async () => {
+    seedDataset("nm000201");
+    envOverrides = {
+      GITHUB_APP_ID: "1234567",
+      GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS: undefined,
+    };
+    const wrongId = await single("nm000201", { dry_run: false });
+    expect(wrongId.status).toBe(409);
+    expect(wrongId.body.code).toBe("review_app_mismatch");
+    expect(wrongId.body.error).not.toContain("GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS");
+
+    envOverrides = {
+      GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS: undefined,
+      PR_REVIEW_ENABLED: undefined,
+    };
+    const off = await single("nm000201", { dry_run: false });
+    expect(off.status).toBe(409);
+    expect(off.body.code).toBe("review_disabled");
+    expect(standIn.calls).toHaveLength(0);
   });
 });
 

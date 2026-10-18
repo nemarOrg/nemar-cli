@@ -28,11 +28,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
 import { isValidDatasetId } from "../backend/src/services/datasetId";
-import { NEMAR_APP_ID } from "../backend/src/services/github";
 import { hashApiKey } from "../backend/src/services/token";
 import type { Bindings } from "../backend/src/types/bindings";
 import { freshDb, realD1 } from "../backend/test/helpers/d1";
-import { type RulesetStandIn, startRulesetStandIn } from "../backend/test/helpers/github-rulesets";
+import {
+  REVIEW_APP_BINDINGS,
+  type RulesetStandIn,
+  dropStandInAppToken,
+  seedStandInAppToken,
+  startRulesetStandIn,
+} from "../backend/test/helpers/github-rulesets";
 import { makePrQueueApp } from "../backend/test/helpers/pr-queue-app";
 import { isBoundedDatasetId, isDatasetIdPrefix } from "../src/lib/admin-command";
 
@@ -44,6 +49,7 @@ const OWNER_KEY = "cli-review-owner-key-0123456789abcdef0123456789abcdef";
 const ADMIN_KEY = "cli-review-admin-key-0123456789abcdef0123456789abcdef";
 const MEMBER_KEY = "cli-review-member-key-0123456789abcdef0123456789abcdef";
 const REVIEW_RULESET = "NEMAR PR review required";
+const PAT = "ghp_cli_review_ruleset";
 
 let standIn: RulesetStandIn;
 let apiServer: ReturnType<typeof Bun.serve>;
@@ -58,9 +64,10 @@ function env(): Bindings {
   return {
     DB: realD1(db),
     ENVIRONMENT: "production",
-    GITHUB_ADMIN_PAT: "ghp_cli_review_ruleset",
-    // The App this Worker posts the review check as, which is the one the ruleset requires it from.
-    GITHUB_APP_ID: String(NEMAR_APP_ID),
+    GITHUB_ADMIN_PAT: PAT,
+    // The App this Worker posts the review check as, which is the one the ruleset requires it
+    // from, with the key and installation it signs in with.
+    ...REVIEW_APP_BINDINGS,
     PR_REVIEW_ENABLED: "1",
     ...envOverrides,
   } as Bindings;
@@ -69,6 +76,8 @@ function env(): Bindings {
 beforeAll(() => {
   standIn = startRulesetStandIn();
   (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = standIn.url;
+  // The Worker signs in as the App (see REVIEW_APP_BINDINGS), and this is the token it finds.
+  seedStandInAppToken(PAT);
   handle = makePrQueueApp();
   apiServer = Bun.serve({
     port: 0,
@@ -84,6 +93,7 @@ beforeAll(() => {
 
 afterAll(() => {
   (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = undefined;
+  dropStandInAppToken();
   apiServer.stop(true);
   standIn.stop();
 });
@@ -501,6 +511,102 @@ describe("the GitHub App the ruleset requires the check from", () => {
     expect(r.stdout).toContain("3679074");
     expect(r.stdout).toContain("1234567");
     expect(standIn.calls).toHaveLength(0);
+  });
+
+  // The right id is not enough. The check is posted with an installation token for nemarDatasets,
+  // and a Worker without the App's private key or that installation id would post with a personal
+  // access token, which GitHub does not let post a check run.
+  describe("the right id and no way to sign in as the App", () => {
+    const WITHOUT: Array<[string, Partial<Bindings>]> = [
+      ["no private key", { GITHUB_APP_PRIVATE_KEY: undefined }],
+      ["no installation id", { GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS: undefined }],
+    ];
+
+    test.each(WITHOUT)(
+      "a dry run says so and that --apply would be refused (%s)",
+      async (_n, config) => {
+        seedDataset("nm000201");
+        envOverrides = config;
+
+        const r = await cli(["nm000201"]);
+
+        expect(r.exitCode).toBe(0);
+        expect(r.stdout).toContain(
+          "this Worker is set to App 3679074, the App the ruleset requires it from, but it cannot sign in as that App for nemarDatasets",
+        );
+        expect(r.stdout).toContain(
+          "GITHUB_APP_PRIVATE_KEY or GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS",
+        );
+        expect(r.stdout).toContain("personal access token");
+        expect(r.stdout).toContain("--apply would be refused");
+        // The id is right, so the line that says the Worker posts as the right App is not printed.
+        expect(r.stdout).not.toContain("this Worker posts the check as App 3679074");
+        expect(standIn.writes()).toHaveLength(0);
+      },
+    );
+
+    test("--apply is refused in a plain sentence, and exits 1 with nothing written", async () => {
+      seedDataset("nm000201");
+      envOverrides = { GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS: undefined };
+
+      const r = await cli(["nm000201", "--apply"]);
+
+      expect(r.exitCode).toBe(1);
+      const said = r.stdout + r.stderr;
+      expect(said).toContain("cannot sign in as the GitHub App for the nemarDatasets organization");
+      expect(said).toContain("personal access token");
+      expect(said).toContain("Nothing was changed");
+      expect(standIn.calls).toHaveLength(0);
+    });
+
+    test("--remove --apply is not refused by it", async () => {
+      seedDataset("nm000201");
+      standIn.rulesets.set("nm000201", [
+        {
+          id: 4246,
+          name: REVIEW_RULESET,
+          source_type: "Repository",
+          body: { name: REVIEW_RULESET, target: "branch", enforcement: "active", rules: [] },
+        },
+      ]);
+      envOverrides = { GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS: undefined };
+
+      const r = await cli(["nm000201", "--remove", "--apply"]);
+
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("removed");
+      expect(held("nm000201")).toEqual([]);
+    });
+
+    test("a live page says each refused row in a line and explains the refusal once", async () => {
+      for (const id of ["nm000301", "nm000302", "nm000303"]) seedDataset(id);
+      envOverrides = { GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS: undefined };
+
+      const r = await cli(["--all", "--prefix", "nm", "--apply"]);
+
+      expect(r.exitCode).toBe(1);
+      for (const id of ["nm000301", "nm000302", "nm000303"]) {
+        expect(r.stdout).toMatch(
+          new RegExp(`error\\s+${id}: refused: this Worker cannot sign in as the GitHub App`),
+        );
+      }
+      // The long sentence is there once, however many rows it refused.
+      expect(
+        r.stdout.split("cannot sign in as the GitHub App for the nemarDatasets organization"),
+      ).toHaveLength(2);
+      expect(standIn.calls).toHaveLength(0);
+    });
+
+    test("a dry run of a page says it too", async () => {
+      seedDataset("nm000301");
+      envOverrides = { GITHUB_APP_PRIVATE_KEY: undefined };
+
+      const r = await cli(["--all", "--prefix", "nm"]);
+
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("it cannot sign in as that App for nemarDatasets");
+      expect(r.stdout).toContain("--apply would be refused");
+    });
   });
 
   test("a dry run of a page prints both ids", async () => {
