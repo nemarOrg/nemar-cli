@@ -60,6 +60,7 @@ import {
   gatherListing,
 } from "./pr-review-evidence";
 import {
+  MAX_BODY_CHARS,
   REVIEW_MODEL,
   REVIEW_OUTPUT_SCHEMA,
   SCREEN_MODEL,
@@ -390,15 +391,19 @@ interface PullRequestJson {
  * The description is judged as the models read it, after {@link tidy}: a body of zero-width spaces
  * and soft hyphens is blank to them, so it is empty here, though `trim` leaves it. The whole of it is
  * judged, not the cut the models are given (tidy would end a long run of blanks with its `[cut]`
- * mark, and a description of nothing but blanks is empty however long it is).
+ * mark, and a description of nothing but blanks is empty however long it is). It is cut when the
+ * tidied text is longer than {@link MAX_BODY_CHARS}, the cap the prompt cuts at, so the fact is true
+ * exactly when a model was shown the `[cut]` mark.
  */
 export function textFactsOf(pr: { title?: unknown; body?: unknown }, listing: Listing): TextFacts {
   const changedName =
     listing.nameAfter !== null && listing.nameAfter !== listing.nameBefore
       ? listing.nameAfter
       : null;
+  const body = tidy(pr.body, Number.POSITIVE_INFINITY);
   return {
-    descriptionEmpty: tidy(pr.body, Number.POSITIVE_INFINITY).trim() === "",
+    descriptionEmpty: body.trim() === "",
+    descriptionCut: body.length > MAX_BODY_CHARS,
     titleProblem: namingProblemOf(typeof pr.title === "string" ? pr.title : ""),
     nameProblem: changedName === null ? null : namingProblemOf(changedName),
   };

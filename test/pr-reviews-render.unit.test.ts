@@ -490,6 +490,7 @@ describe("a version 2 report on the terminal", () => {
     areas,
     listed: [{ status: "modified", path: "dataset_description.json" }],
     description_empty: false,
+    description_cut: false,
     title_problem: null,
     name_problem: null,
     ...over,

@@ -234,6 +234,11 @@ export type GitFacts = Listing & ContentFacts;
  */
 export interface TextFacts {
   descriptionEmpty: boolean;
+  /**
+   * The description, as the models read it (after `tidy`), is longer than they are shown, so they
+   * read its start and the mark `[cut]`. The cap is `MAX_BODY_CHARS` in `pr-review-prompt.ts`.
+   */
+  descriptionCut: boolean;
   titleProblem: NamingProblem | null;
   nameProblem: NamingProblem | null;
 }
@@ -810,6 +815,7 @@ function listedEvidence(listing: Listing, text: TextFacts) {
     areas,
     listed,
     description_empty: text.descriptionEmpty,
+    description_cut: text.descriptionCut,
     title_problem: text.titleProblem,
     name_problem: text.nameProblem,
   };

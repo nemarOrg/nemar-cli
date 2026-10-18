@@ -42,6 +42,7 @@ import {
   mapError,
   postCallback,
   runReview,
+  textFactsOf,
 } from "../scripts/ci/pr-review";
 import {
   EVIDENCE_BUDGET_MS,
@@ -62,6 +63,7 @@ import {
   pathPattern,
 } from "../scripts/ci/pr-review-evidence";
 import {
+  MAX_BODY_CHARS,
   REVIEW_OUTPUT_SCHEMA,
   REVIEW_SYSTEM_PROMPT,
   SCREEN_OUTPUT_SCHEMA,
@@ -76,6 +78,7 @@ import {
   FINDING_CODES,
   type PrReviewReport,
   PrReviewReportError,
+  factsOf,
   parseCallbackOutcome,
   parsePrReviewReport,
   renderCheck,
@@ -184,6 +187,7 @@ const tokenExchanges: Array<Record<string, unknown>> = [];
 /** The text facts of a pull request with a fine title, a description and no name change. */
 const NO_TEXT_PROBLEMS: TextFacts = {
   descriptionEmpty: false,
+  descriptionCut: false,
   titleProblem: null,
   nameProblem: null,
 };
@@ -317,6 +321,18 @@ beforeEach(() => {
   reviewReply = () =>
     standInMessage(JSON.stringify(STAND_IN_OUTPUT), { model: "claude-sonnet-5-5" });
 });
+
+/** The one user message of a model request, as the model reads it. */
+function userMessageOf(req: ModelRequest): string {
+  const messages = req.body.messages as Array<{ role: string; content: string }>;
+  expect(messages).toHaveLength(1);
+  return messages[0]?.content ?? "";
+}
+
+/** A readable description of exactly `n` characters. */
+function bodyOfLength(n: number): string {
+  return "Adds sub-03 and its sidecar. ".repeat(Math.ceil(n / 29)).slice(0, n);
+}
 
 /** The closed word an EvidenceError carries, or a note on why there was none. */
 function codeOf(fn: () => unknown): string {
@@ -629,6 +645,7 @@ describe("the prompt keeps the pull request inside its fence", () => {
     ]);
     const offered = new Set(item.code?.enum);
     expect(FINDING_CODES.filter((c) => !offered.has(c)).sort()).toEqual([
+      "description_cut",
       "description_missing",
       "name_author_year",
       "name_template_field",
@@ -2639,6 +2656,67 @@ describe("the facts come before any model, and fail the verdict whatever it says
     const report = await reviewWith("facts-empty", () => {}, { body: "   \n" });
     expect(report.evidence.description_empty).toBe(true);
     expect(verdictOf(report)).toBe("fail");
+  });
+
+  test("a description longer than the models read cannot pass: what they did not read was not assessed", async () => {
+    const report = await reviewWith("facts-cut", () => {}, {
+      body: bodyOfLength(MAX_BODY_CHARS + 1),
+    });
+    expect(report.stage).toBe("full");
+    expect(report.evidence.description_cut).toBe(true);
+    // Both models answered pass, as they do in the control, having read only the start of it...
+    expect(report.criteria.description_not_misleading).toBe("pass");
+    // ...and the platform will not take that for an answer about the rest.
+    expect(factsOf(report).criteria.description_not_misleading).toBe("unknown");
+    expect(verdictOf(report)).toBe("uncertain");
+    expect(renderCheck({ kind: "reported", report }).text).toContain(
+      "Description is too long to read in full",
+    );
+    // The facts say "cut" because both models were shown the cut mark.
+    expect(modelRequests).toHaveLength(2);
+    for (const req of modelRequests) expect(userMessageOf(req)).toContain("\n[cut]");
+  });
+
+  test("a description exactly at the cap is read whole: not cut, and it can pass", async () => {
+    const report = await reviewWith("facts-at-cap", () => {}, {
+      body: bodyOfLength(MAX_BODY_CHARS),
+    });
+    expect(report.evidence.description_cut).toBe(false);
+    expect(verdictOf(report)).toBe("pass");
+    expect(modelRequests).toHaveLength(2);
+    for (const req of modelRequests) {
+      expect(userMessageOf(req)).toContain(bodyOfLength(MAX_BODY_CHARS));
+      expect(userMessageOf(req)).not.toContain("[cut]");
+    }
+  });
+
+  test("the fact and the prompt use one cap: the description is cut exactly when a model sees the mark", () => {
+    const dir = newDataset("facts-one-cap");
+    const r = branch(dir, () => write(dir, "README.md", "# Edited\n"));
+    const listing = gatherListing(r.dir, r.base, r.head);
+    // Blanks and invisible characters count after `tidy` like any other, one for one.
+    for (const body of [
+      bodyOfLength(MAX_BODY_CHARS - 1),
+      bodyOfLength(MAX_BODY_CHARS),
+      bodyOfLength(MAX_BODY_CHARS + 1),
+      `${"\u200b".repeat(MAX_BODY_CHARS)}x`,
+      `${bodyOfLength(MAX_BODY_CHARS - 1)}\u200b`,
+    ]) {
+      const facts = textFactsOf({ title: "t", body }, listing);
+      const screen = buildScreenMessages({
+        listing,
+        pr: { title: "t", body },
+        fromFork: false,
+        nonce: "n0nce",
+      }).user;
+      expect(screen.includes("\n[cut]"), `${body.length} characters`).toBe(facts.descriptionCut);
+    }
+    expect(textFactsOf({ title: "t", body: bodyOfLength(MAX_BODY_CHARS) }, listing)).toMatchObject({
+      descriptionCut: false,
+    });
+    expect(
+      textFactsOf({ title: "t", body: bodyOfLength(MAX_BODY_CHARS + 1) }, listing),
+    ).toMatchObject({ descriptionCut: true });
   });
 
   test("the facts are decided even when the screen stops the pull request", async () => {

@@ -85,6 +85,7 @@ function evidence(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     ...evidenceV1(over),
     description_empty: false,
+    description_cut: false,
     title_problem: null,
     name_problem: null,
     ...over,
@@ -1345,10 +1346,11 @@ describe("a version 2 report is exactly its keys, and its stage is a contract", 
     expect(Object.keys(r.criteria).sort()).toEqual([...CRITERIA].sort());
     expect(r.evidence).toMatchObject({
       description_empty: false,
+      description_cut: false,
       title_problem: null,
       name_problem: null,
     });
-    for (const key of ["description_empty", "title_problem", "name_problem"]) {
+    for (const key of ["description_empty", "description_cut", "title_problem", "name_problem"]) {
       const e = evidence();
       delete e[key];
       expect(refusal(report({ evidence: e })), key).toBe("bad_evidence");
@@ -1359,6 +1361,8 @@ describe("a version 2 report is exactly its keys, and its stage is a contract", 
     expect(refusal(report({ evidence: evidence({ description_empty: "no" }) }))).toBe(
       "bad_evidence",
     );
+    expect(refusal(report({ evidence: evidence({ description_cut: "no" }) }))).toBe("bad_evidence");
+    expect(refusal(report({ evidence: evidence({ description_cut: null }) }))).toBe("bad_evidence");
   });
 
   test("a screen report is accepted only as a fail of genuine_contribution, the rest not assessed", () => {
@@ -1442,6 +1446,37 @@ describe("the text facts fail the verdict whatever the model says", () => {
     expect(factsOf(r).criteria.clear_title_and_description).toBe("fail");
     expect(verdictOf(r)).toBe("fail");
     expect(renderCheck({ kind: "reported", report: r }).text).toContain("Description is empty");
+  });
+
+  test("a description longer than the models read cannot pass: the rest was not assessed", () => {
+    const r = parsed({ evidence: evidence({ description_cut: true }) });
+    // The models answered pass, having read only the start.
+    expect(r.criteria.description_not_misleading).toBe("pass");
+    expect(factsOf(r).criteria.description_not_misleading).toBe("unknown");
+    expect(factsOf(r).notes).toContainEqual({
+      criterion: "description_not_misleading",
+      code: "description_cut",
+      result: "unknown",
+    });
+    expect(verdictOf(r)).toBe("uncertain");
+    expect(conclusionOf({ kind: "reported", report: r })).toBe("action_required");
+    const check = renderCheck({ kind: "reported", report: r });
+    expect(check.summary).toContain("| The description is not misleading | Could not tell |");
+    expect(check.text).toContain("Description is too long to read in full");
+    expect(check.text).toContain("tries to instruct the reviewer, was not assessed");
+    // The cut lowers and never raises: an answer already worse stays as it was, and a steering
+    // finding on the part that was read still fails the review.
+    const misleading = parsed({
+      criteria: { description_not_misleading: "fail" },
+      evidence: evidence({ description_cut: true }),
+    });
+    expect(factsOf(misleading).criteria.description_not_misleading).toBe("fail");
+    expect(verdictOf(misleading)).toBe("fail");
+    expect(
+      verdictOf(parsed({ steering: true, evidence: evidence({ description_cut: true }) })),
+    ).toBe("fail");
+    // And a description that was not cut changes nothing.
+    expect(factsOf(parsed()).notes.map((n) => n.code)).not.toContain("description_cut");
   });
 
   test("a title that breaks the naming rule fails, and the check says how to fix it", () => {

@@ -59,7 +59,13 @@ export const SCREEN_MODEL = SCREEN_MODELS[0];
 export const REVIEW_MODEL = REVIEW_MODELS[0];
 
 export const MAX_TITLE_CHARS = 300;
-export const MAX_BODY_CHARS = 4_000;
+/**
+ * The most characters of a pull request's description, after {@link tidy}, that either model reads.
+ * One constant for both uses: the prompt cuts at it ({@link requestText}) and the text facts say a
+ * description was cut when it is longer ({@link TextFacts.descriptionCut} in `pr-review.ts`), so the
+ * report says "cut" exactly when a model was shown the `[cut]` mark.
+ */
+export const MAX_BODY_CHARS = 12_000;
 const MAX_SUBJECT_CHARS = 200;
 const MAX_PATH_CHARS = 200;
 /** A diff is already cut by the evidence reader; this is only a ceiling on what is sent. */
@@ -231,6 +237,7 @@ export const REVIEW_FINDING_CODES: readonly FindingCode[] = FINDING_CODES.filter
   (c) =>
     c !== "spam" &&
     c !== "description_missing" &&
+    c !== "description_cut" &&
     c !== "title_author_year" &&
     c !== "title_template_field" &&
     c !== "name_author_year" &&

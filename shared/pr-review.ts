@@ -124,6 +124,8 @@ export const FINDING_CODES = [
   "description_missing",
   "description_placeholder",
   "description_misleading",
+  // The description is longer than the models read, so part of it was not assessed.
+  "description_cut",
   // The naming rule (`shared/naming-rule.ts`), decided by the script and never by a model.
   "title_author_year",
   "title_template_field",
@@ -245,6 +247,11 @@ export interface ReviewEvidenceV1 {
 export interface ReviewEvidence extends ReviewEvidenceV1 {
   /** The pull request's description is empty or only whitespace. */
   description_empty: boolean;
+  /**
+   * The description is longer than the models read, so they were shown its start and the mark
+   * `[cut]`. Whether the rest misleads, or tries to instruct them, was not assessed.
+   */
+  description_cut: boolean;
   /** How the title breaks the naming rule, or null when it does not. */
   title_problem: NamingProblem | null;
   /**
@@ -449,6 +456,7 @@ const EVIDENCE_V1_KEYS = [
 const EVIDENCE_V2_KEYS = [
   ...EVIDENCE_V1_KEYS,
   "description_empty",
+  "description_cut",
   "title_problem",
   "name_problem",
 ] as const;
@@ -511,10 +519,13 @@ function parseEvidence(raw: unknown): ReviewEvidence {
   if (!isRecord(raw) || !hasExactKeys(raw, EVIDENCE_V2_KEYS)) {
     throw new PrReviewReportError("bad_evidence");
   }
-  if (typeof raw.description_empty !== "boolean") throw new PrReviewReportError("bad_evidence");
+  if (typeof raw.description_empty !== "boolean" || typeof raw.description_cut !== "boolean") {
+    throw new PrReviewReportError("bad_evidence");
+  }
   return {
     ...parseEvidenceV1Fields(raw),
     description_empty: raw.description_empty,
+    description_cut: raw.description_cut,
     title_problem: nullableNamingProblem(raw.title_problem),
     name_problem: nullableNamingProblem(raw.name_problem),
   };
@@ -764,6 +775,11 @@ const NAME_RULE_CODE: Record<NamingProblem, FindingCode> = {
  *  - A title that breaks the naming rule fails `clear_title_and_description`.
  *  - A new dataset name that breaks the naming rule fails `no_degradation`: the name is part of the
  *    dataset, and a name the policy refuses is broken metadata.
+ *
+ * A description longer than the models read (`description_cut`) lowers `description_not_misleading`
+ * to `unknown`: the models saw only its start, so that it does not mislead, and that it does not try
+ * to instruct them, were not assessed. A steering finding on the part they did see still fails the
+ * review whatever this says.
  */
 export function factsOf(report: PrReviewReport): {
   criteria: Partial<Record<Criterion, CriterionResult>>;
@@ -818,6 +834,7 @@ export function factsOf(report: PrReviewReport): {
   if (report.v === REPORT_VERSION) {
     const v2 = report.evidence;
     if (v2.description_empty) rule("clear_title_and_description", "description_missing");
+    if (v2.description_cut) lower("description_not_misleading", "description_cut", "unknown");
     if (v2.title_problem !== null) {
       rule("clear_title_and_description", TITLE_RULE_CODE[v2.title_problem]);
     }
@@ -1082,6 +1099,7 @@ const CODE_LABEL: Record<FindingCode, string> = {
   description_missing: "Description is empty",
   description_placeholder: "Description is placeholder text or not readable",
   description_misleading: "Description is misleading",
+  description_cut: "Description is too long to read in full",
   title_author_year: "Title starts with a name and a year",
   title_template_field: "Title has an unfilled template field",
   name_author_year: "New dataset name starts with a name and a year",
@@ -1094,6 +1112,8 @@ function factSource(code: FindingCode): string {
   switch (code) {
     case "description_missing":
       return "found from the pull request, not by the reviewer: a pull request needs a description of what changed";
+    case "description_cut":
+      return "found from the pull request, not by the reviewer: the description is longer than the reviewer reads, so whether it is misleading, or tries to instruct the reviewer, was not assessed";
     case "title_author_year":
     case "title_template_field":
     case "name_author_year":
