@@ -1000,8 +1000,9 @@ async function stepRepoPublic(c: ApproveStepContext): Promise<RespondOutcome | u
           visibility: repoShouldBePrivate ? "private" : "public",
           // Read after the visibility update and the stamp above, so a published dataset is given
           // the required review and an anonymous release, which is not reviewed, is not (ADR 0107).
-          // Nothing is asked of the review ruleset until the owner has turned automatic
-          // requirement on (PR_REVIEW_AUTO_REQUIRE).
+          // The owner's switch (PR_REVIEW_AUTO_REQUIRE) gates only the addition of the
+          // requirement: with it off a reviewed dataset's review ruleset is left as it is, and a
+          // removal, which a dataset that is not reviewed gets, is asked for anyway.
           review: await readReviewIntent(c.env, datasetId),
           collaborators: { ownerLogin, approvedWriters },
         });

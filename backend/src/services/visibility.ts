@@ -218,8 +218,9 @@ export async function applyDatasetVisibility(
       // in the publication orchestrator; an exhaustive scan found this one.
       visibility: isPrivate ? "private" : "public",
       // The row after the update above, so a dataset made public and reviewed is given the
-      // required review and one made private has it taken off (ADR 0107), once the owner has
-      // turned automatic requirement on (PR_REVIEW_AUTO_REQUIRE); until then it is left as it is.
+      // required review and one made private has it taken off (ADR 0107). The owner's switch
+      // (PR_REVIEW_AUTO_REQUIRE) gates only the addition of the requirement: with it off a
+      // reviewed dataset's review ruleset is left as it is, and a removal is asked for anyway.
       review: await readReviewIntent(env, datasetId),
       collaborators: { ownerLogin, approvedWriters },
     });
