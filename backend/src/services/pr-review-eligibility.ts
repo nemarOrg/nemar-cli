@@ -7,7 +7,7 @@
  * ruleset on repositories (the admin routes, publication, visibility, the drift report) reads many
  * rows at once and has to give the SAME answer without a query for each, so {@link isReviewableRow}
  * is that answer for a row in hand. Two statements of one rule can drift, which is why
- * `test/pr-review-eligibility.test.ts` runs both over every combination of the four columns and
+ * `backend/test/pr-review-eligibility.test.ts` runs both over every combination of the four columns and
  * fails when they disagree. A change to the rule is a change to both.
  *
  * Nothing here talks to GitHub. The types that name what to do about a repository live with the
@@ -106,17 +106,28 @@ export function reviewIntentOf(
 
 /**
  * {@link reviewIntentOf} for a dataset, read from the catalog now. A dataset the catalog does not
- * hold has no answer (`undefined`: touch nothing), and a failed read throws for the caller to
- * handle, as the lifecycle code does for the rest of its repository work.
+ * hold has no answer (`undefined`: touch nothing), and neither has one whose row could not be read.
+ * The read is made while the lifecycle code is bringing a repository to its spec, with the branch
+ * ruleset and the collaborators still to do, so a failure is logged and leaves the review ruleset
+ * as it is instead of costing the rest of that work. The drift report shows a repository left out
+ * of step.
  */
 export async function readReviewIntent(
   env: Pick<Bindings, "DB" | "PR_REVIEW_ENABLED">,
   datasetId: string,
 ): Promise<ReviewIntent | undefined> {
-  const row = await env.DB.prepare(
-    `SELECT ${REVIEWABLE_ROW_COLUMNS} FROM datasets WHERE dataset_id = ?`,
-  )
-    .bind(datasetId)
-    .first<ReviewableRow>();
-  return row ? reviewIntentOf(datasetId, row, isReviewEnabled(env)) : undefined;
+  try {
+    const row = await env.DB.prepare(
+      `SELECT ${REVIEWABLE_ROW_COLUMNS} FROM datasets WHERE dataset_id = ?`,
+    )
+      .bind(datasetId)
+      .first<ReviewableRow>();
+    return row ? reviewIntentOf(datasetId, row, isReviewEnabled(env)) : undefined;
+  } catch (e) {
+    console.error(
+      `[review-ruleset] could not read ${datasetId} to decide its review ruleset; leaving it as it is:`,
+      e,
+    );
+    return undefined;
+  }
 }

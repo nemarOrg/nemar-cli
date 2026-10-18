@@ -24,7 +24,7 @@ import {
   reviewIntentOf,
 } from "../src/services/pr-review-eligibility";
 import type { Bindings } from "../src/types/bindings";
-import { freshDb, realD1 } from "./helpers/d1";
+import { freshDb, realD1, wrapD1 } from "./helpers/d1";
 
 const STATUSES = ["active", "archived", "deleted"] as const;
 const VISIBILITIES = ["public", "private"] as const;
@@ -208,6 +208,24 @@ describe("what a dataset row calls for", () => {
     // And it follows the row: the same dataset, made private, no longer calls for the ruleset.
     db.run("UPDATE datasets SET visibility = 'private' WHERE dataset_id = 'nm000301'");
     expect(await readReviewIntent(env("1"), "nm000301")).toBe("remove");
+  });
+
+  test("a read that fails answers nothing, so the rest of the repository's work is not lost", async () => {
+    const db = freshDb();
+    insert(db, "nm000301", reviewable);
+    const failing = wrapD1(realD1(db), (sql) => {
+      if (sql.includes("FROM datasets")) throw new Error("D1 is unavailable");
+    });
+
+    const intent = await readReviewIntent(
+      { DB: failing, PR_REVIEW_ENABLED: "1" } as unknown as Pick<
+        Bindings,
+        "DB" | "PR_REVIEW_ENABLED"
+      >,
+      "nm000301",
+    );
+
+    expect(intent).toBeUndefined();
   });
 
   test("the columns it selects are the ones the rule reads", () => {
