@@ -4,8 +4,10 @@
  * orchestrator (epic #713) that drives repos/workflows/collaborators to the
  * governance spec.
  *
- * Moved verbatim from services/github.ts (#906, epic #902); the only
- * intentional changes are import paths.
+ * Split out of services/github.ts (#906, epic #902). The section on the required pull-request
+ * review (ADR 0107: the "NEMAR PR review required" ruleset, its payload, and the
+ * `review_ruleset` step of ensureRepoToSpec) was written for this file afterwards, so the rest of
+ * it is the code that moved and that section is not.
  */
 
 import { PR_REVIEW_CHECK_NAME } from "../../../../shared/pr-review.js";
@@ -474,11 +476,11 @@ const ORGANIZATION_ADMIN_ACTOR_ID = 1;
 /**
  * The id of the repository Admin role, as a `RepositoryRole` bypass actor of the review ruleset.
  *
- * NOT VERIFIED (item U1 of epic #1813). GitHub's ruleset documentation lists no role ids. The 5
- * for the repository Admin role comes from the Terraform GitHub provider's documentation (admin 5,
- * write 4, maintain 2 for the base roles), and nothing here has read it back from GitHub. A wrong
- * id would hand the bypass to the wrong role (Maintain or Write in place of Admin), so the first
- * apply, on a dev-owned exemplar, is followed by the check in the rollout runbook (step R1.2): read
+ * NOT VERIFIED. GitHub's ruleset documentation lists no role ids. The 5 for the repository Admin
+ * role comes from the Terraform GitHub provider's documentation (admin 5, write 4, maintain 2 for
+ * the base roles), and nothing here has read it back from GitHub. A wrong id would hand the bypass
+ * to the wrong role (Maintain or Write in place of Admin), so the first apply, on a dev-owned
+ * exemplar, has to be followed by this check before any other repository gets the ruleset: read
  * the ruleset back through GraphQL and expect exactly one RepositoryRole actor whose role name is
  * "admin".
  *

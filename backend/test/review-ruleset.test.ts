@@ -89,9 +89,10 @@ describe("the review ruleset payload", () => {
     expect(REVIEW_RULESET_NAME).toBe("NEMAR PR review required");
   });
 
-  test("the repository Admin role id is the unverified 5 (item U1), so a change is noticed", () => {
-    // Not a claim that 5 is right: the first apply on a dev-owned exemplar reads it back from
-    // GitHub. This only makes changing it a decision somebody has to make on purpose.
+  test("the repository Admin role id is the unverified 5, so a change is noticed", () => {
+    // Not a claim that 5 is right: it has not been read back from GitHub. The first apply on a
+    // dev-owned exemplar is followed by that read (see REPOSITORY_ADMIN_ROLE_ID). This only makes
+    // changing it a decision somebody has to make on purpose.
     expect(REPOSITORY_ADMIN_ROLE_ID).toBe(5);
   });
 
