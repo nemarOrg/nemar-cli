@@ -163,6 +163,7 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
   A pull request that has moved on from it is refused with `head_moved` (409), and nothing is recorded or posted; without a commit the current one is waived, and the answer and the record name it.
   The waiver is for that commit only: a new commit is checked again.
   A name that could not be read is not waived, because a waiver covers only what the rule found.
+  Two things cause an unread name and they are cured differently, so every message about it (the check, the answer of a start or an override, and the list's label) says both: GitHub may not have answered, which one more start settles, or the file at the head has no readable `Name`, which the same start will find again, so the file has to be fixed and pushed.
   A contributor's pull request that the rule refuses is fixed by its author, or merged in the GitHub UI by an owner or administrator (decision 5).
 
 ### 4. Titles and descriptions must be meaningful, and an edit re-runs the review
@@ -240,7 +241,7 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
   The first staging run of `allow --admin` against a required check verifies it, and until it has, a waiver is not known to release one.
 - **The `exempt` label is inferred from who opened the pull request, not read from GitHub.**
   It does not prove the check was posted: a publish that fails answers 500 and shows in the App's delivery log.
-  The one thing the list reads of that check is whether the newest `NEMAR PR Review` check run on the current commit failed or asks for a person, which the row says in `detail` (`naming_rule` or `naming_unchecked`) and the CLI prints as "exempt, naming rule failed: needs allow --admin" or "exempt, naming rule not checked: run start".
+  The one thing the list reads of that check is whether the newest `NEMAR PR Review` check run on the current commit failed or asks for a person, which the row says in `detail` (`naming_rule` or `naming_unchecked`) and the CLI prints as "exempt, naming rule failed: needs allow --admin" or "exempt, naming rule not checked: start once, else fix the file".
   A list of checks cut short, a check that is skipped or still running, and no check at all leave the plain label.
   It informs and decides nothing: a workflow job of the same name could make it wrong, and the row is still not marked as yours to act on.
 - **GitHub's `author_association` is not a reason to exempt or to reject anyone.**

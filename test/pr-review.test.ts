@@ -2134,7 +2134,7 @@ describe("the naming rule on an owner's or administrator's pull request", () => 
     expect(r.title).toBe("Could not decide: the naming rule was not checked");
     // What the rule did find is not lost, and no override is offered while the name is unread.
     expect(r.summary).toContain("Edit the title.");
-    expect(r.summary).toContain("could not be read");
+    expect(r.summary).toContain("GitHub may not have answered");
     expect(`${r.summary}\n${r.text}`).not.toContain("--admin");
     expect(
       renderComment(
@@ -2155,7 +2155,8 @@ describe("the naming rule on an owner's or administrator's pull request", () => 
     );
     const u = renderCheck({ kind: "naming", facts: { title: null, name: "unchecked" } });
     expect(u.title).toBe("Could not decide: the naming rule was not checked");
-    expect(u.summary).toContain("could not be read from GitHub");
+    expect(u.summary).toContain("GitHub may not have answered");
+    expect(u.summary).toContain("has no readable Name");
   });
 
   test("a waiver is skipped and says it was waived, for this commit only", () => {

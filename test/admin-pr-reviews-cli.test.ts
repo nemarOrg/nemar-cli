@@ -408,7 +408,9 @@ describe("nemar admin pr-reviews (list)", () => {
     const lines = r.stdout.split("\n");
     const row = (ds: string) => lines.find((l) => l.includes(ds)) ?? "";
     expect(row("nm000201")).toMatch(/exempt, naming rule failed: needs allow --admin\s+ok\s+ok/);
-    expect(row("nm000202")).toMatch(/exempt, naming rule not checked: run start\s+ok\s+ok/);
+    expect(row("nm000202")).toMatch(
+      /exempt, naming rule not checked: start once, else fix the file\s+ok\s+ok/,
+    );
     expect(row("nm000203")).toMatch(/exempt \(owner or admin\)\s+ok\s+ok/);
     // The word reaches the JSON as a closed word, not a sentence.
     const json = JSON.parse((await cli([...PR, "--json"])).stdout) as QueueResponse;
@@ -671,7 +673,9 @@ describe("the REVIEW column legend", () => {
     const r = await cli([...PR, "--help-all"]);
     const help = r.stdout.replace(/\s+/g, " ");
     expect(help).toContain('"naming rule failed: needs allow --admin"');
-    expect(help).toContain('"naming rule not checked: run start"');
+    expect(help).toContain('"naming rule not checked: start once, else fix the file"');
+    // And why the label does not say to wait: a file with no readable Name is found unreadable again.
+    expect(help).toContain("a file with no readable Name has to be fixed and pushed");
     expect(help).toContain("allow <dataset> <pr> --admin --reason <why>");
   });
 });
@@ -852,9 +856,16 @@ describe("nemar admin pr-reviews allow <dataset> <pr> --admin: the naming rule's
     const r = await cli([...PR, "allow", "nm000201", "7", "--admin", "--reason", REASON]);
     expect(r.exitCode).toBe(1);
     expect(r.stdout).toContain(
-      `Not waived: the dataset name of nm000201 #7 at ${SHA_A.slice(0, 7)} could not be read from GitHub`,
+      `Not waived: the dataset name of nm000201 #7 at ${SHA_A.slice(0, 7)} could not be read, so there is nothing definite to waive.`,
     );
-    expect(r.stdout).toContain("Run the same command again in a moment");
+    // Either GitHub did not answer or the file is unreadable: one more try, then the file.
+    expect(r.stdout).toContain(
+      "GitHub may not have answered, or dataset_description.json has no readable Name",
+    );
+    expect(r.stdout).toContain(
+      "Run the same command once more; if it says the same, fix dataset_description.json and push",
+    );
+    expect(r.stdout).not.toContain("in a moment");
     expect(r.stdout).not.toMatch(/naming_unchecked|unchecked/);
     expect(waivers()).toHaveLength(0);
   });

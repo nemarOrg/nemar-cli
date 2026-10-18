@@ -271,7 +271,14 @@ describe("nemar admin pr-reviews start <dataset> <pr>", () => {
     expect(r.stdout).toContain(
       "not started: its author is a NEMAR owner or administrator, and its dataset name could not be read to check the naming rule, so its check needs a person",
     );
-    expect(r.stdout).toContain("run the same command again in a moment");
+    // Either GitHub did not answer or the file is unreadable: one more try, then the file, and
+    // never a bare "again in a moment", which a file that cannot be read answers the same way.
+    expect(r.stdout).toContain(
+      "GitHub may not have answered, or dataset_description.json has no readable Name",
+    );
+    expect(r.stdout).toContain("run the same command once more");
+    expect(r.stdout).toContain("fix dataset_description.json and push");
+    expect(r.stdout).not.toContain("in a moment");
     expect(r.stdout).not.toContain("naming_unchecked");
     const checks = gh.seen.filter((s) => s.method === "POST" && s.path.endsWith("/check-runs"));
     expect(checks[0]?.body).toMatchObject({ conclusion: "action_required" });

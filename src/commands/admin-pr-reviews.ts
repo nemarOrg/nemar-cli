@@ -154,7 +154,8 @@ function verdictColor(v: string): (s: string) => string {
  * The verdict as a person reads it, with the closed word behind it when there is one. An exempt
  * pull request the naming rule holds says what releases it, because "exempt" alone reads as nothing
  * waiting: the rule failed it (waive it for the commit, or the author fixes it), or could not check
- * it (a start reads the name again).
+ * it (GitHub may not have answered, which one more start settles, or the file has no readable name,
+ * which only a fix to the file does; nothing is waivable until the name is read).
  */
 export function verdictText(e: Pick<QueueEntry, "verdict" | "detail" | "review_current">): string {
   const word = verdictWord(e.verdict);
@@ -165,7 +166,7 @@ export function verdictText(e: Pick<QueueEntry, "verdict" | "detail" | "review_c
     return "exempt, naming rule failed: needs allow --admin";
   }
   if (e.verdict === "exempt" && e.detail === "naming_unchecked") {
-    return "exempt, naming rule not checked: run start";
+    return "exempt, naming rule not checked: start once, else fix the file";
   }
   return e.detail ? `${word} (${detailWord(e.detail)})` : word;
 }
@@ -194,7 +195,7 @@ export function renderQueue(entries: QueueEntry[], now: number = Date.now()): st
     author: clip(e.author_login, 20),
     from: clip(e.from_fork ? `fork ${e.head_label}` : `branch ${e.head_label}`, 34),
     // Wide enough for the longest word a row can carry: an exempt row the naming rule holds, drafted.
-    verdict: clip(`${verdictText(e)}${e.draft ? " [draft]" : ""}`, 56),
+    verdict: clip(`${verdictText(e)}${e.draft ? " [draft]" : ""}`, 72),
     age: ageOf(e.created_at, now),
   }));
   const w = (f: (r: (typeof rows)[number]) => string, min: number) =>
@@ -627,7 +628,9 @@ REVIEW column (the automated review of the pull request's CURRENT commit):
                     title or the name is fixed or the rule is waived for that commit with
                     'nemar admin pr-reviews allow <dataset> <pr> --admin --reason <why>'. The row
                     says so when the check failed ("naming rule failed: needs allow --admin") or
-                    when the name could not be read ("naming rule not checked: run start")
+                    when the name could not be read ("naming rule not checked: start once, else fix
+                    the file": a start asks GitHub again, and a file with no readable Name has to be
+                    fixed and pushed; nothing is waivable until the name is read)
 A verdict is never carried over to a commit it did not read. '*' marks the pull requests you can
 act on now: a pass to approve, or one nobody has decided for you (drafts are never marked).
 
@@ -1145,7 +1148,8 @@ const START_FAULTS = new Set([
   "misconfigured",
   "unknown_dataset",
   "malformed",
-  // GitHub did not show the dataset's name, so the check needs a person until a start reads it.
+  // The dataset's name could not be read (GitHub did not answer, or the file has no readable Name),
+  // so the check needs a person until a start reads it or the file is fixed.
   "naming_unchecked",
 ]);
 
@@ -1161,7 +1165,7 @@ function notStartedText(r: StartReviewResponse): string {
       : r.reason === "naming_rule"
         ? " (the author fixes the title or the name; to waive the rule for this commit: nemar admin pr-reviews allow <dataset> <pr> --admin --reason <why>)"
         : r.reason === "naming_unchecked"
-          ? " (run the same command again in a moment: it reads the name again and posts the check it comes to)"
+          ? " (GitHub may not have answered, or dataset_description.json has no readable Name: run the same command once more, which reads the name again and posts the check it comes to; if it says the same, fix dataset_description.json and push, because nothing can be waived until the name can be read)"
           : "";
   return `not started: ${why}${hint}`;
 }
@@ -2201,10 +2205,10 @@ export function waiverLines(r: WaiveNamingResponse, dataset: string, pr: number)
     case "naming_unchecked":
       return [
         chalk.yellow(
-          `Not waived: the dataset name of ${label} could not be read from GitHub, so there is nothing definite to waive yet.`,
+          `Not waived: the dataset name of ${label} could not be read, so there is nothing definite to waive.`,
         ),
         chalk.dim(
-          "  A waiver covers only what the naming rule found. Run the same command again in a moment, when GitHub answers.",
+          "  A waiver covers only what the naming rule found. GitHub may not have answered, or dataset_description.json has no readable Name. Run the same command once more; if it says the same, fix dataset_description.json and push, and the new commit is checked.",
         ),
       ];
     default: {

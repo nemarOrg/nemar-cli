@@ -1202,7 +1202,19 @@ const NAMING_SENTENCE: Record<"title" | "name", Record<NamingProblem, string>> =
 
 /** What the check says when a pull request changes the dataset description and its name cannot be read. */
 const NAME_UNCHECKED_SENTENCE =
-  "This pull request changes dataset_description.json, but the dataset's name (its Name field) could not be read from it, so the name was not checked against the naming rule. Make sure the file is valid JSON and that Name is text.";
+  "This pull request changes dataset_description.json, but the dataset's name (its Name field) could not be read from it, so the name was not checked against the naming rule. Make sure the file is valid JSON and that Name is text with a visible name.";
+
+/**
+ * What the check of an owner's or administrator's pull request says when the dataset's name could
+ * not be checked. Two things can cause that and they are cured differently: GitHub may not have
+ * answered, which one more start settles, or the file at the head may have no readable `Name`
+ * (missing where nothing says it was removed, not JSON, no text `Name`, or a `Name` that shows
+ * nothing), which the same start will find again, so the file has to be fixed and pushed. The text
+ * says both, in that order because a retry costs nothing, and says that nothing can be waived
+ * meanwhile.
+ */
+const NAME_UNCHECKED_EXEMPT =
+  "The dataset's name could not be checked against the naming rule. GitHub may not have answered, or dataset_description.json has no readable Name (it is missing, is not valid JSON, or its Name is not text or shows nothing). Start the check again once with `nemar admin pr-reviews start <dataset> <pr>`. If it says the same, fix dataset_description.json and push: the new commit is checked, and nothing can be waived until the name can be read.";
 
 const ERROR_COPY: Record<RunError, string> = {
   evidence_unavailable: "The changes could not be read.",
@@ -1428,7 +1440,7 @@ function renderNaming(facts: NamingFacts): RenderedCheck {
               "",
             ]
           : []),
-        "The dataset's name could not be read from GitHub, so it was not checked against the naming rule. Start the check again with `nemar admin pr-reviews start <dataset> <pr>`.",
+        NAME_UNCHECKED_EXEMPT,
       ].join("\n"),
       text: `${NO_VERDICT}\n\n${FOOTER}`,
     };

@@ -89,7 +89,8 @@ export type QueueEnvironment = "production" | "non-production";
  * the current commit failed, so the author fixes the title or the dataset name, or an administrator
  * waives the rule for the commit with `allow --admin`) and `naming_unchecked` (that check asks for a
  * person, because the dataset's name could not be read, whatever the title says: there is nothing
- * to waive until a start reads it). An exempt row the rule does not hold has no detail.
+ * to waive until a start reads it, or, when the file has no readable `Name`, until the file is fixed
+ * and pushed). An exempt row the rule does not hold has no detail.
  */
 export type VerdictDetail =
   | DeclineReason
@@ -259,8 +260,10 @@ export interface StartReviewResponse {
  *  - `already_waived`: a waiver for this commit covers what the rule finds; its check was posted
  *    again;
  *  - `nothing_to_waive`: the rule finds nothing on the commit; its check was posted as skipped;
- *  - `naming_unchecked`: the dataset's name could not be read from GitHub, so there is nothing
- *    definite to waive and nothing was recorded or posted; asking again reads it again;
+ *  - `naming_unchecked`: the dataset's name could not be read, so there is nothing definite to
+ *    waive and nothing was recorded or posted. GitHub may not have answered, which asking again
+ *    settles, or the file at the head has no readable `Name` (not JSON, no text `Name`, or one that
+ *    shows nothing), which asking again finds again: that file has to be fixed and pushed;
  *  - `not_exempt`: the author is not a NEMAR owner or administrator, whose review it would bypass;
  *  - `reviewed`: the commit was reviewed (someone who is not exempt pushed it), and its review stands;
  *  - or why the pull request was not looked at, in the start's words (`pr_review_disabled`,

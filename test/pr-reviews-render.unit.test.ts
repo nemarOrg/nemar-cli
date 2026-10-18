@@ -13,7 +13,7 @@ import type {
   VolumeWindow,
   WaiveNamingResponse,
 } from "../shared/contract/pr-review-admin";
-import { parsePrReviewReport, parseStoredPrReviewReport } from "../shared/pr-review";
+import { parsePrReviewReport, parseStoredPrReviewReport, renderCheck } from "../shared/pr-review";
 import {
   ageOf,
   briefLines,
@@ -171,7 +171,9 @@ describe("renderQueue", () => {
       entry({ pr_number: 3, verdict: "exempt", detail: null, needs_you: false }),
     ]).map((l) => l.replace(ANSI, ""));
     expect(rows[1]).toContain("exempt, naming rule failed: needs allow --admin  ");
-    expect(rows[2]).toContain("exempt, naming rule not checked: run start [draft]");
+    expect(rows[2]).toContain(
+      "exempt, naming rule not checked: start once, else fix the file [draft]",
+    );
     // Whole: nothing the table cut off.
     expect(rows.join("\n")).not.toContain("…");
     // The plain exemption keeps its word, so the held rows are told apart from it.
@@ -237,7 +239,7 @@ describe("verdictText", () => {
     );
     expect(
       verdictText({ verdict: "exempt", detail: "naming_unchecked", review_current: false }),
-    ).toBe("exempt, naming rule not checked: run start");
+    ).toBe("exempt, naming rule not checked: start once, else fix the file");
     // The two words belong to an exempt row alone: anywhere else they are shown as themselves.
     expect(
       verdictText({ verdict: "not_reviewed", detail: "naming_rule", review_current: true }),
@@ -768,6 +770,40 @@ describe("waiverLines", () => {
     expect(text(answer({ reason: "not_exempt" }))).toContain(
       "is not a NEMAR owner or administrator",
     );
+  });
+
+  test("an unread name is not met with a retry alone: a file with no readable Name is found unreadable again", () => {
+    // The persistent case. Every retry reads the same file, so each surface that says what to do
+    // says to fix the file, and none of them says to wait for GitHub.
+    const exempt = renderCheck({ kind: "naming", facts: { title: null, name: "unchecked" } });
+    const beside = renderCheck({
+      kind: "naming",
+      facts: { title: "author_year", name: "unchecked" },
+    });
+    const surfaces: Record<string, string> = {
+      "the list's label": verdictText({
+        verdict: "exempt",
+        detail: "naming_unchecked",
+        review_current: null,
+      }),
+      "the answer of an override": text(answer({ reason: "naming_unchecked" })),
+      "the check": `${exempt.summary}\n${exempt.text}`,
+      "the check beside a refused title": `${beside.summary}\n${beside.text}`,
+    };
+    for (const [where, said] of Object.entries(surfaces)) {
+      expect(said, where).toMatch(/fix (?:the file|dataset_description\.json)/);
+      expect(said, where).not.toMatch(/in a moment/i);
+    }
+    // The ones with room for it say both causes, and a single retry before the fix.
+    for (const where of [
+      "the answer of an override",
+      "the check",
+      "the check beside a refused title",
+    ]) {
+      expect(surfaces[where], where).toContain("GitHub may not have answered");
+      expect(surfaces[where], where).toContain("has no readable Name");
+      expect(surfaces[where], where).toMatch(/\bonce\b/);
+    }
   });
 
   test("namingFactLines names an unreadable name as such", () => {

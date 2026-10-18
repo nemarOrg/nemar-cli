@@ -1206,7 +1206,7 @@ describe("the naming rule runs first, owners and administrators included (ADR 01
     expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "action_required" });
     expect(lastCheck().output?.title).toBe("Could not decide: the naming rule was not checked");
     expect(lastCheck().output?.summary).toContain("starts with a name and a year");
-    expect(lastCheck().output?.summary).toContain("could not be read");
+    expect(lastCheck().output?.summary).toContain("GitHub may not have answered");
     expect(lastCheck().output?.text).not.toContain("--admin");
     expect(rows()).toHaveLength(0);
   });
