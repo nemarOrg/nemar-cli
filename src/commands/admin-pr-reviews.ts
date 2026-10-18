@@ -324,7 +324,7 @@ function grouped(n: number): string {
  * them (reports from before the screen do not). Says how many reports the sum is over, because a
  * report from before the screen and a run that ended without a report are not in it.
  * `410,000 in and 95,000 out over 12 reports (screen 30,000 in, 60,000 out; review 380,000 in,
- * 35,000 out), about $1.12 at list prices; runs that ended without a report are not counted`.
+ * 35,000 out), about $1.14 at list prices; runs that ended without a report are not counted`.
  */
 export function tokenText(w: VolumeWindow | null | undefined): string | null {
   if (typeof w !== "object" || w === null) return null;
