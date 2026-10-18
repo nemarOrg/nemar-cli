@@ -15417,8 +15417,8 @@ class TestRequireCompanionsVhdr(unittest.TestCase):
         # `.` and `..` components. The tracked file shares no stem with the header,
         # so only the normalized path can satisfy the rule.
         wanted = "sub-01/eeg/shared.eeg"
-        # Where two of the spellings would land if their `..` were dropped, not
-        # resolved.
+        # Paths that a spelling would reach if its `..` were dropped rather than
+        # resolved. The rule must not find them.
         decoys = {"sub-01/eeg/data/shared.eeg", "sub-01/eeg/eeg/shared.eeg"}
         for written in ("./shared.eeg", "data/../shared.eeg", "../eeg/shared.eeg"):
             with self.subTest(written):
