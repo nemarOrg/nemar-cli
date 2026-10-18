@@ -5628,6 +5628,10 @@ environment (PR_REVIEW_ENABLED): a dataset that would get it is refused while th
 alone or on its row of a page. Taking it off never needs the review, so --remove --apply always
 works, and so does a dataset that is not reviewed.
 
+It also needs this Worker to post the review check as the GitHub App the ruleset requires it from
+(App 3679074). The dry run prints both ids, and a dataset that would get the ruleset is refused,
+the same way, when they differ.
+
 Examples:
   $ nemar admin fleet require-review xx099900                 # dry run: shows the body it would send
   $ nemar admin fleet require-review xx099900 --apply
