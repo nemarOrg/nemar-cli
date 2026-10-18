@@ -2270,31 +2270,49 @@ describe("an owner's or administrator's pull request is exempt (ADR 0107)", () =
       expect(by.nm000202).toMatchObject({ verdict: "exempt", detail: "naming_rule" });
     });
 
-    test("a list of checks cut short is not read for it, and a commit status of the same name is not a check run", async () => {
+    test("a list of checks cut short is not read for it", async () => {
+      nodes({
+        ds: "nm000201",
+        n: 1,
+        author: ADMIN_GH,
+        authorId: 4001,
+        checks: withChecks("nm000201", reviewCheck("FAILURE")),
+        moreChecks: true,
+      });
+      const by = await detailOf();
+      expect(by.nm000201).toMatchObject({ verdict: "exempt", detail: null });
+    });
+
+    test("a commit status of the same name is not a check run: it neither holds a pull request nor releases one", async () => {
+      const status = (state: string, at: string): CheckSpec => ({
+        type: "status",
+        name: "NEMAR PR Review",
+        state,
+        at,
+      });
       nodes(
         {
           ds: "nm000201",
           n: 1,
           author: ADMIN_GH,
           authorId: 4001,
-          checks: withChecks("nm000201", reviewCheck("FAILURE")),
-          moreChecks: true,
+          checks: withChecks("nm000201", status("FAILURE", "2026-10-01T11:00:00Z")),
         },
         {
           ds: "nm000202",
           n: 2,
           author: ADMIN_GH,
           authorId: 4001,
-          checks: withChecks("nm000202", {
-            type: "status",
-            name: "NEMAR PR Review",
-            state: "FAILURE",
-          }),
+          checks: withChecks(
+            "nm000202",
+            reviewCheck("FAILURE", { at: "2026-10-01T10:00:00Z" }),
+            status("SUCCESS", "2026-10-01T11:00:00Z"),
+          ),
         },
       );
       const by = await detailOf();
       expect(by.nm000201).toMatchObject({ verdict: "exempt", detail: null });
-      expect(by.nm000202).toMatchObject({ verdict: "exempt", detail: null });
+      expect(by.nm000202).toMatchObject({ verdict: "exempt", detail: "naming_rule" });
     });
 
     test("only an exempt row carries it: another author's failed check is not labeled, and a review of the commit wins", async () => {
