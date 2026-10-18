@@ -831,12 +831,17 @@ describe("a contributor's standing: only an administrator's block pauses anyone 
 });
 
 describe("the sanitiser is bounded on hostile input", () => {
+  // Nothing here is timed (a wall-clock bound fails on a loaded runner). `sanitizeNote` cuts its
+  // input to eight times the limit before its loop runs, and the loop is quadratic on a long run of
+  // `![`, `[` or `<a `. Without the cut, 200,000 repetitions took a minute for `![` and fifteen
+  // seconds for each of the other two (measured), against the five seconds of Bun's default test
+  // timeout. With the cut the call takes milliseconds, so a regression fails these tests by
+  // timeout, and a slower runner only fails them harder. The other three units are linear either
+  // way; they stay as the cheap check that what comes back is still bounded.
   test.each(["![", "[", "<a ", "&#", "(", "]("])(
-    "200,000 repetitions of %j are cut and fast",
+    "200,000 repetitions of %j are cut to the note limit",
     (unit) => {
-      const started = performance.now();
       const out = sanitizeNote(unit.repeat(200_000));
-      expect(performance.now() - started).toBeLessThan(2_000);
       expect(Array.from(out).length).toBeLessThanOrEqual(NOTE_MAX);
     },
   );

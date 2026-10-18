@@ -2492,13 +2492,17 @@ describe("the change log is a platform fact", () => {
     expect(f.changelogEntry).toBe("added");
   });
 
-  test("a hostile change log of 200,000 blank lines is read in linear time", () => {
-    const started = Date.now();
+  test("a hostile change log of 200,000 blank lines is read one line at a time", () => {
+    // Nothing here is timed (a wall-clock bound fails on a loaded runner). The heading is looked for
+    // in each line on its own. A pattern that opened with `\s*` and ran over the whole text would try
+    // every blank line against all the blank lines after it, which is quadratic: it took 46 s on
+    // these 200,000 (measured), against the five seconds of Bun's default test timeout. Read line by
+    // line it takes milliseconds, so a regression fails this test by timeout, and a slower runner
+    // only fails it harder.
     const f = entryOf("n2-log-redos", (d) => {
       bump(d);
       write(d, "CHANGES", `${"\n".repeat(200_000)}1.0.0 2026-01-01\n - Initial release\n`);
     });
-    expect(Date.now() - started).toBeLessThan(5_000);
     expect(f.changelogEntry).toBe("not_added");
   });
 
