@@ -46,6 +46,8 @@ import {
   isReviewEnabled,
   isReviewRulesetFixture,
   notReviewableReason,
+  reviewAppIdRefusal,
+  reviewAppIds,
   reviewIntentOf,
 } from "../../services/pr-review-eligibility";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../services/repo-spec";
@@ -63,7 +65,7 @@ interface ReviewRulesetRow extends ReviewableRow {
 }
 
 /** The words an `error` row of a review-ruleset outcome can carry as its `code`. */
-type ReviewRulesetErrorCode = "review_disabled";
+type ReviewRulesetErrorCode = "review_disabled" | "review_app_mismatch";
 
 /**
  * What one dataset's review-ruleset request came to. `intent` is what the row calls for (or what
@@ -107,13 +109,19 @@ interface RequireRefusal {
 }
 
 /**
- * Why a live REQUIREMENT is refused here, or null when it is not. Asked of a request whose
- * computed intent is `require`, never of a request's shape: taking the ruleset off is the way out
- * and is never refused, so a live request for a private dataset (which is a removal) goes through
- * with the review off, and so does every removal row of a page.
+ * Why a live REQUIREMENT is refused here, or null when it is not: the review is off (nothing would
+ * post the check), or this Worker posts the check as a different GitHub App than the one the
+ * ruleset requires it from (it would never arrive). Asked of a request whose computed intent is
+ * `require`, never of a request's shape: taking the ruleset off is the way out and is never
+ * refused, so a live request for a private dataset (which is a removal) goes through, and so does
+ * every removal row of a page.
  */
-function requireRefusal(env: Pick<Bindings, "PR_REVIEW_ENABLED">): RequireRefusal | null {
+function requireRefusal(
+  env: Pick<Bindings, "PR_REVIEW_ENABLED" | "GITHUB_APP_ID">,
+): RequireRefusal | null {
   if (!isReviewEnabled(env)) return { code: "review_disabled", error: REVIEW_DISABLED_SENTENCE };
+  const app = reviewAppIdRefusal(env);
+  if (app) return { code: "review_app_mismatch", error: app };
   return null;
 }
 
@@ -682,11 +690,16 @@ export function registerFleetRoutes(admin: AdminRouter): void {
    * `dry_run:false` to change anything, so a bare `{}` never mutates.
    *
    * Refused: a standing test fixture (nm099900 to nm099999), whatever else is asked; and a live
-   * request whose COMPUTED intent is to require the review, in an environment where the review is
-   * off, because a required check nothing posts blocks every merge. The test is the intent the
-   * dataset's row works out to, not the shape of the request: a live request for a private dataset
-   * is a removal, and taking the requirement off is never refused, since it is the way out. No
-   * dataset is special-cased for being live.
+   * request whose COMPUTED intent is to require the review where a required check could not
+   * arrive, because it would block every merge: the review is off in this environment
+   * (`review_disabled`), or this Worker posts the check as a different GitHub App than the one the
+   * ruleset requires it from (`review_app_mismatch`, which names both ids). Both are 409. The test
+   * is the intent the dataset's row works out to, not the shape of the request: a live request for
+   * a private dataset is a removal, and taking the requirement off is never refused, since it is
+   * the way out. No dataset is special-cased for being live.
+   *
+   * Every answer carries the two App ids (`github_app_id`, `ruleset_app_id`, `app_id_matches`), so
+   * a dry run shows whether `dry_run:false` would be refused for that reason.
    */
   admin.post("/datasets/:id/review-ruleset", zValidator("json", reviewRulesetSchema), async (c) => {
     const datasetId = c.req.param("id");
@@ -728,7 +741,7 @@ export function registerFleetRoutes(admin: AdminRouter): void {
       return c.json({ error: "Review ruleset request failed", details: outcome.error }, 502);
     }
     await auditReviewRuleset(c.env.DB, c.get("user"), outcome, false);
-    return c.json({ dry_run: dryRun, review_enabled: enabled, ...outcome });
+    return c.json({ dry_run: dryRun, review_enabled: enabled, ...reviewAppIds(c.env), ...outcome });
   });
 
   /**
@@ -741,9 +754,10 @@ export function registerFleetRoutes(admin: AdminRouter): void {
    * at most 50 datasets; `next_after` is the last id of a full page, to send as `after` for the
    * next one. A dataset that fails is an `error` on its row and does not stop the page.
    *
-   * With the review off, a live page still applies every removal. A row whose computed intent is
-   * to require the review is refused on its own row, with the code `review_disabled`, because
-   * requiring a check nothing posts would block every merge.
+   * With the requirement refused (the review off, or the App ids different), a live page still
+   * applies every removal. A row whose computed intent is to require the review is refused on its
+   * own row, with the code `review_disabled` or `review_app_mismatch`, because requiring a check
+   * that cannot arrive would block every merge.
    */
   admin.post(
     "/datasets/review-ruleset/bulk",
@@ -793,6 +807,7 @@ export function registerFleetRoutes(admin: AdminRouter): void {
       return c.json({
         dry_run: dryRun,
         review_enabled: enabled,
+        ...reviewAppIds(c.env),
         remove: removing,
         limit: cap,
         count: datasets.length,

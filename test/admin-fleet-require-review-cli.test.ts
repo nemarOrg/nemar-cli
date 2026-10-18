@@ -27,6 +27,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { NEMAR_APP_ID } from "../backend/src/services/github";
 import { hashApiKey } from "../backend/src/services/token";
 import type { Bindings } from "../backend/src/types/bindings";
 import { freshDb, realD1 } from "../backend/test/helpers/d1";
@@ -53,6 +54,8 @@ function env(): Bindings {
     DB: realD1(db),
     ENVIRONMENT: "production",
     GITHUB_ADMIN_PAT: "ghp_cli_review_ruleset",
+    // The App this Worker posts the review check as, which is the one the ruleset requires it from.
+    GITHUB_APP_ID: String(NEMAR_APP_ID),
     PR_REVIEW_ENABLED: "1",
     ...envOverrides,
   } as Bindings;
@@ -329,6 +332,97 @@ describe("one dataset", () => {
     expect(dry.stdout).toContain("would skip");
     expect(dry.stdout).toContain("the default branch has to be main first");
     expect(dry.stdout).not.toContain("Add --apply");
+  });
+});
+
+// The ruleset requires the check from the GitHub App with id 3679074, and the Worker posts it as the
+// App whose id is its GITHUB_APP_ID. They have to be the same or the check never arrives, so the
+// dry run prints both and a live requirement is refused when they differ.
+describe("the GitHub App the ruleset requires the check from", () => {
+  test("a dry run prints both ids, and that they agree", async () => {
+    seedDataset("nm000201");
+
+    const r = await cli(["nm000201"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(
+      "GitHub App: this Worker posts the check as App 3679074, the App the ruleset requires it from.",
+    );
+    expect(r.stdout).not.toContain("would be refused");
+  });
+
+  test("a dry run on a Worker with another App prints both ids and says --apply would be refused", async () => {
+    seedDataset("nm000201");
+    envOverrides = { GITHUB_APP_ID: "1234567" };
+
+    const r = await cli(["nm000201"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("this Worker posts the check as App 1234567");
+    expect(r.stdout).toContain("the ruleset requires it from App 3679074");
+    expect(r.stdout).toContain("--apply would be refused");
+    expect(standIn.writes()).toHaveLength(0);
+  });
+
+  test("--apply is refused in a sentence that names both ids, and exits 1 with nothing written", async () => {
+    seedDataset("nm000201");
+    envOverrides = { GITHUB_APP_ID: "1234567" };
+
+    const r = await cli(["nm000201", "--apply"]);
+
+    expect(r.exitCode).toBe(1);
+    const said = r.stdout + r.stderr;
+    expect(said).toContain("3679074");
+    expect(said).toContain("1234567");
+    expect(said).toContain("would never arrive");
+    expect(standIn.calls).toHaveLength(0);
+  });
+
+  test("--remove --apply is not refused by it", async () => {
+    seedDataset("nm000201");
+    standIn.rulesets.set("nm000201", [
+      {
+        id: 4245,
+        name: REVIEW_RULESET,
+        source_type: "Repository",
+        body: { name: REVIEW_RULESET, target: "branch", enforcement: "active", rules: [] },
+      },
+    ]);
+    envOverrides = { GITHUB_APP_ID: "1234567" };
+
+    const r = await cli(["nm000201", "--remove", "--apply"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("removed");
+    expect(held("nm000201")).toEqual([]);
+  });
+
+  test("a live page says each refused row in a line and explains the refusal once", async () => {
+    for (const id of ["nm000301", "nm000302", "nm000303"]) seedDataset(id);
+    envOverrides = { GITHUB_APP_ID: "1234567" };
+
+    const r = await cli(["--all", "--prefix", "nm", "--apply"]);
+
+    expect(r.exitCode).toBe(1);
+    for (const id of ["nm000301", "nm000302", "nm000303"]) {
+      expect(r.stdout).toMatch(new RegExp(`error\\s+${id}: refused: this Worker posts the check`));
+    }
+    // The long sentence is there once, however many rows it refused.
+    expect(r.stdout.split("would never arrive")).toHaveLength(2);
+    expect(r.stdout).toContain("3679074");
+    expect(r.stdout).toContain("1234567");
+    expect(standIn.calls).toHaveLength(0);
+  });
+
+  test("a dry run of a page prints both ids", async () => {
+    seedDataset("nm000301");
+    envOverrides = { GITHUB_APP_ID: "1234567" };
+
+    const r = await cli(["--all", "--prefix", "nm"]);
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("this Worker posts the check as App 1234567");
+    expect(r.stdout).toContain("the ruleset requires it from App 3679074");
   });
 });
 

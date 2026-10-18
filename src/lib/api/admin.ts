@@ -1381,7 +1381,8 @@ export type NotReviewableReason = "inactive" | "private" | "anonymous" | "unpubl
  * called for (or `--remove` asked for) and `action` is what was done, or with a dry run would be:
  * `create`, `update`, `remove`, `none` (nothing to take off), `skip` (required here but not
  * written, see `reason`), or null when the attempt failed (`error` says how, and `code` is its
- * word when it has one: `review_disabled` is a requirement refused because the review is off).
+ * word when it has one: `review_disabled` is a requirement refused because the review is off, and
+ * `review_app_mismatch` one refused because the Worker posts the check as another GitHub App).
  */
 export interface ReviewRulesetOutcome {
   dataset_id: string;
@@ -1394,16 +1395,27 @@ export interface ReviewRulesetOutcome {
   default_branch?: string;
   payload?: ReviewRulesetPayload;
   error?: string;
-  code?: "review_disabled";
+  code?: "review_disabled" | "review_app_mismatch";
 }
 
-export interface ReviewRulesetResponse extends ReviewRulesetOutcome {
+/**
+ * The GitHub App ids that decide whether a requirement can ever be met: the ruleset requires the
+ * check from `ruleset_app_id`, and the Worker posts it as `github_app_id` (null when that is unset
+ * or not an id). A requirement is refused (`review_app_mismatch`) unless they are the same App.
+ */
+export interface ReviewAppIds {
+  github_app_id: string | null;
+  ruleset_app_id: number;
+  app_id_matches: boolean;
+}
+
+export interface ReviewRulesetResponse extends ReviewRulesetOutcome, ReviewAppIds {
   dry_run: boolean;
   /** The automated review is switched on in this environment (PR_REVIEW_ENABLED). */
   review_enabled: boolean;
 }
 
-export interface ReviewRulesetBulkResponse {
+export interface ReviewRulesetBulkResponse extends ReviewAppIds {
   dry_run: boolean;
   review_enabled: boolean;
   remove: boolean;

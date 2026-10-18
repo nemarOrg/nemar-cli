@@ -11,6 +11,7 @@
 
 import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { NEMAR_APP_ID } from "../src/services/github";
 import { reviewableDataset } from "../src/services/pr-review";
 import {
   OUTSIDE_FIXTURE_BAND,
@@ -24,6 +25,8 @@ import {
   isReviewableRow,
   notReviewableReason,
   readReviewIntent,
+  reviewAppIdRefusal,
+  reviewAppIds,
   reviewIntentOf,
 } from "../src/services/pr-review-eligibility";
 import type { Bindings } from "../src/types/bindings";
@@ -194,9 +197,14 @@ describe("what a dataset row calls for", () => {
     insert(db, "nm000301", reviewable);
     insert(db, "nm000302", { ...reviewable, visibility: "private" });
     const env = (flag: string | undefined) =>
-      ({ DB: realD1(db), PR_REVIEW_ENABLED: flag, PR_REVIEW_AUTO_REQUIRE: "1" }) as unknown as Pick<
+      ({
+        DB: realD1(db),
+        PR_REVIEW_ENABLED: flag,
+        PR_REVIEW_AUTO_REQUIRE: "1",
+        GITHUB_APP_ID: String(NEMAR_APP_ID),
+      }) as unknown as Pick<
         Bindings,
-        "DB" | "PR_REVIEW_ENABLED" | "PR_REVIEW_AUTO_REQUIRE"
+        "DB" | "PR_REVIEW_ENABLED" | "PR_REVIEW_AUTO_REQUIRE" | "GITHUB_APP_ID"
       >;
 
     expect(await readReviewIntent(env("1"), "nm000301")).toBe("require");
@@ -248,7 +256,10 @@ describe("the automatic requirement switch (PR_REVIEW_AUTO_REQUIRE)", () => {
     anonymous: 0,
     first_published_at: "2026-01-01 00:00:00",
   };
-  type AutoEnv = Pick<Bindings, "DB" | "PR_REVIEW_ENABLED" | "PR_REVIEW_AUTO_REQUIRE">;
+  type AutoEnv = Pick<
+    Bindings,
+    "DB" | "PR_REVIEW_ENABLED" | "PR_REVIEW_AUTO_REQUIRE" | "GITHUB_APP_ID"
+  >;
 
   test("is on only for exactly 1, and unset is off", () => {
     expect(isAutoRequireEnabled({ PR_REVIEW_AUTO_REQUIRE: "1" })).toBe(true);
@@ -319,7 +330,7 @@ describe("the automatic requirement switch (PR_REVIEW_AUTO_REQUIRE)", () => {
   });
 
   test("on, they ask what the row calls for", () => {
-    const on = { PR_REVIEW_AUTO_REQUIRE: "1" };
+    const on = { PR_REVIEW_AUTO_REQUIRE: "1", GITHUB_APP_ID: String(NEMAR_APP_ID) };
     expect(automaticReviewIntent({ ...on, PR_REVIEW_ENABLED: "1" }, "nm000301", reviewable)).toBe(
       "require",
     );
@@ -347,6 +358,7 @@ describe("the automatic requirement switch (PR_REVIEW_AUTO_REQUIRE)", () => {
           DB: realD1(db),
           PR_REVIEW_ENABLED: review,
           PR_REVIEW_AUTO_REQUIRE: auto,
+          GITHUB_APP_ID: String(NEMAR_APP_ID),
         }) as unknown as AutoEnv;
       return { db, env };
     }
@@ -396,6 +408,109 @@ describe("the automatic requirement switch (PR_REVIEW_AUTO_REQUIRE)", () => {
       // addition.
       expect(await readReviewIntent(env("1", undefined), "nm000301")).toBe("remove");
     });
+  });
+});
+
+// The ruleset requires the NEMAR PR Review check from one GitHub App, and the Worker posts it as the
+// App whose id is its GITHUB_APP_ID binding. Unless they are the same App the check never arrives,
+// and every pull request on a repository that carries the ruleset waits for it for good.
+describe("the GitHub App the ruleset requires the check from", () => {
+  const reviewable: ReviewableRow = {
+    status: "active",
+    visibility: "public",
+    anonymous: 0,
+    first_published_at: "2026-01-01 00:00:00",
+  };
+
+  test("agrees only with exactly the NEMAR App id, digit for digit", () => {
+    expect(reviewAppIds({ GITHUB_APP_ID: "3679074" })).toEqual({
+      github_app_id: "3679074",
+      ruleset_app_id: 3679074,
+      app_id_matches: true,
+    });
+    expect(reviewAppIdRefusal({ GITHUB_APP_ID: "3679074" })).toBeNull();
+    for (const value of [
+      undefined,
+      "",
+      "0",
+      "1234567",
+      " 3679074",
+      "3679074 ",
+      "03679074",
+      "3679074\n",
+      "3679074.0",
+      "app",
+    ]) {
+      expect(reviewAppIds({ GITHUB_APP_ID: value }).app_id_matches, JSON.stringify(value)).toBe(
+        false,
+      );
+      expect(reviewAppIdRefusal({ GITHUB_APP_ID: value }), JSON.stringify(value)).not.toBeNull();
+    }
+  });
+
+  test("the sentence names both ids", () => {
+    const sentence = reviewAppIdRefusal({ GITHUB_APP_ID: "1234567" }) ?? "";
+    expect(sentence).toContain("3679074");
+    expect(sentence).toContain("1234567");
+    expect(sentence).toContain("Nothing was changed");
+  });
+
+  test("an unset binding is said to be unset, and a value that is not an id is never repeated", () => {
+    expect(reviewAppIdRefusal({ GITHUB_APP_ID: undefined })).toContain("GITHUB_APP_ID is not set");
+    expect(reviewAppIdRefusal({ GITHUB_APP_ID: "" })).toContain("GITHUB_APP_ID is not set");
+    // Whatever was pasted into the binding by mistake is not echoed into an answer.
+    const pasted = "-----BEGIN PRIVATE KEY-----";
+    const sentence = reviewAppIdRefusal({ GITHUB_APP_ID: pasted }) ?? "";
+    expect(sentence).not.toContain("PRIVATE KEY");
+    expect(sentence).toContain("not a number");
+    expect(reviewAppIds({ GITHUB_APP_ID: pasted }).github_app_id).toBeNull();
+  });
+
+  test("a Worker on another App asks for no requirement on its own, says why in the log, and still asks for the removal", () => {
+    const env = { PR_REVIEW_ENABLED: "1", PR_REVIEW_AUTO_REQUIRE: "1", GITHUB_APP_ID: "1234567" };
+    const logged: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+    };
+    try {
+      expect(automaticReviewIntent(env, "nm000301", reviewable)).toBeUndefined();
+      // A removal needs no check to arrive, so it is never held back by this.
+      expect(automaticReviewIntent(env, "nm000301", { ...reviewable, visibility: "private" })).toBe(
+        "remove",
+      );
+    } finally {
+      console.error = realError;
+    }
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain("nm000301");
+    expect(logged[0]).toContain("3679074");
+    expect(logged[0]).toContain("1234567");
+    // And with the right App the same row is required.
+    expect(
+      automaticReviewIntent({ ...env, GITHUB_APP_ID: "3679074" }, "nm000301", reviewable),
+    ).toBe("require");
+  });
+
+  test("the App id is not asked when nothing would be required", () => {
+    const logged: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+    };
+    try {
+      // The switch is off: no requirement is the answer, and there is nothing to refuse.
+      expect(
+        automaticReviewIntent(
+          { PR_REVIEW_ENABLED: "1", GITHUB_APP_ID: undefined },
+          "nm000301",
+          reviewable,
+        ),
+      ).toBeUndefined();
+    } finally {
+      console.error = realError;
+    }
+    expect(logged).toEqual([]);
   });
 });
 

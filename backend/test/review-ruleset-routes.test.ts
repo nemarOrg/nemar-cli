@@ -16,6 +16,7 @@ import { Hono } from "hono";
 import { adminRoutes } from "../src/routes/admin";
 import {
   BRANCH_RULESET_NAME,
+  NEMAR_APP_ID,
   REVIEW_RULESET_NAME,
   buildReviewRulesetPayload,
   deriveContexts,
@@ -81,6 +82,8 @@ function env(): Bindings {
     DB: realD1(db),
     ENVIRONMENT: "production",
     GITHUB_ADMIN_PAT: PAT,
+    // The App this Worker posts the review check as, which is the one the ruleset requires it from.
+    GITHUB_APP_ID: String(NEMAR_APP_ID),
     PR_REVIEW_ENABLED: "1",
     ...envOverrides,
   } as Bindings;
@@ -746,6 +749,162 @@ describe("POST /admin/datasets/review-ruleset/bulk", () => {
       expect((await bulk(body)).status, JSON.stringify(body)).toBe(400);
     }
     expect(standIn.calls).toHaveLength(0);
+  });
+});
+
+// The ruleset requires the NEMAR PR Review check from the GitHub App with id 3679074, and this Worker
+// posts the check as the App whose id is its GITHUB_APP_ID binding. If they differ the check never
+// arrives and the ruleset blocks every merge on the repository, so a live requirement is refused
+// and a removal, which needs no check, is not.
+describe("a Worker that posts the review check as another GitHub App", () => {
+  const OTHER_APP = "1234567";
+
+  test("a live require is refused with 409, a sentence that names both ids, and no call to GitHub", async () => {
+    seedDataset("nm000201");
+    envOverrides = { GITHUB_APP_ID: OTHER_APP };
+
+    const r = await single("nm000201", { dry_run: false });
+
+    expect(r.status).toBe(409);
+    expect(r.body.code).toBe("review_app_mismatch");
+    expect(r.body.error).toContain("3679074");
+    expect(r.body.error).toContain(OTHER_APP);
+    expect(r.body.error).toContain("Nothing was changed");
+    expect(standIn.calls).toHaveLength(0);
+    expect(held("nm000201")).toEqual([]);
+    expect(audits()).toEqual([]);
+  });
+
+  test("an unset App id is refused the same way, and said to be unset", async () => {
+    seedDataset("nm000201");
+    envOverrides = { GITHUB_APP_ID: undefined };
+
+    const r = await single("nm000201", { dry_run: false });
+
+    expect(r.status).toBe(409);
+    expect(r.body.code).toBe("review_app_mismatch");
+    expect(r.body.error).toContain("3679074");
+    expect(r.body.error).toContain("GITHUB_APP_ID is not set");
+    expect(standIn.calls).toHaveLength(0);
+  });
+
+  test("the same request goes through when the Worker posts as the App the ruleset names", async () => {
+    seedDataset("nm000201");
+    envOverrides = { GITHUB_APP_ID: "3679074" };
+
+    const r = await single("nm000201", { dry_run: false });
+
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ action: "create", applied: true, app_id_matches: true });
+    expect(held("nm000201")).toEqual([REVIEW_RULESET_NAME]);
+  });
+
+  test("a dry run still answers, and prints both ids and that they differ", async () => {
+    seedDataset("nm000201");
+    envOverrides = { GITHUB_APP_ID: OTHER_APP };
+
+    const r = await single("nm000201");
+
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({
+      dry_run: true,
+      action: "create",
+      applied: false,
+      github_app_id: OTHER_APP,
+      ruleset_app_id: 3679074,
+      app_id_matches: false,
+    });
+    expect(standIn.writes()).toHaveLength(0);
+  });
+
+  test("a dry run shows the ids agreeing, too", async () => {
+    seedDataset("nm000201");
+
+    const r = await single("nm000201");
+
+    expect(r.body).toMatchObject({
+      github_app_id: "3679074",
+      ruleset_app_id: 3679074,
+      app_id_matches: true,
+    });
+  });
+
+  test("an App id that is not a number is never repeated in an answer", async () => {
+    seedDataset("nm000201");
+    envOverrides = { GITHUB_APP_ID: "-----BEGIN PRIVATE KEY-----" };
+
+    const dry = await single("nm000201");
+    const live = await single("nm000201", { dry_run: false });
+
+    expect(dry.body).toMatchObject({ github_app_id: null, app_id_matches: false });
+    expect(JSON.stringify(dry.body)).not.toContain("PRIVATE KEY");
+    expect(live.status).toBe(409);
+    expect(JSON.stringify(live.body)).not.toContain("PRIVATE KEY");
+  });
+
+  test("a removal is not refused by it: remove:true, and a dataset the Worker does not review", async () => {
+    seedDataset("nm000201");
+    seedDataset("nm000202", { visibility: "private" });
+    await ensureReviewRuleset("nm000201", PAT);
+    await ensureReviewRuleset("nm000202", PAT);
+    envOverrides = { GITHUB_APP_ID: OTHER_APP };
+
+    const removed = await single("nm000201", { dry_run: false, remove: true });
+    const stray = await single("nm000202", { dry_run: false });
+
+    expect(removed.status).toBe(200);
+    expect(removed.body).toMatchObject({ action: "remove", applied: true });
+    expect(stray.status).toBe(200);
+    expect(stray.body).toMatchObject({ intent: "remove", action: "remove", applied: true });
+    expect(held("nm000201")).toEqual([]);
+    expect(held("nm000202")).toEqual([]);
+  });
+
+  test("a live page refuses each row that would require the ruleset and applies the removals", async () => {
+    seedDataset("nm000301");
+    seedDataset("nm000302", { visibility: "private" });
+    await ensureReviewRuleset("nm000302", PAT);
+    standIn.calls.length = 0;
+    envOverrides = { GITHUB_APP_ID: OTHER_APP };
+
+    const r = await bulk({ dry_run: false });
+
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ github_app_id: OTHER_APP, app_id_matches: false });
+    const byId = Object.fromEntries(r.body.results.map((x: Json) => [x.dataset_id, x]));
+    expect(byId.nm000301).toMatchObject({
+      action: null,
+      applied: false,
+      code: "review_app_mismatch",
+    });
+    expect(byId.nm000301.error).toContain("3679074");
+    expect(byId.nm000301.error).toContain(OTHER_APP);
+    expect(byId.nm000302).toMatchObject({ intent: "remove", action: "remove", applied: true });
+    expect(held("nm000301")).toEqual([]);
+    expect(held("nm000302")).toEqual([]);
+    expect(standIn.calls.filter((c) => c.path.includes("/nm000301"))).toHaveLength(0);
+  });
+
+  test("a dry run page answers with the ids and no refusal", async () => {
+    seedDataset("nm000301");
+    envOverrides = { GITHUB_APP_ID: OTHER_APP };
+
+    const r = await bulk({});
+
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ app_id_matches: false, ruleset_app_id: 3679074 });
+    expect(r.body.results[0]).toMatchObject({ action: "create", applied: false });
+    expect(r.body.results[0].error).toBeUndefined();
+  });
+
+  test("the review being off is said first when both apply", async () => {
+    seedDataset("nm000201");
+    envOverrides = { GITHUB_APP_ID: OTHER_APP, PR_REVIEW_ENABLED: undefined };
+
+    const r = await single("nm000201", { dry_run: false });
+
+    expect(r.status).toBe(409);
+    expect(r.body.code).toBe("review_disabled");
   });
 });
 

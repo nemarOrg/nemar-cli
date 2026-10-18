@@ -5538,10 +5538,45 @@ const NOT_REVIEWED_WORDS: Record<string, string> = {
   unpublished: "not yet published",
 };
 
+/**
+ * Which GitHub App posts the review check and which one the ruleset requires it from, said on a
+ * dry run. They have to be the same App or the check never arrives, and then `--apply` is refused.
+ */
+function reviewAppLine(ids: {
+  github_app_id: string | null;
+  ruleset_app_id: number;
+  app_id_matches: boolean;
+}): string {
+  if (ids.app_id_matches) {
+    return chalk.dim(
+      `  GitHub App: this Worker posts the check as App ${ids.github_app_id}, the App the ruleset requires it from.`,
+    );
+  }
+  const posts = ids.github_app_id
+    ? `App ${ids.github_app_id}`
+    : "no App (GITHUB_APP_ID is not set)";
+  return chalk.yellow(
+    `  GitHub App: this Worker posts the check as ${posts}, but the ruleset requires it from App ${ids.ruleset_app_id}, so --apply would be refused: the check would never arrive.`,
+  );
+}
+
 /** One dataset's line in a page: what is done, to which dataset, and why when it is not obvious. */
+/**
+ * A requirement the Worker refused on a row of a page is said in a line there, and the sentence
+ * that explains it is printed once after the page: the same long sentence on up to fifty rows would
+ * bury the rows. Keyed on the outcome's `code`.
+ */
+const REFUSED_ROW_WORDS: Record<string, string> = {
+  review_disabled: "refused: the review is off (PR_REVIEW_ENABLED is not 1)",
+  review_app_mismatch: "refused: this Worker posts the check as a different GitHub App",
+};
+
 function reviewRulesetRow(o: ReviewRulesetOutcome, dryRun: boolean): string {
   const id = plain(o.dataset_id);
-  if (o.error) return `${chalk.red("error".padEnd(18))} ${id}: ${plain(o.error)}`;
+  if (o.error) {
+    const refused = o.code ? REFUSED_ROW_WORDS[o.code] : undefined;
+    return `${chalk.red("error".padEnd(18))} ${id}: ${refused ?? plain(o.error)}`;
+  }
   const words = o.action ? REVIEW_ACTION_WORDS[o.action] : undefined;
   const verb = words ? (dryRun ? words.dry : words.done) : "unknown";
   let note = "";
@@ -5657,6 +5692,10 @@ Examples:
             out("  The body that would be sent to GitHub:");
             for (const line of JSON.stringify(r.payload, null, 2).split("\n")) out(`  ${line}`);
           }
+          if (dryRun && r.intent === "require") {
+            out("");
+            out(reviewAppLine(r));
+          }
           if (dryRun && !r.review_enabled && r.intent === "require") {
             out("");
             out(
@@ -5715,7 +5754,16 @@ Examples:
           [...tally.entries()].map(([word, n]) => `${n} ${word}`).join(", ") ||
             chalk.dim("No datasets matched."),
         );
+        // Each refusal is explained once, in the Worker's words, however many rows it refused.
+        const explained = new Set<string>();
+        for (const row of r.results) {
+          if (row.code && row.error && REFUSED_ROW_WORDS[row.code] && !explained.has(row.code)) {
+            explained.add(row.code);
+            out(chalk.yellow(plain(row.error)));
+          }
+        }
         const wouldRefuse = r.results.filter((x) => x.intent === "require").length;
+        if (dryRun && wouldRefuse > 0) out(reviewAppLine(r));
         if (dryRun && !r.review_enabled && wouldRefuse > 0) {
           out(
             chalk.yellow(

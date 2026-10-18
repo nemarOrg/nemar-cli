@@ -35,6 +35,7 @@ import {
 } from "../src/services/bucket-policy";
 import {
   BRANCH_RULESET_NAME,
+  NEMAR_APP_ID,
   REVIEW_RULESET_NAME,
   buildReviewRulesetPayload,
   ensureReviewRuleset,
@@ -171,6 +172,8 @@ function env(): Bindings {
     DB: realD1(db),
     ENVIRONMENT: "production",
     GITHUB_ADMIN_PAT: PAT,
+    // The App this Worker posts the review check as, which is the one the ruleset requires it from.
+    GITHUB_APP_ID: String(NEMAR_APP_ID),
     PR_REVIEW_ENABLED: "1",
     S3_BUCKET: BUCKET,
     AWS_REGION: REGION,
@@ -455,6 +458,73 @@ describe("POST /admin/publish/:id/approve (the publication orchestrator)", () =>
     const writes = reviewWrites();
     expect(writes.map((c) => c.method)).toEqual(["POST"]);
     expect(writes[0].body).toStrictEqual(buildReviewRulesetPayload());
+    expect(held(ID)).toContain(REVIEW_RULESET_NAME);
+  });
+});
+
+// The ruleset requires the check from the GitHub App with id 3679074. A Worker that posts it as
+// another App would put a requirement on the repository that nothing can satisfy, so with the
+// switch on it still requires nothing, and says why in the log. A removal needs no check to arrive,
+// so it is not held back.
+describe("a Worker that posts the review check as another GitHub App, with the switch on", () => {
+  const ID = "nm000504";
+
+  test("making a dataset public does the rest and writes no review ruleset", async () => {
+    envOverrides = { PR_REVIEW_AUTO_REQUIRE: "1", GITHUB_APP_ID: "1234567" };
+    seedDataset(ID, { visibility: "private" });
+    s3.policy = buildPublicAccessPolicy(BUCKET, [ID]);
+    const logged: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+    };
+
+    let res: Response;
+    try {
+      res = await request(`/admin/datasets/${ID}/visibility`, "PATCH", { visibility: "public" });
+    } finally {
+      console.error = realError;
+    }
+
+    expect(res.status).toBe(200);
+    expect(visibilityPatches()).toEqual([false]);
+    expect(held(ID)).toContain(BRANCH_RULESET_NAME);
+    expect(((await res.json()) as Json).spec_enforcement.review_ruleset).toBeUndefined();
+    expect(reviewWrites()).toEqual([]);
+    expect(held(ID)).not.toContain(REVIEW_RULESET_NAME);
+    expect(logged.some((l) => l.includes("3679074") && l.includes("1234567"))).toBe(true);
+  });
+
+  test("making a dataset private still takes the review ruleset off", async () => {
+    envOverrides = { PR_REVIEW_AUTO_REQUIRE: "1", GITHUB_APP_ID: "1234567" };
+    seedDataset(ID, { visibility: "public", first_published_at: "2026-01-01 00:00:00" });
+    s3.policy = buildPublicAccessPolicy(BUCKET, []);
+    await ensureReviewRuleset(ID, PAT);
+    const ids = reviewRulesetsOf(ID).map((x) => x.id);
+    github.calls.length = 0;
+
+    const res = await request(`/admin/datasets/${ID}/visibility`, "PATCH", {
+      visibility: "private",
+    });
+
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as Json).spec_enforcement.review_ruleset).toEqual({
+      status: "ok",
+      detail: "removed",
+    });
+    expect(reviewWrites(ids).map((c) => c.method)).toEqual(["DELETE"]);
+  });
+
+  test("the right App is what lets the same flip require it", async () => {
+    envOverrides = { PR_REVIEW_AUTO_REQUIRE: "1", GITHUB_APP_ID: "3679074" };
+    seedDataset(ID, { visibility: "private" });
+    s3.policy = buildPublicAccessPolicy(BUCKET, [ID]);
+
+    const res = await request(`/admin/datasets/${ID}/visibility`, "PATCH", {
+      visibility: "public",
+    });
+
+    expect(res.status).toBe(200);
     expect(held(ID)).toContain(REVIEW_RULESET_NAME);
   });
 });

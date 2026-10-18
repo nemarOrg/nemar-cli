@@ -17,7 +17,7 @@
 
 import type { Bindings } from "../types/bindings.js";
 import { RESERVED_FIXTURE_FLOOR, isReservedFixtureId } from "./datasetId.js";
-import type { ReviewIntent } from "./github/branch-protection.js";
+import { NEMAR_APP_ID, type ReviewIntent } from "./github/branch-protection.js";
 
 /** The four `datasets` columns the review's rule reads. */
 export interface ReviewableRow {
@@ -74,6 +74,47 @@ export function isReviewEnabled(env: Pick<Bindings, "PR_REVIEW_ENABLED">): boole
  */
 export function isAutoRequireEnabled(env: Pick<Bindings, "PR_REVIEW_AUTO_REQUIRE">): boolean {
   return env.PR_REVIEW_AUTO_REQUIRE === "1";
+}
+
+/**
+ * The GitHub App ids that decide whether a requirement can ever be met. The ruleset requires the
+ * `NEMAR PR Review` check from the App with id {@link NEMAR_APP_ID}, and this Worker posts that
+ * check as the App whose id is its `GITHUB_APP_ID` binding. `github_app_id` is that binding when it
+ * is a plain number and null otherwise (an unset binding, or a value that is not an id is never
+ * repeated), `ruleset_app_id` is the one the ruleset names, and `app_id_matches` is whether they
+ * are the same App: exactly the same digits, with nothing around them.
+ */
+export interface ReviewAppIds {
+  github_app_id: string | null;
+  ruleset_app_id: number;
+  app_id_matches: boolean;
+}
+
+export function reviewAppIds(env: Pick<Bindings, "GITHUB_APP_ID">): ReviewAppIds {
+  const raw = env.GITHUB_APP_ID;
+  return {
+    github_app_id: typeof raw === "string" && /^\d{1,15}$/.test(raw) ? raw : null,
+    ruleset_app_id: NEMAR_APP_ID,
+    app_id_matches: raw === String(NEMAR_APP_ID),
+  };
+}
+
+/**
+ * Why the review ruleset must not be REQUIRED from this Worker, or null when it may be: the ruleset
+ * requires the check from the App with id {@link NEMAR_APP_ID}, so unless the Worker posts as that
+ * App the check never arrives, and every pull request on the repository waits for it for good.
+ * The sentence names both ids. Nothing is read or written to produce it; a removal is never
+ * refused by it, because taking the ruleset off needs no check to arrive.
+ */
+export function reviewAppIdRefusal(env: Pick<Bindings, "GITHUB_APP_ID">): string | null {
+  const ids = reviewAppIds(env);
+  if (ids.app_id_matches) return null;
+  const posts = ids.github_app_id
+    ? `the App with id ${ids.github_app_id}`
+    : env.GITHUB_APP_ID
+      ? "an App whose id is not a number (GITHUB_APP_ID holds something else)"
+      : "no App (GITHUB_APP_ID is not set)";
+  return `The review ruleset requires the NEMAR PR Review check from the GitHub App with id ${ids.ruleset_app_id}, but this Worker posts the check as ${posts}, so the check would never arrive and requiring it would block every merge. Nothing was changed. Taking the requirement off is not refused.`;
 }
 
 /**
@@ -146,13 +187,25 @@ export function reviewIntentOf(
  * `remove`: a dataset made private while the switch is off must not keep a ruleset that nothing
  * will satisfy. This is the one place the owner's switch is read for a path that writes, so a path
  * that asks here cannot require the review before the owner has started the fleet step.
+ *
+ * A requirement is also not asked for from a Worker whose GitHub App is not the one the ruleset
+ * names ({@link reviewAppIdRefusal}): the check would never arrive. There is no caller to refuse
+ * with a status here, so that case is `undefined` (the ruleset is left as it is) and an error in
+ * the log that says why, and the explicit routes, which do refuse with a status, say it plainly.
  */
 export function automaticReviewIntent(
-  env: Pick<Bindings, "PR_REVIEW_ENABLED" | "PR_REVIEW_AUTO_REQUIRE">,
+  env: Pick<Bindings, "PR_REVIEW_ENABLED" | "PR_REVIEW_AUTO_REQUIRE" | "GITHUB_APP_ID">,
   datasetId: string,
   row: ReviewableRow,
 ): ReviewIntent | undefined {
-  return reviewIntentOf(datasetId, row, isRequirementTarget(env));
+  const intent = reviewIntentOf(datasetId, row, isRequirementTarget(env));
+  if (intent !== "require") return intent;
+  const refusal = reviewAppIdRefusal(env);
+  if (refusal) {
+    console.error(`[review-ruleset] not requiring the review for ${datasetId}: ${refusal}`);
+    return undefined;
+  }
+  return intent;
 }
 
 /**
@@ -166,7 +219,7 @@ export function automaticReviewIntent(
  * function.
  */
 export async function readReviewIntent(
-  env: Pick<Bindings, "DB" | "PR_REVIEW_ENABLED" | "PR_REVIEW_AUTO_REQUIRE">,
+  env: Pick<Bindings, "DB" | "PR_REVIEW_ENABLED" | "PR_REVIEW_AUTO_REQUIRE" | "GITHUB_APP_ID">,
   datasetId: string,
 ): Promise<ReviewIntent | undefined> {
   try {
