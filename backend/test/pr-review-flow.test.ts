@@ -21,6 +21,7 @@ import {
   DECLINE_REASONS,
   HISTORICAL_DECLINE_REASONS,
   OVERRIDE_MODES,
+  PR_REVIEW_EDIT_CAP,
   REVIEW_STATES,
   RUN_ERRORS,
   VERDICTS,
@@ -36,6 +37,7 @@ import { signPrReviewCallbackToken } from "../src/services/github/callback-token
 import {
   PR_REVIEW_DEADLINE_MINUTES,
   PUBLISH_MAX_ATTEMPTS,
+  handlePullRequestEvent,
   readAuthorTally,
   sweepStalePrReviews,
 } from "../src/services/pr-review";
@@ -3226,6 +3228,331 @@ describe("a reopening or a marking as ready re-runs the review (ADR 0107)", () =
     expect(r.body).toMatchObject({ dispatched: false, reason: "duplicate", review_id: id });
     expect(rows()[0]).toMatchObject({ state: "reported", verdict: "pass" });
     expect(dispatchesMade()).toHaveLength(1);
+  });
+});
+
+describe("the cap on restarts a pull request's text can cause (ADR 0107)", () => {
+  const TITLE = { title: { from: "An older title" } };
+  const BODY = { body: { from: "An older description" } };
+  const edit = (changes: unknown, o: PrOpts = {}) =>
+    deliver(prEvent({ ...o, action: "edited", changes }));
+  const payloadOf = (n: number) =>
+    (dispatchesMade()[n].body as { client_payload: Record<string, unknown> }).client_payload;
+  const latestToken = () => payloadOf(dispatchesMade().length - 1).callback_token as string;
+  const commentEdits = () =>
+    calls.filter((c) => c.method === "PATCH" && /issues\/comments/.test(c.path));
+
+  /** Open the pull request and edit it until the cap is reached: each edit restarts the review. */
+  async function toTheCap(): Promise<number> {
+    const id = (await deliver(prEvent())).body.review_id as number;
+    for (let i = 1; i <= PR_REVIEW_EDIT_CAP; i++) {
+      const r = await edit(i % 2 ? TITLE : BODY);
+      expect(r.body, `edit ${i}`).toMatchObject({
+        dispatched: true,
+        reason: "redispatched_after_edit",
+        review_id: id,
+      });
+      expect(rows()[0], `edit ${i}`).toMatchObject({ state: "dispatched", edit_restarts: i });
+    }
+    expect(dispatchesMade()).toHaveLength(PR_REVIEW_EDIT_CAP + 1);
+    return id;
+  }
+
+  test("the cap is five, and each of them restarts the review", () => {
+    expect(PR_REVIEW_EDIT_CAP).toBe(5);
+  });
+
+  test("five edits restart the review and the sixth is refused, with nothing dispatched for it", async () => {
+    const id = await toTheCap();
+
+    const sixth = await edit(TITLE);
+    expect(sixth.body).toMatchObject({ dispatched: false, reason: "edit_limit", review_id: id });
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]).toMatchObject({
+      id,
+      state: "errored",
+      detail: "edit_limit",
+      edit_restarts: PR_REVIEW_EDIT_CAP,
+      verdict: null,
+      report: null,
+      nonce: null,
+    });
+    // Six dispatches in all: the opening and the five restarts. The refused edit made none.
+    expect(dispatchesMade()).toHaveLength(6);
+
+    // The commit's check says a person has to look, and why, and the comment says so too.
+    expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "action_required" });
+    expect(lastCheck().output?.summary).toContain("the most one commit gets");
+    expect(String(comments().at(-1)?.body?.body)).toContain("NEEDS A PERSON");
+  });
+
+  for (const [what, report, verdict, conclusion] of [
+    ["a stored pass", goodReport(), "pass", "success"],
+    ["a stored fail", failingReport(), "fail", "failure"],
+  ] as const) {
+    test(`the refusal withdraws ${what}: the same check, now needing a person`, async () => {
+      const id = await toTheCap();
+      // The job the fifth edit started finishes, so the commit's review is a result.
+      const done = await callback(id, { outcome: "reported", report }, latestToken());
+      expect(done.status).toBe(200);
+      expect(rows()[0]).toMatchObject({ state: "reported", verdict, edit_restarts: 5 });
+      expect(lastCheck()).toMatchObject({ status: "completed", conclusion });
+      const checkRunId = rows()[0].check_run_id as number;
+      const commentBefore = String(
+        commentEdits().at(-1)?.body?.body ?? comments().at(-1)?.body?.body,
+      );
+      expect(commentBefore).toContain(verdict === "pass" ? "PASS" : "NEEDS CHANGES");
+
+      const sixth = await edit(TITLE);
+      expect(sixth.body).toMatchObject({ dispatched: false, reason: "edit_limit", review_id: id });
+
+      // The result judged text the pull request no longer has, so it does not stand: the row has no
+      // verdict and no report, and the one check on the commit is the same one, rewritten.
+      expect(rows()[0]).toMatchObject({ state: "errored", detail: "edit_limit", verdict: null });
+      expect(rows()[0].report).toBeNull();
+      expect(checks().at(-1)).toMatchObject({
+        method: "PATCH",
+        path: `/repos/nemarDatasets/${DATASET}/check-runs/${checkRunId}`,
+        body: { status: "completed", conclusion: "action_required" },
+      });
+      const comment = String(commentEdits().at(-1)?.body?.body);
+      expect(comment).toContain("NEEDS A PERSON");
+      expect(comment).not.toContain(verdict === "pass" ? "PASS" : "NEEDS CHANGES");
+    });
+  }
+
+  test("the refusal supersedes a running review: the old job's claim and callback are refused", async () => {
+    const id = await toTheCap();
+    const token = latestToken();
+    expect((await claim(id, token)).status).toBe(200);
+
+    await edit(TITLE);
+    expect(rows()[0]).toMatchObject({ state: "errored", detail: "edit_limit", nonce: null });
+
+    const made = calls.length;
+    expect((await claim(id, token)).status).toBe(401);
+    const reported = await callback(id, { outcome: "reported", report: goodReport() }, token);
+    expect(reported.status).toBe(401);
+    const errored = await callback(id, { outcome: "error", error: "model_refused" }, token);
+    expect(errored.status).toBe(401);
+    expect(rows()[0]).toMatchObject({
+      state: "errored",
+      detail: "edit_limit",
+      verdict: null,
+      report: null,
+    });
+    expect(calls).toHaveLength(made);
+  });
+
+  test("a seventh edit dispatches nothing and restates the refusal", async () => {
+    const id = await toTheCap();
+    await edit(TITLE);
+    const before = rows()[0];
+    const made = dispatchesMade().length;
+    const commentsMade = commentEdits().length;
+    const checksMade = checks().length;
+
+    for (const [i, changes] of [BODY, TITLE, BODY].entries()) {
+      const r = await edit(changes);
+      expect(r.body, `edit ${i + 7}`).toMatchObject({
+        dispatched: false,
+        reason: "duplicate",
+        review_id: id,
+      });
+    }
+    expect(dispatchesMade()).toHaveLength(made);
+    expect(rows()[0]).toMatchObject({ state: "errored", detail: "edit_limit", edit_restarts: 5 });
+    expect({ ...rows()[0], seen_at: null }).toEqual({ ...before, seen_at: null });
+    // Restated is the comment, three times, and the check is not rewritten.
+    expect(checks()).toHaveLength(checksMade);
+    expect(commentEdits()).toHaveLength(commentsMade + 3);
+    expect(String(commentEdits().at(-1)?.body?.body)).toContain("NEEDS A PERSON");
+  });
+
+  test("after the refusal a duplicate push, a reopening and a marking as ready each restate it", async () => {
+    const id = await toTheCap();
+    await edit(TITLE);
+    const made = dispatchesMade().length;
+    const checksMade = checks().length;
+
+    for (const action of ["synchronize", "reopened", "ready_for_review"]) {
+      const r = await deliver(prEvent({ action }));
+      expect(r.body, action).toMatchObject({
+        dispatched: false,
+        reason: "duplicate",
+        review_id: id,
+      });
+      expect(rows()[0], action).toMatchObject({ state: "errored", detail: "edit_limit" });
+    }
+    expect(dispatchesMade()).toHaveLength(made);
+    expect(checks()).toHaveLength(checksMade);
+    expect(String(commentEdits().at(-1)?.body?.body)).toContain("NEEDS A PERSON");
+  });
+
+  test("a reopening and a marking as ready count toward the same five", async () => {
+    const id = (await deliver(prEvent())).body.review_id as number;
+    // Two edits, two reopenings and a marking as ready: five restarts of one commit.
+    const deliveries: [string, PrOpts][] = [
+      ["edited", { changes: TITLE }],
+      ["reopened", {}],
+      ["edited", { changes: BODY }],
+      ["ready_for_review", {}],
+      ["reopened", {}],
+    ];
+    for (const [i, [action, extra]] of deliveries.entries()) {
+      const r = await deliver(prEvent({ action, ...extra }));
+      expect(r.body, `${action} ${i + 1}`).toMatchObject({ dispatched: true, review_id: id });
+      expect(rows()[0], `${action} ${i + 1}`).toMatchObject({ edit_restarts: i + 1 });
+    }
+    // The sixth change of any of the three kinds is refused.
+    for (const [action, extra] of [
+      ["reopened", {}],
+      ["ready_for_review", {}],
+      ["edited", { changes: TITLE }],
+    ] as [string, PrOpts][]) {
+      const r = await deliver(prEvent({ action, ...extra }));
+      expect(r.body, action).toMatchObject({
+        reason: action === "reopened" ? "edit_limit" : "duplicate",
+      });
+      expect(rows()[0], action).toMatchObject({ state: "errored", detail: "edit_limit" });
+    }
+    expect(dispatchesMade()).toHaveLength(6);
+  });
+
+  test("an administrator's start answers redispatched, begins the count again, and the next edit is accepted", async () => {
+    const id = await toTheCap();
+    await edit(TITLE);
+    expect(rows()[0]).toMatchObject({ state: "errored", detail: "edit_limit" });
+    const made = dispatchesMade().length;
+
+    // The start's payload is GitHub's own record of the pull request, with no sender.
+    const started = await handlePullRequestEvent(
+      env(),
+      prEvent({ action: "synchronize", sender: null }),
+      {
+        adminStart: true,
+      },
+    );
+    expect(started).toMatchObject({ dispatched: true, reason: "redispatched", review_id: id });
+    expect(rows()[0]).toMatchObject({ id, state: "dispatched", detail: null, edit_restarts: 0 });
+    expect(dispatchesMade()).toHaveLength(made + 1);
+
+    const next = await edit(BODY);
+    expect(next.body).toMatchObject({ dispatched: true, reason: "redispatched_after_edit" });
+    expect(rows()[0]).toMatchObject({ state: "dispatched", edit_restarts: 1 });
+    expect(dispatchesMade()).toHaveLength(made + 2);
+  });
+
+  test("a push after the refusal is a new commit with a new row and a count of 0", async () => {
+    await toTheCap();
+    await edit(TITLE);
+    const pushed = await deliver(prEvent({ action: "synchronize", sha: SHA_B }));
+    expect(pushed.body).toMatchObject({ dispatched: true, reason: "dispatched" });
+    expect(rows()).toHaveLength(2);
+    expect(rows()[0]).toMatchObject({ head_sha: SHA_A, detail: "edit_limit", edit_restarts: 5 });
+    expect(rows()[1]).toMatchObject({ head_sha: SHA_B, state: "dispatched", edit_restarts: 0 });
+    // And its edits are counted from there.
+    const r = await edit(TITLE, { sha: SHA_B });
+    expect(r.body).toMatchObject({ dispatched: true, reason: "redispatched_after_edit" });
+    expect(rows()[1]).toMatchObject({ edit_restarts: 1 });
+  });
+
+  test("the watchdog republishes an unpublished refusal as edit_limit and never calls it unreported", async () => {
+    await toTheCap();
+    // GitHub refuses the check of the refusal, so it is stored and not published.
+    checkStatus = 403;
+    const sixth = await edit(TITLE);
+    expect(sixth.body).toMatchObject({ reason: "edit_limit" });
+    expect(rows()[0]).toMatchObject({ state: "errored", detail: "edit_limit", published_at: null });
+
+    checkStatus = 200;
+    db.run(
+      "UPDATE pr_reviews SET decided_at = datetime('now', '-5 minutes'), created_at = datetime('now', '-3 hours')",
+    );
+    const swept = await sweepStalePrReviews(env());
+    // The overdue sweep looks only at running reviews, and the republish sweep finds this one.
+    expect(swept).toMatchObject({ timedOut: 0, republished: 1, errors: 0 });
+    expect(rows()[0]).toMatchObject({ state: "errored", detail: "edit_limit" });
+    expect(rows()[0].published_at).not.toBeNull();
+    expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "action_required" });
+    expect(lastCheck().output?.summary).toContain("the most one commit gets");
+  });
+
+  describe("what is not counted", () => {
+    test("an edit on a commit with no row is a new delivery at 0", async () => {
+      await deliver(prEvent({ sha: SHA_A }));
+      const r = await edit(TITLE, { sha: SHA_B });
+      expect(r.body).toMatchObject({ dispatched: true, reason: "dispatched" });
+      expect(rows().map((x) => x.edit_restarts)).toEqual([0, 0]);
+    });
+
+    test("a restart that raced and then went through is counted once", async () => {
+      const id = (await deliver(prEvent())).body.review_id as number;
+      expect((await claim(id)).status).toBe(200);
+      // A result lands between the edit's read and its write: the first write finds nothing and the
+      // second, after the row is read again, restarts. One restart is one on the count.
+      let landed = false;
+      const hooked = interceptingD1(realD1(db), async (sql) => {
+        if (!landed && sql.includes("SET state = ?, detail = ?, nonce = ?")) {
+          landed = true;
+          await callback(id, { outcome: "reported", report: goodReport() });
+        }
+      });
+      const r = await deliver(prEvent({ action: "edited", changes: TITLE }), "pull_request", {
+        ...env(),
+        DB: hooked,
+      } as Bindings);
+      expect(r.body).toMatchObject({ dispatched: true, reason: "redispatched_after_edit" });
+      expect(rows()[0]).toMatchObject({ state: "dispatched", edit_restarts: 1 });
+    });
+
+    test("a redelivery of a dispatch GitHub never ran is not counted", async () => {
+      await deliver(prEvent());
+      await edit(TITLE);
+      // The second edit's dispatch fails: counted, because the edit restarted the review.
+      dispatchStatus = 500;
+      const failed = await edit(BODY);
+      expect(failed.body).toMatchObject({ dispatched: false, reason: "dispatch_failed" });
+      expect(rows()[0]).toMatchObject({
+        state: "errored",
+        detail: "dispatch_failed",
+        edit_restarts: 2,
+      });
+
+      // GitHub redelivers the commit as a push once it answers again: it restarts the review, and
+      // that is not a change of the text, so the count stays where it was.
+      dispatchStatus = 204;
+      const again = await deliver(prEvent({ action: "synchronize" }));
+      expect(again.body).toMatchObject({ dispatched: true, reason: "redispatched" });
+      expect(rows()[0]).toMatchObject({ state: "dispatched", detail: null, edit_restarts: 2 });
+    });
+
+    test("a restart that read an older count is refused by its write, so a stale read buys no run", async () => {
+      dispatchStatus = 500;
+      const first = await deliver(prEvent());
+      expect(first.body).toMatchObject({ reason: "dispatch_failed" });
+      dispatchStatus = 204;
+      const made = dispatchesMade().length;
+
+      // Another delivery moves the count between the read and the write (the state is as it was).
+      const hooked = interceptingD1(realD1(db), (sql) => {
+        if (sql.includes("SET state = ?, detail = ?, nonce = ?")) {
+          db.run("UPDATE pr_reviews SET edit_restarts = 3");
+        }
+      });
+      const r = await deliver(prEvent({ action: "synchronize" }), "pull_request", {
+        ...env(),
+        DB: hooked,
+      } as Bindings);
+      // The write found nothing to change, so nothing was started and the row is as it was.
+      expect(r.body).toMatchObject({ dispatched: false, reason: "duplicate" });
+      expect(rows()[0]).toMatchObject({
+        state: "errored",
+        detail: "dispatch_failed",
+        edit_restarts: 3,
+      });
+      expect(dispatchesMade()).toHaveLength(made);
+    });
   });
 });
 

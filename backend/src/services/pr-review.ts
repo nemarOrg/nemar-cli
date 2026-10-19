@@ -67,6 +67,7 @@ import {
   type AuthorOverride,
   type AuthorTally,
   type CallbackOutcome,
+  PR_REVIEW_EDIT_CAP,
   PrReviewReportError,
   type ProducedDeclineReason,
   type ReviewOutcome,
@@ -406,6 +407,8 @@ interface ReviewRow {
   checkRunId: number | null;
   commentId: number | null;
   claimedAt: string | null;
+  /** Restarts an edit, a reopening or a marking as ready has caused for this commit (the cap's count). */
+  editRestarts: number;
 }
 
 interface RawRow {
@@ -419,10 +422,11 @@ interface RawRow {
   check_run_id: number | null;
   comment_id: number | null;
   claimed_at: string | null;
+  edit_restarts: number;
 }
 
 const ROW_COLUMNS =
-  "id, dataset_id, pr_number, head_sha, state, detail, report, check_run_id, comment_id, claimed_at";
+  "id, dataset_id, pr_number, head_sha, state, detail, report, check_run_id, comment_id, claimed_at, edit_restarts";
 
 function toRow(r: RawRow): ReviewRow {
   return {
@@ -436,6 +440,7 @@ function toRow(r: RawRow): ReviewRow {
     checkRunId: r.check_run_id,
     commentId: r.comment_id,
     claimedAt: r.claimed_at,
+    editRestarts: r.edit_restarts,
   };
 }
 
@@ -1038,9 +1043,21 @@ async function handleRepeat(
   // this call read before the other writer ran). For an edit it is not: the text the stored result
   // judged is no longer the pull request's, whoever moved the row, so the edit is dropped only after
   // the restart has been tried against the row as it is now, up to three times in all.
+  //
+  // A delivery that changes the text is also held to the cap (ADR 0107, decision 4): once the
+  // commit's review has been restarted that many times by such deliveries, the next one is refused
+  // instead of restarted, and every one after it re-states the refusal.
   let current = existing;
-  const tries = changesTheText(pr) ? EDIT_RESTART_TRIES : 1;
+  const textChange = changesTheText(pr);
+  const tries = textChange ? EDIT_RESTART_TRIES : 1;
   for (let attempt = 0; attempt < tries; attempt++) {
+    if (textChange && current.editRestarts >= PR_REVIEW_EDIT_CAP) {
+      if (current.detail === "edit_limit") break;
+      const refused = await refuseEdit(env, current);
+      if (refused) return refused;
+      current = (await readRow(db, existing.id)) ?? current;
+      continue;
+    }
     if (!(await isRestartable(db, current, pr, options))) break;
     const restarted = await restartReview(env, current, pr, secret, options);
     if (restarted) return restarted;
@@ -1050,6 +1067,37 @@ async function handleRepeat(
   const outcome = outcomeOfRow(current);
   if (outcome) await publishOutcome(env, current, outcome, { commentOnly: true });
   return no("duplicate", existing.id);
+}
+
+/**
+ * Refuse a delivery that would restart a review past the cap: the row becomes an errored review
+ * with the detail `edit_limit`, its check and comment are published as such, and nothing is
+ * dispatched. The state it is in is deliberately not asked about. A running review is superseded
+ * (its nonce is cleared, so its claim and its report are refused), and a result stored between the
+ * read and this write judged the text from before the edit, so it is overwritten too: a pass or a
+ * fail that stood would be a verdict on text the pull request no longer has, and the queue that
+ * approval reads would show it.
+ *
+ * The write is conditional on the count that was read and on the row not already being refused,
+ * so it is null when another delivery moved the count (an administrator's start resets it) or
+ * refused first, and the caller reads the row again. A refusal whose publish fails stays
+ * unpublished, and the watchdog's republish sweep says it again.
+ */
+async function refuseEdit(env: Bindings, existing: ReviewRow): Promise<PrReviewResponse | null> {
+  const db = env.DB;
+  const refused = await db
+    .prepare(
+      `UPDATE pr_reviews
+          SET state = 'errored', detail = 'edit_limit', verdict = NULL, report = NULL, nonce = NULL,
+              decided_at = datetime('now'), published_at = NULL, publish_attempts = 0
+        WHERE id = ? AND edit_restarts = ? AND detail IS NOT 'edit_limit'`,
+    )
+    .bind(existing.id, existing.editRestarts)
+    .run();
+  if ((refused.meta.changes ?? 0) !== 1) return null;
+  const row = (await readRow(db, existing.id)) ?? existing;
+  await publishOutcome(env, row, { kind: "error", error: "edit_limit" });
+  return no("edit_limit", existing.id);
 }
 
 /**
@@ -1109,6 +1157,10 @@ async function isRestartable(
  * absent for any other row; only a change of the text restarts a reported row, and
  * {@link stageOfReport} reads its stage for this. `claimed_at` is left out by a caller that does not
  * have it (the volume's groups), and absent is not null: it says nothing, so the row is counted.
+ *
+ * A review refused at the edit cap (`edit_limit`) counts as a spent call: it is a refusal and not a
+ * run, but the review it superseded may have been claimed, and counting it errs the safe way, which
+ * is the way this count is allowed to be wrong (nothing decides on it).
  */
 export function spentACall(row: {
   state: string;
@@ -1171,14 +1223,21 @@ async function restartReview(
   const db = env.DB;
   const paused = (await gateDecision(env, pr, options, "on_record")) === "blocked";
   const nonce = crypto.randomUUID();
+  // The cap's count: an administrator's start begins it again, a delivery that changes the text
+  // adds one, and anything else (a redelivery of a dispatch GitHub never ran) leaves it as it is.
+  const count = options.adminStart
+    ? "0"
+    : changesTheText(pr)
+      ? "edit_restarts + 1"
+      : "edit_restarts";
   const reset = await db
     .prepare(
       `UPDATE pr_reviews
           SET state = ?, detail = ?, nonce = ?, claimed_at = NULL,
               published_at = ${paused ? KEEP_RECENT_DECLINE_STAMP : "NULL"},
-              publish_attempts = 0, decided_at = ${paused ? "datetime('now')" : "NULL"},
+              publish_attempts = 0, edit_restarts = ${count}, decided_at = ${paused ? "datetime('now')" : "NULL"},
               created_at = datetime('now'), verdict = NULL, report = NULL
-        WHERE id = ? AND state = ? AND detail IS ?`,
+        WHERE id = ? AND state = ? AND detail IS ? AND edit_restarts = ?`,
     )
     .bind(
       paused ? "declined" : "dispatched",
@@ -1187,6 +1246,7 @@ async function restartReview(
       existing.id,
       existing.state,
       existing.detail,
+      existing.editRestarts,
     )
     .run();
   if ((reset.meta.changes ?? 0) !== 1) return null;
