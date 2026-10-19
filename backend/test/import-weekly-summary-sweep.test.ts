@@ -52,23 +52,25 @@ const WEEK_MS = 7 * 86_400_000;
  * The instant the weekly cron last fired: the latest Monday 03:00 UTC that is not later
  * than the real clock (`lastWeeklyCronFiring`).
  *
- * THE PREMISE. A report is only ever produced by a cron firing, and a firing is an
- * instant the real clock has already passed. The tests inject this as `now`, while
+ * THE PREMISE. A report comes from a scheduled firing, or from an admin run (the
+ * `force` tests) that this fixture pins to one; either way `now` is an instant the real
+ * clock has already passed. The tests inject this as `now`, while
  * three other things read the REAL clock: `audit_log.timestamp` (SQL `datetime('now')`),
  * `seedImported`, and the imported-this-week window. An injected `now` AHEAD of the real
  * clock therefore describes a window the database cannot fill.
  *
  * THE WINDOW. An ISO week starts at Monday 00:00 UTC but the cron fires at 03:00, so
  * from Monday 00:00 to 02:59:59 UTC the current week's firing is still ahead and the
- * latest one is seven days earlier. Two earlier fixtures each missed that:
+ * latest one is seven days earlier. Two earlier fixtures each missed something different:
  *
- *   1. A hardcoded `2026-09-07T03:00:00Z` (2026-W37) agreed with the database only while
- *      the wall clock sat in the same ISO week. The three gate tests failed on every
- *      run from 2026-09-14 onward, on every branch, taking the required `unit-pure`
- *      check with them. Nothing had changed but the date.
- *   2. Monday 03:00 of the CURRENT ISO week fixed that, and then failed "NOW is never
- *      in the future" for the first three hours of every Monday (#1843): the instant
- *      it named had not happened yet.
+ *   1. A hardcoded `2026-09-07T03:00:00Z` (2026-W37) missed that the real clock moves.
+ *      It agreed with the database only while the wall clock sat in the same ISO week,
+ *      so the three gate tests failed on every run from 2026-09-14 onward, on every
+ *      branch, taking the required `unit-pure` check with them. Nothing had changed but
+ *      the date.
+ *   2. Monday 03:00 of the CURRENT ISO week followed the clock but missed the window. It
+ *      failed "NOW is never in the future" for the first three hours of every Monday
+ *      (#1843): the instant it named had not happened yet.
  *
  * Inside the window NOW is therefore in the week BEFORE the real clock's, by design:
  * the cron has not fired yet this week. Anything that has the product write a row

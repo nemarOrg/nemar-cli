@@ -1,10 +1,10 @@
 /**
- * When the weekly import summary last fired, as of an instant (#1843).
+ * When the weekly import summary last fired on schedule, as of an instant (#1843).
  *
  * The daily cron fires at 03:00 UTC (`crons = ["0 3 * * *", ...]` in
  * `wrangler-sccn.toml`), and `shouldRunWeeklySummary` lets the report through on
- * Mondays, so the weekly summary fires on Monday at 03:00 UTC and at no other
- * instant.
+ * Mondays, so the scheduled weekly summary fires on Monday at 03:00 UTC and at no
+ * other instant. An admin run can happen at any time; it is not a firing.
  *
  * "Last fired" is not "the Monday of this ISO week at 03:00". An ISO week starts at
  * Monday 00:00, so from Monday 00:00 to 02:59:59 UTC the 03:00 of the current week
