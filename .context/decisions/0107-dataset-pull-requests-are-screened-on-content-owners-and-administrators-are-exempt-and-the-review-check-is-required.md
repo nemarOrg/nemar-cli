@@ -11,7 +11,7 @@ The Worker as the gate, the per-commit row, the one-shot claim, the derived verd
 Follows ADR 0048 (account kinds), ADR 0053 and ADR 0086 (unknown is never clear), ADR 0020 (a workflow edit reaches ~785 repositories at once).
 
 This ADR records the decisions of epic #1813.
-Built so far: the exemption with the `exempt` queue verdict and its CLI wording (#1814); the removal of the counts, which is the caps, the platform's pool and the automatic tally pause, with a volume line in the admin list (#1815); readable pull request text from the CLI (#1818); and the two-stage review with report version 2, the naming rule and its one override (#1816).
+Built so far: the exemption with the `exempt` queue verdict and its CLI wording (#1814); the removal of the counts, which is the caps, the platform's pool and the automatic tally pause, with a volume line in the admin list (#1815); readable pull request text from the CLI (#1818); the two-stage review with report version 2, the naming rule and its one override (#1816); and the re-review of a pull request when its title, body or base is edited (#1817).
 The rest is decided here and built by the later phases.
 The removal of the counts is released only together with the stage-1 screen, so that spend is never left without a bound.
 
@@ -118,7 +118,7 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
   The review job decides the facts first.
   When the title, or the dataset's changed name, breaks the naming rule (3a), or the changed name cannot be read, the run ends at the `facts` stage: no model is called and no tokens are spent, `models` names none, all six criteria are not assessed, and the report says why in the rule's own sentences.
   The report stage is `facts`, and a facts report can never pass: the parser refuses one that names a model, assesses anything, spent a token, or has no naming fact to explain it.
-  The check reads "Needs changes: the naming rule", or "Could not decide: the naming rule was not checked" when the name could not be read and the rule refused nothing, and the author edits the title or the `Name` and pushes again.
+  The check reads "Needs changes: the naming rule", or "Could not decide: the naming rule was not checked" when the name could not be read and the rule refused nothing, and the author edits the title, which runs the review again (decision 4), or fixes the `Name` and pushes.
   The title, the copy under it and the CLI's reason line are all chosen by the naming fact (`factsStop`) and never by the verdict, so they agree: a version that did not advance fails the verdict of a facts report whose name was only unreadable, and that report still reads "not checked" everywhere.
   A refusal beside an unreadable name reads "Needs changes", because the rule found something.
 - **A description is read up to 12,000 characters, and a longer one is recorded as cut.**
@@ -185,14 +185,25 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
 
 - A placeholder or template title, a description that is gibberish or placeholder text, and a title that does not describe the change are blockers.
   An incomplete or slightly inaccurate description passes with a note, and a misleading one is a blocker the author fixes by editing it.
-- Editing the title, the body or the base re-runs the review and supersedes a running one.
-  That is built by phase P4 (#1817), and until it lands the next bullet is the rule.
-- **The title and the body are read once per run, and an edit does not re-run the review until phase P4 lands.**
-  The workflow reads the pull request from the API when a run starts (`--pr-json`), and the title and the body come from that read.
-  The Worker's gate takes up `opened`, `synchronize`, `reopened` and `ready_for_review` and has no `edited`, so an edit is ignored.
-  A check therefore describes the text as it was when its run started: an author who fixes a title or a description to satisfy a failed check does not clear it by editing, and a text edited after a pass is not judged again.
-  The same holds for the naming rule on an owner's or administrator's pull request, whose title is read from the delivery: editing a refused title does not clear the check, and a new commit, a reopening or an administrator's start does.
-  **The required check (decision 5) must not be turned on before phase P4 lands**, because until then a pull request could be held by text it no longer has, or passed by text that has since changed.
+- Editing the title, the body or the base re-runs the review and supersedes a running one (built by phase P4, #1817).
+  The Worker takes up an `edited` delivery only when its `changes` object names `title`, `body` or `base`; the keys are read, and what they hold (the text from before the edit) never is.
+  Any other edit is ignored.
+- **A commit that has a review is started again on the same row, from any state.**
+  A running review and a stored result are both superseded.
+  The row's nonce is replaced, so the superseded job's token no longer matches: its claim and its report are refused with the 401 any stale token gets, its report is never stored, and a job that has not claimed yet spends nothing.
+  The row's verdict and report are cleared (the table keeps them only for a reported row), so the check goes back to running and an old fail or pass stops standing the moment the text changes.
+  `attempts` goes up by one when the earlier run could have cost a model call, as for any restart, and the answer's reason word is `redispatched_after_edit`.
+  A contributor an administrator has blocked is declined again, as for any restart.
+- **A commit with no row is a new delivery.**
+  An owner's or administrator's takes the exempt path: a new `skipped` check, or the naming rule's verdict on the new title, because the Worker reads that title from the delivery.
+  Editing a refused title on such a pull request therefore clears the failed check, and an edit made by someone who is not exempt is reviewed, the rule for any delivery someone else caused.
+- **A base that is not `main` is not reviewed.**
+  The delivery describes the pull request as it is after the edit, so a base moved off `main` is answered `not_main` and the commit's review is left as it was; an edit that moves the base onto `main` is a new delivery.
+- **The review judges the current text because the job reads it when it starts.**
+  The workflow reads the pull request from the API when a run starts (`--pr-json`), and the title and the body come from that read, so the run an edit starts reviews the edited text and the one it superseded can no longer report.
+  An edit is not counted or limited: like a push, each is a run, what bounds the cost is the workspace spend limit and not a count, and a redelivered edit starts the review once more.
+- **Re-review on an edit is a condition of the required check (decision 5).**
+  Without it a pull request could be held by text it no longer has, or passed by text that has since changed, so it is built before the check can be turned on.
 - An empty description is a blocker decided by a git-free fact, not by the model, and `nemar dataset update` requires a title and a description and writes the CHANGES entry for the version it creates.
   The owner confirmed both.
 
@@ -211,7 +222,7 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
 
 - The workflow's timeout, wording and install order (after the token is minted, with `--ignore-scripts`, as the publication review's workflow does) change first and are mirrored to `nemarDatasets/.github`, because the parity test makes any edit a two-repository change.
   Every dispatch, staging included, runs `main`'s script, so the new reviewer cannot run on staging before a release.
-- There is therefore no staging soak of the reviewer: its screen and its review first run on production, in an advisory shadow mode on production pull requests after the release, and the check is made required only after the shadow run, the calibration gate and the re-review on an edit (decision 4, phase P4).
+- There is therefore no staging soak of the reviewer: its screen and its review first run on production, in an advisory shadow mode on production pull requests after the release, and the check is made required only after the shadow run and the calibration gate, with the re-review on an edit (decision 4, phase P4) built before either.
 - The Worker's side is soaked on staging, as a rollout step of its own.
   The dev Worker deploys from `dev` with the epic, before the release, and the exempt path never dispatches, so a pull request opened by an administrator against a dev-owned exemplar exercises the naming rule's reads, the check posted for it and the override on staging.
   That step verifies two statements of this ADR and no others: how long the naming rule's GitHub reads take against the ten seconds GitHub gives a delivery (decision 3a), and that GitHub reads the newest check run of a name, which is what lets a waiver release a required check (Consequences).
