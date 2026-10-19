@@ -2785,6 +2785,55 @@ describe("an edit of the title, the body or the base re-runs the review (ADR 010
     expect(dispatchesMade()).toHaveLength(1);
   });
 
+  test("a blocked contributor's edits publish the decline once, not once per edit", async () => {
+    db.run(
+      "INSERT INTO pr_review_overrides (author_id, author_login, mode) VALUES (900, 'n', 'block')",
+    );
+    const first = await deliver(prEvent({ userId: 900 }));
+    expect(first.body).toMatchObject({ dispatched: false, reason: "contributor_paused" });
+    // The decline reached the pull request: one check and one comment.
+    expect(checks()).toHaveLength(1);
+    expect(comments()).toHaveLength(1);
+
+    // Two edits within the hour: declined again, and nothing is written to GitHub for either.
+    for (const [i, changes] of [BODY, TITLE].entries()) {
+      const r = await edit(changes, { userId: 900 });
+      expect(r.body, `edit ${i}`).toMatchObject({
+        dispatched: false,
+        reason: "contributor_paused",
+      });
+    }
+    expect(rows()[0]).toMatchObject({
+      state: "declined",
+      detail: "contributor_paused",
+      attempts: 1,
+    });
+    expect(checks()).toHaveLength(1);
+    expect(comments()).toHaveLength(1);
+    expect(dispatchesMade()).toHaveLength(0);
+
+    // The hour is the limit: the same decline, told more than an hour ago, is told again.
+    db.run("UPDATE pr_reviews SET published_at = datetime('now', '-2 hours')");
+    await edit(BODY, { userId: 900 });
+    expect(checks()).toHaveLength(2);
+    expect(comments()).toHaveLength(2);
+  });
+
+  test("an edit that turns a stored result into a decline publishes it, because the check says the result", async () => {
+    const id = (await deliver(prEvent({ userId: 900 }))).body.review_id as number;
+    await callback(id, { outcome: "reported", report: goodReport() });
+    expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "success" });
+    db.run(
+      "INSERT INTO pr_review_overrides (author_id, author_login, mode) VALUES (900, 'n', 'block')",
+    );
+
+    await edit(BODY, { userId: 900 });
+    // The commit's check no longer says success: it says the contributor is held back.
+    expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "action_required" });
+    expect(lastCheck().output?.title).toBe("Not reviewed");
+    expect(rows()[0]).toMatchObject({ state: "declined", detail: "contributor_paused" });
+  });
+
   test("several quick edits before the first job claims add no run, because none of them reached the model", async () => {
     const id = (await deliver(prEvent())).body.review_id as number;
     expect(rows()[0]).toMatchObject({ attempts: 1, claimed_at: null });

@@ -635,6 +635,12 @@ export async function publishOutcome(
  * A stranger pushing commit after commit would otherwise cost two GitHub writes per push for a
  * message that never changes. A decline is published the first time; the same decline for the
  * same pull request within the hour is recorded without being published again.
+ *
+ * "The same pull request" includes this very row: an edit restarts a commit's row, and a blocked
+ * contributor editing a title repeatedly would otherwise publish the decline again each time. The
+ * restart keeps the row's `published_at` only when the row already carried this decline, told
+ * within the hour ({@link KEEP_RECENT_DECLINE_STAMP}), so a stamp on the row itself is the proof
+ * and its own `created_at`, which a restart renews, is not asked about.
  */
 async function publishDecline(
   env: Bindings,
@@ -644,10 +650,11 @@ async function publishDecline(
   const repeat = await env.DB.prepare(
     `SELECT 1 AS ok FROM pr_reviews
       WHERE dataset_id = ? AND pr_number = ? AND state = 'declined' AND detail = ?
-        AND published_at IS NOT NULL AND id < ? AND created_at >= datetime('now', '-1 hour')
+        AND published_at IS NOT NULL
+        AND ((id < ? AND created_at >= datetime('now', '-1 hour')) OR id = ?)
       LIMIT 1`,
   )
-    .bind(row.datasetId, row.prNumber, reason, row.id)
+    .bind(row.datasetId, row.prNumber, reason, row.id, row.id)
     .first<{ ok: number }>();
   if (repeat) {
     await env.DB.prepare("UPDATE pr_reviews SET published_at = datetime('now') WHERE id = ?")
@@ -1099,6 +1106,16 @@ function stageOfReport(report: string | null): string | null {
 }
 
 /**
+ * A restart that ends in a decline keeps the row's `published_at` when the row already stands as
+ * this decline and told it within the hour (the old values are the ones a `SET` expression reads),
+ * and drops it otherwise. {@link publishDecline} then finds that stamp and does not tell the pull
+ * request again. A row that stood as anything else (a pass, a fail, a running review) has a check
+ * that says that, so the decline is published.
+ */
+const KEEP_RECENT_DECLINE_STAMP = `CASE WHEN state = 'declined' AND detail = 'contributor_paused'
+    AND published_at >= datetime('now', '-1 hour') THEN published_at END`;
+
+/**
  * Give a commit a fresh attempt, held to the same gate as a new one except for the exemption (see
  * {@link gateDecision}; the commit has a row, so `skipped` is never an answer): a contributor an
  * administrator has blocked is declined. Null when another delivery moved the row first.
@@ -1124,7 +1141,8 @@ async function restartReview(
   const reset = await db
     .prepare(
       `UPDATE pr_reviews
-          SET state = ?, detail = ?, nonce = ?, claimed_at = NULL, published_at = NULL,
+          SET state = ?, detail = ?, nonce = ?, claimed_at = NULL,
+              published_at = ${paused ? KEEP_RECENT_DECLINE_STAMP : "NULL"},
               publish_attempts = 0, decided_at = ${paused ? "datetime('now')" : "NULL"},
               created_at = datetime('now'), verdict = NULL, report = NULL
         WHERE id = ? AND state = ? AND detail IS ?`,
