@@ -185,8 +185,31 @@ function sqliteUtc(d: Date): string {
  * following week and a second run sails through. Moving the stamp to the injected
  * instant restores what production has by construction: the row and the run agree on
  * when it ran. Same move `heartbeat` makes for the verification sweep's row.
+ *
+ * It overwrites what the product wrote, so it first checks that there is something real
+ * to overwrite: exactly one reservation, with a stamp that parses, written within the
+ * last minute by the run the test just made. Otherwise a run that wrote nothing, wrote
+ * twice, or left an old row behind would be "repaired" into a gate test that passes for
+ * the wrong reason. Age is measured on SQLite's own clock, the one that wrote the stamp,
+ * because that is the clock a test of the window cannot move.
  */
 function stampReservationsAt(db: Database, at: Date): void {
+  const rows = db
+    .query<{ age: number | null }, [string]>(
+      `SELECT CAST(strftime('%s', 'now') AS INTEGER) - CAST(strftime('%s', timestamp) AS INTEGER) AS age
+         FROM audit_log WHERE action = ?`,
+    )
+    .all(WEEKLY_SUMMARY_AUDIT_ACTION);
+  if (rows.length !== 1) {
+    throw new Error(`expected exactly one weekly reservation to restamp, found ${rows.length}`);
+  }
+  const age = rows[0]?.age;
+  if (age === null || age === undefined) {
+    throw new Error("the weekly reservation's timestamp does not parse, so it was not restamped");
+  }
+  if (Math.abs(age) > 60) {
+    throw new Error(`the weekly reservation is ${age}s old, not the run just made; not restamping`);
+  }
   db.query("UPDATE audit_log SET timestamp = ? WHERE action = ?").run(
     sqliteUtc(at),
     WEEKLY_SUMMARY_AUDIT_ACTION,
