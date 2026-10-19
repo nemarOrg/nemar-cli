@@ -232,6 +232,12 @@ describe("verdictText", () => {
     ).toBe("not reviewed (contributor paused)");
   });
 
+  test("a review refused at the edit cap says so in plain words", () => {
+    expect(
+      verdictText({ verdict: "could_not_decide", detail: "edit_limit", review_current: true }),
+    ).toBe("could not decide (too many edits)");
+  });
+
   test("an owner's or administrator's pull request reads exempt (owner or admin), whatever else is on record", () => {
     expect(verdictText({ verdict: "exempt", detail: null, review_current: null })).toBe(
       "exempt (owner or admin)",

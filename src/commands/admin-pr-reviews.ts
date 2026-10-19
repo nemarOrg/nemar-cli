@@ -111,6 +111,8 @@ const DETAIL_WORDS: Record<string, string> = {
   rate_limited: "rate limited",
   daily_limit: "daily limit",
   unreported: "never reported",
+  // The review of a commit was refused at the cap on restarts by edits (ADR 0107).
+  edit_limit: "too many edits",
 };
 
 function detailWord(detail: string): string {

@@ -3282,6 +3282,7 @@ describe("the cap on restarts a pull request's text can cause (ADR 0107)", () =>
 
     // The commit's check says a person has to look, and why, and the comment says so too.
     expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "action_required" });
+    expect(lastCheck().output?.title).toBe("Could not decide: too many edits");
     expect(lastCheck().output?.summary).toContain("the most one commit gets");
     expect(String(comments().at(-1)?.body?.body)).toContain("NEEDS A PERSON");
   });
@@ -3313,7 +3314,11 @@ describe("the cap on restarts a pull request's text can cause (ADR 0107)", () =>
       expect(checks().at(-1)).toMatchObject({
         method: "PATCH",
         path: `/repos/nemarDatasets/${DATASET}/check-runs/${checkRunId}`,
-        body: { status: "completed", conclusion: "action_required" },
+        body: {
+          status: "completed",
+          conclusion: "action_required",
+          output: { title: "Could not decide: too many edits" },
+        },
       });
       const comment = String(commentEdits().at(-1)?.body?.body);
       expect(comment).toContain("NEEDS A PERSON");
