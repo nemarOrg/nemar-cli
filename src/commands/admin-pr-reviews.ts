@@ -1162,8 +1162,13 @@ function gateWord(reason: string): string | undefined {
   return Object.hasOwn(NOT_STARTED, reason) ? NOT_STARTED[reason] : undefined;
 }
 
-function startedWord(r: StartReviewResponse): string {
-  return r.reason === "redispatched" ? "started again" : "started";
+/**
+ * What a start that went is called. Every word that starts with `redispatched` is a commit started
+ * again (`redispatched`, and `redispatched_after_edit`, which only a delivery says), so an equality
+ * with the first would print the second as a first start.
+ */
+export function startedWord(r: StartReviewResponse): string {
+  return r.reason.startsWith("redispatched") ? "started again" : "started";
 }
 
 /** Why a start did not start one, as the line `start` prints. Pure, so it is tested without a server. */
@@ -1195,9 +1200,10 @@ prReviewsCommand
   .addHelpText(
     "after",
     `
-The automated review runs when GitHub tells the NEMAR API a pull request was opened or pushed to. A
+The automated review runs when GitHub tells the NEMAR API that a pull request was opened, pushed to,
+reopened or marked ready for review, or that its title, description or target branch was edited. A
 pull request that was already open when the review was switched on produced no such event, so it has
-no review until its author pushes again. This asks for one by name. The API reads the pull request
+no review until one of those happens to it. This asks for one by name. The API reads the pull request
 from GitHub itself and runs it through the same gate as any other: an administrator's block on the
 contributor still applies, and a pull request opened by a NEMAR owner or administrator is not
 reviewed and nothing is started. Its check is posted all the same, as the naming rule decides:
