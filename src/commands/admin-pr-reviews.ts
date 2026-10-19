@@ -2190,7 +2190,9 @@ async function setContributor(
       console.log(chalk.dim(`  (it was ${r.previous} before)`));
     if (mode === "allow") {
       console.log(
-        chalk.dim("  Pull requests already opened are not re-reviewed until their next push."),
+        chalk.dim(
+          "  A pull request already opened is reviewed when it is pushed to, edited, reopened or marked ready for review, or when an administrator starts its review.",
+        ),
       );
     }
     console.log();
