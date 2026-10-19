@@ -201,6 +201,8 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
   A contributor an administrator has blocked is declined again, as for any restart.
   The restart is tried against the row as it is now.
   If a result or the watchdog's verdict lands between the Worker's read of the row and its write, the write finds nothing to change, and the edit is tried again on a fresh read, up to three times in all, so it is not dropped for having lost that race.
+  A reopening and a marking as ready are retried the same way.
+  If the row moves under all three tries, which takes another writer moving it three times in a row, the stored result is restated and the change is dropped; that stays as designed, because the limit is what keeps a row that keeps moving from holding the webhook.
 - **A reopening and a marking as ready restart it too.**
   An edit made while a pull request is closed or a draft is not taken up (it is not open, or is a draft, as for any delivery), so the stored review of its commit would keep judging text the pull request no longer has.
   The first delivery that follows is the reopening or the marking as ready.
@@ -235,6 +237,11 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
   A refusal whose publish fails is published again by the watchdog's sweep like any unpublished result, and is never marked `unreported`, because the sweep that does that looks only at running reviews.
   A reopening and a marking as ready are counted with edits because a close-and-reopen cycle costs what an edit does and would otherwise be unbounded.
   The owner's decision named edits, so counting them is a reading of it, which stands until the owner confirms or reverses it.
+- **A publish is checked against the row once GitHub has answered, so a slow write cannot leave a stale check.**
+  A callback can store a pass and start updating the check, the sixth edit can refuse the row and publish the refusal, and the callback's slower update can then land last, so GitHub would show a pass for a row that says a person is needed.
+  After the check or the comment is acknowledged, the Worker reads the row again, and when it no longer stands for what was published (its state, decision time, verdict, reason or report moved) it publishes what the row says now, three publishes at most in all.
+  `published_at` is stamped only while the row still has the state and decision time that were published, so a result that moved on is not marked as shown and the watchdog's republish sweep, which looks for the unstamped, corrects it; after the third publish the row is left unstamped for the same reason.
+  Every publisher goes through that one function (the callback's store, the refusal, the running check, a decline and the sweep), so every one of them has it.
 - **The comment can lag the check, and a superseded run is in no token total.**
   A running review publishes its check only (the comment is written when an outcome is decided), so the pull request's comment keeps the text of the last completed review until the new result lands, while the check already shows running.
   The check is what the commit shows and what a required check reads.
