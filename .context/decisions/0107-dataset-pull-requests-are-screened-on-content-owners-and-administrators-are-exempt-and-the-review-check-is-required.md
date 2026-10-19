@@ -141,8 +141,16 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
 
 ### 3a. The naming rule runs first, on every pull request
 
-- **A pull request title, and the dataset's new name when a pull request changes it, may not start with an author and a year or hold a naming-template token.**
-  The rule refuses a first word of letters, of any case, directly followed by a four-digit year from 1900 to 2099, with an optional hyphen or underscore (`Lee2019`, `Lee-2019-EEG`, `BNCI2014_001`), and a template token (`FirstAuthorSurname`, `paperDOI`, `{{x}}`, `${x}`, `<your title>`, `[describe the change]`).
+- **A pull request title, and the dataset's new name when a pull request changes it, may not hold a citation, an author and a year or a DOI, anywhere in it, or a naming-template token.**
+  The rule refuses an author-year key anywhere in the text: a run of letters, of any case and script, directly followed by an optional single hyphen or underscore and a four-digit year from 1900 to 2099 that does not start a longer number (`Lee2019`, `Lee-2019-EEG`, `BNCI2014_001`, `Results from Zhou-2016 cohort`, `(Mainsah2025_L)`).
+  It refuses a DOI anywhere in the text: the characters `10.`, four to nine digits and a slash, which covers a `doi.org` link, a bare `doi:10.1234/x` and a DOI that ends a name in parentheses.
+  And it refuses a template token (`FirstAuthorSurname`, `paperDOI`, `{{x}}`, `${x}`, `<your title>`, `[describe the change]`).
+  The three are asked in that order, as the closed words `author_year`, `doi` and `template_field`, and a text that breaks several is told about the first.
+  An author-year key and a DOI are told to the author in the same plain words, "a citation (an author and a year, or a DOI)", with the advice to cite the paper in `ReferencesAndLinks` and the README instead.
+  The letters of a key must touch the year, or the one separator before it, and that is a deliberate boundary: `Release 2019`, `Andreev 2012` and `Add 2019 recordings` are ordinary sentences, and a rule that read a word and a year across a space would refuse every title that mentions a year.
+  The price is that a citation typed with a space (`Sawada 2022`) is not caught, and that letters attached to a year (`H2020`, `ses-2019`, `R2019b`) are refused wherever they stand.
+  A description is not held to the rule, so it may cite the paper the way the paper is cited.
+  The scan is linear in the length of the text, because a dataset `Name` can be long: it has no repetition that repeats another, and the tests that say so give it texts of hundreds of thousands of characters.
   The name is the `Name` field of `dataset_description.json` at the head, compared with the merge base: a name the pull request did not change is not its problem.
 - **One pure function decides, in `shared/naming-rule.ts`**, which the CLI asks before it opens a pull request, the review job asks before any model call, and the Worker asks of a pull request it does not review.
   A refusal fails the verdict whatever a model says.
