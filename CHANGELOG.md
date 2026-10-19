@@ -52,17 +52,18 @@ The conversion changes run on `hallu` from this repository's `main` branch, not 
   A pinned known gap no longer fails the run as a skip; a real skip still does.
 - **Dataset pull requests are screened on their content, and NEMAR owners and administrators are exempt from the model review by identity (epic #1813, Architecture Decision Record (ADR) 0107).**
   The hourly, daily and platform caps and the automatic tally pause are removed, and the admin list shows a volume line in their place (#1815).
-  The exemption is by identity, and an exempt pull request shows its own queue verdict; the naming rule still applies to it (#1814).
+  The exemption also needs the login to hold admin on the dataset's repository, as GitHub reports it, and an exempt pull request shows its own queue verdict (#1814); the naming rule still applies to it (#1816).
   A title or a changed dataset name that cites an author and year, a Digital Object Identifier (DOI) or a naming-template token ends the review at the facts, before any model is asked (#1813, #1816).
-  A pull request is reviewed again when its title, body or base changes, or when it is reopened or marked ready; each head commit allows five such restarts, and a sixth is refused (#1817).
+  A pull request is reviewed again when its title or body changes, when its base moves onto `main`, or when it is reopened or marked ready; each head commit allows five such restarts, and a sixth is refused (#1817).
 - **The required review check has its switch in place, and the switch is off unless it is set to `1` (#1819).**
   The Worker reads `PR_REVIEW_AUTO_REQUIRE` as on only when it is `1`, and the repository does not set it.
-  The switch gates the automatic paths that add the requirement, publishing and visibility changes, and the bulk fleet pass.
-  An administrator's single-dataset apply, `nemar admin fleet require-review <dataset-id> --apply`, does not wait for it (#1846).
+  The switch gates publishing, visibility changes and `nemar admin fleet enforce`; `nemar admin fleet require-review`, for one dataset or a page, does not wait for it.
 - **The command-line interface (CLI) no longer writes a placeholder pull request title or body (#1818).**
   `nemar dataset push --pr` used to write "Update from branch X" and an empty body when given none, and `nemar dataset update` wrote a stock title and a file list that dropped the first letter of its first path.
   The CLI refuses text that cannot be read as a description of the change.
-  In a script, `nemar dataset update` with only `--message` now fails, because `--description` is required too.
+  In a script, `nemar dataset update` fails unless both `--message` and `--description` are given, and `nemar dataset push --pr` fails unless both `--title` and `--body` are given.
+- **`nemar dataset update` writes its title into the dataset's change log as the new version's entry (#1818).**
+  The entry goes into the change log the dataset already has (`CHANGES`, `CHANGES.md` and the like), or into a new `CHANGES` file if it has none; an entry the author wrote first is left alone.
 
 ### Known limitations
 
@@ -74,7 +75,7 @@ The conversion changes run on `hallu` from this repository's `main` branch, not 
 - A host read error during the MaxShield header probe is still recorded as `maxshield_probe_failed`, which is terminal (#1833).
 - A short read of an EEGLAB `.fdt` caused by an I/O error is reported as a sample-count mismatch, which is typed `corrupt_or_truncated` (biosigIO #169).
 - The review check is not required on any dataset yet, so a dataset pull request still merges without it until the owner applies the ruleset.
-- Once a repository carries the review ruleset, an unset or `0` value of `PR_REVIEW_AUTO_REQUIRE` leaves its pull requests waiting for a check that nothing posts, and its merges stop; remove the rulesets before the switch is turned off.
+- Once a repository carries the review ruleset, an unset or `0` value of `PR_REVIEW_ENABLED` leaves its pull requests waiting for a check that nothing posts, and its merges stop; remove the rulesets before the review is switched off.
 
 ## 0.10.19 - 2026-10-16
 
