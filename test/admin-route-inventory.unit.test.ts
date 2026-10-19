@@ -194,6 +194,8 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "GET /pr-reviews": 1,
   "GET /pr-reviews/:dataset/:pr": 1,
   "POST /pr-reviews/:dataset/:pr/start": 1,
+  // The naming rule's one override (ADR 0107): zValidator + handler (a strict body).
+  "POST /pr-reviews/:dataset/:pr/allow": 2,
   "GET /pr-review-authors/:login": 1,
   "PUT /pr-review-authors/:login": 2,
   "DELETE /pr-review-authors/:login": 1,
@@ -229,7 +231,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(152);
+    expect(adminRoutes.routes.length).toBe(154);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware
