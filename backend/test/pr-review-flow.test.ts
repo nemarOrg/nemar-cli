@@ -3507,6 +3507,10 @@ describe("the cap on restarts a pull request's text can cause (ADR 0107)", () =>
       expect(r.body, action).toMatchObject({
         reason: action === "reopened" ? "edit_limit" : "duplicate",
       });
+      // What a reopening is refused with says that a reopening counts, not only an edit.
+      expect(lastCheck().output?.summary, action).toContain(
+        "reopenings and markings as ready for review",
+      );
       expect(rows()[0], action).toMatchObject({ state: "errored", detail: "edit_limit" });
     }
     expect(dispatchesMade()).toHaveLength(6);

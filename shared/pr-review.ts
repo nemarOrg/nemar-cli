@@ -1277,7 +1277,7 @@ const ERROR_COPY: Record<RunError, string> = {
   report_invalid: "The review could not be read back.",
   dispatch_failed: "The review could not be started. Push again to re-run it.",
   workflow_failed: "The review job failed before it finished.",
-  edit_limit: `The title, description or base of this pull request was edited after edits had already started the review of this commit ${PR_REVIEW_EDIT_CAP} times, the most one commit gets. That edit did not start the review again, and the earlier result no longer stands, because it judged text the pull request no longer has. Push a new commit to run the review, or ask a NEMAR administrator to start the review of this commit again.`,
+  edit_limit: `Edits to the title, description or base of this pull request, and reopenings and markings as ready for review, had already started the review of this commit ${PR_REVIEW_EDIT_CAP} times, the most one commit gets. This latest change did not start the review again, and the earlier result no longer stands, because the text it judged may no longer be the pull request's. Push a new commit to run the review, or ask a NEMAR administrator to start the review of this commit again.`,
 };
 
 const CODE_LABEL: Record<FindingCode, string> = {

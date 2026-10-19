@@ -1231,7 +1231,7 @@ describe("the refusal at the edit cap (ADR 0107, decision 4)", () => {
     const r = renderCheck(refusal);
     expect(r.title).toBe("Could not decide: too many edits");
     expect(r.summary).toBe(
-      "The title, description or base of this pull request was edited after edits had already started the review of this commit 5 times, the most one commit gets. That edit did not start the review again, and the earlier result no longer stands, because it judged text the pull request no longer has. Push a new commit to run the review, or ask a NEMAR administrator to start the review of this commit again.",
+      "Edits to the title, description or base of this pull request, and reopenings and markings as ready for review, had already started the review of this commit 5 times, the most one commit gets. This latest change did not start the review again, and the earlier result no longer stands, because the text it judged may no longer be the pull request's. Push a new commit to run the review, or ask a NEMAR administrator to start the review of this commit again.",
     );
     // The usual footer and the no-verdict line, as every error has, and no model's words.
     const other = renderCheck({ kind: "error", error: "workflow_failed" });
