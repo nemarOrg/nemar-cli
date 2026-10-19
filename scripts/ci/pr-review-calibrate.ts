@@ -32,10 +32,11 @@
  * and says which by name, never by value. Every child it starts, its own `gh` and `git` and the
  * `git` the review's evidence reader runs on a contributor's objects, is started with
  * {@link childEnv} (`pr-review-evidence.ts`): this process's environment without any `ANTHROPIC_*`
- * variable and without the review's callback token. So the key goes to the SDK in this process and
- * to nothing it starts. No message repeats an argument: a flag is named only if the script knows it
- * (one it accepts, or one it refuses by name), and any other is `unknown flag`, because a key
- * pasted after two dashes looks like one.
+ * variable, without any `ACTIONS_ID_TOKEN_REQUEST_*` variable (the request for an identity token,
+ * which an Actions runner puts in a step's environment) and without the review's callback token.
+ * So the key goes to the SDK in this process and to nothing it starts. No message repeats an
+ * argument: a flag is named only if the script knows it (one it accepts, or one it refuses by
+ * name), and any other is `unknown flag`, because a key pasted after two dashes looks like one.
  *
  * **What the table holds.** Closed words, counts, token counts, seconds and an estimate in dollars,
  * never a pull request's text or a word a model wrote, so it can be pasted anywhere. Its columns
