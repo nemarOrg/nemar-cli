@@ -2785,6 +2785,26 @@ describe("an edit of the title, the body or the base re-runs the review (ADR 010
     expect(dispatchesMade()).toHaveLength(1);
   });
 
+  test("several quick edits before the first job claims add no run, because none of them reached the model", async () => {
+    const id = (await deliver(prEvent())).body.review_id as number;
+    expect(rows()[0]).toMatchObject({ attempts: 1, claimed_at: null });
+
+    // Three edits while the dispatched job has not started: each supersedes a review that never
+    // claimed, so none of them could have cost a call.
+    for (const [i, changes] of [BODY, TITLE, BODY].entries()) {
+      const r = await edit(changes);
+      expect(r.body, `edit ${i}`).toMatchObject({ reason: "redispatched_after_edit" });
+    }
+    expect(dispatchesMade()).toHaveLength(4);
+    expect(rows()[0]).toMatchObject({ id, state: "dispatched", attempts: 1, claimed_at: null });
+
+    // Once the job has claimed, it is going to spend: an edit then supersedes a run that did.
+    const token = payloadOf(3).callback_token as string;
+    expect((await claim(id, token)).status).toBe(200);
+    await edit(TITLE);
+    expect(rows()[0]).toMatchObject({ state: "dispatched", attempts: 2, claimed_at: null });
+  });
+
   test("restarting a review that stopped at the facts adds no run, because it made no model call", async () => {
     const id = (await deliver(prEvent())).body.review_id as number;
     await callback(id, { outcome: "reported", report: goodReport() });

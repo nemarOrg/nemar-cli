@@ -389,6 +389,7 @@ interface ReviewRow {
   report: string | null;
   checkRunId: number | null;
   commentId: number | null;
+  claimedAt: string | null;
 }
 
 interface RawRow {
@@ -401,10 +402,11 @@ interface RawRow {
   report: string | null;
   check_run_id: number | null;
   comment_id: number | null;
+  claimed_at: string | null;
 }
 
 const ROW_COLUMNS =
-  "id, dataset_id, pr_number, head_sha, state, detail, report, check_run_id, comment_id";
+  "id, dataset_id, pr_number, head_sha, state, detail, report, check_run_id, comment_id, claimed_at";
 
 function toRow(r: RawRow): ReviewRow {
   return {
@@ -417,6 +419,7 @@ function toRow(r: RawRow): ReviewRow {
     report: r.report,
     checkRunId: r.check_run_id,
     commentId: r.comment_id,
+    claimedAt: r.claimed_at,
   };
 }
 
@@ -448,7 +451,9 @@ async function readRowByKey(
  * report is read by the stored parser, which reads a version 1 report by its own rules, so a review
  * stored before the screen existed keeps the verdict it had.
  */
-export function outcomeOfRow(row: ReviewRow): StoredOutcome | null {
+export function outcomeOfRow(
+  row: Pick<ReviewRow, "id" | "datasetId" | "prNumber" | "state" | "detail" | "report">,
+): StoredOutcome | null {
   if (row.state === "reported") {
     try {
       return {
@@ -1054,20 +1059,28 @@ async function isRestartable(
 
 /**
  * Whether a row's attempt may have reached the model (one run, of up to two calls): the complement
- * of a decline, an attempt GitHub never ran, and a run that ended at the facts stage (`stage` is
- * `facts`: the naming rule decided it before any model was asked, so it made no call). A restart of
- * a row that did adds a second run to its `attempts`, and the administrator's volume count sums
+ * of a decline, an attempt GitHub never ran, a run that ended at the facts stage (`stage` is
+ * `facts`: the naming rule decided it before any model was asked, so it made no call), and a review
+ * handed to GitHub that no job has claimed (`claimed_at` is null while it is `dispatched` or
+ * `unreported`: the claim comes before anything is spent, so the job that was started cannot have
+ * made a call, and several quick edits before it starts are still one run). A restart of a row that
+ * did spend one adds a second run to its `attempts`, and the administrator's volume count sums
  * `attempts` over the rows that did. `stage` is the stage of a stored version 2 report and is
- * absent for any other row; only an edit restarts a reported row, and {@link stageOfReport} reads
- * its stage for this.
+ * absent for any other row; only a change of the text restarts a reported row, and
+ * {@link stageOfReport} reads its stage for this. `claimed_at` is left out by a caller that does not
+ * have it (the volume's groups), and absent is not null: it says nothing, so the row is counted.
  */
 export function spentACall(row: {
   state: string;
   detail: string | null;
   stage?: string | null;
+  claimed_at?: string | null;
 }): boolean {
   if (row.state === "declined") return false;
   if (row.stage === "facts") return false;
+  if ((row.state === "dispatched" || row.state === "unreported") && row.claimed_at === null) {
+    return false;
+  }
   return !(
     row.state === "errored" &&
     (row.detail === "stale_head" || row.detail === "dispatch_failed")
@@ -1133,6 +1146,7 @@ async function restartReview(
         state: existing.state,
         detail: existing.detail,
         stage: stageOfReport(existing.report),
+        claimed_at: existing.claimedAt,
       }),
     });
     return res.dispatched && res.reason === "dispatched"
