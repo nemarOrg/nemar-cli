@@ -2989,6 +2989,12 @@ describe("an edit of the title, the body or the base re-runs the review (ADR 010
   test("restarting a review that stopped at the facts adds no run, because it made no model call", async () => {
     const id = (await deliver(prEvent())).body.review_id as number;
     await callback(id, { outcome: "reported", report: goodReport() });
+    // The fixture is a full report whose stage field is rewritten, not a report the naming path
+    // produced (a facts report names no model and assesses nothing, which this one does). That is
+    // enough here, and only here, because the attempts arithmetic reads the stored report's stage and
+    // nothing else of it (`stageOfReport`), and a restart does not parse the report it supersedes.
+    // What a real facts report is, and that the parser refuses a malformed one, is pinned in
+    // test/pr-review.test.ts.
     db.run("UPDATE pr_reviews SET report = json_set(report, '$.stage', 'facts')");
     const r = await edit(TITLE);
     expect(r.body).toMatchObject({ dispatched: true, reason: "redispatched_after_edit" });
