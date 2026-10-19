@@ -1725,8 +1725,9 @@ describe("a review that ended at the facts: the naming rule decided it before an
     // That the review stage did not run and no model was asked.
     expect(check.summary).toContain("the review stage did not run and no model was asked");
     expect(check.summary).toContain("The full review did not run, so no file's content was read.");
-    // That the author fixes the title or the Name and pushes again.
+    // That a new title runs the review again on its own, and a new Name needs a push.
     expect(check.summary).toContain("Edit the title, or the Name in dataset_description.json");
+    expect(check.summary).toContain("A new title runs the review again as soon as it is saved");
     expect(check.summary).toContain("push again");
     // Nothing was assessed, and the table says so, with only the rule's own failure a No.
     expect(check.summary).toContain("| A genuine contribution, not spam | Not assessed |");

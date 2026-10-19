@@ -1194,12 +1194,13 @@ const WAIVED_COPY = {
 /**
  * What a pull request whose review ended at the facts is told, by the naming fact that ended it
  * ({@link factsStop}, not the verdict): it says the rule decided and no model was asked, and what
- * the author does, which is to fix the title or the dataset's name and push again. Nothing is
- * reviewed until the rule is satisfied, so the next push is what runs the review.
+ * the author does: a new title is an edit, which starts the review again, and a new dataset name is
+ * a change to the files, which needs a push. Nothing is reviewed until the rule is satisfied, so
+ * the next edit or push is what runs the review.
  */
 const FACTS_COPY = {
   refused:
-    "The naming rule found a problem with this pull request, so the review stage did not run and no model was asked. Edit the title, or the Name in dataset_description.json, as described below, and push again: the review runs on the new commit.",
+    "The naming rule found a problem with this pull request, so the review stage did not run and no model was asked. Edit the title, or the Name in dataset_description.json, as described below. A new title runs the review again as soon as it is saved; a new Name is a change to the files, so push again: the review runs on the new commit.",
   unchecked:
     "The naming rule could not check this pull request's new dataset name, so the review stage did not run and no model was asked. Fixing dataset_description.json as described below and pushing again runs the review.",
 } as const;
