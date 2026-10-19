@@ -34,6 +34,16 @@
  * (`nemar admin pr-reviews allow <dataset> <pr> --admin --reason <why>`) turns it back into
  * `skipped`.
  *
+ * **An edit of the title, the body or the base re-runs the review** (ADR 0107). The job reads the
+ * pull request from the API when it starts, so a review describes the text as it was then, and an
+ * author who fixes a title or a description has to be judged on the fix. An `edited` delivery that
+ * names `title`, `body` or `base` in `changes` (keys only, never the old text) restarts the review of
+ * the commit it is on from any state, a running one and a stored result included
+ * ({@link restartReview} rotates the nonce, so the superseded job's claim and report are refused);
+ * with no row yet it is a new delivery, and an owner's or administrator's takes the exempt path
+ * above. A base moved off `main` is not a pull request this review applies to and is ignored like
+ * any other. An edit that names nothing else is ignored.
+ *
  * **Nothing here trusts the pull request.** The event is read by {@link readPullRequestEvent},
  * which accepts only the shapes it expects; the dispatch carries the review's coordinates and not
  * the pull request's text; the report that comes back goes through `parsePrReviewReport` before a
@@ -49,7 +59,8 @@
  * the delivery shows as failed in the App's delivery log, where it can be redelivered. So does an
  * exempt pull request's check that could not be published, which has no row for the watchdog to
  * retry from. Redelivery of a reviewed commit is safe because (dataset, pull request, commit) is
- * unique; redelivery of an exempt commit is safe because a second `skipped` check is harmless.
+ * unique; redelivery of an exempt commit is safe because a second `skipped` check is harmless. A
+ * redelivered edit starts the review again, which supersedes the first and costs one more run.
  */
 
 import {
@@ -87,13 +98,26 @@ import {
   namingFactsFor,
 } from "./pr-review-naming.js";
 
-/** `pull_request` actions that put new content in front of a reviewer. */
+/**
+ * `pull_request` actions that put new content in front of a reviewer. `edited` is on the list and
+ * is taken up only when it changed what the review reads (see {@link EDIT_KEYS}).
+ */
 export const PR_REVIEW_ACTIONS: ReadonlySet<string> = new Set([
   "opened",
   "synchronize",
   "reopened",
   "ready_for_review",
+  "edited",
 ]);
+
+/**
+ * The keys of an `edited` delivery's `changes` object that make an edit one the review must be run
+ * for again (ADR 0107): the title and the body, which the review reads from the pull request, and
+ * the base, which decides whether the pull request is reviewed at all. An edit that names none of
+ * them (the milestone, say, or a label) changed nothing the review saw. Only the keys are looked
+ * at; what they hold is the text from before the edit, and nothing here reads it.
+ */
+const EDIT_KEYS = ["title", "body", "base"] as const;
 
 /** The branch whose pull requests are reviewed. */
 export const PR_REVIEW_BASE_BRANCH = "main";
@@ -179,6 +203,12 @@ export interface PrIntake {
   title: string;
   /** The base branch's commit GitHub named with the pull request, for the naming rule; or null. */
   baseSha: string | null;
+  /**
+   * The delivery is an edit of the title, the body or the base ({@link EDIT_KEYS}), not new
+   * content. A commit that already has a review is started again for it, from whatever state it is
+   * in, because the text the review judged has changed.
+   */
+  edited: boolean;
 }
 
 /** Why a delivery was not taken up. Fixed words, safe to return and log. */
@@ -207,11 +237,18 @@ function posInt(x: unknown): number | null {
   return typeof x === "number" && Number.isSafeInteger(x) && x > 0 ? x : null;
 }
 
+/** Whether an `edited` delivery's `changes` names a key in {@link EDIT_KEYS}. Keys only. */
+function changesWhatTheReviewReads(changes: unknown): boolean {
+  const named = rec(changes);
+  return named !== null && EDIT_KEYS.some((key) => Object.hasOwn(named, key));
+}
+
 /**
  * Read a `pull_request` delivery. Everything in it is attacker-influenced (the title, the branch
  * names, the fork's name). Only ids, the head and base commits, the base branch and fixed-shape
  * logins are read, each checked against the shape it must have, and the title, which only the
- * naming rule reads (see {@link PrIntake.title}).
+ * naming rule reads (see {@link PrIntake.title}). For an edit, the keys of `changes` are looked at
+ * and what they hold, the text from before the edit, is not.
  */
 export function readPullRequestEvent(payload: unknown): IntakeResult {
   const p = rec(payload);
@@ -219,6 +256,12 @@ export function readPullRequestEvent(payload: unknown): IntakeResult {
   const repo = rec(p?.repository);
   if (!p || !pr || !repo) return { ok: false, reason: "malformed" };
   if (typeof p.action !== "string" || !PR_REVIEW_ACTIONS.has(p.action)) {
+    return { ok: false, reason: "action_ignored" };
+  }
+  // An edit counts only when it changed what the review reads. Anything else (a milestone, a
+  // label, an edit that names nothing) puts nothing new in front of it.
+  const edited = p.action === "edited";
+  if (edited && !changesWhatTheReviewReads(p.changes)) {
     return { ok: false, reason: "action_ignored" };
   }
   const owner = rec(repo.owner);
@@ -284,6 +327,7 @@ export function readPullRequestEvent(payload: unknown): IntakeResult {
         typeof sender?.login === "string" && LOGIN.test(sender.login) ? sender.login : null,
       title: pr.title,
       baseSha: typeof base.sha === "string" && SHA40.test(base.sha) ? base.sha : null,
+      edited,
     },
   };
 }
@@ -938,7 +982,8 @@ async function decideInserted(
  * current commit, which is what force-pushing back to an earlier reviewed commit means), its
  * stored result is re-stated on the pull request, and a review whose dispatch failed is tried
  * again. Nothing else is reviewed twice, except that an administrator's start also restarts a
- * commit whose review ended without a verdict (see `isRestartable`).
+ * commit whose review ended without a verdict, and an edit of the title, the body or the base
+ * restarts the review of the commit it is on, whatever state that is in (see `isRestartable`).
  */
 async function handleRepeat(
   env: Bindings,
@@ -954,7 +999,7 @@ async function handleRepeat(
     .run();
 
   let current = existing;
-  if (await isRestartable(db, existing, options)) {
+  if (await isRestartable(db, existing, pr, options)) {
     const restarted = await restartReview(env, existing, pr, secret, options);
     if (restarted) return restarted;
     // Another delivery moved the row first; what is re-stated below is what it is now, not what
@@ -968,15 +1013,24 @@ async function handleRepeat(
 }
 
 /**
- * A commit whose review can be tried again. A dispatch that failed was not run by GitHub (and a late
- * claim of it is refused, its nonce having been cleared), so a redelivery restarts it. A commit that
- * was declined, ended in an error or never reported is restarted only when an administrator asks by
+ * A commit whose review can be tried again. An edit of the title, the body or the base always
+ * restarts it, from any state, a running review and a stored result included: the review judged
+ * text that is no longer the pull request's, and a result for it must not stand, as a pass or as a
+ * fail (ADR 0107). A dispatch that failed was not run by GitHub (and a late claim of it is
+ * refused, its nonce having been cleared), so a redelivery restarts it. A commit that was declined,
+ * ended in an error or never reported is restarted otherwise only when an administrator asks by
  * name: a new delivery of the same commit must not buy a second model call. So is one handed to
  * GitHub that is past the watchdog's deadline: the production watchdog would have closed it as
- * `unreported`, and the dev Worker never runs it. A review that is running, or has a result, is never
- * restarted.
+ * `unreported`, and the dev Worker never runs it. A review that is running, or has a result, is not
+ * restarted by anything else.
  */
-async function isRestartable(db: Db, row: ReviewRow, options: PrReviewOptions): Promise<boolean> {
+async function isRestartable(
+  db: Db,
+  row: ReviewRow,
+  pr: PrIntake,
+  options: PrReviewOptions,
+): Promise<boolean> {
+  if (pr.edited) return true;
   if (row.state === "errored" && row.detail === "dispatch_failed") return true;
   if (options.adminStart !== true) return false;
   if (row.state === "declined" || row.state === "errored" || row.state === "unreported") {
@@ -999,7 +1053,8 @@ async function isRestartable(db: Db, row: ReviewRow, options: PrReviewOptions): 
  * `facts`: the naming rule decided it before any model was asked, so it made no call). A restart of
  * a row that did adds a second run to its `attempts`, and the administrator's volume count sums
  * `attempts` over the rows that did. `stage` is the stage of a stored version 2 report and is
- * absent for any other row; a row a restart reads is never a reported one.
+ * absent for any other row; only an edit restarts a reported row, and {@link stageOfReport} reads
+ * its stage for this.
  */
 export function spentACall(row: {
   state: string;
@@ -1014,10 +1069,29 @@ export function spentACall(row: {
   );
 }
 
+/** The stage of a stored version 2 report (`facts`, `screen` or `full`), or null for any other. */
+function stageOfReport(report: string | null): string | null {
+  if (report === null) return null;
+  try {
+    const stage = (JSON.parse(report) as { stage?: unknown } | null)?.stage;
+    return typeof stage === "string" ? stage : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Give a commit a fresh attempt, held to the same gate as a new one except for the exemption (see
  * {@link gateDecision}; the commit has a row, so `skipped` is never an answer): a contributor an
  * administrator has blocked is declined. Null when another delivery moved the row first.
+ *
+ * The nonce is replaced, and that is what retires the attempt this one supersedes. The superseded
+ * job's token was signed over the old nonce, so its claim and its result are refused (401, the same
+ * bytes as for any token that is not for the review waiting now) and its report is never stored;
+ * `claimed_at` is cleared so the new job can claim. A restart of a reported row also clears its
+ * `verdict` and `report`, which the table keeps null unless the state is `reported`; the old
+ * result stops being the commit's the moment the review runs again, and the check shows it
+ * running.
  */
 async function restartReview(
   env: Bindings,
@@ -1034,7 +1108,7 @@ async function restartReview(
       `UPDATE pr_reviews
           SET state = ?, detail = ?, nonce = ?, claimed_at = NULL, published_at = NULL,
               publish_attempts = 0, decided_at = ${paused ? "datetime('now')" : "NULL"},
-              created_at = datetime('now')
+              created_at = datetime('now'), verdict = NULL, report = NULL
         WHERE id = ? AND state = ? AND detail IS ?`,
     )
     .bind(
@@ -1050,9 +1124,15 @@ async function restartReview(
   try {
     const res = await decideInserted(env, existing.id, paused, nonce, secret, {
       // The earlier attempt cost a model call unless it never got that far.
-      secondCall: spentACall(existing),
+      secondCall: spentACall({
+        state: existing.state,
+        detail: existing.detail,
+        stage: stageOfReport(existing.report),
+      }),
     });
-    return res.dispatched && res.reason === "dispatched" ? { ...res, reason: "redispatched" } : res;
+    return res.dispatched && res.reason === "dispatched"
+      ? { ...res, reason: pr.edited ? "redispatched_after_edit" : "redispatched" }
+      : res;
   } catch (err) {
     await markDispatchFailed(db, existing.id);
     throw err;
