@@ -13,12 +13,13 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
-## 0.10.20 - 2026-10-18
+## 0.10.20 - 2026-10-19
 
 The Zarr conversion that runs on `hallu` now pins biosigIO 1.2.13 and types the failures caused by missing companion data.
 This release requeues nothing and leaves `ZARR_ENGINE_VERSION` at `3`. A dataset's stores are rebuilt when that dataset next runs: the drain rebuilds every recording with `--clean`, and a biosigIO change makes a published index non-current, so a pending retry round also rebuilds. A recording that converts again gets the new verdicts.
-There is no migration and no new Worker secret or variable.
-The Worker serves the index schema from one route, so the descriptions that route returns change on deploy; no Worker logic changes.
+There is one migration, 0099, which rebuilds the `pr_reviews` table for the review gate below.
+This release sets no new Worker secret or variable; it adds one optional switch, `PR_REVIEW_AUTO_REQUIRE`, which is left unset.
+The Worker serves the index schema from one route, so the descriptions that route returns change on deploy.
 The conversion changes run on `hallu` from this repository's `main` branch, not from the npm package.
 
 ### Changed
@@ -29,6 +30,9 @@ The conversion changes run on `hallu` from this repository's `main` branch, not 
   An EDF+C or BDF+C recording whose first time-keeping onset is not zero now converts, where it was refused as not EDF(+) or BDF(+) compliant.
   A truncated FIF read through `Recording.from_file` is typed `corrupt_or_truncated`, where it was `file_read_error`.
   A BrainVision cut that falls exactly on a frame boundary of a file with no `DataPoints` count is not detected; that is a known limit of the reader.
+- **The duration backfill counts the same BrainVision frames as the converter (#1837).**
+  `scripts/patch_duration.py` passes `allow_partial_frame=True`, as the converter does, so a file the converter stores gets the same duration.
+  biosigIO ignores the flag for every other format.
 - **Missing companion data gets a typed, terminal verdict (#1808).**
   A BrainVision header that names a data file the tree does not hold is `companion_missing`; a FIF file whose next split part is not in the tree is `split_part_missing`; an EEGLAB `.set` that stores epoched data is `epoched_recording`.
   These replace the `retry_exhausted`, `maxshield_probe_failed` and `file_read_error` verdicts that the same recordings used to receive, and none of them is retried.
@@ -37,7 +41,7 @@ The conversion changes run on `hallu` from this repository's `main` branch, not 
   That widens discovery for those datasets. A dataset takes the new discovery when it next runs; the engine stamp, which this release leaves at `3`, governs requeues only.
 - **The source copy of the dataset pull-request review workflow now matches the copy that dataset repositories run (#1820).**
   The review workflow runs the checkout, the Bun setup and the install after it mints the dataset token, and before it writes the token to the clone's configuration.
-  The install uses `--ignore-scripts`, and the job timeout is 28 minutes, below the 30-minute watchdog deadline.
+  The install uses `--ignore-scripts`, and the job timeout is 28 minutes, below the 40-minute watchdog deadline.
   The shared workflow repository already runs this body; this release brings the source copy in this repository to the same content.
 - **The index contract says what a retry can change.**
   The `failure` description in `shared/zarr-index.schema.json` says that retrying in the same state will not change the outcome.
@@ -46,6 +50,19 @@ The conversion changes run on `hallu` from this repository's `main` branch, not 
   This is a description-only change.
 - **The unexpected-skip guard in `test.yml` exempts pytest expected failures (epic #1800).**
   A pinned known gap no longer fails the run as a skip; a real skip still does.
+- **Dataset pull requests are screened on their content, and NEMAR owners and administrators are exempt from the model review by identity (epic #1813, Architecture Decision Record (ADR) 0107).**
+  The hourly, daily and platform caps and the automatic tally pause are removed, and the admin list shows a volume line in their place (#1815).
+  The exemption is by identity, and an exempt pull request shows its own queue verdict; the naming rule still applies to it (#1814).
+  A title or a changed dataset name that cites an author and year, a Digital Object Identifier (DOI) or a naming-template token ends the review at the facts, before any model is asked (#1813, #1816).
+  A pull request is reviewed again when its title, body or base changes, or when it is reopened or marked ready; each head commit allows five such restarts, and a sixth is refused (#1817).
+- **The required review check has its switch in place, and the switch is off unless it is set to `1` (#1819).**
+  The Worker reads `PR_REVIEW_AUTO_REQUIRE` as on only when it is `1`, and the repository does not set it.
+  The switch gates the automatic paths that add the requirement, publishing and visibility changes, and the bulk fleet pass.
+  An administrator's single-dataset apply, `nemar admin fleet require-review <dataset-id> --apply`, does not wait for it (#1846).
+- **The command-line interface (CLI) no longer writes a placeholder pull request title or body (#1818).**
+  `nemar dataset push --pr` used to write "Update from branch X" and an empty body when given none, and `nemar dataset update` wrote a stock title and a file list that dropped the first letter of its first path.
+  The CLI refuses text that cannot be read as a description of the change.
+  In a script, `nemar dataset update` with only `--message` now fails, because `--description` is required too.
 
 ### Known limitations
 
@@ -56,6 +73,8 @@ The conversion changes run on `hallu` from this repository's `main` branch, not 
 - A store whose recording metadata carries `brainvision_dropped_bytes` is refused by the scrub zarr stage until an operator names the member with `--allow-member`, as for the converter's other technical flags.
 - A host read error during the MaxShield header probe is still recorded as `maxshield_probe_failed`, which is terminal (#1833).
 - A short read of an EEGLAB `.fdt` caused by an I/O error is reported as a sample-count mismatch, which is typed `corrupt_or_truncated` (biosigIO #169).
+- The review check is not required on any dataset yet, so a dataset pull request still merges without it until the owner applies the ruleset.
+- Once a repository carries the review ruleset, an unset or `0` value of `PR_REVIEW_AUTO_REQUIRE` leaves its pull requests waiting for a check that nothing posts, and its merges stop; remove the rulesets before the switch is turned off.
 
 ## 0.10.19 - 2026-10-16
 
