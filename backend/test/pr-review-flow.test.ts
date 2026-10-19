@@ -855,19 +855,17 @@ describe("owners and administrators are not reviewed (ADR 0107)", () => {
     return id;
   }
 
-  test("an exempt author's own event never rewrites a commit a review has touched", async () => {
-    // The review of the stranger's push failed. The administrator reopening the pull request,
-    // force-pushing back to this commit, or the administrator's start, must not turn that failed
-    // review into `skipped`, which a required check counts as passing.
+  test("an exempt author's own push never rewrites a commit a review has touched", async () => {
+    // The review of the stranger's push failed. The administrator force-pushing back to this
+    // commit must not turn that failed review into `skipped`, which a required check counts as
+    // passing. (A push is the delivery that changes no text, so it is the one that only re-states.)
     await strangerPushFailsReview(SHA_A);
     const before = rows();
 
-    for (const action of ["reopened", "synchronize", "ready_for_review"]) {
-      const r = await deliver(
-        prEvent({ action, login: "admin-gh", userId: 602, number: 7, sha: SHA_A }),
-      );
-      expect(r.body, action).toMatchObject({ dispatched: false, reason: "duplicate" });
-    }
+    const r = await deliver(
+      prEvent({ action: "synchronize", login: "admin-gh", userId: 602, number: 7, sha: SHA_A }),
+    );
+    expect(r.body).toMatchObject({ dispatched: false, reason: "duplicate" });
     // Not one check was written, so the result still on the commit is the review's failure.
     expect(posted()).toEqual([]);
     expect(JSON.stringify(calls)).not.toContain("skipped");
@@ -876,9 +874,41 @@ describe("owners and administrators are not reviewed (ADR 0107)", () => {
     expect(edits.length).toBeGreaterThan(0);
     expect(String(edits.at(-1)?.body?.body)).toContain("NEEDS CHANGES");
     // The row is what it was, but for the time it was last seen.
-    expect(rows().map((r) => ({ ...r, seen_at: null }))).toEqual(
-      before.map((r) => ({ ...r, seen_at: null })),
+    expect(rows().map((x) => ({ ...x, seen_at: null }))).toEqual(
+      before.map((x) => ({ ...x, seen_at: null })),
     );
+  });
+
+  test("an exempt author's edit, reopening or marking as ready restarts the review of a commit someone else pushed, and never skips it", async () => {
+    // What the stranger's push put in front of the review is judged on the text the pull request has
+    // now. Each of these three changes that text (an edit does, and a pull request comes back from
+    // a close or a draft after edits the Worker did not take up), so each starts the review again,
+    // on the same row, and none of them turns the failed review into a `skipped` check.
+    const id = await strangerPushFailsReview(SHA_A);
+    const title = { title: { from: "An older title" } };
+    const own = { login: "admin-gh", userId: 602, number: 7, sha: SHA_A };
+
+    for (const [i, [action, extra]] of (
+      [
+        ["edited", { changes: title }],
+        ["reopened", {}],
+        ["ready_for_review", {}],
+      ] as const
+    ).entries()) {
+      const r = await deliver(prEvent({ action, ...own, ...extra }));
+      expect(r.body, action).toMatchObject({
+        dispatched: true,
+        reason: action === "edited" ? "redispatched_after_edit" : "redispatched",
+        review_id: id,
+      });
+      // The failed review no longer stands: the row is running again and so is its check.
+      expect(rows(), action).toHaveLength(1);
+      expect(rows()[0], action).toMatchObject({ id, state: "dispatched", verdict: null });
+      expect(lastCheck(), action).toMatchObject({ status: "in_progress" });
+      expect(dispatchesMade(), action).toHaveLength(i + 1);
+    }
+    expect(posted().filter((c) => c.method === "POST")).toEqual([]);
+    expect(JSON.stringify(calls)).not.toContain("skipped");
   });
 
   test("an exempt push on top of a reviewed commit posts its own check and leaves the review comment alone", async () => {
@@ -3029,6 +3059,135 @@ describe("an edit of the title, the body or the base re-runs the review (ADR 010
       expect(rows()).toHaveLength(1);
       expect(rows()[0]).toMatchObject({ author_login: "admin-gh", head_sha: SHA_A });
     });
+  });
+});
+
+describe("a reopening or a marking as ready re-runs the review (ADR 0107)", () => {
+  const TITLE = { title: { from: "An older title" } };
+  const BODY = { body: { from: "An older description" } };
+  const payloadOf = (n: number) =>
+    (dispatchesMade()[n].body as { client_payload: Record<string, unknown> }).client_payload;
+
+  test("a failed review, a title edited while the pull request was closed, then reopened: the review runs again", async () => {
+    const id = (await deliver(prEvent())).body.review_id as number;
+    await callback(id, { outcome: "reported", report: failingReport() });
+    expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "failure" });
+    const stored = rows()[0];
+    const made = calls.length;
+
+    // The author closes the pull request and fixes the title. GitHub sends the edit, and the Worker
+    // does not take up an edit of a pull request that is not open, so the failure stands.
+    const edit = await deliver(
+      prEvent({
+        action: "edited",
+        state: "closed",
+        title: "Add three EEG recordings",
+        changes: TITLE,
+      }),
+    );
+    expect(edit.body).toMatchObject({ dispatched: false, reason: "not_open" });
+    expect(rows()).toEqual([stored]);
+    expect(calls).toHaveLength(made);
+
+    // Reopening it is the first delivery that sees the new text, and it runs the review again.
+    const r = await deliver(prEvent({ action: "reopened", title: "Add three EEG recordings" }));
+    expect(r.body).toMatchObject({ dispatched: true, reason: "redispatched", review_id: id });
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]).toMatchObject({
+      id,
+      state: "dispatched",
+      verdict: null,
+      report: null,
+      detail: null,
+      claimed_at: null,
+    });
+    expect(dispatchesMade()).toHaveLength(2);
+    expect(payloadOf(1).callback_token).not.toBe(payloadOf(0).callback_token);
+    expect(lastCheck()).toMatchObject({ status: "in_progress" });
+
+    // The old failure no longer holds the merge: the new job decides.
+    const done = await callback(
+      id,
+      { outcome: "reported", report: goodReport() },
+      payloadOf(1).callback_token as string,
+    );
+    expect(done.status).toBe(200);
+    expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "success" });
+  });
+
+  test("a passing review, a body edited while the pull request was a draft, then ready for review: the review runs again", async () => {
+    const id = (await deliver(prEvent())).body.review_id as number;
+    await callback(id, { outcome: "reported", report: goodReport() });
+    expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "success" });
+    const stored = rows()[0];
+    const made = calls.length;
+
+    // Converted to a draft, and its description rewritten there: a draft is not reviewed, so the
+    // edit is not taken up, and the pass still stands on the commit.
+    const edit = await deliver(prEvent({ action: "edited", draft: true, changes: BODY }));
+    expect(edit.body).toMatchObject({ dispatched: false, reason: "draft" });
+    expect(rows()).toEqual([stored]);
+    expect(calls).toHaveLength(made);
+
+    // Marking it ready is the first delivery that sees the new description.
+    const r = await deliver(prEvent({ action: "ready_for_review" }));
+    expect(r.body).toMatchObject({ dispatched: true, reason: "redispatched", review_id: id });
+    expect(rows()[0]).toMatchObject({ id, state: "dispatched", verdict: null, report: null });
+    expect(dispatchesMade()).toHaveLength(2);
+    expect(lastCheck()).toMatchObject({ status: "in_progress" });
+  });
+
+  test("a resume supersedes a running review: the old job's token is refused", async () => {
+    const id = (await deliver(prEvent())).body.review_id as number;
+    const oldToken = payloadOf(0).callback_token as string;
+    expect((await claim(id, oldToken)).status).toBe(200);
+
+    const r = await deliver(prEvent({ action: "reopened" }));
+    expect(r.body).toMatchObject({ dispatched: true, reason: "redispatched", review_id: id });
+    expect(rows()[0]).toMatchObject({ state: "dispatched", attempts: 2, claimed_at: null });
+    const stale = await callback(id, { outcome: "reported", report: goodReport() }, oldToken);
+    expect(stale.status).toBe(401);
+    expect(rows()[0]).toMatchObject({ state: "dispatched", verdict: null });
+  });
+
+  test("a resume on a commit with no row is a new delivery", async () => {
+    await deliver(prEvent({ sha: SHA_A }));
+    const r = await deliver(prEvent({ action: "reopened", sha: SHA_B }));
+    expect(r.body).toMatchObject({ dispatched: true, reason: "dispatched" });
+    expect(rows()).toHaveLength(2);
+    expect(rows()[0]).toMatchObject({ head_sha: SHA_A, attempts: 1 });
+    expect(rows()[1]).toMatchObject({ head_sha: SHA_B, attempts: 1 });
+  });
+
+  test("a resume of a blocked contributor's pull request is declined again, and adds no run", async () => {
+    const id = (await deliver(prEvent({ userId: 900 }))).body.review_id as number;
+    await callback(id, { outcome: "reported", report: goodReport() });
+    db.run(
+      "INSERT INTO pr_review_overrides (author_id, author_login, mode) VALUES (900, 'n', 'block')",
+    );
+    for (const action of ["reopened", "ready_for_review"]) {
+      const r = await deliver(prEvent({ action, userId: 900 }));
+      expect(r.body, action).toMatchObject({ dispatched: false, reason: "contributor_paused" });
+    }
+    expect(rows()[0]).toMatchObject({
+      id,
+      state: "declined",
+      detail: "contributor_paused",
+      verdict: null,
+      attempts: 1,
+    });
+    expect(dispatchesMade()).toHaveLength(1);
+  });
+
+  test("a delivery that is not a resume still only re-states the stored result", async () => {
+    // The control: a push back to the commit is the one delivery that puts no new text in front of
+    // the review, so it restarts nothing.
+    const id = (await deliver(prEvent())).body.review_id as number;
+    await callback(id, { outcome: "reported", report: goodReport() });
+    const r = await deliver(prEvent({ action: "synchronize" }));
+    expect(r.body).toMatchObject({ dispatched: false, reason: "duplicate", review_id: id });
+    expect(rows()[0]).toMatchObject({ state: "reported", verdict: "pass" });
+    expect(dispatchesMade()).toHaveLength(1);
   });
 });
 

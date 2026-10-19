@@ -217,6 +217,13 @@ export interface PrIntake {
    * in, because the text the review judged has changed.
    */
   edited: boolean;
+  /**
+   * The delivery is a `reopened` or a `ready_for_review`: the pull request comes back into view
+   * after a stretch in which edits were not taken up (a closed pull request, a draft), so an
+   * earlier review of the commit may have judged text that is no longer the pull request's. A
+   * commit that already has a review is started again for it, as for an edit.
+   */
+  resumed: boolean;
 }
 
 /** Why a delivery was not taken up. Fixed words, safe to return and log. */
@@ -336,6 +343,7 @@ export function readPullRequestEvent(payload: unknown): IntakeResult {
       title: pr.title,
       baseSha: typeof base.sha === "string" && SHA40.test(base.sha) ? base.sha : null,
       edited,
+      resumed: p.action === "reopened" || p.action === "ready_for_review",
     },
   };
 }
@@ -1007,8 +1015,9 @@ async function decideInserted(
  * current commit, which is what force-pushing back to an earlier reviewed commit means), its
  * stored result is re-stated on the pull request, and a review whose dispatch failed is tried
  * again. Nothing else is reviewed twice, except that an administrator's start also restarts a
- * commit whose review ended without a verdict, and an edit of the title, the body or the base
- * restarts the review of the commit it is on, whatever state that is in (see `isRestartable`).
+ * commit whose review ended without a verdict, and an edit of the title, the body or the base, a
+ * reopening and a marking as ready restart the review of the commit they are on, whatever state
+ * that is in (see `isRestartable`).
  */
 async function handleRepeat(
   env: Bindings,
@@ -1030,7 +1039,7 @@ async function handleRepeat(
   // judged is no longer the pull request's, whoever moved the row, so the edit is dropped only after
   // the restart has been tried against the row as it is now, up to three times in all.
   let current = existing;
-  const tries = pr.edited ? EDIT_RESTART_TRIES : 1;
+  const tries = changesTheText(pr) ? EDIT_RESTART_TRIES : 1;
   for (let attempt = 0; attempt < tries; attempt++) {
     if (!(await isRestartable(db, current, pr, options))) break;
     const restarted = await restartReview(env, current, pr, secret, options);
@@ -1044,16 +1053,26 @@ async function handleRepeat(
 }
 
 /**
- * A commit whose review can be tried again. An edit of the title, the body or the base always
- * restarts it, from any state, a running review and a stored result included: the review judged
- * text that is no longer the pull request's, and a result for it must not stand, as a pass or as a
- * fail (ADR 0107). A dispatch that failed was not run by GitHub (and a late claim of it is
- * refused, its nonce having been cleared), so a redelivery restarts it. A commit that was declined,
- * ended in an error or never reported is restarted otherwise only when an administrator asks by
- * name: a new delivery of the same commit must not buy a second model call. So is one handed to
- * GitHub that is past the watchdog's deadline: the production watchdog would have closed it as
- * `unreported`, and the dev Worker never runs it. A review that is running, or has a result, is not
- * restarted by anything else.
+ * Whether the delivery may have changed the text a review of its commit judged: an edit of the
+ * title, the body or the base, or the return of a pull request that was closed or a draft (an edit
+ * made meanwhile was not taken up, so the first thing that follows it is the reopening or the
+ * marking as ready).
+ */
+function changesTheText(pr: PrIntake): boolean {
+  return pr.edited || pr.resumed;
+}
+
+/**
+ * A commit whose review can be tried again. An edit of the title, the body or the base, a
+ * reopening and a marking as ready always restart it, from any state, a running review and a stored
+ * result included: the review judged text that is no longer the pull request's, and a result for it
+ * must not stand, as a pass or as a fail (ADR 0107). A dispatch that failed was not run by GitHub
+ * (and a late claim of it is refused, its nonce having been cleared), so a redelivery restarts it.
+ * A commit that was declined, ended in an error or never reported is restarted otherwise only when
+ * an administrator asks by name: a new delivery of the same commit must not buy a second model
+ * call. So is one handed to GitHub that is past the watchdog's deadline: the production watchdog
+ * would have closed it as `unreported`, and the dev Worker never runs it. A review that is running,
+ * or has a result, is not restarted by anything else.
  */
 async function isRestartable(
   db: Db,
@@ -1061,7 +1080,7 @@ async function isRestartable(
   pr: PrIntake,
   options: PrReviewOptions,
 ): Promise<boolean> {
-  if (pr.edited) return true;
+  if (changesTheText(pr)) return true;
   if (row.state === "errored" && row.detail === "dispatch_failed") return true;
   if (options.adminStart !== true) return false;
   if (row.state === "declined" || row.state === "errored" || row.state === "unreported") {
