@@ -3559,6 +3559,57 @@ describe("the cap on restarts a pull request's text can cause (ADR 0107)", () =>
     expect(lastCheck().output?.summary).toContain("the most one commit gets");
   });
 
+  describe("a contributor an administrator has blocked", () => {
+    const block = (userId = 900) =>
+      db.run(
+        "INSERT INTO pr_review_overrides (author_id, author_login, mode) VALUES (?, 'n', 'block')",
+        [userId],
+      );
+
+    test("five blocked edits do not count, and the sixth is declined, not told there were too many", async () => {
+      block();
+      const first = await deliver(prEvent({ userId: 900 }));
+      expect(first.body).toMatchObject({ dispatched: false, reason: "contributor_paused" });
+      // A declined restart buys no run, so nothing is counted, edit after edit.
+      for (let i = 1; i <= PR_REVIEW_EDIT_CAP + 1; i++) {
+        const r = await edit(i % 2 ? TITLE : BODY, { userId: 900 });
+        expect(r.body, `edit ${i}`).toMatchObject({
+          dispatched: false,
+          reason: "contributor_paused",
+        });
+        expect(rows()[0], `edit ${i}`).toMatchObject({
+          state: "declined",
+          detail: "contributor_paused",
+          edit_restarts: 0,
+        });
+      }
+      expect(dispatchesMade()).toHaveLength(0);
+      expect(
+        checks().some((c) => c.body?.output?.title === "Could not decide: too many edits"),
+      ).toBe(false);
+    });
+
+    test("a commit at the cap whose author is then blocked is declined, and refused again once the block is lifted", async () => {
+      await toTheCap();
+      block(501);
+      const made = dispatchesMade().length;
+      const declined = await edit(TITLE);
+      expect(declined.body).toMatchObject({ dispatched: false, reason: "contributor_paused" });
+      expect(rows()[0]).toMatchObject({
+        state: "declined",
+        detail: "contributor_paused",
+        edit_restarts: PR_REVIEW_EDIT_CAP,
+      });
+      expect(dispatchesMade()).toHaveLength(made);
+
+      // The block does not reset the count: lifted, the next change is past the cap.
+      db.run("DELETE FROM pr_review_overrides");
+      const refused = await edit(BODY);
+      expect(refused.body).toMatchObject({ dispatched: false, reason: "edit_limit" });
+      expect(rows()[0]).toMatchObject({ state: "errored", detail: "edit_limit" });
+    });
+  });
+
   describe("a slow publish that the row outruns", () => {
     /** A check update, not the creation of one. */
     const checkUpdate = (r: Recorded) => r.method === "PATCH" && /check-runs\/\d+$/.test(r.path);

@@ -1170,12 +1170,18 @@ async function handleRepeat(
   //
   // A delivery that changes the text is also held to the cap (ADR 0107, decision 4): once the
   // commit's review has been restarted that many times by such deliveries, the next one is refused
-  // instead of restarted, and every one after it re-states the refusal.
+  // instead of restarted, and every one after it re-states the refusal. The cap comes after the
+  // gate: a contributor an administrator has blocked is declined by the restart below, as for any
+  // delivery, and is never told "too many edits" (a declined restart is not counted either).
   let current = existing;
   const textChange = changesTheText(pr);
   const tries = textChange ? EDIT_RESTART_TRIES : 1;
   for (let attempt = 0; attempt < tries; attempt++) {
-    if (textChange && current.editRestarts >= PR_REVIEW_EDIT_CAP) {
+    if (
+      textChange &&
+      current.editRestarts >= PR_REVIEW_EDIT_CAP &&
+      (await gateDecision(env, pr, options, "on_record")) !== "blocked"
+    ) {
       if (current.detail === "edit_limit") break;
       const refused = await refuseEdit(env, current, pr);
       if (refused) return refused;
@@ -1360,11 +1366,15 @@ async function restartReview(
   const db = env.DB;
   const paused = (await gateDecision(env, pr, options, "on_record")) === "blocked";
   const nonce = crypto.randomUUID();
-  // The cap's count: an administrator's start begins it again, a delivery that changes the text
-  // adds one, and anything else (a redelivery of a dispatch GitHub never ran) leaves it as it is.
+  // The cap's count: an administrator's start begins it again when it starts the review (a start
+  // that a block declines is a restart too, and a decline is no run to count), a delivery that
+  // changes the text adds one unless it was declined, and anything else (a push that restarts a
+  // review whose dispatch failed) leaves it as it is.
   const count = options.adminStart
-    ? "0"
-    : changesTheText(pr)
+    ? paused
+      ? "edit_restarts"
+      : "0"
+    : changesTheText(pr) && !paused
       ? "edit_restarts + 1"
       : "edit_restarts";
   const reset = await db
