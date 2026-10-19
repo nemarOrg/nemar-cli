@@ -464,6 +464,62 @@ describe("migration 0099: the guard stops the DROP on its own", () => {
   }
 });
 
+describe("migration 0099: the guard compares every column it copies", () => {
+  // One alteration per column of the old table, so a guard that leaves any one out of its
+  // comparison lets that column be damaged by the copy and still pass. The columns come from the
+  // table the migration builds, and the one it adds (`edit_restarts`, which the old table has no
+  // value for) is the only one left out.
+  const copied = (
+    migrated().db.query("PRAGMA table_info(pr_reviews)").all() as {
+      name: string;
+      type: string;
+    }[]
+  ).filter((c) => c.name !== "edit_restarts");
+
+  /** Where an alteration of a column is made and what it makes, when the plain one would be refused
+   *  by a constraint of the table itself (which would stop the file for a reason that is not the guard). */
+  const SPECIAL: Record<string, { set: string; where: string }> = {
+    id: { set: "id = id + 1000", where: "head_sha = 'h-pass'" },
+    from_fork: { set: "from_fork = 1 - from_fork", where: "head_sha = 'h-pass'" },
+    state: { set: "state = 'unreported'", where: "head_sha = 'h-dispatched'" },
+    verdict: { set: "verdict = 'fail'", where: "head_sha = 'h-pass'" },
+    detail: { set: "detail = 'too_large'", where: "head_sha = 'h-errored-stale_head'" },
+  };
+
+  /** The statement that changes one column of one copied row, and nothing else. */
+  function alteration({ name, type }: { name: string; type: string }): string {
+    const { set, where } = SPECIAL[name] ?? {
+      set:
+        type === "INTEGER"
+          ? `${name} = COALESCE(${name}, 0) + 1`
+          : `${name} = COALESCE(${name}, '') || 'x'`,
+      where: "head_sha = 'h-pass'",
+    };
+    return `UPDATE pr_reviews_new SET ${set} WHERE ${where};`;
+  }
+
+  test("the columns are the 21 the old table had and `attempts`, and none is skipped", () => {
+    expect(copied).toHaveLength(22);
+    expect(copied.map((c) => c.name)).toContain("report");
+    expect(copied.map((c) => c.name)).toContain("attempts");
+  });
+
+  for (const column of copied) {
+    test(`a copy altered in ${column.name} fails the guard itself, before the DROP`, () => {
+      const db = seeded();
+      const before = allRows(db);
+      db.run("PRAGMA foreign_keys = ON");
+      // The guard's own CHECK (`ok = 1`), not a constraint of the new table, which the altered
+      // value does not break: the file has to stop at the comparison.
+      expect(() => applyByStatement(db, withInjection(TARGET_SQL, alteration(column)))).toThrow(
+        /CHECK constraint failed: ok = 1/,
+      );
+      expect(allRows(db)).toEqual(before);
+      expect(storedSql(db, "pr_reviews_new")).not.toBeNull();
+    });
+  }
+});
+
 describe("migration 0099: the new word and the new count", () => {
   test("an errored row can hold edit_limit, with a count", () => {
     const { db } = migrated();
