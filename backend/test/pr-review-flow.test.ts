@@ -2632,10 +2632,17 @@ describe("an edit of the title, the body or the base re-runs the review (ADR 010
 
   test("an edited title restarts a reported fail", async () => {
     const id = (await deliver(prEvent())).body.review_id as number;
+    // The first job claims, as the workflow does before it spends anything, and then reports.
+    expect((await claim(id)).status).toBe(200);
     await callback(id, { outcome: "reported", report: failingReport() });
     expect(rows()[0]).toMatchObject({ state: "reported", verdict: "fail", attempts: 1 });
+    expect(rows()[0].claimed_at).not.toBeNull();
     expect(dispatchesMade()).toHaveLength(1);
     const checkRunId = rows()[0].check_run_id as number;
+    const commentEdits = () =>
+      calls.filter((c) => c.method === "PATCH" && /issues\/comments/.test(c.path));
+    const commentsBefore = comments().length;
+    expect(String(comments().at(-1)?.body?.body)).toContain("NEEDS CHANGES");
 
     const r = await edit(TITLE, { title: "Add three EEG recordings" });
     expect(r.body).toMatchObject({
@@ -2644,7 +2651,8 @@ describe("an edit of the title, the body or the base re-runs the review (ADR 010
       review_id: id,
     });
 
-    // The same row, started again: one more attempt, and the old result no longer stands.
+    // The same row, started again: one more attempt, because the first run had claimed and so could
+    // have spent a call; the claim is cleared for the new job; and the old result no longer stands.
     expect(rows()).toHaveLength(1);
     expect(rows()[0]).toMatchObject({
       id,
@@ -2669,6 +2677,9 @@ describe("an edit of the title, the body or the base re-runs the review (ADR 010
       path: `/repos/nemarDatasets/${DATASET}/check-runs/${checkRunId}`,
       body: { status: "in_progress" },
     });
+    // The comment is not touched by the restart: it still carries the last completed review's text
+    // while the check shows running, and it is rewritten when the new result lands.
+    expect(comments()).toHaveLength(commentsBefore);
     const done = await callback(
       id,
       { outcome: "reported", report: goodReport() },
@@ -2677,6 +2688,11 @@ describe("an edit of the title, the body or the base re-runs the review (ADR 010
     expect(done.status).toBe(200);
     expect(rows()[0]).toMatchObject({ state: "reported", verdict: "pass", attempts: 2 });
     expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "success" });
+    // The review comment is restated with the new result, on the same comment.
+    expect(commentEdits()).toHaveLength(1);
+    const restated = String(commentEdits().at(-1)?.body?.body);
+    expect(restated).toContain("PASS");
+    expect(restated).not.toContain("NEEDS CHANGES");
   });
 
   test("an edited body supersedes a running review and the old callback is refused", async () => {
