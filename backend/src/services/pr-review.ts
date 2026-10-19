@@ -143,6 +143,14 @@ export const PUBLISH_MAX_ATTEMPTS = 5;
 /** Rows the watchdog handles per query (it runs two: overdue reviews, and unpublished results). */
 const SWEEP_LIMIT = 20;
 
+/**
+ * How many times an edit's restart is tried when the row moves under it (a result or the watchdog's
+ * verdict landing between the read and the write), the first try included. Every try reads the row
+ * again, so three is enough for any one writer to have finished, and the limit is what keeps a row
+ * that keeps moving from holding the webhook.
+ */
+const EDIT_RESTART_TRIES = 3;
+
 /** How long the dispatch may wait for GitHub before the Worker answers the webhook. */
 const DISPATCH_TIMEOUT_MS = 10_000;
 
@@ -1015,13 +1023,19 @@ async function handleRepeat(
     .bind(existing.id)
     .run();
 
+  // A restart is a conditional write, so it finds nothing to change when something else moved the
+  // row between the read and the write: a result stored, the watchdog's verdict, another delivery.
+  // For most deliveries that is the answer (what is re-stated below is what the row is now, not what
+  // this call read before the other writer ran). For an edit it is not: the text the stored result
+  // judged is no longer the pull request's, whoever moved the row, so the edit is dropped only after
+  // the restart has been tried against the row as it is now, up to three times in all.
   let current = existing;
-  if (await isRestartable(db, existing, pr, options)) {
-    const restarted = await restartReview(env, existing, pr, secret, options);
+  const tries = pr.edited ? EDIT_RESTART_TRIES : 1;
+  for (let attempt = 0; attempt < tries; attempt++) {
+    if (!(await isRestartable(db, current, pr, options))) break;
+    const restarted = await restartReview(env, current, pr, secret, options);
     if (restarted) return restarted;
-    // Another delivery moved the row first; what is re-stated below is what it is now, not what
-    // this call read before the other one ran.
-    current = (await readRow(db, existing.id)) ?? existing;
+    current = (await readRow(db, existing.id)) ?? current;
   }
 
   const outcome = outcomeOfRow(current);

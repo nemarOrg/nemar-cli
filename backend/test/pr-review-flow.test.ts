@@ -2785,6 +2785,76 @@ describe("an edit of the title, the body or the base re-runs the review (ADR 010
     expect(dispatchesMade()).toHaveLength(1);
   });
 
+  test("a result stored between the read and the restart does not swallow the edit", async () => {
+    const id = (await deliver(prEvent())).body.review_id as number;
+    expect((await claim(id)).status).toBe(200);
+    expect(dispatchesMade()).toHaveLength(1);
+
+    // The job reports after the edit's read of the row and before its restart: a real callback,
+    // through the real route, lands between the two statements. The restart is conditional on the
+    // state it read (dispatched), so it finds nothing to change the first time.
+    let landed = false;
+    const hooked = interceptingD1(realD1(db), async (sql) => {
+      if (!landed && sql.includes("SET state = ?, detail = ?, nonce = ?")) {
+        landed = true;
+        const done = await callback(id, { outcome: "reported", report: goodReport() });
+        expect(done.status).toBe(200);
+      }
+    });
+    const r = await deliver(prEvent({ action: "edited", changes: TITLE }), "pull_request", {
+      ...env(),
+      DB: hooked,
+    } as Bindings);
+
+    expect(landed).toBe(true);
+    // The result judged the old text, so the edit still starts the review, on the same row.
+    expect(r.body).toMatchObject({
+      dispatched: true,
+      reason: "redispatched_after_edit",
+      review_id: id,
+    });
+    expect(rows()[0]).toMatchObject({ id, state: "dispatched", verdict: null, report: null });
+    expect(rows()[0].attempts).toBe(2);
+    expect(dispatchesMade()).toHaveLength(2);
+    expect(lastCheck()).toMatchObject({ status: "in_progress" });
+
+    // The new job is the one that counts.
+    const done = await callback(
+      id,
+      { outcome: "reported", report: goodReport() },
+      payloadOf(1).callback_token as string,
+    );
+    expect(done.status).toBe(200);
+    expect(rows()[0]).toMatchObject({ state: "reported", verdict: "pass" });
+  });
+
+  test("a row that keeps moving gets three tries and then the stored result is re-stated", async () => {
+    const id = (await deliver(prEvent())).body.review_id as number;
+    await callback(id, { outcome: "reported", report: goodReport() });
+    const made = dispatchesMade().length;
+
+    // Another writer moves the row before each of the restart's writes, so every try finds it
+    // different from what it read. Each move leaves a state that differs from the last.
+    let tries = 0;
+    const hooked = interceptingD1(realD1(db), (sql) => {
+      if (!sql.includes("SET state = ?, detail = ?, nonce = ?")) return;
+      tries++;
+      const word = tries % 2 === 0 ? "model_refused" : "workflow_failed";
+      db.run(
+        "UPDATE pr_reviews SET state = 'errored', verdict = NULL, report = NULL, detail = ?, nonce = NULL",
+        [word],
+      );
+    });
+    const r = await deliver(prEvent({ action: "edited", changes: BODY }), "pull_request", {
+      ...env(),
+      DB: hooked,
+    } as Bindings);
+
+    expect(tries).toBe(3);
+    expect(r.body).toMatchObject({ dispatched: false, reason: "duplicate", review_id: id });
+    expect(dispatchesMade()).toHaveLength(made);
+  });
+
   test("a blocked contributor's edits publish the decline once, not once per edit", async () => {
     db.run(
       "INSERT INTO pr_review_overrides (author_id, author_login, mode) VALUES (900, 'n', 'block')",
