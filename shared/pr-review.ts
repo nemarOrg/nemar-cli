@@ -1013,6 +1013,14 @@ export const DECLINE_REASONS = [
 ] as const;
 export type DeclineReason = (typeof DECLINE_REASONS)[number];
 
+/**
+ * How many times an edit of a pull request's title, description or base, a reopening or a marking as
+ * ready may restart the review of one head commit; the next is refused (ADR 0107, decision 4). The
+ * owner set it on 2026-10-19. An administrator's start resets the count, and a push is a new commit
+ * and so a new count. The Worker keeps the count in `pr_reviews.edit_restarts`.
+ */
+export const PR_REVIEW_EDIT_CAP = 5;
+
 /** Why a review ended without a report. Some are the Worker's own words (see the callback). */
 export const RUN_ERRORS = [
   "evidence_unavailable",
@@ -1026,6 +1034,7 @@ export const RUN_ERRORS = [
   "report_invalid",
   "dispatch_failed",
   "workflow_failed",
+  "edit_limit",
 ] as const;
 export type RunError = (typeof RUN_ERRORS)[number];
 
@@ -1259,6 +1268,7 @@ const ERROR_COPY: Record<RunError, string> = {
   report_invalid: "The review could not be read back.",
   dispatch_failed: "The review could not be started. Push again to re-run it.",
   workflow_failed: "The review job failed before it finished.",
+  edit_limit: `The title, description or base of this pull request was edited after edits had already started the review of this commit ${PR_REVIEW_EDIT_CAP} times, the most one commit gets. That edit did not start the review again, and the earlier result no longer stands, because it judged text the pull request no longer has. Push a new commit to run the review, or ask a NEMAR administrator to start the review of this commit again.`,
 };
 
 const CODE_LABEL: Record<FindingCode, string> = {

@@ -3577,27 +3577,28 @@ describe("what is stored is what the parser accepted", () => {
   });
 
   test("the vocabularies of the migration and of the code are the same lists", () => {
-    const sql = readFileSync(
-      join(import.meta.dir, "../src/db/migrations/0092_pr_reviews.sql"),
-      "utf8",
-    );
-    const listAfter = (re: RegExp): string[] => {
-      const m = sql.match(re);
+    // The table was rebuilt by 0099, which carries the state, verdict and detail lists the table
+    // has now; the override modes are in a table 0092 made and no later file touches.
+    const migrations = join(import.meta.dir, "../src/db/migrations");
+    const sql = readFileSync(join(migrations, "0099_pr_review_edit_limit.sql"), "utf8");
+    const overrides = readFileSync(join(migrations, "0092_pr_reviews.sql"), "utf8");
+    const listAfter = (text: string, re: RegExp): string[] => {
+      const m = text.match(re);
       if (!m) throw new Error(`no match for ${re}`);
       return [...m[1].matchAll(/'([a-z_]+)'/g)].map((x) => x[1]);
     };
-    expect(listAfter(/state TEXT NOT NULL\s+CHECK \(state IN \(([^)]*)\)/).sort()).toEqual(
+    expect(listAfter(sql, /state TEXT NOT NULL\s+CHECK \(state IN \(([^)]*)\)/).sort()).toEqual(
       [...REVIEW_STATES].sort(),
     );
     expect(
-      listAfter(/verdict TEXT CHECK \(verdict IS NULL OR verdict IN \(([^)]*)\)/).sort(),
+      listAfter(sql, /verdict TEXT CHECK \(verdict IS NULL OR verdict IN \(([^)]*)\)/).sort(),
     ).toEqual([...VERDICTS].sort());
-    expect(listAfter(/mode TEXT NOT NULL CHECK \(mode IN \(([^)]*)\)/).sort()).toEqual(
+    expect(listAfter(overrides, /mode TEXT NOT NULL CHECK \(mode IN \(([^)]*)\)/).sort()).toEqual(
       [...OVERRIDE_MODES].sort(),
     );
-    expect(listAfter(/detail TEXT CHECK \(detail IS NULL OR detail IN \(([^)]*)\)/).sort()).toEqual(
-      [...DECLINE_REASONS, ...RUN_ERRORS].sort(),
-    );
+    expect(
+      listAfter(sql, /detail TEXT CHECK \(detail IS NULL OR detail IN \(([^)]*)\)/).sort(),
+    ).toEqual([...DECLINE_REASONS, ...RUN_ERRORS].sort());
   });
 
   test("a row cannot say a verdict without having reported, or a reason without having failed", () => {
