@@ -28,7 +28,11 @@
  * reopening) and no review has yet touched that commit, is answered with a `skipped` check and
  * nothing else: no row, no model call. {@link isReviewExempt} decides from the accounts, never from
  * anything the pull request says, and before any row is written. A commit that already has a row
- * keeps what its review said, whoever acts on it next: `skipped` is never written over a review.
+ * keeps what its review said, whoever acts on it next, when the delivery changes no text (a
+ * force-push back to it, an administrator's start of a review that has a result): `skipped` is never
+ * written over a review. The deliveries that do change the text are the exceptions, and they restart
+ * the review of a commit that has a row, an exempt author's included: an edit, a reopening and a
+ * marking as ready (below).
  * They are not exempt from the naming rule, which runs first: a title or a new dataset name it
  * refuses fails their check, and only an administrator's recorded waiver for that commit
  * (`nemar admin pr-reviews allow <dataset> <pr> --admin --reason <why>`) turns it back into
@@ -39,10 +43,26 @@
  * author who fixes a title or a description has to be judged on the fix. An `edited` delivery that
  * names `title`, `body` or `base` in `changes` (keys only, never the old text) restarts the review of
  * the commit it is on from any state, a running one and a stored result included
- * ({@link restartReview} rotates the nonce, so the superseded job's claim and report are refused);
- * with no row yet it is a new delivery, and an owner's or administrator's takes the exempt path
- * above. A base moved off `main` is not a pull request this review applies to and is ignored like
- * any other. An edit that names nothing else is ignored.
+ * ({@link restartReview} rotates the nonce, so the superseded job's claim and report are refused).
+ * A job that had already claimed is not stopped: it still spends its model call before its report is
+ * refused, so superseding a claimed review costs that run in full, while one that never claimed
+ * spends nothing. Only a commit with no row is a new delivery (an owner's or administrator's takes
+ * the exempt path above); a commit with a row is restarted, an edit that moves the base onto `main`
+ * included. A base moved off `main` is not a pull request this review applies to and is ignored
+ * like any other. An edit that names nothing else is ignored.
+ *
+ * **A reopening and a marking as ready restart it too**, because an edit made while the pull
+ * request was closed or a draft was not taken up (it is not open, or is a draft, as for any
+ * delivery) and the first delivery after it is one of these two (`PrIntake.resumed`). The comment
+ * the pull request carries keeps the last completed review's text until the new result lands, while
+ * the check shows running: a running review publishes its check only.
+ *
+ * **Five such restarts are allowed for one head commit, and the sixth is refused** (ADR 0107,
+ * decision 4; the owner set the number, {@link PR_REVIEW_EDIT_CAP}). {@link restartReview} counts
+ * them in `pr_reviews.edit_restarts`, an administrator's start resets the count, and a push is a new
+ * row. {@link refuseEdit} fails closed: the row becomes an errored review with the detail
+ * `edit_limit`, a running review or a stored result superseded, and every later change only
+ * restates it. A restart a race made fail is tried again (up to three tries) and counts once.
  *
  * **Nothing here trusts the pull request.** The event is read by {@link readPullRequestEvent},
  * which accepts only the shapes it expects; the dispatch carries the review's coordinates and not
@@ -60,7 +80,8 @@
  * exempt pull request's check that could not be published, which has no row for the watchdog to
  * retry from. Redelivery of a reviewed commit is safe because (dataset, pull request, commit) is
  * unique; redelivery of an exempt commit is safe because a second `skipped` check is harmless. A
- * redelivered edit starts the review again, which supersedes the first and costs one more run.
+ * redelivered edit starts the review again, which supersedes the first, costs one more run and
+ * counts toward the cap.
  */
 
 import {
@@ -909,9 +930,11 @@ export async function handlePullRequestEvent(
 
   // A commit a review has touched keeps what that review said, whoever acts on it next: a row means
   // someone put this commit through review (a stranger's push to an owner's branch, or an author
-  // who was not exempt yet), and an exempt author's reopening, or an administrator's start, must not
-  // turn another person's failed or undecided review into `skipped`, which a required check counts
-  // as passing. `handleRepeat` re-states the row instead.
+  // who was not exempt yet), and an exempt author's push back to it, or an administrator's start,
+  // must not turn another person's failed or undecided review into `skipped`, which a required
+  // check counts as passing. `handleRepeat` re-states the row instead, or, for an edit, a reopening
+  // and a marking as ready, which change the text the review judged, starts the review again (and
+  // never writes `skipped` either).
   const existing = await readRowByKey(db, pr.datasetId, pr.prNumber, pr.headSha);
   if (existing) return await handleRepeat(env, existing, secret, pr, options);
 
@@ -1043,9 +1066,10 @@ async function handleRepeat(
   // A restart is a conditional write, so it finds nothing to change when something else moved the
   // row between the read and the write: a result stored, the watchdog's verdict, another delivery.
   // For most deliveries that is the answer (what is re-stated below is what the row is now, not what
-  // this call read before the other writer ran). For an edit it is not: the text the stored result
-  // judged is no longer the pull request's, whoever moved the row, so the edit is dropped only after
-  // the restart has been tried against the row as it is now, up to three times in all.
+  // this call read before the other writer ran). For a delivery that changes the text (an edit, a
+  // reopening, a marking as ready) it is not: the text the stored result judged is no longer the
+  // pull request's, whoever moved the row, so the change is dropped only after the restart has been
+  // tried against the row as it is now, up to three times in all.
   //
   // A delivery that changes the text is also held to the cap (ADR 0107, decision 4): once the
   // commit's review has been restarted that many times by such deliveries, the next one is refused
