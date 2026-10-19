@@ -757,7 +757,9 @@ describe("owners and administrators are not reviewed (ADR 0107)", () => {
     seedAccount({ github: "admin-gh", role: "admin" });
     seedAccount({ github: "owner-gh", role: "owner" });
     seedAccount({ github: "member-gh", role: "member" });
-    const actions = ["opened", "synchronize", "reopened", "ready_for_review"];
+    // `edited` is on the list: an administrator editing a contributor's pull request is reviewed,
+    // because the exemption follows the pull request's author and not whoever made the edit.
+    const actions = ["opened", "synchronize", "reopened", "ready_for_review", "edited"];
     // The four cells of author exempt or not and sender exempt or not: only the first is exempt,
     // so neither half alone is enough.
     const cells = [
@@ -778,6 +780,8 @@ describe("owners and administrators are not reviewed (ADR 0107)", () => {
             number: 100 + n,
             sha: n.toString(16).padStart(40, "e"),
             sender,
+            // An edit is taken up when it names the title, the body or the base.
+            ...(action === "edited" ? { changes: { title: { from: "An older title" } } } : {}),
           }),
         );
         expect(r.body, `${action}: ${author}, caused by ${sender}`).toMatchObject(
@@ -787,7 +791,7 @@ describe("owners and administrators are not reviewed (ADR 0107)", () => {
         );
       }
     }
-    // One review for each delivery that was not exempt, and none for the four that were.
+    // One review for each delivery that was not exempt, and none for the one cell of each action that was.
     expect(rows()).toHaveLength(actions.length * 3);
     expect(dispatchesMade()).toHaveLength(actions.length * 3);
   });
