@@ -3485,6 +3485,45 @@ describe("the cap on restarts a pull request's text can cause (ADR 0107)", () =>
     expect(dispatchesMade()).toHaveLength(made + 2);
   });
 
+  test("an administrator's start that lands between the read and the refusal is not overwritten by it", async () => {
+    const id = await toTheCap();
+    // The job the fifth edit started ends in an error, so the commit is at the cap and an
+    // administrator can start it again.
+    await callback(id, { outcome: "error", error: "model_refused" }, latestToken());
+    expect(rows()[0]).toMatchObject({
+      state: "errored",
+      detail: "model_refused",
+      edit_restarts: 5,
+    });
+
+    // The sixth edit has read the row at the cap; before its refusal is written, an administrator's
+    // start restarts the commit for real, which begins the count again.
+    let started: Awaited<ReturnType<typeof handlePullRequestEvent>> | null = null;
+    const hooked = interceptingD1(realD1(db), async (sql) => {
+      if (started === null && sql.includes("SET state = 'errored', detail = 'edit_limit'")) {
+        started = await handlePullRequestEvent(
+          env(),
+          prEvent({ action: "synchronize", sender: null }),
+          { adminStart: true },
+        );
+      }
+    });
+    const r = await deliver(prEvent({ action: "edited", changes: TITLE }), "pull_request", {
+      ...env(),
+      DB: hooked,
+    } as Bindings);
+
+    expect(started).toMatchObject({ dispatched: true, reason: "redispatched", review_id: id });
+    // The refusal's write was conditional on the count it read, found it moved and wrote nothing.
+    // The edit is then judged against the row as it is: the first change since the start, so it
+    // restarts the review, and the fresh review is never replaced by a refusal.
+    expect(r.body).toMatchObject({ dispatched: true, reason: "redispatched_after_edit" });
+    expect(rows()[0]).toMatchObject({ id, state: "dispatched", detail: null, edit_restarts: 1 });
+    expect(checks().some((c) => c.body?.output?.title === "Could not decide: too many edits")).toBe(
+      false,
+    );
+  });
+
   test("a push after the refusal is a new commit with a new row and a count of 0", async () => {
     await toTheCap();
     await edit(TITLE);
