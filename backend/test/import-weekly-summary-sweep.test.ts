@@ -75,10 +75,11 @@ const WEEK_MS = 7 * 86_400_000;
  * stamped by the real clock and then reads it back through NOW's ISO week has to move
  * that stamp to NOW; see `stampReservationsAt`, which the gate tests use.
  *
- * Every other window query is bound from `now` and every other fixture is dated
- * relative to NOW, so they are unaffected. The imported-this-week query and
- * `seedImported` read the real clock on both sides, so they never depended on this
- * value.
+ * The audit-log window queries are bound from `now`, and their fixtures are dated
+ * relative to NOW, so they are unaffected. Apart from that reservation stamp, only the
+ * imported-this-week window and `seedImported` (with the boundary rows seeded against
+ * that window) still read the real clock, on both sides, so they never depended on
+ * this value.
  *
  * The residual is a run that crosses Monday 03:00:00 UTC itself between this line and
  * the guard below, which would leave NOW a week and a few seconds behind. That is
@@ -1060,8 +1061,8 @@ describe("malformed audit rows do not corrupt the section", () => {
     const db = freshDb();
     db.query(
       `INSERT INTO audit_log (user_id, action, details, timestamp)
-       VALUES (1, 'import_issue_triage', '{"closed":9,"relabelled":9}', datetime('now','-1 days'))`,
-    ).run();
+       VALUES (1, 'import_issue_triage', '{"closed":9,"relabelled":9}', ?)`,
+    ).run(sqliteUtc(new Date(NOW.getTime() - 86_400_000)));
 
     const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
 
