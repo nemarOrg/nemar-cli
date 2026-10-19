@@ -433,6 +433,9 @@ interface ReviewRow {
   claimedAt: string | null;
   /** Restarts an edit, a reopening or a marking as ready has caused for this commit (the cap's count). */
   editRestarts: number;
+  /** The standing a publish is of: with `state`, `detail` and `report`, what {@link sameStanding} compares. */
+  verdict: string | null;
+  decidedAt: string | null;
 }
 
 interface RawRow {
@@ -447,10 +450,12 @@ interface RawRow {
   comment_id: number | null;
   claimed_at: string | null;
   edit_restarts: number;
+  verdict: string | null;
+  decided_at: string | null;
 }
 
 const ROW_COLUMNS =
-  "id, dataset_id, pr_number, head_sha, state, detail, report, check_run_id, comment_id, claimed_at, edit_restarts";
+  "id, dataset_id, pr_number, head_sha, state, detail, report, check_run_id, comment_id, claimed_at, edit_restarts, verdict, decided_at";
 
 function toRow(r: RawRow): ReviewRow {
   return {
@@ -465,6 +470,8 @@ function toRow(r: RawRow): ReviewRow {
     commentId: r.comment_id,
     claimedAt: r.claimed_at,
     editRestarts: r.edit_restarts,
+    verdict: r.verdict,
+    decidedAt: r.decided_at,
   };
 }
 
@@ -571,6 +578,30 @@ function errName(err: unknown): string {
 // ---------------------------------------------------------------------------------------------
 
 /**
+ * How many times one {@link publishOutcome} may publish, the first included: it publishes again
+ * when the row moved while it was publishing, and gives up after this many and leaves the result
+ * unpublished, so the watchdog's sweep takes over. Three is enough for one other writer to have
+ * finished, and the limit keeps a row that keeps moving from holding the request.
+ */
+const PUBLISH_ROUNDS = 3;
+
+/**
+ * Whether two reads of a row stand for the same thing on the pull request: the same state, the
+ * same decision time, the same verdict, reason and report. A restart of a running review changes
+ * none of them (it clears nothing a check shows), so a review that was started again while its
+ * running check was published is not a move.
+ */
+function sameStanding(a: ReviewRow, b: ReviewRow): boolean {
+  return (
+    a.state === b.state &&
+    a.decidedAt === b.decidedAt &&
+    a.verdict === b.verdict &&
+    a.detail === b.detail &&
+    a.report === b.report
+  );
+}
+
+/**
  * Publish an outcome to GitHub: the check-run on the reviewed commit, and (for any outcome but
  * `running`, and only while this is still the last commit of the pull request seen) the
  * pull-request comment. Each surface fails on its own and is logged by status; neither can lose
@@ -578,6 +609,17 @@ function errName(err: unknown): string {
  * did is marked published; one that did not stays unpublished and the watchdog tries again.
  * `running` is bounded (it runs inside the webhook request) and publishes the in-progress check
  * only. `commentOnly` re-states a stored result on the pull request without touching the check.
+ *
+ * **A publish is a read of the row, and the row can move while GitHub is being written to.** A
+ * callback stores a pass and starts updating the check; the sixth edit refuses the row and
+ * publishes the refusal; the callback's slower update lands last, and GitHub shows a pass for a
+ * row that says it needs a person. So after the check or the comment is acknowledged the row is
+ * read again, and when it no longer stands for what was just published (see {@link sameStanding})
+ * what its row says now is published, up to {@link PUBLISH_ROUNDS} times in all. The row is stamped
+ * `published_at` only while it still has the state and decision time that were published, so a
+ * result that moved on after the last read is not marked as shown, and the republish sweep, which
+ * selects the unstamped, corrects it. Every publisher goes through here, so every publisher has
+ * this: the callback's store, the refusal, the running check, a decline and the sweep itself.
  */
 export async function publishOutcome(
   env: Bindings,
@@ -585,7 +627,6 @@ export async function publishOutcome(
   outcome: StoredOutcome | "running",
   opts: { commentOnly?: boolean } = {},
 ): Promise<boolean> {
-  let checked = false;
   let token: string;
   let refresh: () => Promise<string>;
   try {
@@ -594,6 +635,73 @@ export async function publishOutcome(
     console.error(`[pr-review] review ${row.id}: no GitHub token (${errName(err)})`);
     return false;
   }
+  const db = env.DB;
+
+  let shown = row;
+  let what = outcome;
+  for (let round = 1; round <= PUBLISH_ROUNDS; round++) {
+    const done = await publishRound(env, { token, refresh }, shown, what, opts);
+    // Nothing reached GitHub, so nothing can be stale there, and the row stays as it was.
+    if (!done.acknowledged) return done.checked;
+    let fresh: ReviewRow | null;
+    try {
+      fresh = await readRow(db, row.id);
+    } catch (err) {
+      // Not knowing whether the row moved is not knowing the check is right: no stamp, and the
+      // sweep publishes it again.
+      console.error(
+        `[pr-review] review ${row.id}: row not read after publishing (${errName(err)})`,
+      );
+      return done.checked;
+    }
+    if (fresh === null || sameStanding(fresh, shown)) {
+      if (done.checked && what !== "running") await stampPublished(db, shown);
+      return done.checked;
+    }
+    // The row moved while it was being published, so what GitHub holds may be what it was.
+    if (round === PUBLISH_ROUNDS) {
+      console.error(
+        `[pr-review] review ${row.id}: the row kept moving while it was published; left for the sweep`,
+      );
+      return false;
+    }
+    shown = fresh;
+    what = outcomeOfRow(fresh) ?? "running";
+  }
+  return false;
+}
+
+/**
+ * Record that a row's result reached GitHub, and only for the row as it was published: the same
+ * state and decision time. A row that moved on since is not stamped, so its new result still waits
+ * for a publish, and the sweep takes it up if nothing else does.
+ */
+async function stampPublished(db: Db, row: ReviewRow): Promise<void> {
+  try {
+    await db
+      .prepare(
+        "UPDATE pr_reviews SET published_at = datetime('now') WHERE id = ? AND state = ? AND decided_at IS ?",
+      )
+      .bind(row.id, row.state, row.decidedAt)
+      .run();
+  } catch (err) {
+    console.error(`[pr-review] review ${row.id}: published_at not stored (${errName(err)})`);
+  }
+}
+
+/**
+ * One publish of `outcome` for `row`: the check, and the comment for a decided outcome. Says whether
+ * the check reached GitHub and whether anything did (the comment alone is something).
+ */
+async function publishRound(
+  env: Bindings,
+  { token, refresh }: { token: string; refresh: () => Promise<string> },
+  row: ReviewRow,
+  outcome: StoredOutcome | "running",
+  opts: { commentOnly?: boolean },
+): Promise<{ checked: boolean; acknowledged: boolean }> {
+  let checked = false;
+  let commented = false;
   const db = env.DB;
 
   if (!opts.commentOnly) {
@@ -634,7 +742,7 @@ export async function publishOutcome(
     }
   }
 
-  if (outcome === "running") return checked;
+  if (outcome === "running") return { checked, acknowledged: checked };
   try {
     if (await isLatestReview(db, row)) {
       const commentId = row.commentId ?? (await existingCommentId(db, row.datasetId, row.prNumber));
@@ -646,6 +754,7 @@ export async function publishOutcome(
         commentId,
         body: renderComment(outcome, row.headSha),
       });
+      commented = true;
       if (id !== row.commentId) {
         try {
           await db
@@ -662,18 +771,7 @@ export async function publishOutcome(
     // Typically the App lacks pull_requests: write. The check still carries the whole review.
     console.error(`[pr-review] review ${row.id}: comment not published (${errName(err)})`);
   }
-
-  if (checked) {
-    try {
-      await db
-        .prepare("UPDATE pr_reviews SET published_at = datetime('now') WHERE id = ?")
-        .bind(row.id)
-        .run();
-    } catch (err) {
-      console.error(`[pr-review] review ${row.id}: published_at not stored (${errName(err)})`);
-    }
-  }
-  return checked;
+  return { checked, acknowledged: checked || commented };
 }
 
 /**
@@ -702,9 +800,8 @@ async function publishDecline(
     .bind(row.datasetId, row.prNumber, reason, row.id, row.id)
     .first<{ ok: number }>();
   if (repeat) {
-    await env.DB.prepare("UPDATE pr_reviews SET published_at = datetime('now') WHERE id = ?")
-      .bind(row.id)
-      .run();
+    // Recorded as told, for the row as it stands: a row that moved on since is not stamped.
+    await stampPublished(env.DB, row);
     return;
   }
   await publishOutcome(env, row, { kind: "declined", reason });

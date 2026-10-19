@@ -83,6 +83,32 @@ let permissions: Record<string, PermissionAnswer> = {};
 /** What the naming rule's reads find, per repository (see helpers/github-naming.ts). */
 let naming: Record<string, NamingRepo> = {};
 let nextId = 9000;
+/**
+ * Requests the stand-in holds when they arrive, until a test lets them through: the way a slow
+ * GitHub answers one write after another that was started later. A held request is recorded in
+ * `calls` when it is released, not when it arrives, so `calls` is the order the writes LANDED in,
+ * which is the order GitHub keeps the last of.
+ */
+let holds: { match: (r: Recorded) => boolean; arrive: () => void; gate: Promise<void> }[] = [];
+let releases: (() => void)[] = [];
+
+/** Hold the next request that matches. `arrived` settles when it is held; `release` lets it land. */
+function holdRequest(match: (r: Recorded) => boolean): {
+  arrived: Promise<void>;
+  release: () => void;
+} {
+  let arrive!: () => void;
+  let release!: () => void;
+  const arrived = new Promise<void>((resolve) => {
+    arrive = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  holds.push({ match, arrive, gate });
+  releases.push(release);
+  return { arrived, release };
+}
 
 let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
@@ -94,7 +120,14 @@ beforeAll(() => {
     async fetch(req) {
       const url = new URL(req.url);
       const body = req.method === "GET" ? null : ((await req.json().catch(() => null)) as never);
-      calls.push({ method: req.method, path: url.pathname, body });
+      const incoming: Recorded = { method: req.method, path: url.pathname, body };
+      const held = holds.findIndex((h) => h.match(incoming));
+      if (held >= 0) {
+        const [hold] = holds.splice(held, 1);
+        hold.arrive();
+        await hold.gate;
+      }
+      calls.push(incoming);
       if (req.method === "POST" && url.pathname === "/repos/nemarDatasets/.github/dispatches") {
         if (claimDuringDispatchFailure && dispatchStatus >= 300) {
           const pending = db
@@ -134,6 +167,10 @@ afterAll(() => {
 });
 
 afterEach(() => {
+  // A test that failed while a request was held must not leave the stand-in waiting on it.
+  for (const release of releases) release();
+  holds = [];
+  releases = [];
   calls = [];
   dispatchStatus = 204;
   claimDuringDispatchFailure = false;
@@ -3481,6 +3518,142 @@ describe("the cap on restarts a pull request's text can cause (ADR 0107)", () =>
     expect(rows()[0].published_at).not.toBeNull();
     expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "action_required" });
     expect(lastCheck().output?.summary).toContain("the most one commit gets");
+  });
+
+  describe("a slow publish that the row outruns", () => {
+    /** A check update, not the creation of one. */
+    const checkUpdate = (r: Recorded) => r.method === "PATCH" && /check-runs\/\d+$/.test(r.path);
+
+    test("a callback's pass that lands after the refusal is corrected: GitHub ends on the refusal", async () => {
+      const id = await toTheCap();
+      // The job reports a pass and the Worker starts updating the check; GitHub is slow to take it.
+      const held = holdRequest((r) => checkUpdate(r) && r.body?.conclusion === "success");
+      const reporting = callback(id, { outcome: "reported", report: goodReport() }, latestToken());
+      await held.arrived;
+      expect(rows()[0]).toMatchObject({ state: "reported", verdict: "pass" });
+
+      // The sixth edit refuses the row, and its update reaches GitHub first.
+      const sixth = await edit(TITLE);
+      expect(sixth.body).toMatchObject({ dispatched: false, reason: "edit_limit" });
+      expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "action_required" });
+      expect(rows()[0]).toMatchObject({ state: "errored", detail: "edit_limit" });
+
+      // The pass lands last. It would be the commit's check for good, because the callback stamped
+      // the row as published, if the Worker did not look at the row again once GitHub answered.
+      held.release();
+      expect((await reporting).status).toBe(200);
+      expect(checks().some((c) => c.body?.conclusion === "success")).toBe(true);
+      expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "action_required" });
+      expect(lastCheck().output?.title).toBe("Could not decide: too many edits");
+      // The comment is corrected the same way, and the row is as the refusal left it, published.
+      expect(String(commentEdits().at(-1)?.body?.body)).toContain("NEEDS A PERSON");
+      expect(String(commentEdits().at(-1)?.body?.body)).not.toContain("PASS");
+      expect(rows()[0]).toMatchObject({ state: "errored", detail: "edit_limit", verdict: null });
+      expect(rows()[0].published_at).not.toBeNull();
+    });
+
+    test("a running update that lands after the refusal is corrected the same way", async () => {
+      const id = (await deliver(prEvent())).body.review_id as number;
+      for (let i = 1; i < PR_REVIEW_EDIT_CAP; i++) await edit(i % 2 ? TITLE : BODY);
+      expect(rows()[0]).toMatchObject({ edit_restarts: PR_REVIEW_EDIT_CAP - 1 });
+
+      // The fifth edit restarts the review and starts showing it as running; that write is slow.
+      const held = holdRequest((r) => checkUpdate(r) && r.body?.status === "in_progress");
+      const fifth = edit(BODY);
+      await held.arrived;
+      expect(rows()[0]).toMatchObject({
+        id,
+        state: "dispatched",
+        edit_restarts: PR_REVIEW_EDIT_CAP,
+      });
+
+      // The sixth change refuses the row before the running update has landed.
+      const sixth = await edit(TITLE);
+      expect(sixth.body).toMatchObject({ dispatched: false, reason: "edit_limit" });
+      expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "action_required" });
+
+      held.release();
+      await fifth;
+      // The running update landed last and was put right: the check says the refusal, and it is
+      // not "in progress" for a review nobody will report.
+      expect(checks().some((c) => c.body?.status === "in_progress")).toBe(true);
+      expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "action_required" });
+      expect(lastCheck().output?.title).toBe("Could not decide: too many edits");
+      expect(rows()[0]).toMatchObject({ state: "errored", detail: "edit_limit" });
+      expect(rows()[0].published_at).not.toBeNull();
+    });
+
+    test("a result that moved on between the last look and the stamp is not stamped, and the sweep publishes it", async () => {
+      const id = (await deliver(prEvent())).body.review_id as number;
+      // The row is refused after the callback has read it and before it stamps it. The stamp is
+      // conditional on the state it published, so it finds nothing to stamp.
+      let moved = false;
+      const hooked = interceptingD1(realD1(db), (sql) => {
+        if (
+          !moved &&
+          sql.includes("SET published_at = datetime('now') WHERE id = ? AND state = ?")
+        ) {
+          moved = true;
+          db.run(
+            `UPDATE pr_reviews SET state = 'errored', detail = 'edit_limit', verdict = NULL, report = NULL,
+                    nonce = NULL, decided_at = datetime('now'), published_at = NULL`,
+          );
+        }
+      });
+      const done = await callback(id, { outcome: "reported", report: goodReport() }, undefined, {
+        ...env(),
+        DB: hooked,
+      } as Bindings);
+      expect(done.status).toBe(200);
+      expect(moved).toBe(true);
+      expect(rows()[0]).toMatchObject({
+        state: "errored",
+        detail: "edit_limit",
+        published_at: null,
+      });
+
+      // Nothing stamped the pass over the refusal, so the sweep finds the row and says the refusal.
+      db.run("UPDATE pr_reviews SET decided_at = datetime('now', '-5 minutes')");
+      const swept = await sweepStalePrReviews(env());
+      expect(swept).toMatchObject({ republished: 1, timedOut: 0, errors: 0 });
+      expect(lastCheck()).toMatchObject({ status: "completed", conclusion: "action_required" });
+      expect(lastCheck().output?.title).toBe("Could not decide: too many edits");
+      expect(rows()[0].published_at).not.toBeNull();
+    });
+
+    test("a row that keeps moving is published three times in all and then left for the sweep", async () => {
+      const id = (await deliver(prEvent())).body.review_id as number;
+      // Every look at the row finds it moved on (its decision time changes), as a row that is
+      // restarted and decided again and again would.
+      let flips = 0;
+      const hooked = interceptingD1(realD1(db), (sql) => {
+        if (sql.includes("FROM pr_reviews WHERE id = ?")) {
+          flips++;
+          db.run("UPDATE pr_reviews SET decided_at = datetime('now', ?) WHERE state = 'reported'", [
+            `+${flips} seconds`,
+          ]);
+        }
+      });
+      const before = checks().length;
+      const done = await callback(id, { outcome: "reported", report: goodReport() }, undefined, {
+        ...env(),
+        DB: hooked,
+      } as Bindings);
+      expect(done.status).toBe(200);
+      // Three publishes of the result, no more, and none of them was stamped.
+      expect(
+        checks()
+          .slice(before)
+          .filter((c) => c.body?.conclusion === "success"),
+      ).toHaveLength(3);
+      expect(rows()[0]).toMatchObject({ state: "reported", verdict: "pass", published_at: null });
+
+      // The sweep, which is the retry, publishes it once more and stamps it.
+      db.run("UPDATE pr_reviews SET decided_at = datetime('now', '-5 minutes')");
+      const swept = await sweepStalePrReviews(env());
+      expect(swept).toMatchObject({ republished: 1, errors: 0 });
+      expect(rows()[0].published_at).not.toBeNull();
+    });
   });
 
   describe("the log", () => {
