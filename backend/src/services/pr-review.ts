@@ -225,6 +225,8 @@ export interface PrIntake {
    * commit that already has a review is started again for it, as for an edit.
    */
   resumed: boolean;
+  /** The delivery's action (one of {@link PR_REVIEW_ACTIONS}), for the log line of a restart. */
+  action: string;
 }
 
 /** Why a delivery was not taken up. Fixed words, safe to return and log. */
@@ -345,6 +347,7 @@ export function readPullRequestEvent(payload: unknown): IntakeResult {
       baseSha: typeof base.sha === "string" && SHA40.test(base.sha) ? base.sha : null,
       edited,
       resumed: p.action === "reopened" || p.action === "ready_for_review",
+      action: p.action,
     },
   };
 }
@@ -1053,7 +1056,7 @@ async function handleRepeat(
   for (let attempt = 0; attempt < tries; attempt++) {
     if (textChange && current.editRestarts >= PR_REVIEW_EDIT_CAP) {
       if (current.detail === "edit_limit") break;
-      const refused = await refuseEdit(env, current);
+      const refused = await refuseEdit(env, current, pr);
       if (refused) return refused;
       current = (await readRow(db, existing.id)) ?? current;
       continue;
@@ -1083,7 +1086,11 @@ async function handleRepeat(
  * refused first, and the caller reads the row again. A refusal whose publish fails stays
  * unpublished, and the watchdog's republish sweep says it again.
  */
-async function refuseEdit(env: Bindings, existing: ReviewRow): Promise<PrReviewResponse | null> {
+async function refuseEdit(
+  env: Bindings,
+  existing: ReviewRow,
+  pr: PrIntake,
+): Promise<PrReviewResponse | null> {
   const db = env.DB;
   const refused = await db
     .prepare(
@@ -1095,9 +1102,18 @@ async function refuseEdit(env: Bindings, existing: ReviewRow): Promise<PrReviewR
     .bind(existing.id, existing.editRestarts)
     .run();
   if ((refused.meta.changes ?? 0) !== 1) return null;
+  console.warn(
+    `[pr-review] review ${existing.id} (${existing.datasetId}#${existing.prNumber}): restart refused at the cap of ${PR_REVIEW_EDIT_CAP} on ${existing.headSha.slice(0, 7)}, sender ${pr.senderLogin ?? "unknown"}`,
+  );
   const row = (await readRow(db, existing.id)) ?? existing;
   await publishOutcome(env, row, { kind: "error", error: "edit_limit" });
   return no("edit_limit", existing.id);
+}
+
+/** What caused a restart, in the words of the log line: the delivery's action, in plain words. */
+function causeOf(pr: PrIntake): string {
+  if (pr.edited) return "an edit";
+  return pr.action === "reopened" ? "a reopen" : "ready for review";
 }
 
 /**
@@ -1250,6 +1266,14 @@ async function restartReview(
     )
     .run();
   if ((reset.meta.changes ?? 0) !== 1) return null;
+  // One line for each restart a change of the text caused, so a commit that keeps being restarted
+  // can be traced to who is doing it. The sender's login has the shape of one (it was checked on
+  // the way in); the title and the body, which the pull request's author controls, are not in it.
+  if (changesTheText(pr)) {
+    console.info(
+      `[pr-review] review ${existing.id} (${existing.datasetId}#${existing.prNumber}): restarted by ${causeOf(pr)} (${existing.editRestarts + 1} of ${PR_REVIEW_EDIT_CAP}) on ${existing.headSha.slice(0, 7)}, sender ${pr.senderLogin ?? "unknown"}`,
+    );
+  }
   try {
     const res = await decideInserted(env, existing.id, paused, nonce, secret, {
       // The earlier attempt cost a model call unless it never got that far.

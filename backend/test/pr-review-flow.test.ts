@@ -3478,6 +3478,85 @@ describe("the cap on restarts a pull request's text can cause (ADR 0107)", () =>
     expect(lastCheck().output?.summary).toContain("the most one commit gets");
   });
 
+  describe("the log", () => {
+    /** The lines the Worker logs while `run` runs, whatever their level. */
+    async function logged(run: () => Promise<void>): Promise<string[]> {
+      const lines: string[] = [];
+      const saved = { info: console.info, warn: console.warn, error: console.error };
+      const keep = (...args: unknown[]) => void lines.push(args.map(String).join(" "));
+      console.info = keep;
+      console.warn = keep;
+      console.error = keep;
+      try {
+        await run();
+      } finally {
+        Object.assign(console, saved);
+      }
+      return lines;
+    }
+    const restarts = (lines: string[]) => lines.filter((l) => l.includes("restarted by"));
+
+    test("each accepted edit, reopening and marking as ready writes one line, naming the dataset, the pull request, the commit and the sender", async () => {
+      const id = (await deliver(prEvent())).body.review_id as number;
+      const lines = await logged(async () => {
+        await edit(TITLE, { sender: "editor-gh" });
+        await deliver(prEvent({ action: "reopened", sender: null }));
+        await deliver(prEvent({ action: "ready_for_review" }));
+        // Not a restart, so not a line: a push back to the commit only restates.
+        await deliver(prEvent({ action: "synchronize" }));
+      });
+      expect(restarts(lines)).toEqual([
+        `[pr-review] review ${id} (${DATASET}#7): restarted by an edit (1 of 5) on aaaaaaa, sender editor-gh`,
+        `[pr-review] review ${id} (${DATASET}#7): restarted by a reopen (2 of 5) on aaaaaaa, sender unknown`,
+        `[pr-review] review ${id} (${DATASET}#7): restarted by ready for review (3 of 5) on aaaaaaa, sender contributor`,
+      ]);
+      // Nothing the pull request wrote is in it.
+      expect(lines.join("\n")).not.toContain(LEAK);
+    });
+
+    test("a restart that raced writes one line, and a commit with no row, an ignored edit and an administrator's start write none", async () => {
+      const id = (await deliver(prEvent())).body.review_id as number;
+      expect((await claim(id)).status).toBe(200);
+      let landed = false;
+      const hooked = interceptingD1(realD1(db), async (sql) => {
+        if (!landed && sql.includes("SET state = ?, detail = ?, nonce = ?")) {
+          landed = true;
+          await callback(id, { outcome: "reported", report: goodReport() });
+        }
+      });
+      const lines = await logged(async () => {
+        // The first write finds the row moved and the retry restarts it: one restart, one line.
+        await deliver(prEvent({ action: "edited", changes: TITLE }), "pull_request", {
+          ...env(),
+          DB: hooked,
+        } as Bindings);
+        // A commit with no row is a new delivery, an edit of nothing is ignored, and an
+        // administrator's start is not a change of the text.
+        await edit(TITLE, { sha: SHA_B });
+        await edit({ milestone: { from: "v1" } });
+        await handlePullRequestEvent(env(), prEvent({ action: "synchronize", sender: null }), {
+          adminStart: true,
+        });
+      });
+      expect(restarts(lines)).toEqual([
+        `[pr-review] review ${id} (${DATASET}#7): restarted by an edit (1 of 5) on aaaaaaa, sender contributor`,
+      ]);
+    });
+
+    test("the refusal at the cap writes one line, and a restated refusal writes none", async () => {
+      const id = await toTheCap();
+      const lines = await logged(async () => {
+        await edit(TITLE, { sender: "editor-gh" });
+        await edit(BODY);
+        await deliver(prEvent({ action: "reopened" }));
+      });
+      expect(restarts(lines)).toEqual([]);
+      expect(lines.filter((l) => l.includes("restart refused"))).toEqual([
+        `[pr-review] review ${id} (${DATASET}#7): restart refused at the cap of 5 on aaaaaaa, sender editor-gh`,
+      ]);
+    });
+  });
+
   describe("what is not counted", () => {
     test("an edit on a commit with no row is a new delivery at 0", async () => {
       await deliver(prEvent({ sha: SHA_A }));
