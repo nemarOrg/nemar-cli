@@ -3644,6 +3644,30 @@ describe("the cap on restarts a pull request's text can cause (ADR 0107)", () =>
       ).toBe(false);
     });
 
+    test("an administrator's start that a block declines does not begin the count again, and one that starts the review does", async () => {
+      const id = (await deliver(prEvent({ userId: 900 }))).body.review_id as number;
+      await edit(TITLE, { userId: 900 });
+      await edit(BODY, { userId: 900 });
+      await callback(id, { outcome: "error", error: "model_refused" }, latestToken());
+      expect(rows()[0]).toMatchObject({ state: "errored", edit_restarts: 2 });
+
+      const start = () =>
+        handlePullRequestEvent(
+          env(),
+          prEvent({ action: "synchronize", sender: null, userId: 900 }),
+          {
+            adminStart: true,
+          },
+        );
+      block();
+      expect(await start()).toMatchObject({ dispatched: false, reason: "contributor_paused" });
+      expect(rows()[0]).toMatchObject({ state: "declined", edit_restarts: 2 });
+
+      db.run("DELETE FROM pr_review_overrides");
+      expect(await start()).toMatchObject({ dispatched: true, reason: "redispatched" });
+      expect(rows()[0]).toMatchObject({ state: "dispatched", edit_restarts: 0 });
+    });
+
     test("a commit at the cap whose author is then blocked is declined, and refused again once the block is lifted", async () => {
       await toTheCap();
       block(501);
@@ -3908,10 +3932,11 @@ describe("the cap on restarts a pull request's text can cause (ADR 0107)", () =>
       expect(rows()[0]).toMatchObject({ state: "dispatched", edit_restarts: 1 });
     });
 
-    test("a redelivery of a dispatch GitHub never ran is not counted", async () => {
+    test("a failed dispatch counts, so does a redelivered edit, and a push that restarts it adds nothing", async () => {
       await deliver(prEvent());
       await edit(TITLE);
-      // The second edit's dispatch fails: counted, because the edit restarted the review.
+      // The second edit's dispatch fails. The count is taken in the restart's own write, before the
+      // dispatch, so the restart counts whether or not GitHub then runs it.
       dispatchStatus = 500;
       const failed = await edit(BODY);
       expect(failed.body).toMatchObject({ dispatched: false, reason: "dispatch_failed" });
@@ -3921,12 +3946,27 @@ describe("the cap on restarts a pull request's text can cause (ADR 0107)", () =>
         edit_restarts: 2,
       });
 
-      // GitHub redelivers the commit as a push once it answers again: it restarts the review, and
-      // that is not a change of the text, so the count stays where it was.
+      // GitHub redelivers that edit once it answers again. It is an edit, so it restarts the review
+      // and counts again: the conservative way to be wrong, and the same for a delivery that is
+      // redelivered as for one that is sent twice.
       dispatchStatus = 204;
-      const again = await deliver(prEvent({ action: "synchronize" }));
-      expect(again.body).toMatchObject({ dispatched: true, reason: "redispatched" });
-      expect(rows()[0]).toMatchObject({ state: "dispatched", detail: null, edit_restarts: 2 });
+      const again = await edit(BODY);
+      expect(again.body).toMatchObject({ dispatched: true, reason: "redispatched_after_edit" });
+      expect(rows()[0]).toMatchObject({ state: "dispatched", detail: null, edit_restarts: 3 });
+
+      // A push that restarts a review whose dispatch failed is not a change of the text, so the count
+      // stays where the failed restart left it.
+      dispatchStatus = 500;
+      await edit(TITLE);
+      expect(rows()[0]).toMatchObject({
+        state: "errored",
+        detail: "dispatch_failed",
+        edit_restarts: 4,
+      });
+      dispatchStatus = 204;
+      const push = await deliver(prEvent({ action: "synchronize" }));
+      expect(push.body).toMatchObject({ dispatched: true, reason: "redispatched" });
+      expect(rows()[0]).toMatchObject({ state: "dispatched", detail: null, edit_restarts: 4 });
     });
 
     test("a restart that read an older count is refused by its write, so a stale read buys no run", async () => {

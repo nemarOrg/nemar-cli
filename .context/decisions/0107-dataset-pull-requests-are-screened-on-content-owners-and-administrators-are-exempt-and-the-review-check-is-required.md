@@ -222,8 +222,11 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
 - **Five restarts caused by a change of the text are allowed for one head commit, and the sixth is refused (the owner, 2026-10-19).**
   The count is `pr_reviews.edit_restarts` (migration 0099).
   It goes up by one at each restart an edit, a reopening or a marking as ready causes, from 0 at the commit's first row.
-  Nothing else counts: a commit with no row, a restart that lost a race and was tried again, and the redelivery of a dispatch GitHub never ran add nothing.
-  An administrator's start resets the count to 0, and a push is a new commit with a new row, so it starts at 0.
+  A restart is counted in its own write, before its dispatch, so a restart whose dispatch then fails counts, and so does a redelivered edit: the conservative way to be wrong, and a race-safe one.
+  What adds nothing is a commit with no row (a new delivery), a restart that lost a race and was tried again (it counts once), a restart a block declined (a decline is no run), and a push that restarts a review whose dispatch failed (it changes no text).
+  An administrator's start resets the count to 0 when it starts the review again; a start that a block declines does not.
+  A push is a new commit with a new row, so it starts at 0.
+  The cap comes after the gate, so a blocked contributor is declined and is never told "too many edits".
   The sixth change is refused and not restarted, and the refusal fails closed.
   The row becomes an errored review with the detail `edit_limit`, whatever state it was in, a running review and a stored pass or fail included, because a result that judged the text from before the edit must not stand for the commit.
   Its check is the same one, now `action_required` and titled "Could not decide: too many edits", the comment says the same, and both name the way out: a push, or an administrator's start.
