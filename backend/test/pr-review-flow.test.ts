@@ -42,7 +42,7 @@ import {
 import { REVIEW_EXEMPT_SQL } from "../src/services/pr-review-exemption";
 import { __setNamingReadTimeoutForTests } from "../src/services/pr-review-naming";
 import type { Bindings, Variables } from "../src/types/bindings";
-import { freshDb, realD1, wrapD1, yieldingD1 } from "./helpers/d1";
+import { freshDb, interceptingD1, realD1, wrapD1, yieldingD1 } from "./helpers/d1";
 import {
   CUT_LIST,
   NAME_NOT_TEXT,
@@ -2792,6 +2792,50 @@ describe("an edit of the title, the body or the base re-runs the review (ADR 010
     const r = await edit(TITLE);
     expect(r.body).toMatchObject({ dispatched: true, reason: "redispatched_after_edit" });
     expect(rows()[0]).toMatchObject({ id, state: "dispatched", attempts: 1 });
+  });
+
+  test("a restart that fails does not clear the nonce of a newer restart that has not claimed yet", async () => {
+    const id = (await deliver(prEvent())).body.review_id as number;
+    await callback(id, { outcome: "reported", report: goodReport() });
+    expect(dispatchesMade()).toHaveLength(1);
+
+    // The older edit's restart is stored, and then reading the row back fails, so it is recorded as
+    // a dispatch that did not happen. Before that write lands, a newer edit restarts the row for
+    // real: the real delivery runs between the two statements, through the real database.
+    let newer: { status: number; body: Record<string, unknown> } | null = null;
+    const hooked = interceptingD1(realD1(db), async (sql) => {
+      if (sql.includes("FROM pr_reviews WHERE id = ?") && newer === null) {
+        // One failure, then the database answers again for the newer delivery.
+        newer = { status: 0, body: {} };
+        throw new Error("D1 is unavailable");
+      }
+      if (sql.includes("detail = 'dispatch_failed'") && newer?.status === 0) {
+        newer = await edit(BODY);
+      }
+    });
+    const original = console.error;
+    console.error = () => {};
+    let older: { status: number };
+    try {
+      older = await deliver(prEvent({ action: "edited", changes: TITLE }), "pull_request", {
+        ...env(),
+        DB: hooked,
+      } as Bindings);
+    } finally {
+      console.error = original;
+    }
+    expect(older.status).toBe(500);
+    expect(newer).toMatchObject({ status: 200, body: { reason: "redispatched_after_edit" } });
+
+    // The row is the newer restart's: running, with its nonce, and the job it started can claim
+    // and report. Clearing the nonce for the older failure would have refused that job.
+    expect(rows()[0]).toMatchObject({ id, state: "dispatched", detail: null });
+    expect(rows()[0].nonce).not.toBeNull();
+    const token = payloadOf(dispatchesMade().length - 1).callback_token as string;
+    expect((await claim(id, token)).status).toBe(200);
+    const done = await callback(id, { outcome: "reported", report: goodReport() }, token);
+    expect(done.status).toBe(200);
+    expect(rows()[0]).toMatchObject({ state: "reported", verdict: "pass" });
   });
 
   describe("owners and administrators", () => {

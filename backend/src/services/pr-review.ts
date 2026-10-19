@@ -915,7 +915,7 @@ export async function handlePullRequestEvent(
   try {
     return await decideInserted(env, reviewId, paused, nonce, secret);
   } catch (err) {
-    await markDispatchFailed(db, reviewId);
+    await markDispatchFailed(db, reviewId, nonce);
     throw err;
   }
 }
@@ -925,16 +925,21 @@ export async function handlePullRequestEvent(
  * dispatch). Left as 'dispatched' it would wait for the watchdog to call it late, and a redelivery
  * would find it and answer "duplicate". Mark it as a dispatch that did not happen, which a
  * redelivery retries; the caller lets the route answer 500.
+ *
+ * `nonce` is the one the failed attempt set, and the row is marked only while it still carries it.
+ * A row can be restarted again while this attempt fails (an edit during a database fault), and the
+ * newer attempt's nonce is the one a live job holds a token for: clearing it would refuse that
+ * job's claim and report for a failure that was not its own.
  */
-async function markDispatchFailed(db: Db, reviewId: number): Promise<void> {
+async function markDispatchFailed(db: Db, reviewId: number, nonce: string): Promise<void> {
   try {
     await db
       .prepare(
         `UPDATE pr_reviews SET state = 'errored', detail = 'dispatch_failed', nonce = NULL,
                 decided_at = datetime('now')
-          WHERE id = ? AND state = 'dispatched' AND claimed_at IS NULL`,
+          WHERE id = ? AND state = 'dispatched' AND claimed_at IS NULL AND nonce = ?`,
       )
-      .bind(reviewId)
+      .bind(reviewId, nonce)
       .run();
   } catch (inner) {
     console.error(`[pr-review] review ${reviewId}: failure not recorded (${errName(inner)})`);
@@ -1134,7 +1139,7 @@ async function restartReview(
       ? { ...res, reason: pr.edited ? "redispatched_after_edit" : "redispatched" }
       : res;
   } catch (err) {
-    await markDispatchFailed(db, existing.id);
+    await markDispatchFailed(db, existing.id, nonce);
     throw err;
   }
 }
