@@ -2699,11 +2699,23 @@ describe("an edit of the title, the body or the base re-runs the review (ADR 010
     expect(dispatchesMade()).toHaveLength(2);
 
     // The superseded job can neither claim again nor report: its token was signed over a nonce
-    // that is gone, and nothing it says is stored.
+    // that is gone, and nothing it says is stored, whether it says a result or an error. Nothing
+    // reaches GitHub either: no check is rewritten and no comment is, so the stale result cannot
+    // be shown for the commit.
+    const made = calls.length;
     expect((await claim(id, oldToken)).status).toBe(401);
     const stale = await callback(id, { outcome: "reported", report: goodReport() }, oldToken);
     expect(stale.status).toBe(401);
-    expect(rows()[0]).toMatchObject({ state: "dispatched", verdict: null, claimed_at: null });
+    const staleError = await callback(id, { outcome: "error", error: "model_refused" }, oldToken);
+    expect(staleError.status).toBe(401);
+    expect(rows()[0]).toMatchObject({
+      state: "dispatched",
+      verdict: null,
+      report: null,
+      detail: null,
+      claimed_at: null,
+    });
+    expect(calls).toHaveLength(made);
 
     // The job the edit started is the one that counts.
     const newToken = payloadOf(1).callback_token as string;
