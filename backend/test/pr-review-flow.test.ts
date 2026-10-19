@@ -2929,6 +2929,30 @@ describe("an edit of the title, the body or the base re-runs the review (ADR 010
     expect(rows()[0]).toMatchObject({ state: "reported", verdict: "pass" });
   });
 
+  test("a reopening that loses the race is tried again too, so it does not swallow the resume", async () => {
+    const id = (await deliver(prEvent())).body.review_id as number;
+    expect((await claim(id)).status).toBe(200);
+
+    // The job reports between the reopening's read of the row and its write, as for an edit.
+    let landed = false;
+    const hooked = interceptingD1(realD1(db), async (sql) => {
+      if (!landed && sql.includes("SET state = ?, detail = ?, nonce = ?")) {
+        landed = true;
+        const done = await callback(id, { outcome: "reported", report: goodReport() });
+        expect(done.status).toBe(200);
+      }
+    });
+    const r = await deliver(prEvent({ action: "reopened" }), "pull_request", {
+      ...env(),
+      DB: hooked,
+    } as Bindings);
+
+    expect(landed).toBe(true);
+    expect(r.body).toMatchObject({ dispatched: true, reason: "redispatched", review_id: id });
+    expect(rows()[0]).toMatchObject({ id, state: "dispatched", verdict: null, report: null });
+    expect(dispatchesMade()).toHaveLength(2);
+  });
+
   test("a row that keeps moving gets three tries and then the stored result is re-stated", async () => {
     const id = (await deliver(prEvent())).body.review_id as number;
     await callback(id, { outcome: "reported", report: goodReport() });
@@ -3023,6 +3047,33 @@ describe("an edit of the title, the body or the base re-runs the review (ADR 010
     expect((await claim(id, token)).status).toBe(200);
     await edit(TITLE);
     expect(rows()[0]).toMatchObject({ state: "dispatched", attempts: 2, claimed_at: null });
+  });
+
+  test("restarting a review the watchdog gave up on adds a run only when a job had claimed it", async () => {
+    const id = (await deliver(prEvent())).body.review_id as number;
+    const giveUp = async () => {
+      db.run(
+        `UPDATE pr_reviews SET created_at = datetime('now', '-${PR_REVIEW_DEADLINE_MINUTES + 5} minutes')`,
+      );
+      expect((await sweepStalePrReviews(env())).timedOut).toBe(1);
+      expect(rows()[0]).toMatchObject({ state: "unreported" });
+    };
+
+    // Handed to GitHub, never claimed, and given up on: no job started, so no call was spent.
+    await giveUp();
+    expect(rows()[0]).toMatchObject({ attempts: 1, claimed_at: null });
+    const first = await edit(TITLE);
+    expect(first.body).toMatchObject({ dispatched: true, reason: "redispatched_after_edit" });
+    expect(rows()[0]).toMatchObject({ id, state: "dispatched", attempts: 1 });
+
+    // The same, with a job that claimed before the watchdog gave up: it may have spent, so a
+    // restart is a second run.
+    expect((await claim(id)).status).toBe(200);
+    await giveUp();
+    expect(rows()[0].claimed_at).not.toBeNull();
+    const second = await edit(BODY);
+    expect(second.body).toMatchObject({ dispatched: true, reason: "redispatched_after_edit" });
+    expect(rows()[0]).toMatchObject({ id, state: "dispatched", attempts: 2 });
   });
 
   test("restarting a review that stopped at the facts adds no run, because it made no model call", async () => {
