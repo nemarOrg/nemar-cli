@@ -62,7 +62,12 @@
  * them in `pr_reviews.edit_restarts`, an administrator's start resets the count, and a push is a new
  * row. {@link refuseEdit} fails closed: the row becomes an errored review with the detail
  * `edit_limit`, a running review or a stored result superseded, and every later change only
- * restates it. A restart a race made fail is tried again (up to three tries) and counts once.
+ * restates it. A restart a race made fail is tried again (up to three tries) and counts once. The
+ * cap is asked after the gate, so a contributor an administrator has blocked is declined and not
+ * told "too many edits", and a declined restart is not counted.
+ *
+ * **A publish is checked against the row once GitHub has answered** ({@link publishOutcome}): a slow
+ * write that lands after a newer result must not leave the older one on the pull request.
  *
  * **Nothing here trusts the pull request.** The event is read by {@link readPullRequestEvent},
  * which accepts only the shapes it expects; the dispatch carries the review's coordinates and not
