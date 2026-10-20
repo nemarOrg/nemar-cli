@@ -909,11 +909,11 @@ describe("runReview: the job around the model call", () => {
     expect(user).toContain("# Edited");
   });
 
-  test("stage 2 is Sonnet 5.5 at max effort, streamed, 32000 tokens, the review schema and the review prompt", async () => {
+  test("stage 2 is Sonnet 5.5 at max effort, streamed, 128000 tokens, the review schema and the review prompt", async () => {
     const { review: req } = await bothRequests("run-stage2-request");
     expect(req.body.model).toBe("claude-sonnet-5-5");
     expect(req.body.stream).toBe(true);
-    expect(req.body.max_tokens).toBe(32_000);
+    expect(req.body.max_tokens).toBe(128_000);
     const config = req.body.output_config as { effort: string; format: Record<string, unknown> };
     expect(config.effort).toBe("max");
     expect(config.format.schema).toEqual(REVIEW_OUTPUT_SCHEMA);
@@ -933,9 +933,9 @@ describe("runReview: the job around the model call", () => {
       },
       review: {
         model: "claude-sonnet-5-5",
-        maxTokens: 32_000,
+        maxTokens: 128_000,
         timeoutMs: 120_000,
-        deadlineMs: 11 * 60_000,
+        deadlineMs: 25 * 60_000,
         maxRetries: 1,
       },
     });

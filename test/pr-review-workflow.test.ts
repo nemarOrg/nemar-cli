@@ -586,7 +586,7 @@ describe("failure and logging", () => {
   });
 
   test("a job cannot run for ever, and ends before the Worker gives up on it", () => {
-    expect(job["timeout-minutes"]).toBeLessThanOrEqual(30);
+    expect(job["timeout-minutes"]).toBeLessThanOrEqual(45);
     expect(job["timeout-minutes"]).toBeLessThan(PR_REVIEW_DEADLINE_MINUTES);
   });
 
@@ -613,8 +613,8 @@ describe("failure and logging", () => {
       callbackMs += callbackBackoffMs(attempt);
     }
     const worst = SETUP_MINUTES + EVIDENCE_MINUTES + stages + minutes(callbackMs);
-    expect(job["timeout-minutes"]).toBe(28);
-    expect(PR_REVIEW_DEADLINE_MINUTES).toBe(40);
+    expect(job["timeout-minutes"]).toBe(45);
+    expect(PR_REVIEW_DEADLINE_MINUTES).toBe(55);
     expect(worst).toBeLessThanOrEqual(job["timeout-minutes"]);
     expect(job["timeout-minutes"]).toBeLessThan(PR_REVIEW_DEADLINE_MINUTES);
     // Each stage's first-byte timeout fits inside its own deadline, so a retry can still happen.

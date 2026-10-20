@@ -1272,7 +1272,7 @@ const ERROR_COPY: Record<RunError, string> = {
   auth_failed: `The review service could not sign in. ${capitalized(PERSON)} needs to fix the review service.`,
   model_unavailable: "The reviewing model was unavailable, or did not finish in time.",
   model_refused: "The reviewing model declined to review this change.",
-  model_truncated: "The reviewing model ran out of room before it finished.",
+  model_truncated: `This pull request is too large for the automated review to finish: the reviewing model used all the room it is given before it reached an answer. Split it into smaller pull requests, for example by group of subjects or by kind of change, and open each one separately. ${capitalized(PERSON)} can also review it by hand.`,
   model_invalid: "The reviewing model did not return a usable review.",
   report_invalid: "The review could not be read back.",
   dispatch_failed: "The review could not be started. Push again to re-run it.",
@@ -1545,9 +1545,14 @@ export function renderCheck(outcome: ReviewOutcome): RenderedCheck {
   if (outcome.kind === "error") {
     return {
       // The refusal at the edit cap says why in its title: the person who reads the check list
-      // learns that nothing is wrong with the review, and that the edits are what held it.
+      // learns that nothing is wrong with the review, and that the edits are what held it. So does
+      // a review that used all its room: the title tells the author to make the pull request smaller.
       title:
-        outcome.error === "edit_limit" ? "Could not decide: too many edits" : "Could not decide",
+        outcome.error === "edit_limit"
+          ? "Could not decide: too many edits"
+          : outcome.error === "model_truncated"
+            ? "Could not decide: too large to review"
+            : "Could not decide",
       summary: ERROR_COPY[outcome.error],
       text: `${FOOTER}\n\n${NO_VERDICT}`,
     };
