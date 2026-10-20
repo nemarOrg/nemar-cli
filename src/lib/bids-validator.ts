@@ -5,7 +5,7 @@
  * The validator version is pinned exactly via `validator-version.json` so the
  * CLI and the per-dataset CI workflow always resolve the same release (see
  * issue #586). The weekly `bump-validator.yml` workflow opens a PR when JSR
- * publishes a newer 2.x release.
+ * publishes a newer stable release, of any major version (issue #1036).
  *
  * Requirements:
  * - Deno must be installed (https://deno.com)
@@ -59,6 +59,8 @@ export interface BidsValidationResult {
   summary: BidsSummary;
   errorCount: number;
   warningCount: number;
+  /** The @bids/validator release that produced this result: the pin, which runs at that exact version. */
+  validatorVersion: string;
 }
 
 /**
@@ -290,6 +292,7 @@ export async function validateBidsDataset(
     summary: result.summary,
     errorCount,
     warningCount,
+    validatorVersion: VALIDATOR_VERSION,
   };
 }
 
@@ -314,6 +317,23 @@ export async function runBidsValidatorDirect(
   const exitCode = await proc.exited;
 
   return { stdout, stderr, exitCode };
+}
+
+/**
+ * Add the validator version to a `--json` report. The report is the validator's own JSON object,
+ * so the version is one more top-level key. Output that is not a JSON object is returned unchanged.
+ */
+export function withValidatorVersion(report: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(report);
+  } catch {
+    return report;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return report;
+  }
+  return JSON.stringify({ ...parsed, validatorVersion: VALIDATOR_VERSION }, null, 2);
 }
 
 /**
@@ -380,6 +400,7 @@ export function formatValidationResult(result: BidsValidationResult, color = tru
     lines.push(`  Modalities: ${result.summary.modalities.join(", ")}`);
   }
   lines.push(`  Schema: BIDS ${result.summary.schemaVersion}`);
+  lines.push(`  Validator: @bids/validator ${result.validatorVersion}`);
   lines.push("");
 
   // Final count

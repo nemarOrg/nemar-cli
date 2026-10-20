@@ -77,6 +77,7 @@ import { isAwsCliAvailable } from "../lib/aws-cli.js";
 import { type BidsFilterResult, buildBidsFilterArgs, chooseGetFilter } from "../lib/bids-filter.js";
 import {
   type BidsValidationResult,
+  VALIDATOR_VERSION,
   checkDenoInstalled,
   formatValidationResult,
   getValidatorVersion,
@@ -84,6 +85,7 @@ import {
   runBidsValidatorDirect,
   updateValidatorCache,
   validateBidsDataset,
+  withValidatorVersion,
 } from "../lib/bids-validator.js";
 import {
   printNoVerifyMismatches,
@@ -510,7 +512,10 @@ datasetCommand
       spinner.succeed("Validation complete");
 
       if (stdout.trim()) {
-        console.log(stdout);
+        console.log(options.json ? withValidatorVersion(stdout) : stdout);
+      }
+      if (!options.json) {
+        console.log(`Validator: @bids/validator ${VALIDATOR_VERSION}`);
       }
 
       process.exit(exitCode);
