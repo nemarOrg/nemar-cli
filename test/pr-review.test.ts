@@ -2206,8 +2206,8 @@ describe("the check text of version 2", () => {
     const outcome = { kind: "error", error: "model_truncated" } as const;
     expect(conclusionOf(outcome)).toBe("action_required");
     const r = renderCheck(outcome);
-    expect(r.title).toBe("Could not decide: too large to review");
-    expect(r.summary).toContain("too large for the automated review to finish");
+    expect(r.title).toBe("Could not decide: split this pull request");
+    expect(r.summary).toContain("used all the room it is given");
     expect(r.summary).toContain("Split it into smaller pull requests");
     // The other errors keep the plain title.
     expect(renderCheck({ kind: "error", error: "model_refused" }).title).toBe("Could not decide");

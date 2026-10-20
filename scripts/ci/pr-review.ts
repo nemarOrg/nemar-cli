@@ -121,8 +121,10 @@ export const REVIEW_MAX_TOKENS = 128_000;
 /**
  * Each stage's {@link StageBudget}. The workflow test keeps the worst case, both deadlines, the
  * evidence budget and the callback's retries, inside the job's `timeout-minutes`. The review's
- * deadline is its ceiling at about 100 tokens a second (128,000 tokens take about 21 minutes) with
- * a margin; a stage that runs out of time first ends `model_unavailable`.
+ * deadline lets the model decode as slowly as about 71 tokens a second and still reach its ceiling
+ * (128,000 tokens in 30 minutes); the one rate observed was about 100, so 128,000 tokens take about
+ * 21 minutes. A stage that runs out of time first ends `model_unavailable`, which names no size and
+ * advises no split, so a test keeps the deadline well past the ceiling.
  */
 export const STAGE_BUDGETS = {
   screen: {
@@ -136,7 +138,7 @@ export const STAGE_BUDGETS = {
     model: REVIEW_MODEL,
     maxTokens: REVIEW_MAX_TOKENS,
     timeoutMs: 120_000,
-    deadlineMs: 25 * 60_000,
+    deadlineMs: 30 * 60_000,
     maxRetries: 1,
   },
 } as const satisfies Record<Stage, StageBudget>;

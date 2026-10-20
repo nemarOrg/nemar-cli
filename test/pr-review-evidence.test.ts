@@ -937,7 +937,7 @@ describe("runReview: the job around the model call", () => {
         model: "claude-sonnet-5-5",
         maxTokens: 128_000,
         timeoutMs: 120_000,
-        deadlineMs: 25 * 60_000,
+        deadlineMs: 30 * 60_000,
         maxRetries: 1,
       },
     });
@@ -2433,9 +2433,94 @@ describe("one change repeated across files is read once", () => {
     expect(shown?.truncated).toBe(true);
     expect(shown?.same).toHaveLength(4);
     expect(facts.readIncomplete).toBe(true);
+    // A cut diff stands for no other file: one of the five was read, and the evidence says so.
+    const evidence = buildEvidence(facts, NO_TEXT_PROBLEMS);
+    expect(evidence.files_changed).toBe(5);
+    expect(evidence.files_read).toBe(1);
+    expect(evidence.truncated).toBe(true);
     expect(
       facts.groups.find((g) => g.pattern === "sub-*/eeg/sub-*_task-rest_channels.tsv")?.shown,
     ).toBe(0);
+  });
+
+  test("a symlink, an executable and a regular file with the same lines changed are three changes", () => {
+    const dir = join(root, "fold-modes");
+    mkdirSync(dir, { recursive: true });
+    git(dir, "init", "-q", "-b", "main");
+    write(dir, "dataset_description.json", desc("1.0.0"));
+    const paths = ["a", "b", "c"].map((k) => `sub-${k}/eeg/sub-${k}_task-rest_eeg.json`);
+    write(dir, paths[0] ?? "", "x");
+    write(dir, paths[2] ?? "", "x");
+    mkdirSync(join(dir, "sub-b/eeg"), { recursive: true });
+    symlinkSync("x", join(dir, paths[1] ?? ""));
+    chmodSync(join(dir, paths[2] ?? ""), 0o755);
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "initial");
+    const r = branch(dir, () => {
+      write(dir, paths[0] ?? "", "target");
+      unlinkSync(join(dir, paths[1] ?? ""));
+      symlinkSync("target", join(dir, paths[1] ?? ""));
+      write(dir, paths[2] ?? "", "target");
+      chmodSync(join(dir, paths[2] ?? ""), 0o755);
+    });
+    const facts = gatherGitFacts(r.dir, r.base, r.head);
+    for (const path of paths) {
+      expect(facts.patches.find((p) => p.path === path)?.same, path).toEqual([]);
+    }
+  });
+
+  test("bytes that are not valid UTF-8 are different changes, not one", () => {
+    const dir = newBigDataset("fold-bytes", 3);
+    const r = branch(dir, () => {
+      writeFileSync(join(dir, sidecar(0)), Buffer.from([0x63, 0x61, 0x66, 0xe9]));
+      writeFileSync(join(dir, sidecar(1)), Buffer.from([0x63, 0x61, 0x66, 0xe8]));
+    });
+    const facts = gatherGitFacts(r.dir, r.base, r.head);
+    expect(facts.patches.find((p) => p.path === sidecar(0))?.same).toEqual([]);
+    expect(facts.patches.find((p) => p.path === sidecar(1))).toBeDefined();
+  });
+
+  test("a CRLF edit and an LF edit of the same line are different changes", () => {
+    const dir = newBigDataset("fold-crlf", 3);
+    const r = branch(dir, () => {
+      write(dir, channels(0), "name\ttype\nCz\tMISC\n");
+      write(dir, channels(1), "name\ttype\r\nCz\tMISC\r\n");
+    });
+    const facts = gatherGitFacts(r.dir, r.base, r.head);
+    expect(facts.patches.find((p) => p.path === channels(0))?.same).toEqual([]);
+    expect(facts.patches.find((p) => p.path === channels(1))).toBeDefined();
+  });
+
+  test("a repeat is found after the patch cap is reached, and the cap still holds", () => {
+    // File 0 and file 99 are the same change; files 1 to 98 are 98 different ones. The 40-patch cap
+    // is full long before file 99, which still rides on file 0 and costs nothing.
+    const dir = newBigDataset("fold-after-cap", 100);
+    const r = branch(dir, () => {
+      for (let i = 0; i < 100; i++) {
+        write(dir, sidecar(i), i === 0 || i === 99 ? fixed : JSON.stringify({ n: i }));
+      }
+    });
+    const facts = gatherGitFacts(r.dir, r.base, r.head);
+    expect(facts.patches).toHaveLength(MAX_PATCH_FILES);
+    expect(facts.patches.find((p) => p.path === sidecar(0))?.same).toEqual([sidecar(99)]);
+    expect(facts.readIncomplete).toBe(true);
+  });
+
+  test("when the pass is nearly out of time the repeats are not searched for and nothing throws", () => {
+    const dir = newBigDataset("fold-late", 10);
+    const r = branch(dir, () => {
+      for (let i = 0; i < 10; i++) write(dir, sidecar(i), fixed);
+    });
+    const listing = gatherListing(r.dir, r.base, r.head);
+    // Less time than the search keeps in reserve: the diffs stay unread, which fails closed.
+    __setEvidenceBudgetForTests({ content: 19_000 });
+    try {
+      const content = gatherContent(r.dir, listing);
+      expect(content.patches).toEqual([]);
+      expect(content.readIncomplete).toBe(true);
+    } finally {
+      __setEvidenceBudgetForTests(null);
+    }
   });
 
   test("the folding reads no more than MAX_DIFFS_EXAMINED files; the rest stay unread", () => {
@@ -2486,6 +2571,10 @@ describe("one change repeated across files is read once", () => {
       "old mode 100644\nnew mode 100755\nindex 111..222",
     );
     expect(diffSignature(mode)).not.toBe(diffSignature(a));
+    // The mode printed on the index line is part of the change; the object ids are not.
+    const exec = a.replace("index 111..222 100644", "index 111..222 100755");
+    expect(diffSignature(exec)).not.toBe(diffSignature(a));
+    expect(diffSignature(exec)).toBe(diffSignature(other.replace("100644", "100755")));
     // A different hunk, a different line number, a different byte.
     expect(diffSignature(a.replace("+b", "+c"))).not.toBe(diffSignature(a));
     expect(diffSignature(a.replace("@@ -1 +1 @@", "@@ -2 +2 @@"))).not.toBe(diffSignature(a));

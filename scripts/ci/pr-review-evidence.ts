@@ -72,6 +72,8 @@ export const MAX_COMMITS = 30;
  * (see {@link diffSignature}). Past it the files are unread, as before this pass existed.
  */
 export const MAX_DIFFS_EXAMINED = 500;
+/** The time left in the content pass below which no more diffs are examined for repeats. */
+const FOLD_TIME_RESERVE_MS = 20_000;
 
 /** A full commit id. Every revision this module hands to git has this shape. */
 export const SHA40 = /^[0-9a-f]{40}$/;
@@ -659,12 +661,14 @@ function changelogEntryFor(
 
 /**
  * What one file's diff says once the file's name is taken out: the lines of `git diff` before the
- * first hunk, less the four that name the file (`diff --git`, `index`, `---` and `+++`), then every
- * hunk exactly as git wrote it. Two files with the same signature were changed in the same way,
- * line for line, at the same lines: a bulk edit that repeats one change across subjects reads as one
- * change. It is exact, with no masking of anything in the content, so a signature never matches two
- * changes that differ in a byte. Null for a diff with no hunk (a binary file, a mode change alone),
- * which is never folded.
+ * first hunk, less the ones that name the file (`diff --git`, `---` and `+++`, and the object ids of
+ * the `index` line, whose mode stays), then every hunk exactly as git wrote it. Two files with the
+ * same signature were changed in the same way, line for line, at the same lines, and have the same
+ * kind and mode: a bulk edit that repeats one change across subjects reads as one change, and a
+ * symlink or an executable is never one with a regular file. It is exact, with no masking of
+ * anything in the content, so a signature never matches two changes that differ in a byte; pass it
+ * the diff as latin1 bytes (see {@link tryGitBytes}) so that bytes which are not valid UTF-8 differ
+ * too. Null for a diff with no hunk (a binary file, a mode change alone), which is never folded.
  */
 export function diffSignature(diff: string): string | null {
   const at = diff.search(/^@@ /m);
@@ -672,7 +676,15 @@ export function diffSignature(diff: string): string | null {
   const header = diff
     .slice(0, at)
     .split("\n")
-    .filter((line) => !/^(diff --git |index |--- |\+\+\+ )/.test(line));
+    .flatMap((line) => {
+      if (/^(diff --git |--- |\+\+\+ )/.test(line)) return [];
+      if (!line.startsWith("index ")) return [line];
+      // The object ids name the blobs and differ for every file; the mode, which git prints only
+      // here when it did not change, is what tells a symlink or an executable from a regular file.
+      const m = line.match(/^index [0-9a-f]+\.\.[0-9a-f]+(?: (\d{6}))?$/);
+      if (m === null) return [line];
+      return m[1] === undefined ? [] : [`mode ${m[1]}`];
+    });
   return `${header.join("\n")}\n${diff.slice(at)}`;
 }
 
@@ -814,7 +826,11 @@ function readContent(dir: string, listing: Listing): ContentFacts {
   // file whose diff is exactly one already shown is covered by it and costs nothing.
   const toRead = wanted.filter((c) => !cosmeticOnly.has(c.path));
   for (const c of toRead.slice(0, MAX_DIFFS_EXAMINED)) {
-    const diff = tryGit(dir, [
+    // The search for repeats is optional: when little of the pass's time is left, the files not yet
+    // examined stay unread (which fails closed, as always) instead of the pass running out of time
+    // and the whole review with it.
+    if (gitDeadline !== null && gitDeadline - Date.now() < FOLD_TIME_RESERVE_MS) break;
+    const bytes = tryGitBytes(dir, [
       "diff",
       "-U2",
       "--no-color",
@@ -825,8 +841,10 @@ function readContent(dir: string, listing: Listing): ContentFacts {
       "--",
       c.path,
     ]);
-    if (diff === null || diff === "") continue;
-    const signature = diffSignature(diff);
+    if (bytes === null || bytes === "") continue;
+    const signature = diffSignature(bytes);
+    // What the model reads is the text, as before: the same bytes decoded as UTF-8.
+    const diff = Buffer.from(bytes, "latin1").toString("utf8");
     const key =
       signature === null
         ? null
@@ -928,8 +946,9 @@ function listedEvidence(listing: Listing, text: TextFacts) {
 export function buildEvidence(facts: GitFacts, text: TextFacts): ReviewEvidence {
   return {
     ...listedEvidence(facts, text),
-    // Each file a diff stands for counts as read, the file it was shown for and the ones it repeats.
-    files_read: facts.patches.reduce((n, p) => n + 1 + p.same.length, 0),
+    // Each file a diff stands for counts as read, the file it was shown for and the ones it repeats;
+    // a diff that was cut stands for no other file.
+    files_read: facts.patches.reduce((n, p) => n + (p.truncated ? 1 : 1 + p.same.length), 0),
     truncated: facts.listCut || facts.readIncomplete,
     changelog_entry: facts.changelogEntry,
   };
