@@ -13,14 +13,15 @@ The publication gate passes or refuses a dataset on the errors that survive the 
 
 ## Decision
 
-`validator-version.json` pins one exact release, and the weekly bump proposes the newest stable release of any major version as a pull request.
+`validator-version.json` pins one exact release, and the monthly bump proposes the newest stable release of any major version as a pull request.
 A bump is merged only after its reference-dataset comparison is on the pull request: the publication-gating error set of the old and the new release, computed with the central workflow's flags and annex filter, for the same datasets, with every difference listed.
+The bump workflow computes that comparison itself, on a fixed set of reference datasets plus a canary layout; a full run over the nemarDatasets organization is a release-time check and is run by hand.
 Every validation report the CLI writes names the release that produced it.
 
 ## Consequences
 
 A new major version reaches a pull request without a code change, and the browser build can use the same release as the CLI.
-A major version can change which datasets pass, so each bump is a review decision rather than an automatic one, and the comparison is a manual step that the bump workflow does not run yet.
+A major version can change which datasets pass, so each bump is a review decision rather than an automatic one, and a reference set of about a dozen datasets is a sample: a change that only shows on other layouts is found by the full run, not by the monthly pull request.
 The central filter removes findings at annex-pointer locations only, so a finding that a release reports at a sidecar file, because its data file is an unfetched annex link, is not removed by it; the comparison is what finds those.
 The validator version appears in the CLI's reports now; the central workflow's check-run gets it from the dispatch payload when that workflow is changed to print it.
 
