@@ -4,7 +4,7 @@
  * Wraps the BIDS validator (via Deno subprocess) to validate datasets.
  * The validator version is pinned exactly via `validator-version.json` so the
  * CLI and the per-dataset CI workflow always resolve the same release (see
- * issue #586). The weekly `bump-validator.yml` workflow opens a PR when JSR
+ * issue #586). The monthly `bump-validator.yml` workflow opens a PR when JSR
  * publishes a newer stable release, of any major version (issue #1036).
  *
  * Requirements:
@@ -21,7 +21,7 @@ import validatorPin from "../../validator-version.json" with { type: "json" };
 
 export const VALIDATOR_VERSION = validatorPin.version;
 const VALIDATOR_JSR_SPECIFIER = `${validatorPin.specifier}@${VALIDATOR_VERSION}`;
-const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 1 day — pin changes weekly via bump-validator.yml
+const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 1 day — pin changes monthly via bump-validator.yml
 
 /**
  * BIDS validation issue from the validator

@@ -1,5 +1,5 @@
 /**
- * The weekly bump finds the newest stable @bids/validator release on JSR and opens a pin PR for it.
+ * The monthly bump finds the newest stable @bids/validator release on JSR and opens a pin PR for it.
  *
  * The selection is scripts/validator/latest-stable.jq, and bump-validator.yml runs that same file.
  * These tests run it with the real jq binary: against a snapshot of JSR's metadata (the version
@@ -62,12 +62,30 @@ describe("latest-stable.jq", () => {
 });
 
 describe("bump-validator.yml", () => {
+  const workflow = parse(readFileSync(join(ROOT, ".github/workflows/bump-validator.yml"), "utf-8"));
+  const steps: { id?: string; name?: string; run?: string; uses?: string; with?: object }[] =
+    workflow.jobs.bump.steps;
+
   test("resolves the newest release with the shared program and no major-version pin", () => {
-    const workflow = parse(
-      readFileSync(join(ROOT, ".github/workflows/bump-validator.yml"), "utf-8"),
+    const resolve = steps.find((step) => step.id === "resolve");
+    expect(resolve?.run).toContain("scripts/validator/latest-stable.jq");
+    expect(resolve?.run).not.toContain("^2");
+  });
+
+  test("runs monthly, on the first day of the month", () => {
+    expect(workflow.on.schedule[0].cron).toBe("0 6 1 * *");
+  });
+
+  test("compares the reference datasets before it opens the pull request, and the body carries the result", () => {
+    const compareAt = steps.findIndex((step) => step.run?.includes("compare-gating.sh"));
+    const openAt = steps.findIndex((step) =>
+      step.uses?.startsWith("peter-evans/create-pull-request"),
     );
-    const resolve = workflow.jobs.bump.steps.find((step: { id?: string }) => step.id === "resolve");
-    expect(resolve.run).toContain("scripts/validator/latest-stable.jq");
-    expect(resolve.run).not.toContain("^2");
+    expect(compareAt).toBeGreaterThanOrEqual(0);
+    expect(openAt).toBeGreaterThan(compareAt);
+    expect(steps[openAt].with).toHaveProperty("body-path");
+    expect(steps.find((step) => step.name === "Write the pull request body")?.run).toContain(
+      "validator-compare/summary.md",
+    );
   });
 });
