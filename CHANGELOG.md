@@ -13,6 +13,25 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## 0.10.21 - 2026-10-20
+
+The dataset pull-request review is given the room to finish, and a bulk edit that repeats one change across files is read once.
+This release has no migration, sets no new Worker secret or variable, and leaves `PR_REVIEW_AUTO_REQUIRE` unset.
+The review workflow's `timeout-minutes` is 45 in `nemarDatasets/.github` and in the source copy here, and has to be merged there before this release reaches `main`: the new script runs from `main` at once, and a 28-minute job would be cancelled in the middle of a long review.
+
+### Changed
+
+- **The review stage may use 128,000 output tokens, and a review that still runs out says the pull request is too large (ADR 0107, amendment of 2026-10-20).**
+  On the first day of the shadow run seven of nine reviews on real pull requests ended `model_truncated` at 32,000 tokens, after about five minutes: the model's thinking at effort `max` filled the budget, not its input.
+  The review stage's `max_tokens` is now 128,000, the most `claude-sonnet-5-5` allows in one answer; the screen stays at 32,000.
+  The review's deadline is 25 minutes, the job's `timeout-minutes` is 45 and the Worker's `PR_REVIEW_DEADLINE_MINUTES` is 55, so a check can stay `running` for up to 45 minutes on a pull request that uses all its room, and the watchdog's wait for a review that never reported grows from 40 to 55 minutes.
+  A review that still uses all of its room is `action_required` as before, now titled "Could not decide: too large to review", and tells the author to split the pull request into smaller ones.
+  A review costs up to about $1.28 when it uses the whole ceiling (the spend limit is the owner's to raise).
+- **A change repeated across many files is read once.**
+  A changed metadata file whose diff is identical to one already shown, line for line and at the same lines, is counted on that diff and is not read again: it uses none of the file or character budget, counts as read when that diff was shown in full, and counts in `files_read`.
+  Before this, a sidecar edit made the same way in every subject filled the 40-file budget and left the rest unread, so `no_degradation` could not pass.
+  The match is exact, so a change that differs in one byte, or names its own subject, is shown on its own; at most 500 files' diffs are examined.
+
 ## 0.10.20 - 2026-10-19
 
 The Zarr conversion that runs on `hallu` now pins biosigIO 1.2.13 and types the failures caused by missing companion data.

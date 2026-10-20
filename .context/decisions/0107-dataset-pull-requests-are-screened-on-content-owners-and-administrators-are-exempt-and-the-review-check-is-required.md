@@ -112,11 +112,11 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
   A reject ends the run with a screen report; stage 2 is never called and no file's content is read beyond `dataset_description.json`.
 - **Stage 2, the review, runs on `claude-sonnet-5-5`.**
   It reads the content, answers the three questions about the files (nothing lost, the revision advances, materially better), and judges the pull request's text with prompt v3's rules, copied word for word: whether the title and the description say what changed, whether the description misleads, and whether anything steers the reviewer (a claim that someone other than the author approved the change, or text that tells the reviewer what to answer).
-- **Both stages run at effort `max`, streamed, with `max_tokens` 32000**, each under a deadline for the whole stage (every attempt and the streamed answer together, through an abort signal).
-  The screen's deadline is 4 minutes and the review's 11, each with a 5-second grace for the sign-in that takes no signal.
+- **Both stages run at effort `max` and streamed, the screen with `max_tokens` 32,000 and the review with 128,000 (amendment of 2026-10-20, below)**, each under a deadline for the whole stage (every attempt and the streamed answer together, through an abort signal).
+  The screen's deadline is 4 minutes and the review's 25, each with a 5-second grace for the sign-in that takes no signal.
   The worst case adds the other steps, each at its budget: the setup steps 4 minutes (an allowance, because GitHub's own steps bound them and not the script), the evidence passes 3 minutes (60 seconds for the change list and the trees, 120 for the diffs and the change log), and the callback's four attempts of 60 seconds with pauses of 2, 4 and 8 seconds, 4 minutes 14 seconds.
-  That is 4 + 3 + 4 min 5 s + 11 min 5 s + 4 min 14 s, which is 26.4 minutes, inside the job's 28, which is inside the Worker's 40-minute deadline (`PR_REVIEW_DEADLINE_MINUTES`); a test (`test/pr-review-workflow.test.ts`) reads the workflow and the script's budgets and checks the inequalities.
-- **A refusal or a truncation at either stage is no verdict.**
+  That is 4 + 3 + 4 min 5 s + 25 min 5 s + 4 min 14 s, which is 40.4 minutes, inside the job's 45, which is inside the Worker's 55-minute deadline (`PR_REVIEW_DEADLINE_MINUTES`); a test (`test/pr-review-workflow.test.ts`) reads the workflow and the script's budgets and checks the inequalities.
+- **A refusal or a truncation at either stage is no verdict.** (A truncation of the review now tells the author to split the pull request: see the amendment of 2026-10-20.)
   The check is `action_required`, which does not pass a required check, and its text says a NEMAR administrator needs to look.
 - **The verdict stays derived.**
   The model never writes it, a fact can lower an answer and never raise one, and a screen report can never pass.
@@ -207,7 +207,7 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
   The row's verdict and report are cleared (the table keeps them only for a reported row), so the row says running, and the check is meant to go back to running with it, which is what stops an old fail or pass standing the moment the text changes.
   **That last step is unverified against GitHub.**
   The check goes back to running by updating the commit's completed check run to `in_progress`, a transition GitHub's documentation neither allows nor forbids, and no run of it has been read back.
-  A restarted check that stays completed would leave the old pass on a required check until the job reports or the 40-minute watchdog decides.
+  A restarted check that stays completed would leave the old pass on a required check until the job reports or the 55-minute watchdog decides.
   The Worker does not rely on the transition succeeding: a refused or timed-out update is tried again once, after one second, and if it fails again one error line is logged that names the review and says the old result may still stand on the check.
   The retry sits inside the webhook's own request, so a delivery whose first attempt failed spends at most that second plus the update's own 5-second bound more, and nothing is written to the row about it.
   The staging step (decision 6) settles it before the check is required.
@@ -331,6 +331,42 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
 - The workspace spend limit is $175 a month.
   Setting it is the owner's action in the Anthropic Console, and no phase assumes it is set without checking.
 
+## Amendment of 2026-10-20: the review is given the model's whole output ceiling, and a change repeated across files is read once
+
+**What was measured.**
+The first day of the shadow run on production (the release of 0.10.20 was deployed at 2026-10-20 00:12 UTC) produced nine reviews on open pull requests of the canary account, read from GitHub's check runs.
+Seven ended `model_truncated` ("the reviewing model ran out of room"), two failed correctly (the version had not advanced), and none passed.
+The public log of a truncated run shows the review stage running for about five minutes before the error, which is 32,000 output tokens at roughly 100 tokens a second: the review's thinking at effort `max`, not its small JSON answer and not its input (the diffs are capped at 80,000 characters), filled the budget.
+With the check required, a pull request in that state could not merge without an administrator's bypass, so the required check could not be turned on.
+
+**Decisions.**
+
+- **The review stage gets the model's whole output ceiling: `max_tokens` 128,000** (`claude-sonnet-5-5` allows 128,000 output tokens; 300,000 is not available as an output budget).
+  The screen stays at 32,000: no screen has been seen to truncate, and its deadline is 4 minutes.
+- **The deadlines grow to fit the ceiling.**
+  At about 100 tokens a second 128,000 tokens take about 21 minutes, so the review's deadline is 25 minutes, the job's `timeout-minutes` is 45 (in both `nemarOrg/nemar-cli` and `nemarDatasets/.github`, where the parity test makes it a two-repository change) and the Worker's `PR_REVIEW_DEADLINE_MINUTES` is 55.
+  The worst case is 40.4 minutes (decision 3), inside 45, inside 55.
+  A check can now stay `running` for up to 45 minutes on a pull request that uses all its room.
+  A stage that runs out of time before it runs out of tokens still ends `model_unavailable`.
+- **A review that still uses all of its room is a pull request too large for one review.**
+  Its check is still `action_required` (nothing but a report decides success or failure, and an error is never a failure), titled "Could not decide: too large to review", and says to split the pull request into smaller ones, by group of subjects or by kind of change, and that a NEMAR administrator can review it by hand.
+  The owner asked for exactly this on 2026-10-20: make as much room as possible, and when that is not enough, ask for several pull requests.
+- **A change that repeats across files is read once, exactly.**
+  A bulk edit often makes the same change in every subject's sidecar, and it used the 40-file budget on 40 copies of one diff and left the rest unread, so `no_degradation` could never pass.
+  A changed metadata file whose diff is identical to one already shown, line for line and at the same lines, with only the file's name different, is now counted on that diff (`Patch.same`) and not read again.
+  It uses none of the file or character budget, counts as read exactly when the diff it rides on was shown in full (a cut diff covers nothing), and counts in `files_read`.
+  The match is exact (a hash of the diff less its four file-naming lines, per status), so it never masks a label or a number: a change that differs in one byte, or names its own subject, is shown on its own.
+  The model is told which diff stands for how many files, and the first three paths.
+  Folding examines at most 500 files' diffs (`MAX_DIFFS_EXAMINED`); the rest stay unread, as before.
+  No tool is given to the model for this (decision 3 stands: it has no tools); the platform does the matching, so the model cannot be steered into skipping a file.
+
+**Consequences.**
+
+- The review costs more when it uses its room: 128,000 output tokens is about $1.28 at $10 per million, against $0.32 for 32,000.
+  Most reviews are expected to use far less, and the volume line of the admin list shows what they cost, but a run of large pull requests can spend the $175 monthly limit quickly, and the owner decides whether to raise it.
+- The workflow file in `nemarDatasets/.github` has to carry `timeout-minutes: 45` before the release reaches `main`: the new script runs from `main` as soon as it is released, and a 28-minute job would be cancelled by GitHub in the middle of a long review.
+- Folding changes what a bulk edit's evidence looks like, not what the Worker accepts: `files_read` never exceeds `files_changed`, and the report's other fields are the same.
+
 ## What this supersedes
 
 - **ADR 0092, the second Decision bullet:** the hourly, daily and platform caps and the tally pause.
@@ -359,7 +395,7 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
 - **A demotion or a revocation does not retract a `skipped` check already posted.**
   It stays valid for its commit until the commit changes, and the next delivery reads the role afresh.
 - **An edit holds the check running for as long as a run takes, and a restart may be one nobody wanted.**
-  A maintainer's typo fix on a pull request that already had a result puts its check back to running for up to about 28 minutes (the job's own limit) and costs a run, if GitHub lets a completed check run go back to running (decision 4 says that is unverified).
+  A maintainer's typo fix on a pull request that already had a result puts its check back to running for up to about 45 minutes (the job's own limit) and costs a run, if GitHub lets a completed check run go back to running (decision 4 says that is unverified).
   An exempt author's edit, reopening or marking as ready on a commit someone else pushed restarts that review, because the commit has a row and the exemption is judged only for a commit no review has touched.
   The cap bounds both at five restarts a commit.
 - **An exempt push stores no row, so it does not supersede a review of the previous commit that is still running.**
@@ -404,6 +440,7 @@ The owner set the models, the budgets and the prompt on 2026-10-16, after a comp
   The owner decides whether to raise the limit, before the check is required.
 - **A long answer can run out of room.**
   The same run's second review used 28,000 of its 32,000 output tokens on a one-file pull request, and in the model comparison Haiku once used more than 32,000 on a text-only screen.
+  The ceiling was too low for the review: see the amendment of 2026-10-20.
   Either is a truncation, which is no verdict and a check that needs a person; the calibration gate counts them.
 - **The production canary exercises the gate because it is not exempt.**
   An exempt account cannot, so the canary is a data author whose pull requests are reviewed.
