@@ -232,7 +232,7 @@ export interface ChangedFile {
  */
 export interface ReviewEvidenceV1 {
   files_changed: number;
-  /** How many changed files had their content (a diff) given to the model. The rest were judged by name and type. */
+  /** How many changed files had their content (a diff) given to the model, a change repeated line for line across files counted for each file it covers. The rest were judged by name and type. */
   files_read: number;
   /**
    * Something the reviewer needed to see was not shown in full: the change list was cut at

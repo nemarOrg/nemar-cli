@@ -30,9 +30,16 @@
  * a new file cannot remove anything. Nor does a MODIFIED `.json` or `.tsv` file whose change the
  * platform itself proved cosmetic (see {@link GitFacts.cosmeticOnlyFiles}); such a file is not
  * shown either, because there is nothing in it to read.
+ *
+ * **One change repeated across many files is read once.** A bulk edit often makes the same change in
+ * every subject's sidecar. A file whose diff is exactly one already shown, line for line (see
+ * {@link diffSignature}), is not shown again: it is counted on the patch that shows the change
+ * ({@link Patch.same}), costs none of the file or character budget, and counts as read exactly when
+ * that diff was shown in full. The match is exact, so a change that differs in one byte is shown.
  */
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { hasVisibleText } from "../../shared/naming-rule";
 import {
   AREAS,
@@ -60,6 +67,11 @@ export const MAX_PATCH_FILE_CHARS = 12_000;
 export const MAX_PATCH_TOTAL_CHARS = 80_000;
 /** Commit subjects shown to the model. */
 export const MAX_COMMITS = 30;
+/**
+ * The most changed metadata files whose diff is read to look for a change repeated across files
+ * (see {@link diffSignature}). Past it the files are unread, as before this pass existed.
+ */
+export const MAX_DIFFS_EXAMINED = 500;
 
 /** A full commit id. Every revision this module hands to git has this shape. */
 export const SHA40 = /^[0-9a-f]{40}$/;
@@ -149,6 +161,12 @@ export interface Patch {
   path: string;
   text: string;
   truncated: boolean;
+  /**
+   * The other changed files whose diff is this one, line for line, with only the file's name
+   * different (see {@link diffSignature}). The reviewer reads the change once; each of these files
+   * counts as read exactly when this diff was shown in full.
+   */
+  same: string[];
 }
 
 /**
@@ -640,6 +658,25 @@ function changelogEntryFor(
 }
 
 /**
+ * What one file's diff says once the file's name is taken out: the lines of `git diff` before the
+ * first hunk, less the four that name the file (`diff --git`, `index`, `---` and `+++`), then every
+ * hunk exactly as git wrote it. Two files with the same signature were changed in the same way,
+ * line for line, at the same lines: a bulk edit that repeats one change across subjects reads as one
+ * change. It is exact, with no masking of anything in the content, so a signature never matches two
+ * changes that differ in a byte. Null for a diff with no hunk (a binary file, a mode change alone),
+ * which is never folded.
+ */
+export function diffSignature(diff: string): string | null {
+  const at = diff.search(/^@@ /m);
+  if (at < 0) return null;
+  const header = diff
+    .slice(0, at)
+    .split("\n")
+    .filter((line) => !/^(diff --git |index |--- |\+\+\+ )/.test(line));
+  return `${header.join("\n")}\n${diff.slice(at)}`;
+}
+
+/**
  * The metadata files a review would read, in the order it would read them: removals and
  * modifications first, because that is where a loss hides, and additions last, so a budget that runs
  * out costs the least important reads.
@@ -770,11 +807,13 @@ function readContent(dir: string, listing: Listing): ContentFacts {
 
   const patches: Patch[] = [];
   const read = new Map<string, Patch>();
+  // The patch that already shows a change, by status and the hash of its diff's signature.
+  const shownBy = new Map<string, Patch>();
   let budget = MAX_PATCH_TOTAL_CHARS;
-  // The read budget goes to files that are not cosmetic-only.
+  // The read budget goes to files that are not cosmetic-only, and to each DISTINCT change once: a
+  // file whose diff is exactly one already shown is covered by it and costs nothing.
   const toRead = wanted.filter((c) => !cosmeticOnly.has(c.path));
-  for (const c of toRead.slice(0, MAX_PATCH_FILES)) {
-    if (budget <= 0) break;
+  for (const c of toRead.slice(0, MAX_DIFFS_EXAMINED)) {
     const diff = tryGit(dir, [
       "diff",
       "-U2",
@@ -787,11 +826,24 @@ function readContent(dir: string, listing: Listing): ContentFacts {
       c.path,
     ]);
     if (diff === null || diff === "") continue;
+    const signature = diffSignature(diff);
+    const key =
+      signature === null
+        ? null
+        : `${c.status}\0${createHash("sha256").update(signature).digest("hex")}`;
+    const same = key === null ? undefined : shownBy.get(key);
+    if (same !== undefined) {
+      same.same.push(c.path);
+      read.set(c.path, same);
+      continue;
+    }
+    if (patches.length >= MAX_PATCH_FILES || budget <= 0) continue;
     const { text, truncated } = clip(diff, Math.min(MAX_PATCH_FILE_CHARS, budget));
     budget -= text.length;
-    const patch = { path: c.path, text, truncated };
+    const patch: Patch = { path: c.path, text, truncated, same: [] };
     patches.push(patch);
     read.set(c.path, patch);
+    if (key !== null) shownBy.set(key, patch);
   }
 
   const readIncomplete = wanted.some((c) => {
@@ -876,7 +928,8 @@ function listedEvidence(listing: Listing, text: TextFacts) {
 export function buildEvidence(facts: GitFacts, text: TextFacts): ReviewEvidence {
   return {
     ...listedEvidence(facts, text),
-    files_read: facts.patches.length,
+    // Each file a diff stands for counts as read, the file it was shown for and the ones it repeats.
+    files_read: facts.patches.reduce((n, p) => n + 1 + p.same.length, 0),
     truncated: facts.listCut || facts.readIncomplete,
     changelog_entry: facts.changelogEntry,
   };
