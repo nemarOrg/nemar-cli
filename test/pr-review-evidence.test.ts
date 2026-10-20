@@ -2506,17 +2506,23 @@ describe("one change repeated across files is read once", () => {
     expect(facts.readIncomplete).toBe(true);
   });
 
-  test("when the pass is nearly out of time the repeats are not searched for and nothing throws", () => {
-    const dir = newBigDataset("fold-late", 10);
+  test("when the pass is nearly out of time the first diffs are still read, the search for repeats stops, and nothing throws", () => {
+    // Files 0 and 49 are the same change; files 1 to 48 are 48 different ones, so the 40 patches
+    // are full before file 49 is reached.
+    const dir = newBigDataset("fold-late", 50);
     const r = branch(dir, () => {
-      for (let i = 0; i < 10; i++) write(dir, sidecar(i), fixed);
+      for (let i = 0; i < 50; i++) {
+        write(dir, sidecar(i), i === 0 || i === 49 ? fixed : JSON.stringify({ n: i }));
+      }
     });
     const listing = gatherListing(r.dir, r.base, r.head);
-    // Less time than the search keeps in reserve: the diffs stay unread, which fails closed.
+    // Less time than the search keeps in reserve.
     __setEvidenceBudgetForTests({ content: 19_000 });
     try {
       const content = gatherContent(r.dir, listing);
-      expect(content.patches).toEqual([]);
+      expect(content.patches).toHaveLength(MAX_PATCH_FILES);
+      // File 49 would have ridden on file 0; with the search stopped it is unread, which fails closed.
+      expect(content.patches.find((p) => p.path === sidecar(0))?.same).toEqual([]);
       expect(content.readIncomplete).toBe(true);
     } finally {
       __setEvidenceBudgetForTests(null);

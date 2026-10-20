@@ -30,7 +30,7 @@ The review workflow's `timeout-minutes` is 50 in `nemarDatasets/.github` and in 
 - **A change repeated across many files is read once.**
   A changed metadata file whose diff is identical to one already shown, line for line and at the same lines, with the same mode, is counted on that diff and is not read again: it uses none of the file or character budget, and is covered by that diff when it was shown in full (a cut diff covers nothing).
   Before this, a sidecar edit made the same way in every subject filled the 40-file budget and left the rest unread, so `no_degradation` could not pass.
-  The match is exact, so a change that differs in one byte, or names its own subject, is shown on its own, and a symlink or an executable is never one with a regular file; at most 500 files' diffs are examined, and the search stops early when the content pass is short of time, leaving the rest unread.
+  The match is exact, so a change that differs in one byte, or names its own subject, is shown on its own, and a symlink or an executable is never one with a regular file; at most 500 files' diffs are examined, and, once the patches are full, the search stops early when the content pass is short of time, leaving the rest unread.
 
 ## 0.10.20 - 2026-10-19
 

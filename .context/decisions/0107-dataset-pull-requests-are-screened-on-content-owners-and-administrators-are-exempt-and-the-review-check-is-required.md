@@ -346,7 +346,7 @@ With the check required, a pull request in that state could not merge without an
 - **The deadlines grow to fit the ceiling.**
   At the one rate observed, about 100 tokens a second, 128,000 tokens take about 21 minutes.
   The review's deadline is 30 minutes, so the model can decode as slowly as about 71 tokens a second and still reach its ceiling (a test keeps the break-even rate under 75): a stage that runs out of time before it runs out of tokens ends `model_unavailable`, which names no size, advises no split and bills the tokens spent.
-  The job's `timeout-minutes` is 50 (in both `nemarOrg/nemar-cli` and `nemarDatasets/.github`, where the parity test makes it a two-repository change) and the Worker's `PR_REVIEW_DEADLINE_MINUTES` is 55.
+  The job's `timeout-minutes` is 50 (in both `nemarOrg/nemar-cli` and `nemarDatasets/.github`, where the parity test makes it a two-repository change) and the Worker's `PR_REVIEW_DEADLINE_MINUTES` is 60.
   The worst case is 45.4 minutes (decision 3), inside 50, inside 60; the fallback reporter, which runs only after the script has failed, adds up to about three more.
   A check can now stay `running` for up to 50 minutes on a pull request that uses all its room.
   A stage that runs out of time before it runs out of tokens still ends `model_unavailable`.
@@ -360,7 +360,7 @@ With the check required, a pull request in that state could not merge without an
   It uses none of the file or character budget, covers its files exactly when the diff it rides on was shown in full (a cut diff covers nothing, and counts for itself alone in `files_read`).
   The match is exact: a hash of the diff's bytes (not their UTF-8 decoding) less the lines that name the file (`diff --git`, `---`, `+++` and the object ids of the `index` line), per status, with the file's mode kept, so it never masks a label or a number and never joins a symlink or an executable to a regular file: a change that differs in one byte, or names its own subject, is shown on its own.
   The model is told which diff stands for how many files, and the first three paths.
-  Folding examines at most 500 files' diffs (`MAX_DIFFS_EXAMINED`), and stops examining when less than 20 seconds of the content pass's 120 are left; the files not examined stay unread, which fails closed, instead of the pass timing out and taking the review with it.
+  Folding examines at most 500 files' diffs (`MAX_DIFFS_EXAMINED`), and, once the 40 patches are full, stops examining when less than 20 seconds of the content pass's 120 are left; the files not examined stay unread, which fails closed, instead of the pass timing out and taking the review with it.
   Measured by a reviewer on a full clone, 500 examined diffs cost about 5 seconds, against about 0.4 for the 40 read before; a partial clone is expected to be 2 to 3 times slower.
   No tool is given to the model for this (decision 3 stands: it has no tools); the platform does the matching, so the model cannot be steered into skipping a file.
 

@@ -72,7 +72,7 @@ export const MAX_COMMITS = 30;
  * (see {@link diffSignature}). Past it the files are unread, as before this pass existed.
  */
 export const MAX_DIFFS_EXAMINED = 500;
-/** The time left in the content pass below which no more diffs are examined for repeats. */
+/** The time left in the content pass below which, once the patches are full, no more diffs are examined for repeats. */
 const FOLD_TIME_RESERVE_MS = 20_000;
 
 /** A full commit id. Every revision this module hands to git has this shape. */
@@ -826,10 +826,17 @@ function readContent(dir: string, listing: Listing): ContentFacts {
   // file whose diff is exactly one already shown is covered by it and costs nothing.
   const toRead = wanted.filter((c) => !cosmeticOnly.has(c.path));
   for (const c of toRead.slice(0, MAX_DIFFS_EXAMINED)) {
-    // The search for repeats is optional: when little of the pass's time is left, the files not yet
-    // examined stay unread (which fails closed, as always) instead of the pass running out of time
-    // and the whole review with it.
-    if (gitDeadline !== null && gitDeadline - Date.now() < FOLD_TIME_RESERVE_MS) break;
+    // The search for repeats is optional, the first diffs are not: once the patches are full, the
+    // search goes on only while time is left. When little is, the files not yet examined stay unread
+    // (which fails closed, as always) instead of the pass running out of time and the whole review
+    // with it.
+    if (
+      (patches.length >= MAX_PATCH_FILES || budget <= 0) &&
+      gitDeadline !== null &&
+      gitDeadline - Date.now() < FOLD_TIME_RESERVE_MS
+    ) {
+      break;
+    }
     const bytes = tryGitBytes(dir, [
       "diff",
       "-U2",
