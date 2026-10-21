@@ -212,6 +212,10 @@ Whitespace is not a JSON difference (the cosmetic proof handles a reindent).
 A file whose tree is equal but whose token text differs beyond whitespace (a respelled escape) gets the format class `json_respelled`.
 (Phase 2 note: `json_respelled` is deferred to phase 3.
 The parser keeps no token text to compare, so the change model's format words are `bom`, `line_endings`, `line_ending_pattern` and `final_newline`, declared as the type `FormatDetail`; phase 3 adds the fifth word with the renderer that shows it.)
+(Phase 3: `summarizeChanges` adds `json_respelled` when `canonicalJson` of the two trees is equal and the two texts, without their byte order mark and with the whitespace between tokens removed by `stripJsonSpace`, differ.
+It is information only, with no before or after state.
+It is decided only on equal trees: a respelled escape in a document that also changed a value is not reported, since the respelled value is equal for every reader.
+A JSON document's other layout atoms (`bom`, `line_endings`, `final_newline`) come from `formatAtoms` in `summarizeChanges`, outside the JSON diff's totality check; a table's come from its diff, once.)
 
 ### 3.3 Encodings
 
@@ -263,6 +267,21 @@ A **class key** is the tuple `(kind, shape, field, rule)`:
 **Value pairs are not part of the key.**
 A class holds the multiset of its distinct `(before, after)` value pairs with counts (for `row_removed`, the removed key or row text; for `json_key_removed`, `name = value`).
 So two files with the same logical change land in the same class whatever their line offsets, unrelated rows, row counts or subject labels, and an edit that differs gets its own pair or its own class.
+
+**The key as built (phase 3).**
+The class key is the JSON text of `[kind, shape, field, rule, detail]`, built by `classKeyOf`:
+
+- `shape` is `entityPattern` of the file's own path for every kind; a `row_relocated` atom's target shape is already its `detail`.
+- `field` is the column for a table kind (never folded: a column name is the author's text) and, for a JSON kind, the atom's path with every array index written `[*]` by `foldIndices`, which passes a bracketed key (`["[0]"]`) over whole: the leaf path for the value kinds, the parent path for the key kinds (the phase 2 atom conventions).
+- `rule` is the relabel rule for `key_relabeled` and `cell_templated` only, compared by its fields in a fixed order.
+- `detail` is in the key for `format` (the word), `row_relocated` (the target shape) and `json_key_renamed` (`old -> new`) only.
+  A removed column's count of non-missing values, a JSON key's name and every value are what a class is made of, so they are not in the key.
+
+A pair is the text `before + U+0000 + after` for the kinds shown by pairs (`cell_replaced`, `cell_emptied`, `json_value_changed`, `json_type_changed`, `json_emptied`) and `text + U+0000` for the removals (`row_removed`: the key or the row's cells joined with a tab; `json_key_removed` and `json_empty_key_removed`: `name = value`).
+No after side can hold U+0000 (a table refuses a NUL byte and canonical JSON escapes it), so the last U+0000 is the separator, while a JSON key name may hold one.
+`DISPLAY_OF` records, per kind, whether it is shown by `pairs`, `removals`, `rule` or is `additive`; like `ROLE_OF` it is a `Record`, so a new kind does not compile without it.
+Examples are the first atom of each of the first two files in review order, or the first two atoms when the class is in one file.
+`classify` orders classes by section 5.1.
 
 ### 4.3 Relabel rules
 
@@ -375,6 +394,9 @@ Owner Question A2 asks whether relocation elsewhere should also count; the defau
 Since `T` names the one file it can serve, no two different files compete for a copy, and the order the files are diffed in does not change what either is told.
 The pool lists the copies of one file in sorted path order, so which of two copies is taken does not depend on the order the pool was built from.
 The caller (phase 3) still diffs the candidate files in sorted path order, so nothing about a run depends on the order git listed the files in; the only consumption that depends on order is a second diff of the same path against the same pool, which the caller never makes.
+(Phase 3: `summarizeChanges` sorts the candidates by path in code-unit order and diffs them in that order.
+A path given twice is refused as `internal_mismatch` every time it appears, so the one order-dependent consumption cannot happen.
+The pool itself is passed to `buildPools` unsorted, which gives the same pools in any order; a mutation run showed a sort there was dead code.)
 
 **JSON moves.**
 A removed leaf `(p, v)` of file `F` is `json_key_moved` when some added or modified JSON file `T` (not `F`) has leaf `p` with value `v` that it did not have before, and `T` **applies to `F` under BIDS inheritance**: `T`'s directory is `F`'s directory or an ancestor of it, `T` and `F` have the same suffix and extension (everything after the first dot), and every `key-value` entity of `T`'s name is in `F`'s name.
@@ -440,13 +462,20 @@ A rendered class is **complete** when:
 - for a **rule** kind (`key_relabeled`, `cell_templated`, `json_key_renamed`, `row_relocated`, `json_key_moved`, `column_removed`, the three reorder kinds, `format`): the class line is rendered (the rule is the full description; examples only illustrate);
 - an **additive** kind is never needed for coverage, rendered or not.
 
+(Phase 3, the stricter reading: a class whose class line was cut is incomplete whatever its kind, because a rule describes its members only if the reader can read which column or key it applies to.
+The line is cut when its shape or a relocation's target is over 300 characters, or when its field, a rename's names or a rule's added text is cut by `renderValue`.
+A cut example changes nothing.)
+
 ### 5.4 At the bounds
 
 - A class that does not fit is not rendered, its number does not appear, and `classes_cut` counts it; the fenced block ends with `(N more change classes not shown)`.
+  (Phase 3: rendering stops at the FIRST class that does not fit `maxClasses` or `maxSummaryChars`, so the shown classes are always a prefix of the order of section 5.1 and a later, smaller class is never shown in place of an earlier one; room for the closing count line is kept from the start, so the block never exceeds `maxSummaryChars`.)
 - A paired class with more than 12 distinct pairs renders 12 and the line `(N more distinct values not shown)`, and is incomplete.
 - A file over a per-file cap is refused; a run over `maxTotalBytes` stops reading at the cap and the files not read are refused (`too_large`).
+  (Phase 3: the pure module counts the bytes of both sides of each candidate in sorted path order; the file that would pass the cap and every later one are refused `too_large`, even a small later one. The pool's bytes are bounded by the caller's blob reader, `readBlobs`.)
 - **If the summary pass reaches its deadline, the whole summary is abandoned**: no file is accounted for by it, nothing of it is shown, and `change_summary.abandoned` is true in the facts.
   All-or-nothing is simpler to prove than a partial account, and an abandoned summary leaves today's behavior.
+  (Phase 3: the deadline is checked before each file with the caller's clock; an abandoned summary has no outcomes, classes or text, and its loss facts are zero.)
 
 ---
 
@@ -582,6 +611,7 @@ change_summary: {
 ```
 
 The kind words come from a closed table (`KIND_WORDS`), the counts from the platform, and the completeness from section 5.3 (`in full`, `values not all shown`); no attacker text is in this block.
+(Phase 3: `classTable` writes `1 item` and `1 file` in the singular; `KIND_WORDS` gives every kind its own words, so a line names its kind exactly.)
 `fence()` already breaks any `<facts>` text inside fenced material, so the class table cannot be forged from a value.
 
 The existing `changed-metadata-groups` block gains a column, `accounted for by the summary`, and `PathGroup` gains `summarized: number` (an internal type, not in the report).
@@ -616,6 +646,12 @@ C<n> | <shape> | <column "x" | key path | parent path> | <rule words>
 
 Paths and shapes go through `tidyPath`, as today.
 Nothing from the pull request can start a line: values are escaped, so a newline in a value is `\n`.
+
+**As built (phase 3).**
+The class line is `C<n> | <shape> | <field> | <kind words>[: <rule>]`, where the field part is `column "x"` for a table, `key "<leaf path>"` (or `the whole document`) for a JSON value kind, `under "<parent path>"` (or `top level`) for a JSON key kind, and absent for the kinds without a field; the rule part is the relabel rule's words, `to <target shape>` for a relocation, the quoted `old -> new` of a rename, or the format word.
+Column names, JSON paths, rename names and a rule's added text are rendered with `renderValue` (a rule's added text is put where `ruleWords` puts its quotes), so a zero-width prefix and the six characters that spell its escape read differently.
+A pair line is `"<before>" -> "<after>" x<count>`, a removal's `"<text>" x<count>`; the twelve shown are the most frequent, then by text.
+A pair gets the first-difference note when its rendered texts are equal, when its raw values differ only in characters the renderer escapes, when they are equal after NFC, or when they first differ at a character outside ASCII (so a Latin `a` and a Cyrillic one are annotated, case 10 of section 11); the last condition covers the NFC one, which is kept as the design states it.
 
 ### 8.3 The example, computed from `on004551` #1
 
@@ -840,6 +876,8 @@ export function renderValue(v: string, max?: number): { text: string; cut: boole
 export function firstDifference(a: string, b: string): string | null;
 export const EMPTY_SUMMARY: ChangeSummary; // abandoned: false, nothing in it
 ```
+
+Phase 3 also exports the pieces `summarizeChanges` is built from, each tested on its own: `DISPLAY_OF` (how each kind is shown completely), `foldIndices`, `classKeyOf`, `classify`, `renderClasses`, `accountedFiles`, `lossFactsOf` with `NO_LOSS`, `classTable`, `summaryFacts`, `stripJsonSpace`, and `summarizeChangesWith`, which takes the two totality checks so a test can prove that a diff the check rejects is refused (`internal_mismatch`) and accounts for nothing.
 
 ### 10.2 `scripts/ci/pr-review-evidence.ts`
 
