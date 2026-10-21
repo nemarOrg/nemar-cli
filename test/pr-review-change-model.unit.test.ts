@@ -551,6 +551,9 @@ describe("relabelRule: numbers and nothing-to-say pairs never get a rule", () =>
       ["1e05", "1e5"],
       ["1x000 Hz", "1x0000 Hz"],
       ["1E0100", "1E100"],
+      // A digit with no value this module vouches for anywhere in the string, around a plain one.
+      ["Fp\u{663} EEG05", "Fp\u{663} EEG5"],
+      ["Fp\u{B2} EEG05", "Fp\u{B2} EEG5"],
     ];
     for (const [a, b] of hidden) {
       for (const chars of [false, true]) {
@@ -996,7 +999,8 @@ function rebuildsByText(found: RelabelRule, before: string, after: string): bool
  * The alphabet of the padding property tests: digits and zeros, the three allowed separators,
  * letters, and the marks a number can be written with (the two decimal marks, an apostrophe, the
  * middle dot, the Arabic decimal separator, the fullwidth full stop, letter-like marks, a word
- * joiner, and `p`, a decimal in BIDS-style names).
+ * joiner, and `p`, a decimal in BIDS-style names), and an Arabic-Indic digit, which has no value
+ * this module vouches for.
  */
 const SEPARATOR_ALPHABET = [
   "0",
@@ -1017,6 +1021,7 @@ const SEPARATOR_ALPHABET = [
   "\u{2BC}",
   "\u{2CC}",
   "\u{2060}",
+  "\u{663}",
   "p",
   "a",
   "B",
@@ -2379,6 +2384,17 @@ describe("diffTable: the lookup passes find relabels the positional walk cannot"
       tsv(header, ["POL A3", "EEG", "z"], ["POL A2", "EEG", "y"], ["POL A1", "EEG", "x"]),
     );
     expect(relabels(diff)).toEqual(["A1 -> POL A1", "A2 -> POL A2", "A3 -> POL A3"]);
+  });
+
+  test("the lookup reads digits by value: a wrap that also repads is found in reversed order", () => {
+    // The positional walk cannot pair a reversed list; only the lookup can, and only when it
+    // indexes `A1` and the `A01` inside `POL A01` as one form.
+    const diff = diffText(
+      path,
+      tsv(header, ["A1", "EEG", "x"], ["A2", "EEG", "y"], ["A3", "EEG", "z"]),
+      tsv(header, ["POL A03", "EEG", "z"], ["POL A02", "EEG", "y"], ["POL A01", "EEG", "x"]),
+    );
+    expect(relabels(diff)).toEqual(["A1 -> POL A01", "A2 -> POL A02", "A3 -> POL A03"]);
   });
 
   test("each gone key's parts are looked up among the added keys: a strip in reversed order", () => {
