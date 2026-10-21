@@ -49,6 +49,9 @@
 export const SUMMARY_LIMITS = {
   maxBlobBytes: 8 * 1024 * 1024, // per file side
   maxRows: 200_000, // per table
+  // Columns per table; a wider header refuses the file `too_large` before its names are split, so
+  // the cost of a table is not its width times its rows of changed cells.
+  maxColumns: 10_000,
   maxJsonDepth: 64,
   maxJsonNodes: 200_000,
   maxKeyChars: 128, // longer keys get no relabel rule
@@ -303,9 +306,11 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
  * `invalid_utf8`; 4. a leading BOM is removed and recorded; 5. the text is split on LF, an empty
  * last piece meaning a final newline; 6. one CR ending a TERMINATED line is the line's CRLF and is
  * recorded per line, any other CR (inside a line, or ending an unterminated last line) is
- * `bare_cr`; 7. no line at all: `empty`; 8. the first line is the header, and an empty column name
- * is `empty_column_name`, a repeated one `duplicate_column`, one longer than `maxNameChars` code
- * units `too_large` (so no atom or class key is ever built from such a name); 9. every other line
+ * `bare_cr`; 7. no line at all: `empty`; 8. the first line is the header: more than `maxColumns`
+ * columns is `too_large` (counted before the line is split into names, and before any row is
+ * split into cells), an empty column name `empty_column_name`, a repeated one `duplicate_column`,
+ * one longer than `maxNameChars` code units `too_large` (so no atom or class key is ever built
+ * from such a name); 9. every other line
  * must have exactly the header's number of cells (`ragged_row`), and there may be at most
  * `maxRows` of them (`too_many_rows`, reported only when no row was ragged); 10. a header name or
  * a cell that STARTS with a double quote is `quoted_cell`, because BIDS tables do not quote but
@@ -371,8 +376,13 @@ export function parseTsvWith(
   // Step 7.
   if (lines.length === 0) return { ok: false, refusal: "empty" };
 
-  // Step 8.
-  const header = (lines[0] as string).split("\t");
+  // Step 8. The width first, by counting tabs, so a header too wide is never split.
+  const first = lines[0] as string;
+  let tabs = 0;
+  for (let at = first.indexOf("\t"); at !== -1; at = first.indexOf("\t", at + 1)) {
+    if (++tabs >= SUMMARY_LIMITS.maxColumns) return { ok: false, refusal: "too_large" };
+  }
+  const header = first.split("\t");
   if (header.includes("")) return { ok: false, refusal: "empty_column_name" };
   if (new Set(header).size !== header.length) return { ok: false, refusal: "duplicate_column" };
   if (header.some((name) => name.length > SUMMARY_LIMITS.maxNameChars)) {

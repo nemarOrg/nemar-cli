@@ -446,6 +446,7 @@ A class renders whole or not at all.
 export const SUMMARY_LIMITS = {
   maxBlobBytes: 8 * 1024 * 1024, // per file side
   maxRows: 200_000, // per table
+  maxColumns: 10_000, // phase 3 review: per table; a wider header is too_large before it is split
   maxJsonDepth: 64,
   maxJsonNodes: 200_000,
   maxKeyChars: 128, // longer keys get no relabel rule

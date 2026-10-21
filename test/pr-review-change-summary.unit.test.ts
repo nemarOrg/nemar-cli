@@ -30,6 +30,7 @@ describe("the limits and the refusal words", () => {
     expect(SUMMARY_LIMITS).toEqual({
       maxBlobBytes: 8 * 1024 * 1024,
       maxRows: 200_000,
+      maxColumns: 10_000,
       maxJsonDepth: 64,
       maxJsonNodes: 200_000,
       maxKeyChars: 128,
@@ -534,6 +535,22 @@ describe("parseTsv refuses, with one closed word per fault", () => {
     expect(tsvRefusal("a\ta\n")).toBe("duplicate_column");
     // Names that differ only in case, or by a trailing space, are different names.
     expect(tsvRefusal("a\tA\ta \n")).toBeNull();
+  });
+
+  test("too_large: a header of 10,001 columns is refused, and 10,000 are read", () => {
+    const max = SUMMARY_LIMITS.maxColumns;
+    const table = (n: number) => {
+      const names = Array.from({ length: n }, (_, i) => `c${i}`);
+      return `${names.join("\t")}\n${names.map(() => "1").join("\t")}\n`;
+    };
+    expect(tsvRefusal(table(max))).toBeNull();
+    expect(tsvRefusal(table(max + 1))).toBe("too_large");
+    // The width is the first thing read of the header: before an empty or a repeated name.
+    const wide = Array.from({ length: max + 1 }, () => "").join("\t");
+    expect(tsvRefusal(`${wide}\n`)).toBe("too_large");
+    expect(tsvRefusal(`${Array.from({ length: max + 1 }, () => "a").join("\t")}\n`)).toBe(
+      "too_large",
+    );
   });
 
   test("too_large: a column name of 1,025 code units is refused, and 1,024 is read", () => {
