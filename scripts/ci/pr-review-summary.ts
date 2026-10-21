@@ -3075,7 +3075,8 @@ function exampleOf(path: string, atom: Atom): string {
     case "json_type_changed":
     case "json_emptied":
     case "json_filled":
-      return `${where} key ${value(atom.field)}`;
+      // A document that is one scalar changed at its root, which has no path to name.
+      return atom.field === "" ? where : `${where} key ${value(atom.field)}`;
     case "json_key_removed":
     case "json_empty_key_removed":
     case "json_key_added":
@@ -3173,4 +3174,195 @@ export function classify(files: readonly FileAtoms[]): ChangeClass[] {
       b.items - a.items ||
       byCodeUnits(a.key, b.key),
   );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Rendering, bounds and completeness (design sections 5.2 to 5.4 and 8.2)
+// ---------------------------------------------------------------------------------------------
+
+/** What a `format` class says changed, in the platform's words. */
+const FORMAT_WORDS: Readonly<Record<FormatDetail, string>> = {
+  bom: "byte order mark added or removed",
+  line_endings: "line endings changed",
+  line_ending_pattern: "which lines end in CRLF changed",
+  final_newline: "final newline added or removed",
+};
+
+/** The JSON kinds whose field is a leaf path; every other JSON kind with a field names its parent. */
+const JSON_VALUE_KINDS: ReadonlySet<ClassKind> = new Set([
+  "json_value_changed",
+  "json_type_changed",
+  "json_emptied",
+  "json_filled",
+]);
+
+/** The last line of a summary that could not show every class. */
+function moreClassesLine(n: number): string {
+  return `(${n} more change classes not shown)`;
+}
+
+/** A value with every character {@link renderValue} would escape removed, spaces kept. */
+function withoutUnseen(v: string): string {
+  return v.replace(UNSEEN, (ch) => (ch === " " ? ch : ""));
+}
+
+/**
+ * The note a pair needs when its two sides may LOOK alike (design section 8.2), or null. A pair
+ * gets one when its two rendered texts are equal (two values cut at the same place), when they
+ * differ only in characters the renderer escapes (a zero-width space, a bidirectional mark, a
+ * control character), when the raw values are equal after NFC normalization but not byte for byte
+ * (a precomposed letter against the letter and a combining mark), or when they first differ at a
+ * character outside ASCII (a Latin `a` against a Cyrillic one, U+0430). The last is wider than it
+ * must be, and deliberately: a note on a pair that did not need one costs a few words, while a
+ * look-alike without one is a change the reader cannot see. The note is computed on the raw
+ * values, never on the rendered ones.
+ */
+function differenceNote(
+  before: string,
+  after: string,
+  b: { text: string },
+  a: { text: string },
+): string | null {
+  const note = firstDifference(before, after);
+  if (note === null) return null;
+  if (
+    b.text === a.text ||
+    withoutUnseen(before) === withoutUnseen(after) ||
+    before.normalize("NFC") === after.normalize("NFC")
+  ) {
+    return note;
+  }
+  const points = [...note.matchAll(/U\+([0-9A-F]+)/g)].map((m) =>
+    Number.parseInt(m[1] as string, 16),
+  );
+  return points.some((p) => p >= 0x80) ? note : null;
+}
+
+/**
+ * One class as the fenced block shows it, numbered `n` (design section 8.2), and whether that
+ * showing is COMPLETE (section 5.3):
+ *
+ * ```text
+ * C<n> | <shape> | <column "x" | key "path" | under "parent"> | <kind words>[: <rule>]
+ *     "<before>" -> "<after>" x<count>        (pairs; a removal shows one side)
+ *     (<k> more distinct values not shown)
+ *     e.g. <path> <what changed>
+ * ```
+ *
+ * Every author text is rendered so that nothing from the pull request can start a line or imitate
+ * the platform's words: values, column names, JSON paths and a rule's added text go through
+ * {@link renderValue} (quoted, escaped, cut with a marker after the closing quote), and paths
+ * through `tidyPath` (control and line-breaking characters made spaces).
+ *
+ * A class is complete when nothing on its class line was cut (the shape, the field, a rename's
+ * names, a relocation's target) and, for the `pairs` and `removals` kinds, every distinct pair is
+ * shown and no shown value was cut. A cut anywhere a reader needs is a reason not to account for
+ * the class's files, whatever the kind: the rule of a rule kind describes its members only if the
+ * reader can read which column or key it applies to. Examples only illustrate, so a cut example
+ * changes nothing.
+ */
+function renderClass(n: number, c: ChangeClass): { text: string; complete: boolean } {
+  let lineCut = c.shape.length > PATH_CHARS;
+  const quoted = (v: string): string => {
+    const r = renderValue(v);
+    if (r.cut) lineCut = true;
+    return r.text;
+  };
+  const parts = [`C${n}`, tidyPath(c.shape, PATH_CHARS)];
+  if (c.field !== null) {
+    if (!c.kind.startsWith("json_")) parts.push(`column ${quoted(c.field)}`);
+    else if (JSON_VALUE_KINDS.has(c.kind)) {
+      parts.push(c.field === "" ? "the whole document" : `key ${quoted(c.field)}`);
+    } else parts.push(c.field === "" ? "top level" : `under ${quoted(c.field)}`);
+  }
+  let rule: string | null = null;
+  if (c.rule !== null) {
+    // The rule's added or removed text is the author's: each gap is rendered like a value and
+    // put where `ruleWords` puts its quotes, so the words are the module's and the text is escaped.
+    const gaps = c.rule.gaps.map((gap) => {
+      const text = quoted(gap);
+      return text.slice(1, text.lastIndexOf('"'));
+    });
+    rule = ruleWords({ ...c.rule, gaps });
+  } else if (c.kind === "row_relocated" && c.detail !== null) {
+    if (c.detail.length > PATH_CHARS) lineCut = true;
+    rule = `to ${tidyPath(c.detail, PATH_CHARS)}`;
+  } else if (c.kind === "json_key_renamed" && c.detail !== null) {
+    rule = quoted(c.detail);
+  } else if (c.kind === "format" && c.detail !== null) {
+    rule = FORMAT_WORDS[c.detail as FormatDetail] ?? quoted(c.detail);
+  }
+  parts.push(rule === null ? KIND_WORDS[c.kind] : `${KIND_WORDS[c.kind]}: ${rule}`);
+  const lines = [parts.join(" | ")];
+
+  const display = DISPLAY_OF[c.kind];
+  let pairsComplete = true;
+  if (display === "pairs" || display === "removals") {
+    // Most frequent first, then by text, so which pairs fit is a function of the class alone.
+    const ordered = [...c.pairs].sort((x, y) => y[1] - x[1] || byCodeUnits(x[0], y[0]));
+    const shown = ordered.slice(0, SUMMARY_LIMITS.maxPairsPerClass);
+    for (const [pair, count] of shown) {
+      const at = pair.lastIndexOf("\u{0}");
+      const before = pair.slice(0, at);
+      const b = renderValue(before);
+      if (b.cut) pairsComplete = false;
+      if (display === "removals") {
+        lines.push(`    ${b.text} x${count}`);
+        continue;
+      }
+      const after = pair.slice(at + 1);
+      const a = renderValue(after);
+      if (a.cut) pairsComplete = false;
+      const note = differenceNote(before, after, b, a);
+      lines.push(`    ${b.text} -> ${a.text} x${count}${note === null ? "" : ` (${note})`}`);
+    }
+    if (ordered.length > shown.length) {
+      lines.push(`    (${ordered.length - shown.length} more distinct values not shown)`);
+      pairsComplete = false;
+    }
+  }
+  for (const example of c.examples) lines.push(`    e.g. ${example}`);
+  return { text: lines.join("\n"), complete: !lineCut && pairsComplete };
+}
+
+/** The fenced block of a summary, and which classes it shows and shows completely. */
+export interface RenderedClasses {
+  /** The block's text: every shown class, then the line that counts the others; "" for no class. */
+  text: string;
+  /** The keys of the classes shown, in render order: always a prefix of the classes given. */
+  shown: ReadonlySet<string>;
+  /** The keys of the classes shown completely (design section 5.3); a subset of `shown`. */
+  complete: ReadonlySet<string>;
+  /** How many classes were not shown. */
+  cut: number;
+}
+
+/**
+ * Render classes, in the order given, within `maxClasses` and `maxSummaryChars` (design sections
+ * 5.2 to 5.4). A class renders whole or not at all, and rendering STOPS at the first class that
+ * does not fit: the classes shown are always a prefix of the order, so a loss class can never be
+ * left out while a later class is shown, and no class's showing depends on the size of the ones
+ * after it. When any class is left out, the block ends with `(N more change classes not shown)`;
+ * room for that line is kept from the start, so the text never exceeds `maxSummaryChars`.
+ */
+export function renderClasses(classes: readonly ChangeClass[]): RenderedClasses {
+  const blocks: string[] = [];
+  const shown = new Set<string>();
+  const complete = new Set<string>();
+  let length = 0;
+  for (const [i, c] of classes.entries()) {
+    if (shown.size >= SUMMARY_LIMITS.maxClasses) break;
+    const block = renderClass(shown.size + 1, c);
+    const after = classes.length - i - 1;
+    const reserve = after > 0 ? 1 + moreClassesLine(after).length : 0;
+    const separator = blocks.length > 0 ? 1 : 0;
+    if (length + separator + block.text.length + reserve > SUMMARY_LIMITS.maxSummaryChars) break;
+    blocks.push(block.text);
+    length += separator + block.text.length;
+    shown.add(c.key);
+    if (block.complete) complete.add(c.key);
+  }
+  const cut = classes.length - shown.size;
+  if (cut > 0) blocks.push(moreClassesLine(cut));
+  return { text: blocks.join("\n"), shown, complete, cut };
 }
