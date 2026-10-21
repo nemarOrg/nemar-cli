@@ -1040,6 +1040,8 @@ function changeSummary(
     if (regular || json) sides.push({ entry, regular });
   }
   // The blobs the cosmetic proofs already read are not read again, and count toward the bound.
+  // The subtraction binds only when those blobs and the pool's pass `maxTotalBytes` (256 MiB) in
+  // all; no test builds that much data, so it is read, not run.
   let held = 0;
   for (const blob of checkedBlobs.values()) held += blob.length;
   const poolBlobs = readBlobs(

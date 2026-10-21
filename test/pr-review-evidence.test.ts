@@ -2478,6 +2478,30 @@ describe("cosmetic changes are proven from the blobs, never assumed", () => {
     expect(calls.filter((c) => /^show \S+\.(json|tsv)$/.test(c ?? ""))).toEqual([]);
   });
 
+  test("at most 2,000 files are compared for a cosmetic change: the 2,001st is not proven, so it is read as a diff", () => {
+    // MAX_COSMETIC_CHECKS. Every file is reindented and so would be proven cosmetic, which is what
+    // makes the one past the cap show: it is shown as a diff because it was never compared.
+    const cap = 2_000;
+    // At the root, so the fixture is 2,001 files and not 2,001 directories as well.
+    const path = (i: number) => `task-${i}_eeg.json`;
+    const files = Array.from({ length: cap + 1 }, (_, i) => path(i));
+    const r = changed(
+      "n2-check-cap",
+      Object.fromEntries(files.map((f, i) => [f, JSON.stringify({ n: i })])),
+      (dir) => {
+        for (const [i, f] of files.entries()) write(dir, f, JSON.stringify({ n: i }, null, 4));
+      },
+    );
+    const listing = gatherListing(r.dir, r.base, r.head);
+    expect(listing.changes).toHaveLength(cap + 1);
+    const content = gatherContent(r.dir, listing);
+    // The files are compared in review order, which within one status and area is path order.
+    const last = [...files].sort()[cap] as string;
+    expect(content.cosmeticOnlyFiles).toBe(cap);
+    expect(content.patches.map((p) => p.path)).toEqual([last]);
+    expect(content.readIncomplete).toBe(false);
+  }, 60_000);
+
   test("a cosmetic read that stalls has no deadline of its own: inside a 2 s content budget the pass is timed_out", () => {
     const dir = newBigDataset("n2-stall", 3);
     const r = branch(dir, () => write(dir, sidecar(0), JSON.stringify(base, null, 4)));
