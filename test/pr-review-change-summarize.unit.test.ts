@@ -978,6 +978,98 @@ describe("renderClasses: completeness by kind (design section 5.3)", () => {
     expect(complete.size).toBe(0);
   });
 
+  describe("a cut in any one token of the class line leaves the class incomplete, whichever token it is", () => {
+    /**
+     * Nested keys whose JSON path (`.k0xx.k1xx...`) is exactly `length` code units, each key 5 to
+     * 60 long: a path past the 300 of a cut that stays far under the 1,024 a name may have.
+     */
+    const keysOfPath = (length: number): string[] => {
+      const count = Math.ceil(length / 61);
+      return Array.from({ length: count }, (_, i) => {
+        const size = Math.floor(length / count) + (i < length % count ? 1 : 0);
+        return `k${i}`.padEnd(size - 1, "x");
+      });
+    };
+    const pathOf = (keys: readonly string[]): string => keys.map((key) => `.${key}`).join("");
+    /** `{k0: {k1: ... inner}}`, the innermost key last. */
+    const nested = (keys: readonly string[], inner: unknown): unknown =>
+      keys.reduceRight((value, key) => ({ [key]: value }), inner);
+    const summaryOf = (before: unknown, after: unknown): ChangeSummary =>
+      summarize([candidate("x.json", JSON.stringify(before), JSON.stringify(after))]);
+
+    /** The one class a file made, its line, and the line the facts table has for it. */
+    const lineOf = (summary: ChangeSummary, kind: ClassKind) => {
+      expect(summary.classes.map((c) => c.kind)).toEqual([kind]);
+      return {
+        line: summary.text.split("\n")[0] as string,
+        fact: summary.facts.classes[0] as string,
+        accounted: summary.accounted.size,
+      };
+    };
+
+    test("a rename's names: the pair 'old -> new' is cut at 300 code points", () => {
+      // The detail is `old -> new`, so names of 148 make it exactly 300 and 149 make it 302.
+      for (const [size, whole] of [
+        [148, true],
+        [149, false],
+        [310, false],
+      ] as const) {
+        const upper = "K".repeat(size);
+        const { line, fact, accounted } = lineOf(
+          summaryOf({ [upper]: 1 }, { [upper.toLowerCase()]: 1 }),
+          "json_key_renamed",
+        );
+        expect(line.includes('"...(cut)'), `${size} line ${line.length}`).toBe(!whole);
+        expect(fact, `${size}`).toBe(
+          `C1 keys renamed | 1 item in 1 file | ${whole ? "in full" : "not shown in full"}`,
+        );
+        expect(accounted, `${size}`).toBe(whole ? 1 : 0);
+      }
+    });
+
+    test("a value's leaf path: the 'key' token is cut at 300 code units", () => {
+      for (const [length, whole] of [
+        [300, true],
+        [301, false],
+        [310, false],
+      ] as const) {
+        const keys = keysOfPath(length);
+        expect(pathOf(keys).length).toBe(length);
+        const { line, fact, accounted } = lineOf(
+          summaryOf(nested(keys, "go"), nested(keys, "stop")),
+          "json_value_changed",
+        );
+        expect(line.includes('"...(cut)'), `${length}`).toBe(!whole);
+        expect(line.startsWith('C1 | "x.json" | key "'), `${length}`).toBe(true);
+        expect(fact, `${length}`).toBe(
+          `C1 values changed | 1 item in 1 file | ${whole ? "in full" : "not shown in full"}`,
+        );
+        expect(accounted, `${length}`).toBe(whole ? 1 : 0);
+      }
+    });
+
+    test("a key kind's parent path: the 'under' token is cut at 300 code units", () => {
+      for (const [length, whole] of [
+        [300, true],
+        [301, false],
+        [310, false],
+      ] as const) {
+        const keys = keysOfPath(length);
+        expect(pathOf(keys).length).toBe(length);
+        const { line, fact, accounted } = lineOf(
+          summaryOf(nested(keys, { gone: 1, stay: 2 }), nested(keys, { stay: 2 })),
+          "json_key_removed",
+        );
+        expect(line.includes('"...(cut)'), `${length}`).toBe(!whole);
+        expect(line.startsWith('C1 | "x.json" | under "'), `${length}`).toBe(true);
+        expect(fact, `${length}`).toBe(
+          `C1 keys removed | 1 item in 1 file | ${whole ? "in full" : "not shown in full"}`,
+        );
+        expect(accounted, `${length}`).toBe(whole ? 1 : 0);
+      }
+    });
+  });
+
   test("additive classes are shown after every other and are complete when shown", () => {
     const { complete, classes, text } = rendered([
       {
