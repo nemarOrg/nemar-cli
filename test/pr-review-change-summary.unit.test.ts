@@ -557,6 +557,8 @@ describe("parseTsv refuses, with one closed word per fault", () => {
     expect(tsvRefusal(`a\tb\n${"x\ty\n".repeat(SUMMARY_LIMITS.maxRows + 1)}`)).toBe(
       "too_many_rows",
     );
+    // The one-column rule is also decided before the row count: a blank last line wins.
+    expect(tsvRefusal(`a\n${"x\n".repeat(SUMMARY_LIMITS.maxRows + 1)}\n`)).toBe("ragged_row");
   });
 
   test("too_many_rows: 200,001 data rows are refused and 200,000 are read", () => {

@@ -21,8 +21,8 @@
  *    path or a message would put a contributor's text there.
  *
  * What the model is shown of a value goes through {@link renderValue}, which escapes the characters
- * that are invisible or that look like another (see {@link UNSEEN}), so a value cannot forge the
- * platform's own markers.
+ * that are invisible or are not text (see {@link UNSEEN}), so a value cannot forge the platform's
+ * own markers.
  */
 
 /**
@@ -159,8 +159,8 @@ const CUT_MARKER = "...(cut)";
  * so a cut never splits a surrogate pair). The kept text then goes through `JSON.stringify`, which
  * doubles every backslash and escapes quotes, line breaks and the other control characters, so no
  * value can imitate an escape the platform writes after it. Only then is every character that
- * survives and is unseen (`\p{C}` or `\p{Z}`: zero-width and bidi controls, no-break and other
- * spaces, the soft hyphen, private-use and unassigned code points) replaced by `\u{HEX}`, which is
+ * survives and is in {@link UNSEEN} (control, format and separator characters, private-use and
+ * unassigned code points, the default-ignorable ones and the Braille blank) replaced by `\u{HEX}`, which is
  * safe because a literal `\u{200B}` in the value was already doubled to `\\u{200B}`. Only U+0020 is
  * left alone. A lone surrogate is escaped by `JSON.stringify` itself (well-formed since ES2019).
  * When the value was cut, `...(cut)` is appended AFTER the closing quote; a value that merely ends
@@ -292,8 +292,9 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
  * **A one-column table is stricter.** csv readers skip an empty line and pandas skips a line of
  * only spaces, so in a table with one column such a line is a row here and not there. The platform
  * would show more than the reader sees, which cannot hide a change, but "two readers cannot
- * disagree" is the promise, so a one-column table with an empty or all-space line (the header
- * included) is `ragged_row`. In a table with two or more columns every reader agrees.
+ * disagree" is the promise, so a one-column table with an empty or all-space line is `ragged_row`
+ * (an empty header is already `empty_column_name`; an all-space header reaches this rule). In a
+ * table with two or more columns every reader agrees.
  */
 export function parseTsv(bytes: Uint8Array): Parsed<Table> {
   return parseTsvWith(bytes, serializeTsv);
@@ -346,11 +347,13 @@ export function parseTsvWith(
   if (header.includes("")) return { ok: false, refusal: "empty_column_name" };
   if (new Set(header).size !== header.length) return { ok: false, refusal: "duplicate_column" };
 
-  // Step 9. A row past the cap is counted, not kept, so a hostile file cannot make this hold it
-  // all; its width is still checked, because a ragged row anywhere is the first thing wrong.
+  // A one-column table with an empty or all-space line: see the doc above.
   if (header.length === 1 && lines.some((line) => /^ *$/.test(line))) {
     return { ok: false, refusal: "ragged_row" };
   }
+
+  // Step 9. A row past the cap is counted, not kept, so a hostile file cannot make this hold it
+  // all; its width is still checked, because a ragged row anywhere is the first thing wrong.
   const rows: string[][] = [];
   let tooMany = false;
   for (let i = 1; i < lines.length; i++) {
