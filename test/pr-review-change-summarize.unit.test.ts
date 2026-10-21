@@ -1156,7 +1156,7 @@ describe("renderClasses: completeness by kind (design section 5.3)", () => {
   test("a class whose line was cut is incomplete, whatever its kind: a long column name, a long path", () => {
     const longColumn = "c".repeat(301);
     const longDir = "d".repeat(301);
-    const { complete, classes } = rendered([
+    const { complete, shown, classes } = rendered([
       {
         path: channels(1),
         before: tsv(["name", longColumn, "units"], ["A1", "1", "uV"]),
@@ -1169,6 +1169,8 @@ describe("renderClasses: completeness by kind (design section 5.3)", () => {
       },
     ]);
     expect(classes.map((c) => c.kind).sort()).toEqual(["column_removed", "key_relabeled"]);
+    // Both were rendered (a class that never rendered is not complete either): they were cut.
+    expect(shown.size).toBe(2);
     expect(complete.size).toBe(0);
   });
 
@@ -1601,6 +1603,13 @@ describe("renderClasses: pairs that may look alike are annotated with their firs
     );
   });
 
+  // `differenceNote` keeps the design's NFC condition although the last one (a first difference
+  // outside ASCII) covers it: two values equal after NFC cannot first differ at an ASCII character
+  // on both sides. That was checked, not only argued, by a brute force in the phase 3 review over
+  // 400,000 generated strings: 187 pairs were equal after NFC but not byte for byte, and in none of
+  // them did the values first differ at ASCII on both sides (0 violations), so the NFC condition
+  // annotates no pair the last one would not. Which condition annotates such a pair is therefore
+  // not observable, and the tests here pin the pairs, not the branch.
   test("equal after NFC with both sides outside ASCII: the Angstrom sign and the letter A with a ring", () => {
     expect(pairLine("\u{212B}", "\u{C5}")).toBe(
       '    "\u{212B}" -> "\u{C5}" x1 (first difference at character 1: U+212B to U+00C5)',
@@ -2188,7 +2197,7 @@ describe("summarizeChanges: one outcome per candidate, in path order", () => {
       small("a.tsv"),
       { path: "b.tsv", before: half, after: half },
       small("c.tsv"),
-      small("d.json".replace(".json", ".tsv")),
+      small("d.tsv"),
     ]);
     expect(refusals(summary)).toEqual([
       "a.tsv ok",
