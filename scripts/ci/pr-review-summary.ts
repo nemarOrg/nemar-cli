@@ -3236,6 +3236,10 @@ function differenceNote(
 ): string | null {
   const note = firstDifference(before, after);
   if (note === null) return null;
+  // The NFC condition is the design's own, kept as it is written, though the last condition covers
+  // it: two values equal after NFC that differ first at an ASCII character on both sides cannot
+  // exist (an ASCII character is a starter that decomposes to itself, so the decompositions would
+  // differ there too), so such a pair always differs first at a character outside ASCII.
   if (
     b.text === a.text ||
     withoutUnseen(before) === withoutUnseen(after) ||
@@ -3716,7 +3720,8 @@ export function summarizeChanges(input: {
  *    its corresponding path, so two different files never compete for one; the only order that
  *    could matter is two candidates with ONE path, and a path given twice is refused, every time
  *    it appears, as `internal_mismatch`, the word for the platform's own reading not adding up.)
- * 2. Builds the pools once, from `pool` sorted by path.
+ * 2. Builds the pools once, from `pool`. {@link buildPools} gives the same pools for the files in
+ *    any order (it sorts the copies of one file itself), so the pool needs no sorting here.
  * 3. Checks the deadline BEFORE each file. When `now()` has reached it, the WHOLE summary is
  *    abandoned: no file is accounted for, no class or text is kept, and the loss facts are zero.
  *    All or nothing is simpler to prove than a partial account, and an abandoned summary leaves
@@ -3746,7 +3751,7 @@ export function summarizeChangesWith(
   for (const candidate of candidates) {
     listed.set(candidate.path, (listed.get(candidate.path) ?? 0) + 1);
   }
-  const pools = buildPools([...input.pool].sort((a, b) => byCodeUnits(a.path, b.path)));
+  const pools = buildPools(input.pool);
 
   const outcomes: FileOutcome[] = [];
   const summarized: FileAtoms[] = [];

@@ -813,6 +813,30 @@ describe("renderClasses: the bounds", () => {
     expect(shown.has((classes[6] as ChangeClass).key)).toBe(false);
   });
 
+  test("room for the count line is kept: near the bound, the block never passes 30,000 characters", () => {
+    // Four classes of twelve long pairs, a fifth whose values grow 12 characters a step, and a
+    // short last one. Some steps put the first five within the count line's length of the bound
+    // with the last one left out; only the room kept for the count line holds the block under it.
+    const pairs = (k: number, side: string, length: number) =>
+      Array.from({ length: 12 }, (_, i) => ({ v: `${side}${k}-${i}-${"w".repeat(length)}` }));
+    const near: number[] = [];
+    for (let length = 0; length < 100; length++) {
+      const before: Record<string, unknown> = { small: "a", k4: pairs(4, "old", 0) };
+      const after: Record<string, unknown> = { small: "b", k4: pairs(4, "new", length) };
+      for (let k = 0; k < 4; k++) {
+        before[`k${k}`] = pairs(k, "old", 280);
+        after[`k${k}`] = pairs(k, "new", 280);
+      }
+      const { text, cut } = rendered([
+        { path: "x.json", before: JSON.stringify(before), after: JSON.stringify(after) },
+      ]);
+      expect(text.length).toBeLessThanOrEqual(SUMMARY_LIMITS.maxSummaryChars);
+      if (cut === 1 && text.length > SUMMARY_LIMITS.maxSummaryChars - 60) near.push(length);
+    }
+    // The sweep reaches the edge: five classes shown, the last left out, the count line close.
+    expect(near.length).toBeGreaterThan(2);
+  });
+
   test("a first class too large to fit leaves the block with the count alone", () => {
     const pairs = Array.from({ length: 12 }, (_, i) => ({ v: `${i}${"\u{200B}".repeat(299)}` }));
     const bigBefore = { a: pairs, b: pairs, c: pairs, d: pairs, e: pairs, f: pairs };
@@ -848,6 +872,37 @@ describe("renderClasses: completeness by kind (design section 5.3)", () => {
     ]);
     expect(classes.map((c) => `${c.kind} ${c.items}`)).toEqual(["key_relabeled 500"]);
     expect(complete.has((classes[0] as ChangeClass).key)).toBe(true);
+  });
+
+  test("a relocation whose target path is cut is incomplete: the reader cannot see where the rows went", () => {
+    const path = channels(1);
+    const far = `sourcedata/${"d".repeat(290)}/${path}`;
+    const near = `sourcedata/old/${channels(2)}`;
+    const { complete, classes, accounted } = account(
+      [
+        {
+          path,
+          before: tsv(CHANNELS, ["A1", "EEG", "uV"], ["R1", "EEG", "uV"]),
+          after: tsv(CHANNELS, ["A1", "EEG", "uV"]),
+        },
+        {
+          path: channels(2),
+          before: tsv(CHANNELS, ["A1", "EEG", "uV"], ["R1", "EEG", "uV"]),
+          after: tsv(CHANNELS, ["A1", "EEG", "uV"]),
+        },
+      ],
+      {
+        pool: [
+          pooled(far, null, tsv(CHANNELS, ["R1", "EEG", "uV"])),
+          pooled(near, null, tsv(CHANNELS, ["R1", "EEG", "uV"])),
+        ],
+      },
+    );
+    expect(classes.map((c) => c.kind)).toEqual(["row_relocated", "row_relocated"]);
+    expect(classes.filter((c) => complete.has(c.key)).map((c) => c.detail)).toEqual([
+      "sourcedata/old/sub-*/eeg/sub-*_task-*_channels.tsv",
+    ]);
+    expect([...accounted]).toEqual([channels(2)]);
   });
 
   test("a class whose line was cut is incomplete, whatever its kind: a long column name, a long path", () => {
@@ -997,6 +1052,12 @@ describe("renderClasses: pairs that may look alike are annotated with their firs
     const stem = "s".repeat(300);
     expect(pairLine(`${stem}A`, `${stem}B`)).toBe(
       `    "${stem}"...(cut) -> "${stem}"...(cut) x1 (first difference at character 301: U+0041 to U+0042)`,
+    );
+  });
+
+  test("equal after NFC with both sides outside ASCII: the Angstrom sign and the letter A with a ring", () => {
+    expect(pairLine("\u{212B}", "\u{C5}")).toBe(
+      '    "\u{212B}" -> "\u{C5}" x1 (first difference at character 1: U+212B to U+00C5)',
     );
   });
 
