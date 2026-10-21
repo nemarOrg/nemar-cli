@@ -33,6 +33,7 @@ import { dirname, join } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import {
   CALLBACK_ORIGINS,
+  type EvidenceStats,
   STAGE_BUDGETS,
   type StageObservation,
   __setStageBudgetsForTests,
@@ -42,6 +43,7 @@ import {
   main,
   mapError,
   postCallback,
+  reviewPullRequest,
   runReview,
   textFactsOf,
 } from "../scripts/ci/pr-review";
@@ -5627,6 +5629,109 @@ describe("the change summary in the prompt", () => {
     expect([opens, closes]).toEqual([4, 4]);
     expect(platformFindings(content.summary)).toEqual([]);
   }, 30_000);
+});
+
+describe("the evidence observer", () => {
+  /**
+   * A release that removes a row and a key in sub-01, and changes a cell and a value in sub-02,
+   * built once (nothing writes to it).
+   */
+  let repo: Repo | null = null;
+  const stats = (): Repo => {
+    repo ??= releaseChanging("eo-stats", TWO_SUBJECTS, (dir) => {
+      write(dir, tableOf("sub-01"), "name\ttype\nPz\tEEG\n");
+      write(dir, sidecarOf("sub-01"), '{"SamplingFrequency":500}');
+      write(dir, tableOf("sub-02"), "name\ttype\nCz\tMISC\nPz\tEEG\n");
+      write(dir, sidecarOf("sub-02"), '{"TaskName":"rest","SamplingFrequency":512}');
+    });
+    return repo;
+  };
+  const under = (r: Repo, title: string) => ({
+    repoDir: r.dir,
+    base: r.base,
+    head: r.head,
+    pr: { title, body: "Cz was never recorded in sub-01; sub-02 is corrected." },
+    fromFork: false,
+  });
+
+  test("it sees closed numbers once, after the content was read and before the review is asked", async () => {
+    const r = stats();
+    const seen: EvidenceStats[] = [];
+    const asked: number[] = [];
+    const report = await reviewPullRequest(under(r, "Remove the Cz channel"), undefined, (s) => {
+      seen.push(s);
+      asked.push(modelRequests.length);
+    });
+    expect(seen).toHaveLength(1);
+    // The screen had been asked, and the review not yet.
+    expect(asked).toEqual([1]);
+    expect(modelRequests).toHaveLength(2);
+    const s = seen[0] as EvidenceStats;
+    for (const [key, value] of Object.entries(s)) {
+      expect(["number", "boolean"], key).toContain(typeof value);
+    }
+    const f = gatherGitFacts(r.dir, r.base, r.head);
+    // Six files changed in the areas the review reads: the description, CHANGES, two tables and two
+    // sidecars. The summary accounts for the five it reads; CHANGES and three illustrations are
+    // shown as diffs.
+    expect(s).toEqual({
+      files: 6,
+      wanted: 6,
+      cosmetic: 0,
+      read: 6,
+      patches: 4,
+      readIncomplete: false,
+      truncated: false,
+      summaryAbandoned: false,
+      summarized: 5,
+      refused: 0,
+      accounted: 5,
+      classes: 5,
+      cut: 0,
+      summaryChars: f.summary.text.length,
+      rowsRemoved: 1,
+      rowsRemovedFiles: 1,
+      rowsRelocated: 0,
+      columnsRemoved: 0,
+      keysRemoved: 1,
+      keysRemovedFiles: 1,
+      keysMoved: 0,
+      valuesEmptied: 0,
+      platformFindings: 2,
+    });
+    expect(s.summaryChars).toBeGreaterThan(0);
+    // The numbers the report carries are the same ones.
+    expect([s.files, s.read, s.truncated]).toEqual([
+      report.evidence.files_changed,
+      report.evidence.files_read,
+      report.evidence.truncated,
+    ]);
+    expect(report.findings.slice(0, s.platformFindings).map((x) => x.code)).toEqual([
+      "data_removed",
+      "metadata_removed",
+    ]);
+  });
+
+  test("it is not told anything when the review ends at the facts or at the screen", async () => {
+    const r = stats();
+    const seen: EvidenceStats[] = [];
+    const facts = await reviewPullRequest(under(r, "Lee2019 EEG update"), undefined, (s) => {
+      seen.push(s);
+    });
+    expect(facts.v === 2 && facts.stage).toBe("facts");
+    screenReply = () => standInMessage(JSON.stringify(REJECT));
+    const screened = await reviewPullRequest(under(r, "Remove the Cz channel"), undefined, (s) => {
+      seen.push(s);
+    });
+    expect(screened.v === 2 && screened.stage).toBe("screen");
+    expect(seen).toEqual([]);
+    // The control: the same pull request through the screen tells it once.
+    screenReply = () => standInMessage(JSON.stringify(PROCEED));
+    await reviewPullRequest(under(r, "Remove the Cz channel"), undefined, (s) => {
+      seen.push(s);
+    });
+    expect(seen).toHaveLength(1);
+  });
 });
 
 describe("the content pass on the job's blob-less clone", () => {
