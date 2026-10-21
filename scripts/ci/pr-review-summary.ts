@@ -1360,6 +1360,18 @@ export interface JsonPool {
   readonly files: ReadonlyMap<string, ReadonlyMap<string, string>>;
   /** Leaf (path and value) to the files that have it as a new leaf, in the order given. */
   readonly byLeaf: ReadonlyMap<string, readonly string[]>;
+  /**
+   * By top-level key, EVERY JSON file of the pull request whose after document has that key,
+   * whether it adds a leaf or not. A sidecar nearer to a file than the one a key was moved to
+   * decides the key's value for that file, so a move is checked against all of them (see
+   * {@link diffJson}).
+   */
+  readonly byTopKey: ReadonlyMap<string, readonly string[]>;
+  /**
+   * The JSON files of the pull request whose after document could not be read. Such a file may hold
+   * any key, so where it applies to a file nothing can be said to have moved past it.
+   */
+  readonly unreadable: ReadonlySet<string>;
 }
 
 /** The key of {@link JsonPool.byLeaf}: injective in the pair, since both parts are JSON text. */
@@ -1401,6 +1413,8 @@ export function buildPools(files: readonly PoolFile[]): { rows: RowPool; json: J
   const sourcedataFor = new Map<string, string[]>();
   const jsonFiles = new Map<string, Map<string, string>>();
   const byLeaf = new Map<string, string[]>();
+  const byTopKey = new Map<string, string[]>();
+  const unreadable = new Set<string>();
 
   const seen = new Set<string>();
   for (const file of files) {
@@ -1437,7 +1451,21 @@ export function buildPools(files: readonly PoolFile[]): { rows: RowPool; json: J
     } else if (file.path.endsWith(".json")) {
       const after = parseJson(file.after);
       const before = file.before === null ? null : parseJson(file.before);
-      if (!after.ok || (before !== null && !before.ok)) continue;
+      if (!after.ok) {
+        unreadable.add(file.path);
+        continue;
+      }
+      // Every top-level key the file has now, before anything decides whether it adds a leaf: a
+      // file that only changed elsewhere still overrides a farther sidecar under these keys.
+      const root = after.value.value;
+      if (root.t === "obj") {
+        for (const key of root.keys) {
+          const listed = byTopKey.get(key);
+          if (listed === undefined) byTopKey.set(key, [file.path]);
+          else listed.push(file.path);
+        }
+      }
+      if (before !== null && !before.ok) continue;
       const had = new Map<string, string>();
       if (before?.ok)
         for (const leaf of flattenJson(before.value.value)) had.set(leaf.path, leaf.value);
@@ -1458,7 +1486,10 @@ export function buildPools(files: readonly PoolFile[]): { rows: RowPool; json: J
   // Sorted, so which of two copies of one removed row is taken does not depend on the order of
   // `files`: a relocation names the shape of the place it found the row, and that must not vary.
   for (const listed of sourcedataFor.values()) listed.sort(byCodeUnits);
-  return { rows: { files: rows, sourcedataFor }, json: { files: jsonFiles, byLeaf } };
+  return {
+    rows: { files: rows, sourcedataFor },
+    json: { files: jsonFiles, byLeaf, byTopKey, unreadable },
+  };
 }
 
 /** Code-unit order, the one order that is the same on every machine and in every locale. */
@@ -2424,6 +2455,33 @@ function bidsName(
 }
 
 /**
+ * Of the `sidecars` that apply to `target` under BIDS inheritance, the one whose value of a key the
+ * target sees: the nearest, that is the deepest directory, and in one directory the one whose name
+ * holds the most entities. Null when none applies, or when two are equally near: BIDS gives no
+ * order between those, so which one wins cannot be decided here and nothing is said to reach the
+ * target through either.
+ */
+function nearestSidecar(target: string, sidecars: readonly string[]): string | null {
+  let best: string | null = null;
+  let bestRank: readonly [number, number] = [-1, -1];
+  let tie = false;
+  for (const sidecar of new Set(sidecars)) {
+    if (!sidecarApplies(sidecar, target)) continue;
+    const name = bidsName(sidecar) as NonNullable<ReturnType<typeof bidsName>>;
+    const rank = [name.dir === "" ? 0 : name.dir.split("/").length, name.entities.size] as const;
+    const order = rank[0] - bestRank[0] || rank[1] - bestRank[1];
+    if (order > 0) {
+      best = sidecar;
+      bestRank = rank;
+      tie = false;
+    } else if (order === 0) {
+      tie = true;
+    }
+  }
+  return tie ? null : best;
+}
+
+/**
  * Whether the JSON file `sidecar` applies to the file `target` under BIDS inheritance, as far as
  * this module reads it (design section 4.6): it sits in the target's directory or in an ancestor of
  * it, it has the same suffix and the same extension, and every `key-value` entity of its name is in
@@ -2548,14 +2606,15 @@ export function verifyJsonCounts(diff: FileDiff<JsonCounts>): boolean {
  *   punctuation removed, except punctuation between two digits) or match by a relabel rule. A shared value is no evidence of which key
  *   became which: with `go` and `go2` both `"Go"`, `go` removed and `go3` added is a removed key
  *   and an added one, not `go` renamed.
- * - **moved** (`json_key_moved`) when another file of the pull request that applies to this one
- *   under BIDS inheritance ({@link sidecarApplies}) has it, with its path and value, as a leaf it
- *   did not have before, AND this file's after document is an object that no longer has the leaf's
- *   top-level key at all. Inheritance merges sidecars one level deep: a nearer file that has a
- *   top-level key replaces the farther file's whole value under it, so a nested leaf removed from a
- *   key this file keeps is gone for this file however many sidecars hold it. What the module cannot
- *   see is an UNCHANGED sidecar between the two that has the key; that limit is the model's to
- *   weigh (design section 4.6).
+ * - **moved** (`json_key_moved`) when this file's after document is an object that no longer has
+ *   the leaf's top-level key at all, and the NEAREST file of the pull request that applies to this
+ *   one under BIDS inheritance ({@link sidecarApplies}) and has that top-level key holds the leaf,
+ *   with its path and value, as a leaf it did not have before. Inheritance merges sidecars one
+ *   level deep: the nearest file that has a top-level key gives its whole value under it, so a
+ *   nested leaf removed from a key this file keeps is gone, and a key moved to a farther file is
+ *   overridden by a nearer one that sets it (see `nearestSidecar` for nearness and ties). What the
+ *   module cannot see is an UNCHANGED sidecar between the two; that limit is the model's to weigh
+ *   (design section 4.6).
  * - otherwise **removed**: a loss (`json_key_removed`), or a modification
  *   (`json_empty_key_removed`) when the value held nothing ({@link isMissingJson}), because nothing
  *   was lost.
@@ -2655,11 +2714,22 @@ export function diffJsonWith(
   // 3. What is left of the before side: kept in a sidecar that applies, or removed. A non-object
   // after document has no keys for a sidecar to merge under, so nothing in it is moved.
   const keptKeys = after.t === "obj" ? after.v : null;
+  const nearestByKey = new Map<string, string | null>();
+  const nearest = (key: string): string | null => {
+    let found = nearestByKey.get(key);
+    if (found === undefined) {
+      found = nearestSidecar(path, [...(pool.byTopKey.get(key) ?? []), ...pool.unreadable]);
+      if (found !== null && pool.unreadable.has(found)) found = null;
+      nearestByKey.set(key, found);
+    }
+    return found;
+  };
   for (const [bi, leaf] of bl.entries()) {
     if (bFate[bi] !== JSON_FATE_NONE) continue;
     const unshadowed = leaf.top !== null && keptKeys !== null && !keptKeys.has(leaf.top);
-    const homes = unshadowed ? (pool.byLeaf.get(leafKey(leaf.path, leaf.value)) ?? []) : [];
-    if (homes.some((home) => sidecarApplies(home, path))) bFate[bi] = JSON_FATE_MOVED;
+    const decider = unshadowed ? nearest(leaf.top as string) : null;
+    const homes = decider === null ? [] : (pool.byLeaf.get(leafKey(leaf.path, leaf.value)) ?? []);
+    if (decider !== null && homes.includes(decider)) bFate[bi] = JSON_FATE_MOVED;
     else bFate[bi] = isMissingJson(leaf.json) ? JSON_FATE_EMPTY_REMOVED : JSON_FATE_REMOVED;
   }
   // 4. What is left of the after side is new.

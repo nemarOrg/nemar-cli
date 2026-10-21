@@ -989,6 +989,30 @@ describe("buildPools: the rows and leaves a pull request adds", () => {
     expect([...pool.json.files.keys()]).toEqual(["good.json"]);
   });
 
+  test("every readable JSON file lists its top-level keys, and an unreadable one is named", () => {
+    const pool = buildPools([
+      pooled("task-x_eeg.json", '{"A": 1, "B": 2}', '{"A": 1, "B": 2, "C": 3}'),
+      pooled("sub-01/sub-01_task-x_eeg.json", '{"A": 1}', '{"A": 5}'),
+      pooled("unchanged_eeg.json", '{"A": 1}', '{"A": 1}'),
+      pooled("list_eeg.json", null, "[1]"),
+      pooled("bad_before_eeg.json", "{", '{"D": 1}'),
+      pooled("bad_after_eeg.json", '{"A": 1}', "{"),
+    ]);
+    expect(Object.fromEntries(pool.json.byTopKey)).toEqual({
+      A: ["task-x_eeg.json", "sub-01/sub-01_task-x_eeg.json", "unchanged_eeg.json"],
+      B: ["task-x_eeg.json"],
+      C: ["task-x_eeg.json"],
+      D: ["bad_before_eeg.json"],
+    });
+    expect([...pool.json.unreadable]).toEqual(["bad_after_eeg.json"]);
+    // Only the files that add a leaf are homes.
+    expect([...pool.json.files.keys()]).toEqual([
+      "task-x_eeg.json",
+      "sub-01/sub-01_task-x_eeg.json",
+      "list_eeg.json",
+    ]);
+  });
+
   test("a JSON file contributes the leaves it has now and did not have, by path and value", () => {
     const pool = buildPools([
       pooled(
@@ -3676,6 +3700,77 @@ describe("diffJson: moved keys", () => {
     ).toEqual(["json_key_removed"]);
   });
 
+  test("a nearer sidecar the pull request changed decides the value: a key moved past it is lost", () => {
+    const file = "sub-01/eeg/sub-01_task-x_eeg.json";
+    const before = '{"SamplingFrequency": 500, "x": 1}';
+    const after = '{"x": 1}';
+    const root = pooled("task-x_eeg.json", "{}", '{"SamplingFrequency": 500}');
+    const kinds = (files: PoolFile[]) =>
+      diffJsonText(file, before, after, files).atoms.map((a) => a.kind);
+    // The root sidecar holds 500 now, but the subject one, nearer to the file, says 250.
+    expect(
+      kinds([root, pooled("sub-01/sub-01_task-x_eeg.json", "{}", '{"SamplingFrequency": 250}')]),
+    ).toEqual(["json_key_removed"]);
+    // Also when the nearer one already had the key and changed something else.
+    expect(
+      kinds([
+        root,
+        pooled(
+          "sub-01/sub-01_task-x_eeg.json",
+          '{"SamplingFrequency": 250, "Other": 1}',
+          '{"SamplingFrequency": 250, "Other": 2}',
+        ),
+      ]),
+    ).toEqual(["json_key_removed"]);
+    // A nearer one that holds the same value as a new leaf is itself a home.
+    expect(
+      kinds([root, pooled("sub-01/sub-01_task-x_eeg.json", "{}", '{"SamplingFrequency": 500}')]),
+    ).toEqual(["json_key_moved"]);
+    // A nearer one without the key leaves the farther one deciding.
+    expect(kinds([root, pooled("sub-01/sub-01_task-x_eeg.json", "{}", '{"Other": 1}')])).toEqual([
+      "json_key_moved",
+    ]);
+    // A nearer one that cannot be read may hold anything.
+    expect(kinds([root, pooled("sub-01/sub-01_task-x_eeg.json", "{}", "{")])).toEqual([
+      "json_key_removed",
+    ]);
+    // One that does not apply (another subject) decides nothing.
+    expect(
+      kinds([root, pooled("sub-02/sub-02_task-x_eeg.json", "{}", '{"SamplingFrequency": 250}')]),
+    ).toEqual(["json_key_moved"]);
+  });
+
+  test("nearest is the deepest directory, then the most entities; two equally near decide nothing", () => {
+    const file = "sub-01/eeg/sub-01_task-x_run-1_eeg.json";
+    const before = '{"SamplingFrequency": 500, "x": 1}';
+    const after = '{"x": 1}';
+    const kinds = (files: PoolFile[]) =>
+      diffJsonText(file, before, after, files).atoms.map((a) => a.kind);
+    const home = (path: string) => pooled(path, "{}", '{"SamplingFrequency": 500}');
+    const other = (path: string) => pooled(path, "{}", '{"SamplingFrequency": 250}');
+    // A deeper directory wins over more entities.
+    expect(kinds([home("task-x_run-1_eeg.json"), other("sub-01/eeg.json")])).toEqual([
+      "json_key_removed",
+    ]);
+    expect(kinds([other("task-x_run-1_eeg.json"), home("sub-01/eeg.json")])).toEqual([
+      "json_key_moved",
+    ]);
+    // In one directory, more entities win.
+    expect(kinds([home("sub-01/sub-01_eeg.json"), other("sub-01/sub-01_task-x_eeg.json")])).toEqual(
+      ["json_key_removed"],
+    );
+    expect(kinds([other("sub-01/sub-01_eeg.json"), home("sub-01/sub-01_task-x_eeg.json")])).toEqual(
+      ["json_key_moved"],
+    );
+    // Two in one directory with as many entities: BIDS gives no order, so nothing is moved.
+    expect(
+      kinds([home("sub-01/sub-01_task-x_eeg.json"), other("sub-01/sub-01_run-1_eeg.json")]),
+    ).toEqual(["json_key_removed"]);
+    expect(
+      kinds([home("sub-01/sub-01_task-x_eeg.json"), home("sub-01/sub-01_run-1_eeg.json")]),
+    ).toEqual(["json_key_removed"]);
+  });
+
   test("a rename wins over a move: the key is still in this file", () => {
     const diff = diffJsonText(
       target,
@@ -5072,15 +5167,20 @@ function oracleFold(name: string): string {
 const typeWord = (v: Plain): string => (v === null ? "null" : Array.isArray(v) ? "arr" : typeof v);
 
 /** The JSON files a generated case may put moved keys in, and whether each applies to which file. */
-const ORACLE_SIDECARS: { path: string; appliesTo: readonly string[] }[] = [
+const ORACLE_SIDECARS: { path: string; appliesTo: readonly string[]; nearness: number }[] = [
   {
     path: "task-x_eeg.json",
     appliesTo: ["sub-01/eeg/sub-01_task-x_eeg.json", "sub-02/eeg/sub-02_task-x_eeg.json"],
+    nearness: 0,
   },
-  { path: "sub-01/sub-01_task-x_eeg.json", appliesTo: ["sub-01/eeg/sub-01_task-x_eeg.json"] },
-  { path: "sub-02/eeg/sub-02_task-x_eeg.json", appliesTo: [] },
-  { path: "task-x_channels.json", appliesTo: [] },
-  { path: "sub-01/eeg/sub-01_task-x_run-1_eeg.json", appliesTo: [] },
+  {
+    path: "sub-01/sub-01_task-x_eeg.json",
+    appliesTo: ["sub-01/eeg/sub-01_task-x_eeg.json"],
+    nearness: 1,
+  },
+  { path: "sub-02/eeg/sub-02_task-x_eeg.json", appliesTo: [], nearness: 2 },
+  { path: "task-x_channels.json", appliesTo: [], nearness: 0 },
+  { path: "sub-01/eeg/sub-01_task-x_run-1_eeg.json", appliesTo: [], nearness: 2 },
 ];
 
 /** Everything the oracle finds wrong with a JSON diff. */
@@ -5167,14 +5267,26 @@ function jsonViolations(
             top === null ||
             Object.prototype.hasOwnProperty.call(after, top);
           if (keepsTop) out.push("moved_but_shadowed");
-          const home = sidecars.some((s) => {
-            const applies =
-              ORACLE_SIDECARS.find((o) => o.path === s.path)?.appliesTo.includes(path) ?? false;
-            const now = oracleLeaves(s.after).get(p);
-            const then = s.before === null ? undefined : oracleLeaves(s.before).get(p);
-            return applies && now?.value === x.before && then?.value !== x.before;
-          });
-          if (!home) out.push("moved_nowhere");
+          // The nearest applying sidecar that has the top-level key must be the one holding the
+          // leaf as new; the oracle's sidecars differ in nearness, so there is no tie to decide.
+          const deciding = sidecars
+            .map((sc) => ({ sc, spec: ORACLE_SIDECARS.find((o) => o.path === sc.path) }))
+            .filter(
+              ({ sc, spec }) =>
+                (spec?.appliesTo.includes(path) ?? false) &&
+                top !== null &&
+                sc.after !== null &&
+                typeof sc.after === "object" &&
+                !Array.isArray(sc.after) &&
+                Object.prototype.hasOwnProperty.call(sc.after, top),
+            )
+            .sort((m, n) => (n.spec?.nearness ?? 0) - (m.spec?.nearness ?? 0))[0]?.sc;
+          const now = deciding === undefined ? undefined : oracleLeaves(deciding.after).get(p);
+          const then =
+            deciding === undefined || deciding.before === null
+              ? undefined
+              : oracleLeaves(deciding.before).get(p);
+          if (now?.value !== x.before || then?.value === x.before) out.push("moved_not_by_nearest");
         }
         break;
       }
@@ -5327,6 +5439,18 @@ describe("reconstruction oracle: JSON", () => {
         if (typeWord(before) !== typeWord(after)) note("root_type_changed");
         cases.push({ path, before, after });
       }
+      // A nearer sidecar that also sets a moved key, to the same value or another one.
+      const farther = sidecarAfter.get("task-x_eeg.json");
+      if (farther !== undefined) {
+        const near = "sub-01/sub-01_task-x_eeg.json";
+        for (const key of Object.keys(farther)) {
+          if (!chance(0.7)) continue;
+          const side = sidecarAfter.get(near) ?? {};
+          side[key] = chance(0.4) ? (farther[key] as Plain) : oracleValue(random, 1);
+          sidecarAfter.set(near, side);
+          note("nearer_sets_moved_key");
+        }
+      }
       const sidecars = [...sidecarAfter].map(([path, value]) => ({
         path,
         before: chance(0.5) ? null : ({} as Plain),
@@ -5387,6 +5511,7 @@ describe("reconstruction oracle: JSON", () => {
       ["several_renames_found", 40],
       ["moved_whole", 1000],
       ["nested_move_shadowed", 300],
+      ["nearer_sets_moved_key", 200],
       ["shared_value", 500],
       ["emptied", 500],
       ["value_changed", 1000],
