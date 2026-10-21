@@ -31,7 +31,14 @@
  * evidence for a pairing is doubtful, the pairing is not made: a doubtful pair is a removal and an
  * addition, shown as such and counted as a loss, and never a quiet match. That direction is the
  * rule of every choice in it.
+ *
+ * The third part groups the atoms of every file into change classes ({@link classify}): one class
+ * per kind, path shape, field, rule and detail, so one edit repeated over 125 subjects is one
+ * class with a count.
  */
+
+// The one import, and a pure one: how a path is made safe for the prompt is decided once, there.
+import { tidyPath } from "../../shared/untrusted-text";
 
 /**
  * The bounds of the summary. Every cap is a refusal or a cut, never a silent truncation: a file
@@ -2853,4 +2860,317 @@ export function diffJsonWith(
   const diff: FileDiff<JsonCounts> = { family: "json", keyColumn: null, atoms, counts };
   if (!verify(diff)) return { ok: false, refusal: "internal_mismatch" };
   return { ok: true, value: diff };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Change classes (design sections 4.2 and 5.1)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The words a class of each kind is called by, in the class table of the facts block and on the
+ * class line of the fenced block. Closed phrases written by the platform, one per kind and no two
+ * alike, so a class line names its kind exactly and no author text is ever in the facts. A
+ * `Record` over {@link ClassKind}, so a kind added without words does not compile.
+ */
+export const KIND_WORDS: Readonly<Record<ClassKind, string>> = {
+  column_removed: "columns removed",
+  row_removed: "rows removed",
+  json_key_removed: "keys removed",
+  row_relocated: "rows removed and found verbatim in a row this pull request adds",
+  json_key_moved: "keys moved to a sidecar that applies by inheritance",
+  key_relabeled: "rows relabeled",
+  cell_templated: "cells changed by a rule",
+  cell_replaced: "cells replaced",
+  cell_emptied: "cells emptied",
+  json_value_changed: "values changed",
+  json_type_changed: "value types changed",
+  json_emptied: "values emptied",
+  json_key_renamed: "keys renamed",
+  json_empty_key_removed: "keys without a value removed",
+  rows_reordered: "row order changed",
+  columns_reordered: "column order changed",
+  json_keys_reordered: "key order changed",
+  format: "file layout changed",
+  column_added: "columns added",
+  row_added: "rows added",
+  cell_filled: "cells filled",
+  json_key_added: "keys added",
+  json_filled: "values filled",
+};
+
+/**
+ * What showing a class of a kind COMPLETELY takes (design section 5.3).
+ *
+ * - `pairs`: every distinct before and after value, with its count, and no value cut. The kinds
+ *   whose atoms say "this value became that one", where only the values say what was lost.
+ * - `removals`: the same for kinds with one side only (a removed row's key or row text, a removed
+ *   key's `name = value`).
+ * - `rule`: the class line, whose rule is the full description (a relabel rule, the place a row
+ *   was found, a rename, the fact of a reorder or a layout change); examples only illustrate.
+ * - `additive`: nothing. New content removes nothing, so coverage never needs it shown.
+ *
+ * A `Record` over {@link ClassKind}: a kind added without saying how it is shown does not compile,
+ * because a kind that defaulted to `rule` or `additive` would let a class be called complete
+ * without its values.
+ */
+export type ClassDisplay = "pairs" | "removals" | "rule" | "additive";
+export const DISPLAY_OF: Readonly<Record<ClassKind, ClassDisplay>> = {
+  column_removed: "rule",
+  row_removed: "removals",
+  json_key_removed: "removals",
+  row_relocated: "rule",
+  json_key_moved: "rule",
+  key_relabeled: "rule",
+  cell_templated: "rule",
+  cell_replaced: "pairs",
+  cell_emptied: "pairs",
+  json_value_changed: "pairs",
+  json_type_changed: "pairs",
+  json_emptied: "pairs",
+  json_key_renamed: "rule",
+  json_empty_key_removed: "removals",
+  rows_reordered: "rule",
+  columns_reordered: "rule",
+  json_keys_reordered: "rule",
+  format: "rule",
+  column_added: "additive",
+  row_added: "additive",
+  cell_filled: "additive",
+  json_key_added: "additive",
+  json_filled: "additive",
+};
+
+/**
+ * One change, repeated: every atom of every file that has the same kind, path shape, field, rule
+ * and detail (design section 4.2). One edit made to 125 subjects is one class with a count, and an
+ * edit that differs in any of those is another class.
+ */
+export interface ChangeClass {
+  /** The JSON text of `[kind, shape, field, rule, detail]`: unique per class, stable within a run. */
+  key: string;
+  kind: ClassKind;
+  /** The path with every BIDS entity value written `*` ({@link entityPattern}). */
+  shape: string;
+  /**
+   * The column for a table kind; for a JSON kind the leaf path (value kinds) or the parent path
+   * (key kinds), with every array index written `[*]` ({@link foldIndices}); null for the kinds
+   * that have none (the reorders, `format`, and a row kind of a keyless table).
+   */
+  field: string | null;
+  /** The relabel rule, for `key_relabeled` and `cell_templated`; null otherwise. */
+  rule: RelabelRule | null;
+  /**
+   * Part of the key for three kinds only: the {@link FormatDetail} word of `format`, the target
+   * shape of `row_relocated`, and the `old -> new` names of `json_key_renamed`. Null otherwise:
+   * a removed column's count, a key's name and every value are what a class is made OF, not what
+   * it is.
+   */
+  detail: string | null;
+  /** The files that have an atom of the class, in review order. */
+  files: ReadonlySet<string>;
+  /** How many atoms the class holds. */
+  items: number;
+  /**
+   * For the `pairs` and `removals` kinds ({@link DISPLAY_OF}), each distinct value pair as the
+   * text `before + U+0000 + after` with how many atoms have it; empty for every other kind. The
+   * before side of a removal is the removed key or row text, or `name = value` for a JSON key, and
+   * its after side is empty. No after side can hold U+0000 (a table refuses a NUL byte, and
+   * canonical JSON escapes it), so the LAST U+0000 is always the separator, while a JSON key name
+   * on the before side may hold one.
+   */
+  pairs: ReadonlyMap<string, number>;
+  /**
+   * Up to `samplesPerClass` examples, each a file path and what in it changed (a row's key, a key's
+   * name, a cell's two values), already rendered for the prompt: the first atom of each of the
+   * first files in review order, or, when the class is in one file only, its first atoms there.
+   */
+  examples: readonly string[];
+}
+
+/** One file's atoms, as {@link classify} groups them. */
+export interface FileAtoms {
+  path: string;
+  atoms: readonly Atom[];
+}
+
+/** The kinds whose `detail` is part of the class key: see {@link ChangeClass.detail}. */
+const DETAIL_IN_KEY: ReadonlySet<ClassKind> = new Set([
+  "format",
+  "row_relocated",
+  "json_key_renamed",
+]);
+
+/**
+ * A JSON path with every array index written `[*]`, so the same edit in every element of a list is
+ * one class. A key in brackets (`["a b"]`, JSON-escaped) is passed over whole, so a key that reads
+ * `[0]` is never taken for an index: only a bracket of digits is one.
+ */
+export function foldIndices(path: string): string {
+  return path.replace(/(\["(?:[^"\\]|\\.)*"\])|\[[0-9]+\]/g, (match, key: string | undefined) =>
+    key === undefined ? "[*]" : match,
+  );
+}
+
+/** The identity of the class an atom of a file belongs to: see {@link ChangeClass}. */
+export function classKeyOf(
+  path: string,
+  atom: Atom,
+): Pick<ChangeClass, "key" | "kind" | "shape" | "field" | "rule" | "detail"> {
+  const shape = entityPattern(path);
+  // A table's column name is the author's text and is never folded; a JSON path is the module's.
+  const field =
+    atom.field === null
+      ? null
+      : atom.kind.startsWith("json_")
+        ? foldIndices(atom.field)
+        : atom.field;
+  const rule = atom.kind === "key_relabeled" || atom.kind === "cell_templated" ? atom.rule : null;
+  const detail = DETAIL_IN_KEY.has(atom.kind) ? atom.detail : null;
+  // The rule by its fields in a fixed order, so two equal rules are one key however they were built.
+  const ruleKey = rule === null ? null : [rule.kind, rule.gaps, rule.shape, rule.repadded];
+  const key = JSON.stringify([atom.kind, shape, field, ruleKey, detail]);
+  return { key, kind: atom.kind, shape, field, rule, detail };
+}
+
+/** The before side of a removal as its pair shows it: see {@link ChangeClass.pairs}. */
+function removedText(atom: Atom): string {
+  return atom.kind === "row_removed"
+    ? (atom.before ?? "")
+    : `${atom.detail ?? ""} = ${atom.before ?? ""}`;
+}
+
+/** The pair an atom adds to its class, or null for a kind that is not shown by its values. */
+function pairOf(atom: Atom): string | null {
+  switch (DISPLAY_OF[atom.kind]) {
+    case "pairs":
+      return `${atom.before ?? ""}\u{0}${atom.after ?? ""}`;
+    case "removals":
+      return `${removedText(atom)}\u{0}`;
+    default:
+      return null;
+  }
+}
+
+/** A path as the summary prints it: control and line-breaking characters made spaces, and cut. */
+const PATH_CHARS = SUMMARY_LIMITS.maxValueChars;
+
+/** What one example of an atom says, after its file's path: see {@link ChangeClass.examples}. */
+function exampleOf(path: string, atom: Atom): string {
+  const where = tidyPath(path, PATH_CHARS);
+  const value = (v: string | null): string => renderValue(v ?? "").text;
+  switch (atom.kind) {
+    case "key_relabeled":
+      return `${where} row ${value(atom.before)} -> ${value(atom.after)}`;
+    case "row_removed":
+    case "row_relocated":
+      return `${where} row ${value(atom.before)}`;
+    case "row_added":
+      return `${where} row ${value(atom.after)}`;
+    case "cell_templated":
+    case "cell_replaced":
+    case "cell_emptied":
+    case "cell_filled":
+      return `${where} ${value(atom.before)} -> ${value(atom.after)}`;
+    case "json_value_changed":
+    case "json_type_changed":
+    case "json_emptied":
+    case "json_filled":
+      return `${where} key ${value(atom.field)}`;
+    case "json_key_removed":
+    case "json_empty_key_removed":
+    case "json_key_added":
+    case "json_key_moved":
+    case "json_key_renamed":
+      return `${where} key ${value(atom.detail)}`;
+    case "column_removed":
+      return `${where} (${atom.detail ?? "0"} non-missing values)`;
+    case "format":
+      // The states are the platform's own words, except a mixed file's per-line pattern.
+      return atom.detail === "line_ending_pattern" || atom.before === null || atom.after === null
+        ? where
+        : `${where} (${atom.before} to ${atom.after})`;
+    case "column_added":
+    case "columns_reordered":
+    case "rows_reordered":
+    case "json_keys_reordered":
+      return where;
+  }
+}
+
+/** The order of the roles in the summary: what a reader most needs to see comes first. */
+const ROLE_RANK: Readonly<Record<ClassRole, number>> = {
+  loss: 0,
+  relocated: 1,
+  modification: 2,
+  additive: 3,
+};
+
+/**
+ * Group the atoms of every file into classes (design section 4.2), in render order (section 5.1):
+ * loss, then relocated, then modification, then additive; within a role the class in more files
+ * first, then the one with more items, then the class key in code-unit order, so the order is a
+ * function of the classes alone.
+ *
+ * `files` must be in review order (the summary passes them sorted by path); the examples are taken
+ * in that order, so they too depend only on the input.
+ */
+export function classify(files: readonly FileAtoms[]): ChangeClass[] {
+  interface Building {
+    identity: ReturnType<typeof classKeyOf>;
+    files: Set<string>;
+    items: number;
+    pairs: Map<string, number>;
+    examples: string[];
+    /** The second atom of the first file, used when no second file has the class. */
+    spare: string | null;
+  }
+  const byKey = new Map<string, Building>();
+  for (const file of files) {
+    for (const atom of file.atoms) {
+      const identity = classKeyOf(file.path, atom);
+      let entry = byKey.get(identity.key);
+      if (entry === undefined) {
+        entry = {
+          identity,
+          files: new Set(),
+          items: 0,
+          pairs: new Map(),
+          examples: [],
+          spare: null,
+        };
+        byKey.set(identity.key, entry);
+      }
+      const newFile = !entry.files.has(file.path);
+      entry.files.add(file.path);
+      entry.items++;
+      const pair = pairOf(atom);
+      if (pair !== null) entry.pairs.set(pair, (entry.pairs.get(pair) ?? 0) + 1);
+      if (newFile && entry.examples.length < SUMMARY_LIMITS.samplesPerClass) {
+        entry.examples.push(exampleOf(file.path, atom));
+      } else if (!newFile && entry.files.size === 1 && entry.spare === null) {
+        entry.spare = exampleOf(file.path, atom);
+      }
+    }
+  }
+  const classes: ChangeClass[] = [];
+  for (const entry of byKey.values()) {
+    const examples = [...entry.examples];
+    if (examples.length < SUMMARY_LIMITS.samplesPerClass && entry.spare !== null) {
+      examples.push(entry.spare);
+    }
+    classes.push({
+      ...entry.identity,
+      files: entry.files,
+      items: entry.items,
+      pairs: entry.pairs,
+      examples,
+    });
+  }
+  return classes.sort(
+    (a, b) =>
+      ROLE_RANK[ROLE_OF[a.kind]] - ROLE_RANK[ROLE_OF[b.kind]] ||
+      b.files.size - a.files.size ||
+      b.items - a.items ||
+      byCodeUnits(a.key, b.key),
+  );
 }
