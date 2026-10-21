@@ -17,19 +17,25 @@ import {
   type ChangeClass,
   DISPLAY_OF,
   type FileAtoms,
+  type FileOutcome,
   KIND_WORDS,
+  NO_LOSS,
   type PoolFile,
   ROLE_OF,
   SUMMARY_LIMITS,
+  accountedFiles,
   buildPools,
   classKeyOf,
+  classTable,
   classify,
   diffJson,
   diffTable,
   foldIndices,
+  lossFactsOf,
   parseJson,
   parseTsv,
   renderClasses,
+  summaryFacts,
 } from "../scripts/ci/pr-review-summary";
 
 const enc = (text: string): Uint8Array => new TextEncoder().encode(text);
@@ -992,5 +998,363 @@ describe("renderClasses: pairs that may look alike are annotated with their firs
     expect(text.split("\n")[1]).toBe(
       '    "\\"x y\\"" -> "\\"x\\u{A0}y\\"" x1 (first difference at character 3: U+0020 to U+00A0)',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Coverage, loss facts and the facts block
+// ---------------------------------------------------------------------------------------------
+
+/** The outcome of a file that parsed and diffed: its class keys. */
+function outcomesOf(files: readonly FileAtoms[]): FileOutcome[] {
+  return files.map((f) => ({
+    path: f.path,
+    family: f.path.endsWith(".tsv") ? "tsv" : "json",
+    refusal: null,
+    keyColumn: null,
+    classKeys: new Set(f.atoms.map((a) => classKeyOf(f.path, a).key)),
+  }));
+}
+
+/** Classify, render and account for some files, with optional refused outcomes beside them. */
+function account(
+  files: readonly { path: string; before: string; after: string }[],
+  options: {
+    pool?: readonly PoolFile[];
+    refused?: readonly FileOutcome[];
+    abandoned?: boolean;
+  } = {},
+) {
+  const atoms = atomsOf(files, options.pool ?? []);
+  const classes = classify(atoms);
+  const r = renderClasses(classes);
+  const outcomes = [...outcomesOf(atoms), ...(options.refused ?? [])];
+  return {
+    atoms,
+    classes,
+    outcomes,
+    ...r,
+    accounted: accountedFiles(outcomes, classes, r.complete, options.abandoned ?? false),
+  };
+}
+
+/** One channel table at sub-0n whose listed columns change from 1 to 2. */
+function changedColumns(n: number, columns: readonly string[]) {
+  return {
+    path: channels(n),
+    before: tsv(["name", ...columns], ["A1", ...columns.map(() => "1")]),
+    after: tsv(["name", ...columns], ["A1", ...columns.map(() => "2")]),
+  };
+}
+
+const COLUMNS_120 = Array.from({ length: 120 }, (_, i) => `c${String(i).padStart(3, "0")}`);
+
+describe("accountedFiles: a file is accounted for only when every non-additive class of it was shown completely", () => {
+  test("a file whose classes were all shown completely is accounted for, and so is a file with no atom", () => {
+    const { accounted } = account([
+      {
+        path: channels(1),
+        before: tsv(CHANNELS, ["A1", "EEG", "uV"], ["B1", "EEG", "uV"]),
+        after: tsv(CHANNELS, ["POL A1", "EEG", "uV"], ["B1", "EEG", "mV"]),
+      },
+      { path: "x.json", before: '{"a": 1}', after: '{ "a" : 1 }' },
+    ]);
+    expect([...accounted].sort()).toEqual([channels(1), "x.json"]);
+  });
+
+  test("additive classes are never needed: a file whose only class was cut is still accounted for when that class is additive", () => {
+    const { accounted, cut, classes, shown } = account([
+      changedColumns(1, COLUMNS_120),
+      {
+        path: channels(2),
+        before: tsv(CHANNELS, ["A1", "EEG", "uV"]),
+        after: tsv(CHANNELS, ["A1", "EEG", "uV"], ["A2", "EEG", "uV"]),
+      },
+    ]);
+    expect(cut).toBe(1);
+    const left = classes.find((c) => !shown.has(c.key));
+    expect(left?.kind).toBe("row_added");
+    expect([...accounted].sort()).toEqual([channels(1), channels(2)]);
+  });
+
+  test("a modification class left out leaves its file unaccounted for", () => {
+    const { accounted, cut } = account([
+      changedColumns(1, COLUMNS_120),
+      changedColumns(2, ["c999"]),
+    ]);
+    expect(cut).toBe(1);
+    expect([...accounted]).toEqual([channels(1)]);
+  });
+
+  test("a loss class left out leaves its file unaccounted for", () => {
+    const removing = (n: number, columns: readonly string[]) => ({
+      path: channels(n),
+      before: tsv(["name", ...columns], ["A1", ...columns.map(() => "1")]),
+      after: tsv(["name"], ["A1"]),
+    });
+    const { accounted, cut, classes, shown } = account([
+      removing(1, COLUMNS_120),
+      removing(2, ["c999"]),
+    ]);
+    expect(cut).toBe(1);
+    expect(classes.find((c) => !shown.has(c.key))?.kind).toBe("column_removed");
+    expect([...accounted]).toEqual([channels(1)]);
+  });
+
+  test("a class with pairs not shown leaves EVERY file it is in unaccounted for", () => {
+    const units = (n: number, from: number) => ({
+      path: channels(n),
+      before: tsv(CHANNELS, ...Array.from({ length: 7 }, (_, i) => [`A${i}`, "EEG", "uV"])),
+      after: tsv(
+        CHANNELS,
+        ...Array.from({ length: 7 }, (_, i) => [`A${i}`, "EEG", `v${from + i}`]),
+      ),
+    });
+    const { accounted } = account([
+      units(1, 0),
+      units(2, 100),
+      {
+        path: channels(3),
+        before: tsv(CHANNELS, ["A1", "EEG", "uV"]),
+        after: tsv(CHANNELS, ["A1", "EOG", "uV"]),
+      },
+    ]);
+    expect([...accounted]).toEqual([channels(3)]);
+  });
+
+  test("a value cut at 300 characters leaves its file unaccounted for, a removal's as much as a pair's", () => {
+    const { accounted } = account([
+      {
+        path: channels(1),
+        before: tsv(CHANNELS, ["A1", "EEG", "u".repeat(301)]),
+        after: tsv(CHANNELS, ["A1", "EEG", "uV"]),
+      },
+      {
+        path: "sub-01/eeg/sub-01_task-x_events.tsv",
+        before: tsv(["onset", "note"], ["1", "ok"], ["2", "n".repeat(301)]),
+        after: tsv(["onset", "note"], ["1", "ok"]),
+      },
+      {
+        path: channels(2),
+        before: tsv(CHANNELS, ["A1", "EEG", "u".repeat(300)]),
+        after: tsv(CHANNELS, ["A1", "EOG", "u".repeat(300)]),
+      },
+    ]);
+    expect([...accounted]).toEqual([channels(2)]);
+  });
+
+  test("a rule class of any size is enough, when its line is shown", () => {
+    const rows = Array.from({ length: 400 }, (_, i) => [`A${i}`, "EEG", "uV"]);
+    const { accounted } = account([
+      {
+        path: channels(1),
+        before: tsv(CHANNELS, ...rows),
+        after: tsv(
+          CHANNELS,
+          ...[...rows].reverse().map(([a, b, c]) => [`POL ${a}`, b as string, c as string]),
+        ),
+      },
+    ]);
+    expect([...accounted]).toEqual([channels(1)]);
+  });
+
+  test("a refused file accounts for nothing, and an abandoned pass for no file at all", () => {
+    const refused: FileOutcome = {
+      path: channels(3),
+      family: "tsv",
+      refusal: "ragged_row",
+      keyColumn: null,
+      classKeys: new Set(),
+    };
+    const files = [
+      {
+        path: channels(1),
+        before: tsv(CHANNELS, ["A1", "EEG", "uV"]),
+        after: tsv(CHANNELS, ["A1", "EEG", "mV"]),
+      },
+    ];
+    expect([...account(files, { refused: [refused] }).accounted]).toEqual([channels(1)]);
+    expect(account(files, { abandoned: true }).accounted.size).toBe(0);
+  });
+
+  test("a refusal is never accounted for, even when its class keys would all be complete", () => {
+    const { outcomes, classes, complete } = account([
+      {
+        path: channels(1),
+        before: tsv(CHANNELS, ["A1", "EEG", "uV"]),
+        after: tsv(CHANNELS, ["A1", "EEG", "mV"]),
+      },
+    ]);
+    const withRefusal = outcomes.map((o) => ({ ...o, refusal: "internal_mismatch" as const }));
+    expect(accountedFiles(withRefusal, classes, complete, false).size).toBe(0);
+  });
+
+  test("a class the function does not know, or a path listed twice with different fates, accounts for nothing", () => {
+    const { outcomes, classes, complete } = account([
+      {
+        path: channels(1),
+        before: tsv(CHANNELS, ["A1", "EEG", "uV"]),
+        after: tsv(CHANNELS, ["A1", "EEG", "mV"]),
+      },
+    ]);
+    const unknown = outcomes.map((o) => ({ ...o, classKeys: new Set([...o.classKeys, "[]"]) }));
+    expect(accountedFiles(unknown, classes, complete, false).size).toBe(0);
+    const twice = [
+      ...outcomes,
+      {
+        ...(outcomes[0] as FileOutcome),
+        refusal: "too_large" as const,
+        classKeys: new Set<string>(),
+      },
+    ];
+    expect(accountedFiles(twice, classes, complete, false).size).toBe(0);
+  });
+});
+
+describe("lossFactsOf: the loss and relocation facts of every summarized file", () => {
+  const sidecar = "task-x_eeg.json";
+  const run = () =>
+    atomsOf(
+      [
+        {
+          path: channels(2),
+          before: tsv(
+            [...CHANNELS, "notes", "empty"],
+            ["A1", "EEG", "uV", "bad", "n/a"],
+            ["A2", "EEG", "uV", "ok", ""],
+            ["A3", "EEG", "uV", "ok", "n/a"],
+            ["R1", "EEG", "uV", "ok", "n/a"],
+          ),
+          after: tsv(CHANNELS, ["A1", "EEG", "n/a"]),
+        },
+        {
+          path: channels(1),
+          before: tsv(CHANNELS, ["A1", "EEG", "uV"], ["A2", "EEG", "uV"]),
+          after: tsv(CHANNELS, ["A1", "EEG", "uV"]),
+        },
+        {
+          path: "sub-01/eeg/sub-01_task-x_eeg.json",
+          before: '{"PowerLineFrequency": 50, "Notes": "x", "More": [1], "Empty": "", "Ref": "Cz"}',
+          after: '{"Ref": ""}',
+        },
+      ],
+      [
+        pooled(
+          `sourcedata/old/${channels(2)}`,
+          null,
+          tsv([...CHANNELS, "notes", "empty"], ["R1", "EEG", "uV", "ok", "n/a"]),
+        ),
+        pooled(sidecar, null, '{"PowerLineFrequency": 50}'),
+      ],
+    );
+
+  test("each count is its own kind, and a file counts once toward the files", () => {
+    expect(lossFactsOf(run())).toEqual({
+      rowsRemoved: 3,
+      rowsRemovedFiles: 2,
+      rowsRelocated: 1,
+      // `notes` held values; `empty` held only n/a and empty cells, which is no loss.
+      columnsRemoved: 1,
+      keysRemoved: 2,
+      keysRemovedFiles: 1,
+      keysMoved: 1,
+      // A cell (`uV` to `n/a`) and a JSON value (`Cz` to "").
+      valuesEmptied: 2,
+      firstBlockingPath: channels(1),
+    });
+  });
+
+  test("the first blocking path is the first in code-unit order, whatever order the files came in", () => {
+    const files = run();
+    expect(lossFactsOf([...files].reverse()).firstBlockingPath).toBe(channels(1));
+  });
+
+  test("an additive or relocated atom, an empty removed column or an emptied value does not block", () => {
+    const files = atomsOf([
+      {
+        path: "a.tsv",
+        before: tsv(["x", "y"], ["1", "n/a"]),
+        after: tsv(["x"], ["1"], ["2"]),
+      },
+      {
+        path: "b.json",
+        before: '{"a": "x", "b": null}',
+        after: '{"a": "", "c": 1}',
+      },
+      {
+        path: "c.tsv",
+        before: tsv(["x"], ["1"], ["2"]),
+        after: tsv(["x"], ["1"]),
+      },
+    ]);
+    const facts = lossFactsOf(files);
+    expect(facts.firstBlockingPath).toBe("c.tsv");
+    expect(facts.columnsRemoved).toBe(0);
+    expect(facts.valuesEmptied).toBe(1);
+    expect(lossFactsOf(files.slice(0, 2))).toEqual({ ...NO_LOSS, valuesEmptied: 1 });
+  });
+
+  test("relocated and moved content is counted apart from what was lost", () => {
+    const facts = lossFactsOf(run());
+    expect([facts.rowsRelocated, facts.keysMoved]).toEqual([1, 1]);
+  });
+});
+
+describe("the facts block: numbers and the class table, the platform's words only", () => {
+  test("one line per shown class, numbered as the block numbers them, with its completeness", () => {
+    const { classes, shown, complete } = account([
+      {
+        path: channels(1),
+        before: tsv(CHANNELS, ...Array.from({ length: 13 }, (_, i) => [`A${i}`, "EEG", "uV"])),
+        after: tsv(
+          CHANNELS,
+          ...Array.from({ length: 13 }, (_, i) => [`POL A${i}`, "EEG", `v${i}`]),
+          ["NEW", "EEG", "uV"],
+        ),
+      },
+    ]);
+    expect(classTable(classes, shown, complete)).toEqual([
+      "C1 cells replaced | 13 items in 1 file | values not all shown",
+      "C2 rows relabeled | 13 items in 1 file | in full",
+      "C3 rows added | 1 item in 1 file | in full",
+    ]);
+  });
+
+  test("the numbers come from the outcomes, the accounted files, the render and the loss facts", () => {
+    const a = account([changedColumns(1, COLUMNS_120), changedColumns(2, ["c999"])], {
+      refused: [
+        {
+          path: "z.tsv",
+          family: "tsv",
+          refusal: "ragged_row",
+          keyColumn: null,
+          classKeys: new Set(),
+        },
+      ],
+    });
+    const loss = lossFactsOf(a.atoms);
+    expect(
+      summaryFacts({
+        abandoned: false,
+        outcomes: a.outcomes,
+        accounted: a.accounted,
+        shown: a.shown.size,
+        cut: a.cut,
+        loss,
+      }),
+    ).toEqual({
+      abandoned: false,
+      files_summarized: 2,
+      files_not_summarized: 1,
+      files_accounted_for: 1,
+      classes_shown: 120,
+      classes_cut: 1,
+      rows_removed_not_found_elsewhere: 0,
+      rows_removed_found_verbatim_in_sourcedata: 0,
+      columns_with_values_removed: 0,
+      keys_removed_not_found_elsewhere: 0,
+      keys_moved_to_an_inherited_sidecar: 0,
+      values_emptied: 0,
+    });
   });
 });

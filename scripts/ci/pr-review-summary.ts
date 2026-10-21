@@ -3366,3 +3366,221 @@ export function renderClasses(classes: readonly ChangeClass[]): RenderedClasses 
   if (cut > 0) blocks.push(moreClassesLine(cut));
   return { text: blocks.join("\n"), shown, complete, cut };
 }
+
+// ---------------------------------------------------------------------------------------------
+// Coverage and loss facts (design sections 6.1, 7.1 and 8.1)
+// ---------------------------------------------------------------------------------------------
+
+/** What became of one summary candidate. */
+export interface FileOutcome {
+  path: string;
+  family: "tsv" | "json";
+  /** Why the file was not summarized, or null when both sides parsed and its diff was total. */
+  refusal: SummaryRefusal | null;
+  /** The key column its rows were paired by (tables only), or null. */
+  keyColumn: string | null;
+  /** The keys of the classes its atoms are in; empty for a refused file. */
+  classKeys: ReadonlySet<string>;
+}
+
+/**
+ * The loss and relocation facts of a run (design section 7.1), counted over EVERY summarized file,
+ * whether the summary accounted for it or not: a pull request is held to the same rule at 3 files
+ * and at 3,000, and a file that is also shown as a raw diff still counts.
+ */
+export interface LossFacts {
+  /** `row_removed` atoms, and the number of files they are in. */
+  rowsRemoved: number;
+  rowsRemovedFiles: number;
+  /** `row_relocated` atoms. */
+  rowsRelocated: number;
+  /** `column_removed` atoms whose column held at least one non-missing value. */
+  columnsRemoved: number;
+  /** `json_key_removed` atoms, and the number of files they are in. */
+  keysRemoved: number;
+  keysRemovedFiles: number;
+  /** `json_key_moved` atoms. */
+  keysMoved: number;
+  /** `cell_emptied` and `json_emptied` atoms. */
+  valuesEmptied: number;
+  /**
+   * The first path in code-unit order with a blocking atom (`row_removed`, `json_key_removed`, or
+   * a `column_removed` that held a value), for the platform finding's `path`; null when none.
+   */
+  firstBlockingPath: string | null;
+}
+
+/** The facts of a run with nothing lost. */
+export const NO_LOSS: Readonly<LossFacts> = Object.freeze({
+  rowsRemoved: 0,
+  rowsRemovedFiles: 0,
+  rowsRelocated: 0,
+  columnsRemoved: 0,
+  keysRemoved: 0,
+  keysRemovedFiles: 0,
+  keysMoved: 0,
+  valuesEmptied: 0,
+  firstBlockingPath: null,
+});
+
+/**
+ * A removed column held a value unless its count says exactly zero. A count that is not a number
+ * cannot come from the diff; if it ever did, it would be counted as a loss, never as nothing lost.
+ */
+function heldValues(atom: Atom): boolean {
+  return Number(atom.detail) !== 0;
+}
+
+/** The loss facts of the summarized files: see {@link LossFacts}. */
+export function lossFactsOf(files: readonly FileAtoms[]): LossFacts {
+  const facts: LossFacts = { ...NO_LOSS };
+  for (const file of files) {
+    let rows = 0;
+    let keys = 0;
+    let blocking = false;
+    for (const atom of file.atoms) {
+      switch (atom.kind) {
+        case "row_removed":
+          rows++;
+          blocking = true;
+          break;
+        case "row_relocated":
+          facts.rowsRelocated++;
+          break;
+        case "column_removed":
+          if (heldValues(atom)) {
+            facts.columnsRemoved++;
+            blocking = true;
+          }
+          break;
+        case "json_key_removed":
+          keys++;
+          blocking = true;
+          break;
+        case "json_key_moved":
+          facts.keysMoved++;
+          break;
+        case "cell_emptied":
+        case "json_emptied":
+          facts.valuesEmptied++;
+          break;
+        default:
+          break;
+      }
+    }
+    facts.rowsRemoved += rows;
+    if (rows > 0) facts.rowsRemovedFiles++;
+    facts.keysRemoved += keys;
+    if (keys > 0) facts.keysRemovedFiles++;
+    if (
+      blocking &&
+      (facts.firstBlockingPath === null || byCodeUnits(file.path, facts.firstBlockingPath) < 0)
+    ) {
+      facts.firstBlockingPath = file.path;
+    }
+  }
+  return facts;
+}
+
+/**
+ * The files the summary accounts for (design section 6.1): a file is accounted for when it parsed
+ * on both sides with no refusal (so its table round-tripped and its diff was total), the pass was
+ * not abandoned, and EVERY class that holds one of its atoms and is not additive was shown
+ * completely. Additive classes are never needed: new content removes nothing. A class this
+ * function does not know, or a path that appears twice with different fates, accounts for
+ * nothing: every doubt here falls toward the raw-diff path.
+ */
+export function accountedFiles(
+  outcomes: readonly FileOutcome[],
+  classes: readonly ChangeClass[],
+  complete: ReadonlySet<string>,
+  abandoned: boolean,
+): Set<string> {
+  const accounted = new Set<string>();
+  if (abandoned) return accounted;
+  const kindOf = new Map(classes.map((c) => [c.key, c.kind]));
+  const refused = new Set<string>();
+  for (const outcome of outcomes) {
+    const covered =
+      outcome.refusal === null &&
+      [...outcome.classKeys].every((key) => {
+        const kind = kindOf.get(key);
+        if (kind === undefined) return false;
+        return ROLE_OF[kind] === "additive" || complete.has(key);
+      });
+    if (covered) accounted.add(outcome.path);
+    else refused.add(outcome.path);
+  }
+  for (const path of refused) accounted.delete(path);
+  return accounted;
+}
+
+/**
+ * The summary's numbers for the facts block (design section 8.1), outside every fence. Only
+ * counts and the platform's own words: no path, value or name from the pull request.
+ */
+export interface SummaryFacts {
+  abandoned: boolean;
+  /** Candidates that parsed on both sides with a total diff. */
+  files_summarized: number;
+  /** Candidates refused, for any reason; the reasons are not given here. */
+  files_not_summarized: number;
+  files_accounted_for: number;
+  classes_shown: number;
+  classes_cut: number;
+  rows_removed_not_found_elsewhere: number;
+  rows_removed_found_verbatim_in_sourcedata: number;
+  columns_with_values_removed: number;
+  keys_removed_not_found_elsewhere: number;
+  keys_moved_to_an_inherited_sidecar: number;
+  values_emptied: number;
+}
+
+/** `1 item`, `2 items`. */
+function counted(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+/**
+ * The class table of the facts block: one line per SHOWN class, `C<n> <kind words> | <items> in
+ * <files> | in full` or `values not all shown`, numbered as the fenced block numbers them. Only
+ * the platform's words and counts, so a value cannot forge or change it.
+ */
+export function classTable(
+  classes: readonly ChangeClass[],
+  shown: ReadonlySet<string>,
+  complete: ReadonlySet<string>,
+): string[] {
+  return classes
+    .filter((c) => shown.has(c.key))
+    .map(
+      (c, i) =>
+        `C${i + 1} ${KIND_WORDS[c.kind]} | ${counted(c.items, "item")} in ${counted(c.files.size, "file")} | ${complete.has(c.key) ? "in full" : "values not all shown"}`,
+    );
+}
+
+/** The facts of a run: see {@link SummaryFacts}. */
+export function summaryFacts(input: {
+  abandoned: boolean;
+  outcomes: readonly FileOutcome[];
+  accounted: ReadonlySet<string>;
+  shown: number;
+  cut: number;
+  loss: LossFacts;
+}): SummaryFacts {
+  const summarized = input.outcomes.filter((o) => o.refusal === null).length;
+  return {
+    abandoned: input.abandoned,
+    files_summarized: summarized,
+    files_not_summarized: input.outcomes.length - summarized,
+    files_accounted_for: input.accounted.size,
+    classes_shown: input.shown,
+    classes_cut: input.cut,
+    rows_removed_not_found_elsewhere: input.loss.rowsRemoved,
+    rows_removed_found_verbatim_in_sourcedata: input.loss.rowsRelocated,
+    columns_with_values_removed: input.loss.columnsRemoved,
+    keys_removed_not_found_elsewhere: input.loss.keysRemoved,
+    keys_moved_to_an_inherited_sidecar: input.loss.keysMoved,
+    values_emptied: input.loss.valuesEmptied,
+  };
+}
