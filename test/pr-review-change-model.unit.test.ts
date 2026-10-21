@@ -530,6 +530,60 @@ describe("relabelRule: numbers and nothing-to-say pairs never get a rule", () =>
     expect(relabelRule("05 a 1", "5 a 1", { chars: false })).toEqual(rule("repad", [], "", true));
   });
 
+  test("digits are read by value only among the allowed neighbors: no other mark, wherever it stands, lets a pair claim a padding", () => {
+    const hidden: (readonly [string, string])[] = [
+      // A mark at the edge of both strings.
+      ["\u{66B}05 Hz", "\u{66B}5 Hz"],
+      ["\u{FF0E}05 Hz", "\u{FF0E}5 Hz"],
+      // A mark only in the text a rule would add, alone or with an invisible or a space after it.
+      ["05 Hz", "\u{FF0E}5 Hz"],
+      ["005", "\u{B7}5"],
+      ["05 Hz", ".\u{2060}5 Hz"],
+      ["05 Hz", ".\u{200B}5 Hz"],
+      ["05 Hz", ".\u{AD}5 Hz"],
+      ["05 Hz", ".\u{301}5 Hz"],
+      ["05 Hz", ". 5 Hz"],
+      // A letter, or a letter-like mark, inside one number.
+      ["0\u{A78F}05 Hz", "0\u{A78F}5 Hz"],
+      ["1\u{2BC}000 Hz", "1\u{2BC}0000 Hz"],
+      ["1\u{2CC}000", "1\u{2CC}0000"],
+      ["res-0p05mm", "res-0p5mm"],
+      ["1e05", "1e5"],
+      ["1x000 Hz", "1x0000 Hz"],
+      ["1E0100", "1E100"],
+    ];
+    for (const [a, b] of hidden) {
+      for (const chars of [false, true]) {
+        for (const [x, y] of [
+          [a, b],
+          [b, a],
+        ] as const) {
+          const found = relabelRule(x, y, { chars });
+          const label = JSON.stringify([x, y, chars, found]);
+          expect(found?.kind === "repad" || found?.repadded === true, label).toBe(false);
+        }
+      }
+    }
+  });
+
+  test("the allowed neighbors keep every real padding: an edge, a separator, or letters that are not one letter between numbers", () => {
+    for (const [a, b] of [
+      ["sub-01", "sub-1"],
+      ["sub-01_ses-02", "sub-1_ses-2"],
+      ["0100 Hz", "100 Hz"],
+      ["EEG 001", "EEG 1"],
+      ["x_02_y", "x_2_y"],
+      ["E001", "E1"],
+      ["ECOG1", "ECOG01"],
+      ["Fp1", "Fp01"],
+    ] as const) {
+      for (const chars of [false, true]) {
+        expect(relabelRule(a, b, { chars }), `${a} -> ${b}`).toEqual(rule("repad", [], "", true));
+        expect(relabelRule(b, a, { chars }), `${b} -> ${a}`).toEqual(rule("repad", [], "", true));
+      }
+    }
+  });
+
   test("a letter between two digit runs breaks the join: legitimate repads keep their rule", () => {
     for (const [a, b] of [
       ["sub-01", "sub-1"],
@@ -841,26 +895,57 @@ describe("relabelRule: every rule it returns rebuilds the other string from one 
     }
     // The generator reaches every kind of rule, so the property is not vacuous.
     expect([...kinds].sort()).toEqual(["case", "delete", "insert", "repad", "strip", "wrap"]);
-    // 1,487 of the 6,000 tries find a rule (3,437 before digits were barred from inserted text,
+    // 1,403 of the 6,000 tries find a rule (3,437 before digits were barred from inserted text,
     // which this generator, with four digits in a twelve-character alphabet, hits often). It was
-    // 1,535 before a pair in which either string holds a joined number or a digit next to a `.`
-    // compared every digit as text: 56 tries lost a rule then, each a padding change inside such a
-    // number, and 8 found one by text that the old reading, digit run by digit run, did not
-    // (`07` to `..07` is the prefix `..`).
-    expect(withRule).toBeGreaterThan(1450);
+    // 1,535 before a pair compared its digits by value only when every digit run of both strings
+    // stands among the neighbors the allowlist names: 140 tries lost a rule then, each a padding
+    // change in a string whose digits are now read as text (beside a `.`, a single letter with
+    // digits beyond it, or another number), and 8 found an exact one by text that the old
+    // reading, digit run by digit run, did not (`07` to `..07` is the prefix `..`).
+    expect(withRule).toBeGreaterThan(1350);
   });
 });
 
 /**
- * An independent reading, written apart from the module's runs, of a string that holds a number
- * written with a separator: one of its maximal letter-free stretches holds two digit runs (the
- * separator between them), or a digit sits directly next to a `.` or a `,`. When either string of
- * a pair holds one, every digit of the pair must be compared as text.
+ * An independent reading of the allowlist, written over characters rather than the module's runs:
+ * a string is read as text when it holds a digit that is not ASCII, or when a maximal run of ASCII
+ * digits has a side that is none of: the edge; a maximal run of letters that are all ASCII and are
+ * not one letter with a digit beyond it; one space, hyphen or underscore with the edge or such
+ * letters beyond it. When either string of a pair is read as text, every digit of the pair must
+ * be compared as text.
  */
-function holdsSeparatedNumber(s: string): boolean {
-  const stretches = s.match(/[^\p{L}]+/gu) ?? [];
-  if (stretches.some((stretch) => (stretch.match(/[0-9]+/g) ?? []).length >= 2)) return true;
-  return /[0-9][.,]|[.,][0-9]/.test(s);
+function readAsText(s: string): boolean {
+  const chars = Array.from(s);
+  const asciiDigit = (c: string | undefined) => c !== undefined && c >= "0" && c <= "9";
+  const digit = (c: string | undefined) => c !== undefined && /^\p{N}$/u.test(c);
+  const letter = (c: string | undefined) => c !== undefined && /^\p{L}$/u.test(c);
+  if (chars.some((c) => digit(c) && !asciiDigit(c))) return true;
+  // The letters from `at` outward (`step`): all ASCII, and more than one or no digit beyond.
+  const lettersOk = (at: number, step: number): boolean => {
+    let end = at;
+    while (letter(chars[end])) end += step;
+    const run = chars.slice(Math.min(at, end - step), Math.max(at, end - step) + 1);
+    return run.every((c) => /^[A-Za-z]$/.test(c)) && (run.length > 1 || !digit(chars[end]));
+  };
+  const sideOk = (at: number, step: number): boolean => {
+    const c = chars[at];
+    if (c === undefined) return true;
+    if (letter(c)) return lettersOk(at, step);
+    if (c !== " " && c !== "-" && c !== "_") return false;
+    const beyond = chars[at + step];
+    return beyond === undefined || (letter(beyond) && lettersOk(at + step, step));
+  };
+  for (let i = 0; i < chars.length; ) {
+    if (!asciiDigit(chars[i])) {
+      i++;
+      continue;
+    }
+    let end = i;
+    while (asciiDigit(chars[end])) end++;
+    if (!sideOk(i - 1, -1) || !sideOk(end, 1)) return true;
+    i = end;
+  }
+  return false;
 }
 
 /**
@@ -875,7 +960,7 @@ function onlyPaddingDiffers(before: string, after: string): boolean {
   if (numeric.test(before) && numeric.test(after)) return false;
   // A case change is the rule that comes first; it is not a padding.
   if (before.toLowerCase() === after.toLowerCase()) return false;
-  if (holdsSeparatedNumber(before) || holdsSeparatedNumber(after)) return false;
+  if (readAsText(before) || readAsText(after)) return false;
   const pieces = (s: string): string[] => s.match(/\p{L}+|[^\p{L}]+/gu) ?? [];
   const byValue = (piece: string): string =>
     piece.replace(/[0-9]+/g, (digits) => digits.replace(/^0+(?=[0-9])/, ""));
@@ -907,7 +992,12 @@ function rebuildsByText(found: RelabelRule, before: string, after: string): bool
   }
 }
 
-/** The item 1 and decimal-mark alphabet: digits, zeros, separators, the two marks and letters. */
+/**
+ * The alphabet of the padding property tests: digits and zeros, the three allowed separators,
+ * letters, and the marks a number can be written with (the two decimal marks, an apostrophe, the
+ * middle dot, the Arabic decimal separator, the fullwidth full stop, letter-like marks, a word
+ * joiner, and `p`, a decimal in BIDS-style names).
+ */
 const SEPARATOR_ALPHABET = [
   "0",
   "0",
@@ -922,8 +1012,15 @@ const SEPARATOR_ALPHABET = [
   "-",
   "\u{B7}",
   "\u{66B}",
+  "\u{FF0E}",
+  "\u{A78F}",
+  "\u{2BC}",
+  "\u{2CC}",
+  "\u{2060}",
+  "p",
   "a",
   "B",
+  "Hz",
 ];
 
 describe("relabelRule: a repad is exactly what an independent reading of the two strings allows", () => {
@@ -942,7 +1039,16 @@ describe("relabelRule: a repad is exactly what an independent reading of the two
 
   test("4,000 generated pairs over digits, zeros, separators and letters", () => {
     const random = seeded(1868);
-    const word = wordFrom(random);
+    // Half the characters from the plain ones, so pairs that may repad stay common beside the marks.
+    const plain = ["0", "01", "5", " ", "-", "_", "a", "Hz", "EEG", "Fp", "sub"];
+    const marked = wordFrom(random);
+    const word = (): string =>
+      random() < 0.5
+        ? Array.from(
+            { length: 1 + Math.floor(random() * 8) },
+            () => plain[Math.floor(random() * plain.length)],
+          ).join("")
+        : marked();
     // Mostly the padding of one or every number changed, so repads and near-repads are common.
     const mutate = (s: string): string => {
       const choice = random();
@@ -1000,7 +1106,7 @@ describe("relabelRule: a repad is exactly what an independent reading of the two
         [after, before],
       ] as const) {
         const expected = onlyPaddingDiffers(b, a);
-        const strict = holdsSeparatedNumber(b) || holdsSeparatedNumber(a);
+        const strict = readAsText(b) || readAsText(a);
         if (strict) separated++;
         for (const chars of [false, true]) {
           const found = relabelRule(b, a, { chars });
@@ -1022,6 +1128,45 @@ describe("relabelRule: a repad is exactly what an independent reading of the two
     expect(ruled).toBeGreaterThan(300);
     expect(wouldHaveRepadded).toBeGreaterThan(300);
   });
+});
+
+describe("relabelRule: the allowlist over every code point", () => {
+  test("c05 Hz to c5 Hz claims a padding exactly for an ASCII letter, a space, a hyphen or an underscore; 0c05 never; 05 to c5 only as a real repad", () => {
+    // A digit c is part of the number itself (`105`), so it is left out; every other code point,
+    // the surrogates excepted, is tried in all three places.
+    const allowed = (c: string) => /^[A-Za-z _-]$/.test(c);
+    const claims = (found: RelabelRule | null) =>
+      found?.kind === "repad" || found?.repadded === true;
+    let tried = 0;
+    let claimed = 0;
+    const wrong: string[] = [];
+    for (let cp = 0; cp <= 0x10ffff; cp++) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      if (cp >= 0x30 && cp <= 0x39) continue;
+      const c = String.fromCodePoint(cp);
+      tried++;
+      const edge = relabelRule(`${c}05 Hz`, `${c}5 Hz`, { chars: false });
+      if (claims(edge) !== allowed(c)) wrong.push(`edge U+${cp.toString(16)}`);
+      if (claims(relabelRule(`0${c}05 Hz`, `0${c}5 Hz`, { chars: false }))) {
+        wrong.push(`joined U+${cp.toString(16)}`);
+      }
+      const added = relabelRule("05 Hz", `${c}5 Hz`, { chars: false });
+      if (claims(added) !== allowed(c)) wrong.push(`added U+${cp.toString(16)}`);
+      if (claims(added)) {
+        claimed++;
+        // A real repad: the text added holds no digit, and with it the number keeps its value.
+        const gaps = added?.gaps ?? [];
+        const rebuilt = `${gaps[0] ?? ""}05 Hz${gaps[1] ?? ""}`;
+        const value = (s: string) => s.replace(/[0-9]+/g, (d) => d.replace(/^0+(?=[0-9])/, ""));
+        if (gaps.some((gap) => /\p{N}/u.test(gap)) || value(rebuilt) !== value(`${c}5 Hz`)) {
+          wrong.push(`added, not a repad: U+${cp.toString(16)}`);
+        }
+      }
+    }
+    expect(wrong.slice(0, 10)).toEqual([]);
+    expect(tried).toBe(0x110000 - 0x800 - 10);
+    expect(claimed).toBe(52 + 3);
+  }, 30_000);
 });
 
 /** A pool file from text; `before` is null for an added file. */

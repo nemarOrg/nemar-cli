@@ -44,6 +44,7 @@ import {
   parseJson,
   parseTsv,
   renderClasses,
+  renderValue,
   ruleWords,
   stripJsonSpace,
   summarizeChanges,
@@ -2474,6 +2475,57 @@ describe("summarizeChanges: a change of magnitude is never a rule class", () => 
 });
 
 describe("summarizeChanges: a decimal mark in the added text is never a padding", () => {
+  test("every number written with a mark outside the allowlist is shown as its pair, beside 80 real repads that stay a rule", () => {
+    // Sixteen ways to hide a tenfold change behind "zero padding changed", eight in each column,
+    // each in a row of its own among 40 rows whose padding really changed.
+    const hidden: (readonly [string, string])[] = [
+      ["\u{66B}05 Hz", "\u{66B}5 Hz"],
+      ["\u{FF0E}05 Hz", "\u{FF0E}5 Hz"],
+      ["05 Hz", "\u{FF0E}5 Hz"],
+      ["005", "\u{B7}5"],
+      ["05 Hz", ".\u{2060}5 Hz"],
+      ["05 Hz", ".\u{200B}5 Hz"],
+      ["05 Hz", ".\u{AD}5 Hz"],
+      ["05 Hz", ". 5 Hz"],
+      ["0\u{A78F}05 Hz", "0\u{A78F}5 Hz"],
+      ["1\u{2BC}000 Hz", "1\u{2BC}0000 Hz"],
+      ["1\u{2CC}000", "1\u{2CC}0000"],
+      ["res-0p05mm", "res-0p5mm"],
+      ["1e05", "1e5"],
+      ["1x000 Hz", "1x0000 Hz"],
+      ["1E0100", "1E100"],
+      ["05 Hz", ".\u{301}5 Hz"],
+    ];
+    const header = ["name", "low_cutoff", "high_cutoff"];
+    const before: string[][] = [];
+    const after: string[][] = [];
+    for (let i = 0; i < 40; i++) {
+      before.push([`E${i}`, `00${(i % 9) + 1} Hz`, `0${(i % 9) + 1}00 Hz`]);
+      after.push([`E${i}`, `${(i % 9) + 1} Hz`, `${(i % 9) + 1}00 Hz`]);
+    }
+    for (const [i, [b, a]] of hidden.entries()) {
+      const low = i < 8;
+      before.push([`H${i}`, low ? b : "1 Hz", low ? "300 Hz" : b]);
+      after.push([`H${i}`, low ? a : "1 Hz", low ? "300 Hz" : a]);
+    }
+    const summary = summarize([
+      candidate(channels(1), tsv(header, ...before), tsv(header, ...after)),
+    ]);
+    expect(summary.classes.map((c) => `${c.kind} ${c.field} ${c.items}`).sort()).toEqual([
+      "cell_replaced high_cutoff 8",
+      "cell_replaced low_cutoff 8",
+      "cell_templated high_cutoff 40",
+      "cell_templated low_cutoff 40",
+    ]);
+    for (const [b, a] of hidden) {
+      const line = `\n    ${renderValue(b).text} -> ${renderValue(a).text} x1`;
+      expect(summary.text.includes(line), line).toBe(true);
+    }
+    // Every class shown in full: the file is accounted for, and nothing in it reads as padding.
+    expect(summary.facts.classes.every((line) => line.endsWith("| in full"))).toBe(true);
+    expect([...summary.accounted]).toEqual([channels(1)]);
+  });
+
   test("05 Hz to .5 Hz is a pair shown in full, and A05 to A.5 is a removed and an added row", () => {
     const header = ["name", "type", "units", "high_cutoff"];
     const summary = summarize([

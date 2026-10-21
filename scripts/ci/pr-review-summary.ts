@@ -868,17 +868,25 @@ interface Run {
   cls: RunClass;
   text: string;
   /**
-   * What the run is compared by when the digits of a pair are compared by value (see
-   * {@link Name.numbersAsText} for when they are not). Letters and other characters: exactly
-   * their text. Digits: their value, so `01` and `1` are one number, but only for ASCII digits;
-   * any other digit (Arabic-Indic, a superscript, a fraction) is the text it is, because it has no
-   * value this module can vouch for.
+   * What the run is compared by when the digits of a pair are compared by value, which they are
+   * only when every digit run of both strings stands among the neighbors {@link plainSide} allows
+   * (see {@link Name.numbersAsText}). Letters and other characters: exactly their text. Digits:
+   * their value, so `01` and `1` are one number, but only for ASCII digits; any other digit
+   * (Arabic-Indic, a superscript, a fraction) is the text it is, because it has no value this
+   * module can vouch for, and a string that holds one is compared as text whole.
    */
   norm: string;
 }
 
-/** The characters that make the digits directly next to them part of a decimal number. */
-const DECIMAL_MARKS: ReadonlySet<string> = new Set([".", ","]);
+/**
+ * The separators a run of ASCII digits may have beside it, one character each, and still be read
+ * as a number with padding: a space, a hyphen and an underscore, as in `0100 Hz`, `sub-01` and
+ * `x_02_y`. An ALLOWLIST: every other character beside a digit (a dot, a comma, an apostrophe, a
+ * middle dot, any other mark, symbol or space, a format or combining character) may be part of
+ * the number, and no list of such marks could be complete, so it compares the pair as text.
+ */
+const DIGIT_SEPARATORS: ReadonlySet<string> = new Set([" ", "-", "_"]);
+const ASCII_LETTERS = /^[A-Za-z]+$/;
 
 function normalizeRun(run: { cls: RunClass; text: string }): string {
   if (run.cls !== "D" || !ASCII_DIGITS.test(run.text)) return run.text;
@@ -886,25 +894,46 @@ function normalizeRun(run: { cls: RunClass; text: string }): string {
 }
 
 /**
- * Whether a string holds a digit run whose zeros may be part of a number rather than its padding
- * (see {@link Name.numbersAsText}): a digit run directly before or after a `.` or a `,`, also at
- * the edge of the string, or two digit runs JOINED, with nothing but runs of one other character
- * between them. One pass from the left finds a join at its second digit run, whose nearest run on
- * the left that is not one other character is the first.
+ * Whether a string compares its pair as text (see {@link Name.numbersAsText}): it holds a digit
+ * run with a non-ASCII digit, or an ASCII digit run with a side {@link plainSide} does not allow.
  */
 function holdsNumberText(runs: readonly Run[]): boolean {
-  let last: RunClass | null = null;
   for (let i = 0; i < runs.length; i++) {
     const run = runs[i] as Run;
-    if (run.cls === "D") {
-      if (last === "D") return true;
-      const mark =
-        DECIMAL_MARKS.has(runs[i - 1]?.text ?? "") || DECIMAL_MARKS.has(runs[i + 1]?.text ?? "");
-      if (mark) return true;
-    }
-    if (run.cls !== "O") last = run.cls;
+    if (run.cls !== "D") continue;
+    if (!ASCII_DIGITS.test(run.text)) return true;
+    if (!plainSide(runs, i, -1) || !plainSide(runs, i, 1)) return true;
   }
   return false;
+}
+
+/**
+ * Whether one side (`step` -1 or 1) of the digit run at `i` lets its digits be read by value. The
+ * allowlist, and nothing else:
+ *
+ * - the edge of the string;
+ * - a run of ASCII letters that is not ONE letter with a digit run beyond it ({@link plainLetters}):
+ *   `E001`, `Fp1` and `ECOG1` are plain, the `p` of `0p05`, the `e` of `1e05` and the `x` of
+ *   `1x000` are each part of one number;
+ * - ONE separator of {@link DIGIT_SEPARATORS} with the edge or such a letter run beyond it, as in
+ *   `0100 Hz`, `sub-01` and `x_02_y`. A digit run beyond it JOINS the two (`5 000`, `1-05`, `1_000`
+ *   are one number), and anything else beyond it is not on the list (`. 5`, two separators).
+ */
+function plainSide(runs: readonly Run[], i: number, step: number): boolean {
+  const next = runs[i + step];
+  if (next === undefined) return true;
+  if (next.cls === "L") return plainLetters(runs, i + step, step);
+  if (next.cls !== "O" || !DIGIT_SEPARATORS.has(next.text)) return false;
+  const beyond = runs[i + 2 * step];
+  if (beyond === undefined) return true;
+  return beyond.cls === "L" && plainLetters(runs, i + 2 * step, step);
+}
+
+/** Whether the letter run at `j`, beside a digit run on its other side, is plain: see {@link plainSide}. */
+function plainLetters(runs: readonly Run[], j: number, step: number): boolean {
+  const letters = (runs[j] as Run).text;
+  if (!ASCII_LETTERS.test(letters)) return false;
+  return letters.length > 1 || runs[j + step]?.cls !== "D";
 }
 
 /**
@@ -969,20 +998,20 @@ interface Name {
   /** Its runs, or null when it is long or has more than `maxRuns` of them. */
   runs: readonly Run[] | null;
   /**
-   * The string holds a digit run whose zeros may be part of a number rather than its padding: one
-   * directly before or after a `.` or a `,` (also at the edge of the string), where `0.05` to `0.5`
-   * is a tenfold change; or one JOINED to another digit run, scanning from it in either direction
-   * over runs that are one other character each, so that `5 000`, `1'000`, `1_000`, `0·05` and
-   * `1٫05` (the Arabic decimal separator) are each one number written with a separator this
-   * module cannot list. A letter anywhere between two digit runs breaks the join, so
-   * `sub-01_ses-02`, `0100 Hz` and `EEG 001` hold none.
+   * The string has a digit run whose zeros may be part of a number rather than its padding, so its
+   * pair is compared as text. The digits of a pair are read by VALUE only when every digit run of
+   * both strings is ASCII and stands among neighbors an allowlist names ({@link plainSide}): the
+   * edge of the string, an ASCII letter run that is not one letter with digits beyond it, or one
+   * space, hyphen or underscore with the edge or such a letter run beyond it. So `sub-01_ses-02`,
+   * `0100 Hz`, `EEG 001`, `x_02_y`, `E001`, `ECOG1` and `Fp1` are plain; `0.05`, `5 000`, `1'000`,
+   * `0·05`, `1٫05`, `0ꞏ05`, `1ʼ000`, `0p05`, `1e05`, `．05` and `.⁠5` (a word joiner after the dot)
+   * are not, and no mark has to be known for that.
    *
    * It is decided for each string alone, and it decides the PAIR: when either string of a pair
    * holds such a run, every digit run of both is compared by its text, so no rule between them
    * can say a number kept its value. Deciding it run by run is not enough, because the mark can be
    * in the text a rule adds: `05 Hz` to `.5 Hz` would otherwise read as a prefix `.` added and the
-   * zero padding changed, which is a tenfold change. A pair in which neither string holds one
-   * compares its ASCII digits by value.
+   * zero padding changed, which is a tenfold change.
    */
   numbersAsText: boolean;
 }
@@ -1208,9 +1237,9 @@ function characterRule(before: Name, after: Name): RelabelRule | null {
 /**
  * The first rule that says how `before` became `after`, or null. In order: `case` (equal once both
  * are lower-cased); then, over the runs of each string (a maximal run of letters, a maximal run of
- * digits, or one other character; digits compared by value, so `01` is `1`, unless either string
- * holds a digit run next to a `.` or `,` or joined to another digit run, when every digit of both
- * is compared as text: see {@link Name.numbersAsText}), `repad`, `wrap` or `strip` (the
+ * digits, or one other character; digits compared by value, so `01` is `1`, only when every digit
+ * run of both strings stands among the neighbors an allowlist names, and otherwise every digit of
+ * both is compared as text: see {@link Name.numbersAsText}), `repad`, `wrap` or `strip` (the
  * shorter string's runs sit contiguously in the longer one), and `insert` or `delete` (they sit in
  * order, with text between them, and the one with fewer runs holds a digit run: see `runRule`);
  * and only when `opts.chars` is set, the character rule, whose inserted text must be whole runs
