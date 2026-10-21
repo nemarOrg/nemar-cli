@@ -1,8 +1,8 @@
 /**
  * A pass-through wrapper for the real Git executable. Tests may add environment
- * variables to one matching call, record its arguments or its environment, or delay it,
- * from its first matching call or from a later one; it never changes Git's output or exit
- * status.
+ * variables to one matching call, record its arguments, its environment or its standard
+ * input, or delay it, from its first matching call or from a later one; it never changes
+ * Git's input, output or exit status.
  *
  * `env` lets a test steer one child process (for example point git-annex's HTTP client
  * at a dead local proxy) without writing to `process.env`: Bun keeps a proxy variable
@@ -25,6 +25,11 @@ export interface ShimRule {
    * a child process was handed, and what it was not.
    */
   envLog?: string;
+  /**
+   * Append the call's standard input, then run the real Git executable on that same input: what a
+   * batch call such as `cat-file --batch-check` was asked about.
+   */
+  stdinLog?: string;
   /**
    * Wait this many seconds before running the real Git executable: a fetch that stalls. The wait
    * holds none of the call's pipes, so a caller that kills the call on a timeout is not kept
@@ -81,6 +86,15 @@ export function installGitShim(root: string, rules: ShimRule[]): () => void {
     if (rule.log !== undefined) lines.push(`  printf '%s\\n' "$args" >> ${quote(rule.log)}`);
     if (rule.envLog !== undefined) {
       lines.push(`  { printf '== %s\\n' "$args"; env; } >> ${quote(rule.envLog)}`);
+    }
+    if (rule.stdinLog !== undefined) {
+      // A copy of the input, appended to the log and then made the input of the real call.
+      lines.push(
+        `  stdin_copy=$(mktemp ${quote(join(dir, "stdin.XXXXXX"))})`,
+        '  cat > "$stdin_copy"',
+        `  cat "$stdin_copy" >> ${quote(rule.stdinLog)}`,
+        '  exec < "$stdin_copy"',
+      );
     }
     if (rule.sleepSeconds !== undefined) {
       lines.push(`  sleep ${Number(rule.sleepSeconds)} </dev/null >/dev/null 2>&1`);

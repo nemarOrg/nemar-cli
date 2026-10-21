@@ -103,6 +103,7 @@ import {
   standInMessage,
 } from "./helpers/anthropic-sse";
 import { type ShimRule, installGitShim, readEnvLog } from "./helpers/git-shim";
+import { longKeyDocument } from "./helpers/summary-pool";
 
 let root: string;
 const GIT_ENV = {
@@ -4479,6 +4480,73 @@ describe("the change summary", () => {
       keysRemovedFiles: 1,
       firstBlockingPath: symlink.file,
     });
+  });
+
+  test("pool files no candidate can consult are never read, and change nothing the summary says", () => {
+    const file = sidecar(1);
+    const table = channels(1);
+    // Added, so in the pool and never a candidate: the home of the moved key, and the row's copy.
+    const nearer = "sub-001/sub-001_task-rest_eeg.json";
+    const copy = `sourcedata/channels-removed-2026-10-18/${table}`;
+    // Files no candidate can consult: long-key documents that would each hold about a hundred
+    // million code units, a table of the moved row where no copy counts, and a copy of a table
+    // that is not a candidate.
+    const unconsulted = [
+      ...[1, 2, 3].map((p) => `derivatives/p${p}/${file}`),
+      `derivatives/p1/${table}`,
+      `sourcedata/old/${channels(9)}`,
+    ];
+    const base = {
+      "dataset_description.json": desc("1.0.0"),
+      [file]: '{"TaskName":"rest","PowerLineFrequency":60}',
+      [table]: "name\ttype\nCz\tEEG\nPz\tEEG\n",
+    };
+    const edit = (others: boolean) => (dir: string) => {
+      write(dir, file, '{"TaskName":"rest"}');
+      write(dir, nearer, '{"PowerLineFrequency":60}');
+      write(dir, table, "name\ttype\nCz\tEEG\n");
+      write(dir, copy, "name\ttype\nPz\tEEG\n");
+      if (!others) return;
+      // Each with content of its own, so no blob id is shared with a file that is read.
+      for (const [i, path] of unconsulted.entries()) {
+        write(
+          dir,
+          path,
+          path.endsWith(".json")
+            ? longKeyDocument(60_000, `"Copy":${i},`)
+            : `name\ttype\nPz\tEEG\nX${i}\tEEG\n`,
+        );
+      }
+    };
+    const read = (r: Repo) => {
+      const listing = gatherListing(r.dir, r.base, r.head);
+      const log = callLog("cs-unconsulted");
+      const restore = installGitShim(root, [{ match: " cat-file ", stdinLog: log }]);
+      try {
+        const content = gatherContent(r.dir, listing);
+        const evidence = buildEvidence({ ...listing, ...content }, NO_TEXT_PROBLEMS);
+        return { content, evidence, asked: new Set(loggedCalls(log)) };
+      } finally {
+        restore();
+      }
+    };
+    const plain = changed("cs-unconsulted-plain", base, edit(false));
+    const crowded = changed("cs-unconsulted-crowded", base, edit(true));
+    const without = read(plain);
+    const withOthers = read(crowded);
+    for (const run of [without, withOthers]) {
+      expect(run.content.summary.loss).toEqual({ ...NO_LOSS, keysMoved: 1, rowsRelocated: 1 });
+      expect([...run.content.summary.accounted].sort()).toEqual([table, file].sort());
+    }
+    expect(withOthers.content.readIncomplete).toBe(without.content.readIncomplete);
+    expect(withOthers.evidence.files_read).toBe(without.evidence.files_read);
+    // A blob's id is its content's, so the two repositories share the ids of the shared files: the
+    // other files added nothing to what cat-file was asked about.
+    const id = (r: Repo, path: string) => git(r.dir, "rev-parse", `${r.head}:${path}`);
+    expect(withOthers.asked).toContain(id(crowded, nearer));
+    expect(withOthers.asked).toContain(id(crowded, copy));
+    for (const path of unconsulted) expect(withOthers.asked, path).not.toContain(id(crowded, path));
+    expect([...withOthers.asked].sort()).toEqual([...without.asked].sort());
   });
 
   test("a pool table whose earlier version cannot be read lends no copies", () => {

@@ -37,6 +37,7 @@ import {
   leafKey,
   parseJson,
   parseTsv,
+  poolFileMatters,
   relabelRule,
   ruleWords,
   sidecarApplies,
@@ -4233,6 +4234,146 @@ describe("sidecarApplies: BIDS inheritance, as far as the change model reads it"
     // A single-part name is a suffix: the root eeg.json applies to every eeg sidecar below it.
     expect(sidecarApplies("eeg.json", "sub-01/sub-01_eeg.json")).toBe(true);
     expect(sidecarApplies("participants.json", "participants.json")).toBe(false);
+  });
+});
+
+describe("poolFileMatters: the pool files a candidate can consult", () => {
+  const sidecar = "sub-01/ses-1/eeg/sub-01_ses-1_task-rest_eeg.json";
+  const table = "sub-01/ses-1/eeg/sub-01_ses-1_task-rest_channels.tsv";
+  const matters = poolFileMatters([sidecar, table, "participants.tsv"]);
+
+  test("a JSON file matters exactly when it applies to a candidate under BIDS inheritance", () => {
+    const cases: [string, boolean][] = [
+      ["task-rest_eeg.json", true], // the root
+      ["eeg.json", true], // a name of the suffix alone
+      ["sub-01/sub-01_eeg.json", true], // an intermediate directory
+      ["sub-01/ses-1/sub-01_ses-1_task-rest_eeg.json", true],
+      ["sub-01/ses-1/eeg/sub-01_eeg.json", true], // the candidate's own directory
+      ["sub-01/ses-1/eeg/task-rest_eeg.json", true],
+      [sidecar, false], // the candidate itself
+      ["sub-01/ses-2/eeg/sub-01_ses-2_task-rest_eeg.json", false], // a sibling session
+      ["sub-02/sub-02_eeg.json", false], // another subject
+      ["sub-01/ses-1/eeg/deeper/task-rest_eeg.json", false], // below the candidate
+      ["acq-a_eeg.json", false], // an entity the candidate does not have
+      ["task-sleep_eeg.json", false], // another value of one it has
+      ["task-rest_channels.json", false], // another suffix
+      ["task-rest_eeg.JSON", false], // never pooled
+      ["derivatives/p/sub-01/ses-1/eeg/sub-01_ses-1_task-rest_eeg.json", false],
+      ["sourcedata/raw/sub-01/ses-1/eeg/sub-01_ses-1_task-rest_eeg.json", false],
+      ["sourcedata/task-rest_eeg.json", false],
+      ["notes_eeg.json", false], // not a BIDS name
+      ["participants.json", false], // a suffix no candidate has
+    ];
+    for (const [path, expected] of cases) expect(matters(path), path).toBe(expected);
+  });
+
+  test("a table matters exactly when it is sourcedata/<one directory>/<a candidate's path>", () => {
+    const cases: [string, boolean][] = [
+      [`sourcedata/channels-removed-2026-10-18/${table}`, true],
+      [`sourcedata/old/${table}`, true],
+      ["sourcedata/old/participants.tsv", true],
+      [table, false], // the candidate itself
+      [`sourcedata/${table}`, false], // no directory between
+      [`sourcedata/a/b/${table}`, false], // two
+      [`derivatives/p/${table}`, false],
+      ["sourcedata/old/sub-02/eeg/sub-02_task-rest_channels.tsv", false], // not a candidate's copy
+      [`sourcedata/old/${table.replace(".tsv", ".TSV")}`, false],
+      [`sourcedata/old/${table}.gz`, false],
+      ["sourcedata/old/sub-01/ses-1/eeg/sub-01_ses-1_task-rest_channels.json", false],
+    ];
+    for (const [path, expected] of cases) expect(matters(path), path).toBe(expected);
+  });
+
+  test("a candidate under sourcedata or derivatives is consulted like any other", () => {
+    const derived = "derivatives/p/sub-01/eeg/sub-01_task-rest_eeg.json";
+    const check = poolFileMatters([derived, "sourcedata/raw/sub-01_scans.tsv"]);
+    expect(check("derivatives/p/task-rest_eeg.json")).toBe(true);
+    expect(check("task-rest_eeg.json")).toBe(true); // the root applies to every file below it
+    expect(check("derivatives/q/task-rest_eeg.json")).toBe(false);
+    expect(check("sourcedata/old/sourcedata/raw/sub-01_scans.tsv")).toBe(true);
+    expect(check("sourcedata/raw/sub-01_scans.tsv")).toBe(false);
+  });
+
+  test("with no candidates nothing matters, and a candidate that is not a BIDS name lends nothing", () => {
+    expect(poolFileMatters([])("task-rest_eeg.json")).toBe(false);
+    expect(poolFileMatters([])("sourcedata/old/x.tsv")).toBe(false);
+    const odd = poolFileMatters(["notes_eeg.json", "x.tsv"]);
+    expect(odd("eeg.json")).toBe(false);
+    expect(odd("sourcedata/old/x.tsv")).toBe(true);
+  });
+
+  test("on generated paths it is exactly its definition: sidecarApplies to some candidate, or a candidate's sourcedata copy", () => {
+    const random = seeded(1871);
+    const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)] as T;
+    const dirs = [
+      "",
+      "sub-01",
+      "sub-01/ses-1",
+      "sub-01/ses-1/eeg",
+      "sub-01/ses-2/eeg",
+      "sub-02/eeg",
+      "sub-0",
+      "derivatives/p/sub-01",
+      "sourcedata/old",
+      "sourcedata/old/sub-01/ses-1/eeg",
+      "sourcedata/a/b",
+    ];
+    const entities = ["sub-01", "sub-02", "ses-1", "ses-2", "task-rest", "run-1", "acq-a"];
+    const suffixes = ["eeg", "events", "channels"];
+    const extensions = [".json", ".tsv", ".JSON", ".x.json", ""];
+    const name = (): string => {
+      const parts = entities.filter(() => random() < 0.3);
+      if (random() < 0.05) parts.push("notes");
+      return `${[...parts, pick(suffixes)].join("_")}${pick(extensions)}`;
+    };
+    const path = (): string => {
+      const dir = pick(dirs);
+      return dir === "" ? name() : `${dir}/${name()}`;
+    };
+    const corresponding = (p: string): string | null =>
+      /^sourcedata\/[^/]+\/(.+)$/.exec(p)?.[1] ?? null;
+    // A sidecar built from a candidate: an ancestor of its directory, some of its entities, mostly
+    // its suffix and extension, and now and then an entity it does not have.
+    const near = (c: string): string => {
+      const slash = c.lastIndexOf("/");
+      const dir = slash < 0 ? "" : c.slice(0, slash);
+      const file = c.slice(slash + 1);
+      const dot = file.indexOf(".");
+      const parts = (dot < 0 ? file : file.slice(0, dot)).split("_");
+      const ext = dot < 0 ? "" : file.slice(dot);
+      const segments = dir === "" ? [] : dir.split("/");
+      const up = segments.slice(0, Math.floor(random() * (segments.length + 1))).join("/");
+      const kept = parts.slice(0, -1).filter(() => random() < 0.6);
+      if (random() < 0.15) kept.push(pick(entities));
+      const suffix = random() < 0.85 ? (parts[parts.length - 1] as string) : pick(suffixes);
+      const named = `${[...kept, suffix].join("_")}${random() < 0.85 ? ext : pick(extensions)}`;
+      const where = random() < 0.1 ? pick(dirs) : up;
+      return where === "" ? named : `${where}/${named}`;
+    };
+    let applies = 0;
+    let copies = 0;
+    for (let n = 0; n < 400; n++) {
+      const candidates = Array.from({ length: 1 + Math.floor(random() * 4) }, path);
+      const check = poolFileMatters(candidates);
+      for (let k = 0; k < 40; k++) {
+        const roll = random();
+        const p =
+          roll < 0.3
+            ? `sourcedata/${pick(["old", "x"])}/${pick(candidates)}`
+            : roll < 0.7
+              ? near(pick(candidates))
+              : path();
+        const expected = p.endsWith(".json")
+          ? candidates.some((c) => sidecarApplies(p, c))
+          : p.endsWith(".tsv") && candidates.includes(corresponding(p) ?? "");
+        if (expected && p.endsWith(".json")) applies++;
+        if (expected && p.endsWith(".tsv")) copies++;
+        expect(check(p), `${p} for ${candidates.join(", ")}`).toBe(expected);
+      }
+    }
+    // Not vacuous: both kinds of pool file that matter came up often.
+    expect(applies).toBeGreaterThan(300);
+    expect(copies).toBeGreaterThan(300);
   });
 });
 

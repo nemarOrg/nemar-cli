@@ -2764,6 +2764,84 @@ export function sidecarApplies(sidecar: string, target: string): boolean {
 }
 
 /**
+ * Which pool files can change what a run says about `candidates`: the predicate, built once per run
+ * from the candidates' paths, that {@link summarizeChanges} prunes its pool with, and that the
+ * evidence reader applies before it reads a pool file's blobs.
+ *
+ * A diff consults the pools for one candidate at a time, and only in two ways:
+ *
+ * - a table diff reads the rows of the pool tables at `sourcedata/<D>/<the candidate's path>`
+ *   (`sourcedataFor`), and no other table: a table is kept when it is such a copy of a candidate;
+ * - a JSON diff asks, per removed leaf, which file of the pull request that applies to the candidate
+ *   under BIDS inheritance ({@link sidecarApplies}) and has the leaf's top-level key, or is
+ *   unreadable, is the nearest, and then whether THAT file is a home of the leaf (see
+ *   {@link diffJson}): a document is kept when it applies to some candidate.
+ *
+ * A file this says false for is therefore never a copy, a decider, a blocker or a home for any
+ * candidate, and the pools without it answer every one of those questions as the pools with it
+ * do; a test compares whole summaries with and without it on generated pull requests. Any other
+ * extension is never pooled, `.JSON` included. What the pruning does change is the room the files
+ * that do matter have within `maxPoolChars` and `maxTotalBytes`, which is only ever more.
+ *
+ * One pool path is answered by a lookup and a scan of few candidates: they are indexed by
+ * extension, suffix and each of their ancestor directories, then by entity, and a sidecar is
+ * checked only against the candidates that hold the rarest of its entities.
+ */
+export function poolFileMatters(candidates: readonly string[]): (path: string) => boolean {
+  const tables = new Set<string>();
+  type Indexed = { path: string; entities: ReadonlySet<string> };
+  const near = new Map<string, { all: Indexed[]; byEntity: Map<string, Indexed[]> }>();
+  const bucketKey = (extension: string, suffix: string, dir: string): string =>
+    JSON.stringify([extension, suffix, dir]);
+  for (const path of candidates) {
+    if (path.endsWith(".tsv")) tables.add(path);
+    const name = bidsName(path);
+    if (name === null) continue;
+    const indexed: Indexed = { path, entities: name.entities };
+    // Every directory a sidecar may sit in to apply to this candidate: the root, each ancestor and
+    // its own (see `sidecarApplies`).
+    const dirs = new Set(["", name.dir]);
+    for (let at = name.dir.indexOf("/"); at >= 0; at = name.dir.indexOf("/", at + 1)) {
+      dirs.add(name.dir.slice(0, at));
+    }
+    for (const dir of dirs) {
+      const key = bucketKey(name.extension, name.suffix, dir);
+      let bucket = near.get(key);
+      if (bucket === undefined) {
+        bucket = { all: [], byEntity: new Map() };
+        near.set(key, bucket);
+      }
+      bucket.all.push(indexed);
+      for (const entity of name.entities) {
+        const listed = bucket.byEntity.get(entity);
+        if (listed === undefined) bucket.byEntity.set(entity, [indexed]);
+        else listed.push(indexed);
+      }
+    }
+  }
+  return (path: string): boolean => {
+    if (path.endsWith(".tsv")) {
+      const kept = correspondingFile(path);
+      return kept !== null && tables.has(kept);
+    }
+    if (!path.endsWith(".json")) return false;
+    const name = bidsName(path);
+    if (name === null) return false;
+    const bucket = near.get(bucketKey(name.extension, name.suffix, name.dir));
+    if (bucket === undefined) return false;
+    let fewest = bucket.all;
+    for (const entity of name.entities) {
+      const listed = bucket.byEntity.get(entity);
+      if (listed === undefined) return false;
+      if (listed.length < fewest.length) fewest = listed;
+    }
+    return fewest.some(
+      (c) => c.path !== path && [...name.entities].every((entity) => c.entities.has(entity)),
+    );
+  };
+}
+
+/**
  * A name with case and punctuation removed, so `MISC_Channel-Count` and `MiscChannelCount` fold
  * alike. Punctuation between two digits is part of a number and stays: `1.2` is not `12`, and `0.5`
  * is not `05`, so a key renamed from one to the other is not a respelling.
@@ -4208,7 +4286,8 @@ export function summarizeChanges(input: {
 
 /**
  * {@link summarizeChanges} with the totality checks passed in, so a test can prove that a diff the
- * check rejects is refused (`internal_mismatch`) and accounts for nothing. A run:
+ * check rejects is refused (`internal_mismatch`) and accounts for nothing, and with the pool's
+ * pruning passed in, so a test can compare a run that keeps every pool file. A run:
  *
  * 1. **Sorts the candidates by path, in code-unit order**, and processes them in that order. So
  *    nothing about a run depends on the order git listed the files in: not the outcomes, not the
@@ -4216,10 +4295,12 @@ export function summarizeChanges(input: {
  *    its corresponding path, so two different files never compete for one; the only order that
  *    could matter is two candidates with ONE path, and a path given twice is refused, every time
  *    it appears, as `internal_mismatch`, the word for the platform's own reading not adding up.)
- * 2. Builds the pools once, from `pool`. {@link buildPools} gives the same pools for the files in
- *    any order (it decides which files fit `maxPoolChars` in path order, sorts the copies of one
- *    file itself, and a path listed twice contributes nothing, whichever entry comes first), so the
- *    pool needs no sorting here.
+ * 2. Builds the pools once, from the files of `pool` that can matter to a candidate (`keep`, which
+ *    is {@link poolFileMatters} unless a test passes another): any other file is never consulted,
+ *    so it is not read, and takes nothing of `maxPoolChars`. {@link buildPools} gives the same pools
+ *    for the files in any order (it decides which files fit `maxPoolChars` in path order, sorts the
+ *    copies of one file itself, and a path listed twice contributes nothing, whichever entry comes
+ *    first), so the pool needs no sorting here.
  * 3. Checks the deadline BEFORE each pool file it reads, BEFORE each candidate, AFTER each file it
  *    folds in (a diff can be long), and once more after the last file, before anything is
  *    rendered. When `now()` has reached it at any of these, the WHOLE summary is abandoned: no file
@@ -4249,6 +4330,7 @@ export function summarizeChangesWith(
     now?: () => number;
   },
   checks: SummaryChecks,
+  keep: (candidates: readonly string[]) => (path: string) => boolean = poolFileMatters,
 ): ChangeSummary {
   const now = input.now ?? Date.now;
   const expired = (): boolean => input.deadline !== null && now() >= input.deadline;
@@ -4257,7 +4339,11 @@ export function summarizeChangesWith(
   for (const candidate of candidates) {
     listed.set(candidate.path, (listed.get(candidate.path) ?? 0) + 1);
   }
-  const pools = poolsWithin(input.pool, expired);
+  const matters = keep(candidates.map((c) => c.path));
+  const pools = poolsWithin(
+    input.pool.filter((file) => matters(file.path)),
+    expired,
+  );
   if (pools === null) return emptySummary(true);
 
   const outcomes: FileOutcome[] = [];

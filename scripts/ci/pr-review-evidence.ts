@@ -66,6 +66,7 @@ import {
   type PoolFile,
   SUMMARY_LIMITS,
   type SummaryCandidate,
+  poolFileMatters,
   summarizeChanges,
 } from "./pr-review-summary";
 
@@ -1005,13 +1006,16 @@ export function gatherContent(
  *   {@link ABANDONED_SUMMARY}, and the pass goes on;
  * - past its deadline while it runs: abandoned by {@link summarizeChanges} itself.
  *
- * The pool is every added or modified `.tsv` and `.json` file anywhere in the tree, in path order,
- * `sourcedata/` and `derivatives/` included: where a removed row or key may have been kept, and
- * which sidecars a moved key may have reached. A JSON path whose blob is not a regular file at the
- * head (a type change, a symlink, a submodule), or could not be read, is in the pool as a document
- * that cannot be read, so it still stops a key from being read as moved past it. A table that
- * cannot be read is left out, so nothing can be found kept in it. A side that could not be read is
- * never handed on as a missing one, which would say the file was added.
+ * The pool is every added or modified `.tsv` and `.json` file, in path order, that a candidate can
+ * consult ({@link poolFileMatters}): a table at `sourcedata/<D>/<a candidate's path>`, where a
+ * removed row may have been kept, and a sidecar that applies to a candidate, which a moved key may
+ * have reached or which may stop a move past it. No other file can change what the summary says,
+ * so its blobs are not read at all; `summarizeChanges` prunes with the same predicate. A JSON path
+ * whose blob is not a regular file at the head (a type change, a symlink, a submodule), or could
+ * not be read, is in the pool as a document that cannot be read, so it still stops a key from
+ * being read as moved past it. A table that cannot be read is left out, so nothing can be found
+ * kept in it. A side that could not be read is never handed on as a missing one, which would say
+ * the file was added.
  */
 function changeSummary(
   dir: string,
@@ -1024,10 +1028,12 @@ function changeSummary(
   const deadline = gitDeadline === null ? null : gitDeadline - SUMMARY_LIMITS.timeReserveMs;
   if (deadline !== null && now() >= deadline) return ABANDONED_SUMMARY;
 
+  const matters = poolFileMatters(candidates.map((c) => c.path));
   const sides: { entry: RawEntry; regular: boolean }[] = [];
   for (const entry of [...entries.values()].sort((a, b) => codeUnitOrder(a.path, b.path))) {
     const json = entry.path.endsWith(".json");
     if (entry.status === "removed" || (!json && !entry.path.endsWith(".tsv"))) continue;
+    if (!matters(entry.path)) continue;
     const regular =
       (entry.status === "added" || entry.status === "modified") &&
       REGULAR_FILE_MODES.has(entry.modeAfter);
