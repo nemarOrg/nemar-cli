@@ -4630,6 +4630,113 @@ describe("the change summary keeps to its deadline, and leaves the raw path as i
   }, 30_000);
 });
 
+describe("the content pass on the job's blob-less clone", () => {
+  /**
+   * A clone made as the review job makes one: a bare origin that allows blob-less fetches, a
+   * promisor remote, and one fetch of the base and the head with `--filter=blob:none`, no checkout.
+   */
+  function blobLessClone(name: string, origin: Repo): string {
+    const bare = join(root, `${name}-origin.git`);
+    execFileSync("git", ["clone", "-q", "--bare", origin.dir, bare], { env: GIT_ENV });
+    git(bare, "config", "uploadpack.allowFilter", "true");
+    git(bare, "config", "uploadpack.allowAnySHA1InWant", "true");
+    const clone = join(root, name);
+    mkdirSync(clone, { recursive: true });
+    git(clone, "init", "-q", "-b", "main");
+    git(clone, "config", "extensions.partialClone", "origin");
+    git(clone, "remote", "add", "origin", `file://${bare}`);
+    git(
+      clone,
+      "fetch",
+      "-q",
+      "--no-tags",
+      "--filter=blob:none",
+      "origin",
+      "+refs/heads/main:refs/remotes/origin/main",
+      "+refs/heads/contrib:refs/remotes/pr/head",
+    );
+    return clone;
+  }
+
+  /** Whether the clone holds the object, asked so that asking cannot fetch it. */
+  function holds(clone: string, oid: string): boolean {
+    try {
+      execFileSync("git", ["-C", clone, "cat-file", "-e", oid], {
+        env: { ...GIT_ENV, GIT_NO_LAZY_FETCH: "1" },
+        stdio: "ignore",
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  const NO_LAZY_FETCH = { GIT_NO_LAZY_FETCH: "1" };
+  /** Twenty tables of the bulk relabel and one sidecar reindented, which is cosmetic. */
+  const origin = () =>
+    bulkRelabel(`clone-source-${Math.random().toString(36).slice(2)}`, {
+      files: 20,
+      setUp: (dir) => write(dir, "task-sleep_ieeg.json", '{"TaskName":"sleep"}'),
+      edit: (dir) => write(dir, "task-sleep_ieeg.json", '{\n  "TaskName": "sleep"\n}\n'),
+    });
+
+  test("one prefetch brings every blob: the cosmetic proof and the summary read them with no fetch of their own", () => {
+    const r = origin();
+    const clone = blobLessClone("clone-lazy", r);
+    const before = git(r.dir, "rev-parse", `${r.base}:${bulkTable(1)}`);
+    const after = git(r.dir, "rev-parse", `${r.head}:${bulkTable(1)}`);
+    expect(holds(clone, before)).toBe(false);
+    expect(holds(clone, after)).toBe(false);
+    const listing = gatherListing(clone, r.base, r.head);
+    const log = callLog("clone-lazy");
+    // cat-file may not fetch: what it reads, the prefetch must already have brought.
+    const restore = installGitShim(root, [
+      { match: " cat-file ", env: NO_LAZY_FETCH },
+      { match: " ", log },
+    ]);
+    let content: ReturnType<typeof gatherContent>;
+    try {
+      content = gatherContent(clone, listing);
+    } finally {
+      restore();
+    }
+    expect(content.cosmeticOnlyFiles).toBe(1);
+    expect([...content.summary.accounted].sort()).toEqual(
+      Array.from({ length: 20 }, (_, i) => bulkTable(i + 1)),
+    );
+    expect(content.summary.loss.rowsRelocated).toBe(30);
+    expect(content.readIncomplete).toBe(false);
+    const calls = loggedCalls(log).map(
+      (c) => c.split("protocol.ext.allow=never ")[1]?.trim() ?? "",
+    );
+    expect(calls.filter((c) => c.startsWith("diff --numstat"))).toHaveLength(1);
+    expect(calls.filter((c) => c.startsWith("diff --raw"))).toHaveLength(1);
+    expect(calls.filter((c) => c.startsWith("cat-file")).length).toBeLessThanOrEqual(4);
+    expect(calls.filter((c) => /^show \S+\.(json|tsv)$/.test(c))).toEqual([]);
+    // The README and CHANGES, which nothing else covers, and three illustrations.
+    expect(calls.filter((c) => c.startsWith("diff -U2")).length).toBeLessThanOrEqual(2 + 3);
+  });
+
+  test("when the prefetch cannot fetch either, nothing is proven cosmetic and nothing is accounted for", () => {
+    const r = origin();
+    const clone = blobLessClone("clone-cut-off", r);
+    const listing = gatherListing(clone, r.base, r.head);
+    const restore = installGitShim(root, [
+      { match: " cat-file ", env: NO_LAZY_FETCH },
+      { match: " --numstat ", env: NO_LAZY_FETCH },
+    ]);
+    let content: ReturnType<typeof gatherContent>;
+    try {
+      content = gatherContent(clone, listing);
+    } finally {
+      restore();
+    }
+    expect(content.cosmeticOnlyFiles).toBe(0);
+    expect(content.summary.accounted.size).toBe(0);
+    expect(content.summary).toBe(EMPTY_SUMMARY);
+  });
+});
+
 describe("the worst case fits", () => {
   test("the worst-case user messages of both stages stay under 300,000 characters", () => {
     const long = (n: number, c = "x") => c.repeat(n);
