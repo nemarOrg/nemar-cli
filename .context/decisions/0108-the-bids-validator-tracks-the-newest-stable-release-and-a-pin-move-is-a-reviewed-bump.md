@@ -14,7 +14,7 @@ The publication gate passes or refuses a dataset on the errors that survive the 
 ## Decision
 
 `validator-version.json` pins one exact release, and the monthly bump proposes the newest stable release of any major version as a pull request.
-A bump is merged only after its reference-dataset comparison is on the pull request: the publication-gating error set of the old and the new release, computed with the central workflow's flags and annex filter, for the same datasets, with every difference listed.
+A bump is merged only after its reference-dataset comparison is on the pull request: the publication-gating error set of the old and the new release, computed with the central workflow's flags and annex filter, for the same datasets, with the differences listed in the pull request. The complete comparison is kept as the run's artifact, so a long diff is never silently cut.
 The bump workflow computes that comparison itself, on a fixed set of reference datasets plus a canary layout; a full run over the nemarDatasets organization is a release-time check and is run by hand.
 Every validation report the CLI writes names the release that produced it.
 
