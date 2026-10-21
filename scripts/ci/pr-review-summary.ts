@@ -857,50 +857,43 @@ interface Run {
   cls: RunClass;
   text: string;
   /**
-   * What two runs are compared by. Letters and other characters: exactly their text. Digits:
-   * their value, so `01` and `1` are one number, but only for ASCII digits that stand alone; any
-   * other digit (Arabic-Indic, a superscript, a fraction) is compared as the text it is, because it
-   * has no value this module can vouch for, and so are two kinds of ASCII run whose zeros may be
-   * part of a number rather than its padding:
-   *
-   * - a run directly before or after a `.` or a `,` (see {@link DECIMAL_MARKS}), also when the run
-   *   or the mark is at the edge of the string: `0.05` to `0.5` is a tenfold change, and by value
-   *   it would read as "only the zero padding changed";
-   * - a run JOINED to another digit run: scanning from it in either direction over runs that are
-   *   one other character each, the first run that is not one is a digit run. `5 000`, `1'000`,
-   *   `1_000`, `0·05` and `1٫05` (the Arabic decimal separator) are each one number written with a
-   *   separator this module cannot list, so the zeros after the separator are digits of that
-   *   number, and `5 000` to `5 0` is not a padding. A letter anywhere between the two breaks the
-   *   join, so `sub-01_ses-02`, `0100 Hz` and `EEG 001` still compare their numbers by value.
-   *
-   * Both are decided from the string alone, the same way for a key and for a cell.
+   * What the run is compared by when the digits of a pair are compared by value (see
+   * {@link Name.numbersAsText} for when they are not). Letters and other characters: exactly
+   * their text. Digits: their value, so `01` and `1` are one number, but only for ASCII digits;
+   * any other digit (Arabic-Indic, a superscript, a fraction) is the text it is, because it has no
+   * value this module can vouch for.
    */
   norm: string;
 }
 
-/**
- * The characters that make the digits directly next to them part of a decimal number. Only these
- * two are listed: a digit run separated from another digit run by any other character that is not
- * a letter is caught by the join (see {@link Run.norm}), so no separator needs to be named here.
- */
+/** The characters that make the digits directly next to them part of a decimal number. */
 const DECIMAL_MARKS: ReadonlySet<string> = new Set([".", ","]);
 
-function normalizeRun(
-  run: { cls: RunClass; text: string },
-  previous: { text: string } | undefined,
-  next: { text: string } | undefined,
-  joined: boolean,
-): string {
-  if (run.cls !== "D" || !ASCII_DIGITS.test(run.text) || joined) return run.text;
-  if (DECIMAL_MARKS.has(previous?.text ?? "") || DECIMAL_MARKS.has(next?.text ?? "")) {
-    return run.text;
-  }
+function normalizeRun(run: { cls: RunClass; text: string }): string {
+  if (run.cls !== "D" || !ASCII_DIGITS.test(run.text)) return run.text;
   return run.text.replace(/^0+(?=[0-9])/, "");
 }
 
 /**
- * For each run, whether it is a digit run joined to another digit run (see {@link Run.norm}): the
- * nearest run on its left or on its right that is not one other character is a digit run. Two
+ * Whether a string holds a digit run whose zeros may be part of a number rather than its padding
+ * (see {@link Name.numbersAsText}): a digit run directly before or after a `.` or a `,`, also at
+ * the edge of the string, or a digit run JOINED to another, that is, one whose nearest run on its
+ * left or on its right that is not one other character is a digit run.
+ */
+function holdsNumberText(runs: readonly Run[]): boolean {
+  const joined = joinedDigitRuns(runs);
+  return runs.some(
+    (run, i) =>
+      run.cls === "D" &&
+      (joined[i] === true ||
+        DECIMAL_MARKS.has(runs[i - 1]?.text ?? "") ||
+        DECIMAL_MARKS.has(runs[i + 1]?.text ?? "")),
+  );
+}
+
+/**
+ * For each run, whether it is a digit run joined to another digit run (see {@link holdsNumberText}):
+ * the nearest run on its left or on its right that is not one other character is a digit run. Two
  * passes, one from each end, each remembering the class of the last such run it passed.
  */
 function joinedDigitRuns(parts: readonly { cls: RunClass }[]): boolean[] {
@@ -949,8 +942,7 @@ function exceedsKeyChars(s: string): boolean {
 
 /**
  * Split a name into runs, or null when it has more than `maxRuns` of them. The caller has already
- * bounded the length in code points. A digit run's `norm` depends on its neighbors (see
- * {@link Run}), so the norms are set once every run is known.
+ * bounded the length in code points.
  */
 function splitRuns(s: string): Run[] | null {
   const parts: { cls: RunClass; text: string }[] = [];
@@ -969,12 +961,7 @@ function splitRuns(s: string): Run[] | null {
     text = ch;
   }
   if (cls !== null) parts.push({ cls, text });
-  const joined = joinedDigitRuns(parts);
-  return parts.map((part, i) => ({
-    cls: part.cls,
-    text: part.text,
-    norm: normalizeRun(part, parts[i - 1], parts[i + 1], joined[i] as boolean),
-  }));
+  return parts.map((part) => ({ cls: part.cls, text: part.text, norm: normalizeRun(part) }));
 }
 
 /**
@@ -987,23 +974,45 @@ interface Name {
   long: boolean;
   /** Its runs, or null when it is long or has more than `maxRuns` of them. */
   runs: readonly Run[] | null;
+  /**
+   * The string holds a digit run whose zeros may be part of a number rather than its padding: one
+   * directly before or after a `.` or a `,` (also at the edge of the string), where `0.05` to `0.5`
+   * is a tenfold change; or one JOINED to another digit run, scanning from it in either direction
+   * over runs that are one other character each, so that `5 000`, `1'000`, `1_000`, `0·05` and
+   * `1٫05` (the Arabic decimal separator) are each one number written with a separator this
+   * module cannot list. A letter anywhere between two digit runs breaks the join, so
+   * `sub-01_ses-02`, `0100 Hz` and `EEG 001` hold none.
+   *
+   * It is decided for each string alone, and it decides the PAIR: when either string of a pair
+   * holds such a run, every digit run of both is compared by its text, so no rule between them
+   * can say a number kept its value. Deciding it run by run is not enough, because the mark can be
+   * in the text a rule adds: `05 Hz` to `.5 Hz` would otherwise read as a prefix `.` added and the
+   * zero padding changed, which is a tenfold change. A pair in which neither string holds one
+   * compares its ASCII digits by value.
+   */
+  numbersAsText: boolean;
 }
 
 function nameOf(text: string): Name {
   const long = exceedsKeyChars(text);
-  return { text, long, runs: long ? null : splitRuns(text) };
+  const runs = long ? null : splitRuns(text);
+  return { text, long, runs, numbersAsText: runs !== null && holdsNumberText(runs) };
 }
 
-function sameRun(a: Run, b: Run): boolean {
-  return a.cls === b.cls && a.norm === b.norm;
+/**
+ * Whether two runs are the same part: the same class and, for digits, the same text when the pair
+ * compares numbers as text (`byText`), the same {@link Run.norm} otherwise.
+ */
+function sameRun(a: Run, b: Run, byText: boolean): boolean {
+  return a.cls === b.cls && (byText ? a.text === b.text : a.norm === b.norm);
 }
 
 /** The leftmost offset at which all of `short` appears among the runs of `long`, or -1. */
-function findContiguous(short: readonly Run[], long: readonly Run[]): number {
+function findContiguous(short: readonly Run[], long: readonly Run[], byText: boolean): number {
   for (let k = 0; k + short.length <= long.length; k++) {
     let all = true;
     for (let i = 0; i < short.length && all; i++) {
-      all = sameRun(short[i] as Run, long[k + i] as Run);
+      all = sameRun(short[i] as Run, long[k + i] as Run, byText);
     }
     if (all) return k;
   }
@@ -1014,7 +1023,8 @@ function findContiguous(short: readonly Run[], long: readonly Run[]): number {
  * Match the runs of `short` against the TEXT of `long`, in order, and return the text left over
  * between the matches (one more gap than there are runs), or null when they do not all match.
  *
- * A digit run matches only a whole digit run of the same value. A letter run or another character
+ * A digit run matches only a whole digit run of the same value (the same text, when `byText`).
+ * A letter run or another character
  * matches an occurrence of its text, preferably one that starts and ends where a run of `long`
  * does, else the first occurrence after the previous match: `GA` is in `EEGGA` only as its tail, and
  * that is how `GA01` becomes `EEGGA_01REF`. The choice is greedy and never backs up, so a name that
@@ -1025,6 +1035,7 @@ function findContiguous(short: readonly Run[], long: readonly Run[]): number {
 function matchInOrder(
   short: readonly Run[],
   long: readonly Run[],
+  byText: boolean,
 ): { gaps: string[]; repadded: boolean } | null {
   const text = long.map((run) => run.text).join("");
   const starts: number[] = [];
@@ -1043,11 +1054,7 @@ function matchInOrder(
     if (run.cls === "D") {
       for (let i = 0; i < long.length; i++) {
         const candidate = long[i] as Run;
-        if (
-          (starts[i] as number) >= position &&
-          candidate.cls === "D" &&
-          candidate.norm === run.norm
-        ) {
+        if ((starts[i] as number) >= position && sameRun(candidate, run, byText)) {
           at = starts[i] as number;
           length = candidate.text.length;
           if (candidate.text !== run.text) repadded = true;
@@ -1088,13 +1095,18 @@ function matchInOrder(
  * unrelated new one. A number is what makes `GA01` and `EEGGA_01REF` the same channel; a name with
  * no number has no part that the insertion could not have changed the meaning of.
  */
-function runRule(before: readonly Run[], after: readonly Run[]): RelabelRule | null {
+function runRule(
+  before: readonly Run[],
+  after: readonly Run[],
+  byText: boolean,
+): RelabelRule | null {
   if (before.length === after.length) {
     // Same number of parts: only a number's padding can be the whole difference. Letters and other
     // characters compare by their exact text and the two strings differ (the caller returned on
     // equal strings), so when every run is the same by `norm`, some digit run changed its padding.
+    // Compared by text, every run the same would be two equal strings: no repad is ever found.
     for (let i = 0; i < before.length; i++) {
-      if (!sameRun(before[i] as Run, after[i] as Run)) return null;
+      if (!sameRun(before[i] as Run, after[i] as Run, byText)) return null;
     }
     return { kind: "repad", gaps: [], shape: "", repadded: true };
   }
@@ -1103,7 +1115,7 @@ function runRule(before: readonly Run[], after: readonly Run[]): RelabelRule | n
   const short = beforeShorter ? before : after;
   const long = beforeShorter ? after : before;
 
-  const k = findContiguous(short, long);
+  const k = findContiguous(short, long, byText);
   if (k >= 0) {
     const prefix = long
       .slice(0, k)
@@ -1121,7 +1133,7 @@ function runRule(before: readonly Run[], after: readonly Run[]): RelabelRule | n
   // Every gap is never empty here: if the runs of `short` sat in `long` with nothing between them,
   // `long` would split into the same runs (a matched letter run is followed by a digit or another
   // character, so it is a whole run of `long`), and the two would have the same number of runs.
-  const matched = matchInOrder(short, long);
+  const matched = matchInOrder(short, long, byText);
   if (matched === null) return null;
   return {
     kind: beforeShorter ? "insert" : "delete",
@@ -1202,8 +1214,9 @@ function characterRule(before: Name, after: Name): RelabelRule | null {
 /**
  * The first rule that says how `before` became `after`, or null. In order: `case` (equal once both
  * are lower-cased); then, over the runs of each string (a maximal run of letters, a maximal run of
- * digits, or one other character; digits compared by value, so `01` is `1`, except next to a `.`
- * or `,` or joined to another digit run: see {@link Run.norm}), `repad`, `wrap` or `strip` (the
+ * digits, or one other character; digits compared by value, so `01` is `1`, unless either string
+ * holds a digit run next to a `.` or `,` or joined to another digit run, when every digit of both
+ * is compared as text: see {@link Name.numbersAsText}), `repad`, `wrap` or `strip` (the
  * shorter string's runs sit contiguously in the longer one), and `insert` or `delete` (they sit in
  * order, with text between them, and the one with fewer runs holds a digit run: see `runRule`);
  * and only when `opts.chars` is set, the character rule, whose inserted text must be whole runs
@@ -1239,7 +1252,8 @@ function relabelNames(before: Name, after: Name, opts: { chars: boolean }): Rela
     return { kind: "case", gaps: [], shape: "", repadded: false };
   }
   if (before.runs === null || after.runs === null) return null;
-  const byRuns = runRule(before.runs, after.runs);
+  // One mode for the whole pair: see `Name.numbersAsText`.
+  const byRuns = runRule(before.runs, after.runs, before.numbersAsText || after.numbersAsText);
   const found = byRuns ?? (opts.chars ? characterRule(before, after) : null);
   // A number put in or taken out is never a respelling: `A1` to `A1-A2` adds a channel to the name
   // and `A1-A2` to `A2` drops one, and either can be a removed row and an unrelated new one that

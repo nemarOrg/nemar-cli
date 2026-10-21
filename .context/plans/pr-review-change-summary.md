@@ -294,9 +294,12 @@ Examples are the first atom of each of the first two files in review order, or t
    With empty prefix and suffix and `repadded`, the rule is `repad` ("only the zero padding of numbers changed").
    **Decimals** (phase 2 review, decision D4): a digit run directly before or after a `.` or `,` is compared by its text, not its value, wherever runs are compared.
    So `0.05` to `0.5`, `A1.05` to `A1.5` and `0.05 Hz` to `0.5 Hz` get no `repad`: a tenfold change must never read as formatting.
-   **Joined numbers** (phase 3 review): a digit run is also compared by its text when it is joined to another digit run, that is, when scanning from it in either direction over runs that are one other character each, the first run that is not one is a digit run.
-   So `5 000` to `5 0`, `1'000` to `1'0000`, `1_000` to `1_0000`, `0·05 Hz` to `0·5 Hz` and `1٫05` to `1٫5` get no `repad` either: each is one number written with a separator, and no list of separators is kept.
-   A letter anywhere between two digit runs breaks the join, so `sub-01_ses-02`, `0100 Hz`, `EEG 001` and `x_02_y` still repad; the join is decided from each string alone, for keys and cells alike.
+   **Joined numbers** (phase 3 review): a digit run joined to another digit run (scanning from it in either direction over runs that are one other character each, the first run that is not one is a digit run) is part of one number written with a separator, so `5 000` to `5 0`, `1'000` to `1'0000`, `1_000` to `1_0000`, `0·05 Hz` to `0·5 Hz` and `1٫05` to `1٫5` get no `repad` either; no list of separators is kept.
+   A letter anywhere between two digit runs breaks the join, so `sub-01_ses-02`, `0100 Hz`, `EEG 001` and `x_02_y` still repad.
+   **The pair decides** (phase 3 review, replacing the run-by-run reading of D4): when EITHER string of a pair holds a digit run next to a `.` or `,` (also at the edge of the string) or a joined digit run, EVERY digit run of BOTH strings is compared by its text, so no rule between them can say a number kept its value.
+   Run by run was not enough, because the mark can be in the text a rule adds: `05 Hz` to `.5 Hz` read as "prefix `.` added, zero padding changed", a tenfold change in a rule class.
+   Compared as text, a rule that rebuilds the string exactly is still found and never carries `repadded` (`07 Hz` to `.07 Hz` is the prefix `.`); a pair in which neither string holds such a run compares its ASCII digits by value as before.
+   The lookup of section 4.4 indexes every key by its digits' values, so it finds every candidate either reading could accept, and the rule decides.
 4. `insert` or `delete`: the shorter string's runs appear in order in the longer string, a digit run only as a whole digit run of the same value, a letter or other run preferably where it starts and ends on a run boundary of the longer string, else at its first occurrence after the previous match; the rule is the list of inserted texts and the shape (`L`, `D`, `O` per run).
    `GA01` to `EEGGA_01REF` is `"EEG" + letters + "_" + digits + "REF"`.
    **Anchor** (D2): the string with fewer runs must contain at least one digit run, the anchor.

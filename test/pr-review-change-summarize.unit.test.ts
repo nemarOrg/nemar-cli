@@ -1995,6 +1995,44 @@ describe("summarizeChanges: a change of magnitude is never a rule class", () => 
   });
 });
 
+describe("summarizeChanges: a decimal mark in the added text is never a padding", () => {
+  test("05 Hz to .5 Hz is a pair shown in full, and A05 to A.5 is a removed and an added row", () => {
+    const header = ["name", "type", "units", "high_cutoff"];
+    const summary = summarize([
+      candidate(
+        channels(1),
+        tsv(header, ["Cz", "EEG", "uV", "05 Hz"]),
+        tsv(header, ["Cz", "EEG", "uV", ".5 Hz"]),
+      ),
+      candidate(
+        channels(2),
+        tsv(header, ["A05", "EEG", "uV", "1 Hz"]),
+        tsv(header, ["A.5", "EEG", "uV", "1 Hz"]),
+      ),
+      // Beside them, a real padding in both places keeps its rule.
+      candidate(
+        channels(3),
+        tsv(header, ["A05", "EEG", "uV", "0100 Hz"]),
+        tsv(header, ["A5", "EEG", "uV", "100 Hz"]),
+      ),
+    ]);
+    const kindsOf = (path: string) => {
+      const keys = (summary.files.find((f) => f.path === path) as FileOutcome).classKeys;
+      return summary.classes
+        .filter((c) => keys.has(c.key))
+        .map((c) => c.kind)
+        .sort();
+    };
+    expect(kindsOf(channels(1))).toEqual(["cell_replaced"]);
+    expect(kindsOf(channels(2))).toEqual(["row_added", "row_removed"]);
+    expect(kindsOf(channels(3))).toEqual(["cell_templated", "key_relabeled"]);
+    expect(summary.text).toContain('\n    "05 Hz" -> ".5 Hz" x1\n');
+    expect(summary.text).toContain('\n    "A05" x1\n');
+    expect(summary.loss.rowsRemoved).toBe(1);
+    expect(summary.loss.firstBlockingPath).toBe(channels(2));
+  });
+});
+
 describe("summarizeChanges: layout and respelling", () => {
   const formatDetails = (summary: ChangeSummary) =>
     summary.classes.filter((c) => c.kind === "format").map((c) => `${c.detail} ${c.items}`);
