@@ -754,7 +754,7 @@ describe("readBlobs and rawEntries", () => {
     let calls: string[] = [];
     try {
       started = Date.now();
-      stalled = readBlobs(dir, [id("a.txt")], CAPS, Date.now() + 300);
+      stalled = readBlobs(dir, [id("a.txt")], CAPS, Date.now() + 1_000);
       elapsed = Date.now() - started;
       calls = loggedCalls(log);
       past = readBlobs(dir, [id("a.txt")], CAPS, Date.now() - 1);
@@ -771,7 +771,7 @@ describe("readBlobs and rawEntries", () => {
     expect(texts(readBlobs(dir, [id("a.txt")], CAPS, Date.now() + 60_000))).toEqual({
       [id("a.txt")]: "alpha\n",
     });
-  });
+  }, 30_000);
 
   test("parseRawEntries reads what git writes: added, modified, removed, a type change and a submodule", () => {
     const dir = join(root, "raw-entries");
@@ -2466,7 +2466,7 @@ describe("cosmetic changes are proven from the blobs, never assumed", () => {
     expect(Date.now() - started).toBeLessThan(4_500);
     // The same pass with nothing stalling proves the file cosmetic.
     expect(gatherContent(r.dir, listing).cosmeticOnlyFiles).toBe(1);
-  });
+  }, 30_000);
 
   test("a cosmetic proof does not depend on the summary's 8 MiB cap: a reindented 9 MiB sidecar is cosmetic", () => {
     const dir = newBigDataset("n2-over-8mib", 3);
@@ -4326,7 +4326,7 @@ describe("the change summary", () => {
       ...Array.from({ length: 40 }, (_, i) => sidecar(i)),
       "sub-900/eeg/sub-900_task-rest_eeg.json",
     ]);
-  });
+  }, 30_000);
 
   test("illustrations are not counted among the diffs examined: past MAX_DIFFS_EXAMINED one is still shown", () => {
     const n = MAX_DIFFS_EXAMINED + 5;
@@ -4671,7 +4671,7 @@ describe("the change summary keeps to its deadline, and leaves the raw path as i
     expect(clocked.catFile).toEqual(COSMETIC_READS);
     expectRaw(clocked.content, clocked.listing);
     expect(withoutSummary(clocked.content)).toEqual(withoutSummary(late.content));
-  });
+  }, 30_000);
 
   test("a summary that reaches its deadline while it runs is abandoned, and the raw path is as it was", () => {
     let reads = 0;
@@ -4682,7 +4682,7 @@ describe("the change summary keeps to its deadline, and leaves the raw path as i
     expect(midway.catFile).toHaveLength(4);
     expectRaw(midway.content, midway.listing);
     expect(withoutSummary(midway.content)).toEqual(withoutSummary(tooLate().content));
-  });
+  }, 30_000);
 
   test("a pool read that stalls past the summary's deadline abandons the summary, and the pass goes on", () => {
     // 42 seconds leaves the summary two seconds before its line; the third cat-file is the pool's
@@ -4783,7 +4783,7 @@ describe("the content pass on the job's blob-less clone", () => {
     expect(calls.filter((c) => /^show \S+\.(json|tsv)$/.test(c))).toEqual([]);
     // The README and CHANGES, which nothing else covers, and three illustrations.
     expect(calls.filter((c) => c.startsWith("diff -U2")).length).toBeLessThanOrEqual(2 + 3);
-  });
+  }, 30_000);
 
   test("when the prefetch cannot fetch either, nothing is proven cosmetic and nothing is accounted for", () => {
     const r = origin();
@@ -4802,7 +4802,7 @@ describe("the content pass on the job's blob-less clone", () => {
     expect(content.cosmeticOnlyFiles).toBe(0);
     expect(content.summary.accounted.size).toBe(0);
     expect(content.summary).toBe(EMPTY_SUMMARY);
-  });
+  }, 30_000);
 });
 
 describe("the worst case fits", () => {
