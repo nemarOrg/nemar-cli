@@ -2239,6 +2239,23 @@ describe("diffTable: keyless tables", () => {
     ]);
   });
 
+  test("a row paired as an edit counts toward the order: moving it is a reorder", () => {
+    // 1 0.5 go matches exactly; 2 0.5 stop is paired with 2 0.5 STOP as an edit. The edited row
+    // moved in front of the other, and that is a reorder too.
+    expect(
+      lines(
+        diffText(
+          path,
+          tsv(header, ["1", "0.5", "go"], ["2", "0.5", "stop"]),
+          tsv(header, ["2", "0.5", "STOP"], ["1", "0.5", "go"]),
+        ),
+      ),
+    ).toEqual([
+      'cell_replaced | field=trial_type | before="stop" | after="STOP"',
+      "rows_reordered",
+    ]);
+  });
+
   test("the two pointers skip a gone row, skip an added row, or advance both", () => {
     // A gone row in the way: the next gone row is the added one's.
     expect(

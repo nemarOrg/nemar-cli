@@ -329,7 +329,7 @@ So a table of ids alone, or of `n/a`, has no evidence, and `1` removed with `sub
 
 **Bounds** (D10).
 A lookup looks at no more than 64 candidates, counting the ones already paired, and passes a paired prefix of a candidate list with a cursor that only moves forward, so the work of one lookup does not grow with what was paired before it.
-All pairing passes of one file (the four relabel passes, and the keyless pairing of section 4.5) share one step budget, `maxPairingSteps` (section 5.2): a substring looked up costs one step, a candidate pair tried costs a fixed part plus one step per 8 characters of the two keys and per 8 compared cells, and one per 8 pairs of runs (the rules match the runs of one name against the runs of the other; D16), a keyless pair compared one step plus one per 8 cells.
+The four relabel passes of one file share one step budget, `maxPairingSteps` (section 5.2): a substring looked up costs one step, and a candidate pair tried costs a fixed part plus one step per 8 characters of the two keys and per 8 compared cells, and one per 8 pairs of runs (the rules match the runs of one name against the runs of the other; D16).
 Rule 4 finds the occurrence of a letter or other run that starts and ends on run boundaries among the runs of the longer name (such an occurrence is always a whole run), so its cost does not grow with how often the text repeats.
 When the budget is spent no further pair is made, and whatever is unpaired is removed and added, exactly as if no rule had held: the budget can only show more change, it never pairs a row it did not check, and it is spent in the same order on every run.
 Measured on a laptop: 100,000 case variants of one word relabel in about 0.2 s; the costliest crafted tables that fit in 8 MiB spend the whole budget in about 0.75 s (100,000 keys of 23 runs tried against keys of 24, each failing only at its last digit) and 0.76 s (keys whose every substring is looked up and missed); legitimate 200,000-row relabels use 28% of the budget (a prefix stripped) to 66% (a prefix added with every age changed, so only the lenient pass pairs them).
@@ -349,7 +349,7 @@ A mistake in this order can only turn "relocated" into "relabeled with changed c
 3. Relocation of each unmatched before row (full before row).
 4. Two-pointer pairing of the remaining before and after rows, in file order, accepting a pair only when **at most half** of the common columns differ **and** EQ is at least DIFF, where EQ counts only the equal common cells that are not missing (D6); a paired row's differing cells become cell atoms.
    (The first condition follows from the second, since EQ + DIFF is at most the number of common columns; it stays as the statement of what an edit is.)
-   It spends from the same step budget as section 4.4.
+   It needs no step budget: it compares at most three pairs of rows per row, each over the common columns, so its work is bounded by the size of the table (a few million cell comparisons at the 8 MiB cap).
 5. What is left: `row_removed` and `row_added`.
 
 The half-columns condition makes a deleted event and an unrelated new event a removal plus an addition (a loss fact) instead of a "changed onset and trial type".
@@ -937,7 +937,7 @@ Each case names how the design answers it; the test of section 12 that pins it i
     A move counts only into a sidecar that applies by BIDS inheritance, and only when the file no longer has the key's top-level key; elsewhere, or under a top-level key the file keeps, it is a removed key. [`json moved needs inheritance`]
 16. **Slow input to time out the review.**
     The summary is abandoned at its deadline (all-or-nothing) and the raw path runs as today; an abandoned summary never accounts for anything.
-    Within one file, the pairing passes share a step budget (section 4.4), so no input makes one file's diff slow, and what the budget leaves unpaired is removed and added. [`deadline abandons`, `pairing budget`]
+    Within one file, the relabel passes share a step budget and the keyless and JSON rename passes are linear (section 4.4), so no input makes one file's diff slow, and what the budget leaves unpaired is removed and added. [`deadline abandons`, `pairing budget`]
 17. **A value that forges a class line or the facts.**
     Values are escaped (no newline), paths are `tidyPath`ed, the class table is in `<facts>`, and `fence()` breaks `<facts` and `<untrusted` in fenced text. [`forged class line`]
 18. **Steering text in a cell.**
@@ -961,7 +961,7 @@ Each case names how the design answers it; the test of section 12 that pins it i
 - Parse, diff and classify are linear: 0.45 ms per file on average over the open set (2.6 s for 5,907 files), 0.74 ms on the largest (567 ms for 768 files).
   For 2,000 files expect under 2 s on a laptop and under 4 s on a runner.
 - Relabel lookups are bounded by 24 runs and 128 characters per key (at most 300 substrings per key) and positional passes are linear.
-  Every pairing pass of a file spends from one step budget (`maxPairingSteps`, section 4.4), so no input makes one file's diff take more than about a second on a laptop; past the budget, what is unpaired is removed and added.
+  Every relabel pass of a file spends from one step budget (`maxPairingSteps`, section 4.4), and the keyless and JSON rename passes are linear, so no input makes one file's diff take more than about a second on a laptop; past the budget, what is unpaired is removed and added.
 - **Budget**: the content pass keeps its 120 s (`EVIDENCE_BUDGET_MS.content`); the summary starts only if more than `timeReserveMs` (40 s) remain and abandons itself at that line, which leaves the raw path its own 20 s reserve as today.
   No new budget enters the job's worst case (ADR 0107's 45.4 minutes are unchanged), and `test/pr-review-workflow.test.ts` needs no new term.
 - **Memory**: `maxTotalBytes` (256 MiB) bounds what the summary holds; the largest open pull request read 20.6 MB.

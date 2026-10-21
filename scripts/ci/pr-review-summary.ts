@@ -1700,9 +1700,6 @@ const PROBE_STEPS = 1;
 function candidateSteps(keyChars: number, cellCount: number, runPairs: number): number {
   return 4 + ((keyChars + cellCount) >> 3) + (runPairs >> 3);
 }
-function nearSteps(cellCount: number): number {
-  return 1 + (cellCount >> 3);
-}
 
 /** A key as the lookup compares it: runs lower-cased and digits by value, with where each run starts. */
 interface LookupForm {
@@ -1805,11 +1802,13 @@ function lookupHits(
  * rows. The copies are taken only if the diff succeeds, so a file that is refused does not use up
  * copies; and since a copy can serve only the one file its path names, no other file can take it.
  *
- * **The pairing passes share one budget per file** (`maxPairingSteps`): every substring looked up,
- * every candidate pair tried and every pair of keyless rows compared spends from it, and when it is
- * spent no further pair is made. What is still unpaired then is removed and added, exactly as if no
- * rule had held: the budget can only show more change, never pair a row it did not check, and it is
- * spent in the same order on every run, so the result does not depend on the machine.
+ * **The relabel passes share one budget per file** (`maxPairingSteps`): every substring looked up
+ * and every candidate pair tried spends from it, and when it is spent no further pair is made. What
+ * is still unpaired then is removed and added, exactly as if no rule had held: the budget can only
+ * show more change, never pair a row it did not check, and it is spent in the same order on every
+ * run, so the result does not depend on the machine. The keyless pairing needs none: it compares
+ * at most three pairs of rows per row, each over the common columns, so its work is bounded by the
+ * size of the table (a few million cell comparisons at the 8 MiB cap) and could never reach it.
  */
 export function diffTable(
   path: string,
@@ -1986,7 +1985,6 @@ export function diffTableWith(
     steps += cost;
     return true;
   };
-  const exhausted = (): boolean => steps >= SUMMARY_LIMITS.maxPairingSteps;
 
   // Relocation. The copies taken are held here and applied to the pool only when the diff succeeds.
   // The before header is the one a copy must have: the removed row's cells mean what they mean
@@ -2137,7 +2135,8 @@ export function diffTableWith(
       const added = unpairedRows(aFate);
       let i = 0;
       let j = 0;
-      while (i < gone.length && j < added.length && !exhausted()) {
+      // Once the budget is spent every try returns at once, so the walk only advances its pointers.
+      while (i < gone.length && j < added.length) {
         const g = gone[i] as number;
         const a = added[j] as number;
         const here = pairable(g, a, strict, chars);
@@ -2202,7 +2201,6 @@ export function diffTableWith(
      * differ and three are equal, but only because they are all missing.
      */
     const near = (bi: number, ai: number): boolean => {
-      if (!spend(nearSteps(cells.length))) return false;
       const b = before.rows[bi] as readonly string[];
       const a = after.rows[ai] as readonly string[];
       let equal = 0;
@@ -2220,7 +2218,7 @@ export function diffTableWith(
     const addedRows = unpairedRows(aFate);
     let i = 0;
     let j = 0;
-    while (i < goneRows.length && j < addedRows.length && !exhausted()) {
+    while (i < goneRows.length && j < addedRows.length) {
       const g = goneRows[i] as number;
       const a = addedRows[j] as number;
       if (near(g, a)) {
