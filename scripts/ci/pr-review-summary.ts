@@ -65,6 +65,9 @@ export const SUMMARY_LIMITS = {
   maxTotalBytes: 256 * 1024 * 1024, // all blobs the summary reads in one run
   maxSummaryChars: 30_000, // the fenced block
   maxClasses: 120, // classes rendered
+  // Distinct classes a run may hold: the fold that would make one more abandons the whole
+  // summary, as the deadline does, so a run's memory is bounded by its classes, not its atoms.
+  maxTrackedClasses: 5_000,
   maxPairsPerClass: 12, // distinct value pairs rendered per class
   maxValueChars: 300, // per rendered value
   samplesPerClass: 2,
@@ -3081,6 +3084,8 @@ export interface ChangeClass {
    * Up to `samplesPerClass` examples, each a file path and what in it changed (a row's key, a key's
    * name, a cell's two values), already rendered for the prompt: the first atom of each of the
    * first files in review order, or, when the class is in one file only, its first atoms there.
+   * Rendered only for the first `maxClasses` classes in render order, the only ones that can be
+   * shown; every later class has none, and is never shown.
    */
   examples: readonly string[];
 }
@@ -3109,12 +3114,16 @@ export function foldIndices(path: string): string {
   );
 }
 
+/** What names a class: see {@link ChangeClass}. */
+type ClassIdentity = Pick<ChangeClass, "key" | "kind" | "shape" | "field" | "rule" | "detail">;
+
 /** The identity of the class an atom of a file belongs to: see {@link ChangeClass}. */
-export function classKeyOf(
-  path: string,
-  atom: Atom,
-): Pick<ChangeClass, "key" | "kind" | "shape" | "field" | "rule" | "detail"> {
-  const shape = entityPattern(path);
+export function classKeyOf(path: string, atom: Atom): ClassIdentity {
+  return classIdentity(entityPattern(path), atom);
+}
+
+/** {@link classKeyOf} with the file's shape already known: it is the same for all its atoms. */
+function classIdentity(shape: string, atom: Atom): ClassIdentity {
   // A table's column name is the author's text and is never folded; a JSON path is the module's.
   const field =
     atom.field === null
@@ -3204,31 +3213,56 @@ const ROLE_RANK: Readonly<Record<ClassRole, number>> = {
   additive: 3,
 };
 
+/** Where an example comes from: rendered only if its class is among the ones that can be shown. */
+interface ExampleSource {
+  path: string;
+  atom: Atom;
+}
+
+/** A class while its files are folded in. */
+interface Building {
+  identity: ClassIdentity;
+  files: Set<string>;
+  items: number;
+  pairs: Map<string, number>;
+  examples: ExampleSource[];
+  /** The second atom of the first file, used when no second file has the class. */
+  spare: ExampleSource | null;
+}
+
+/** Render order (design section 5.1): see {@link classify}. */
+function renderOrder(a: Building, b: Building): number {
+  return (
+    ROLE_RANK[ROLE_OF[a.identity.kind]] - ROLE_RANK[ROLE_OF[b.identity.kind]] ||
+    b.files.size - a.files.size ||
+    b.items - a.items ||
+    byCodeUnits(a.identity.key, b.identity.key)
+  );
+}
+
 /**
- * Group the atoms of every file into classes (design section 4.2), in render order (section 5.1):
- * loss, then relocated, then modification, then additive; within a role the class in more files
- * first, then the one with more items, then the class key in code-unit order, so the order is a
- * function of the classes alone.
+ * The classes of a run, built one file at a time, so a file's atoms can be dropped once they are
+ * folded in: what a run holds is its classes (their counts, pairs and at most three atoms each, for
+ * the examples), never every atom of every file.
  *
- * `files` must be in review order (the summary passes them sorted by path); the examples are taken
- * in that order, so they too depend only on the input.
+ * `fold` computes each atom's class key once and hands the file's keys back. It returns null when
+ * the file would make the run hold more than `limit` classes; the builder is then unusable, and the
+ * summary abandons the run. `finish` sorts the classes into render order and renders the examples
+ * of the first `maxClasses` only, since no later class can be shown.
  */
-export function classify(files: readonly FileAtoms[]): ChangeClass[] {
-  interface Building {
-    identity: ReturnType<typeof classKeyOf>;
-    files: Set<string>;
-    items: number;
-    pairs: Map<string, number>;
-    examples: string[];
-    /** The second atom of the first file, used when no second file has the class. */
-    spare: string | null;
-  }
-  const byKey = new Map<string, Building>();
-  for (const file of files) {
-    for (const atom of file.atoms) {
-      const identity = classKeyOf(file.path, atom);
-      let entry = byKey.get(identity.key);
+class ClassBuilder {
+  private readonly byKey = new Map<string, Building>();
+
+  constructor(private readonly limit: number) {}
+
+  fold(path: string, atoms: readonly Atom[]): Set<string> | null {
+    const keys = new Set<string>();
+    const shape = entityPattern(path);
+    for (const atom of atoms) {
+      const identity = classIdentity(shape, atom);
+      let entry = this.byKey.get(identity.key);
       if (entry === undefined) {
+        if (this.byKey.size >= this.limit) return null;
         entry = {
           identity,
           files: new Set(),
@@ -3237,41 +3271,58 @@ export function classify(files: readonly FileAtoms[]): ChangeClass[] {
           examples: [],
           spare: null,
         };
-        byKey.set(identity.key, entry);
+        this.byKey.set(identity.key, entry);
       }
-      const newFile = !entry.files.has(file.path);
-      entry.files.add(file.path);
+      keys.add(identity.key);
+      const newFile = !entry.files.has(path);
+      entry.files.add(path);
       entry.items++;
       const pair = pairOf(atom);
       if (pair !== null) entry.pairs.set(pair, (entry.pairs.get(pair) ?? 0) + 1);
       if (newFile && entry.examples.length < SUMMARY_LIMITS.samplesPerClass) {
-        entry.examples.push(exampleOf(file.path, atom));
+        entry.examples.push({ path, atom });
       } else if (!newFile && entry.files.size === 1 && entry.spare === null) {
-        entry.spare = exampleOf(file.path, atom);
+        entry.spare = { path, atom };
       }
     }
+    return keys;
   }
-  const classes: ChangeClass[] = [];
-  for (const entry of byKey.values()) {
-    const examples = [...entry.examples];
-    if (examples.length < SUMMARY_LIMITS.samplesPerClass && entry.spare !== null) {
-      examples.push(entry.spare);
-    }
-    classes.push({
-      ...entry.identity,
-      files: entry.files,
-      items: entry.items,
-      pairs: entry.pairs,
-      examples,
+
+  finish(): ChangeClass[] {
+    return [...this.byKey.values()].sort(renderOrder).map((entry, i) => {
+      const sources = [...entry.examples];
+      if (sources.length < SUMMARY_LIMITS.samplesPerClass && entry.spare !== null) {
+        sources.push(entry.spare);
+      }
+      return {
+        ...entry.identity,
+        files: entry.files,
+        items: entry.items,
+        pairs: entry.pairs,
+        examples:
+          i < SUMMARY_LIMITS.maxClasses
+            ? sources.map((source) => exampleOf(source.path, source.atom))
+            : [],
+      };
     });
   }
-  return classes.sort(
-    (a, b) =>
-      ROLE_RANK[ROLE_OF[a.kind]] - ROLE_RANK[ROLE_OF[b.kind]] ||
-      b.files.size - a.files.size ||
-      b.items - a.items ||
-      byCodeUnits(a.key, b.key),
-  );
+}
+
+/**
+ * Group the atoms of every file into classes (design section 4.2), in render order (section 5.1):
+ * loss, then relocated, then modification, then additive; within a role the class in more files
+ * first, then the one with more items, then the class key in code-unit order, so the order is a
+ * function of the classes alone.
+ *
+ * `files` must be in review order (the summary passes them sorted by path); the examples are taken
+ * in that order, so they too depend only on the input. Only the first `maxClasses` classes have
+ * their examples rendered (see {@link ChangeClass.examples}). This is {@link ClassBuilder} with no
+ * bound on the classes; the summary folds its files one at a time under `maxTrackedClasses`.
+ */
+export function classify(files: readonly FileAtoms[]): ChangeClass[] {
+  const builder = new ClassBuilder(Number.POSITIVE_INFINITY);
+  for (const file of files) builder.fold(file.path, file.atoms);
+  return builder.finish();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3536,76 +3587,82 @@ function heldValues(atom: Atom): boolean {
   return atom.detail !== "0";
 }
 
-/** The loss facts of the summarized files: see {@link LossFacts}. */
+/**
+ * The loss facts of the summarized files: see {@link LossFacts}. The summary counts the same facts
+ * one file at a time as it folds the file in ({@link addLossFacts}), so the two always agree.
+ */
 export function lossFactsOf(files: readonly FileAtoms[]): LossFacts {
   const facts: LossFacts = { ...NO_LOSS };
-  for (const file of files) {
-    let rows = 0;
-    let keys = 0;
-    let blocking = false;
-    for (const atom of file.atoms) {
-      switch (atom.kind) {
-        case "row_removed":
-          rows++;
+  for (const file of files) addLossFacts(facts, file);
+  return facts;
+}
+
+/** Add one summarized file's loss facts to a run's: the one place a loss fact is counted. */
+function addLossFacts(facts: LossFacts, file: FileAtoms): void {
+  let rows = 0;
+  let keys = 0;
+  let blocking = false;
+  for (const atom of file.atoms) {
+    switch (atom.kind) {
+      case "row_removed":
+        rows++;
+        blocking = true;
+        break;
+      case "row_relocated":
+        facts.rowsRelocated++;
+        break;
+      case "column_removed":
+        if (heldValues(atom)) {
+          facts.columnsRemoved++;
           blocking = true;
-          break;
-        case "row_relocated":
-          facts.rowsRelocated++;
-          break;
-        case "column_removed":
-          if (heldValues(atom)) {
-            facts.columnsRemoved++;
-            blocking = true;
-          }
-          break;
-        case "json_key_removed":
-          keys++;
-          blocking = true;
-          break;
-        case "json_key_moved":
-          facts.keysMoved++;
-          break;
-        case "cell_emptied":
-        case "json_emptied":
-          facts.valuesEmptied++;
-          break;
-        // No loss fact: every other kind, named, so a kind added to `CLASS_KINDS` without being
-        // placed here or above does not compile.
-        case "key_relabeled":
-        case "cell_templated":
-        case "cell_replaced":
-        case "json_value_changed":
-        case "json_type_changed":
-        case "json_key_renamed":
-        case "json_empty_key_removed":
-        case "rows_reordered":
-        case "columns_reordered":
-        case "json_keys_reordered":
-        case "format":
-        case "column_added":
-        case "row_added":
-        case "cell_filled":
-        case "json_key_added":
-        case "json_filled":
-          break;
-        default: {
-          const unclassified: never = atom.kind;
-          throw new Error(`lossFactsOf: a kind with no case: ${String(unclassified)}`);
         }
+        break;
+      case "json_key_removed":
+        keys++;
+        blocking = true;
+        break;
+      case "json_key_moved":
+        facts.keysMoved++;
+        break;
+      case "cell_emptied":
+      case "json_emptied":
+        facts.valuesEmptied++;
+        break;
+      // No loss fact: every other kind, named, so a kind added to `CLASS_KINDS` without being
+      // placed here or above does not compile.
+      case "key_relabeled":
+      case "cell_templated":
+      case "cell_replaced":
+      case "json_value_changed":
+      case "json_type_changed":
+      case "json_key_renamed":
+      case "json_empty_key_removed":
+      case "rows_reordered":
+      case "columns_reordered":
+      case "json_keys_reordered":
+      case "format":
+      case "column_added":
+      case "row_added":
+      case "cell_filled":
+      case "json_key_added":
+      case "json_filled":
+        break;
+      default: {
+        const unclassified: never = atom.kind;
+        throw new Error(`addLossFacts: a kind with no case: ${String(unclassified)}`);
       }
     }
-    facts.rowsRemoved += rows;
-    if (rows > 0) facts.rowsRemovedFiles++;
-    facts.keysRemoved += keys;
-    if (keys > 0) facts.keysRemovedFiles++;
-    if (
-      blocking &&
-      (facts.firstBlockingPath === null || byCodeUnits(file.path, facts.firstBlockingPath) < 0)
-    ) {
-      facts.firstBlockingPath = file.path;
-    }
   }
-  return facts;
+  facts.rowsRemoved += rows;
+  if (rows > 0) facts.rowsRemovedFiles++;
+  facts.keysRemoved += keys;
+  if (keys > 0) facts.keysRemovedFiles++;
+  if (
+    blocking &&
+    (facts.firstBlockingPath === null || byCodeUnits(file.path, facts.firstBlockingPath) < 0)
+  ) {
+    facts.firstBlockingPath = file.path;
+  }
 }
 
 /**
@@ -3645,6 +3702,10 @@ export function accountedFiles(
  * counts and the platform's own words: no path, value or name from the pull request.
  */
 export interface SummaryFacts {
+  /**
+   * The run was abandoned, either at its deadline or because it would have held more than
+   * `maxTrackedClasses` classes: every other number is then zero and nothing is accounted for.
+   */
   abandoned: boolean;
   /** Candidates that parsed on both sides with a total diff. */
   files_summarized: number;
@@ -3723,7 +3784,10 @@ export interface SummaryCandidate {
 
 /** Everything the summary of a pull request decided, for the evidence and the prompt. */
 export interface ChangeSummary {
-  /** The deadline was reached: nothing below is used, and nothing is accounted for. */
+  /**
+   * The run was abandoned: the deadline was reached, or the files would have made more than
+   * `maxTrackedClasses` classes. Nothing below is used, and nothing is accounted for.
+   */
   abandoned: boolean;
   /** One outcome per `.tsv` and `.json` candidate, in the order the candidates were processed. */
   files: readonly FileOutcome[];
@@ -3740,7 +3804,10 @@ export interface ChangeSummary {
   text: string;
 }
 
-/** A summary with nothing in it: no candidate, or (abandoned) a pass that ran out of time. */
+/**
+ * A summary with nothing in it: no candidate, or (abandoned) a pass that ran out of time or would
+ * have held too many classes.
+ */
 function emptySummary(abandoned: boolean): ChangeSummary {
   const outcomes: FileOutcome[] = [];
   return {
@@ -3868,8 +3935,8 @@ function summarizeFile(
 
 /**
  * Summarize the modified candidates of a pull request against its pools (design sections 4 to 7).
- * Past the deadline the result is `abandoned` and accounts for nothing; see
- * {@link summarizeChangesWith} for how a run proceeds.
+ * Past the deadline, or past `maxTrackedClasses` classes, the result is `abandoned` and accounts
+ * for nothing; see {@link summarizeChangesWith} for how a run proceeds.
  */
 export function summarizeChanges(input: {
   candidates: readonly SummaryCandidate[];
@@ -3904,7 +3971,12 @@ export function summarizeChanges(input: {
  *    ({@link summarizeFile}). Any refusal, `internal_mismatch` included, is recorded on the file's
  *    outcome, and such a file has no atoms, no class and no loss fact: it stays on the raw-diff
  *    path.
- * 6. Groups the atoms into classes, renders them, accounts for files and counts the loss facts.
+ * 6. Folds each summarized file into the classes ({@link ClassBuilder}) and adds its loss facts as
+ *    it goes, then drops its atoms, so a run never holds every atom of every file. A file whose
+ *    atoms would make more than `maxTrackedClasses` classes abandons the WHOLE summary, exactly as
+ *    the deadline does: what a run can hold is bounded, and a run past the bound leaves the review
+ *    where it was without a summary.
+ * 7. Renders the classes, and accounts for files.
  */
 export function summarizeChangesWith(
   input: {
@@ -3924,7 +3996,8 @@ export function summarizeChangesWith(
   const pools = buildPools(input.pool);
 
   const outcomes: FileOutcome[] = [];
-  const summarized: FileAtoms[] = [];
+  const builder = new ClassBuilder(SUMMARY_LIMITS.maxTrackedClasses);
+  const loss: LossFacts = { ...NO_LOSS };
   let read = 0;
   let exhausted = false;
   for (const candidate of candidates) {
@@ -3953,20 +4026,15 @@ export function summarizeChangesWith(
       continue;
     }
     const { atoms, keyColumn } = file.value;
-    outcomes.push({
-      path,
-      family,
-      refusal: null,
-      keyColumn,
-      classKeys: new Set(atoms.map((atom) => classKeyOf(path, atom).key)),
-    });
-    summarized.push({ path, atoms });
+    const classKeys = builder.fold(path, atoms);
+    if (classKeys === null) return emptySummary(true);
+    outcomes.push({ path, family, refusal: null, keyColumn, classKeys });
+    addLossFacts(loss, { path, atoms });
   }
 
-  const classes = classify(summarized);
+  const classes = builder.finish();
   const rendered = renderClasses(classes);
   const accounted = accountedFiles(outcomes, classes, rendered.complete);
-  const loss = lossFactsOf(summarized);
   return {
     abandoned: false,
     files: outcomes,

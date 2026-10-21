@@ -439,6 +439,24 @@ describe("classify: examples", () => {
     ]);
   });
 
+  test("only the first 120 classes in render order have examples; the rest are never shown and have none", () => {
+    const columns = Array.from({ length: 125 }, (_, i) => `c${String(i).padStart(3, "0")}`);
+    const classes = classify(
+      atomsOf([
+        {
+          path: shape(1),
+          before: tsv(["name", ...columns], ["A1", ...columns.map(() => "1")]),
+          after: tsv(["name", ...columns], ["A1", ...columns.map(() => "2")]),
+        },
+      ]),
+    );
+    expect(classes.length).toBe(125);
+    const withExamples = classes.map((c) => c.examples.length);
+    expect(withExamples.slice(0, SUMMARY_LIMITS.maxClasses).every((n) => n === 1)).toBe(true);
+    expect(withExamples.slice(SUMMARY_LIMITS.maxClasses)).toEqual([0, 0, 0, 0, 0]);
+    expect(classes[0]?.examples).toEqual([`${shape(1)} "1" -> "2"`]);
+  });
+
   test("examples are rendered: a key, a row, a column count, a layout change, a JSON key", () => {
     const files = atomsOf([
       {
@@ -1631,7 +1649,7 @@ describe("summarizeChanges: one outcome per candidate, in path order", () => {
   });
 });
 
-describe("summarizeChanges: the deadline abandons the whole summary", () => {
+describe("summarizeChanges: the deadline, or too many classes, abandons the whole summary", () => {
   const files = () => [
     candidate(
       channels(1),
@@ -1670,6 +1688,38 @@ describe("summarizeChanges: the deadline abandons the whole summary", () => {
 
   test("a deadline already reached abandons before the first file", () => {
     abandonedShape(summarizeChanges({ candidates: files(), pool: [], deadline: 5, now: () => 5 }));
+  });
+
+  /** A channel table at sub-0n whose listed columns all change: one class per column. */
+  const columnsChanged = (n: number, columns: readonly string[]) =>
+    candidate(
+      channels(n),
+      tsv(["name", ...columns], ["A1", ...columns.map(() => "1")]),
+      tsv(["name", ...columns], ["A1", ...columns.map(() => "2")]),
+    );
+  const named = (count: number, from = 0) =>
+    Array.from({ length: count }, (_, i) => `c${String(from + i).padStart(5, "0")}`);
+
+  test("5,000 distinct classes are summarized; the file that would make one more abandons everything, as the deadline does", () => {
+    const max = SUMMARY_LIMITS.maxTrackedClasses;
+    const kept = summarize([columnsChanged(1, named(max))]);
+    expect(kept.abandoned).toBe(false);
+    expect(kept.classes.length).toBe(max);
+    expect(kept.facts.classes_shown + kept.facts.classes_cut).toBe(max);
+    abandonedShape(summarize([columnsChanged(1, named(max + 1))]));
+    // Counted over the run, not per file: the third file's one new class is the 5,001st.
+    const half = max / 2;
+    const run = [columnsChanged(1, named(half)), columnsChanged(2, named(half, half))];
+    expect(summarize(run).classes.length).toBe(max);
+    abandonedShape(summarize([...run, columnsChanged(3, named(1, max))]));
+  });
+
+  test("a class in many files is one class: the bound counts classes, never atoms or files", () => {
+    const max = SUMMARY_LIMITS.maxTrackedClasses;
+    const summary = summarize([1, 2, 3].map((n) => columnsChanged(n, named(max))));
+    expect(summary.abandoned).toBe(false);
+    expect(summary.classes.length).toBe(max);
+    expect(summary.classes.every((c) => c.files.size === 3 && c.items === 3)).toBe(true);
   });
 
   test("a deadline not reached, or none, changes nothing, and the clock is read once per file", () => {
@@ -2771,6 +2821,23 @@ function generateOracleCase(random: () => number, traits: Set<string>): OracleCa
 }
 
 describe("the hidden-loss round-trip oracle", () => {
+  test("lossFactsOf over the summarized files' atoms is the summary's own count, file by file, on 1,000 generated pull requests", () => {
+    const random = seeded(1868);
+    let lossy = 0;
+    for (let n = 0; n < 1000; n++) {
+      const c = generateOracleCase(random, new Set());
+      const summary = summarizeChanges({ candidates: c.candidates, pool: c.pool, deadline: null });
+      const files = [...oracleAtoms(c)].flatMap(([path, atoms]) =>
+        atoms === null ? [] : [{ path, atoms }],
+      );
+      expect(lossFactsOf(files), `case ${n}`).toEqual(summary.loss);
+      expect(lossFactsOf([...files].reverse()), `case ${n}`).toEqual(summary.loss);
+      const { rowsRemoved, keysRemoved, columnsRemoved } = summary.loss;
+      if (rowsRemoved + keysRemoved + columnsRemoved > 0) lossy++;
+    }
+    expect(lossy).toBeGreaterThan(300);
+  });
+
   test("4,500 generated pull requests: what an accounted file lost or changed is recoverable from the text, and nothing else is accounted for", () => {
     const random = seeded(20261020);
     const counts = new Map<string, number>();

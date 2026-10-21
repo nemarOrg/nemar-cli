@@ -39,6 +39,7 @@ describe("the limits and the refusal words", () => {
       maxTotalBytes: 256 * 1024 * 1024,
       maxSummaryChars: 30_000,
       maxClasses: 120,
+      maxTrackedClasses: 5_000,
       maxPairsPerClass: 12,
       maxValueChars: 300,
       samplesPerClass: 2,
