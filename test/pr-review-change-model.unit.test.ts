@@ -359,6 +359,10 @@ describe("relabelRule: the real pairs from the open pull requests", () => {
     expect(relabelRule("DC EMBRACE-REF", "DCEMBRACE", { chars: true })?.shape).toBe("c9");
     // A run inserted between two others, even in the middle of letters, is whole.
     expect(relabelRule("AB", "A-B", { chars: true })).toEqual(rule("insert", ["", "-", ""], "c2"));
+    // Runs are counted in characters: two astral letters are two characters, not four units.
+    expect(relabelRule("\u{10400}\u{10401}AB", "\u{10400}\u{10401} AB-X", { chars: true })).toEqual(
+      rule("insert", ["", "", " ", "", "-X"], "c4"),
+    );
   });
 });
 
@@ -1156,7 +1160,8 @@ describe("diffTable: columns", () => {
       tsv(["onset", "type"], ["1", "go"]),
     );
     expect(kindsOf(diff)).toEqual(["column_removed", "column_added"]);
-    // A column name is its exact text: case and a trailing space make another column.
+    // A column name is its exact text: case and a trailing space make another column, whichever
+    // side has the respelling.
     for (const renamed of ["Kind", "kind ", "KIND"]) {
       const respelled = diffText(
         "events.tsv",
@@ -1166,6 +1171,15 @@ describe("diffTable: columns", () => {
       expect(lines(respelled), renamed).toEqual([
         'column_removed | field=kind | detail="1"',
         `column_added | field=${renamed}`,
+      ]);
+      const back = diffText(
+        "events.tsv",
+        tsv(["onset", renamed], ["1", "go"]),
+        tsv(["onset", "kind"], ["1", "go"]),
+      );
+      expect(lines(back), renamed).toEqual([
+        `column_removed | field=${renamed} | detail="1"`,
+        "column_added | field=kind",
       ]);
     }
   });
@@ -1859,6 +1873,36 @@ describe("diffTable: the lookup passes find relabels the positional walk cannot"
     expect(relabels(diff)).not.toContain(`${variant(69)} -> ${variant(171)}`);
     expect(relabels(diff)).toContain(`${variant(69)} -> ${variant(169)}`);
     expect(diff.counts).toMatchObject({ paired: 70, removed: 0, added: 2 });
+  });
+});
+
+describe("diffTable: a lookup passes the paired front of its list", () => {
+  test("100 renamed case variants pair by their cells even when the walk by position is out of step", () => {
+    // Seventy unrelated variants come first in the after table: the walk by position is seventy rows
+    // out of step and pairs nothing, and a gone key's own lookup meets 64 of them before any row it
+    // could pair with. The added keys' lookup still pairs every row with the one whose cells it has,
+    // because it passes the paired front of its list instead of counting it toward the cap;
+    // otherwise the 65th row on would be paired by case alone, in order, with the wrong rows.
+    const header = ["name", "type", "v"];
+    const variant = (i: number): string =>
+      [..."abcdefghi"].map((ch, b) => ((i >> b) & 1 ? ch.toUpperCase() : ch)).join("");
+    const gone = Array.from({ length: 100 }, (_, i) => [variant(i), "EEG", `v${i}`]);
+    const unrelated = Array.from({ length: 70 }, (_, i) => [variant(200 + i), "EEG", `w${i}`]);
+    const added = [
+      ...unrelated,
+      ...Array.from({ length: 100 }, (_, i) => [variant(100 + i), "EEG", `v${i}`]),
+    ];
+    const diff = diffText(
+      "sub-01_task-x_channels.tsv",
+      tsv(header, ...gone),
+      tsv(header, ...added),
+    );
+    expect(
+      diff.atoms.filter((a) => a.kind === "key_relabeled").map((a) => `${a.before} -> ${a.after}`),
+    ).toEqual(Array.from({ length: 100 }, (_, i) => `${variant(i)} -> ${variant(100 + i)}`));
+    expect(diff.atoms.filter((a) => a.kind === "row_added").map((a) => a.after)).toEqual(
+      unrelated.map((row) => row[0]),
+    );
   });
 });
 
@@ -3228,6 +3272,26 @@ describe("diffJson: renamed keys", () => {
     ]);
   });
 
+  test("an element of a list is not renamed even to a member named by its index", () => {
+    // The list became an object whose key "1" holds what index 1 held. "[1]" and "1" fold alike,
+    // but an index is not a key, so the element is removed and the member added.
+    expect(jsonLines('{"a": [{"x": 1}, 5]}', '{"a": {"1": 5, "x": 1}}')).toEqual([
+      'json_key_removed | field=.a[0] | before="1" | detail="x"',
+      'json_key_removed | field=.a | before="5" | detail="[1]"',
+      'json_key_added | field=.a | after="5" | detail="1"',
+      'json_key_added | field=.a | after="1" | detail="x"',
+    ]);
+  });
+
+  test("a member is not renamed to a list element named by its index either", () => {
+    expect(jsonLines('{"a": {"1": 5, "x": 1}}', '{"a": [{"x": 1}, 5]}')).toEqual([
+      'json_key_removed | field=.a | before="5" | detail="1"',
+      'json_key_removed | field=.a | before="1" | detail="x"',
+      'json_key_added | field=.a[0] | after="1" | detail="x"',
+      'json_key_added | field=.a | after="5" | detail="[1]"',
+    ]);
+  });
+
   test("an element of a list is not a key and is never renamed", () => {
     // The two elements swapped places. Nothing is a rename, so the old places are removed keys and the
     // new places added ones: more change shown, never less.
@@ -4048,6 +4112,20 @@ describe("the diffs are bounded in time on large and hostile input", () => {
     }
   }, 30_000);
 
+  test("a gone row that never pairs, in front of 100,000 that do, does not make the lookup quadratic", () => {
+    // Every lookup meets the first gone row, unpaired, before the ones already paired; counting
+    // those toward the cap is what keeps each lookup bounded.
+    const n = 100_000;
+    const word = "abcdefghijklmnopqr";
+    const gone = ["name\ttype"];
+    const added = ["name\ttype"];
+    for (let i = 0; i < n; i++) gone.push(`${variant(word, 2 * i)}\t${i === 0 ? "EMG" : "EEG"}`);
+    for (let i = 0; i < n; i++) added.push(`${variant(word, 2 * i + 1)}\tEEG`);
+    const { value, ms } = timed(() => diffTable(channels, big(gone), big(added), noPool.rows));
+    expect(value.ok && kindCount(value.value, "key_relabeled")).toBe(n);
+    expect(ms).toBeLessThan(3000);
+  }, 30_000);
+
   test("a keyless table of 65,000 rows, all different or all edited, diffs in well under 3 seconds", () => {
     const n = 65_000;
     const header = "onset\tduration\ttrial_type";
@@ -4077,6 +4155,33 @@ describe("the diffs are bounded in time on large and hostile input", () => {
     const { value, ms } = timed(() => diffJson("x_eeg.json", b, a, noPool.json));
     expect(value.ok && value.value.counts).toMatchObject({ renamed: 0, emptyRemoved: n, added: n });
     expect(ms).toBeLessThan(3000);
+  }, 30_000);
+
+  test("candidate pairs on long keys are charged by size, so they spend the budget too", () => {
+    // 7,000 added keys each look up a 100-letter word that 1,000 gone keys share, and try 64 of them;
+    // every try fails on its cells. Charged by the size of the keys, those tries spend the whole
+    // budget, so the nine real renames that come last are never tried and stay a removal and an
+    // addition. Were a try charged one step, the budget would last and they would pair.
+    const word = `abcdefghij${"k".repeat(90)}`;
+    const variant = (i: number): string =>
+      [...word].map((ch, b) => (b < 10 && (i >> b) & 1 ? ch.toUpperCase() : ch)).join("");
+    const before = ["name\ttype"];
+    const after = ["name\ttype"];
+    for (let i = 0; i < 1000; i++) before.push(`${variant(i)}\tx${i}`);
+    for (let j = 0; j < 7000; j++)
+      after.push(`${variant(j % 1000)}-q${Math.floor(j / 1000)}\ty${j}`);
+    for (let i = 1; i <= 9; i++) {
+      before.push(`A${i}\tEEG`);
+      after.push(`POL A${i}\tEEG`);
+    }
+    const { value, ms } = timed(() => diffTable(channels, big(before), big(after), noPool.rows));
+    expect(ms).toBeLessThan(3000);
+    expect(value.ok).toBe(true);
+    if (!value.ok) return;
+    expect(kindCount(value.value, "key_relabeled")).toBe(0);
+    expect(
+      value.value.atoms.filter((a) => a.kind === "row_removed").map((a) => a.before),
+    ).toContain("A1");
   }, 30_000);
 
   test("a table that spends the whole pairing budget stops pairing: what is left is removed and added, the same on every run", () => {
