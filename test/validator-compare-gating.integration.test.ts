@@ -11,9 +11,17 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 const ROOT = join(import.meta.dir, "..");
 const SCRIPT = join(ROOT, "scripts/validator/compare-gating.sh");
@@ -32,10 +40,14 @@ function freshDir(prefix: string): string {
   return dir;
 }
 
-/** Run the script with exactly these arguments. */
-function run(args: string[]): { exitCode: number; stderr: string } {
+/** Run the script with exactly these arguments, and these environment variables on top of ours. */
+function run(
+  args: string[],
+  env: Record<string, string> = {},
+): { exitCode: number; stderr: string } {
   const proc = Bun.spawnSync(["bash", SCRIPT, ...args], {
     cwd: ROOT,
+    env: { ...process.env, ...env },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -43,9 +55,12 @@ function run(args: string[]): { exitCode: number; stderr: string } {
 }
 
 /** Run the script with an output directory of its own; returns that directory too. */
-function compare(args: string[]): { out: string; exitCode: number; stderr: string } {
+function compare(
+  args: string[],
+  env: Record<string, string> = {},
+): { out: string; exitCode: number; stderr: string } {
   const out = freshDir("compare-gating-");
-  return { out, ...run([...args, "--out", out]) };
+  return { out, ...run([...args, "--out", out], env) };
 }
 
 /** The rows of results.tsv, keyed by dataset: dataset, status, gating old, gating new, changed, note. */
@@ -192,11 +207,44 @@ describe("compare-gating.sh", () => {
     const layout = rows(failed.out)["canary-annex-link"];
     expect(layout?.[1]).toBe("not_compared");
     expect(layout?.[5]).toContain("validator 99.0.0 exited");
+    expect(layout?.[5]).toMatch(/exited 1: error: Could not find version/);
     expect(readOut(failed.out, "results.tsv")).not.toContain(ESCAPE);
     expect(readOut(failed.out, "summary.md")).toContain(
       "Not compared, so not counted as unchanged",
     );
   }, 120_000);
+
+  // An unreadable subdirectory makes the real validator crash: an `error:` line, a source excerpt
+  // and stack frames, so the run ends on a frame. Root reads any directory, so it cannot crash there.
+  test.skipIf(process.getuid?.() === 0)(
+    "a validator crash is named by its error line, not by the stack frame it ends with",
+    () => {
+      const dataset = freshDir("compare-crash-");
+      cpSync(FIXTURE, dataset, { recursive: true });
+      const locked = join(dataset, "sub-01");
+      chmodSync(locked, 0o000);
+      try {
+        // FORCE_COLOR makes Deno colour the crash even though the script asks for NO_COLOR.
+        const crashed = compare(
+          ["--old", "3.0.2", "--new", "3.0.2", "--ids", "", "--local", dataset],
+          { FORCE_COLOR: "1" },
+        );
+        expect(crashed.exitCode).toBe(1);
+        const row = rows(crashed.out)[basename(dataset)];
+        expect(row?.[1]).toBe("not_compared");
+        expect(row?.[5]).toMatch(
+          /^validator 3\.0\.2 exited 1: error: Uncaught \(in promise\) PermissionDenied/,
+        );
+        expect(row?.[5]).not.toContain(ESCAPE);
+        expect(crashed.stderr).toContain(
+          `compare-gating.sh: ${basename(dataset)} not compared: validator 3.0.2 exited 1: error:`,
+        );
+      } finally {
+        chmodSync(locked, 0o755);
+      }
+    },
+    120_000,
+  );
 
   test("nothing to compare is a failure, not an empty pass", () => {
     expect(compare(["--old", "3.0.2", "--new", "3.0.2", "--ids", ""]).exitCode).toBe(1);

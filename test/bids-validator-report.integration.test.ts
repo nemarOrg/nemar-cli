@@ -19,6 +19,17 @@ import {
 import validatorPin from "../validator-version.json" with { type: "json" };
 
 const FIXTURE = join(import.meta.dir, "fixtures/bids-minimal");
+const ESCAPE = "\u001b";
+
+/** The error a validation run throws; a run that does not throw fails the test. */
+async function failureOf(run: () => Promise<unknown>): Promise<Error> {
+  try {
+    await run();
+  } catch (error) {
+    return error as Error;
+  }
+  throw new Error("expected the validator run to fail, and it did not");
+}
 
 describe("validator version in validation reports", () => {
   test("the pin resolves to the release the validator reports for itself", async () => {
@@ -50,9 +61,27 @@ describe("validator version in validation reports", () => {
     expect(report.validatorVersion).toBe(validatorPin.version);
   }, 120_000);
 
-  test("a dataset the validator cannot read is a failed validation, not a valid one", async () => {
-    await expect(validateBidsDataset("/nonexistent/dataset-for-test")).rejects.toThrow(
-      "BIDS validator failed",
-    );
+  test("a dataset the validator cannot read is a failed validation that names the validator's error", async () => {
+    const error = await failureOf(() => validateBidsDataset("/nonexistent/dataset-for-test"));
+    // The reason is the validator's own error line, not the stack frame its stderr ends with.
+    expect(error.message).toMatch(/BIDS validator failed \(exit 1\): error: /);
+    expect(error.message).not.toContain(ESCAPE);
+  }, 120_000);
+
+  test("the failure message stays plain when the environment asks for colour", async () => {
+    // Deno lets FORCE_COLOR override the NO_COLOR the wrapper sets, so its stderr is coloured here.
+    const before = process.env.FORCE_COLOR;
+    process.env.FORCE_COLOR = "1";
+    try {
+      const error = await failureOf(() => validateBidsDataset("/nonexistent/dataset-for-test"));
+      expect(error.message).toMatch(/BIDS validator failed \(exit 1\): error: /);
+      expect(error.message).not.toContain(ESCAPE);
+    } finally {
+      if (before === undefined) {
+        Reflect.deleteProperty(process.env, "FORCE_COLOR");
+      } else {
+        process.env.FORCE_COLOR = before;
+      }
+    }
   }, 120_000);
 });

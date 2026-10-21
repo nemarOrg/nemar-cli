@@ -85,11 +85,18 @@ rm -f "$OUT"/diff-*.txt
 
 ESC=$(printf '\033')
 
-# One line that says why a validation or clone failed: the last line of stderr that is neither a
-# download progress line nor blank, with colour codes and tabs removed.
+# One line that says why a validation or clone failed, chosen the way validatorFailureReason in
+# src/lib/bids-validator.ts chooses it. Colour codes, carriage returns and tabs go first, so the
+# prefixes match; blank and download progress lines are dropped; then the first "error:" line wins,
+# or else the last line that is not a stack frame ("at ..."). Cut to 200 characters.
 failure_note() {
-  local text
-  text=$(grep -v -E '^(Download|[[:space:]]*$)' "$1" 2>/dev/null | tail -n 1 | sed "s/${ESC}\[[0-9;]*[A-Za-z]//g" | tr '\t' ' ' | cut -c1-200)
+  local lines text
+  lines=$(sed "s/${ESC}\[[0-9;]*[A-Za-z]//g" "$1" 2>/dev/null | tr -d '\r' | tr '\t' ' ' | sed -e 's/^ *//' -e 's/ *$//' | grep -v -E '^(Download|$)')
+  text=$(printf '%s\n' "$lines" | grep -m 1 '^error:')
+  if [ -z "$text" ]; then
+    text=$(printf '%s\n' "$lines" | grep -v '^at ' | tail -n 1)
+  fi
+  text=$(printf '%s' "$text" | cut -c1-200)
   printf '%s' "${text:-no message on stderr}"
 }
 

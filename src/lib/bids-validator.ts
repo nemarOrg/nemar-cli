@@ -239,6 +239,32 @@ function buildValidatorArgs(
 }
 
 /**
+ * A colour or cursor sequence. Deno writes these to stderr unless NO_COLOR reaches it, and it lets
+ * FORCE_COLOR override NO_COLOR, so a failure message is stripped here rather than trusted.
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching the escape byte is the point
+const ANSI_ESCAPE = /\u001b\[[0-9;]*[A-Za-z]/g;
+
+/**
+ * The line of a failed validator run's stderr that says why it failed, or undefined when stderr has
+ * nothing to say. The validator is a Deno program: an uncaught error prints an `error:` line and
+ * then stack-frame lines (`at ...`), and a cold cache prints `Download` progress lines before
+ * either. So the reason is the first `error:` line, or else the last line that is not a stack
+ * frame, with colour codes removed first so the prefixes match.
+ */
+export function validatorFailureReason(stderr: string): string | undefined {
+  const lines = stderr
+    .replace(ANSI_ESCAPE, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "" && !line.startsWith("Download"));
+  return (
+    lines.find((line) => line.startsWith("error:")) ??
+    lines.filter((line) => !line.startsWith("at ")).pop()
+  );
+}
+
+/**
  * Validate a BIDS dataset (JSON mode, for programmatic use by upload command).
  *
  * @param datasetPath - Path to the BIDS dataset directory
@@ -255,7 +281,9 @@ export async function validateBidsDataset(
     cmd: ["deno", ...args],
     stdout: "pipe",
     stderr: "pipe",
-    // Plain messages: colour codes would hide the validator's own "error:" line from the failure below.
+    // NO_COLOR asks Deno for plain output, but Deno lets FORCE_COLOR override it (checked on Deno 2.9
+    // with both set), so the request is not a guarantee. validatorFailureReason strips colour codes
+    // itself, which is why FORCE_COLOR stays in the environment: nothing else reads this stderr.
     env: { ...process.env, NO_COLOR: "1" },
   });
 
@@ -264,16 +292,12 @@ export async function validateBidsDataset(
   const exitCode = await proc.exited;
 
   // 0 means valid and 16 means the validator found errors. Any other exit is a failed run, and the
-  // last line it wrote says why.
+  // validator's own error line says why.
   if (exitCode !== 0 && exitCode !== VALIDATOR_ERRORS_FOUND_EXIT) {
-    const lastLine = stderr
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .pop();
+    const reason = validatorFailureReason(stderr);
     throw new Error(
-      lastLine
-        ? `BIDS validator failed (exit ${exitCode}): ${lastLine}`
+      reason
+        ? `BIDS validator failed (exit ${exitCode}): ${reason}`
         : `BIDS validator failed with exit code ${exitCode}`,
     );
   }
