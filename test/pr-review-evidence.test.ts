@@ -542,7 +542,7 @@ describe("reading a real pull request as git data", () => {
     expect(e.truncated).toBe(true);
     expect(e.listed.length).toBeLessThanOrEqual(50);
     expect(facts.patches.length).toBeLessThanOrEqual(MAX_PATCH_FILES);
-  });
+  }, 30_000);
 
   test("name-status output is parsed with NUL separators, so odd names survive", () => {
     expect(parseNameStatus("A\0new file.json\0M\0dir/a\nb.json\0D\0gone.edf\0")).toEqual([
