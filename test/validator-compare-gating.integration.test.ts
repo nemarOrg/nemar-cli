@@ -3,13 +3,15 @@
  *
  * compare-gating.sh runs two validator releases over each dataset with the gate the central
  * workflow applies. These tests run the real script with the real validator, on the bids-minimal
- * fixture and on two generated canary layouts. Published JSR releases never change, so the known
- * difference between 2.4.1 and 3.0.2 on the symlink canary is a stable expectation. The tests need
+ * fixture and on three generated layouts: a key-shaped annex link and an annex pointer (both the
+ * layouts real datasets have, which no release changes), and a bare broken link (the detector for a
+ * change in how a release reads a link to nothing). Published JSR releases never change, so the
+ * known difference between 2.4.1 and 3.0.2 on the detector is a stable expectation. The tests need
  * the network (JSR and GitHub), so they belong to the integration tier. No mocks.
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -57,7 +59,7 @@ function readOut(out: string, name: string): string {
 }
 
 describe("compare-gating.sh", () => {
-  test("a release compared with itself changes nothing, on the fixture and both canaries", () => {
+  test("a release compared with itself changes nothing, on the fixture and all three layouts", () => {
     const run1 = compare([
       "--old",
       "3.0.2",
@@ -71,44 +73,52 @@ describe("compare-gating.sh", () => {
     ]);
     expect(run1.exitCode).toBe(0);
     expect(rows(run1.out)["bids-minimal"]?.slice(1, 5)).toEqual(["compared", "0", "0", "no"]);
-    // Under 3.0.2 the symlink canary's sidecar error survives the filter, so the gate would refuse it.
-    expect(rows(run1.out)["canary-emg-annex-sidecar"]?.slice(1, 5)).toEqual([
-      "compared",
-      "1",
-      "1",
-      "no",
-    ]);
-    // The pointer canary is filtered by the central gate under both releases.
-    expect(rows(run1.out)["canary-emg-annex-pointer"]?.slice(1, 5)).toEqual([
+    // A key-shaped annex link: the central gate filters it, and no release changes it.
+    expect(rows(run1.out)["canary-annex-link"]?.slice(1, 5)).toEqual(["compared", "0", "0", "no"]);
+    expect(rows(run1.out)["canary-annex-pointer"]?.slice(1, 5)).toEqual([
       "compared",
       "0",
       "0",
       "no",
     ]);
-    expect(readOut(run1.out, "summary.md")).toContain("Compared 3 of 3 datasets; 0 changed.");
+    // A bare broken link: under 3.0.2 the detector's sidecar error survives the filter.
+    expect(rows(run1.out)["detector-bare-link"]?.slice(1, 5)).toEqual(["compared", "1", "1", "no"]);
+    expect(readOut(run1.out, "summary.md")).toContain("Compared 4 of 4 datasets; 0 changed.");
   }, 120_000);
 
-  test("the symlink canary's gating verdict changes between 2.4.1 and 3.0.2; the pointer canary's does not", () => {
+  test("only the bare-link detector's gating verdict changes between 2.4.1 and 3.0.2", () => {
     const run2 = compare(["--old", "2.4.1", "--new", "3.0.2", "--ids", "", "--canary"]);
     expect(run2.exitCode).toBe(0);
-    expect(rows(run2.out)["canary-emg-annex-sidecar"]?.slice(1, 5)).toEqual([
+    expect(rows(run2.out)["detector-bare-link"]?.slice(1, 5)).toEqual([
       "compared",
       "0",
       "1",
       "yes",
     ]);
-    expect(rows(run2.out)["canary-emg-annex-pointer"]?.slice(1, 5)).toEqual([
+    expect(rows(run2.out)["canary-annex-link"]?.slice(1, 5)).toEqual(["compared", "0", "0", "no"]);
+    expect(rows(run2.out)["canary-annex-pointer"]?.slice(1, 5)).toEqual([
       "compared",
       "0",
       "0",
       "no",
     ]);
-    expect(readOut(run2.out, "diff-canary-emg-annex-sidecar.txt")).toContain(
-      "SIDECAR_WITHOUT_DATAFILE",
-    );
+    expect(readOut(run2.out, "diff-detector-bare-link.txt")).toContain("SIDECAR_WITHOUT_DATAFILE");
     const summary = readOut(run2.out, "summary.md");
-    expect(summary).toContain("### canary-emg-annex-sidecar");
-    expect(summary).not.toContain("### canary-emg-annex-pointer");
+    expect(summary).toContain("### detector-bare-link");
+    expect(summary).not.toContain("### canary-annex-link");
+  }, 120_000);
+
+  test("a reused output directory does not keep the diff of an earlier run", () => {
+    const out = freshDir("compare-reuse-");
+    expect(
+      run(["--old", "2.4.1", "--new", "3.0.2", "--ids", "", "--canary", "--out", out]).exitCode,
+    ).toBe(0);
+    expect(readOut(out, "summary.md")).toContain("### detector-bare-link");
+    expect(
+      run(["--old", "3.0.2", "--new", "3.0.2", "--ids", "", "--canary", "--out", out]).exitCode,
+    ).toBe(0);
+    expect(readOut(out, "summary.md")).not.toContain("### detector-bare-link");
+    expect(existsSync(join(out, "diff-detector-bare-link.txt"))).toBe(false);
   }, 120_000);
 
   test("a dataset that cannot be cloned fails the run, unless partial results are accepted", () => {
@@ -135,9 +145,9 @@ describe("compare-gating.sh", () => {
   test("a validator release that does not exist is a failed comparison, with plain messages", () => {
     const failed = compare(["--old", "99.0.0", "--new", "3.0.2", "--ids", "", "--canary"]);
     expect(failed.exitCode).toBe(1);
-    const sidecar = rows(failed.out)["canary-emg-annex-sidecar"];
-    expect(sidecar?.[1]).toBe("not_compared");
-    expect(sidecar?.[5]).toContain("validator 99.0.0 exited");
+    const layout = rows(failed.out)["canary-annex-link"];
+    expect(layout?.[1]).toBe("not_compared");
+    expect(layout?.[5]).toContain("validator 99.0.0 exited");
     expect(readOut(failed.out, "results.tsv")).not.toContain(ESCAPE);
     expect(readOut(failed.out, "summary.md")).toContain(
       "Not compared, so not counted as unchanged",

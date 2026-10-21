@@ -76,6 +76,10 @@ if ! mkdir -p "$RUN" "$DATA" || ! printf 'dataset\tstatus\tgating_old\tgating_ne
   exit 1
 fi
 
+# Diff files left by an earlier run in the same directory would describe a comparison that no
+# longer holds, so they are removed before this run writes its own.
+rm -f "$OUT"/diff-*.txt
+
 ESC=$(printf '\033')
 
 # One line that says why a validation or clone failed: the last line of stderr that is neither a
@@ -86,9 +90,12 @@ failure_note() {
   printf '%s' "${text:-no message on stderr}"
 }
 
-# The two layouts a release can change, both with a sidecar beside the data file. A symlink is an
-# unfetched git-annex link: the central workflow filters the data file's error, not the sidecar's.
-# A pointer is a small file holding an annex pointer, which the central workflow filters.
+# Three layouts, each with a sidecar beside the data file. The kind says what the data file is:
+#   annex-link  a link to a git-annex key, which is what git-annex writes for content that is not
+#               fetched, and the layout real datasets have. The validator reads it as present.
+#   bare-link   a link to no annex key. A release may report it as broken and its sidecar as
+#               orphaned, so this is the detector for that change, not a layout that exists.
+#   pointer     a small file holding an annex pointer, which the central gate filters.
 make_canary() {
   local d="$1" kind="$2"
   rm -rf "$d"
@@ -97,11 +104,13 @@ make_canary() {
   printf 'participant_id\nsub-01\n' > "$d/participants.tsv"
   printf '%s\n' '{"SamplingFrequency":1000,"EMGChannelCount":1,"RecordingDuration":1,"EMGReference":"Other","PowerLineFrequency":50,"SoftwareFilters":"n/a"}' > "$d/sub-01/emg/sub-01_task-x_emg.json"
   printf 'name\ttype\tunits\tsampling_frequency\nEMG1\tEMG\tuV\t1000\n' > "$d/sub-01/emg/sub-01_task-x_channels.tsv"
-  if [ "$kind" = symlink ]; then
-    ln -s ../../.git/annex/objects/missing.bdf "$d/sub-01/emg/sub-01_task-x_emg.bdf"
-  else
-    printf '%s\n' '/annex/objects/SHA256E-s1024--0000000000000000000000000000000000000000000000000000000000000000.bdf' > "$d/sub-01/emg/sub-01_task-x_emg.bdf"
-  fi
+  local key="SHA256E-s1024--0000000000000000000000000000000000000000000000000000000000000000.bdf"
+  case "$kind" in
+    annex-link) ln -s "../../.git/annex/objects/00/00/$key/$key" "$d/sub-01/emg/sub-01_task-x_emg.bdf" ;;
+    bare-link) ln -s ../../.git/annex/objects/missing.bdf "$d/sub-01/emg/sub-01_task-x_emg.bdf" ;;
+    pointer) printf '%s\n' "/annex/objects/$key" > "$d/sub-01/emg/sub-01_task-x_emg.bdf" ;;
+    *) return 1 ;;
+  esac
 }
 
 # Each target is "id|absolute path".
@@ -126,12 +135,13 @@ for loc in ${LOCALS[@]+"${LOCALS[@]}"}; do
   TARGETS+=("$(basename "$dir")|$dir")
 done
 if [ "$CANARY" = 1 ]; then
-  dir="$DATA/canary-emg-annex-sidecar"
-  make_canary "$dir" symlink || { echo "compare-gating.sh: cannot create $dir" >&2; exit 1; }
-  TARGETS+=("canary-emg-annex-sidecar|$dir")
-  dir="$DATA/canary-emg-annex-pointer"
-  make_canary "$dir" pointer || { echo "compare-gating.sh: cannot create $dir" >&2; exit 1; }
-  TARGETS+=("canary-emg-annex-pointer|$dir")
+  for spec in canary-annex-link:annex-link canary-annex-pointer:pointer detector-bare-link:bare-link; do
+    name="${spec%%:*}"
+    kind="${spec#*:}"
+    dir="$DATA/$name"
+    make_canary "$dir" "$kind" || { echo "compare-gating.sh: cannot create $dir" >&2; exit 1; }
+    TARGETS+=("$name|$dir")
+  done
 fi
 
 # A release's report is usable only when it is a JSON object whose issues are a list.
