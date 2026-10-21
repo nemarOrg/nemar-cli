@@ -2516,6 +2516,28 @@ describe("summarizeChanges: the deadline abandons the whole summary", () => {
     expect(EMPTY_SUMMARY.facts.classes).toEqual([]);
     expect(EMPTY_SUMMARY.text).toBe("");
   });
+
+  test("the empty summary's sets cannot be filled through a cast; a run's own summary keeps ordinary sets", () => {
+    for (const set of [EMPTY_SUMMARY.shown, EMPTY_SUMMARY.complete, EMPTY_SUMMARY.accounted]) {
+      const writable = set as Set<string>;
+      expect(() => writable.add("sub-01/x.tsv")).toThrow();
+      expect(() => writable.delete("sub-01/x.tsv")).toThrow();
+      expect(() => writable.clear()).toThrow();
+      expect(set.size).toBe(0);
+      expect(set.has("sub-01/x.tsv")).toBe(false);
+    }
+    expect([...EMPTY_SUMMARY.accounted]).toEqual([]);
+    // An abandoned summary is made for its run alone: nothing is shared, so nothing refuses.
+    const abandoned = summarizeChanges({
+      candidates: files(),
+      pool: [],
+      deadline: 0,
+      now: () => 0,
+    });
+    (abandoned.accounted as Set<string>).add("sub-01/x.tsv");
+    expect(abandoned.accounted.size).toBe(1);
+    expect(EMPTY_SUMMARY.accounted.size).toBe(0);
+  });
 });
 
 describe("summarizeChanges: a change of magnitude is never a rule class", () => {

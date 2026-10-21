@@ -3908,15 +3908,18 @@ export interface ChangeSummary {
 }
 
 /** A summary with nothing in it: no candidate, or (abandoned) a pass that ran out of time. */
-function emptySummary(abandoned: boolean): ChangeSummary {
+function emptySummary(
+  abandoned: boolean,
+  emptySet: () => ReadonlySet<string> = () => new Set<string>(),
+): ChangeSummary {
   const outcomes: readonly FileOutcome[] = Object.freeze([]);
   return Object.freeze({
     abandoned,
     files: outcomes,
     classes: Object.freeze([]),
-    shown: new Set<string>(),
-    complete: new Set<string>(),
-    accounted: new Set<string>(),
+    shown: emptySet(),
+    complete: emptySet(),
+    accounted: emptySet(),
     loss: NO_LOSS,
     facts: Object.freeze({
       ...summaryFacts({
@@ -3934,10 +3937,27 @@ function emptySummary(abandoned: boolean): ChangeSummary {
 }
 
 /**
- * The summary of a pull request with no candidate: not abandoned, and nothing in it. One object
- * shared by every caller, so it is frozen, its facts too; its sets are read-only by type.
+ * An empty set that stays empty: its `add`, `delete` and `clear` throw. `Object.freeze` does not
+ * reach a set's entries, so without this a caller could fill the shared summary's sets through a
+ * cast and change them for every later reader.
  */
-export const EMPTY_SUMMARY: ChangeSummary = emptySummary(false);
+function frozenSet(): ReadonlySet<string> {
+  const set = new Set<string>();
+  const refuse = (): never => {
+    throw new TypeError("the shared empty summary cannot change");
+  };
+  for (const name of ["add", "delete", "clear"] as const) {
+    Object.defineProperty(set, name, { value: refuse });
+  }
+  return Object.freeze(set);
+}
+
+/**
+ * The summary of a pull request with no candidate: not abandoned, and nothing in it. One object
+ * shared by every caller, so it is frozen, its facts too, and its sets refuse every change
+ * ({@link frozenSet}). The summaries a run returns are its own and keep ordinary sets.
+ */
+export const EMPTY_SUMMARY: ChangeSummary = emptySummary(false, frozenSet);
 
 /**
  * JSON text with the whitespace between its tokens removed (space, tab, LF and CR outside a
