@@ -668,6 +668,34 @@ describe("renderClasses: what a class looks like", () => {
     );
   });
 
+  test("a removed JSON key that holds U+0000 is shown whole: a pair splits at its LAST U+0000, never the key's", () => {
+    // `JSON.stringify` writes the NUL as \u0000, which the parser reads back as the character.
+    const keys = { "a\u0000b": "secret value", "\u0000": "v3", "c\u0000": "v2" };
+    const { text, complete, classes } = rendered([
+      {
+        path: "x.json",
+        before: JSON.stringify({ ...keys, keep: 1 }),
+        after: JSON.stringify({ keep: 1 }),
+      },
+    ]);
+    expect(Object.keys(keys).every((key) => key.includes("\u0000"))).toBe(true);
+    expect(text).toBe(
+      [
+        'C1 | "x.json" | top level | keys removed',
+        '    "\\u0000 = \\"v3\\"" x1',
+        '    "a\\u0000b = \\"secret value\\"" x1',
+        '    "c\\u0000 = \\"v2\\"" x1',
+        '    e.g. "x.json" key "a\\u0000b"',
+        '    e.g. "x.json" key "\\u0000"',
+      ].join("\n"),
+    );
+    expect(complete.has((classes[0] as ChangeClass).key)).toBe(true);
+    const summary = summarize([
+      candidate("x.json", JSON.stringify({ ...keys, keep: 1 }), JSON.stringify({ keep: 1 })),
+    ]);
+    expect([...summary.accounted]).toEqual(["x.json"]);
+  });
+
   test("rule kinds name their rule: a relocation's target, a rename, a layout change, a templated cell", () => {
     const path = channels(1);
     const { text, complete } = rendered(
@@ -3147,6 +3175,7 @@ const O_JSON_KEYS = [
   "a.b",
   "0",
   "k\u{200B}",
+  "a\u{0}b",
 ];
 type Plain = null | boolean | number | string | Plain[] | { [key: string]: Plain };
 const O_SCALARS: Plain[] = [
