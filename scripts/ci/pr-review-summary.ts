@@ -2,12 +2,13 @@
  * The mechanical change summary of a dataset pull request: strict parsers, value rendering and the
  * closed vocabulary they share (ADR 0092, ADR 0107; design `.context/plans/pr-review-change-summary.md`).
  *
- * **This module is pure.** No git, no file system, no clock of its own (the summary's deadline is
- * read from a clock the caller passes), and no import at all, so everything here can be tested on
- * bytes and strings alone and cannot reach the pull request's repository. The model is shown a summary of a change instead of every
- * diff, and that is only safe if the summary loses nothing; the coverage argument (design section
- * 6.2) therefore starts from two promises made here, and every function below is written to keep
- * one of them.
+ * **This module is pure.** No git, no file system, and no import at all; it reads the clock only
+ * through the `now` the caller passes to {@link summarizeChanges}, which defaults to `Date.now`, and
+ * only to check the summary's deadline. So everything here can be tested on bytes and strings
+ * alone and cannot reach the pull request's repository. The model is shown a summary of a change
+ * instead of every diff, and that is only safe if the summary loses nothing; the coverage argument
+ * (design section 6.2) therefore starts from two promises made here, and every function below is
+ * written to keep one of them.
  *
  * 1. **A parse loses nothing a reader could tell apart.** A table is accepted only when
  *    serializing the parse gives the input back byte for byte ({@link parseTsv}). A JSON document is
@@ -306,9 +307,9 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
  * units `too_large` (so no atom or class key is ever built from such a name); 9. every other line
  * must have exactly the header's number of cells (`ragged_row`), and there may be at most
  * `maxRows` of them (`too_many_rows`, reported only when no row was ragged); 10. a header name or
- * a cell that STARTS
- * with a double quote is `quoted_cell`, because BIDS tables do not quote but pandas does at the
- * start of a field, so a file two readers would split differently is refused instead of guessed;
+ * a cell that STARTS with a double quote is `quoted_cell`, because BIDS tables do not quote but
+ * pandas does at the start of a field, so a file two readers would split differently is refused
+ * instead of guessed;
  * 11. the round trip: the serialization of what was read must equal the input byte for byte.
  *
  * Step 11 is the precondition of the coverage argument (design section 6.2): a parse that loses no
@@ -866,11 +867,11 @@ interface Run {
    *   or the mark is at the edge of the string: `0.05` to `0.5` is a tenfold change, and by value
    *   it would read as "only the zero padding changed";
    * - a run JOINED to another digit run: scanning from it in either direction over runs that are
-   *   one other character each, the first run that is not one is a digit run. `5 000` to `5 0`,
-   *   `1'000` to `1'0000`, `1_000` to `1_0000`, `0·05` to `0·5` and the Arabic decimal separator
-   *   are each one number written with a separator this module cannot list, so the zeros after
-   *   the separator are digits of that number. A letter anywhere between the two breaks the join,
-   *   so `sub-01_ses-02`, `0100 Hz` and `EEG 001` still compare their numbers by value.
+   *   one other character each, the first run that is not one is a digit run. `5 000`, `1'000`,
+   *   `1_000`, `0·05` and `1٫05` (the Arabic decimal separator) are each one number written with a
+   *   separator this module cannot list, so the zeros after the separator are digits of that
+   *   number, and `5 000` to `5 0` is not a padding. A letter anywhere between the two breaks the
+   *   join, so `sub-01_ses-02`, `0100 Hz` and `EEG 001` still compare their numbers by value.
    *
    * Both are decided from the string alone, the same way for a key and for a cell.
    */
@@ -3403,7 +3404,9 @@ function differenceNote(
   // The NFC condition is the design's own, kept as it is written, though the last condition covers
   // it: two values equal after NFC that differ first at an ASCII character on both sides cannot
   // exist (an ASCII character is a starter that decomposes to itself, so the decompositions would
-  // differ there too), so such a pair always differs first at a character outside ASCII.
+  // differ there too), so such a pair always differs first at a character outside ASCII. Checked,
+  // not only argued: a brute force over 400,000 strings in the phase 3 review found no pair this
+  // condition annotates that the last one would not.
   if (
     b.text === a.text ||
     withoutUnseen(before) === withoutUnseen(after) ||
@@ -3465,6 +3468,9 @@ function renderClass(n: number, c: ChangeClass): { text: string; complete: boole
   if (c.rule !== null) {
     // The rule's added or removed text is the author's: each gap is rendered like a value and
     // put where `ruleWords` puts its quotes, so the words are the module's and the text is escaped.
+    // No gap can be cut today: a rule is found only between names of at most `maxKeyChars` (128)
+    // code points, so a gap never reaches the 300 of a cut. `quoted` would still mark the line
+    // cut if one did; that is kept as the guard that fails closed, not as a case that happens.
     const gaps = c.rule.gaps.map((gap) => {
       const text = quoted(gap);
       return text.slice(1, text.lastIndexOf('"'));
