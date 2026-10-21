@@ -40,7 +40,7 @@ Every decision has a recommendation and a reason; the policy choices that belong
 11. Part B shares Part A's blob reader, budget, value renderer, facts block and platform-finding mechanism; it needs three new finding codes, which ship accept-only in slice 1 so that slice 2 has no deploy skew.
 
 **Measured on the 86 open dataset pull requests** (section 1): the prototype accounts for 5,495 of 5,907 summarizable files; pull requests whose content is incompletely read drop from 31 to 14, and 7 of those 14 are over the 400-file name cut that this design deliberately leaves for slice 3.
-`nemarDatasets/on004551` #1 is fully accounted for in 5 classes and 2,385 characters, and its numbers match its author's own README claims exactly.
+`nemarDatasets/on004551` #1 is fully accounted for in 5 classes and 2,385 characters (a design-time figure, measured with the prototype's rendering; section 8.3 has the as-built text and sizes), and its numbers match its author's own README claims exactly.
 
 ---
 
@@ -78,7 +78,7 @@ All numbers in this document come from a throwaway prototype run on real data, n
 | --- | --- | --- |
 | Files whose content counts as read | 9 | 127 (125 accounted for, 2 raw diffs) |
 | `readIncomplete` | true | false |
-| Prompt text for the 125 tables | 80,000 characters of 9 diffs | 2,385 characters (768 facts, 1,617 fenced) |
+| Prompt text for the 125 tables | 80,000 characters of 9 diffs | 2,385 characters (768 facts, 1,617 fenced; design-time, see section 8.3 for the as-built sizes) |
 | Classes | | 5 |
 | Parse, diff and classify | | 66 to 106 ms |
 
