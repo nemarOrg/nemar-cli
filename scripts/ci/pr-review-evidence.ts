@@ -56,6 +56,7 @@ import {
   SEMVER,
 } from "../../shared/pr-review";
 import { shouldAnnex } from "../../src/lib/git-annex/policy";
+import { SUMMARY_LIMITS } from "./pr-review-summary";
 
 export { MAX_MODEL_FILES };
 export type { ChangelogEntry };
@@ -968,19 +969,45 @@ function readContent(dir: string, listing: Listing): ContentFacts {
     headSha,
   ]);
   const entries = rawEntries(dir, mergeBase, headSha);
-  let cosmeticChecks = 0;
-  const cosmeticOnly = new Set<string>();
+  // The files whose two blobs are compared: modified on both lists, a regular file on both sides
+  // with the same mode, a `.json` or a `.tsv`, at most MAX_COSMETIC_CHECKS of them in review order.
+  const checked: { path: string; entry: RawEntry }[] = [];
   for (const c of wanted) {
-    if (c.status !== "modified" || entries === null) continue;
+    if (entries === null || checked.length >= MAX_COSMETIC_CHECKS) break;
+    if (c.status !== "modified") continue;
     if (!c.path.endsWith(".json") && !c.path.endsWith(".tsv")) continue;
-    const m = entries.get(c.path);
-    if (!m || m.modeBefore !== m.modeAfter || !REGULAR_FILE_MODES.has(m.modeBefore)) continue;
-    if (cosmeticChecks >= MAX_COSMETIC_CHECKS) continue;
-    cosmeticChecks++;
-    const before = tryGitBytes(dir, ["show", `${mergeBase}:${c.path}`]);
-    const after = tryGitBytes(dir, ["show", `${headSha}:${c.path}`]);
-    if (before !== null && after !== null && isCosmeticChange(c.path, before, after)) {
-      cosmeticOnly.add(c.path);
+    const entry = entries.get(c.path);
+    if (
+      entry === undefined ||
+      entry.status !== "modified" ||
+      entry.modeBefore !== entry.modeAfter ||
+      !REGULAR_FILE_MODES.has(entry.modeBefore)
+    ) {
+      continue;
+    }
+    checked.push({ path: c.path, entry });
+  }
+  // Both sides of every checked file in one batch, two processes in all instead of two per file.
+  // No deadline of its own: a read that stalls here stalls the pass, which is `timed_out`, as a
+  // stalled `git show` was. Each blob may be as large as the whole bound, so a proof never depends
+  // on the summary's per-file cap; a blob that cannot be read leaves its file unproven.
+  const checkedBlobs =
+    readBlobs(
+      dir,
+      checked.flatMap((f) => [f.entry.oidBefore, f.entry.oidAfter]),
+      { maxBytes: SUMMARY_LIMITS.maxTotalBytes, maxTotalBytes: SUMMARY_LIMITS.maxTotalBytes },
+    ) ?? new Map<string, Buffer>();
+  const cosmeticOnly = new Set<string>();
+  for (const { path, entry } of checked) {
+    const before = checkedBlobs.get(entry.oidBefore);
+    const after = checkedBlobs.get(entry.oidAfter);
+    // As latin1, so bytes that are not valid UTF-8 still differ (see tryGitBytes).
+    if (
+      before !== undefined &&
+      after !== undefined &&
+      isCosmeticChange(path, before.toString("latin1"), after.toString("latin1"))
+    ) {
+      cosmeticOnly.add(path);
     }
   }
 

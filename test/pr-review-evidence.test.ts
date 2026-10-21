@@ -2409,6 +2409,65 @@ describe("cosmetic changes are proven from the blobs, never assumed", () => {
     expect(facts.readIncomplete).toBe(false);
   });
 
+  test("60 cosmetic proofs read their 120 blobs with two cat-file processes and no git show of a file", () => {
+    const dir = newBigDataset("n2-one-batch", 60);
+    const r = branch(dir, () => {
+      for (let i = 0; i < 60; i++) write(dir, sidecar(i), JSON.stringify(base, null, 4));
+    });
+    const listing = gatherListing(r.dir, r.base, r.head);
+    const log = callLog("n2-one-batch");
+    const restore = installGitShim(root, [{ match: " ", log }]);
+    let content: ReturnType<typeof gatherContent>;
+    try {
+      content = gatherContent(r.dir, listing);
+    } finally {
+      restore();
+    }
+    expect(content.cosmeticOnlyFiles).toBe(60);
+    const calls = loggedCalls(log).map((c) => c.split("protocol.ext.allow=never ")[1]?.trim());
+    expect(calls.filter((c) => c?.startsWith("cat-file"))).toEqual([
+      "cat-file --batch-check",
+      "cat-file --batch",
+    ]);
+    // The change log is still read with `git show`; no sidecar or table is.
+    expect(calls.filter((c) => /^show \S+\.(json|tsv)$/.test(c ?? ""))).toEqual([]);
+  });
+
+  test("a cosmetic read that stalls has no deadline of its own: inside a 2 s content budget the pass is timed_out", () => {
+    const dir = newBigDataset("n2-stall", 3);
+    const r = branch(dir, () => write(dir, sidecar(0), JSON.stringify(base, null, 4)));
+    const listing = gatherListing(r.dir, r.base, r.head);
+    const restore = installGitShim(root, [{ match: " cat-file ", sleepSeconds: 5 }]);
+    __setEvidenceBudgetForTests({ content: 2_000 });
+    const started = Date.now();
+    try {
+      expect(codeOf(() => gatherContent(r.dir, listing))).toBe("timed_out");
+    } finally {
+      __setEvidenceBudgetForTests(null);
+      restore();
+    }
+    expect(Date.now() - started).toBeLessThan(4_500);
+    // The same pass with nothing stalling proves the file cosmetic.
+    expect(gatherContent(r.dir, listing).cosmeticOnlyFiles).toBe(1);
+  });
+
+  test("a cosmetic proof does not depend on the summary's 8 MiB cap: a reindented 9 MiB sidecar is cosmetic", () => {
+    const dir = newBigDataset("n2-over-8mib", 3);
+    // Over the summary's per-file cap on both sides, and far under the cosmetic batch's own bound.
+    const big = {
+      TaskName: "rest",
+      Notes: Array.from({ length: 9_000 }, (_, i) => `${i}`.padEnd(1_000, "x")),
+    };
+    write(dir, sidecar(0), JSON.stringify(big));
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "a large sidecar");
+    const r = branch(dir, () => write(dir, sidecar(0), JSON.stringify(big, null, 1)));
+    const facts = gatherGitFacts(r.dir, r.base, r.head);
+    expect(JSON.stringify(big).length).toBeGreaterThan(8 * 1024 * 1024);
+    expect(facts.cosmeticOnlyFiles).toBe(1);
+    expect(facts.readIncomplete).toBe(false);
+  });
+
   test("trailing spaces and CRLF endings in a table are cosmetic", () => {
     const dir = newBigDataset("n2-crlf", 50);
     const r = branch(dir, () => {
