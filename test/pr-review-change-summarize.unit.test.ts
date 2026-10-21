@@ -1415,6 +1415,37 @@ describe("renderClasses: author text cannot forge the platform's lines", () => {
     expect(complete.size).toBe(1);
   });
 
+  test("a relocation target of 300 code points is shown whole; one of 301 is cut, and its class is incomplete", () => {
+    const path = channels(1);
+    for (const [length, whole] of [
+      [300, true],
+      [301, false],
+    ] as const) {
+      // The target is the shape of `sourcedata/<d..>/<path>`; a run of `d` is no entity.
+      const dirs = "d".repeat(length - "sourcedata//".length - entityPattern(path).length);
+      const where = `sourcedata/${dirs}/${path}`;
+      expect(entityPattern(where).length).toBe(length);
+      const summary = summarize(
+        [
+          candidate(
+            path,
+            tsv(CHANNELS, ["A1", "EEG", "uV"], ["R1", "EEG", "uV"]),
+            tsv(CHANNELS, ["A1", "EEG", "uV"]),
+          ),
+        ],
+        [pooled(where, null, tsv(CHANNELS, ["R1", "EEG", "uV"]))],
+      );
+      expect(summary.classes.map((c) => c.kind)).toEqual(["row_relocated"]);
+      const line = summary.text.split("\n")[0] as string;
+      const target = readQuoted(line, line.lastIndexOf(": to ") + ": to ".length);
+      expect(target?.cut, `${length}`).toBe(!whole);
+      expect(target?.value, `${length}`).toBe(entityPattern(where).slice(0, 300));
+      expect(target?.end, `${length}`).toBe(line.length);
+      expect(summary.complete.size, `${length}`).toBe(whole ? 1 : 0);
+      expect(summary.accounted.size, `${length}`).toBe(whole ? 1 : 0);
+    }
+  });
+
   test("invisible characters in a path are escaped, in the shape, the target and the examples", () => {
     const odd = "\u{3164}\u{2800}\u{34F}\u{A0}";
     const path = `sub-01/eeg${odd}/sub-01_task-x_channels.tsv`;
@@ -1468,13 +1499,17 @@ describe("renderClasses: author text cannot forge the platform's lines", () => {
       // A directory that is no entity: the shape is the path itself.
       const fit = `${"d".repeat(length - "/x_channels.tsv".length)}/x_channels.tsv`;
       expect(fit.length).toBe(length);
-      const { complete } = rendered([
+      const { complete, text } = rendered([
         {
           path: fit,
           before: tsv(CHANNELS, ["A1", "EEG", "uV"]),
           after: tsv(CHANNELS, ["A1", "EEG", "mV"]),
         },
       ]);
+      // The shape token of the class line itself is cut at the same place as the example's path.
+      const shape = readQuoted(text, "C1 | ".length);
+      expect(shape?.cut, `shape ${length}`).toBe(!whole);
+      expect(shape?.value, `shape ${length}`).toBe(fit.slice(0, 300));
       expect(complete.size, `shape ${length}`).toBe(whole ? 1 : 0);
     }
   });
@@ -2145,6 +2180,38 @@ describe("summarizeChanges: one outcome per candidate, in path order", () => {
   });
 });
 
+describe("summarizeChanges: the total bytes read are capped exactly", () => {
+  // Both sides of a file are one zero-filled buffer, which a table refuses `nul_byte` at its first
+  // byte: a file the budget admits shows that word, and one it does not shows `too_large`.
+  const side = new Uint8Array(SUMMARY_LIMITS.maxBlobBytes / 2);
+  const file = (path: string): SummaryCandidate => ({ path, before: side, after: side });
+  const cap = SUMMARY_LIMITS.maxTotalBytes;
+  const files = Array.from({ length: cap / (2 * side.length) }, (_, i) =>
+    file(`f${String(i).padStart(2, "0")}.tsv`),
+  );
+
+  test("a total of exactly maxTotalBytes is read in full", () => {
+    expect(files.reduce((sum, f) => sum + f.before.length + f.after.length, 0)).toBe(cap);
+    expect(refusals(summarize(files))).toEqual(files.map((f) => `${f.path} nul_byte`));
+  });
+
+  test("one byte more refuses that file and every later one too_large, however small", () => {
+    const summary = summarize([
+      ...files,
+      { path: "g.tsv", before: new Uint8Array(1), after: new Uint8Array(0) },
+      candidate("h.tsv", tsv(["a"], ["1"]), tsv(["a"], ["2"])),
+      candidate("i.json", '{"a": 1}', '{"a": 2}'),
+    ]);
+    expect(refusals(summary)).toEqual([
+      ...files.map((f) => `${f.path} nul_byte`),
+      "g.tsv too_large",
+      "h.tsv too_large",
+      "i.json too_large",
+    ]);
+    expect(summary.accounted.size).toBe(0);
+  });
+});
+
 describe("summarizeChanges: the deadline abandons the whole summary", () => {
   const files = () => [
     candidate(
@@ -2698,6 +2765,115 @@ describe("summarizeChanges: order, determinism and loss facts", () => {
       expect(line).toMatch(
         /^C[0-9]+ [a-z ]+ \| [0-9]+ items? in [0-9]+ files? \| (in full|not shown in full)$/,
       );
+    }
+  });
+});
+
+describe("code-unit order is the only order, never the locale's", () => {
+  // Each pair is ordered one way by code units and the other by a locale's collation: an upper
+  // case letter before a lower case one, `-` (45) before `_` (95), and a character outside the
+  // basic plane (a surrogate pair, 0xD835 first) before a fullwidth one (0xFF01).
+  const PAIRS = [
+    ["B", "a"],
+    ["-", "_"],
+    ["\u{1D400}", "\uFF01"],
+  ] as const;
+  const changed = (path: string) => candidate(path, tsv(["a"], ["1"]), tsv(["a"], ["2"]));
+
+  test("candidates are processed, and their outcomes listed, in code-unit order of their paths", () => {
+    for (const [low, high] of PAIRS) {
+      for (const order of [
+        [low, high],
+        [high, low],
+      ]) {
+        const summary = summarize(order.map((name) => changed(`${name}.tsv`)));
+        expect(
+          summary.files.map((f) => f.path),
+          `${low} ${high}`,
+        ).toEqual([`${low}.tsv`, `${high}.tsv`]);
+      }
+    }
+  });
+
+  test("the first examples of a class are those of the first files in code-unit order", () => {
+    const at = (id: string) => `sub-${id}/eeg/sub-${id}_task-x_channels.tsv`;
+    for (const order of [
+      ["B1", "a1", "c1"],
+      ["c1", "a1", "B1"],
+    ]) {
+      const summary = summarize(
+        order.map((id) =>
+          candidate(at(id), tsv(CHANNELS, ["A1", "EEG", "uV"]), tsv(CHANNELS, ["A1", "EEG", "mV"])),
+        ),
+      );
+      // `B` (66) is before `a` (97) and `c` (99): the examples are B1 then a1.
+      expect(summary.classes[0]?.examples).toEqual([
+        `"${at("B1")}" "uV" -> "mV"`,
+        `"${at("a1")}" "uV" -> "mV"`,
+      ]);
+    }
+  });
+
+  test("the pairs of equal count are listed in code-unit order of their text", () => {
+    const afters = ["a", "B", "_", "-", "\u{1D400}", "\uFF01"];
+    const { text } = rendered([
+      {
+        path: channels(1),
+        before: tsv(CHANNELS, ...afters.map((_, i) => [`A${i}`, "EEG", "x"])),
+        after: tsv(CHANNELS, ...afters.map((after, i) => [`A${i}`, "EEG", after])),
+      },
+    ]);
+    const shown = text
+      .split("\n")
+      .filter((line) => line.startsWith('    "'))
+      .map((line) => {
+        const before = readQuoted(line, 4) as { end: number };
+        return (readQuoted(line, before.end + 4) as { value: string }).value;
+      });
+    expect(shown).toEqual(["-", "B", "_", "a", "\u{1D400}", "\uFF01"]);
+  });
+
+  test("the first blocking path is the least in code-unit order, in either order of the files", () => {
+    for (const [low, high] of PAIRS) {
+      const removed = (name: string) => ({
+        path: `${name}.tsv`,
+        before: tsv(["x"], ["1"], ["2"]),
+        after: tsv(["x"], ["1"]),
+      });
+      for (const order of [
+        [low, high],
+        [high, low],
+      ]) {
+        const facts = lossFactsOf(atomsOf(order.map(removed)));
+        expect(facts.firstBlockingPath, `${low} ${high}`).toBe(`${low}.tsv`);
+      }
+    }
+  });
+
+  test("of two copies of a removed row, the one at the least path in code-unit order names the relocation", () => {
+    const path = channels(1);
+    for (const [low, high] of PAIRS) {
+      for (const order of [
+        [low, high],
+        [high, low],
+      ]) {
+        const summary = summarize(
+          [
+            candidate(
+              path,
+              tsv(CHANNELS, ["A1", "EEG", "uV"], ["R1", "EEG", "uV"]),
+              tsv(CHANNELS, ["A1", "EEG", "uV"]),
+            ),
+          ],
+          order.map((dir) =>
+            pooled(`sourcedata/${dir}/${path}`, null, tsv(CHANNELS, ["R1", "EEG", "uV"])),
+          ),
+        );
+        expect(
+          summary.classes.map((c) => c.detail),
+          `${low} ${high}`,
+        ).toEqual([entityPattern(`sourcedata/${low}/${path}`)]);
+      }
     }
   });
 });
