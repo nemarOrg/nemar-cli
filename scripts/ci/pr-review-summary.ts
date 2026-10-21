@@ -1298,13 +1298,23 @@ export interface RowPoolFile {
  * pull request wherever it sits (`sourcedata/` included): a row is only a copy of a removed one if
  * the pool says it is new, and a row that was already in that file proves nothing.
  *
- * A pool is used up by the diffs that read it, in the order they run; build one per run.
+ * A pool is used up by the diffs that read it; build one per run. Which file a copy can serve is
+ * fixed by its path (`sourcedata/<one directory>/<the file's full path>`, see `sourcedataFor`), so
+ * no two different files can compete for one copy and the order the files are diffed in does not
+ * change what either is told. The caller still diffs in sorted path order (design section 4.6), so
+ * that nothing about a run depends on the order git listed the files in.
  */
 export interface RowPool {
   /** By path. Only files that add at least one row are here. */
   readonly files: ReadonlyMap<string, RowPoolFile>;
-  /** The paths under `sourcedata/` that are in `files`, by last path segment, in the order given. */
-  readonly sourcedataByName: ReadonlyMap<string, readonly string[]>;
+  /**
+   * The paths in `files` that are exactly `sourcedata/<D>/<F>`, where `D` is ONE path segment, by
+   * `F`, sorted. These are the only places a row removed from `F` can be relocated to: the layout
+   * the open pull requests use (`sourcedata/channels-removed-2026-10-18/<F>`), and nothing looser.
+   * `sourcedata/<F>` itself is not one (it is the file's own path one level down, a place a
+   * dataset keeps a real table), and neither is a deeper nesting.
+   */
+  readonly sourcedataFor: ReadonlyMap<string, readonly string[]>;
 }
 
 /** The leaves each JSON file of the pull request has now and did not have before. */
@@ -1322,6 +1332,12 @@ export function leafKey(path: string, value: string): string {
 
 function lastSegment(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
+}
+
+/** The file a `sourcedata/<D>/<F>` path keeps rows for (`F`), or null for any other path. */
+function correspondingFile(path: string): string | null {
+  const match = /^sourcedata\/[^/]+\/(.+)$/.exec(path);
+  return match === null ? null : (match[1] as string);
 }
 
 function sameCells(a: readonly string[], b: readonly string[]): boolean {
@@ -1345,13 +1361,14 @@ function sameCells(a: readonly string[], b: readonly string[]): boolean {
  */
 export function buildPools(files: readonly PoolFile[]): { rows: RowPool; json: JsonPool } {
   const rows = new Map<string, RowPoolFile>();
-  const sourcedataByName = new Map<string, string[]>();
+  const sourcedataFor = new Map<string, string[]>();
   const jsonFiles = new Map<string, Map<string, string>>();
   const byLeaf = new Map<string, string[]>();
 
   const seen = new Set<string>();
   for (const file of files) {
     // A path is listed once by git; if a caller lists one twice, the first entry is the one used.
+    // That is the only thing about a pool that depends on the order of `files`.
     if (seen.has(file.path)) continue;
     seen.add(file.path);
     if (file.path.endsWith(".tsv")) {
@@ -1374,10 +1391,10 @@ export function buildPools(files: readonly PoolFile[]): { rows: RowPool; json: J
       }
       if (added.size === 0) continue;
       rows.set(file.path, { header: after.value.header.join("\t"), rows: added });
-      if (file.path.startsWith("sourcedata/")) {
-        const name = lastSegment(file.path);
-        const listed = sourcedataByName.get(name);
-        if (listed === undefined) sourcedataByName.set(name, [file.path]);
+      const kept = correspondingFile(file.path);
+      if (kept !== null) {
+        const listed = sourcedataFor.get(kept);
+        if (listed === undefined) sourcedataFor.set(kept, [file.path]);
         else listed.push(file.path);
       }
     } else if (file.path.endsWith(".json")) {
@@ -1401,7 +1418,15 @@ export function buildPools(files: readonly PoolFile[]): { rows: RowPool; json: J
       }
     }
   }
-  return { rows: { files: rows, sourcedataByName }, json: { files: jsonFiles, byLeaf } };
+  // Sorted, so which of two copies of one removed row is taken does not depend on the order of
+  // `files`: a relocation names the shape of the place it found the row, and that must not vary.
+  for (const listed of sourcedataFor.values()) listed.sort(byCodeUnits);
+  return { rows: { files: rows, sourcedataFor }, json: { files: jsonFiles, byLeaf } };
+}
+
+/** Code-unit order, the one order that is the same on every machine and in every locale. */
+function byCodeUnits(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1637,8 +1662,8 @@ function lookupHits(
  *
  * 1. a key relabeled by a rule, found by lookup, with every other common cell equal;
  * 2. the same, found by position, where character rules are allowed too;
- * 3. relocation of what is still unpaired: a row removed here and found verbatim under
- *    `sourcedata/` at the corresponding path;
+ * 3. relocation of what is still unpaired: a row removed here and found verbatim in a row the pull
+ *    request adds at `sourcedata/<one directory>/<this path>`;
  * 4. a key relabeled by a rule, found by lookup and then by position, with NO condition on the other
  *    cells (they are then compared, and every difference is shown);
  * 5. what is left: removed and added.
@@ -1655,8 +1680,8 @@ function lookupHits(
  * and an unrelated new one stay a removal and an addition. Nothing is ever inferred as a key.
  *
  * **Relocation** consumes the copy it uses from `pool`: one copy never accounts for two removed
- * rows, in this file or in another. The copies are taken only if the diff succeeds, so a file that
- * is refused does not use up copies the others could have used.
+ * rows. The copies are taken only if the diff succeeds, so a file that is refused does not use up
+ * copies; and since a copy can serve only the one file its path names, no other file can take it.
  */
 export function diffTable(
   path: string,
@@ -1764,16 +1789,15 @@ export function diffTableWith(
   };
 
   // Relocation. The copies taken are held here and applied to the pool only when the diff succeeds.
+  // The before header is the one a copy must have: the removed row's cells mean what they mean
+  // under it, and a copy under any other header (the after one included) is another row.
   const header = before.header.join("\t");
-  const candidates = pool.sourcedataByName.get(lastSegment(path)) ?? [];
-  const needle = `/${path}`;
+  const targets = pool.sourcedataFor.get(path) ?? [];
   const taken = new Map<string, Map<string, number>>();
   const relocate = (bi: number): void => {
-    if (candidates.length === 0 || bFate[bi] !== FATE_NONE) return;
+    if (bFate[bi] !== FATE_NONE) return;
     const text = (before.rows[bi] as readonly string[]).join("\t");
-    for (const target of candidates) {
-      if (target === path || !target.startsWith("sourcedata/") || !target.endsWith(needle))
-        continue;
+    for (const target of targets) {
       const entry = pool.files.get(target);
       if (entry === undefined || entry.header !== header) continue;
       const used = taken.get(target)?.get(text) ?? 0;

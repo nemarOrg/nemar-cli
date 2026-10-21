@@ -828,41 +828,68 @@ describe("buildPools: the rows and leaves a pull request adds", () => {
       header: "type\tname",
       rows: { "EEG\tA1": 1, "EMG\tA2": 1 },
     });
-    // The same columns in another order are a different header, so a row that is unchanged still counts.
-    expect(rowsOf(buildPools([pooled("y.tsv", "a\tb\n1\t2\n", "b\ta\n2\t1\n")]), "y.tsv")).toEqual({
+    // The same columns in another order are a different header, so a row whose TEXT was there
+    // before is still new: under the new header it says something else.
+    expect(rowsOf(buildPools([pooled("y.tsv", "a\tb\n1\t2\n", "b\ta\n1\t2\n")]), "y.tsv")).toEqual({
       header: "b\ta",
-      rows: { "2\t1": 1 },
+      rows: { "1\t2": 1 },
     });
   });
 
-  test("a table that adds nothing is not in the pool, and neither is one that only lost rows", () => {
+  test("a file that adds nothing is not in the pool, and neither is one that only lost rows", () => {
     const pool = buildPools([
       pooled("same.tsv", "a\n1\n", "a\n1\n"),
       pooled("lost.tsv", "a\tb\n1\t2\n3\t4\n", "a\tb\n1\t2\n"),
       pooled("header_only.tsv", null, "a\tb\n"),
+      pooled("same.json", '{"a": 1}', '{"a": 1}'),
+      pooled("lost.json", '{"a": 1, "b": 2}', '{"a": 1}'),
+      pooled("reindented.json", '{"a": 1}', '{\n  "a": 1\n}\n'),
     ]);
     expect([...pool.rows.files.keys()]).toEqual([]);
+    expect([...pool.json.files.keys()]).toEqual([]);
+    expect([...pool.json.byLeaf.keys()]).toEqual([]);
   });
 
-  test("tables anywhere in the tree are pooled, and sourcedata ones are indexed by their last segment", () => {
+  test("tables anywhere in the tree are pooled; only sourcedata/<one directory>/<F> is indexed, by F", () => {
     const pool = buildPools([
       pooled("sub-01/eeg/sub-01_channels.tsv", null, "name\nA1\n"),
       pooled("sourcedata/removed/sub-01/eeg/sub-01_channels.tsv", null, "name\nA1\n"),
       pooled("sourcedata/other/sub-02_channels.tsv", null, "name\nA2\n"),
       pooled("derivatives/x/sub-01_channels.tsv", null, "name\nA3\n"),
-      pooled("notsourcedata/sub-01_channels.tsv", null, "name\nA4\n"),
+      pooled("notsourcedata/x/sub-01_channels.tsv", null, "name\nA4\n"),
+      pooled("sourcedata/sub-03_channels.tsv", null, "name\nA5\n"),
     ]);
     expect([...pool.rows.files.keys()]).toEqual([
       "sub-01/eeg/sub-01_channels.tsv",
       "sourcedata/removed/sub-01/eeg/sub-01_channels.tsv",
       "sourcedata/other/sub-02_channels.tsv",
       "derivatives/x/sub-01_channels.tsv",
-      "notsourcedata/sub-01_channels.tsv",
+      "notsourcedata/x/sub-01_channels.tsv",
+      "sourcedata/sub-03_channels.tsv",
     ]);
-    expect(Object.fromEntries(pool.rows.sourcedataByName)).toEqual({
-      "sub-01_channels.tsv": ["sourcedata/removed/sub-01/eeg/sub-01_channels.tsv"],
+    // A sourcedata file keeps rows for the one path below its first directory, and for no other:
+    // not for its own last segment (sub-01_channels.tsv), and sourcedata/<F> keeps rows for nothing.
+    expect(Object.fromEntries(pool.rows.sourcedataFor)).toEqual({
+      "sub-01/eeg/sub-01_channels.tsv": ["sourcedata/removed/sub-01/eeg/sub-01_channels.tsv"],
       "sub-02_channels.tsv": ["sourcedata/other/sub-02_channels.tsv"],
     });
+  });
+
+  test("several sourcedata copies of one file are listed in path order, whatever order they came in", () => {
+    const files = [
+      pooled("sourcedata/b/x_channels.tsv", null, "name\nA1\n"),
+      pooled("sourcedata/a/x_channels.tsv", null, "name\nA1\n"),
+      pooled("sourcedata/c/x_channels.tsv", null, "name\nA1\n"),
+    ];
+    const sorted = [
+      "sourcedata/a/x_channels.tsv",
+      "sourcedata/b/x_channels.tsv",
+      "sourcedata/c/x_channels.tsv",
+    ];
+    expect(buildPools(files).rows.sourcedataFor.get("x_channels.tsv")).toEqual(sorted);
+    expect(buildPools([...files].reverse()).rows.sourcedataFor.get("x_channels.tsv")).toEqual(
+      sorted,
+    );
   });
 
   test("files with other extensions are ignored, including a gzipped table", () => {
@@ -917,6 +944,12 @@ describe("buildPools: the rows and leaves a pull request adds", () => {
     // An unchanged leaf is not new, and neither is a leaf at the same path with a changed value at its OLD value.
     expect(pool.json.byLeaf.get(leafKey(".A", "1"))).toBeUndefined();
     expect(pool.json.byLeaf.get(leafKey(".B", '"x"'))).toBeUndefined();
+  });
+
+  test("the leaf key is injective: a path and a value never run into each other", () => {
+    expect(leafKey(".a1", "2")).not.toBe(leafKey(".a", "12"));
+    expect(leafKey('.a["b"]', '"c"')).not.toBe(leafKey(".a", '["b"]"c"'));
+    expect(leafKey(".a", "1")).toBe(leafKey(".a", "1"));
   });
 
   test("several files adding one leaf are listed in the order given", () => {
@@ -1693,6 +1726,10 @@ describe("diffTable: relocation is exact and corresponding", () => {
       `sourcedata/removed/${path}.bak`, // a different name
       `sourcedata/removed/x${path}`, // the directory name differs
       "sourcedata/removed/channels.tsv",
+      `sourcedata/${path}`, // the file's own path one level down: no directory of its own
+      `sourcedata/a/b/${path}`, // deeper than one directory
+      `sourcedata/a/b/c/${path}`,
+      `sourcedata/removed/sourcedata/x/${path}`,
       "other/removed/sub-01/eeg/sub-01_channels.tsv", // not under sourcedata
       `derivatives/${path}`,
       `notsourcedata/removed/${path}`,
@@ -1704,27 +1741,41 @@ describe("diffTable: relocation is exact and corresponding", () => {
     }
   });
 
-  test("any directory under sourcedata may hold the corresponding path, however deep", () => {
+  test("exactly one directory under sourcedata, whatever its name, holds the corresponding path", () => {
     const rows = tsv(header, ["A2", "EEG"], ["A3", "EEG"]);
     for (const where of [
-      `sourcedata/${path}`,
       `sourcedata/a/${path}`,
-      `sourcedata/a/b/c/${path}`,
+      `sourcedata/channels-removed-2026-10-18/${path}`,
+      `sourcedata/x y/${path}`,
     ]) {
       const diff = diffText(path, before, after, [pooled(where, null, rows)]);
       expect(kindsOf(diff), where).toEqual(["row_relocated", "row_relocated"]);
     }
   });
 
-  test("a copy under a different header is not a relocation, even with the same cells in another order", () => {
+  test("a copy under a different header is not a relocation, even when its row text is the same", () => {
+    // Each copy holds the very text of the removed rows ("A2\tEEG"), so only the header can refuse it.
     for (const other of [
-      tsv(["name", "type", "units"], ["A2", "EEG", "uV"], ["A3", "EEG", "uV"]),
-      tsv(["type", "name"], ["EEG", "A2"], ["EEG", "A3"]),
+      tsv(["name", "kind"], ["A2", "EEG"], ["A3", "EEG"]),
+      tsv(["type", "name"], ["A2", "EEG"], ["A3", "EEG"]),
       tsv(["Name", "type"], ["A2", "EEG"], ["A3", "EEG"]),
     ]) {
       const diff = diffText(path, before, after, [pooled(target, null, other)]);
-      expect(kindsOf(diff)).toEqual(["row_removed", "row_removed"]);
+      expect(kindsOf(diff), other.split("\n")[0]).toEqual(["row_removed", "row_removed"]);
     }
+  });
+
+  test("the copy must have the header the row had BEFORE, not the one the file has now", () => {
+    // The file's columns were swapped. Its removed row was name A2, type EEG. The copy has the
+    // file's new header, and a row whose text is "A2\tEEG": under that header it is type A2, name
+    // EEG, a different row, so it is no copy of the removed one.
+    const diff = diffText(
+      path,
+      tsv(header, ["A1", "EEG"], ["A2", "EEG"]),
+      tsv(["type", "name"], ["EEG", "A1"]),
+      [pooled(target, null, tsv(["type", "name"], ["A2", "EEG"]))],
+    );
+    expect(kindsOf(diff)).toEqual(["columns_reordered", "row_removed"]);
   });
 
   test("two identical removed rows and one copy give one relocated row and one removed", () => {
@@ -1748,26 +1799,66 @@ describe("diffTable: relocation is exact and corresponding", () => {
     expect(kindsOf(both)).toEqual(["row_relocated", "row_relocated"]);
   });
 
-  test("one copy is never used twice, across files either", () => {
-    const hdr = ["name", "type"];
+  test("a copy serves only the file its path names, so the order files are diffed in changes nothing", () => {
+    const hdr = ["participant_id", "age"];
+    const files = [
+      pooled("sourcedata/x/phenotype/participants.tsv", null, tsv(hdr, ["sub-07", "33"])),
+    ];
+    const run = (order: string[]) => {
+      const pool = buildPools(files).rows;
+      return Object.fromEntries(
+        order.map((at) => {
+          const result = diffTable(
+            at,
+            table(tsv(hdr, ["sub-07", "33"], ["sub-01", "20"])),
+            table(tsv(hdr, ["sub-01", "20"])),
+            pool,
+          );
+          return [at, result.ok && kindsOf(result.value)];
+        }),
+      );
+    };
+    // Both paths end in participants.tsv, but the copy is at sourcedata/x/<phenotype/participants.tsv>.
+    const expected = {
+      "participants.tsv": ["row_removed"],
+      "phenotype/participants.tsv": ["row_relocated"],
+    };
+    expect(run(["participants.tsv", "phenotype/participants.tsv"])).toEqual(expected);
+    expect(run(["phenotype/participants.tsv", "participants.tsv"])).toEqual(expected);
+  });
+
+  test("a copy used is used up: a second diff against the same pool finds what is left", () => {
+    // Two copies of one event row, and a file that removes two of them. A second diff of the same
+    // path against the same pool (the only way another diff can reach those copies) finds none.
+    const events = "sub-01/eeg/sub-01_task-x_events.tsv";
+    const hdr = ["onset", "trial_type"];
     const pool = buildPools([
-      pooled("sourcedata/old/sub-01/x_channels.tsv", null, tsv(hdr, ["A2", "EEG"])),
+      pooled(`sourcedata/old/${events}`, null, tsv(hdr, ["1", "go"], ["1", "go"])),
     ]).rows;
-    // sub-01/x_channels.tsv and x_channels.tsv both correspond to that one file.
-    const first = diffTable(
-      "sub-01/x_channels.tsv",
-      table(tsv(hdr, ["A1", "EEG"], ["A2", "EEG"])),
-      table(tsv(hdr, ["A1", "EEG"])),
-      pool,
+    const removeTwo = () =>
+      diffTable(
+        events,
+        table(tsv(hdr, ["1", "go"], ["1", "go"], ["2", "stop"])),
+        table(tsv(hdr, ["2", "stop"])),
+        pool,
+      );
+    const first = removeTwo();
+    expect(first.ok && kindsOf(first.value)).toEqual(["row_relocated", "row_relocated"]);
+    expect(pool.files.get(`sourcedata/old/${events}`)?.rows.get("1\tgo")).toBe(0);
+    const second = removeTwo();
+    expect(second.ok && kindsOf(second.value)).toEqual(["row_removed", "row_removed"]);
+    // One copy used of two leaves one.
+    const pool2 = buildPools([
+      pooled(`sourcedata/old/${events}`, null, tsv(hdr, ["1", "go"], ["1", "go"])),
+    ]).rows;
+    const one = diffTable(
+      events,
+      table(tsv(hdr, ["1", "go"], ["2", "stop"])),
+      table(tsv(hdr, ["2", "stop"])),
+      pool2,
     );
-    const second = diffTable(
-      "x_channels.tsv",
-      table(tsv(hdr, ["A1", "EEG"], ["A2", "EEG"])),
-      table(tsv(hdr, ["A1", "EEG"])),
-      pool,
-    );
-    expect(first.ok && kindsOf(first.value)).toEqual(["row_relocated"]);
-    expect(second.ok && kindsOf(second.value)).toEqual(["row_removed"]);
+    expect(one.ok && kindsOf(one.value)).toEqual(["row_relocated"]);
+    expect(pool2.files.get(`sourcedata/old/${events}`)?.rows.get("1\tgo")).toBe(1);
   });
 
   test("a diff that is refused does not use up the copies it found", () => {
@@ -1787,6 +1878,11 @@ describe("diffTable: relocation is exact and corresponding", () => {
     const diff = diffText(events, tsv(hdr, ["1", "go"], ["2", "stop"]), tsv(hdr, ["1", "go"]), [
       pooled(`sourcedata/x/${events}`, null, tsv(hdr, ["2", "stop"])),
     ]);
+    // A matched row is not relocated even when the pool holds a copy of it too.
+    const kept = diffText(events, tsv(hdr, ["1", "go"]), tsv(hdr, ["1", "go"]), [
+      pooled(`sourcedata/x/${events}`, null, tsv(hdr, ["1", "go"])),
+    ]);
+    expect(kept.atoms).toEqual([]);
     expect(lines(diff)).toEqual([
       'row_relocated | before="2\\tstop" | detail="sourcedata/x/sub-*_events.tsv"',
     ]);
