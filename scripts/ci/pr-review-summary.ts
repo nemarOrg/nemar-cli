@@ -198,3 +198,149 @@ export function firstDifference(a: string, b: string): string | null {
     j += width;
   }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Bytes to text (steps 1 to 4 of both parsers)
+// ---------------------------------------------------------------------------------------------
+
+/** A byte order mark, as the one character it decodes to. */
+const BOM = "\u{FEFF}";
+
+/**
+ * The checks every file passes before its structure is read, in the order the design gives them:
+ * size, NUL, strict UTF-8, byte order mark. `ignoreBOM: true` is what makes the decoder KEEP a
+ * leading U+FEFF (the flag names whether the BOM is ignored by the decoder, not by us), so this
+ * function can record it and the serializer can put it back; with the default the first character
+ * would vanish and the round trip could not be exact. `fatal: true` refuses a malformed sequence
+ * instead of replacing it with U+FFFD, which would make two different files decode to one text.
+ */
+function decodeText(bytes: Uint8Array): Parsed<{ bom: boolean; text: string }> {
+  if (bytes.length > SUMMARY_LIMITS.maxBlobBytes) return { ok: false, refusal: "too_large" };
+  if (bytes.includes(0)) return { ok: false, refusal: "nul_byte" };
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    return { ok: false, refusal: "invalid_utf8" };
+  }
+  const bom = text.startsWith(BOM);
+  return { ok: true, value: { bom, text: bom ? text.slice(BOM.length) : text } };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tab-separated tables
+// ---------------------------------------------------------------------------------------------
+
+/** The tab-separated text of a table, exactly as {@link parseTsv} read it (BOM, endings, final newline). */
+export function serializeTsv(table: Table): Uint8Array {
+  const lines = [table.header, ...table.rows];
+  const last = lines.length - 1;
+  const parts: string[] = [];
+  if (table.format.bom) parts.push(BOM);
+  for (let i = 0; i <= last; i++) {
+    parts.push((lines[i] as readonly string[]).join("\t"));
+    if (i < last || table.format.finalNewline) parts.push(table.crByLine[i] ? "\r\n" : "\n");
+  }
+  return new TextEncoder().encode(parts.join(""));
+}
+
+/** Whether two byte strings are the same bytes. */
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/**
+ * Read a tab-separated table, or say in one closed word why the platform will not. The steps are
+ * the design's (section 3.1), in this order, so the word a file gets is the first thing wrong with
+ * it and never depends on the implementation:
+ *
+ * 1. more than `maxBlobBytes`: `too_large`; 2. a NUL: `nul_byte`; 3. not strict UTF-8:
+ * `invalid_utf8`; 4. a leading BOM is removed and recorded; 5. the text is split on LF, an empty
+ * last piece meaning a final newline; 6. one CR ending a TERMINATED line is the line's CRLF and is
+ * recorded per line, any other CR (inside a line, or ending an unterminated last line) is
+ * `bare_cr`; 7. no line at all: `empty`; 8. the first line is the header, and an empty column name
+ * is `empty_column_name`, a repeated one `duplicate_column`; 9. every other line must have exactly
+ * the header's number of cells (`ragged_row`), and there may be at most `maxRows` of them
+ * (`too_many_rows`, reported only when no row was ragged); 10. a header name or a cell that STARTS
+ * with a double quote is `quoted_cell`, because BIDS tables do not quote but pandas does at the
+ * start of a field, so a file two readers would split differently is refused instead of guessed;
+ * 11. the round trip: the serialization of what was read must equal the input byte for byte.
+ *
+ * Step 11 is the precondition of the coverage argument (design section 6.2): a parse that loses no
+ * byte cannot hide a difference between two versions of a file. Steps 1 to 10 make it hold for
+ * every file they accept, so the guard cannot fire on real input; `check` is how a test proves it
+ * would. It is the serializer the round trip uses and must not be passed in production code.
+ */
+export function parseTsv(
+  bytes: Uint8Array,
+  check: (table: Table) => Uint8Array = serializeTsv,
+): Parsed<Table> {
+  const decoded = decodeText(bytes);
+  if (!decoded.ok) return decoded;
+  const { bom, text } = decoded.value;
+
+  // Step 5. No text is no lines and no final newline; otherwise the last piece is empty exactly
+  // when the text ends in LF, and that piece is the end of the file, not a line.
+  const pieces = text === "" ? [] : text.split("\n");
+  const finalNewline = pieces.length > 0 && pieces[pieces.length - 1] === "";
+  if (finalNewline) pieces.pop();
+
+  // Step 6.
+  const lines: string[] = [];
+  const crByLine: boolean[] = [];
+  let terminated = 0;
+  let crlf = 0;
+  for (let i = 0; i < pieces.length; i++) {
+    let line = pieces[i] as string;
+    const ended = i < pieces.length - 1 || finalNewline;
+    let cr = false;
+    if (ended && line.endsWith("\r")) {
+      line = line.slice(0, -1);
+      cr = true;
+    }
+    if (line.includes("\r")) return { ok: false, refusal: "bare_cr" };
+    lines.push(line);
+    crByLine.push(cr);
+    if (ended) terminated++;
+    if (cr) crlf++;
+  }
+
+  // Step 7.
+  if (lines.length === 0) return { ok: false, refusal: "empty" };
+
+  // Step 8.
+  const header = (lines[0] as string).split("\t");
+  if (header.includes("")) return { ok: false, refusal: "empty_column_name" };
+  if (new Set(header).size !== header.length) return { ok: false, refusal: "duplicate_column" };
+
+  // Step 9. A row past the cap is counted, not kept, so a hostile file cannot make this hold it
+  // all; its width is still checked, because a ragged row anywhere is the first thing wrong.
+  const rows: string[][] = [];
+  let tooMany = false;
+  for (let i = 1; i < lines.length; i++) {
+    const cells = (lines[i] as string).split("\t");
+    if (cells.length !== header.length) return { ok: false, refusal: "ragged_row" };
+    if (rows.length < SUMMARY_LIMITS.maxRows) rows.push(cells);
+    else tooMany = true;
+  }
+  if (tooMany) return { ok: false, refusal: "too_many_rows" };
+
+  // Step 10.
+  if (header.some(startsWithQuote) || rows.some((cells) => cells.some(startsWithQuote))) {
+    return { ok: false, refusal: "quoted_cell" };
+  }
+
+  const eol =
+    terminated === 0 ? "none" : crlf === 0 ? "lf" : crlf === terminated ? "crlf" : "mixed";
+  const table: Table = { format: { bom, eol, finalNewline }, crByLine, header, rows };
+
+  // Step 11.
+  if (!sameBytes(check(table), bytes)) return { ok: false, refusal: "no_round_trip" };
+  return { ok: true, value: table };
+}
+
+function startsWithQuote(cell: string): boolean {
+  return cell.charCodeAt(0) === 34;
+}
