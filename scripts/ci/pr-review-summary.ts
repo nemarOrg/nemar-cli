@@ -55,6 +55,11 @@ export const SUMMARY_LIMITS = {
   maxJsonDepth: 64,
   maxJsonNodes: 200_000,
   maxKeyChars: 128, // longer keys get no relabel rule
+  // A column name, a JSON key or a JSON path longer than this, in UTF-16 code units (`.length`),
+  // refuses its file `too_large`. Every atom of a file can carry one, so an unbounded name would
+  // make the cost of a file its row count times the name. Above `maxValueChars` on purpose: a
+  // name between 301 and 1024 is still summarized, and its class line is cut and incomplete.
+  maxNameChars: 1024,
   maxRuns: 24,
   maxPairingSteps: 12_000_000, // per file: the pairing passes' work, in steps of about one lookup
   maxTotalBytes: 256 * 1024 * 1024, // all blobs the summary reads in one run
@@ -71,6 +76,7 @@ export const SUMMARY_LIMITS = {
  * about the bytes, the next six about a table's shape, the next four about a JSON document, and the
  * last two about the platform's own reading (`blob_missing` is a git object that
  * could not be read, `internal_mismatch` is the bucket count of design section 6.2 not adding up).
+ * `too_large` is also the word for a column name, a JSON key or a JSON path over `maxNameChars`.
  */
 export const SUMMARY_REFUSALS = [
   "too_large",
@@ -297,9 +303,11 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
  * last piece meaning a final newline; 6. one CR ending a TERMINATED line is the line's CRLF and is
  * recorded per line, any other CR (inside a line, or ending an unterminated last line) is
  * `bare_cr`; 7. no line at all: `empty`; 8. the first line is the header, and an empty column name
- * is `empty_column_name`, a repeated one `duplicate_column`; 9. every other line must have exactly
- * the header's number of cells (`ragged_row`), and there may be at most `maxRows` of them
- * (`too_many_rows`, reported only when no row was ragged); 10. a header name or a cell that STARTS
+ * is `empty_column_name`, a repeated one `duplicate_column`, one longer than `maxNameChars` code
+ * units `too_large` (so no atom or class key is ever built from such a name); 9. every other line
+ * must have exactly the header's number of cells (`ragged_row`), and there may be at most
+ * `maxRows` of them (`too_many_rows`, reported only when no row was ragged); 10. a header name or
+ * a cell that STARTS
  * with a double quote is `quoted_cell`, because BIDS tables do not quote but pandas does at the
  * start of a field, so a file two readers would split differently is refused instead of guessed;
  * 11. the round trip: the serialization of what was read must equal the input byte for byte.
@@ -366,6 +374,9 @@ export function parseTsvWith(
   const header = (lines[0] as string).split("\t");
   if (header.includes("")) return { ok: false, refusal: "empty_column_name" };
   if (new Set(header).size !== header.length) return { ok: false, refusal: "duplicate_column" };
+  if (header.some((name) => name.length > SUMMARY_LIMITS.maxNameChars)) {
+    return { ok: false, refusal: "too_large" };
+  }
 
   // A one-column table with an empty or all-space line: see the doc above.
   if (header.length === 1 && lines.some((line) => /^ *$/.test(line))) {
@@ -582,6 +593,8 @@ class JsonReader {
     for (;;) {
       if (this.text.charCodeAt(this.pos) !== 0x22) throw new JsonRefusal("not_json");
       const key = this.string();
+      // Before the key is stored, so no path or atom is ever built from it.
+      if (key.length > SUMMARY_LIMITS.maxNameChars) throw new JsonRefusal("too_large");
       if (members.has(key)) throw new JsonRefusal("duplicate_key");
       this.skipSpace();
       if (this.text.charCodeAt(this.pos) !== 0x3a) throw new JsonRefusal("not_json");
@@ -632,9 +645,9 @@ function jsonFormat(bom: boolean, text: string): TextFormat {
  * trailing commas, single quotes, leading zeros, a raw control character in a string and anything
  * after the value are `not_json`; a key repeated within one object, at any depth, is
  * `duplicate_key` (keys are compared decoded, so `"a"` and the six-character escape of `a` are the
- * same key); nesting past `maxJsonDepth` is `too_deep` and more than `maxJsonNodes` values
- * `too_many_nodes`. Where a document has several faults the word is the first one met in reading
- * order.
+ * same key); a key longer than `maxNameChars` code units once decoded is `too_large`; nesting past
+ * `maxJsonDepth` is `too_deep` and more than `maxJsonNodes` values `too_many_nodes`. Where a
+ * document has several faults the word is the first one met in reading order.
  *
  * Numbers stay as the text the file wrote and strings are decoded, so the six-character escape of
  * `A` and a plain `A` are one value, while `1.0`, `1` and `1e400` are three. Equal trees therefore
@@ -1328,9 +1341,16 @@ export interface JsonLeaf {
  * canonical text, and an empty array is a leaf; an array with any object or array element recurses
  * with index paths; a scalar is a leaf. Treating a list of scalars as one value keeps a list that
  * lost an element a CHANGED value, shown whole, instead of a removed index with a shifted tail.
+ *
+ * Null when a path would be longer than `maxNameChars` code units: every atom of a leaf carries its
+ * path or its parent's, so a long path repeated over many leaves would make the cost of a document
+ * its leaf count times the path. The length is checked before a path is joined, so no path over
+ * the bound is ever built, and the caller refuses the file (`too_large`).
  */
-export function flattenJson(root: JsonValue): JsonLeaf[] {
+export function flattenJson(root: JsonValue): JsonLeaf[] | null {
   const out: JsonLeaf[] = [];
+  const max = SUMMARY_LIMITS.maxNameChars;
+  let tooLong = false;
   const walk = (
     v: JsonValue,
     path: string,
@@ -1341,21 +1361,40 @@ export function flattenJson(root: JsonValue): JsonLeaf[] {
   ): void => {
     if (v.t === "obj" && v.keys.length > 0) {
       for (const key of v.keys) {
+        // A segment is at least the key and one character, so a key that cannot fit is never
+        // escaped either.
+        if (path.length + key.length + 1 > max) {
+          tooLong = true;
+          return;
+        }
         const segment = BARE_KEY.test(key) ? `.${key}` : `[${JSON.stringify(key)}]`;
+        if (path.length + segment.length > max) {
+          tooLong = true;
+          return;
+        }
         // The root (the one place whose path is empty) holds the top-level keys; below them the
         // top-level key is inherited.
         walk(v.v.get(key) as JsonValue, path + segment, path, key, true, path === "" ? key : top);
+        if (tooLong) return;
       }
       return;
     }
     if (v.t === "arr" && v.v.some((item) => item.t === "arr" || item.t === "obj")) {
-      v.v.forEach((item, i) => walk(item, `${path}[${i}]`, path, `[${i}]`, false, top));
+      for (let i = 0; i < v.v.length; i++) {
+        const segment = `[${i}]`;
+        if (path.length + segment.length > max) {
+          tooLong = true;
+          return;
+        }
+        walk(v.v[i] as JsonValue, path + segment, path, segment, false, top);
+        if (tooLong) return;
+      }
       return;
     }
     out.push({ path, parent, name, isKey, top, value: canonicalJson(v), json: v });
   };
   walk(root, "", "", "", false, null);
-  return out;
+  return tooLong ? null : out;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1522,11 +1561,15 @@ export function buildPools(files: readonly PoolFile[]): { rows: RowPool; json: J
         }
       }
       if (before !== null && !before.ok) continue;
+      // A path over `maxNameChars` on either side leaves the file's leaves out, as a side that
+      // does not parse does: it keeps its top-level keys above, and is never a home.
+      const beforeLeaves = before?.ok ? flattenJson(before.value.value) : [];
+      const afterLeaves = flattenJson(after.value.value);
+      if (beforeLeaves === null || afterLeaves === null) continue;
       const had = new Map<string, string>();
-      if (before?.ok)
-        for (const leaf of flattenJson(before.value.value)) had.set(leaf.path, leaf.value);
+      for (const leaf of beforeLeaves) had.set(leaf.path, leaf.value);
       const fresh = new Map<string, string>();
-      for (const leaf of flattenJson(after.value.value)) {
+      for (const leaf of afterLeaves) {
         if (had.get(leaf.path) !== leaf.value) fresh.set(leaf.path, leaf.value);
       }
       if (fresh.size === 0) continue;
@@ -2657,10 +2700,11 @@ export function verifyJsonCounts(diff: FileDiff<JsonCounts>): boolean {
 
 /**
  * The difference between two versions of a JSON document, as atoms, or `internal_mismatch` when the
- * diff is not total. Both documents are flattened to leaves ({@link flattenJson}); every before leaf
- * ends in exactly one of: unchanged, changed (value or type), emptied, filled, renamed, moved,
- * removed (with a value, or without one); every after leaf in one of: unchanged, changed, emptied,
- * filled, renamed, added. The tallies and the atoms are checked against each other
+ * diff is not total, or `too_large` when a path of either is longer than `maxNameChars` (checked
+ * before the path is built). Both documents are flattened to leaves ({@link flattenJson}); every
+ * before leaf ends in exactly one of: unchanged, changed (value or type), emptied, filled, renamed,
+ * moved, removed (with a value, or without one); every after leaf in one of: unchanged, changed,
+ * emptied, filled, renamed, added. The tallies and the atoms are checked against each other
  * ({@link verifyJsonCounts}).
  *
  * Leaves at the same path are compared first. A before leaf whose path is gone is then, in order:
@@ -2710,6 +2754,7 @@ export function diffJsonWith(
 ): Parsed<FileDiff<JsonCounts>> {
   const bl = flattenJson(before);
   const al = flattenJson(after);
+  if (bl === null || al === null) return { ok: false, refusal: "too_large" };
   const bFate = new Uint8Array(bl.length);
   const aFate = new Uint8Array(al.length);
   const pairOfBefore = new Int32Array(bl.length).fill(-1);

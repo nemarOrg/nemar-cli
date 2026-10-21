@@ -17,10 +17,12 @@ import {
   type ClassKind,
   type FileDiff,
   type JsonCounts,
+  type JsonLeaf,
   type JsonValue,
   type PoolFile,
   ROLE_OF,
   type RelabelRule,
+  SUMMARY_LIMITS,
   type Table,
   type TableCounts,
   buildPools,
@@ -926,9 +928,16 @@ function pooled(path: string, before: string | null, after: string): PoolFile {
   return { path, before: before === null ? null : enc(before), after: enc(after) };
 }
 
+/** The leaves of a document no test here expects to be refused for a long path. */
+function leavesOf(value: JsonValue): JsonLeaf[] {
+  const found = flattenJson(value);
+  if (found === null) throw new Error("a path over maxNameChars in a test document");
+  return found;
+}
+
 describe("flattenJson: the leaves of a document", () => {
   const leaves = (text: string) =>
-    flattenJson(json(text)).map((leaf) => [leaf.path, leaf.value] as const);
+    leavesOf(json(text)).map((leaf) => [leaf.path, leaf.value] as const);
 
   test("objects recurse, scalars are leaves, and a list of scalars is one leaf", () => {
     expect(
@@ -989,7 +998,7 @@ describe("flattenJson: the leaves of a document", () => {
   });
 
   test("a leaf knows its parent, its name and whether it is a key", () => {
-    const found = flattenJson(json('{"a": {"b": 1}, "c": [{"d": 2}, 3]}'));
+    const found = leavesOf(json('{"a": {"b": 1}, "c": [{"d": 2}, 3]}'));
     expect(found.map((l) => [l.path, l.parent, l.name, l.isKey])).toEqual([
       [".a.b", ".a", "b", true],
       [".c[0].d", ".c[0]", "d", true],
@@ -1005,6 +1014,29 @@ describe("flattenJson: the leaves of a document", () => {
       [".e", "1e400"],
       [".z", "-0"],
     ]);
+  });
+
+  test("a path of 1,024 code units is a leaf; one longer, built of short keys, leaves the document with none", () => {
+    const max = SUMMARY_LIMITS.maxNameChars;
+    // 64 nested objects (the deepest a document may be), each key 15 characters: a path of 64
+    // segments of 16. The last key one character longer makes it 1,025.
+    const deep = (last: number): string => {
+      const keys = Array.from({ length: 63 }, (_, i) => `k${String(i).padStart(14, "0")}`);
+      keys.push("z".repeat(last));
+      return `${keys.map((k) => `{"${k}":`).join("")}1${"}".repeat(keys.length)}`;
+    };
+    const exact = leavesOf(json(deep(15)));
+    expect(exact.length).toBe(1);
+    expect(exact[0]?.path.length).toBe(max);
+    expect(flattenJson(json(deep(16)))).toBeNull();
+    // A key written in brackets counts as written, its quotes and brackets included.
+    const bracketed = (n: number) => `{"${"x ".repeat(n / 2)}":1}`;
+    expect(leavesOf(json(bracketed(max - 4)))[0]?.path.length).toBe(max);
+    expect(flattenJson(json(bracketed(max - 2)))).toBeNull();
+    // An index is a segment too, but a list of scalars is one leaf and adds none.
+    const key = "y".repeat(max - 3);
+    expect(flattenJson(json(`{"${key}":[[1],[2]]}`))).toBeNull();
+    expect(leavesOf(json(`{"${key}":[1,2]}`))[0]?.path.length).toBe(max - 2);
   });
 });
 
@@ -1167,6 +1199,28 @@ describe("buildPools: the rows and leaves a pull request adds", () => {
       "sub-01/sub-01_task-x_eeg.json",
       "list_eeg.json",
     ]);
+  });
+
+  test("a name or path over maxNameChars leaves a file out as a parse failure does, keeping its top-level keys", () => {
+    const max = SUMMARY_LIMITS.maxNameChars;
+    const long = "k".repeat(max);
+    const pool = buildPools([
+      // A path of 1,025 on the after side, then on the before side: no leaf is a home.
+      pooled("task-x_eeg.json", null, `{"A":{"${long}":1}}`),
+      pooled("sub-01/sub-01_task-x_eeg.json", `{"B":{"${long}":1}}`, '{"B":{"x":1}}'),
+      // A key of 1,025 does not parse: the file is unreadable.
+      pooled("sub-02/sub-02_task-x_eeg.json", null, `{"${long}k":1}`),
+      // A column name of 1,025 does not parse either: no row of it is a copy.
+      pooled("sourcedata/old/x.tsv", null, `a\t${long}k\n1\t2\n`),
+    ]);
+    expect(pool.json.files.size).toBe(0);
+    expect(pool.json.byLeaf.size).toBe(0);
+    expect(Object.fromEntries(pool.json.byTopKey)).toEqual({
+      A: ["task-x_eeg.json"],
+      B: ["sub-01/sub-01_task-x_eeg.json"],
+    });
+    expect([...pool.json.unreadable]).toEqual(["sub-02/sub-02_task-x_eeg.json"]);
+    expect(pool.rows.files.size).toBe(0);
   });
 
   test("a JSON file contributes the leaves it has now and did not have, by path and value", () => {
@@ -3340,6 +3394,27 @@ const jsonLines = (before: string, after: string, files: PoolFile[] = []): strin
   diffJsonText("sub-01/eeg/sub-01_task-x_eeg.json", before, after, files).atoms.map(line);
 
 describe("diffJson: leaves at the same path", () => {
+  test("a path over maxNameChars on either side refuses the file too_large; one at the bound is diffed", () => {
+    const max = SUMMARY_LIMITS.maxNameChars;
+    const at = (key: string, value: number) => json(`{"a":{"${key}":${value}}}`);
+    // `.a.` and the key: 3 + (max - 3) is exactly the bound.
+    const fits = "k".repeat(max - 3);
+    const over = "k".repeat(max - 2);
+    const pool = buildPools([]).json;
+    const diff = diffJson("x.json", at(fits, 1), at(fits, 2), pool);
+    expect(diff.ok && diff.value.atoms.map((a) => [a.kind, a.field?.length])).toEqual([
+      ["json_value_changed", max],
+    ]);
+    expect(diffJson("x.json", at(over, 1), at(fits, 1), pool)).toEqual({
+      ok: false,
+      refusal: "too_large",
+    });
+    expect(diffJson("x.json", at(fits, 1), at(over, 1), pool)).toEqual({
+      ok: false,
+      refusal: "too_large",
+    });
+  });
+
   test("a document that did not change has no atoms, whatever its layout", () => {
     const diff = diffJsonText(
       "a.json",
@@ -4427,8 +4502,8 @@ describe("diffJson on generated documents", () => {
       for (const atom of atoms) seen.add(atom.kind);
 
       expect(verifyJsonCounts(result.value), `case ${n}`).toBe(true);
-      const beforeLeaves = flattenJson(b.value.value);
-      const afterLeaves = flattenJson(a.value.value);
+      const beforeLeaves = leavesOf(b.value.value);
+      const afterLeaves = leavesOf(a.value.value);
       expect(counts.beforeLeaves).toBe(beforeLeaves.length);
       expect(counts.afterLeaves).toBe(afterLeaves.length);
 

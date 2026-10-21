@@ -446,6 +446,7 @@ export const SUMMARY_LIMITS = {
   maxJsonDepth: 64,
   maxJsonNodes: 200_000,
   maxKeyChars: 128, // longer keys get no relabel rule
+  maxNameChars: 1024, // phase 3 review: a longer column name, JSON key or JSON path refuses the file too_large
   maxRuns: 24,
   maxPairingSteps: 12_000_000, // per file: the pairing passes' work, in steps of about one lookup (section 4.4)
   maxTotalBytes: 256 * 1024 * 1024, // all blobs the summary reads in one run
@@ -457,6 +458,10 @@ export const SUMMARY_LIMITS = {
   timeReserveMs: 40_000, // stop summarizing when less than this is left of the content pass
 } as const;
 ```
+
+(Phase 3 review: `maxNameChars` is counted in UTF-16 code units and checked where a name is read, a table's header and a JSON key, and where a JSON path is joined, before any atom or class key is built from it, because every atom of a file can carry its column or path and the cost of a file would otherwise be its rows times its longest name.
+It is above `maxValueChars` on purpose, so a name between 301 and 1,024 units is summarized and its cut class line makes it incomplete.
+A top-level JSON key of exactly 1,024 units parses, but its path is 1,025 and refuses the file.)
 
 ### 5.3 Completeness
 

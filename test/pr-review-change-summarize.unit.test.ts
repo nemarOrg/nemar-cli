@@ -1548,6 +1548,51 @@ describe("summarizeChanges: one outcome per candidate, in path order", () => {
     );
   });
 
+  test("a column name, a JSON key or a JSON path over 1,024 code units refuses its file too_large; at 1,024 it is summarized", () => {
+    const max = SUMMARY_LIMITS.maxNameChars;
+    const column = (n: number) =>
+      candidate(
+        `c${n}.tsv`,
+        tsv(["a", "n".repeat(n)], ["1", "x"]),
+        tsv(["a", "n".repeat(n)], ["1", "y"]),
+      );
+    const key = (n: number) =>
+      candidate(`k${n}.json`, `{"${"k".repeat(n)}":1}`, `{"${"k".repeat(n)}":2}`);
+    // A deep path made of short keys: 64 levels of 16, the last key setting the length.
+    const deep = (last: number) => {
+      const keys = Array.from({ length: 63 }, (_, i) => `k${String(i).padStart(14, "0")}`);
+      keys.push("z".repeat(last));
+      const doc = (v: number) => `${keys.map((k) => `{"${k}":`).join("")}${v}${"}".repeat(64)}`;
+      return candidate(`d${last}.json`, doc(1), doc(2));
+    };
+    // A key of 1,024 parses (the parser's own test), but at the top level its path is `.` and the
+    // key, 1,025 units, so the path refuses it; 1,023 is the longest top-level key summarized.
+    const summary = summarize([
+      column(max),
+      column(max + 1),
+      key(max - 1),
+      key(max),
+      key(max + 1),
+      deep(15),
+      deep(16),
+    ]);
+    expect(refusals(summary)).toEqual([
+      `c${max}.tsv ok`,
+      `c${max + 1}.tsv too_large`,
+      "d15.json ok",
+      "d16.json too_large",
+      `k${max - 1}.json ok`,
+      `k${max}.json too_large`,
+      `k${max + 1}.json too_large`,
+    ]);
+    // What is summarized carries its name whole; its class line is cut at 300 characters, so it
+    // is shown but not accounted for.
+    const fields = summary.classes.map((c) => c.field?.length);
+    expect(fields.sort()).toEqual([max, max, max]);
+    expect(summary.accounted.size).toBe(0);
+    expect(summary.classes.length).toBe(3);
+  });
+
   test("once the bytes read would pass maxTotalBytes, that file and every later one is refused too_large", () => {
     // One buffer for both sides of the large file: half the cap plus one byte each.
     const half = new Uint8Array(SUMMARY_LIMITS.maxTotalBytes / 2 + 1);
