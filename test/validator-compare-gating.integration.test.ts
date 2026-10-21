@@ -179,6 +179,23 @@ describe("compare-gating.sh", () => {
     expect(existsSync(join(out, "diff-detector-bare-link.txt"))).toBe(false);
   }, 120_000);
 
+  test("a reference dataset is cloned and compared, and only the comparison is kept", () => {
+    // The one test of a successful clone: a real clone of the public exemplar xx099900, one of the
+    // script's default reference ids. What the dataset's own error counts are may change, so this
+    // checks that it was cloned and compared (the same release on both sides never changes), and
+    // that the clone is gone when the script exits.
+    const scratch = freshDir("compare-clone-scratch-");
+    const cloned = compare(["--old", "3.0.2", "--new", "3.0.2", "--ids", "xx099900"], {
+      TMPDIR: scratch,
+    });
+    expect(cloned.exitCode).toBe(0);
+    const row = rows(cloned.out).xx099900;
+    expect(row?.[1]).toBe("compared");
+    expect(row?.[4]).toBe("no");
+    expect(existsSync(join(cloned.out, "data"))).toBe(false);
+    expect(readdirSync(scratch)).toEqual([]);
+  }, 120_000);
+
   test("a dataset that cannot be cloned fails the run, unless partial results are accepted", () => {
     const strict = compare(["--old", "3.0.2", "--new", "3.0.2", "--ids", "nm999999"]);
     expect(strict.exitCode).toBe(1);

@@ -139,15 +139,14 @@ make_canary() {
 TARGETS=()
 for id in $IDS; do
   dir="$DATA/$id"
-  if [ ! -d "$dir/.git" ]; then
+  # DATA is new for this run, so a directory exists here only when --ids names the id twice.
+  rm -rf "$dir"
+  # A connection below 1 KB/s for two minutes is abandoned, so a stalled clone fails its own row
+  # rather than holding the job until the job's timeout.
+  if ! GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=120 git clone --depth 1 --quiet "https://github.com/nemarDatasets/$id.git" "$dir" 2>"$RUN/$id.clone.err"; then
     rm -rf "$dir"
-    # A connection below 1 KB/s for two minutes is abandoned, so a stalled clone fails its own row
-    # rather than holding the job until the job's timeout.
-    if ! GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=120 git clone --depth 1 --quiet "https://github.com/nemarDatasets/$id.git" "$dir" 2>"$RUN/$id.clone.err"; then
-      rm -rf "$dir"
-      printf '%s\tnot_compared\t-\t-\t-\tclone failed: %s\n' "$id" "$(failure_note "$RUN/$id.clone.err")" >> "$OUT/results.tsv"
-      continue
-    fi
+    printf '%s\tnot_compared\t-\t-\t-\tclone failed: %s\n' "$id" "$(failure_note "$RUN/$id.clone.err")" >> "$OUT/results.tsv"
+    continue
   fi
   TARGETS+=("$id|$dir")
 done
