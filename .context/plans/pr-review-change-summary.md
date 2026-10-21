@@ -294,6 +294,9 @@ Examples are the first atom of each of the first two files in review order, or t
    With empty prefix and suffix and `repadded`, the rule is `repad` ("only the zero padding of numbers changed").
    **Decimals** (phase 2 review, decision D4): a digit run directly before or after a `.` or `,` is compared by its text, not its value, wherever runs are compared.
    So `0.05` to `0.5`, `A1.05` to `A1.5` and `0.05 Hz` to `0.5 Hz` get no `repad`: a tenfold change must never read as formatting.
+   **Joined numbers** (phase 3 review): a digit run is also compared by its text when it is joined to another digit run, that is, when scanning from it in either direction over runs that are one other character each, the first run that is not one is a digit run.
+   So `5 000` to `5 0`, `1'000` to `1'0000`, `1_000` to `1_0000`, `0·05 Hz` to `0·5 Hz` and `1٫05` to `1٫5` get no `repad` either: each is one number written with a separator, and no list of separators is kept.
+   A letter anywhere between two digit runs breaks the join, so `sub-01_ses-02`, `0100 Hz`, `EEG 001` and `x_02_y` still repad; the join is decided from each string alone, for keys and cells alike.
 4. `insert` or `delete`: the shorter string's runs appear in order in the longer string, a digit run only as a whole digit run of the same value, a letter or other run preferably where it starts and ends on a run boundary of the longer string, else at its first occurrence after the previous match; the rule is the list of inserted texts and the shape (`L`, `D`, `O` per run).
    `GA01` to `EEGGA_01REF` is `"EEG" + letters + "_" + digits + "REF"`.
    **Anchor** (D2): the string with fewer runs must contain at least one digit run, the anchor.

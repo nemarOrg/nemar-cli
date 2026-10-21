@@ -847,27 +847,64 @@ interface Run {
    * What two runs are compared by. Letters and other characters: exactly their text. Digits:
    * their value, so `01` and `1` are one number, but only for ASCII digits that stand alone; any
    * other digit (Arabic-Indic, a superscript, a fraction) is compared as the text it is, because it
-   * has no value this module can vouch for, and so is a run directly before or after a `.` or a
-   * `,`. There the digits are part of a decimal number, where a zero after the point is not
-   * padding: `0.05` to `0.5` is a tenfold change, and by value it would read as "only the zero
-   * padding changed".
+   * has no value this module can vouch for, and so are two kinds of ASCII run whose zeros may be
+   * part of a number rather than its padding:
+   *
+   * - a run directly before or after a `.` or a `,` (see {@link DECIMAL_MARKS}), also when the run
+   *   or the mark is at the edge of the string: `0.05` to `0.5` is a tenfold change, and by value
+   *   it would read as "only the zero padding changed";
+   * - a run JOINED to another digit run: scanning from it in either direction over runs that are
+   *   one other character each, the first run that is not one is a digit run. `5 000` to `5 0`,
+   *   `1'000` to `1'0000`, `1_000` to `1_0000`, `0·05` to `0·5` and the Arabic decimal separator
+   *   are each one number written with a separator this module cannot list, so the zeros after
+   *   the separator are digits of that number. A letter anywhere between the two breaks the join,
+   *   so `sub-01_ses-02`, `0100 Hz` and `EEG 001` still compare their numbers by value.
+   *
+   * Both are decided from the string alone, the same way for a key and for a cell.
    */
   norm: string;
 }
 
-/** The characters that make the digits next to them part of a decimal number. */
+/**
+ * The characters that make the digits directly next to them part of a decimal number. Only these
+ * two are listed: a digit run separated from another digit run by any other character that is not
+ * a letter is caught by the join (see {@link Run.norm}), so no separator needs to be named here.
+ */
 const DECIMAL_MARKS: ReadonlySet<string> = new Set([".", ","]);
 
 function normalizeRun(
   run: { cls: RunClass; text: string },
   previous: { text: string } | undefined,
   next: { text: string } | undefined,
+  joined: boolean,
 ): string {
-  if (run.cls !== "D" || !ASCII_DIGITS.test(run.text)) return run.text;
+  if (run.cls !== "D" || !ASCII_DIGITS.test(run.text) || joined) return run.text;
   if (DECIMAL_MARKS.has(previous?.text ?? "") || DECIMAL_MARKS.has(next?.text ?? "")) {
     return run.text;
   }
   return run.text.replace(/^0+(?=[0-9])/, "");
+}
+
+/**
+ * For each run, whether it is a digit run joined to another digit run (see {@link Run.norm}): the
+ * nearest run on its left or on its right that is not one other character is a digit run. Two
+ * passes, one from each end, each remembering the class of the last such run it passed.
+ */
+function joinedDigitRuns(parts: readonly { cls: RunClass }[]): boolean[] {
+  const joined = parts.map(() => false);
+  let last: RunClass | null = null;
+  for (let i = 0; i < parts.length; i++) {
+    const cls = (parts[i] as { cls: RunClass }).cls;
+    if (cls === "D" && last === "D") joined[i] = true;
+    if (cls !== "O") last = cls;
+  }
+  last = null;
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const cls = (parts[i] as { cls: RunClass }).cls;
+    if (cls === "D" && last === "D") joined[i] = true;
+    if (cls !== "O") last = cls;
+  }
+  return joined;
 }
 
 /**
@@ -919,10 +956,11 @@ function splitRuns(s: string): Run[] | null {
     text = ch;
   }
   if (cls !== null) parts.push({ cls, text });
+  const joined = joinedDigitRuns(parts);
   return parts.map((part, i) => ({
     cls: part.cls,
     text: part.text,
-    norm: normalizeRun(part, parts[i - 1], parts[i + 1]),
+    norm: normalizeRun(part, parts[i - 1], parts[i + 1], joined[i] as boolean),
   }));
 }
 
@@ -1152,11 +1190,12 @@ function characterRule(before: Name, after: Name): RelabelRule | null {
  * The first rule that says how `before` became `after`, or null. In order: `case` (equal once both
  * are lower-cased); then, over the runs of each string (a maximal run of letters, a maximal run of
  * digits, or one other character; digits compared by value, so `01` is `1`, except next to a `.`
- * or `,`), `repad`, `wrap` or `strip` (the shorter string's runs sit contiguously in the longer
- * one), and `insert` or `delete` (they sit in order, with text between them, and the one with
- * fewer runs holds a digit run: see `runRule`); and only when `opts.chars` is set, the character
- * rule, whose inserted text must be whole runs (see `characterRule`). Cells never ask for
- * characters: a changed character in a cell is a replaced value.
+ * or `,` or joined to another digit run: see {@link Run.norm}), `repad`, `wrap` or `strip` (the
+ * shorter string's runs sit contiguously in the longer one), and `insert` or `delete` (they sit in
+ * order, with text between them, and the one with fewer runs holds a digit run: see `runRule`);
+ * and only when `opts.chars` is set, the character rule, whose inserted text must be whole runs
+ * (see `characterRule`). Cells never ask for characters: a changed character in a cell is a
+ * replaced value.
  *
  * A pair gets no rule when the strings are equal, either is empty, either is longer than
  * `maxKeyChars` code points or has more than `maxRuns` runs (a long text is not a name, and an

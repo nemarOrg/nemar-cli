@@ -1657,6 +1657,30 @@ describe("summarizeChanges: the deadline abandons the whole summary", () => {
   });
 });
 
+describe("summarizeChanges: a change of magnitude is never a rule class", () => {
+  test("1 000 Hz to 1 0 Hz is shown as its pair, beside two real repads that stay a rule", () => {
+    const header = ["name", "type", "units", "high_cutoff"];
+    const summary = summarize(
+      [1, 2, 3].map((n) =>
+        candidate(
+          channels(n),
+          tsv(header, ["Cz", "EEG", "uV", n === 3 ? "1 000 Hz" : "0100 Hz"]),
+          tsv(header, ["Cz", "EEG", "uV", n === 3 ? "1 0 Hz" : "100 Hz"]),
+        ),
+      ),
+    );
+    expect(summary.classes.map((c) => `${c.kind} ${c.items}/${c.files.size}`)).toEqual([
+      "cell_templated 2/2",
+      "cell_replaced 1/1",
+    ]);
+    expect(summary.text).toContain('\n    "1 000 Hz" -> "1 0 Hz" x1\n');
+    const third = summary.files.find((f) => f.path === channels(3)) as FileOutcome;
+    const kinds = summary.classes.filter((c) => third.classKeys.has(c.key)).map((c) => c.kind);
+    expect(kinds).toEqual(["cell_replaced"]);
+    for (const kind of kinds) expect(DISPLAY_OF[kind]).toBe("pairs");
+  });
+});
+
 describe("summarizeChanges: layout and respelling", () => {
   const formatDetails = (summary: ChangeSummary) =>
     summary.classes.filter((c) => c.kind === "format").map((c) => `${c.detail} ${c.items}`);
