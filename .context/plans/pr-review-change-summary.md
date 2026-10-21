@@ -130,6 +130,16 @@ A changed path is a **summary candidate** when all of these hold:
 
 A path is read for the **relocation pools** (never summarized, never shown) when its status is `A` or `M`, its after mode is regular, it ends in `.tsv` or `.json`, and it sits anywhere in the tree, `sourcedata/` and `derivatives/` included.
 
+(Phase 4, as built.
+The raw listing is `git diff --raw -z --no-renames --no-abbrev`, not `--abbrev=40`: `--no-abbrev` writes full ids however long they are, so a repository whose ids are not 40-hex fails the strict parse (`parseRawEntries` refuses anything but six-digit octal modes, two 40-hex ids and a status of `A`, `M`, `D` or `T`, and a path given twice) and nothing is proven cosmetic or summarized, instead of reading abbreviations.
+A candidate is a file the cosmetic check compares: modified on the change list and `M` in the raw listing, both modes regular and equal, a lower-case `.tsv` or `.json`, among the first `MAX_COSMETIC_CHECKS` (2,000) such files in review order, with both blobs read, and not proven cosmetic; then `classifyPath` must not say `readme_and_changes`.
+So `README.json` and `CHANGES.tsv` are not candidates, nor is `.JSON` (wanted, but never compared), nor anything under `sourcedata/` or `derivatives/` (not wanted at all).
+The pool is built in path order from the raw listing, removals left out.
+An added or modified `.tsv` or `.json` whose after mode is regular is read, its before side only when it is modified.
+Any other `.json` entry (a type change, a symlink or a submodule at the head) is handed to the pool as a document that cannot be read, and so is a `.json` whose after side, or whose before side when it is modified, could not be read: it still stops a key from being read as moved past it.
+A `.tsv` with a side that could not be read is left out, so nothing can be found kept in it.
+A before side that could not be read is never passed as missing, which would say the file was added.)
+
 **Not summarized, and why.**
 
 - Added files: they cannot remove anything, and today an unread added file does not set `readIncomplete`; that stays.
@@ -748,6 +758,19 @@ The README and CHANGES diffs are still shown raw, and the remaining patch budget
 
 A small pull request whose every diff fits is therefore shown both its diffs and its summary, which is what the model has been calibrated on plus exact counts.
 
+(Phase 4, as built.
+The summary starts only when its clock says less than `gitDeadline - timeReserveMs` (the content pass's end less 40 seconds); otherwise it is the shared `ABANDONED_SUMMARY` and nothing of it is read.
+The clock is `ContentOptions.now`, a parameter of `gatherContent` that only tests pass; every git call's timeout and the search for repeats keep the real clock.
+The cosmetic batch has no deadline of its own, so a stall there is `timed_out`, as a stalled `git show` was.
+The pool's batch has the summary's line as its own deadline: a read that fails, or is still running at the line, is `CallExpired` (never `timed_out`), and the summary is `ABANDONED_SUMMARY` while the pass goes on.
+A summary that reaches its line while it runs is abandoned by `summarizeChanges` itself.
+An abandoned summary accounts for nothing, so the raw path reads the pull request exactly as it would without one; three tests pin that by building the same 125-table pull request and checking the not-started, the abandoned-midway and the stalled-pool runs against each other and against values worked out by hand.
+The raw diffs run in three lists: the removed and modified files the summary did not account for (counted toward `MAX_DIFFS_EXAMINED`, and stopped as before when the patches are full and the pass is short of time); then the first `MAX_ILLUSTRATION_PATCHES` accounted files in review order, each only while a patch slot and characters are left and the pass is not short of time, not counted toward `MAX_DIFFS_EXAMINED`, folding onto a shown diff like any other; then the added files, counted and stopped as the first list.
+With nothing accounted for, the first and the last list are the old list in the old order, so the raw path is unchanged.
+Added files stay after the illustrations: on a pull request like `on004551` the added files would otherwise take every slot.
+`readIncomplete` adds "accounted for by the summary" as a third way a file is covered; an accounted file whose illustration is cut stays covered.
+`PathGroup.summarized` counts a group's accounted files (not its parsed ones).)
+
 ---
 
 ## 9. Evidence, Worker and check text
@@ -943,6 +966,46 @@ original: OriginalContentFacts | null; // Part B, null in slice 1
 
 `PathGroup` gains `summarized: number`.
 `readContent` follows section 8.5; `buildEvidence` computes `files_read` as in section 9.
+
+**As built (phase 4).**
+
+```ts
+/** Per-call bounds of runGit; a call past its own deadline is CallExpired (module-private, not an EvidenceError). */
+interface GitCallOptions { input?: Buffer; deadline?: number; maxBuffer?: number }
+function runGit(dir: string, args: string[], encoding: "utf8" | "latin1" | "buffer", call?: GitCallOptions): string | Buffer;
+
+export interface RawEntry { /* as above */ }
+/** Pure: the parse of `git diff --raw -z --no-renames --no-abbrev`, by path; null for anything git did not write. */
+export function parseRawEntries(raw: string): Map<string, RawEntry> | null;
+function rawEntries(dir: string, mergeBase: string, head: string): Map<string, RawEntry> | null;
+
+/** Null when the answer was not had or cannot be trusted (`deadline` is the call's own). */
+export function readBlobs(
+  dir: string,
+  oids: readonly string[],
+  caps: { maxBytes: number; maxTotalBytes: number },
+  deadline?: number,
+): Map<string, Buffer> | null;
+
+export const MAX_ILLUSTRATION_PATCHES = 3;
+export interface ContentOptions { now?: () => number }
+export function gatherContent(dir: string, listing: Listing, options?: ContentOptions): ContentFacts;
+```
+
+- `runGit` takes the pass's time left and the call's own, and uses the smaller as the timeout; the pass running out is `timed_out` as before, the call's own deadline running out first is `CallExpired`, which `tryGit` and `tryGitBytes` turn into null.
+  Standard input is closed unless the call has `input`.
+- `readBlobs` drops every id that is not 40 lowercase hex and the zero id before any process starts, so `HEAD` or a `rev:path` never reaches git's input, and takes each id once, in the order first given.
+  `cat-file --batch-check` answers with each id's type and size; an id that is `missing` or is not a blob is left out, and so is a blob over `maxBytes`; the first blob that would pass `maxTotalBytes` and every id after it are left out (the summary's own prefix rule).
+  `cat-file --batch` then reads the rest, its output bounded by their sizes; a header, a size or a terminator that is not what the first answer said is null for the whole read.
+  Left out is never an empty buffer.
+- The cosmetic batch reads with `maxBytes` and `maxTotalBytes` both at `SUMMARY_LIMITS.maxTotalBytes` (256 MiB), so a cosmetic proof never depends on the summary's 8 MiB per-file cap; the pool reads with `maxBlobBytes` per blob and what is left of the 256 MiB after the cosmetic batch, never re-reading a blob the cosmetic batch read.
+- `ContentFacts.summary` is in; `original` is slice 2's.
+  `ABANDONED_SUMMARY` (pure module) is the one addition to `pr-review-summary.ts`: shared, frozen, abandoned and empty, so the caller says "not started" or "could not read the pool" without faking a deadline.
+- `files_read` is the size of the set of the accounted paths, every patch's own path, and the `same` paths of every patch that was not cut; it is at most `files_changed` because every member is a path of the change list, and it equals the old sum when nothing is accounted for.
+- The test helper `ShimRule` gains `fromCall`, so a test can stall the third `cat-file` and not the first two.
+- Measured on the 125-table fixture of the tests (twelve rows each, 189 changed files; medians of five runs on a laptop): the content pass took 2.08 s before this phase (250 `git show` processes for the cosmetic check), 0.79 s with the batched cosmetic check alone, and 0.17 s with the summary, which accounts for the 125 tables and leaves 5 diffs to read instead of 127.
+  At 200 rows a table the same three are 2.10 s, 0.81 s and 0.24 s.
+  On a blob-less clone of a 20-table fixture, the content pass started 15 git processes: one `--numstat`, one `--raw`, four `cat-file`, two `ls-tree` and two `show` of `CHANGES` for the change log, and five `-U2` diffs (`README.md`, `CHANGES` and three illustrations).
 
 ### 10.3 `scripts/ci/pr-review-prompt.ts`
 
