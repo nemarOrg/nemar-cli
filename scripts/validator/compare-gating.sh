@@ -17,12 +17,15 @@
 #   diff-<id>.txt       the gating errors that differ, for each changed dataset
 #   run/                the raw reports, stderr and annex lists, kept as evidence
 #
-# A dataset that cannot be cloned or validated is listed as not compared. It is never reported as
-# unchanged. The script then exits 1, so an incomplete comparison fails the job that runs it;
-# --allow-partial accepts a partial comparison for a manual run.
+# A dataset that cannot be cloned or validated is listed as not compared, and named with its reason
+# on stderr. It is never reported as unchanged. The script then exits 1, so an incomplete comparison
+# fails the job that runs it; --allow-partial accepts a partial comparison for a manual run.
 set -uo pipefail
 
-REFERENCE_IDS="xx099900 xx099901 xx099902 xx099903 xx099904 xx099905 xx099906 nm000103 nm000104 nm000105 nm000106 nm000107"
+# Every default id must clone without credentials, because the monthly bump job has none. xx099904
+# is not listed: its repository cannot be cloned anonymously. nm000189, the public dataset it was
+# built from, stands in for it and keeps the HED-annotated EEG coverage.
+REFERENCE_IDS="xx099900 xx099901 xx099902 xx099903 nm000189 xx099905 xx099906 nm000103 nm000104 nm000105 nm000106 nm000107"
 VALIDATOR_ERRORS_FOUND=16
 MAX_DIFF_LINES=40
 
@@ -178,7 +181,8 @@ for target in ${TARGETS[@]+"${TARGETS[@]}"}; do
   fi
   for ver in "$OLD" "$NEW"; do
     [ "$status" = "compared" ] || break
-    # Run from the scratch directory, never from inside a dataset. NO_COLOR keeps the messages plain.
+    # Run from the scratch directory, never from inside a dataset. NO_COLOR asks Deno for plain
+    # output, but Deno lets FORCE_COLOR override it, so failure_note strips colour codes itself.
     ( cd "$RUN" && NO_COLOR=1 deno run --node-modules-dir=none -A "jsr:@bids/validator@$ver" "$dir" --json --ignoreWarnings > "$RUN/$ID.$ver.json" 2> "$RUN/$ID.$ver.err" )
     rc=$?
     echo "$rc" > "$RUN/$ID.$ver.rc"
@@ -256,8 +260,12 @@ if [ "$total" -eq 0 ]; then
   echo "compare-gating.sh: nothing to compare" >&2
   exit 1
 fi
-if [ "$not_compared_count" -gt 0 ] && [ "$ALLOW_PARTIAL" = 0 ]; then
-  echo "compare-gating.sh: $not_compared_count dataset(s) not compared; see $OUT/summary.md. Pass --allow-partial to accept a partial comparison." >&2
-  exit 1
+if [ "$not_compared_count" -gt 0 ]; then
+  # Name each dataset and why, so the job log says which one failed without opening the artifact.
+  awk -F'\t' 'NR > 1 && $2 != "compared" { printf "compare-gating.sh: %s not compared: %s\n", $1, $6 }' "$OUT/results.tsv" >&2
+  if [ "$ALLOW_PARTIAL" = 0 ]; then
+    echo "compare-gating.sh: $not_compared_count dataset(s) not compared; see $OUT/summary.md. Pass --allow-partial to accept a partial comparison." >&2
+    exit 1
+  fi
 fi
 exit 0

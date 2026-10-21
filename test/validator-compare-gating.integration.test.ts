@@ -58,7 +58,49 @@ function readOut(out: string, name: string): string {
   return readFileSync(join(out, name), "utf-8");
 }
 
+/** The script's own default reference ids, so a test checks the real list and not a copy of it. */
+function defaultReferenceIds(): string[] {
+  const line = readFileSync(SCRIPT, "utf-8").match(/^REFERENCE_IDS="([^"]+)"$/m);
+  return line ? line[1].trim().split(/\s+/) : [];
+}
+
 describe("compare-gating.sh", () => {
+  test("every default reference dataset is reachable without credentials, as in the bump job", async () => {
+    const ids = defaultReferenceIds();
+    expect(ids.length).toBeGreaterThan(0);
+    // The bump job has no credentials, so this has none either: no global or system git
+    // configuration (where a credential helper lives), no prompt, no askpass program, and a
+    // working directory that is not a checkout (whose own configuration may hold a token).
+    const env = {
+      ...Object.fromEntries(
+        Object.entries(process.env).filter(
+          ([name]) => !["GIT_ASKPASS", "SSH_ASKPASS"].includes(name),
+        ),
+      ),
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_TERMINAL_PROMPT: "0",
+    };
+    const cwd = freshDir("compare-ls-remote-");
+    // Asynchronous, with a kill timer: a stalled connection must fail this test, not hang the run.
+    const exitCodes = await Promise.all(
+      ids.map(
+        (id) =>
+          Bun.spawn(
+            [
+              "git",
+              "ls-remote",
+              "--exit-code",
+              `https://github.com/nemarDatasets/${id}.git`,
+              "HEAD",
+            ],
+            { cwd, env, stdout: "ignore", stderr: "ignore", timeout: 60_000 },
+          ).exited,
+      ),
+    );
+    expect(ids.filter((_, index) => exitCodes[index] !== 0)).toEqual([]);
+  }, 120_000);
+
   test("a release compared with itself changes nothing, on the fixture and all three layouts", () => {
     const run1 = compare([
       "--old",
@@ -124,6 +166,8 @@ describe("compare-gating.sh", () => {
   test("a dataset that cannot be cloned fails the run, unless partial results are accepted", () => {
     const strict = compare(["--old", "3.0.2", "--new", "3.0.2", "--ids", "nm999999"]);
     expect(strict.exitCode).toBe(1);
+    // The job log names the dataset and why, without opening the artifact.
+    expect(strict.stderr).toContain("compare-gating.sh: nm999999 not compared: clone failed");
     expect(rows(strict.out).nm999999?.slice(1, 5)).toEqual(["not_compared", "-", "-", "-"]);
     expect(readOut(strict.out, "summary.md")).toContain(
       "Not compared, so not counted as unchanged: nm999999",
