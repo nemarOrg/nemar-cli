@@ -399,7 +399,8 @@ The pool lists the copies of one file in sorted path order, so which of two copi
 The caller (phase 3) still diffs the candidate files in sorted path order, so nothing about a run depends on the order git listed the files in; the only consumption that depends on order is a second diff of the same path against the same pool, which the caller never makes.
 (Phase 3: `summarizeChanges` sorts the candidates by path in code-unit order and diffs them in that order.
 A path given twice is refused as `internal_mismatch` every time it appears, so the one order-dependent consumption cannot happen.
-The pool itself is passed to `buildPools` unsorted, which gives the same pools in any order; a mutation run showed a sort there was dead code.)
+The pool itself is passed to `buildPools` unsorted, which gives the same pools in any order; a mutation run showed a sort there was dead code.
+Phase 3 review: a pool path listed more than once contributes nothing at all, so no row of either entry is ever a copy and the removals they would explain stay removals; keeping the first entry made the pool depend on the order of the list.)
 
 **JSON moves.**
 A removed leaf `(p, v)` of file `F` is `json_key_moved` when some added or modified JSON file `T` (not `F`) has leaf `p` with value `v` that it did not have before, and `T` **applies to `F` under BIDS inheritance**: `T`'s directory is `F`'s directory or an ancestor of it, `T` and `F` have the same suffix and extension (everything after the first dot), and every `key-value` entity of `T`'s name is in `F`'s name.

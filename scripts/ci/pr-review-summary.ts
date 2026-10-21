@@ -1459,6 +1459,12 @@ function sameCells(a: readonly string[], b: readonly string[]): boolean {
  * pool, so a copy cannot be found in it: the removal it would have explained is shown as a removal,
  * which is more change shown, never less. Nothing is thrown, because the pool is built before any
  * file is diffed and one contributor's bad file must not stop the diffs of the others.
+ *
+ * **A path listed more than once contributes nothing**, in any family: git lists a path once, so
+ * two entries are a caller's mistake, and which of them is the file cannot be decided. Keeping one
+ * would make the pool depend on the order of `files`; keeping neither means no row of either can
+ * be shown relocated, so the removals they would have explained stay removals. Nothing else about
+ * the pool depends on that order.
  */
 export function buildPools(files: readonly PoolFile[]): { rows: RowPool; json: JsonPool } {
   const rows = new Map<string, RowPoolFile>();
@@ -1468,12 +1474,10 @@ export function buildPools(files: readonly PoolFile[]): { rows: RowPool; json: J
   const byTopKey = new Map<string, string[]>();
   const unreadable = new Set<string>();
 
-  const seen = new Set<string>();
+  const listed = new Map<string, number>();
+  for (const file of files) listed.set(file.path, (listed.get(file.path) ?? 0) + 1);
   for (const file of files) {
-    // A path is listed once by git; if a caller lists one twice, the first entry is the one used.
-    // That is the only thing about a pool that depends on the order of `files`.
-    if (seen.has(file.path)) continue;
-    seen.add(file.path);
+    if ((listed.get(file.path) ?? 0) > 1) continue;
     if (file.path.endsWith(".tsv")) {
       const after = parseTsv(file.after);
       const before = file.before === null ? null : parseTsv(file.before);
@@ -3760,7 +3764,8 @@ export function summarizeChanges(input: {
  *    could matter is two candidates with ONE path, and a path given twice is refused, every time
  *    it appears, as `internal_mismatch`, the word for the platform's own reading not adding up.)
  * 2. Builds the pools once, from `pool`. {@link buildPools} gives the same pools for the files in
- *    any order (it sorts the copies of one file itself), so the pool needs no sorting here.
+ *    any order (it sorts the copies of one file itself, and a path listed twice contributes
+ *    nothing, whichever entry comes first), so the pool needs no sorting here.
  * 3. Checks the deadline BEFORE each file. When `now()` has reached it, the WHOLE summary is
  *    abandoned: no file is accounted for, no class or text is kept, and the loss facts are zero.
  *    All or nothing is simpler to prove than a partial account, and an abandoned summary leaves

@@ -1206,9 +1206,25 @@ describe("buildPools: the rows and leaves a pull request adds", () => {
     expect(pool.json.byLeaf.get(leafKey(".K", "1"))).toEqual(["b.json", "a.json"]);
   });
 
-  test("a path listed twice uses the first entry", () => {
-    const pool = buildPools([pooled("a.tsv", null, "x\n1\n"), pooled("a.tsv", null, "x\n2\n")]);
-    expect(rowsOf(pool, "a.tsv")).toEqual({ header: "x", rows: { "1": 1 } });
+  test("a path listed twice contributes nothing, whichever entry comes first", () => {
+    const one = pooled("a.tsv", null, "x\n1\n");
+    const two = pooled("a.tsv", null, "x\n2\n");
+    const json = (value: string) => pooled("task-x_eeg.json", null, `{"K": ${value}}`);
+    for (const files of [
+      [one, two, json("1"), json("2")],
+      [two, one, json("2"), json("1")],
+    ]) {
+      const pool = buildPools(files);
+      expect(rowsOf(pool, "a.tsv")).toBeUndefined();
+      expect(pool.rows.files.size).toBe(0);
+      expect(pool.json.files.size).toBe(0);
+      expect(pool.json.byLeaf.size).toBe(0);
+      expect(pool.json.byTopKey.size).toBe(0);
+      expect(pool.json.unreadable.size).toBe(0);
+    }
+    // A path listed once beside them is pooled as usual.
+    const pool = buildPools([one, two, pooled("b.tsv", null, "x\n3\n")]);
+    expect(rowsOf(pool, "b.tsv")).toEqual({ header: "x", rows: { "3": 1 } });
   });
 
   test("nothing in the pool depends on the bytes being shared: a pool is its own copy", () => {

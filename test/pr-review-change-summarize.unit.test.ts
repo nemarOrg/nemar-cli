@@ -1779,6 +1779,33 @@ describe("summarizeChanges: order, determinism and loss facts", () => {
     }
   });
 
+  test("a pool path listed twice relocates nothing, in either order, and the summaries are identical", () => {
+    const path = channels(1);
+    const where = `sourcedata/old/${path}`;
+    const input = [
+      candidate(
+        path,
+        tsv(CHANNELS, ["A1", "EEG", "uV"], ["R1", "EEG", "uV"], ["R2", "EEG", "uV"]),
+        tsv(CHANNELS, ["A1", "EEG", "uV"]),
+      ),
+    ];
+    // Each copy holds one of the removed rows: with the first entry kept, the row relocated would
+    // depend on which entry came first.
+    const first = pooled(where, null, tsv(CHANNELS, ["R1", "EEG", "uV"]));
+    const second = pooled(where, null, tsv(CHANNELS, ["R2", "EEG", "uV"]));
+    const forward = summarize(input, [first, second]);
+    const backward = summarize(input, [second, first]);
+    for (const summary of [forward, backward]) {
+      expect(summary.loss.rowsRemoved).toBe(2);
+      expect(summary.loss.rowsRelocated).toBe(0);
+      expect(summary.classes.map((c) => c.kind)).toEqual(["row_removed"]);
+    }
+    expect(backward.text).toBe(forward.text);
+    expect(backward.facts).toEqual(forward.facts);
+    expect(backward.loss).toEqual(forward.loss);
+    expect(backward.files).toEqual(forward.files);
+  });
+
   test("the loss facts count every summarized file, accounted or not, and never a refused one", () => {
     const { candidates, pool } = mixed();
     const summary = summarize(candidates, pool);
