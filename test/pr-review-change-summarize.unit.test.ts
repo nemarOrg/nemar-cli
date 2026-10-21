@@ -1886,6 +1886,53 @@ describe("summarizeChanges: the deadline abandons the whole summary", () => {
     abandonedShape(summary);
   });
 
+  /**
+   * Candidates that record when the summary first reads their bytes, and a clock that reads that
+   * record: the deadline is reached only while `touched` holds `from` and not `until`. Only a check
+   * made in that state can see it, whichever checks come before or after.
+   */
+  const watched = (
+    specs: readonly { path: string; before: string; after: string }[],
+    from: string,
+    until: string | null,
+  ) => {
+    const touched = new Set<string>();
+    const candidates: SummaryCandidate[] = specs.map((spec) => ({
+      path: spec.path,
+      get before() {
+        touched.add(spec.path);
+        return enc(spec.before);
+      },
+      after: enc(spec.after),
+    }));
+    const now = () => (touched.has(from) && (until === null || !touched.has(until)) ? 10 : 0);
+    return summarizeChanges({ candidates, pool: [], deadline: 10, now });
+  };
+  const ragged = { path: "a.tsv", before: "a\tb\n1\n", after: "a\n" };
+  const changed = (path: string) => ({
+    path,
+    before: tsv(["a"], ["1"]),
+    after: tsv(["a"], ["2"]),
+  });
+
+  test("only the check before a file sees the time between a refused file and the next: it abandons", () => {
+    // `a.tsv` is refused, so no fold and no check follow it; `b.tsv`'s bytes are read right after
+    // the check before it. The deadline holds only between the two.
+    abandonedShape(watched([ragged, changed("b.tsv")], "a.tsv", "b.tsv"));
+    // Not vacuous: with the state never reached, nothing is abandoned.
+    expect(watched([ragged, changed("b.tsv")], "c.tsv", null).abandoned).toBe(false);
+  });
+
+  test("only the check after the last file sees the time after a refused last file: it abandons", () => {
+    // `z.tsv` is last and refused, so no fold follows it: only the check after the loop is made
+    // once its bytes were read.
+    abandonedShape(watched([changed("b.tsv"), { ...ragged, path: "z.tsv" }], "z.tsv", null));
+  });
+
+  // The check after a fold has no state of its own: nothing happens between it and the check that
+  // comes next (before the next file, or after the loop), so no clock can trip it alone. The read
+  // counts below are what pin it.
+
   test("a deadline already reached abandons before the first file", () => {
     const c = clock([5]);
     abandonedShape(summarizeChanges({ candidates: files(), pool: [], deadline: 5, now: c.now }));
