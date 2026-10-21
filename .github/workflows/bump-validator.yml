@@ -67,6 +67,14 @@ jobs:
             --local test/fixtures/bids-minimal \
             --canary
 
+      - name: Keep the comparison as a run artifact
+        if: always() && steps.resolve.outputs.skip == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: validator-compare-${{ steps.resolve.outputs.latest }}
+          path: ${{ runner.temp }}/validator-compare
+          if-no-files-found: warn
+
       - name: Update pin
         if: steps.resolve.outputs.skip == 'false'
         run: |
