@@ -3782,7 +3782,10 @@ export interface SummaryCandidate {
   after: Uint8Array;
 }
 
-/** Everything the summary of a pull request decided, for the evidence and the prompt. */
+/**
+ * Everything the summary of a pull request decided, for the evidence and the prompt. Read-only
+ * throughout: {@link EMPTY_SUMMARY} is one shared object, and no reader may change a summary.
+ */
 export interface ChangeSummary {
   /**
    * The run was abandoned: the deadline was reached, or the files would have made more than
@@ -3798,8 +3801,8 @@ export interface ChangeSummary {
   complete: ReadonlySet<string>;
   /** The paths the summary accounts for (design section 6.1). */
   accounted: ReadonlySet<string>;
-  loss: LossFacts;
-  facts: SummaryFacts & { classes: string[] };
+  loss: Readonly<LossFacts>;
+  facts: Readonly<SummaryFacts> & { readonly classes: readonly string[] };
   /** The fenced block's text: author text inside it, escaped; "" when there is no class. */
   text: string;
 }
@@ -3809,16 +3812,16 @@ export interface ChangeSummary {
  * have held too many classes.
  */
 function emptySummary(abandoned: boolean): ChangeSummary {
-  const outcomes: FileOutcome[] = [];
-  return {
+  const outcomes: readonly FileOutcome[] = Object.freeze([]);
+  return Object.freeze({
     abandoned,
     files: outcomes,
-    classes: [],
-    shown: new Set(),
-    complete: new Set(),
-    accounted: new Set(),
-    loss: { ...NO_LOSS },
-    facts: {
+    classes: Object.freeze([]),
+    shown: new Set<string>(),
+    complete: new Set<string>(),
+    accounted: new Set<string>(),
+    loss: NO_LOSS,
+    facts: Object.freeze({
       ...summaryFacts({
         abandoned,
         outcomes,
@@ -3827,13 +3830,16 @@ function emptySummary(abandoned: boolean): ChangeSummary {
         cut: 0,
         loss: NO_LOSS,
       }),
-      classes: [],
-    },
+      classes: Object.freeze([]),
+    }),
     text: "",
-  };
+  });
 }
 
-/** The summary of a pull request with no candidate: not abandoned, and nothing in it. */
+/**
+ * The summary of a pull request with no candidate: not abandoned, and nothing in it. One object
+ * shared by every caller, so it is frozen, its facts too; its sets are read-only by type.
+ */
 export const EMPTY_SUMMARY: ChangeSummary = emptySummary(false);
 
 /**

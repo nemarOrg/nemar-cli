@@ -1793,6 +1793,28 @@ describe("summarizeChanges: the deadline, or too many classes, abandons the whol
     });
     expect(summarize([]).facts).toEqual(EMPTY_SUMMARY.facts);
   });
+
+  test("the empty summary is one shared object, so it is frozen: a caller cannot change it for the next", () => {
+    for (const summary of [
+      EMPTY_SUMMARY,
+      summarizeChanges({ candidates: files(), pool: [], deadline: 0, now: () => 0 }),
+    ]) {
+      expect(Object.isFrozen(summary)).toBe(true);
+      expect(Object.isFrozen(summary.facts)).toBe(true);
+      expect(Object.isFrozen(summary.facts.classes)).toBe(true);
+      expect(Object.isFrozen(summary.loss)).toBe(true);
+      expect(Object.isFrozen(summary.files)).toBe(true);
+      expect(Object.isFrozen(summary.classes)).toBe(true);
+    }
+    expect(() => {
+      (EMPTY_SUMMARY.facts.classes as string[]).push("C1 forged");
+    }).toThrow();
+    expect(() => {
+      (EMPTY_SUMMARY as { text: string }).text = "forged";
+    }).toThrow();
+    expect(EMPTY_SUMMARY.facts.classes).toEqual([]);
+    expect(EMPTY_SUMMARY.text).toBe("");
+  });
 });
 
 describe("summarizeChanges: a change of magnitude is never a rule class", () => {
