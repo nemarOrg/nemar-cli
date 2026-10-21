@@ -4756,6 +4756,51 @@ describe("the change summary keeps to its deadline, and leaves the raw path as i
     expectRaw(stalled.content, stalled.listing);
     expect(withoutSummary(stalled.content)).toEqual(withoutSummary(tooLate().content));
   }, 30_000);
+
+  test("a pass that is late after the first diffs shows no illustration, though the summary ran", () => {
+    // 45 seconds: the summary starts only with 40 left (SUMMARY_LIMITS.timeReserveMs), so the cosmetic
+    // proofs and the summary have 5 seconds to be done, and 20 tables take a fraction of one.
+    // 26 seconds on the diff of CHANGES: 19 are left, under the 20 an illustration needs, and still
+    // positive, so the pass goes on and does not end timed_out. Every second lost anywhere else
+    // makes the pass later, never earlier, and it takes 19 more to end it.
+    const r = bulkRelabel("late-illustration", { files: 20 });
+    const listing = gatherListing(r.dir, r.base, r.head);
+    const log = callLog("late-illustration");
+    const restore = installGitShim(root, [
+      { match: " -U2 ", log },
+      { match: " -- CHANGES ", sleepSeconds: 26 },
+    ]);
+    __setEvidenceBudgetForTests({ content: 45_000 });
+    let content: ReturnType<typeof gatherContent>;
+    let elapsed = 0;
+    try {
+      const started = Date.now();
+      content = gatherContent(r.dir, listing);
+      elapsed = Date.now() - started;
+    } finally {
+      __setEvidenceBudgetForTests(null);
+      restore();
+    }
+    expect(elapsed).toBeGreaterThanOrEqual(25_000);
+    // The summary was started and finished: it accounts for the tables.
+    expect(content.summary.abandoned).toBe(false);
+    expect(content.summary.accounted.size).toBe(20);
+    // Only the files it did not account for were read, and no illustration of the ones it did.
+    expect(content.patches.map((p) => p.path)).toEqual(["CHANGES", "README.md"]);
+    expect(loggedCalls(log).map((c) => c.split(" -- ")[1]?.trim())).toEqual([
+      "CHANGES",
+      "README.md",
+    ]);
+    expect(content.readIncomplete).toBe(false);
+    // The control: with time to spare the same pass shows three illustrations after them.
+    expect(gatherContent(r.dir, listing).patches.map((p) => p.path)).toEqual([
+      "CHANGES",
+      "README.md",
+      bulkTable(1),
+      bulkTable(2),
+      bulkTable(3),
+    ]);
+  }, 60_000);
 });
 
 describe("the content pass on the job's blob-less clone", () => {
