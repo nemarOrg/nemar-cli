@@ -391,6 +391,58 @@ describe("classify: one class per kind, shape, field, rule and detail", () => {
     expect(pairLines(classes[1] as ChangeClass)).toEqual(['"go" -> "stop" x3']);
   });
 
+  test("JSON key kinds fold the array indices of their parent path: the same edit under [0] and under [1] is one class", () => {
+    const files = atomsOf([
+      {
+        path: "sub-01/eeg/sub-01_task-x_events.json",
+        before: JSON.stringify({ trials: [{ go: 1, drop: 2 }] }),
+        after: JSON.stringify({ trials: [{ GO: 1, add: 3 }] }),
+      },
+      {
+        path: "sub-02/eeg/sub-02_task-x_events.json",
+        before: JSON.stringify({ trials: [{ go: 1 }, { go: 1, drop: 2 }] }),
+        after: JSON.stringify({ trials: [{ go: 1 }, { GO: 1, add: 3 }] }),
+      },
+    ]);
+    const classes = classify(files);
+    expect(classes.map((c) => `${c.kind} ${c.field} ${c.items} in ${c.files.size}`).sort()).toEqual(
+      [
+        "json_key_added .trials[*] 2 in 2",
+        "json_key_removed .trials[*] 2 in 2",
+        "json_key_renamed .trials[*] 2 in 2",
+      ],
+    );
+    const { text } = renderClasses(classes);
+    expect(text).toContain(
+      'C1 | "sub-*/eeg/sub-*_task-*_events.json" | under ".trials[*]" | keys removed',
+    );
+    expect(text).not.toContain("[0]");
+    expect(text).not.toContain("[1]");
+  });
+
+  test("the class key holds the shape and the kind: the same column edit under another shape, or of another kind, is another class", () => {
+    const files = atomsOf([
+      {
+        path: "sub-01/eeg/sub-01_task-x_channels.tsv",
+        before: tsv(CHANNELS, ["A1", "EEG", "uV"], ["A2", "EEG", "uV"]),
+        // One cell replaced and one emptied, both in the column `units` of one file.
+        after: tsv(CHANNELS, ["A1", "EEG", "mV"], ["A2", "EEG", "n/a"]),
+      },
+      {
+        path: "sub-01/eeg/sub-01_task-x_events.tsv",
+        before: tsv(CHANNELS, ["A1", "EEG", "uV"]),
+        after: tsv(CHANNELS, ["A1", "EEG", "mV"]),
+      },
+    ]);
+    const classes = classify(files);
+    expect(classes.map((c) => `${c.kind} ${c.shape} ${c.field} ${c.items}`).sort()).toEqual([
+      "cell_emptied sub-*/eeg/sub-*_task-*_channels.tsv units 1",
+      "cell_replaced sub-*/eeg/sub-*_task-*_channels.tsv units 1",
+      "cell_replaced sub-*/eeg/sub-*_task-*_events.tsv units 1",
+    ]);
+    expect(new Set(classes.map((c) => c.key)).size).toBe(3);
+  });
+
   test("a keyless table's removed rows are paired by their whole row text", () => {
     const events = "sub-01/eeg/sub-01_task-x_events.tsv";
     const files = atomsOf([
@@ -731,6 +783,18 @@ describe("renderClasses: what a class looks like", () => {
     expect(complete.size).toBe(4);
   });
 
+  test("a filled JSON value is a value kind too: it names its leaf path, and a scalar document is the whole document", () => {
+    const { text, complete } = rendered([
+      { path: "x.json", before: '{"a": {"b": ""}}', after: '{"a": {"b": "set"}}' },
+      { path: "y.json", before: '""', after: '"set"' },
+    ]);
+    expect(text.split("\n").filter((l) => l.startsWith("C"))).toEqual([
+      'C1 | "x.json" | key ".a.b" | values filled',
+      'C2 | "y.json" | the whole document | values filled',
+    ]);
+    expect(complete.size).toBe(2);
+  });
+
   test("a JSON value class names its leaf path, and a scalar document is the whole document", () => {
     const { text } = rendered([
       {
@@ -814,6 +878,49 @@ describe("renderClasses: the bounds", () => {
     ]);
     expect(text).toContain(`    "${"x".repeat(300)}"...(cut) -> "uV" x1`);
     expect(complete.has((classes[0] as ChangeClass).key)).toBe(false);
+  });
+
+  test("a value over 300 characters on the AFTER side is cut too, and leaves the class incomplete and its file unaccounted for", () => {
+    // A cell, and a JSON value (whose text is its canonical form: the quotes are two of the 300).
+    const cases = [
+      {
+        file: (value: string) =>
+          candidate(
+            channels(1),
+            tsv(CHANNELS, ["A1", "EEG", "uV"]),
+            tsv(CHANNELS, ["A1", "EEG", value]),
+          ),
+        kind: "cell_replaced",
+        shown: (value: string) => `"uV" -> "${value}"`,
+        lengths: [300, 301],
+      },
+      {
+        file: (value: string) => candidate("x.json", '{"a":"uV"}', JSON.stringify({ a: value })),
+        kind: "json_value_changed",
+        shown: (value: string) => `"\\"uV\\"" -> "\\"${value}\\""`,
+        lengths: [298, 299],
+      },
+    ] as const;
+    for (const { file, kind, shown, lengths } of cases) {
+      for (const [i, length] of lengths.entries()) {
+        const whole = i === 0;
+        const value = "m".repeat(length);
+        const summary = summarize([file(value)]);
+        expect(
+          summary.classes.map((c) => c.kind),
+          `${kind} ${length}`,
+        ).toEqual([kind]);
+        const pair = summary.text.split("\n")[1] as string;
+        // The after side is the one that ends the pair, so its cut marker is the last thing before `x1`.
+        expect(pair.includes('"...(cut) x1'), `${kind} ${length}: ${pair.length}`).toBe(!whole);
+        if (whole) expect(pair).toBe(`    ${shown(value)} x1`);
+        expect(summary.complete.size, `${kind} ${length}`).toBe(whole ? 1 : 0);
+        expect(summary.accounted.size, `${kind} ${length}`).toBe(whole ? 1 : 0);
+        expect(
+          summary.facts.classes[0]?.endsWith(whole ? "| in full" : "| not shown in full"),
+        ).toBe(true);
+      }
+    }
   });
 
   test("a value of exactly 300 characters, astral ones counted as one, is not cut", () => {
@@ -1795,6 +1902,29 @@ describe("the facts block: numbers and the class table, the platform's words onl
       "C2 rows relabeled | 13 items in 1 file | in full",
       "C3 rows added | 1 item in 1 file | in full",
     ]);
+  });
+
+  test("only a SHOWN class has a line: the classes the 120 bound leaves out are in no table", () => {
+    const columns = [...COLUMNS_120, "c120"];
+    const { classes, shown, complete, cut } = account([changedColumns(1, columns)]);
+    expect(classes.length).toBe(121);
+    expect(cut).toBe(1);
+    const table = classTable(classes, shown, complete);
+    expect(table.length).toBe(SUMMARY_LIMITS.maxClasses);
+    expect(table[0]).toBe("C1 cells replaced | 1 item in 1 file | in full");
+    expect(table.at(-1)).toBe("C120 cells replaced | 1 item in 1 file | in full");
+    expect(table.some((line) => line.startsWith("C121 "))).toBe(false);
+    // The facts of a whole summary are the same table, and count the class that was left out.
+    const summary = summarize([
+      candidate(
+        channels(1),
+        tsv(["name", ...columns], ["A1", ...columns.map(() => "1")]),
+        tsv(["name", ...columns], ["A1", ...columns.map(() => "2")]),
+      ),
+    ]);
+    expect(summary.facts.classes).toEqual(table);
+    expect(summary.facts.classes_shown).toBe(120);
+    expect(summary.facts.classes_cut).toBe(1);
   });
 
   test("the numbers come from the outcomes, the accounted files, the render and the loss facts", () => {
