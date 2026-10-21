@@ -2120,6 +2120,27 @@ describe("summarizeChanges: order, determinism and loss facts", () => {
     expect(backward.files).toEqual(forward.files);
   });
 
+  test("a nearer sidecar listed twice still stops a move past it: the key stays removed, in either order", () => {
+    const path = "sub-01/eeg/sub-01_task-x_eeg.json";
+    const input = [candidate(path, '{"SamplingFrequency": 500, "A": 1}', '{"A": 1}')];
+    // The root sidecar gains the removed value; the subject sidecar, nearer, sets the key to 250.
+    const root = pooled("task-x_eeg.json", "{}", '{"SamplingFrequency": 500}');
+    const near = pooled("sub-01/sub-01_task-x_eeg.json", "{}", '{"SamplingFrequency": 250}');
+    const once = summarize(input, [root, near]);
+    expect(once.loss.keysRemoved).toBe(1);
+    expect(once.loss.keysMoved).toBe(0);
+    for (const pool of [
+      [root, near, { ...near }],
+      [near, { ...near }, root],
+      [{ ...near }, root, near],
+    ]) {
+      const twice = summarize(input, pool);
+      expect(twice.loss).toEqual(once.loss);
+      expect(twice.classes.map((c) => c.kind)).toEqual(["json_key_removed"]);
+      expect(twice.text).toBe(once.text);
+    }
+  });
+
   test("the loss facts count every summarized file, accounted or not, and never a refused one", () => {
     const { candidates, pool } = mixed();
     const summary = summarize(candidates, pool);

@@ -1260,7 +1260,7 @@ describe("buildPools: the rows and leaves a pull request adds", () => {
     expect(pool.json.byLeaf.get(leafKey(".K", "1"))).toEqual(["b.json", "a.json"]);
   });
 
-  test("a path listed twice contributes nothing, whichever entry comes first", () => {
+  test("a path listed twice contributes nothing, whichever entry comes first; a JSON one is unreadable", () => {
     const one = pooled("a.tsv", null, "x\n1\n");
     const two = pooled("a.tsv", null, "x\n2\n");
     const json = (value: string) => pooled("task-x_eeg.json", null, `{"K": ${value}}`);
@@ -1274,7 +1274,8 @@ describe("buildPools: the rows and leaves a pull request adds", () => {
       expect(pool.json.files.size).toBe(0);
       expect(pool.json.byLeaf.size).toBe(0);
       expect(pool.json.byTopKey.size).toBe(0);
-      expect(pool.json.unreadable.size).toBe(0);
+      // Not left out: it may hold any key, so it blocks a move past it as an unreadable file does.
+      expect([...pool.json.unreadable]).toEqual(["task-x_eeg.json"]);
     }
     // A path listed once beside them is pooled as usual.
     const pool = buildPools([one, two, pooled("b.tsv", null, "x\n3\n")]);

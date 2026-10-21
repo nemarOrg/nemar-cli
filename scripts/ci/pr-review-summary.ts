@@ -1459,8 +1459,9 @@ export interface JsonPool {
    */
   readonly byTopKey: ReadonlyMap<string, readonly string[]>;
   /**
-   * The JSON files of the pull request whose after document could not be read. Such a file may hold
-   * any key, so where it applies to a file nothing can be said to have moved past it.
+   * The JSON files of the pull request whose after document could not be read, or whose path was
+   * listed more than once. Such a file may hold any key, so where it applies to a file nothing can
+   * be said to have moved past it.
    */
   readonly unreadable: ReadonlySet<string>;
 }
@@ -1499,11 +1500,13 @@ function sameCells(a: readonly string[], b: readonly string[]): boolean {
  * which is more change shown, never less. Nothing is thrown, because the pool is built before any
  * file is diffed and one contributor's bad file must not stop the diffs of the others.
  *
- * **A path listed more than once contributes nothing**, in any family: git lists a path once, so
- * two entries are a caller's mistake, and which of them is the file cannot be decided. Keeping one
- * would make the pool depend on the order of `files`; keeping neither means no row of either can
- * be shown relocated, so the removals they would have explained stay removals. Nothing else about
- * the pool depends on that order.
+ * **A path listed more than once contributes nothing**: git lists a path once, so two entries are
+ * a caller's mistake, and which of them is the file cannot be decided. Keeping one would make the
+ * pool depend on the order of `files`; keeping neither means no row or leaf of either can be shown
+ * relocated or moved, so the removals they would have explained stay removals. A JSON path listed
+ * twice is named `unreadable`, never simply left out: left out, a nearer sidecar that sets a key
+ * would no longer stop a move past it, and a removed key would read as moved. Nothing else about
+ * the pool depends on the order of `files`.
  */
 export function buildPools(files: readonly PoolFile[]): { rows: RowPool; json: JsonPool } {
   const rows = new Map<string, RowPoolFile>();
@@ -1516,7 +1519,12 @@ export function buildPools(files: readonly PoolFile[]): { rows: RowPool; json: J
   const listed = new Map<string, number>();
   for (const file of files) listed.set(file.path, (listed.get(file.path) ?? 0) + 1);
   for (const file of files) {
-    if ((listed.get(file.path) ?? 0) > 1) continue;
+    if ((listed.get(file.path) ?? 0) > 1) {
+      // Which entry is the document cannot be decided, so it is read as one that could not be
+      // read at all: it may hold any key, blocks every move past it, and is never a home.
+      if (file.path.endsWith(".json")) unreadable.add(file.path);
+      continue;
+    }
     if (file.path.endsWith(".tsv")) {
       const after = parseTsv(file.after);
       const before = file.before === null ? null : parseTsv(file.before);
