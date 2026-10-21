@@ -1119,3 +1119,191 @@ export function ruleWords(rule: RelabelRule): string {
     }
   }
 }
+
+// ---------------------------------------------------------------------------------------------
+// JSON leaves (design section 2.3)
+// ---------------------------------------------------------------------------------------------
+
+/** A key that can be written after a dot: the rest are written in brackets, so the paths stay unambiguous. */
+const BARE_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** One value of a JSON document that is compared as a unit: see {@link flattenJson}. */
+export interface JsonLeaf {
+  /**
+   * Where the leaf is: `.name` for a key that matches `^[A-Za-z_][A-Za-z0-9_]*$`, `["..."]` (JSON
+   * escaped) for any other key, `[i]` for an index. The encoding is injective: no two places in a
+   * document share a path, and a key `a.b` (`["a.b"]`) is not the key `b` inside `a` (`.a.b`).
+   */
+  path: string;
+  /** The path of the container the leaf is in (`""` for the document itself). */
+  parent: string;
+  /** The key (verbatim) or, for an element of an array that holds containers, its index as `[i]`. */
+  name: string;
+  /** The leaf is an object member (it has a key that can be renamed), not an array element. */
+  isKey: boolean;
+  /** The leaf's value as canonical JSON text: strings decoded and re-encoded, numbers as written. */
+  value: string;
+  json: JsonValue;
+}
+
+/**
+ * The leaves of a document, in source order. An object recurses into its keys, and an EMPTY object
+ * is a leaf; an array whose elements are all scalars is ONE leaf whose value is the array's
+ * canonical text, and an empty array is a leaf; an array with any object or array element recurses
+ * with index paths; a scalar is a leaf. Treating a list of scalars as one value keeps a list that
+ * lost an element a CHANGED value, shown whole, instead of a removed index with a shifted tail.
+ */
+export function flattenJson(root: JsonValue): JsonLeaf[] {
+  const out: JsonLeaf[] = [];
+  const walk = (v: JsonValue, path: string, parent: string, name: string, isKey: boolean): void => {
+    if (v.t === "obj" && v.keys.length > 0) {
+      for (const key of v.keys) {
+        const segment = BARE_KEY.test(key) ? `.${key}` : `[${JSON.stringify(key)}]`;
+        walk(v.v.get(key) as JsonValue, path + segment, path, key, true);
+      }
+      return;
+    }
+    if (v.t === "arr" && v.v.some((item) => item.t === "arr" || item.t === "obj")) {
+      v.v.forEach((item, i) => walk(item, `${path}[${i}]`, path, `[${i}]`, false));
+      return;
+    }
+    out.push({ path, parent, name, isKey, value: canonicalJson(v), json: v });
+  };
+  walk(root, "", "", "", false);
+  return out;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The relocation pools (design section 4.6)
+// ---------------------------------------------------------------------------------------------
+
+/** One added or modified file of the pull request, both sides as bytes (`before` is null for an added file). */
+export interface PoolFile {
+  path: string;
+  before: Uint8Array | null;
+  after: Uint8Array;
+}
+
+/** What one table of the pool has that its earlier version did not. */
+export interface RowPoolFile {
+  /** The table's header after the change, its names joined with a tab. */
+  header: string;
+  /**
+   * The rows (cells joined with a tab) the table has now and did not have before, with how many
+   * copies. Counts here are the copies still UNUSED: a diff that relocates a row takes one copy
+   * (see {@link diffTable}), so one copy never accounts for two removed rows.
+   */
+  rows: Map<string, number>;
+}
+
+/**
+ * The rows a pull request adds, by file, so a row removed from one file can be recognized as kept in
+ * another. Built once per run, before any file is diffed, from EVERY added or modified table in the
+ * pull request wherever it sits (`sourcedata/` included): a row is only a copy of a removed one if
+ * the pool says it is new, and a row that was already in that file proves nothing.
+ *
+ * A pool is used up by the diffs that read it, in the order they run; build one per run.
+ */
+export interface RowPool {
+  /** By path. Only files that add at least one row are here. */
+  readonly files: ReadonlyMap<string, RowPoolFile>;
+  /** The paths under `sourcedata/` that are in `files`, by last path segment, in the order given. */
+  readonly sourcedataByName: ReadonlyMap<string, readonly string[]>;
+}
+
+/** The leaves each JSON file of the pull request has now and did not have before. */
+export interface JsonPool {
+  /** By path, then leaf path to canonical value. Only files with at least one such leaf are here. */
+  readonly files: ReadonlyMap<string, ReadonlyMap<string, string>>;
+  /** Leaf (path and value) to the files that have it as a new leaf, in the order given. */
+  readonly byLeaf: ReadonlyMap<string, readonly string[]>;
+}
+
+/** The key of {@link JsonPool.byLeaf}: injective in the pair, since both parts are JSON text. */
+export function leafKey(path: string, value: string): string {
+  return JSON.stringify([path, value]);
+}
+
+function lastSegment(path: string): string {
+  return path.slice(path.lastIndexOf("/") + 1);
+}
+
+function sameCells(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((cell, i) => cell === b[i]);
+}
+
+/**
+ * Build the pools from every added or modified `.tsv` and `.json` file of the pull request.
+ *
+ * For a table, the pool holds the rows its after side has that its before side did not: the multiset
+ * difference when the two headers are equal (a row that was there before is not a copy of anything),
+ * and all of the after side's rows otherwise (a new layout makes every row new). For a JSON
+ * document, it holds the leaves it has now that it did not have: a leaf at a path whose value
+ * changed is new at its new value.
+ *
+ * **A file that does not parse is skipped, and never an error.** Either side failing to parse (a
+ * table that is ragged or not UTF-8, a document with a repeated key) leaves that file out of the
+ * pool, so a copy cannot be found in it: the removal it would have explained is shown as a removal,
+ * which is more change shown, never less. Nothing is thrown, because the pool is built before any
+ * file is diffed and one contributor's bad file must not stop the diffs of the others.
+ */
+export function buildPools(files: readonly PoolFile[]): { rows: RowPool; json: JsonPool } {
+  const rows = new Map<string, RowPoolFile>();
+  const sourcedataByName = new Map<string, string[]>();
+  const jsonFiles = new Map<string, Map<string, string>>();
+  const byLeaf = new Map<string, string[]>();
+
+  const seen = new Set<string>();
+  for (const file of files) {
+    // A path is listed once by git; if a caller lists one twice, the first entry is the one used.
+    if (seen.has(file.path)) continue;
+    seen.add(file.path);
+    if (file.path.endsWith(".tsv")) {
+      const after = parseTsv(file.after);
+      const before = file.before === null ? null : parseTsv(file.before);
+      if (!after.ok || (before !== null && !before.ok)) continue;
+      const known = new Map<string, number>();
+      if (before?.ok && sameCells(before.value.header, after.value.header)) {
+        for (const row of before.value.rows) {
+          const text = row.join("\t");
+          known.set(text, (known.get(text) ?? 0) + 1);
+        }
+      }
+      const added = new Map<string, number>();
+      for (const row of after.value.rows) {
+        const text = row.join("\t");
+        const have = known.get(text) ?? 0;
+        if (have > 0) known.set(text, have - 1);
+        else added.set(text, (added.get(text) ?? 0) + 1);
+      }
+      if (added.size === 0) continue;
+      rows.set(file.path, { header: after.value.header.join("\t"), rows: added });
+      if (file.path.startsWith("sourcedata/")) {
+        const name = lastSegment(file.path);
+        const listed = sourcedataByName.get(name);
+        if (listed === undefined) sourcedataByName.set(name, [file.path]);
+        else listed.push(file.path);
+      }
+    } else if (file.path.endsWith(".json")) {
+      const after = parseJson(file.after);
+      const before = file.before === null ? null : parseJson(file.before);
+      if (!after.ok || (before !== null && !before.ok)) continue;
+      const had = new Map<string, string>();
+      if (before?.ok)
+        for (const leaf of flattenJson(before.value.value)) had.set(leaf.path, leaf.value);
+      const fresh = new Map<string, string>();
+      for (const leaf of flattenJson(after.value.value)) {
+        if (had.get(leaf.path) !== leaf.value) fresh.set(leaf.path, leaf.value);
+      }
+      if (fresh.size === 0) continue;
+      jsonFiles.set(file.path, fresh);
+      for (const [leafPath, value] of fresh) {
+        const key = leafKey(leafPath, value);
+        const listed = byLeaf.get(key);
+        if (listed === undefined) byLeaf.set(key, [file.path]);
+        else listed.push(file.path);
+      }
+    }
+  }
+  return { rows: { files: rows, sourcedataByName }, json: { files: jsonFiles, byLeaf } };
+}

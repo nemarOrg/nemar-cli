@@ -14,10 +14,14 @@ import { describe, expect, test } from "bun:test";
 import {
   CLASS_KINDS,
   type ClassKind,
+  type PoolFile,
   ROLE_OF,
   type RelabelRule,
+  buildPools,
+  flattenJson,
   isMissingCell,
   isMissingJson,
+  leafKey,
   parseJson,
   relabelRule,
   ruleWords,
@@ -567,5 +571,246 @@ describe("relabelRule: every rule it returns rebuilds the other string from one 
     // The generator reaches every kind of rule, so the property is not vacuous.
     expect([...kinds].sort()).toEqual(["case", "delete", "insert", "repad", "strip", "wrap"]);
     expect(withRule).toBeGreaterThan(2000);
+  });
+});
+
+/** A pool file from text; `before` is null for an added file. */
+function pooled(path: string, before: string | null, after: string): PoolFile {
+  return { path, before: before === null ? null : enc(before), after: enc(after) };
+}
+
+describe("flattenJson: the leaves of a document", () => {
+  const leaves = (text: string) =>
+    flattenJson(json(text)).map((leaf) => [leaf.path, leaf.value] as const);
+
+  test("objects recurse, scalars are leaves, and a list of scalars is one leaf", () => {
+    expect(
+      leaves('{"Name": "x", "Count": 3, "Nested": {"a": true, "b": null}, "List": [1, 2]}'),
+    ).toEqual([
+      [".Name", '"x"'],
+      [".Count", "3"],
+      [".Nested.a", "true"],
+      [".Nested.b", "null"],
+      [".List", "[1,2]"],
+    ]);
+  });
+
+  test("an empty object and an empty array are leaves, and so is a scalar document", () => {
+    expect(leaves('{"a": {}, "b": [], "c": [[]], "d": [{}]}')).toEqual([
+      [".a", "{}"],
+      [".b", "[]"],
+      [".c[0]", "[]"],
+      [".d[0]", "{}"],
+    ]);
+    expect(leaves("{}")).toEqual([["", "{}"]]);
+    expect(leaves("[]")).toEqual([["", "[]"]]);
+    expect(leaves("7")).toEqual([["", "7"]]);
+    expect(leaves('"x"')).toEqual([["", '"x"']]);
+  });
+
+  test("an array with any container element recurses with index paths, scalars included", () => {
+    expect(leaves('{"a": [1, {"b": 2}, "c"]}')).toEqual([
+      [".a[0]", "1"],
+      [".a[1].b", "2"],
+      [".a[2]", '"c"'],
+    ]);
+    expect(leaves("[[1, 2], [3]]")).toEqual([
+      ["[0]", "[1,2]"],
+      ["[1]", "[3]"],
+    ]);
+  });
+
+  test("a key that is not a bare name is written in brackets, JSON escaped, so no two places share a path", () => {
+    const text = String.raw`{"a.b": 1, "a": {"b": 2}, "x y": 3, "1": 4, "q\"r": 5, "": 6, "caf\u00e9": 7}`;
+    const found = leaves(text);
+    expect(found.map(([path]) => path)).toEqual([
+      '["a.b"]',
+      ".a.b",
+      '["x y"]',
+      '["1"]',
+      '["q\\"r"]',
+      '[""]',
+      '["caf\u{E9}"]',
+    ]);
+    expect(new Set(found.map(([path]) => path)).size).toBe(found.length);
+    // A key "0" is not the index 0.
+    expect(leaves('{"a": {"0": 1}}')).toEqual([['.a["0"]', "1"]]);
+    expect(leaves('{"a": [1, {"k": 1}]}')).toEqual([
+      [".a[0]", "1"],
+      [".a[1].k", "1"],
+    ]);
+  });
+
+  test("a leaf knows its parent, its name and whether it is a key", () => {
+    const found = flattenJson(json('{"a": {"b": 1}, "c": [{"d": 2}, 3]}'));
+    expect(found.map((l) => [l.path, l.parent, l.name, l.isKey])).toEqual([
+      [".a.b", ".a", "b", true],
+      [".c[0].d", ".c[0]", "d", true],
+      [".c[1]", ".c", "[1]", false],
+    ]);
+  });
+
+  test("values are canonical text: numbers as written, strings re-encoded, key order kept", () => {
+    expect(leaves('{"n": 1.0, "m": 1, "s": "\u0041", "e": 1e400, "z": -0}')).toEqual([
+      [".n", "1.0"],
+      [".m", "1"],
+      [".s", '"A"'],
+      [".e", "1e400"],
+      [".z", "-0"],
+    ]);
+  });
+});
+
+describe("buildPools: the rows and leaves a pull request adds", () => {
+  const rowsOf = (pool: ReturnType<typeof buildPools>, path: string) => {
+    const file = pool.rows.files.get(path);
+    return file === undefined
+      ? undefined
+      : { header: file.header, rows: Object.fromEntries(file.rows) };
+  };
+
+  test("an added table contributes every row, with how many copies, under its own header", () => {
+    const pool = buildPools([
+      pooled("sourcedata/old/a_channels.tsv", null, "name\ttype\nA1\tEEG\nA2\tEEG\nA1\tEEG\n"),
+    ]);
+    expect(rowsOf(pool, "sourcedata/old/a_channels.tsv")).toEqual({
+      header: "name\ttype",
+      rows: { "A1\tEEG": 2, "A2\tEEG": 1 },
+    });
+  });
+
+  test("a modified table with the same header contributes the multiset difference only", () => {
+    const pool = buildPools([
+      pooled(
+        "x_channels.tsv",
+        "name\ttype\nA1\tEEG\nA2\tEEG\nA2\tEEG\n",
+        "name\ttype\nA2\tEEG\nA2\tEEG\nA2\tEEG\nA3\tEMG\nA3\tEMG\n",
+      ),
+    ]);
+    // Before had A2 twice; after has it three times, so one copy is new, and A3 twice is new.
+    expect(rowsOf(pool, "x_channels.tsv")).toEqual({
+      header: "name\ttype",
+      rows: { "A2\tEEG": 1, "A3\tEMG": 2 },
+    });
+  });
+
+  test("a modified table with a different header contributes every row of its after side", () => {
+    const pool = buildPools([
+      pooled("x_channels.tsv", "name\ttype\nA1\tEEG\n", "type\tname\nEEG\tA1\nEMG\tA2\n"),
+    ]);
+    expect(rowsOf(pool, "x_channels.tsv")).toEqual({
+      header: "type\tname",
+      rows: { "EEG\tA1": 1, "EMG\tA2": 1 },
+    });
+    // The same columns in another order are a different header, so a row that is unchanged still counts.
+    expect(rowsOf(buildPools([pooled("y.tsv", "a\tb\n1\t2\n", "b\ta\n2\t1\n")]), "y.tsv")).toEqual({
+      header: "b\ta",
+      rows: { "2\t1": 1 },
+    });
+  });
+
+  test("a table that adds nothing is not in the pool, and neither is one that only lost rows", () => {
+    const pool = buildPools([
+      pooled("same.tsv", "a\n1\n", "a\n1\n"),
+      pooled("lost.tsv", "a\tb\n1\t2\n3\t4\n", "a\tb\n1\t2\n"),
+      pooled("header_only.tsv", null, "a\tb\n"),
+    ]);
+    expect([...pool.rows.files.keys()]).toEqual([]);
+  });
+
+  test("tables anywhere in the tree are pooled, and sourcedata ones are indexed by their last segment", () => {
+    const pool = buildPools([
+      pooled("sub-01/eeg/sub-01_channels.tsv", null, "name\nA1\n"),
+      pooled("sourcedata/removed/sub-01/eeg/sub-01_channels.tsv", null, "name\nA1\n"),
+      pooled("sourcedata/other/sub-02_channels.tsv", null, "name\nA2\n"),
+      pooled("derivatives/x/sub-01_channels.tsv", null, "name\nA3\n"),
+      pooled("notsourcedata/sub-01_channels.tsv", null, "name\nA4\n"),
+    ]);
+    expect([...pool.rows.files.keys()]).toEqual([
+      "sub-01/eeg/sub-01_channels.tsv",
+      "sourcedata/removed/sub-01/eeg/sub-01_channels.tsv",
+      "sourcedata/other/sub-02_channels.tsv",
+      "derivatives/x/sub-01_channels.tsv",
+      "notsourcedata/sub-01_channels.tsv",
+    ]);
+    expect(Object.fromEntries(pool.rows.sourcedataByName)).toEqual({
+      "sub-01_channels.tsv": ["sourcedata/removed/sub-01/eeg/sub-01_channels.tsv"],
+      "sub-02_channels.tsv": ["sourcedata/other/sub-02_channels.tsv"],
+    });
+  });
+
+  test("files with other extensions are ignored, including a gzipped table", () => {
+    const pool = buildPools([
+      pooled("a.tsv.gz", null, "x\n1\n"),
+      pooled("README.md", null, "x\n1\n"),
+      pooled("a.TSV", null, "x\n1\n"),
+      pooled("a.csv", null, "x\n1\n"),
+    ]);
+    expect(pool.rows.files.size).toBe(0);
+    expect(pool.json.files.size).toBe(0);
+  });
+
+  test("a pool file that does not parse is SKIPPED, on either side, and never an error", () => {
+    const ragged = "a\tb\n1\n";
+    const bad = new Uint8Array([0x61, 0x09, 0x62, 0x0a, 0xff, 0x09, 0x31, 0x0a]);
+    const files: PoolFile[] = [
+      pooled("ragged_after.tsv", null, ragged),
+      pooled("ragged_before.tsv", ragged, "a\tb\n1\t2\n"),
+      { path: "binary_after.tsv", before: null, after: bad },
+      { path: "binary_before.tsv", before: bad, after: enc("a\tb\n1\t2\n") },
+      pooled("quoted.tsv", null, 'a\n"x"\n'),
+      pooled("dup_key.json", null, '{"a": 1, "a": 2}'),
+      pooled("bad_json_before.json", "{", '{"a": 1}'),
+      pooled("bad_json_after.json", '{"a": 1}', "{"),
+      pooled("not_json.json", null, "NaN"),
+      pooled("good.tsv", null, "a\tb\n1\t2\n"),
+      pooled("good.json", null, '{"a": 1}'),
+    ];
+    const pool = buildPools(files);
+    expect([...pool.rows.files.keys()]).toEqual(["good.tsv"]);
+    expect([...pool.json.files.keys()]).toEqual(["good.json"]);
+  });
+
+  test("a JSON file contributes the leaves it has now and did not have, by path and value", () => {
+    const pool = buildPools([
+      pooled(
+        "task-rest_eeg.json",
+        '{"A": 1, "B": "x", "C": {"d": 1, "e": 2}, "L": [1, 2]}',
+        '{"A": 1, "B": "y", "C": {"d": 1, "f": 3}, "L": [1, 2, 3], "N": null}',
+      ),
+      pooled("added.json", null, '{"Q": {"r": 1}}'),
+    ]);
+    expect(Object.fromEntries(pool.json.files.get("task-rest_eeg.json") ?? [])).toEqual({
+      ".B": '"y"',
+      ".C.f": "3",
+      ".L": "[1,2,3]",
+      ".N": "null",
+    });
+    expect(Object.fromEntries(pool.json.files.get("added.json") ?? [])).toEqual({ ".Q.r": "1" });
+    expect(pool.json.byLeaf.get(leafKey(".B", '"y"'))).toEqual(["task-rest_eeg.json"]);
+    // An unchanged leaf is not new, and neither is a leaf at the same path with a changed value at its OLD value.
+    expect(pool.json.byLeaf.get(leafKey(".A", "1"))).toBeUndefined();
+    expect(pool.json.byLeaf.get(leafKey(".B", '"x"'))).toBeUndefined();
+  });
+
+  test("several files adding one leaf are listed in the order given", () => {
+    const pool = buildPools([
+      pooled("b.json", null, '{"K": 1}'),
+      pooled("a.json", '{"K": 2}', '{"K": 1}'),
+      pooled("c.json", '{"K": 1}', '{"K": 1}'),
+    ]);
+    expect(pool.json.byLeaf.get(leafKey(".K", "1"))).toEqual(["b.json", "a.json"]);
+  });
+
+  test("a path listed twice uses the first entry", () => {
+    const pool = buildPools([pooled("a.tsv", null, "x\n1\n"), pooled("a.tsv", null, "x\n2\n")]);
+    expect(rowsOf(pool, "a.tsv")).toEqual({ header: "x", rows: { "1": 1 } });
+  });
+
+  test("nothing in the pool depends on the bytes being shared: a pool is its own copy", () => {
+    const bytes = enc("a\n1\n");
+    const pool = buildPools([{ path: "a.tsv", before: null, after: bytes }]);
+    bytes[2] = 0x39;
+    expect(rowsOf(pool, "a.tsv")).toEqual({ header: "a", rows: { "1": 1 } });
   });
 });
