@@ -3569,8 +3569,29 @@ export function lossFactsOf(files: readonly FileAtoms[]): LossFacts {
         case "json_emptied":
           facts.valuesEmptied++;
           break;
-        default:
+        // No loss fact: every other kind, named, so a kind added to `CLASS_KINDS` without being
+        // placed here or above does not compile.
+        case "key_relabeled":
+        case "cell_templated":
+        case "cell_replaced":
+        case "json_value_changed":
+        case "json_type_changed":
+        case "json_key_renamed":
+        case "json_empty_key_removed":
+        case "rows_reordered":
+        case "columns_reordered":
+        case "json_keys_reordered":
+        case "format":
+        case "column_added":
+        case "row_added":
+        case "cell_filled":
+        case "json_key_added":
+        case "json_filled":
           break;
+        default: {
+          const unclassified: never = atom.kind;
+          throw new Error(`lossFactsOf: a kind with no case: ${String(unclassified)}`);
+        }
       }
     }
     facts.rowsRemoved += rows;
