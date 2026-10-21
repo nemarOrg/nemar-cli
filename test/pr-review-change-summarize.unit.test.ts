@@ -1492,6 +1492,31 @@ describe("renderClasses: author text cannot forge the platform's lines", () => {
     for (const ch of odd) expect(text.includes(ch), ch.codePointAt(0)?.toString(16)).toBe(false);
   });
 
+  test("a cut in the second example's path alone makes the class incomplete, and accounts for nothing", () => {
+    // Two files of one shape: the first example's path is short, the second's is over 300.
+    const long = "L".repeat(150);
+    const short = "sub-01/eeg/sub-01_task-x_channels.tsv";
+    const longPath = `sub-${long}/eeg/sub-${long}_task-x_channels.tsv`;
+    expect(entityPattern(longPath)).toBe(entityPattern(short));
+    const before = tsv(["name", "type"], ["Fp1", "EEG"], ["Fp2", "EEG"]);
+    const after = tsv(["name", "type"], ["Fp1", "EOG"], ["Fp2", "EEG"]);
+    const summary = summarize([
+      candidate(short, before, after),
+      candidate(longPath, before, after),
+    ]);
+    expect(summary.classes.map((c) => `${c.kind} ${c.files.size}`)).toEqual(["cell_replaced 2"]);
+    const examples = summary.text.split("\n").filter((l) => l.startsWith("    e.g. "));
+    expect(examples.length).toBe(2);
+    expect(readQuoted(examples[0] as string, "    e.g. ".length)?.cut).toBe(false);
+    expect(readQuoted(examples[1] as string, "    e.g. ".length)?.cut).toBe(true);
+    expect(summary.classes[0]?.examplePathCut).toBe(true);
+    expect(summary.complete.size).toBe(0);
+    expect(summary.facts.classes).toEqual([
+      "C1 cells replaced | 2 items in 2 files | not shown in full",
+    ]);
+    expect(summary.accounted.size).toBe(0);
+  });
+
   test("a path of 300 code points is shown whole; one of 301 is cut, and its class is incomplete", () => {
     // `sub-<id>/eeg/sub-01_task-x_channels.tsv` is 35 characters and the id; its shape stays short.
     const at = (length: number) => `sub-${"1".repeat(length - 35)}/eeg/sub-01_task-x_channels.tsv`;
