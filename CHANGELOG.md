@@ -32,6 +32,7 @@ It moves the Brain Imaging Data Structure (BIDS) validator from 2.4.1 to 3.0.2, 
   If the comparison is incomplete, the bump fails rather than opening a pull request, and the comparison is kept as a run artifact.
 - **Every validation report names the validator release that produced it.**
   `nemar dataset validate` prints `Validator: @bids/validator <version>` after the validator's own text report, and adds a top-level `validatorVersion` key to the `--json` report.
+  A report written with `--outfile` names the release in the same way: the key in a `--json` file, or a final `Validator:` line in a text file.
 - **A validator run that fails is reported as a failure.**
   An exit other than 0 (valid) or 16 (errors found) is a failed run: `nemar dataset validate` shows the validator's own message and exits with its code.
   A report without a list of issues is refused rather than read as clean.
@@ -48,7 +49,7 @@ It moves the Brain Imaging Data Structure (BIDS) validator from 2.4.1 to 3.0.2, 
   A link to a git-annex key, the layout real datasets have, gives the same gating errors under 2.4.1 and 3.0.2, and so does a pointer file.
   A link to no annex key is reported as broken, with its sidecar as orphaned, by 3.0.2 only. The comparison carries that layout as a detector, not as a layout that exists.
 - **Under the upload preflight's flags, which keep warnings, 3.0.2 reports fewer warnings on six reference datasets.**
-  The six are `xx099904`, `xx099905`, and `nm000104` to `nm000107`. No warning gates.
+  The six are `nm000189`, `xx099905`, and `nm000104` to `nm000107`. The other six reference datasets report the same number of warnings under both releases, and no warning gates.
 
 ### Deploy coupling
 
