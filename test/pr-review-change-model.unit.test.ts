@@ -231,18 +231,58 @@ describe("relabelRule: one assertion per rule kind", () => {
     expect(relabelRule("GA01", "EEGGA_01REF", cells)).toEqual(
       rule("insert", ["EEG", "_", "REF"], "LD"),
     );
-    expect(relabelRule("a-b", "a-X-b", cells)).toEqual(rule("insert", ["", "", "X-", ""], "LOL"));
+    expect(relabelRule("a-1", "a-X-1", cells)).toEqual(rule("insert", ["", "", "X-", ""], "LOD"));
   });
 
   test("delete: text was removed from between the parts of the value", () => {
     expect(relabelRule("EEGGA_01REF", "GA01", cells)).toEqual(
       rule("delete", ["EEG", "_", "REF"], "LD"),
     );
-    expect(relabelRule("a-X-b", "a-b", cells)).toEqual(rule("delete", ["", "", "X-", ""], "LOL"));
+    expect(relabelRule("a-X-1", "a-1", cells)).toEqual(rule("delete", ["", "", "X-", ""], "LOD"));
+  });
+
+  test("an insertion or a deletion is anchored: the name with fewer runs must hold a digit run", () => {
+    // Letters alone are no anchor: Cz is in FCz and Pz in POz, and each is another electrode.
+    for (const [a, b] of [
+      ["Cz", "FCz"],
+      ["Pz", "POz"],
+      ["a-b", "a-X-b"],
+      ["Fp", "F-x-p"],
+    ] as const) {
+      expect(relabelRule(a, b, cells), `${a} -> ${b}`).toBeNull();
+      expect(relabelRule(b, a, cells), `${b} -> ${a}`).toBeNull();
+    }
+    // A superscript two is a number character, so it anchors, though it is compared as its text.
+    expect(relabelRule("x\u{B2}", "EEGx_\u{B2}REF", cells)).toEqual(
+      rule("insert", ["EEG", "_", "REF"], "LD"),
+    );
+    // The anchor matches only a whole digit run of the same value.
+    expect(relabelRule("GA01", "EEGGA_02REF", cells)).toBeNull();
+    expect(relabelRule("GA1", "EEGGA_12REF", cells)).toBeNull();
+    // The anchor still works when the digit run is repadded, and the rule says so.
+    const repadded = relabelRule("GA01", "EEGGA_1REF", cells);
+    expect(repadded).toEqual(rule("insert", ["EEG", "_", "REF"], "LD", true));
+    expect(ruleWords(repadded as RelabelRule)).toBe(
+      'inserted "EEG" at the start, "_" after run 1 and "REF" after run 2 (runs kept: letters, digits), zero padding of numbers changed',
+    );
+  });
+
+  test("a letter run is matched where a run of the other name starts and ends, if it can be", () => {
+    // ab is inside abx and also whole after the hyphen; the whole one is the one the rule keeps.
+    expect(relabelRule("ab1c", "abx-ab_1c", cells)).toEqual(
+      rule("insert", ["abx-", "_", "", ""], "LDL"),
+    );
+    // Only a start on a boundary is not enough: the end must be one too.
+    expect(relabelRule("ab1c", "xab-ab_1c", cells)).toEqual(
+      rule("insert", ["xab-", "_", "", ""], "LDL"),
+    );
   });
 
   test("the character rule exists only when asked for, and then describes the longer string exactly", () => {
     expect(relabelRule("DCEMBRACE", "DC EMBRACE-REF", cells)).toBeNull();
+    expect(relabelRule("DCEMBRACE", "DCEMBRACE-REF", { chars: true })).toEqual(
+      rule("wrap", ["", "-REF"]),
+    );
     expect(relabelRule("DCEMBRACE", "DC EMBRACE-REF", { chars: true })).toEqual(
       rule("insert", ["", "", " ", "", "", "", "", "", "", "-REF"], "c9"),
     );
@@ -295,12 +335,29 @@ describe("relabelRule: the real pairs from the open pull requests", () => {
     // Both sides are plain numbers.
     expect(relabelRule("64", "640", { chars: false })).toBeNull();
     expect(relabelRule("64", "640", { chars: true })).toBeNull();
-    // 1 is not 10, so no run rule holds.
-    expect(relabelRule("A1", "A10", { chars: false })).toBeNull();
-    expect(relabelRule("A10", "A1", { chars: false })).toBeNull();
-    // With characters allowed, A10 IS A1 with a 0 after it. That is the design's character rule
-    // (section 4.3 step 5), asked for only by a keyed pairing whose every other cell is equal.
-    expect(relabelRule("A1", "A10", { chars: true })).toEqual(rule("insert", ["", "", "0"], "c2"));
+    // 1 is not 10, so no run rule holds; and the 0 would join the run 1, so no character rule.
+    for (const chars of [false, true]) {
+      expect(relabelRule("A1", "A10", { chars })).toBeNull();
+      expect(relabelRule("A10", "A1", { chars })).toBeNull();
+    }
+  });
+
+  test("the character rule inserts or deletes whole runs only: a name that changed a run is another name", () => {
+    for (const [a, b] of [
+      ["A1", "A10"],
+      ["sub-2", "sub-12"],
+      ["sub-1", "sub-10"],
+      ["Cz", "FCz"],
+      ["Pz", "POz"],
+      ["Fp1", "Fpz1"],
+    ] as const) {
+      expect(relabelRule(a, b, { chars: true }), `${a} -> ${b}`).toBeNull();
+      expect(relabelRule(b, a, { chars: true }), `${b} -> ${a}`).toBeNull();
+    }
+    // The real one keeps: a space and -REF are whole runs of the new name, in both directions.
+    expect(relabelRule("DC EMBRACE-REF", "DCEMBRACE", { chars: true })?.shape).toBe("c9");
+    // A run inserted between two others, even in the middle of letters, is whole.
+    expect(relabelRule("AB", "A-B", { chars: true })).toEqual(rule("insert", ["", "-", ""], "c2"));
   });
 });
 
@@ -346,14 +403,33 @@ describe("relabelRule: numbers and nothing-to-say pairs never get a rule", () =>
     expect(relabelRule("Fp1", "Fp2", { chars: true })).toBeNull();
   });
 
+  test("digits next to a decimal point or comma compare as text: 0.05 to 0.5 is not a padding", () => {
+    for (const [a, b] of [
+      ["A1.05", "A1.5"],
+      ["0.05 Hz", "0.5 Hz"],
+      ["1.05mV", "1.5mV"],
+      ["v1,05", "v1,5"],
+      ["05.A", "5.A"],
+      ["2020-01-01T10:00:00.050", "2020-01-01T10:00:00.5"],
+    ] as const) {
+      expect(relabelRule(a, b, { chars: false }), `${a} -> ${b}`).toBeNull();
+      expect(relabelRule(b, a, { chars: false }), `${b} -> ${a}`).toBeNull();
+    }
+    // Any other neighbor leaves the value comparison in place.
+    expect(relabelRule("A01-x", "A1-x", { chars: false })).toEqual(rule("repad", [], "", true));
+    expect(relabelRule("A01 Hz", "A1 Hz", { chars: false })).toEqual(rule("repad", [], "", true));
+  });
+
   test("digits compare by value only as ASCII digits: a superscript is the text it is", () => {
     // The superscript two is a number character but has no value this module vouches for.
     expect(relabelRule("A\u{B2}", "POL A\u{B2}", { chars: false })).toEqual(
       rule("wrap", ["POL ", ""]),
     );
     expect(relabelRule("A\u{B2}", "A2", { chars: false })).toBeNull();
-    // Arabic-Indic digits are compared as text, so they do not repad against ASCII ones.
+    // Arabic-Indic digits are compared as text, so they do not repad against ASCII ones, and an
+    // ASCII zero in front of one is not padding either.
     expect(relabelRule("A\u{661}", "A01", { chars: false })).toBeNull();
+    expect(relabelRule("A00\u{661}", "A0\u{661}", { chars: false })).toBeNull();
   });
 });
 
@@ -390,15 +466,25 @@ describe("relabelRule: the bounds", () => {
     expect(relabelRule(mixed, `${mixed}!`, { chars: true })).toBeNull();
   });
 
-  test("a rule is a function of the two strings alone", () => {
-    for (const [a, b] of [
-      ["GA01", "EEGGA_01REF"],
-      ["A1", "POL A01"],
-      ["DCEMBRACE", "DC EMBRACE-REF"],
-      ["'G1'    ", "'G1'"],
-    ] as const) {
-      expect(relabelRule(a, b, { chars: true })).toEqual(relabelRule(a, b, { chars: true }));
-    }
+  test("the length bound is checked on each side alone", () => {
+    const edge = "A".repeat(128);
+    // Within the bound these are a strip and a wrap.
+    expect(relabelRule(`x-${edge.slice(2)}`, edge.slice(2), { chars: false })?.kind).toBe("strip");
+    expect(relabelRule(edge.slice(2), `x-${edge.slice(2)}`, { chars: false })?.kind).toBe("wrap");
+    // One character more on either side, and neither.
+    expect(relabelRule(`x-${edge}`, edge, { chars: true })).toBeNull();
+    expect(relabelRule(edge, `x-${edge}`, { chars: true })).toBeNull();
+    // Lower-casing can change a length: U+0130 lower-cases to i and a combining dot. These two are
+    // a case change of each other, but one of them is 129 characters, so it is not a name.
+    const dotted = `\u{130}${"a".repeat(127)}`;
+    const decomposed = `i\u{307}${"a".repeat(127)}`;
+    expect(dotted.toLowerCase()).toBe(decomposed.toLowerCase());
+    expect(relabelRule(decomposed, dotted, { chars: false })).toBeNull();
+    expect(relabelRule(dotted, decomposed, { chars: false })).toBeNull();
+    // At 128 characters the decomposed one is a name again, and the pair is a case change.
+    expect(relabelRule(dotted.slice(0, -1), decomposed.slice(0, -1), { chars: false })).toEqual(
+      rule("case"),
+    );
   });
 });
 
@@ -494,6 +580,31 @@ function partsOf(s: string): string[] {
 }
 
 /**
+ * Whether a rule keeps the anchoring of design section 4.3: an insertion or deletion of runs keeps a
+ * digit run of the shorter name, and a character rule inserts or deletes only whole runs of the
+ * longer one. Every other kind holds trivially.
+ */
+function anchored(found: RelabelRule, before: string, after: string): boolean {
+  if (found.kind !== "insert" && found.kind !== "delete") return true;
+  const kept = found.kind === "insert" ? before : after;
+  const whole = found.kind === "insert" ? after : before;
+  if (!found.shape.startsWith("c")) return partsOf(kept).some((part) => /^\p{N}/u.test(part));
+  const boundaries = new Set<number>([0]);
+  let at = 0;
+  for (const part of partsOf(whole)) {
+    at += Array.from(part).length;
+    boundaries.add(at);
+  }
+  let position = 0;
+  for (const [i, gap] of found.gaps.entries()) {
+    const width = Array.from(gap).length;
+    if (width > 0 && !(boundaries.has(position) && boundaries.has(position + width))) return false;
+    position += width + (i < found.gaps.length - 1 ? 1 : 0);
+  }
+  return true;
+}
+
+/**
  * Rebuild the longer string from the shorter one and the rule alone. This is the property that
  * makes a rule an exact description: if the rebuilt text is not the real one, the class line would
  * tell the model something the files do not say.
@@ -576,6 +687,7 @@ describe("relabelRule: every rule it returns rebuilds the other string from one 
           rebuilds(found, before, after),
           `${JSON.stringify([before, after, chars, found])}`,
         ).toBe(true);
+        expect(anchored(found, before, after), JSON.stringify([before, after, found])).toBe(true);
         expect(ruleWords(found).length).toBeGreaterThan(0);
         const numeric = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
         expect(numeric.test(before) && numeric.test(after), `${before} -> ${after}`).toBe(false);
@@ -1033,10 +1145,13 @@ describe("diffTable: cells of paired rows", () => {
     expect(cell("NA", "5")).toEqual(['cell_replaced | field=v | before="NA" | after="5"']);
   });
 
-  test("a cell changed by wrap, strip, repad or case is a template with its rule", () => {
-    expect(cell("Cz", "CZ")).toEqual([
-      'cell_templated | field=v | before="Cz" | after="CZ" | rule=letter case changed',
-    ]);
+  test("a cell's letter case is part of its value: a case change in a cell is a replaced value", () => {
+    // mV is millivolts and MV megavolts; a key's case only spells a name, a cell's can mean a unit.
+    expect(cell("mV", "MV")).toEqual(['cell_replaced | field=v | before="mV" | after="MV"']);
+    expect(cell("Cz", "CZ")).toEqual(['cell_replaced | field=v | before="Cz" | after="CZ"']);
+  });
+
+  test("a cell changed by wrap, strip or repad is a template with its rule", () => {
     expect(cell("A01", "A1")).toEqual([
       'cell_templated | field=v | before="A01" | after="A1" | rule=zero padding of numbers changed',
     ]);
@@ -1328,10 +1443,30 @@ describe("diffTable: a strict relabel needs a cell that says something, not just
   test("an equal cell that says something is evidence: the same age under the new name is a relabel", () => {
     const diff = diffText(
       "participants.tsv",
-      tsv(["participant_id", "age"], ["sub-1", "30"], ["sub-2", "31"]),
-      tsv(["participant_id", "age"], ["sub-2", "31"], ["sub-10", "30"]),
+      tsv(["participant_id", "age"], ["1", "30"], ["sub-2", "31"]),
+      tsv(["participant_id", "age"], ["sub-2", "31"], ["sub-1", "30"]),
     );
-    expect(kindsOf(diff)).toEqual(["key_relabeled", "rows_reordered"]);
+    expect(lines(diff)).toEqual([
+      'key_relabeled | field=participant_id | before="1" | after="sub-1" | rule=added prefix "sub-"',
+      "rows_reordered",
+    ]);
+  });
+
+  test("sub-1 and sub-10 are two participants, whatever the other cells say", () => {
+    const diff = diffText(
+      "participants.tsv",
+      tsv(
+        ["participant_id", "age", "sex", "handedness"],
+        ["sub-1", "23", "M", "R"],
+        ["sub-2", "30", "F", "R"],
+      ),
+      tsv(
+        ["participant_id", "age", "sex", "handedness"],
+        ["sub-2", "30", "F", "R"],
+        ["sub-10", "23", "M", "R"],
+      ),
+    );
+    expect(kindsOf(diff)).toEqual(["row_removed", "row_added"]);
   });
 
   test("a rule that keeps the name's letters and digit values still pairs without cell evidence", () => {

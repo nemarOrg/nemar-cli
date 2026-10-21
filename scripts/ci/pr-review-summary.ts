@@ -786,13 +786,17 @@ export function isMissingJson(v: JsonValue): boolean {
 /**
  * One exact description of how a name or a cell became another, written so that it is a function of
  * the BEFORE value: a class that holds one rule describes every member of the class completely, and
- * a member the rule does not describe has a different rule or none.
+ * a member the rule does not describe has a different rule or none. `case`, `repad` and the
+ * `repadded` flag are the exceptions, and deliberately so: they say only that a spelling changed
+ * (which letters are upper case, how many zeros pad a number), never what the new spelling is, and
+ * a spelling is all they can change.
  */
 export interface RelabelRule {
   /**
-   * `case`: only letter case changed. `wrap` and `strip`: text was added around the value, or
-   * removed from around it. `repad`: only the zero padding of numbers changed. `insert` and
-   * `delete`: text was added to or removed from between the parts of the value.
+   * `case`: only letter case changed (for keys only: in a cell, a case change is a replaced value).
+   * `wrap` and `strip`: text was added around the value, or removed from around it. `repad`: only
+   * the zero padding of numbers changed. `insert` and `delete`: text was added to or removed from
+   * between the parts of the value.
    */
   kind: "case" | "wrap" | "strip" | "repad" | "insert" | "delete";
   /**
@@ -829,18 +833,43 @@ interface Run {
   text: string;
   /**
    * What two runs are compared by. Letters and other characters: exactly their text. Digits:
-   * their value, so `01` and `1` are one number, but only for ASCII digits; any other digit
-   * (Arabic-Indic, a superscript, a fraction) is compared as the text it is, because it has no
-   * value this module can vouch for.
+   * their value, so `01` and `1` are one number, but only for ASCII digits that stand alone; any
+   * other digit (Arabic-Indic, a superscript, a fraction) is compared as the text it is, because it
+   * has no value this module can vouch for, and so is a run directly before or after a `.` or a
+   * `,`. There the digits are part of a decimal number, where a zero after the point is not
+   * padding: `0.05` to `0.5` is a tenfold change, and by value it would read as "only the zero
+   * padding changed".
    */
   norm: string;
 }
 
-function normalizeRun(cls: RunClass, text: string): string {
-  return cls === "D" && ASCII_DIGITS.test(text) ? text.replace(/^0+(?=[0-9])/, "") : text;
+/** The characters that make the digits next to them part of a decimal number. */
+const DECIMAL_MARKS: ReadonlySet<string> = new Set([".", ","]);
+
+function normalizeRun(
+  run: { cls: RunClass; text: string },
+  previous: { text: string } | undefined,
+  next: { text: string } | undefined,
+): string {
+  if (run.cls !== "D" || !ASCII_DIGITS.test(run.text)) return run.text;
+  if (DECIMAL_MARKS.has(previous?.text ?? "") || DECIMAL_MARKS.has(next?.text ?? "")) {
+    return run.text;
+  }
+  return run.text.replace(/^0+(?=[0-9])/, "");
 }
 
+/**
+ * The class of one code point. ASCII is decided by its code, because this runs once per character
+ * of every key a large table holds and a Unicode property test is the slow path; the result is the
+ * one the property tests give (ASCII letters are the only `\p{L}` and ASCII digits the only `\p{N}`
+ * below U+0080).
+ */
 function runClassOf(ch: string): RunClass {
+  const code = ch.charCodeAt(0);
+  if (code < 0x80) {
+    if ((code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a)) return "L";
+    return code >= 0x30 && code <= 0x39 ? "D" : "O";
+  }
   if (LETTER.test(ch)) return "L";
   if (NUMBER_CHARACTER.test(ch)) return "D";
   return "O";
@@ -858,15 +887,13 @@ function exceedsKeyChars(s: string): boolean {
 
 /**
  * Split a name into runs, or null when it has more than `maxRuns` of them. The caller has already
- * bounded the length in code points.
+ * bounded the length in code points. A digit run's `norm` depends on its neighbors (see
+ * {@link Run}), so the norms are set once every run is known.
  */
 function splitRuns(s: string): Run[] | null {
-  const runs: Run[] = [];
+  const parts: { cls: RunClass; text: string }[] = [];
   let cls: RunClass | null = null;
   let text = "";
-  const flush = (): void => {
-    if (cls !== null) runs.push({ cls, text, norm: normalizeRun(cls, text) });
-  };
   for (const ch of s) {
     const next = runClassOf(ch);
     // Letters and digits extend the run they are in; every other character is a run of its own.
@@ -874,13 +901,34 @@ function splitRuns(s: string): Run[] | null {
       text += ch;
       continue;
     }
-    flush();
-    if (runs.length >= SUMMARY_LIMITS.maxRuns) return null;
+    if (cls !== null) parts.push({ cls, text });
+    if (parts.length >= SUMMARY_LIMITS.maxRuns) return null;
     cls = next;
     text = ch;
   }
-  flush();
-  return runs;
+  if (cls !== null) parts.push({ cls, text });
+  return parts.map((part, i) => ({
+    cls: part.cls,
+    text: part.text,
+    norm: normalizeRun(part, parts[i - 1], parts[i + 1]),
+  }));
+}
+
+/**
+ * A string as the relabel rules read it, computed once: a table diff asks for the rule between the
+ * same keys many times, and splitting a key into runs is most of the cost of asking.
+ */
+interface Name {
+  text: string;
+  /** Longer than `maxKeyChars` code points: not a name, and no rule of any kind. */
+  long: boolean;
+  /** Its runs, or null when it is long or has more than `maxRuns` of them. */
+  runs: readonly Run[] | null;
+}
+
+function nameOf(text: string): Name {
+  const long = exceedsKeyChars(text);
+  return { text, long, runs: long ? null : splitRuns(text) };
 }
 
 function sameRun(a: Run, b: Run): boolean {
@@ -965,18 +1013,25 @@ function matchInOrder(
   return { gaps, repadded };
 }
 
-/** The rules over runs: `repad`, `wrap`/`strip`, then `insert`/`delete`. */
+/**
+ * The rules over runs: `repad`, `wrap`/`strip`, then `insert`/`delete`.
+ *
+ * **An insertion or a deletion needs an anchor**: the name with fewer runs must hold a digit run,
+ * and a digit run matches only a whole digit run of the same value. Without that, a rule built from
+ * letters alone would call two different electrodes one electrode respelled (`Cz` is in `FCz`, `Pz`
+ * in `POz`, `FC3` in `FCC3h` with a letter between), and a removed channel would pair with an
+ * unrelated new one. A number is what makes `GA01` and `EEGGA_01REF` the same channel; a name with
+ * no number has no part that the insertion could not have changed the meaning of.
+ */
 function runRule(before: readonly Run[], after: readonly Run[]): RelabelRule | null {
   if (before.length === after.length) {
-    // Same number of parts: only a number's padding can be the whole difference.
-    let repadded = false;
+    // Same number of parts: only a number's padding can be the whole difference. Letters and other
+    // characters compare by their exact text and the two strings differ (the caller returned on
+    // equal strings), so when every run is the same by `norm`, some digit run changed its padding.
     for (let i = 0; i < before.length; i++) {
-      const b = before[i] as Run;
-      const a = after[i] as Run;
-      if (!sameRun(b, a)) return null;
-      if (b.text !== a.text) repadded = true;
+      if (!sameRun(before[i] as Run, after[i] as Run)) return null;
     }
-    return repadded ? { kind: "repad", gaps: [], shape: "", repadded: true } : null;
+    return { kind: "repad", gaps: [], shape: "", repadded: true };
   }
 
   const beforeShorter = before.length < after.length;
@@ -997,10 +1052,12 @@ function runRule(before: readonly Run[], after: readonly Run[]): RelabelRule | n
     return { kind: beforeShorter ? "wrap" : "strip", gaps: [prefix, suffix], shape: "", repadded };
   }
 
+  if (!short.some((run) => run.cls === "D")) return null;
+  // Every gap is never empty here: if the runs of `short` sat in `long` with nothing between them,
+  // `long` would split into the same runs (a matched letter run is followed by a digit or another
+  // character, so it is a whole run of `long`), and the two would have the same number of runs.
   const matched = matchInOrder(short, long);
-  // A match with nothing between the parts cannot happen for names with fewer runs; refusing it
-  // costs nothing and keeps a rule from claiming an insertion that inserted nothing.
-  if (matched === null || matched.gaps.every((gap) => gap === "")) return null;
+  if (matched === null) return null;
   return {
     kind: beforeShorter ? "insert" : "delete",
     gaps: matched.gaps,
@@ -1010,30 +1067,54 @@ function runRule(before: readonly Run[], after: readonly Run[]): RelabelRule | n
 }
 
 /**
- * The last rule: the shorter string is a subsequence of the longer one, character by character.
- * The leftmost subsequence is used, so the result depends only on the two strings. It is the rule
- * for `DCEMBRACE` becoming `DC EMBRACE-REF`, where no part of the first survives whole.
+ * The last rule: the shorter string is a subsequence of the longer one, character by character,
+ * and **every inserted or deleted text is made of whole runs of the longer string** (the runs of
+ * rule 2: a maximal run of letters, a maximal run of digits, or one other character). It is the
+ * rule for `DCEMBRACE` becoming `DC EMBRACE-REF`, where no part of the first survives whole but
+ * the text put in (` `, `-REF`) is separate parts of the new name.
+ *
+ * The whole-runs condition is what keeps a character rule from changing a name's meaning: without
+ * it `A1` becomes `A10` ("a 0 inserted"), `sub-2` becomes `sub-12` and `Cz` becomes `FCz`, each a
+ * different channel or participant, because the inserted text joins a run that was already there.
+ *
+ * The leftmost subsequence is used, so the result depends only on the two strings. A pair that
+ * only another alignment would describe in whole runs gets no rule: a removal and an addition,
+ * which shows more change, never less.
  */
-function characterRule(before: string, after: string): RelabelRule | null {
-  const b = Array.from(before);
-  const a = Array.from(after);
-  if (b.length === a.length) return null;
+function characterRule(before: Name, after: Name): RelabelRule | null {
+  const b = Array.from(before.text);
+  const a = Array.from(after.text);
   const beforeShorter = b.length < a.length;
   const short = beforeShorter ? b : a;
   const long = beforeShorter ? a : b;
+  // The places, in code points, where a run of the longer string starts or ends.
+  const boundary = new Set<number>([0]);
+  let offset = 0;
+  for (const run of (beforeShorter ? after.runs : before.runs) as readonly Run[]) {
+    for (const _ of run.text) offset++;
+    boundary.add(offset);
+  }
+  const wholeRuns = (start: number, end: number): boolean =>
+    start === end || (boundary.has(start) && boundary.has(end));
+
   const gaps: string[] = [];
   let gap = "";
+  let gapStart = 0;
   let j = 0;
-  for (const ch of long) {
+  for (let i = 0; i < long.length; i++) {
+    const ch = long[i] as string;
     if (j < short.length && ch === short[j]) {
+      if (!wholeRuns(gapStart, i)) return null;
       gaps.push(gap);
       gap = "";
+      gapStart = i + 1;
       j++;
     } else {
       gap += ch;
     }
   }
-  if (j < short.length) return null;
+  // Equal lengths cannot reach here with a full match: that would be two equal strings.
+  if (j < short.length || !wholeRuns(gapStart, long.length)) return null;
   gaps.push(gap);
   return {
     kind: beforeShorter ? "insert" : "delete",
@@ -1046,34 +1127,41 @@ function characterRule(before: string, after: string): RelabelRule | null {
 /**
  * The first rule that says how `before` became `after`, or null. In order: `case` (equal once both
  * are lower-cased); then, over the runs of each string (a maximal run of letters, a maximal run of
- * digits, or one other character; digits compared by value, so `01` is `1`), `repad`, `wrap` or
- * `strip` (the shorter string's runs sit contiguously in the longer one), and `insert` or `delete`
- * (they sit in order, with text between them); and only when `opts.chars` is set, the character
- * rule. Cells never ask for characters: a changed character in a cell is a replaced value.
+ * digits, or one other character; digits compared by value, so `01` is `1`, except next to a `.`
+ * or `,`), `repad`, `wrap` or `strip` (the shorter string's runs sit contiguously in the longer
+ * one), and `insert` or `delete` (they sit in order, with text between them, and the one with
+ * fewer runs holds a digit run: see `runRule`); and only when `opts.chars` is set, the character
+ * rule, whose inserted text must be whole runs (see `characterRule`). Cells never ask for
+ * characters: a changed character in a cell is a replaced value.
  *
  * A pair gets no rule when the strings are equal, either is empty, either is longer than
  * `maxKeyChars` code points or has more than `maxRuns` runs (a long text is not a name, and an
  * unbounded search would be a way to stall the review), or both are plain numbers. Every case that
  * gets no rule is shown as a removal and an addition or as a replaced value, which is more change
- * shown, never less. One consequence worth knowing: `A1` to `A10` has no run rule (`1` is not `10`)
- * but, with characters allowed, `A10` is `A1` with a `0` inserted at the end; a keyed table asks for
- * that only when every other cell of the row is equal.
+ * shown, never less. So `A1` and `A10`, `sub-1` and `sub-10`, `Cz` and `FCz` get no rule of any
+ * kind: `1` is not `10`, and the inserted text would join a run that was already there.
+ *
+ * A rule says that a pair COULD be one name respelled; whether a table pairs it is decided by the
+ * evidence of the rest of the row (see {@link diffTable}).
  */
 export function relabelRule(
   before: string,
   after: string,
   opts: { chars: boolean },
 ): RelabelRule | null {
-  if (before === after || before === "" || after === "") return null;
-  if (exceedsKeyChars(before) || exceedsKeyChars(after)) return null;
-  if (NUMERIC_TEXT.test(before) && NUMERIC_TEXT.test(after)) return null;
-  if (before.toLowerCase() === after.toLowerCase()) {
+  return relabelNames(nameOf(before), nameOf(after), opts);
+}
+
+/** {@link relabelRule} over names whose runs are already known. */
+function relabelNames(before: Name, after: Name, opts: { chars: boolean }): RelabelRule | null {
+  if (before.text === after.text || before.text === "" || after.text === "") return null;
+  if (before.long || after.long) return null;
+  if (NUMERIC_TEXT.test(before.text) && NUMERIC_TEXT.test(after.text)) return null;
+  if (before.text.toLowerCase() === after.text.toLowerCase()) {
     return { kind: "case", gaps: [], shape: "", repadded: false };
   }
-  const b = splitRuns(before);
-  const a = splitRuns(after);
-  if (b === null || a === null) return null;
-  const byRuns = runRule(b, a);
+  if (before.runs === null || after.runs === null) return null;
+  const byRuns = runRule(before.runs, after.runs);
   if (byRuns !== null) return byRuns;
   return opts.chars ? characterRule(before, after) : null;
 }
@@ -2032,12 +2120,16 @@ export function diffTableWith(
   return { ok: true, value: { family: "tsv", keyColumn, atoms, counts } };
 }
 
+/** The relabel rules that are templates in a cell: see {@link cellAtom}. */
+const CELL_TEMPLATES: ReadonlySet<RelabelRule["kind"]> = new Set(["wrap", "strip", "repad"]);
+
 /**
  * The atom for one table cell that is not equal on the two sides. Only a rule that says the cell was
- * wrapped, stripped, repadded or recased is a template; an insertion, a deletion or a character rule
- * is for names, so in a cell it is a replaced value. Two missing cells that differ (`n/a` and empty)
- * are a replaced value too: calling the change anything gentler would hide that the file says
- * something else.
+ * wrapped, stripped or repadded is a template; an insertion, a deletion or a character rule is for
+ * names, so in a cell it is a replaced value, and so is a change of letter case: `mV` to `MV` is
+ * millivolts to megavolts, and a cell's case is part of its value in a way a key's is not. Two
+ * missing cells that differ (`n/a` and empty) are a replaced value too: calling the change anything
+ * gentler would hide that the file says something else.
  */
 function cellAtom(field: string, before: string, after: string): Atom {
   const missingBefore = isMissingCell(before);
@@ -2050,7 +2142,7 @@ function cellAtom(field: string, before: string, after: string): Atom {
   }
   if (!missingBefore && !missingAfter) {
     const rule = relabelRule(before, after, { chars: false });
-    if (rule !== null && ["wrap", "strip", "repad", "case"].includes(rule.kind)) {
+    if (rule !== null && CELL_TEMPLATES.has(rule.kind)) {
       return { kind: "cell_templated", field, rule, detail: null, before, after };
     }
   }
